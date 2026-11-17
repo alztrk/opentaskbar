@@ -149,7 +149,8 @@ public sealed class LauncherWindow : Window
     private void UpdateResults()
     {
         _hint.Visibility = _query.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
-        var english = UiText.Current.IsEnglish;
+        // Japanese launcher search falls back to English page names until they are localized.
+        var english = UiText.Current.Language != AppLanguage.Turkish;
         var results = Catalog.Search(_query.Text, english, ResultLimit);
         _results.ItemsSource = results.Select(entry => new ListBoxItem { Content = BuildRow(entry), Tag = entry }).ToList();
         _results.SelectedIndex = results.Count > 0 ? 0 : -1;

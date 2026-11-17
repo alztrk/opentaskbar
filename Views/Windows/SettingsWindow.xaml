@@ -139,9 +139,10 @@
                             </StackPanel></Border>
                             <Border Style="{StaticResource SettingsChoiceRow}"><StackPanel>
                                 <TextBlock Text="{local:Loc Language}" Style="{StaticResource SettingsChoiceLabel}" />
-                                <UniformGrid Columns="2" Margin="-3,0">
+                                <UniformGrid Columns="3" Margin="-3,0">
                                     <RadioButton x:Name="TurkishLanguage" GroupName="Language" Content="Türkçe" Style="{StaticResource SettingsChoice}" />
                                     <RadioButton x:Name="EnglishLanguage" GroupName="Language" Content="English" Style="{StaticResource SettingsChoice}" />
+                                    <RadioButton x:Name="JapaneseLanguage" GroupName="Language" Content="日本語" Style="{StaticResource SettingsChoice}" />
                                 </UniformGrid>
                             </StackPanel></Border>
                             <Border Style="{StaticResource SettingsChoiceRow}"><StackPanel>

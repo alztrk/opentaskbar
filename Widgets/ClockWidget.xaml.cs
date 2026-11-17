@@ -15,7 +15,12 @@ public partial class ClockWidget : DockWidget
 
     public ClockWidget() => InitializeComponent();
 
-    private CultureInfo Culture => CultureInfo.GetCultureInfo(Settings.Language == AppLanguage.English ? "en-US" : "tr-TR");
+    private CultureInfo Culture => CultureInfo.GetCultureInfo(Settings.Language switch
+    {
+        AppLanguage.English => "en-US",
+        AppLanguage.Japanese => "ja-JP",
+        _ => "tr-TR"
+    });
 
     protected override void OnActivated()
     {
@@ -49,12 +54,22 @@ public partial class ClockWidget : DockWidget
                     DateColumn.Visibility = Visibility.Visible;
                     DayOfWeekText.Visibility = Visibility.Visible;
                     DayOfWeekText.Text = now.ToString("dddd", culture).ToUpper(culture);
-                    DateText.Text = now.ToString(Settings.Language == AppLanguage.English ? "MMM d" : "d MMM", culture);
+                    DateText.Text = now.ToString(Settings.Language switch
+                    {
+                        AppLanguage.English => "MMM d",
+                        AppLanguage.Japanese => "M月d日",
+                        _ => "d MMM"
+                    }, culture);
                     break;
                 case ClockDateStyle.ShortDateOnly:
                     DateColumn.Visibility = Visibility.Visible;
                     DayOfWeekText.Visibility = Visibility.Collapsed;
-                    DateText.Text = now.ToString(Settings.Language == AppLanguage.English ? "MMM d, yyyy" : "d MMM yyyy", culture);
+                    DateText.Text = now.ToString(Settings.Language switch
+                    {
+                        AppLanguage.English => "MMM d, yyyy",
+                        AppLanguage.Japanese => "yyyy年M月d日",
+                        _ => "d MMM yyyy"
+                    }, culture);
                     break;
                 case ClockDateStyle.NumericDate:
                     DateColumn.Visibility = Visibility.Visible;
