@@ -45,6 +45,18 @@ public sealed class DockAutoHideController : IDisposable
     public bool IsMouseAtEdge { get; private set; }
     public bool HasOverlap { get; private set; }
 
+    /// <summary>True while a shell menu (the Start menu) is open; the dock then stays revealed like the native taskbar.</summary>
+    public Func<bool>? IsShellMenuOpen { get; set; }
+
+    /// <summary>
+    /// Identifies foreground windows that belong to a shell menu rather than an application. The Start menu stays
+    /// the (cloaked) foreground window after it closes, so it must not decide whether an application covers the dock.
+    /// </summary>
+    public Func<nint, bool>? IsShellMenuWindow { get; set; }
+
+    /// <summary>The last application window that held the foreground, used while a shell menu holds it instead.</summary>
+    public Func<nint>? LastApplicationWindowProvider { get; set; }
+
     /// <summary>Seam for tests: supplies the OS foreground window without depending on a real desktop.</summary>
     internal Func<nint> ForegroundProvider { get; set; } = NativeWindowTracker.GetForegroundApplicationWindow;
 
@@ -169,8 +181,9 @@ public sealed class DockAutoHideController : IDisposable
 
     public void CheckForegroundWindow(nint foregroundHwnd)
     {
-        if (Mode != AutoHideMode.Smart) return;
-        RefreshSmartOverlap(foregroundHwnd);
+        if (Mode == AutoHideMode.Disabled) return;
+        // Always mode also re-evaluates so an opening Start menu reveals the hidden dock.
+        if (Mode == AutoHideMode.Smart) RefreshSmartOverlap(foregroundHwnd);
         EvaluateState();
     }
 
@@ -184,6 +197,13 @@ public sealed class DockAutoHideController : IDisposable
         var root = GetAncestor(foregroundHwnd, GaRootOwner);
         var target = root != 0 ? root : foregroundHwnd;
         if (!IsWindow(target)) return;
+        if (IsShellMenuWindow?.Invoke(target) == true)
+        {
+            // Judge the application beneath the Start menu; without one, keep the last known overlap.
+            var application = LastApplicationWindowProvider?.Invoke() ?? 0;
+            if (application == 0 || !IsWindow(application)) return;
+            target = application;
+        }
         GetWindowThreadProcessId(target, out var pid);
         if (pid == Environment.ProcessId)
         {
@@ -194,9 +214,16 @@ public sealed class DockAutoHideController : IDisposable
             }
             else
             {
-                // No distinct application beneath our own window: any earlier overlap is stale.
-                HasOverlap = false;
-                return;
+                // Closing the Start menu from the dock leaves the dock itself in the foreground; judge the
+                // application that was in front before it, which still covers the dock area.
+                var application = LastApplicationWindowProvider?.Invoke() ?? 0;
+                if (application == 0 || application == target || !IsWindow(application))
+                {
+                    // No distinct application beneath our own window: any earlier overlap is stale.
+                    HasOverlap = false;
+                    return;
+                }
+                target = application;
             }
         }
         HasOverlap = EvaluateWindowOverlap(target);
@@ -284,6 +311,7 @@ public sealed class DockAutoHideController : IDisposable
     {
         if (Mode == AutoHideMode.Disabled) return false;
         if (IsMouseOverDock || IsMouseAtEdge) return false;
+        if (IsShellMenuOpen?.Invoke() == true) return false;
         if (_isInteractionLocked()) return false;
         if (Mode == AutoHideMode.Always) return true;
         if (Mode == AutoHideMode.Smart) return HasOverlap;

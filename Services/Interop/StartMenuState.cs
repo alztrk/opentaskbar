@@ -4,9 +4,10 @@ using System.Runtime.InteropServices;
 namespace OpenTaskbar.Services;
 
 /// <summary>
-/// Tracks whether the Windows Start menu is open so the dock's Start button can toggle it like the native taskbar
-/// does instead of always reopening it. A closed Start menu often remains the foreground window but is cloaked
-/// by DWM, so the open state follows the cloak events of the Start menu window as well as foreground changes.
+/// Tracks whether the Windows Start menu is open so the dock can treat it like the native taskbar does: the
+/// Start button toggles it instead of always reopening it, and auto-hide keeps the dock revealed while it is open.
+/// A closed Start menu often remains the foreground window but is cloaked by DWM, so the open state follows the
+/// cloak events of the Start menu window as well as foreground changes.
 /// </summary>
 internal sealed class StartMenuState : IDisposable
 {

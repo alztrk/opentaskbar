@@ -261,6 +261,18 @@ internal static class SettingsAndAutoHideChecks
             PumpUntil(application.Dispatcher, () => controller.IsHidden, waitBudgetMs);
             check(controller.IsHidden, "Continuous guard timer must hide the dock after a long hover even if MouseLeave was dropped.");
 
+            // Like the native taskbar, an open Start menu reveals the dock and keeps it revealed until it closes.
+            var startMenuOpen = true;
+            controller.IsShellMenuOpen = () => startMenuOpen;
+            controller.CheckForegroundWindow(hwnd);
+            check(!controller.IsHidden, "Opening the Start menu must reveal the hidden dock.");
+            PumpDispatcher(application.Dispatcher, (int)DockMetrics.AutoHideDelayMs + 150);
+            check(!controller.IsHidden, "The dock must stay revealed while the Start menu is open.");
+            startMenuOpen = false;
+            PumpUntil(application.Dispatcher, () => controller.IsHidden, waitBudgetMs);
+            check(controller.IsHidden, "Closing the Start menu must let the dock hide again without another click.");
+            controller.IsShellMenuOpen = null;
+
             controller.SetMode(AutoHideMode.Smart);
             // Keep the same-process rule independent of whatever real window happens to be foreground on the CI box.
             controller.ForegroundProvider = () => hwnd;
@@ -269,6 +281,13 @@ internal static class SettingsAndAutoHideChecks
             PumpUntil(application.Dispatcher, () => !controller.IsHidden, waitBudgetMs);
             check(!controller.HasOverlap && !controller.IsHidden,
                 "Smart mode must ignore same-process foreground windows and stay visible without foreign overlap.");
+
+            // When the dock holds the foreground (e.g. after closing Start from it), the last application decides.
+            controller.LastApplicationWindowProvider = () => hwnd;
+            controller.CheckForegroundWindow(hwnd);
+            check(!controller.HasOverlap,
+                "The dock's own window must never count as the application beneath it.");
+            controller.LastApplicationWindowProvider = null;
 
             controller.SetMode(AutoHideMode.Disabled);
             check(!controller.IsHidden && Math.Abs(translate.Y) < 0.001,

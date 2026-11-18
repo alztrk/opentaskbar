@@ -268,6 +268,9 @@ public partial class MainWindow : Window
                 || (_settingsWindow is { IsVisible: true, IsActive: true, WindowState: not WindowState.Minimized })
                 || DockFlyout.IsAnyOpen || _keyboardNavigationActive);
         _autoHideController.DockBoundsProvider = GetDockPhysicalBounds;
+        _autoHideController.IsShellMenuOpen = _startMenu.IsStartMenuOpenNow;
+        _autoHideController.IsShellMenuWindow = _startMenu.IsStartMenuWindow;
+        _autoHideController.LastApplicationWindowProvider = () => _lastApplicationWindow;
         _startMenu.StartWatching();
         _autoHideController.AnimationsEnabled = _preferences.Current.AnimationsEnabled;
         _autoHideController.SetMode(_preferences.Current.AutoHide);
