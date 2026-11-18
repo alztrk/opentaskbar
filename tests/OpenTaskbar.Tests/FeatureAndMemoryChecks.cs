@@ -49,7 +49,8 @@ internal static class FeatureAndMemoryChecks
                 lazyCoordinator.Apply(new DockSettings(
                     Widgets: WidgetCoordinator.DefaultWidgetOrder,
                     StatsMeters: SystemMeters.All));
-                Check(strip.Children.Count == 9, "Enabling all 9 live widgets must materialize all 9 controls.");
+                Check(strip.Children.Count == WidgetCoordinator.DefaultWidgetOrder.Length,
+                    "Enabling all live widgets must materialize all controls.");
             }
 
             // 2. SystemStats + on-demand SystemSensors parity & disposal

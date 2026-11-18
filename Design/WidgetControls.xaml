@@ -285,6 +285,22 @@
                 </StackPanel>
             </Border>
 
+            <!-- AI Limits widget taskbar preview -->
+            <Border x:Name="AiLimitsPreview" Style="{StaticResource WidgetCardBorder}" Padding="10,4,12,4" Visibility="Collapsed">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <w:SplitArcGauge Width="28" Height="28" StrokeThickness="2.6"
+                                     TopValue="0.16" BottomValue="0.24"
+                                     TrackBrush="{DynamicResource WidgetTrack}"
+                                     TopBrush="#D97757" BottomBrush="#F0A88A" CenterBrush="#D97757"
+                                     CenterGlyph="M12 2L13.5 8.8L18.6 4.2L14.8 10.1L21.5 9.2L15.4 12L21.5 14.8L14.8 13.9L18.6 19.8L13.5 15.2L12 22L10.5 15.2L5.4 19.8L9.2 13.9L2.5 14.8L8.6 12L2.5 9.2L9.2 10.1L5.4 4.2L10.5 8.8Z"
+                                     Margin="0,0,9,0" VerticalAlignment="Center" />
+                    <StackPanel VerticalAlignment="Center">
+                        <TextBlock Text="Claude · Pro" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}" />
+                        <TextBlock Text="Session 18:30 | Weekly 22 Nov" FontSize="10.5" Foreground="{DynamicResource TextSecondary}" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
             <!-- Virtual Desktops widget taskbar preview -->
             <Border x:Name="DesktopsPreview" Style="{StaticResource WidgetCardBorder}" Padding="8,0" Visibility="Collapsed">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -330,6 +346,10 @@
             <DataTrigger Binding="{Binding Id}" Value="Weather">
                 <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
                 <Setter TargetName="WeatherPreview" Property="Visibility" Value="Visible" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Id}" Value="AiLimits">
+                <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
+                <Setter TargetName="AiLimitsPreview" Property="Visibility" Value="Visible" />
             </DataTrigger>
             <DataTrigger Binding="{Binding Id}" Value="Desktops">
                 <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />

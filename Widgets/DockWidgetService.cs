@@ -22,6 +22,7 @@ public sealed class DockWidgetService(TimeProvider timeProvider)
     public const string DesktopsId = "Desktops";
     public const string TrayId = "Tray";
     public const string WeatherId = "Weather";
+    public const string AiLimitsId = "AiLimits";
     public const string BatteryId = "Battery";
     public const string StopwatchId = "Stopwatch";
     public const string CountdownId = "Countdown";
@@ -37,6 +38,7 @@ public sealed class DockWidgetService(TimeProvider timeProvider)
         new(SystemStatsId, "WidgetSystemStats", _ => "CPU · RAM"),
         new(FocusId, "WidgetFocus", _ => "25:00"),
         new(WeatherId, "WidgetWeather", _ => "21°"),
+        new(AiLimitsId, "WidgetAiLimits", _ => "16%"),
         new(DesktopsId, "WidgetDesktops", _ => "1 / 2"),
         new(TrayId, "WidgetTray", _ => "▲"),
         new(BatteryId, "WidgetBattery", _ => ReadBatteryStatus()),

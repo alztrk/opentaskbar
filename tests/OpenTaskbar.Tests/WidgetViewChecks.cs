@@ -395,6 +395,7 @@ internal static class WidgetViewChecks
                 DockWidgetService.SystemStatsId => "CPU · RAM",
                 DockWidgetService.FocusId => "25:00",
                 DockWidgetService.WeatherId => "21°",
+                DockWidgetService.AiLimitsId => "16%",
                 DockWidgetService.DesktopsId => "1 / 2",
                 DockWidgetService.TrayId => "▲",
                 DockWidgetService.BatteryId => UiText.Get("SystemDataUnavailable"),
