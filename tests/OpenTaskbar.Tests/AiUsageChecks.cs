@@ -295,6 +295,14 @@ internal static class AiUsageChecks
             Check(AiUsageService.ReadOpenCodeToken(path) == "fixture-oc-v1", "OpenCode must read v1 auth.json provider keys.");
             File.WriteAllText(path, """[{"integrationID":"ollama-cloud","active":true,"value":{"key":"other"}},{"integrationID":"opencode-go","active":true,"value":{"type":"key","key":"fixture-oc-v2"}}]""");
             Check(AiUsageService.ReadOpenCodeToken(path) == "fixture-oc-v2", "OpenCode must read v2 auth export array entries.");
+            File.WriteAllText(path, """{"github.com:fixture":{"oauth_token":"fixture-copilot"}}""");
+            Check(AiUsageService.ReadCopilotToken(path) == "fixture-copilot", "Copilot must read its oauth_token from apps.json.");
+            var (copilotReport, copilotError) = AiUsageService.ParseCopilot("""
+                {"copilot_plan":"individual","quota_reset_date_utc":"2026-12-01T00:00:00Z","quota_snapshots":{"premium_interactions":{"percent_remaining":72.5}}}
+                """);
+            Check(copilotError is null && copilotReport is { Provider: AiProviders.Copilot, Plan: "Individual", LimitReached: false }
+                  && copilotReport.Windows is [{ LabelKey: "AiUsageMonthly", Used: >= 0.274 and <= 0.276, WindowSeconds: 2592000L }],
+                "Copilot must parse plan, reset date, and premium interactions remaining percentage.");
             File.WriteAllText(path, "null");
             Check(AiUsageService.ReadClaudeToken(path) is null && AiUsageService.ReadCodexToken(path) is null,
                 "Malformed credential files must fail closed.");
