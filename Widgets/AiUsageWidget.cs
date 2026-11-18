@@ -14,7 +14,7 @@ namespace OpenTaskbar.Widgets;
 /// <summary>Opt-in CLI quota meters; only active, enabled providers may poll.</summary>
 public sealed class AiUsageWidget : DockWidget
 {
-    private static readonly AiProviders[] Providers = [AiProviders.Claude, AiProviders.Codex, AiProviders.Antigravity, AiProviders.OpenCode];
+    private static readonly AiProviders[] Providers = [AiProviders.Claude, AiProviders.Codex, AiProviders.Antigravity, AiProviders.OpenCode, AiProviders.DeepSeek];
     private readonly Func<AiProviders, CancellationToken, Task<(AiUsageReport?, string?)>>? _loader;
     private readonly Dictionary<AiProviders, AiUsageReport> _reports = [];
     private readonly Dictionary<AiProviders, string> _errors = [];
@@ -32,6 +32,7 @@ public sealed class AiUsageWidget : DockWidget
     private readonly Card _codex;
     private readonly Card _antigravity;
     private readonly Card _openCode;
+    private readonly Card _deepSeek;
     private readonly DockFlyout _flyout = new();
     private CancellationTokenSource? _loading;
     private AiProviders _loadingProvider;
@@ -48,6 +49,7 @@ public sealed class AiUsageWidget : DockWidget
         _codex = AddCard("Codex", "LogoCodex");
         _antigravity = AddCard("Antigravity", "LogoAntigravity");
         _openCode = AddCard("OpenCode", "LogoOpenCode");
+        _deepSeek = AddCard("DeepSeek", "LogoDeepSeek");
         _flyout.Closed += (_, _) => _countdowns.Clear();
         Content = _cards;
         Render();
@@ -214,6 +216,7 @@ public sealed class AiUsageWidget : DockWidget
         AiProviders.Claude => "Claude Code",
         AiProviders.Codex => "Codex",
         AiProviders.OpenCode => "OpenCode Go",
+        AiProviders.DeepSeek => "DeepSeek",
         _ => "Antigravity"
     };
     private string ErrorText(AiProviders provider, string key) => key == "ErrorAiUsageSignIn"
@@ -222,6 +225,7 @@ public sealed class AiUsageWidget : DockWidget
             AiProviders.Claude => "claude auth login",
             AiProviders.Codex => "codex login",
             AiProviders.OpenCode => "opencode auth login",
+            AiProviders.DeepSeek => "DEEPSEEK_API_KEY",
             _ => "agy"
         }) : UiText.Get(key);
     private CultureInfo Culture => Settings.Language.Culture;
@@ -384,7 +388,7 @@ public sealed class AiUsageWidget : DockWidget
                 providers.Length == 0 ? UiText.Get("AiUsageNoProviders") : string.Join("\n", providers.Select(Summary)));
         }
         _summary.Button.Visibility = summary ? Visibility.Visible : Visibility.Collapsed;
-        foreach (var (provider, card) in new[] { (AiProviders.Claude, _claude), (AiProviders.Codex, _codex), (AiProviders.Antigravity, _antigravity), (AiProviders.OpenCode, _openCode) })
+        foreach (var (provider, card) in new[] { (AiProviders.Claude, _claude), (AiProviders.Codex, _codex), (AiProviders.Antigravity, _antigravity), (AiProviders.OpenCode, _openCode), (AiProviders.DeepSeek, _deepSeek) })
         {
             var visible = !summary && _enabled.HasFlag(provider);
             card.Button.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
@@ -659,6 +663,7 @@ public sealed class AiUsageWidget : DockWidget
                 AiProviders.Claude => "https://claude.ai/settings/usage",
                 AiProviders.Codex => "https://chatgpt.com/codex/settings/usage",
                 AiProviders.OpenCode => "https://opencode.ai/go",
+                AiProviders.DeepSeek => "https://platform.deepseek.com/usage",
                 _ => "https://antigravity.google/docs"
             };
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
