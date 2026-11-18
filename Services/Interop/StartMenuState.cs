@@ -34,6 +34,7 @@ internal sealed class StartMenuState : IDisposable
     private long _closedAt = long.MinValue;
     private uint _cachedProcessId;
     private bool _cachedIsStartMenu;
+    private nint _startWindow;
 
     public StartMenuState(TimeProvider? clock = null)
     {
@@ -102,6 +103,7 @@ internal sealed class StartMenuState : IDisposable
         if (objectId != ObjectWindow || windowHandle == 0 || !IsStartMenuWindow(windowHandle)) return;
         // Only the window the user sees as Start matters: the foreground one (or, while closing, the one that was).
         if (eventType == EventObjectUncloaked && GetForegroundWindow() != windowHandle) return;
+        if (eventType == EventObjectUncloaked) _startWindow = windowHandle;
         OnStartMenuCloakChanged(cloaked: eventType == EventObjectCloaked);
     }
 
@@ -132,12 +134,23 @@ internal sealed class StartMenuState : IDisposable
         return isStartMenu;
     }
 
-    /// <summary>True while the Start menu is actually on screen (foreground and not cloaked).</summary>
+    /// <summary>
+    /// True while the Start menu is actually on screen (visible and not cloaked). It is normally the foreground
+    /// window, but Alt+Tab takes the foreground while the Start menu stays open beneath the switcher, so the
+    /// last Start menu window is checked as well.
+    /// </summary>
     public bool IsStartMenuOpenNow()
     {
         var foreground = GetForegroundWindow();
-        return IsStartMenuWindow(foreground) && IsWindowVisible(foreground) && !IsCloaked(foreground);
+        if (IsStartMenuWindow(foreground))
+        {
+            _startWindow = foreground;
+            return IsOnScreen(foreground);
+        }
+        return _startWindow != 0 && IsStartMenuWindow(_startWindow) && IsOnScreen(_startWindow);
     }
+
+    private static bool IsOnScreen(nint windowHandle) => IsWindowVisible(windowHandle) && !IsCloaked(windowHandle);
 
     private static bool IsCloaked(nint windowHandle) =>
         DwmGetWindowAttribute(windowHandle, DwmwaCloaked, out var cloaked, sizeof(int)) == 0 && cloaked != 0;
