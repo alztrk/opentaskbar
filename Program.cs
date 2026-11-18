@@ -16,6 +16,9 @@ public static class Program
 
         var app = new App();
         app.InitializeComponent();
+        // Used by Windows CI to verify the published EXE can load WPF without starting a dock
+        // or changing the native Windows taskbar.
+        if (args.Contains("--smoke-test", StringComparer.OrdinalIgnoreCase)) return;
         app.Run();
     }
 }
