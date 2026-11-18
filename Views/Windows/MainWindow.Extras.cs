@@ -21,6 +21,8 @@ public partial class MainWindow
     private readonly DockFlyout _stackFlyout = new();
     private DispatcherTimer? _recycleBinTimer;
     private bool? _recycleBinFull;
+    private bool _recycleBinQueryRunning;
+    private bool _recycleBinQueryAgain;
     private Point _dragStackStartPoint;
     private DockStack? _draggedStack;
 
@@ -213,9 +215,38 @@ public partial class MainWindow
         if (RecycleBinButton.Visibility == Visibility.Visible) yield return RecycleBinButton;
     }
 
-    private void UpdateRecycleBin()
+    /// <summary>
+    /// Refreshes the Recycle Bin state off the UI thread. SHQueryRecycleBin walks the bin on every drive and takes
+    /// around 100 ms inside the dock process; polled every 3 s on the UI thread it froze the whole dock each time.
+    /// Requests that arrive while a query runs are coalesced into one follow-up query.
+    /// </summary>
+    private async void UpdateRecycleBin()
     {
-        var count = RecycleBin.ItemCount();
+        if (_recycleBinQueryRunning)
+        {
+            _recycleBinQueryAgain = true;
+            return;
+        }
+
+        _recycleBinQueryRunning = true;
+        try
+        {
+            do
+            {
+                _recycleBinQueryAgain = false;
+                var count = await Task.Run(RecycleBin.ItemCount);
+                ApplyRecycleBinCount(count);
+            }
+            while (_recycleBinQueryAgain);
+        }
+        finally
+        {
+            _recycleBinQueryRunning = false;
+        }
+    }
+
+    private void ApplyRecycleBinCount(long? count)
+    {
         var full = count > 0;
         if (_recycleBinFull == full) return;
         _recycleBinFull = full;

@@ -18,6 +18,7 @@ internal static class NetSpeedChecks
         CheckCompactFormatting(Check);
         CheckBytesFormatting(Check);
         CheckWidgetLifecycleAndCalculations(Check);
+        CheckRateCalculation(Check);
         CheckHoverFlyoutAndInteractions(Check);
         CheckSpeedTestExecution(Check);
 
@@ -86,6 +87,24 @@ internal static class NetSpeedChecks
 
         widget.Deactivate();
         check(widget.Visibility == Visibility.Collapsed, "Widget must collapse on deactivation.");
+    }
+
+    // Samples are now taken off the UI thread; the rate math is checked on its own, independent of timing.
+    private static void CheckRateCalculation(Action<bool, string> check)
+    {
+        var first = NetSpeedWidget.ComputeRates(-1, -1, 0, 1_000, 500, 10_000);
+        check(first == (0, 0, 0, 0), "The first sample has no baseline and must report zero rates.");
+
+        var second = NetSpeedWidget.ComputeRates(1_000, 500, 10_000, 1_000 + 2_048, 500 + 1_024, 12_000);
+        check(second.DeltaReceived == 2_048 && second.DeltaSent == 1_024
+            && Math.Abs(second.Download - 1_024) < 0.001 && Math.Abs(second.Upload - 512) < 0.001,
+            "Rates must divide the byte deltas by the time between the two samples.");
+
+        var reset = NetSpeedWidget.ComputeRates(5_000, 5_000, 10_000, 100, 200, 11_000);
+        check(reset == (0, 0, 0, 0), "Adapter counter resets must not produce negative or huge rates.");
+
+        var burst = NetSpeedWidget.ComputeRates(0, 0, 10_000, 1_000, 0, 10_010);
+        check(Math.Abs(burst.Download - 5_000) < 0.001, "Back-to-back samples must use at least 0.2 s to avoid spikes.");
     }
 
     private static void CheckHoverFlyoutAndInteractions(Action<bool, string> check)

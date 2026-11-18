@@ -50,6 +50,7 @@ public sealed class NetSpeedWidget : DockWidget
     private long _lastReceivedBytes = -1;
     private long _lastSentBytes = -1;
     private long _lastTickMs;
+    private bool _sampleInFlight;
     private double _downloadBytesPerSec;
     private double _uploadBytesPerSec;
     private long _sessionDownloadedBytes;
@@ -193,33 +194,49 @@ public sealed class NetSpeedWidget : DockWidget
 
     protected override void OnTick(DateTime now)
     {
-        var nowMs = Environment.TickCount64;
-        var (received, sent, ifName) = NetworkReader();
-        _primaryInterfaceName = ifName;
-
-        if (_lastReceivedBytes >= 0 && _lastSentBytes >= 0 && _lastTickMs > 0)
+        // Enumerating adapters and their statistics takes ~40 ms; doing it every second on the UI thread made the
+        // whole dock stutter. Sample off the UI thread and apply the result when it arrives; skip a tick while the
+        // previous sample is still running.
+        if (_sampleInFlight) return;
+        _sampleInFlight = true;
+        var reader = NetworkReader;
+        _ = Task.Run(() =>
         {
-            var elapsedSeconds = Math.Max(0.2, (nowMs - _lastTickMs) / 1000.0);
-            var deltaReceived = received >= _lastReceivedBytes ? received - _lastReceivedBytes : 0;
-            var deltaSent = sent >= _lastSentBytes ? sent - _lastSentBytes : 0;
-
-            _downloadBytesPerSec = deltaReceived / elapsedSeconds;
-            _uploadBytesPerSec = deltaSent / elapsedSeconds;
-
-            _sessionDownloadedBytes += deltaReceived;
-            _sessionUploadedBytes += deltaSent;
-        }
-        else
+            var sample = reader();
+            return (Sample: sample, SampledAtMs: Environment.TickCount64);
+        }).ContinueWith(task => Dispatcher.BeginInvoke(() =>
         {
-            _downloadBytesPerSec = 0;
-            _uploadBytesPerSec = 0;
-        }
+            _sampleInFlight = false;
+            if (!IsActive || !task.IsCompletedSuccessfully) return;
+            ApplySample(task.Result.Sample, task.Result.SampledAtMs);
+        }), TaskScheduler.Default);
+    }
 
-        _lastReceivedBytes = received;
-        _lastSentBytes = sent;
-        _lastTickMs = nowMs;
+    private void ApplySample((long Received, long Sent, string PrimaryInterfaceName) sample, long sampledAtMs)
+    {
+        _primaryInterfaceName = sample.PrimaryInterfaceName;
+        var rates = ComputeRates(_lastReceivedBytes, _lastSentBytes, _lastTickMs, sample.Received, sample.Sent, sampledAtMs);
+        _downloadBytesPerSec = rates.Download;
+        _uploadBytesPerSec = rates.Upload;
+        _sessionDownloadedBytes += rates.DeltaReceived;
+        _sessionUploadedBytes += rates.DeltaSent;
+
+        _lastReceivedBytes = sample.Received;
+        _lastSentBytes = sample.Sent;
+        _lastTickMs = sampledAtMs;
 
         UpdateLabels();
+    }
+
+    /// <summary>Byte rates between two samples; the first sample (no baseline) and counter resets yield zero.</summary>
+    internal static (double Download, double Upload, long DeltaReceived, long DeltaSent) ComputeRates(
+        long lastReceived, long lastSent, long lastMs, long received, long sent, long nowMs)
+    {
+        if (lastReceived < 0 || lastSent < 0 || lastMs <= 0) return (0, 0, 0, 0);
+        var elapsedSeconds = Math.Max(0.2, (nowMs - lastMs) / 1000.0);
+        var deltaReceived = received >= lastReceived ? received - lastReceived : 0;
+        var deltaSent = sent >= lastSent ? sent - lastSent : 0;
+        return (deltaReceived / elapsedSeconds, deltaSent / elapsedSeconds, deltaReceived, deltaSent);
     }
 
     protected override void OnCompactChanged(bool compact)
