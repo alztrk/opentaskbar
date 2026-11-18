@@ -157,6 +157,8 @@ public partial class MainWindow : Window
             Interval = RunningAppIconCache.RetryDelay
         };
         _iconRetryTimer.Tick += IconRetryTimer_Tick;
+        // Icons load off the UI thread; refresh the running apps once when one or more loads finish.
+        _runningAppIcons.IconLoaded += QueueIconRefresh;
         _timedWidgetRefreshTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
         {
             Interval = TimeSpan.FromSeconds(1)
@@ -535,6 +537,19 @@ public partial class MainWindow : Window
         }
     }
 
+    private bool _iconRefreshQueued;
+
+    private void QueueIconRefresh()
+    {
+        if (_iconRefreshQueued) return;
+        _iconRefreshQueued = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+        {
+            _iconRefreshQueued = false;
+            if (_windowTracker is not null) WindowTracker_WindowsChanged(this, _windowTracker.Snapshot);
+        });
+    }
+
     private void IconRetryTimer_Tick(object? sender, EventArgs e)
     {
         _iconRetryTimer.Stop();
@@ -595,7 +610,8 @@ public partial class MainWindow : Window
                 var windowCount = group.Count();
                 if (currentApps.TryGetValue(executablePath, out var existingApp))
                 {
-                    existingApp.Icon = icon;
+                    // While a new identity icon loads in the background, keep showing the current one.
+                    if (icon is not null || !_runningAppIcons.IsLoading) existingApp.Icon = icon;
                     existingApp.HasNotification = hasNotification;
                     existingApp.IsForeground = isForeground;
                     existingApp.WindowCount = windowCount;

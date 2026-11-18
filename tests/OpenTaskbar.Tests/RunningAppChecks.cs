@@ -85,6 +85,57 @@ internal static class RunningAppChecks
             "Entries of closed windows and executables must be dropped.");
         Check(cache.HasPendingLookups, "A reopened window must be looked up again.");
 
+        // Offloaded mode: lookups run in the background and Get never blocks the dock.
+        var queued = new Queue<(Func<BitmapSource?> Load, TaskCompletionSource<BitmapSource?> Done)>();
+        Task<BitmapSource?> Offload(Func<BitmapSource?> load)
+        {
+            var done = new TaskCompletionSource<BitmapSource?>();
+            queued.Enqueue((load, done));
+            return done.Task;
+        }
+        void FinishLoads()
+        {
+            while (queued.TryDequeue(out var item)) item.Done.SetResult(item.Load());
+        }
+
+        var loaded = 0;
+        var asyncIds = new Dictionary<nint, string?> { [2] = "Vendor.App_abc!App", [8] = "Missing!App" };
+        var background = new RunningAppIconCache(
+            path => path == Desktop ? resource : null,
+            window => asyncIds.GetValueOrDefault(window),
+            appId => shellIcons.GetValueOrDefault(appId),
+            _ => generic,
+            new TestClock(),
+            Offload);
+        background.IconLoaded += () => loaded++;
+
+        Check(background.Get(Desktop, 1) is null && background.IsLoading,
+            "A first lookup must not block the caller; there is no icon until the background load ends.");
+        FinishLoads();
+        Check(loaded == 1 && !background.IsLoading && ReferenceEquals(background.Get(Desktop, 1), resource),
+            "A finished load must notify the caller and then serve the icon from the cache.");
+
+        Check(background.Get(Packaged, 2) is null, "The resource lookup of a new executable runs in the background.");
+        FinishLoads();
+        Check(background.Get(Packaged, 2) is null && background.IsLoading,
+            "Without executable resources the Start menu image is loaded next, still in the background.");
+        // The dock refreshes (and prunes the cache with Retain) whenever a load finishes; a Store app such as
+        // WhatsApp lost its freshly loaded image there and reloaded it in a loop, never showing an icon.
+        background.Retain([new TrackedWindow(1, "Desktop", Desktop), new TrackedWindow(2, "App", Packaged)]);
+        FinishLoads();
+        background.Retain([new TrackedWindow(1, "Desktop", Desktop), new TrackedWindow(2, "App", Packaged)]);
+        Check(ReferenceEquals(background.Get(Packaged, 2), settings) && !background.HasPendingLookups && !background.IsLoading,
+            "A Start menu image loaded in the background must survive the refresh it triggers.");
+
+        background.Get(FrameHost, 8);
+        FinishLoads();
+        background.Get(FrameHost, 8);
+        FinishLoads();
+        background.Get(FrameHost, 8);
+        FinishLoads();
+        Check(ReferenceEquals(background.Get(FrameHost, 8), generic) && background.HasPendingLookups,
+            "A missing Start menu image must fall back to the file icon and keep its identity retries.");
+
         return checks;
     }
 

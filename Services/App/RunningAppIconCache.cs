@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Windows.Media.Imaging;
 using OpenTaskbar.Models;
@@ -9,6 +10,12 @@ namespace OpenTaskbar.Services;
 /// ApplicationFrameHost often have none, so the window's AppUserModelID selects the Start menu image
 /// (<c>shell:AppsFolder\{AUMID}</c>) before the generic file icon is used.
 /// </summary>
+/// <remarks>
+/// With an <c>offload</c> function the expensive lookups (icon resources, Start menu images, file icons) run off the
+/// caller's thread. They took 30 ms to almost a second on the UI thread whenever a new app window appeared, freezing
+/// the dock. Until a lookup finishes, <see cref="Get"/> reports no icon for that step, and <see cref="IconLoaded"/>
+/// asks the caller to call <see cref="Get"/> again. All cache state is only touched on the caller's thread.
+/// </remarks>
 public sealed class RunningAppIconCache
 {
     public const int AttemptLimit = 4;
@@ -19,10 +26,16 @@ public sealed class RunningAppIconCache
     private readonly Func<string, BitmapSource?> _appIcon;
     private readonly Func<string, BitmapSource?> _fileIcon;
     private readonly TimeProvider _clock;
+    private readonly Func<Func<BitmapSource?>, Task<BitmapSource?>>? _offload;
     private readonly Dictionary<string, BitmapSource?> _resourceIcons = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, BitmapSource?> _fileIcons = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, BitmapSource> _appIcons = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _appIconMisses = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _loading = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<nint, Lookup> _windows = [];
+
+    /// <summary>Raised on the caller's thread when an offloaded lookup finished; call <see cref="Get"/> again.</summary>
+    public event Action? IconLoaded;
 
     public RunningAppIconCache()
         : this(
@@ -30,7 +43,8 @@ public sealed class RunningAppIconCache
             Guard<nint, string>(window => NativeJumpListSession.ReadWindowAppId(window) ?? NativeWindowTracker.GetPackagedAppId(window)),
             Guard<string, BitmapSource>(appId => ApplicationIconProvider.GetForShellItem(@"shell:AppsFolder\" + appId, ApplicationIconProvider.PreferredIconPixels, iconOnly: true)),
             Guard<string, BitmapSource>(path => ApplicationIconProvider.GetForFile(path)),
-            TimeProvider.System)
+            TimeProvider.System,
+            IconLoaderThread.Run)
     {
     }
 
@@ -39,13 +53,15 @@ public sealed class RunningAppIconCache
         Func<nint, string?> appId,
         Func<string, BitmapSource?> appIcon,
         Func<string, BitmapSource?> fileIcon,
-        TimeProvider clock)
+        TimeProvider clock,
+        Func<Func<BitmapSource?>, Task<BitmapSource?>>? offload = null)
     {
         _resourceIcon = resourceIcon;
         _appId = appId;
         _appIcon = appIcon;
         _fileIcon = fileIcon;
         _clock = clock;
+        _offload = offload;
     }
 
     /// <summary>True while a window without an identity icon still has lookups left; call <see cref="Get"/> again after <see cref="RetryDelay"/>.</summary>
@@ -58,19 +74,21 @@ public sealed class RunningAppIconCache
         }
     }
 
+    /// <summary>True while an offloaded lookup is still running; <see cref="IconLoaded"/> follows when it ends.</summary>
+    public bool IsLoading => _loading.Count > 0;
+
     public BitmapSource? Get(string executablePath, nint window)
     {
-        if (!_resourceIcons.TryGetValue(executablePath, out var icon))
-        {
-            _resourceIcons[executablePath] = icon = _resourceIcon(executablePath);
-        }
+        if (!TryCached(_resourceIcons, "resource:", executablePath, _resourceIcon, out var icon)) return null;
 
         // Shell images are keyed by identity, never by executable: ApplicationFrameHost.exe hosts many apps.
-        icon ??= GetAppIcon(window);
-        if (icon is null && !_fileIcons.TryGetValue(executablePath, out icon))
+        if (icon is null)
         {
-            _fileIcons[executablePath] = icon = _fileIcon(executablePath);
+            icon = GetAppIcon(window, out var appIconLoading);
+            if (appIconLoading) return null;
         }
+
+        if (icon is null && !TryCached(_fileIcons, "file:", executablePath, _fileIcon, out icon)) return null;
 
         // Application icons remain fixed to their native high-resolution system icons.
         return icon;
@@ -90,6 +108,7 @@ public sealed class RunningAppIconCache
         {
             _appIcons.Remove(appId);
         }
+        _appIconMisses.RemoveWhere(appId => !appIds.Contains(appId));
 
         var paths = windows.Select(window => window.ExecutablePath).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var path in _resourceIcons.Keys.Where(path => !paths.Contains(path)).ToList())
@@ -99,8 +118,24 @@ public sealed class RunningAppIconCache
         }
     }
 
-    private BitmapSource? GetAppIcon(nint window)
+    /// <summary>Cached result, or a synchronous load, or (when offloading) a background load: false while it runs.</summary>
+    private bool TryCached(Dictionary<string, BitmapSource?> cache, string kind, string key,
+        Func<string, BitmapSource?> load, out BitmapSource? icon)
     {
+        if (cache.TryGetValue(key, out icon)) return true;
+        if (_offload is null)
+        {
+            cache[key] = icon = load(key);
+            return true;
+        }
+
+        StartLoad(kind + key, () => load(key), result => cache[key] = result);
+        return false;
+    }
+
+    private BitmapSource? GetAppIcon(nint window, out bool loading)
+    {
+        loading = false;
         if (window == 0) return null;
         var now = _clock.GetTimestamp();
         var known = _windows.TryGetValue(window, out var lookup);
@@ -115,8 +150,26 @@ public sealed class RunningAppIconCache
         BitmapSource? icon = null;
         if (appId is not null && !_appIcons.TryGetValue(appId, out icon))
         {
-            icon = _appIcon(appId);
-            if (icon is not null) _appIcons[appId] = icon;
+            if (_offload is null)
+            {
+                icon = _appIcon(appId);
+                if (icon is not null) _appIcons[appId] = icon;
+            }
+            else if (!_appIconMisses.Remove(appId))
+            {
+                // Still loading: no attempt is used up until the result is known. The window keeps its identity,
+                // so Retain (run by the refresh this load triggers) does not drop the image it is about to use.
+                StartLoad("app:" + appId, () => _appIcon(appId), result =>
+                {
+                    if (result is not null) _appIcons[appId] = result;
+                    else _appIconMisses.Add(appId);
+                });
+                var retryDelay = (long)(RetryDelay.TotalSeconds * _clock.TimestampFrequency);
+                _windows[window] = new Lookup(appId, null, lookup.Attempts, now,
+                    known ? lookup.Deadline : now + retryDelay * AttemptLimit);
+                loading = true;
+                return null;
+            }
         }
 
         var delay = (long)(RetryDelay.TotalSeconds * _clock.TimestampFrequency);
@@ -125,10 +178,29 @@ public sealed class RunningAppIconCache
         return icon;
     }
 
+    private void StartLoad(string id, Func<BitmapSource?> load, Action<BitmapSource?> store)
+    {
+        if (!_loading.Add(id)) return;
+        var context = SynchronizationContext.Current;
+        _offload!(load).ContinueWith(task =>
+        {
+            var result = task.IsCompletedSuccessfully ? task.Result : null;
+            void Apply()
+            {
+                _loading.Remove(id);
+                store(result);
+                IconLoaded?.Invoke();
+            }
+
+            if (context is null) Apply();
+            else context.Post(_ => Apply(), null);
+        }, TaskContinuationOptions.ExecuteSynchronously);
+    }
+
     private static bool IsPending(Lookup lookup, long now) =>
         lookup.Icon is null && lookup.Attempts < AttemptLimit && now < lookup.Deadline;
 
-    // The default sources call into the Shell on the UI thread; a failure there must only cost the icon.
+    // The default sources call into the Shell; a failure there must only cost the icon.
     private static Func<T, TResult?> Guard<T, TResult>(Func<T, TResult?> source) where TResult : class => value =>
     {
         try
@@ -144,4 +216,49 @@ public sealed class RunningAppIconCache
     };
 
     private readonly record struct Lookup(string? AppId, BitmapSource? Icon, int Attempts, long NextAttempt, long Deadline);
+
+    /// <summary>
+    /// One background STA thread for Shell icon work: shell items and icon handlers expect an apartment thread,
+    /// and a single thread keeps the loads in order without competing for the CPU with the UI.
+    /// </summary>
+    private static class IconLoaderThread
+    {
+        private static readonly BlockingCollection<Action> Work = new();
+        private static readonly Lazy<Thread> Worker = new(() =>
+        {
+            var thread = new Thread(() =>
+            {
+                foreach (var item in Work.GetConsumingEnumerable()) item();
+            })
+            {
+                IsBackground = true,
+                Name = "Running app icon loader",
+                Priority = ThreadPriority.BelowNormal
+            };
+            thread.SetApartmentState(ApartmentState.STA);
+            thread.Start();
+            return thread;
+        });
+
+        public static Task<BitmapSource?> Run(Func<BitmapSource?> load)
+        {
+            _ = Worker.Value;
+            var completion = new TaskCompletionSource<BitmapSource?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            Work.Add(() =>
+            {
+                try
+                {
+                    var icon = load();
+                    // Icons cross to the UI thread; unfrozen bitmaps would throw there.
+                    if (icon is { IsFrozen: false } && icon.CanFreeze) icon.Freeze();
+                    completion.SetResult(icon is { IsFrozen: true } ? icon : null);
+                }
+                catch (Exception ex)
+                {
+                    completion.SetException(ex);
+                }
+            });
+            return completion.Task;
+        }
+    }
 }
