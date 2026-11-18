@@ -366,6 +366,14 @@ void StartMenuToggleChecks()
         && !StartMenuState.IsStartMenuProcessName("explorer")
         && !StartMenuState.IsStartMenuProcessName(null),
         "Only Start menu host processes (Windows 10 and the redesigned Windows 11 Start) must count as the Start menu.");
+
+    Check(ShellOverlayWindows.IsTaskSwitcherClassName("XamlExplorerHostIslandWindow")
+        && ShellOverlayWindows.IsTaskSwitcherClassName("MultitaskingViewFrame")
+        && ShellOverlayWindows.IsTaskSwitcherClassName("TaskSwitcherWnd")
+        && !ShellOverlayWindows.IsTaskSwitcherClassName("Chrome_WidgetWin_1")
+        && !ShellOverlayWindows.IsTaskSwitcherClassName("Progman")
+        && !ShellOverlayWindows.IsTaskSwitcherClassName(null),
+        "Only the Alt+Tab / Task View switcher windows must count as the task switcher.");
 }
 
 sealed class TestClock : TimeProvider

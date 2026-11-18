@@ -50,8 +50,9 @@ public sealed class DockAutoHideController : IDisposable
     public Func<bool>? IsShellMenuOpen { get; set; }
 
     /// <summary>
-    /// Identifies foreground windows that belong to a shell menu rather than an application. The Start menu stays
-    /// the (cloaked) foreground window after it closes, so it must not decide whether an application covers the dock.
+    /// Identifies foreground windows that belong to the shell rather than an application: the Start menu (which
+    /// stays the cloaked foreground window after it closes) and the full-screen Alt+Tab switcher. They must not
+    /// decide whether an application covers the dock; the application in front before them does.
     /// </summary>
     public Func<nint, bool>? IsShellMenuWindow { get; set; }
 

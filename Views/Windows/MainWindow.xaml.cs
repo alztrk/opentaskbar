@@ -269,7 +269,8 @@ public partial class MainWindow : Window
                 || DockFlyout.IsAnyOpen || _keyboardNavigationActive);
         _autoHideController.DockBoundsProvider = GetDockPhysicalBounds;
         _autoHideController.IsShellMenuOpen = _startMenu.IsStartMenuOpenNow;
-        _autoHideController.IsShellMenuWindow = _startMenu.IsStartMenuWindow;
+        // The Start menu and the Alt+Tab switcher cover the dock but are not applications: look past them.
+        _autoHideController.IsShellMenuWindow = IsShellOverlayWindow;
         _autoHideController.LastApplicationWindowProvider = () => _lastApplicationWindow;
         _autoHideController.BackgroundWindowsProvider = () => (_windowTracker?.Snapshot ?? []).Select(window => window.Handle);
         _startMenu.StartWatching();
@@ -1170,6 +1171,9 @@ public partial class MainWindow : Window
             : description.Trim();
     }
 
+    private bool IsShellOverlayWindow(nint windowHandle) =>
+        _startMenu.IsStartMenuWindow(windowHandle) || ShellOverlayWindows.IsTaskSwitcher(windowHandle);
+
     private void WindowTracker_ForegroundWindowChanged(nint windowHandle)
     {
         _replacementSession?.UpdateForeground(windowHandle);
@@ -1180,7 +1184,8 @@ public partial class MainWindow : Window
         if (processId == Environment.ProcessId) return;
         var isStartMenu = _startMenu.IsStartMenuWindow(windowHandle);
         _startMenu.OnForegroundChanged(isStartMenu);
-        if (!isStartMenu && windowHandle != 0) _lastApplicationWindow = windowHandle;
+        if (!isStartMenu && windowHandle != 0 && !ShellOverlayWindows.IsTaskSwitcher(windowHandle))
+            _lastApplicationWindow = windowHandle;
         if (_openContextMenu is not null
             && windowHandle != 0
             && windowHandle != _foregroundWindow
