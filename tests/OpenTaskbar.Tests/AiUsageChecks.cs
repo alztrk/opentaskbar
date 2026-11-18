@@ -295,6 +295,14 @@ internal static class AiUsageChecks
             Check(AiUsageService.ReadOpenCodeToken(path) == "fixture-oc-v1", "OpenCode must read v1 auth.json provider keys.");
             File.WriteAllText(path, """[{"integrationID":"ollama-cloud","active":true,"value":{"key":"other"}},{"integrationID":"opencode-go","active":true,"value":{"type":"key","key":"fixture-oc-v2"}}]""");
             Check(AiUsageService.ReadOpenCodeToken(path) == "fixture-oc-v2", "OpenCode must read v2 auth export array entries.");
+            File.WriteAllText(path, """{"api_key":"fixture-openrouter"}""");
+            Check(AiUsageService.ReadOpenRouterToken(path) == "fixture-openrouter", "OpenRouter must read its api_key from auth.json.");
+            var (orReport, orError) = AiUsageService.ParseOpenRouter("""
+                {"data":{"total_credits":20.0,"total_usage":5.0}}
+                """);
+            Check(orError is null && orReport is { Provider: AiProviders.OpenRouter, Plan: "$15", Credits: 15.0, LimitReached: false }
+                  && orReport.Windows is [{ LabelKey: "AiUsageCreditsLabel", Used: >= 0.249 and <= 0.251 }],
+                "OpenRouter must parse total_credits and total_usage.");
             File.WriteAllText(path, "null");
             Check(AiUsageService.ReadClaudeToken(path) is null && AiUsageService.ReadCodexToken(path) is null,
                 "Malformed credential files must fail closed.");

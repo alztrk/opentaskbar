@@ -506,6 +506,10 @@
                                             <CheckBox x:Name="AiUsageOpenCodeToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}" AutomationProperties.Name="OpenCode Go" />
                                             <TextBlock Text="OpenCode Go" Style="{StaticResource SettingsRowLabel}" FontSize="12" />
                                         </DockPanel></Border>
+                                        <Border Style="{StaticResource CompactSettingsRow}"><DockPanel>
+                                            <CheckBox x:Name="AiUsageOpenRouterToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}" AutomationProperties.Name="OpenRouter" />
+                                            <TextBlock Text="OpenRouter" Style="{StaticResource SettingsRowLabel}" FontSize="12" />
+                                        </DockPanel></Border>
                                         <Border Style="{StaticResource CompactSettingsRow}"><StackPanel>
                                             <TextBlock Text="{local:Loc AiUsageRingLabel}" FontWeight="SemiBold" FontSize="12" Margin="0,0,0,6" />
                                             <UniformGrid Columns="1" Margin="-2,0">

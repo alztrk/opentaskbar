@@ -552,7 +552,8 @@ public partial class SettingsWindow : Window
         (AiUsageClaudeToggle.IsChecked == true ? AiProviders.Claude : 0)
         | (AiUsageCodexToggle.IsChecked == true ? AiProviders.Codex : 0)
         | (AiUsageAntigravityToggle.IsChecked == true ? AiProviders.Antigravity : 0)
-        | (AiUsageOpenCodeToggle.IsChecked == true ? AiProviders.OpenCode : 0);
+        | (AiUsageOpenCodeToggle.IsChecked == true ? AiProviders.OpenCode : 0)
+        | (AiUsageOpenRouterToggle.IsChecked == true ? AiProviders.OpenRouter : 0);
 
     private SystemMeters ReadStatsMeters() =>
         (StatsCpuToggle.IsChecked == true ? SystemMeters.Cpu : 0)
@@ -739,6 +740,7 @@ public partial class SettingsWindow : Window
         AiUsageCodexToggle.IsChecked = settings.AiUsageProviders.HasFlag(AiProviders.Codex);
         AiUsageAntigravityToggle.IsChecked = settings.AiUsageProviders.HasFlag(AiProviders.Antigravity);
         AiUsageOpenCodeToggle.IsChecked = settings.AiUsageProviders.HasFlag(AiProviders.OpenCode);
+        AiUsageOpenRouterToggle.IsChecked = settings.AiUsageProviders.HasFlag(AiProviders.OpenRouter);
         AiUsageRingHighest.IsChecked = settings.AiUsageRing == AiUsageRing.Highest;
         AiUsageRingSession.IsChecked = settings.AiUsageRing == AiUsageRing.Session;
         AiUsageRingWeekly.IsChecked = settings.AiUsageRing == AiUsageRing.Weekly;

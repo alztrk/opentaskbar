@@ -47,7 +47,7 @@ public static class AiUsageService
 
     internal static async Task<LoadResult> LoadWithPolicyAsync(AiProviders provider, CancellationToken cancellation)
     {
-        if (provider is not (AiProviders.Claude or AiProviders.Codex or AiProviders.Antigravity or AiProviders.OpenCode))
+        if (provider is not (AiProviders.Claude or AiProviders.Codex or AiProviders.Antigravity or AiProviders.OpenCode or AiProviders.OpenRouter))
             return new(null, "ErrorAiUsageLoad");
         int? status = null;
         try
@@ -89,6 +89,7 @@ public static class AiUsageService
                     AiProviders.Claude => ParseClaude(json, credential.Plan),
                     AiProviders.Codex => ParseCodex(json),
                     AiProviders.OpenCode => ParseOpenCode(json, credential.Plan),
+                    AiProviders.OpenRouter => ParseOpenRouter(json, credential.Plan),
                     _ => ParseAntigravity(json, credential.Plan)
                 };
                 return new(report, error);
@@ -119,6 +120,7 @@ public static class AiUsageService
             AiProviders.Claude => ("CLAUDE_CONFIG_DIR", ".claude", ".credentials.json"),
             AiProviders.Codex => ("CODEX_HOME", ".codex", "auth.json"),
             AiProviders.OpenCode => ("OPENCODE_CONFIG_DIR", Path.Combine(".local", "share", "opencode"), "auth.json"),
+            AiProviders.OpenRouter => ("OPENROUTER_CONFIG_DIR", ".openrouter", "auth.json"),
             _ => ("GEMINI_CONFIG_DIR", ".gemini", "oauth_creds.json")
         };
         var directory = Environment.GetEnvironmentVariable(envVar);
@@ -155,6 +157,7 @@ public static class AiUsageService
     internal static string? ReadCodexToken(string? path = null) => ReadCredential(AiProviders.Codex, path ?? CredentialPath(AiProviders.Codex))?.Token;
     internal static string? ReadAntigravityToken(string? path = null) => ReadCredential(AiProviders.Antigravity, path)?.Token;
     internal static string? ReadOpenCodeToken(string? path = null) => ReadCredential(AiProviders.OpenCode, path)?.Token;
+    internal static string? ReadOpenRouterToken(string? path = null) => ReadCredential(AiProviders.OpenRouter, path)?.Token;
 
     internal static async Task<string?> TryRefreshClaudeTokenAsync(
         string path,
@@ -173,6 +176,7 @@ public static class AiUsageService
             AiProviders.Claude => "https://api.anthropic.com/api/oauth/usage",
             AiProviders.Codex => "https://chatgpt.com/backend-api/wham/usage",
             AiProviders.OpenCode => "https://opencode.ai/zen/go/v1/usage",
+            AiProviders.OpenRouter => "https://openrouter.ai/api/v1/credits",
             _ => "https://aicode.googleapis.com/v1alpha:fetchQuotaStatus"
         });
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential.Token);
@@ -195,6 +199,14 @@ public static class AiUsageService
                 if (Environment.GetEnvironmentVariable(envKey) is { Length: > 0 } envToken && !string.IsNullOrWhiteSpace(envToken))
                     return new(envToken.Trim());
         }
+        if (provider == AiProviders.OpenRouter && path is null)
+        {
+            var envToken = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY")
+                ?? Environment.GetEnvironmentVariable("OPENROUTER_API_KEY", EnvironmentVariableTarget.User)
+                ?? Environment.GetEnvironmentVariable("OPENROUTER_API_KEY", EnvironmentVariableTarget.Machine);
+            if (!string.IsNullOrWhiteSpace(envToken))
+                return new(envToken.Trim());
+        }
         try
         {
             var targetPath = path ?? CredentialPath(provider);
@@ -214,6 +226,7 @@ public static class AiUsageService
             var root = document.RootElement;
             if (provider == AiProviders.Antigravity) return ParseAntigravityCredential(root);
             if (provider == AiProviders.OpenCode) return ParseOpenCodeCredential(root);
+            if (provider == AiProviders.OpenRouter) return ParseOpenRouterCredential(root);
             if (provider == AiProviders.Claude)
             {
                 var fileCred = ParseClaudeCredential(root, targetPath);
@@ -449,6 +462,14 @@ public static class AiUsageService
     internal static (AiUsageReport? Report, string? Error) ParseCodex(string json) => Parse(json, AiProviders.Codex, null);
     internal static (AiUsageReport? Report, string? Error) ParseAntigravity(string json, string? plan = null) => Parse(json, AiProviders.Antigravity, plan);
     internal static (AiUsageReport? Report, string? Error) ParseOpenCode(string json, string? plan = null) => Parse(json, AiProviders.OpenCode, plan);
+    internal static (AiUsageReport? Report, string? Error) ParseOpenRouter(string json, string? plan = null) => Parse(json, AiProviders.OpenRouter, plan);
+
+    private static Credential? ParseOpenRouterCredential(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        var token = Text(root, "api_key") ?? Text(root, "key") ?? Text(root, "token");
+        return string.IsNullOrWhiteSpace(token) ? null : new(token);
+    }
 
     private static (AiUsageReport? Report, string? Error) Parse(string json, AiProviders provider, string? plan)
     {
@@ -620,6 +641,26 @@ public static class AiUsageService
                 {
                     LimitReached = Flag(root, "limit_reached") || Flag(root, "limitReached")
                         || windows.Any(window => window.Used >= 1.0)
+                };
+            }
+            else if (provider == AiProviders.OpenRouter)
+            {
+                if (Property(root, "data") is not { ValueKind: JsonValueKind.Object } data
+                    || Property(data, "total_credits") is not { } totalElem || Number(totalElem) is not { } totalCredits
+                    || Property(data, "total_usage") is not { } usedElem || Number(usedElem) is not { } totalUsage
+                    || !double.IsFinite(totalCredits) || !double.IsFinite(totalUsage))
+                {
+                    return (null, "ErrorAiUsageLoad");
+                }
+
+                var remaining = Math.Max(0.0, totalCredits - totalUsage);
+                var used = totalCredits > 0 ? Math.Clamp(totalUsage / totalCredits, 0.0, 1.0) : 0.0;
+                plan ??= $"${remaining.ToString("0.##", CultureInfo.InvariantCulture)}";
+                windows.Add(new("AiUsageCreditsLabel", used, null, null));
+                report = new(provider, plan, windows, now)
+                {
+                    Credits = remaining,
+                    LimitReached = totalCredits > 0 && remaining <= 0
                 };
             }
             else

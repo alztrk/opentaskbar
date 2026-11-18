@@ -103,11 +103,12 @@ internal static class FeatureAndMemoryChecks
                 ai.Activate();
                 Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.Background);
                 var cards = AiCards(ai);
-                Check(cards.Length == 4 && cards.All(card => card.Content is StackPanel { Children: [System.Windows.Shapes.Path { Data: not null }, TextBlock, RingMeter] })
+                Check(cards.Length == 5 && cards.All(card => card.Content is StackPanel { Children: [System.Windows.Shapes.Path { Data: not null }, TextBlock, RingMeter] })
                     && cards[0].Content is StackPanel { Children: [_, TextBlock { Text: "Claude" }, RingMeter { Value: 0.42, Text: "42" }] }
                     && cards[1].Content is StackPanel { Children: [_, TextBlock { Text: "Codex" }, RingMeter { Value: 0.9 }] }
                     && cards[2].Content is StackPanel { Children: [_, TextBlock { Text: "Antigravity" }, RingMeter { Value: 0.42, Text: "42" }] }
                     && cards[3].Content is StackPanel { Children: [_, TextBlock { Text: "OpenCode" }, RingMeter { Value: 0.42, Text: "42" }] }
+                    && cards[4].Content is StackPanel { Children: [_, TextBlock { Text: "OpenRouter" }, RingMeter { Value: 0.42, Text: "42" }] }
                     && cards[0].ToolTip is string claudeTip && claudeTip.StartsWith("Claude Code 42%", StringComparison.Ordinal)
                     && claudeTip.Contains("Weekly 29%", StringComparison.Ordinal) && claudeTip.Contains("Resets in", StringComparison.Ordinal)
                     && cards[1].ToolTip is string codexTip && codexTip.Contains(UiText.Get("AiUsageLimitReached"), StringComparison.Ordinal),
