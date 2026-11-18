@@ -32,9 +32,7 @@ jobs:
         shell: pwsh
         run: |
           & "scripts/publish-portable.ps1" -OutputDir dist
-          if (-not (Test-Path "dist/OpenTaskbar.exe")) {
-            throw "dist/OpenTaskbar.exe was not created."
-          }
+          & "scripts/check-portable.ps1" -OutputDir dist
 
       - name: Determine release tag
         id: release_info
