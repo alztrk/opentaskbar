@@ -976,40 +976,50 @@ public partial class MainWindow : Window
     private void LaunchApp(DockApp app, bool elevated)
     {
         var executablePath = app.ExecutablePath;
-        if (!File.Exists(executablePath))
+        var arguments = app.LaunchArguments ?? string.Empty;
+        // ShellExecuteEx loads shell extensions and can take from 100 ms to over a second. On the UI thread it froze
+        // the dock, launch bounce included, until Windows had taken the app. Start it from the thread pool instead;
+        // Process.Start runs ShellExecuteEx on its own STA thread when called from an MTA thread.
+        _ = Task.Run(() => StartApplication(executablePath, arguments, elevated)).ContinueWith(task =>
         {
-            ReportError("ErrorAppFileNotFound");
-            return;
-        }
+            if (task.Result is { } error) Dispatcher.BeginInvoke(() => ReportError(error));
+        }, TaskScheduler.Default);
+    }
 
+    /// <summary>Starts an application through the shell and returns an error key, or null on success or UAC cancel.</summary>
+    internal static string? StartApplication(string executablePath, string arguments, bool elevated)
+    {
+        if (!File.Exists(executablePath)) return "ErrorAppFileNotFound";
         try
         {
             using var _ = Process.Start(new ProcessStartInfo(executablePath)
             {
-                Arguments = app.LaunchArguments ?? string.Empty,
+                Arguments = arguments,
                 UseShellExecute = true,
                 Verb = elevated ? "runas" : string.Empty
             });
+            return null;
         }
         catch (Win32Exception ex) when (elevated && ex.NativeErrorCode == 1223)
         {
             // The user declined the UAC prompt.
+            return null;
         }
         catch (Win32Exception)
         {
-            ReportError("ErrorAppLaunchWin32");
+            return "ErrorAppLaunchWin32";
         }
         catch (InvalidOperationException)
         {
-            ReportError("ErrorAppLaunchFailed");
+            return "ErrorAppLaunchFailed";
         }
         catch (UnauthorizedAccessException)
         {
-            ReportError("ErrorAppLaunchDenied");
+            return "ErrorAppLaunchDenied";
         }
         catch (IOException)
         {
-            ReportError("ErrorAppFileInaccessible");
+            return "ErrorAppFileInaccessible";
         }
     }
 

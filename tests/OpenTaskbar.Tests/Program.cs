@@ -17,6 +17,7 @@ InitialLanguageChecks();
 MultiMonitorChecks();
 DockIconPixelChecks();
 StartMenuAndOverlayChecks();
+AppLaunchChecks();
 checks += RunningAppChecks.Run();
 checks += AiUsageChecks.Run();
 if (!headless) checks += WidgetViewChecks.Run();
@@ -30,6 +31,14 @@ void Check(bool condition, string name)
 {
     if (!condition) throw new InvalidOperationException(name);
     checks++;
+}
+
+// Launching runs off the UI thread now, so failures come back as error keys; nothing is started here.
+void AppLaunchChecks()
+{
+    var missing = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".exe");
+    Check(OpenTaskbar.MainWindow.StartApplication(missing, string.Empty, elevated: false) == "ErrorAppFileNotFound",
+        "A missing executable must report ErrorAppFileNotFound instead of starting anything.");
 }
 
 void CountdownChecks()

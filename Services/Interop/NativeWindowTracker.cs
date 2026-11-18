@@ -375,6 +375,13 @@ public sealed class NativeWindowTracker : IDisposable
         return true;
     }
 
+    private static bool IsForegroundRoot(nint windowHandle)
+    {
+        var active = GetForegroundWindow();
+        return active == windowHandle
+            || (active != 0 && NormalizeRootWindow(active) == NormalizeRootWindow(windowHandle));
+    }
+
     private static nint NormalizeRootWindow(nint windowHandle)
     {
         if (windowHandle == 0) return 0;
@@ -395,6 +402,14 @@ public sealed class NativeWindowTracker : IDisposable
         }
 
         AllowSetForegroundWindow(-1);
+        // Fast path: a dock click is the last input event, so this process may set the foreground window directly.
+        // Attaching input queues and raising the window first waits on both apps' UI threads and cost 50-250 ms per
+        // click; keep that only as the fallback for when Windows refuses the plain request.
+        if (SetForegroundWindow(windowHandle) && IsForegroundRoot(windowHandle))
+        {
+            return true;
+        }
+
         var foreground = GetForegroundWindow();
         var foregroundThread = foreground != 0 ? GetWindowThreadProcessId(foreground, out _) : 0;
         var targetThread = GetWindowThreadProcessId(windowHandle, out _);
