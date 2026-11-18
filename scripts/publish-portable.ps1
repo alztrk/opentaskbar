@@ -1,5 +1,5 @@
 # OpenTaskbar Portable Single-File Publisher
-# Builds a self-contained, compressed single-file executable for Windows x64.
+# Builds a self-contained single-file executable for Windows x64.
 param (
     [string]$OutputDir = "$PSScriptRoot\..\dist"
 )
@@ -30,6 +30,7 @@ dotnet publish $projectPath `
     -r win-x64 `
     --self-contained true `
     -p:PublishSingleFile=true `
+    -p:IncludeNativeLibrariesForSelfExtract=true `
     -p:PublishReadyToRun=false `
     -p:EnableCompressionInSingleFile=false `
     -o $OutputDir
