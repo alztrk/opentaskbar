@@ -33,3 +33,9 @@ jobs:
 
       - name: Run behavior and contract test suite
         run: dotnet run --project tests/OpenTaskbar.Tests/OpenTaskbar.Tests.csproj --configuration Release
+
+      - name: Verify portable EXE starts without sidecar DLLs
+        shell: pwsh
+        run: |
+          & "scripts/publish-portable.ps1" -OutputDir dist
+          & "scripts/check-portable.ps1" -OutputDir dist
