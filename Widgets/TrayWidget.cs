@@ -11,6 +11,11 @@ public sealed class TrayWidget : DockWidget
     private readonly Button _button;
     private readonly DockFlyout _flyout = new();
     private int _requestVersion;
+    private IReadOnlyList<TrayApp>? _lastApps;
+    private Task<IReadOnlyList<TrayApp>>? _refresh;
+
+    /// <summary>Seam for tests: enumerates the tray apps (registry snapshot plus every running process).</summary>
+    internal Func<IReadOnlyList<TrayApp>> AppsReader { get; set; } = TrayIcons.RunningApps;
 
     public event Action<string>? CloseApplicationRequested;
     public event Action<string>? TerminateApplicationRequested;
@@ -23,6 +28,8 @@ public sealed class TrayWidget : DockWidget
         _button = new Button { Content = glyph, Padding = new Thickness(10, 0, 10, 0) };
         _button.SetResourceReference(StyleProperty, "WidgetCardButton");
         _button.Click += Button_Click;
+        // Warm the list while the pointer approaches, so a click can show it at once.
+        _button.MouseEnter += (_, _) => RefreshAppsQuietly();
         Localize();
         Content = _button;
     }
@@ -31,7 +38,44 @@ public sealed class TrayWidget : DockWidget
     {
         UiText.Current.PropertyChanged += UiText_PropertyChanged;
         Localize();
+        RefreshAppsQuietly();
     }
+
+    /// <summary>
+    /// One enumeration at a time, shared by every caller. It reads the tray registry snapshot and every running
+    /// process (~100 ms), so it always runs off the UI thread and its result is kept for the next click.
+    /// </summary>
+    private Task<IReadOnlyList<TrayApp>> RefreshAppsAsync()
+    {
+        if (_refresh is { IsCompleted: false } running) return running;
+        var reader = AppsReader;
+        return _refresh = LoadAsync();
+
+        async Task<IReadOnlyList<TrayApp>> LoadAsync()
+        {
+            var apps = await Task.Run(reader);
+            _lastApps = apps;
+            return apps;
+        }
+    }
+
+    private async void RefreshAppsQuietly()
+    {
+        try
+        {
+            await RefreshAppsAsync();
+        }
+        catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException
+            or System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            AppLog.Warning($"Tray enumeration failed: {ex.Message}");
+        }
+    }
+
+    internal static bool SameApps(IReadOnlyList<TrayApp> left, IReadOnlyList<TrayApp> right) =>
+        left.Count == right.Count && left.Zip(right).All(pair =>
+            pair.First.Name == pair.Second.Name
+            && string.Equals(pair.First.ExecutablePath, pair.Second.ExecutablePath, StringComparison.OrdinalIgnoreCase));
 
     protected override void OnDeactivated()
     {
@@ -58,17 +102,22 @@ public sealed class TrayWidget : DockWidget
         }
 
         var requestVersion = ++_requestVersion;
+        // Show the last known list at once instead of waiting for a fresh enumeration; update it in place if the
+        // fresh list differs. Only the very first open, with nothing cached yet, waits for the enumeration.
+        var cached = _lastApps;
+        if (cached is not null) _flyout.Show(_button, BuildContent(cached));
         try
         {
-            var apps = await Task.Run(TrayIcons.RunningApps);
+            var apps = await RefreshAppsAsync();
             if (!IsActive || requestVersion != _requestVersion) return;
-            _flyout.Show(_button, BuildContent(apps));
+            if (cached is null) _flyout.Show(_button, BuildContent(apps));
+            else if (_flyout.IsOpen && !SameApps(cached, apps)) _flyout.Show(_button, BuildContent(apps), animate: false);
         }
         catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException
             or System.ComponentModel.Win32Exception or InvalidOperationException)
         {
             AppLog.Warning($"Tray enumeration failed: {ex.Message}");
-            if (IsActive && requestVersion == _requestVersion) Report(UiText.Get("SystemDataUnavailable"));
+            if (cached is null && IsActive && requestVersion == _requestVersion) Report(UiText.Get("SystemDataUnavailable"));
         }
     }
 

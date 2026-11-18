@@ -18,6 +18,7 @@ MultiMonitorChecks();
 DockIconPixelChecks();
 StartMenuAndOverlayChecks();
 AppLaunchChecks();
+TrayListChecks();
 checks += RunningAppChecks.Run();
 checks += AiUsageChecks.Run();
 if (!headless) checks += WidgetViewChecks.Run();
@@ -39,6 +40,18 @@ void AppLaunchChecks()
     var missing = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName() + ".exe");
     Check(OpenTaskbar.MainWindow.StartApplication(missing, string.Empty, elevated: false) == "ErrorAppFileNotFound",
         "A missing executable must report ErrorAppFileNotFound instead of starting anything.");
+}
+
+// The tray flyout shows its last list at once and rebuilds only when a fresh enumeration differs.
+void TrayListChecks()
+{
+    IReadOnlyList<TrayApp> first = [new("OneDrive", @"C:\Apps\OneDrive.exe", null), new("Teams", @"C:\Apps\Teams.exe", null)];
+    IReadOnlyList<TrayApp> sameWithNewIcons = [new("OneDrive", @"c:\apps\onedrive.exe", null), new("Teams", @"C:\Apps\Teams.exe", null)];
+    IReadOnlyList<TrayApp> renamed = [new("OneDrive - Personal", @"C:\Apps\OneDrive.exe", null), new("Teams", @"C:\Apps\Teams.exe", null)];
+    IReadOnlyList<TrayApp> shorter = [new("OneDrive", @"C:\Apps\OneDrive.exe", null)];
+    Check(OpenTaskbar.Widgets.TrayWidget.SameApps(first, sameWithNewIcons), "Path casing alone must not rebuild the open tray list.");
+    Check(!OpenTaskbar.Widgets.TrayWidget.SameApps(first, renamed), "A changed app name must refresh the open tray list.");
+    Check(!OpenTaskbar.Widgets.TrayWidget.SameApps(first, shorter), "An app that exited must refresh the open tray list.");
 }
 
 void CountdownChecks()
