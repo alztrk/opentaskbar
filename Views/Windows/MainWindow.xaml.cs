@@ -63,6 +63,9 @@ public partial class MainWindow : Window
     private DateTime _contextMenuOpenedAtUtc;
     private Size _dockArea;
     private nint? _foregroundAtAppPress;
+    private readonly StartMenuState _startMenu = new();
+    private bool _startMenuOpenAtPress;
+    private nint _lastApplicationWindow;
     private uint _taskbarCreatedMessage;
     private Point _dragStartPoint;
     private readonly HashSet<FrameworkElement> _displacedIcons = [];
@@ -168,6 +171,9 @@ public partial class MainWindow : Window
             RebuildDockOrder();
         };
         Deactivated += (_, _) => _widgetCoordinator.CollapseHover();
+        // Right-clicks activate the dock; the window hook skips our own process, so this is the only sign
+        // that the Start menu lost the foreground to the dock.
+        Activated += (_, _) => _startMenu.OnDockActivated();
         _widgetCoordinator.AvailabilityChanged += () =>
         {
             ResizeDockToContent();
@@ -262,6 +268,7 @@ public partial class MainWindow : Window
                 || (_settingsWindow is { IsVisible: true, IsActive: true, WindowState: not WindowState.Minimized })
                 || DockFlyout.IsAnyOpen || _keyboardNavigationActive);
         _autoHideController.DockBoundsProvider = GetDockPhysicalBounds;
+        _startMenu.StartWatching();
         _autoHideController.AnimationsEnabled = _preferences.Current.AnimationsEnabled;
         _autoHideController.SetMode(_preferences.Current.AutoHide);
         ApplyBackdropHitTesting();
@@ -863,12 +870,55 @@ public partial class MainWindow : Window
             return;
         }
 
+        var startMenuWasOpen = _startMenuOpenAtPress;
+        _startMenuOpenAtPress = false;
+        if (_startMenu.IsStartMenuOpenNow())
+        {
+            // The dock does not take activation on left clicks, so the Start menu is not light-dismissed: close it.
+            CloseStartMenu();
+            return;
+        }
+        if (startMenuWasOpen)
+        {
+            // The press already dismissed the Start menu; requesting it now would reopen it.
+            _startMenu.Reset();
+            return;
+        }
+
         const uint wmSysCommand = 0x0112;
         const int scTaskList = 0xF130;
         if (_source is null || !PostMessage(_source.Handle, wmSysCommand, scTaskList, 0))
         {
             ReportError("ErrorStartMenuOpen");
         }
+    }
+
+    /// <summary>
+    /// Closes the open Start menu with the Windows key, then hands the foreground back to the application that
+    /// was in front before it, as the native taskbar does. Windows otherwise returns it to the dock window.
+    /// </summary>
+    private void CloseStartMenu()
+    {
+        _startMenu.Reset();
+        const byte vkLeftWindows = 0x5B;
+        const uint keyEventKeyUp = 0x0002;
+        keybd_event(vkLeftWindows, 0, 0, 0);
+        keybd_event(vkLeftWindows, 0, keyEventKeyUp, 0);
+
+        var application = _lastApplicationWindow;
+        if (application == 0) return;
+        var restoreTimer = new DispatcherTimer(DispatcherPriority.Normal) { Interval = TimeSpan.FromMilliseconds(200) };
+        restoreTimer.Tick += (_, _) =>
+        {
+            restoreTimer.Stop();
+            if (_startMenu.IsStartMenuOpenNow() || !IsWindow(application) || IsIconic(application)) return;
+            // Only take the foreground back from the dock or the closed Start menu, never from a window the
+            // user switched to in the meantime.
+            var foreground = NativeWindowTracker.GetForegroundApplicationWindow();
+            if (foreground != 0 && !_startMenu.IsStartMenuWindow(foreground)) return;
+            NativeWindowTracker.Activate(application);
+        };
+        restoreTimer.Start();
     }
 
     private void OpenDockApp(DockApp app, bool toggleIfForeground = false, nint? foregroundAtPress = null)
@@ -1124,6 +1174,9 @@ public partial class MainWindow : Window
         GetWindowThreadProcessId(windowHandle, out var processId);
         // Dock buttons, thumbnail hosts, and menus must not replace the last external foreground window.
         if (processId == Environment.ProcessId) return;
+        var isStartMenu = _startMenu.IsStartMenuWindow(windowHandle);
+        _startMenu.OnForegroundChanged(isStartMenu);
+        if (!isStartMenu && windowHandle != 0) _lastApplicationWindow = windowHandle;
         if (_openContextMenu is not null
             && windowHandle != 0
             && windowHandle != _foregroundWindow
@@ -2141,6 +2194,9 @@ public partial class MainWindow : Window
         _foregroundWindow = 0;
         _foregroundAtMenuOpen = 0;
         _foregroundAtAppPress = null;
+        _startMenuOpenAtPress = false;
+        _startMenu.Reset();
+        _lastApplicationWindow = 0;
         _contextTargetWasForeground = false;
         _contextMenuOpenedAtUtc = default;
         _keyboardNavigationActive = false;
@@ -2390,6 +2446,7 @@ public partial class MainWindow : Window
         _thumbnailPreview.Dispose();
         _autoHideController?.Dispose();
         _autoHideController = null;
+        _startMenu.Dispose();
         _widgetCoordinator.Dispose();
         _jumpLists.Dispose();
         _wheelAudio?.Dispose();
@@ -2407,6 +2464,17 @@ public partial class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(nint windowHandle, out uint processId);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindow(nint windowHandle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsIconic(nint windowHandle);
+
+    [DllImport("user32.dll")]
+    private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, nuint extraInfo);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

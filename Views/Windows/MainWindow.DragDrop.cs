@@ -274,6 +274,8 @@ public partial class MainWindow
     {
         _startDragStartPoint = e.GetPosition(this);
         _isStartPressing = true;
+        // Snapshot at press: the press itself light-dismisses an open Start menu before the click runs.
+        _startMenuOpenAtPress = _startMenu.WasOpenAtPress(_startMenu.IsStartMenuOpenNow());
     }
 
     private void StartButton_PreviewMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)

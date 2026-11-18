@@ -15,6 +15,7 @@ TaskManagerTextChecks();
 SettingsChecks();
 InitialLanguageChecks();
 MultiMonitorChecks();
+StartMenuToggleChecks();
 checks += RunningAppChecks.Run();
 if (!headless) checks += WidgetViewChecks.Run();
 checks += ThemePackChecks.Run();
@@ -321,6 +322,50 @@ void MultiMonitorChecks()
     Check(UiText.Get("SecondaryWidgets") == "İkinci ekranda widget göster", "SecondaryWidgets must be localized in Turkish.");
     Check(UiText.Get("SecondaryAppsCurrent") == "Yalnızca bu ekrandaki pencereler", "SecondaryAppsCurrent must be localized in Turkish.");
     Check(UiText.Get("SecondaryAppsAll") == "Tüm açık pencereler", "SecondaryAppsAll must be localized in Turkish.");
+}
+
+void StartMenuToggleChecks()
+{
+    var clock = new TestClock();
+    var state = new StartMenuState(clock);
+    Check(!state.WasOpenAtPress(openNow: false), "A closed Start menu must be opened by the Start button.");
+    Check(state.WasOpenAtPress(openNow: true), "A Start menu still on screen at press must be closed.");
+
+    state.OnForegroundChanged(isStartMenu: true);
+    Check(state.IsOpen && state.WasOpenAtPress(false), "A tracked open Start menu must be closed by the Start button.");
+
+    // A press outside the Start menu light-dismisses it before the dock's press handler runs.
+    state.OnForegroundChanged(isStartMenu: false);
+    Check(!state.IsOpen && state.WasOpenAtPress(false),
+        "Start dismissed by the press itself must still count as open, so the click closes it.");
+    clock.Advance(StartMenuState.DismissGrace + TimeSpan.FromMilliseconds(1));
+    Check(!state.WasOpenAtPress(false), "A later press after Start closed must open it again.");
+
+    state.OnForegroundChanged(isStartMenu: false);
+    Check(!state.WasOpenAtPress(false), "Foreground changes between other windows must not look like a Start dismissal.");
+
+    state.OnForegroundChanged(isStartMenu: true);
+    state.OnDockActivated();
+    Check(state.WasOpenAtPress(false), "Start losing the foreground to the dock itself must count as just dismissed.");
+    state.Reset();
+    Check(!state.WasOpenAtPress(false), "Reset after a handled close must let the next press open Start.");
+
+    // A closed Start menu stays the foreground window but is cloaked; no foreground change reports it.
+    state.OnForegroundChanged(isStartMenu: true);
+    state.OnStartMenuCloakChanged(cloaked: true);
+    Check(!state.IsOpen && state.WasOpenAtPress(false), "A Start menu cloaked by the press must count as just dismissed.");
+    clock.Advance(StartMenuState.DismissGrace + TimeSpan.FromMilliseconds(1));
+    Check(!state.WasOpenAtPress(false), "A Start menu cloaked earlier must not swallow the next press.");
+    state.OnStartMenuCloakChanged(cloaked: false);
+    Check(state.IsOpen, "Uncloaking the Start menu must mark it open again.");
+    state.Reset();
+
+    Check(StartMenuState.IsStartMenuProcessName("StartMenuExperienceHost")
+        && StartMenuState.IsStartMenuProcessName("SearchHost")
+        && StartMenuState.IsStartMenuProcessName("startmenuexperiencehost")
+        && !StartMenuState.IsStartMenuProcessName("explorer")
+        && !StartMenuState.IsStartMenuProcessName(null),
+        "Only Start menu host processes (Windows 10 and the redesigned Windows 11 Start) must count as the Start menu.");
 }
 
 sealed class TestClock : TimeProvider
