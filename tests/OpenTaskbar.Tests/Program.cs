@@ -15,6 +15,7 @@ TaskManagerTextChecks();
 SettingsChecks();
 InitialLanguageChecks();
 MultiMonitorChecks();
+DockIconPixelChecks();
 checks += RunningAppChecks.Run();
 if (!headless) checks += WidgetViewChecks.Run();
 checks += ThemePackChecks.Run();
@@ -325,6 +326,19 @@ void MultiMonitorChecks()
     Check(UiText.Get("SecondaryWidgets") == "İkinci ekranda widget göster", "SecondaryWidgets must be localized in Turkish.");
     Check(UiText.Get("SecondaryAppsCurrent") == "Yalnızca bu ekrandaki pencereler", "SecondaryAppsCurrent must be localized in Turkish.");
     Check(UiText.Get("SecondaryAppsAll") == "Tüm açık pencereler", "SecondaryAppsAll must be localized in Turkish.");
+}
+
+void DockIconPixelChecks()
+{
+    // Large dock at 100%: 38 DIP * 0.88 = 33.4 px must use the native 32 px artwork instead of resampling it.
+    Check(ApplicationIconProvider.ComputeApplicationIconPixels(38 * 0.88, 1.0) == 32, "Large dock icons must snap to 32 px.");
+    Check(ApplicationIconProvider.ComputeApplicationIconPixels(34 * 0.88, 1.0) == 32, "Medium dock icons must snap to 32 px.");
+    Check(ApplicationIconProvider.ComputeApplicationIconPixels(28 * 0.88, 1.0) == 24, "Compact dock icons must snap to 24 px.");
+    Check(ApplicationIconProvider.ComputeApplicationIconPixels(38 * 0.88, 1.25) == 40, "125% DPI must snap to the native 40 px size.");
+    Check(ApplicationIconProvider.ComputeApplicationIconPixels(38 * 0.88, 1.5) == 48, "150% DPI must snap to the native 48 px size.");
+    Check(ApplicationIconProvider.ComputeApplicationIconPixels(38 * 0.88 * 1.5, 1.5) == 75,
+        "Sizes far from any native size must keep their own pixel size instead of jumping to a distant one.");
+    Check(ApplicationIconProvider.ComputeApplicationIconPixels(10, 0.5) == 16, "Icons must never drop below 16 px.");
 }
 
 sealed class TestClock : TimeProvider

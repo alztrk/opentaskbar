@@ -255,7 +255,8 @@
                                             <TranslateTransform Y="0" />
                                         </TransformGroup>
                                     </Grid.RenderTransform>
-                                    <Image x:Name="RecycleBinIcon" Margin="2.5" Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality" />
+                                    <Image x:Name="RecycleBinIcon" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
+                                           Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality" />
                                 </Grid>
                             </Button>
                             <Border x:Name="WidgetDivider" Width="1" Height="22" Background="{DynamicResource StrokeSubtle}" Margin="6,0" Visibility="Collapsed" IsHitTestVisible="False" />

@@ -2238,9 +2238,6 @@ public partial class MainWindow : Window
         Application.Current.Resources["DockCellSize"] = profile.Cell;
         Application.Current.Resources["DockCellHeight"] = profile.Cell;
         Application.Current.Resources["DockIconSize"] = profile.Icon;
-        // Keep app artwork visually balanced with neighboring compact widgets without
-        // shrinking the clickable dock cell or changing its drag/drop geometry.
-        Application.Current.Resources["DockApplicationIconSize"] = Math.Max(18, Math.Round(profile.Icon * 0.88));
         Application.Current.Resources["StartLogoSize"] = Math.Max(14, Math.Round(profile.Icon * 0.68));
         DockFrame.Padding = new Thickness(10, profile.VerticalPadding, 10, profile.VerticalPadding);
         DockFrame.CornerRadius = new CornerRadius(radius);
@@ -2269,9 +2266,12 @@ public partial class MainWindow : Window
     private void UpdatePreferredIconPixels()
     {
         var dpiScale = VisualTreeHelper.GetDpi(this).DpiScaleX;
-        var pixels = ApplicationIconProvider.ComputeTargetPixels(Profile.Icon, dpiScale);
+        // Keep app artwork visually balanced with neighboring compact widgets without shrinking the clickable
+        // dock cell or changing its drag/drop geometry; the size is snapped so icons are drawn 1:1 in pixels.
+        var pixels = ApplicationIconProvider.ComputeApplicationIconPixels(Math.Max(18, Profile.Icon * 0.88), dpiScale);
         ApplicationIconProvider.PreferredIconPixels = pixels;
         ThemePacks.PreferredIconPixels = pixels;
+        Application.Current.Resources["DockApplicationIconSize"] = pixels / Math.Max(1.0, dpiScale);
     }
 
     private void WidgetStrip_SizeChanged(object sender, SizeChangedEventArgs e)

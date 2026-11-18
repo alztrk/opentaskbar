@@ -16,6 +16,24 @@ public static class ApplicationIconProvider
     public static int ComputeTargetPixels(double iconDip, double dpiScale) =>
         Math.Max(16, (int)Math.Ceiling(iconDip * Math.Max(1.0, dpiScale)));
 
+    /// <summary>Pixel sizes that icon resources commonly ship, drawn by the app author for that exact size.</summary>
+    internal static readonly int[] NativeIconSizes = [16, 20, 24, 32, 40, 48, 64, 96, 128, 256];
+
+    /// <summary>How far a native size may be from the requested one and still be used instead of it.</summary>
+    internal const double NativeSnapTolerance = 0.12;
+
+    /// <summary>
+    /// Device-pixel size for dock application icons. Icons scaled to an arbitrary size (e.g. 38 px extracted and
+    /// drawn at 33 px) are resampled twice and look soft. Snapping to a nearby native icon size and drawing the
+    /// bitmap at exactly that many device pixels keeps them as crisp as the author drew them.
+    /// </summary>
+    public static int ComputeApplicationIconPixels(double iconDip, double dpiScale)
+    {
+        var desired = Math.Max(16, iconDip * Math.Max(1.0, dpiScale));
+        var nearest = NativeIconSizes.MinBy(size => Math.Abs(size - desired));
+        return Math.Abs(nearest - desired) <= desired * NativeSnapTolerance ? nearest : (int)Math.Round(desired);
+    }
+
     public static BitmapSource? GetForFile(string path, int targetSize = 0)
     {
         var size = targetSize > 0 ? targetSize : PreferredIconPixels;
