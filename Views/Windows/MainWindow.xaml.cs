@@ -2270,6 +2270,7 @@ public partial class MainWindow : Window
         // dock cell or changing its drag/drop geometry; the size is snapped so icons are drawn 1:1 in pixels.
         var pixels = ApplicationIconProvider.ComputeApplicationIconPixels(Math.Max(18, Profile.Icon * 0.88), dpiScale);
         ApplicationIconProvider.PreferredIconPixels = pixels;
+        ApplicationIconProvider.HoverIconPixels = ApplicationIconProvider.ComputeHoverIconPixels(pixels, DockMetrics.HoverScale);
         ThemePacks.PreferredIconPixels = pixels;
         Application.Current.Resources["DockApplicationIconSize"] = pixels / Math.Max(1.0, dpiScale);
     }

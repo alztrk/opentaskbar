@@ -1,7 +1,9 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Imaging;
 using OpenTaskbar.Services;
 
 namespace OpenTaskbar;
@@ -14,6 +16,7 @@ public partial class MainWindow
     private readonly Dictionary<FrameworkElement, double> _magnificationScaleTargets = [];
     private bool _magnificationRendering;
     private TimeSpan? _magnificationLastFrame;
+    private readonly Dictionary<Image, BitmapSource> _restingIcons = [];
 
     internal void InvalidateMagnificationTargets() => _magnificationTargetsDirty = true;
 
@@ -206,6 +209,7 @@ public partial class MainWindow
                 ? targetScale : current + (targetScale - current) * blend;
             if (Math.Abs(targetScale - next) >= 0.003) settled = false;
             if (Math.Abs(current - next) < 0.0001) continue;
+            UseHoverIcon(icon, next > HoverIconThreshold);
             scale.ScaleX = next;
             scale.ScaleY = next;
         }
@@ -249,10 +253,41 @@ public partial class MainWindow
         foreach (var icon in _magnifiedIcons)
         {
             var (scale, _) = GetIconTransforms(icon);
-            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, duration) { EasingFunction = easing });
+            var shrink = new DoubleAnimation(1.0, duration) { EasingFunction = easing };
+            // Keep the sharp variant while shrinking; the resting bitmap is exact only at scale 1.
+            shrink.Completed += (_, _) =>
+            {
+                if (scale.ScaleX <= HoverIconThreshold) UseHoverIcon(icon, false);
+            };
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, shrink);
             scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, duration) { EasingFunction = easing });
         }
 
         _magnifiedIcons.Clear();
+    }
+
+    /// <summary>Scale above which an icon shows its larger variant instead of the 1:1 resting bitmap.</summary>
+    private const double HoverIconThreshold = 1.005;
+
+    /// <summary>
+    /// Swaps a dock icon between its resting bitmap (drawn 1:1, sharp at scale 1) and a larger native variant
+    /// (scaled down while magnified, so it stays sharp instead of blurring). The binding to the resting icon is kept:
+    /// the variant is set with SetCurrentValue and the binding is re-read to restore.
+    /// </summary>
+    private void UseHoverIcon(FrameworkElement icon, bool magnified)
+    {
+        if ((icon as Image ?? FindVisualChild<Image>(icon)) is not { } image) return;
+        if (magnified)
+        {
+            if (image.Source is not BitmapSource current
+                || ApplicationIconProvider.GetHoverVariant(current) is not { } hover) return;
+            _restingIcons[image] = current;
+            image.SetCurrentValue(Image.SourceProperty, hover);
+        }
+        else if (_restingIcons.Remove(image, out var resting))
+        {
+            if (BindingOperations.GetBindingExpression(image, Image.SourceProperty) is { } binding) binding.UpdateTarget();
+            else image.SetCurrentValue(Image.SourceProperty, resting);
+        }
     }
 }

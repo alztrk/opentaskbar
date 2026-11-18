@@ -339,6 +339,14 @@ void DockIconPixelChecks()
     Check(ApplicationIconProvider.ComputeApplicationIconPixels(38 * 0.88 * 1.5, 1.5) == 75,
         "Sizes far from any native size must keep their own pixel size instead of jumping to a distant one.");
     Check(ApplicationIconProvider.ComputeApplicationIconPixels(10, 0.5) == 16, "Icons must never drop below 16 px.");
+
+    // Magnified icons (up to 1.28x) use the smallest native size that covers the magnified size, so they are
+    // scaled down instead of blurred up.
+    Check(ApplicationIconProvider.ComputeHoverIconPixels(32, 1.28) == 48, "A 32 px icon magnified to 41 px must use 48 px artwork.");
+    Check(ApplicationIconProvider.ComputeHoverIconPixels(24, 1.28) == 32, "A 24 px icon magnified to 31 px must use 32 px artwork.");
+    Check(ApplicationIconProvider.ComputeHoverIconPixels(40, 1.28) == 64, "A 40 px icon magnified to 52 px must use 64 px artwork.");
+    Check(ApplicationIconProvider.ComputeHoverIconPixels(300, 1.28) == 384, "Beyond the largest native size the exact magnified size is used.");
+    Check(ApplicationIconProvider.GetHoverVariant(null) is null, "A missing icon has no hover variant.");
 }
 
 sealed class TestClock : TimeProvider

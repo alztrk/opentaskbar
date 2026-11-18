@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Windows.Interop;
 using System.Windows.Media.Imaging;
@@ -34,9 +35,48 @@ public static class ApplicationIconProvider
         return Math.Abs(nearest - desired) <= desired * NativeSnapTolerance ? nearest : (int)Math.Round(desired);
     }
 
+    /// <summary>
+    /// Device-pixel size of the variant shown while the dock magnifies an icon. Drawing the resting bitmap scaled
+    /// up blurs it; a larger native bitmap scaled down stays sharp. 0 disables hover variants.
+    /// </summary>
+    public static int HoverIconPixels { get; set; }
+
+    // Resting dock icon -> how to load its larger variant. Weak keys: entries go away with their icons, and the
+    // variant is only extracted the first time that icon is magnified.
+    private static readonly ConditionalWeakTable<BitmapSource, Lazy<BitmapSource?>> HoverVariants = new();
+
+    /// <summary>The smallest native icon size that covers <paramref name="restPixels"/> magnified by <paramref name="scale"/>.</summary>
+    public static int ComputeHoverIconPixels(int restPixels, double scale)
+    {
+        var needed = (int)Math.Ceiling(restPixels * Math.Max(1.0, scale));
+        foreach (var size in NativeIconSizes)
+        {
+            if (size >= needed) return size;
+        }
+        return needed;
+    }
+
+    /// <summary>The larger variant of a resting dock icon for magnification, or null when there is none.</summary>
+    public static BitmapSource? GetHoverVariant(BitmapSource? icon) =>
+        icon is not null && HoverVariants.TryGetValue(icon, out var variant) ? variant.Value : null;
+
+    private static BitmapSource? RememberHoverVariant(BitmapSource? icon, Func<int, BitmapSource?> load)
+    {
+        var hoverPixels = HoverIconPixels;
+        if (icon is null || hoverPixels <= icon.PixelWidth) return icon;
+        HoverVariants.AddOrUpdate(icon, new Lazy<BitmapSource?>(() =>
+        {
+            var variant = load(hoverPixels);
+            // A source without larger artwork returns the same small size; that would not be any sharper.
+            return variant is not null && variant.PixelWidth > icon.PixelWidth ? variant : null;
+        }));
+        return icon;
+    }
+
     public static BitmapSource? GetForFile(string path, int targetSize = 0)
     {
-        var size = targetSize > 0 ? targetSize : PreferredIconPixels;
+        if (targetSize <= 0) return RememberHoverVariant(GetForFile(path, PreferredIconPixels), size => GetForFile(path, size));
+        var size = targetSize;
         if (string.Equals(Path.GetExtension(path), ".exe", StringComparison.OrdinalIgnoreCase))
         {
             var executableIcon = GetExecutableIcon(path, 0, size);
@@ -74,14 +114,25 @@ public static class ApplicationIconProvider
     public static BitmapSource? GetForResource(string path, int index, int targetSize = 0)
     {
         var expanded = Environment.ExpandEnvironmentVariables(path);
-        var size = targetSize > 0 ? targetSize : PreferredIconPixels;
-        return File.Exists(expanded) ? GetExecutableIcon(expanded, index, size) : null;
+        if (!File.Exists(expanded)) return null;
+        if (targetSize > 0) return GetExecutableIcon(expanded, index, targetSize);
+        return RememberHoverVariant(GetExecutableIcon(expanded, index, PreferredIconPixels),
+            size => GetExecutableIcon(expanded, index, size));
     }
 
     /// <summary>
     /// Thumbnail or icon for any Shell parsing name: files, folders, or <c>shell:AppsFolder\{AUMID}</c> entries.
     /// </summary>
     public static BitmapSource? GetForShellItem(string parsingName, int size = 64, bool iconOnly = false)
+    {
+        var icon = LoadShellItemImage(parsingName, size, iconOnly);
+        // Dock icons are requested at the preferred size; give those a sharper variant for magnification.
+        return size == PreferredIconPixels
+            ? RememberHoverVariant(icon, hoverSize => LoadShellItemImage(parsingName, hoverSize, iconOnly))
+            : icon;
+    }
+
+    private static BitmapSource? LoadShellItemImage(string parsingName, int size, bool iconOnly)
     {
         var factoryId = typeof(IShellItemImageFactory).GUID;
         if (SHCreateItemFromParsingName(parsingName, 0, ref factoryId, out var factoryObject) != 0
