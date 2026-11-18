@@ -42,69 +42,12 @@ jobs:
         run: |
           $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') {
             $env:GITHUB_REF_NAME
-          } elseif ($env:GITHUB_REF_TYPE -eq 'branch' -and $env:GITHUB_REF_NAME -match '^release/(v[0-9]+\.[0-9]+\.[0-9]+)
-
-      - name: Package release archive
-        shell: pwsh
-        run: |
-          $zipName = "OpenTaskbar-${{ env.TAG_NAME }}-win-x64.zip"
-          Compress-Archive -Path "dist/OpenTaskbar.exe", "LICENSE", "README.md" -DestinationPath $zipName
-          
-          # Generate SHA256 checksums
-          $exeHash = (Get-FileHash -Path "dist/OpenTaskbar.exe" -Algorithm SHA256).Hash.ToLower()
-          $zipHash = (Get-FileHash -Path $zipName -Algorithm SHA256).Hash.ToLower()
-          
-          $checksumContent = @"
-          $exeHash *OpenTaskbar.exe
-          $zipHash *$zipName
-          "@
-          Set-Content -Path "checksums.txt" -Value $checksumContent
-
-      - name: Create GitHub Release and Upload Assets
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.TAG_NAME }}
-          target_commitish: ${{ github.sha }}
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          files: |
-            dist/OpenTaskbar.exe
-            OpenTaskbar-*-win-x64.zip
-            checksums.txt
-) {
+          } elseif ($env:GITHUB_REF_TYPE -eq 'branch' -and $env:GITHUB_REF_NAME -match '^release/(v[0-9]+\.[0-9]+\.[0-9]+)$') {
             $Matches[1]
           } else {
             "${{ inputs.tag_name }}"
           }
-          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+
-
-      - name: Package release archive
-        shell: pwsh
-        run: |
-          $zipName = "OpenTaskbar-${{ env.TAG_NAME }}-win-x64.zip"
-          Compress-Archive -Path "dist/OpenTaskbar.exe", "LICENSE", "README.md" -DestinationPath $zipName
-          
-          # Generate SHA256 checksums
-          $exeHash = (Get-FileHash -Path "dist/OpenTaskbar.exe" -Algorithm SHA256).Hash.ToLower()
-          $zipHash = (Get-FileHash -Path $zipName -Algorithm SHA256).Hash.ToLower()
-          
-          $checksumContent = @"
-          $exeHash *OpenTaskbar.exe
-          $zipHash *$zipName
-          "@
-          Set-Content -Path "checksums.txt" -Value $checksumContent
-
-      - name: Create GitHub Release and Upload Assets
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.TAG_NAME }}
-          generate_release_notes: true
-          files: |
-            dist/OpenTaskbar.exe
-            OpenTaskbar-*-win-x64.zip
-            checksums.txt
-) {
+          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
             throw "Release tag must be a version, for example v0.2.9."
           }
           [xml]$project = Get-Content "OpenTaskbar.csproj" -Raw
@@ -134,6 +77,9 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG_NAME }}
+          target_commitish: ${{ github.sha }}
+          draft: false
+          prerelease: false
           generate_release_notes: true
           files: |
             dist/OpenTaskbar.exe
