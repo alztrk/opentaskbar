@@ -1,4 +1,6 @@
 using System.IO;
+using OpenTaskbar;
+using OpenTaskbar.Models;
 using OpenTaskbar.Services;
 
 internal static class TaskbarRecoveryChecks
@@ -50,6 +52,16 @@ internal static class TaskbarRecoveryChecks
                 $"Malformed watchdog arguments must be ignored: {malformed}");
         }
         Check(!TaskbarRecoveryWatchdog.TryParseArguments([], out _, out _), "An empty argument list must be ignored.");
+
+        // Win-based hotkeys are retired: a modifier lost during a lock transition can trigger them without Win.
+        Check(MainWindow.DescribeHotkey(HotkeyChoice.WinAltD) is null, "MOD_WIN hotkeys must never be registered.");
+        Check(MainWindow.DescribeHotkey(HotkeyChoice.CtrlAltD) is { Modifiers: 0x3, Key: 0x44 },
+            "Legacy WinAltD selections must fall back to a safe Ctrl+Alt+D hotkey.");
+        Check(MainWindow.DescribeHotkey(HotkeyChoice.AltSpace) is { Modifiers: 0x1, Key: 0x20 },
+            "The launcher hotkey must remain unchanged.");
+
+        Check(SyntheticKeyboard.SendChord() is null, "An empty synthetic chord must be a no-op.");
+        Check(SyntheticKeyboard.TrackedModifiers.Count == 0, "No modifier can remain tracked after an empty chord.");
 
         return checks;
     }

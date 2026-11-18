@@ -517,9 +517,8 @@
 
                             <Border Style="{StaticResource SettingsRow}"><DockPanel>
                                 <Border DockPanel.Dock="Right" Width="280" Height="32" CornerRadius="7" Background="{DynamicResource SettingsControl}" BorderBrush="{DynamicResource StrokeSubtle}" BorderThickness="1" Padding="2" VerticalAlignment="Center">
-                                    <UniformGrid Columns="3">
+                                    <UniformGrid Columns="2">
                                         <RadioButton x:Name="DockCtrlAltD" GroupName="DockHotkey" Content="Ctrl+Alt+D" Style="{StaticResource SettingsSegmentChoice}" />
-                                        <RadioButton x:Name="DockWinAltD" GroupName="DockHotkey" Content="Win+Alt+D" Style="{StaticResource SettingsSegmentChoice}" />
                                         <RadioButton x:Name="DockOff" GroupName="DockHotkey" Content="{local:Loc HotkeyDisabled}" Style="{StaticResource SettingsSegmentChoice}" />
                                     </UniformGrid>
                                 </Border>

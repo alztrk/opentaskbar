@@ -107,13 +107,13 @@ public sealed class DockFlyout
         }
     }
 
-    public static void CloseAll()
+    public static void CloseAll(bool restoreFocus = true)
     {
         CleanRegistry();
         for (var i = 0; i < FlyoutRegistry.Count; i++)
         {
             if (FlyoutRegistry[i].TryGetTarget(out var flyout) && flyout._popup.IsOpen)
-                flyout.Close();
+                flyout.Close(restoreFocus);
         }
     }
 

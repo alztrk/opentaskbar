@@ -632,7 +632,11 @@ public sealed class TaskbarReplacementSession : IDisposable
 
         var className = new StringBuilder(128);
         GetClassName(targetHandle, className, className.Capacity);
-        if (className.ToString() is "Progman" or "WorkerW" or "Shell_TrayWnd") return false;
+        if (className.ToString() is "Progman" or "WorkerW" or "Shell_TrayWnd" or "LogonUI" or "LockAppWindow")
+            return false;
+        // The lock screen covers the whole monitor but is not a full-screen app. Treating it as one hides the dock
+        // with SW_HIDE and desynchronizes it from the auto-hide state, so it pops back on its own after unlocking.
+        if (IsLockScreenWindow(targetHandle)) return false;
 
         var monitor = new MonitorInfo { cbSize = (uint)Marshal.SizeOf<MonitorInfo>() };
         if (!GetMonitorInfo(MonitorFromWindow(targetHandle, MonitorDefaultToNearest), ref monitor)
@@ -642,6 +646,19 @@ public sealed class TaskbarReplacementSession : IDisposable
         var style = GetWindowLongPtr(targetHandle, GwlStyle).ToInt64();
         var zoomed = IsZoomed(targetHandle);
         return IsFullScreenBounds(rect, style, zoomed, monitor.rcMonitor, monitor.rcWork);
+    }
+
+    private static bool IsLockScreenWindow(nint handle)
+    {
+        GetWindowThreadProcessId(handle, out var processId);
+        if (processId == 0) return false;
+        try
+        {
+            using var process = Process.GetProcessById((int)processId);
+            return process.ProcessName is "LogonUI" or "LockApp";
+        }
+        catch (ArgumentException) { return false; }
+        catch (InvalidOperationException) { return false; }
     }
 
     internal static bool IsFullScreenBounds(Rect windowRect, long windowStyle, bool isZoomed, Rect monitorBounds, Rect workBounds)

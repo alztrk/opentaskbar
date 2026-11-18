@@ -23,9 +23,6 @@ public static class ShellShortcuts
     private const ushort VkA = 0x41;
     private const ushort VkN = 0x4E;
     private const ushort VkP = 0x50;
-    private const uint InputKeyboard = 1;
-    private const uint KeyEventKeyUp = 0x0002;
-    private const uint KeyEventExtended = 0x0001;
     private const uint MonitorDefaultToNearest = 2;
     private const uint SwpNoSize = 0x0001;
     private const uint SwpNoZOrder = 0x0004;
@@ -33,8 +30,6 @@ public static class ShellShortcuts
     private const int ErrorCancelled = 1223;
     private static CancellationTokenSource? _repositionCts;
     public static Func<bool>? IsMediaWidgetActive { get; set; }
-
-    private static bool IsExtended(ushort key) => key is VkLeft or VkRight or VkLeftWindows;
 
     /// <summary>Win+A: Quick Settings (Windows 11) or Action Center (Windows 10), anchored above the clicked button when given.</summary>
     public static string? OpenQuickSettings(FrameworkElement? anchor = null)
@@ -212,53 +207,11 @@ public static class ShellShortcuts
 
     private static string? SendWindowsShortcut(ushort key) => SendChord(VkLeftWindows, key);
 
-    /// <summary>Presses the keys in order and releases them in reverse, like a user typing the chord.</summary>
-    public static string? SendChord(params ushort[] keys)
-    {
-        if (keys.Length == 0) return null;
-        var inputs = new Input[keys.Length * 2];
-        for (var i = 0; i < keys.Length; i++)
-        {
-            var key = keys[i];
-            inputs[i] = KeyInput(key, IsExtended(key) ? KeyEventExtended : 0);
-        }
+    /// <summary>Presses the keys in order and releases them in reverse, with a guaranteed modifier cleanup.</summary>
+    public static string? SendChord(params ushort[] keys) => SyntheticKeyboard.SendChord(keys);
 
-        for (var i = 0; i < keys.Length; i++)
-        {
-            var key = keys[keys.Length - 1 - i];
-            inputs[keys.Length + i] = KeyInput(key, KeyEventKeyUp | (IsExtended(key) ? KeyEventExtended : 0));
-        }
-
-        var sent = SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<Input>());
-        if (sent == inputs.Length) return null;
-        AppLog.Warning($"SendInput sent {sent}/{inputs.Length} events: {Marshal.GetLastPInvokeError()}");
-        return UiText.Get("ErrorShortcutSend");
-    }
-
-    private static Input KeyInput(ushort key, uint flags) => new()
-    {
-        Type = InputKeyboard,
-        Keyboard = new KeyboardInput { VirtualKey = key, Flags = flags }
-    };
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct Input
-    {
-        public uint Type;
-        public KeyboardInput Keyboard;
-        // Pads the union to the size of MOUSEINPUT, the largest member.
-        private readonly long _padding;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct KeyboardInput
-    {
-        public ushort VirtualKey;
-        public ushort ScanCode;
-        public uint Flags;
-        public uint Time;
-        public nint ExtraInfo;
-    }
+    /// <summary>Drops modifiers left down by a shell shortcut interrupted by a lock or focus transition.</summary>
+    public static void ReleaseStuckModifiers() => SyntheticKeyboard.ReleaseAll();
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeRect
@@ -274,9 +227,6 @@ public static class ShellShortcuts
         public NativeRect Work;
         public uint Flags;
     }
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern uint SendInput(uint count, Input[] inputs, int size);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern nint FindWindow(string? lpClassName, string? lpWindowName);

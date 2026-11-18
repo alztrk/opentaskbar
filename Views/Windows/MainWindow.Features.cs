@@ -85,13 +85,14 @@ public partial class MainWindow
 
     // ---- Global hotkeys (#2) ----
 
-    private static (uint Modifiers, uint Key)? DescribeHotkey(HotkeyChoice choice) => choice switch
+    internal static (uint Modifiers, uint Key)? DescribeHotkey(HotkeyChoice choice) => choice switch
     {
         HotkeyChoice.AltSpace => (0x1, 0x20),
         HotkeyChoice.CtrlSpace => (0x2, 0x20),
         HotkeyChoice.CtrlAltSpace => (0x3, 0x20),
         HotkeyChoice.CtrlAltD => (0x3, 0x44),
-        HotkeyChoice.WinAltD => (0x9, 0x44),
+        // No MOD_WIN hotkey: a Win keydown lost during a lock/secure-desktop transition can make a later
+        // ordinary keystroke trigger this registration (and other Win shortcuts) with no physical Win press.
         _ => null
     };
 

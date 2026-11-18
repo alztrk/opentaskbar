@@ -22,6 +22,7 @@ public sealed class WidgetHoverCoordinator : IDisposable
     private DockWidget? _activeWidget;
     private UIElement? _activeFlyoutContent;
     private long _outsideSinceMs;
+    private long _suppressedUntilMs;
     private bool _disposed;
     private readonly HashSet<DockWidget> _attached = [];
 
@@ -71,6 +72,16 @@ public sealed class WidgetHoverCoordinator : IDisposable
         }
     }
 
+    /// <summary>
+    /// Collapses hover UI and ignores hover intent for a while. Used when the interactive desktop returns so the
+    /// first click after unlocking cannot land on an automatically reopened flyout's settings action.
+    /// </summary>
+    public void Suppress(TimeSpan duration)
+    {
+        CollapseActive();
+        _suppressedUntilMs = Environment.TickCount64 + (long)duration.TotalMilliseconds;
+    }
+
     public void CollapseActive()
     {
         _enterTimer.Stop();
@@ -112,6 +123,7 @@ public sealed class WidgetHoverCoordinator : IDisposable
     private void Widget_MouseEnter(object sender, MouseEventArgs e)
     {
         if (_disposed || sender is not DockWidget widget || !widget.IsCompact) return;
+        if (Environment.TickCount64 < _suppressedUntilMs) return;
         if (widget == _activeWidget)
         {
             _outsideSinceMs = 0;
@@ -141,6 +153,12 @@ public sealed class WidgetHoverCoordinator : IDisposable
     private void EnterTimer_Tick(object? sender, EventArgs e)
     {
         _enterTimer.Stop();
+        if (Environment.TickCount64 < _suppressedUntilMs)
+        {
+            _pendingWidget = null;
+            return;
+        }
+
         var widget = _pendingWidget;
         _pendingWidget = null;
         if (_disposed || widget is null || !widget.IsCompact || !IsWidgetCurrentlyHovered(widget)) return;

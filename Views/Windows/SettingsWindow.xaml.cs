@@ -310,7 +310,7 @@ public partial class SettingsWindow : Window
             LauncherHotkey = LauncherAltSpace.IsChecked == true ? HotkeyChoice.AltSpace
                 : LauncherCtrlSpace.IsChecked == true ? HotkeyChoice.CtrlSpace
                 : LauncherCtrlAltSpace.IsChecked == true ? HotkeyChoice.CtrlAltSpace : HotkeyChoice.Disabled,
-            DockHotkey = DockCtrlAltD.IsChecked == true ? HotkeyChoice.CtrlAltD : DockWinAltD.IsChecked == true ? HotkeyChoice.WinAltD : HotkeyChoice.Disabled,
+            DockHotkey = DockCtrlAltD.IsChecked == true ? HotkeyChoice.CtrlAltD : HotkeyChoice.Disabled,
             StartAction = StartOpensLauncher.IsChecked == true ? StartButtonAction.Launcher : StartButtonAction.WindowsStart,
             StartPlacement = StartHidden.IsChecked == true ? StartButtonPlacement.Hidden
                 : StartLast.IsChecked == true ? StartButtonPlacement.End
@@ -718,8 +718,8 @@ public partial class SettingsWindow : Window
         LauncherCtrlSpace.IsChecked = settings.LauncherHotkey == HotkeyChoice.CtrlSpace;
         LauncherCtrlAltSpace.IsChecked = settings.LauncherHotkey == HotkeyChoice.CtrlAltSpace;
         LauncherOff.IsChecked = settings.LauncherHotkey is not (HotkeyChoice.AltSpace or HotkeyChoice.CtrlSpace or HotkeyChoice.CtrlAltSpace);
-        DockCtrlAltD.IsChecked = settings.DockHotkey == HotkeyChoice.CtrlAltD;
-        DockWinAltD.IsChecked = settings.DockHotkey == HotkeyChoice.WinAltD;
+        // WinAltD is retired: existing selections fall back to the equivalent Ctrl+Alt+D.
+        DockCtrlAltD.IsChecked = settings.DockHotkey is HotkeyChoice.CtrlAltD or HotkeyChoice.WinAltD;
         DockOff.IsChecked = settings.DockHotkey is not (HotkeyChoice.CtrlAltD or HotkeyChoice.WinAltD);
         StartOpensWindows.IsChecked = settings.StartAction == StartButtonAction.WindowsStart;
         StartOpensLauncher.IsChecked = settings.StartAction == StartButtonAction.Launcher;

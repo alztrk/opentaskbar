@@ -9,6 +9,9 @@
 - Crash handlers now fall back to journal-based restore when no session is active or another thread is already stopping.
 - Added a detached watchdog process that restores the taskbar after End Task, `taskkill /F`, FailFast or power loss.
 - `OpenTaskbar.exe --restore` now reports failures through the exit code and only clears the journal after success.
+- Fixed Windows Settings (and other shell flyouts) opening by themselves after Win+L: synthetic Win chords now guarantee modifier release, and stuck modifiers are cleared when the desktop unlocks.
+- Removed the Win+Alt+D dock hotkey (existing selections migrate to Ctrl+Alt+D) because MOD_WIN registrations can fire spuriously after a secure-desktop transition.
+- The lock screen is no longer mistaken for a full-screen app; dock hover, flyouts and cached foreground windows are reset on lock/unlock so the first click after returning cannot hit a settings link.
 
 ## 0.2.7 - 2026-11-17
 

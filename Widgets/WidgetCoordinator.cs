@@ -96,6 +96,7 @@ public sealed class WidgetCoordinator : IDisposable
         remove => _hoverCoordinator.HoverActiveChanged -= value;
     }
     public void CollapseHover() => _hoverCoordinator.CollapseActive();
+    public void SuppressHover(TimeSpan duration) => _hoverCoordinator.Suppress(duration);
 
     private static bool IsCatalogEnabled(DockSettings settings, string id) =>
         settings.Widgets?.Contains(id, StringComparer.OrdinalIgnoreCase) == true;

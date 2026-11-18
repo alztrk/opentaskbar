@@ -229,6 +229,20 @@ public sealed class NativeWindowTracker : IDisposable
         FlushRefresh();
     }
 
+    /// <summary>
+    /// Drops cached foreground state after a secure-desktop transition. Without this, LogonUI's handle can survive
+    /// as the "previous foreground window" and be reactivated on the first click after unlocking.
+    /// </summary>
+    public void ResyncForeground()
+    {
+        _refreshTimer.Stop();
+        _pendingLocationForeground = 0;
+        RefreshWindows();
+        var foreground = GetForegroundWindow();
+        _lastForegroundWindow = foreground != 0 ? NormalizeRootWindow(foreground) : 0;
+        if (_lastForegroundWindow != 0) ForegroundWindowChanged?.Invoke(_lastForegroundWindow);
+    }
+
     private void FlushRefresh()
     {
         _refreshTimer.Stop();
