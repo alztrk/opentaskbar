@@ -85,7 +85,7 @@
                         </DataTrigger>
                         <DataTrigger Binding="{Binding IsForeground}" Value="True">
                             <Setter TargetName="Surface" Property="Background" Value="{DynamicResource SurfaceSelectedStrong}" />
-                            <Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource StrokeSubtle}" />
+                            <Setter TargetName="Surface" Property="BorderBrush" Value="Transparent" />
                             <Setter TargetName="ActiveIndicatorGlow" Property="Visibility" Value="Visible" />
                             <Setter TargetName="ActiveIndicator" Property="Visibility" Value="Visible" />
                             <Setter TargetName="ActiveIndicator" Property="Opacity" Value="1.0" />

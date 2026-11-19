@@ -108,7 +108,11 @@
                 <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}"
                       RenderTransformOrigin="0.5,0.95">
                     <Image Source="{Binding Icon}" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
-                           Stretch="Uniform" ClipToBounds="True" RenderOptions.BitmapScalingMode="HighQuality" />
+                           Stretch="Uniform" ClipToBounds="True" RenderOptions.BitmapScalingMode="HighQuality">
+                        <Image.Effect>
+                            <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Color="#000000" Opacity="0.35" />
+                        </Image.Effect>
+                    </Image>
                     <Ellipse Width="9" Height="9" Fill="{DynamicResource NotificationBrush}"
                              Stroke="{DynamicResource SurfacePopup}" StrokeThickness="1"
                              HorizontalAlignment="Right" VerticalAlignment="Top"
@@ -132,7 +136,11 @@
                     DragLeave="StackButton_DragLeave"
                     Drop="StackButton_Drop">
                 <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}" RenderTransformOrigin="0.5,0.95">
-                    <Image Source="{Binding Icon}" Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality" />
+                    <Image Source="{Binding Icon}" Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality">
+                        <Image.Effect>
+                            <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Color="#000000" Opacity="0.35" />
+                        </Image.Effect>
+                    </Image>
                     <Ellipse Width="9" Height="9" Fill="{DynamicResource NotificationBrush}"
                              Stroke="{DynamicResource SurfacePopup}" StrokeThickness="1"
                              HorizontalAlignment="Right" VerticalAlignment="Top"
@@ -189,7 +197,11 @@
                                            RenderOptions.BitmapScalingMode="HighQuality" />
                                     <Path x:Name="StartLogo" Width="{DynamicResource StartLogoSize}" Height="{DynamicResource StartLogoSize}" Stretch="Uniform" Fill="{DynamicResource WindowsLogoBrush}"
                                           MaxWidth="{DynamicResource DockIconSize}" MaxHeight="{DynamicResource DockIconSize}"
-                                          Data="M0,0 H10 V10 H0 Z M12,0 H22 V10 H12 Z M0,12 H10 V22 H0 Z M12,12 H22 V22 H12 Z" />
+                                          Data="M0,0 H10 V10 H0 Z M12,0 H22 V10 H12 Z M0,12 H10 V22 H0 Z M12,12 H22 V22 H12 Z">
+                                        <Path.Effect>
+                                            <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Color="#000000" Opacity="0.32" />
+                                        </Path.Effect>
+                                    </Path>
                                 </Grid>
                             </Button>
                             <Border x:Name="StartDivider" Width="1" Height="22" Background="{DynamicResource StrokeSubtle}" Margin="3,0,4,0" IsHitTestVisible="False" />
@@ -253,7 +265,11 @@
                                         </TransformGroup>
                                     </Grid.RenderTransform>
                                     <Image x:Name="RecycleBinIcon" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
-                                           Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality" />
+                                           Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality">
+                                        <Image.Effect>
+                                            <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Color="#000000" Opacity="0.35" />
+                                        </Image.Effect>
+                                    </Image>
                                 </Grid>
                             </Button>
                             <Border x:Name="WidgetDivider" Width="1" Height="22" Background="{DynamicResource StrokeSubtle}" Margin="6,0" Visibility="Collapsed" IsHitTestVisible="False" />

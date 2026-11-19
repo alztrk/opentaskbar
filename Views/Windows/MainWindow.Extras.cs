@@ -39,17 +39,32 @@ public partial class MainWindow
 
     private static readonly Brush StackTileBrush = CreateFrozenStackBrush(Color.FromArgb(0x35, 0xFF, 0xFF, 0xFF));
     private static readonly Brush StackTileStroke = CreateFrozenStackBrush(Color.FromArgb(0x55, 0xFF, 0xFF, 0xFF));
-    private static readonly Brush CardShadowBrush1 = CreateFrozenStackBrush(Color.FromArgb(0x35, 0x00, 0x00, 0x00));
-    private static readonly Brush CardShadowBrush2 = CreateFrozenStackBrush(Color.FromArgb(0x18, 0x00, 0x00, 0x00));
-    private static readonly Brush CardDeckBackBrush = CreateFrozenStackBrush(Color.FromArgb(0x28, 0xFF, 0xFF, 0xFF));
-    private static readonly Brush CardDeckBackStroke = CreateFrozenStackBrush(Color.FromArgb(0x38, 0xFF, 0xFF, 0xFF));
+    private static readonly Brush CardShadowBrush1 = CreateFrozenStackBrush(Color.FromArgb(0x40, 0x00, 0x00, 0x00));
+    private static readonly Brush CardShadowBrush2 = CreateFrozenStackBrush(Color.FromArgb(0x55, 0x00, 0x00, 0x00));
+    private static readonly Brush CardDeckBackBrush = CreateFrozenStackBrush(Color.FromArgb(0x35, 0x1E, 0x24, 0x30));
+    private static readonly Brush CardDeckBackStroke = CreateFrozenStackBrush(Color.FromArgb(0x35, 0xFF, 0xFF, 0xFF));
     private static readonly Brush CardDeckMidBrush = CreateFrozenStackBrush(Color.FromArgb(0x3C, 0xFF, 0xFF, 0xFF));
     private static readonly Brush CardDeckMidStroke = CreateFrozenStackBrush(Color.FromArgb(0x50, 0xFF, 0xFF, 0xFF));
     private static readonly Brush CardDeckFrontBrush = CreateFrozenStackBrush(Color.FromArgb(0x50, 0xFF, 0xFF, 0xFF));
     private static readonly Brush CardDeckFrontStroke = CreateFrozenStackBrush(Color.FromArgb(0x75, 0xFF, 0xFF, 0xFF));
-    private static readonly Brush BadgeBackdropBrush = CreateFrozenStackBrush(Color.FromArgb(0xE0, 0x1E, 0x29, 0x3B));
-    private static readonly Brush BadgeStrokeBrush = CreateFrozenStackBrush(Color.FromArgb(0x60, 0xFF, 0xFF, 0xFF));
-    private static readonly Brush BadgeIconBrush = CreateFrozenStackBrush(Color.FromArgb(0xF0, 0x60, 0xA5, 0xFA));
+    private static readonly Brush BadgeBackdropBrush = CreateFrozenStackBrush(Color.FromArgb(0xEB, 0x0F, 0x17, 0x2A));
+    private static readonly Brush BadgeStrokeBrush = CreateFrozenStackBrush(Color.FromArgb(0x60, 0x38, 0xBD, 0xF8));
+    private static readonly Brush BadgeIconBrush = CreateFrozenStackBrush(Color.FromArgb(0xFF, 0x38, 0xBD, 0xF8));
+
+    private static readonly Brush FolderTabBrush = CreateFrozenStackBrush(Color.FromArgb(0xFF, 0x02, 0x84, 0xC7));
+    private static readonly Brush FolderBackBrush = CreateFrozenStackBrush(Color.FromArgb(0xFF, 0x03, 0x69, 0xA1));
+    private static readonly Brush FolderPaperBrush = CreateFrozenStackBrush(Color.FromArgb(0xD8, 0xF0, 0xF9, 0xFF));
+    private static readonly Brush FolderFrontBrush = CreateFrozenGradient(
+        Color.FromArgb(0xFF, 0x38, 0xBD, 0xF8),
+        Color.FromArgb(0xFF, 0x02, 0x84, 0xC7));
+    private static readonly Brush FolderFrontStroke = CreateFrozenStackBrush(Color.FromArgb(0x60, 0xFF, 0xFF, 0xFF));
+
+    private static Brush CreateFrozenGradient(Color top, Color bottom)
+    {
+        var brush = new LinearGradientBrush(top, bottom, new Point(0, 0), new Point(0, 1));
+        brush.Freeze();
+        return brush;
+    }
 
     private static Brush CreateFrozenStackBrush(Color color)
     {
@@ -112,13 +127,49 @@ public partial class MainWindow
         return geom;
     }
 
+    internal static BitmapSource RenderModernFolderIcon(int size)
+    {
+        var target = Math.Max(16, size);
+        var scale = target / 128.0;
+        var visual = new DrawingVisual();
+        using (var dc = visual.RenderOpen())
+        {
+            // 1. Ambient drop shadow under folder
+            var shadowRect = new Rect(14 * scale, 34 * scale, 100 * scale, 74 * scale);
+            dc.DrawRoundedRectangle(CardShadowBrush1, null, new Rect(shadowRect.X, shadowRect.Y + 4 * scale, shadowRect.Width, shadowRect.Height), 16 * scale, 16 * scale);
+
+            // 2. Folder Tab (back layer)
+            var tabRect = new Rect(18 * scale, 24 * scale, 42 * scale, 22 * scale);
+            dc.DrawRoundedRectangle(FolderTabBrush, null, tabRect, 8 * scale, 8 * scale);
+
+            // 3. Folder Back Body
+            var backBodyRect = new Rect(14 * scale, 30 * scale, 100 * scale, 76 * scale);
+            dc.DrawRoundedRectangle(FolderBackBrush, null, backBodyRect, 14 * scale, 14 * scale);
+
+            // 4. White paper sheet inside
+            var paperRect = new Rect(24 * scale, 26 * scale, 80 * scale, 48 * scale);
+            dc.DrawRoundedRectangle(FolderPaperBrush, null, paperRect, 6 * scale, 6 * scale);
+
+            // 5. Front Pocket with rich modern gradient and top highlight
+            var frontRect = new Rect(14 * scale, 46 * scale, 100 * scale, 60 * scale);
+            var frontPen = new Pen(FolderFrontStroke, Math.Max(0.5, 1.0 * scale));
+            frontPen.Freeze();
+            dc.DrawRoundedRectangle(FolderFrontBrush, frontPen, frontRect, 14 * scale, 14 * scale);
+        }
+
+        var rtb = new RenderTargetBitmap(target, target, 96, 96, PixelFormats.Pbgra32);
+        rtb.Render(visual);
+        rtb.Freeze();
+        return rtb;
+    }
+
     internal static BitmapSource? CreateStackIcon(DockStack stack, int targetSize = 128)
     {
         var size = Math.Max(16, targetSize);
         var entries = stack.RecentEntries(3);
         if (entries.Count == 0)
         {
-            return ApplicationIconProvider.GetForShellItem(stack.Path, size, iconOnly: true);
+            return RenderModernFolderIcon(size);
         }
 
         var scale = size / 128.0;
@@ -126,63 +177,56 @@ public partial class MainWindow
         var visual = new DrawingVisual();
         using (var dc = visual.RenderOpen())
         {
-            // 1. Back card (top-right depth)
-            var rectBack = new Rect(24 * scale, 8 * scale, 76 * scale, 76 * scale);
-            var cornerBack = 14 * scale;
-            dc.DrawRoundedRectangle(CardShadowBrush2, null, new Rect(rectBack.X, rectBack.Y + 3 * scale, rectBack.Width, rectBack.Height), cornerBack, cornerBack);
-            var penBack = new Pen(CardDeckBackStroke, Math.Max(0.5, 1.2 * scale));
-            penBack.Freeze();
-            dc.DrawRoundedRectangle(CardDeckBackBrush, penBack, rectBack, cornerBack, cornerBack);
-            if (entries.Count >= 3)
-            {
-                var iconBack = ApplicationIconProvider.GetForShellItem(entries[2].FullName, (int)Math.Ceiling(44 * scale), iconOnly: true);
-                if (iconBack is not null)
-                {
-                    dc.DrawImage(iconBack, new Rect(rectBack.X + (rectBack.Width - 44 * scale) / 2, rectBack.Y + (rectBack.Height - 44 * scale) / 2, 44 * scale, 44 * scale));
-                }
-            }
-
-            // 2. Middle card (intermediate layer)
-            var rectMid = new Rect(16 * scale, 20 * scale, 82 * scale, 82 * scale);
-            var cornerMid = 15 * scale;
-            dc.DrawRoundedRectangle(CardShadowBrush1, null, new Rect(rectMid.X, rectMid.Y + 3 * scale, rectMid.Width, rectMid.Height), cornerMid, cornerMid);
-            var penMid = new Pen(CardDeckMidStroke, Math.Max(0.5, 1.4 * scale));
-            penMid.Freeze();
-            dc.DrawRoundedRectangle(CardDeckMidBrush, penMid, rectMid, cornerMid, cornerMid);
+            // 1. If 2 or more entries exist, draw a secondary frosted glass backing plate with second item preview
             if (entries.Count >= 2)
             {
-                var iconMid = ApplicationIconProvider.GetForShellItem(entries[1].FullName, (int)Math.Ceiling(50 * scale), iconOnly: true);
-                if (iconMid is not null)
+                var backRect = new Rect(24 * scale, 12 * scale, 86 * scale, 86 * scale);
+                var backRadius = 16 * scale;
+                dc.DrawRoundedRectangle(CardShadowBrush1, null, new Rect(backRect.X, backRect.Y + 3 * scale, backRect.Width, backRect.Height), backRadius, backRadius);
+                var backPen = new Pen(CardDeckBackStroke, Math.Max(0.5, 1.0 * scale));
+                backPen.Freeze();
+                dc.DrawRoundedRectangle(CardDeckBackBrush, backPen, backRect, backRadius, backRadius);
+
+                var iconBack = ApplicationIconProvider.GetForShellItem(entries[1].FullName, (int)Math.Ceiling(60 * scale), iconOnly: true);
+                if (iconBack is not null)
                 {
-                    dc.DrawImage(iconMid, new Rect(rectMid.X + (rectMid.Width - 50 * scale) / 2, rectMid.Y + (rectMid.Height - 50 * scale) / 2, 50 * scale, 50 * scale));
+                    dc.PushOpacity(0.55);
+                    dc.DrawImage(iconBack, new Rect(backRect.X + (backRect.Width - 56 * scale) / 2, backRect.Y + 8 * scale, 56 * scale, 56 * scale));
+                    dc.Pop();
                 }
             }
 
-            // 3. Front card (prominent foreground hero card)
-            var rectFront = new Rect(8 * scale, 32 * scale, 88 * scale, 88 * scale);
-            var cornerFront = 16 * scale;
-            dc.DrawRoundedRectangle(CardShadowBrush1, null, new Rect(rectFront.X, rectFront.Y + 4 * scale, rectFront.Width, rectFront.Height), cornerFront, cornerFront);
-            var penFront = new Pen(CardDeckFrontStroke, Math.Max(0.5, 1.6 * scale));
-            penFront.Freeze();
-            dc.DrawRoundedRectangle(CardDeckFrontBrush, penFront, rectFront, cornerFront, cornerFront);
-            if (entries.Count >= 1)
+            // 2. Primary Hero Item (entries[0]): large, crisp, front-and-center
+            var heroW = 90 * scale;
+            var heroH = 90 * scale;
+            var heroX = entries.Count >= 2 ? (12 * scale) : ((size - heroW) / 2);
+            var heroY = entries.Count >= 2 ? (26 * scale) : ((size - heroH) / 2);
+            var heroRect = new Rect(heroX, heroY, heroW, heroH);
+
+            // Ambient shadow under hero item
+            dc.DrawRoundedRectangle(CardShadowBrush2, null, new Rect(heroX, heroY + 4 * scale, heroW, heroH), 16 * scale, 16 * scale);
+
+            // Hero item icon
+            var iconFront = ApplicationIconProvider.GetForShellItem(entries[0].FullName, (int)Math.Ceiling(heroW), iconOnly: true);
+            if (iconFront is not null)
             {
-                var iconFront = ApplicationIconProvider.GetForShellItem(entries[0].FullName, (int)Math.Ceiling(58 * scale), iconOnly: true);
-                if (iconFront is not null)
-                {
-                    dc.DrawImage(iconFront, new Rect(rectFront.X + (rectFront.Width - 58 * scale) / 2, rectFront.Y + (rectFront.Height - 58 * scale) / 2, 58 * scale, 58 * scale));
-                }
+                dc.DrawImage(iconFront, heroRect);
+            }
+            else
+            {
+                var folderBmp = RenderModernFolderIcon((int)heroW);
+                dc.DrawImage(folderBmp, heroRect);
             }
 
-            // 4. Folder badge pill (bottom-right corner emblem)
-            var badgeCenter = new Point(size - 22 * scale, size - 22 * scale);
-            var badgeRadius = 18 * scale;
-            dc.DrawEllipse(CardShadowBrush1, null, new Point(badgeCenter.X, badgeCenter.Y + 2 * scale), badgeRadius + 1 * scale, badgeRadius + 1 * scale);
-            var badgePen = new Pen(BadgeStrokeBrush, Math.Max(0.5, 1.5 * scale));
+            // 3. Refined Micro-Badge: small, elegant glass disc in bottom-right corner
+            var badgeRadius = 11 * scale;
+            var badgeCenter = new Point(size - 18 * scale, size - 18 * scale);
+            dc.DrawEllipse(CardShadowBrush1, null, new Point(badgeCenter.X, badgeCenter.Y + 1.5 * scale), badgeRadius + 0.5 * scale, badgeRadius + 0.5 * scale);
+            var badgePen = new Pen(BadgeStrokeBrush, Math.Max(0.5, 1.0 * scale));
             badgePen.Freeze();
             dc.DrawEllipse(BadgeBackdropBrush, badgePen, badgeCenter, badgeRadius, badgeRadius);
 
-            var iconSize = 18 * scale;
+            var iconSize = 12 * scale;
             var scaleGeom = iconSize / 24.0;
             var originX = badgeCenter.X - (iconSize / 2);
             var originY = badgeCenter.Y - (iconSize / 2);
@@ -195,7 +239,7 @@ public partial class MainWindow
             dc.Pop();
         }
 
-        var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
+        var rtb = new RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
         rtb.Render(visual);
         rtb.Freeze();
         return rtb;
