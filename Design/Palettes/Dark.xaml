@@ -28,8 +28,8 @@
         <GradientStop Color="#00000000" Offset="0.6" />
         <GradientStop Color="#18000000" Offset="1" />
     </LinearGradientBrush>
-    <SolidColorBrush x:Key="StartTileBackground" Color="#151A222C" />
-    <SolidColorBrush x:Key="StartTileStroke" Color="#28FFFFFF" />
+    <SolidColorBrush x:Key="StartTileBackground" Color="#00000000" />
+    <SolidColorBrush x:Key="StartTileStroke" Color="#00000000" />
     <SolidColorBrush x:Key="StartTileHover" Color="#2BFFFFFF" />
     <SolidColorBrush x:Key="StartTilePressed" Color="#3EFFFFFF" />
     <SolidColorBrush x:Key="WidgetIsland" Color="#08FFFFFF" />

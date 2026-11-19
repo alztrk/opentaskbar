@@ -304,7 +304,7 @@ public partial class MainWindow
         var raw = full ? RecycleBin.FullIcon : RecycleBin.EmptyIcon;
         var themed = ThemePacks.ApplyIcon(raw, null,
             specialKey: full ? IconPack.RecycleBinFullKey : IconPack.RecycleBinKey);
-        RecycleBinIcon.Source = ThemePacks.PlateIcon(themed);
+        RecycleBinIcon.Source = themed;
     }
 
     private void RecycleBin_Click(object sender, RoutedEventArgs e)

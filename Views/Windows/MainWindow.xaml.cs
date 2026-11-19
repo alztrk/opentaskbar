@@ -607,8 +607,7 @@ public partial class MainWindow : Window
                 var executablePath = group.Key;
                 var hasNotification = _preferences.Current.NotificationBadgesEnabled && group.Any(window => window.HasNotification);
                 // The topmost window decides identity icons, as ApplicationFrameHost hosts several Store apps.
-                var rawIcon = _runningAppIcons.Get(executablePath, group.First().Handle);
-                var icon = ThemePacks.PlateIcon(rawIcon);
+                var icon = _runningAppIcons.Get(executablePath, group.First().Handle);
                 var isForeground = group.Any(window => window.Handle == _foregroundWindow);
                 var windowCount = group.Count();
                 if (currentApps.TryGetValue(executablePath, out var existingApp))
@@ -1760,7 +1759,7 @@ public partial class MainWindow : Window
     private System.Windows.Media.Imaging.BitmapSource? ApplyApplicationIcon(string executablePath)
     {
         var raw = ApplicationIconProvider.GetForFile(executablePath);
-        return ThemePacks.PlateIcon(raw);
+        return ThemePacks.ApplyIcon(raw, executablePath);
     }
 
     private void ThemePacks_Changed(object? sender, EventArgs e)
@@ -1777,10 +1776,11 @@ public partial class MainWindow : Window
         }
     }
 
-    // The theme's @start image replaces the Windows logo; without one the logo stays.
+    // The theme's @start image replaces the Windows logo; without one the authentic native Windows logo is shown.
     private void ApplyStartIcon()
     {
-        var image = ThemePacks.ApplyIcon(null, null, specialKey: IconPack.StartKey);
+        var image = ThemePacks.ApplyIcon(null, null, specialKey: IconPack.StartKey)
+                    ?? ThemePacks.GetNativeWindowsLogo();
         StartImage.Source = image;
         StartImage.Visibility = image is null ? Visibility.Collapsed : Visibility.Visible;
         StartLogo.Visibility = image is null ? Visibility.Visible : Visibility.Collapsed;
@@ -2361,7 +2361,7 @@ public partial class MainWindow : Window
         Application.Current.Resources["DockCellSize"] = profile.Cell;
         Application.Current.Resources["DockCellHeight"] = profile.Cell;
         Application.Current.Resources["DockIconSize"] = profile.Icon;
-        Application.Current.Resources["StartLogoSize"] = Math.Max(14, Math.Round(profile.Icon * 0.68));
+        Application.Current.Resources["StartLogoSize"] = Math.Max(14, Math.Round(profile.Icon * 0.62));
         DockFrame.Padding = new Thickness(10, profile.VerticalPadding, 10, profile.VerticalPadding);
         DockFrame.CornerRadius = new CornerRadius(radius);
         DockInnerBevel.CornerRadius = new CornerRadius(Math.Max(0, radius - 1));
@@ -2394,11 +2394,11 @@ public partial class MainWindow : Window
         var dpiScale = VisualTreeHelper.GetDpi(this).DpiScaleX;
         // Keep app artwork visually balanced with neighboring compact widgets without shrinking the clickable
         // dock cell or changing its drag/drop geometry; the size is snapped so icons are drawn 1:1 in pixels.
-        var pixels = ApplicationIconProvider.ComputeApplicationIconPixels(Math.Max(18, Profile.Icon * 0.88), dpiScale);
+        var pixels = ApplicationIconProvider.ComputeApplicationIconPixels(Math.Max(18, Profile.Icon * 0.95), dpiScale);
         ApplicationIconProvider.PreferredIconPixels = pixels;
         ApplicationIconProvider.HoverIconPixels = ApplicationIconProvider.ComputeHoverIconPixels(pixels, DockMetrics.HoverScale);
         ThemePacks.PreferredIconPixels = pixels;
-        Application.Current.Resources["DockApplicationIconSize"] = pixels / Math.Max(1.0, dpiScale);
+        Application.Current.Resources["DockApplicationIconSize"] = Math.Max(36.0, pixels / Math.Max(1.0, dpiScale));
     }
 
     private void WidgetStrip_SizeChanged(object sender, SizeChangedEventArgs e)

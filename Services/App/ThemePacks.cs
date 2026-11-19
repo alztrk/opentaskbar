@@ -276,6 +276,74 @@ public static class ThemePacks
         return dictionary.Contains(key) && !ThemeManager.IsManagedDictionary(dictionary) ? dictionary : null;
     }
 
+    private static BitmapSource? _nativeWindowsLogo;
+
+    /// <summary>
+    /// Loads the authentic Windows logo directly from native Windows system assets.
+    /// </summary>
+    public static BitmapSource? GetNativeWindowsLogo()
+    {
+        if (_nativeWindowsLogo is not null) return _nativeWindowsLogo;
+        try
+        {
+            var winDir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            var candidates = new[]
+            {
+                Path.Combine(winDir, "System32", "@WLOGO_96x96.png"),
+                Path.Combine(winDir, "WinSxS", "amd64_microsoft-windows-oobe-user_31bf3856ad364e35_10.0.26100.9818_none_fc02451902096475", "@WLOGO_96x96.png"),
+                Path.Combine(winDir, "WinSxS", "amd64_microsoft-windows-oobe-user_31bf3856ad364e35_10.0.26100.9549_none_fc259ef301ee7648", "@WLOGO_96x96.png")
+            };
+
+            foreach (var path in candidates)
+            {
+                if (File.Exists(path))
+                {
+                    _nativeWindowsLogo = LoadBitmapFromFile(path);
+                    if (_nativeWindowsLogo is not null) return _nativeWindowsLogo;
+                }
+            }
+
+            var winsxsDir = Path.Combine(winDir, "WinSxS");
+            if (Directory.Exists(winsxsDir))
+            {
+                foreach (var matchDir in Directory.EnumerateDirectories(winsxsDir, "amd64_microsoft-windows-oobe-user_*"))
+                {
+                    var wlogo = Path.Combine(matchDir, "@WLOGO_96x96.png");
+                    if (File.Exists(wlogo))
+                    {
+                        _nativeWindowsLogo = LoadBitmapFromFile(wlogo);
+                        if (_nativeWindowsLogo is not null) return _nativeWindowsLogo;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warning($"Failed to load native Windows logo: {ex.Message}");
+        }
+        return null;
+    }
+
+    private static BitmapSource? LoadBitmapFromFile(string path)
+    {
+        try
+        {
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+            bitmap.UriSource = new Uri(path, UriKind.Absolute);
+            bitmap.EndInit();
+            bitmap.Freeze();
+            return bitmap;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warning($"Failed to read bitmap '{path}': {ex.Message}");
+            return null;
+        }
+    }
+
     private static readonly IconPackFallback DefaultSquircleFallback = new(
         Shape: IconPackShape.Rounded,
         CornerRadius: 0.24,
