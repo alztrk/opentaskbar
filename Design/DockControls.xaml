@@ -68,11 +68,7 @@
                         </DataTrigger>
                         <DataTrigger Binding="{Binding IsForeground}" Value="True">
                             <Setter TargetName="ActiveIndicator" Property="Visibility" Value="Visible" />
-                            <Setter TargetName="ActiveIndicator" Property="Opacity" Value="1.0" />
-                            <Setter TargetName="ActiveIndicator" Property="Width" Value="5" />
-                            <Setter TargetName="ActiveIndicator" Property="Height" Value="5" />
-                            <Setter TargetName="ActiveIndicator" Property="RadiusX" Value="2.5" />
-                            <Setter TargetName="ActiveIndicator" Property="RadiusY" Value="2.5" />
+                            <Setter TargetName="ActiveIndicator" Property="Opacity" Value="0.9" />
                             <Setter TargetName="ActiveIndicator" Property="Fill" Value="{DynamicResource IndicatorForegroundBrush}" />
                         </DataTrigger>
                     </ControlTemplate.Triggers>

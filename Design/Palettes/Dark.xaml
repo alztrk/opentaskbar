@@ -56,8 +56,8 @@
     <SolidColorBrush x:Key="SurfaceSelectedStrong" Color="#10FFFFFF" />
     <SolidColorBrush x:Key="SurfaceDanger" Color="#FFC43846" />
     <SolidColorBrush x:Key="NotificationBrush" Color="#FFFF6673" />
-    <SolidColorBrush x:Key="IndicatorBrush" Color="#90E2E8F0" />
-    <SolidColorBrush x:Key="IndicatorForegroundBrush" Color="#FFFFFFFF" />
+    <SolidColorBrush x:Key="IndicatorBrush" Color="#6E8797" />
+    <SolidColorBrush x:Key="IndicatorForegroundBrush" Color="#A8C4D6" />
     <!-- macOS style Frosted Glass: soft, translucent, breathes with the desktop. -->
     <LinearGradientBrush x:Key="DockMaterial" StartPoint="0,0" EndPoint="0,1">
         <GradientStop Color="#A0141922" Offset="0" />
