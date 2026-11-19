@@ -39,6 +39,8 @@
             <MenuItem Header="{local:Loc Terminate}" Icon="{StaticResource IconTerminate}" Style="{StaticResource DestructiveMenuItem}" Tag="TerminateDockApp" Click="TerminateDockApp_Click" />
         </ContextMenu>
         <ContextMenu x:Key="DockContextMenu" Opened="DockContextMenu_Opened" Closed="DockContextMenu_Closed">
+            <MenuItem Header="{local:Loc RemoveWidget}" Icon="{StaticResource IconTrash}" Tag="RemoveWidgetMenu" Visibility="Collapsed" Click="RemoveWidgetMenu_Click" />
+            <Separator Tag="RemoveWidgetDivider" Visibility="Collapsed" />
             <MenuItem Header="{local:Loc OpenLauncher}" Icon="{StaticResource IconSearch}" Click="OpenSearch_Click" />
             <MenuItem Header="{local:Loc AddStack}" Icon="{StaticResource IconFolderPlus}" Click="AddStack_Click" />
             <MenuItem Header="{local:Loc NewGroup}" Icon="{StaticResource IconLayers}" Tag="NewGroup" Click="NewGroup_Click" />
@@ -52,23 +54,6 @@
             <Separator />
             <MenuItem Header="{local:Loc Exit}" Icon="{StaticResource IconExit}" Click="ExitOpenTaskbar_Click" />
         </ContextMenu>
-        <ContextMenu x:Key="WidgetContextMenu" Opened="DockContextMenu_Opened" Closed="DockContextMenu_Closed">
-            <MenuItem Header="{local:Loc RemoveWidget}" Icon="{StaticResource IconTrash}" Tag="RemoveWidgetMenu" Click="RemoveWidgetMenu_Click" />
-            <Separator />
-            <MenuItem Header="{local:Loc OpenLauncher}" Icon="{StaticResource IconSearch}" Click="OpenSearch_Click" />
-            <MenuItem Header="{local:Loc AddStack}" Icon="{StaticResource IconFolderPlus}" Click="AddStack_Click" />
-            <MenuItem Header="{local:Loc NewGroup}" Icon="{StaticResource IconLayers}" Tag="NewGroup" Click="NewGroup_Click" />
-            <MenuItem Header="{local:Loc Profiles}" Icon="{StaticResource IconLayers}" Tag="ProfilesMenu">
-                <MenuItem Header="…" />
-            </MenuItem>
-            <Separator />
-            <MenuItem Header="{local:Loc CheckForUpdates}" Icon="{StaticResource IconRefresh}" Tag="UpdateMenu" Click="CheckUpdates_Click" />
-            <MenuItem Header="{local:Loc TaskManager}" Icon="{StaticResource IconTaskManager}" Click="OpenTaskManager_Click" />
-            <MenuItem Header="{local:Loc Settings}" Icon="{StaticResource IconSettings}" Click="OpenSettings_Click" />
-            <Separator />
-            <MenuItem Header="{local:Loc Exit}" Icon="{StaticResource IconExit}" Click="ExitOpenTaskbar_Click" />
-        </ContextMenu>
-
         <ContextMenu x:Key="GroupContextMenu" Opened="DockContextMenu_Opened" Closed="DockContextMenu_Closed">
             <MenuItem Header="{local:Loc RenameGroup}" Icon="{StaticResource IconSettings}" Tag="RenameGroup" Click="RenameGroup_Click" />
             <MenuItem Header="{local:Loc DeleteGroup}" Icon="{StaticResource IconClose}" Tag="DeleteGroup" Click="DeleteGroup_Click" Style="{StaticResource DestructiveMenuItem}" />

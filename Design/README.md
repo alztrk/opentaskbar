@@ -123,9 +123,8 @@ One accent gradient, teal `#5EEAD4` → sky `#38BDF8` (→ indigo `#818CF8` on t
 - `Design/Palettes/Dark.xaml` & `Light.xaml`: Theme color palettes and material brushes swapped dynamically by `ThemeManager`.
 - `Design/DockControls.xaml`: Dock buttons (`DockButton`, `StartDockButton` with aligned 6 DIP bottom baseline), resize thumbs, and scroll viewer/indicator templates.
 - `Design/ContextMenus.xaml`: Vector outline icon styles, Jump List headers, and menu item templates.
-- `Design/SettingsControls.xaml`: Legacy settings window controls (being migrated into `UI/`).
+- `Design/SettingsControls.xaml`: Settings window controls.
 - `Design/WidgetControls.xaml` & `Design/Widgets.xaml`: Widget tokens, card/button/pill/slider styles (with full-surface `HoverLayer` alignment), and widget icon geometries.
-- `UI/UILibrary.xaml`: Modular WPF UI component library under active construction (`UI/Tokens/`, `UI/Effects/`, `UI/Animations/`, `UI/Controls/`), intended to unify Settings and dock controls and evolve into a standalone reusable library.
 
 ### Settings navigation
 

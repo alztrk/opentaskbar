@@ -164,9 +164,9 @@ User preferences, pinned item order, and widget configurations are stored locall
 
 ---
 
-## Design System & UI Library
+## Design System
 
-For in-depth documentation on OpenTaskbar's design tokens, materials, typography, and layout metrics, see [Design/README.md](Design/README.md). Reusable modular WPF tokens, effects, animations, and control templates are also being consolidated under [UI/UILibrary.xaml](UI/UILibrary.xaml).
+For in-depth documentation on OpenTaskbar's design tokens, materials, typography, and layout metrics, see [Design/README.md](Design/README.md). All shipped UI resources live under `Design/*`.
 
 ---
 

@@ -5,8 +5,6 @@
                     xmlns:local="clr-namespace:OpenTaskbar.Services"
                     xmlns:widgets="clr-namespace:OpenTaskbar.Views.Widgets"
                     xmlns:w="clr-namespace:OpenTaskbar.Widgets">
-    <sys:Double x:Key="TimedWidgetMinimumWidth">160</sys:Double>
-    <sys:Double x:Key="TextSizeTimedWidgetValue">20</sys:Double>
     <sys:Double x:Key="WidgetQuickActionSize">36</sys:Double>
     <CornerRadius x:Key="WidgetQuickActionRadius">18</CornerRadius>
     <sys:Double x:Key="WidgetPanelWidth">320</sys:Double>
@@ -50,16 +48,6 @@
         </Setter>
     </Style>
 
-    <Style x:Key="DockWidgetFrame" TargetType="Border">
-        <Setter Property="MinWidth" Value="{StaticResource DockWidgetMinimumWidth}" />
-        <Setter Property="MinHeight" Value="{StaticResource DockWidgetMinimumHeight}" />
-        <Setter Property="Margin" Value="{StaticResource WidgetTileMargin}" />
-        <Setter Property="Padding" Value="{StaticResource DockWidgetPadding}" />
-        <Setter Property="CornerRadius" Value="{StaticResource DockWidgetRadius}" />
-        <Setter Property="Background" Value="{DynamicResource DockWidgetSurface}" />
-        <Setter Property="BorderBrush" Value="{DynamicResource StrokeSubtle}" />
-        <Setter Property="BorderThickness" Value="1" />
-    </Style>
     <Style x:Key="WidgetButton" TargetType="Button">
         <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
         <Setter Property="Background" Value="Transparent" />

@@ -179,7 +179,7 @@ public partial class MainWindow : Window
             menu.Opened += DockContextMenu_Opened;
             menu.Closed += DockContextMenu_Closed;
         };
-        _widgetCoordinator.CreateWidgetContextMenu = _ => (ContextMenu)FindResource("WidgetContextMenu");
+        _widgetCoordinator.CreateWidgetContextMenu = _ => (ContextMenu)FindResource("DockContextMenu");
         _widgetCoordinator.HoverActiveChanged += _ => _autoHideController?.EvaluateState();
         _widgetCoordinator.ExternalLayout = true;
         _widgetCoordinator.WidgetsPlaced += () =>
@@ -1403,6 +1403,9 @@ public partial class MainWindow : Window
 
         if (pinnedApp is null)
         {
+            var isWidget = _contextTargetWidget is not null;
+            SetMenuItemVisibility(contextMenu, "RemoveWidgetMenu", isWidget);
+            SetSeparatorVisibility(contextMenu, "RemoveWidgetDivider", isWidget);
             FocusContextMenu(contextMenu);
             return;
         }
@@ -2121,7 +2124,7 @@ public partial class MainWindow : Window
             Focusable = false,
             Tag = widgetId,
             VerticalAlignment = VerticalAlignment.Center,
-            ContextMenu = (ContextMenu)FindResource("WidgetContextMenu")
+            ContextMenu = (ContextMenu)FindResource("DockContextMenu")
         };
         host.SizeChanged += (_, e) =>
         {
