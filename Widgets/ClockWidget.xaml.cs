@@ -94,8 +94,6 @@ public partial class ClockWidget : DockWidget
         {
             _currentPeriod = period;
             var theme = GetTheme(period);
-            ClockButton.Background = theme.Background;
-            ClockButton.BorderBrush = theme.Border;
             TimeOfDayIcon.Content = FindResource(theme.IconKey);
             TimeOfDayIcon.Foreground = theme.Accent;
             DayOfWeekText.Foreground = theme.Accent;
