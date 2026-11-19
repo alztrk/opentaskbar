@@ -489,9 +489,9 @@ public sealed class DockFlyout
         _closedTarget = null;
         _root.Margin = Edge switch
         {
-            DockEdge.Left => new Thickness(12, 10, 14, 14),
-            DockEdge.Right => new Thickness(14, 10, 12, 14),
-            _ => new Thickness(12, 10, 12, 14)
+            DockEdge.Left => new Thickness(10, 8, 12, 12),
+            DockEdge.Right => new Thickness(12, 8, 10, 12),
+            _ => new Thickness(10, 8, 10, 12)
         };
         _innerBevel.Child = content;
         _popup.StaysOpen = false;
