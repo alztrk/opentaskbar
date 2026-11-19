@@ -58,17 +58,15 @@
     </LinearGradientBrush>
     <!-- Midnight Obsidian glass with a rich translucent optical body. -->
     <LinearGradientBrush x:Key="DockMaterial" StartPoint="0,0" EndPoint="0,1">
-        <GradientStop Color="#D0121722" Offset="0" />
-        <GradientStop Color="#DC0E1219" Offset="0.45" />
-        <GradientStop Color="#E807090D" Offset="1" />
+        <GradientStop Color="#E60E121A" Offset="0" />
+        <GradientStop Color="#F0090C11" Offset="1" />
     </LinearGradientBrush>
     <!-- Fresnel optical rim light: bright specular highlight on top, grounded ambient occlusion at bottom. -->
     <LinearGradientBrush x:Key="DockBorderMaterial" StartPoint="0,0" EndPoint="0,1">
-        <GradientStop Color="#B5FFFFFF" Offset="0" />
-        <GradientStop Color="#4AFFFFFF" Offset="0.08" />
-        <GradientStop Color="#1EFFFFFF" Offset="0.30" />
-        <GradientStop Color="#0CFFFFFF" Offset="0.75" />
-        <GradientStop Color="#6E000000" Offset="1" />
+        <GradientStop Color="#4AFFFFFF" Offset="0" />
+        <GradientStop Color="#1AFFFFFF" Offset="0.15" />
+        <GradientStop Color="#08FFFFFF" Offset="0.5" />
+        <GradientStop Color="#00FFFFFF" Offset="1" />
     </LinearGradientBrush>
     <SolidColorBrush x:Key="SettingsBackground" Color="#FF181A1E" />
     <SolidColorBrush x:Key="SettingsControl" Color="#FF22252A" />

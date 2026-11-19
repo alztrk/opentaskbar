@@ -133,8 +133,6 @@ public partial class MainWindow
 
     private void DockSurface_MouseMove(object sender, System.Windows.Input.MouseEventArgs e)
     {
-        UpdateDockSpecularSpotlight(e);
-
         if (!_preferences.Current.MagnificationEnabled || !_preferences.Current.AnimationsEnabled || !SystemParameters.ClientAreaAnimation)
             return;
 
@@ -227,29 +225,14 @@ public partial class MainWindow
         _magnificationLastFrame = null;
     }
 
-    private void UpdateDockSpecularSpotlight(System.Windows.Input.MouseEventArgs e)
-    {
-        if (DockFrame.ActualWidth <= 0) return;
-        var pos = e.GetPosition(DockFrame);
-        var rel = Math.Clamp(IsVertical ? (pos.Y / DockFrame.ActualHeight) : (pos.X / DockFrame.ActualWidth), 0.05, 0.95);
-        var pt = new Point(rel, 0.0);
-        DockSpotlightBrush.Center = pt;
-        DockSpotlightBrush.GradientOrigin = pt;
-    }
-
     private void DockSurface_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
     {
-        DockSpecularSpotlight.Opacity = 0.85;
-        UpdateDockSpecularSpotlight(e);
         NativeMemoryMethods.CancelIdleTrim();
         _autoHideController?.OnMouseEnterDock();
     }
 
     private void DockSurface_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
     {
-        DockSpecularSpotlight.Opacity = 0.45;
-        DockSpotlightBrush.Center = new Point(0.5, 0.0);
-        DockSpotlightBrush.GradientOrigin = new Point(0.5, 0.0);
         ResetMagnification();
         _autoHideController?.OnMouseLeaveDock();
         NativeMemoryMethods.ScheduleIdleTrim(TimeSpan.FromSeconds(2));
