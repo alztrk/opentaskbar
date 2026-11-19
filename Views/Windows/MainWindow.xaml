@@ -282,9 +282,11 @@
                             Margin="-10,-4,-10,0" CornerRadius="20,20,0,0" IsHitTestVisible="False" Opacity="0">
                         <Border.Background>
                             <LinearGradientBrush x:Name="DockSpecularGlintBrush" StartPoint="0,0" EndPoint="1,0">
-                                <GradientStop x:Name="DockSpecularGlintStop0" Color="#00FFFFFF" Offset="0.38" />
-                                <GradientStop x:Name="DockSpecularGlintStop1" Color="#FFFFFFFF" Offset="0.5" />
-                                <GradientStop x:Name="DockSpecularGlintStop2" Color="#00FFFFFF" Offset="0.62" />
+                                <GradientStop x:Name="DockSpecularGlintStop0" Color="#00D6E8FF" Offset="0.38" />
+                                <GradientStop x:Name="DockSpecularGlintStop1" Color="#30D6E8FF" Offset="0.45" />
+                                <GradientStop x:Name="DockSpecularGlintStop2" Color="#E5F0F6FC" Offset="0.50" />
+                                <GradientStop x:Name="DockSpecularGlintStop3" Color="#30D6E8FF" Offset="0.55" />
+                                <GradientStop x:Name="DockSpecularGlintStop4" Color="#00D6E8FF" Offset="0.62" />
                             </LinearGradientBrush>
                         </Border.Background>
                     </Border>
@@ -292,10 +294,10 @@
                     <Border x:Name="DockDynamicGlowBorder" Height="24" VerticalAlignment="Top"
                             Margin="-10,-4,-10,0" CornerRadius="20,20,0,0" IsHitTestVisible="False" Opacity="0">
                         <Border.Background>
-                            <RadialGradientBrush x:Name="DockSpecularGlow" Center="0.5,0.0" GradientOrigin="0.5,0.0" RadiusX="0.18" RadiusY="1.0">
-                                <GradientStop Color="#45FFFFFF" Offset="0.0" />
-                                <GradientStop Color="#14FFFFFF" Offset="0.45" />
-                                <GradientStop Color="#00FFFFFF" Offset="1.0" />
+                            <RadialGradientBrush x:Name="DockSpecularGlow" Center="0.5,0.0" GradientOrigin="0.5,0.0" RadiusX="0.20" RadiusY="1.0">
+                                <GradientStop Color="#30C8DCFF" Offset="0.0" />
+                                <GradientStop Color="#0EC8DCFF" Offset="0.45" />
+                                <GradientStop Color="#00C8DCFF" Offset="1.0" />
                             </RadialGradientBrush>
                         </Border.Background>
                     </Border>
