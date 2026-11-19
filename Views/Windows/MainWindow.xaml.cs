@@ -2655,7 +2655,14 @@ public partial class MainWindow : Window
         var appScrollFloor = (double)FindResource("DockCellSize") * 2;
         var effectiveAppsWidth = WidgetCoordinator.EffectiveAppsWidth(appsContentWidth, maxAppsWidth, appScrollFloor);
         var contentFixedWidth = leadWidth + effectiveAppsWidth + trailWidth + widgetsWidth;
-        if (_widgetCoordinator.UpdateAdaptiveDensity(maxLayoutWidth, contentFixedWidth, _preferences.Current, widgetScale: Profile.WidgetScale))
+        // When the user has manually resized the dock, the shrink is intentional for the apps area only.
+        // Widget compact mode must not be triggered by the dock width override — only by genuine content overflow
+        // relative to the monitor width. Pass the full monitor layout width so Auto widgets never compact
+        // just because the user dragged the dock narrower.
+        var densityBudget = _dockWidthOverride is not null
+            ? Math.Max(1, maximumSurfaceWidth - DockHorizontalChrome)
+            : maxLayoutWidth;
+        if (_widgetCoordinator.UpdateAdaptiveDensity(densityBudget, contentFixedWidth, _preferences.Current, widgetScale: Profile.WidgetScale))
             _resizePending = true; // Measure again after the widget templates switch to compact mode.
 
         DockScrollViewer.MaxWidth = maxAppsWidth;
