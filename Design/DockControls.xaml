@@ -66,8 +66,9 @@
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Surface" Property="Background" Value="Transparent" />
-                            <Setter TargetName="HoverGlow" Property="Opacity" Value="1" />
+                            <Setter TargetName="Surface" Property="Background" Value="{DynamicResource SurfaceHover}" />
+                            <Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource StrokeSubtle}" />
+                            <Setter TargetName="HoverGlow" Property="Opacity" Value="0.65" />
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
                             <Setter TargetName="Surface" Property="Background" Value="{DynamicResource SurfacePressed}" />
@@ -80,17 +81,18 @@
                         </Trigger>
                         <DataTrigger Binding="{Binding IsRunning}" Value="True">
                             <Setter TargetName="ActiveIndicator" Property="Visibility" Value="Visible" />
-                            <Setter TargetName="ActiveIndicator" Property="Opacity" Value="0.75" />
+                            <Setter TargetName="ActiveIndicator" Property="Opacity" Value="0.9" />
                         </DataTrigger>
                         <DataTrigger Binding="{Binding IsForeground}" Value="True">
                             <Setter TargetName="Surface" Property="Background" Value="{DynamicResource SurfaceSelectedStrong}" />
+                            <Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource StrokeSubtle}" />
                             <Setter TargetName="ActiveIndicatorGlow" Property="Visibility" Value="Visible" />
                             <Setter TargetName="ActiveIndicator" Property="Visibility" Value="Visible" />
                             <Setter TargetName="ActiveIndicator" Property="Opacity" Value="1.0" />
-                            <Setter TargetName="ActiveIndicator" Property="Width" Value="8" />
-                            <Setter TargetName="ActiveIndicator" Property="Height" Value="4" />
-                            <Setter TargetName="ActiveIndicator" Property="RadiusX" Value="2" />
-                            <Setter TargetName="ActiveIndicator" Property="RadiusY" Value="2" />
+                            <Setter TargetName="ActiveIndicator" Property="Width" Value="10" />
+                            <Setter TargetName="ActiveIndicator" Property="Height" Value="3.5" />
+                            <Setter TargetName="ActiveIndicator" Property="RadiusX" Value="1.75" />
+                            <Setter TargetName="ActiveIndicator" Property="RadiusY" Value="1.75" />
                             <Setter TargetName="ActiveIndicator" Property="Fill" Value="{DynamicResource IndicatorForegroundBrush}" />
                         </DataTrigger>
                     </ControlTemplate.Triggers>
@@ -106,7 +108,7 @@
                 <ControlTemplate TargetType="Button">
                     <Grid Width="{TemplateBinding Width}" Height="{TemplateBinding Height}">
                         <Border x:Name="StartTile" Margin="3,3,3,3"
-                                CornerRadius="10"
+                                CornerRadius="12"
                                 Background="Transparent"
                                 BorderBrush="Transparent"
                                 BorderThickness="1">
@@ -115,11 +117,11 @@
                     </Grid>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="StartTile" Property="Background" Value="{DynamicResource StartTileHover}" />
-                            <Setter TargetName="StartTile" Property="BorderBrush" Value="{DynamicResource StrokeFocus}" />
+                            <Setter TargetName="StartTile" Property="Background" Value="{DynamicResource SurfaceHover}" />
+                            <Setter TargetName="StartTile" Property="BorderBrush" Value="{DynamicResource StrokeSubtle}" />
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="StartTile" Property="Background" Value="{DynamicResource StartTilePressed}" />
+                            <Setter TargetName="StartTile" Property="Background" Value="{DynamicResource SurfacePressed}" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>

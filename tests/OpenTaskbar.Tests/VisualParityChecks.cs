@@ -46,7 +46,8 @@ internal static class VisualParityChecks
                 ["WeatherGradients_Dark"] = "7738B36883895809AAEF350A7A569DDDBDCAE75D36E0D034C0858439EBFA9957",
                 ["WeatherGradients_Light"] = "7738B36883895809AAEF350A7A569DDDBDCAE75D36E0D034C0858439EBFA9957"
             };
-            // Fix RingMeters_Dark baseline hash from exact baseline capture:
+            expected["DockButtons_Dark"] = "2D6C6F18E40CA1D5F8E830AC78300082AA5EEA7BDE313BE4121AF72549B7F09D";
+            expected["DockButtons_Light"] = "88044FF237D75A19C0E889D9BCCFD2B294A95869EE6A868E0BE3C55C7C166F91";
             expected["RingMeters_Dark"] = "AA26B0446BBDF57C2C965049395A248F668538AF3A49D4DA8589B1BC8619B598";
 
             foreach (var theme in new[] { AppTheme.Dark, AppTheme.Light })

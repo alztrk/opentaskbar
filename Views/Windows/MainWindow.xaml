@@ -158,10 +158,10 @@
                 <TranslateTransform x:Name="DockSurfaceTranslate" Y="0" />
             </Grid.RenderTransform>
             <!-- Pure-WPF concentric shadow rings avoid DropShadowEffect pixel shaders and offscreen render targets. -->
-            <Border x:Name="DockShadow4" Margin="-12,-8,-12,-16" CornerRadius="36" BorderThickness="4" BorderBrush="#0505070B" Background="Transparent" IsHitTestVisible="False" />
-            <Border x:Name="DockShadow3" Margin="-8,-5,-8,-11" CornerRadius="31" BorderThickness="3" BorderBrush="#0A05070B" Background="Transparent" IsHitTestVisible="False" />
-            <Border x:Name="DockShadow2" Margin="-5,-3,-5,-7" CornerRadius="27" BorderThickness="3" BorderBrush="#1205070B" Background="Transparent" IsHitTestVisible="False" />
-            <Border x:Name="DockShadow1" Margin="-2,-1,-2,-3" CornerRadius="24" BorderThickness="2" BorderBrush="#1C05070B" Background="Transparent" IsHitTestVisible="False" />
+            <Border x:Name="DockShadow4" Margin="-12,-8,-12,-16" CornerRadius="38" BorderThickness="4" BorderBrush="#0505070B" Background="Transparent" IsHitTestVisible="False" />
+            <Border x:Name="DockShadow3" Margin="-8,-5,-8,-11" CornerRadius="33" BorderThickness="3" BorderBrush="#0A05070B" Background="Transparent" IsHitTestVisible="False" />
+            <Border x:Name="DockShadow2" Margin="-5,-3,-5,-7" CornerRadius="29" BorderThickness="3" BorderBrush="#1205070B" Background="Transparent" IsHitTestVisible="False" />
+            <Border x:Name="DockShadow1" Margin="-2,-1,-2,-3" CornerRadius="26" BorderThickness="2" BorderBrush="#1C05070B" Background="Transparent" IsHitTestVisible="False" />
             <Border x:Name="DockFrame" Padding="{StaticResource DockPadding}"
                     Background="{DynamicResource DockMaterial}" BorderBrush="{DynamicResource DockBorderMaterial}"
                     BorderThickness="{StaticResource ControlStroke}" CornerRadius="{StaticResource DockRadius}">

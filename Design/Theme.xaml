@@ -41,9 +41,9 @@
     <Thickness x:Key="DockScrollContentInset">6,0</Thickness>
     <x:Static x:Key="DockPadding" Member="svc:DockMetrics.Padding" />
     <Thickness x:Key="ControlStroke">1</Thickness>
-    <CornerRadius x:Key="DockRadius">18</CornerRadius>
-    <CornerRadius x:Key="DockInnerRadius">17</CornerRadius>
-    <CornerRadius x:Key="DockSheenRadius">17,17,0,0</CornerRadius>
+    <CornerRadius x:Key="DockRadius">20</CornerRadius>
+    <CornerRadius x:Key="DockInnerRadius">19</CornerRadius>
+    <CornerRadius x:Key="DockSheenRadius">19,19,0,0</CornerRadius>
     <CornerRadius x:Key="ControlRadius">12</CornerRadius>
     <CornerRadius x:Key="DockWidgetRadius">12</CornerRadius>
     <CornerRadius x:Key="PopupRadius">12</CornerRadius>
