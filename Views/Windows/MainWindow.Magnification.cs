@@ -51,7 +51,7 @@ public partial class MainWindow
         newGroup.Children.Add(newScale);
         newGroup.Children.Add(newTranslate);
         icon.RenderTransform = newGroup;
-        icon.RenderTransformOrigin = new Point(0.5, 0.95);
+        icon.RenderTransformOrigin = new Point(0.5, 0.5);
         return (newScale, newTranslate);
     }
 
@@ -221,9 +221,9 @@ public partial class MainWindow
                 scale.ScaleY = next;
             }
 
-            // Organic elevation tracking the magnification wave (lifts up to 3.5 DIP)
+            // Organic elevation tracking the magnification wave (lifts up to 1.5 DIP)
             var liftFactor = Math.Max(0.0, (next - 1.0) / (maxScale - 1.0));
-            var targetLift = -3.5 * liftFactor * BounceDirection;
+            var targetLift = -1.5 * liftFactor * BounceDirection;
             var currentLift = IsVertical ? translate.X : translate.Y;
             var nextLift = Math.Abs(targetLift - currentLift) < 0.05
                 ? targetLift : currentLift + (targetLift - currentLift) * blend;

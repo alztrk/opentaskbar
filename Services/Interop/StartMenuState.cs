@@ -107,8 +107,6 @@ internal sealed class StartMenuState : IDisposable
     private void OnCloakEvent(nint hook, uint eventType, nint windowHandle, int objectId, int childId, uint thread, uint time)
     {
         if (objectId != ObjectWindow || windowHandle == 0 || !IsStartMenuWindow(windowHandle)) return;
-        // Only the window the user sees as Start matters: the foreground one (or, while closing, the one that was).
-        if (eventType == EventObjectUncloaked && GetForegroundWindow() != windowHandle) return;
         if (eventType == EventObjectUncloaked)
         {
             _startWindow = windowHandle;
@@ -157,7 +155,17 @@ internal sealed class StartMenuState : IDisposable
             _startWindow = foreground;
             return IsOnScreen(foreground);
         }
-        return _startWindow != 0 && IsStartMenuWindow(_startWindow) && IsOnScreen(_startWindow);
+        if (_startWindow != 0 && IsStartMenuWindow(_startWindow) && IsOnScreen(_startWindow))
+        {
+            return true;
+        }
+        var windows = ShellShortcuts.FindStartMenuWindows();
+        if (windows.Count > 0)
+        {
+            _startWindow = windows[0];
+            return true;
+        }
+        return false;
     }
 
     private static bool IsOnScreen(nint windowHandle) => IsWindowVisible(windowHandle) && !IsCloaked(windowHandle);

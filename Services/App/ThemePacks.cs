@@ -515,16 +515,11 @@ public static class ThemePacks
         var fill = new LinearGradientBrush(Lighten(plate, isDark ? 0.22 : 0.18), Darken(plate, isDark ? 0.12 : 0.08), 90);
         fill.Freeze();
 
-        var rimPen = new Pen(new LinearGradientBrush(
-            Color.FromArgb(isDark ? (byte)0x48 : (byte)0x60, 255, 255, 255),
-            Color.FromArgb(isDark ? (byte)0x0E : (byte)0x18, 255, 255, 255),
-            90), Math.Max(0.5, 1.2));
-        rimPen.Freeze();
-
         var visual = new DrawingVisual();
+        RenderOptions.SetBitmapScalingMode(visual, BitmapScalingMode.HighQuality);
         using (var context = visual.RenderOpen())
         {
-            context.DrawGeometry(fill, rimPen, shape);
+            context.DrawGeometry(fill, null, shape);
             var scale = Math.Clamp(fallback.IconScale, 0.2, 1.0);
             var inner = size * scale;
             var offset = (size - inner) / 2;
@@ -533,7 +528,6 @@ public static class ThemePacks
             context.Pop();
         }
 
-        RenderOptions.SetBitmapScalingMode(visual, BitmapScalingMode.HighQuality);
         var bitmap = new RenderTargetBitmap(RenderSize, RenderSize, 96, 96, PixelFormats.Pbgra32);
         bitmap.Render(visual);
         bitmap.Freeze();

@@ -14,13 +14,8 @@ public partial class MainWindow
 
     private bool IsVertical => Edge != DockEdge.Bottom;
 
-    /// <summary>Icons grow away from the screen edge.</summary>
-    private Point IconScaleOrigin => Edge switch
-    {
-        DockEdge.Left => new Point(0.05, 0.5),
-        DockEdge.Right => new Point(0.95, 0.5),
-        _ => new Point(0.5, 0.95)
-    };
+    /// <summary>Icons grow centered for balanced scaling within the dock boundaries.</summary>
+    private Point IconScaleOrigin => new Point(0.5, 0.5);
 
     /// <summary>Launch bounce runs away from the edge: up for the bottom dock, sideways for side docks.</summary>
     private double BounceDirection => Edge == DockEdge.Left ? -1 : 1;

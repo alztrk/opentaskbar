@@ -120,7 +120,9 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
+        var startup = StartupStopwatch.Start("MainWindow constructor");
         InitializeComponent();
+        StartupStopwatch.Mark("XAML inflated");
         DockContents.LayoutUpdated += (_, _) => InvalidateMagnificationTargets();
         _widgetPanel = new WidgetPanelHost(this);
         _widgetPanel.IsOpenChanged += WidgetPanel_IsOpenChanged;
@@ -205,6 +207,7 @@ public partial class MainWindow : Window
             _replacementSession?.RefreshPosition();
         };
         ApplyWidgets(_preferences.Current.Widgets);
+        StartupStopwatch.Mark("widgets created");
         _thumbnailPreview.PointerEntered += ThumbnailPreview_PointerEntered;
         _thumbnailPreview.PointerLeft += ThumbnailPreview_PointerLeft;
         _thumbnailPreview.PreviewClicked += ThumbnailPreview_PreviewClicked;
@@ -219,8 +222,8 @@ public partial class MainWindow : Window
         ThemePacks.Changed += ThemePacks_Changed;
         Closed += (_, _) => ThemePacks.Changed -= ThemePacks_Changed;
         UpdatePreferredIconPixels();
-        ApplyStartIcon();
-        LoadPinnedApps(_preferences.Current.PinOrder);
+        // Pinned apps, the start logo and shell thumbnails are populated after the first paint by
+        // PopulateDockContent; none of their COM/file work belongs on the first-paint critical path.
         if (_preferences.LoadError is not null)
         {
             ReportError(_preferences.LoadError);
@@ -237,13 +240,12 @@ public partial class MainWindow : Window
         };
         startupTrimTimer.Start();
 
-        _widgetCoordinator.Apply(_preferences.Current);
-        InitializeExtras();
-        RebuildDockOrder();
+        // Widget placement (~180 ms) is deferred with the rest of the dock content so the frame paints first.
         ApplySizeProfile();
         ApplyLayoutMode();
         PositionDock();
         NotificationService.UpdateRequested += OnUpdateNotificationRequested;
+        startup.Finish("constructor total");
         Closed += (_, _) => NotificationService.UpdateRequested -= OnUpdateNotificationRequested;
     }
 
@@ -278,20 +280,9 @@ public partial class MainWindow : Window
         _windowTracker = new NativeWindowTracker(Dispatcher);
         _windowTracker.WindowsChanged += WindowTracker_WindowsChanged;
         _windowTracker.ForegroundWindowChanged += WindowTracker_ForegroundWindowChanged;
-        try
-        {
-            _windowTracker.Start(source.Handle);
-            if (!_windowTracker.NotificationsAvailable)
-            {
-                ReportError("ErrorNotificationBadge");
-            }
-        }
-        catch (InvalidOperationException ex)
-        {
-            ReportError(ex.Message);
-            _windowTracker.Dispose();
-            _windowTracker = null;
-        }
+        // Window enumeration, the native taskbar takeover and feature setup are deferred to
+        // Window_ContentRenderedOnce. Running them here would block WPF inside Show() before the
+        // first paint, making the dock appear seconds after the executable starts.
 
         _autoHideController = new DockAutoHideController(
             this,
@@ -314,10 +305,9 @@ public partial class MainWindow : Window
         _autoHideController.SetMode(_preferences.Current.AutoHide);
         ApplyBackdropHitTesting();
 
-        // Dev mode uses the real taskbar replacement so the dock sits exactly where the taskbar is,
-        // just like release. Only the data hot-reload service differs.
-        if (!_isPreview) StartReplacementMode();
-        InitializeFeatures();
+        // The expensive startup work runs once the window has actually been rendered, so the dock
+        // shows up immediately instead of appearing only after all shell/COM/process calls finish.
+        ContentRendered += Window_ContentRenderedOnce;
 #if DEBUG
         // Verifies crash recovery: the unhandled-exception handlers must restore the Windows taskbar.
         if (Environment.GetCommandLineArgs().Contains("--crash-test"))
@@ -333,6 +323,77 @@ public partial class MainWindow : Window
             Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () => OpenSettings_Click(this, new RoutedEventArgs()));
         }
 #endif
+    }
+
+    private bool _startupFinalized;
+
+    /// <summary>
+    /// Runs on the first render, after the dock is already on screen. Everything here used to run
+    /// inside SourceInitialized (i.e. inside Show()), so Explorer shell calls, the watchdog process
+    /// launch and ManagedShell's notification-area init delayed the window's first paint by seconds.
+    /// </summary>
+    private void Window_ContentRenderedOnce(object? sender, EventArgs e)
+    {
+        ContentRendered -= Window_ContentRenderedOnce;
+        if (_startupFinalized) return;
+        _startupFinalized = true;
+
+        StartupStopwatch.Mark("dock first paint");
+        // Loaded priority sits below Render but above Input: both phases run right after the first
+        // paint, cannot be starved by mouse movement, and the handler itself returns immediately.
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, PopulateDockContent);
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, FinalizeStartup);
+    }
+
+    /// <summary>Fills the already-visible dock with pins, the start logo and extras.</summary>
+    private void PopulateDockContent()
+    {
+        if (!IsLoaded) return;
+        var startup = StartupStopwatch.Start("dock content");
+        _widgetCoordinator.Apply(_preferences.Current);
+        StartupStopwatch.Mark("widgets placed");
+        ApplyStartIcon();
+        StartupStopwatch.Mark("start icon applied");
+        LoadPinnedApps(_preferences.Current.PinOrder);
+        StartupStopwatch.Mark("pinned apps and icons loaded");
+        InitializeExtras();
+        RebuildDockOrder();
+        PositionDock();
+        startup.Finish("content total");
+    }
+
+    /// <summary>Native taskbar replacement, window tracking and feature wiring, after the dock is visible.</summary>
+    private void FinalizeStartup()
+    {
+        if (!IsLoaded) return;
+        var startup = StartupStopwatch.Start("startup finalize");
+        if (_windowTracker is not null)
+        {
+            try
+            {
+                _windowTracker.Start(_source!.Handle);
+                if (!_windowTracker.NotificationsAvailable)
+                {
+                    ReportError("ErrorNotificationBadge");
+                }
+            }
+            catch (InvalidOperationException ex)
+            {
+                ReportError(ex.Message);
+                _windowTracker.Dispose();
+                _windowTracker = null;
+            }
+        }
+
+        StartupStopwatch.Mark("window tracking started");
+
+        // Dev mode uses the real taskbar replacement so the dock sits exactly where the taskbar is,
+        // just like release. Only the data hot-reload service differs.
+        if (!_isPreview) StartReplacementMode();
+        StartupStopwatch.Mark("taskbar replacement started");
+        InitializeFeatures();
+        StartupStopwatch.Mark("features initialized");
+        startup.Finish("finalize total");
     }
 
     private (int Left, int Top, int Right, int Bottom)? GetDockPhysicalBounds()
@@ -924,18 +985,11 @@ public partial class MainWindow : Window
         _previewCloseTimer.Stop();
         _thumbnailPreview.Hide();
 
-        var startMenuWasOpen = _startMenuOpenAtPress;
+        var startMenuWasOpen = _startMenuOpenAtPress || _startMenu.IsOpen || _startMenu.IsStartMenuOpenNow();
         _startMenuOpenAtPress = false;
-        if (_startMenu.IsStartMenuOpenNow())
-        {
-            // The dock does not take activation on left clicks, so the Start menu is not light-dismissed: close it.
-            CloseStartMenu();
-            return;
-        }
         if (startMenuWasOpen)
         {
-            // The press already dismissed the Start menu; requesting it now would reopen it.
-            _startMenu.Reset();
+            CloseStartMenu();
             return;
         }
 
@@ -952,16 +1006,22 @@ public partial class MainWindow : Window
     }
 
     /// <summary>
-    /// Closes the open Start menu with the Windows key, then hands the foreground back to the application that
+    /// Closes the open Start menu with Escape and the Windows key, then hands the foreground back to the application that
     /// was in front before it, as the native taskbar does. Windows otherwise returns it to the dock window.
     /// </summary>
     private void CloseStartMenu()
     {
         _startMenu.Reset();
-        const byte vkLeftWindows = 0x5B;
-        const uint keyEventKeyUp = 0x0002;
-        keybd_event(vkLeftWindows, 0, 0, 0);
-        keybd_event(vkLeftWindows, 0, keyEventKeyUp, 0);
+        var startWindows = ShellShortcuts.FindStartMenuWindows();
+        if (startWindows.Count > 0)
+        {
+            var fg = GetForegroundWindow();
+            if (fg != startWindows[0] && !_startMenu.IsStartMenuWindow(fg))
+            {
+                SetForegroundWindow(startWindows[0]);
+            }
+        }
+        SyntheticKeyboard.SendChord(0x1B);
 
         var application = _lastApplicationWindow;
         if (application == 0) return;

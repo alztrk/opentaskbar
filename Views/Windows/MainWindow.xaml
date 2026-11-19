@@ -106,11 +106,11 @@
                     MouseEnter="DockApp_MouseEnter" MouseLeave="DockApp_MouseLeave"
                     MouseUp="DockApp_MouseUp" MouseWheel="DockApp_MouseWheel">
                 <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}"
-                      RenderTransformOrigin="0.5,0.95">
+                      RenderTransformOrigin="0.5,0.5">
                     <Image Source="{Binding Icon}" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
                            Stretch="Uniform" ClipToBounds="True" RenderOptions.BitmapScalingMode="HighQuality">
                         <Image.Effect>
-                            <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Color="#000000" Opacity="0.35" />
+                            <DropShadowEffect BlurRadius="5" ShadowDepth="1.5" Direction="270" Color="#000000" Opacity="0.25" />
                         </Image.Effect>
                     </Image>
                     <Ellipse Width="9" Height="9" Fill="{DynamicResource NotificationBrush}"
@@ -135,12 +135,12 @@
                     DragOver="StackButton_DragOver"
                     DragLeave="StackButton_DragLeave"
                     Drop="StackButton_Drop">
-                <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}" RenderTransformOrigin="0.5,0.95">
+                <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}" RenderTransformOrigin="0.5,0.5">
                     <Image Source="{Binding Icon}" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
                            HorizontalAlignment="Center" VerticalAlignment="Center"
                            Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality">
                         <Image.Effect>
-                            <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Color="#000000" Opacity="0.35" />
+                            <DropShadowEffect BlurRadius="5" ShadowDepth="1.5" Direction="270" Color="#000000" Opacity="0.25" />
                         </Image.Effect>
                     </Image>
                     <Ellipse Width="9" Height="9" Fill="{DynamicResource NotificationBrush}"
@@ -181,14 +181,14 @@
                             <ColumnDefinition x:Name="WidgetColumn" Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel x:Name="DockLeadControls" Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center"
-                                    AllowDrop="True" DragOver="DockLeadControls_DragOver" Drop="DockLeadControls_Drop">
+                                    Margin="3,0,0,0" AllowDrop="True" DragOver="DockLeadControls_DragOver" Drop="DockLeadControls_Drop">
                             <Button x:Name="StartButton" Style="{StaticResource StartDockButton}" Click="StartButton_Click"
                                     PreviewMouseLeftButtonDown="StartButton_PreviewMouseLeftButtonDown"
                                     PreviewMouseMove="StartButton_PreviewMouseMove"
                                     PreviewMouseLeftButtonUp="StartButton_PreviewMouseLeftButtonUp"
                                     AutomationProperties.Name="{local:Loc Start}" ToolTip="{local:Loc Start}" ToolTipService.InitialShowDelay="650">
                                 <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}"
-                                      RenderTransformOrigin="0.5,0.95">
+                                      RenderTransformOrigin="0.5,0.5">
                                     <Grid.RenderTransform>
                                         <TransformGroup>
                                             <ScaleTransform ScaleX="1" ScaleY="1" />
@@ -200,14 +200,14 @@
                                            HorizontalAlignment="Center" VerticalAlignment="Center"
                                            RenderOptions.BitmapScalingMode="HighQuality">
                                         <Image.Effect>
-                                            <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Color="#000000" Opacity="0.35" />
+                                            <DropShadowEffect BlurRadius="5" ShadowDepth="1.5" Direction="270" Color="#000000" Opacity="0.25" />
                                         </Image.Effect>
                                     </Image>
                                     <Path x:Name="StartLogo" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}" Stretch="Uniform" Fill="{DynamicResource WindowsLogoBrush}"
                                           MaxWidth="{DynamicResource DockIconSize}" MaxHeight="{DynamicResource DockIconSize}"
                                           Data="M0,0 H10 V10 H0 Z M12,0 H22 V10 H12 Z M0,12 H10 V22 H0 Z M12,12 H22 V22 H12 Z">
                                         <Path.Effect>
-                                            <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Color="#000000" Opacity="0.35" />
+                                            <DropShadowEffect BlurRadius="5" ShadowDepth="1.5" Direction="270" Color="#000000" Opacity="0.25" />
                                         </Path.Effect>
                                     </Path>
                                 </Grid>
@@ -254,7 +254,7 @@
                             </StackPanel>
                         </views:DockScrollViewer>
                         <StackPanel x:Name="DockTrailControls" Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center"
-                                    AllowDrop="True" DragOver="DockTrailControls_DragOver" Drop="DockTrailControls_Drop">
+                                    Margin="0,0,3,0" AllowDrop="True" DragOver="DockTrailControls_DragOver" Drop="DockTrailControls_Drop">
                             <Button x:Name="RecycleBinButton" Style="{StaticResource DockButton}" Click="RecycleBin_Click"
                                     AllowDrop="True" DragOver="RecycleBin_DragOver" Drop="RecycleBin_Drop"
                                     AutomationProperties.Name="{local:Loc RecycleBin}" ToolTip="{local:Loc RecycleBin}" ToolTipService.InitialShowDelay="650">
@@ -265,7 +265,7 @@
                                                   Style="{StaticResource DestructiveMenuItem}" Click="EmptyRecycleBin_Click" />
                                     </ContextMenu>
                                 </Button.ContextMenu>
-                                <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}" RenderTransformOrigin="0.5,0.95">
+                                <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}" RenderTransformOrigin="0.5,0.5">
                                     <Grid.RenderTransform>
                                         <TransformGroup>
                                             <ScaleTransform ScaleX="1" ScaleY="1" />
@@ -275,7 +275,7 @@
                                     <Image x:Name="RecycleBinIcon" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
                                            Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality">
                                         <Image.Effect>
-                                            <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Color="#000000" Opacity="0.35" />
+                                            <DropShadowEffect BlurRadius="5" ShadowDepth="1.5" Direction="270" Color="#000000" Opacity="0.25" />
                                         </Image.Effect>
                                     </Image>
                                 </Grid>
