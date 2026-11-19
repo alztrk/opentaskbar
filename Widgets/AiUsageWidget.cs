@@ -594,8 +594,8 @@ public sealed class AiUsageWidget : DockWidget
         var divider = new Border
         {
             Width = 1,
-            Height = 20,
-            Margin = new Thickness(6, 0, 6, 0),
+            Height = 24,
+            Margin = new Thickness(5, 0, 5, 0),
             VerticalAlignment = VerticalAlignment.Center,
             Opacity = 0.35
         };
@@ -603,24 +603,25 @@ public sealed class AiUsageWidget : DockWidget
         return divider;
     }
 
-    private static string AntigravityGroupShort(string group) => group switch
+    private static string AntigravityGroupHeader(string group) => group switch
     {
-        "AiUsageGroupGemini" or "Gemini Models" => "Gem",
-        "AiUsageGroupClaudeGpt" or "Claude and GPT models" => "Cld",
+        "AiUsageGroupGemini" or "Gemini Models" => "Gemini",
+        "AiUsageGroupClaudeGpt" or "Claude and GPT models" => "Claude",
+        _ when group.Contains("Argon", StringComparison.OrdinalIgnoreCase) => "Argon",
         _ when group.StartsWith("Gemini", StringComparison.OrdinalIgnoreCase) && group.Length > 6
-            => group[6..].Trim().Split(' ')[0][..Math.Min(3, group[6..].Trim().Split(' ')[0].Length)],
-        _ => group.Split(' ')[0][..Math.Min(3, group.Split(' ')[0].Length)]
+            => group[6..].Trim(),
+        _ => group.Split(' ')[0]
     };
 
-    private static string AntigravityPoolShort(string labelKey) => labelKey switch
+    private static string AntigravityPoolHeader(string labelKey) => labelKey switch
     {
         "AiUsagePool:Gemini Pro" => "Pro",
-        "AiUsagePool:Gemini Flash" => "Fla",
-        "AiUsagePool:Claude" => "Cld",
+        "AiUsagePool:Gemini Flash" => "Flash",
+        "AiUsagePool:Claude" => "Claude",
         "AiUsagePool:GPT-OSS" => "GPT",
         _ when labelKey.StartsWith("AiUsagePool:", StringComparison.Ordinal)
-            => labelKey[12..].Split(' ')[^1][..Math.Min(3, labelKey[12..].Split(' ')[^1].Length)],
-        _ => labelKey[..Math.Min(3, labelKey.Length)]
+            => labelKey[12..].Split(' ')[^1],
+        _ => labelKey
     };
 
     private void RebuildAntigravity(AntigravityCard agy, bool stale)
@@ -641,6 +642,7 @@ public sealed class AiUsageWidget : DockWidget
             var groups = report.Windows
                 .Where(w => w.Group is not null)
                 .GroupBy(w => w.Group!, StringComparer.Ordinal)
+                .Where(g => g.Any())
                 .ToList();
 
             for (var i = 0; i < groups.Count; i++)
@@ -665,43 +667,52 @@ public sealed class AiUsageWidget : DockWidget
 
     private void BuildAntigravityPlaceholder(AntigravityCard agy, string secondary)
     {
-        var col1 = BuildAntigravityPlaceholderColumn("Gem", secondary);
+        var col1 = BuildAntigravityPlaceholderColumn("Gemini", secondary, hasSession: true);
         agy.Columns.Add(col1);
         agy.Container.Children.Add(col1.Element);
 
         agy.Container.Children.Add(CreateVerticalDivider());
 
-        var col2 = BuildAntigravityPlaceholderColumn("Cld", secondary);
+        var col2 = BuildAntigravityPlaceholderColumn("Claude", secondary, hasSession: false);
         agy.Columns.Add(col2);
         agy.Container.Children.Add(col2.Element);
     }
 
-    private AntigravityColumn BuildAntigravityPlaceholderColumn(string label, string secondary)
+    private AntigravityColumn BuildAntigravityPlaceholderColumn(string label, string secondary, bool hasSession = true)
     {
         var slots = new List<AntigravityQuotaSlot>();
         var rows = new StackPanel { Orientation = Orientation.Vertical, VerticalAlignment = VerticalAlignment.Center };
 
-        var (sRow, sSlot) = CreateAntigravityBarRow(UiText.Get("AiUsageSessionShort"), null, false, secondary);
-        rows.Children.Add(sRow);
-        slots.Add(sSlot);
+        if (hasSession)
+        {
+            var (sRow, sSlot) = CreateAntigravityBarRow(UiText.Get("AiUsageSessionShort"), null, false, secondary, true);
+            rows.Children.Add(sRow);
+            slots.Add(sSlot);
+        }
 
-        var (wRow, wSlot) = CreateAntigravityBarRow(UiText.Get("AiUsageWeeklyShort"), null, true, secondary);
+        var (wRow, wSlot) = CreateAntigravityBarRow(UiText.Get("AiUsageWeeklyShort"), null, true, secondary, false);
         rows.Children.Add(wRow);
         slots.Add(wSlot);
 
-        var header = Text(label, 9.5, secondary, new Thickness(0, 0, 4, 0));
+        var header = Text(label, 9.5, secondary);
         header.FontWeight = FontWeights.SemiBold;
-        header.VerticalAlignment = VerticalAlignment.Center;
+        header.HorizontalAlignment = HorizontalAlignment.Left;
+        header.Margin = new Thickness(0, 0, 0, 1.5);
         Typography.SetNumeralAlignment(header, FontNumeralAlignment.Tabular);
 
-        var panel = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        panel.Children.Add(header);
-        panel.Children.Add(rows);
-        return new(panel, slots);
+        var colPanel = new StackPanel
+        {
+            Orientation = Orientation.Vertical,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(2, 0, 2, 0)
+        };
+        colPanel.Children.Add(header);
+        colPanel.Children.Add(rows);
+        return new(colPanel, slots);
     }
 
     private (StackPanel Row, AntigravityQuotaSlot Slot) CreateAntigravityBarRow(
-        string label, AiUsageWindow? window, bool isWeekly, string secondary)
+        string label, AiUsageWindow? window, bool isWeekly, string secondary, bool hasBottomMargin)
     {
         var lbl = Text(label, 9, secondary);
         lbl.FontWeight = FontWeights.SemiBold;
@@ -762,7 +773,7 @@ public sealed class AiUsageWidget : DockWidget
         {
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 0, isWeekly ? 0 : 2)
+            Margin = new Thickness(0, 0, 0, hasBottomMargin ? 1.5 : 0)
         };
         row.Children.Add(lbl);
         row.Children.Add(bar);
@@ -776,50 +787,55 @@ public sealed class AiUsageWidget : DockWidget
         var slots = new List<AntigravityQuotaSlot>();
         var rows = new StackPanel { Orientation = Orientation.Vertical, VerticalAlignment = VerticalAlignment.Center };
 
-        var session = windows.FirstOrDefault(w => w.LabelKey == "AiUsageSession");
-        var weekly = windows.FirstOrDefault(w => w.LabelKey == "AiUsageWeekly");
+        var orderedWindows = windows
+            .OrderBy(w => w.LabelKey == "AiUsageSession" ? 0 : w.LabelKey == "AiUsageWeekly" ? 1 : 2)
+            .ToList();
 
-        if (session is not null || weekly is not null)
+        for (var i = 0; i < orderedWindows.Count; i++)
         {
-            var (sRow, sSlot) = CreateAntigravityBarRow(UiText.Get("AiUsageSessionShort"), session, false, secondary);
-            rows.Children.Add(sRow);
-            slots.Add(sSlot);
-
-            var (wRow, wSlot) = CreateAntigravityBarRow(UiText.Get("AiUsageWeeklyShort"), weekly, true, secondary);
-            rows.Children.Add(wRow);
-            slots.Add(wSlot);
-        }
-        else if (windows.Count > 0)
-        {
-            var win = windows[0];
-            var isWeekly = win.WindowSeconds is { } s && s >= 604800;
-            var (row, slot) = CreateAntigravityBarRow(UiText.Get(isWeekly ? "AiUsageWeeklyShort" : "AiUsageSessionShort"), win, isWeekly, secondary);
+            var win = orderedWindows[i];
+            var isWeekly = win.LabelKey == "AiUsageWeekly" || (win.WindowSeconds is { } s && s >= 604800);
+            var isLast = i == orderedWindows.Count - 1;
+            var shortLabel = UiText.Get(isWeekly ? "AiUsageWeeklyShort" : "AiUsageSessionShort");
+            var (row, slot) = CreateAntigravityBarRow(shortLabel, win, isWeekly, secondary, !isLast);
             rows.Children.Add(row);
             slots.Add(slot);
         }
 
-        var header = Text(AntigravityGroupShort(group), 9.5, secondary, new Thickness(0, 0, 4, 0));
+        var header = Text(AntigravityGroupHeader(group), 9.5, secondary);
         header.FontWeight = FontWeights.SemiBold;
-        header.VerticalAlignment = VerticalAlignment.Center;
+        header.HorizontalAlignment = HorizontalAlignment.Left;
+        header.Margin = new Thickness(0, 0, 0, 1.5);
         Typography.SetNumeralAlignment(header, FontNumeralAlignment.Tabular);
 
-        var panel = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        panel.Children.Add(header);
-        panel.Children.Add(rows);
-        return new(panel, slots);
+        var colPanel = new StackPanel
+        {
+            Orientation = Orientation.Vertical,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(2, 0, 2, 0)
+        };
+        colPanel.Children.Add(header);
+        colPanel.Children.Add(rows);
+        return new(colPanel, slots);
     }
 
     private AntigravityColumn BuildAntigravityPoolColumn(AiUsageWindow window, string secondary)
     {
         var slots = new List<AntigravityQuotaSlot>();
-        var rows = new StackPanel { Orientation = Orientation.Vertical, VerticalAlignment = VerticalAlignment.Center };
+        var colPanel = new StackPanel
+        {
+            Orientation = Orientation.Vertical,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(2, 0, 2, 0)
+        };
 
-        var label = AntigravityPoolShort(window.LabelKey);
-        var lbl = Text(label, 9, secondary);
-        lbl.FontWeight = FontWeights.SemiBold;
-        lbl.Width = 20;
-        lbl.VerticalAlignment = VerticalAlignment.Center;
-        Typography.SetNumeralAlignment(lbl, FontNumeralAlignment.Tabular);
+        var label = AntigravityPoolHeader(window.LabelKey);
+        var header = Text(label, 9.5, secondary);
+        header.FontWeight = FontWeights.SemiBold;
+        header.HorizontalAlignment = HorizontalAlignment.Left;
+        header.Margin = new Thickness(0, 0, 0, 1.5);
+        Typography.SetNumeralAlignment(header, FontNumeralAlignment.Tabular);
+        colPanel.Children.Add(header);
 
         var track = new Border
         {
@@ -847,21 +863,11 @@ public sealed class AiUsageWidget : DockWidget
         {
             Width = 32,
             Height = 6,
-            Margin = new Thickness(2, 0, 0, 0),
+            Margin = new Thickness(0, 0, 4, 0),
             VerticalAlignment = VerticalAlignment.Center
         };
         bar.Children.Add(track);
         bar.Children.Add(fill);
-
-        var row1 = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 0, 2)
-        };
-        row1.Children.Add(lbl);
-        row1.Children.Add(bar);
-        rows.Children.Add(row1);
 
         string resetStr;
         var isWeekly = window.WindowSeconds is { } s && s >= 604800;
@@ -878,14 +884,20 @@ public sealed class AiUsageWidget : DockWidget
         }
 
         var resetText = Text(resetStr, 8.5, secondary);
-        resetText.Margin = new Thickness(22, 0, 0, 0);
         resetText.VerticalAlignment = VerticalAlignment.Center;
         Typography.SetNumeralAlignment(resetText, FontNumeralAlignment.Tabular);
 
-        rows.Children.Add(resetText);
-        slots.Add(new AntigravityQuotaSlot(fill, resetText, window.ResetsAt, isWeekly));
+        var row = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        row.Children.Add(bar);
+        row.Children.Add(resetText);
+        colPanel.Children.Add(row);
 
-        return new(rows, slots);
+        slots.Add(new AntigravityQuotaSlot(fill, resetText, window.ResetsAt, isWeekly));
+        return new(colPanel, slots);
     }
 
     private UIElement BuildFlyout(List<(TextBlock Block, DateTimeOffset Reset)> countdowns)

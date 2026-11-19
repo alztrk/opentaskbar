@@ -486,14 +486,14 @@ internal static class AiUsageChecks
             checks += 7;
         }
 
-        // Antigravity widget checks: dynamic columns with vertical dividers, no name, no ring, no flyout menu
+        // Antigravity widget checks: dynamic columns with vertical dividers, headers on top, no empty quotas, no name, no ring, no flyout menu
         using var agyWidget = new AiUsageWidget(AiProviders.Antigravity, (provider, _) =>
         {
             var agyReport = new AiUsageReport(provider, "Google AI Pro",
             [
                 new("AiUsageSession", 0.40, DateTimeOffset.UtcNow.AddHours(3), 18000L, Group: "AiUsageGroupGemini"),
                 new("AiUsageWeekly", 0.60, DateTimeOffset.UtcNow.AddDays(5), 604800L, Group: "AiUsageGroupGemini"),
-                new("AiUsageSession", 0.85, DateTimeOffset.UtcNow.AddHours(1), 18000L, Group: "AiUsageGroupClaudeGpt"),
+                // Claude group only has weekly quota, no 5h session data
                 new("AiUsageWeekly", 0.30, DateTimeOffset.UtcNow.AddDays(4), 604800L, Group: "AiUsageGroupClaudeGpt")
             ], DateTimeOffset.UtcNow);
             return Task.FromResult<(AiUsageReport?, string?)>((agyReport, null));
@@ -523,6 +523,33 @@ internal static class AiUsageChecks
         // 2 groups (Gemini, Claude) separated by 1 divider = 3 children in container
         if (container.Children.Count != 3)
             throw new InvalidOperationException($"Antigravity container must have 3 children (2 columns + 1 divider), got {container.Children.Count}");
+
+        var columnsProp = agyCard.GetType().GetProperty("Columns")!;
+        var columnsList = (System.Collections.IList)columnsProp.GetValue(agyCard)!;
+        if (columnsList.Count != 2)
+            throw new InvalidOperationException($"Antigravity must have 2 columns, got {columnsList.Count}");
+
+        // Column 1 (Gemini) has 2 slots (5h + weekly) and header "Gemini" on top
+        var col1 = columnsList[0]!;
+        var col1SlotsProp = col1.GetType().GetProperty("Slots")!;
+        var col1Slots = (System.Collections.IList)col1SlotsProp.GetValue(col1)!;
+        if (col1Slots.Count != 2)
+            throw new InvalidOperationException($"Gemini column must have 2 quota slots, got {col1Slots.Count}");
+        var col1ElemProp = col1.GetType().GetProperty("Element")!;
+        var col1Panel = (StackPanel)col1ElemProp.GetValue(col1)!;
+        if (col1Panel.Orientation != Orientation.Vertical || ((TextBlock)col1Panel.Children[0]).Text != "Gemini")
+            throw new InvalidOperationException("Gemini column must be vertical StackPanel with 'Gemini' header on top.");
+
+        // Column 2 (Claude) has only 1 slot (weekly only, no missing 5h slot) and header "Claude" on top
+        var col2 = columnsList[1]!;
+        var col2SlotsProp = col2.GetType().GetProperty("Slots")!;
+        var col2Slots = (System.Collections.IList)col2SlotsProp.GetValue(col2)!;
+        if (col2Slots.Count != 1)
+            throw new InvalidOperationException($"Claude column must only have 1 quota slot when 5h data is missing, got {col2Slots.Count}");
+        var col2ElemProp = col2.GetType().GetProperty("Element")!;
+        var col2Panel = (StackPanel)col2ElemProp.GetValue(col2)!;
+        if (col2Panel.Orientation != Orientation.Vertical || ((TextBlock)col2Panel.Children[0]).Text != "Claude")
+            throw new InvalidOperationException("Claude column must be vertical StackPanel with 'Claude' header on top.");
 
         // Now test 3 pools format
         using var agyPoolWidget = new AiUsageWidget(AiProviders.Antigravity, (provider, _) =>
