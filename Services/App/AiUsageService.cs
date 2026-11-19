@@ -47,7 +47,7 @@ public static class AiUsageService
 
     internal static async Task<LoadResult> LoadWithPolicyAsync(AiProviders provider, CancellationToken cancellation)
     {
-        if (provider is not (AiProviders.Claude or AiProviders.Codex or AiProviders.Antigravity or AiProviders.OpenCode))
+        if (provider is not (AiProviders.Claude or AiProviders.Codex or AiProviders.Antigravity or AiProviders.OpenCode or AiProviders.Copilot or AiProviders.DeepSeek or AiProviders.OpenRouter))
             return new(null, "ErrorAiUsageLoad");
         int? status = null;
         try
@@ -89,6 +89,9 @@ public static class AiUsageService
                     AiProviders.Claude => ParseClaude(json, credential.Plan),
                     AiProviders.Codex => ParseCodex(json),
                     AiProviders.OpenCode => ParseOpenCode(json, credential.Plan),
+                    AiProviders.Copilot => ParseCopilot(json, credential.Plan),
+                    AiProviders.DeepSeek => ParseDeepSeek(json, credential.Plan),
+                    AiProviders.OpenRouter => ParseOpenRouter(json, credential.Plan),
                     _ => ParseAntigravity(json, credential.Plan)
                 };
                 return new(report, error);
@@ -114,11 +117,16 @@ public static class AiUsageService
 
     internal static string CredentialPath(AiProviders provider)
     {
+        if (provider == AiProviders.Copilot)
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "github-copilot", "apps.json");
+
         var (envVar, folder, file) = provider switch
         {
             AiProviders.Claude => ("CLAUDE_CONFIG_DIR", ".claude", ".credentials.json"),
             AiProviders.Codex => ("CODEX_HOME", ".codex", "auth.json"),
             AiProviders.OpenCode => ("OPENCODE_CONFIG_DIR", Path.Combine(".local", "share", "opencode"), "auth.json"),
+            AiProviders.DeepSeek => ("DEEPSEEK_CONFIG_DIR", ".deepseek", "auth.json"),
+            AiProviders.OpenRouter => ("OPENROUTER_CONFIG_DIR", ".openrouter", "auth.json"),
             _ => ("GEMINI_CONFIG_DIR", ".gemini", "oauth_creds.json")
         };
         var directory = Environment.GetEnvironmentVariable(envVar);
@@ -144,6 +152,12 @@ public static class AiUsageService
                 var dbStamp = File.GetLastWriteTimeUtc(dbPath);
                 if (dbStamp > stamp) stamp = dbStamp;
             }
+            if (provider == AiProviders.Copilot)
+            {
+                var fallbackPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "github-copilot", "apps.json");
+                var fallbackStamp = File.GetLastWriteTimeUtc(fallbackPath);
+                if (fallbackStamp > stamp) stamp = fallbackStamp;
+            }
             return stamp;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException
@@ -155,6 +169,9 @@ public static class AiUsageService
     internal static string? ReadCodexToken(string? path = null) => ReadCredential(AiProviders.Codex, path ?? CredentialPath(AiProviders.Codex))?.Token;
     internal static string? ReadAntigravityToken(string? path = null) => ReadCredential(AiProviders.Antigravity, path)?.Token;
     internal static string? ReadOpenCodeToken(string? path = null) => ReadCredential(AiProviders.OpenCode, path)?.Token;
+    internal static string? ReadCopilotToken(string? path = null) => ReadCredential(AiProviders.Copilot, path)?.Token;
+    internal static string? ReadDeepSeekToken(string? path = null) => ReadCredential(AiProviders.DeepSeek, path)?.Token;
+    internal static string? ReadOpenRouterToken(string? path = null) => ReadCredential(AiProviders.OpenRouter, path)?.Token;
 
     internal static async Task<string?> TryRefreshClaudeTokenAsync(
         string path,
@@ -173,11 +190,15 @@ public static class AiUsageService
             AiProviders.Claude => "https://api.anthropic.com/api/oauth/usage",
             AiProviders.Codex => "https://chatgpt.com/backend-api/wham/usage",
             AiProviders.OpenCode => "https://opencode.ai/zen/go/v1/usage",
+            AiProviders.Copilot => "https://api.github.com/copilot_internal/user",
+            AiProviders.DeepSeek => "https://api.deepseek.com/user/balance",
+            AiProviders.OpenRouter => "https://openrouter.ai/api/v1/credits",
             _ => "https://aicode.googleapis.com/v1alpha:fetchQuotaStatus"
         });
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential.Token);
         if (provider == AiProviders.Claude) request.Headers.Add("anthropic-beta", "oauth-2025-04-20");
         else if (provider == AiProviders.Antigravity) request.Headers.UserAgent.ParseAdd("antigravity");
+        else if (provider == AiProviders.Copilot) request.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
         else if (!string.IsNullOrWhiteSpace(credential.Account)) request.Headers.Add("ChatGPT-Account-Id", credential.Account);
         return await Client.SendAsync(request, cancellation).ConfigureAwait(false);
     }
@@ -195,6 +216,22 @@ public static class AiUsageService
                 if (Environment.GetEnvironmentVariable(envKey) is { Length: > 0 } envToken && !string.IsNullOrWhiteSpace(envToken))
                     return new(envToken.Trim());
         }
+        if (provider == AiProviders.DeepSeek && path is null)
+        {
+            var envToken = Environment.GetEnvironmentVariable("DEEPSEEK_API_KEY")
+                ?? Environment.GetEnvironmentVariable("DEEPSEEK_API_KEY", EnvironmentVariableTarget.User)
+                ?? Environment.GetEnvironmentVariable("DEEPSEEK_API_KEY", EnvironmentVariableTarget.Machine);
+            if (!string.IsNullOrWhiteSpace(envToken))
+                return new(envToken.Trim());
+        }
+        if (provider == AiProviders.OpenRouter && path is null)
+        {
+            var envToken = Environment.GetEnvironmentVariable("OPENROUTER_API_KEY")
+                ?? Environment.GetEnvironmentVariable("OPENROUTER_API_KEY", EnvironmentVariableTarget.User)
+                ?? Environment.GetEnvironmentVariable("OPENROUTER_API_KEY", EnvironmentVariableTarget.Machine);
+            if (!string.IsNullOrWhiteSpace(envToken))
+                return new(envToken.Trim());
+        }
         try
         {
             var targetPath = path ?? CredentialPath(provider);
@@ -209,11 +246,19 @@ public static class AiUsageService
                 if (File.Exists(legacyPath)) targetPath = legacyPath;
                 else if (TryReadOpenCodeCliCredential() is { } cliCred) return cliCred;
             }
+            if (provider == AiProviders.Copilot && path is null && !File.Exists(targetPath))
+            {
+                var configPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config", "github-copilot", "apps.json");
+                if (File.Exists(configPath)) targetPath = configPath;
+            }
             using var stream = new FileStream(targetPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var document = JsonDocument.Parse(stream);
             var root = document.RootElement;
             if (provider == AiProviders.Antigravity) return ParseAntigravityCredential(root);
             if (provider == AiProviders.OpenCode) return ParseOpenCodeCredential(root);
+            if (provider == AiProviders.Copilot) return ParseCopilotCredential(root);
+            if (provider == AiProviders.DeepSeek) return ParseDeepSeekCredential(root);
+            if (provider == AiProviders.OpenRouter) return ParseOpenRouterCredential(root);
             if (provider == AiProviders.Claude)
             {
                 var fileCred = ParseClaudeCredential(root, targetPath);
@@ -449,6 +494,37 @@ public static class AiUsageService
     internal static (AiUsageReport? Report, string? Error) ParseCodex(string json) => Parse(json, AiProviders.Codex, null);
     internal static (AiUsageReport? Report, string? Error) ParseAntigravity(string json, string? plan = null) => Parse(json, AiProviders.Antigravity, plan);
     internal static (AiUsageReport? Report, string? Error) ParseOpenCode(string json, string? plan = null) => Parse(json, AiProviders.OpenCode, plan);
+    internal static (AiUsageReport? Report, string? Error) ParseCopilot(string json, string? plan = null) => Parse(json, AiProviders.Copilot, plan);
+    internal static (AiUsageReport? Report, string? Error) ParseDeepSeek(string json, string? plan = null) => Parse(json, AiProviders.DeepSeek, plan);
+    internal static (AiUsageReport? Report, string? Error) ParseOpenRouter(string json, string? plan = null) => Parse(json, AiProviders.OpenRouter, plan);
+
+    private static Credential? ParseCopilotCredential(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        foreach (var entry in root.EnumerateObject())
+        {
+            if (entry.Value.ValueKind == JsonValueKind.Object
+                && Text(entry.Value, "oauth_token") is { Length: > 0 } token)
+            {
+                return new(token);
+            }
+        }
+        return null;
+    }
+
+    private static Credential? ParseDeepSeekCredential(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        var token = Text(root, "api_key") ?? Text(root, "key") ?? Text(root, "token");
+        return string.IsNullOrWhiteSpace(token) ? null : new(token);
+    }
+
+    private static Credential? ParseOpenRouterCredential(JsonElement root)
+    {
+        if (root.ValueKind != JsonValueKind.Object) return null;
+        var token = Text(root, "api_key") ?? Text(root, "key") ?? Text(root, "token");
+        return string.IsNullOrWhiteSpace(token) ? null : new(token);
+    }
 
     private static (AiUsageReport? Report, string? Error) Parse(string json, AiProviders provider, string? plan)
     {
@@ -620,6 +696,82 @@ public static class AiUsageService
                 {
                     LimitReached = Flag(root, "limit_reached") || Flag(root, "limitReached")
                         || windows.Any(window => window.Used >= 1.0)
+                };
+            }
+            else if (provider == AiProviders.Copilot)
+            {
+                plan ??= Text(root, "copilot_plan");
+                DateTimeOffset? resetAt = null;
+                if (Text(root, "quota_reset_date_utc") is { } resetRaw
+                    && DateTimeOffset.TryParse(resetRaw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsedReset))
+                {
+                    resetAt = parsedReset;
+                }
+
+                if (Property(root, "quota_snapshots") is { ValueKind: JsonValueKind.Object } snapshots
+                    && Property(snapshots, "premium_interactions") is { ValueKind: JsonValueKind.Object } premium
+                    && Property(premium, "percent_remaining") is { } remElem
+                    && Number(remElem) is { } percentRemaining
+                    && double.IsFinite(percentRemaining))
+                {
+                    var used = Math.Clamp((100.0 - percentRemaining) / 100.0, 0.0, 1.0);
+                    windows.Add(new("AiUsageMonthly", used, resetAt, 2592000L));
+                }
+
+                report = new(provider, PlanLabel(plan), windows, now)
+                {
+                    LimitReached = windows.Any(window => window.Used >= 1.0)
+                };
+            }
+            else if (provider == AiProviders.DeepSeek)
+            {
+                var isAvailable = Flag(root, "is_available");
+                double? totalBalance = null;
+                string? currency = null;
+                if (Property(root, "balance_infos") is { ValueKind: JsonValueKind.Array } infos)
+                {
+                    foreach (var info in infos.EnumerateArray())
+                    {
+                        if (info.ValueKind != JsonValueKind.Object) continue;
+                        var totalText = Text(info, "total_balance");
+                        if (double.TryParse(totalText, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedBalance))
+                        {
+                            totalBalance = parsedBalance;
+                            currency = Text(info, "currency") ?? "USD";
+                            break;
+                        }
+                    }
+                }
+
+                if (totalBalance is not { } bal)
+                    return (null, "ErrorAiUsageLoad");
+
+                plan ??= $"{bal.ToString("0.##", CultureInfo.InvariantCulture)} {currency}";
+                windows.Add(new("AiUsageBalance", bal <= 0 ? 1.0 : 0.0, null, null));
+                report = new(provider, plan, windows, now)
+                {
+                    Credits = bal,
+                    LimitReached = !isAvailable || bal <= 0
+                };
+            }
+            else if (provider == AiProviders.OpenRouter)
+            {
+                if (Property(root, "data") is not { ValueKind: JsonValueKind.Object } data
+                    || Property(data, "total_credits") is not { } totalElem || Number(totalElem) is not { } totalCredits
+                    || Property(data, "total_usage") is not { } usedElem || Number(usedElem) is not { } totalUsage
+                    || !double.IsFinite(totalCredits) || !double.IsFinite(totalUsage))
+                {
+                    return (null, "ErrorAiUsageLoad");
+                }
+
+                var remaining = Math.Max(0.0, totalCredits - totalUsage);
+                var used = totalCredits > 0 ? Math.Clamp(totalUsage / totalCredits, 0.0, 1.0) : 0.0;
+                plan ??= $"${remaining.ToString("0.##", CultureInfo.InvariantCulture)}";
+                windows.Add(new("AiUsageCreditsLabel", used, null, null));
+                report = new(provider, plan, windows, now)
+                {
+                    Credits = remaining,
+                    LimitReached = totalCredits > 0 && remaining <= 0
                 };
             }
             else

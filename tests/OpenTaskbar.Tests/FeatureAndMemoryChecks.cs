@@ -1,5 +1,6 @@
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -103,11 +104,14 @@ internal static class FeatureAndMemoryChecks
                 ai.Activate();
                 Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.Background);
                 var cards = AiCards(ai);
-                Check(cards.Length == 4 && cards.All(card => card.Content is StackPanel { Children: [System.Windows.Shapes.Path { Data: not null }, TextBlock, RingMeter] })
+                Check(cards.Length == 7 && cards.All(card => card.Content is StackPanel { Children: [System.Windows.Shapes.Path { Data: not null }, TextBlock, RingMeter] })
                     && cards[0].Content is StackPanel { Children: [_, TextBlock { Text: "Claude" }, RingMeter { Value: 0.42, Text: "42" }] }
                     && cards[1].Content is StackPanel { Children: [_, TextBlock { Text: "Codex" }, RingMeter { Value: 0.9 }] }
                     && cards[2].Content is StackPanel { Children: [_, TextBlock { Text: "Antigravity" }, RingMeter { Value: 0.42, Text: "42" }] }
                     && cards[3].Content is StackPanel { Children: [_, TextBlock { Text: "OpenCode" }, RingMeter { Value: 0.42, Text: "42" }] }
+                    && cards[4].Content is StackPanel { Children: [_, TextBlock { Text: "Copilot" }, RingMeter { Value: 0.42, Text: "42" }] }
+                    && cards[5].Content is StackPanel { Children: [_, TextBlock { Text: "DeepSeek" }, RingMeter { Value: 0.42, Text: "42" }] }
+                    && cards[6].Content is StackPanel { Children: [_, TextBlock { Text: "OpenRouter" }, RingMeter { Value: 0.42, Text: "42" }] }
                     && cards[0].ToolTip is string claudeTip && claudeTip.StartsWith("Claude Code 42%", StringComparison.Ordinal)
                     && claudeTip.Contains("Weekly 29%", StringComparison.Ordinal) && claudeTip.Contains("Resets in", StringComparison.Ordinal)
                     && cards[1].ToolTip is string codexTip && codexTip.Contains(UiText.Get("AiUsageLimitReached"), StringComparison.Ordinal),
@@ -260,6 +264,21 @@ internal static class FeatureAndMemoryChecks
             var decodedLarge = (BitmapSource?)decodeMethod.Invoke(null, [largePng]);
             Check(decodedSmall?.PixelWidth == 16, "Small tray PNG snapshots must not be upscaled.");
             Check(decodedLarge?.PixelWidth == 32, "Oversized tray PNG snapshots must be downsampled to 32px.");
+
+            // 10. NativeTaskbarWindow & Live TrayHost checks
+            var explorerTaskbar = NativeTaskbarWindow.Find();
+            if (explorerTaskbar != 0)
+            {
+                GetWindowThreadProcessId(explorerTaskbar, out var ownerPid);
+                Check(ownerPid != (uint)Environment.ProcessId, "NativeTaskbarWindow.Find must never return a window owned by OpenTaskbar.");
+            }
+            Check(!TrayHost.IsBroadcasting, "TrayHost.IsBroadcasting must be false when idle.");
+            using (var testTray = new TrayWidget())
+            {
+                var liveEmptyContent = testTray.BuildLiveContent(Array.Empty<ManagedShell.WindowsTray.NotifyIcon>());
+                Check(liveEmptyContent is StackPanel sp && sp.Children.Count >= 2,
+                    "TrayWidget.BuildLiveContent must render a heading, empty caption and settings for an empty icon list.");
+            }
         }
         finally
         {
@@ -309,4 +328,7 @@ internal static class FeatureAndMemoryChecks
 
     private static Button[] AiCards(AiUsageWidget widget) =>
         ((Panel)widget.Content).Children.OfType<Button>().Where(card => card.Visibility == Visibility.Visible).ToArray();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(nint windowHandle, out uint processId);
 }

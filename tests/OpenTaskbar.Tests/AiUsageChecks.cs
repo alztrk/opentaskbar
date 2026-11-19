@@ -295,12 +295,36 @@ internal static class AiUsageChecks
             Check(AiUsageService.ReadOpenCodeToken(path) == "fixture-oc-v1", "OpenCode must read v1 auth.json provider keys.");
             File.WriteAllText(path, """[{"integrationID":"ollama-cloud","active":true,"value":{"key":"other"}},{"integrationID":"opencode-go","active":true,"value":{"type":"key","key":"fixture-oc-v2"}}]""");
             Check(AiUsageService.ReadOpenCodeToken(path) == "fixture-oc-v2", "OpenCode must read v2 auth export array entries.");
+            File.WriteAllText(path, """{"github.com:fixture":{"oauth_token":"fixture-copilot"}}""");
+            Check(AiUsageService.ReadCopilotToken(path) == "fixture-copilot", "Copilot must read its oauth_token from apps.json.");
+            var (copilotReport, copilotError) = AiUsageService.ParseCopilot("""
+                {"copilot_plan":"individual","quota_reset_date_utc":"2026-12-01T00:00:00Z","quota_snapshots":{"premium_interactions":{"percent_remaining":72.5}}}
+                """);
+            Check(copilotError is null && copilotReport is { Provider: AiProviders.Copilot, Plan: "Individual", LimitReached: false }
+                  && copilotReport.Windows is [{ LabelKey: "AiUsageMonthly", Used: >= 0.274 and <= 0.276, WindowSeconds: 2592000L }],
+                "Copilot must parse plan, reset date, and premium interactions remaining percentage.");
+            File.WriteAllText(path, """{"api_key":"fixture-deepseek"}""");
+            Check(AiUsageService.ReadDeepSeekToken(path) == "fixture-deepseek", "DeepSeek must read its api_key from auth.json.");
+            var (dsReport, dsError) = AiUsageService.ParseDeepSeek("""
+                {"is_available":true,"balance_infos":[{"currency":"USD","total_balance":"4.81"}]}
+                """);
+            Check(dsError is null && dsReport is { Provider: AiProviders.DeepSeek, Plan: "4.81 USD", Credits: 4.81, LimitReached: false }
+                  && dsReport.Windows is [{ LabelKey: "AiUsageBalance", Used: 0.0 }],
+                "DeepSeek must parse balance_infos and remaining balance.");
+            File.WriteAllText(path, """{"api_key":"fixture-openrouter"}""");
+            Check(AiUsageService.ReadOpenRouterToken(path) == "fixture-openrouter", "OpenRouter must read its api_key from auth.json.");
+            var (orReport, orError) = AiUsageService.ParseOpenRouter("""
+                {"data":{"total_credits":20.0,"total_usage":5.0}}
+                """);
+            Check(orError is null && orReport is { Provider: AiProviders.OpenRouter, Plan: "$15", Credits: 15.0, LimitReached: false }
+                  && orReport.Windows is [{ LabelKey: "AiUsageCreditsLabel", Used: >= 0.249 and <= 0.251 }],
+                "OpenRouter must parse total_credits and total_usage.");
             File.WriteAllText(path, "null");
             Check(AiUsageService.ReadClaudeToken(path) is null && AiUsageService.ReadCodexToken(path) is null,
                 "Malformed credential files must fail closed.");
             var settings = new DockSettings(AiUsageProviders: AiProviders.All);
             var store = new DockSettingsStore(path);
-            Check(!DockSettingsStore.Validate(settings with { AiUsageProviders = (AiProviders)64 }), "Unknown AI provider flags must be rejected.");
+            Check(!DockSettingsStore.Validate(settings with { AiUsageProviders = (AiProviders)128 }), "Unknown AI provider flags must be rejected.");
             Check(store.Save(settings) is null && store.Load().Settings.AiUsageProviders == AiProviders.All,
                 "Provider flags must round-trip through settings.");
             File.WriteAllText(path, "{}");

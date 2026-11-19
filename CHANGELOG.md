@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.11 - 2026-11-19
+
+- Added GitHub Copilot, DeepSeek, and OpenRouter quota and balance providers to the AI usage widget, including credential discovery, status rings, and settings toggles (#58, #59, #60).
+- Hosted notification area to open apps' native tray context menus from the Background apps flyout (#57).
+- Improved dock responsiveness by moving Recycle Bin queries, network speed sampling, application launches, and icon extraction off the UI thread (#61).
+
 ## 0.2.8 - 2026-11-18
 
 - Added an optional AI Usage widget for Claude Code and Codex, with read-only CLI sign-in, one quota ring per provider (session and weekly), a pace hint, reset countdowns, a selectable ring window, and translations in all 14 languages.
