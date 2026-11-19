@@ -148,7 +148,7 @@ public sealed class TrayWidget : DockWidget
             row.Children.Add(image);
             row.Children.Add(new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis });
             var open = DockFlyout.FlatButton(row, (_, _) => ForwardClick(icon, System.Windows.Input.MouseButton.Left), name);
-            open.PreviewMouseRightButtonDown += (_, _) => _flyout.StaysOpen = true;
+            open.PreviewMouseRightButtonDown += (_, _) => _flyout.RetainForExternalContextMenu(icon.HWnd);
             open.PreviewMouseRightButtonUp += (_, e) =>
             {
                 e.Handled = true;
@@ -194,15 +194,11 @@ public sealed class TrayWidget : DockWidget
         }
         else
         {
-            // Right-clicks open the app's context menu; keep the flyout open.
-            _flyout.StaysOpen = true;
+            // Right-clicks open the app's context menu; retain the flyout open.
+            _flyout.RetainForExternalContextMenu(icon.HWnd);
             Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () =>
             {
                 TrayHost.Click(icon, button);
-                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ContextIdle, () =>
-                {
-                    _flyout.StaysOpen = false;
-                });
             });
         }
     }

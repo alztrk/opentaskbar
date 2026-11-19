@@ -72,7 +72,18 @@ internal static class ApplicationInteractionChecks
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance, null, [testHost, true], null)!;
         testHost.RaiseEvent(args);
         Check(testFlyout.StaysOpen, "Opening a context menu on an element inside the flyout must keep the flyout open.");
+        DockFlyout.CloseAll(force: false);
+        Check(testFlyout.IsOpen, "CloseAll(force: false) must not close a flyout while its context menu is active.");
         testFlyout.Close();
+        Check(!testFlyout.IsOpen && !testFlyout.StaysOpen, "Closing the flyout must reset StaysOpen.");
+
+        testFlyout.Show(testHost, testHost, animate: false);
+        testFlyout.RetainForExternalContextMenu(0);
+        Check(testFlyout.StaysOpen, "RetainForExternalContextMenu must keep the flyout open for external app menus.");
+        DockFlyout.CloseAll(force: false);
+        Check(testFlyout.IsOpen, "External deactivation must not close a flyout retained for an app context menu.");
+        testFlyout.Close();
+        Check(!testFlyout.IsOpen && !testFlyout.StaysOpen, "Explicit close must reset external retention.");
 
         var panel = new StackPanel { Children = { buttons, content } };
         panel.SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, "TextPrimary");
