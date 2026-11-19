@@ -20,6 +20,7 @@ DockIconPixelChecks();
 StartMenuAndOverlayChecks();
 AppLaunchChecks();
 TrayListChecks();
+ShellTokenChecks();
 checks += RunningAppChecks.Run();
 checks += AiUsageChecks.Run();
 if (!headless) checks += WidgetViewChecks.Run();
@@ -50,9 +51,23 @@ void TrayListChecks()
     IReadOnlyList<TrayApp> sameWithNewIcons = [new("OneDrive", @"c:\apps\onedrive.exe", null), new("Teams", @"C:\Apps\Teams.exe", null)];
     IReadOnlyList<TrayApp> renamed = [new("OneDrive - Personal", @"C:\Apps\OneDrive.exe", null), new("Teams", @"C:\Apps\Teams.exe", null)];
     IReadOnlyList<TrayApp> shorter = [new("OneDrive", @"C:\Apps\OneDrive.exe", null)];
-    Check(OpenTaskbar.Widgets.TrayWidget.SameApps(first, sameWithNewIcons), "Path casing alone must not rebuild the open tray list.");
-    Check(!OpenTaskbar.Widgets.TrayWidget.SameApps(first, renamed), "A changed app name must refresh the open tray list.");
-    Check(!OpenTaskbar.Widgets.TrayWidget.SameApps(first, shorter), "An app that exited must refresh the open tray list.");
+    Check(OpenTaskbar.Views.Shell.TrayShellButton.SameApps(first, sameWithNewIcons), "Path casing alone must not rebuild the open tray list.");
+    Check(!OpenTaskbar.Views.Shell.TrayShellButton.SameApps(first, renamed), "A changed app name must refresh the open tray list.");
+    Check(!OpenTaskbar.Views.Shell.TrayShellButton.SameApps(first, shorter), "An app that exited must refresh the open tray list.");
+}
+
+// Permanent shell buttons must be addressable by a free-form dock-order token, including Show Desktop.
+void ShellTokenChecks()
+{
+    var expected = new[] { "start", "search", "taskview", "tray", "peek", "bin" };
+    Check(OpenTaskbar.MainWindow.ShellDockTokens.SequenceEqual(expected, StringComparer.OrdinalIgnoreCase),
+        "Every permanent shell button must have a stable dock-order token.");
+    var settings = new DockSettings(ShowTaskViewButton: false, ShowTrayButton: false, ShowDesktopButton: false);
+    Check(!expected.Skip(2).Any(token => OpenTaskbar.MainWindow.ShellDockTokens.Contains(token, StringComparer.OrdinalIgnoreCase)
+        && (token == "taskview" ? settings.ShowTaskViewButton
+            : token == "tray" ? settings.ShowTrayButton
+            : token == "peek" && settings.ShowDesktopButton)),
+        "Shell button visibility must be independently controllable through DockSettings.");
 }
 
 void CountdownChecks()

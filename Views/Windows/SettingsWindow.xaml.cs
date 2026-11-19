@@ -325,8 +325,6 @@ public partial class SettingsWindow : Window
             CurrentDesktopOnly = CurrentDesktopToggle.IsChecked == true,
             CheckUpdates = UpdatesToggle.IsChecked == true,
             Edge = LeftEdge.IsChecked == true ? DockEdge.Left : RightEdge.IsChecked == true ? DockEdge.Right : DockEdge.Bottom,
-            ShowVirtualDesktops = TaskViewButtonToggle.IsChecked == true,
-            ShowTray = TrayButtonToggle.IsChecked == true,
             ShowWeather = IsEnabled("Weather"),
             WeatherCity = WeatherCityBox.Text.Trim(),
             LauncherHotkey = _preferences.Current.LauncherHotkey,

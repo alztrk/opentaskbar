@@ -251,6 +251,9 @@
                                 </Grid>
                             </Button>
                             <Button x:Name="SearchButton" Style="{StaticResource DockButton}" Click="SearchButton_Click"
+                                    PreviewMouseLeftButtonDown="ShellButton_PreviewMouseLeftButtonDown"
+                                    PreviewMouseMove="ShellButton_PreviewMouseMove"
+                                    PreviewMouseLeftButtonUp="ShellButton_PreviewMouseLeftButtonUp"
                                     AutomationProperties.Name="{local:Loc WidgetLauncher}" ToolTip="{local:Loc WidgetLauncher}"
                                     ToolTipService.InitialShowDelay="650">
                                 <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}"
@@ -269,6 +272,9 @@
                                 </Grid>
                             </Button>
                             <Button x:Name="TaskViewButton" Style="{StaticResource DockButton}" Click="TaskViewButton_Click"
+                                    PreviewMouseLeftButtonDown="ShellButton_PreviewMouseLeftButtonDown"
+                                    PreviewMouseMove="ShellButton_PreviewMouseMove"
+                                    PreviewMouseLeftButtonUp="ShellButton_PreviewMouseLeftButtonUp"
                                     AutomationProperties.Name="{local:Loc WidgetDesktops}" ToolTip="{local:Loc WidgetDesktops}"
                                     ToolTipService.InitialShowDelay="650">
                                 <Button.ContextMenu>
@@ -295,7 +301,9 @@
                                 </Grid>
                             </Button>
                             <shell:TrayShellButton x:Name="TrayButton" Style="{StaticResource DockButton}"
-                                                   AutomationProperties.Name="{local:Loc TrayApps}" ToolTip="{local:Loc TrayApps}"
+                                                   PreviewMouseLeftButtonDown="ShellButton_PreviewMouseLeftButtonDown"
+                                                   PreviewMouseMove="ShellButton_PreviewMouseMove"
+                                                   PreviewMouseLeftButtonUp="ShellButton_PreviewMouseLeftButtonUp"
                                                    ToolTipService.InitialShowDelay="650" />
                             <Border x:Name="StartDivider" Width="1" Height="22" Background="{DynamicResource StrokeSubtle}" Margin="3,0,4,0" IsHitTestVisible="False" Visibility="Collapsed" />
                         </StackPanel>
@@ -369,10 +377,14 @@
                                     <ItemsPanelTemplate><StackPanel Orientation="Horizontal" VerticalAlignment="Center" /></ItemsPanelTemplate>
                                 </ItemsControl.ItemsPanel>
                             </ItemsControl>
-                            <Border x:Name="ShowDesktopStrip" Width="6" Height="{StaticResource DockWindowHeight}"
-                                    Background="Transparent" ToolTip="{local:Loc ShowDesktop}"
-                                    MouseLeftButtonDown="ShowDesktopStrip_MouseLeftButtonDown" Cursor="Hand"
-                                    VerticalAlignment="Stretch" Margin="3,0,0,0" /> 
+                            <Button x:Name="ShowDesktopButton" Style="{StaticResource DockButton}" Width="6"
+                                    Click="ShowDesktop_Click" Cursor="Hand"
+                                    PreviewMouseLeftButtonDown="ShellButton_PreviewMouseLeftButtonDown"
+                                    PreviewMouseMove="ShellButton_PreviewMouseMove"
+                                    PreviewMouseLeftButtonUp="ShellButton_PreviewMouseLeftButtonUp"
+                                    AutomationProperties.Name="{local:Loc ShowDesktop}" ToolTip="{local:Loc ShowDesktop}"
+                                    ToolTipService.InitialShowDelay="650" Margin="3,0,0,0"
+                                    VerticalAlignment="Stretch" /> 
                         </StackPanel>
                         <!-- Widgets follow the apps in floating mode and pin to the right edge in full-width mode. -->
                         <Border x:Name="WidgetIsland" Grid.Column="3" VerticalAlignment="Center" HorizontalAlignment="Left" Margin="4,0,0,0"

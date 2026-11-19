@@ -1951,9 +1951,7 @@ public partial class MainWindow : Window
                 ShowFocus = id.Equals("Focus", StringComparison.OrdinalIgnoreCase) ? false : settings.ShowFocus,
                 ShowAudio = id.Equals("Audio", StringComparison.OrdinalIgnoreCase) ? false : settings.ShowAudio,
                 ShowQuickSettings = id.Equals("QuickSettings", StringComparison.OrdinalIgnoreCase) ? false : settings.ShowQuickSettings,
-                ShowWeather = id.Equals("Weather", StringComparison.OrdinalIgnoreCase) ? false : settings.ShowWeather,
-                ShowVirtualDesktops = id.Equals("Desktops", StringComparison.OrdinalIgnoreCase) ? false : settings.ShowVirtualDesktops,
-                ShowTray = id.Equals("Tray", StringComparison.OrdinalIgnoreCase) ? false : settings.ShowTray
+                ShowWeather = id.Equals("Weather", StringComparison.OrdinalIgnoreCase) ? false : settings.ShowWeather
             };
             var error = _preferences.Save(updated);
             if (error is not null) ReportError(error);
@@ -2007,6 +2005,9 @@ public partial class MainWindow : Window
         ResizeDockToContent();
     }
 
+    /// <summary>Free-form order tokens owned by permanent shell buttons (draggable via ShellDockDragData).</summary>
+    internal static readonly string[] ShellDockTokens = ["start", "search", "taskview", "tray", "peek", "bin"];
+
     private IReadOnlyList<string> DefaultDockOrder(DockSettings settings)
     {
         var tokens = new List<string>();
@@ -2014,6 +2015,7 @@ public partial class MainWindow : Window
         if (settings.ShowSearchButton) tokens.Add("search");
         if (settings.ShowTaskViewButton) tokens.Add("taskview");
         if (settings.ShowTrayButton) tokens.Add("tray");
+        if (settings.ShowDesktopButton) tokens.Add("peek");
 
         var groupedPaths = (settings.AppGroups ?? []).SelectMany(g => g.ExecutablePaths)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -2058,6 +2060,8 @@ public partial class MainWindow : Window
             return _preferences.Current.ShowTaskViewButton ? TaskViewButton : null;
         if (string.Equals(token, "tray", StringComparison.OrdinalIgnoreCase))
             return _preferences.Current.ShowTrayButton ? TrayButton : null;
+        if (string.Equals(token, "peek", StringComparison.OrdinalIgnoreCase))
+            return _preferences.Current.ShowDesktopButton ? ShowDesktopButton : null;
         if (string.Equals(token, "bin", StringComparison.OrdinalIgnoreCase)) return RecycleBinButton;
         if (token.StartsWith("app:", StringComparison.OrdinalIgnoreCase))
         {
@@ -2206,7 +2210,8 @@ public partial class MainWindow : Window
                 }
                 else if (string.Equals(token, "search", StringComparison.OrdinalIgnoreCase)
                     || string.Equals(token, "taskview", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(token, "tray", StringComparison.OrdinalIgnoreCase))
+                    || string.Equals(token, "tray", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(token, "peek", StringComparison.OrdinalIgnoreCase))
                 {
                     // Orders saved before these shell buttons existed keep them beside Start instead of appending them.
                     var startIndex = tokens.FindIndex(t => string.Equals(t, "start", StringComparison.OrdinalIgnoreCase));

@@ -45,13 +45,8 @@
     <StreamGeometry x:Key="IconCloudFog">M4 14.9A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.24 M16 17H7 M17 21H9</StreamGeometry>
     <StreamGeometry x:Key="IconSnow">M2 12h20 M12 2v20 M20 16l-4-4 4-4 M4 8l4 4-4 4 M16 4l-4 4-4-4 M8 20l4-4 4 4</StreamGeometry>
     <StreamGeometry x:Key="IconCloudLightning">M6 16.33A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 .5 8.97 M13 11l-4 6h6l-4 6</StreamGeometry>
-    <StreamGeometry x:Key="IconChevronLeft">M15 18l-6-6 6-6</StreamGeometry>
-    <StreamGeometry x:Key="IconChevronNext">M9 18l6-6-6-6</StreamGeometry>
-    <StreamGeometry x:Key="IconChevronUp">M18 15l-6-6-6 6</StreamGeometry>
-    <StreamGeometry x:Key="IconChevronDown">M6 9l6 6 6-6</StreamGeometry>
     <StreamGeometry x:Key="IconArrowDown">M12 5v14 M19 12l-7 7-7-7</StreamGeometry>
     <StreamGeometry x:Key="IconArrowUp">M12 19V5 M5 12l7-7 7 7</StreamGeometry>
-    <StreamGeometry x:Key="IconCheck">M20 6L9 17l-5-5</StreamGeometry>
     <StreamGeometry x:Key="IconAlertCircle">M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 8v4 M12 16h.01</StreamGeometry>
     <StreamGeometry x:Key="IconInfoCircle">M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z M12 16v-4 M12 8h.01</StreamGeometry>
     <StreamGeometry x:Key="IconDesktops">M3 4h12a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1z M20 8h1a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1v-1</StreamGeometry>

@@ -26,20 +26,51 @@ public sealed class TrayShellButton : Button
 
     public TrayShellButton()
     {
+        // Same Grid + TransformGroup cell as the other shell buttons so magnification and edge-origin updates
+        // can drive the existing transforms instead of allocating one on first hover.
         var glyph = new ContentControl
         {
             Content = FindResource("IconChevronUp"),
             Width = (double)Application.Current.Resources["DockUtilityGlyphSize"],
-            Height = (double)Application.Current.Resources["DockUtilityGlyphSize"]
+            Height = (double)Application.Current.Resources["DockUtilityGlyphSize"],
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
         };
         glyph.SetResourceReference(StyleProperty, "WidgetIcon");
         glyph.SetResourceReference(ForegroundProperty, "TextPrimary");
-        Content = glyph;
+        var cell = new Grid
+        {
+            Width = (double)Application.Current.Resources["DockIconSize"],
+            Height = (double)Application.Current.Resources["DockIconSize"],
+            RenderTransformOrigin = new Point(0.5, 0.5)
+        };
+        cell.RenderTransform = new TransformGroup
+        {
+            Children =
+            {
+                new ScaleTransform(1, 1),
+                new TranslateTransform()
+            }
+        };
+        cell.Children.Add(glyph);
+        Content = cell;
         Click += Button_Click;
         // Warm the list while the pointer approaches, so a click can show it at once.
         MouseEnter += (_, _) => _ = RefreshAppsQuietlyAsync();
-        Unloaded += (_, _) => _flyout.Close();
+        Unloaded += (_, _) =>
+        {
+            UiText.Current.PropertyChanged -= UiText_PropertyChanged;
+            _flyout.Close();
+        };
+        UiText.Current.PropertyChanged += UiText_PropertyChanged;
         Localize();
+    }
+
+    private void UiText_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        Localize();
+        if (_flyout.IsOpen && _lastApps is not null)
+            _flyout.Show(this, BuildContent(_lastApps), animate: false);
     }
 
     /// <summary>Wires the dock's error reporter and process actions. Called once from MainWindow.</summary>
@@ -232,17 +263,8 @@ public sealed class TrayShellButton : Button
             };
             menu.Items.Add(closeItem);
             menu.Items.Add(terminateItem);
-            open.PreviewMouseRightButtonDown += (_, _) => _flyout.StaysOpen = true;
-            open.ContextMenuOpening += (_, _) => _flyout.StaysOpen = true;
-            menu.Opened += (_, _) => _flyout.StaysOpen = true;
-            menu.Closed += (_, _) =>
-            {
-                _flyout.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, () =>
-                {
-                    if (!_flyout.IsOpen) return;
-                    _flyout.StaysOpen = false;
-                });
-            };
+            // DockFlyout hooks ContextMenuOpening at its root and owns StaysOpen for every flyout context menu;
+            // duplicating that logic here used to double-manage the same popup state.
             open.ContextMenu = menu;
 
             // Tray apps may keep running after WM_CLOSE; force quit uses the dock's existing confirmation flow.

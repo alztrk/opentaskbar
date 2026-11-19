@@ -158,7 +158,7 @@ public partial class ClockWidget : DockWidget
 
         var header = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
         var previous = NavButton("IconChevronLeft", -1, host);
-        var next = NavButton("IconChevronNext", 1, host);
+        var next = NavButton("IconChevronRight", 1, host);
         DockPanel.SetDock(previous, Dock.Left);
         DockPanel.SetDock(next, Dock.Right);
         header.Children.Add(previous);

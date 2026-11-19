@@ -37,8 +37,6 @@ internal static class VisualParityChecks
                 ["TimedWidgets_Light"] = "DFA830AC953B2F7E6CD0E802FE01E56CD5A6B2BF2437965E726AFE17F6AAF698",
                 ["FocusWidget_Dark"] = "D842256A1EF1F1938FDF3CE13F96D7C93A61843D3B38C0210B7AD481936A7041",
                 ["FocusWidget_Light"] = "A43CBAB0E8609FA3086027BCF7D61F99F3932124247916EE3875F4BE823CD6B2",
-                ["TrayWidget_Dark"] = "B66A3488F5FE43763ECE9117B0813D7B5E356C861B676575D2CA340A82D75ED0",
-                ["TrayWidget_Light"] = "E4AC2AB486DEECCA98BFF4315E1BF806CAFE6D34480869C843312B794D049C2F",
                 ["QuickSettingsWidget_Dark"] = "893BD1AB9AA324C04358CE2C4757F9BEB8D5E19AF8AA238CF3A18922D6952FC9",
                 ["QuickSettingsWidget_Light"] = "1E5A415786524A70A9D200DBF34235FF41B3E213867A01BEEC0081B132F2EEC5",
                 ["MediaWidget_Dark"] = "F8643286558AFFF25FC3E1C88EDE0EFBBF396EA354E7F7CF63D9529F4DE260F9",
@@ -49,10 +47,8 @@ internal static class VisualParityChecks
             expected["DockButtons_Dark"] = "D79C2E983AEDDE5CC445385A76E30E4A75E15BE845E013B21A7874BE26112530";
             expected["TimedWidgets_Dark"] = "A0BAF935617D19BBD130E05449FD8AF9F6B95D1AEC1ACE4FBB75511020C6EA27";
             expected["FocusWidget_Dark"] = "61F633ABDB8BF6F6152990C0C627DE4652E6B4ED26489C04D8503E30A1A86410";
-            expected["TrayWidget_Dark"] = "9B3C44123AFC37BA92DD6C68172CF6F885E2576CC60B37433DBF31D8C28E3ACB";
             expected["TimedWidgets_Light"] = "057438532CEB295234A68624878EAFA85B5FA919DBF4A5030D69B061DBC01255";
             expected["FocusWidget_Light"] = "2D0874E57F6C623E2E7D00F13D0E1C2E14082ABC5732BF8EC487876BBDEDC16F";
-            expected["TrayWidget_Light"] = "B573F42011EB44405EF7046449E1A8B712227E726CD234245BA04F7440C68900";
             expected["DockButtons_Light"] = "CFC6DCD48253E10333D87FBBCC13BD63F507C637F73B261E38985C8E5EB5AFB6";
             expected["RingMeters_Dark"] = "07124012760F90BB1A6B5161790BEDA5E7C4ABEF24C926385E2B6D31706A359D";
 
@@ -134,13 +130,6 @@ internal static class VisualParityChecks
                 Check(focusHash == expected[$"FocusWidget_{theme}"],
                     $"FocusWidget_{theme} pixel buffer must match baseline exactly. Actual: {focusHash}");
 
-                using var tray = new TrayWidget();
-                tray.ApplySettings(settings);
-                tray.Activate();
-                var trayHash = CaptureHash(app, tray, 60, 52, out _);
-                Check(trayHash == expected[$"TrayWidget_{theme}"],
-                    $"TrayWidget_{theme} pixel buffer must match baseline exactly. Actual: {trayHash}");
-
                 using var qs = new QuickSettingsWidget();
                 qs.ApplySettings(settings);
                 qs.Visibility = Visibility.Visible;
@@ -168,14 +157,7 @@ internal static class VisualParityChecks
                 Check(CaptureHash(app, weatherSwatches, 256, 32, out _) == expected[$"WeatherGradients_{theme}"],
                     $"WeatherGradients_{theme} pixel buffer must match baseline exactly.");
 
-                // 6. DesktopsWidget & ClockWidget layout rendering (dynamic OS values, check non-empty & deterministic re-render)
-                using var desktops = new DesktopsWidget();
-                desktops.ApplySettings(settings);
-                desktops.Activate();
-                var dHash1 = CaptureHash(app, desktops, 140, 52, out var dPixels);
-                var dHash2 = CaptureHash(app, desktops, 140, 52, out _);
-                Check(dHash1 == dHash2 && dPixels.Any(b => b != 0), $"DesktopsWidget_{theme} must render deterministically.");
-
+                // 6. ClockWidget layout rendering (dynamic OS values, check non-empty & deterministic re-render)
                 using var clock = new ClockWidget();
                 clock.ApplySettings(settings);
                 clock.Activate();

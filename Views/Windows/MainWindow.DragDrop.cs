@@ -265,6 +265,59 @@ public partial class MainWindow
         e.Handled = true;
     }
 
+    // ---- Permanent shell button drag & drop ----
+
+    private Point _shellDragStartPoint;
+    private Button? _shellDragButton;
+    private string? _shellDragToken;
+
+    private void ShellButton_PreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (sender is not Button button) return;
+        _shellDragButton = button;
+        _shellDragToken = button.Name switch
+        {
+            nameof(SearchButton) => "search",
+            nameof(TaskViewButton) => "taskview",
+            nameof(TrayButton) => "tray",
+            nameof(ShowDesktopButton) => "peek",
+            _ => null
+        };
+        _shellDragStartPoint = e.GetPosition(this);
+    }
+
+    private void ShellButton_PreviewMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        _shellDragButton = null;
+        _shellDragToken = null;
+    }
+
+    private void ShellButton_PreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_shellDragButton is null || _shellDragToken is null
+            || e.LeftButton != System.Windows.Input.MouseButtonState.Pressed) return;
+        var diff = _shellDragStartPoint - e.GetPosition(this);
+        if (Math.Abs(diff.X) <= SystemParameters.MinimumHorizontalDragDistance
+            && Math.Abs(diff.Y) <= SystemParameters.MinimumVerticalDragDistance) return;
+
+        var button = _shellDragButton;
+        var token = _shellDragToken;
+        _shellDragButton = null;
+        _shellDragToken = null;
+        _previewCloseTimer.Stop();
+        _thumbnailPreview.Hide();
+        ResetMagnification(immediate: true);
+        button.Opacity = 0.55;
+        try
+        {
+            DragDrop.DoDragDrop(button, token, DragDropEffects.Move);
+        }
+        finally
+        {
+            button.Opacity = 1.0;
+        }
+    }
+
     // ---- Start Button Drag & Drop ----
 
     private Point _startDragStartPoint;
@@ -335,6 +388,12 @@ public partial class MainWindow
         if (e.Data.GetData(typeof(WidgetCoordinator.WidgetDragPayload)) is WidgetCoordinator.WidgetDragPayload widget)
         {
             token = "widget:" + widget.WidgetId;
+            return true;
+        }
+        if (e.Data.GetData(typeof(string)) is string shellToken
+            && ShellDockTokens.Contains(shellToken, StringComparer.OrdinalIgnoreCase))
+        {
+            token = shellToken;
             return true;
         }
         token = string.Empty;

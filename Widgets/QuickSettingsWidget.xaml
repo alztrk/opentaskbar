@@ -13,7 +13,7 @@
                     </ToggleButton>
                     <Rectangle x:Name="WifiSettingsDivider" Width="1" Height="16" Fill="{DynamicResource StrokeSubtle}" />
                     <Button x:Name="WifiSettings" Style="{StaticResource WidgetIconButton}" Width="28" Height="29" Click="WifiSettings_Click">
-                        <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconChevronNext}" Width="13" Height="13" />
+                        <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconChevronRight}" Width="13" Height="13" />
                     </Button>
                 </StackPanel>
             </Border>
@@ -28,7 +28,7 @@
                     </ToggleButton>
                     <Rectangle x:Name="BluetoothSettingsDivider" Width="1" Height="16" Fill="{DynamicResource StrokeSubtle}" />
                     <Button x:Name="BluetoothSettings" Style="{StaticResource WidgetIconButton}" Width="28" Height="29" Click="BluetoothSettings_Click">
-                        <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconChevronNext}" Width="13" Height="13" />
+                        <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconChevronRight}" Width="13" Height="13" />
                     </Button>
                 </StackPanel>
             </Border>

@@ -190,7 +190,7 @@ public partial class AudioWidget : DockWidget
             {
                 Width = 12,
                 Height = 12,
-                Content = FindResource(_outputDevicesExpanded ? "IconChevronDown" : "IconChevronNext"),
+                Content = FindResource(_outputDevicesExpanded ? "IconChevronDown" : "IconChevronRight"),
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(6, 0, 0, 0)
             };
@@ -387,7 +387,7 @@ public partial class AudioWidget : DockWidget
             {
                 Width = 12,
                 Height = 12,
-                Content = FindResource(_inputDevicesExpanded ? "IconChevronDown" : "IconChevronNext"),
+                Content = FindResource(_inputDevicesExpanded ? "IconChevronDown" : "IconChevronRight"),
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(6, 0, 0, 0)
             };

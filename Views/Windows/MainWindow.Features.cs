@@ -98,7 +98,7 @@ public partial class MainWindow
             ? Visibility.Visible : Visibility.Collapsed;
         TrayButton.Visibility = _preferences.Current.ShowTrayButton
             ? Visibility.Visible : Visibility.Collapsed;
-        ShowDesktopStrip.Visibility = _preferences.Current.ShowDesktopButton
+        ShowDesktopButton.Visibility = _preferences.Current.ShowDesktopButton
             ? Visibility.Visible : Visibility.Collapsed;
     }
 
@@ -114,7 +114,7 @@ public partial class MainWindow
     private void NewDesktop_Click(object sender, RoutedEventArgs e) =>
         ReportResult(VirtualDesktops.Create());
 
-    private void ShowDesktopStrip_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e) =>
+    private void ShowDesktop_Click(object sender, RoutedEventArgs e) =>
         ReportResult(ShellShortcuts.ToggleShowDesktop());
 
     // ---- Global hotkeys (#2) ----
@@ -213,8 +213,10 @@ public partial class MainWindow
         }
 
         if (key != forward && key != backward && key != Key.Home && key != Key.End) return;
-        var buttons = GetAllDockButtons().Where(button => button.IsVisible)
-            .OrderBy(button => vertical ? button.TranslatePoint(default, DockContents).Y : button.TranslatePoint(default, DockContents).X)
+        // Buttons live in several Grid columns (lead strip, scroller, trail strip), so translate against the shared
+        // surface rather than DockContents: absolute coordinates keep navigation in visual order in every edge mode.
+        var buttons = GetAllDockButtons().Where(button => button.IsVisible && button.ActualWidth > 0)
+            .OrderBy(button => vertical ? button.TranslatePoint(default, DockSurface).Y : button.TranslatePoint(default, DockSurface).X)
             .ToList();
         if (buttons.Count == 0) return;
         var current = buttons.FindIndex(button => button.IsKeyboardFocusWithin);

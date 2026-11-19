@@ -192,10 +192,6 @@ internal static class FeatureAndMemoryChecks
             Check(ReferenceEquals(dockItem1.ContextMenu, dockItem2.ContextMenu),
                 "Shared ContextMenu must be reused across dock items without per-item duplication.");
 
-            var tray = new TrayWidget();
-            tray.Activate();
-            tray.Deactivate();
-
             // Verify MediaWidget lifecycle, hover flyout, density and tick safety
             using (var mediaWidget = new MediaWidget())
             {
@@ -255,12 +251,10 @@ internal static class FeatureAndMemoryChecks
                 Check(ownerPid != (uint)Environment.ProcessId, "NativeTaskbarWindow.Find must never return a window owned by OpenTaskbar.");
             }
             Check(!TrayHost.IsBroadcasting, "TrayHost.IsBroadcasting must be false when idle.");
-            using (var testTray = new TrayWidget())
-            {
-                var liveEmptyContent = testTray.BuildLiveContent(Array.Empty<ManagedShell.WindowsTray.NotifyIcon>());
-                Check(liveEmptyContent is StackPanel sp && sp.Children.Count >= 2,
-                    "TrayWidget.BuildLiveContent must render a heading, empty caption and settings for an empty icon list.");
-            }
+            var testTray = new OpenTaskbar.Views.Shell.TrayShellButton();
+            var liveEmptyContent = testTray.BuildLiveContent(Array.Empty<ManagedShell.WindowsTray.NotifyIcon>());
+            Check(liveEmptyContent is StackPanel sp && sp.Children.Count >= 2,
+                "TrayShellButton.BuildLiveContent must render a heading, empty caption and settings for an empty icon list.");
         }
         finally
         {

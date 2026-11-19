@@ -23,9 +23,6 @@
     <FontFamily x:Key="WidgetActionFont">Segoe MDL2 Assets</FontFamily>
     <CornerRadius x:Key="WidgetFieldRadius">7</CornerRadius>
     <!-- Soft, eased hover/release for widget buttons (no more instant surface swap). -->
-    <CubicEase x:Key="WidgetButtonHoverEase" EasingMode="EaseOut" />
-    <Duration x:Key="WidgetButtonHoverInDuration">0:0:0.14</Duration>
-    <Duration x:Key="WidgetButtonHoverOutDuration">0:0:0.18</Duration>
     <Style x:Key="WidgetTextField" TargetType="TextBox">
         <Setter Property="Padding" Value="{StaticResource WidgetPanelFieldPadding}" />
         <Setter Property="MinHeight" Value="{StaticResource WidgetPanelActionHeight}" />
@@ -88,8 +85,8 @@
                             <BeginStoryboard>
                                 <Storyboard>
                                     <DoubleAnimation Storyboard.TargetName="HoverLayer" Storyboard.TargetProperty="Opacity"
-                                                     To="1" Duration="{StaticResource WidgetButtonHoverInDuration}"
-                                                     EasingFunction="{StaticResource WidgetButtonHoverEase}" />
+                                                     To="1" Duration="{StaticResource WidgetHoverInDuration}"
+                                                     EasingFunction="{StaticResource WidgetHoverEase}" />
                                 </Storyboard>
                             </BeginStoryboard>
                         </EventTrigger>
@@ -97,8 +94,8 @@
                             <BeginStoryboard>
                                 <Storyboard>
                                     <DoubleAnimation Storyboard.TargetName="HoverLayer" Storyboard.TargetProperty="Opacity"
-                                                     To="0" Duration="{StaticResource WidgetButtonHoverOutDuration}"
-                                                     EasingFunction="{StaticResource WidgetButtonHoverEase}" />
+                                                     To="0" Duration="{StaticResource WidgetHoverOutDuration}"
+                                                     EasingFunction="{StaticResource WidgetHoverEase}" />
                                 </Storyboard>
                             </BeginStoryboard>
                         </EventTrigger>
@@ -138,8 +135,8 @@
                             <BeginStoryboard>
                                 <Storyboard>
                                     <DoubleAnimation Storyboard.TargetName="HoverLayer" Storyboard.TargetProperty="Opacity"
-                                                     To="1" Duration="{StaticResource WidgetButtonHoverInDuration}"
-                                                     EasingFunction="{StaticResource WidgetButtonHoverEase}" />
+                                                     To="1" Duration="{StaticResource WidgetHoverInDuration}"
+                                                     EasingFunction="{StaticResource WidgetHoverEase}" />
                                 </Storyboard>
                             </BeginStoryboard>
                         </EventTrigger>
@@ -147,8 +144,8 @@
                             <BeginStoryboard>
                                 <Storyboard>
                                     <DoubleAnimation Storyboard.TargetName="HoverLayer" Storyboard.TargetProperty="Opacity"
-                                                     To="0" Duration="{StaticResource WidgetButtonHoverOutDuration}"
-                                                     EasingFunction="{StaticResource WidgetButtonHoverEase}" />
+                                                     To="0" Duration="{StaticResource WidgetHoverOutDuration}"
+                                                     EasingFunction="{StaticResource WidgetHoverEase}" />
                                 </Storyboard>
                             </BeginStoryboard>
                         </EventTrigger>
@@ -456,7 +453,7 @@
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                     <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconChevronLeft}" Width="14" Height="14" Margin="3,0" Foreground="{DynamicResource TextSecondary}" />
                     <TextBlock Text="{Binding Value}" Style="{StaticResource WidgetText}" Margin="6,0" />
-                    <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconChevronNext}" Width="14" Height="14" Margin="3,0" Foreground="{DynamicResource TextPrimary}" />
+                    <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconChevronRight}" Width="14" Height="14" Margin="3,0" Foreground="{DynamicResource TextPrimary}" />
                     <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconPlus}" Width="14" Height="14" Margin="5,0,2,0" Foreground="{DynamicResource TextPrimary}" />
                 </StackPanel>
             </Border>
