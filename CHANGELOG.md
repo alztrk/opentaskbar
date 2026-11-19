@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Promoted Task View, Tray and Show Desktop to permanent dock shell buttons. Task View is a single icon with a right-click menu (previous/next/new desktop), Tray keeps its rich flyout in a fixed button, and Show Desktop is a slim trailing strip (Win+D). Each has a Settings toggle; legacy `Desktops`/`Tray` widget entries migrate into the new button state.
+- Moved Search out of the widget strip into a dedicated Start-adjacent dock button (`MainWindow.xaml`, `MainWindow.xaml.cs`) sized to the dock cell with an optically matched glyph, and added a `ShowSearchButton` Settings toggle. Legacy `Search` widget entries in `settings.json` migrate to the new button state.
+
+- Overhauled dock fisheye magnification (`Services/App/DockFisheyeLayout.cs`, `MainWindow.Magnification.cs`) with C1-smooth raised-cosine falloff, critically-damped spring physics, synchronized slot and floating dock-frame expansion, overlap-free scale capping on constrained/scrolling docks, `StartDockButton` baseline alignment, and dynamic thumbnail preview clearance.
+- Added application groups (`MainWindow.Groups.cs`) with context-menu grouping, drag-and-drop membership, and group member count badges.
+- Moved dock scroll chevrons (`‹` / `›`) and directional gradient scrims to the outer dock resize edges (`DockSurface`), inset cleanly inside `DockFrame` bounds and synced to the active inner corner radius.
+- Added Bluetooth Battery widget with device-type icons and live Windows PnP active-node filtering (`System.Devices.Present` and `LastArrivalDate`) so stale disconnected PnP nodes never override current battery readings.
+- Removed the manual Screen edge spacing setting in favor of automatic profile-based spacing from `DockMetrics.For(size, scale)`, while keeping legacy `settings.json` files backward-compatible.
+- Updated Settings widget catalog to display inline category headings with live widget previews, and fixed widget/flyout hover highlight templates (`WidgetCardButton`, `WidgetPill`, `FlyoutButton`, `WidgetButton`) so hover fills the full outer button surface matching pressed state.
+- Replaced managed watchdog runtime overhead with a lightweight native C Win32 watchdog (`tools/watchdog/watchdog.c`) that restores the native taskbar and exits immediately, with incremental `build.ps1` skipping rebuilds when `watchdog.c` is unchanged.
+- Added graceful fallback taskbar dimensions when starting while Explorer's taskbar is already hidden, and preserved desktop work area when switching dock screen edges.
+- Started consolidating reusable WPF tokens, effects, animations, and control templates under `UI/UILibrary.xaml`.
+
 ## 0.2.11 - 2026-11-19
 
 - Added GitHub Copilot, DeepSeek, and OpenRouter quota and balance providers to the AI usage widget, including credential discovery, status rings, and settings toggles (#58, #59, #60).

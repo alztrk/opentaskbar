@@ -20,9 +20,7 @@ public sealed class WidgetCoordinator : IDisposable
 
     public static readonly string[] DefaultWidgetOrder =
     [
-        "Search",
         "Media",
-        "Desktops",
         "SystemStats",
         "Focus",
         "Weather",
@@ -31,15 +29,12 @@ public sealed class WidgetCoordinator : IDisposable
         .. DockWidgetService.AiUsageWidgets.Select(widget => widget.Id),
         "Audio",
         "QuickSettings",
-        "Tray",
         "Clock"
     ];
 
     public static string? GetLabelKey(string id) => id switch
     {
-        "Search" => "WidgetLauncher",
         "Media" => "WidgetMedia",
-        "Desktops" => "WidgetDesktops",
         "SystemStats" => "WidgetSystemStats",
         "Focus" => "WidgetFocus",
         "Weather" => "WidgetWeather",
@@ -47,7 +42,6 @@ public sealed class WidgetCoordinator : IDisposable
         "BluetoothBattery" => "WidgetBluetoothBattery",
         "Audio" => "WidgetAudio",
         "QuickSettings" => "WidgetQuickSettings",
-        "Tray" => "WidgetTray",
         "Clock" => "WidgetClock",
         _ => DockWidgetService.AiUsageWidgets.FirstOrDefault(widget => widget.Id == id)?.LabelKey
     };
@@ -65,9 +59,7 @@ public sealed class WidgetCoordinator : IDisposable
         if (aiDefinition is not null) return new AiUsageWidget(aiDefinition.Provider);
         return id switch
         {
-            "Search" => new SearchWidget(),
             "Media" => new MediaWidget(),
-            "Desktops" => new DesktopsWidget(),
             "SystemStats" => new SystemStatsWidget(),
             "Focus" => new FocusWidget(),
             "Weather" => new WeatherWidget(),
@@ -75,7 +67,6 @@ public sealed class WidgetCoordinator : IDisposable
             "BluetoothBattery" => new BluetoothBatteryWidget(),
             "Audio" => new AudioWidget(),
             "QuickSettings" => new QuickSettingsWidget(),
-            "Tray" => new TrayWidget(),
             "Clock" => new ClockWidget(),
             _ => throw new ArgumentException($"Unknown widget id '{id}'.", nameof(id))
         };
@@ -104,8 +95,6 @@ public sealed class WidgetCoordinator : IDisposable
 
     public Action<IReadOnlyList<string>>? OrderChanged { get; set; }
     public event Action? WidgetsPlaced;
-    public event Action<string>? CloseApplicationRequested;
-    public event Action<string>? TerminateApplicationRequested;
     public event Action<string>? WidgetRemoveRequested;
 
     /// <summary>Lets the host wire its context-menu open/close handlers so auto-hide stays locked while the menu is up.</summary>
@@ -151,9 +140,7 @@ public sealed class WidgetCoordinator : IDisposable
             onHoverLayoutChanged ?? (_ => { }));
         _widgets =
         [
-            new("Search", "WidgetLauncher", () => CreateWidget("Search"), s => IsCatalogEnabled(s, "Search")),
             new("Media", "WidgetMedia", () => CreateWidget("Media"), s => IsCatalogEnabled(s, "Media")),
-            new("Desktops", "WidgetDesktops", () => CreateWidget("Desktops"), s => IsCatalogEnabled(s, "Desktops")),
             new("SystemStats", "WidgetSystemStats", () => CreateWidget("SystemStats"), s => IsCatalogEnabled(s, "SystemStats")),
             new("Focus", "WidgetFocus", () => CreateWidget("Focus"), s => IsCatalogEnabled(s, "Focus")),
             new("Weather", "WidgetWeather", () => CreateWidget("Weather"), s => IsCatalogEnabled(s, "Weather")),
@@ -163,7 +150,6 @@ public sealed class WidgetCoordinator : IDisposable
                 () => CreateWidget(definition.Id), s => IsCatalogEnabled(s, definition.Id))),
             new("Audio", "WidgetAudio", () => CreateWidget("Audio"), s => IsCatalogEnabled(s, "Audio")),
             new("QuickSettings", "WidgetQuickSettings", () => CreateWidget("QuickSettings"), s => IsCatalogEnabled(s, "QuickSettings")),
-            new("Tray", "WidgetTray", CreateTrayWidget, s => IsCatalogEnabled(s, "Tray")),
             new("Clock", "WidgetClock", () => CreateWidget("Clock"), s => IsCatalogEnabled(s, "Clock") || IsCatalogEnabled(s, "Date"))
         ];
 
@@ -179,14 +165,6 @@ public sealed class WidgetCoordinator : IDisposable
 
         _timer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = TimeSpan.FromSeconds(1) };
         _timer.Tick += Timer_Tick;
-    }
-
-    private TrayWidget CreateTrayWidget()
-    {
-        var tray = new TrayWidget();
-        tray.CloseApplicationRequested += path => CloseApplicationRequested?.Invoke(path);
-        tray.TerminateApplicationRequested += path => TerminateApplicationRequested?.Invoke(path);
-        return tray;
     }
 
     public string? GetWidgetId(DockWidget widget) =>

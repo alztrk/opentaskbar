@@ -90,7 +90,6 @@ public partial class MainWindow : Window
     private double _dockTopGap;
     private (DockSize Size, double Scale)? _sizePreviewOverride;
     private double? _radiusPreviewOverride;
-    private double? _bottomGapPreviewOverride;
     private AudioEndpointMonitor.SharedHandle? _wheelAudio;
     private int _wheelRemainder;
 
@@ -173,9 +172,8 @@ public partial class MainWindow : Window
         {
             OrderChanged = OnWidgetOrderChanged
         };
-        _widgetCoordinator.CloseApplicationRequested += CloseApplication;
-        _widgetCoordinator.TerminateApplicationRequested += TerminateApplication;
         _widgetCoordinator.WidgetRemoveRequested += RemoveDockWidget;
+        TrayButton.Initialize(ReportError, CloseApplication, TerminateApplication);
         _widgetCoordinator.ConfigureWidgetMenu = menu =>
         {
             menu.Opened += DockContextMenu_Opened;
@@ -1186,6 +1184,9 @@ public partial class MainWindow : Window
         }
 
         var appIcon = hoveredButton.DataContext is DockApp app ? app.Icon : null;
+        _thumbnailPreview.ExtraGapDips = _preferences.Current.MagnificationEnabled
+            ? DockFisheyeLayout.ComputePreviewClearance(Profile.Icon, CurrentMagnificationMaxScale)
+            : 0;
         _thumbnailPreview.ShowForWindows(matchingWindows, hoveredButton, appIcon);
     }
 
@@ -1383,12 +1384,15 @@ public partial class MainWindow : Window
         var isPinnedTarget = pinnedApp?.ShortcutPath is not null;
         var isRunning = pinnedApp?.IsRunning == true;
         SetMenuItemVisibility(contextMenu, "ActivateDockApp", hasAppTarget);
+        SetMenuItemVisibility(contextMenu, "AddToGroup", hasAppTarget);
+        SetMenuItemVisibility(contextMenu, "NewGroup", !hasAppTarget);
         SetMenuItemVisibility(contextMenu, "CloseDockApp", isRunning);
         SetMenuItemVisibility(contextMenu, "TerminateDockApp", isRunning);
         SetMenuItemVisibility(contextMenu, "PinDockApp", hasAppTarget && !isPinnedTarget);
         SetMenuItemVisibility(contextMenu, "UnpinDockApp", isPinnedTarget);
         SetSeparatorVisibility(contextMenu, "RunningCommandsDivider", isRunning);
         SetMenuItemVisibility(contextMenu, "HideInProfile", isPinnedTarget && ActiveProfile is not null);
+        if (FindMenuItem(contextMenu, "AddToGroup") is { } addToGroupMenu) PopulateAddToGroupMenu(addToGroupMenu, pinnedApp);
         if (FindMenuItem(contextMenu, "ProfilesMenu") is { } profilesMenu) PopulateProfilesMenu(profilesMenu);
         if (FindMenuItem(contextMenu, "UpdateMenu") is { } updateMenu)
         {
@@ -1877,7 +1881,7 @@ public partial class MainWindow : Window
     {
         _sizePreviewOverride = null;
         _radiusPreviewOverride = null;
-        _bottomGapPreviewOverride = null;
+        ResetMagnification(immediate: true);
         DockSurfaceTranslate.X = 0;
         ApplyWidgets(_preferences.Current.Widgets);
         ThemePacks_Changed(this, EventArgs.Empty);
@@ -2007,14 +2011,24 @@ public partial class MainWindow : Window
     {
         var tokens = new List<string>();
         if (settings.StartPlacement != StartButtonPlacement.Hidden) tokens.Add("start");
+        if (settings.ShowSearchButton) tokens.Add("search");
+        if (settings.ShowTaskViewButton) tokens.Add("taskview");
+        if (settings.ShowTrayButton) tokens.Add("tray");
 
+        var groupedPaths = (settings.AppGroups ?? []).SelectMany(g => g.ExecutablePaths)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         var pins = (settings.PinOrder ?? _pinnedApps.Select(a => a.ExecutablePath).Where(p => p is not null).ToArray())
             .Where(p => p is not null).ToArray();
-        foreach (var path in pins) tokens.Add("app:" + path);
+        foreach (var path in pins)
+        {
+            if (!groupedPaths.Contains(path)) tokens.Add("app:" + path);
+        }
         foreach (var app in _runningApps)
         {
-            if (!pins.Contains(app.ExecutablePath, StringComparer.OrdinalIgnoreCase)) tokens.Add("app:" + app.ExecutablePath);
+            if (!pins.Contains(app.ExecutablePath, StringComparer.OrdinalIgnoreCase) && !groupedPaths.Contains(app.ExecutablePath))
+                tokens.Add("app:" + app.ExecutablePath);
         }
+        foreach (var group in settings.AppGroups ?? []) tokens.Add("group:" + group.Id);
         foreach (var stack in _stacks) tokens.Add("stack:" + stack.Path);
         if (settings.ShowRecycleBin) tokens.Add("bin");
         foreach (var id in _widgetCoordinator.CurrentOrder)
@@ -2038,13 +2052,27 @@ public partial class MainWindow : Window
     private FrameworkElement? CreateDockItemElement(string token)
     {
         if (string.Equals(token, "start", StringComparison.OrdinalIgnoreCase)) return StartButton;
+        if (string.Equals(token, "search", StringComparison.OrdinalIgnoreCase))
+            return _preferences.Current.ShowSearchButton ? SearchButton : null;
+        if (string.Equals(token, "taskview", StringComparison.OrdinalIgnoreCase))
+            return _preferences.Current.ShowTaskViewButton ? TaskViewButton : null;
+        if (string.Equals(token, "tray", StringComparison.OrdinalIgnoreCase))
+            return _preferences.Current.ShowTrayButton ? TrayButton : null;
         if (string.Equals(token, "bin", StringComparison.OrdinalIgnoreCase)) return RecycleBinButton;
         if (token.StartsWith("app:", StringComparison.OrdinalIgnoreCase))
         {
             var app = FindDockApp(token[4..]);
-            if (app is null) return null;
+            if (app is null || GroupContaining(app.ExecutablePath) is not null) return null;
             var element = (FrameworkElement)((DataTemplate)FindResource("DockAppIconTemplate")).LoadContent();
             element.DataContext = app;
+            return element;
+        }
+        if (token.StartsWith("group:", StringComparison.OrdinalIgnoreCase))
+        {
+            var group = FindAppGroup(token[6..]);
+            if (group is null) return null;
+            var element = (FrameworkElement)((DataTemplate)FindResource("DockGroupIconTemplate")).LoadContent();
+            element.DataContext = CreateGroupViewModel(group);
             return element;
         }
         if (token.StartsWith("stack:", StringComparison.OrdinalIgnoreCase))
@@ -2176,6 +2204,17 @@ public partial class MainWindow : Window
                         }
                     }
                 }
+                else if (string.Equals(token, "search", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(token, "taskview", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(token, "tray", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Orders saved before these shell buttons existed keep them beside Start instead of appending them.
+                    var startIndex = tokens.FindIndex(t => string.Equals(t, "start", StringComparison.OrdinalIgnoreCase));
+                    var searchIndex = tokens.FindIndex(t => string.Equals(t, "search", StringComparison.OrdinalIgnoreCase));
+                    var insertAt = startIndex >= 0 ? startIndex + 1 : 0;
+                    if (searchIndex >= 0) insertAt = searchIndex + 1;
+                    tokens.Insert(Math.Min(insertAt, tokens.Count), token);
+                }
                 else
                 {
                     tokens.Add(token);
@@ -2191,6 +2230,7 @@ public partial class MainWindow : Window
     {
         if (_rebuildingDockOrder || DockContents is null) return;
         _rebuildingDockOrder = true;
+        ResetMagnification(immediate: true);
         try
         {
             var tokens = BuildEffectiveDockOrder();
@@ -2395,7 +2435,7 @@ public partial class MainWindow : Window
     private void ApplyDockMargin()
     {
         var side = IsFullWidth ? DockMetrics.FullWidthSideInset : DockMetrics.SideInset;
-        var bottomGap = EffectiveBottomGap;
+        var bottomGap = Profile.BottomGap;
         DockSurface.Margin = Edge switch
         {
             DockEdge.Left => new Thickness(bottomGap, side, _dockTopGap, side),
@@ -2408,10 +2448,6 @@ public partial class MainWindow : Window
         ? customRadius
         : Profile.Radius);
 
-    private double EffectiveBottomGap => _bottomGapPreviewOverride ?? (_preferences.Current.DockBottomGap is { } customGap && customGap >= 0
-        ? customGap
-        : Profile.BottomGap);
-
     private DockSizeProfile Profile => _sizePreviewOverride is { } preview
         ? DockMetrics.For(preview.Size, preview.Scale)
         : DockMetrics.For(_preferences.Current.Size, _preferences.Current.DockScale);
@@ -2423,23 +2459,17 @@ public partial class MainWindow : Window
         if (_replacementSession?.IsActive == true)
         {
             var thickness = IsVertical ? _dockArea.Width : _dockArea.Height;
-            if (thickness > 0) _dockTopGap = Math.Max(0.0, thickness - Profile.SurfaceHeight - EffectiveBottomGap);
+            if (thickness > 0) _dockTopGap = Math.Max(0.0, thickness - Profile.SurfaceHeight - Profile.BottomGap);
         }
         ApplyDockMargin();
         ResizeDockToContent();
         _replacementSession?.RefreshPosition();
     }
 
-    internal void SetGeometryPreview(int? radius, int? bottomGap)
+    internal void SetGeometryPreview(int? radius)
     {
         _radiusPreviewOverride = radius;
-        _bottomGapPreviewOverride = bottomGap;
         ApplySizeProfile();
-        if (_replacementSession?.IsActive == true)
-        {
-            var thickness = IsVertical ? _dockArea.Width : _dockArea.Height;
-            if (thickness > 0) _dockTopGap = Math.Max(0.0, thickness - Profile.SurfaceHeight - EffectiveBottomGap);
-        }
         ApplyDockMargin();
         ResizeDockToContent();
         _replacementSession?.RefreshPosition();
@@ -2453,6 +2483,7 @@ public partial class MainWindow : Window
         Application.Current.Resources["DockCellSize"] = profile.Cell;
         Application.Current.Resources["DockCellHeight"] = profile.Cell;
         Application.Current.Resources["DockIconSize"] = profile.Icon;
+        Application.Current.Resources["DockUtilityGlyphSize"] = Math.Round(profile.Icon * 0.6);
         Application.Current.Resources["StartLogoSize"] = Application.Current.Resources["DockApplicationIconSize"] is double currentSize ? currentSize : 36.0;
         DockFrame.Padding = new Thickness(10, profile.VerticalPadding, 10, profile.VerticalPadding);
         DockFrame.CornerRadius = new CornerRadius(radius);
@@ -2546,7 +2577,7 @@ public partial class MainWindow : Window
         _dockArea = area;
         var profile = Profile;
         var thickness = IsVertical ? area.Width : area.Height;
-        _dockTopGap = Math.Max(0.0, thickness - profile.SurfaceHeight - EffectiveBottomGap);
+        _dockTopGap = Math.Max(0.0, thickness - profile.SurfaceHeight - profile.BottomGap);
         ApplyDockMargin();
         ResizeDockToContent();
     }
@@ -2644,6 +2675,8 @@ public partial class MainWindow : Window
 
     private void FitDockToContent()
     {
+        ClearMagnificationLayoutOverrides();
+        _magnificationTargetsDirty = true;
         if (IsVertical)
         {
             ResizeSideDockToContent();
@@ -2702,6 +2735,7 @@ public partial class MainWindow : Window
         if (!double.IsNaN(DockSurface.Width)
             && DockSurface.ActualWidth > 0
             && _dockWidthOverride is null
+            && !_magnificationRendering
             && LeftResizeThumb.IsDragging == false && RightResizeThumb.IsDragging == false
             && !_instantDockResize
             && _preferences.Current.AnimationsEnabled
@@ -2807,9 +2841,7 @@ public partial class MainWindow : Window
         _jumpListLoad?.Dispose();
         if (_openContextMenu is not null) _openContextMenu.IsOpen = false;
         _openContextMenu = null;
-        StopMagnificationRendering();
-        _magnificationScaleTargets.Clear();
-        _magnifiedIcons.Clear();
+        ResetMagnification(immediate: true);
         _restingIcons.Clear();
         _source?.RemoveHook(WindowProc);
         _source = null;

@@ -64,6 +64,8 @@ public partial class MainWindow
         else _desktopTimer?.Stop();
         _filteredSource = null;
         ApplyStartPlacement();
+        ApplySearchButton();
+        ApplyShellButtons();
         ApplyEdge();
         ApplySecondaryDocks();
         ApplyProfileFilter();
@@ -80,6 +82,40 @@ public partial class MainWindow
         // The divider belonged to the old grouped layout and is no longer rendered.
         StartDivider.Visibility = Visibility.Collapsed;
     }
+
+    /// <summary>Only controls visibility; the unified dock order decides where the Search button sits.</summary>
+    private void ApplySearchButton()
+    {
+        SearchButton.Visibility = _preferences.Current.ShowSearchButton
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    /// <summary>Visibility for the permanent shell buttons; their position comes from the unified dock order.</summary>
+    private void ApplyShellButtons()
+    {
+        TaskViewButton.Visibility = _preferences.Current.ShowTaskViewButton
+            ? Visibility.Visible : Visibility.Collapsed;
+        TrayButton.Visibility = _preferences.Current.ShowTrayButton
+            ? Visibility.Visible : Visibility.Collapsed;
+        ShowDesktopStrip.Visibility = _preferences.Current.ShowDesktopButton
+            ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void TaskViewButton_Click(object sender, RoutedEventArgs e) =>
+        ReportResult(VirtualDesktops.TaskView());
+
+    private void PreviousDesktop_Click(object sender, RoutedEventArgs e) =>
+        ReportResult(VirtualDesktops.Previous());
+
+    private void NextDesktop_Click(object sender, RoutedEventArgs e) =>
+        ReportResult(VirtualDesktops.Next());
+
+    private void NewDesktop_Click(object sender, RoutedEventArgs e) =>
+        ReportResult(VirtualDesktops.Create());
+
+    private void ShowDesktopStrip_MouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e) =>
+        ReportResult(ShellShortcuts.ToggleShowDesktop());
 
     // ---- Global hotkeys (#2) ----
 
@@ -130,6 +166,9 @@ public partial class MainWindow
                 return false;
         }
     }
+
+    private void SearchButton_Click(object sender, RoutedEventArgs e) =>
+        ReportResult(ShellShortcuts.OpenWindowsSearch(SearchButton));
 
     private void OpenSearch_Click(object sender, RoutedEventArgs e) => ReportResult(ShellShortcuts.OpenWindowsSearch());
 

@@ -1,12 +1,18 @@
 # Compiles the lightweight native Win32 watchdog helper (24 KB, ~1 MB RAM)
 param (
-    [string]$OutputDir = $PSScriptRoot
+    [string]$OutputDir = $PSScriptRoot,
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
 
 $source = Join-Path $PSScriptRoot "watchdog.c"
 $outputExe = Join-Path $OutputDir "OpenTaskbarWatchdog.exe"
+
+if (-not $Force -and (Test-Path $outputExe) -and (Get-Item $outputExe).LastWriteTimeUtc -ge (Get-Item $source).LastWriteTimeUtc) {
+    Write-Host "Native watchdog binary is up to date; skipping rebuild." -ForegroundColor DarkGray
+    exit 0
+}
 
 $gcc = $null
 $gccCmd = Get-Command gcc.exe -ErrorAction SilentlyContinue

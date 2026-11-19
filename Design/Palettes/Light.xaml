@@ -47,6 +47,7 @@
     <SolidColorBrush x:Key="StrokeSubtle" Color="#20000000" />
     <SolidColorBrush x:Key="StrokeFocus" Color="#FF457DA8" />
     <SolidColorBrush x:Key="SurfaceHover" Color="#12000000" />
+    <Color x:Key="SurfaceHoverColor">#12000000</Color>
     <SolidColorBrush x:Key="SurfacePressed" Color="#20000000" />
     <SolidColorBrush x:Key="SurfaceSelected" Color="#0C000000" />
     <SolidColorBrush x:Key="DockWidgetSurface" Color="#AFFFFFFF" />

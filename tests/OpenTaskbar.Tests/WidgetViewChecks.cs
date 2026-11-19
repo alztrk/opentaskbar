@@ -60,6 +60,26 @@ internal static class WidgetViewChecks
                     .Any(trigger => trigger.Property == UIElement.IsKeyboardFocusedProperty),
                 "Widget cards must not paint a focus border when clicked.");
 
+            // Hover feedback must fade in/out instead of snapping the surface instantly.
+            static bool HasHoverFade(ControlTemplate template) =>
+                template.Triggers.OfType<EventTrigger>().Any(t => t.RoutedEvent == UIElement.MouseEnterEvent)
+                && template.Triggers.OfType<EventTrigger>().Any(t => t.RoutedEvent == UIElement.MouseLeaveEvent);
+            foreach (var key in new[] { "WidgetCardButton", "WidgetIconButton", "WidgetPill", "FlyoutButton", "WidgetButton", "WidgetQuickAction" })
+            {
+                var template = (ControlTemplate)((Style)app.FindResource(key)).Setters.OfType<Setter>()
+                    .Single(s => s.Property == Control.TemplateProperty).Value;
+                Check(HasHoverFade(template), $"{key} must animate hover with MouseEnter/MouseLeave EventTriggers.");
+            }
+            var borderStyle = (Style)app.FindResource("WidgetCardBorder");
+            var borderTriggers = borderStyle.Triggers.OfType<EventTrigger>().ToList();
+            Check(borderTriggers.Any(t => t.RoutedEvent == UIElement.MouseEnterEvent)
+                  && borderTriggers.Any(t => t.RoutedEvent == UIElement.MouseLeaveEvent),
+                "WidgetCardBorder must animate its surface color on hover.");
+            var borderA = new Border { Style = borderStyle };
+            var borderB = new Border { Style = borderStyle };
+            Check(!ReferenceEquals(borderA.Background, borderB.Background),
+                "Each widget card must own its background brush so hover animations stay isolated.");
+
             foreach (var (key, height) in new[]
                      {
                          ("LogoCopilot", 20.04), ("LogoDeepSeek", 17.66), ("LogoOpenRouter", 20.31)
@@ -84,30 +104,6 @@ internal static class WidgetViewChecks
                 if (!condition) throw new InvalidOperationException(name);
                 checks++;
             }
-
-            // Re-clicking Search must work even if Windows closes its flyout.
-            var nativeSearchOpen = false;
-            var searchOpenRequests = 0;
-            var search = new OpenTaskbar.Widgets.SearchWidget
-            {
-                IsSearchOpen = () => nativeSearchOpen,
-                OpenSearch = _ =>
-                {
-                    searchOpenRequests++;
-                    nativeSearchOpen = true;
-                    return null;
-                }
-            };
-            search.Activate();
-            Layout(search);
-            search.HandleSearchClick();
-            Check(searchOpenRequests == 1, "Clicking search widget must open Windows Search.");
-            search.HandleSearchClick();
-            Check(searchOpenRequests == 1, "Clicking while Windows Search is open must not reopen it.");
-            nativeSearchOpen = false;
-            search.HandleSearchClick();
-            Check(searchOpenRequests == 2, "After Windows Search closes, clicking search widget again must reopen it.");
-            search.Dispose();
 
             var clock = new TestClock();
             var timer = new CountdownDockWidget(clock);
@@ -390,9 +386,9 @@ internal static class WidgetViewChecks
                     Check(RequiredName<FrameworkElement>(settings, "ClockOptions").Visibility == Visibility.Collapsed,
                         "Collapsing settings must set ClockOptions visibility to Collapsed.");
 
-                    var trayCard = Descendants<WidgetCatalogItem>(list).Single(card => ((DockWidgetOption)card.DataContext).Id == DockWidgetService.TrayId);
-                    var trayOption = (DockWidgetOption)trayCard.DataContext;
-                    Check(!trayOption.HasSettings && RequiredName<Button>(trayCard, "SettingsExpandButton").Visibility == Visibility.Collapsed,
+                    var netSpeedCard = Descendants<WidgetCatalogItem>(list).Single(card => ((DockWidgetOption)card.DataContext).Id == DockWidgetService.NetSpeedId);
+                    var netSpeedOption = (DockWidgetOption)netSpeedCard.DataContext;
+                    Check(!netSpeedOption.HasSettings && RequiredName<Button>(netSpeedCard, "SettingsExpandButton").Visibility == Visibility.Collapsed,
                         "Widgets without custom settings must hide the settings expand button.");
 
                     var weatherCard = Descendants<WidgetCatalogItem>(list).Single(card => ((DockWidgetOption)card.DataContext).Id == DockWidgetService.WeatherId);
@@ -428,8 +424,8 @@ internal static class WidgetViewChecks
                         "All five category sections must be listed in enum order.");
                     Check(groups.All(group => !string.IsNullOrEmpty(group.Label)),
                         "Every category section must expose a localized label.");
-                    Check(groups.SelectMany(group => group.Widgets).Count() == 24,
-                        "All 24 widgets must be listed under their category labels.");
+                    Check(groups.SelectMany(group => group.Widgets).Count() == 21,
+                        "All 21 widgets must be listed under their category labels.");
                     var aiGroup = groups.Single(group => group.Category == DockWidgetCategory.AiQuotas);
                     Check(aiGroup.Widgets.Count == 7 && aiGroup.Widgets.All(option => option.Category == DockWidgetCategory.AiQuotas),
                         "The AI category section must contain all 7 AI widgets.");
@@ -437,7 +433,7 @@ internal static class WidgetViewChecks
                     Check(systemGroup.Widgets.Count == 5 && systemGroup.Widgets.All(option => option.Category == DockWidgetCategory.SystemAndHardware),
                         "The system category section must contain all 5 system widgets.");
                     var allCards = Descendants<WidgetCatalogItem>(list).ToArray();
-                    Check(allCards.Length == 24, "All 24 widgets must be visible at once without any category filter.");
+                    Check(allCards.Length == 21, "All 21 widgets must be visible at once without any category filter.");
                     Check(settings.FindName("WidgetCategoryAiRadio") is null,
                         "Widget categories must be labels, not a segmented tab filter.");
                 }
@@ -471,9 +467,6 @@ internal static class WidgetViewChecks
                 DockWidgetService.NetSpeedId => "↓ 12 MB/s · ↑ 2 MB/s",
                 DockWidgetService.BluetoothBatteryId => "53%",
                 var id when id.StartsWith("AiUsage", StringComparison.Ordinal) => string.Empty,
-                DockWidgetService.DesktopsId => "1 / 2",
-                DockWidgetService.TrayId => "▲",
-                DockWidgetService.SearchId => "Alt+Space",
                 DockWidgetService.BatteryId => UiText.Get("SystemDataUnavailable"),
                 "Storage" => "128,5 GiB",
                 "DayProgress" => "61%",

@@ -20,7 +20,7 @@ public partial class MainWindow
     {
         _widgetPanel.Close(restoreFocus: false);
         _resizingFromLeft = ReferenceEquals(sender, LeftResizeThumb);
-        ResetMagnification();
+        ResetMagnification(immediate: true);
     }
 
     private void DockResizeThumb_DragDelta(object sender, DragDeltaEventArgs e)
@@ -119,6 +119,6 @@ public partial class MainWindow
     {
         if (e.HorizontalChange == 0) return;
         _widgetPanel.Close(restoreFocus: false);
-        ResetMagnification();
+        ResetMagnification(immediate: true);
     }
 }

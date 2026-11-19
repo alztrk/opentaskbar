@@ -422,6 +422,10 @@
   "ErrorAiUsageRateLimited": "Too many requests. Waiting before retrying.",
   "WidgetLauncher": "Search",
   "WidgetLauncherDescription": "Opens Windows Search (Win+S).",
+  "ShowDesktop": "Show desktop",
+  "ShowDesktopDescription": "Toggles the desktop (Win+D).",
+  "TaskViewDescription": "Shows the Task View button beside Search.",
+  "TrayButtonDescription": "Shows the background-apps (tray) button in the dock.",
   "LauncherWidgetHint": "Opens Windows Search (Win+S).",
   "AllMonitors": "Show on all displays",
   "AllMonitorsDescription": "Other displays get a dock with the windows on that display.",
@@ -572,6 +576,13 @@
   "PreviewDate": "Nov 16",
   "DockCornerRadius": "Corner radius",
   "DockCornerRadiusDescription": "Controls the roundness of the taskbar frame corners (0 px = sharp, 16–22 px = normal, 32 px = pill).",
-  "DockBottomGapDescription": "Distance between the taskbar and the screen edge.",
-  "DockBottomGap": "Screen edge spacing"
+  "AddToGroup": "Add to group",
+  "NewGroup": "Create group…",
+  "GroupNamePrompt": "Group name:",
+  "RenameGroup": "Rename group",
+  "DeleteGroup": "Delete group",
+  "RemoveFromGroup": "Remove from group",
+  "GroupEmptyHint": "Drag an app onto this group icon to add it.",
+  "GroupDropHint": "Drop an app here or on the group icon to add it.",
+  "ErrorGroupExists": "A group with this name already exists."
 }

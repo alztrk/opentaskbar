@@ -143,10 +143,31 @@ void CatalogChecks()
     Check(catalog.CreateWidgets(null).Count == 0, "New settings must not install widgets implicitly.");
     Check(catalog.CreateOptions([], []).All(option => !option.IsInstalled && !option.IsEnabled),
         "The available catalog must be optional.");
-    var searchOption = catalog.CreateOptions([], []).SingleOrDefault(option => option.Id == DockWidgetService.SearchId);
-    Check(searchOption is not null && searchOption.Label == UiText.Get("WidgetLauncher")
-        && searchOption.Description == UiText.Get("WidgetLauncherDescription") && searchOption.HasSettings,
-        "The Search widget must be listed in Settings with a localized label, description and options panel.");
+    Check(catalog.CreateOptions([], []).All(option => option.Id != "Search"),
+        "Search must be a dock button, not a catalog widget.");
+    var legacySearch = DockSettingsStore.MigrateRemovedWidgets(new DockSettings(
+        Widgets: ["Search", "Clock"], InstalledWidgets: ["Search", "Clock"], WidgetOrder: ["Search", "Clock"],
+        DockItemOrder: ["start", "widget:Search", "widget:Clock"],
+        WidgetDensityOverrides: new Dictionary<string, WidgetDensityMode> { ["Search"] = WidgetDensityMode.Compact }));
+    Check(legacySearch.Widgets!.SequenceEqual(["Clock"])
+        && legacySearch.InstalledWidgets!.SequenceEqual(["Clock"])
+        && legacySearch.WidgetOrder!.SequenceEqual(["Clock"])
+        && legacySearch.DockItemOrder!.SequenceEqual(["start", "widget:Clock"])
+        && legacySearch.WidgetDensityOverrides!.Count == 0
+        && legacySearch.ShowSearchButton
+        && DockSettingsStore.Validate(legacySearch),
+        "The retired Search widget must migrate into a visible dock search button.");
+    var legacyShell = DockSettingsStore.MigrateRemovedWidgets(new DockSettings(
+        Widgets: ["Desktops", "Clock"], InstalledWidgets: ["Desktops", "Tray", "Clock"],
+        WidgetOrder: ["Desktops", "Tray", "Clock"], DockItemOrder: ["start", "widget:Desktops", "widget:Tray", "widget:Clock"],
+        ShowTaskViewButton: false, ShowTrayButton: false));
+    Check(legacyShell.Widgets!.SequenceEqual(["Clock"])
+        && legacyShell.InstalledWidgets!.SequenceEqual(["Clock"])
+        && legacyShell.WidgetOrder!.SequenceEqual(["Clock"])
+        && legacyShell.DockItemOrder!.SequenceEqual(["start", "widget:Clock"])
+        && legacyShell.ShowTaskViewButton && !legacyShell.ShowTrayButton
+        && DockSettingsStore.Validate(legacyShell),
+        "The retired Desktops and Tray widgets must migrate into dock shell buttons with their enabled state.");
     var first = catalog.CreateWidgets([DockWidgetService.StopwatchId, DockWidgetService.CountdownId]);
     var options = catalog.CreateOptions([], []);
     Check(DockWidgetService.AiUsageWidgets.Select(definition => definition.Provider).Order().SequenceEqual(
@@ -188,7 +209,7 @@ void WidgetCategoryChecks()
     var catalog = new DockWidgetService(clock);
     var options = catalog.CreateOptions([], []);
 
-    Check(options.Count == 24, "Catalog must define exactly 24 widgets.");
+    Check(options.Count == 21, "Catalog must define exactly 21 widgets.");
 
     var timeWidgets = options.Where(o => o.Category == DockWidgetCategory.TimeAndWeather).Select(o => o.Id).ToArray();
     Check(timeWidgets.Length == 5
@@ -214,19 +235,15 @@ void WidgetCategoryChecks()
         "AiQuotas category must contain all 7 AI provider widgets.");
 
     var mediaWidgets = options.Where(o => o.Category == DockWidgetCategory.MediaAndControls).Select(o => o.Id).ToArray();
-    Check(mediaWidgets.Length == 4
+    Check(mediaWidgets.Length == 3
         && mediaWidgets.Contains(DockWidgetService.MediaId)
         && mediaWidgets.Contains(DockWidgetService.AudioId)
-        && mediaWidgets.Contains(DockWidgetService.QuickSettingsId)
-        && mediaWidgets.Contains(DockWidgetService.TrayId),
-        "MediaAndControls category must contain Media, Audio, QuickSettings and Tray.");
+        && mediaWidgets.Contains(DockWidgetService.QuickSettingsId),
+        "MediaAndControls category must contain Media, Audio and QuickSettings.");
 
     var prodWidgets = options.Where(o => o.Category == DockWidgetCategory.Productivity).Select(o => o.Id).ToArray();
-    Check(prodWidgets.Length == 3
-        && prodWidgets.Contains(DockWidgetService.FocusId)
-        && prodWidgets.Contains(DockWidgetService.SearchId)
-        && prodWidgets.Contains(DockWidgetService.DesktopsId),
-        "Productivity category must contain Focus, Search and Desktops.");
+    Check(prodWidgets.Length == 1 && prodWidgets.Contains(DockWidgetService.FocusId),
+        "Productivity category must contain only Focus.");
 
     UiText.Current.SetLanguage(AppLanguage.Turkish);
     var sample = options.First(o => o.Category == DockWidgetCategory.AiQuotas);

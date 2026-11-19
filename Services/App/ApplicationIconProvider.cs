@@ -197,6 +197,18 @@ public static class ApplicationIconProvider
                 Marshal.Copy(info.Bits + sourceRow * stride, pixels, row * stride, stride);
             }
 
+            // Some shell images (notably packaged Settings) arrive with straight alpha even though the
+            // format is 32bpp. Pbgra32 expects premultiplied channels; leaving them straight makes the
+            // antialiased edges glow white. Premultiply explicitly so both variants render correctly.
+            for (var offset = 0; offset < pixels.Length; offset += 4)
+            {
+                var alpha = pixels[offset + 3];
+                if (alpha == 255) continue;
+                pixels[offset] = (byte)(pixels[offset] * alpha / 255);
+                pixels[offset + 1] = (byte)(pixels[offset + 1] * alpha / 255);
+                pixels[offset + 2] = (byte)(pixels[offset + 2] * alpha / 255);
+            }
+
             var result = BitmapSource.Create(width, height, 96, 96, System.Windows.Media.PixelFormats.Pbgra32, null, pixels, stride);
             result.Freeze();
             return result;

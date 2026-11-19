@@ -4,6 +4,7 @@
         xmlns:local="clr-namespace:OpenTaskbar.Services"
         xmlns:widgets="clr-namespace:OpenTaskbar.Views.Widgets"
         xmlns:views="clr-namespace:OpenTaskbar.Views"
+        xmlns:shell="clr-namespace:OpenTaskbar.Views.Shell"
         Title="OpenTaskbar"
         Width="360"
         Height="{StaticResource DockWindowHeight}"
@@ -28,6 +29,9 @@
             <MenuItem Header="{local:Loc Pin}" Icon="{StaticResource IconPin}" Tag="PinDockApp" Visibility="Collapsed" Click="PinDockApp_Click" />
             <MenuItem Header="{local:Loc Unpin}" Icon="{StaticResource IconUnpin}" Tag="UnpinDockApp" Visibility="Collapsed" Click="UnpinDockApp_Click" />
             <MenuItem Header="{local:Loc HideInProfile}" Icon="{StaticResource IconEyeOff}" Tag="HideInProfile" Visibility="Collapsed" Click="HideInProfile_Click" />
+            <MenuItem Header="{local:Loc AddToGroup}" Icon="{StaticResource IconLayers}" Tag="AddToGroup">
+                <MenuItem Header="…" />
+            </MenuItem>
             <MenuItem Header="{local:Loc NewInstance}" Icon="{StaticResource IconPlus}" Tag="NewInstance" InputGestureText="Shift+Click" Click="NewInstance_Click" />
             <MenuItem Header="{local:Loc RunAsAdmin}" Icon="{StaticResource IconShield}" Tag="RunAsAdmin" InputGestureText="Ctrl+Shift+Click" Click="RunAsAdmin_Click" />
             <Separator Tag="RunningCommandsDivider" />
@@ -37,6 +41,7 @@
         <ContextMenu x:Key="DockContextMenu" Opened="DockContextMenu_Opened" Closed="DockContextMenu_Closed">
             <MenuItem Header="{local:Loc OpenLauncher}" Icon="{StaticResource IconSearch}" Click="OpenSearch_Click" />
             <MenuItem Header="{local:Loc AddStack}" Icon="{StaticResource IconFolderPlus}" Click="AddStack_Click" />
+            <MenuItem Header="{local:Loc NewGroup}" Icon="{StaticResource IconLayers}" Tag="NewGroup" Click="NewGroup_Click" />
             <MenuItem Header="{local:Loc Profiles}" Icon="{StaticResource IconLayers}" Tag="ProfilesMenu">
                 <MenuItem Header="…" />
             </MenuItem>
@@ -52,6 +57,7 @@
             <Separator />
             <MenuItem Header="{local:Loc OpenLauncher}" Icon="{StaticResource IconSearch}" Click="OpenSearch_Click" />
             <MenuItem Header="{local:Loc AddStack}" Icon="{StaticResource IconFolderPlus}" Click="AddStack_Click" />
+            <MenuItem Header="{local:Loc NewGroup}" Icon="{StaticResource IconLayers}" Tag="NewGroup" Click="NewGroup_Click" />
             <MenuItem Header="{local:Loc Profiles}" Icon="{StaticResource IconLayers}" Tag="ProfilesMenu">
                 <MenuItem Header="…" />
             </MenuItem>
@@ -61,6 +67,11 @@
             <MenuItem Header="{local:Loc Settings}" Icon="{StaticResource IconSettings}" Click="OpenSettings_Click" />
             <Separator />
             <MenuItem Header="{local:Loc Exit}" Icon="{StaticResource IconExit}" Click="ExitOpenTaskbar_Click" />
+        </ContextMenu>
+
+        <ContextMenu x:Key="GroupContextMenu" Opened="DockContextMenu_Opened" Closed="DockContextMenu_Closed">
+            <MenuItem Header="{local:Loc RenameGroup}" Icon="{StaticResource IconSettings}" Tag="RenameGroup" Click="RenameGroup_Click" />
+            <MenuItem Header="{local:Loc DeleteGroup}" Icon="{StaticResource IconClose}" Tag="DeleteGroup" Click="DeleteGroup_Click" Style="{StaticResource DestructiveMenuItem}" />
         </ContextMenu>
 
         <Style x:Key="PreviewCloseButton" TargetType="Button">
@@ -108,15 +119,48 @@
                 <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}"
                       RenderTransformOrigin="0.5,0.5">
                     <Image Source="{Binding Icon}" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
-                           Stretch="Uniform" ClipToBounds="True" RenderOptions.BitmapScalingMode="HighQuality">
-                        <Image.Effect>
-                            <DropShadowEffect BlurRadius="5" ShadowDepth="1.5" Direction="270" Color="#000000" Opacity="0.25" />
-                        </Image.Effect>
-                    </Image>
+                           Stretch="Uniform" ClipToBounds="True" RenderOptions.BitmapScalingMode="HighQuality" />
                     <Ellipse Width="9" Height="9" Fill="{DynamicResource NotificationBrush}"
                              Stroke="{DynamicResource SurfacePopup}" StrokeThickness="1"
                              HorizontalAlignment="Right" VerticalAlignment="Top"
                              Visibility="{Binding HasNotification, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                </Grid>
+            </Button>
+        </DataTemplate>
+        <DataTemplate x:Key="DockGroupIconTemplate">
+            <Button Style="{StaticResource DockButton}" Tag="{Binding Id}"
+                    Click="DockGroup_Click" AutomationProperties.Name="{Binding Name}"
+                    ToolTip="{Binding Name}" ToolTipService.InitialShowDelay="650" ContextMenu="{StaticResource GroupContextMenu}"
+                    AllowDrop="True" Drop="DockGroup_Drop" DragOver="DockGroup_DragOver" DragLeave="DockGroup_DragLeave"
+                    PreviewMouseLeftButtonDown="DockGroup_PreviewMouseLeftButtonDown"
+                    PreviewMouseLeftButtonUp="DockGroup_PreviewMouseLeftButtonUp"
+                    PreviewMouseMove="DockGroup_PreviewMouseMove"
+                    MouseEnter="DockApp_MouseEnter" MouseLeave="DockApp_MouseLeave" MouseUp="DockApp_MouseUp">
+                <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}" RenderTransformOrigin="0.5,0.5">
+                    <Grid Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}">
+                        <TextBlock Text="{Binding Initial}"
+                                   FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TextPrimary}" />
+                        <Image Source="{Binding Icon}" Stretch="Uniform" ClipToBounds="True" RenderOptions.BitmapScalingMode="HighQuality">
+                            <Image.Style>
+                                <Style TargetType="Image">
+                                    <Style.Triggers>
+                                        <Trigger Property="Source" Value="{x:Null}">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Image.Style>
+
+                        </Image>
+                    </Grid>
+                    <Border Width="16" Height="16" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                            Margin="0,0,-2,-2" CornerRadius="8" Background="{DynamicResource SurfaceSelected}"
+                            BorderBrush="{DynamicResource SurfacePopup}" BorderThickness="1">
+                        <TextBlock Text="{Binding MemberCount}" FontSize="9" FontWeight="SemiBold"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Foreground="{DynamicResource TextPrimary}" />
+                    </Border>
                 </Grid>
             </Button>
         </DataTemplate>
@@ -139,9 +183,7 @@
                     <Image Source="{Binding Icon}" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
                            HorizontalAlignment="Center" VerticalAlignment="Center"
                            Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality">
-                        <Image.Effect>
-                            <DropShadowEffect BlurRadius="5" ShadowDepth="1.5" Direction="270" Color="#000000" Opacity="0.25" />
-                        </Image.Effect>
+
                     </Image>
                     <Ellipse Width="9" Height="9" Fill="{DynamicResource NotificationBrush}"
                              Stroke="{DynamicResource SurfacePopup}" StrokeThickness="1"
@@ -199,19 +241,62 @@
                                            Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
                                            HorizontalAlignment="Center" VerticalAlignment="Center"
                                            RenderOptions.BitmapScalingMode="HighQuality">
-                                        <Image.Effect>
-                                            <DropShadowEffect BlurRadius="5" ShadowDepth="1.5" Direction="270" Color="#000000" Opacity="0.25" />
-                                        </Image.Effect>
+
                                     </Image>
                                     <Path x:Name="StartLogo" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}" Stretch="Uniform" Fill="{DynamicResource WindowsLogoBrush}"
                                           MaxWidth="{DynamicResource DockIconSize}" MaxHeight="{DynamicResource DockIconSize}"
                                           Data="M0,0 H10 V10 H0 Z M12,0 H22 V10 H12 Z M0,12 H10 V22 H0 Z M12,12 H22 V22 H12 Z">
-                                        <Path.Effect>
-                                            <DropShadowEffect BlurRadius="5" ShadowDepth="1.5" Direction="270" Color="#000000" Opacity="0.25" />
-                                        </Path.Effect>
+
                                     </Path>
                                 </Grid>
                             </Button>
+                            <Button x:Name="SearchButton" Style="{StaticResource DockButton}" Click="SearchButton_Click"
+                                    AutomationProperties.Name="{local:Loc WidgetLauncher}" ToolTip="{local:Loc WidgetLauncher}"
+                                    ToolTipService.InitialShowDelay="650">
+                                <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}"
+                                      RenderTransformOrigin="0.5,0.5">
+                                    <Grid.RenderTransform>
+                                        <TransformGroup>
+                                            <ScaleTransform ScaleX="1" ScaleY="1" />
+                                            <TranslateTransform Y="0" />
+                                        </TransformGroup>
+                                    </Grid.RenderTransform>
+                                    <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconSearch}"
+                                                    Width="{DynamicResource DockUtilityGlyphSize}"
+                                                    Height="{DynamicResource DockUtilityGlyphSize}"
+                                                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                    Foreground="{DynamicResource TextPrimary}" />
+                                </Grid>
+                            </Button>
+                            <Button x:Name="TaskViewButton" Style="{StaticResource DockButton}" Click="TaskViewButton_Click"
+                                    AutomationProperties.Name="{local:Loc WidgetDesktops}" ToolTip="{local:Loc WidgetDesktops}"
+                                    ToolTipService.InitialShowDelay="650">
+                                <Button.ContextMenu>
+                                    <ContextMenu Opened="DockContextMenu_Opened" Closed="DockContextMenu_Closed">
+                                        <MenuItem Header="{local:Loc DesktopPrevious}" Click="PreviousDesktop_Click" />
+                                        <MenuItem Header="{local:Loc DesktopNext}" Click="NextDesktop_Click" />
+                                        <MenuItem Header="{local:Loc DesktopNew}" Click="NewDesktop_Click" />
+                                        <Separator />
+                                        <MenuItem Header="{local:Loc DesktopTaskView}" Click="TaskViewButton_Click" />
+                                    </ContextMenu>
+                                </Button.ContextMenu>
+                                <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}" RenderTransformOrigin="0.5,0.5">
+                                    <Grid.RenderTransform>
+                                        <TransformGroup>
+                                            <ScaleTransform ScaleX="1" ScaleY="1" />
+                                            <TranslateTransform Y="0" />
+                                        </TransformGroup>
+                                    </Grid.RenderTransform>
+                                    <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconDesktops}"
+                                                    Width="{DynamicResource DockUtilityGlyphSize}"
+                                                    Height="{DynamicResource DockUtilityGlyphSize}"
+                                                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                    Foreground="{DynamicResource TextPrimary}" />
+                                </Grid>
+                            </Button>
+                            <shell:TrayShellButton x:Name="TrayButton" Style="{StaticResource DockButton}"
+                                                   AutomationProperties.Name="{local:Loc TrayApps}" ToolTip="{local:Loc TrayApps}"
+                                                   ToolTipService.InitialShowDelay="650" />
                             <Border x:Name="StartDivider" Width="1" Height="22" Background="{DynamicResource StrokeSubtle}" Margin="3,0,4,0" IsHitTestVisible="False" Visibility="Collapsed" />
                         </StackPanel>
                         <views:DockScrollViewer x:Name="DockScrollViewer" Grid.Column="1" Style="{StaticResource DockScrollViewerStyle}"
@@ -274,9 +359,7 @@
                                     </Grid.RenderTransform>
                                     <Image x:Name="RecycleBinIcon" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
                                            Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality">
-                                        <Image.Effect>
-                                            <DropShadowEffect BlurRadius="5" ShadowDepth="1.5" Direction="270" Color="#000000" Opacity="0.25" />
-                                        </Image.Effect>
+
                                     </Image>
                                 </Grid>
                             </Button>
@@ -286,6 +369,10 @@
                                     <ItemsPanelTemplate><StackPanel Orientation="Horizontal" VerticalAlignment="Center" /></ItemsPanelTemplate>
                                 </ItemsControl.ItemsPanel>
                             </ItemsControl>
+                            <Border x:Name="ShowDesktopStrip" Width="6" Height="{StaticResource DockWindowHeight}"
+                                    Background="Transparent" ToolTip="{local:Loc ShowDesktop}"
+                                    MouseLeftButtonDown="ShowDesktopStrip_MouseLeftButtonDown" Cursor="Hand"
+                                    VerticalAlignment="Stretch" Margin="3,0,0,0" /> 
                         </StackPanel>
                         <!-- Widgets follow the apps in floating mode and pin to the right edge in full-width mode. -->
                         <Border x:Name="WidgetIsland" Grid.Column="3" VerticalAlignment="Center" HorizontalAlignment="Left" Margin="4,0,0,0"

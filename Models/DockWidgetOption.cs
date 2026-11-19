@@ -60,9 +60,7 @@ public sealed class DockWidgetOption(
         || string.Equals(Id, "SystemStats", StringComparison.OrdinalIgnoreCase)
         || string.Equals(Id, "Media", StringComparison.OrdinalIgnoreCase)
         || string.Equals(Id, "Audio", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(Id, "QuickSettings", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(Id, "Desktops", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(Id, "Search", StringComparison.OrdinalIgnoreCase);
+        || string.Equals(Id, "QuickSettings", StringComparison.OrdinalIgnoreCase);
 
     public Visibility HasSettingsVisibility => HasSettings ? Visibility.Visible : Visibility.Collapsed;
 

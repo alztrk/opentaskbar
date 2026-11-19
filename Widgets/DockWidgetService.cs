@@ -19,13 +19,10 @@ public sealed class DockWidgetService(TimeProvider timeProvider)
     public const string FocusId = "Focus";
     public const string AudioId = "Audio";
     public const string QuickSettingsId = "QuickSettings";
-    public const string DesktopsId = "Desktops";
-    public const string TrayId = "Tray";
     public const string WeatherId = "Weather";
     public const string BatteryId = "Battery";
     public const string StopwatchId = "Stopwatch";
     public const string CountdownId = "Countdown";
-    public const string SearchId = "Search";
     public const string NetSpeedId = "NetSpeed";
     public const string BluetoothBatteryId = "BluetoothBattery";
 
@@ -69,12 +66,9 @@ public sealed class DockWidgetService(TimeProvider timeProvider)
         new(MediaId, "WidgetMedia", _ => "▶ · 02:15", DockWidgetCategory.MediaAndControls),
         new(AudioId, "WidgetAudio", _ => "100%", DockWidgetCategory.MediaAndControls),
         new(QuickSettingsId, "WidgetQuickSettings", _ => "Wi-Fi · BT", DockWidgetCategory.MediaAndControls),
-        new(TrayId, "WidgetTray", _ => "▲", DockWidgetCategory.MediaAndControls),
 
         // Productivity
-        new(FocusId, "WidgetFocus", _ => "25:00", DockWidgetCategory.Productivity),
-        new(SearchId, "WidgetLauncher", _ => "Win+S", DockWidgetCategory.Productivity),
-        new(DesktopsId, "WidgetDesktops", _ => "1 / 2", DockWidgetCategory.Productivity)
+        new(FocusId, "WidgetFocus", _ => "25:00", DockWidgetCategory.Productivity)
     ];
 
     public static IReadOnlyCollection<string> SupportedIds { get; } =

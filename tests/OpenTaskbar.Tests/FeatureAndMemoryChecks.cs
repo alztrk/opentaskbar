@@ -41,9 +41,10 @@ internal static class FeatureAndMemoryChecks
                     "Lazy WidgetCoordinator must instantiate only enabled widgets on demand.");
 
                 var reordered = false;
+                var firstWidget = lazyCoordinator.CurrentOrder[0];
                 lazyCoordinator.OrderChanged = _ => reordered = true;
                 lazyCoordinator.ReorderWidgets(0, 1);
-                Check(reordered && lazyCoordinator.CurrentOrder[0] != "Search",
+                Check(reordered && lazyCoordinator.CurrentOrder[0] != firstWidget,
                     "Lazy WidgetCoordinator must support drag reordering.");
 
                 // Enable all live widgets + SystemMeters.All
@@ -191,20 +192,9 @@ internal static class FeatureAndMemoryChecks
             Check(ReferenceEquals(dockItem1.ContextMenu, dockItem2.ContextMenu),
                 "Shared ContextMenu must be reused across dock items without per-item duplication.");
 
-            var search = new SearchWidget();
-            search.Activate();
-            Check(search.BuildHoverFlyoutContent() is not null,
-                "Search widget must provide hover content.");
             var tray = new TrayWidget();
             tray.Activate();
-            search.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            tray.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            Check(Math.Abs(search.DesiredSize.Height - tray.DesiredSize.Height) < 0.001,
-                $"Search widget ({search.DesiredSize.Height}) and Tray widget ({tray.DesiredSize.Height}) must have identical desired heights.");
-            Check(Math.Abs(search.DesiredSize.Width - tray.DesiredSize.Width) < 0.001,
-                $"Search widget ({search.DesiredSize.Width}) and Tray widget ({tray.DesiredSize.Width}) must have identical desired widths.");
             tray.Deactivate();
-            search.Deactivate();
 
             // Verify MediaWidget lifecycle, hover flyout, density and tick safety
             using (var mediaWidget = new MediaWidget())
@@ -230,8 +220,8 @@ internal static class FeatureAndMemoryChecks
                     Position: DockPosition.Center,
                     Theme: AppTheme.Dark,
                     Language: AppLanguage.English,
-                    Widgets: ["Media", "Desktops", "SystemStats", "Focus", "Weather", "Audio", "QuickSettings", "Tray", "Clock", "Storage", "DayProgress", "Stopwatch", "Countdown"],
-                    InstalledWidgets: ["Media", "Desktops", "SystemStats", "Focus", "Weather", "Audio", "QuickSettings", "Tray", "Clock", "Storage", "DayProgress", "Stopwatch", "Countdown"],
+                    Widgets: ["Media", "SystemStats", "Focus", "Weather", "Audio", "QuickSettings", "Clock", "Storage", "DayProgress", "Stopwatch", "Countdown"],
+                    InstalledWidgets: ["Media", "SystemStats", "Focus", "Weather", "Audio", "QuickSettings", "Clock", "Storage", "DayProgress", "Stopwatch", "Countdown"],
                     ShowRecycleBin: true,
                     ShowOnAllMonitors: true,
                     StatsMeters: SystemMeters.All,
@@ -239,8 +229,8 @@ internal static class FeatureAndMemoryChecks
                     ActiveProfile: "Work");
                 Check(store.Save(heavy) is null, "Heavy DockSettings must save without errors.");
                 var (loaded, loadErr) = store.Load();
-                Check(loadErr is null && loaded.StatsMeters == SystemMeters.All && loaded.Widgets?.Count == 13 && loaded.ShowOnAllMonitors,
-                    "Heavy DockSettings must round-trip all 13 widgets, SystemMeters.All, and multi-monitor flags.");
+                Check(loadErr is null && loaded.StatsMeters == SystemMeters.All && loaded.Widgets?.Count == 11 && loaded.ShowOnAllMonitors,
+                    "Heavy DockSettings must round-trip all 11 widgets, SystemMeters.All, and multi-monitor flags.");
             }
             finally
             {

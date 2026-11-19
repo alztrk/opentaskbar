@@ -23,8 +23,8 @@ public static class DockMetrics
     public const double MinCellSize = 24;
     public const double IconSize = 42;
 
-    // Magnification.
-    public const double HoverScale = 1.25;
+    // Magnification. Icons grow to 1.5x and push neighbours aside along the dock axis.
+    public const double HoverScale = 1.5;
     public const double InfluenceRadius = 135;
 
     // Previews.

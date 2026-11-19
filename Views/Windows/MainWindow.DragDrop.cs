@@ -48,7 +48,7 @@ public partial class MainWindow
             _foregroundAtAppPress = null;
             _previewCloseTimer.Stop();
             _thumbnailPreview.Hide();
-            ResetMagnification();
+            ResetMagnification(immediate: true);
             AnimateAppDrag(button, app);
         }
     }
@@ -296,7 +296,7 @@ public partial class MainWindow
             _isStartPressing = false;
             _previewCloseTimer.Stop();
             _thumbnailPreview.Hide();
-            ResetMagnification();
+            ResetMagnification(immediate: true);
 
             StartButton.Opacity = 0.55;
             try
@@ -320,6 +320,11 @@ public partial class MainWindow
         if (e.Data.GetData(typeof(DockApp)) is DockApp app)
         {
             token = "app:" + app.ExecutablePath;
+            return true;
+        }
+        if (e.Data.GetData(typeof(DockAppGroup)) is DockAppGroup group)
+        {
+            token = "group:" + group.Id;
             return true;
         }
         if (e.Data.GetData(typeof(DockStack)) is DockStack stack)

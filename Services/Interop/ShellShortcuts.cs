@@ -688,6 +688,9 @@ public static class ShellShortcuts
         }
     }
 
+    /// <summary>Win+D: toggles the desktop. Used by the slim trailing Show Desktop strip.</summary>
+    public static string? ToggleShowDesktop() => SendWindowsShortcut(VkD);
+
     public static string? OpenUri(string uri) => Start(uri, "ErrorSettingsPageOpen");
 
     /// <summary>

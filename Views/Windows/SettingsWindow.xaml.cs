@@ -92,6 +92,7 @@ public partial class SettingsWindow : Window
             WeatherCountryBox.ItemsSource = null;
             ThemeManager.SetSurfaceOpacity(_preferences.Current.SurfaceOpacity);
             (Application.Current.MainWindow as MainWindow)?.SetSizePreview(null, null);
+            (Application.Current.MainWindow as MainWindow)?.SetGeometryPreview(null);
         };
         DarkTheme.IsChecked = _applied.Theme == AppTheme.Dark;
         LightTheme.IsChecked = _applied.Theme == AppTheme.Light;
@@ -114,9 +115,7 @@ public partial class SettingsWindow : Window
         UpdateDockScaleLabel();
         var initialProfile = DockMetrics.For(_applied.Size, _applied.DockScale);
         CornerRadiusSlider.Value = _applied.DockCornerRadius ?? (int)Math.Round(initialProfile.Radius);
-        BottomGapSlider.Value = _applied.DockBottomGap ?? (int)Math.Round(initialProfile.BottomGap);
         UpdateCornerRadiusLabel();
-        UpdateBottomGapLabel();
         FocusMinutesSlider.Value = _applied.FocusMinutes;
         BreakMinutesSlider.Value = _applied.FocusBreakMinutes;
         FocusSessionsSlider.Value = _applied.FocusSessions;
@@ -305,7 +304,6 @@ public partial class SettingsWindow : Window
             Size = LargeSize.IsChecked == true ? DockSize.Large : MediumSize.IsChecked == true ? DockSize.Medium : DockSize.Compact,
             DockScale = Math.Round(DockScaleSlider.Value) / 100,
             DockCornerRadius = (int)Math.Round(CornerRadiusSlider.Value),
-            DockBottomGap = (int)Math.Round(BottomGapSlider.Value),
             ShowClock = IsEnabled("Clock"),
             ShowMedia = IsEnabled("Media"),
             ShowSystemStats = IsEnabled("SystemStats"),
@@ -316,6 +314,10 @@ public partial class SettingsWindow : Window
             FocusBreakMinutes = (int)Math.Round(BreakMinutesSlider.Value),
             FocusSessions = (int)Math.Round(FocusSessionsSlider.Value),
             ShowRecycleBin = RecycleBinToggle.IsChecked == true,
+            ShowSearchButton = SearchButtonToggle.IsChecked == true,
+            ShowTaskViewButton = TaskViewButtonToggle.IsChecked == true,
+            ShowTrayButton = TrayButtonToggle.IsChecked == true,
+            ShowDesktopButton = ShowDesktopButtonToggle.IsChecked == true,
             TargetDisplay = (TargetDisplayBox.SelectedItem as DisplayChoice)?.DeviceName,
             ShowOnAllMonitors = AllMonitorsToggle.IsChecked == true,
             SecondaryApps = (SecondaryAppsBox.SelectedItem as SecondaryAppChoice)?.Scope ?? SecondaryAppScope.CurrentMonitorOnly,
@@ -323,8 +325,8 @@ public partial class SettingsWindow : Window
             CurrentDesktopOnly = CurrentDesktopToggle.IsChecked == true,
             CheckUpdates = UpdatesToggle.IsChecked == true,
             Edge = LeftEdge.IsChecked == true ? DockEdge.Left : RightEdge.IsChecked == true ? DockEdge.Right : DockEdge.Bottom,
-            ShowVirtualDesktops = IsEnabled("Desktops"),
-            ShowTray = IsEnabled("Tray"),
+            ShowVirtualDesktops = TaskViewButtonToggle.IsChecked == true,
+            ShowTray = TrayButtonToggle.IsChecked == true,
             ShowWeather = IsEnabled("Weather"),
             WeatherCity = WeatherCityBox.Text.Trim(),
             LauncherHotkey = _preferences.Current.LauncherHotkey,
@@ -790,6 +792,10 @@ public partial class SettingsWindow : Window
     private void LoadFeatureSelection(DockSettings settings)
     {
         RecycleBinToggle.IsChecked = settings.ShowRecycleBin;
+        SearchButtonToggle.IsChecked = settings.ShowSearchButton;
+        TaskViewButtonToggle.IsChecked = settings.ShowTaskViewButton;
+        TrayButtonToggle.IsChecked = settings.ShowTrayButton;
+        ShowDesktopButtonToggle.IsChecked = settings.ShowDesktopButton;
         DensityAuto.IsChecked = settings.GlobalWidgetDensity == WidgetDensityMode.Auto;
         DensityCompact.IsChecked = settings.GlobalWidgetDensity == WidgetDensityMode.Compact;
         DensityFull.IsChecked = settings.GlobalWidgetDensity == WidgetDensityMode.Full;
@@ -852,35 +858,12 @@ public partial class SettingsWindow : Window
             AttachDensityRow("SystemStats", StatsOptions);
             stats.SettingsView = StatsOptions;
         }
-        foreach (var id in new[] { "Media", "Audio", "QuickSettings", "Desktops", "Search" })
+        foreach (var id in new[] { "Media", "Audio", "QuickSettings" })
         {
             if (_widgetOptions.FirstOrDefault(o => o.Id == id) is not { } option) continue;
             var panel = new StackPanel();
             AttachDensityRow(id, panel);
             option.SettingsView = panel;
-        }
-        if (_widgetOptions.FirstOrDefault(o => o.Id == DockWidgetService.SearchId) is { } search)
-        {
-            var panel = new StackPanel();
-            var heading = new TextBlock
-            {
-                Text = UiText.Get("WidgetLauncher"),
-                FontWeight = FontWeights.SemiBold,
-                FontSize = 13,
-                Margin = new Thickness(0, 0, 0, 6)
-            };
-            heading.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
-            var description = new TextBlock
-            {
-                Text = UiText.Get("WidgetLauncherDescription"),
-                TextWrapping = TextWrapping.Wrap,
-                Margin = new Thickness(0, 0, 0, 10)
-            };
-            description.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
-            panel.Children.Add(heading);
-            panel.Children.Add(description);
-            AttachDensityRow(DockWidgetService.SearchId, panel);
-            search.SettingsView = panel;
         }
     }
 
@@ -1108,9 +1091,7 @@ public partial class SettingsWindow : Window
         UpdateDockScaleLabel();
         var reloadProfile = DockMetrics.For(settings.Size, settings.DockScale);
         CornerRadiusSlider.Value = settings.DockCornerRadius ?? (int)Math.Round(reloadProfile.Radius);
-        BottomGapSlider.Value = settings.DockBottomGap ?? (int)Math.Round(reloadProfile.BottomGap);
         UpdateCornerRadiusLabel();
-        UpdateBottomGapLabel();
         LoadThemePacks(settings.ThemePack);
         foreach (var option in _widgetOptions)
         {
@@ -1249,21 +1230,7 @@ public partial class SettingsWindow : Window
     {
         if (_initializing) return;
         UpdateCornerRadiusLabel();
-        (Application.Current.MainWindow as MainWindow)?.SetGeometryPreview(
-            (int)Math.Round(CornerRadiusSlider.Value),
-            (int)Math.Round(BottomGapSlider.Value));
-        PreferenceEdited(sender, e);
-    }
-
-    private void UpdateBottomGapLabel() => BottomGapValue.Text = $"{(int)Math.Round(BottomGapSlider.Value)} px";
-
-    private void BottomGapSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-    {
-        if (_initializing) return;
-        UpdateBottomGapLabel();
-        (Application.Current.MainWindow as MainWindow)?.SetGeometryPreview(
-            (int)Math.Round(CornerRadiusSlider.Value),
-            (int)Math.Round(BottomGapSlider.Value));
+        (Application.Current.MainWindow as MainWindow)?.SetGeometryPreview((int)Math.Round(CornerRadiusSlider.Value));
         PreferenceEdited(sender, e);
     }
 

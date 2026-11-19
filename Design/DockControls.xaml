@@ -68,7 +68,11 @@
                         </DataTrigger>
                         <DataTrigger Binding="{Binding IsForeground}" Value="True">
                             <Setter TargetName="ActiveIndicator" Property="Visibility" Value="Visible" />
-                            <Setter TargetName="ActiveIndicator" Property="Opacity" Value="0.9" />
+                            <Setter TargetName="ActiveIndicator" Property="Opacity" Value="1.0" />
+                            <Setter TargetName="ActiveIndicator" Property="Width" Value="5" />
+                            <Setter TargetName="ActiveIndicator" Property="Height" Value="5" />
+                            <Setter TargetName="ActiveIndicator" Property="RadiusX" Value="2.5" />
+                            <Setter TargetName="ActiveIndicator" Property="RadiusY" Value="2.5" />
                             <Setter TargetName="ActiveIndicator" Property="Fill" Value="{DynamicResource IndicatorForegroundBrush}" />
                         </DataTrigger>
                     </ControlTemplate.Triggers>
@@ -77,12 +81,16 @@
         </Setter>
     </Style>
 
-    <!-- Clean Start button template with zero artificial card boxes -->
+    <!-- Clean Start button template aligned to the same vertical baseline as DockButton -->
     <Style x:Key="StartDockButton" TargetType="Button" BasedOn="{StaticResource DockButton}">
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
                     <Grid Width="{TemplateBinding Width}" Height="{TemplateBinding Height}">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="*" />
+                            <RowDefinition Height="6" />
+                        </Grid.RowDefinitions>
                         <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
                     </Grid>
                 </ControlTemplate>

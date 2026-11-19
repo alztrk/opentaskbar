@@ -422,6 +422,10 @@
   "ErrorAiUsageRateLimited": "Çok fazla istek gönderildi. Yeniden denemeden önce bekleniyor.",
   "WidgetLauncher": "Ara",
   "WidgetLauncherDescription": "Windows Arama menüsünü açar (Win+S).",
+  "ShowDesktop": "Masaüstünü göster",
+  "ShowDesktopDescription": "Masaüstünü aç/kapat (Win+D).",
+  "TaskViewDescription": "Search yanında Görev Görünümü düğmesini gösterir.",
+  "TrayButtonDescription": "Dock'ta arka plan uygulamaları (tepsi) düğmesini gösterir.",
   "LauncherWidgetHint": "Windows Arama menüsünü açar (Win+S).",
   "AllMonitors": "Tüm ekranlarda göster",
   "AllMonitorsDescription": "Diğer ekranlarda o ekrandaki pencereleri gösteren bir dock açılır.",
@@ -572,6 +576,13 @@
   "PreviewDate": "16 Kas",
   "DockCornerRadius": "Köşe yuvarlaklığı",
   "DockCornerRadiusDescription": "Görev çubuğu çerçevesinin köşe kavisini ayarlar (0 px = keskin, 16–22 px = standart, 32 px = yuvarlak hap).",
-  "DockBottomGapDescription": "Görev çubuğunun ekran kenarına olan mesafesini ayarlar.",
-  "DockBottomGap": "Ekran kenar boşluğu"
+  "AddToGroup": "Gruba ekle",
+  "NewGroup": "Grup oluştur…",
+  "GroupNamePrompt": "Grup adı:",
+  "RenameGroup": "Grubu yeniden adlandır",
+  "DeleteGroup": "Grubu sil",
+  "RemoveFromGroup": "Gruptan çıkar",
+  "GroupEmptyHint": "Eklemek için bir uygulamayı grup ikonunun üzerine sürükleyin.",
+  "GroupDropHint": "Eklemek için bir uygulamayı buraya veya grup ikonuna bırakın.",
+  "ErrorGroupExists": "Bu adda bir grup zaten var."
 }

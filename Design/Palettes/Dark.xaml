@@ -50,14 +50,15 @@
     <SolidColorBrush x:Key="StrokeSubtle" Color="#24FFFFFF" />
     <SolidColorBrush x:Key="StrokeFocus" Color="#FFD0E8FA" />
     <SolidColorBrush x:Key="SurfaceHover" Color="#22FFFFFF" />
+    <Color x:Key="SurfaceHoverColor">#22FFFFFF</Color>
     <SolidColorBrush x:Key="SurfacePressed" Color="#34FFFFFF" />
     <SolidColorBrush x:Key="SurfaceSelected" Color="#12FFFFFF" />
     <SolidColorBrush x:Key="DockWidgetSurface" Color="#38252B34" />
     <SolidColorBrush x:Key="SurfaceSelectedStrong" Color="#10FFFFFF" />
     <SolidColorBrush x:Key="SurfaceDanger" Color="#FFC43846" />
     <SolidColorBrush x:Key="NotificationBrush" Color="#FFFF6673" />
-    <SolidColorBrush x:Key="IndicatorBrush" Color="#6E8797" />
-    <SolidColorBrush x:Key="IndicatorForegroundBrush" Color="#A8C4D6" />
+    <SolidColorBrush x:Key="IndicatorBrush" Color="#90E2E8F0" />
+    <SolidColorBrush x:Key="IndicatorForegroundBrush" Color="#FFFFFFFF" />
     <!-- macOS style Frosted Glass: soft, translucent, breathes with the desktop. -->
     <LinearGradientBrush x:Key="DockMaterial" StartPoint="0,0" EndPoint="0,1">
         <GradientStop Color="#A0141922" Offset="0" />

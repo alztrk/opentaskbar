@@ -119,6 +119,38 @@
                                 </StackPanel>
                             </DockPanel></Border>
                             <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                <CheckBox x:Name="SearchButtonToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                          AutomationProperties.Name="{local:Loc WidgetLauncher}" AutomationProperties.HelpText="{local:Loc WidgetLauncherDescription}" />
+                                <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                    <TextBlock Text="{local:Loc WidgetLauncher}" Style="{StaticResource SettingsRowLabel}" />
+                                    <TextBlock Text="{local:Loc WidgetLauncherDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                </StackPanel>
+                            </DockPanel></Border>
+                            <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                <CheckBox x:Name="TaskViewButtonToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                          AutomationProperties.Name="{local:Loc WidgetDesktops}" AutomationProperties.HelpText="{local:Loc TaskViewDescription}" />
+                                <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                    <TextBlock Text="{local:Loc WidgetDesktops}" Style="{StaticResource SettingsRowLabel}" />
+                                    <TextBlock Text="{local:Loc TaskViewDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                </StackPanel>
+                            </DockPanel></Border>
+                            <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                <CheckBox x:Name="TrayButtonToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                          AutomationProperties.Name="{local:Loc TrayApps}" AutomationProperties.HelpText="{local:Loc TrayButtonDescription}" />
+                                <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                    <TextBlock Text="{local:Loc TrayApps}" Style="{StaticResource SettingsRowLabel}" />
+                                    <TextBlock Text="{local:Loc TrayButtonDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                </StackPanel>
+                            </DockPanel></Border>
+                            <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                <CheckBox x:Name="ShowDesktopButtonToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                          AutomationProperties.Name="{local:Loc ShowDesktop}" AutomationProperties.HelpText="{local:Loc ShowDesktopDescription}" />
+                                <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
+                                    <TextBlock Text="{local:Loc ShowDesktop}" Style="{StaticResource SettingsRowLabel}" />
+                                    <TextBlock Text="{local:Loc ShowDesktopDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                </StackPanel>
+                            </DockPanel></Border>
+                            <Border Style="{StaticResource SettingsRow}"><DockPanel>
                                 <CheckBox x:Name="CurrentDesktopToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
                                           AutomationProperties.Name="{local:Loc CurrentDesktopOnly}" AutomationProperties.HelpText="{local:Loc CurrentDesktopOnlyDescription}" />
                                 <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
@@ -310,20 +342,6 @@
                                 <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
                                     <TextBlock Text="{local:Loc DockCornerRadius}" Style="{StaticResource SettingsRowLabel}" />
                                     <TextBlock Text="{local:Loc DockCornerRadiusDescription}" Style="{StaticResource SettingsRowDescription}" />
-                                </StackPanel>
-                            </DockPanel></Border>
-
-                            <Border Style="{StaticResource SettingsRow}"><DockPanel>
-                                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Width="240" VerticalAlignment="Center">
-                                    <Slider x:Name="BottomGapSlider" Width="176" Minimum="0" Maximum="24" Value="6" TickFrequency="1"
-                                            IsSnapToTickEnabled="True" SmallChange="1" LargeChange="3" Style="{StaticResource SettingsOpacitySlider}"
-                                            AutomationProperties.Name="{local:Loc DockBottomGap}" AutomationProperties.HelpText="{local:Loc DockBottomGapDescription}"
-                                            ValueChanged="BottomGapSlider_ValueChanged" VerticalAlignment="Center" />
-                                    <TextBlock x:Name="BottomGapValue" Width="56" TextAlignment="Right" Foreground="{DynamicResource TextSecondary}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="8,0,0,0" />
-                                </StackPanel>
-                                <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
-                                    <TextBlock Text="{local:Loc DockBottomGap}" Style="{StaticResource SettingsRowLabel}" />
-                                    <TextBlock Text="{local:Loc DockBottomGapDescription}" Style="{StaticResource SettingsRowDescription}" />
                                 </StackPanel>
                             </DockPanel></Border>
 

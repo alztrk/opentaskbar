@@ -63,6 +63,9 @@ public enum AiUsageRing { Highest, Session, Weekly }
 /// <summary>A named view of the dock that hides some pinned apps; pins themselves are never removed.</summary>
 public sealed record DockProfile(string Name, IReadOnlyList<string> HiddenApps);
 
+/// <summary>A user-defined group of applications shown as a single dock icon with a flyout.</summary>
+public sealed record DockAppGroup(string Id, string Name, IReadOnlyList<string> ExecutablePaths);
+
 // Missing JSON properties fall back to these constructor defaults, so older settings files stay valid.
 public sealed record DockSettings(
     DockPosition Position = DockPosition.Center,
@@ -121,12 +124,19 @@ public sealed record DockSettings(
     bool ThemeApplicationIcons = true,
     WidgetDensityMode GlobalWidgetDensity = WidgetDensityMode.Auto,
     IReadOnlyDictionary<string, WidgetDensityMode>? WidgetDensityOverrides = null,
-    // Free-form dock order: "start", "app:<path>", "stack:<path>", "widget:<id>", "bin".
+    // Free-form dock order: "start", "search", "taskview", "tray", "peek", "app:<path>", "stack:<path>", "widget:<id>", "bin".
     // Null keeps the legacy grouped layout until the user drags an item.
     IReadOnlyList<string>? DockItemOrder = null,
-    // Custom taskbar geometry overrides (null = auto from size profile).
+    // Custom taskbar corner radius override (null = auto from size profile).
     int? DockCornerRadius = null,
-    int? DockBottomGap = null,
     // Legacy: read only to migrate the retired single AI usage widget; every provider is now its own widget.
     AiProviders AiUsageProviders = AiProviders.None,
-    AiUsageRing AiUsageRing = AiUsageRing.Highest);
+    AiUsageRing AiUsageRing = AiUsageRing.Highest,
+    // User-defined application groups. Each app belongs to at most one group.
+    IReadOnlyList<DockAppGroup>? AppGroups = null,
+    // Shows the Search button beside Start. Search used to be a widget; the setting keeps the same opt-out.
+    bool ShowSearchButton = true,
+    // Permanent shell buttons that used to be (or would have been) widgets.
+    bool ShowTaskViewButton = true,
+    bool ShowTrayButton = true,
+    bool ShowDesktopButton = true);

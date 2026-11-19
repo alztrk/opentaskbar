@@ -22,6 +22,10 @@
     <Thickness x:Key="WidgetPanelFieldPadding">10,6</Thickness>
     <FontFamily x:Key="WidgetActionFont">Segoe MDL2 Assets</FontFamily>
     <CornerRadius x:Key="WidgetFieldRadius">7</CornerRadius>
+    <!-- Soft, eased hover/release for widget buttons (no more instant surface swap). -->
+    <CubicEase x:Key="WidgetButtonHoverEase" EasingMode="EaseOut" />
+    <Duration x:Key="WidgetButtonHoverInDuration">0:0:0.14</Duration>
+    <Duration x:Key="WidgetButtonHoverOutDuration">0:0:0.18</Duration>
     <Style x:Key="WidgetTextField" TargetType="TextBox">
         <Setter Property="Padding" Value="{StaticResource WidgetPanelFieldPadding}" />
         <Setter Property="MinHeight" Value="{StaticResource WidgetPanelActionHeight}" />
@@ -72,11 +76,32 @@
                 <ControlTemplate TargetType="Button">
                     <Border x:Name="Surface" Background="{TemplateBinding Background}"
                             BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
-                            Padding="{TemplateBinding Padding}" CornerRadius="{StaticResource DockWidgetActionRadius}">
-                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" />
+                            CornerRadius="{StaticResource DockWidgetActionRadius}">
+                        <Grid>
+                            <Border x:Name="HoverLayer" Background="{DynamicResource SurfaceHover}"
+                                    CornerRadius="{StaticResource DockWidgetActionRadius}" Opacity="0" IsHitTestVisible="False" />
+                            <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" />
+                        </Grid>
                     </Border>
                     <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Surface" Property="Background" Value="{DynamicResource SurfaceHover}" /></Trigger>
+                        <EventTrigger RoutedEvent="MouseEnter">
+                            <BeginStoryboard>
+                                <Storyboard>
+                                    <DoubleAnimation Storyboard.TargetName="HoverLayer" Storyboard.TargetProperty="Opacity"
+                                                     To="1" Duration="{StaticResource WidgetButtonHoverInDuration}"
+                                                     EasingFunction="{StaticResource WidgetButtonHoverEase}" />
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </EventTrigger>
+                        <EventTrigger RoutedEvent="MouseLeave">
+                            <BeginStoryboard>
+                                <Storyboard>
+                                    <DoubleAnimation Storyboard.TargetName="HoverLayer" Storyboard.TargetProperty="Opacity"
+                                                     To="0" Duration="{StaticResource WidgetButtonHoverOutDuration}"
+                                                     EasingFunction="{StaticResource WidgetButtonHoverEase}" />
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </EventTrigger>
                         <Trigger Property="IsPressed" Value="True"><Setter TargetName="Surface" Property="Background" Value="{DynamicResource SurfacePressed}" /></Trigger>
                         <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource StrokeFocus}" /></Trigger>
                         <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Surface" Property="Opacity" Value="0.45" /></Trigger>
@@ -102,10 +127,31 @@
                     <Border x:Name="Surface" Background="{TemplateBinding Background}"
                             BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
                             CornerRadius="{StaticResource WidgetQuickActionRadius}">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        <Grid>
+                            <Border x:Name="HoverLayer" Background="{DynamicResource SurfaceHover}"
+                                    CornerRadius="{StaticResource WidgetQuickActionRadius}" Opacity="0" IsHitTestVisible="False" />
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Grid>
                     </Border>
                     <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Surface" Property="Opacity" Value="0.88" /></Trigger>
+                        <EventTrigger RoutedEvent="MouseEnter">
+                            <BeginStoryboard>
+                                <Storyboard>
+                                    <DoubleAnimation Storyboard.TargetName="HoverLayer" Storyboard.TargetProperty="Opacity"
+                                                     To="1" Duration="{StaticResource WidgetButtonHoverInDuration}"
+                                                     EasingFunction="{StaticResource WidgetButtonHoverEase}" />
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </EventTrigger>
+                        <EventTrigger RoutedEvent="MouseLeave">
+                            <BeginStoryboard>
+                                <Storyboard>
+                                    <DoubleAnimation Storyboard.TargetName="HoverLayer" Storyboard.TargetProperty="Opacity"
+                                                     To="0" Duration="{StaticResource WidgetButtonHoverOutDuration}"
+                                                     EasingFunction="{StaticResource WidgetButtonHoverEase}" />
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </EventTrigger>
                         <Trigger Property="IsPressed" Value="True"><Setter TargetName="Surface" Property="Opacity" Value="0.72" /></Trigger>
                         <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource StrokeFocus}" /></Trigger>
                     </ControlTemplate.Triggers>

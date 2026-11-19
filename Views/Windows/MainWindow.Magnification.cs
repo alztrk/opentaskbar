@@ -4,42 +4,121 @@ using System.Windows.Data;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
+using OpenTaskbar.Models;
 using OpenTaskbar.Services;
 
 namespace OpenTaskbar;
 
 public partial class MainWindow
 {
+    private readonly record struct MagnificationTarget(Button Button, FrameworkElement Icon, double RestCenter, double BaseSize);
+
     private readonly HashSet<FrameworkElement> _currentMagnifiedBuffer = [];
-    private readonly List<(FrameworkElement Icon, Point Center)> _magnificationTargets = [];
+    private readonly List<MagnificationTarget> _magnificationTargets = [];
     private bool _magnificationTargetsDirty = true;
+    private bool _magnificationLayoutActive;
+    private bool _updatingMagnificationLayout;
+    private double _restSurfaceWidth;
+    private double _restScrollMaxWidth;
+    private bool _canExpandSurface;
+    private double _availableExpansion;
+    private double _effectiveMaxScale = DockMetrics.HoverScale;
     private readonly Dictionary<FrameworkElement, double> _magnificationScaleTargets = [];
-    // Velocity-based spring state, so grow and shrink share one motion curve with a gentle settle.
     private readonly Dictionary<FrameworkElement, double> _magnificationVelocity = [];
     private bool _magnificationRendering;
     private TimeSpan? _magnificationLastFrame;
     private readonly System.Runtime.CompilerServices.ConditionalWeakTable<Image, BitmapSource> _restingIcons = new();
 
-    /// <summary>Quintic smoothstep: continuous velocity at both ends, unlike the previous squared cosine.</summary>
-    private static double MagnificationFalloff(double distance, double radius)
+    internal void InvalidateMagnificationTargets()
     {
-        var t = Math.Clamp(1.0 - distance / radius, 0.0, 1.0);
-        return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+        if (_updatingMagnificationLayout || _magnificationLayoutActive) return;
+        _magnificationTargetsDirty = true;
     }
-
-    internal void InvalidateMagnificationTargets() => _magnificationTargetsDirty = true;
 
     private void RebuildMagnificationTargets()
     {
         _magnificationTargets.Clear();
+        if (DockHost is null || !IsLoaded) return;
+
+        var fallbackCell = Profile.Cell;
         foreach (var button in GetAllDockButtons())
         {
+            if (button.Visibility != Visibility.Visible) continue;
+            if (button.ActualWidth <= 0 || button.ActualHeight <= 0) continue;
+            if (!button.IsDescendantOf(DockHost)) continue;
             if (GetButtonIcon(button) is not { } icon) continue;
-            var center = button.TranslatePoint(new Point(button.ActualWidth / 2, button.ActualHeight / 2), DockContents);
-            _magnificationTargets.Add((icon, center));
+
+            var center = button.TranslatePoint(new Point(button.ActualWidth / 2, button.ActualHeight / 2), DockHost);
+            var restCenter = IsVertical ? center.Y : center.X;
+            var baseSize = IsVertical ? button.ActualHeight : button.ActualWidth;
+            if (!double.IsFinite(baseSize) || baseSize <= 0) baseSize = fallbackCell;
+            _magnificationTargets.Add(new MagnificationTarget(button, icon, restCenter, baseSize));
         }
 
+        CaptureMagnificationExpansionBudget();
         _magnificationTargetsDirty = false;
+    }
+
+    /// <summary>Live peak magnification scale coupled to available slot expansion room.</summary>
+    internal double CurrentMagnificationMaxScale => _effectiveMaxScale;
+
+    private void UpdateEffectiveMaxScale()
+    {
+        var profile = Profile;
+        var appIconSize = TryFindResource("DockApplicationIconSize") as double? ?? profile.Icon;
+        var visualIconSize = Math.Max(profile.Icon, appIconSize);
+        _effectiveMaxScale = DockFisheyeLayout.ComputeEffectiveMaxScale(
+            profile.Cell, visualIconSize, DockMetrics.HoverScale, _availableExpansion);
+    }
+
+    private void CaptureMagnificationExpansionBudget()
+    {
+        var margin = DockSurface.Margin;
+        if (IsVertical)
+        {
+            _canExpandSurface = false;
+            _restSurfaceWidth = 0;
+            _restScrollMaxWidth = double.PositiveInfinity;
+            var availableHeight = _dockArea.Height > 0 ? _dockArea.Height : ActualHeight;
+            var maximumSurfaceHeight = Math.Max(1.0, availableHeight - margin.Top - margin.Bottom);
+            _availableExpansion = DockScrollViewer.ScrollableHeight <= 0.5 && DockSurface.ActualHeight > 0
+                ? Math.Max(0.0, maximumSurfaceHeight - DockSurface.ActualHeight)
+                : 0.0;
+            UpdateEffectiveMaxScale();
+            return;
+        }
+
+        var availableWidth = _dockArea.Width > 0 ? _dockArea.Width : ActualWidth;
+        var maximumSurfaceWidth = Math.Max(1.0, availableWidth - margin.Left - margin.Right);
+        _restSurfaceWidth = !double.IsNaN(DockSurface.Width) && DockSurface.Width > 0
+            ? DockSurface.Width
+            : DockSurface.ActualWidth;
+        _restScrollMaxWidth = DockScrollViewer.MaxWidth;
+
+        if (!IsFullWidth
+            && _dockWidthOverride is null
+            && DockScrollViewer.ScrollableWidth <= 0.5
+            && _restSurfaceWidth > 0
+            && _dockArea.Width > 0)
+        {
+            _canExpandSurface = true;
+            _availableExpansion = Math.Max(0.0, maximumSurfaceWidth - _restSurfaceWidth);
+        }
+        else if (IsFullWidth
+            && DockScrollViewer.ScrollableWidth <= 0.5
+            && double.IsFinite(_restScrollMaxWidth)
+            && DockContents.ActualWidth > 0)
+        {
+            _canExpandSurface = false;
+            _availableExpansion = Math.Max(0.0, _restScrollMaxWidth - DockContents.ActualWidth);
+        }
+        else
+        {
+            _canExpandSurface = false;
+            _availableExpansion = 0.0;
+        }
+
+        UpdateEffectiveMaxScale();
     }
 
     internal static (ScaleTransform Scale, TranslateTransform Translate) GetIconTransforms(FrameworkElement icon)
@@ -110,6 +189,39 @@ public partial class MainWindow
         foreach (var button in GetExtraDockButtons()) yield return button;
     }
 
+    private bool IsPointerOverNonMagnifiedZone(DependencyObject? source)
+    {
+        var current = source;
+        while (current is not null && !ReferenceEquals(current, DockSurface))
+        {
+            if (ReferenceEquals(current, WidgetIsland)
+                || ReferenceEquals(current, LeftResizeThumb)
+                || ReferenceEquals(current, RightResizeThumb)
+                || ReferenceEquals(current, ScrollPrevOverlay)
+                || ReferenceEquals(current, ScrollNextOverlay))
+            {
+                return true;
+            }
+
+            if (current is FrameworkElement fe)
+            {
+                foreach (var (token, element) in _dockItemElements)
+                {
+                    if (token.StartsWith("widget:", StringComparison.OrdinalIgnoreCase) && ReferenceEquals(element, fe))
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            current = current is Visual or System.Windows.Media.Media3D.Visual3D
+                ? VisualTreeHelper.GetParent(current)
+                : LogicalTreeHelper.GetParent(current);
+        }
+
+        return false;
+    }
+
     private void AnimateActivationFeedback(Button button)
     {
         if (!_preferences.Current.AnimationsEnabled || !SystemParameters.ClientAreaAnimation)
@@ -145,34 +257,38 @@ public partial class MainWindow
         if (!_preferences.Current.MagnificationEnabled || !_preferences.Current.AnimationsEnabled || !SystemParameters.ClientAreaAnimation)
             return;
 
-        var mousePos = e.GetPosition(DockContents);
-        var mouseX = IsVertical ? mousePos.Y : mousePos.X;
-        const double influenceRadius = DockMetrics.InfluenceRadius;
-        const double maxScale = DockMetrics.HoverScale;
+        if (LeftResizeThumb.IsDragging || RightResizeThumb.IsDragging || DockScrollViewer.IsPanning)
+            return;
 
-        if (_magnificationTargetsDirty) RebuildMagnificationTargets();
+        if (LeftResizeThumb.IsMouseOver || RightResizeThumb.IsMouseOver
+            || ScrollPrevOverlay.IsMouseOver || ScrollNextOverlay.IsMouseOver
+            || IsPointerOverNonMagnifiedZone(e.OriginalSource as DependencyObject))
+        {
+            ResetMagnification();
+            return;
+        }
+
+        if (_magnificationTargetsDirty && !_magnificationLayoutActive)
+        {
+            RebuildMagnificationTargets();
+        }
+
+        if (_magnificationTargets.Count == 0) return;
+
+        var mousePos = e.GetPosition(DockHost);
+        var mouseAxis = IsVertical ? mousePos.Y : mousePos.X;
+        var constrained = _availableExpansion <= 0.5;
+        var influenceRadius = DockFisheyeLayout.InfluenceRadiusForCell(Profile.Cell, constrained);
+        var maxScale = _effectiveMaxScale;
 
         _currentMagnifiedBuffer.Clear();
         _magnificationScaleTargets.Clear();
 
-        // Delay grows with distance from the cursor, so the wave travels outwards instead of
-        // every icon snapping to its target on the same frame.
-        const double waveDelayMsPerDip = 0.09;
-        foreach (var (icon, center) in _magnificationTargets)
+        foreach (var target in _magnificationTargets)
         {
-            var distance = Math.Abs(mouseX - (IsVertical ? center.Y : center.X));
-            var targetScale = 1.0;
-            if (distance < influenceRadius)
-            {
-                var delay = distance * waveDelayMsPerDip;
-                var waveX = mouseX + (mouseX >= (IsVertical ? center.Y : center.X) ? -delay : delay);
-                var waveDistance = Math.Abs(waveX - (IsVertical ? center.Y : center.X));
-                var factor = MagnificationFalloff(waveDistance, influenceRadius);
-                targetScale = 1.0 + (maxScale - 1.0) * factor;
-            }
-
-            _magnificationScaleTargets[icon] = targetScale;
-            if (targetScale > HoverIconThreshold) _currentMagnifiedBuffer.Add(icon);
+            var targetScale = DockFisheyeLayout.ComputeTargetScale(mouseAxis - target.RestCenter, influenceRadius, maxScale);
+            _magnificationScaleTargets[target.Icon] = targetScale;
+            if (targetScale > HoverIconThreshold) _currentMagnifiedBuffer.Add(target.Icon);
         }
 
         foreach (var icon in _magnifiedIcons)
@@ -185,75 +301,213 @@ public partial class MainWindow
         foreach (var icon in _currentMagnifiedBuffer)
             _magnifiedIcons.Add(icon);
 
-        if (!_magnificationRendering)
+        StartMagnificationRendering();
+    }
+
+    private void StartMagnificationRendering()
+    {
+        if (_magnificationRendering) return;
+
+        foreach (var icon in _magnificationScaleTargets.Keys)
         {
-            // Cancel a still-running mouse-leave animation without snapping to its base value.
-            foreach (var icon in _magnificationScaleTargets.Keys)
+            var (scale, _) = GetIconTransforms(icon);
+            icon.RenderTransformOrigin = IconScaleOrigin;
+            if (scale.HasAnimatedProperties)
             {
-                var (scale, translate) = GetIconTransforms(icon);
                 var currentX = scale.ScaleX;
                 var currentY = scale.ScaleY;
-                var prop = IsVertical ? TranslateTransform.XProperty : TranslateTransform.YProperty;
-                var currentT = IsVertical ? translate.X : translate.Y;
                 scale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
                 scale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
-                translate.BeginAnimation(prop, null);
                 scale.ScaleX = currentX;
                 scale.ScaleY = currentY;
-                if (IsVertical) translate.X = currentT;
-                else translate.Y = currentT;
             }
-
-            _magnificationLastFrame = null;
-            _magnificationVelocity.Clear();
-            CompositionTarget.Rendering += RenderMagnification;
-            _magnificationRendering = true;
         }
+
+        _magnificationLastFrame = null;
+        _magnificationVelocity.Clear();
+        CompositionTarget.Rendering += RenderMagnification;
+        _magnificationRendering = true;
     }
 
     private void RenderMagnification(object? sender, EventArgs e)
     {
+        if (_magnificationTargetsDirty && !_magnificationLayoutActive)
+        {
+            RebuildMagnificationTargets();
+        }
+
         var frameTime = e is RenderingEventArgs frame ? frame.RenderingTime : TimeSpan.Zero;
         var elapsedMs = _magnificationLastFrame is { } last
             ? Math.Clamp((frameTime - last).TotalMilliseconds, 1, 50) : 16.7;
         _magnificationLastFrame = frameTime;
-        // Critically damped spring: quick response, a touch of overshoot, and a clean settle.
-        // Same dynamics in both directions, unlike the previous exponential + separate exit animation.
-        const double stiffness = 210.0;
-        const double damping = 24.0;
-        var seconds = Math.Min(elapsedMs, 32.0) / 1000.0;
-        var settled = true;
-        const double maxScale = DockMetrics.HoverScale;
 
+        var dtSeconds = Math.Min(elapsedMs, 32.0) / 1000.0;
+        var settled = true;
+        var maxScale = _effectiveMaxScale;
+        var profile = Profile;
+        var availableHeadroom = DockMetrics.Headroom + profile.VerticalPadding;
+        var vertical = IsVertical;
+        var liftSign = vertical ? (Edge == DockEdge.Left ? 1.0 : -1.0) : -1.0;
+
+        // 1) Advance spring scales and apply icon transform + safe outward lift.
         foreach (var (icon, targetScale) in _magnificationScaleTargets)
         {
             var (scale, translate) = GetIconTransforms(icon);
             icon.RenderTransformOrigin = IconScaleOrigin;
             var current = scale.ScaleX;
             var velocity = _magnificationVelocity.GetValueOrDefault(icon);
-            velocity += (targetScale - current) * stiffness * seconds;
-            velocity *= Math.Exp(-damping * seconds);
-            var next = Math.Clamp(current + velocity * seconds, 1.0, maxScale + 0.04);
-            if (Math.Abs(targetScale - next) >= 0.003 || Math.Abs(velocity) >= 0.02) settled = false;
-            if (Math.Abs(current - next) >= 0.0001)
+            var (next, nextVelocity, iconSettled) = DockFisheyeLayout.StepSpring(current, targetScale, velocity, dtSeconds, maxScale);
+            if (!iconSettled) settled = false;
+
+            if (Math.Abs(current - next) >= 0.0001 || iconSettled)
             {
                 UseHoverIcon(icon, next > HoverIconThreshold);
                 scale.ScaleX = next;
                 scale.ScaleY = next;
             }
-            _magnificationVelocity[icon] = Math.Abs(targetScale - next) < 0.003 ? 0 : velocity;
 
-            // Elevation tracks the magnification wave (up to 2 DIP), using the same spring value.
-            var liftFactor = Math.Max(0.0, (next - 1.0) / (maxScale - 1.0));
-            var targetLift = -2.0 * liftFactor * BounceDirection;
-            var currentLift = IsVertical ? translate.X : translate.Y;
-            var nextLift = Math.Abs(targetLift - currentLift) < 0.05
-                ? targetLift : currentLift + (targetLift - currentLift) * Math.Min(1.0, stiffness * seconds / damping);
-            if (IsVertical) translate.X = nextLift;
-            else translate.Y = nextLift;
+            if (!translate.HasAnimatedProperties)
+            {
+                var lift = DockFisheyeLayout.ComputeSafeLift(next, maxScale, profile.Icon, availableHeadroom);
+                if (vertical)
+                {
+                    translate.X = lift * liftSign;
+                    translate.Y = 0;
+                }
+                else
+                {
+                    translate.X = 0;
+                    translate.Y = lift * liftSign;
+                }
+            }
+
+            _magnificationVelocity[icon] = nextVelocity;
         }
 
-        if (settled) StopMagnificationRendering();
+        // 2) Expand button slots (and floating dock frame) proportionally so icons, active indicator dots,
+        // click hitboxes, and neighbouring widgets breathe outward smoothly with zero overlap or clipping.
+        var count = _magnificationTargets.Count;
+        if (count > 0)
+        {
+            var scales = count <= 64 ? stackalloc double[count] : new double[count];
+            var baseSizes = count <= 64 ? stackalloc double[count] : new double[count];
+            var extras = count <= 64 ? stackalloc double[count] : new double[count];
+            for (var i = 0; i < count; i++)
+            {
+                var target = _magnificationTargets[i];
+                var (scale, _) = GetIconTransforms(target.Icon);
+                scales[i] = scale.ScaleX;
+                baseSizes[i] = target.BaseSize;
+                var zIndex = (int)Math.Round(Math.Max(0.0, scale.ScaleX - 1.0) * 100.0);
+                if (zIndex > 0) Panel.SetZIndex(target.Button, zIndex);
+                else target.Button.ClearValue(Panel.ZIndexProperty);
+            }
+
+            var totalActualExtra = DockFisheyeLayout.ComputeSlotExtras(scales, baseSizes, _availableExpansion, extras);
+            ApplyMagnificationSlotLayout(extras, totalActualExtra, vertical);
+        }
+
+        if (settled)
+        {
+            var allAtRest = true;
+            foreach (var targetScale in _magnificationScaleTargets.Values)
+            {
+                if (targetScale > 1.001)
+                {
+                    allAtRest = false;
+                    break;
+                }
+            }
+
+            if (allAtRest)
+            {
+                ClearMagnificationLayoutOverrides();
+                ClearMagnificationZIndexes();
+                _magnificationScaleTargets.Clear();
+                _magnifiedIcons.Clear();
+            }
+
+            StopMagnificationRendering();
+        }
+    }
+
+    private void ApplyMagnificationSlotLayout(ReadOnlySpan<double> extras, double totalActualExtra, bool vertical)
+    {
+        if (totalActualExtra > 0.05)
+        {
+            _updatingMagnificationLayout = true;
+            try
+            {
+                _magnificationLayoutActive = true;
+                for (var i = 0; i < _magnificationTargets.Count; i++)
+                {
+                    var target = _magnificationTargets[i];
+                    var slotSize = target.BaseSize + extras[i];
+                    if (vertical) target.Button.Height = slotSize;
+                    else target.Button.Width = slotSize;
+                }
+
+                if (_canExpandSurface && _restSurfaceWidth > 0)
+                {
+                    DockSurface.BeginAnimation(WidthProperty, null);
+                    DockSurface.Width = _restSurfaceWidth + totalActualExtra;
+                    if (double.IsFinite(_restScrollMaxWidth))
+                    {
+                        DockScrollViewer.MaxWidth = _restScrollMaxWidth + totalActualExtra;
+                    }
+                }
+            }
+            finally
+            {
+                _updatingMagnificationLayout = false;
+            }
+        }
+        else if (_magnificationLayoutActive)
+        {
+            ClearMagnificationLayoutOverrides();
+        }
+    }
+
+    /// <summary>
+    /// Restores every button's local Width/Height back to its dynamic style resource and returns
+    /// DockSurface/DockScrollViewer to their resting widths so layout passes always measure resting geometry.
+    /// </summary>
+    internal void ClearMagnificationLayoutOverrides()
+    {
+        if (!_magnificationLayoutActive) return;
+        _updatingMagnificationLayout = true;
+        try
+        {
+            foreach (var target in _magnificationTargets)
+            {
+                target.Button.ClearValue(WidthProperty);
+                target.Button.ClearValue(HeightProperty);
+            }
+
+            if (_canExpandSurface && _restSurfaceWidth > 0)
+            {
+                DockSurface.BeginAnimation(WidthProperty, null);
+                DockSurface.Width = _restSurfaceWidth;
+                if (double.IsFinite(_restScrollMaxWidth))
+                {
+                    DockScrollViewer.MaxWidth = _restScrollMaxWidth;
+                }
+            }
+
+            _magnificationLayoutActive = false;
+        }
+        finally
+        {
+            _updatingMagnificationLayout = false;
+        }
+    }
+
+    private void ClearMagnificationZIndexes()
+    {
+        foreach (var target in _magnificationTargets)
+        {
+            target.Button.ClearValue(Panel.ZIndexProperty);
+        }
     }
 
     private void StopMagnificationRendering()
@@ -285,26 +539,60 @@ public partial class MainWindow
     private void DockEdgeTrigger_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e) => _autoHideController?.OnMouseEnterEdge();
     private void DockEdgeTrigger_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e) => _autoHideController?.OnMouseLeaveEdge();
 
-    private void ResetMagnification()
+    private void ResetMagnification(bool immediate = false)
     {
-        if (_magnifiedIcons.Count == 0)
+        var iconsToReset = _magnificationScaleTargets.Keys
+            .Concat(_magnifiedIcons)
+            .Concat(_magnificationTargets.Select(t => t.Icon))
+            .Distinct()
+            .ToList();
+
+        if (immediate)
         {
             StopMagnificationRendering();
+            foreach (var icon in iconsToReset)
+            {
+                var (scale, translate) = GetIconTransforms(icon);
+                scale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+                scale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+                scale.ScaleX = 1.0;
+                scale.ScaleY = 1.0;
+                if (!translate.HasAnimatedProperties)
+                {
+                    translate.X = 0;
+                    translate.Y = 0;
+                }
+                UseHoverIcon(icon, false);
+            }
+
+            ClearMagnificationLayoutOverrides();
+            ClearMagnificationZIndexes();
             _magnificationScaleTargets.Clear();
+            _magnifiedIcons.Clear();
+            _magnificationTargetsDirty = true;
             return;
         }
 
-        // Let the same spring animate back to rest instead of a separate CubicEase animation,
-        // so the exit has the same character as the entrance.
         _magnificationScaleTargets.Clear();
-        foreach (var icon in _magnifiedIcons) _magnificationScaleTargets[icon] = 1.0;
-        if (!_magnificationRendering)
+        var anyMagnified = _magnificationLayoutActive;
+        foreach (var icon in iconsToReset)
         {
-            _magnificationLastFrame = null;
-            _magnificationVelocity.Clear();
-            CompositionTarget.Rendering += RenderMagnification;
-            _magnificationRendering = true;
+            var (scale, _) = GetIconTransforms(icon);
+            if (scale.ScaleX > 1.001) anyMagnified = true;
+            _magnificationScaleTargets[icon] = 1.0;
         }
+
+        if (!anyMagnified)
+        {
+            StopMagnificationRendering();
+            ClearMagnificationLayoutOverrides();
+            ClearMagnificationZIndexes();
+            _magnificationScaleTargets.Clear();
+            _magnifiedIcons.Clear();
+            return;
+        }
+
+        StartMagnificationRendering();
     }
 
     /// <summary>Scale above which an icon shows its larger variant instead of the 1:1 resting bitmap.</summary>

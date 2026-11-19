@@ -151,6 +151,9 @@ public sealed class WindowThumbnailPreview : IDisposable
     public bool IsVisible => _window?.IsVisible == true;
     public bool AnimationsEnabled { get; set; } = true;
 
+    /// <summary>Extra clearance (DIP) above <see cref="DockMetrics.PreviewGap"/> so previews clear magnified icons.</summary>
+    public double ExtraGapDips { get; set; }
+
     public nint SourceHandle => _sourceHandle;
 
     public IReadOnlyList<nint> ActiveHandles => _activeThumbnails.Select(t => t.Source).ToList();
@@ -438,15 +441,13 @@ public sealed class WindowThumbnailPreview : IDisposable
         var eased = 1 - Math.Pow(1 - progress, 3);
         var opacity = (byte)Math.Round(byte.MaxValue * eased);
 
-        foreach (var (_, thumb, target) in _activeThumbnails)
+        // Only fade in. Re-sending a different destination rectangle every frame makes DWM
+        // re-rasterise the live thumbnail and leaves smeared/duplicated pixels behind.
+        foreach (var (_, thumb, _) in _activeThumbnails)
         {
-            var insetX = (int)Math.Round((target.Right - target.Left) * 0.025 * (1 - eased));
-            var insetY = (int)Math.Round((target.Bottom - target.Top) * 0.025 * (1 - eased));
             var frame = new DwmThumbnailProperties
             {
-                Flags = DwmThumbnailRectDestination | DwmThumbnailOpacity | DwmThumbnailVisible,
-                Destination = new NativeRect(target.Left + insetX, target.Top + insetY,
-                    target.Right - insetX, target.Bottom - insetY),
+                Flags = DwmThumbnailOpacity | DwmThumbnailVisible,
                 Opacity = opacity,
                 Visible = true
             };
@@ -585,7 +586,7 @@ public sealed class WindowThumbnailPreview : IDisposable
         width = Math.Min(width, monitorInfo.Monitor.Right - monitorInfo.Monitor.Left);
         height = Math.Min(height, monitorInfo.Monitor.Bottom - monitorInfo.Monitor.Top);
 
-        var gapDips = DockMetrics.PreviewGap;
+        var gapDips = DockMetrics.PreviewGap + Math.Max(0.0, ExtraGapDips);
         var gap = (int)Math.Round(gapDips * dpi / 96d);
         if (DockFlyout.Edge != Models.DockEdge.Bottom)
         {

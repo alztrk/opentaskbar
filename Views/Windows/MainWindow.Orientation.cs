@@ -27,6 +27,7 @@ public partial class MainWindow
         var edge = Edge;
         if (_appliedEdge == edge) return;
         _appliedEdge = edge;
+        ResetMagnification(immediate: true);
         var vertical = edge != DockEdge.Bottom;
         DockFlyout.Edge = edge;
         if (_autoHideController is not null)

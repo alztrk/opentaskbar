@@ -8,6 +8,7 @@ using System.Windows.Threading;
 using OpenTaskbar;
 using OpenTaskbar.Models;
 using OpenTaskbar.Services;
+using OpenTaskbar.Views.Shell;
 using OpenTaskbar.Widgets;
 
 internal static class ApplicationInteractionChecks
@@ -28,11 +29,10 @@ internal static class ApplicationInteractionChecks
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Children = { firstButton, secondButton } };
         var strip = new StackPanel();
         using var coordinator = new WidgetCoordinator(strip, Dispatcher.CurrentDispatcher, _ => { });
-        var tray = strip.Children.OfType<TrayWidget>().Single();
+        var tray = new TrayShellButton();
         string? closePath = null;
         string? terminatePath = null;
-        coordinator.CloseApplicationRequested += path => closePath = path;
-        coordinator.TerminateApplicationRequested += path => terminatePath = path;
+        tray.Initialize(_ => { }, path => closePath = path, path => terminatePath = path);
         var trayApp = new TrayApp("Background app test", "tray-test.exe", null);
         var content = (StackPanel)tray.BuildContent([trayApp]);
         var row = content.Children.OfType<DockPanel>().Single();
