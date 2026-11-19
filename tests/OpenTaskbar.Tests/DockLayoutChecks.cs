@@ -681,8 +681,8 @@ internal static class DockLayoutChecks
         Check((double)app.FindResource("SettingsReadingWidth") >= 960, "SettingsReadingWidth must accommodate wider layout.");
 
         var panelFrame = new OpenTaskbar.Views.Widgets.WidgetPanelFrame { Heading = "Test" };
-        Check(panelFrame.Content is Border outerBorder && outerBorder.Child is Border innerBevel && innerBevel.Child is ScrollViewer,
-            "WidgetPanelFrame must feature outer glass frame and inner optical bevel border.");
+        Check(panelFrame.Content is Border outerBorder && outerBorder.Child is Grid bodyGrid && bodyGrid.Children.Count == 2 && bodyGrid.Children[0] is Border && bodyGrid.Children[1] is ScrollViewer,
+            "WidgetPanelFrame must feature outer glass frame, top specular sheen, and scroll viewer.");
 
         var flyout = new DockFlyout();
         var flyoutAnchor = new Button();
