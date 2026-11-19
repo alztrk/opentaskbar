@@ -225,14 +225,62 @@ public partial class MainWindow
         _magnificationLastFrame = null;
     }
 
+    private void DockSurface_PreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        UpdateDynamicGlassReflection(e);
+    }
+
+    private void UpdateDynamicGlassReflection(System.Windows.Input.MouseEventArgs e)
+    {
+        var width = DockFrame.ActualWidth;
+        if (width <= 0) return;
+
+        var pos = e.GetPosition(DockFrame);
+        var relX = Math.Clamp(IsVertical ? (pos.Y / DockFrame.ActualHeight) : (pos.X / width), 0.0, 1.0);
+
+        const double spread = 0.12;
+        var leftOffset = Math.Max(0.0, relX - spread);
+        var rightOffset = Math.Min(1.0, relX + spread);
+
+        DockSpecularGlintStop0.Offset = leftOffset;
+        DockSpecularGlintStop1.Offset = relX;
+        DockSpecularGlintStop2.Offset = rightOffset;
+
+        var pt = new Point(relX, 0.0);
+        DockSpecularGlow.Center = pt;
+        DockSpecularGlow.GradientOrigin = pt;
+    }
+
+    private void SetDynamicGlintActive(bool active)
+    {
+        var targetOpacity = active ? 1.0 : 0.0;
+        if (_preferences.Current.AnimationsEnabled && SystemParameters.ClientAreaAnimation)
+        {
+            var anim = new System.Windows.Media.Animation.DoubleAnimation(targetOpacity, TimeSpan.FromMilliseconds(150))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            };
+            DockDynamicGlintBorder.BeginAnimation(UIElement.OpacityProperty, anim);
+            DockDynamicGlowBorder.BeginAnimation(UIElement.OpacityProperty, anim);
+        }
+        else
+        {
+            DockDynamicGlintBorder.Opacity = targetOpacity;
+            DockDynamicGlowBorder.Opacity = targetOpacity;
+        }
+    }
+
     private void DockSurface_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
     {
+        UpdateDynamicGlassReflection(e);
+        SetDynamicGlintActive(true);
         NativeMemoryMethods.CancelIdleTrim();
         _autoHideController?.OnMouseEnterDock();
     }
 
     private void DockSurface_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
     {
+        SetDynamicGlintActive(false);
         ResetMagnification();
         _autoHideController?.OnMouseLeaveDock();
         NativeMemoryMethods.ScheduleIdleTrim(TimeSpan.FromSeconds(2));

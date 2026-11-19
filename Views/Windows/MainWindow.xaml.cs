@@ -2359,6 +2359,10 @@ public partial class MainWindow : Window
         DockInnerBevel.CornerRadius = new CornerRadius(Math.Max(0, radius - 1));
         DockSheen.CornerRadius = new CornerRadius(radius);
         DockSheen.Margin = new Thickness(-10, -profile.VerticalPadding, -10, -profile.VerticalPadding);
+        DockDynamicGlintBorder.CornerRadius = new CornerRadius(radius, radius, 0, 0);
+        DockDynamicGlowBorder.CornerRadius = new CornerRadius(radius, radius, 0, 0);
+        DockDynamicGlintBorder.Margin = new Thickness(-10, -profile.VerticalPadding, -10, 0);
+        DockDynamicGlowBorder.Margin = new Thickness(-10, -profile.VerticalPadding, -10, 0);
         var bevelH = -9;
         var bevelV = -profile.VerticalPadding + 1;
         DockInnerBevel.Margin = IsVertical ? new Thickness(bevelV, bevelH, bevelV, bevelH) : new Thickness(bevelH, bevelV, bevelH, bevelV);

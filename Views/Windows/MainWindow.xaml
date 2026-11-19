@@ -152,6 +152,7 @@
         <Grid x:Name="DockSurface" Grid.Row="1" HorizontalAlignment="Stretch"
               Margin="{StaticResource DockInset}" VerticalAlignment="Bottom"
               ContextMenu="{StaticResource DockContextMenu}"
+              PreviewMouseMove="DockSurface_PreviewMouseMove"
               MouseEnter="DockSurface_MouseEnter" MouseMove="DockSurface_MouseMove" MouseLeave="DockSurface_MouseLeave"
               MouseWheel="DockSurface_MouseWheel">
             <Grid.RenderTransform>
@@ -276,6 +277,28 @@
                     <Border x:Name="DockSheen" Background="{DynamicResource DockHighlight}"
                             CornerRadius="{StaticResource DockRadius}"
                             Margin="-10,-4,-10,-4" IsHitTestVisible="False" />
+                    <!-- Dynamic interactive specular glint on the top border rail tracking the mouse -->
+                    <Border x:Name="DockDynamicGlintBorder" Height="2" VerticalAlignment="Top"
+                            Margin="-10,-4,-10,0" CornerRadius="20,20,0,0" IsHitTestVisible="False" Opacity="0">
+                        <Border.Background>
+                            <LinearGradientBrush x:Name="DockSpecularGlintBrush" StartPoint="0,0" EndPoint="1,0">
+                                <GradientStop x:Name="DockSpecularGlintStop0" Color="#00FFFFFF" Offset="0.38" />
+                                <GradientStop x:Name="DockSpecularGlintStop1" Color="#FFFFFFFF" Offset="0.5" />
+                                <GradientStop x:Name="DockSpecularGlintStop2" Color="#00FFFFFF" Offset="0.62" />
+                            </LinearGradientBrush>
+                        </Border.Background>
+                    </Border>
+                    <!-- Dynamic diffuse glass shoulder glow tracking the cursor -->
+                    <Border x:Name="DockDynamicGlowBorder" Height="24" VerticalAlignment="Top"
+                            Margin="-10,-4,-10,0" CornerRadius="20,20,0,0" IsHitTestVisible="False" Opacity="0">
+                        <Border.Background>
+                            <RadialGradientBrush x:Name="DockSpecularGlow" Center="0.5,0.0" GradientOrigin="0.5,0.0" RadiusX="0.18" RadiusY="1.0">
+                                <GradientStop Color="#45FFFFFF" Offset="0.0" />
+                                <GradientStop Color="#14FFFFFF" Offset="0.45" />
+                                <GradientStop Color="#00FFFFFF" Offset="1.0" />
+                            </RadialGradientBrush>
+                        </Border.Background>
+                    </Border>
                 </Grid>
             </Border>
             <Thumb x:Name="LeftResizeThumb" HorizontalAlignment="Left" VerticalAlignment="Stretch"
