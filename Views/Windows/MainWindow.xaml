@@ -194,12 +194,20 @@
                                         </TransformGroup>
                                     </Grid.RenderTransform>
                                     <Image x:Name="StartImage" Visibility="Collapsed" Stretch="Uniform"
-                                           Width="{DynamicResource StartLogoSize}" Height="{DynamicResource StartLogoSize}"
+                                           Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
                                            HorizontalAlignment="Center" VerticalAlignment="Center"
-                                           RenderOptions.BitmapScalingMode="HighQuality" />
-                                    <Path x:Name="StartLogo" Width="{DynamicResource StartLogoSize}" Height="{DynamicResource StartLogoSize}" Stretch="Uniform" Fill="{DynamicResource WindowsLogoBrush}"
+                                           RenderOptions.BitmapScalingMode="HighQuality">
+                                        <Image.Effect>
+                                            <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Color="#000000" Opacity="0.35" />
+                                        </Image.Effect>
+                                    </Image>
+                                    <Path x:Name="StartLogo" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}" Stretch="Uniform" Fill="{DynamicResource WindowsLogoBrush}"
                                           MaxWidth="{DynamicResource DockIconSize}" MaxHeight="{DynamicResource DockIconSize}"
-                                          Data="M0,0 H10 V10 H0 Z M12,0 H22 V10 H12 Z M0,12 H10 V22 H0 Z M12,12 H22 V22 H12 Z" />
+                                          Data="M0,0 H10 V10 H0 Z M12,0 H22 V10 H12 Z M0,12 H10 V22 H0 Z M12,12 H22 V22 H12 Z">
+                                        <Path.Effect>
+                                            <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Color="#000000" Opacity="0.35" />
+                                        </Path.Effect>
+                                    </Path>
                                 </Grid>
                             </Button>
                             <Border x:Name="StartDivider" Width="1" Height="22" Background="{DynamicResource StrokeSubtle}" Margin="3,0,4,0" IsHitTestVisible="False" />

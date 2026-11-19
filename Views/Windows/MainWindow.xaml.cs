@@ -2361,7 +2361,7 @@ public partial class MainWindow : Window
         Application.Current.Resources["DockCellSize"] = profile.Cell;
         Application.Current.Resources["DockCellHeight"] = profile.Cell;
         Application.Current.Resources["DockIconSize"] = profile.Icon;
-        Application.Current.Resources["StartLogoSize"] = Math.Max(14, Math.Round(profile.Icon * 0.62));
+        Application.Current.Resources["StartLogoSize"] = Application.Current.Resources["DockApplicationIconSize"] is double currentSize ? currentSize : 36.0;
         DockFrame.Padding = new Thickness(10, profile.VerticalPadding, 10, profile.VerticalPadding);
         DockFrame.CornerRadius = new CornerRadius(radius);
         DockInnerBevel.CornerRadius = new CornerRadius(Math.Max(0, radius - 1));
@@ -2398,7 +2398,9 @@ public partial class MainWindow : Window
         ApplicationIconProvider.PreferredIconPixels = pixels;
         ApplicationIconProvider.HoverIconPixels = ApplicationIconProvider.ComputeHoverIconPixels(pixels, DockMetrics.HoverScale);
         ThemePacks.PreferredIconPixels = pixels;
-        Application.Current.Resources["DockApplicationIconSize"] = Math.Max(36.0, pixels / Math.Max(1.0, dpiScale));
+        var appIconSize = Math.Max(36.0, pixels / Math.Max(1.0, dpiScale));
+        Application.Current.Resources["DockApplicationIconSize"] = appIconSize;
+        Application.Current.Resources["StartLogoSize"] = appIconSize;
     }
 
     private void WidgetStrip_SizeChanged(object sender, SizeChangedEventArgs e)

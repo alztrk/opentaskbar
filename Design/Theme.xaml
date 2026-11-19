@@ -25,7 +25,7 @@
     <x:Static x:Key="DockCellHeight" Member="svc:DockMetrics.CellSize" />
     <x:Static x:Key="DockIconSize" Member="svc:DockMetrics.IconSize" />
     <sys:Double x:Key="DockApplicationIconSize">36</sys:Double>
-    <sys:Double x:Key="StartLogoSize">24</sys:Double>
+    <sys:Double x:Key="StartLogoSize">36</sys:Double>
     <x:Static x:Key="DockEdgeTriggerHeight" Member="svc:DockMetrics.EdgeTriggerHeight" />
     <sys:Double x:Key="TextSizeWidgetValue">18</sys:Double>
     <sys:Double x:Key="DockWidgetMinimumWidth">104</sys:Double>
