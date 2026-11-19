@@ -5,7 +5,7 @@ using OpenTaskbar.Models;
 namespace OpenTaskbar.Services;
 
 /// <summary>
-/// Single source of truth for dock geometry and motion. XAML reads these through x:Static in Design/Theme.xaml.
+/// Single source of truth for dock geometry and motion. XAML reads these through x:Static in Design/Tokens/Layout.xaml.
 /// </summary>
 public static class DockMetrics
 {

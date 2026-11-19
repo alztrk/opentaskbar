@@ -115,7 +115,7 @@ Brushes and colors change at once. Sizes, radii and fonts are read when a view i
 
 The dock and menu glass (`DockMaterial`, `MenuMaterial`) keep the **Surface opacity** setting: their colors come from the theme and their opacity from Settings.
 
-Token names are listed in [Design/Palettes/Dark.xaml](../Design/Palettes/Dark.xaml), [Design/Theme.xaml](../Design/Theme.xaml) and [Design/Widgets.xaml](../Design/Widgets.xaml).
+Token names are listed in [Design/Tokens/](../Design/Tokens/) (`Typography`, `Spacing`, `Radii`, `Layout`, `Motion`), [Design/Palettes/Dark.xaml](../Design/Palettes/Dark.xaml), and [Design/Widgets.xaml](../Design/Widgets.xaml).
 
 ## Licensing
 

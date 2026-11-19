@@ -13,6 +13,16 @@ using OpenTaskbar.Views.Widgets;
 
 internal static class WidgetViewChecks
 {
+    // Mirrors App.xaml's modular resource order so UI tests load exactly what the app loads.
+    private static readonly string[] ModularResources =
+    [
+        "Tokens/Typography", "Tokens/Spacing", "Tokens/Radii", "Tokens/Layout", "Tokens/Motion",
+        "Palettes/Dark",
+        "Icons/Navigation", "Icons/Actions", "Icons/Status", "Icons/Media", "Icons/Brand", "Icons/GeometryTemplate",
+        "Controls/Tooltip", "Controls/ScrollBar",
+        "DockControls", "ContextMenus", "Widgets", "WidgetControls", "SettingsControls"
+    ];
+
     public static int Run()
     {
         Exception? failure = null;
@@ -35,7 +45,7 @@ internal static class WidgetViewChecks
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         try
         {
-            foreach (var resource in new[] { "Theme", "DockControls", "ContextMenus", "Widgets", "WidgetControls", "SettingsControls" })
+            foreach (var resource in ModularResources)
                 app.Resources.MergedDictionaries.Add(new ResourceDictionary
                 {
                     Source = new Uri($"/OpenTaskbar;component/Design/{resource}.xaml", UriKind.Relative)
@@ -64,7 +74,7 @@ internal static class WidgetViewChecks
             static bool HasHoverFade(ControlTemplate template) =>
                 template.Triggers.OfType<EventTrigger>().Any(t => t.RoutedEvent == UIElement.MouseEnterEvent)
                 && template.Triggers.OfType<EventTrigger>().Any(t => t.RoutedEvent == UIElement.MouseLeaveEvent);
-            foreach (var key in new[] { "WidgetCardButton", "WidgetIconButton", "WidgetPill", "FlyoutButton", "WidgetButton", "WidgetQuickAction" })
+            foreach (var key in new[] { "WidgetCardButton", "WidgetIconButton", "WidgetPill", "FlyoutButton", "WidgetButton" })
             {
                 var template = (ControlTemplate)((Style)app.FindResource(key)).Setters.OfType<Setter>()
                     .Single(s => s.Property == Control.TemplateProperty).Value;

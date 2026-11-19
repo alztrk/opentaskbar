@@ -2,12 +2,6 @@
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                     xmlns:local="clr-namespace:OpenTaskbar.Services"
                     xmlns:sys="clr-namespace:System;assembly=System.Runtime">
-    <sys:Double x:Key="SettingsReadingWidth">960</sys:Double>
-    <Thickness x:Key="SettingsPageInset">24,16,24,20</Thickness>
-    <sys:Double x:Key="WidgetCatalogItemWidth">232</sys:Double>
-    <sys:Double x:Key="WidgetCatalogPreviewHeight">116</sys:Double>
-    <Thickness x:Key="WidgetCatalogItemMargin">0,0,12,12</Thickness>
-    <Thickness x:Key="WidgetCatalogPreviewPadding">12</Thickness>
     <Style x:Key="WidgetCatalogHeaderButton" TargetType="Button" BasedOn="{StaticResource WidgetButton}">
         <Setter Property="MinHeight" Value="{StaticResource WidgetCatalogPreviewHeight}" />
         <Setter Property="Padding" Value="{StaticResource WidgetCatalogPreviewPadding}" />
@@ -248,30 +242,6 @@
                         <Trigger Property="IsPressed" Value="True"><Setter TargetName="Surface" Property="Opacity" Value="0.72" /></Trigger>
                         <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource TextPrimary}" /></Trigger>
                         <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Surface" Property="Opacity" Value="0.4" /></Trigger>
-                    </ControlTemplate.Triggers>
-                </ControlTemplate>
-            </Setter.Value>
-        </Setter>
-    </Style>
-    <Style x:Key="SettingsSecondaryButton" TargetType="Button">
-        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
-        <Setter Property="Padding" Value="8,4" />
-        <Setter Property="Background" Value="{DynamicResource SurfaceSelected}" />
-        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
-        <Setter Property="BorderBrush" Value="{DynamicResource MenuStroke}" />
-        <Setter Property="BorderThickness" Value="1" />
-        <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="Template">
-            <Setter.Value>
-                <ControlTemplate TargetType="Button">
-                    <Border x:Name="Surface" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}" CornerRadius="6"
-                            BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
-                    </Border>
-                    <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Surface" Property="Background" Value="{DynamicResource SurfaceHover}" /></Trigger>
-                        <Trigger Property="IsPressed" Value="True"><Setter TargetName="Surface" Property="Opacity" Value="0.75" /></Trigger>
-                        <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Surface" Property="Opacity" Value="0.35" /></Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>

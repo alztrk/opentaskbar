@@ -119,12 +119,16 @@ One accent gradient, teal `#5EEAD4` → sky `#38BDF8` (→ indigo `#818CF8` on t
 
 ## Project Structure
 
-- `Design/Theme.xaml`: Core design system definitions, standard sizing tokens, brushes, and base control templates.
+The design system is modular: every token category, icon family and control family lives in its own XAML file. `App.xaml` merges them in dependency order (tokens → palette → icons → controls); `ThemeManager` swaps the palette and appends theme-pack overrides last.
+
+- `Design/Tokens/`: `Typography.xaml`, `Spacing.xaml`, `Radii.xaml`, `Layout.xaml`, `Motion.xaml` — every shared token, one category per file. Theme packs override these by key.
 - `Design/Palettes/Dark.xaml` & `Light.xaml`: Theme color palettes and material brushes swapped dynamically by `ThemeManager`.
+- `Design/Icons/`: `Navigation.xaml`, `Actions.xaml`, `Status.xaml`, `Media.xaml`, `Brand.xaml`, `GeometryTemplate.xaml` — all vector geometries, grouped by meaning, plus the shared geometry `DataTemplate`.
+- `Design/Controls/Tooltip.xaml` & `ScrollBar.xaml`: Implicit base-control styles.
 - `Design/DockControls.xaml`: Dock buttons (`DockButton`, `StartDockButton` with aligned 6 DIP bottom baseline), resize thumbs, and scroll viewer/indicator templates.
-- `Design/ContextMenus.xaml`: Vector outline icon styles, Jump List headers, and menu item templates.
+- `Design/ContextMenus.xaml`: Menu item templates, Jump List headers and the destructive action style.
 - `Design/SettingsControls.xaml`: Settings window controls.
-- `Design/WidgetControls.xaml` & `Design/Widgets.xaml`: Widget tokens, card/button/pill/slider styles (with full-surface `HoverLayer` alignment), and widget icon geometries.
+- `Design/WidgetControls.xaml` & `Design/Widgets.xaml`: Widget card/button/pill/slider styles with full-surface `HoverLayer` alignment.
 
 ### Settings navigation
 

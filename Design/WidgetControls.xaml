@@ -5,21 +5,6 @@
                     xmlns:local="clr-namespace:OpenTaskbar.Services"
                     xmlns:widgets="clr-namespace:OpenTaskbar.Views.Widgets"
                     xmlns:w="clr-namespace:OpenTaskbar.Widgets">
-    <sys:Double x:Key="WidgetQuickActionSize">36</sys:Double>
-    <CornerRadius x:Key="WidgetQuickActionRadius">18</CornerRadius>
-    <sys:Double x:Key="WidgetPanelWidth">320</sys:Double>
-    <sys:Double x:Key="WidgetPanelGap">8</sys:Double>
-    <sys:Double x:Key="WidgetPanelValueSize">32</sys:Double>
-    <sys:Double x:Key="WidgetPanelActionHeight">36</sys:Double>
-    <sys:Double x:Key="WidgetPanelHeadingSize">16</sys:Double>
-    <sys:Double x:Key="WidgetActionGlyphSize">14</sys:Double>
-    <Thickness x:Key="WidgetTileMargin">3,0</Thickness>
-    <Thickness x:Key="WidgetPanelPadding">18</Thickness>
-    <Thickness x:Key="WidgetPanelSectionMargin">0,16,0,0</Thickness>
-    <Thickness x:Key="WidgetPanelFieldMargin">0,6,0,0</Thickness>
-    <Thickness x:Key="WidgetPanelFieldPadding">10,6</Thickness>
-    <FontFamily x:Key="WidgetActionFont">Segoe MDL2 Assets</FontFamily>
-    <CornerRadius x:Key="WidgetFieldRadius">7</CornerRadius>
     <!-- Soft, eased hover/release for widget buttons (no more instant surface swap). -->
     <Style x:Key="WidgetTextField" TargetType="TextBox">
         <Setter Property="Padding" Value="{StaticResource WidgetPanelFieldPadding}" />
@@ -94,69 +79,6 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
-    </Style>
-    <Style x:Key="WidgetQuickAction" TargetType="Button" BasedOn="{StaticResource WidgetButton}">
-        <Setter Property="Width" Value="{StaticResource WidgetQuickActionSize}" />
-        <Setter Property="Height" Value="{StaticResource WidgetQuickActionSize}" />
-        <Setter Property="HorizontalContentAlignment" Value="Center" />
-        <Setter Property="Background" Value="{DynamicResource AccentBrush}" />
-        <Setter Property="Foreground" Value="{DynamicResource AccentText}" />
-        <Setter Property="FontFamily" Value="{StaticResource WidgetActionFont}" />
-        <Setter Property="FontSize" Value="{StaticResource WidgetActionGlyphSize}" />
-        <Setter Property="Content" Value="&#xE768;" />
-        <Setter Property="AutomationProperties.Name" Value="{local:Loc TimedWidgetStart}" />
-        <Setter Property="ToolTip" Value="{local:Loc TimedWidgetStart}" />
-        <Setter Property="Template">
-            <Setter.Value>
-                <ControlTemplate TargetType="Button">
-                    <Border x:Name="Surface" Background="{TemplateBinding Background}"
-                            BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
-                            CornerRadius="{StaticResource WidgetQuickActionRadius}">
-                        <Grid>
-                            <Border x:Name="HoverLayer" Background="{DynamicResource SurfaceHover}"
-                                    CornerRadius="{StaticResource WidgetQuickActionRadius}" Opacity="0" IsHitTestVisible="False" />
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
-                        </Grid>
-                    </Border>
-                    <ControlTemplate.Triggers>
-                        <EventTrigger RoutedEvent="MouseEnter">
-                            <BeginStoryboard>
-                                <Storyboard>
-                                    <DoubleAnimation Storyboard.TargetName="HoverLayer" Storyboard.TargetProperty="Opacity"
-                                                     To="1" Duration="{StaticResource WidgetHoverInDuration}"
-                                                     EasingFunction="{StaticResource WidgetHoverEase}" />
-                                </Storyboard>
-                            </BeginStoryboard>
-                        </EventTrigger>
-                        <EventTrigger RoutedEvent="MouseLeave">
-                            <BeginStoryboard>
-                                <Storyboard>
-                                    <DoubleAnimation Storyboard.TargetName="HoverLayer" Storyboard.TargetProperty="Opacity"
-                                                     To="0" Duration="{StaticResource WidgetHoverOutDuration}"
-                                                     EasingFunction="{StaticResource WidgetHoverEase}" />
-                                </Storyboard>
-                            </BeginStoryboard>
-                        </EventTrigger>
-                        <Trigger Property="IsPressed" Value="True"><Setter TargetName="Surface" Property="Opacity" Value="0.72" /></Trigger>
-                        <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource StrokeFocus}" /></Trigger>
-                    </ControlTemplate.Triggers>
-                </ControlTemplate>
-            </Setter.Value>
-        </Setter>
-        <Style.Triggers>
-            <DataTrigger Binding="{Binding IsRunning}" Value="True">
-                <Setter Property="Content" Value="&#xE769;" />
-                <Setter Property="AutomationProperties.Name" Value="{local:Loc TimedWidgetPause}" />
-                <Setter Property="ToolTip" Value="{local:Loc TimedWidgetPause}" />
-            </DataTrigger>
-            <DataTrigger Binding="{Binding CanToggle}" Value="False">
-                <Setter Property="Content" Value="&#xE713;" />
-                <Setter Property="Background" Value="{DynamicResource SurfaceSelected}" />
-                <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
-                <Setter Property="AutomationProperties.Name" Value="{local:Loc WidgetSetDuration}" />
-                <Setter Property="ToolTip" Value="{local:Loc WidgetSetDuration}" />
-            </DataTrigger>
-        </Style.Triggers>
     </Style>
     <Style x:Key="WidgetPanelAction" TargetType="Button" BasedOn="{StaticResource WidgetButton}">
         <Setter Property="Height" Value="{StaticResource WidgetPanelActionHeight}" />

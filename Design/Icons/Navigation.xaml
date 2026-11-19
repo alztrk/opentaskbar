@@ -1,0 +1,10 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <StreamGeometry x:Key="IconOpen">M15 3h6v6 M10 14L21 3 M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6</StreamGeometry>
+    <StreamGeometry x:Key="IconExit">M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4 M16 17l5-5-5-5 M21 12H9</StreamGeometry>
+    <StreamGeometry x:Key="IconChevronRight">M9 18l6-6-6-6</StreamGeometry>
+    <StreamGeometry x:Key="IconChevronLeft">M15 18l-6-6 6-6</StreamGeometry>
+    <StreamGeometry x:Key="IconChevronUp">M18 15l-6-6-6 6</StreamGeometry>
+    <StreamGeometry x:Key="IconChevronDown">M6 9l6 6 6-6</StreamGeometry>
+    <StreamGeometry x:Key="IconSearch">M11 19a8 8 0 1 0 0-16a8 8 0 0 0 0 16z M21 21l-4.3-4.3</StreamGeometry>
+</ResourceDictionary>

@@ -13,6 +13,7 @@
 - Updated Settings widget catalog to display inline category headings with live widget previews, and fixed widget/flyout hover highlight templates (`WidgetCardButton`, `WidgetPill`, `FlyoutButton`, `WidgetButton`) so hover fills the full outer button surface matching pressed state.
 - Replaced managed watchdog runtime overhead with a lightweight native C Win32 watchdog (`tools/watchdog/watchdog.c`) that restores the native taskbar and exits immediately, with incremental `build.ps1` skipping rebuilds when `watchdog.c` is unchanged.
 - Added graceful fallback taskbar dimensions when starting while Explorer's taskbar is already hidden, and preserved desktop work area when switching dock screen edges.
+- Rebuilt the UI as a modular design system: tokens (`Design/Tokens/{Typography,Spacing,Radii,Layout,Motion}.xaml`), vector icons (`Design/Icons/{Navigation,Actions,Status,Media,Brand,GeometryTemplate}.xaml`) and base controls (`Design/Controls/{Tooltip,ScrollBar}.xaml`) now live in one file per concern and are merged in dependency order by `App.xaml`. Theme-pack overrides keep working by key.
 - Removed the unused parallel `UI/UILibrary.xaml` design system and consolidated the shipped UI entirely under `Design/*`; unified the duplicated dock/widget context menus and de-duplicated shared icon geometries and hover-animation tokens.
 
 ## 0.2.11 - 2026-11-19
