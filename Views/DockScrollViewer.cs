@@ -266,6 +266,7 @@ public sealed class DockScrollViewer : ScrollViewer
 
     private void UpdateIndicatorLayout()
     {
+        var topOffset = HoverHeadroom;
         if (ScrollableHeight > 0)
         {
             if (_previousButton is not null)
@@ -275,11 +276,12 @@ public sealed class DockScrollViewer : ScrollViewer
                 _previousButton.HorizontalAlignment = HorizontalAlignment.Stretch;
                 _previousButton.VerticalAlignment = VerticalAlignment.Top;
                 _previousButton.Width = double.NaN;
-                _previousButton.Height = 34;
+                _previousButton.Height = 28;
                 _previousButton.HorizontalContentAlignment = HorizontalAlignment.Center;
                 _previousButton.VerticalContentAlignment = VerticalAlignment.Top;
                 _previousButton.Padding = new Thickness(0, 4, 0, 0);
-                _previousButton.Margin = new Thickness(0);
+                _previousButton.Margin = new Thickness(0, topOffset, 0, 0);
+                _previousButton.Tag = new CornerRadius(16, 16, 0, 0);
             }
             if (_nextButton is not null)
             {
@@ -288,28 +290,29 @@ public sealed class DockScrollViewer : ScrollViewer
                 _nextButton.HorizontalAlignment = HorizontalAlignment.Stretch;
                 _nextButton.VerticalAlignment = VerticalAlignment.Bottom;
                 _nextButton.Width = double.NaN;
-                _nextButton.Height = 34;
+                _nextButton.Height = 28;
                 _nextButton.HorizontalContentAlignment = HorizontalAlignment.Center;
                 _nextButton.VerticalContentAlignment = VerticalAlignment.Bottom;
                 _nextButton.Padding = new Thickness(0, 0, 0, 4);
                 _nextButton.Margin = new Thickness(0);
+                _nextButton.Tag = new CornerRadius(0, 0, 16, 16);
             }
         }
         else
         {
-            var topOffset = HoverHeadroom;
             if (_previousButton is not null)
             {
                 _previousButton.Content = TryFindResource("IconChevronLeft");
                 _previousButton.Background = TryFindResource("DockScrollScrimStart") as Brush;
                 _previousButton.HorizontalAlignment = HorizontalAlignment.Left;
                 _previousButton.VerticalAlignment = VerticalAlignment.Stretch;
-                _previousButton.Width = 34;
+                _previousButton.Width = 28;
                 _previousButton.Height = double.NaN;
                 _previousButton.HorizontalContentAlignment = HorizontalAlignment.Left;
                 _previousButton.VerticalContentAlignment = VerticalAlignment.Center;
-                _previousButton.Padding = new Thickness(5, topOffset, 0, 0);
-                _previousButton.Margin = new Thickness(0);
+                _previousButton.Padding = new Thickness(5, 0, 0, 0);
+                _previousButton.Margin = new Thickness(0, topOffset, 0, 0);
+                _previousButton.Tag = new CornerRadius(16, 0, 0, 16);
             }
             if (_nextButton is not null)
             {
@@ -317,12 +320,13 @@ public sealed class DockScrollViewer : ScrollViewer
                 _nextButton.Background = TryFindResource("DockScrollScrimEnd") as Brush;
                 _nextButton.HorizontalAlignment = HorizontalAlignment.Right;
                 _nextButton.VerticalAlignment = VerticalAlignment.Stretch;
-                _nextButton.Width = 34;
+                _nextButton.Width = 28;
                 _nextButton.Height = double.NaN;
                 _nextButton.HorizontalContentAlignment = HorizontalAlignment.Right;
                 _nextButton.VerticalContentAlignment = VerticalAlignment.Center;
-                _nextButton.Padding = new Thickness(0, topOffset, 5, 0);
-                _nextButton.Margin = new Thickness(0);
+                _nextButton.Padding = new Thickness(0, 0, 5, 0);
+                _nextButton.Margin = new Thickness(0, topOffset, 0, 0);
+                _nextButton.Tag = new CornerRadius(0, 16, 16, 0);
             }
         }
     }
