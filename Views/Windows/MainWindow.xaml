@@ -270,9 +270,12 @@
                                         SizeChanged="WidgetStrip_SizeChanged" />
                         </Border>
                     </Grid>
-                    <!-- Internal legacy overlays collapsed to keep the dock as a pure, unified glass capsule -->
+                    <!-- Internal legacy bevel collapsed to prevent duplicate inner box borders -->
                     <Border x:Name="DockInnerBevel" Visibility="Collapsed" IsHitTestVisible="False" />
-                    <Border x:Name="DockSheen" Visibility="Collapsed" IsHitTestVisible="False" />
+                    <!-- Smooth full-frame glass shoulder sheen with smooth exponential roll-off -->
+                    <Border x:Name="DockSheen" Background="{DynamicResource DockHighlight}"
+                            CornerRadius="{StaticResource DockRadius}"
+                            Margin="-10,-4,-10,-4" IsHitTestVisible="False" />
                 </Grid>
             </Border>
             <Thumb x:Name="LeftResizeThumb" HorizontalAlignment="Left" VerticalAlignment="Stretch"

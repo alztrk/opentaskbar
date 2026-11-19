@@ -2357,9 +2357,8 @@ public partial class MainWindow : Window
         DockFrame.Padding = new Thickness(10, profile.VerticalPadding, 10, profile.VerticalPadding);
         DockFrame.CornerRadius = new CornerRadius(radius);
         DockInnerBevel.CornerRadius = new CornerRadius(Math.Max(0, radius - 1));
-        // The sheen sits on the inner top edge of the glass frame, inset past the rounded corners.
-        var sheenHorizontal = Math.Max(4, radius - 8);
-        DockSheen.Margin = new Thickness(sheenHorizontal, -profile.VerticalPadding + 1, sheenHorizontal, 0);
+        DockSheen.CornerRadius = new CornerRadius(radius);
+        DockSheen.Margin = new Thickness(-10, -profile.VerticalPadding, -10, -profile.VerticalPadding);
         var bevelH = -9;
         var bevelV = -profile.VerticalPadding + 1;
         DockInnerBevel.Margin = IsVertical ? new Thickness(bevelV, bevelH, bevelV, bevelH) : new Thickness(bevelH, bevelV, bevelH, bevelV);
