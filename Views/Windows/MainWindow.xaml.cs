@@ -189,6 +189,16 @@ public partial class MainWindow : Window
         };
         Deactivated += (_, _) => _widgetCoordinator.CollapseHover();
         Activated += (_, _) => _startMenu.OnDockActivated();
+        _startMenu.StartMenuOpened += hwnd =>
+        {
+            Dispatcher.BeginInvoke(DispatcherPriority.Normal, () =>
+            {
+                if (StartButton.IsVisible)
+                {
+                    ShellShortcuts.ScheduleStartMenuReposition(StartButton, hwnd);
+                }
+            });
+        };
         _widgetCoordinator.AvailabilityChanged += () =>
         {
             ResizeDockToContent();
@@ -934,6 +944,10 @@ public partial class MainWindow : Window
         if (_source is null || !PostMessage(_source.Handle, wmSysCommand, scTaskList, 0))
         {
             ReportError("ErrorStartMenuOpen");
+        }
+        else
+        {
+            ShellShortcuts.ScheduleStartMenuReposition(StartButton);
         }
     }
 

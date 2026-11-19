@@ -32,6 +32,7 @@ public static class ShellShortcuts
     private const int ErrorCancelled = 1223;
     private static CancellationTokenSource? _repositionCts;
     private static CancellationTokenSource? _searchRepositionCts;
+    private static CancellationTokenSource? _startMenuRepositionCts;
     public static Func<bool>? IsMediaWidgetActive { get; set; }
 
     /// <summary>Win+A: Quick Settings (Windows 11) or Action Center (Windows 10), anchored above the clicked button when given.</summary>
@@ -357,6 +358,171 @@ public static class ShellShortcuts
                 for (var frame = 0; frame < 5; frame++)
                 {
                     await Task.Delay(30, cancellation);
+                    EnsureNativeTaskbarHidden();
+                    SetWindowPos(mainHwnd, 0, targetX, targetY, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
+                }
+                break;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    /// <summary>
+    /// Anchors and repositions the native Windows Start menu directly above or beside the dock Start button.
+    /// </summary>
+    public static void ScheduleStartMenuReposition(FrameworkElement anchor, nint hintHwnd = 0)
+    {
+        AppLog.Info("ScheduleStartMenuReposition: scheduled.");
+        var next = new CancellationTokenSource();
+        var previous = Interlocked.Exchange(ref _startMenuRepositionCts, next);
+        previous?.Cancel();
+        previous?.Dispose();
+        _ = RepositionStartMenuAsync(anchor, hintHwnd, next.Token);
+    }
+
+    public static List<nint> FindStartMenuWindows()
+    {
+        var list = new List<nint>();
+        try
+        {
+            var pids = Process.GetProcessesByName("StartMenuExperienceHost")
+                .Select(p => (uint)p.Id)
+                .ToHashSet();
+
+            if (pids.Count > 0)
+            {
+                EnumWindows((hwnd, _) =>
+                {
+                    if (!IsWindowVisible(hwnd) || IsWindowCloaked(hwnd)) return true;
+                    GetWindowThreadProcessId(hwnd, out var pid);
+                    if (pids.Contains(pid))
+                    {
+                        if (GetWindowRect(hwnd, out var rect))
+                        {
+                            var w = rect.Right - rect.Left;
+                            var h = rect.Bottom - rect.Top;
+                            if (w > 100 && h > 100)
+                            {
+                                list.Add(hwnd);
+                            }
+                        }
+                    }
+                    return true;
+                }, 0);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warning($"FindStartMenuWindows exception: {ex.Message}");
+        }
+
+        if (list.Count == 0)
+        {
+            foreach (var title in new[] { "Start", "Başlat" })
+            {
+                var h = FindWindow("Windows.UI.Core.CoreWindow", title);
+                if (h != 0 && IsWindowVisible(h) && !IsWindowCloaked(h))
+                {
+                    list.Add(h);
+                    break;
+                }
+            }
+        }
+
+        return list;
+    }
+
+    private static async Task RepositionStartMenuAsync(FrameworkElement anchor, nint hintHwnd, CancellationToken cancellation)
+    {
+        if (PresentationSource.FromVisual(anchor) is not HwndSource source || source.Handle == 0)
+        {
+            AppLog.Warning("RepositionStartMenuAsync: PresentationSource is null.");
+            return;
+        }
+
+        Point topLeft;
+        Point bottomRight;
+        try
+        {
+            topLeft = anchor.PointToScreen(new Point(0, 0));
+            bottomRight = anchor.PointToScreen(new Point(anchor.ActualWidth, anchor.ActualHeight));
+        }
+        catch (InvalidOperationException ex)
+        {
+            AppLog.Warning($"RepositionStartMenuAsync PointToScreen failed: {ex.Message}");
+            return;
+        }
+
+        var monitor = MonitorFromWindow(source.Handle, MonitorDefaultToNearest);
+        var monitorInfo = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+        if (monitor == 0 || !GetMonitorInfo(monitor, ref monitorInfo))
+        {
+            AppLog.Warning("RepositionStartMenuAsync: GetMonitorInfo failed.");
+            return;
+        }
+
+        var edge = DockFlyout.Edge;
+        AppLog.Info($"RepositionStartMenuAsync: anchor bounds [{topLeft.X:F0},{topLeft.Y:F0} - {bottomRight.X:F0},{bottomRight.Y:F0}], edge: {edge}");
+
+        try
+        {
+            for (var attempt = 0; attempt < 40; attempt++)
+            {
+                await Task.Delay(20, cancellation);
+                if (cancellation.IsCancellationRequested) return;
+
+                EnsureNativeTaskbarHidden();
+
+                var startWindows = hintHwnd != 0 && IsWindowVisible(hintHwnd) && !IsWindowCloaked(hintHwnd)
+                    ? new List<nint> { hintHwnd }
+                    : FindStartMenuWindows();
+
+                if (startWindows.Count == 0) continue;
+
+                var mainHwnd = startWindows.OrderByDescending(h =>
+                {
+                    if (GetWindowRect(h, out var r)) return (long)(r.Right - r.Left) * (r.Bottom - r.Top);
+                    return 0L;
+                }).First();
+
+                if (!GetWindowRect(mainHwnd, out var rect)) continue;
+                var width = rect.Right - rect.Left;
+                var height = rect.Bottom - rect.Top;
+                if (width < 100 || height < 100) continue;
+
+                var centerY = (int)Math.Round((topLeft.Y + bottomRight.Y) / 2);
+                int targetX;
+                int targetY;
+                var minY = monitorInfo.Work.Top + 8;
+                var maxY = Math.Max(minY, monitorInfo.Work.Bottom - height - 8);
+
+                switch (edge)
+                {
+                    case DockEdge.Left:
+                        targetX = (int)Math.Round(bottomRight.X) + 12;
+                        targetY = Math.Clamp(centerY - height / 2, minY, maxY);
+                        break;
+                    case DockEdge.Right:
+                        targetX = (int)Math.Round(topLeft.X) - width - 12;
+                        targetY = Math.Clamp(centerY - height / 2, minY, maxY);
+                        break;
+                    default:
+                        var minX = monitorInfo.Work.Left + 8;
+                        var maxX = Math.Max(minX, monitorInfo.Work.Right - width - 8);
+                        targetX = Math.Clamp((int)Math.Round(topLeft.X - 8), minX, maxX);
+                        targetY = Math.Clamp((int)Math.Round(topLeft.Y) - height - 12, minY, maxY);
+                        break;
+                }
+
+                AppLog.Info($"RepositionStartMenuAsync: moving start menu window {mainHwnd:X} ({width}x{height}) to ({targetX},{targetY})");
+                SetWindowPos(mainHwnd, 0, targetX, targetY, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
+
+                // Settle across extra frames to smoothly complete shell entrance transitions
+                for (var frame = 0; frame < 6; frame++)
+                {
+                    await Task.Delay(25, cancellation);
                     EnsureNativeTaskbarHidden();
                     SetWindowPos(mainHwnd, 0, targetX, targetY, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
                 }

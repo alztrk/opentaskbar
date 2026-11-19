@@ -39,6 +39,8 @@ internal sealed class StartMenuState : IDisposable
         _cloakCallback = OnCloakEvent;
     }
 
+    public event Action<nint>? StartMenuOpened;
+
     public bool IsOpen => _isOpen;
 
     /// <summary>Starts following the Start menu's cloak events; call on the UI thread once its message loop runs.</summary>
@@ -107,7 +109,11 @@ internal sealed class StartMenuState : IDisposable
         if (objectId != ObjectWindow || windowHandle == 0 || !IsStartMenuWindow(windowHandle)) return;
         // Only the window the user sees as Start matters: the foreground one (or, while closing, the one that was).
         if (eventType == EventObjectUncloaked && GetForegroundWindow() != windowHandle) return;
-        if (eventType == EventObjectUncloaked) _startWindow = windowHandle;
+        if (eventType == EventObjectUncloaked)
+        {
+            _startWindow = windowHandle;
+            StartMenuOpened?.Invoke(windowHandle);
+        }
         OnStartMenuCloakChanged(cloaked: eventType == EventObjectCloaked);
     }
 
