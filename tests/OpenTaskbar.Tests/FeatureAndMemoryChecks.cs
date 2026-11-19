@@ -105,9 +105,9 @@ internal static class FeatureAndMemoryChecks
                 Check(AiCards(claude) is [{ Content: StackPanel { Children: [System.Windows.Shapes.Path { Data: not null }, TextBlock { Text: "Claude" }, RingMeter { Value: 0.42, Text: "42" }] } } claudeCard]
                     && claudeCard.ToolTip is string claudeTip && claudeTip.StartsWith("Claude Code 42%", StringComparison.Ordinal)
                     && claudeTip.Contains("Weekly 29%", StringComparison.Ordinal) && claudeTip.Contains("Resets in", StringComparison.Ordinal)
-                    && AiCards(codex) is [{ Content: StackPanel { Children: [_, TextBlock { Text: "Codex" }, RingMeter { Value: 0.9 }] } } codexCard]
+                    && AiCards(codex) is [{ Content: StackPanel { Children: [_, TextBlock { Text: "Codex" }, StackPanel { Children: [StackPanel, StackPanel] }] } } codexCard]
                     && codexCard.ToolTip is string codexTip && codexTip.Contains(UiText.Get("AiUsageLimitReached"), StringComparison.Ordinal),
-                    "Each AI usage widget must show one card with logo, name, usage ring and a one-line summary.");
+                    "Each AI usage widget must show one card with logo, name, usage indicators and a one-line summary.");
                 claude.ApplySettings(new DockSettings(AiUsageRing: AiUsageRing.Weekly));
                 Check(AiCards(claude)[0].ToolTip is string weeklyTip && weeklyTip.StartsWith("Claude Code 29%", StringComparison.Ordinal),
                     "The ring setting must choose the window the dock shows.");

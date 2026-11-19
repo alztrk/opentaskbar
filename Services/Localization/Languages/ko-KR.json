@@ -325,6 +325,8 @@
   "AiUsageUnofficialNote": "비공식 엔드포인트를 사용하므로 이용 가능 여부가 변경될 수 있습니다.",
   "AiUsageSession": "세션(5시간)",
   "AiUsageWeekly": "주간",
+  "AiUsageSessionShort": "5시간",
+  "AiUsageWeeklyShort": "7일",
   "AiUsageMonthly": "월간",
   "AiUsageWeeklyModel": "주간 · {0}",
   "AiUsageGroupGemini": "Gemini 모델",

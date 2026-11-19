@@ -325,6 +325,8 @@
   "AiUsageUnofficialNote": "使用非官方端点；可用性可能发生变化。",
   "AiUsageSession": "会话（5 小时）",
   "AiUsageWeekly": "每周",
+  "AiUsageSessionShort": "5小时",
+  "AiUsageWeeklyShort": "7天",
   "AiUsageMonthly": "每月",
   "AiUsageWeeklyModel": "每周 · {0}",
   "AiUsageGroupGemini": "Gemini 模型",

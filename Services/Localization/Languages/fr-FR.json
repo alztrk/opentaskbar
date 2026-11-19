@@ -325,6 +325,8 @@
   "AiUsageUnofficialNote": "Utilise des points d’accès non officiels ; leur disponibilité peut changer.",
   "AiUsageSession": "Session (5 h)",
   "AiUsageWeekly": "Hebdomadaire",
+  "AiUsageSessionShort": "5 h",
+  "AiUsageWeeklyShort": "7 j",
   "AiUsageMonthly": "Mensuel",
   "AiUsageWeeklyModel": "Hebdomadaire · {0}",
   "AiUsageGroupGemini": "Modèles Gemini",

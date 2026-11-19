@@ -325,6 +325,8 @@
   "AiUsageUnofficialNote": "Korzysta z nieoficjalnych punktów końcowych; dostępność może się zmienić.",
   "AiUsageSession": "Sesja (5 godz.)",
   "AiUsageWeekly": "Tygodniowo",
+  "AiUsageSessionShort": "5 godz.",
+  "AiUsageWeeklyShort": "7 dni",
   "AiUsageMonthly": "Miesięcznie",
   "AiUsageWeeklyModel": "Tygodniowo · {0}",
   "AiUsageGroupGemini": "Modele Gemini",

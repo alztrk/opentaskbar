@@ -325,6 +325,8 @@
   "AiUsageUnofficialNote": "Verwendet inoffizielle Endpunkte; die Verfügbarkeit kann sich ändern.",
   "AiUsageSession": "Sitzung (5 Std.)",
   "AiUsageWeekly": "Wöchentlich",
+  "AiUsageSessionShort": "5 Std.",
+  "AiUsageWeeklyShort": "7 T",
   "AiUsageMonthly": "Monatlich",
   "AiUsageWeeklyModel": "Wöchentlich · {0}",
   "AiUsageGroupGemini": "Gemini-Modelle",

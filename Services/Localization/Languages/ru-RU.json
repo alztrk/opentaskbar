@@ -325,6 +325,8 @@
   "AiUsageUnofficialNote": "Используются неофициальные точки доступа; доступность может измениться.",
   "AiUsageSession": "Сеанс (5 ч)",
   "AiUsageWeekly": "За неделю",
+  "AiUsageSessionShort": "5 ч",
+  "AiUsageWeeklyShort": "7 д",
   "AiUsageMonthly": "Ежемесячно",
   "AiUsageWeeklyModel": "За неделю · {0}",
   "AiUsageGroupGemini": "Модели Gemini",

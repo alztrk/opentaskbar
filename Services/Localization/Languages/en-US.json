@@ -386,6 +386,8 @@
   "AiUsageUnofficialNote": "Uses unofficial endpoints; availability may change.",
   "AiUsageSession": "Session (5 h)",
   "AiUsageWeekly": "Weekly",
+  "AiUsageSessionShort": "5h",
+  "AiUsageWeeklyShort": "7d",
   "AiUsageMonthly": "Monthly",
   "AiUsageWeeklyModel": "Weekly · {0}",
   "AiUsageGroupGemini": "Gemini models",

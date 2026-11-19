@@ -386,6 +386,8 @@
   "AiUsageUnofficialNote": "Resmî olmayan veri kaynakları kullanılır; kullanılabilirlik değişebilir.",
   "AiUsageSession": "Oturum (5 saat)",
   "AiUsageWeekly": "Haftalık",
+  "AiUsageSessionShort": "5s",
+  "AiUsageWeeklyShort": "7g",
   "AiUsageMonthly": "Aylık",
   "AiUsageWeeklyModel": "Haftalık · {0}",
   "AiUsageGroupGemini": "Gemini modelleri",

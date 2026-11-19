@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Windows.Controls;
 using OpenTaskbar.Models;
 using OpenTaskbar.Services;
 using OpenTaskbar.Widgets;
@@ -363,7 +364,7 @@ internal static class AiUsageChecks
         Check(AiUsageWidget.RetryDelay(null, 0, null).TotalSeconds is >= 300 and <= 330, "Successful loads must refresh after five minutes plus jitter.");
 
         string[] keys = ["WidgetAiUsage", "WidgetAiUsageDescription", "AiUsageSettingsHeading", "AiUsageProviderHint",
-            "AiUsageUnofficialNote", "AiUsageSession", "AiUsageWeekly", "AiUsageMonthly", "AiUsageWeeklyModel", "AiUsageGroupGemini", "AiUsageGroupClaudeGpt", "AiUsageResetsIn", "AiUsageResetsAt",
+            "AiUsageUnofficialNote", "AiUsageSession", "AiUsageWeekly", "AiUsageSessionShort", "AiUsageWeeklyShort", "AiUsageMonthly", "AiUsageWeeklyModel", "AiUsageGroupGemini", "AiUsageGroupClaudeGpt", "AiUsageResetsIn", "AiUsageResetsAt",
             "AiUsageUpdated", "AiUsageRefresh", "AiUsageOpenDashboard", "AiUsageNoProviders", "AiUsageRingLabel",
             "AiUsageRingHighest", "AiUsageRingSession", "AiUsageLimitReached", "AiUsageStatusOk", "AiUsageStatusSignIn",
             "AiUsageStatusStale", "AiUsageStatusNearLimit", "AiUsageStatusHigh", "AiUsageStatusUnavailable", "AiUsageStatusLoading", "AiUsagePaceIn", "AiUsagePaceAt", "AiUsagePaceMarker", "HoursMinutesFormat",
@@ -420,6 +421,62 @@ internal static class AiUsageChecks
                     widget.SetCompactState(!compact);
                     checks++;
                 }
+
+        // Codex widget checks: dual progress bars, no ring, no flyout menu, localized 5h/7d labels
+        using var codexWidget = new AiUsageWidget(AiProviders.Codex, (provider, _) =>
+        {
+            var codexReport = new AiUsageReport(provider, "Pro",
+            [
+                new("AiUsageSession", 0.50, DateTimeOffset.UtcNow.AddHours(2), 18000L),
+                new("AiUsageWeekly", 0.25, DateTimeOffset.UtcNow.AddDays(4), 604800L)
+            ], DateTimeOffset.UtcNow);
+            return Task.FromResult<(AiUsageReport?, string?)>((codexReport, null));
+        });
+        codexWidget.Activate();
+        if (codexWidget.BuildHoverFlyoutContent() is not null)
+            throw new InvalidOperationException("Codex must have no hover flyout content.");
+
+        var cardField = typeof(AiUsageWidget).GetField("_card", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var cardObj = cardField.GetValue(codexWidget)!;
+        var ringProp = cardObj.GetType().GetProperty("Ring")!;
+        if (ringProp.GetValue(cardObj) is not null)
+            throw new InvalidOperationException("Codex must not use a RingMeter.");
+
+        var codexBarsProp = cardObj.GetType().GetProperty("Codex")!;
+        var codexBars = codexBarsProp.GetValue(cardObj);
+        if (codexBars is null)
+            throw new InvalidOperationException("Codex must have CodexBars container.");
+
+        var sessionLabelProp = codexBars.GetType().GetProperty("SessionLabel")!;
+        var sessionLabel = (TextBlock)sessionLabelProp.GetValue(codexBars)!;
+        var weeklyLabelProp = codexBars.GetType().GetProperty("WeeklyLabel")!;
+        var weeklyLabel = (TextBlock)weeklyLabelProp.GetValue(codexBars)!;
+        var sessionResetProp = codexBars.GetType().GetProperty("SessionReset")!;
+        var sessionReset = (TextBlock)sessionResetProp.GetValue(codexBars)!;
+        var weeklyResetProp = codexBars.GetType().GetProperty("WeeklyReset")!;
+        var weeklyReset = (TextBlock)weeklyResetProp.GetValue(codexBars)!;
+        var sessionFillProp = codexBars.GetType().GetProperty("SessionFill")!;
+        var sessionFill = (Border)sessionFillProp.GetValue(codexBars)!;
+        var weeklyFillProp = codexBars.GetType().GetProperty("WeeklyFill")!;
+        var weeklyFill = (Border)weeklyFillProp.GetValue(codexBars)!;
+
+        // Turkish test
+        UiText.Current.SetLanguage(AppLanguage.Turkish);
+        codexWidget.Tick(DateTime.Now.AddMinutes(1));
+        if (sessionLabel.Text != "5s" || weeklyLabel.Text != "7g")
+            throw new InvalidOperationException($"Codex labels must be localized in Turkish: expected 5s/7g, got {sessionLabel.Text}/{weeklyLabel.Text}");
+        if (sessionFill.Width <= 0 || weeklyFill.Width <= 0)
+            throw new InvalidOperationException("Codex progress bars must reflect loaded quota.");
+
+        // English test
+        UiText.Current.SetLanguage(AppLanguage.English);
+        codexWidget.Tick(DateTime.Now.AddMinutes(2));
+        if (sessionLabel.Text != "5h" || weeklyLabel.Text != "7d")
+            throw new InvalidOperationException($"Codex labels must be localized in English: expected 5h/7d, got {sessionLabel.Text}/{weeklyLabel.Text}");
+
+        UiText.Current.SetLanguage(AppLanguage.Turkish);
+        checks += 6;
+
         pending.SetCanceled();
         return checks;
     }

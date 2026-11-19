@@ -325,6 +325,8 @@
   "AiUsageUnofficialNote": "Gebruikt onofficiële eindpunten; de beschikbaarheid kan veranderen.",
   "AiUsageSession": "Sessie (5 uur)",
   "AiUsageWeekly": "Wekelijks",
+  "AiUsageSessionShort": "5 u",
+  "AiUsageWeeklyShort": "7 d",
   "AiUsageMonthly": "Maandelijks",
   "AiUsageWeeklyModel": "Wekelijks · {0}",
   "AiUsageGroupGemini": "Gemini-modellen",
