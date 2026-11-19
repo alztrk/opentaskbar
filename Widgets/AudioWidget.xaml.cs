@@ -2,8 +2,11 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using OpenTaskbar.Models;
 using OpenTaskbar.Services;
@@ -12,6 +15,10 @@ namespace OpenTaskbar.Widgets;
 
 public partial class AudioWidget : DockWidget
 {
+    private const double VolumeOsdTrackHeight = 112;
+    private const double VolumeOsdExpandedHeight = 200;
+    private const double VolumeOsdShadowMargin = 10;
+
     private readonly DockFlyout _flyout = new();
     private AudioEndpointMonitor.SharedHandle? _monitor;
     private bool _updating;
@@ -35,6 +42,17 @@ public partial class AudioWidget : DockWidget
     private ContentControl? _flyoutMicIcon;
     private readonly List<AppAudioSession> _appSessions = [];
 
+    private Popup? _volumeOsdPopup;
+    private Grid? _volumeOsdCapsuleHost;
+    private Border? _volumeOsdFrame;
+    private Border? _volumeOsdFill;
+    private TextBlock? _volumeOsdLevelText;
+    private ContentControl? _volumeOsdIcon;
+    private Grid? _volumeOsdTrackHost;
+    private bool _volumeOsdDragging;
+    private bool _volumeOsdClosing;
+    private DispatcherTimer? _volumeOsdTimer;
+
     // Allows the mixer controls to be tested without real audio hardware.
     internal Func<IReadOnlyList<AppAudioSession>>? AppSessionSource { get; set; }
 
@@ -46,38 +64,12 @@ public partial class AudioWidget : DockWidget
 
     public override bool SupportsCompactMode => true;
     public override int ShrinkPriority => 40;
-    public override double FullWidthEstimate => 140;
-    public override double CompactWidthEstimate => 48;
+    public override double FullWidthEstimate => 42;
+    public override double CompactWidthEstimate => 42;
 
     public AudioWidget()
     {
         InitializeComponent();
-    }
-
-    protected override void OnCompactChanged(bool compact) => ApplyDensityLayout();
-    protected override void OnHoverExpandedChanged(bool expanded) => ApplyDensityLayout();
-
-    private void ApplyDensityLayout()
-    {
-        var compact = IsCompact && !IsHoverExpanded;
-        Card.Width = compact ? 48 : 140;
-        Card.Padding = compact ? new Thickness(4, 2, 4, 2) : new Thickness(8, 0, 10, 0);
-        DeviceText.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
-
-        if (compact)
-        {
-            MuteButton.Margin = new Thickness(0);
-            MuteButton.Width = 22;
-            MuteButton.Height = 20;
-            LevelText.FontSize = 10;
-        }
-        else
-        {
-            MuteButton.Margin = new Thickness(0, 0, 4, 0);
-            MuteButton.Width = 24;
-            MuteButton.Height = 24;
-            LevelText.ClearValue(TextBlock.FontSizeProperty);
-        }
     }
 
     public override UIElement? BuildHoverFlyoutContent() => BuildFlyoutContent();
@@ -712,6 +704,7 @@ public partial class AudioWidget : DockWidget
                 appList.Children.Add(appRow);
             }
 
+            appList.Margin = new Thickness(0, 0, 6, 0);
             var scrollViewer = new ScrollViewer
             {
                 Content = appList,
@@ -780,6 +773,7 @@ public partial class AudioWidget : DockWidget
 
     protected override void OnDisposed()
     {
+        CloseVolumeOsd();
         _flyout.Close();
         ReleaseAppSessions();
     }
@@ -849,14 +843,11 @@ public partial class AudioWidget : DockWidget
             _lastHasDevice = false;
             _lastLanguage = lang;
             _lastLevel = -1;
-            MuteButton.IsEnabled = false;
             if (_flyoutSlider is not null) _flyoutSlider.IsEnabled = false;
             if (_flyoutLevelText is not null) _flyoutLevelText.Text = string.Empty;
             if (_flyoutIcon is not null) _flyoutIcon.Content = FindResource("IconVolumeMute");
-            DeviceText.Text = UiText.Get("NoAudioDevice");
-            Card.ToolTip = DeviceText.Text;
-            LevelText.Text = string.Empty;
             SetVolumeIcon("IconVolumeMute");
+            UpdateVolumeOsdVisuals(hasDevice: false, level: 0, muted: true);
             return;
         }
 
@@ -875,11 +866,8 @@ public partial class AudioWidget : DockWidget
         _lastDeviceName = deviceName;
         _lastLanguage = lang;
 
-        MuteButton.IsEnabled = true;
         if (_flyoutSlider is not null) _flyoutSlider.IsEnabled = true;
-        DeviceText.Text = deviceName;
-        Card.ToolTip = $"{deviceName} ({level}%)";
-        LevelText.Text = muted ? "—" : UiText.Format("Percent", level);
+        var levelText = muted ? "—" : UiText.Format("Percent", level);
 
         var isHeadphone = deviceName.Contains("headphone", StringComparison.OrdinalIgnoreCase)
             || deviceName.Contains("kulaklık", StringComparison.OrdinalIgnoreCase)
@@ -899,13 +887,15 @@ public partial class AudioWidget : DockWidget
 
         _updating = true;
         if (_flyoutSlider is not null) _flyoutSlider.Value = level;
-        if (_flyoutLevelText is not null) _flyoutLevelText.Text = LevelText.Text;
+        if (_flyoutLevelText is not null) _flyoutLevelText.Text = levelText;
         if (_flyoutIcon is not null)
         {
             var flyoutIconKey = muted || level == 0 ? "IconVolumeMute" : level < 50 ? "IconVolumeLow" : "IconVolume";
             _flyoutIcon.Content = FindResource(flyoutIconKey);
         }
         _updating = false;
+
+        UpdateVolumeOsdVisuals(hasDevice: true, level, muted);
     }
 
     private void SetVolumeIcon(string key)
@@ -922,35 +912,353 @@ public partial class AudioWidget : DockWidget
         else Report(UiText.Get("ErrorVolumeChange"));
     }
 
-    private void Card_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    private void Card_Click(object sender, RoutedEventArgs e)
     {
-        if (e.OriginalSource is DependencyObject dep && IsDescendantOf(dep, MuteButton))
-        {
-            return;
-        }
-
+        CloseVolumeOsd();
         _flyout.Toggle(Card, BuildFlyoutContent, animate: true, focusable: false);
+    }
+
+    private void Card_MouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Middle || _monitor?.HasDevice != true) return;
+        if (_monitor.ToggleMute())
+        {
+            Render();
+            if (!_flyout.IsOpen) ShowVolumeOsd();
+        }
+        else
+        {
+            Report(UiText.Get("ErrorVolumeChange"));
+        }
         e.Handled = true;
     }
 
     private void Card_MouseWheel(object sender, MouseWheelEventArgs e)
     {
+        AdjustVolumeByWheel(e);
+    }
+
+    private void AdjustVolumeByWheel(MouseWheelEventArgs e)
+    {
         if (_monitor?.HasDevice != true) return;
-        if (_monitor.SetVolume(Math.Clamp(_monitor.Volume + Math.Sign(e.Delta) * 0.02f, 0f, 1f))) Render();
-        else Report(UiText.Get("ErrorVolumeChange"));
+        if (_monitor.SetVolume(Math.Clamp(_monitor.Volume + Math.Sign(e.Delta) * 0.02f, 0f, 1f)))
+        {
+            Render();
+            if (!_flyout.IsOpen) ShowVolumeOsd();
+        }
+        else
+        {
+            Report(UiText.Get("ErrorVolumeChange"));
+        }
         e.Handled = true;
     }
 
-    private static bool IsDescendantOf(DependencyObject node, DependencyObject target)
+    private void EnsureVolumeOsdPopup()
     {
-        var current = node;
-        while (current is not null)
+        if (_volumeOsdPopup is not null) return;
+
+        _volumeOsdLevelText = new TextBlock
         {
-            if (ReferenceEquals(current, target)) return true;
-            current = current is Visual || current is System.Windows.Media.Media3D.Visual3D
-                ? VisualTreeHelper.GetParent(current)
-                : LogicalTreeHelper.GetParent(current);
+            FontSize = 11,
+            FontWeight = FontWeights.SemiBold,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, 8)
+        };
+        Typography.SetNumeralAlignment(_volumeOsdLevelText, FontNumeralAlignment.Tabular);
+        _volumeOsdLevelText.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+
+        var trackBg = new Border
+        {
+            Width = 6,
+            Height = VolumeOsdTrackHeight,
+            CornerRadius = new CornerRadius(3),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            ClipToBounds = true
+        };
+        trackBg.SetResourceReference(Border.BackgroundProperty, "WidgetTrack");
+
+        _volumeOsdFill = new Border
+        {
+            Width = 6,
+            Height = 0,
+            CornerRadius = new CornerRadius(3),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Bottom
+        };
+        _volumeOsdFill.SetResourceReference(Border.BackgroundProperty, "WidgetAccent");
+        trackBg.Child = _volumeOsdFill;
+
+        _volumeOsdTrackHost = new Grid
+        {
+            Width = 28,
+            Height = VolumeOsdTrackHeight,
+            Background = Brushes.Transparent,
+            Cursor = Cursors.Hand
+        };
+        _volumeOsdTrackHost.Children.Add(trackBg);
+        _volumeOsdTrackHost.MouseLeftButtonDown += VolumeOsdTrack_MouseLeftButtonDown;
+        _volumeOsdTrackHost.MouseMove += VolumeOsdTrack_MouseMove;
+        _volumeOsdTrackHost.MouseLeftButtonUp += VolumeOsdTrack_MouseLeftButtonUp;
+        _volumeOsdTrackHost.LostMouseCapture += (_, _) => _volumeOsdDragging = false;
+
+        _volumeOsdIcon = new ContentControl
+        {
+            Width = 16,
+            Height = 16,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        _volumeOsdIcon.SetResourceReference(StyleProperty, "WidgetIcon");
+
+        var iconHost = new Grid
+        {
+            Width = 44,
+            Height = 44,
+            Background = Brushes.Transparent,
+            Cursor = Cursors.Hand
+        };
+        iconHost.Children.Add(_volumeOsdIcon);
+        iconHost.MouseLeftButtonUp += (_, e) =>
+        {
+            CloseVolumeOsd();
+            _flyout.Toggle(Card, BuildFlyoutContent, animate: true, focusable: false);
+            e.Handled = true;
+        };
+        iconHost.MouseDown += (s, e) =>
+        {
+            if (e.ChangedButton is MouseButton.Middle or MouseButton.Right)
+            {
+                MuteButton_Click(s, new RoutedEventArgs());
+                ResetVolumeOsdTimer();
+                e.Handled = true;
+            }
+        };
+
+        var upperStack = new StackPanel
+        {
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(0, 10, 0, 4)
+        };
+        upperStack.Children.Add(_volumeOsdLevelText);
+        upperStack.Children.Add(_volumeOsdTrackHost);
+
+        var contentDock = new DockPanel
+        {
+            Height = VolumeOsdExpandedHeight - 2,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            LastChildFill = true
+        };
+        DockPanel.SetDock(iconHost, Dock.Bottom);
+        contentDock.Children.Add(iconHost);
+        contentDock.Children.Add(upperStack);
+
+        var topSheen = new Border
+        {
+            Height = 28,
+            VerticalAlignment = VerticalAlignment.Top,
+            CornerRadius = new CornerRadius(11, 11, 0, 0),
+            IsHitTestVisible = false
+        };
+        topSheen.SetResourceReference(Border.BackgroundProperty, "DockHighlight");
+
+        var bodyGrid = new Grid();
+        bodyGrid.Children.Add(topSheen);
+        bodyGrid.Children.Add(contentDock);
+
+        _volumeOsdFrame = new Border
+        {
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(12),
+            ClipToBounds = true,
+            Child = bodyGrid
+        };
+        _volumeOsdFrame.SetResourceReference(Border.BackgroundProperty, "MenuMaterial");
+        _volumeOsdFrame.SetResourceReference(Border.BorderBrushProperty, "MenuStroke");
+        _volumeOsdFrame.SetResourceReference(TextElement.ForegroundProperty, "TextPrimary");
+        _volumeOsdFrame.SetResourceReference(TextElement.FontFamilyProperty, "InterfaceFont");
+
+        _volumeOsdCapsuleHost = new Grid
+        {
+            Width = 46,
+            Height = 46,
+            VerticalAlignment = VerticalAlignment.Bottom,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(VolumeOsdShadowMargin)
+        };
+        DockFlyout.AttachSoftShadow(_volumeOsdCapsuleHost, 12);
+        _volumeOsdCapsuleHost.Children.Add(_volumeOsdFrame);
+
+        var root = new Grid
+        {
+            Height = VolumeOsdExpandedHeight + (VolumeOsdShadowMargin * 2),
+            Background = Brushes.Transparent,
+            Children = { _volumeOsdCapsuleHost }
+        };
+        root.MouseWheel += (_, e) => AdjustVolumeByWheel(e);
+        root.MouseEnter += (_, _) => _volumeOsdTimer?.Stop();
+        root.MouseLeave += (_, _) =>
+        {
+            if (!_volumeOsdDragging) ResetVolumeOsdTimer(650);
+        };
+
+        _volumeOsdPopup = new Popup
+        {
+            AllowsTransparency = true,
+            StaysOpen = true,
+            PopupAnimation = PopupAnimation.None,
+            Placement = PlacementMode.Custom,
+            PlacementTarget = Card,
+            CustomPopupPlacementCallback = PlaceVolumeOsd,
+            Child = root
+        };
+
+        _volumeOsdTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1500) };
+        _volumeOsdTimer.Tick += (_, _) =>
+        {
+            _volumeOsdTimer.Stop();
+            if (_volumeOsdPopup is { IsOpen: true } && !root.IsMouseOver && !_volumeOsdDragging)
+            {
+                CollapseVolumeOsd();
+            }
+        };
+    }
+
+    private static CustomPopupPlacement[] PlaceVolumeOsd(Size popupSize, Size targetSize, Point offset)
+    {
+        var x = (targetSize.Width - popupSize.Width) / 2.0;
+        var y = targetSize.Height - popupSize.Height + VolumeOsdShadowMargin;
+        return [new CustomPopupPlacement(new Point(x, y), PopupPrimaryAxis.Vertical)];
+    }
+
+    private void ShowVolumeOsd()
+    {
+        EnsureVolumeOsdPopup();
+        var hasDevice = _monitor?.HasDevice == true;
+        var level = hasDevice ? (int)Math.Round(_monitor!.Volume * 100) : 0;
+        var muted = !hasDevice || _monitor!.Muted;
+        UpdateVolumeOsdVisuals(hasDevice, level, muted);
+
+        var baseWidth = Card.ActualWidth > 0 ? Card.ActualWidth : 46;
+        var baseHeight = Card.ActualHeight > 0 ? Card.ActualHeight : 46;
+        _volumeOsdCapsuleHost!.Width = baseWidth;
+
+        var wasClosedOrClosing = !_volumeOsdPopup!.IsOpen || _volumeOsdClosing;
+        _volumeOsdClosing = false;
+
+        if (!_volumeOsdPopup.IsOpen)
+        {
+            _volumeOsdCapsuleHost.BeginAnimation(HeightProperty, null);
+            _volumeOsdCapsuleHost.Height = baseHeight;
+            Card.Opacity = 0;
+            _volumeOsdPopup.IsOpen = true;
         }
-        return false;
+
+        if (wasClosedOrClosing)
+        {
+            var expand = new DoubleAnimation
+            {
+                From = _volumeOsdCapsuleHost.Height,
+                To = VolumeOsdExpandedHeight,
+                Duration = TimeSpan.FromMilliseconds(180),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            };
+            _volumeOsdCapsuleHost.BeginAnimation(HeightProperty, expand);
+        }
+
+        ResetVolumeOsdTimer();
+    }
+
+    private void CollapseVolumeOsd()
+    {
+        if (_volumeOsdPopup is not { IsOpen: true } || _volumeOsdCapsuleHost is null || _volumeOsdClosing) return;
+        _volumeOsdClosing = true;
+        _volumeOsdTimer?.Stop();
+
+        var baseHeight = Card.ActualHeight > 0 ? Card.ActualHeight : 46;
+        var collapse = new DoubleAnimation
+        {
+            From = _volumeOsdCapsuleHost.ActualHeight > 0 ? _volumeOsdCapsuleHost.ActualHeight : VolumeOsdExpandedHeight,
+            To = baseHeight,
+            Duration = TimeSpan.FromMilliseconds(150),
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+        };
+        collapse.Completed += (_, _) =>
+        {
+            if (!_volumeOsdClosing) return;
+            _volumeOsdClosing = false;
+            _volumeOsdCapsuleHost.BeginAnimation(HeightProperty, null);
+            _volumeOsdCapsuleHost.Height = baseHeight;
+            if (_volumeOsdPopup is not null) _volumeOsdPopup.IsOpen = false;
+            Card.Opacity = 1;
+        };
+        _volumeOsdCapsuleHost.BeginAnimation(HeightProperty, collapse);
+    }
+
+    private void CloseVolumeOsd()
+    {
+        _volumeOsdTimer?.Stop();
+        _volumeOsdDragging = false;
+        _volumeOsdClosing = false;
+        if (_volumeOsdCapsuleHost is not null) _volumeOsdCapsuleHost.BeginAnimation(HeightProperty, null);
+        if (_volumeOsdPopup is not null) _volumeOsdPopup.IsOpen = false;
+        Card.Opacity = 1;
+    }
+
+    private void ResetVolumeOsdTimer(int delayMs = 1500)
+    {
+        if (_volumeOsdTimer is null) return;
+        _volumeOsdTimer.Stop();
+        _volumeOsdTimer.Interval = TimeSpan.FromMilliseconds(delayMs);
+        _volumeOsdTimer.Start();
+    }
+
+    private void UpdateVolumeOsdVisuals(bool hasDevice, int level, bool muted)
+    {
+        if (_volumeOsdFill is null || _volumeOsdLevelText is null || _volumeOsdIcon is null) return;
+        var clamped = Math.Clamp(level, 0, 100);
+        _volumeOsdFill.Height = hasDevice ? VolumeOsdTrackHeight * clamped / 100.0 : 0;
+        _volumeOsdFill.Opacity = muted || !hasDevice ? 0.35 : 1.0;
+        _volumeOsdLevelText.Text = !hasDevice || muted ? "—" : $"{clamped}%";
+        var iconKey = !hasDevice || muted || clamped == 0
+            ? "IconVolumeMute"
+            : clamped < 50
+                ? "IconVolumeLow"
+                : "IconVolume";
+        _volumeOsdIcon.Content = FindResource(iconKey);
+    }
+
+    private void VolumeOsdTrack_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (_volumeOsdTrackHost is null || _monitor?.HasDevice != true) return;
+        _volumeOsdDragging = true;
+        _volumeOsdTrackHost.CaptureMouse();
+        SetVolumeFromOsdPoint(e.GetPosition(_volumeOsdTrackHost));
+        e.Handled = true;
+    }
+
+    private void VolumeOsdTrack_MouseMove(object sender, MouseEventArgs e)
+    {
+        if (!_volumeOsdDragging || _volumeOsdTrackHost is null) return;
+        SetVolumeFromOsdPoint(e.GetPosition(_volumeOsdTrackHost));
+    }
+
+    private void VolumeOsdTrack_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_volumeOsdDragging || _volumeOsdTrackHost is null) return;
+        _volumeOsdDragging = false;
+        _volumeOsdTrackHost.ReleaseMouseCapture();
+        SetVolumeFromOsdPoint(e.GetPosition(_volumeOsdTrackHost));
+        ResetVolumeOsdTimer();
+        e.Handled = true;
+    }
+
+    private void SetVolumeFromOsdPoint(Point pos)
+    {
+        if (_monitor?.HasDevice != true) return;
+        var ratio = (float)Math.Clamp(1.0 - (pos.Y / VolumeOsdTrackHeight), 0.0, 1.0);
+        if (_monitor.SetVolume(ratio)) Render();
+        else Report(UiText.Get("ErrorVolumeChange"));
     }
 }
