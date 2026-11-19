@@ -62,10 +62,6 @@
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="Surface" Property="Opacity" Value="0.48" />
                         </Trigger>
-                        <Trigger Property="IsKeyboardFocused" Value="True">
-                            <Setter TargetName="Surface" Property="BorderThickness" Value="1" />
-                            <Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource StrokeFocus}" />
-                        </Trigger>
                         <DataTrigger Binding="{Binding IsRunning}" Value="True">
                             <Setter TargetName="ActiveIndicator" Property="Visibility" Value="Visible" />
                             <Setter TargetName="ActiveIndicator" Property="Opacity" Value="0.75" />

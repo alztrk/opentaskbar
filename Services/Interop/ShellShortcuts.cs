@@ -434,6 +434,77 @@ public static class ShellShortcuts
         return list;
     }
 
+    /// <summary>
+    /// Computes the host window coordinates required to place the Windows Start menu flyout directly above
+    /// or beside the Start button. Handles both discrete popup windows and Windows 11 full-screen CoreWindow canvases.
+    /// </summary>
+    public static (int TargetX, int TargetY) ComputeStartMenuPosition(
+        int windowWidth, int windowHeight,
+        int workLeft, int workTop, int workRight, int workBottom,
+        double anchorLeft, double anchorTop, double anchorRight, double anchorBottom,
+        DockEdge edge, double dpiScale = 1.0, bool isLeftAligned = false)
+    {
+        var workWidth = workRight - workLeft;
+        var isFullScreenContainer = windowWidth >= workWidth - 100;
+
+        if (!isFullScreenContainer)
+        {
+            var centerY = (int)Math.Round((anchorTop + anchorBottom) / 2);
+            var minY = workTop + 8;
+            var maxY = Math.Max(minY, workBottom - windowHeight - 8);
+
+            return edge switch
+            {
+                DockEdge.Left => (
+                    (int)Math.Round(anchorRight) + 12,
+                    Math.Clamp(centerY - windowHeight / 2, minY, maxY)
+                ),
+                DockEdge.Right => (
+                    (int)Math.Round(anchorLeft) - windowWidth - 12,
+                    Math.Clamp(centerY - windowHeight / 2, minY, maxY)
+                ),
+                _ => (
+                    Math.Clamp((int)Math.Round(anchorLeft - 8), workLeft + 8, Math.Max(workLeft + 8, workRight - windowWidth - 8)),
+                    Math.Clamp((int)Math.Round(anchorTop) - windowHeight - 12, minY, maxY)
+                )
+            };
+        }
+
+        var flyoutWidth = (int)Math.Round(642 * dpiScale);
+        var flyoutHeight = (int)Math.Round(724 * dpiScale);
+
+        int flyoutLocalX = isLeftAligned ? (int)Math.Round(12 * dpiScale) : (windowWidth - flyoutWidth) / 2;
+        int flyoutLocalY = windowHeight - flyoutHeight - (int)Math.Round(12 * dpiScale);
+
+        var workMinY = workTop + 8;
+        var workMaxY = Math.Max(workMinY, workBottom - flyoutHeight - 8);
+
+        int desiredFlyoutX;
+        int desiredFlyoutY;
+
+        switch (edge)
+        {
+            case DockEdge.Left:
+                desiredFlyoutX = (int)Math.Round(anchorRight) + 12;
+                var centerY = (int)Math.Round((anchorTop + anchorBottom) / 2);
+                desiredFlyoutY = Math.Clamp(centerY - flyoutHeight / 2, workMinY, workMaxY);
+                break;
+            case DockEdge.Right:
+                desiredFlyoutX = (int)Math.Round(anchorLeft) - flyoutWidth - 12;
+                var rCenterY = (int)Math.Round((anchorTop + anchorBottom) / 2);
+                desiredFlyoutY = Math.Clamp(rCenterY - flyoutHeight / 2, workMinY, workMaxY);
+                break;
+            default:
+                var minX = workLeft + 8;
+                var maxX = Math.Max(minX, workRight - flyoutWidth - 8);
+                desiredFlyoutX = Math.Clamp((int)Math.Round(anchorLeft - 8), minX, maxX);
+                desiredFlyoutY = Math.Clamp((int)Math.Round(anchorTop) - flyoutHeight - 12, workMinY, workMaxY);
+                break;
+        }
+
+        return (desiredFlyoutX - flyoutLocalX, desiredFlyoutY - flyoutLocalY);
+    }
+
     private static async Task RepositionStartMenuAsync(FrameworkElement anchor, nint hintHwnd, CancellationToken cancellation)
     {
         if (PresentationSource.FromVisual(anchor) is not HwndSource source || source.Handle == 0)
@@ -492,29 +563,28 @@ public static class ShellShortcuts
                 var height = rect.Bottom - rect.Top;
                 if (width < 100 || height < 100) continue;
 
-                var centerY = (int)Math.Round((topLeft.Y + bottomRight.Y) / 2);
-                int targetX;
-                int targetY;
-                var minY = monitorInfo.Work.Top + 8;
-                var maxY = Math.Max(minY, monitorInfo.Work.Bottom - height - 8);
+                var dpi = GetDpiForWindow(mainHwnd);
+                if (dpi == 0) dpi = 96;
+                var dpiScale = dpi / 96.0;
 
-                switch (edge)
+                var isLeftAligned = false;
+                try
                 {
-                    case DockEdge.Left:
-                        targetX = (int)Math.Round(bottomRight.X) + 12;
-                        targetY = Math.Clamp(centerY - height / 2, minY, maxY);
-                        break;
-                    case DockEdge.Right:
-                        targetX = (int)Math.Round(topLeft.X) - width - 12;
-                        targetY = Math.Clamp(centerY - height / 2, minY, maxY);
-                        break;
-                    default:
-                        var minX = monitorInfo.Work.Left + 8;
-                        var maxX = Math.Max(minX, monitorInfo.Work.Right - width - 8);
-                        targetX = Math.Clamp((int)Math.Round(topLeft.X - 8), minX, maxX);
-                        targetY = Math.Clamp((int)Math.Round(topLeft.Y) - height - 12, minY, maxY);
-                        break;
+                    using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced");
+                    if (key?.GetValue("TaskbarAl") is int al && al == 0)
+                    {
+                        isLeftAligned = true;
+                    }
                 }
+                catch
+                {
+                }
+
+                var (targetX, targetY) = ComputeStartMenuPosition(
+                    width, height,
+                    monitorInfo.Work.Left, monitorInfo.Work.Top, monitorInfo.Work.Right, monitorInfo.Work.Bottom,
+                    topLeft.X, topLeft.Y, bottomRight.X, bottomRight.Y,
+                    edge, dpiScale, isLeftAligned);
 
                 AppLog.Info($"RepositionStartMenuAsync: moving start menu window {mainHwnd:X} ({width}x{height}) to ({targetX},{targetY})");
                 SetWindowPos(mainHwnd, 0, targetX, targetY, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
@@ -717,4 +787,7 @@ public static class ShellShortcuts
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetWindowPos(nint hWnd, nint hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(nint hwnd);
 }

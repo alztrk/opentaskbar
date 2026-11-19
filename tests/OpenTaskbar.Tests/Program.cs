@@ -10,6 +10,7 @@ var checks = 0;
 CountdownChecks();
 StopwatchChecks();
 CatalogChecks();
+WidgetCategoryChecks();
 LocalizationChecks();
 TaskManagerTextChecks();
 SettingsChecks();
@@ -181,6 +182,60 @@ void CatalogChecks()
     Check(stopwatch.Value == "00:00:30" && timer.Value == "00:00:30", "Hidden widgets must retain elapsed time.");
 }
 
+void WidgetCategoryChecks()
+{
+    var clock = new TestClock();
+    var catalog = new DockWidgetService(clock);
+    var options = catalog.CreateOptions([], []);
+
+    Check(options.Count == 24, "Catalog must define exactly 24 widgets.");
+
+    var timeWidgets = options.Where(o => o.Category == DockWidgetCategory.TimeAndWeather).Select(o => o.Id).ToArray();
+    Check(timeWidgets.Length == 5
+        && timeWidgets.Contains(DockWidgetService.ClockId)
+        && timeWidgets.Contains(DockWidgetService.WeatherId)
+        && timeWidgets.Contains("DayProgress")
+        && timeWidgets.Contains(DockWidgetService.StopwatchId)
+        && timeWidgets.Contains(DockWidgetService.CountdownId),
+        "TimeAndWeather category must contain Clock, Weather, DayProgress, Stopwatch and Countdown.");
+
+    var systemWidgets = options.Where(o => o.Category == DockWidgetCategory.SystemAndHardware).Select(o => o.Id).ToArray();
+    Check(systemWidgets.Length == 5
+        && systemWidgets.Contains(DockWidgetService.SystemStatsId)
+        && systemWidgets.Contains(DockWidgetService.NetSpeedId)
+        && systemWidgets.Contains(DockWidgetService.BatteryId)
+        && systemWidgets.Contains(DockWidgetService.BluetoothBatteryId)
+        && systemWidgets.Contains("Storage"),
+        "SystemAndHardware category must contain SystemStats, NetSpeed, Battery, BluetoothBattery and Storage.");
+
+    var aiWidgets = options.Where(o => o.Category == DockWidgetCategory.AiQuotas).Select(o => o.Id).ToArray();
+    Check(aiWidgets.Length == 7
+        && DockWidgetService.AiUsageWidgets.All(w => aiWidgets.Contains(w.Id)),
+        "AiQuotas category must contain all 7 AI provider widgets.");
+
+    var mediaWidgets = options.Where(o => o.Category == DockWidgetCategory.MediaAndControls).Select(o => o.Id).ToArray();
+    Check(mediaWidgets.Length == 4
+        && mediaWidgets.Contains(DockWidgetService.MediaId)
+        && mediaWidgets.Contains(DockWidgetService.AudioId)
+        && mediaWidgets.Contains(DockWidgetService.QuickSettingsId)
+        && mediaWidgets.Contains(DockWidgetService.TrayId),
+        "MediaAndControls category must contain Media, Audio, QuickSettings and Tray.");
+
+    var prodWidgets = options.Where(o => o.Category == DockWidgetCategory.Productivity).Select(o => o.Id).ToArray();
+    Check(prodWidgets.Length == 3
+        && prodWidgets.Contains(DockWidgetService.FocusId)
+        && prodWidgets.Contains(DockWidgetService.SearchId)
+        && prodWidgets.Contains(DockWidgetService.DesktopsId),
+        "Productivity category must contain Focus, Search and Desktops.");
+
+    UiText.Current.SetLanguage(AppLanguage.Turkish);
+    var sample = options.First(o => o.Category == DockWidgetCategory.AiQuotas);
+    Check(sample.CategoryLabel == "Yapay Zekâ", "Category label must be localized in Turkish.");
+    UiText.Current.SetLanguage(AppLanguage.English);
+    Check(sample.CategoryLabel == "AI Quotas", "Category label must be localized in English.");
+    UiText.Current.SetLanguage(AppLanguage.Turkish);
+}
+
 void LocalizationChecks()
 {
     var option = new DockWidgetOption("Clock", "Saat", "Yerel saat", true, false, new DockWidget("Clock", "Saat"));
@@ -188,7 +243,7 @@ void LocalizationChecks()
     option.PropertyChanged += (_, e) => changes.Add(e.PropertyName);
     option.UpdateText("Clock", "Local time");
     Check(option.IsInstalled && !option.IsEnabled, "Localization must preserve installation and visibility.");
-    Check(changes.SequenceEqual([nameof(option.Label), nameof(option.Description)]), "Both localized fields must notify bindings.");
+    Check(changes.SequenceEqual([nameof(option.Label), nameof(option.Description), nameof(option.CategoryLabel)]), "All localized fields must notify bindings.");
     changes.Clear();
     option.UpdateText("Clock", "Local time");
     Check(changes.Count == 0, "Unchanged text must not notify.");
@@ -430,6 +485,30 @@ void StartMenuAndOverlayChecks()
     var later = System.Diagnostics.Stopwatch.GetTimestamp() + (long)(0.5 * System.Diagnostics.Stopwatch.Frequency);
     Check(!state.WasOpenAtPress(openNow: false, pressTimestamp: later),
         "A later click must not be treated as open at press.");
+
+    // Start menu positioning: full-screen CoreWindow container offset math
+    // On 2560x1440 screen at 100% DPI, Start button at X=570, Y=1379:
+    // Window width is 2560, height is 1374. Flyout is 642x724.
+    // flyoutLocalX = (2560 - 642) / 2 = 959.
+    // desiredFlyoutX = 570 - 8 = 562.
+    // targetX = 562 - 959 = -397.
+    // Resulting screen flyout X: targetX + flyoutLocalX = -397 + 959 = 562 (directly above Start button!).
+    var (fullX, fullY) = ShellShortcuts.ComputeStartMenuPosition(
+        windowWidth: 2560, windowHeight: 1374,
+        workLeft: 0, workTop: 0, workRight: 2560, workBottom: 1374,
+        anchorLeft: 570, anchorTop: 1379, anchorRight: 620, anchorBottom: 1429,
+        edge: DockEdge.Bottom, dpiScale: 1.0, isLeftAligned: false);
+    Check(fullX == -397, "Full-screen container must offset horizontally so flyout aligns over the Start button.");
+    Check(fullY == 4, "Full-screen container must offset vertically to sit right above the dock.");
+
+    // Discrete window (e.g. Windows 10 or custom shell, 642x724):
+    var (discreteX, discreteY) = ShellShortcuts.ComputeStartMenuPosition(
+        windowWidth: 642, windowHeight: 724,
+        workLeft: 0, workTop: 0, workRight: 2560, workBottom: 1374,
+        anchorLeft: 570, anchorTop: 1379, anchorRight: 620, anchorBottom: 1429,
+        edge: DockEdge.Bottom, dpiScale: 1.0, isLeftAligned: false);
+    Check(discreteX == 562, "Discrete window must be positioned directly at the clamped anchor X.");
+    Check(discreteY == 642, "Discrete window must be clamped to the work area above the dock.");
 }
 
 sealed class TestClock : TimeProvider

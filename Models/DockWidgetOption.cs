@@ -1,10 +1,18 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.Windows;
+using OpenTaskbar.Services;
 
 namespace OpenTaskbar.Models;
 
-public sealed class DockWidgetOption(string id, string label, string description, bool isInstalled, bool isEnabled, DockWidgetItem preview) : INotifyPropertyChanged
+public sealed class DockWidgetOption(
+    string id,
+    string label,
+    string description,
+    bool isInstalled,
+    bool isEnabled,
+    DockWidgetItem preview,
+    DockWidgetCategory category = DockWidgetCategory.TimeAndWeather) : INotifyPropertyChanged
 {
     private bool _isInstalled = isInstalled;
     private bool _isEnabled = isEnabled;
@@ -17,6 +25,17 @@ public sealed class DockWidgetOption(string id, string label, string description
     public string Description => _description;
     public DockWidgetItem Preview { get; } = preview;
     public FrameworkElement? SettingsView { get; set; }
+    public DockWidgetCategory Category { get; } = category;
+
+    public string CategoryLabel => Category switch
+    {
+        DockWidgetCategory.TimeAndWeather => UiText.Get("WidgetCategoryTime"),
+        DockWidgetCategory.SystemAndHardware => UiText.Get("WidgetCategorySystem"),
+        DockWidgetCategory.AiQuotas => UiText.Get("WidgetCategoryAi"),
+        DockWidgetCategory.MediaAndControls => UiText.Get("WidgetCategoryMedia"),
+        DockWidgetCategory.Productivity => UiText.Get("WidgetCategoryProductivity"),
+        _ => string.Empty
+    };
 
     public bool HasSettings => string.Equals(Id, "Clock", StringComparison.OrdinalIgnoreCase)
         || string.Equals(Id, "Weather", StringComparison.OrdinalIgnoreCase)
@@ -51,16 +70,23 @@ public sealed class DockWidgetOption(string id, string label, string description
 
     public void UpdateText(string label, string description)
     {
+        var changed = false;
         if (_label != label)
         {
             _label = label;
             Preview.Label = label;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Label)));
+            changed = true;
         }
         if (_description != description)
         {
             _description = description;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Description)));
+            changed = true;
+        }
+        if (changed)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CategoryLabel)));
         }
     }
 
