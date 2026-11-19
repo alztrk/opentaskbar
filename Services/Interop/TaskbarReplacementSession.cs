@@ -297,7 +297,10 @@ public sealed class TaskbarReplacementSession : IDisposable
             _lastWindowPos = null;
             _active = true;
             PositionDockWindow(throwOnFailure: true);
-            TaskbarRecoveryWatchdog.Start(Environment.ProcessId);
+            // Extracting the embedded watchdog EXE and starting it (AV/SmartScreen scanning, process
+            // creation) can take hundreds of ms. It does not need the UI thread; the recovery journal
+            // written above is the authoritative fallback if this run exits before it comes up.
+            _ = Task.Run(() => TaskbarRecoveryWatchdog.Start(Environment.ProcessId));
         }
         catch
         {

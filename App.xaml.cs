@@ -48,9 +48,11 @@ public partial class App : Application
         }
 
         AppLog.Initialize();
+        StartupStopwatch.Mark("OnStartup entered");
         // A previous instance may have been killed while the taskbar was hidden. Heal before choosing a mode:
         // --preview and --inspect never start a replacement session, so they would otherwise leave it hidden.
         var healError = TaskbarReplacementSession.HealPendingRecovery();
+        StartupStopwatch.Mark("taskbar recovery healed");
         if (healError is not null) AppLog.Error($"Startup taskbar self-heal failed: {healError}");
         DispatcherUnhandledException += App_DispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
@@ -84,11 +86,14 @@ public partial class App : Application
         // Before any window exists, so a widget pack's sizes and fonts are in place when styles are first built.
         ThemePacks.Select(Preferences.Current.ThemePack);
         ThemePacks.ApplyWidgets(Preferences.Current.Theme);
+        StartupStopwatch.Mark("themes and settings ready");
         base.OnStartup(e);
 
         var mainWindow = new MainWindow();
+        StartupStopwatch.Mark("MainWindow constructed");
         MainWindow = mainWindow;
         mainWindow.Show();
+        StartupStopwatch.Mark("MainWindow shown (first paint pending)");
         if (themeInstallError is not null)
             AppLog.Error($"Built-in theme installation: {themeInstallError}");
 
