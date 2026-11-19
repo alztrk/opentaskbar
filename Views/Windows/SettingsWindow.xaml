@@ -394,6 +394,16 @@
                             <TextBlock Text="{local:Loc WidgetsDescription}" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,16" TextWrapping="Wrap" />
 
                             <TextBlock Text="{local:Loc SectionWidgetsCatalog}" Style="{StaticResource SettingsSectionHeading}" Margin="0,0,0,12" />
+                            <Border Background="{DynamicResource SettingsControl}" CornerRadius="8" Padding="3" Margin="0,0,0,14" HorizontalAlignment="Left">
+                                <WrapPanel Orientation="Horizontal">
+                                    <RadioButton x:Name="WidgetCategoryAllRadio" GroupName="WidgetCategoryFilter" Content="{local:Loc WidgetCategoryAll}" Style="{StaticResource SettingsSegmentChoice}" IsChecked="True" Click="WidgetCategoryFilter_Click" Padding="12,5" />
+                                    <RadioButton x:Name="WidgetCategoryTimeRadio" GroupName="WidgetCategoryFilter" Content="{local:Loc WidgetCategoryTime}" Style="{StaticResource SettingsSegmentChoice}" Click="WidgetCategoryFilter_Click" Padding="12,5" />
+                                    <RadioButton x:Name="WidgetCategorySystemRadio" GroupName="WidgetCategoryFilter" Content="{local:Loc WidgetCategorySystem}" Style="{StaticResource SettingsSegmentChoice}" Click="WidgetCategoryFilter_Click" Padding="12,5" />
+                                    <RadioButton x:Name="WidgetCategoryAiRadio" GroupName="WidgetCategoryFilter" Content="{local:Loc WidgetCategoryAi}" Style="{StaticResource SettingsSegmentChoice}" Click="WidgetCategoryFilter_Click" Padding="12,5" />
+                                    <RadioButton x:Name="WidgetCategoryMediaRadio" GroupName="WidgetCategoryFilter" Content="{local:Loc WidgetCategoryMedia}" Style="{StaticResource SettingsSegmentChoice}" Click="WidgetCategoryFilter_Click" Padding="12,5" />
+                                    <RadioButton x:Name="WidgetCategoryProductivityRadio" GroupName="WidgetCategoryFilter" Content="{local:Loc WidgetCategoryProductivity}" Style="{StaticResource SettingsSegmentChoice}" Click="WidgetCategoryFilter_Click" Padding="12,5" />
+                                </WrapPanel>
+                            </Border>
                             <ItemsControl x:Name="WidgetOptionsList" ItemTemplate="{StaticResource SettingsWidgetOptionTemplate}"
                                           HorizontalAlignment="Stretch">
                                 <ItemsControl.ItemsPanel>

@@ -394,6 +394,31 @@ internal static class WidgetViewChecks
                     Check(preferences.Current.WeatherCity == "İzmir", "Selecting a city in the dropdown must auto-save WeatherCity.");
                     weatherExpandBtn.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                     Check(!weatherOption.IsSettingsExpanded, "Clicking weather settings button again must collapse it.");
+
+                    // Test Category Filtering
+                    var aiFilterRadio = RequiredName<RadioButton>(settings, "WidgetCategoryAiRadio");
+                    var allFilterRadio = RequiredName<RadioButton>(settings, "WidgetCategoryAllRadio");
+                    var systemFilterRadio = RequiredName<RadioButton>(settings, "WidgetCategorySystemRadio");
+
+                    aiFilterRadio.IsChecked = true;
+                    aiFilterRadio.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Layout(settings);
+                    var aiCards = Descendants<WidgetCatalogItem>(list).ToArray();
+                    Check(aiCards.Length == 7 && aiCards.All(card => ((DockWidgetOption)card.DataContext).Category == DockWidgetCategory.AiQuotas),
+                        "Selecting AI category filter must display only the 7 AI widgets.");
+
+                    systemFilterRadio.IsChecked = true;
+                    systemFilterRadio.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Layout(settings);
+                    var systemCards = Descendants<WidgetCatalogItem>(list).ToArray();
+                    Check(systemCards.Length == 5 && systemCards.All(card => ((DockWidgetOption)card.DataContext).Category == DockWidgetCategory.SystemAndHardware),
+                        "Selecting System category filter must display only the 5 system widgets.");
+
+                    allFilterRadio.IsChecked = true;
+                    allFilterRadio.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Layout(settings);
+                    var allCards = Descendants<WidgetCatalogItem>(list).ToArray();
+                    Check(allCards.Length == 24, "Selecting All category filter must restore all 24 widgets in the catalog.");
                 }
                 finally
                 {

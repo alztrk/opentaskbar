@@ -23,6 +23,8 @@ public partial class SettingsWindow : Window
     private readonly ApplicationPreferences _preferences;
     private readonly StartupRegistration _startup = new();
     private readonly ObservableCollection<DockWidgetOption> _widgetOptions = [];
+    private readonly ObservableCollection<DockWidgetOption> _displayedWidgetOptions = [];
+    private DockWidgetCategory? _selectedCategory;
     private readonly Dictionary<string, ComboBox> _widgetDensityBoxes = [];
     private readonly DockWidgetService _widgetPreviewService = new(TimeProvider.System);
     private readonly DispatcherTimer _widgetPreviewTimer = new() { Interval = TimeSpan.FromSeconds(15) };
@@ -56,9 +58,10 @@ public partial class SettingsWindow : Window
         foreach (var option in _widgetPreviewService.CreateOptions(_applied.InstalledWidgets, _applied.Widgets))
         {
             _widgetOptions.Add(option);
+            _displayedWidgetOptions.Add(option);
         }
         AttachWidgetSettingsPanels();
-        WidgetOptionsList.ItemsSource = _widgetOptions;
+        WidgetOptionsList.ItemsSource = _displayedWidgetOptions;
         WeatherCountryBox.ItemsSource = CountryCityService.GetInitialCountries().Select(c => c.Name).ToList();
         _ = InitializeWeatherLocationsAsync(_applied.WeatherCity);
         _preferences.Changed += Preferences_Changed;
@@ -82,11 +85,11 @@ public partial class SettingsWindow : Window
             if (_source is { IsDisposed: false }) _source.RemoveHook(WindowProc);
             WidgetOptionsList.ItemsSource = null;
             _widgetOptions.Clear();
+            _displayedWidgetOptions.Clear();
             _widgetDensityBoxes.Clear();
             WeatherCountryBox.ItemsSource = null;
             ThemeManager.SetSurfaceOpacity(_preferences.Current.SurfaceOpacity);
             (Application.Current.MainWindow as MainWindow)?.SetSizePreview(null, null);
-            _widgetOptions.Clear();
         };
         DarkTheme.IsChecked = _applied.Theme == AppTheme.Dark;
         LightTheme.IsChecked = _applied.Theme == AppTheme.Light;
@@ -598,6 +601,36 @@ public partial class SettingsWindow : Window
             _widgetPreviewTimer.Start();
         }
         else _widgetPreviewTimer.Stop();
+    }
+
+    private void WidgetCategoryFilter_Click(object sender, RoutedEventArgs e)
+    {
+        if (WidgetCategoryTimeRadio.IsChecked == true)
+            _selectedCategory = DockWidgetCategory.TimeAndWeather;
+        else if (WidgetCategorySystemRadio.IsChecked == true)
+            _selectedCategory = DockWidgetCategory.SystemAndHardware;
+        else if (WidgetCategoryAiRadio.IsChecked == true)
+            _selectedCategory = DockWidgetCategory.AiQuotas;
+        else if (WidgetCategoryMediaRadio.IsChecked == true)
+            _selectedCategory = DockWidgetCategory.MediaAndControls;
+        else if (WidgetCategoryProductivityRadio.IsChecked == true)
+            _selectedCategory = DockWidgetCategory.Productivity;
+        else
+            _selectedCategory = null;
+
+        ApplyCategoryFilter();
+    }
+
+    private void ApplyCategoryFilter()
+    {
+        _displayedWidgetOptions.Clear();
+        foreach (var option in _widgetOptions)
+        {
+            if (_selectedCategory is null || option.Category == _selectedCategory.Value)
+            {
+                _displayedWidgetOptions.Add(option);
+            }
+        }
     }
 
     private void WidgetInstallation_Click(object sender, RoutedEventArgs e)
