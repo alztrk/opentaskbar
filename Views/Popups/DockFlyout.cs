@@ -122,19 +122,32 @@ public sealed class DockFlyout
         FlyoutRegistry.Add(new WeakReference<DockFlyout>(this));
         _innerBevel = new Border
         {
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(13),
-            Padding = new Thickness(12),
-            Background = System.Windows.Media.Brushes.Transparent
+            BorderThickness = new Thickness(0),
+            CornerRadius = new CornerRadius(15),
+            Padding = new Thickness(14),
+            Background = Brushes.Transparent
         };
-        _innerBevel.SetResourceReference(Border.BorderBrushProperty, "DockInnerBevelMaterial");
+
+        var topSheen = new Border
+        {
+            Height = 36,
+            VerticalAlignment = VerticalAlignment.Top,
+            CornerRadius = new CornerRadius(15, 15, 0, 0),
+            IsHitTestVisible = false
+        };
+        topSheen.SetResourceReference(Border.BackgroundProperty, "DockHighlight");
+
+        var bodyGrid = new Grid();
+        bodyGrid.Children.Add(topSheen);
+        bodyGrid.Children.Add(_innerBevel);
 
         _frame = new Border
         {
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(14),
+            CornerRadius = new CornerRadius(16),
             Padding = new Thickness(0),
-            Child = _innerBevel
+            ClipToBounds = true,
+            Child = bodyGrid
         };
         _frame.SetResourceReference(Border.BackgroundProperty, "MenuMaterial");
         _frame.SetResourceReference(Border.BorderBrushProperty, "MenuStroke");
@@ -142,10 +155,10 @@ public sealed class DockFlyout
         _frame.SetResourceReference(TextElement.FontFamilyProperty, "InterfaceFont");
 
         var contentHost = new Grid();
-        AttachSoftShadow(contentHost, 14);
+        AttachSoftShadow(contentHost, 16);
         contentHost.Children.Add(_frame);
 
-        _root = new Grid { Margin = new Thickness(12, 10, 12, 14), Children = { contentHost } };
+        _root = new Grid { Margin = new Thickness(10, 8, 10, 12), Children = { contentHost } };
         _popup = new Popup
         {
             AllowsTransparency = true,
