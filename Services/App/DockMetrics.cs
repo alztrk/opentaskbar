@@ -24,8 +24,8 @@ public static class DockMetrics
     public const double IconSize = 42;
 
     // Magnification.
-    public const double HoverScale = 1.28;
-    public const double InfluenceRadius = 90;
+    public const double HoverScale = 1.25;
+    public const double InfluenceRadius = 135;
 
     // Previews.
     public const double PreviewGap = 18;

@@ -175,13 +175,18 @@ public partial class MainWindow
             // Cancel a still-running mouse-leave animation without snapping to its base value.
             foreach (var icon in _magnificationScaleTargets.Keys)
             {
-                var (scale, _) = GetIconTransforms(icon);
+                var (scale, translate) = GetIconTransforms(icon);
                 var currentX = scale.ScaleX;
                 var currentY = scale.ScaleY;
+                var prop = IsVertical ? TranslateTransform.XProperty : TranslateTransform.YProperty;
+                var currentT = IsVertical ? translate.X : translate.Y;
                 scale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
                 scale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+                translate.BeginAnimation(prop, null);
                 scale.ScaleX = currentX;
                 scale.ScaleY = currentY;
+                if (IsVertical) translate.X = currentT;
+                else translate.Y = currentT;
             }
 
             _magnificationLastFrame = null;
@@ -196,22 +201,35 @@ public partial class MainWindow
         var elapsedMs = _magnificationLastFrame is { } last
             ? Math.Clamp((frameTime - last).TotalMilliseconds, 1, 50) : 16.7;
         _magnificationLastFrame = frameTime;
-        // Frame-rate-independent easing with roughly a 55 ms response time.
-        var blend = 1 - Math.Exp(-elapsedMs / 55.0);
+        // Smooth organic easing with a gentle 75 ms response time.
+        var blend = 1 - Math.Exp(-elapsedMs / 75.0);
         var settled = true;
+        const double maxScale = DockMetrics.HoverScale;
 
         foreach (var (icon, targetScale) in _magnificationScaleTargets)
         {
-            var (scale, _) = GetIconTransforms(icon);
+            var (scale, translate) = GetIconTransforms(icon);
             icon.RenderTransformOrigin = IconScaleOrigin;
             var current = scale.ScaleX;
             var next = Math.Abs(targetScale - current) < 0.003
                 ? targetScale : current + (targetScale - current) * blend;
             if (Math.Abs(targetScale - next) >= 0.003) settled = false;
-            if (Math.Abs(current - next) < 0.0001) continue;
-            UseHoverIcon(icon, next > HoverIconThreshold);
-            scale.ScaleX = next;
-            scale.ScaleY = next;
+            if (Math.Abs(current - next) >= 0.0001)
+            {
+                UseHoverIcon(icon, next > HoverIconThreshold);
+                scale.ScaleX = next;
+                scale.ScaleY = next;
+            }
+
+            // Organic elevation tracking the magnification wave (lifts up to 3.5 DIP)
+            var liftFactor = Math.Max(0.0, (next - 1.0) / (maxScale - 1.0));
+            var targetLift = -3.5 * liftFactor * BounceDirection;
+            var currentLift = IsVertical ? translate.X : translate.Y;
+            var nextLift = Math.Abs(targetLift - currentLift) < 0.05
+                ? targetLift : currentLift + (targetLift - currentLift) * blend;
+            if (Math.Abs(targetLift - nextLift) >= 0.05) settled = false;
+            if (IsVertical) translate.X = nextLift;
+            else translate.Y = nextLift;
         }
 
         if (settled) StopMagnificationRendering();
@@ -251,12 +269,13 @@ public partial class MainWindow
         _magnificationScaleTargets.Clear();
         if (_magnifiedIcons.Count == 0) return;
         var duration = _preferences.Current.AnimationsEnabled && SystemParameters.ClientAreaAnimation
-            ? TimeSpan.FromMilliseconds(120) : TimeSpan.Zero;
+            ? TimeSpan.FromMilliseconds(140) : TimeSpan.Zero;
         var easing = new CubicEase { EasingMode = EasingMode.EaseOut };
+        var prop = IsVertical ? TranslateTransform.XProperty : TranslateTransform.YProperty;
 
         foreach (var icon in _magnifiedIcons)
         {
-            var (scale, _) = GetIconTransforms(icon);
+            var (scale, translate) = GetIconTransforms(icon);
             var shrink = new DoubleAnimation(1.0, duration) { EasingFunction = easing };
             // Keep the sharp variant while shrinking; the resting bitmap is exact only at scale 1.
             shrink.Completed += (_, _) =>
@@ -265,6 +284,7 @@ public partial class MainWindow
             };
             scale.BeginAnimation(ScaleTransform.ScaleXProperty, shrink);
             scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, duration) { EasingFunction = easing });
+            translate.BeginAnimation(prop, new DoubleAnimation(0.0, duration) { EasingFunction = easing });
         }
 
         _magnifiedIcons.Clear();
