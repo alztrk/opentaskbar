@@ -532,9 +532,13 @@ public partial class MainWindow : Window
         if (_thumbnailPreview.IsVisible)
         {
             var activeHandles = _thumbnailPreview.ActiveHandles;
-            if (activeHandles.Count > 0 && !activeHandles.Any(h => windows.Any(w => w.Handle == h)))
+            var closed = activeHandles.Where(h => windows.All(w => w.Handle != h)).ToList();
+            if (closed.Count > 0 && _thumbnailPreview.Anchor is { Tag: string previewPath })
             {
-                _thumbnailPreview.Hide();
+                var remaining = windows
+                    .Where(w => string.Equals(w.ExecutablePath, previewPath, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                _thumbnailPreview.RemoveClosed(closed, remaining);
             }
         }
     }
@@ -1143,10 +1147,9 @@ public partial class MainWindow : Window
 
     private void ThumbnailPreview_CloseRequested(object? sender, EventArgs e)
     {
+        // The preview stays open: the window-list update removes the closed card once the window is gone.
         var sourceHandle = _thumbnailPreview.SourceHandle;
         _previewCloseTimer.Stop();
-        _thumbnailPreview.Hide();
-        _autoHideController?.EvaluateState();
         if (sourceHandle == 0 || !NativeWindowTracker.RequestClose(sourceHandle))
         {
             ReportError("ErrorPreviewClose");
