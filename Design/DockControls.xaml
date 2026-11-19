@@ -98,41 +98,37 @@
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />
         <Setter Property="Focusable" Value="False" />
         <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="Width" Value="20" />
-        <Setter Property="Height" Value="34" />
+        <Setter Property="Width" Value="24" />
+        <Setter Property="Height" Value="36" />
         <Setter Property="Visibility" Value="Collapsed" />
         <Setter Property="Panel.ZIndex" Value="10" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
-                    <Border x:Name="IndicatorPlate"
-                            Background="{DynamicResource SurfacePopup}"
-                            BorderBrush="{DynamicResource StrokeSubtle}"
-                            BorderThickness="1"
-                            CornerRadius="10"
-                            Padding="0">
-                        <Border.Effect>
-                            <DropShadowEffect BlurRadius="6" ShadowDepth="1" Direction="270" Color="#000000" Opacity="0.35" />
-                        </Border.Effect>
+                    <Border Background="Transparent" BorderThickness="0" Padding="0">
                         <Path x:Name="IndicatorGlyph"
                               Data="{Binding Content, RelativeSource={RelativeSource TemplatedParent}}"
                               Stroke="{DynamicResource TextPrimary}"
-                              StrokeThickness="1.75"
+                              StrokeThickness="2"
                               StrokeStartLineCap="Round"
                               StrokeEndLineCap="Round"
                               StrokeLineJoin="Round"
-                              MaxWidth="11" MaxHeight="11"
+                              MaxWidth="12" MaxHeight="14"
                               Stretch="Uniform"
-                              HorizontalAlignment="Center" VerticalAlignment="Center" />
+                              Opacity="0.75"
+                              HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <Path.Effect>
+                                <DropShadowEffect BlurRadius="4" ShadowDepth="1" Direction="270" Color="#000000" Opacity="0.55" />
+                            </Path.Effect>
+                        </Path>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="IndicatorPlate" Property="Background" Value="{DynamicResource SurfaceHover}" />
-                            <Setter TargetName="IndicatorPlate" Property="BorderBrush" Value="{DynamicResource StrokeFocus}" />
+                            <Setter TargetName="IndicatorGlyph" Property="Opacity" Value="1.0" />
                             <Setter TargetName="IndicatorGlyph" Property="Stroke" Value="{DynamicResource IndicatorForegroundBrush}" />
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="IndicatorPlate" Property="Background" Value="{DynamicResource SurfacePressed}" />
+                            <Setter TargetName="IndicatorGlyph" Property="Opacity" Value="0.5" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
