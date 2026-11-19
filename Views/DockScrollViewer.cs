@@ -18,6 +18,9 @@ public sealed class DockScrollViewer : ScrollViewer
     private Button? _nextButton;
     private Button? _externalPreviousButton;
     private Button? _externalNextButton;
+    private double _externalIndicatorCornerRadius = 19;
+    private bool? _lastExternalVertical;
+    private double _lastExternalRadius = double.NaN;
 
     public static readonly DependencyProperty CurrentHorizontalOffsetProperty = DependencyProperty.Register(
         nameof(CurrentHorizontalOffset), typeof(double), typeof(DockScrollViewer),
@@ -249,16 +252,30 @@ public sealed class DockScrollViewer : ScrollViewer
     private void OnNextButtonClick(object sender, RoutedEventArgs e) => ScrollStep(forward: true);
 
     /// <summary>
-    /// Registers external overlay buttons (e.g. placed in DockSurface) that mirror the scroll
-    /// indicator state. The external buttons must already have their Click events wired to
-    /// <see cref="ScrollStep"/> via <see cref="ScrollStepBack"/> and <see cref="ScrollStepForward"/>.
+    /// Registers external overlay buttons (e.g. placed at the outer edges of DockSurface) that
+    /// render the scroll scrim and chevron in place of the internal template buttons.
     /// </summary>
     public void SetExternalIndicators(Button? previous, Button? next)
     {
         _externalPreviousButton = previous;
         _externalNextButton = next;
+        _lastExternalVertical = null;
+        _lastExternalRadius = double.NaN;
         UpdateIndicatorLayout();
         UpdateIndicators();
+    }
+
+    /// <summary>Inner corner radius matching DockFrame so external edge scrims align cleanly with the dock corners.</summary>
+    public double ExternalIndicatorCornerRadius
+    {
+        get => _externalIndicatorCornerRadius;
+        set
+        {
+            var clamped = double.IsFinite(value) ? Math.Max(0, value) : 0;
+            if (Math.Abs(_externalIndicatorCornerRadius - clamped) < 0.01) return;
+            _externalIndicatorCornerRadius = clamped;
+            UpdateIndicatorLayout();
+        }
     }
 
     public void ScrollStepBack() => ScrollStep(forward: false);
@@ -285,12 +302,13 @@ public sealed class DockScrollViewer : ScrollViewer
     private void UpdateIndicatorLayout()
     {
         var topOffset = HoverHeadroom;
-        if (ScrollableHeight > 0)
+        var vertical = ScrollableHeight > 0;
+        if (vertical)
         {
             if (_previousButton is not null)
             {
                 _previousButton.Content = TryFindResource("IconChevronUp");
-                _previousButton.Background = TryFindResource("DockScrollScrimTop") as Brush;
+                _previousButton.SetResourceReference(BackgroundProperty, "DockScrollScrimTop");
                 _previousButton.HorizontalAlignment = HorizontalAlignment.Stretch;
                 _previousButton.VerticalAlignment = VerticalAlignment.Top;
                 _previousButton.Width = double.NaN;
@@ -304,7 +322,7 @@ public sealed class DockScrollViewer : ScrollViewer
             if (_nextButton is not null)
             {
                 _nextButton.Content = TryFindResource("IconChevronDown");
-                _nextButton.Background = TryFindResource("DockScrollScrimBottom") as Brush;
+                _nextButton.SetResourceReference(BackgroundProperty, "DockScrollScrimBottom");
                 _nextButton.HorizontalAlignment = HorizontalAlignment.Stretch;
                 _nextButton.VerticalAlignment = VerticalAlignment.Bottom;
                 _nextButton.Width = double.NaN;
@@ -321,7 +339,7 @@ public sealed class DockScrollViewer : ScrollViewer
             if (_previousButton is not null)
             {
                 _previousButton.Content = TryFindResource("IconChevronLeft");
-                _previousButton.Background = TryFindResource("DockScrollScrimStart") as Brush;
+                _previousButton.SetResourceReference(BackgroundProperty, "DockScrollScrimStart");
                 _previousButton.HorizontalAlignment = HorizontalAlignment.Left;
                 _previousButton.VerticalAlignment = VerticalAlignment.Stretch;
                 _previousButton.Width = 28;
@@ -335,7 +353,7 @@ public sealed class DockScrollViewer : ScrollViewer
             if (_nextButton is not null)
             {
                 _nextButton.Content = TryFindResource("IconChevronRight");
-                _nextButton.Background = TryFindResource("DockScrollScrimEnd") as Brush;
+                _nextButton.SetResourceReference(BackgroundProperty, "DockScrollScrimEnd");
                 _nextButton.HorizontalAlignment = HorizontalAlignment.Right;
                 _nextButton.VerticalAlignment = VerticalAlignment.Stretch;
                 _nextButton.Width = 28;
@@ -345,6 +363,82 @@ public sealed class DockScrollViewer : ScrollViewer
                 _nextButton.Padding = new Thickness(0, 0, 5, 0);
                 _nextButton.Margin = new Thickness(0, topOffset, 0, 0);
                 _nextButton.Tag = new CornerRadius(0, 16, 16, 0);
+            }
+        }
+
+        UpdateExternalIndicatorLayout(vertical);
+    }
+
+    private void UpdateExternalIndicatorLayout(bool vertical)
+    {
+        if (_externalPreviousButton is null && _externalNextButton is null) return;
+        var radius = _externalIndicatorCornerRadius;
+        if (_lastExternalVertical == vertical && Math.Abs(_lastExternalRadius - radius) < 0.01) return;
+        _lastExternalVertical = vertical;
+        _lastExternalRadius = radius;
+
+        // Inset by 1 DIP (ControlStroke) so edge scrims stay cleanly inside DockFrame's border.
+        if (vertical)
+        {
+            if (_externalPreviousButton is not null)
+            {
+                _externalPreviousButton.Content = TryFindResource("IconChevronUp");
+                _externalPreviousButton.SetResourceReference(BackgroundProperty, "DockScrollScrimTop");
+                _externalPreviousButton.HorizontalAlignment = HorizontalAlignment.Stretch;
+                _externalPreviousButton.VerticalAlignment = VerticalAlignment.Top;
+                _externalPreviousButton.Width = double.NaN;
+                _externalPreviousButton.Height = 28;
+                _externalPreviousButton.HorizontalContentAlignment = HorizontalAlignment.Center;
+                _externalPreviousButton.VerticalContentAlignment = VerticalAlignment.Top;
+                _externalPreviousButton.Padding = new Thickness(0, 6, 0, 0);
+                _externalPreviousButton.Margin = new Thickness(1, 1, 1, 0);
+                _externalPreviousButton.Tag = new CornerRadius(radius, radius, 0, 0);
+            }
+            if (_externalNextButton is not null)
+            {
+                _externalNextButton.Content = TryFindResource("IconChevronDown");
+                _externalNextButton.SetResourceReference(BackgroundProperty, "DockScrollScrimBottom");
+                _externalNextButton.HorizontalAlignment = HorizontalAlignment.Stretch;
+                _externalNextButton.VerticalAlignment = VerticalAlignment.Bottom;
+                _externalNextButton.Width = double.NaN;
+                _externalNextButton.Height = 28;
+                _externalNextButton.HorizontalContentAlignment = HorizontalAlignment.Center;
+                _externalNextButton.VerticalContentAlignment = VerticalAlignment.Bottom;
+                _externalNextButton.Padding = new Thickness(0, 0, 0, 6);
+                _externalNextButton.Margin = new Thickness(1, 0, 1, 1);
+                _externalNextButton.Tag = new CornerRadius(0, 0, radius, radius);
+            }
+        }
+        else
+        {
+            if (_externalPreviousButton is not null)
+            {
+                _externalPreviousButton.Content = TryFindResource("IconChevronLeft");
+                _externalPreviousButton.SetResourceReference(BackgroundProperty, "DockScrollScrimStart");
+                _externalPreviousButton.HorizontalAlignment = HorizontalAlignment.Left;
+                _externalPreviousButton.VerticalAlignment = VerticalAlignment.Stretch;
+                _externalPreviousButton.Width = 28;
+                _externalPreviousButton.Height = double.NaN;
+                _externalPreviousButton.HorizontalContentAlignment = HorizontalAlignment.Left;
+                _externalPreviousButton.VerticalContentAlignment = VerticalAlignment.Center;
+                // 1 DIP margin + 7 DIP padding places the chevron right beside the 8 DIP resize grip.
+                _externalPreviousButton.Padding = new Thickness(7, 0, 0, 0);
+                _externalPreviousButton.Margin = new Thickness(1, 1, 0, 1);
+                _externalPreviousButton.Tag = new CornerRadius(radius, 0, 0, radius);
+            }
+            if (_externalNextButton is not null)
+            {
+                _externalNextButton.Content = TryFindResource("IconChevronRight");
+                _externalNextButton.SetResourceReference(BackgroundProperty, "DockScrollScrimEnd");
+                _externalNextButton.HorizontalAlignment = HorizontalAlignment.Right;
+                _externalNextButton.VerticalAlignment = VerticalAlignment.Stretch;
+                _externalNextButton.Width = 28;
+                _externalNextButton.Height = double.NaN;
+                _externalNextButton.HorizontalContentAlignment = HorizontalAlignment.Right;
+                _externalNextButton.VerticalContentAlignment = VerticalAlignment.Center;
+                _externalNextButton.Padding = new Thickness(0, 0, 7, 0);
+                _externalNextButton.Margin = new Thickness(0, 1, 1, 1);
+                _externalNextButton.Tag = new CornerRadius(0, radius, radius, 0);
             }
         }
     }

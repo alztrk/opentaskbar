@@ -241,6 +241,7 @@ public partial class MainWindow : Window
         startupTrimTimer.Start();
 
         // Widget placement (~180 ms) is deferred with the rest of the dock content so the frame paints first.
+        DockScrollViewer.SetExternalIndicators(ScrollPrevOverlay, ScrollNextOverlay);
         ApplySizeProfile();
         ApplyLayoutMode();
         PositionDock();
@@ -350,7 +351,6 @@ public partial class MainWindow : Window
     {
         if (!IsLoaded) return;
         var startup = StartupStopwatch.Start("dock content");
-        WireScrollOverlays();
         _widgetCoordinator.Apply(_preferences.Current);
         StartupStopwatch.Mark("widgets placed");
         ApplyStartIcon();
@@ -2448,6 +2448,7 @@ public partial class MainWindow : Window
         DockFrame.Padding = new Thickness(10, profile.VerticalPadding, 10, profile.VerticalPadding);
         DockFrame.CornerRadius = new CornerRadius(radius);
         DockInnerBevel.CornerRadius = new CornerRadius(Math.Max(0, radius - 1));
+        DockScrollViewer.ExternalIndicatorCornerRadius = Math.Max(0, radius - 1);
         DockSheen.CornerRadius = new CornerRadius(radius);
         DockSheen.Margin = new Thickness(-10, -profile.VerticalPadding, -10, -profile.VerticalPadding);
         DockDynamicGlintBorder.CornerRadius = new CornerRadius(radius, radius, 0, 0);
@@ -2876,27 +2877,6 @@ public partial class MainWindow : Window
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "RegisterWindowMessageW")]
     private static extern uint RegisterWindowMessage(string message);
-
-    // --- Scroll overlay wiring -------------------------------------------------------
-
-    /// <summary>
-    /// Registers the DockSurface overlay chevron buttons with DockScrollViewer so their
-    /// visibility is kept in sync with the scroll position, and sets their icon content.
-    /// Called once after the first render when both the template and the named parts exist.
-    /// </summary>
-    private void WireScrollOverlays()
-    {
-        // Set chevron glyphs (same resources the template buttons use).
-        ScrollPrevOverlay.Content = TryFindResource("IconChevronLeft");
-        ScrollNextOverlay.Content = TryFindResource("IconChevronRight");
-
-        // Top margin matches HoverHeadroom so the button sits inside the visible shelf area.
-        var headroom = TryFindResource("DockHeadroom") as double? ?? 0d;
-        ScrollPrevOverlay.Margin = new Thickness(0, headroom, 0, 0);
-        ScrollNextOverlay.Margin = new Thickness(0, headroom, 0, 0);
-
-        DockScrollViewer.SetExternalIndicators(ScrollPrevOverlay, ScrollNextOverlay);
-    }
 
     private void ScrollPrevOverlay_Click(object sender, RoutedEventArgs e)
         => DockScrollViewer.ScrollStepBack();

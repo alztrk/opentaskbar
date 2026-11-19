@@ -289,6 +289,32 @@ internal static class DockLayoutChecks
                 viewer.ScrollByWheel(int.MaxValue, ModifierKeys.Shift);
                 Layout();
                 Check(viewer.HorizontalOffset == 0, "Backward scrolling must stop at the content start.");
+
+                // External edge overlays (mounted in DockSurface beside the resize thumbs) must take over
+                // indicator visibility and stay bounded inside the shelf border without HoverHeadroom offset.
+                var extPrev = new Button { Style = (Style)app.FindResource("DockScrollIndicatorButton") };
+                var extNext = new Button { Style = (Style)app.FindResource("DockScrollIndicatorButton") };
+                viewer.ExternalIndicatorCornerRadius = 19;
+                viewer.SetExternalIndicators(extPrev, extNext);
+                Layout();
+                Check(prevIndicator.Visibility == Visibility.Collapsed && nextIndicator.Visibility == Visibility.Collapsed,
+                    "Internal template scroll buttons must stay collapsed when external dock-edge overlays are registered.");
+                Check(extPrev.Visibility == Visibility.Collapsed && extNext.Visibility == Visibility.Visible,
+                    "At offset 0 with external overlays, only the right dock-edge overlay must be visible.");
+                Check(extPrev.Margin == new Thickness(1, 1, 0, 1) && extNext.Margin == new Thickness(0, 1, 1, 1),
+                    "External dock-edge overlays must inset by 1 DIP inside DockFrame without HoverHeadroom top offset.");
+                Check(extPrev.Tag is CornerRadius prevCorner && prevCorner == new CornerRadius(19, 0, 0, 19)
+                    && extNext.Tag is CornerRadius nextCorner && nextCorner == new CornerRadius(0, 19, 19, 0),
+                    "External dock-edge overlays must match DockFrame inner corner radii.");
+                Check(extPrev.Background is not null && extNext.Background is not null,
+                    "External dock-edge overlays must carry the directional edge scrim brushes.");
+                viewer.ScrollToHorizontalOffset(cellWidth);
+                Layout();
+                Check(extPrev.Visibility == Visibility.Visible && extNext.Visibility == Visibility.Visible,
+                    "Mid-scroll with external overlays must show both left and right dock-edge indicators.");
+                viewer.ScrollToHorizontalOffset(0);
+                viewer.SetExternalIndicators(null, null);
+                Layout();
             }
             else Check(!viewer.ScrollByWheel(-120, ModifierKeys.Control), "A dock that already fits must not consume modifier wheel scrolling.");
         }
