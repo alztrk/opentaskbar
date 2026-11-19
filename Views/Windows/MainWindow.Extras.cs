@@ -166,83 +166,9 @@ public partial class MainWindow
     internal static BitmapSource? CreateStackIcon(DockStack stack, int targetSize = 128)
     {
         var size = Math.Max(16, targetSize);
-        var entries = stack.RecentEntries(3);
-        if (entries.Count == 0)
-        {
-            return RenderModernFolderIcon(size);
-        }
-
-        var scale = size / 128.0;
-
-        var visual = new DrawingVisual();
-        using (var dc = visual.RenderOpen())
-        {
-            // 1. If 2 or more entries exist, draw a secondary frosted glass backing plate with second item preview
-            if (entries.Count >= 2)
-            {
-                var backRect = new Rect(24 * scale, 12 * scale, 86 * scale, 86 * scale);
-                var backRadius = 16 * scale;
-                dc.DrawRoundedRectangle(CardShadowBrush1, null, new Rect(backRect.X, backRect.Y + 3 * scale, backRect.Width, backRect.Height), backRadius, backRadius);
-                var backPen = new Pen(CardDeckBackStroke, Math.Max(0.5, 1.0 * scale));
-                backPen.Freeze();
-                dc.DrawRoundedRectangle(CardDeckBackBrush, backPen, backRect, backRadius, backRadius);
-
-                var iconBack = ApplicationIconProvider.GetForShellItem(entries[1].FullName, (int)Math.Ceiling(60 * scale), iconOnly: true);
-                if (iconBack is not null)
-                {
-                    dc.PushOpacity(0.55);
-                    dc.DrawImage(iconBack, new Rect(backRect.X + (backRect.Width - 56 * scale) / 2, backRect.Y + 8 * scale, 56 * scale, 56 * scale));
-                    dc.Pop();
-                }
-            }
-
-            // 2. Primary Hero Item (entries[0]): large, crisp, front-and-center
-            var heroW = 90 * scale;
-            var heroH = 90 * scale;
-            var heroX = entries.Count >= 2 ? (12 * scale) : ((size - heroW) / 2);
-            var heroY = entries.Count >= 2 ? (26 * scale) : ((size - heroH) / 2);
-            var heroRect = new Rect(heroX, heroY, heroW, heroH);
-
-            // Ambient shadow under hero item
-            dc.DrawRoundedRectangle(CardShadowBrush2, null, new Rect(heroX, heroY + 4 * scale, heroW, heroH), 16 * scale, 16 * scale);
-
-            // Hero item icon
-            var iconFront = ApplicationIconProvider.GetForShellItem(entries[0].FullName, (int)Math.Ceiling(heroW), iconOnly: true);
-            if (iconFront is not null)
-            {
-                dc.DrawImage(iconFront, heroRect);
-            }
-            else
-            {
-                var folderBmp = RenderModernFolderIcon((int)heroW);
-                dc.DrawImage(folderBmp, heroRect);
-            }
-
-            // 3. Refined Micro-Badge: small, elegant glass disc in bottom-right corner
-            var badgeRadius = 11 * scale;
-            var badgeCenter = new Point(size - 18 * scale, size - 18 * scale);
-            dc.DrawEllipse(CardShadowBrush1, null, new Point(badgeCenter.X, badgeCenter.Y + 1.5 * scale), badgeRadius + 0.5 * scale, badgeRadius + 0.5 * scale);
-            var badgePen = new Pen(BadgeStrokeBrush, Math.Max(0.5, 1.0 * scale));
-            badgePen.Freeze();
-            dc.DrawEllipse(BadgeBackdropBrush, badgePen, badgeCenter, badgeRadius, badgeRadius);
-
-            var iconSize = 12 * scale;
-            var scaleGeom = iconSize / 24.0;
-            var originX = badgeCenter.X - (iconSize / 2);
-            var originY = badgeCenter.Y - (iconSize / 2);
-            dc.PushTransform(new TranslateTransform(originX, originY));
-            dc.PushTransform(new ScaleTransform(scaleGeom, scaleGeom));
-            var iconPen = new Pen(BadgeIconBrush, 2.0);
-            iconPen.Freeze();
-            dc.DrawGeometry(null, iconPen, FolderBadgeGeometry);
-            dc.Pop();
-            dc.Pop();
-        }
-
-        var rtb = new RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
-        rtb.Render(visual);
-        rtb.Freeze();
-        return rtb;
+        return ApplicationIconProvider.GetForShellItem(stack.Path, size, iconOnly: true)
+               ?? ApplicationIconProvider.GetForFile(stack.Path, size)
+               ?? RenderModernFolderIcon(size);
     }
 
     private IEnumerable<Button> GetExtraDockButtons()

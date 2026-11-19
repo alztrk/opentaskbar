@@ -136,7 +136,9 @@
                     DragLeave="StackButton_DragLeave"
                     Drop="StackButton_Drop">
                 <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}" RenderTransformOrigin="0.5,0.95">
-                    <Image Source="{Binding Icon}" Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality">
+                    <Image Source="{Binding Icon}" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                           Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality">
                         <Image.Effect>
                             <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Color="#000000" Opacity="0.35" />
                         </Image.Effect>
