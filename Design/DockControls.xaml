@@ -44,7 +44,7 @@
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
                     <Border x:Name="Surface" Background="{TemplateBinding Background}"
-                            BorderBrush="Transparent" BorderThickness="{StaticResource ControlStroke}"
+                            BorderBrush="Transparent" BorderThickness="0"
                             CornerRadius="{StaticResource ControlRadius}" Padding="{TemplateBinding Padding}">
                         <Grid>
                             <Grid.RowDefinitions>
@@ -63,6 +63,7 @@
                             <Setter TargetName="Surface" Property="Opacity" Value="0.48" />
                         </Trigger>
                         <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="Surface" Property="BorderThickness" Value="1" />
                             <Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource StrokeFocus}" />
                         </Trigger>
                         <DataTrigger Binding="{Binding IsRunning}" Value="True">
@@ -70,7 +71,6 @@
                             <Setter TargetName="ActiveIndicator" Property="Opacity" Value="0.75" />
                         </DataTrigger>
                         <DataTrigger Binding="{Binding IsForeground}" Value="True">
-                            <Setter TargetName="Surface" Property="Background" Value="{DynamicResource SurfaceSelectedStrong}" />
                             <Setter TargetName="ActiveIndicator" Property="Visibility" Value="Visible" />
                             <Setter TargetName="ActiveIndicator" Property="Opacity" Value="1.0" />
                             <Setter TargetName="ActiveIndicator" Property="Width" Value="5" />

@@ -85,8 +85,8 @@ internal static class ApplicationInteractionChecks
                 Flush();
                 var firstSurface = (Border)firstButton.Template.FindName("Surface", firstButton);
                 var secondSurface = (Border)secondButton.Template.FindName("Surface", secondButton);
-                Check(firstSurface.Background == application.FindResource("SurfaceSelectedStrong"),
-                    "The foreground application must have a background without keyboard focus.");
+                Check(IsTransparent(firstSurface.Background),
+                    "The foreground application must maintain a clean transparent dock background without artificial card boxes.");
                 Check(secondButton.IsKeyboardFocused && IsTransparent(secondSurface.Background),
                     "Keyboard focus on a background app must not create an active background.");
                 Check(secondSurface.BorderBrush == application.FindResource("StrokeFocus"),
@@ -95,8 +95,8 @@ internal static class ApplicationInteractionChecks
                 second.IsForeground = true;
                 Flush();
                 Check(IsTransparent(firstSurface.Background)
-                    && secondSurface.Background == application.FindResource("SurfaceSelectedStrong"),
-                    "Switching applications must move the foreground background immediately.");
+                    && IsTransparent(secondSurface.Background),
+                    "Switching applications must keep dock icon backgrounds completely transparent.");
                 second.IsForeground = false;
                 Flush();
                 Check(secondButton.IsKeyboardFocused && IsTransparent(secondSurface.Background),
