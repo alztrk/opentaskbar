@@ -14,9 +14,18 @@ public partial class MainWindow
     private readonly List<(FrameworkElement Icon, Point Center)> _magnificationTargets = [];
     private bool _magnificationTargetsDirty = true;
     private readonly Dictionary<FrameworkElement, double> _magnificationScaleTargets = [];
+    // Velocity-based spring state, so grow and shrink share one motion curve with a gentle settle.
+    private readonly Dictionary<FrameworkElement, double> _magnificationVelocity = [];
     private bool _magnificationRendering;
     private TimeSpan? _magnificationLastFrame;
     private readonly System.Runtime.CompilerServices.ConditionalWeakTable<Image, BitmapSource> _restingIcons = new();
+
+    /// <summary>Quintic smoothstep: continuous velocity at both ends, unlike the previous squared cosine.</summary>
+    private static double MagnificationFalloff(double distance, double radius)
+    {
+        var t = Math.Clamp(1.0 - distance / radius, 0.0, 1.0);
+        return t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+    }
 
     internal void InvalidateMagnificationTargets() => _magnificationTargetsDirty = true;
 
@@ -146,18 +155,24 @@ public partial class MainWindow
         _currentMagnifiedBuffer.Clear();
         _magnificationScaleTargets.Clear();
 
+        // Delay grows with distance from the cursor, so the wave travels outwards instead of
+        // every icon snapping to its target on the same frame.
+        const double waveDelayMsPerDip = 0.09;
         foreach (var (icon, center) in _magnificationTargets)
         {
             var distance = Math.Abs(mouseX - (IsVertical ? center.Y : center.X));
             var targetScale = 1.0;
             if (distance < influenceRadius)
             {
-                var factor = Math.Cos(distance / influenceRadius * (Math.PI / 2));
-                targetScale = 1.0 + (maxScale - 1.0) * factor * factor;
+                var delay = distance * waveDelayMsPerDip;
+                var waveX = mouseX + (mouseX >= (IsVertical ? center.Y : center.X) ? -delay : delay);
+                var waveDistance = Math.Abs(waveX - (IsVertical ? center.Y : center.X));
+                var factor = MagnificationFalloff(waveDistance, influenceRadius);
+                targetScale = 1.0 + (maxScale - 1.0) * factor;
             }
 
             _magnificationScaleTargets[icon] = targetScale;
-            if (targetScale > 1.005) _currentMagnifiedBuffer.Add(icon);
+            if (targetScale > HoverIconThreshold) _currentMagnifiedBuffer.Add(icon);
         }
 
         foreach (var icon in _magnifiedIcons)
@@ -190,6 +205,7 @@ public partial class MainWindow
             }
 
             _magnificationLastFrame = null;
+            _magnificationVelocity.Clear();
             CompositionTarget.Rendering += RenderMagnification;
             _magnificationRendering = true;
         }
@@ -201,8 +217,11 @@ public partial class MainWindow
         var elapsedMs = _magnificationLastFrame is { } last
             ? Math.Clamp((frameTime - last).TotalMilliseconds, 1, 50) : 16.7;
         _magnificationLastFrame = frameTime;
-        // Smooth organic easing with a gentle 75 ms response time.
-        var blend = 1 - Math.Exp(-elapsedMs / 75.0);
+        // Critically damped spring: quick response, a touch of overshoot, and a clean settle.
+        // Same dynamics in both directions, unlike the previous exponential + separate exit animation.
+        const double stiffness = 210.0;
+        const double damping = 24.0;
+        var seconds = Math.Min(elapsedMs, 32.0) / 1000.0;
         var settled = true;
         const double maxScale = DockMetrics.HoverScale;
 
@@ -211,23 +230,25 @@ public partial class MainWindow
             var (scale, translate) = GetIconTransforms(icon);
             icon.RenderTransformOrigin = IconScaleOrigin;
             var current = scale.ScaleX;
-            var next = Math.Abs(targetScale - current) < 0.003
-                ? targetScale : current + (targetScale - current) * blend;
-            if (Math.Abs(targetScale - next) >= 0.003) settled = false;
+            var velocity = _magnificationVelocity.GetValueOrDefault(icon);
+            velocity += (targetScale - current) * stiffness * seconds;
+            velocity *= Math.Exp(-damping * seconds);
+            var next = Math.Clamp(current + velocity * seconds, 1.0, maxScale + 0.04);
+            if (Math.Abs(targetScale - next) >= 0.003 || Math.Abs(velocity) >= 0.02) settled = false;
             if (Math.Abs(current - next) >= 0.0001)
             {
                 UseHoverIcon(icon, next > HoverIconThreshold);
                 scale.ScaleX = next;
                 scale.ScaleY = next;
             }
+            _magnificationVelocity[icon] = Math.Abs(targetScale - next) < 0.003 ? 0 : velocity;
 
-            // Organic elevation tracking the magnification wave (lifts up to 1.5 DIP)
+            // Elevation tracks the magnification wave (up to 2 DIP), using the same spring value.
             var liftFactor = Math.Max(0.0, (next - 1.0) / (maxScale - 1.0));
-            var targetLift = -1.5 * liftFactor * BounceDirection;
+            var targetLift = -2.0 * liftFactor * BounceDirection;
             var currentLift = IsVertical ? translate.X : translate.Y;
             var nextLift = Math.Abs(targetLift - currentLift) < 0.05
-                ? targetLift : currentLift + (targetLift - currentLift) * blend;
-            if (Math.Abs(targetLift - nextLift) >= 0.05) settled = false;
+                ? targetLift : currentLift + (targetLift - currentLift) * Math.Min(1.0, stiffness * seconds / damping);
             if (IsVertical) translate.X = nextLift;
             else translate.Y = nextLift;
         }
@@ -241,6 +262,7 @@ public partial class MainWindow
         CompositionTarget.Rendering -= RenderMagnification;
         _magnificationRendering = false;
         _magnificationLastFrame = null;
+        _magnificationVelocity.Clear();
     }
 
     private void DockSurface_PreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
@@ -265,33 +287,28 @@ public partial class MainWindow
 
     private void ResetMagnification()
     {
-        StopMagnificationRendering();
-        _magnificationScaleTargets.Clear();
-        if (_magnifiedIcons.Count == 0) return;
-        var duration = _preferences.Current.AnimationsEnabled && SystemParameters.ClientAreaAnimation
-            ? TimeSpan.FromMilliseconds(140) : TimeSpan.Zero;
-        var easing = new CubicEase { EasingMode = EasingMode.EaseOut };
-        var prop = IsVertical ? TranslateTransform.XProperty : TranslateTransform.YProperty;
-
-        foreach (var icon in _magnifiedIcons)
+        if (_magnifiedIcons.Count == 0)
         {
-            var (scale, translate) = GetIconTransforms(icon);
-            var shrink = new DoubleAnimation(1.0, duration) { EasingFunction = easing };
-            // Keep the sharp variant while shrinking; the resting bitmap is exact only at scale 1.
-            shrink.Completed += (_, _) =>
-            {
-                if (scale.ScaleX <= HoverIconThreshold) UseHoverIcon(icon, false);
-            };
-            scale.BeginAnimation(ScaleTransform.ScaleXProperty, shrink);
-            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, duration) { EasingFunction = easing });
-            translate.BeginAnimation(prop, new DoubleAnimation(0.0, duration) { EasingFunction = easing });
+            StopMagnificationRendering();
+            _magnificationScaleTargets.Clear();
+            return;
         }
 
-        _magnifiedIcons.Clear();
+        // Let the same spring animate back to rest instead of a separate CubicEase animation,
+        // so the exit has the same character as the entrance.
+        _magnificationScaleTargets.Clear();
+        foreach (var icon in _magnifiedIcons) _magnificationScaleTargets[icon] = 1.0;
+        if (!_magnificationRendering)
+        {
+            _magnificationLastFrame = null;
+            _magnificationVelocity.Clear();
+            CompositionTarget.Rendering += RenderMagnification;
+            _magnificationRendering = true;
+        }
     }
 
     /// <summary>Scale above which an icon shows its larger variant instead of the 1:1 resting bitmap.</summary>
-    private const double HoverIconThreshold = 1.005;
+    private const double HoverIconThreshold = 1.08;
 
     /// <summary>
     /// Swaps a dock icon between its resting bitmap (drawn 1:1, sharp at scale 1) and a larger native variant
