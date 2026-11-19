@@ -424,7 +424,7 @@ internal static class WidgetViewChecks
                 DockWidgetService.WeatherId => "21°",
                 DockWidgetService.NetSpeedId => "↓ 12 MB/s · ↑ 2 MB/s",
                 DockWidgetService.BluetoothBatteryId => "53%",
-                DockWidgetService.AiUsageId => "CL · CX",
+                var id when id.StartsWith("AiUsage", StringComparison.Ordinal) => string.Empty,
                 DockWidgetService.DesktopsId => "1 / 2",
                 DockWidgetService.TrayId => "▲",
                 DockWidgetService.SearchId => "Alt+Space",

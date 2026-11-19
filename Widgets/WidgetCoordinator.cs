@@ -28,7 +28,7 @@ public sealed class WidgetCoordinator : IDisposable
         "Weather",
         "NetSpeed",
         "BluetoothBattery",
-        "AiUsage",
+        .. DockWidgetService.AiUsageWidgets.Select(widget => widget.Id),
         "Audio",
         "QuickSettings",
         "Tray",
@@ -45,12 +45,11 @@ public sealed class WidgetCoordinator : IDisposable
         "Weather" => "WidgetWeather",
         "NetSpeed" => "WidgetNetSpeed",
         "BluetoothBattery" => "WidgetBluetoothBattery",
-        "AiUsage" => "WidgetAiUsage",
         "Audio" => "WidgetAudio",
         "QuickSettings" => "WidgetQuickSettings",
         "Tray" => "WidgetTray",
         "Clock" => "WidgetClock",
-        _ => null
+        _ => DockWidgetService.AiUsageWidgets.FirstOrDefault(widget => widget.Id == id)?.LabelKey
     };
 
     public static bool HandlesWidget(string id) =>
@@ -134,7 +133,8 @@ public sealed class WidgetCoordinator : IDisposable
             new("Weather", "WidgetWeather", () => new WeatherWidget(), s => IsCatalogEnabled(s, "Weather")),
             new("NetSpeed", "WidgetNetSpeed", () => new NetSpeedWidget(), s => IsCatalogEnabled(s, "NetSpeed")),
             new("BluetoothBattery", "WidgetBluetoothBattery", () => new BluetoothBatteryWidget(), s => IsCatalogEnabled(s, "BluetoothBattery")),
-            new("AiUsage", "WidgetAiUsage", () => new AiUsageWidget(), s => IsCatalogEnabled(s, "AiUsage")),
+            .. DockWidgetService.AiUsageWidgets.Select(definition => new WidgetSlot(definition.Id, definition.LabelKey,
+                () => new AiUsageWidget(definition.Provider), s => IsCatalogEnabled(s, definition.Id))),
             new("Audio", "WidgetAudio", () => new AudioWidget(), s => IsCatalogEnabled(s, "Audio")),
             new("QuickSettings", "WidgetQuickSettings", () => new QuickSettingsWidget(), s => IsCatalogEnabled(s, "QuickSettings")),
             new("Tray", "WidgetTray", CreateTrayWidget, s => IsCatalogEnabled(s, "Tray")),

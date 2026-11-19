@@ -33,9 +33,11 @@ public static class SettingsBackup
         try
         {
             var backup = JsonSerializer.Deserialize<BackupFile>(File.ReadAllText(path), DockSettingsStore.SerializerOptions);
-            if (backup?.Settings is null || !DockSettingsStore.Validate(backup.Settings)) return (null, [], "ErrorSettingsFileInvalid");
+            if (backup?.Settings is null) return (null, [], "ErrorSettingsFileInvalid");
+            var settings = DockSettingsStore.MigrateLegacyAiUsage(backup.Settings);
+            if (!DockSettingsStore.Validate(settings)) return (null, [], "ErrorSettingsFileInvalid");
             var pins = (backup.Pins ?? []).Where(pin => !string.IsNullOrWhiteSpace(pin.ExecutablePath)).ToList();
-            return (backup.Settings, pins, null);
+            return (settings, pins, null);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or NotSupportedException)
         {

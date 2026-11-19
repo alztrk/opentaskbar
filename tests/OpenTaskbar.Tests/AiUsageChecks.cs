@@ -325,8 +325,8 @@ internal static class AiUsageChecks
             var settings = new DockSettings(AiUsageProviders: AiProviders.All);
             var store = new DockSettingsStore(path);
             Check(!DockSettingsStore.Validate(settings with { AiUsageProviders = (AiProviders)128 }), "Unknown AI provider flags must be rejected.");
-            Check(store.Save(settings) is null && store.Load().Settings.AiUsageProviders == AiProviders.All,
-                "Provider flags must round-trip through settings.");
+            Check(store.Save(settings) is null && store.Load().Settings.AiUsageProviders == AiProviders.None,
+                "Legacy provider flags must be consumed by the per-provider widget migration.");
             File.WriteAllText(path, "{}");
             Check(store.Load().Settings is { AiUsageProviders: AiProviders.None, AiUsageRing: AiUsageRing.Highest },
                 "Legacy settings must leave providers disabled and the ring on the highest window.");
@@ -401,12 +401,17 @@ internal static class AiUsageChecks
             (_, _) => pending.Task,
             (provider, _) => Task.FromResult<(AiUsageReport?, string?)>((new(provider, null, [], DateTimeOffset.UtcNow), null))
         ];
+        foreach (var provider in new[] { AiProviders.None, AiProviders.All })
+        {
+            try { _ = new AiUsageWidget(provider); }
+            catch (ArgumentOutOfRangeException) { checks++; continue; }
+            throw new InvalidOperationException("An AI usage widget must require exactly one provider.");
+        }
         foreach (var loader in loaders)
-            foreach (var providers in new[] { AiProviders.None, AiProviders.Claude, AiProviders.All })
+            foreach (var provider in new[] { AiProviders.Claude, AiProviders.OpenRouter })
                 foreach (var compact in new[] { false, true })
                 {
-                    using var widget = new AiUsageWidget(loader);
-                    widget.ApplySettings(new DockSettings(AiUsageProviders: providers));
+                    using var widget = new AiUsageWidget(provider, loader);
                     widget.Activate();
                     widget.SetCompactState(compact);
                     widget.Tick(DateTime.Now.AddMinutes(1));

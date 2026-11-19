@@ -22,7 +22,6 @@ public sealed class DockWidgetService(TimeProvider timeProvider)
     public const string DesktopsId = "Desktops";
     public const string TrayId = "Tray";
     public const string WeatherId = "Weather";
-    public const string AiUsageId = "AiUsage";
     public const string BatteryId = "Battery";
     public const string StopwatchId = "Stopwatch";
     public const string CountdownId = "Countdown";
@@ -31,6 +30,20 @@ public sealed class DockWidgetService(TimeProvider timeProvider)
     public const string BluetoothBatteryId = "BluetoothBattery";
 
     private sealed record WidgetDefinition(string Id, string LabelKey, Func<CultureInfo, string>? Read);
+
+    public sealed record AiUsageWidgetDefinition(string Id, AiProviders Provider, string LabelKey);
+
+    /// <summary>Every AI provider is its own widget so each can be added, ordered and removed independently.</summary>
+    public static IReadOnlyList<AiUsageWidgetDefinition> AiUsageWidgets { get; } =
+    [
+        new("AiUsageClaude", AiProviders.Claude, "WidgetAiUsageClaude"),
+        new("AiUsageCodex", AiProviders.Codex, "WidgetAiUsageCodex"),
+        new("AiUsageAntigravity", AiProviders.Antigravity, "WidgetAiUsageAntigravity"),
+        new("AiUsageOpenCode", AiProviders.OpenCode, "WidgetAiUsageOpenCode"),
+        new("AiUsageCopilot", AiProviders.Copilot, "WidgetAiUsageCopilot"),
+        new("AiUsageDeepSeek", AiProviders.DeepSeek, "WidgetAiUsageDeepSeek"),
+        new("AiUsageOpenRouter", AiProviders.OpenRouter, "WidgetAiUsageOpenRouter")
+    ];
 
     private static readonly WidgetDefinition[] Definitions =
     [
@@ -43,7 +56,7 @@ public sealed class DockWidgetService(TimeProvider timeProvider)
         new(WeatherId, "WidgetWeather", _ => "21°"),
         new(NetSpeedId, "WidgetNetSpeed", _ => "↓ 0 B/s · ↑ 0 B/s"),
         new(BluetoothBatteryId, "WidgetBluetoothBattery", _ => "53% · 🔋"),
-        new(AiUsageId, "WidgetAiUsage", _ => "CL · CX"),
+        .. AiUsageWidgets.Select(widget => new WidgetDefinition(widget.Id, widget.LabelKey, null)),
         new(DesktopsId, "WidgetDesktops", _ => "1 / 2"),
         new(TrayId, "WidgetTray", _ => "▲"),
         new(BatteryId, "WidgetBattery", _ => ReadBatteryStatus()),

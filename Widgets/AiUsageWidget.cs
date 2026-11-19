@@ -11,68 +11,53 @@ using OpenTaskbar.Services;
 
 namespace OpenTaskbar.Widgets;
 
-/// <summary>Opt-in CLI quota meters; only active, enabled providers may poll.</summary>
+/// <summary>One CLI quota meter for a single provider; it only polls while the widget is enabled.</summary>
 public sealed class AiUsageWidget : DockWidget
 {
-    private static readonly AiProviders[] Providers = [AiProviders.Claude, AiProviders.Codex, AiProviders.Antigravity, AiProviders.OpenCode, AiProviders.Copilot, AiProviders.DeepSeek, AiProviders.OpenRouter];
+    private readonly AiProviders _provider;
     private readonly Func<AiProviders, CancellationToken, Task<(AiUsageReport?, string?)>>? _loader;
-    private readonly Dictionary<AiProviders, AiUsageReport> _reports = [];
-    private readonly Dictionary<AiProviders, string> _errors = [];
-    private readonly Dictionary<AiProviders, DateTimeOffset> _nextLoadAt = [];
-    private readonly Dictionary<AiProviders, DateTime> _signInStamps = [];
-    private readonly Dictionary<AiProviders, int> _failures = [];
-    private readonly Dictionary<AiProviders, DateTimeOffset> _lastLoadAt = [];
-    // Each built flyout keeps its own countdowns: the click flyout and the compact hover flyout can coexist.
+    private AiUsageReport? _report;
+    private string? _error;
+    private DateTimeOffset? _nextLoadAt;
+    private DateTime? _signInStamp;
+    private int _failures;
+    private DateTimeOffset? _lastLoadAt;
+    // The click flyout and the compact hover flyout can coexist, so each keeps its own countdowns.
     private readonly List<(TextBlock Block, DateTimeOffset Reset)> _countdowns = [];
     private readonly List<(TextBlock Block, DateTimeOffset Reset)> _hoverCountdowns = [];
     private readonly ContentControl _flyoutHost = new();
-    private readonly StackPanel _cards = new();
-    private readonly Card _summary;
-    private readonly Card _claude;
-    private readonly Card _codex;
-    private readonly Card _antigravity;
-    private readonly Card _openCode;
-    private readonly Card _copilot;
-    private readonly Card _deepSeek;
-    private readonly Card _openRouter;
+    private readonly Card _card;
     private readonly DockFlyout _flyout = new();
     private CancellationTokenSource? _loading;
-    private AiProviders _loadingProvider;
-    private AiProviders _enabled;
     private int _renderedMinute = -1;
 
     private sealed record Card(Button Button, System.Windows.Shapes.Path Logo, TextBlock Name, RingMeter Ring);
 
-    public AiUsageWidget(Func<AiProviders, CancellationToken, Task<(AiUsageReport?, string?)>>? loader = null)
+    public AiUsageWidget(AiProviders provider, Func<AiProviders, CancellationToken, Task<(AiUsageReport?, string?)>>? loader = null)
     {
+        if (!Enum.IsDefined(provider) || provider is AiProviders.None or AiProviders.All)
+            throw new ArgumentOutOfRangeException(nameof(provider), provider, "A single AI provider is required.");
+        _provider = provider;
         _loader = loader;
-        _summary = AddCard("AI", null);
-        _claude = AddCard("Claude", "LogoClaude");
-        _codex = AddCard("Codex", "LogoCodex");
-        _antigravity = AddCard("Antigravity", "LogoAntigravity");
-        _openCode = AddCard("OpenCode", "LogoOpenCode");
-        _copilot = AddCard("Copilot", "LogoCopilot");
-        _deepSeek = AddCard("DeepSeek", "LogoDeepSeek");
-        _openRouter = AddCard("OpenRouter", "LogoOpenRouter");
+        _card = AddCard();
         _flyout.Closed += (_, _) => _countdowns.Clear();
-        Content = _cards;
+        Content = _card.Button;
         Render();
     }
 
     public override bool SupportsCompactMode => true;
     public override int ShrinkPriority => 40;
-    // Card layout: padding and border, logo, name, ring; the compact summary card has no logo.
+    // Card layout: padding and border, logo, name, ring; the compact card drops the name.
     private const double LogoSize = 16, NameWidth = 44, RingSize = 34, Gap = 6;
     private const double CardPaddingAndBorder = 22;
-    public override double FullWidthEstimate => Math.Max(1, EnabledProviders.Count()) * (CardWidth(true) + CardSpacing);
-    public override double CompactWidthEstimate => CardWidth(false) + CardSpacing;
-    private static double CardWidth(bool logo) => CardPaddingAndBorder + (logo ? LogoSize + Gap : 0) + NameWidth + Gap + RingSize;
+    public override double FullWidthEstimate => CardWidth(false) + CardSpacing;
+    public override double CompactWidthEstimate => CardWidth(true) + CardSpacing;
+    private static double CardWidth(bool compact) =>
+        CardPaddingAndBorder + LogoSize + Gap + (compact ? 0 : NameWidth + Gap) + RingSize;
     private double CardSpacing => TryFindResource("WidgetSpacing") is Thickness spacing ? spacing.Left + spacing.Right : 0;
-    private IEnumerable<AiProviders> EnabledProviders => Providers.Where(provider => _enabled.HasFlag(provider));
 
     protected override void OnActivated()
     {
-        _enabled = Settings.AiUsageProviders;
         Render();
         _ = LoadAsync();
     }
@@ -87,39 +72,15 @@ public sealed class AiUsageWidget : DockWidget
     {
         _loading?.Cancel();
         _loading = null;
-        _reports.Clear();
-        _errors.Clear();
-        _nextLoadAt.Clear();
-        _signInStamps.Clear();
-        _failures.Clear();
-        _lastLoadAt.Clear();
+        _report = null;
+        _error = null;
+        _nextLoadAt = null;
+        _signInStamp = null;
+        _failures = 0;
+        _lastLoadAt = null;
     }
 
-    protected override void OnSettingsChanged()
-    {
-        if (_enabled != Settings.AiUsageProviders)
-        {
-            foreach (var provider in Providers.Where(provider => _enabled.HasFlag(provider) != Settings.AiUsageProviders.HasFlag(provider)))
-            {
-                _reports.Remove(provider);
-                _errors.Remove(provider);
-                _nextLoadAt.Remove(provider);
-                _signInStamps.Remove(provider);
-                _failures.Remove(provider);
-                _lastLoadAt.Remove(provider);
-                if (_loadingProvider == provider)
-                {
-                    _loading?.Cancel();
-                    _loading = null;
-                }
-            }
-            _flyout.Close();
-            _enabled = Settings.AiUsageProviders;
-            if (IsActive) _ = LoadAsync();
-        }
-        Render();
-    }
-
+    protected override void OnSettingsChanged() => Render();
     protected override void OnLanguageChanged() => Refresh();
     protected override void OnCompactChanged(bool compact) => Render();
     public override UIElement? BuildHoverFlyoutContent() => BuildFlyout(_hoverCountdowns);
@@ -133,7 +94,7 @@ public sealed class AiUsageWidget : DockWidget
         foreach (var (block, reset) in _countdowns.Concat(_hoverCountdowns)) block.Text = ResetText(reset);
     }
 
-    /// <summary>Re-renders the cards and, when our click flyout is open, swaps its content in place without reopening it.</summary>
+    /// <summary>Re-renders the card and, when our click flyout is open, swaps its content in place without reopening it.</summary>
     private void Refresh()
     {
         Render();
@@ -142,62 +103,52 @@ public sealed class AiUsageWidget : DockWidget
 
     private static bool IsStale(AiUsageReport report) => DateTimeOffset.UtcNow - report.FetchedAt > TimeSpan.FromMinutes(10);
 
-    private bool IsDue(AiProviders provider, DateTime credentialStamp)
+    private bool IsDue(DateTime credentialStamp)
     {
-        if (_signInStamps.TryGetValue(provider, out var stamp))
+        if (_signInStamp is { } stamp)
         {
             if (_loader is not null || credentialStamp == stamp) return false;
-            _signInStamps.Remove(provider);
-            _nextLoadAt.Remove(provider);
+            _signInStamp = null;
+            _nextLoadAt = null;
         }
-        return !_nextLoadAt.TryGetValue(provider, out var next) || DateTimeOffset.UtcNow >= next;
+        return _nextLoadAt is not { } next || DateTimeOffset.UtcNow >= next;
     }
 
     private async Task LoadAsync()
     {
         if (!IsActive || _loading is not null) return;
-        var due = EnabledProviders.Where(provider => _signInStamps.ContainsKey(provider)
-            || !_nextLoadAt.TryGetValue(provider, out var next) || DateTimeOffset.UtcNow >= next).ToArray();
-        if (due.Length == 0) return;
+        if (_signInStamp is null && _nextLoadAt is { } scheduled && DateTimeOffset.UtcNow < scheduled) return;
         var loading = new CancellationTokenSource();
         _loading = loading;
+        bool Superseded() => !ReferenceEquals(_loading, loading) || !IsActive || loading.IsCancellationRequested;
         try
         {
-            foreach (var provider in due)
+            var stamp = _loader is null ? await Task.Run(() => AiUsageService.CredentialStamp(_provider), loading.Token) : DateTime.MinValue;
+            if (Superseded() || !IsDue(stamp)) return;
+            _lastLoadAt = DateTimeOffset.UtcNow;
+            AiUsageService.LoadResult result;
+            if (_loader is null) result = await AiUsageService.LoadWithPolicyAsync(_provider, loading.Token);
+            else
             {
-                _loadingProvider = provider;
-                var stamp = _loader is null ? await Task.Run(() => AiUsageService.CredentialStamp(provider), loading.Token) : DateTime.MinValue;
-                if (!ReferenceEquals(_loading, loading) || !IsActive || loading.IsCancellationRequested) return;
-                if (!_enabled.HasFlag(provider) || !IsDue(provider, stamp)) continue;
-                _lastLoadAt[provider] = DateTimeOffset.UtcNow;
-                AiUsageService.LoadResult result;
-                if (_loader is null) result = await AiUsageService.LoadWithPolicyAsync(provider, loading.Token);
-                else
-                {
-                    var (report, error) = await _loader(provider, loading.Token);
-                    result = new(report, error);
-                }
-                if (!ReferenceEquals(_loading, loading) || !IsActive || loading.IsCancellationRequested) return;
-                if (!_enabled.HasFlag(provider)) continue;
-                if (result.Report is { } loaded) _reports[provider] = loaded;
-                if (result.Error is { } failure) _errors[provider] = failure;
-                else _errors.Remove(provider);
-                if (result.Error == "ErrorAiUsageSignIn") _signInStamps[provider] = stamp;
-                var failures = result.Error is null ? 0 : _failures.GetValueOrDefault(provider) + 1;
-                _failures[provider] = Math.Min(failures, 10);
-                var delay = RetryDelay(result.Error, failures, result.RetryAfter);
-                _nextLoadAt[provider] = DateTimeOffset.UtcNow + delay;
-                Refresh();
+                var (report, error) = await _loader(_provider, loading.Token);
+                result = new(report, error);
             }
+            if (Superseded()) return;
+            if (result.Report is { } loaded) _report = loaded;
+            _error = result.Error;
+            if (result.Error == "ErrorAiUsageSignIn") _signInStamp = stamp;
+            var failures = result.Error is null ? 0 : _failures + 1;
+            _failures = Math.Min(failures, 10);
+            _nextLoadAt = DateTimeOffset.UtcNow + RetryDelay(result.Error, failures, result.RetryAfter);
+            Refresh();
         }
         catch (OperationCanceledException) when (loading.IsCancellationRequested) { }
         catch (Exception ex)
         {
-            if (!ReferenceEquals(_loading, loading) || !IsActive) return;
-            _errors[_loadingProvider] = "ErrorAiUsageLoad";
-            var failures = Math.Min(10, _failures.GetValueOrDefault(_loadingProvider) + 1);
-            _failures[_loadingProvider] = failures;
-            _nextLoadAt[_loadingProvider] = DateTimeOffset.UtcNow + RetryDelay("ErrorAiUsageLoad", failures, null);
+            if (Superseded()) return;
+            _error = "ErrorAiUsageLoad";
+            _failures = Math.Min(10, _failures + 1);
+            _nextLoadAt = DateTimeOffset.UtcNow + RetryDelay("ErrorAiUsageLoad", _failures, null);
             AppLog.Info($"AI usage unavailable: {ex.GetType().Name}");
         }
         finally
@@ -341,29 +292,46 @@ public sealed class AiUsageWidget : DockWidget
         return minutes < 60 ? UiText.Format("MinutesFormat", minutes) : UiText.Format("HoursMinutesFormat", minutes / 60, minutes % 60);
     }
 
-    private string Summary(AiProviders provider)
+    private string Summary()
     {
-        var name = ProviderName(provider);
-        _errors.TryGetValue(provider, out var error);
-        if (!_reports.TryGetValue(provider, out var report) || RingWindow(report, Settings.AiUsageRing) is not { } main)
-            return error is null ? name : $"{name}: {ErrorText(provider, error)}";
+        var name = ProviderName(_provider);
+        if (_report is not { } report || RingWindow(report, Settings.AiUsageRing) is not { } main)
+            return _error is null ? name : $"{name}: {ErrorText(_provider, _error)}";
         var parts = new List<string> { $"{name} {Percent(main.Used)}" };
         parts.AddRange(report.Windows.Where(window => window != main && !IsModel(window))
             .Select(window => $"{SummaryWindowLabel(window)} {Percent(window.Used)}"));
         if (IsLimitReached(report)) parts.Add(UiText.Get("AiUsageLimitReached"));
         else if (main.ResetsAt is { } reset) parts.Add(ResetText(reset));
-        if (error is not null) parts.Add(ErrorText(provider, error));
+        if (_error is not null) parts.Add(ErrorText(_provider, _error));
         return string.Join(" · ", parts);
     }
 
-    private Card AddCard(string name, string? logoKey)
+    private static string ShortName(AiProviders provider) => provider switch
+    {
+        AiProviders.Claude => "Claude",
+        AiProviders.OpenCode => "OpenCode",
+        AiProviders.Copilot => "Copilot",
+        _ => ProviderName(provider)
+    };
+
+    private static string LogoKey(AiProviders provider) => provider switch
+    {
+        AiProviders.Claude => "LogoClaude",
+        AiProviders.Codex => "LogoCodex",
+        AiProviders.OpenCode => "LogoOpenCode",
+        AiProviders.Copilot => "LogoCopilot",
+        AiProviders.DeepSeek => "LogoDeepSeek",
+        AiProviders.OpenRouter => "LogoOpenRouter",
+        _ => "LogoAntigravity"
+    };
+
+    private Card AddCard()
     {
         var logo = new System.Windows.Shapes.Path { Width = LogoSize, Height = LogoSize, Stretch = Stretch.Uniform,
-            Margin = new Thickness(0, 0, Gap, 0), VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false };
-        if (logoKey is null) logo.Visibility = Visibility.Collapsed;
-        else logo.Data = (Geometry)TryFindResource(logoKey);
+            Margin = new Thickness(0, 0, Gap, 0), VerticalAlignment = VerticalAlignment.Center, IsHitTestVisible = false,
+            Data = (Geometry)TryFindResource(LogoKey(_provider)) };
         logo.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "TextPrimary");
-        var label = Text(name, 12, "TextPrimary");
+        var label = Text(ShortName(_provider), 12, "TextPrimary");
         label.FontWeight = FontWeights.SemiBold;
         label.Margin = new Thickness(0, 0, Gap, 0);
         var ring = new RingMeter { Width = RingSize, Height = RingSize, StrokeThickness = 3, FontSize = 10.5, Text = "—", IsHitTestVisible = false };
@@ -376,75 +344,45 @@ public sealed class AiUsageWidget : DockWidget
             _flyoutHost.Content = BuildFlyout(_countdowns);
             return _flyoutHost;
         });
-        _cards.Children.Add(button);
         return new(button, logo, label, ring);
     }
+
     private void Render()
     {
         HasData = true;
         _renderedMinute = DateTime.Now.Minute;
-        _cards.Orientation = Settings.Edge == DockEdge.Bottom ? Orientation.Horizontal : Orientation.Vertical;
-        var providers = EnabledProviders.ToArray();
-        var summary = IsCompact || providers.Length == 0;
-        if (summary)
-        {
-            var reports = providers.Where(_reports.ContainsKey).Select(provider => _reports[provider]).ToArray();
-            // MaxBy over reference types returns null for an empty sequence, so nothing loaded yet shows a dash.
-            var highest = reports.Select(report => RingWindow(report, Settings.AiUsageRing)).OfType<AiUsageWindow>()
-                .MaxBy(window => window.Used);
-            UpdateCard(_summary, highest, reports.Any(IsStale),
-                providers.Length == 0 ? UiText.Get("AiUsageNoProviders") : string.Join("\n", providers.Select(Summary)));
-        }
-        _summary.Button.Visibility = summary ? Visibility.Visible : Visibility.Collapsed;
-        foreach (var (provider, card) in new[] { (AiProviders.Claude, _claude), (AiProviders.Codex, _codex), (AiProviders.Antigravity, _antigravity), (AiProviders.OpenCode, _openCode), (AiProviders.Copilot, _copilot), (AiProviders.DeepSeek, _deepSeek), (AiProviders.OpenRouter, _openRouter) })
-        {
-            var visible = !summary && _enabled.HasFlag(provider);
-            card.Button.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
-            if (!visible) continue;
-            if (!_reports.TryGetValue(provider, out var report) || RingWindow(report, Settings.AiUsageRing) is not { } main)
-            {
-                UpdateCard(card, null, false, Summary(provider));
-                continue;
-            }
-            UpdateCard(card, main, IsStale(report), Summary(provider));
-        }
+        _card.Name.Visibility = IsCompact ? Visibility.Collapsed : Visibility.Visible;
+        var main = _report is { } report ? RingWindow(report, Settings.AiUsageRing) : null;
+        UpdateCard(main, _report is { } loaded && IsStale(loaded), Summary());
     }
 
-    private void UpdateCard(Card card, AiUsageWindow? main, bool stale, string toolTip)
+    private void UpdateCard(AiUsageWindow? main, bool stale, string toolTip)
     {
-        card.Ring.Value = main?.Used ?? 0;
-        card.Ring.Text = main is null ? "—" : ((int)Math.Round(main.Used * 100)).ToString(CultureInfo.InvariantCulture);
-        card.Ring.SetResourceReference(RingMeter.ValueBrushProperty, main is null ? "TextMuted" : Accent(main.Used, main.Severity));
+        _card.Ring.Value = main?.Used ?? 0;
+        _card.Ring.Text = main is null ? "—" : ((int)Math.Round(main.Used * 100)).ToString(CultureInfo.InvariantCulture);
+        _card.Ring.SetResourceReference(RingMeter.ValueBrushProperty, main is null ? "TextMuted" : Accent(main.Used, main.Severity));
         var foreground = stale ? "TextMuted" : "TextPrimary";
-        card.Ring.SetResourceReference(RingMeter.ForegroundProperty, foreground);
-        card.Name.SetResourceReference(TextBlock.ForegroundProperty, foreground);
-        card.Logo.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, foreground);
-        card.Button.ToolTip = toolTip;
-        AutomationProperties.SetName(card.Button, $"{UiText.Get("WidgetAiUsage")}: {toolTip}");
+        _card.Ring.SetResourceReference(RingMeter.ForegroundProperty, foreground);
+        _card.Name.SetResourceReference(TextBlock.ForegroundProperty, foreground);
+        _card.Logo.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, foreground);
+        _card.Button.ToolTip = toolTip;
+        AutomationProperties.SetName(_card.Button, $"{UiText.Get("WidgetAiUsage")}: {toolTip}");
     }
+
     private UIElement BuildFlyout(List<(TextBlock Block, DateTimeOffset Reset)> countdowns)
     {
         countdowns.Clear();
         var now = DateTimeOffset.UtcNow;
         var root = new StackPanel { Width = 280 };
-        if (_enabled == AiProviders.None)
+        root.Children.Add(SectionHeader(_provider, _report));
+        if (_error is not null)
         {
-            root.Children.Add(DockFlyout.Heading(UiText.Get("WidgetAiUsage")));
-            root.Children.Add(DockFlyout.Caption(UiText.Get("AiUsageNoProviders")));
-            return root;
+            var message = Text(ErrorText(_provider, _error), 11.5, "TextSecondary", new Thickness(0, 0, 0, 8));
+            message.TextWrapping = TextWrapping.Wrap;
+            root.Children.Add(message);
         }
-        foreach (var provider in EnabledProviders)
+        if (_report is { } report)
         {
-            if (root.Children.Count > 0) root.Children.Add(Divider());
-            _reports.TryGetValue(provider, out var report);
-            root.Children.Add(SectionHeader(provider, report));
-            if (_errors.TryGetValue(provider, out var error))
-            {
-                var message = Text(ErrorText(provider, error), 11.5, "TextSecondary", new Thickness(0, 0, 0, 8));
-                message.TextWrapping = TextWrapping.Wrap;
-                root.Children.Add(message);
-            }
-            if (report is null) continue;
             var pace = PaceWindow(report, now);
             string? currentGroup = null;
             foreach (var window in report.Windows)
@@ -481,11 +419,11 @@ public sealed class AiUsageWidget : DockWidget
 
     private UIElement SectionHeader(AiProviders provider, AiUsageReport? report)
     {
-        var (status, brush) = _errors.GetValueOrDefault(provider) == "ErrorAiUsageSignIn" ? ("AiUsageStatusSignIn", "WidgetWarning")
+        var (status, brush) = _error == "ErrorAiUsageSignIn" ? ("AiUsageStatusSignIn", "WidgetWarning")
             : report is not null && IsLimitReached(report) ? Status(report)
             : report is not null && IsStale(report) ? ("AiUsageStatusStale", "TextMuted")
             : report is not null ? Status(report)
-            : _errors.ContainsKey(provider) ? ("AiUsageStatusUnavailable", "TextMuted") : ("AiUsageStatusLoading", "TextMuted");
+            : _error is not null ? ("AiUsageStatusUnavailable", "TextMuted") : ("AiUsageStatusLoading", "TextMuted");
         var header = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
         var open = IconButton("IconOpen", "AiUsageOpenDashboard", 12, () => OpenDashboard(provider));
         open.Width = open.Height = 22;
@@ -571,18 +509,16 @@ public sealed class AiUsageWidget : DockWidget
         var footer = new DockPanel();
         var refresh = IconButton("IconRefresh", "AiUsageRefresh", 14, () =>
         {
-            foreach (var provider in EnabledProviders.Where(provider => !_errors.ContainsKey(provider)
-                && (!_lastLoadAt.TryGetValue(provider, out var last) || DateTimeOffset.UtcNow - last >= TimeSpan.FromSeconds(30))))
-                _nextLoadAt.Remove(provider);
+            if (_error is null && (_lastLoadAt is not { } last || DateTimeOffset.UtcNow - last >= TimeSpan.FromSeconds(30)))
+                _nextLoadAt = null;
             _ = LoadAsync();
         });
         refresh.VerticalAlignment = VerticalAlignment.Top;
         DockPanel.SetDock(refresh, Dock.Right);
         footer.Children.Add(refresh);
         var notes = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-        var fetched = EnabledProviders.Where(_reports.ContainsKey).Select(provider => _reports[provider].FetchedAt).ToArray();
-        if (fetched.Length > 0)
-            notes.Children.Add(Text(UiText.Format("AiUsageUpdated", fetched.Min().ToLocalTime().ToString("t", Culture)), 11, "TextSecondary"));
+        if (_report is { } fetched)
+            notes.Children.Add(Text(UiText.Format("AiUsageUpdated", fetched.FetchedAt.ToLocalTime().ToString("t", Culture)), 11, "TextSecondary"));
         var note = Text(UiText.Get("AiUsageUnofficialNote"), 10.5, "TextSecondary", new Thickness(0, 1, 0, 0));
         note.TextWrapping = TextWrapping.Wrap;
         notes.Children.Add(note);

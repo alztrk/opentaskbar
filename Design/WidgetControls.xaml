@@ -316,29 +316,69 @@
                 </Border>
             </StackPanel>
 
-            <!-- AI usage widget taskbar preview (one card per provider: logo, name, usage ring) -->
-            <StackPanel x:Name="AiUsagePreview" Orientation="Horizontal" Visibility="Collapsed">
-                <Border Style="{StaticResource WidgetCardBorder}" Padding="10,0">
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <Path Data="{StaticResource LogoClaude}" Width="16" Height="16" Stretch="Uniform" Margin="0,0,6,0"
-                              Fill="{DynamicResource TextPrimary}" VerticalAlignment="Center" />
-                        <TextBlock Text="Claude" Width="44" Margin="0,0,6,0" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
-                                   Foreground="{DynamicResource TextPrimary}" TextTrimming="CharacterEllipsis" />
-                        <w:RingMeter Width="34" Height="34" StrokeThickness="3" FontSize="10.5" Value="0.42" Text="42"
-                                     TrackBrush="{DynamicResource TextMuted}" ValueBrush="{DynamicResource WidgetAccent}" Foreground="{DynamicResource TextPrimary}" />
-                    </StackPanel>
-                </Border>
-                <Border Style="{StaticResource WidgetCardBorder}" Padding="10,0">
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <Path Data="{StaticResource LogoCodex}" Width="16" Height="16" Stretch="Uniform" Margin="0,0,6,0"
-                              Fill="{DynamicResource TextPrimary}" VerticalAlignment="Center" />
-                        <TextBlock Text="Codex" Width="44" Margin="0,0,6,0" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
-                                   Foreground="{DynamicResource TextPrimary}" TextTrimming="CharacterEllipsis" />
-                        <w:RingMeter Width="34" Height="34" StrokeThickness="3" FontSize="10.5" Value="0.78" Text="78"
-                                     TrackBrush="{DynamicResource TextMuted}" ValueBrush="{DynamicResource WidgetWarning}" Foreground="{DynamicResource TextPrimary}" />
-                    </StackPanel>
-                </Border>
-            </StackPanel>
+            <!-- AI usage widget taskbar preview (one provider: logo, name, usage ring) -->
+            <Border x:Name="AiUsagePreview" Style="{StaticResource WidgetCardBorder}" Padding="10,0" Visibility="Collapsed">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <Path Width="16" Height="16" Stretch="Uniform" Margin="0,0,6,0" VerticalAlignment="Center"
+                          Fill="{DynamicResource TextPrimary}">
+                        <Path.Style>
+                            <Style TargetType="Path">
+                                <Setter Property="Data" Value="{StaticResource LogoClaude}" />
+                                <Style.Triggers>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageCodex">
+                                    <Setter Property="Data" Value="{StaticResource LogoCodex}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageAntigravity">
+                                    <Setter Property="Data" Value="{StaticResource LogoAntigravity}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageOpenCode">
+                                    <Setter Property="Data" Value="{StaticResource LogoOpenCode}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageCopilot">
+                                    <Setter Property="Data" Value="{StaticResource LogoCopilot}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageDeepSeek">
+                                    <Setter Property="Data" Value="{StaticResource LogoDeepSeek}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageOpenRouter">
+                                    <Setter Property="Data" Value="{StaticResource LogoOpenRouter}" />
+                                </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Path.Style>
+                    </Path>
+                    <TextBlock Width="44" Margin="0,0,6,0" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
+                               Foreground="{DynamicResource TextPrimary}" TextTrimming="CharacterEllipsis">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Text" Value="Claude" />
+                                <Style.Triggers>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageCodex">
+                                    <Setter Property="Text" Value="Codex" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageAntigravity">
+                                    <Setter Property="Text" Value="Antigravity" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageOpenCode">
+                                    <Setter Property="Text" Value="OpenCode" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageCopilot">
+                                    <Setter Property="Text" Value="Copilot" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageDeepSeek">
+                                    <Setter Property="Text" Value="DeepSeek" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageOpenRouter">
+                                    <Setter Property="Text" Value="OpenRouter" />
+                                </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                    <w:RingMeter Width="34" Height="34" StrokeThickness="3" FontSize="10.5" Value="0.42" Text="42"
+                                 TrackBrush="{DynamicResource TextMuted}" ValueBrush="{DynamicResource WidgetAccent}" Foreground="{DynamicResource TextPrimary}" />
+                </StackPanel>
+            </Border>
             <!-- Focus (Pomodoro) widget taskbar preview -->
             <Border x:Name="FocusPreview" Style="{StaticResource WidgetCardBorder}" BorderThickness="1.5" Padding="12,0,8,0" Visibility="Collapsed">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -403,7 +443,31 @@
                 <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
                 <Setter TargetName="SystemStatsPreview" Property="Visibility" Value="Visible" />
             </DataTrigger>
-            <DataTrigger Binding="{Binding Id}" Value="AiUsage">
+            <DataTrigger Binding="{Binding Id}" Value="AiUsageClaude">
+                <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
+                <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Id}" Value="AiUsageCodex">
+                <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
+                <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Id}" Value="AiUsageAntigravity">
+                <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
+                <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Id}" Value="AiUsageOpenCode">
+                <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
+                <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Id}" Value="AiUsageCopilot">
+                <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
+                <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Id}" Value="AiUsageDeepSeek">
+                <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
+                <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Id}" Value="AiUsageOpenRouter">
                 <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
                 <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
             </DataTrigger>

@@ -127,5 +127,6 @@ public sealed record DockSettings(
     // Custom taskbar geometry overrides (null = auto from size profile).
     int? DockCornerRadius = null,
     int? DockBottomGap = null,
+    // Legacy: read only to migrate the retired single AI usage widget; every provider is now its own widget.
     AiProviders AiUsageProviders = AiProviders.None,
     AiUsageRing AiUsageRing = AiUsageRing.Highest);

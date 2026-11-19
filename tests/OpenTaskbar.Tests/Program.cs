@@ -147,10 +147,25 @@ void CatalogChecks()
         && searchOption.Description == UiText.Get("WidgetLauncherDescription") && searchOption.HasSettings,
         "The Search widget must be listed in Settings with a localized label, description and options panel.");
     var first = catalog.CreateWidgets([DockWidgetService.StopwatchId, DockWidgetService.CountdownId]);
-    var aiOption = catalog.CreateOptions([], []).SingleOrDefault(option => option.Id == DockWidgetService.AiUsageId);
-    Check(aiOption is not null && aiOption.Label == UiText.Get("WidgetAiUsage")
-        && aiOption.Description == UiText.Get("WidgetAiUsageDescription") && aiOption.HasSettings,
-        "AI Usage must have a localized catalog card and settings panel.");
+    var options = catalog.CreateOptions([], []);
+    Check(DockWidgetService.AiUsageWidgets.Select(definition => definition.Provider).Order().SequenceEqual(
+            Enum.GetValues<AiProviders>().Where(provider => provider is not (AiProviders.None or AiProviders.All)).Order())
+        && DockWidgetService.AiUsageWidgets.All(definition => options.SingleOrDefault(option => option.Id == definition.Id) is { } aiOption
+            && aiOption.Label == UiText.Get(definition.LabelKey) && aiOption.Description == UiText.Get(definition.LabelKey + "Description")
+            && aiOption.HasSettings)
+        && options.All(option => option.Id != "AiUsage"),
+        "Every AI provider must be its own catalog widget with a localized card and settings panel.");
+    var legacy = DockSettingsStore.MigrateLegacyAiUsage(new DockSettings(
+        Widgets: ["AiUsage", "Clock"], InstalledWidgets: ["AiUsage", "Clock"], WidgetOrder: ["Clock", "AiUsage"],
+        DockItemOrder: ["start", "widget:AiUsage"], AiUsageProviders: AiProviders.Claude | AiProviders.Codex,
+        WidgetDensityOverrides: new Dictionary<string, WidgetDensityMode> { ["AiUsage"] = WidgetDensityMode.Compact }));
+    Check(legacy.Widgets!.SequenceEqual(["AiUsageClaude", "AiUsageCodex", "Clock"])
+        && legacy.InstalledWidgets!.Count == DockWidgetService.AiUsageWidgets.Count + 1
+        && legacy.WidgetOrder!.Count == DockWidgetService.AiUsageWidgets.Count + 1 && legacy.WidgetOrder[0] == "Clock"
+        && legacy.DockItemOrder!.Contains("widget:AiUsageOpenRouter") && !legacy.DockItemOrder!.Contains("widget:AiUsage")
+        && legacy.WidgetDensityOverrides!["AiUsageCopilot"] == WidgetDensityMode.Compact && !legacy.WidgetDensityOverrides.ContainsKey("AiUsage")
+        && legacy.AiUsageProviders == AiProviders.None && DockSettingsStore.Validate(legacy),
+        "The retired single AI usage widget must migrate into one valid widget per provider.");
     Check(first.Count == 2 && first.OfType<ITimedDockWidget>().Count() == 2, "Both time widgets must be available.");
     var stopwatch = first.OfType<StopwatchDockWidget>().Single();
     var timer = first.OfType<CountdownDockWidget>().Single();

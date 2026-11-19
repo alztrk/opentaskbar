@@ -32,6 +32,8 @@ public partial class SettingsWindow : Window
     private DockSettings _applied;
     private bool _closingApplication;
     private bool _initializing = true;
+    private AiUsageRing _aiUsageRing;
+    private readonly Dictionary<string, RadioButton[]> _aiUsageRingChoices = [];
     private bool _closed;
     private bool _sourceReady;
     private HwndSource? _source;
@@ -334,10 +336,7 @@ public partial class SettingsWindow : Window
                 : DateStyleShort.IsChecked == true ? ClockDateStyle.ShortDateOnly
                 : ClockDateStyle.DayAndShortDate,
             StatsMeters = ReadStatsMeters(),
-            AiUsageProviders = ReadAiProviders(),
-            AiUsageRing = AiUsageRingSession.IsChecked == true ? AiUsageRing.Session
-                : AiUsageRingWeekly.IsChecked == true ? AiUsageRing.Weekly
-                : AiUsageRing.Highest,
+            AiUsageRing = _aiUsageRing,
             ThemePack = (ThemePackBox.SelectedItem as ThemePackChoice)?.Id,
             ThemeApplicationIcons = false
         };
@@ -548,15 +547,6 @@ public partial class SettingsWindow : Window
         ThemePacks.ApplyWidgets(_preferences.Current.Theme);
     }
 
-    private AiProviders ReadAiProviders() =>
-        (AiUsageClaudeToggle.IsChecked == true ? AiProviders.Claude : 0)
-        | (AiUsageCodexToggle.IsChecked == true ? AiProviders.Codex : 0)
-        | (AiUsageAntigravityToggle.IsChecked == true ? AiProviders.Antigravity : 0)
-        | (AiUsageOpenCodeToggle.IsChecked == true ? AiProviders.OpenCode : 0)
-        | (AiUsageCopilotToggle.IsChecked == true ? AiProviders.Copilot : 0)
-        | (AiUsageDeepSeekToggle.IsChecked == true ? AiProviders.DeepSeek : 0)
-        | (AiUsageOpenRouterToggle.IsChecked == true ? AiProviders.OpenRouter : 0);
-
     private SystemMeters ReadStatsMeters() =>
         (StatsCpuToggle.IsChecked == true ? SystemMeters.Cpu : 0)
         | (StatsMemoryToggle.IsChecked == true ? SystemMeters.Memory : 0)
@@ -653,7 +643,6 @@ public partial class SettingsWindow : Window
             {
                 "Clock" => ClockOptions,
                 "Weather" => WeatherOptions,
-                "AiUsage" => AiUsageOptions,
                 "Focus" => FocusOptions,
                 "SystemStats" => StatsOptions,
                 _ => null
@@ -679,13 +668,6 @@ public partial class SettingsWindow : Window
     private void CollapseFocusOptions_Click(object sender, RoutedEventArgs e)
     {
         if (_widgetOptions.FirstOrDefault(o => o.Id == "Focus") is { } option)
-            option.IsSettingsExpanded = false;
-        UpdateWidgetOptionState();
-    }
-
-    private void CollapseAiUsageOptions_Click(object sender, RoutedEventArgs e)
-    {
-        if (_widgetOptions.FirstOrDefault(o => o.Id == "AiUsage") is { } option)
             option.IsSettingsExpanded = false;
         UpdateWidgetOptionState();
     }
@@ -738,16 +720,8 @@ public partial class SettingsWindow : Window
         DateStyleNumeric.IsChecked = settings.DateStyle == ClockDateStyle.NumericDate;
         DateStyleHidden.IsChecked = settings.DateStyle == ClockDateStyle.Hidden;
         WeatherCityBox.Text = settings.WeatherCity;
-        AiUsageClaudeToggle.IsChecked = settings.AiUsageProviders.HasFlag(AiProviders.Claude);
-        AiUsageCodexToggle.IsChecked = settings.AiUsageProviders.HasFlag(AiProviders.Codex);
-        AiUsageAntigravityToggle.IsChecked = settings.AiUsageProviders.HasFlag(AiProviders.Antigravity);
-        AiUsageOpenCodeToggle.IsChecked = settings.AiUsageProviders.HasFlag(AiProviders.OpenCode);
-        AiUsageCopilotToggle.IsChecked = settings.AiUsageProviders.HasFlag(AiProviders.Copilot);
-        AiUsageDeepSeekToggle.IsChecked = settings.AiUsageProviders.HasFlag(AiProviders.DeepSeek);
-        AiUsageOpenRouterToggle.IsChecked = settings.AiUsageProviders.HasFlag(AiProviders.OpenRouter);
-        AiUsageRingHighest.IsChecked = settings.AiUsageRing == AiUsageRing.Highest;
-        AiUsageRingSession.IsChecked = settings.AiUsageRing == AiUsageRing.Session;
-        AiUsageRingWeekly.IsChecked = settings.AiUsageRing == AiUsageRing.Weekly;
+        _aiUsageRing = settings.AiUsageRing;
+        foreach (var choices in _aiUsageRingChoices.Values) ShowAiUsageRing(choices);
         StatsCpuToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Cpu);
         StatsMemoryToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Memory);
         StatsBatteryToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Battery);
@@ -770,10 +744,13 @@ public partial class SettingsWindow : Window
         _widgetDensityBoxes.Clear();
         if (_widgetOptions.FirstOrDefault(o => o.Id == "Clock") is { } clock) clock.SettingsView = ClockOptions;
         if (_widgetOptions.FirstOrDefault(o => o.Id == "Weather") is { } weather) weather.SettingsView = WeatherOptions;
-        if (_widgetOptions.FirstOrDefault(o => o.Id == "AiUsage") is { } aiUsage)
+        _aiUsageRingChoices.Clear();
+        foreach (var definition in DockWidgetService.AiUsageWidgets)
         {
-            AttachDensityRow("AiUsage", AiUsageOptions);
-            aiUsage.SettingsView = AiUsageOptions;
+            if (_widgetOptions.FirstOrDefault(o => o.Id == definition.Id) is not { } aiUsage) continue;
+            var panel = CreateAiUsageOptions(definition.Id);
+            AttachDensityRow(definition.Id, panel);
+            aiUsage.SettingsView = panel;
         }
         if (_widgetOptions.FirstOrDefault(o => o.Id == "Focus") is { } focus)
         {
@@ -815,6 +792,52 @@ public partial class SettingsWindow : Window
             AttachDensityRow(DockWidgetService.SearchId, panel);
             search.SettingsView = panel;
         }
+    }
+
+    // The ring choice is one shared setting, so every AI widget shows the same radio group state.
+    private StackPanel CreateAiUsageOptions(string widgetId)
+    {
+        var panel = new StackPanel();
+        var heading = new TextBlock { Text = UiText.Get("AiUsageRingLabel"), FontWeight = FontWeights.SemiBold, FontSize = 12, Margin = new Thickness(0, 0, 0, 6) };
+        panel.Children.Add(heading);
+        var grid = new UniformGrid { Columns = 1, Margin = new Thickness(-2, 0, -2, 0) };
+        var rings = new[] { AiUsageRing.Highest, AiUsageRing.Session, AiUsageRing.Weekly };
+        var labels = new[] { "AiUsageRingHighest", "AiUsageRingSession", "AiUsageWeekly" };
+        var choices = new RadioButton[rings.Length];
+        for (var i = 0; i < rings.Length; i++)
+        {
+            var ring = rings[i];
+            var choice = new RadioButton
+            {
+                GroupName = $"AiUsageRing_{widgetId}_{_radioGroupScope}",
+                Content = UiText.Get(labels[i]),
+                Style = (Style)FindResource("SettingsChoice")
+            };
+            choice.Checked += (_, _) =>
+            {
+                if (_initializing || _aiUsageRing == ring) return;
+                _aiUsageRing = ring;
+                _initializing = true;
+                try { foreach (var other in _aiUsageRingChoices.Values) ShowAiUsageRing(other); }
+                finally { _initializing = false; }
+            };
+            choices[i] = choice;
+            grid.Children.Add(choice);
+        }
+        panel.Children.Add(grid);
+        var note = new TextBlock { Text = UiText.Get("AiUsageUnofficialNote"), FontSize = 11, Margin = new Thickness(0, 8, 0, 0), TextWrapping = TextWrapping.Wrap };
+        note.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+        panel.Children.Add(note);
+        _aiUsageRingChoices[widgetId] = choices;
+        ShowAiUsageRing(choices);
+        return panel;
+    }
+
+    private void ShowAiUsageRing(RadioButton[] choices)
+    {
+        choices[0].IsChecked = _aiUsageRing == AiUsageRing.Highest;
+        choices[1].IsChecked = _aiUsageRing == AiUsageRing.Session;
+        choices[2].IsChecked = _aiUsageRing == AiUsageRing.Weekly;
     }
 
     private void AttachDensityRow(string widgetId, FrameworkElement container)
@@ -1063,7 +1086,6 @@ public partial class SettingsWindow : Window
         FocusOptions.Visibility = IsExpanded("Focus") ? Visibility.Visible : Visibility.Collapsed;
         StatsOptions.Visibility = IsExpanded("SystemStats") ? Visibility.Visible : Visibility.Collapsed;
         WeatherOptions.Visibility = IsExpanded("Weather") ? Visibility.Visible : Visibility.Collapsed;
-        AiUsageOptions.Visibility = IsExpanded("AiUsage") ? Visibility.Visible : Visibility.Collapsed;
         FocusMinutesValue.Text = UiText.Format("MinutesFormat", (int)Math.Round(FocusMinutesSlider.Value));
         BreakMinutesValue.Text = UiText.Format("MinutesFormat", (int)Math.Round(BreakMinutesSlider.Value));
         FocusSessionsValue.Text = ((int)Math.Round(FocusSessionsSlider.Value)).ToString(System.Globalization.CultureInfo.InvariantCulture);

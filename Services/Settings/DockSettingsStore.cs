@@ -9,6 +9,7 @@ namespace OpenTaskbar.Services;
 public sealed class DockSettingsStore
 {
     private const string RemovedMemoryWidgetId = "Memory";
+    private const string LegacyAiUsageWidgetId = "AiUsage";
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
 
     private readonly string _path;
@@ -47,6 +48,8 @@ public sealed class DockSettingsStore
                     Widgets = settings.Widgets?.Where(id => id != RemovedMemoryWidgetId).ToArray(),
                     InstalledWidgets = settings.InstalledWidgets?.Where(id => id != RemovedMemoryWidgetId).ToArray()
                 };
+            if (settings is not null)
+                settings = MigrateLegacyAiUsage(settings);
             if (settings is null || !IsValid(settings))
             {
                 return (CreateDefaultSettings(), "ErrorDockSettingsInvalid");
@@ -69,6 +72,42 @@ public sealed class DockSettingsStore
     }
 
     private DockSettings CreateDefaultSettings() => new(Language: _defaultLanguage);
+
+    /// <summary>
+    /// Splits the retired single AI usage widget into one widget per provider: the providers it had enabled stay
+    /// enabled, and every provider becomes available in the catalog, order and density settings.
+    /// </summary>
+    public static DockSettings MigrateLegacyAiUsage(DockSettings settings)
+    {
+        var all = DockWidgetService.AiUsageWidgets.Select(widget => widget.Id).ToArray();
+        var enabled = DockWidgetService.AiUsageWidgets
+            .Where(widget => settings.AiUsageProviders.HasFlag(widget.Provider)).Select(widget => widget.Id).ToArray();
+
+        static IReadOnlyList<string>? Replace(IReadOnlyList<string>? ids, string legacy, IEnumerable<string> replacement) =>
+            ids is null || !ids.Contains(legacy, StringComparer.OrdinalIgnoreCase)
+                ? ids
+                : ids.SelectMany(id => string.Equals(id, legacy, StringComparison.OrdinalIgnoreCase) ? replacement : [id])
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
+        var densities = settings.WidgetDensityOverrides;
+        if (densities is not null && densities.TryGetValue(LegacyAiUsageWidgetId, out var density))
+        {
+            var migrated = densities.Where(pair => !string.Equals(pair.Key, LegacyAiUsageWidgetId, StringComparison.OrdinalIgnoreCase))
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+            foreach (var id in all) migrated[id] = density;
+            densities = migrated;
+        }
+
+        return settings with
+        {
+            Widgets = Replace(settings.Widgets, LegacyAiUsageWidgetId, enabled),
+            InstalledWidgets = Replace(settings.InstalledWidgets, LegacyAiUsageWidgetId, all),
+            WidgetOrder = Replace(settings.WidgetOrder, LegacyAiUsageWidgetId, all),
+            DockItemOrder = Replace(settings.DockItemOrder, "widget:" + LegacyAiUsageWidgetId, all.Select(id => "widget:" + id)),
+            WidgetDensityOverrides = densities,
+            AiUsageProviders = AiProviders.None
+        };
+    }
 
     public string? Save(DockSettings settings)
     {

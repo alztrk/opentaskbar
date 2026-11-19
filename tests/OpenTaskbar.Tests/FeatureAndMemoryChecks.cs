@@ -55,16 +55,15 @@ internal static class FeatureAndMemoryChecks
             }
 
             var aiLoads = 0;
-            using (var ai = new AiUsageWidget((_, _) =>
+            using (var ai = new AiUsageWidget(AiProviders.Claude, (_, _) =>
             {
                 aiLoads++;
                 return Task.FromResult<(AiUsageReport?, string?)>((null, "ErrorAiUsageSignIn"));
             }))
             {
-                ai.Activate();
                 ai.Tick(DateTime.Now);
-                Check(aiLoads == 0, "AI Usage must not load while all providers are disabled.");
-                ai.ApplySettings(new DockSettings(AiUsageProviders: AiProviders.Claude));
+                Check(aiLoads == 0, "An inactive AI usage widget must not load.");
+                ai.Activate();
                 Check(aiLoads == 1 && ai.Visibility == Visibility.Visible
                     && AiCards(ai) is [{ ToolTip: string hint }] && hint.Contains("claude", StringComparison.Ordinal),
                     "AI Usage must keep sign-in failures visible with a localized CLI hint.");
@@ -79,51 +78,44 @@ internal static class FeatureAndMemoryChecks
 
             var pending = new TaskCompletionSource<(AiUsageReport?, string?)>();
             CancellationToken aiCancellation = default;
-            using (var ai = new AiUsageWidget((_, cancellation) =>
+            using (var ai = new AiUsageWidget(AiProviders.Codex, (_, cancellation) =>
             {
                 aiCancellation = cancellation;
                 return pending.Task;
             }))
             {
-                ai.ApplySettings(new DockSettings(AiUsageProviders: AiProviders.Codex));
                 ai.Activate();
-                ai.ApplySettings(new DockSettings());
-                Check(aiCancellation.IsCancellationRequested, "Disabling AI providers must cancel their pending request.");
+                ai.Deactivate();
+                Check(aiCancellation.IsCancellationRequested, "Disabling an AI widget must cancel its pending request.");
                 pending.SetResult((new(AiProviders.Codex, "fixture", [new("AiUsageSession", 0.5, null, 18000)], DateTimeOffset.UtcNow), null));
                 Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.Background);
-                Check(AiCards(ai) is [{ ToolTip: string hint }] && hint == UiText.Get("AiUsageNoProviders"),
-                    "A late AI response must not restore a disabled provider.");
+                Check(AiCards(ai) is [{ ToolTip: "Codex" }], "A late AI response must not restore a disabled widget.");
             }
 
             var aiNow = DateTimeOffset.UtcNow;
-            using (var ai = new AiUsageWidget((provider, _) => Task.FromResult<(AiUsageReport?, string?)>((new(provider, "Plus",
-                [new("AiUsageSession", 0.42, aiNow.AddHours(3), 18000), new("AiUsageWeekly", provider == AiProviders.Codex ? 0.9 : 0.29,
-                    aiNow.AddDays(5), 604800)], aiNow) { LimitReached = provider == AiProviders.Codex }, null))))
+            AiUsageWidget CreateAiWidget(AiProviders provider) => new(provider, (p, _) => Task.FromResult<(AiUsageReport?, string?)>((new(p, "Plus",
+                [new("AiUsageSession", 0.42, aiNow.AddHours(3), 18000), new("AiUsageWeekly", p == AiProviders.Codex ? 0.9 : 0.29,
+                    aiNow.AddDays(5), 604800)], aiNow) { LimitReached = p == AiProviders.Codex }, null)));
+            using (var claude = CreateAiWidget(AiProviders.Claude))
+            using (var codex = CreateAiWidget(AiProviders.Codex))
             {
-                ai.ApplySettings(new DockSettings(AiUsageProviders: AiProviders.All));
-                ai.Activate();
+                claude.Activate();
+                codex.Activate();
                 Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.Background);
-                var cards = AiCards(ai);
-                Check(cards.Length == 7 && cards.All(card => card.Content is StackPanel { Children: [System.Windows.Shapes.Path { Data: not null }, TextBlock, RingMeter] })
-                    && cards[0].Content is StackPanel { Children: [_, TextBlock { Text: "Claude" }, RingMeter { Value: 0.42, Text: "42" }] }
-                    && cards[1].Content is StackPanel { Children: [_, TextBlock { Text: "Codex" }, RingMeter { Value: 0.9 }] }
-                    && cards[2].Content is StackPanel { Children: [_, TextBlock { Text: "Antigravity" }, RingMeter { Value: 0.42, Text: "42" }] }
-                    && cards[3].Content is StackPanel { Children: [_, TextBlock { Text: "OpenCode" }, RingMeter { Value: 0.42, Text: "42" }] }
-                    && cards[4].Content is StackPanel { Children: [_, TextBlock { Text: "Copilot" }, RingMeter { Value: 0.42, Text: "42" }] }
-                    && cards[5].Content is StackPanel { Children: [_, TextBlock { Text: "DeepSeek" }, RingMeter { Value: 0.42, Text: "42" }] }
-                    && cards[6].Content is StackPanel { Children: [_, TextBlock { Text: "OpenRouter" }, RingMeter { Value: 0.42, Text: "42" }] }
-                    && cards[0].ToolTip is string claudeTip && claudeTip.StartsWith("Claude Code 42%", StringComparison.Ordinal)
+                Check(AiCards(claude) is [{ Content: StackPanel { Children: [System.Windows.Shapes.Path { Data: not null }, TextBlock { Text: "Claude" }, RingMeter { Value: 0.42, Text: "42" }] } } claudeCard]
+                    && claudeCard.ToolTip is string claudeTip && claudeTip.StartsWith("Claude Code 42%", StringComparison.Ordinal)
                     && claudeTip.Contains("Weekly 29%", StringComparison.Ordinal) && claudeTip.Contains("Resets in", StringComparison.Ordinal)
-                    && cards[1].ToolTip is string codexTip && codexTip.Contains(UiText.Get("AiUsageLimitReached"), StringComparison.Ordinal),
-                    "AI Usage must show one card per provider with logo, name, usage ring and a one-line summary.");
-                ai.ApplySettings(new DockSettings(AiUsageProviders: AiProviders.All, AiUsageRing: AiUsageRing.Weekly));
-                Check(AiCards(ai)[0].ToolTip is string weeklyTip && weeklyTip.StartsWith("Claude Code 29%", StringComparison.Ordinal),
+                    && AiCards(codex) is [{ Content: StackPanel { Children: [_, TextBlock { Text: "Codex" }, RingMeter { Value: 0.9 }] } } codexCard]
+                    && codexCard.ToolTip is string codexTip && codexTip.Contains(UiText.Get("AiUsageLimitReached"), StringComparison.Ordinal),
+                    "Each AI usage widget must show one card with logo, name, usage ring and a one-line summary.");
+                claude.ApplySettings(new DockSettings(AiUsageRing: AiUsageRing.Weekly));
+                Check(AiCards(claude)[0].ToolTip is string weeklyTip && weeklyTip.StartsWith("Claude Code 29%", StringComparison.Ordinal),
                     "The ring setting must choose the window the dock shows.");
-                ai.SetCompactState(true);
-                Check(AiCards(ai) is [{ ToolTip: string compactTip }] && compactTip.Contains('\n'),
-                    "Compact AI Usage must collapse to one card that summarizes every provider.");
-                Check(ai.BuildHoverFlyoutContent() is StackPanel aiFlyout && aiFlyout.Children.Count > 4,
-                    "The AI Usage flyout must build sections for every provider.");
+                claude.SetCompactState(true);
+                Check(AiCards(claude) is [{ Content: StackPanel { Children: [_, TextBlock { Visibility: Visibility.Collapsed }, _] } }],
+                    "Compact AI Usage must keep the logo and ring and drop the name.");
+                Check(claude.BuildHoverFlyoutContent() is StackPanel aiFlyout && aiFlyout.Children.Count > 4,
+                    "The AI Usage flyout must show the provider's section.");
             }
 
             // 2. SystemStats + on-demand SystemSensors parity & disposal
@@ -327,7 +319,7 @@ internal static class FeatureAndMemoryChecks
     }
 
     private static Button[] AiCards(AiUsageWidget widget) =>
-        ((Panel)widget.Content).Children.OfType<Button>().Where(card => card.Visibility == Visibility.Visible).ToArray();
+        widget.Content is Button { Visibility: Visibility.Visible } card ? [card] : [];
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(nint windowHandle, out uint processId);
