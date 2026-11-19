@@ -2425,6 +2425,11 @@ public partial class MainWindow : Window
         _radiusPreviewOverride = radius;
         _bottomGapPreviewOverride = bottomGap;
         ApplySizeProfile();
+        if (_replacementSession?.IsActive == true)
+        {
+            var thickness = IsVertical ? _dockArea.Width : _dockArea.Height;
+            if (thickness > 0) _dockTopGap = Math.Max(0.0, thickness - Profile.SurfaceHeight - EffectiveBottomGap);
+        }
         ApplyDockMargin();
         ResizeDockToContent();
         _replacementSession?.RefreshPosition();
@@ -2530,7 +2535,7 @@ public partial class MainWindow : Window
         _dockArea = area;
         var profile = Profile;
         var thickness = IsVertical ? area.Width : area.Height;
-        _dockTopGap = Math.Max(0.0, thickness - profile.SurfaceHeight - profile.BottomGap);
+        _dockTopGap = Math.Max(0.0, thickness - profile.SurfaceHeight - EffectiveBottomGap);
         ApplyDockMargin();
         ResizeDockToContent();
     }

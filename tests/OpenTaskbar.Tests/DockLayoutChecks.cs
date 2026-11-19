@@ -96,6 +96,20 @@ internal static class DockLayoutChecks
                 "A returning native taskbar must release our shelf.");
         }
 
+        // Primary replacement session shelf reservation when returning from side dock (Explorer strip released)
+        foreach (var dpi in new uint[] { 96, 120, 144, 192 })
+        foreach (var size in new[] { DockSize.Compact, DockSize.Medium, DockSize.Large })
+        {
+            var profile = DockMetrics.For(size);
+            var metrics = DockLayoutMetrics.Calculate(profile.Shelf, 0, DockMetrics.Headroom, dpi);
+            Check(metrics.AdditionalReservation(0, false) == metrics.ShelfPixels,
+                $"Returning from side dock with released strip must reserve the full shelf for {size}@{dpi}dpi.");
+            var nativePixels = (int)Math.Ceiling(48d * dpi / 96d);
+            var expectedExtra = Math.Max(0, metrics.ShelfPixels - nativePixels);
+            Check(metrics.AdditionalReservation(nativePixels, false) == expectedExtra,
+                $"Existing native taskbar strip must reduce the primary dock reservation for {size}@{dpi}dpi.");
+        }
+
         Check((SecondaryDockWindow.PositionFlags(false) & 0x0040u) == 0,
             "Positioning a fullscreen-hidden secondary dock must not force it visible.");
         Check((SecondaryDockWindow.PositionFlags(true) & 0x0040u) != 0,

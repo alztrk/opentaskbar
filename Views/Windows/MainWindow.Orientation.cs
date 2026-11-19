@@ -103,8 +103,8 @@ public partial class MainWindow
             if (GetButtonIcon(button) is { } icon) icon.RenderTransformOrigin = IconScaleOrigin;
         }
 
-        ApplySizeProfile();
         if (_replacementSession is not null) _replacementSession.Edge = edge;
+        ApplySizeProfile();
         ApplyLayoutMode();
     }
 

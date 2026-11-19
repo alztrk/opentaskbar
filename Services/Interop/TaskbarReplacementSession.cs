@@ -502,7 +502,7 @@ public sealed class TaskbarReplacementSession : IDisposable
 
         var headroomDips = _cachedHeadroomDips ??= _window.TryFindResource("DockHeadroom") as double? ?? DockHeadroomDips;
         var metrics = DockLayoutMetrics.Calculate(ShelfHeight, _nativeBottomTaskbarHeight, headroomDips, dpi);
-        ReserveShelf(monitorInfo.rcMonitor, metrics, dpi);
+        ReserveShelf(monitorInfo.rcMonitor, monitorInfo.rcWork, metrics, dpi);
         var height = metrics.ShelfPixels;
         var totalHeight = metrics.WindowPixels;
         var layout = new Size((monitorInfo.rcMonitor.Right - monitorInfo.rcMonitor.Left) * 96d / dpi,
@@ -546,10 +546,13 @@ public sealed class TaskbarReplacementSession : IDisposable
         _nativeBottomTaskbarHeight = _nativeTaskbarAtBottom ? (data.rc.Bottom - data.rc.Top) * 96d / dpi : 0;
     }
 
-    private void ReserveShelf(Rect monitor, DockLayoutMetrics metrics, uint dpi)
+    private void ReserveShelf(Rect monitor, Rect workArea, DockLayoutMetrics metrics, uint dpi)
     {
         if (!_registered) return;
-        var nativePixels = _autoHideEnabled ? 0 : (int)Math.Ceiling(_nativeBottomTaskbarHeight * dpi / 96d);
+        var totalBottomStrip = Math.Max(0, monitor.Bottom - workArea.Bottom);
+        var ownReserved = _reservation?.ExtraHeight ?? 0;
+        var existingExternal = Math.Max(0, totalBottomStrip - ownReserved);
+        var nativePixels = _autoHideEnabled ? 0 : Math.Min(existingExternal, metrics.ShelfPixels);
         var extraHeight = metrics.AdditionalReservation(nativePixels, _autoHideEnabled);
         var request = (monitor.Left, monitor.Bottom, nativePixels, extraHeight);
         if (_reservation == request) return;
