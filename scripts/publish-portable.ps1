@@ -1,7 +1,7 @@
 # OpenTaskbar Portable Single-File Publisher
 # Builds a self-contained single-file executable for Windows x64.
 param (
-    [string]$OutputDir = "$PSScriptRoot\..\dist"
+    [string]$OutputDir = "$PSScriptRoot\..\release"
 )
 
 $ErrorActionPreference = "Stop"

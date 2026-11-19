@@ -137,7 +137,7 @@ dotnet run --project OpenTaskbar.csproj
 # Run in preview mode with Settings window open (keeps Windows taskbar visible)
 dotnet run --project OpenTaskbar.csproj -- --preview --settings
 
-# Build self-contained portable executable (outputs to dist\OpenTaskbar.exe)
+# Build self-contained portable executable (outputs to release\OpenTaskbar.exe)
 powershell -ExecutionPolicy Bypass -File ".\scripts\publish-portable.ps1"
 
 # Run automated behavior and visual verification tests (full suite, used by CI)

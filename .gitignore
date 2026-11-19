@@ -6,6 +6,7 @@ obj/
 *.log
 artifacts/
 dist/
+release/
 tmp/
 .research/
 .reports/
