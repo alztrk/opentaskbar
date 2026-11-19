@@ -8,7 +8,7 @@ namespace OpenTaskbar.Views;
 
 public sealed class DockScrollViewer : ScrollViewer
 {
-    private const double EdgeFadeWidth = 24;
+    private const double EdgeFadeWidth = 34;
     private Point? _panStart;
     private double _panOffset;
     private double _targetHorizontalOffset;
@@ -271,20 +271,28 @@ public sealed class DockScrollViewer : ScrollViewer
             if (_previousButton is not null)
             {
                 _previousButton.Content = TryFindResource("IconChevronUp");
-                _previousButton.HorizontalAlignment = HorizontalAlignment.Center;
+                _previousButton.Background = TryFindResource("DockScrollScrimTop") as Brush;
+                _previousButton.HorizontalAlignment = HorizontalAlignment.Stretch;
                 _previousButton.VerticalAlignment = VerticalAlignment.Top;
-                _previousButton.Width = 34;
-                _previousButton.Height = 20;
-                _previousButton.Margin = new Thickness(0, 2, 0, 0);
+                _previousButton.Width = double.NaN;
+                _previousButton.Height = 34;
+                _previousButton.HorizontalContentAlignment = HorizontalAlignment.Center;
+                _previousButton.VerticalContentAlignment = VerticalAlignment.Top;
+                _previousButton.Padding = new Thickness(0, 4, 0, 0);
+                _previousButton.Margin = new Thickness(0);
             }
             if (_nextButton is not null)
             {
                 _nextButton.Content = TryFindResource("IconChevronDown");
-                _nextButton.HorizontalAlignment = HorizontalAlignment.Center;
+                _nextButton.Background = TryFindResource("DockScrollScrimBottom") as Brush;
+                _nextButton.HorizontalAlignment = HorizontalAlignment.Stretch;
                 _nextButton.VerticalAlignment = VerticalAlignment.Bottom;
-                _nextButton.Width = 34;
-                _nextButton.Height = 20;
-                _nextButton.Margin = new Thickness(0, 0, 0, 2);
+                _nextButton.Width = double.NaN;
+                _nextButton.Height = 34;
+                _nextButton.HorizontalContentAlignment = HorizontalAlignment.Center;
+                _nextButton.VerticalContentAlignment = VerticalAlignment.Bottom;
+                _nextButton.Padding = new Thickness(0, 0, 0, 4);
+                _nextButton.Margin = new Thickness(0);
             }
         }
         else
@@ -293,20 +301,28 @@ public sealed class DockScrollViewer : ScrollViewer
             if (_previousButton is not null)
             {
                 _previousButton.Content = TryFindResource("IconChevronLeft");
+                _previousButton.Background = TryFindResource("DockScrollScrimStart") as Brush;
                 _previousButton.HorizontalAlignment = HorizontalAlignment.Left;
-                _previousButton.VerticalAlignment = VerticalAlignment.Center;
-                _previousButton.Width = 20;
-                _previousButton.Height = 34;
-                _previousButton.Margin = new Thickness(2, topOffset, 0, 0);
+                _previousButton.VerticalAlignment = VerticalAlignment.Stretch;
+                _previousButton.Width = 34;
+                _previousButton.Height = double.NaN;
+                _previousButton.HorizontalContentAlignment = HorizontalAlignment.Left;
+                _previousButton.VerticalContentAlignment = VerticalAlignment.Center;
+                _previousButton.Padding = new Thickness(5, topOffset, 0, 0);
+                _previousButton.Margin = new Thickness(0);
             }
             if (_nextButton is not null)
             {
                 _nextButton.Content = TryFindResource("IconChevronRight");
+                _nextButton.Background = TryFindResource("DockScrollScrimEnd") as Brush;
                 _nextButton.HorizontalAlignment = HorizontalAlignment.Right;
-                _nextButton.VerticalAlignment = VerticalAlignment.Center;
-                _nextButton.Width = 20;
-                _nextButton.Height = 34;
-                _nextButton.Margin = new Thickness(0, topOffset, 2, 0);
+                _nextButton.VerticalAlignment = VerticalAlignment.Stretch;
+                _nextButton.Width = 34;
+                _nextButton.Height = double.NaN;
+                _nextButton.HorizontalContentAlignment = HorizontalAlignment.Right;
+                _nextButton.VerticalContentAlignment = VerticalAlignment.Center;
+                _nextButton.Padding = new Thickness(0, topOffset, 5, 0);
+                _nextButton.Margin = new Thickness(0);
             }
         }
     }

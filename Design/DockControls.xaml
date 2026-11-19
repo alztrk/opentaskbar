@@ -98,14 +98,13 @@
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />
         <Setter Property="Focusable" Value="False" />
         <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="Width" Value="24" />
-        <Setter Property="Height" Value="36" />
+        <Setter Property="Width" Value="34" />
         <Setter Property="Visibility" Value="Collapsed" />
         <Setter Property="Panel.ZIndex" Value="10" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
-                    <Border Background="Transparent" BorderThickness="0" Padding="0">
+                    <Border Background="{TemplateBinding Background}" BorderThickness="0" Padding="{TemplateBinding Padding}">
                         <Path x:Name="IndicatorGlyph"
                               Data="{Binding Content, RelativeSource={RelativeSource TemplatedParent}}"
                               Stroke="{DynamicResource TextPrimary}"
@@ -115,8 +114,9 @@
                               StrokeLineJoin="Round"
                               MaxWidth="12" MaxHeight="14"
                               Stretch="Uniform"
-                              Opacity="0.75"
-                              HorizontalAlignment="Center" VerticalAlignment="Center">
+                              Opacity="0.85"
+                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}">
                             <Path.Effect>
                                 <DropShadowEffect BlurRadius="4" ShadowDepth="1" Direction="270" Color="#000000" Opacity="0.55" />
                             </Path.Effect>
@@ -154,10 +154,14 @@
                             </ScrollContentPresenter.Content>
                         </ScrollContentPresenter>
                         <Button x:Name="PART_PreviousButton" Style="{StaticResource DockScrollIndicatorButton}"
-                                HorizontalAlignment="Left" VerticalAlignment="Center" Margin="2,0,0,0"
+                                Background="{DynamicResource DockScrollScrimStart}"
+                                HorizontalAlignment="Left" VerticalAlignment="Stretch" Width="34"
+                                HorizontalContentAlignment="Left" Padding="5,0,0,0"
                                 AutomationProperties.Name="{local:Loc ScrollDockHelp}" ToolTip="{local:Loc ScrollDockHelp}" />
                         <Button x:Name="PART_NextButton" Style="{StaticResource DockScrollIndicatorButton}"
-                                HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,2,0"
+                                Background="{DynamicResource DockScrollScrimEnd}"
+                                HorizontalAlignment="Right" VerticalAlignment="Stretch" Width="34"
+                                HorizontalContentAlignment="Right" Padding="0,0,5,0"
                                 AutomationProperties.Name="{local:Loc ScrollDockHelp}" ToolTip="{local:Loc ScrollDockHelp}" />
                     </Grid>
                 </ControlTemplate>

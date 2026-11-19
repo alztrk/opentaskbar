@@ -96,4 +96,25 @@
     <SolidColorBrush x:Key="WidgetFocusAccent" Color="#FFEF4444" />
     <SolidColorBrush x:Key="WidgetOnStroke" Color="#FF4F8EF7" />
     <SolidColorBrush x:Key="WidgetWarning" Color="#FFFBBF24" />
+    <!-- Dock scroll edge scrims: soft directional gradient shadows for overflowing content -->
+    <LinearGradientBrush x:Key="DockScrollScrimStart" StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="#C80C0F14" Offset="0" />
+        <GradientStop Color="#700C0F14" Offset="0.5" />
+        <GradientStop Color="#000C0F14" Offset="1" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="DockScrollScrimEnd" StartPoint="1,0" EndPoint="0,0">
+        <GradientStop Color="#C80C0F14" Offset="0" />
+        <GradientStop Color="#700C0F14" Offset="0.5" />
+        <GradientStop Color="#000C0F14" Offset="1" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="DockScrollScrimTop" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#C80C0F14" Offset="0" />
+        <GradientStop Color="#700C0F14" Offset="0.5" />
+        <GradientStop Color="#000C0F14" Offset="1" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="DockScrollScrimBottom" StartPoint="0,1" EndPoint="0,0">
+        <GradientStop Color="#C80C0F14" Offset="0" />
+        <GradientStop Color="#700C0F14" Offset="0.5" />
+        <GradientStop Color="#000C0F14" Offset="1" />
+    </LinearGradientBrush>
 </ResourceDictionary>
