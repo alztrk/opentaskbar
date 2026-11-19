@@ -24,6 +24,23 @@ public sealed class DockWidgetOption(
     public string Label => _label;
     public string Description => _description;
     public DockWidgetItem Preview { get; } = preview;
+
+    private FrameworkElement? _livePreview;
+
+    /// <summary>The real dock widget instance rendered in the catalog. Falls back to the static template when absent.</summary>
+    public FrameworkElement? LivePreview
+    {
+        get => _livePreview;
+        set
+        {
+            if (ReferenceEquals(_livePreview, value)) return;
+            _livePreview = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(LivePreview)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(PreviewContent)));
+        }
+    }
+
+    public object PreviewContent => (object?)_livePreview ?? Preview;
     public FrameworkElement? SettingsView { get; set; }
     public DockWidgetCategory Category { get; } = category;
 
@@ -45,8 +62,7 @@ public sealed class DockWidgetOption(
         || string.Equals(Id, "Audio", StringComparison.OrdinalIgnoreCase)
         || string.Equals(Id, "QuickSettings", StringComparison.OrdinalIgnoreCase)
         || string.Equals(Id, "Desktops", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(Id, "Search", StringComparison.OrdinalIgnoreCase)
-        || Id.StartsWith("AiUsage", StringComparison.Ordinal);
+        || string.Equals(Id, "Search", StringComparison.OrdinalIgnoreCase);
 
     public Visibility HasSettingsVisibility => HasSettings ? Visibility.Visible : Visibility.Collapsed;
 

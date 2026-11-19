@@ -23,11 +23,12 @@ public partial class SettingsWindow : Window
     private readonly ApplicationPreferences _preferences;
     private readonly StartupRegistration _startup = new();
     private readonly ObservableCollection<DockWidgetOption> _widgetOptions = [];
-    private readonly ObservableCollection<DockWidgetOption> _displayedWidgetOptions = [];
-    private DockWidgetCategory? _selectedCategory;
+    private readonly ObservableCollection<WidgetCategoryGroup> _widgetGroups = [];
     private readonly Dictionary<string, ComboBox> _widgetDensityBoxes = [];
     private readonly DockWidgetService _widgetPreviewService = new(TimeProvider.System);
     private readonly DispatcherTimer _widgetPreviewTimer = new() { Interval = TimeSpan.FromSeconds(15) };
+    private readonly List<OpenTaskbar.Widgets.DockWidget> _livePreviewWidgets = [];
+    private DispatcherTimer? _livePreviewTimer;
     private readonly DispatcherTimer _autoSaveTimer = new() { Interval = TimeSpan.FromMilliseconds(250) };
     private bool _startupEnabled;
     private bool _startupAvailable;
@@ -35,7 +36,6 @@ public partial class SettingsWindow : Window
     private bool _closingApplication;
     private bool _initializing = true;
     private AiUsageRing _aiUsageRing;
-    private readonly Dictionary<string, RadioButton[]> _aiUsageRingChoices = [];
     private bool _closed;
     private bool _sourceReady;
     private HwndSource? _source;
@@ -58,10 +58,11 @@ public partial class SettingsWindow : Window
         foreach (var option in _widgetPreviewService.CreateOptions(_applied.InstalledWidgets, _applied.Widgets))
         {
             _widgetOptions.Add(option);
-            _displayedWidgetOptions.Add(option);
         }
         AttachWidgetSettingsPanels();
-        WidgetOptionsList.ItemsSource = _displayedWidgetOptions;
+        AttachLiveWidgetPreviews();
+        RebuildWidgetGroups();
+        WidgetOptionsList.ItemsSource = _widgetGroups;
         WeatherCountryBox.ItemsSource = CountryCityService.GetInitialCountries().Select(c => c.Name).ToList();
         _ = InitializeWeatherLocationsAsync(_applied.WeatherCity);
         _preferences.Changed += Preferences_Changed;
@@ -80,12 +81,13 @@ public partial class SettingsWindow : Window
             _autoSaveTimer.Stop();
             _widgetPreviewTimer.Stop();
             _widgetPreviewTimer.Tick -= WidgetPreviewTimer_Tick;
+            StopAndDisposeLivePreviews();
             IsVisibleChanged -= Settings_IsVisibleChanged;
             _preferences.Changed -= Preferences_Changed;
             if (_source is { IsDisposed: false }) _source.RemoveHook(WindowProc);
             WidgetOptionsList.ItemsSource = null;
             _widgetOptions.Clear();
-            _displayedWidgetOptions.Clear();
+            _widgetGroups.Clear();
             _widgetDensityBoxes.Clear();
             WeatherCountryBox.ItemsSource = null;
             ThemeManager.SetSurfaceOpacity(_preferences.Current.SurfaceOpacity);
@@ -249,6 +251,8 @@ public partial class SettingsWindow : Window
                 option.UpdateText(localized.Label, localized.Description);
             }
             RefreshWidgetPreviews();
+            foreach (var group in _widgetGroups) group.RefreshLabel();
+            foreach (var widget in _livePreviewWidgets) widget.ApplySettings(_preferences.Current);
         }
         ThemeManager.SetSurfaceOpacity(Math.Round(OpacitySlider.Value) / 100);
         UpdateOpacityLabel();
@@ -599,37 +603,99 @@ public partial class SettingsWindow : Window
         {
             RefreshWidgetPreviews();
             _widgetPreviewTimer.Start();
+            _livePreviewTimer?.Start();
         }
-        else _widgetPreviewTimer.Stop();
-    }
-
-    private void WidgetCategoryFilter_Click(object sender, RoutedEventArgs e)
-    {
-        if (WidgetCategoryTimeRadio.IsChecked == true)
-            _selectedCategory = DockWidgetCategory.TimeAndWeather;
-        else if (WidgetCategorySystemRadio.IsChecked == true)
-            _selectedCategory = DockWidgetCategory.SystemAndHardware;
-        else if (WidgetCategoryAiRadio.IsChecked == true)
-            _selectedCategory = DockWidgetCategory.AiQuotas;
-        else if (WidgetCategoryMediaRadio.IsChecked == true)
-            _selectedCategory = DockWidgetCategory.MediaAndControls;
-        else if (WidgetCategoryProductivityRadio.IsChecked == true)
-            _selectedCategory = DockWidgetCategory.Productivity;
         else
-            _selectedCategory = null;
-
-        ApplyCategoryFilter();
+        {
+            _widgetPreviewTimer.Stop();
+            _livePreviewTimer?.Stop();
+        }
     }
 
-    private void ApplyCategoryFilter()
+    /// <summary>
+    /// Replaces the catalog's static mock visuals with real, running dock widgets. Each preview is a genuine
+    /// widget instance with current settings applied, so the cards show exactly what the taskbar shows.
+    /// </summary>
+    private void AttachLiveWidgetPreviews()
     {
-        _displayedWidgetOptions.Clear();
+        StopAndDisposeLivePreviews();
         foreach (var option in _widgetOptions)
         {
-            if (_selectedCategory is null || option.Category == _selectedCategory.Value)
+            if (!WidgetCoordinator.HandlesWidget(option.Id)) continue;
+            try
             {
-                _displayedWidgetOptions.Add(option);
+                var widget = WidgetCoordinator.CreateWidget(option.Id);
+                widget.ReportError = message => AppLog.Warning($"Widget preview '{option.Id}': {message}");
+                widget.ApplySettings(_applied);
+                widget.Activate();
+                widget.Tick(DateTime.Now);
+                // An inactive data source (no media session, no providers signed in) must not blank the card.
+                widget.Visibility = Visibility.Visible;
+                option.LivePreview = widget;
+                _livePreviewWidgets.Add(widget);
             }
+            catch (Exception ex)
+            {
+                AppLog.Warning($"Widget preview '{option.Id}' unavailable: {ex.Message}");
+            }
+        }
+
+        _livePreviewTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher) { Interval = TimeSpan.FromSeconds(1) };
+        _livePreviewTimer.Tick += (_, _) =>
+        {
+            var now = DateTime.Now;
+            foreach (var widget in _livePreviewWidgets)
+            {
+                widget.Tick(now);
+                if (widget.Visibility != Visibility.Visible) widget.Visibility = Visibility.Visible;
+            }
+        };
+        _livePreviewTimer.Start();
+    }
+
+    private void StopAndDisposeLivePreviews()
+    {
+        _livePreviewTimer?.Stop();
+        _livePreviewTimer = null;
+        foreach (var widget in _livePreviewWidgets) widget.Dispose();
+        _livePreviewWidgets.Clear();
+        foreach (var option in _widgetOptions) option.LivePreview = null;
+    }
+
+    /// <summary>A localized category label followed by the widgets that belong to it.</summary>
+    internal sealed class WidgetCategoryGroup : INotifyPropertyChanged
+    {
+        public WidgetCategoryGroup(DockWidgetCategory category, IReadOnlyList<DockWidgetOption> widgets)
+        {
+            Category = category;
+            Widgets = widgets;
+        }
+
+        public DockWidgetCategory Category { get; }
+        public IReadOnlyList<DockWidgetOption> Widgets { get; }
+
+        public string Label => Category switch
+        {
+            DockWidgetCategory.TimeAndWeather => UiText.Get("WidgetCategoryTime"),
+            DockWidgetCategory.SystemAndHardware => UiText.Get("WidgetCategorySystem"),
+            DockWidgetCategory.AiQuotas => UiText.Get("WidgetCategoryAi"),
+            DockWidgetCategory.MediaAndControls => UiText.Get("WidgetCategoryMedia"),
+            DockWidgetCategory.Productivity => UiText.Get("WidgetCategoryProductivity"),
+            _ => string.Empty
+        };
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        public void RefreshLabel() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Label)));
+    }
+
+    private void RebuildWidgetGroups()
+    {
+        _widgetGroups.Clear();
+        foreach (var category in Enum.GetValues<DockWidgetCategory>())
+        {
+            var widgets = _widgetOptions.Where(option => option.Category == category).ToList();
+            if (widgets.Count > 0) _widgetGroups.Add(new WidgetCategoryGroup(category, widgets));
         }
     }
 
@@ -754,7 +820,6 @@ public partial class SettingsWindow : Window
         DateStyleHidden.IsChecked = settings.DateStyle == ClockDateStyle.Hidden;
         WeatherCityBox.Text = settings.WeatherCity;
         _aiUsageRing = settings.AiUsageRing;
-        foreach (var choices in _aiUsageRingChoices.Values) ShowAiUsageRing(choices);
         StatsCpuToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Cpu);
         StatsMemoryToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Memory);
         StatsBatteryToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Battery);
@@ -777,14 +842,6 @@ public partial class SettingsWindow : Window
         _widgetDensityBoxes.Clear();
         if (_widgetOptions.FirstOrDefault(o => o.Id == "Clock") is { } clock) clock.SettingsView = ClockOptions;
         if (_widgetOptions.FirstOrDefault(o => o.Id == "Weather") is { } weather) weather.SettingsView = WeatherOptions;
-        _aiUsageRingChoices.Clear();
-        foreach (var definition in DockWidgetService.AiUsageWidgets)
-        {
-            if (_widgetOptions.FirstOrDefault(o => o.Id == definition.Id) is not { } aiUsage) continue;
-            var panel = CreateAiUsageOptions(definition.Id);
-            AttachDensityRow(definition.Id, panel);
-            aiUsage.SettingsView = panel;
-        }
         if (_widgetOptions.FirstOrDefault(o => o.Id == "Focus") is { } focus)
         {
             AttachDensityRow("Focus", FocusOptions);
@@ -825,52 +882,6 @@ public partial class SettingsWindow : Window
             AttachDensityRow(DockWidgetService.SearchId, panel);
             search.SettingsView = panel;
         }
-    }
-
-    // The ring choice is one shared setting, so every AI widget shows the same radio group state.
-    private StackPanel CreateAiUsageOptions(string widgetId)
-    {
-        var panel = new StackPanel();
-        var heading = new TextBlock { Text = UiText.Get("AiUsageRingLabel"), FontWeight = FontWeights.SemiBold, FontSize = 12, Margin = new Thickness(0, 0, 0, 6) };
-        panel.Children.Add(heading);
-        var grid = new UniformGrid { Columns = 1, Margin = new Thickness(-2, 0, -2, 0) };
-        var rings = new[] { AiUsageRing.Highest, AiUsageRing.Session, AiUsageRing.Weekly };
-        var labels = new[] { "AiUsageRingHighest", "AiUsageRingSession", "AiUsageWeekly" };
-        var choices = new RadioButton[rings.Length];
-        for (var i = 0; i < rings.Length; i++)
-        {
-            var ring = rings[i];
-            var choice = new RadioButton
-            {
-                GroupName = $"AiUsageRing_{widgetId}_{_radioGroupScope}",
-                Content = UiText.Get(labels[i]),
-                Style = (Style)FindResource("SettingsChoice")
-            };
-            choice.Checked += (_, _) =>
-            {
-                if (_initializing || _aiUsageRing == ring) return;
-                _aiUsageRing = ring;
-                _initializing = true;
-                try { foreach (var other in _aiUsageRingChoices.Values) ShowAiUsageRing(other); }
-                finally { _initializing = false; }
-            };
-            choices[i] = choice;
-            grid.Children.Add(choice);
-        }
-        panel.Children.Add(grid);
-        var note = new TextBlock { Text = UiText.Get("AiUsageUnofficialNote"), FontSize = 11, Margin = new Thickness(0, 8, 0, 0), TextWrapping = TextWrapping.Wrap };
-        note.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
-        panel.Children.Add(note);
-        _aiUsageRingChoices[widgetId] = choices;
-        ShowAiUsageRing(choices);
-        return panel;
-    }
-
-    private void ShowAiUsageRing(RadioButton[] choices)
-    {
-        choices[0].IsChecked = _aiUsageRing == AiUsageRing.Highest;
-        choices[1].IsChecked = _aiUsageRing == AiUsageRing.Session;
-        choices[2].IsChecked = _aiUsageRing == AiUsageRing.Weekly;
     }
 
     private void AttachDensityRow(string widgetId, FrameworkElement container)

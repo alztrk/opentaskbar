@@ -31,19 +31,20 @@
                         <Grid.RowDefinitions>
                             <RowDefinition Height="*" />
                             <RowDefinition Height="Auto" />
-                            <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
-                        <ContentControl Content="{Binding Preview}" HorizontalAlignment="Center" VerticalAlignment="Center"
-                                        Focusable="False" IsHitTestVisible="False" KeyboardNavigation.TabNavigation="None">
-                            <ContentControl.LayoutTransform>
-                                <ScaleTransform ScaleX="1.05" ScaleY="1.05" />
-                            </ContentControl.LayoutTransform>
-                        </ContentControl>
+                        <!-- Live real widget scaled to fit the card; static template remains the fallback. -->
+                        <Viewbox Grid.Row="0" Stretch="Uniform" StretchDirection="DownOnly" MaxWidth="220" MaxHeight="92"
+                                 HorizontalAlignment="Center" VerticalAlignment="Center"
+                                 Focusable="False" IsHitTestVisible="False">
+                            <ContentControl Content="{Binding PreviewContent}" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                            Focusable="False" IsHitTestVisible="False" KeyboardNavigation.TabNavigation="None">
+                                <ContentControl.LayoutTransform>
+                                    <ScaleTransform ScaleX="1.05" ScaleY="1.05" />
+                                </ContentControl.LayoutTransform>
+                            </ContentControl>
+                        </Viewbox>
                         <TextBlock Grid.Row="1" Text="{Binding Label}" HorizontalAlignment="Center" Margin="0,8,0,0"
                                    FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"
-                                   TextTrimming="CharacterEllipsis" IsHitTestVisible="False" />
-                        <TextBlock Grid.Row="2" Text="{Binding CategoryLabel}" HorizontalAlignment="Center" Margin="0,2,0,0"
-                                   FontSize="10.5" Foreground="{DynamicResource TextSecondary}"
                                    TextTrimming="CharacterEllipsis" IsHitTestVisible="False" />
                     </Grid>
                 </Button>
