@@ -2054,7 +2054,7 @@ public partial class MainWindow : Window
             if (target.Tag is string widgetId)
             {
                 if (Mouse.Captured is UIElement captured) captured.ReleaseMouseCapture();
-                DragDrop.DoDragDrop(target, new WidgetCoordinator.WidgetDragPayload(widgetId), DragDropEffects.Move);
+                DragGhost.DoDragDrop(target, new WidgetCoordinator.WidgetDragPayload(widgetId), DragDropEffects.Move);
             }
         }
     }

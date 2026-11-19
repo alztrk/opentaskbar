@@ -309,26 +309,13 @@ public sealed class WidgetCoordinator : IDisposable
 
     private void AnimateWidgetDrag(DockWidget widget, string widgetId)
     {
-        widget.Opacity = 0.55;
-        var (scale, translate) = GetWidgetTransforms(widget);
-        var animDuration = TimeSpan.FromMilliseconds(130);
-        var easeOut = new CubicEase { EasingMode = EasingMode.EaseOut };
-
-        scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.05, animDuration) { EasingFunction = easeOut });
-        scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.05, animDuration) { EasingFunction = easeOut });
-        translate.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(-4, animDuration) { EasingFunction = easeOut });
-
         try
         {
-            DragDrop.DoDragDrop(widget, new WidgetDragPayload(widgetId), DragDropEffects.Move);
+            DragGhost.DoDragDrop(widget, new WidgetDragPayload(widgetId), DragDropEffects.Move);
         }
         finally
         {
-            widget.Opacity = 1.0;
             ResetWidgetDisplacements();
-            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, animDuration) { EasingFunction = easeOut });
-            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, animDuration) { EasingFunction = easeOut });
-            translate.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(0, animDuration) { EasingFunction = easeOut });
         }
     }
 
