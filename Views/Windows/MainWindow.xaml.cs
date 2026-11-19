@@ -683,13 +683,15 @@ public partial class MainWindow : Window
                 var executablePath = group.Key;
                 var hasNotification = _preferences.Current.NotificationBadgesEnabled && group.Any(window => window.HasNotification);
                 // The topmost window decides identity icons, as ApplicationFrameHost hosts several Store apps.
-                var icon = _runningAppIcons.Get(executablePath, group.First().Handle);
-                var isForeground = group.Any(window => window.Handle == _foregroundWindow);
+                var window = group.First().Handle;
+                var icon = _runningAppIcons.Get(executablePath, window);
+                var isForeground = group.Any(candidate => candidate.Handle == _foregroundWindow);
                 var windowCount = group.Count();
                 if (currentApps.TryGetValue(executablePath, out var existingApp))
                 {
-                    // While a new identity icon loads in the background, keep showing the current one.
-                    if (icon is not null || !_runningAppIcons.IsLoading) existingApp.Icon = icon;
+                    // While this app's icon loads in the background, keep showing the current one. Other apps must
+                    // still be free to update theirs.
+                    if (icon is not null || !_runningAppIcons.IsLoadingFor(executablePath, window)) existingApp.Icon = icon;
                     existingApp.HasNotification = hasNotification;
                     existingApp.IsForeground = isForeground;
                     existingApp.WindowCount = windowCount;
@@ -1079,7 +1081,14 @@ public partial class MainWindow : Window
         // Process.Start runs ShellExecuteEx on its own STA thread when called from an MTA thread.
         _ = Task.Run(() => StartApplication(executablePath, arguments, elevated)).ContinueWith(task =>
         {
-            if (task.Result is { } error) Dispatcher.BeginInvoke(() => ReportError(error));
+            if (task.IsCompletedSuccessfully)
+            {
+                if (task.Result is { } error) Dispatcher.BeginInvoke(() => ReportError(error));
+                return;
+            }
+
+            AppLog.Warning($"Failed to start application: {task.Exception?.GetBaseException().Message}");
+            Dispatcher.BeginInvoke(() => ReportError("ErrorAppLaunchFailed"));
         }, TaskScheduler.Default);
     }
 

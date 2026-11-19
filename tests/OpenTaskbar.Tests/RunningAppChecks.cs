@@ -119,6 +119,8 @@ internal static class RunningAppChecks
         FinishLoads();
         Check(background.Get(Packaged, 2) is null && background.IsLoading,
             "Without executable resources the Start menu image is loaded next, still in the background.");
+        Check(background.IsLoadingFor(Packaged, 2) && !background.IsLoadingFor(Desktop, 1),
+            "A pending lookup must only hold back the icon of its own app.");
         // The dock refreshes (and prunes the cache with Retain) whenever a load finishes; a Store app such as
         // WhatsApp lost its freshly loaded image there and reloaded it in a loop, never showing an icon.
         background.Retain([new TrackedWindow(1, "Desktop", Desktop), new TrackedWindow(2, "App", Packaged)]);

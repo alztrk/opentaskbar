@@ -51,6 +51,7 @@ public sealed class NetSpeedWidget : DockWidget
     private long _lastSentBytes = -1;
     private long _lastTickMs;
     private bool _sampleInFlight;
+    private int _sampleGeneration;
     private double _downloadBytesPerSec;
     private double _uploadBytesPerSec;
     private long _sessionDownloadedBytes;
@@ -168,6 +169,9 @@ public sealed class NetSpeedWidget : DockWidget
     {
         UiText.Current.PropertyChanged += UiText_PropertyChanged;
         Localize();
+        // A sample from a previous activation would otherwise skip the first tick and then land with reset baselines.
+        _sampleGeneration++;
+        _sampleInFlight = false;
         _lastReceivedBytes = -1;
         _lastSentBytes = -1;
         _lastTickMs = 0;
@@ -177,6 +181,8 @@ public sealed class NetSpeedWidget : DockWidget
     protected override void OnDeactivated()
     {
         UiText.Current.PropertyChanged -= UiText_PropertyChanged;
+        _sampleGeneration++;
+        _sampleInFlight = false;
         CancelSpeedTest();
         _flyout.Close();
     }
@@ -199,6 +205,7 @@ public sealed class NetSpeedWidget : DockWidget
         // previous sample is still running.
         if (_sampleInFlight) return;
         _sampleInFlight = true;
+        var generation = _sampleGeneration;
         var reader = NetworkReader;
         _ = Task.Run(() =>
         {
@@ -206,6 +213,7 @@ public sealed class NetSpeedWidget : DockWidget
             return (Sample: sample, SampledAtMs: Environment.TickCount64);
         }).ContinueWith(task => Dispatcher.BeginInvoke(() =>
         {
+            if (generation != _sampleGeneration) return;
             _sampleInFlight = false;
             if (!IsActive || !task.IsCompletedSuccessfully) return;
             ApplySample(task.Result.Sample, task.Result.SampledAtMs);

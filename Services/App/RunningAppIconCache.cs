@@ -77,6 +77,15 @@ public sealed class RunningAppIconCache
     /// <summary>True while an offloaded lookup is still running; <see cref="IconLoaded"/> follows when it ends.</summary>
     public bool IsLoading => _loading.Count > 0;
 
+    /// <summary>True while the lookups for this window are running, so an unrelated app keeps its own icon.</summary>
+    public bool IsLoadingFor(string executablePath, nint window)
+    {
+        if (_loading.Contains("resource:" + executablePath) || _loading.Contains("file:" + executablePath)) return true;
+        return _windows.TryGetValue(window, out var lookup)
+            && lookup.AppId is { } appId
+            && _loading.Contains("app:" + appId);
+    }
+
     public BitmapSource? Get(string executablePath, nint window)
     {
         if (!TryCached(_resourceIcons, "resource:", executablePath, _resourceIcon, out var icon)) return null;
