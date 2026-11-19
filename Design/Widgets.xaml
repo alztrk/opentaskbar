@@ -174,7 +174,6 @@
                             BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{StaticResource WidgetRadius}"
                             SnapsToDevicePixels="True">
                         <Grid>
-                            <Border CornerRadius="11" BorderThickness="0,1,0,0" BorderBrush="#22FFFFFF" IsHitTestVisible="False" />
                             <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Grid>
                     </Border>
