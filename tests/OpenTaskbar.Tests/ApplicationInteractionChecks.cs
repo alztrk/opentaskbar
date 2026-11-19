@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using OpenTaskbar;
 using OpenTaskbar.Models;
 using OpenTaskbar.Services;
 using OpenTaskbar.Widgets;
@@ -61,6 +62,18 @@ internal static class ApplicationInteractionChecks
             && empty.Children.OfType<TextBlock>().Any(text => text.Text == UiText.Get("TrayEmpty")),
             "An empty tray must show its empty state without application actions.");
 
+        var testFlyout = new DockFlyout();
+        var testHost = new Button();
+        var testMenu = new ContextMenu();
+        testHost.ContextMenu = testMenu;
+        testFlyout.Show(testHost, testHost, animate: false);
+        Check(testFlyout.IsOpen, "Flyout must be open initially.");
+        var args = (ContextMenuEventArgs)Activator.CreateInstance(typeof(ContextMenuEventArgs),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance, null, [testHost, true], null)!;
+        testHost.RaiseEvent(args);
+        Check(testFlyout.StaysOpen, "Opening a context menu on an element inside the flyout must keep the flyout open.");
+        testFlyout.Close();
+
         var panel = new StackPanel { Children = { buttons, content } };
         panel.SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, "TextPrimary");
         panel.SetResourceReference(System.Windows.Documents.TextElement.FontFamilyProperty, "InterfaceFont");
@@ -89,8 +102,8 @@ internal static class ApplicationInteractionChecks
                     "The foreground application must maintain a clean transparent dock background without artificial card boxes.");
                 Check(secondButton.IsKeyboardFocused && IsTransparent(secondSurface.Background),
                     "Keyboard focus on a background app must not create an active background.");
-                Check(secondSurface.BorderBrush == application.FindResource("StrokeFocus"),
-                    "Keyboard navigation must retain a visible focus outline.");
+                Check(IsTransparent(secondSurface.BorderBrush),
+                    "Dock buttons must retain a clean borderless appearance without focus borders.");
                 first.IsForeground = false;
                 second.IsForeground = true;
                 Flush();

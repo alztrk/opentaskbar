@@ -155,6 +155,28 @@ public sealed class DockFlyout
             Placement = PlacementMode.Custom,
             CustomPopupPlacementCallback = Place
         };
+        _root.AddHandler(FrameworkElement.ContextMenuOpeningEvent, new ContextMenuEventHandler((_, e) =>
+        {
+            _popup.StaysOpen = true;
+            if (e.Source is FrameworkElement fe && fe.ContextMenu is { } cm)
+            {
+                RoutedEventHandler? onClosed = null;
+                onClosed = (_, _) =>
+                {
+                    cm.Closed -= onClosed;
+                    _popup.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, () =>
+                    {
+                        if (!_popup.IsOpen) return;
+                        _popup.StaysOpen = false;
+                        if (!IsCursorOver(_frame) && !IsCursorOver(_currentTarget))
+                        {
+                            Close();
+                        }
+                    });
+                };
+                cm.Closed += onClosed;
+            }
+        }), handledEventsToo: true);
         _popup.Closed += (_, _) =>
         {
             _isOpenState = false;
@@ -200,6 +222,14 @@ public sealed class DockFlyout
     public event EventHandler? Closed;
 
     public bool IsOpen => _isOpenState || _popup.IsOpen;
+
+    public bool StaysOpen
+    {
+        get => _popup.StaysOpen;
+        set => _popup.StaysOpen = value;
+    }
+
+    public System.Windows.Threading.Dispatcher Dispatcher => _popup.Dispatcher;
 
     private void Target_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {

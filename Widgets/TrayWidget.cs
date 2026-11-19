@@ -148,7 +148,7 @@ public sealed class TrayWidget : DockWidget
             row.Children.Add(image);
             row.Children.Add(new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis });
             var open = DockFlyout.FlatButton(row, (_, _) => ForwardClick(icon, System.Windows.Input.MouseButton.Left), name);
-            // The app draws its own menu; close the flyout first so the menu keeps the foreground.
+            open.PreviewMouseRightButtonDown += (_, _) => _flyout.StaysOpen = true;
             open.PreviewMouseRightButtonUp += (_, e) =>
             {
                 e.Handled = true;
@@ -186,9 +186,25 @@ public sealed class TrayWidget : DockWidget
 
     private void ForwardClick(ManagedShell.WindowsTray.NotifyIcon icon, System.Windows.Input.MouseButton button)
     {
-        _flyout.Close();
-        // Let the flyout finish closing before the app takes the foreground for its window or menu.
-        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => TrayHost.Click(icon, button));
+        if (button == System.Windows.Input.MouseButton.Left)
+        {
+            _flyout.Close();
+            // Let the flyout finish closing before the app takes the foreground for its window.
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => TrayHost.Click(icon, button));
+        }
+        else
+        {
+            // Right-clicks open the app's context menu; keep the flyout open.
+            _flyout.StaysOpen = true;
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () =>
+            {
+                TrayHost.Click(icon, button);
+                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ContextIdle, () =>
+                {
+                    _flyout.StaysOpen = false;
+                });
+            });
+        }
     }
 
     internal UIElement BuildContent(IReadOnlyList<TrayApp> apps)
@@ -224,6 +240,17 @@ public sealed class TrayWidget : DockWidget
             };
             menu.Items.Add(closeItem);
             menu.Items.Add(terminateItem);
+            open.PreviewMouseRightButtonDown += (_, _) => _flyout.StaysOpen = true;
+            open.ContextMenuOpening += (_, _) => _flyout.StaysOpen = true;
+            menu.Opened += (_, _) => _flyout.StaysOpen = true;
+            menu.Closed += (_, _) =>
+            {
+                _flyout.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, () =>
+                {
+                    if (!_flyout.IsOpen) return;
+                    _flyout.StaysOpen = false;
+                });
+            };
             open.ContextMenu = menu;
 
             // Tray apps may keep running after WM_CLOSE; force quit uses the dock's existing confirmation flow.
