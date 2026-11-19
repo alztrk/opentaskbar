@@ -537,13 +537,21 @@ public sealed class TaskbarReplacementSession : IDisposable
     {
         var taskbar = NativeTaskbarWindow.Find();
         var data = CreateData();
-        if (taskbar == 0 || SHAppBarMessage(AbmGetTaskbarPos, ref data) == 0)
-            throw new InvalidOperationException("ErrorTaskbarDimensions");
-        var dpi = GetDpiForWindow(taskbar);
-        if (dpi == 0 || data.rc.Bottom <= data.rc.Top || data.rc.Right <= data.rc.Left)
-            throw new InvalidOperationException("ErrorTaskbarDimensions");
-        _nativeTaskbarAtBottom = data.uEdge == AbeBottom;
-        _nativeBottomTaskbarHeight = _nativeTaskbarAtBottom ? (data.rc.Bottom - data.rc.Top) * 96d / dpi : 0;
+        if (taskbar != 0 && SHAppBarMessage(AbmGetTaskbarPos, ref data) != 0)
+        {
+            var dpi = GetDpiForWindow(taskbar);
+            if (dpi != 0 && data.rc.Bottom > data.rc.Top && data.rc.Right > data.rc.Left)
+            {
+                _nativeTaskbarAtBottom = data.uEdge == AbeBottom;
+                _nativeBottomTaskbarHeight = _nativeTaskbarAtBottom ? (data.rc.Bottom - data.rc.Top) * 96d / dpi : 0;
+                return;
+            }
+        }
+
+        // When Explorer's taskbar is hidden (e.g. recovering from a killed session or transient restart),
+        // ABM_GETTASKBARPOS can fail. Fall back to standard dimensions so the replacement session can still start.
+        _nativeTaskbarAtBottom = true;
+        _nativeBottomTaskbarHeight = 48;
     }
 
     private void ReserveShelf(Rect monitor, Rect workArea, DockLayoutMetrics metrics, uint dpi)
