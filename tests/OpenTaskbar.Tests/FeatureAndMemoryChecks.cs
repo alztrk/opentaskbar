@@ -55,7 +55,7 @@ internal static class FeatureAndMemoryChecks
             }
 
             var aiLoads = 0;
-            using (var ai = new AiUsageWidget(AiProviders.Claude, (_, _) =>
+            using (var ai = new AiUsageWidget(AiProviders.OpenCode, (_, _) =>
             {
                 aiLoads++;
                 return Task.FromResult<(AiUsageReport?, string?)>((null, "ErrorAiUsageSignIn"));
@@ -65,7 +65,7 @@ internal static class FeatureAndMemoryChecks
                 Check(aiLoads == 0, "An inactive AI usage widget must not load.");
                 ai.Activate();
                 Check(aiLoads == 1 && ai.Visibility == Visibility.Visible
-                    && AiCards(ai) is [{ ToolTip: string hint }] && hint.Contains("claude", StringComparison.Ordinal),
+                    && AiCards(ai) is [{ ToolTip: string hint }] && hint.Contains("opencode", StringComparison.Ordinal),
                     "AI Usage must keep sign-in failures visible with a localized CLI hint.");
                 ai.Tick(DateTime.Now);
                 Check(aiLoads == 1, "A sign-in failure must not poll again without changed credentials.");
@@ -102,7 +102,7 @@ internal static class FeatureAndMemoryChecks
                 claude.Activate();
                 codex.Activate();
                 Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.Background);
-                Check(AiCards(claude) is [{ Content: StackPanel { Children: [System.Windows.Shapes.Path { Data: not null }, TextBlock { Text: "Claude" }, RingMeter { Value: 0.42, Text: "42" }] } } claudeCard]
+                Check(AiCards(claude) is [{ Content: StackPanel { Children: [System.Windows.Shapes.Path { Data: not null }, TextBlock { Text: "Claude" }, StackPanel { Children: [StackPanel, StackPanel] }] } } claudeCard]
                     && claudeCard.ToolTip is string claudeTip && claudeTip.StartsWith("Claude Code 42%", StringComparison.Ordinal)
                     && claudeTip.Contains("Weekly 29%", StringComparison.Ordinal) && claudeTip.Contains("Resets in", StringComparison.Ordinal)
                     && AiCards(codex) is [{ Content: StackPanel { Children: [_, TextBlock { Text: "Codex" }, StackPanel { Children: [StackPanel, StackPanel] }] } } codexCard]
@@ -113,9 +113,9 @@ internal static class FeatureAndMemoryChecks
                     "The ring setting must choose the window the dock shows.");
                 claude.SetCompactState(true);
                 Check(AiCards(claude) is [{ Content: StackPanel { Children: [_, TextBlock { Visibility: Visibility.Collapsed }, _] } }],
-                    "Compact AI Usage must keep the logo and ring and drop the name.");
-                Check(claude.BuildHoverFlyoutContent() is StackPanel aiFlyout && aiFlyout.Children.Count > 4,
-                    "The AI Usage flyout must show the provider's section.");
+                    "Compact AI Usage must keep the logo and indicators and drop the name.");
+                Check(claude.BuildHoverFlyoutContent() is null && codex.BuildHoverFlyoutContent() is null,
+                    "Claude and Codex have inline indicators and no hover flyout.");
             }
 
             // 2. SystemStats + on-demand SystemSensors parity & disposal

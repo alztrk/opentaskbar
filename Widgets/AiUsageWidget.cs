@@ -31,7 +31,7 @@ public sealed class AiUsageWidget : DockWidget
     private CancellationTokenSource? _loading;
     private int _renderedMinute = -1;
 
-    private sealed record CodexBars(
+    private sealed record DualQuotaBars(
         TextBlock SessionLabel,
         Border SessionTrack,
         Border SessionFill,
@@ -41,7 +41,12 @@ public sealed class AiUsageWidget : DockWidget
         Border WeeklyFill,
         TextBlock WeeklyReset);
 
-    private sealed record Card(Button Button, System.Windows.Shapes.Path Logo, TextBlock Name, RingMeter? Ring, CodexBars? Codex);
+    private sealed record Card(Button Button, System.Windows.Shapes.Path Logo, TextBlock Name, RingMeter? Ring, DualQuotaBars? Bars)
+    {
+        public DualQuotaBars? Codex => Bars;
+    }
+
+    private static bool UsesDualQuota(AiProviders provider) => provider is AiProviders.Codex or AiProviders.Claude;
 
     public AiUsageWidget(AiProviders provider, Func<AiProviders, CancellationToken, Task<(AiUsageReport?, string?)>>? loader = null)
     {
@@ -63,8 +68,8 @@ public sealed class AiUsageWidget : DockWidget
     public override double FullWidthEstimate => CardWidth(_provider, false) + CardSpacing;
     public override double CompactWidthEstimate => CardWidth(_provider, true) + CardSpacing;
     private static double CardWidth(AiProviders provider, bool compact) =>
-        provider == AiProviders.Codex
-            ? CardPaddingAndBorder + LogoSize + Gap + (compact ? 0 : 38 + Gap) + 120
+        UsesDualQuota(provider)
+            ? CardPaddingAndBorder + LogoSize + Gap + (compact ? 0 : NameWidth + Gap) + 120
             : CardPaddingAndBorder + LogoSize + Gap + (compact ? 0 : NameWidth + Gap) + RingSize;
     private double CardSpacing => TryFindResource("WidgetSpacing") is Thickness spacing ? spacing.Left + spacing.Right : 0;
 
@@ -95,29 +100,29 @@ public sealed class AiUsageWidget : DockWidget
     protected override void OnSettingsChanged() => Render();
     protected override void OnLanguageChanged() => Refresh();
     protected override void OnCompactChanged(bool compact) => Render();
-    public override UIElement? BuildHoverFlyoutContent() => _provider == AiProviders.Codex ? null : BuildFlyout(_hoverCountdowns);
+    public override UIElement? BuildHoverFlyoutContent() => UsesDualQuota(_provider) ? null : BuildFlyout(_hoverCountdowns);
 
     protected override void OnTick(DateTime now)
     {
         if (_loading is null) _ = LoadAsync();
         // Reset times and staleness only change by the minute; open flyouts keep counting down.
         if (now.Minute != _renderedMinute) Render();
-        if (_card.Codex is not null) UpdateCodexCountdowns();
+        if (_card.Bars is not null) UpdateDualCountdowns();
         if (!IsHoverFlyoutOpen) _hoverCountdowns.Clear();
         foreach (var (block, reset) in _countdowns.Concat(_hoverCountdowns)) block.Text = ResetText(reset);
     }
 
-    private void UpdateCodexCountdowns()
+    private void UpdateDualCountdowns()
     {
-        if (_card.Codex is not { } codex || _report is not { } report) return;
+        if (_card.Bars is not { } bars || _report is not { } report) return;
         if (report.Windows.FirstOrDefault(w => w.LabelKey == "AiUsageSession")?.ResetsAt is { } sReset)
         {
             var sRem = sReset - DateTimeOffset.UtcNow;
-            codex.SessionReset.Text = sRem > TimeSpan.Zero ? Duration(sRem) : Duration(TimeSpan.Zero);
+            bars.SessionReset.Text = sRem > TimeSpan.Zero ? Duration(sRem) : Duration(TimeSpan.Zero);
         }
         if (report.Windows.FirstOrDefault(w => w.LabelKey == "AiUsageWeekly")?.ResetsAt is { } wReset)
         {
-            codex.WeeklyReset.Text = When(wReset);
+            bars.WeeklyReset.Text = When(wReset);
         }
     }
 
@@ -362,7 +367,7 @@ public sealed class AiUsageWidget : DockWidget
         label.FontWeight = FontWeights.SemiBold;
         label.Margin = new Thickness(0, 0, Gap, 0);
 
-        if (_provider == AiProviders.Codex)
+        if (UsesDualQuota(_provider))
         {
             var sessionLabel = Text(UiText.Get("AiUsageSessionShort"), 9.5, "TextSecondary");
             sessionLabel.FontWeight = FontWeights.SemiBold;
@@ -420,13 +425,13 @@ public sealed class AiUsageWidget : DockWidget
             barsPanel.Children.Add(sessionRow);
             barsPanel.Children.Add(weeklyRow);
 
-            var codexBars = new CodexBars(sessionLabel, sessionTrack, sessionFill, sessionReset, weeklyLabel, weeklyTrack, weeklyFill, weeklyReset);
+            var dualBars = new DualQuotaBars(sessionLabel, sessionTrack, sessionFill, sessionReset, weeklyLabel, weeklyTrack, weeklyFill, weeklyReset);
 
             var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Children = { logo, label, barsPanel } };
             var button = new Button { Content = row, Cursor = System.Windows.Input.Cursors.Arrow };
             button.SetResourceReference(StyleProperty, "WidgetCardButton");
-            // Codex click popup menu is removed as requested
-            return new(button, logo, label, null, codexBars);
+            // Click popup menu is removed for dual quota widgets (Codex, Claude)
+            return new(button, logo, label, null, dualBars);
         }
 
         var ring = new RingMeter { Width = RingSize, Height = RingSize, StrokeThickness = 3, FontSize = 10.5, Text = "—", IsHitTestVisible = false };
@@ -460,44 +465,44 @@ public sealed class AiUsageWidget : DockWidget
         _card.Button.ToolTip = toolTip;
         AutomationProperties.SetName(_card.Button, $"{UiText.Get("WidgetAiUsage")}: {toolTip}");
 
-        if (_card.Codex is { } codex)
+        if (_card.Bars is { } bars)
         {
-            codex.SessionLabel.Text = UiText.Get("AiUsageSessionShort");
-            codex.WeeklyLabel.Text = UiText.Get("AiUsageWeeklyShort");
-            codex.SessionLabel.SetResourceReference(TextBlock.ForegroundProperty, secondary);
-            codex.WeeklyLabel.SetResourceReference(TextBlock.ForegroundProperty, secondary);
+            bars.SessionLabel.Text = UiText.Get("AiUsageSessionShort");
+            bars.WeeklyLabel.Text = UiText.Get("AiUsageWeeklyShort");
+            bars.SessionLabel.SetResourceReference(TextBlock.ForegroundProperty, secondary);
+            bars.WeeklyLabel.SetResourceReference(TextBlock.ForegroundProperty, secondary);
 
             var session = _report?.Windows.FirstOrDefault(w => w.LabelKey == "AiUsageSession");
             var weekly = _report?.Windows.FirstOrDefault(w => w.LabelKey == "AiUsageWeekly");
 
             var sUsed = session?.Used ?? 0;
-            codex.SessionFill.Width = Math.Max(0, Math.Min(38, 38 * sUsed));
-            codex.SessionFill.SetResourceReference(Border.BackgroundProperty, session is null ? "TextMuted" : Accent(sUsed, session.Severity));
+            bars.SessionFill.Width = Math.Max(0, Math.Min(38, 38 * sUsed));
+            bars.SessionFill.SetResourceReference(Border.BackgroundProperty, session is null ? "TextMuted" : Accent(sUsed, session.Severity));
 
             if (session?.ResetsAt is { } sReset)
             {
                 var sRem = sReset - DateTimeOffset.UtcNow;
-                codex.SessionReset.Text = sRem > TimeSpan.Zero ? Duration(sRem) : Duration(TimeSpan.Zero);
+                bars.SessionReset.Text = sRem > TimeSpan.Zero ? Duration(sRem) : Duration(TimeSpan.Zero);
             }
             else
             {
-                codex.SessionReset.Text = "—";
+                bars.SessionReset.Text = "—";
             }
-            codex.SessionReset.SetResourceReference(TextBlock.ForegroundProperty, secondary);
+            bars.SessionReset.SetResourceReference(TextBlock.ForegroundProperty, secondary);
 
             var wUsed = weekly?.Used ?? 0;
-            codex.WeeklyFill.Width = Math.Max(0, Math.Min(38, 38 * wUsed));
-            codex.WeeklyFill.SetResourceReference(Border.BackgroundProperty, weekly is null ? "TextMuted" : Accent(wUsed, weekly.Severity));
+            bars.WeeklyFill.Width = Math.Max(0, Math.Min(38, 38 * wUsed));
+            bars.WeeklyFill.SetResourceReference(Border.BackgroundProperty, weekly is null ? "TextMuted" : Accent(wUsed, weekly.Severity));
 
             if (weekly?.ResetsAt is { } wReset)
             {
-                codex.WeeklyReset.Text = When(wReset);
+                bars.WeeklyReset.Text = When(wReset);
             }
             else
             {
-                codex.WeeklyReset.Text = "—";
+                bars.WeeklyReset.Text = "—";
             }
-            codex.WeeklyReset.SetResourceReference(TextBlock.ForegroundProperty, secondary);
+            bars.WeeklyReset.SetResourceReference(TextBlock.ForegroundProperty, secondary);
         }
         else if (_card.Ring is { } ring)
         {
