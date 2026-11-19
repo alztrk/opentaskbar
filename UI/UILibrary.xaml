@@ -1,0 +1,31 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <ResourceDictionary.MergedDictionaries>
+        <!-- Design Tokens -->
+        <ResourceDictionary Source="Tokens/Colors.xaml" />
+        <ResourceDictionary Source="Tokens/Radii.xaml" />
+        <ResourceDictionary Source="Tokens/Spacing.xaml" />
+        <ResourceDictionary Source="Tokens/Typography.xaml" />
+
+        <!-- Effects & Animations -->
+        <ResourceDictionary Source="Effects/Shadows.xaml" />
+        <ResourceDictionary Source="Effects/GlassSurface.xaml" />
+        <ResourceDictionary Source="Animations/Motions.xaml" />
+
+        <!-- Modular Control Templates -->
+        <ResourceDictionary Source="Controls/Button.xaml" />
+        <ResourceDictionary Source="Controls/Dropdown.xaml" />
+        <ResourceDictionary Source="Controls/ContextMenu.xaml" />
+        <ResourceDictionary Source="Controls/ToggleSwitch.xaml" />
+        <ResourceDictionary Source="Controls/Slider.xaml" />
+        <ResourceDictionary Source="Controls/Tooltip.xaml" />
+        <ResourceDictionary Source="Controls/TextBox.xaml" />
+        <ResourceDictionary Source="Controls/ScrollBar.xaml" />
+        <ResourceDictionary Source="Controls/Flyout.xaml" />
+        <ResourceDictionary Source="Controls/AppTile.xaml" />
+        <ResourceDictionary Source="Controls/RunningIndicator.xaml" />
+        <ResourceDictionary Source="Controls/NotificationBadge.xaml" />
+    </ResourceDictionary.MergedDictionaries>
+
+</ResourceDictionary>

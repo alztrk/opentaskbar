@@ -1,0 +1,42 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Glass & Base Surfaces -->
+    <Color x:Key="ColorGlassBase">#E60D0F14</Color>
+    <Color x:Key="ColorGlassSurface">#99141822</Color>
+    <Color x:Key="ColorGlassTile">#40242B38</Color>
+    <Color x:Key="ColorGlassTileHover">#66323C4E</Color>
+    <Color x:Key="ColorGlassTileActive">#803E4A60</Color>
+
+    <SolidColorBrush x:Key="BrushGlassBase" Color="{StaticResource ColorGlassBase}" />
+    <SolidColorBrush x:Key="BrushGlassSurface" Color="{StaticResource ColorGlassSurface}" />
+    <SolidColorBrush x:Key="BrushGlassTile" Color="{StaticResource ColorGlassTile}" />
+    <SolidColorBrush x:Key="BrushGlassTileHover" Color="{StaticResource ColorGlassTileHover}" />
+    <SolidColorBrush x:Key="BrushGlassTileActive" Color="{StaticResource ColorGlassTileActive}" />
+
+    <!-- Specular Border Light -->
+    <LinearGradientBrush x:Key="BrushSpecularBorder" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#55FFFFFF" Offset="0.0" />
+        <GradientStop Color="#22FFFFFF" Offset="0.3" />
+        <GradientStop Color="#10FFFFFF" Offset="0.7" />
+        <GradientStop Color="#08FFFFFF" Offset="1.0" />
+    </LinearGradientBrush>
+
+    <LinearGradientBrush x:Key="BrushTileBorder" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#33FFFFFF" Offset="0.0" />
+        <GradientStop Color="#0DFFFFFF" Offset="1.0" />
+    </LinearGradientBrush>
+
+    <!-- Typography Brushes -->
+    <SolidColorBrush x:Key="BrushTextPrimary" Color="#FAFAFA" />
+    <SolidColorBrush x:Key="BrushTextSecondary" Color="#B0B6C2" />
+    <SolidColorBrush x:Key="BrushTextMuted" Color="#6E7686" />
+
+    <!-- Functional Accent Highlights -->
+    <SolidColorBrush x:Key="BrushAccentBlue" Color="#388BFD" />
+    <SolidColorBrush x:Key="BrushAccentGreen" Color="#2EA043" />
+    <SolidColorBrush x:Key="BrushAccentAmber" Color="#E3B341" />
+    <SolidColorBrush x:Key="BrushAccentRed" Color="#F85149" />
+    <SolidColorBrush x:Key="BrushRunningDot" Color="#58A6FF" />
+
+</ResourceDictionary>
