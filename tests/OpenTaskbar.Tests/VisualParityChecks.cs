@@ -46,9 +46,10 @@ internal static class VisualParityChecks
                 ["WeatherGradients_Dark"] = "7738B36883895809AAEF350A7A569DDDBDCAE75D36E0D034C0858439EBFA9957",
                 ["WeatherGradients_Light"] = "7738B36883895809AAEF350A7A569DDDBDCAE75D36E0D034C0858439EBFA9957"
             };
-            expected["DockButtons_Dark"] = "FA5892B1F18D96AE6926C57E0B3D2754CD109FE132830D9C5712EA7B6677E3C1";
-            expected["TimedWidgets_Dark"] = "388904F11531CC7F3E8D9857DA44A3E48C1498A4DFBE0C89A09D8B12F9FE4361";
-            expected["DockButtons_Light"] = "52481CDFCB0D940216DA597DF266232ACB1A999FD8AD347DAC055B4620C040CF";
+            expected["DockButtons_Dark"] = "AA8331427AA68DC01964E488B22E5A22040FE416B09ECAF6C73C12C15B5001BC";
+            expected["TimedWidgets_Dark"] = "CAF361B4B6C65BC5186E54C5EBD325894E5CB82036BCF75B55740473A8627C26";
+            expected["TimedWidgets_Light"] = "07582D2FDA7DD9CDC8762280B1B2EE5F4764F1B8873BE7C5C3269CB5D3EB8F8C";
+            expected["DockButtons_Light"] = "C464BE866655D9AA1FCE1718877D671E018F2EB031AA8F11351B3602A6DD8B0F";
             expected["RingMeters_Dark"] = "AA26B0446BBDF57C2C965049395A248F668538AF3A49D4DA8589B1BC8619B598";
 
             foreach (var theme in new[] { AppTheme.Dark, AppTheme.Light })
@@ -111,7 +112,7 @@ internal static class VisualParityChecks
                 timedPanel.Children.Add(new ContentControl { Content = sw });
                 timedPanel.Children.Add(new ContentControl { Content = cd });
                 var timedHash = CaptureHash(app, timedPanel, 380, 64, out _);
-                Check(timedHash == expected[$"TimedWidgets_{theme}"], $"TimedWidgets_{theme} pixel buffer must match baseline exactly.");
+                Check(timedHash == expected[$"TimedWidgets_{theme}"], $"TimedWidgets_{theme} pixel buffer must match baseline exactly. Actual: {timedHash}");
 
                 // 4. Activated live widgets
                 var settings = new DockSettings(

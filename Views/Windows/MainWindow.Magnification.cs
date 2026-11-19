@@ -17,11 +17,6 @@ public partial class MainWindow
     private bool _magnificationRendering;
     private TimeSpan? _magnificationLastFrame;
     private readonly System.Runtime.CompilerServices.ConditionalWeakTable<Image, BitmapSource> _restingIcons = new();
-    private double _targetGlintRelX = 0.5;
-    private double _currentGlintRelX = 0.5;
-    private bool _glintRendering;
-    private bool _glintActive;
-    private double _glintCurrentOpacity;
 
     internal void InvalidateMagnificationTargets() => _magnificationTargetsDirty = true;
 
@@ -230,109 +225,18 @@ public partial class MainWindow
         _magnificationLastFrame = null;
     }
 
-    private void StartGlintRendering()
-    {
-        if (_glintRendering) return;
-        _glintRendering = true;
-        CompositionTarget.Rendering += RenderGlintPhysics;
-    }
-
-    private void StopGlintRendering()
-    {
-        if (!_glintRendering) return;
-        CompositionTarget.Rendering -= RenderGlintPhysics;
-        _glintRendering = false;
-    }
-
-    private void RenderGlintPhysics(object? sender, EventArgs e)
-    {
-        var targetOpacity = _glintActive ? 1.0 : 0.0;
-        var opacityDiff = targetOpacity - _glintCurrentOpacity;
-        if (Math.Abs(opacityDiff) > 0.005)
-        {
-            _glintCurrentOpacity += opacityDiff * 0.18;
-        }
-        else
-        {
-            _glintCurrentOpacity = targetOpacity;
-        }
-
-        var posDiff = _targetGlintRelX - _currentGlintRelX;
-        if (Math.Abs(posDiff) > 0.0002)
-        {
-            _currentGlintRelX += posDiff * 0.18;
-        }
-        else
-        {
-            _currentGlintRelX = _targetGlintRelX;
-        }
-
-        ApplyGlintMetrics(_currentGlintRelX, _glintCurrentOpacity);
-
-        if (!_glintActive && _glintCurrentOpacity <= 0.005)
-        {
-            _glintCurrentOpacity = 0.0;
-            DockDynamicGlintBorder.Opacity = 0.0;
-            DockDynamicGlowBorder.Opacity = 0.0;
-            StopGlintRendering();
-        }
-    }
-
-    private void ApplyGlintMetrics(double relX, double opacity)
-    {
-        var cornerFactor = Math.Clamp(Math.Sin(relX * Math.PI), 0.35, 1.0);
-        var effectiveOpacity = opacity * cornerFactor;
-
-        DockDynamicGlintBorder.Opacity = effectiveOpacity;
-        DockDynamicGlowBorder.Opacity = effectiveOpacity * 0.85;
-
-        const double halfSpread = 0.12;
-        const double innerSpread = 0.05;
-
-        var x0 = Math.Max(0.0, relX - halfSpread);
-        var x1 = Math.Max(0.0, relX - innerSpread);
-        var x2 = relX;
-        var x3 = Math.Min(1.0, relX + innerSpread);
-        var x4 = Math.Min(1.0, relX + halfSpread);
-
-        DockSpecularGlintStop0.Offset = x0;
-        DockSpecularGlintStop1.Offset = x1;
-        DockSpecularGlintStop2.Offset = x2;
-        DockSpecularGlintStop3.Offset = x3;
-        DockSpecularGlintStop4.Offset = x4;
-
-        var pt = new Point(relX, 0.0);
-        DockSpecularGlow.Center = pt;
-        DockSpecularGlow.GradientOrigin = pt;
-    }
-
     private void DockSurface_PreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
     {
-        var width = DockFrame.ActualWidth;
-        if (width <= 0) return;
-        var pos = e.GetPosition(DockFrame);
-        _targetGlintRelX = Math.Clamp(IsVertical ? (pos.Y / DockFrame.ActualHeight) : (pos.X / width), 0.0, 1.0);
-        StartGlintRendering();
     }
 
     private void DockSurface_MouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
     {
-        _glintActive = true;
-        var width = DockFrame.ActualWidth;
-        if (width > 0)
-        {
-            var pos = e.GetPosition(DockFrame);
-            _targetGlintRelX = Math.Clamp(IsVertical ? (pos.Y / DockFrame.ActualHeight) : (pos.X / width), 0.0, 1.0);
-        }
-        StartGlintRendering();
         NativeMemoryMethods.CancelIdleTrim();
         _autoHideController?.OnMouseEnterDock();
     }
 
     private void DockSurface_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
     {
-        _glintActive = false;
-        StartGlintRendering();
         ResetMagnification();
         _autoHideController?.OnMouseLeaveDock();
         NativeMemoryMethods.ScheduleIdleTrim(TimeSpan.FromSeconds(2));

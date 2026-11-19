@@ -212,7 +212,7 @@
                                     </Path>
                                 </Grid>
                             </Button>
-                            <Border x:Name="StartDivider" Width="1" Height="22" Background="{DynamicResource StrokeSubtle}" Margin="3,0,4,0" IsHitTestVisible="False" />
+                            <Border x:Name="StartDivider" Width="1" Height="22" Background="{DynamicResource StrokeSubtle}" Margin="3,0,4,0" IsHitTestVisible="False" Visibility="Collapsed" />
                         </StackPanel>
                         <views:DockScrollViewer x:Name="DockScrollViewer" Grid.Column="1" Style="{StaticResource DockScrollViewerStyle}"
                                               HoverHeadroom="{StaticResource DockHeadroom}" ContentInset="{StaticResource DockScrollContentInset}"
@@ -297,34 +297,10 @@
                     </Grid>
                     <!-- Internal legacy bevel collapsed to prevent duplicate inner box borders -->
                     <Border x:Name="DockInnerBevel" Visibility="Collapsed" IsHitTestVisible="False" />
-                    <!-- Smooth full-frame glass shoulder sheen with smooth exponential roll-off -->
-                    <Border x:Name="DockSheen" Background="{DynamicResource DockHighlight}"
-                            CornerRadius="{StaticResource DockRadius}"
-                            Margin="-10,-4,-10,-4" IsHitTestVisible="False" />
-                    <!-- Dynamic interactive specular glint on the top border rail tracking the mouse -->
-                    <Border x:Name="DockDynamicGlintBorder" Height="2" VerticalAlignment="Top"
-                            Margin="-10,-4,-10,0" CornerRadius="20,20,0,0" IsHitTestVisible="False" Opacity="0">
-                        <Border.Background>
-                            <LinearGradientBrush x:Name="DockSpecularGlintBrush" StartPoint="0,0" EndPoint="1,0">
-                                <GradientStop x:Name="DockSpecularGlintStop0" Color="#00D6E8FF" Offset="0.38" />
-                                <GradientStop x:Name="DockSpecularGlintStop1" Color="#30D6E8FF" Offset="0.45" />
-                                <GradientStop x:Name="DockSpecularGlintStop2" Color="#E5F0F6FC" Offset="0.50" />
-                                <GradientStop x:Name="DockSpecularGlintStop3" Color="#30D6E8FF" Offset="0.55" />
-                                <GradientStop x:Name="DockSpecularGlintStop4" Color="#00D6E8FF" Offset="0.62" />
-                            </LinearGradientBrush>
-                        </Border.Background>
-                    </Border>
-                    <!-- Dynamic diffuse glass shoulder glow tracking the cursor -->
-                    <Border x:Name="DockDynamicGlowBorder" Height="24" VerticalAlignment="Top"
-                            Margin="-10,-4,-10,0" CornerRadius="20,20,0,0" IsHitTestVisible="False" Opacity="0">
-                        <Border.Background>
-                            <RadialGradientBrush x:Name="DockSpecularGlow" Center="0.5,0.0" GradientOrigin="0.5,0.0" RadiusX="0.20" RadiusY="1.0">
-                                <GradientStop Color="#30C8DCFF" Offset="0.0" />
-                                <GradientStop Color="#0EC8DCFF" Offset="0.45" />
-                                <GradientStop Color="#00C8DCFF" Offset="1.0" />
-                            </RadialGradientBrush>
-                        </Border.Background>
-                    </Border>
+                    <!-- Clean, calm glass surface without artificial specular glints or neon glow overlays -->
+                    <Border x:Name="DockSheen" Visibility="Collapsed" IsHitTestVisible="False" />
+                    <Border x:Name="DockDynamicGlintBorder" Visibility="Collapsed" IsHitTestVisible="False" />
+                    <Border x:Name="DockDynamicGlowBorder" Visibility="Collapsed" IsHitTestVisible="False" />
                 </Grid>
             </Border>
             <Thumb x:Name="LeftResizeThumb" HorizontalAlignment="Left" VerticalAlignment="Stretch"

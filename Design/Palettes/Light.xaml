@@ -50,26 +50,22 @@
     <SolidColorBrush x:Key="SurfacePressed" Color="#20000000" />
     <SolidColorBrush x:Key="SurfaceSelected" Color="#0C000000" />
     <SolidColorBrush x:Key="DockWidgetSurface" Color="#AFFFFFFF" />
-    <SolidColorBrush x:Key="SurfaceSelectedStrong" Color="#1F1F6FD1" />
+    <SolidColorBrush x:Key="SurfaceSelectedStrong" Color="#0A000000" />
     <SolidColorBrush x:Key="SurfaceDanger" Color="#FFC43846" />
     <SolidColorBrush x:Key="NotificationBrush" Color="#FFD22D42" />
-    <SolidColorBrush x:Key="IndicatorBrush" Color="#700F172A" />
-    <LinearGradientBrush x:Key="IndicatorForegroundBrush" StartPoint="0,0" EndPoint="1,0">
-        <GradientStop Color="#FF0D9488" Offset="0" />
-        <GradientStop Color="#FF0284C7" Offset="1" />
-    </LinearGradientBrush>
-    <!-- Frosted White glass with pure optical depth. -->
+    <SolidColorBrush x:Key="IndicatorBrush" Color="#601E293B" />
+    <SolidColorBrush x:Key="IndicatorForegroundBrush" Color="#E00F172A" />
+    <!-- Frosted White glass: soft, translucent. -->
     <LinearGradientBrush x:Key="DockMaterial" StartPoint="0,0" EndPoint="0,1">
-        <GradientStop Color="#E7F6F8FC" Offset="0" />
-        <GradientStop Color="#EDF0F3F7" Offset="0.45" />
-        <GradientStop Color="#F3EAEFF4" Offset="1" />
+        <GradientStop Color="#B8FFFFFF" Offset="0" />
+        <GradientStop Color="#C8F3F6FA" Offset="1" />
     </LinearGradientBrush>
-    <!-- Fresnel optical rim light for light glass: bright specular top rim, soft shadow base. -->
+    <!-- Soft glass rim for light glass. -->
     <LinearGradientBrush x:Key="DockBorderMaterial" StartPoint="0,0" EndPoint="0,1">
-        <GradientStop Color="#FFFFFFFF" Offset="0" />
-        <GradientStop Color="#70FFFFFF" Offset="0.15" />
-        <GradientStop Color="#25000000" Offset="0.5" />
-        <GradientStop Color="#38000000" Offset="1" />
+        <GradientStop Color="#60FFFFFF" Offset="0" />
+        <GradientStop Color="#25FFFFFF" Offset="0.3" />
+        <GradientStop Color="#15000000" Offset="0.7" />
+        <GradientStop Color="#25000000" Offset="1" />
     </LinearGradientBrush>
     <SolidColorBrush x:Key="SettingsBackground" Color="#FFF7F8FA" />
     <SolidColorBrush x:Key="SettingsControl" Color="#FFFFFFFF" />
