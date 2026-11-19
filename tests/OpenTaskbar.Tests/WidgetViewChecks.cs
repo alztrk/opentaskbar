@@ -51,6 +51,7 @@ internal static class WidgetViewChecks
             checks += AdaptiveWidgetAndConfirmChecks.Run(app);
             checks += NetSpeedChecks.Run(app);
             checks += BluetoothBatteryChecks.Run(app);
+            checks += SystemStatsAvailabilityChecks.Run(app);
 
             var settingsAction = new Button { Content = UiText.Get("Apply") };
             var selectedTab = new TabItem { Header = UiText.Get("General"), Content = settingsAction };

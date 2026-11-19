@@ -1919,7 +1919,7 @@ public partial class MainWindow : Window
 
         WidgetDivider.Visibility = Visibility.Collapsed;
         DockWidgets.Visibility = Visibility.Collapsed;
-        if (_widgets.Count > 0)
+        if (_widgets.Count > 0 || _widgetCoordinator.ActiveWidgets.Count > 0)
         {
             DockWidgetService.Refresh(_widgets, _preferences.Current.Language);
             if (!_widgetRefreshTimer.IsEnabled) _widgetRefreshTimer.Start();

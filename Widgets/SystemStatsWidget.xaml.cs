@@ -14,6 +14,11 @@ public partial class SystemStatsWidget : DockWidget
     private const double RingValueEpsilon = 0.005;
     private const long FastSamplePeriodMs = 1800;
     private const long SensorSamplePeriodMs = 3800;
+    // Sensors commonly fail to produce a value on the first samples (D3DKMT needs a delta, drivers initialise
+    // lazily). Hide a meter only after repeated misses and require repeated successes to bring it back, so a
+    // single transient failure cannot make the dock's width oscillate.
+    private const int SensorHideMisses = 5;
+    private const int SensorShowSamples = 2;
 
     private struct RingState
     {
@@ -44,7 +49,9 @@ public partial class SystemStatsWidget : DockWidget
     private bool _hasGpu;
     private bool _hasCpuTemp;
     private bool _hasGpuTemp;
+    private SystemMeters _configuredMeters;
     private readonly Dictionary<FrameworkElement, int> _missingSensorSamples = [];
+    private readonly Dictionary<FrameworkElement, int> _validSensorSamples = [];
 
     public override bool SupportsCompactMode => true;
     public override int ShrinkPriority => 30;
@@ -133,11 +140,6 @@ public partial class SystemStatsWidget : DockWidget
         // Opening the widget must never wait for a slow native sensor query.
         Interlocked.Increment(ref _sensorGeneration);
 
-        var meters = Settings.StatsMeters;
-        _hasGpu = meters.HasFlag(SystemMeters.Gpu);
-        _hasCpuTemp = meters.HasFlag(SystemMeters.CpuTemperature);
-        _hasGpuTemp = meters.HasFlag(SystemMeters.GpuTemperature);
-
         ApplyMeterSelection();
         // Show Memory & Battery right away, and schedule the first CPU/sensor sample.
         SampleFastCounters(sampleCpu: false);
@@ -174,11 +176,6 @@ public partial class SystemStatsWidget : DockWidget
     protected override void OnSettingsChanged()
     {
         Interlocked.Increment(ref _sensorGeneration);
-
-        var meters = Settings.StatsMeters;
-        _hasGpu = meters.HasFlag(SystemMeters.Gpu);
-        _hasCpuTemp = meters.HasFlag(SystemMeters.CpuTemperature);
-        _hasGpuTemp = meters.HasFlag(SystemMeters.GpuTemperature);
 
         ApplyMeterSelection();
         if (IsActive)
@@ -319,41 +316,86 @@ public partial class SystemStatsWidget : DockWidget
         });
     }
 
-    private void ApplyMeterSelection() => SyncMeterVisibility();
+    private void ApplyMeterSelection()
+    {
+        var meters = Settings.StatsMeters;
+        if (_configuredMeters != meters)
+        {
+            // A newly enabled meter must not show an empty tile until it has produced real readings.
+            _configuredMeters = meters;
+            _hasGpu = false;
+            _hasCpuTemp = false;
+            _hasGpuTemp = false;
+            _missingSensorSamples.Clear();
+            _validSensorSamples.Clear();
+        }
+        SyncMeterVisibility();
+    }
 
     private void SyncMeterVisibility()
     {
         var compact = IsCompact && !IsHoverExpanded;
         var meters = Settings.StatsMeters;
-        CompactSummaryButton.Visibility = compact ? Visibility.Visible : Visibility.Collapsed;
-        BatteryButton.Visibility = !compact && meters.HasFlag(SystemMeters.Battery) && _batteryState.Present ? Visibility.Visible : Visibility.Collapsed;
-        CpuButton.Visibility = !compact && meters.HasFlag(SystemMeters.Cpu) ? Visibility.Visible : Visibility.Collapsed;
-        MemoryButton.Visibility = !compact && meters.HasFlag(SystemMeters.Memory) ? Visibility.Visible : Visibility.Collapsed;
-        GpuButton.Visibility = !compact && meters.HasFlag(SystemMeters.Gpu) && _hasGpu ? Visibility.Visible : Visibility.Collapsed;
-        CpuTemperatureButton.Visibility = !compact && meters.HasFlag(SystemMeters.CpuTemperature) && _hasCpuTemp ? Visibility.Visible : Visibility.Collapsed;
-        GpuTemperatureButton.Visibility = !compact && meters.HasFlag(SystemMeters.GpuTemperature) && _hasGpuTemp ? Visibility.Visible : Visibility.Collapsed;
+        var changed = false;
+        Set(CompactSummaryButton, compact);
+        Set(BatteryButton, !compact && meters.HasFlag(SystemMeters.Battery) && _batteryState.Present);
+        Set(CpuButton, !compact && meters.HasFlag(SystemMeters.Cpu));
+        Set(MemoryButton, !compact && meters.HasFlag(SystemMeters.Memory));
+        Set(GpuButton, !compact && meters.HasFlag(SystemMeters.Gpu) && _hasGpu);
+        Set(CpuTemperatureButton, !compact && meters.HasFlag(SystemMeters.CpuTemperature) && _hasCpuTemp);
+        Set(GpuTemperatureButton, !compact && meters.HasFlag(SystemMeters.GpuTemperature) && _hasGpuTemp);
+        if (changed) RaiseContentWidthChanged();
+
+        void Set(FrameworkElement element, bool visible)
+        {
+            var target = visible ? Visibility.Visible : Visibility.Collapsed;
+            if (element.Visibility == target) return;
+            element.Visibility = target;
+            changed = true;
+        }
     }
 
     private void UpdateSensor(FrameworkElement button, double? reading, Action<double> render)
     {
         if (reading is null)
         {
-            _missingSensorSamples.TryGetValue(button, out var misses);
-            misses = Math.Min(misses + 1, 3);
+            var misses = Math.Min(_missingSensorSamples.GetValueOrDefault(button) + 1, SensorHideMisses);
             _missingSensorSamples[button] = misses;
-            // A single missed sample should not make the dock jump in width.
-            if (misses < 3) return;
-        }
-        else
-        {
-            _missingSensorSamples.Remove(button);
+            _validSensorSamples.Remove(button);
+            if (misses >= SensorHideMisses) SetAvailability(button, false);
+            return;
         }
 
-        var available = reading is not null;
-        if (button == GpuButton) _hasGpu = available;
-        else if (button == CpuTemperatureButton) _hasCpuTemp = available;
-        else if (button == GpuTemperatureButton) _hasGpuTemp = available;
-        if (reading is { } value) render(value);
+        _missingSensorSamples.Remove(button);
+        var valid = Math.Min(_validSensorSamples.GetValueOrDefault(button) + 1, SensorShowSamples);
+        _validSensorSamples[button] = valid;
+        render(reading.Value);
+        if (valid >= SensorShowSamples) SetAvailability(button, true);
+    }
+
+    /// <summary>Test seam: feeds a reading through the same availability logic as the native sensors.</summary>
+    internal void ApplySensorReading(FrameworkElement button, double? reading, Action<double>? render = null) =>
+        UpdateSensor(button, reading, render ?? (_ => { }));
+
+    private void SetAvailability(FrameworkElement button, bool available)
+    {
+        if (button == GpuButton)
+        {
+            if (_hasGpu == available) return;
+            _hasGpu = available;
+        }
+        else if (button == CpuTemperatureButton)
+        {
+            if (_hasCpuTemp == available) return;
+            _hasCpuTemp = available;
+        }
+        else if (button == GpuTemperatureButton)
+        {
+            if (_hasGpuTemp == available) return;
+            _hasGpuTemp = available;
+        }
+        else return;
+
         SyncMeterVisibility();
     }
 

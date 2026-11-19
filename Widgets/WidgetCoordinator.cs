@@ -182,6 +182,7 @@ public sealed class WidgetCoordinator : IDisposable
         widget.DragLeave += Widget_DragLeave;
         widget.Drop += Widget_Drop;
         widget.AvailabilityChanged += Widget_AvailabilityChanged;
+        widget.ContentWidthChanged += Widget_AvailabilityChanged;
 
         widget.ContextMenu = CreateWidgetContextMenu?.Invoke(slot.Id) ?? CreateDefaultWidgetMenu(slot.Id);
 
@@ -645,6 +646,7 @@ public sealed class WidgetCoordinator : IDisposable
             widget.DragLeave -= Widget_DragLeave;
             widget.Drop -= Widget_Drop;
             widget.AvailabilityChanged -= Widget_AvailabilityChanged;
+            widget.ContentWidthChanged -= Widget_AvailabilityChanged;
             widget.Dispose();
         }
     }
