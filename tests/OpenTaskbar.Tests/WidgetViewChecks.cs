@@ -60,6 +60,16 @@ internal static class WidgetViewChecks
                     .Any(trigger => trigger.Property == UIElement.IsKeyboardFocusedProperty),
                 "Widget cards must not paint a focus border when clicked.");
 
+            foreach (var (key, height) in new[]
+                     {
+                         ("LogoCopilot", 20.04), ("LogoDeepSeek", 17.66), ("LogoOpenRouter", 20.31)
+                     })
+            {
+                var geometry = (System.Windows.Media.StreamGeometry)app.FindResource(key);
+                Check(Math.Abs(geometry.Bounds.Width - 24) < 0.5 && Math.Abs(geometry.Bounds.Height - height) < 0.5,
+                    $"{key} must keep the official 24x24 brand silhouette.");
+            }
+
             var settingsAction = new Button { Content = UiText.Get("Apply") };
             var selectedTab = new TabItem { Header = UiText.Get("General"), Content = settingsAction };
             var settingsTabs = new TabControl { Items = { selectedTab }, SelectedIndex = 0 };
