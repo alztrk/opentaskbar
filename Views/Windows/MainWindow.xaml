@@ -280,9 +280,22 @@
                             CornerRadius="{StaticResource DockInnerRadius}"
                             Margin="-9,-3,-9,-3" IsHitTestVisible="False" />
                     <!-- Specular ambient sheen curving across the top half of the glass dock -->
-                    <Border x:Name="DockSheen" Height="20" VerticalAlignment="Top" Margin="6,-3,6,0"
+                    <Border x:Name="DockSheen" Height="22" VerticalAlignment="Top" Margin="-9,-3,-9,0"
                             CornerRadius="{StaticResource DockSheenRadius}"
                             Background="{DynamicResource DockHighlight}" IsHitTestVisible="False" />
+                    <!-- Dynamic interactive specular spotlight that reflects light towards the cursor -->
+                    <Border x:Name="DockSpecularSpotlight" Height="26" VerticalAlignment="Top" Margin="-9,-3,-9,0"
+                            CornerRadius="{StaticResource DockSheenRadius}"
+                            IsHitTestVisible="False" Opacity="0.5">
+                        <Border.Background>
+                            <RadialGradientBrush x:Name="DockSpotlightBrush" Center="0.5,0.0" GradientOrigin="0.5,0.0" RadiusX="0.22" RadiusY="1.0">
+                                <GradientStop Color="#65FFFFFF" Offset="0.0" />
+                                <GradientStop Color="#22FFFFFF" Offset="0.35" />
+                                <GradientStop Color="#06FFFFFF" Offset="0.70" />
+                                <GradientStop Color="#00FFFFFF" Offset="1.0" />
+                            </RadialGradientBrush>
+                        </Border.Background>
+                    </Border>
                 </Grid>
             </Border>
             <Thumb x:Name="LeftResizeThumb" HorizontalAlignment="Left" VerticalAlignment="Stretch"

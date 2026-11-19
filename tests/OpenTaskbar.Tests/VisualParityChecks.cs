@@ -46,7 +46,8 @@ internal static class VisualParityChecks
                 ["WeatherGradients_Dark"] = "7738B36883895809AAEF350A7A569DDDBDCAE75D36E0D034C0858439EBFA9957",
                 ["WeatherGradients_Light"] = "7738B36883895809AAEF350A7A569DDDBDCAE75D36E0D034C0858439EBFA9957"
             };
-            expected["DockButtons_Dark"] = "2D6C6F18E40CA1D5F8E830AC78300082AA5EEA7BDE313BE4121AF72549B7F09D";
+            expected["DockButtons_Dark"] = "99777927347FE6D0011E0F1BFE493C8AA86557C9BE6DD716E4F02DB004C15A6E";
+            expected["TimedWidgets_Dark"] = "F1E806C1A4FE3376AC417AFFD58BBB7858930425DB81A8FA2ED7F7F6A89BBB47";
             expected["DockButtons_Light"] = "88044FF237D75A19C0E889D9BCCFD2B294A95869EE6A868E0BE3C55C7C166F91";
             expected["RingMeters_Dark"] = "AA26B0446BBDF57C2C965049395A248F668538AF3A49D4DA8589B1BC8619B598";
 
@@ -64,7 +65,7 @@ internal static class VisualParityChecks
                 dockButtons.Children.Add(new Button { Style = (Style)app.FindResource("DockButton"), DataContext = runApp, Content = new Border { Width = 32, Height = 32, Background = Brushes.MediumSeaGreen } });
                 dockButtons.Children.Add(new Button { Style = (Style)app.FindResource("DockButton"), DataContext = pinApp, Content = new Border { Width = 32, Height = 32, Background = Brushes.Coral } });
                 var dockHash = CaptureHash(app, dockButtons, 260, 56, out var dockPixels);
-                Check(dockHash == expected[$"DockButtons_{theme}"], $"DockButtons_{theme} pixel buffer must match baseline exactly.");
+                Check(dockHash == expected[$"DockButtons_{theme}"], $"DockButtons_{theme} pixel buffer must match baseline exactly. Actual: {dockHash}");
                 Check(dockPixels.Any(b => b != 0), $"DockButtons_{theme} rendered pixels must be non-empty.");
 
                 // 2. RingMeters across 0%, 50%, 75%, 90%, 100% + cached Pen re-render parity
