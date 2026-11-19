@@ -53,6 +53,13 @@ internal static class WidgetViewChecks
             checks += BluetoothBatteryChecks.Run(app);
             checks += SystemStatsAvailabilityChecks.Run(app);
 
+            var cardStyle = (Style)app.FindResource("WidgetCardButton");
+            var cardTemplate = (ControlTemplate)cardStyle.Setters.OfType<Setter>()
+                .Single(setter => setter.Property == Control.TemplateProperty).Value;
+            Check(!cardTemplate.Triggers.OfType<Trigger>()
+                    .Any(trigger => trigger.Property == UIElement.IsKeyboardFocusedProperty),
+                "Widget cards must not paint a focus border when clicked.");
+
             var settingsAction = new Button { Content = UiText.Get("Apply") };
             var selectedTab = new TabItem { Header = UiText.Get("General"), Content = settingsAction };
             var settingsTabs = new TabControl { Items = { selectedTab }, SelectedIndex = 0 };
