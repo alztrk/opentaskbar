@@ -256,10 +256,22 @@ internal static class DockLayoutChecks
                     "Plain wheel must scroll horizontal-only overflow; zero input must do nothing.");
                 viewer.ScrollToHorizontalOffset(0);
                 Layout();
+                var prevIndicator = viewer.Template.FindName("PART_PreviousButton", viewer) as Button;
+                var nextIndicator = viewer.Template.FindName("PART_NextButton", viewer) as Button;
+                Check(prevIndicator is not null && nextIndicator is not null, "DockScrollViewer must provide Previous and Next chevron indicator buttons.");
+                if (prevIndicator is null || nextIndicator is null) throw new InvalidOperationException("Indicator buttons not found.");
+                Check(prevIndicator.Visibility == Visibility.Collapsed && nextIndicator.Visibility == Visibility.Visible,
+                    "At offset 0 with overflow, previous indicator must be collapsed and next indicator visible.");
                 viewer.ScrollByWheel(int.MinValue, ModifierKeys.Control | ModifierKeys.Shift);
                 Layout();
                 Check(viewer.HorizontalOffset == viewer.ScrollableWidth && viewer.VerticalOffset == 0,
                     "Forward scrolling must stop at the content end without vertical movement.");
+                Check(prevIndicator.Visibility == Visibility.Visible && nextIndicator.Visibility == Visibility.Collapsed,
+                    "At maximum offset, previous indicator must be visible and next indicator collapsed.");
+                viewer.ScrollToHorizontalOffset(cellWidth);
+                Layout();
+                Check(prevIndicator.Visibility == Visibility.Visible && nextIndicator.Visibility == Visibility.Visible,
+                    "When scrolled in between both ends, both indicators must be visible.");
                 viewer.ScrollByWheel(int.MaxValue, ModifierKeys.Shift);
                 Layout();
                 Check(viewer.HorizontalOffset == 0, "Backward scrolling must stop at the content start.");

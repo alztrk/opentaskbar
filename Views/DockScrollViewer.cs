@@ -8,11 +8,14 @@ namespace OpenTaskbar.Views;
 
 public sealed class DockScrollViewer : ScrollViewer
 {
-    private const double EdgeFadeWidth = 14;
+    private const double EdgeFadeWidth = 24;
     private Point? _panStart;
     private double _panOffset;
     private double _targetHorizontalOffset;
     private double _targetVerticalOffset;
+    private ScrollContentPresenter? _scrollContentPresenter;
+    private Button? _previousButton;
+    private Button? _nextButton;
 
     public static readonly DependencyProperty CurrentHorizontalOffsetProperty = DependencyProperty.Register(
         nameof(CurrentHorizontalOffset), typeof(double), typeof(DockScrollViewer),
@@ -218,6 +221,139 @@ public sealed class DockScrollViewer : ScrollViewer
         base.OnPreviewMouseUp(e);
     }
 
+    public override void OnApplyTemplate()
+    {
+        base.OnApplyTemplate();
+
+        if (_previousButton is not null)
+            _previousButton.Click -= OnPreviousButtonClick;
+        if (_nextButton is not null)
+            _nextButton.Click -= OnNextButtonClick;
+
+        _scrollContentPresenter = GetTemplateChild("PART_ScrollContentPresenter") as ScrollContentPresenter;
+        _previousButton = GetTemplateChild("PART_PreviousButton") as Button;
+        _nextButton = GetTemplateChild("PART_NextButton") as Button;
+
+        if (_previousButton is not null)
+            _previousButton.Click += OnPreviousButtonClick;
+        if (_nextButton is not null)
+            _nextButton.Click += OnNextButtonClick;
+
+        UpdateIndicatorLayout();
+        UpdateIndicators();
+    }
+
+    private void OnPreviousButtonClick(object sender, RoutedEventArgs e) => ScrollStep(forward: false);
+    private void OnNextButtonClick(object sender, RoutedEventArgs e) => ScrollStep(forward: true);
+
+    private void ScrollStep(bool forward)
+    {
+        var cellSize = TryFindResource("DockCellSize") as double? ?? 52d;
+        var step = cellSize * 2.5;
+        if (ScrollableHeight > 0)
+        {
+            var current = (Math.Abs(VerticalOffset - _targetVerticalOffset) > 1) ? _targetVerticalOffset : VerticalOffset;
+            var next = forward ? current + step : current - step;
+            AnimateScrollVertical(next);
+        }
+        else if (ScrollableWidth > 0)
+        {
+            var current = (Math.Abs(HorizontalOffset - _targetHorizontalOffset) > 1) ? _targetHorizontalOffset : HorizontalOffset;
+            var next = forward ? current + step : current - step;
+            AnimateScrollHorizontal(next);
+        }
+    }
+
+    private void UpdateIndicatorLayout()
+    {
+        if (ScrollableHeight > 0)
+        {
+            if (_previousButton is not null)
+            {
+                _previousButton.Content = TryFindResource("IconChevronUp");
+                _previousButton.HorizontalAlignment = HorizontalAlignment.Center;
+                _previousButton.VerticalAlignment = VerticalAlignment.Top;
+                _previousButton.Width = 34;
+                _previousButton.Height = 20;
+                _previousButton.Margin = new Thickness(0, 2, 0, 0);
+            }
+            if (_nextButton is not null)
+            {
+                _nextButton.Content = TryFindResource("IconChevronDown");
+                _nextButton.HorizontalAlignment = HorizontalAlignment.Center;
+                _nextButton.VerticalAlignment = VerticalAlignment.Bottom;
+                _nextButton.Width = 34;
+                _nextButton.Height = 20;
+                _nextButton.Margin = new Thickness(0, 0, 0, 2);
+            }
+        }
+        else
+        {
+            var topOffset = HoverHeadroom;
+            if (_previousButton is not null)
+            {
+                _previousButton.Content = TryFindResource("IconChevronLeft");
+                _previousButton.HorizontalAlignment = HorizontalAlignment.Left;
+                _previousButton.VerticalAlignment = VerticalAlignment.Center;
+                _previousButton.Width = 20;
+                _previousButton.Height = 34;
+                _previousButton.Margin = new Thickness(2, topOffset, 0, 0);
+            }
+            if (_nextButton is not null)
+            {
+                _nextButton.Content = TryFindResource("IconChevronRight");
+                _nextButton.HorizontalAlignment = HorizontalAlignment.Right;
+                _nextButton.VerticalAlignment = VerticalAlignment.Center;
+                _nextButton.Width = 20;
+                _nextButton.Height = 34;
+                _nextButton.Margin = new Thickness(0, topOffset, 2, 0);
+            }
+        }
+    }
+
+    private void UpdateIndicators()
+    {
+        if (_previousButton is null && _nextButton is null) return;
+
+        if (ScrollableHeight > 0)
+        {
+            var vHiddenBefore = VerticalOffset > 0.5;
+            var vHiddenAfter = VerticalOffset < ScrollableHeight - 0.5;
+            if (_previousButton is not null)
+                _previousButton.Visibility = vHiddenBefore ? Visibility.Visible : Visibility.Collapsed;
+            if (_nextButton is not null)
+                _nextButton.Visibility = vHiddenAfter ? Visibility.Visible : Visibility.Collapsed;
+            return;
+        }
+
+        if (ScrollableWidth > 0)
+        {
+            var hiddenBefore = HorizontalOffset > 0.5;
+            var hiddenAfter = HorizontalOffset < ScrollableWidth - 0.5;
+            if (_previousButton is not null)
+                _previousButton.Visibility = hiddenBefore ? Visibility.Visible : Visibility.Collapsed;
+            if (_nextButton is not null)
+                _nextButton.Visibility = hiddenAfter ? Visibility.Visible : Visibility.Collapsed;
+            return;
+        }
+
+        if (_previousButton is not null) _previousButton.Visibility = Visibility.Collapsed;
+        if (_nextButton is not null) _nextButton.Visibility = Visibility.Collapsed;
+    }
+
+    private void ApplyOpacityMask(Brush? mask)
+    {
+        if (_scrollContentPresenter is not null)
+        {
+            _scrollContentPresenter.OpacityMask = mask;
+            ClearValue(OpacityMaskProperty);
+        }
+        else
+        {
+            OpacityMask = mask;
+        }
+    }
+
     protected override void OnLostMouseCapture(MouseEventArgs e)
     {
         _panStart = null;
@@ -239,13 +375,16 @@ public sealed class DockScrollViewer : ScrollViewer
     /// <summary>Fades the side that has more content, since the scrollbar is hidden and overflow would otherwise go unnoticed.</summary>
     private void UpdateEdgeFade()
     {
+        UpdateIndicatorLayout();
+        UpdateIndicators();
+
         if (ScrollableHeight > 0)
         {
             var vHiddenBefore = VerticalOffset > 0.5;
             var vHiddenAfter = VerticalOffset < ScrollableHeight - 0.5;
             if (ActualHeight <= EdgeFadeWidth * 2 || (!vHiddenBefore && !vHiddenAfter))
             {
-                ClearValue(OpacityMaskProperty);
+                ApplyOpacityMask(null);
                 return;
             }
             var vFade = EdgeFadeWidth / ActualHeight;
@@ -255,7 +394,7 @@ public sealed class DockScrollViewer : ScrollViewer
             vMask.GradientStops.Add(new GradientStop(Colors.Black, 1 - vFade));
             vMask.GradientStops.Add(new GradientStop(Color.FromArgb(vHiddenAfter ? (byte)0 : (byte)255, 0, 0, 0), 1));
             vMask.Freeze();
-            OpacityMask = vMask;
+            ApplyOpacityMask(vMask);
             return;
         }
 
@@ -263,7 +402,7 @@ public sealed class DockScrollViewer : ScrollViewer
         var hiddenAfter = HorizontalOffset < ScrollableWidth - 0.5;
         if (ActualWidth <= EdgeFadeWidth * 2 || (!hiddenBefore && !hiddenAfter))
         {
-            ClearValue(OpacityMaskProperty);
+            ApplyOpacityMask(null);
             return;
         }
 
@@ -274,7 +413,7 @@ public sealed class DockScrollViewer : ScrollViewer
         mask.GradientStops.Add(new GradientStop(Colors.Black, 1 - fade));
         mask.GradientStops.Add(new GradientStop(Color.FromArgb(hiddenAfter ? (byte)0 : (byte)255, 0, 0, 0), 1));
         mask.Freeze();
-        OpacityMask = mask;
+        ApplyOpacityMask(mask);
     }
 
     private static void LayoutChanged(DependencyObject owner, DependencyPropertyChangedEventArgs e)
@@ -284,5 +423,6 @@ public sealed class DockScrollViewer : ScrollViewer
         // Expand the clipping viewport upward, then keep the shelf content at its original position.
         viewer.SetCurrentValue(MarginProperty, new Thickness(inset.Left, inset.Top - viewer.HoverHeadroom, inset.Right, inset.Bottom));
         viewer.SetCurrentValue(PaddingProperty, new Thickness(0, viewer.HoverHeadroom, 0, 0));
+        viewer.UpdateIndicatorLayout();
     }
 }
