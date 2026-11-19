@@ -16,6 +16,8 @@ public sealed class DockScrollViewer : ScrollViewer
     private ScrollContentPresenter? _scrollContentPresenter;
     private Button? _previousButton;
     private Button? _nextButton;
+    private Button? _externalPreviousButton;
+    private Button? _externalNextButton;
 
     public static readonly DependencyProperty CurrentHorizontalOffsetProperty = DependencyProperty.Register(
         nameof(CurrentHorizontalOffset), typeof(double), typeof(DockScrollViewer),
@@ -246,6 +248,22 @@ public sealed class DockScrollViewer : ScrollViewer
     private void OnPreviousButtonClick(object sender, RoutedEventArgs e) => ScrollStep(forward: false);
     private void OnNextButtonClick(object sender, RoutedEventArgs e) => ScrollStep(forward: true);
 
+    /// <summary>
+    /// Registers external overlay buttons (e.g. placed in DockSurface) that mirror the scroll
+    /// indicator state. The external buttons must already have their Click events wired to
+    /// <see cref="ScrollStep"/> via <see cref="ScrollStepBack"/> and <see cref="ScrollStepForward"/>.
+    /// </summary>
+    public void SetExternalIndicators(Button? previous, Button? next)
+    {
+        _externalPreviousButton = previous;
+        _externalNextButton = next;
+        UpdateIndicatorLayout();
+        UpdateIndicators();
+    }
+
+    public void ScrollStepBack() => ScrollStep(forward: false);
+    public void ScrollStepForward() => ScrollStep(forward: true);
+
     private void ScrollStep(bool forward)
     {
         var cellSize = TryFindResource("DockCellSize") as double? ?? 52d;
@@ -333,16 +351,24 @@ public sealed class DockScrollViewer : ScrollViewer
 
     private void UpdateIndicators()
     {
-        if (_previousButton is null && _nextButton is null) return;
+        if (_previousButton is null && _nextButton is null
+            && _externalPreviousButton is null && _externalNextButton is null) return;
 
         if (ScrollableHeight > 0)
         {
             var vHiddenBefore = VerticalOffset > 0.5;
             var vHiddenAfter = VerticalOffset < ScrollableHeight - 0.5;
+            var prevVis = vHiddenBefore ? Visibility.Visible : Visibility.Collapsed;
+            var nextVis = vHiddenAfter ? Visibility.Visible : Visibility.Collapsed;
+            // Template buttons: keep in sync for tests; hide visually when external overlay is active.
             if (_previousButton is not null)
-                _previousButton.Visibility = vHiddenBefore ? Visibility.Visible : Visibility.Collapsed;
+                _previousButton.Visibility = _externalPreviousButton is null ? prevVis : Visibility.Collapsed;
             if (_nextButton is not null)
-                _nextButton.Visibility = vHiddenAfter ? Visibility.Visible : Visibility.Collapsed;
+                _nextButton.Visibility = _externalNextButton is null ? nextVis : Visibility.Collapsed;
+            if (_externalPreviousButton is not null)
+                _externalPreviousButton.Visibility = prevVis;
+            if (_externalNextButton is not null)
+                _externalNextButton.Visibility = nextVis;
             return;
         }
 
@@ -350,15 +376,23 @@ public sealed class DockScrollViewer : ScrollViewer
         {
             var hiddenBefore = HorizontalOffset > 0.5;
             var hiddenAfter = HorizontalOffset < ScrollableWidth - 0.5;
+            var prevVis = hiddenBefore ? Visibility.Visible : Visibility.Collapsed;
+            var nextVis = hiddenAfter ? Visibility.Visible : Visibility.Collapsed;
             if (_previousButton is not null)
-                _previousButton.Visibility = hiddenBefore ? Visibility.Visible : Visibility.Collapsed;
+                _previousButton.Visibility = _externalPreviousButton is null ? prevVis : Visibility.Collapsed;
             if (_nextButton is not null)
-                _nextButton.Visibility = hiddenAfter ? Visibility.Visible : Visibility.Collapsed;
+                _nextButton.Visibility = _externalNextButton is null ? nextVis : Visibility.Collapsed;
+            if (_externalPreviousButton is not null)
+                _externalPreviousButton.Visibility = prevVis;
+            if (_externalNextButton is not null)
+                _externalNextButton.Visibility = nextVis;
             return;
         }
 
         if (_previousButton is not null) _previousButton.Visibility = Visibility.Collapsed;
         if (_nextButton is not null) _nextButton.Visibility = Visibility.Collapsed;
+        if (_externalPreviousButton is not null) _externalPreviousButton.Visibility = Visibility.Collapsed;
+        if (_externalNextButton is not null) _externalNextButton.Visibility = Visibility.Collapsed;
     }
 
     private void ApplyOpacityMask(Brush? mask)

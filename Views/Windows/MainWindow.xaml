@@ -313,6 +313,27 @@
                    DragDelta="DockResizeThumb_DragDelta" DragCompleted="DockResizeThumb_DragCompleted"
                    MouseDoubleClick="DockResizeThumb_MouseDoubleClick"
                    AutomationProperties.Name="{local:Loc ResizeDockFromRight}" />
+            <!-- Scroll chevron overlays: visually at resize thumb edges, wired to DockScrollViewer -->
+            <Button x:Name="ScrollPrevOverlay"
+                    HorizontalAlignment="Left" VerticalAlignment="Stretch"
+                    Width="{StaticResource DockResizeGripWidth}"
+                    Style="{StaticResource DockScrollIndicatorButton}"
+                    HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                    Padding="0"
+                    Tag="16,0,0,16"
+                    Click="ScrollPrevOverlay_Click"
+                    Panel.ZIndex="9"
+                    AutomationProperties.Name="{local:Loc ScrollDockHelp}" />
+            <Button x:Name="ScrollNextOverlay"
+                    HorizontalAlignment="Right" VerticalAlignment="Stretch"
+                    Width="{StaticResource DockResizeGripWidth}"
+                    Style="{StaticResource DockScrollIndicatorButton}"
+                    HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+                    Padding="0"
+                    Tag="0,16,16,0"
+                    Click="ScrollNextOverlay_Click"
+                    Panel.ZIndex="9"
+                    AutomationProperties.Name="{local:Loc ScrollDockHelp}" />
         </Grid>
         <Border x:Name="DockEdgeTrigger" Grid.Row="1" VerticalAlignment="Bottom" Height="{StaticResource DockEdgeTriggerHeight}" Background="#01000000"
                 MouseEnter="DockEdgeTrigger_MouseEnter" MouseLeave="DockEdgeTrigger_MouseLeave" />
