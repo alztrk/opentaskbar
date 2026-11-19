@@ -85,6 +85,19 @@
     <SolidColorBrush x:Key="WidgetCard" Color="#14FFFFFF" />
     <SolidColorBrush x:Key="WidgetCardHover" Color="#24FFFFFF" />
     <SolidColorBrush x:Key="WidgetCardStroke" Color="#1EFFFFFF" />
+    <LinearGradientBrush x:Key="WidgetGlassCard" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#282B3648" Offset="0" />
+        <GradientStop Color="#18181E28" Offset="1" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="WidgetGlassCardHover" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#40364358" Offset="0" />
+        <GradientStop Color="#26202836" Offset="1" />
+    </LinearGradientBrush>
+    <LinearGradientBrush x:Key="WidgetGlassCardStroke" StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#48FFFFFF" Offset="0" />
+        <GradientStop Color="#1AFFFFFF" Offset="0.45" />
+        <GradientStop Color="#1C000000" Offset="1" />
+    </LinearGradientBrush>
     <SolidColorBrush x:Key="WidgetTrack" Color="#2EFFFFFF" />
     <SolidColorBrush x:Key="WidgetAccent" Color="#FF2DD4BF" />
     <SolidColorBrush x:Key="WidgetAccentText" Color="#FFFFFFFF" />
