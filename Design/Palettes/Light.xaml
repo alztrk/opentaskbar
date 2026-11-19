@@ -77,22 +77,12 @@
     <SolidColorBrush x:Key="SettingsSidebarOverlay" Color="#24FFFFFF" />
     <SolidColorBrush x:Key="CaptionCloseForeground" Color="#FFFFFFFF" />
     <!-- Dock widgets -->
-    <SolidColorBrush x:Key="WidgetCard" Color="#0D000000" />
-    <SolidColorBrush x:Key="WidgetCardHover" Color="#18000000" />
-    <SolidColorBrush x:Key="WidgetCardStroke" Color="#16000000" />
-    <LinearGradientBrush x:Key="WidgetGlassCard" StartPoint="0,0" EndPoint="0,1">
-        <GradientStop Color="#88FFFFFF" Offset="0" />
-        <GradientStop Color="#50F2F5FA" Offset="1" />
-    </LinearGradientBrush>
-    <LinearGradientBrush x:Key="WidgetGlassCardHover" StartPoint="0,0" EndPoint="0,1">
-        <GradientStop Color="#B8FFFFFF" Offset="0" />
-        <GradientStop Color="#78F2F5FA" Offset="1" />
-    </LinearGradientBrush>
-    <LinearGradientBrush x:Key="WidgetGlassCardStroke" StartPoint="0,0" EndPoint="0,1">
-        <GradientStop Color="#B0FFFFFF" Offset="0" />
-        <GradientStop Color="#1C000000" Offset="0.55" />
-        <GradientStop Color="#28000000" Offset="1" />
-    </LinearGradientBrush>
+    <SolidColorBrush x:Key="WidgetCard" Color="#00000000" />
+    <SolidColorBrush x:Key="WidgetCardHover" Color="#12000000" />
+    <SolidColorBrush x:Key="WidgetCardStroke" Color="#00000000" />
+    <SolidColorBrush x:Key="WidgetGlassCard" Color="#00000000" />
+    <SolidColorBrush x:Key="WidgetGlassCardHover" Color="#12000000" />
+    <SolidColorBrush x:Key="WidgetGlassCardStroke" Color="#00000000" />
     <SolidColorBrush x:Key="WidgetTrack" Color="#1F000000" />
     <SolidColorBrush x:Key="WidgetAccent" Color="#FF0D9488" />
     <SolidColorBrush x:Key="WidgetAccentText" Color="#FFFFFFFF" />

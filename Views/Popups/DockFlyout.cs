@@ -6,6 +6,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using OpenTaskbar.Models;
 using OpenTaskbar.Services;
 
@@ -159,7 +160,8 @@ public sealed class DockFlyout
         AttachSoftShadow(contentHost, 16);
         contentHost.Children.Add(_frame);
 
-        _root = new Grid { Margin = new Thickness(10, 8, 10, 12), Children = { contentHost } };
+        var translate = new TranslateTransform();
+        _root = new Grid { Margin = new Thickness(10, 8, 10, 12), RenderTransform = translate, Children = { contentHost } };
         _popup = new Popup
         {
             AllowsTransparency = true,
@@ -168,6 +170,28 @@ public sealed class DockFlyout
             PopupAnimation = PopupAnimation.Fade,
             Placement = PlacementMode.Custom,
             CustomPopupPlacementCallback = Place
+        };
+        _popup.Opened += (_, _) =>
+        {
+            if (!SystemParameters.ClientAreaAnimation)
+            {
+                translate.X = 0;
+                translate.Y = 0;
+                _root.Opacity = 1;
+                return;
+            }
+
+            var duration = TimeSpan.FromMilliseconds(160);
+            var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+            var isBottom = Edge == DockEdge.Bottom;
+            var isLeft = Edge == DockEdge.Left;
+            var isRight = Edge == DockEdge.Right;
+
+            var prop = (isLeft || isRight) ? TranslateTransform.XProperty : TranslateTransform.YProperty;
+            var fromVal = isBottom ? 5.0 : (isLeft ? -5.0 : 5.0);
+
+            translate.BeginAnimation(prop, new DoubleAnimation(fromVal, 0.0, duration) { EasingFunction = ease });
+            _root.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(140)) { EasingFunction = ease });
         };
         _root.AddHandler(FrameworkElement.ContextMenuOpeningEvent, new ContextMenuEventHandler((_, e) =>
         {
@@ -607,13 +631,14 @@ public sealed class DockFlyout
 
     public static TextBlock Heading(string text)
     {
-        var block = new TextBlock { Text = text, FontWeight = FontWeights.SemiBold, FontSize = 13, Margin = new Thickness(4, 0, 4, 8) };
+        var block = new TextBlock { Text = text, FontWeight = FontWeights.SemiBold, FontSize = 12.5, Margin = new Thickness(4, 0, 4, 8) };
+        block.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
         return block;
     }
 
     public static TextBlock Caption(string text)
     {
-        var block = new TextBlock { Text = text, FontSize = 11.5, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4, 2, 4, 2) };
+        var block = new TextBlock { Text = text, FontSize = 11, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4, 2, 4, 2) };
         block.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
         return block;
     }

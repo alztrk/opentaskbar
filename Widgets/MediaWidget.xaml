@@ -3,7 +3,7 @@
               xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
               xmlns:w="clr-namespace:OpenTaskbar.Widgets"
               xmlns:local="clr-namespace:OpenTaskbar.Services">
-    <Border x:Name="Card" Style="{StaticResource WidgetCardBorder}" Width="316" Padding="6,0,8,0">
+    <Border x:Name="Card" Style="{StaticResource WidgetCardBorder}" Width="210" Padding="6,0,8,0">
         <Grid VerticalAlignment="Center">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
@@ -11,14 +11,14 @@
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
-            <Border Width="34" Height="34" CornerRadius="7" Background="{DynamicResource WidgetTrack}" ClipToBounds="True">
+            <Border Width="32" Height="32" CornerRadius="6" Background="{DynamicResource WidgetTrack}" ClipToBounds="True">
                 <Grid>
                     <ContentControl x:Name="ArtPlaceholder" Style="{StaticResource WidgetIcon}" Content="{StaticResource IconMusic}"
                                     Foreground="{DynamicResource TextSecondary}" />
-                    <Image x:Name="ArtImage" Width="34" Height="34" HorizontalAlignment="Center" VerticalAlignment="Center"
+                    <Image x:Name="ArtImage" Width="32" Height="32" HorizontalAlignment="Center" VerticalAlignment="Center"
                            Stretch="UniformToFill" RenderOptions.BitmapScalingMode="HighQuality">
                         <Image.Clip>
-                            <RectangleGeometry Rect="0,0,34,34" RadiusX="7" RadiusY="7" />
+                            <RectangleGeometry Rect="0,0,32,32" RadiusX="6" RadiusY="6" />
                         </Image.Clip>
                     </Image>
                 </Grid>
@@ -27,26 +27,27 @@
                 <TextBlock x:Name="TitleText" Style="{StaticResource WidgetText}" FontSize="11" />
                 <TextBlock x:Name="ArtistText" Style="{StaticResource WidgetCaption}" FontSize="10" Margin="0,-1,0,0" />
                 <Slider x:Name="ProgressSlider" Style="{StaticResource MediaProgressSlider}" Minimum="0" Maximum="100" Value="0"
+                        Visibility="Collapsed"
                         Margin="0,2,0,0" PreviewMouseLeftButtonDown="ProgressSlider_PreviewMouseLeftButtonDown"
                         PreviewMouseLeftButtonUp="ProgressSlider_PreviewMouseLeftButtonUp"
                         LostMouseCapture="ProgressSlider_LostMouseCapture"
                         ValueChanged="ProgressSlider_ValueChanged" />
             </StackPanel>
             <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
-                <Button x:Name="PreviousButton" Style="{StaticResource WidgetIconButton}" Width="24" Height="24" Click="Previous_Click"
+                <Button x:Name="PreviousButton" Style="{StaticResource WidgetIconButton}" Width="22" Height="22" Click="Previous_Click"
                         ToolTip="{local:Loc MediaPrevious}" AutomationProperties.Name="{local:Loc MediaPrevious}">
-                    <ContentControl Style="{StaticResource WidgetGlyph}" Content="{StaticResource IconPreviousFill}" Width="11" Height="11" />
+                    <ContentControl Style="{StaticResource WidgetGlyph}" Content="{StaticResource IconPreviousFill}" Width="10" Height="10" />
                 </Button>
-                <Button x:Name="PlayPauseButton" Style="{StaticResource WidgetIconButton}" Width="28" Height="28" Click="PlayPause_Click"
+                <Button x:Name="PlayPauseButton" Style="{StaticResource WidgetIconButton}" Width="26" Height="26" Click="PlayPause_Click"
                         ToolTip="{local:Loc MediaPlayPause}" AutomationProperties.Name="{local:Loc MediaPlayPause}">
-                    <ContentControl x:Name="PlayPauseGlyph" Style="{StaticResource WidgetGlyph}" Content="{StaticResource IconPlayFill}" Width="14" Height="14" />
+                    <ContentControl x:Name="PlayPauseGlyph" Style="{StaticResource WidgetGlyph}" Content="{StaticResource IconPlayFill}" Width="13" Height="13" />
                 </Button>
-                <Button x:Name="NextButton" Style="{StaticResource WidgetIconButton}" Width="24" Height="24" Click="Next_Click"
+                <Button x:Name="NextButton" Style="{StaticResource WidgetIconButton}" Width="22" Height="22" Click="Next_Click"
                         ToolTip="{local:Loc MediaNext}" AutomationProperties.Name="{local:Loc MediaNext}">
-                    <ContentControl Style="{StaticResource WidgetGlyph}" Content="{StaticResource IconNextFill}" Width="11" Height="11" />
+                    <ContentControl Style="{StaticResource WidgetGlyph}" Content="{StaticResource IconNextFill}" Width="10" Height="10" />
                 </Button>
             </StackPanel>
-            <StackPanel x:Name="VolumePanel" Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Background="Transparent" MouseWheel="Volume_MouseWheel">
+            <StackPanel x:Name="VolumePanel" Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Background="Transparent" MouseWheel="Volume_MouseWheel" Visibility="Collapsed">
                 <Rectangle Width="1" Height="20" Fill="{DynamicResource StrokeSubtle}" Margin="4,0,4,0" />
                 <Button x:Name="MuteButton" Style="{StaticResource WidgetIconButton}" Width="24" Height="24" Click="MuteButton_Click"
                         ToolTip="{local:Loc MuteToggle}" AutomationProperties.Name="{local:Loc MuteToggle}">

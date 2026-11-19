@@ -46,7 +46,7 @@ public partial class AudioWidget : DockWidget
 
     public override bool SupportsCompactMode => true;
     public override int ShrinkPriority => 40;
-    public override double FullWidthEstimate => 140;
+    public override double FullWidthEstimate => 54;
     public override double CompactWidthEstimate => 48;
 
     public AudioWidget()
@@ -60,9 +60,9 @@ public partial class AudioWidget : DockWidget
     private void ApplyDensityLayout()
     {
         var compact = IsCompact && !IsHoverExpanded;
-        Card.Width = compact ? 48 : 140;
-        Card.Padding = compact ? new Thickness(4, 2, 4, 2) : new Thickness(8, 0, 10, 0);
-        DeviceText.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
+        Card.Width = double.NaN;
+        Card.Padding = compact ? new Thickness(4, 2, 4, 2) : new Thickness(6, 0, 8, 0);
+        DeviceText.Visibility = Visibility.Collapsed;
 
         if (compact)
         {

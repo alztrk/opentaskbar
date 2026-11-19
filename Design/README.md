@@ -101,7 +101,7 @@ One accent gradient, teal `#5EEAD4` → sky `#38BDF8` (→ indigo `#818CF8` on t
 - **Floating:** The dock hugs its content and follows the Left/Center/Right alignment. Widgets sit after the applications inside the same surface.
 - **Full width:** The surface spans the monitor with a 6 DIP side inset. Applications stay left and widgets are pinned to the right edge. Alignment is disabled.
 - **Sizing:** Widgets keep their natural width.
-- **Widget card** (`WidgetCardBorder` / `WidgetCardButton`): 46 DIP high, 12 DIP radius, a `WidgetCard` fill with a 1 DIP `WidgetCardStroke`, and 3 DIP horizontal spacing.
+- **Widget card** (`WidgetCardBorder` / `WidgetCardButton`): 46 DIP high, 12 DIP radius, transparent resting surface with soft organic hover (`SurfaceHover`), and 3 DIP horizontal spacing.
 - **Widget Height Uniformity Rule:** All dock widgets must strictly have a uniform height governed by `{StaticResource WidgetHeight}` (46 DIP). Every top-level widget container must use `WidgetCardBorder` or `WidgetCardButton` and must never specify a hardcoded or one-off `Height` (such as `Height = 32`). This invariant guarantees that all dock widgets align symmetrically and flush within the dock shelf across all configurations.
 - **Colors:**
   - `WidgetAccent` (sky blue): meter values and the on state.

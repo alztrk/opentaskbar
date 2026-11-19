@@ -3,19 +3,19 @@
               xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
               xmlns:w="clr-namespace:OpenTaskbar.Widgets"
               xmlns:local="clr-namespace:OpenTaskbar.Services">
-    <Border x:Name="Card" Style="{StaticResource WidgetCardBorder}" Width="140" Padding="8,0,10,0" MouseWheel="Card_MouseWheel" MouseLeftButtonUp="Card_MouseLeftButtonUp" Cursor="Hand">
+    <Border x:Name="Card" Style="{StaticResource WidgetCardBorder}" Padding="6,0,8,0" MouseWheel="Card_MouseWheel" MouseLeftButtonUp="Card_MouseLeftButtonUp" Cursor="Hand">
         <Grid VerticalAlignment="Center">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <Button x:Name="MuteButton" Grid.Column="0" VerticalAlignment="Center" Style="{StaticResource WidgetIconButton}" Width="24" Height="24" Click="MuteButton_Click"
                     ToolTip="{local:Loc MuteToggle}" AutomationProperties.Name="{local:Loc MuteToggle}" Margin="0,0,4,0">
                 <ContentControl x:Name="VolumeIcon" Style="{StaticResource WidgetIcon}" Content="{StaticResource IconVolume}" Width="15" Height="15" />
             </Button>
-            <TextBlock x:Name="DeviceText" Grid.Column="1" Style="{StaticResource WidgetText}" FontSize="11.5" VerticalAlignment="Center" Margin="2,0,4,0" TextTrimming="CharacterEllipsis" />
-            <TextBlock x:Name="LevelText" Grid.Column="2" Style="{StaticResource WidgetCaption}" FontWeight="SemiBold" VerticalAlignment="Center" />
+            <TextBlock x:Name="DeviceText" Grid.Column="1" Style="{StaticResource WidgetText}" FontSize="11.5" VerticalAlignment="Center" Margin="2,0,4,0" TextTrimming="CharacterEllipsis" Visibility="Collapsed" />
+            <TextBlock x:Name="LevelText" Grid.Column="2" Style="{StaticResource WidgetCaption}" FontWeight="SemiBold" VerticalAlignment="Center" Typography.NumeralAlignment="Tabular" />
         </Grid>
     </Border>
 </w:DockWidget>

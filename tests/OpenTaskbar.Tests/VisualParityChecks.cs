@@ -32,7 +32,7 @@ internal static class VisualParityChecks
                 ["DockButtons_Dark"] = "EA8C4048F68397F476CD20C0DE8A324F81E02763C20D7EFAF5B5CE28CCB13999",
                 ["DockButtons_Light"] = "8A3AAD5AF8F20219480CB972C5FC68D06FEE4DC1244160952591A65AA29EAECE",
                 ["RingMeters_Dark"] = "AA26B0446BBDF57C22178347AF6A6130652401D0CF2F2558BB2F89F242D01B39",
-                ["RingMeters_Light"] = "9C6CCB7DB0D700DA8B4A592B59359572624028B6536111E22545F834C75B7B05",
+                ["RingMeters_Light"] = "9E3A45D2D26A51D6026C79407B5FE1821000FAE8C8E972BEE9F6C4A520B8D39C",
                 ["TimedWidgets_Dark"] = "60E193612F9523954A32E4CE0DB18D9339EC740B2D6712EAA35A5ACD439CE2D7",
                 ["TimedWidgets_Light"] = "DFA830AC953B2F7E6CD0E802FE01E56CD5A6B2BF2437965E726AFE17F6AAF698",
                 ["FocusWidget_Dark"] = "D842256A1EF1F1938FDF3CE13F96D7C93A61843D3B38C0210B7AD481936A7041",
@@ -47,14 +47,14 @@ internal static class VisualParityChecks
                 ["WeatherGradients_Light"] = "7738B36883895809AAEF350A7A569DDDBDCAE75D36E0D034C0858439EBFA9957"
             };
             expected["DockButtons_Dark"] = "49D58EE200E74120456007FE432C7846A447A350B2943AE7FF21A88F199A9E90";
-            expected["TimedWidgets_Dark"] = "67EF8FF8F669E15A99FC1A5BA4B006419F3210E4295DDCD4D22EB8DBC16D8B9A";
-            expected["FocusWidget_Dark"] = "DA2DF04E8460F5CA09CB4E5B19D75FC2DBBC62C88C45262BB312AC6EE59DE7F9";
-            expected["TrayWidget_Dark"] = "255B20F964D5EA62FF09D454957A2A8F52F2AF492FA64133E5AF5BA8929B7097";
-            expected["TimedWidgets_Light"] = "277FCEE89A9C4E3BFFAFEB3C185559489FA95D3C399234A60A25587170A31456";
-            expected["FocusWidget_Light"] = "29AD405999855A80F4761B924818021A6F0ABFC92B6B0064E7A64D9B2968F0A8";
-            expected["TrayWidget_Light"] = "4C53C826C5DF8BDCA0C06BC683F921612A13B2ECC7299A97D77B579DC16712F5";
+            expected["TimedWidgets_Dark"] = "A0BAF935617D19BBD130E05449FD8AF9F6B95D1AEC1ACE4FBB75511020C6EA27";
+            expected["FocusWidget_Dark"] = "61F633ABDB8BF6F6152990C0C627DE4652E6B4ED26489C04D8503E30A1A86410";
+            expected["TrayWidget_Dark"] = "9B3C44123AFC37BA92DD6C68172CF6F885E2576CC60B37433DBF31D8C28E3ACB";
+            expected["TimedWidgets_Light"] = "057438532CEB295234A68624878EAFA85B5FA919DBF4A5030D69B061DBC01255";
+            expected["FocusWidget_Light"] = "2D0874E57F6C623E2E7D00F13D0E1C2E14082ABC5732BF8EC487876BBDEDC16F";
+            expected["TrayWidget_Light"] = "B573F42011EB44405EF7046449E1A8B712227E726CD234245BA04F7440C68900";
             expected["DockButtons_Light"] = "4F7BB77036598CD3A64BB19D98D9425DED4B9831976672A69D81E736030D3087";
-            expected["RingMeters_Dark"] = "AA26B0446BBDF57C2C965049395A248F668538AF3A49D4DA8589B1BC8619B598";
+            expected["RingMeters_Dark"] = "07124012760F90BB1A6B5161790BEDA5E7C4ABEF24C926385E2B6D31706A359D";
 
             foreach (var theme in new[] { AppTheme.Dark, AppTheme.Light })
             {
@@ -98,7 +98,7 @@ internal static class VisualParityChecks
                     rings.Children.Add(ring);
                 }
                 var ringsHash = CaptureHash(app, rings, 220, 46, out _);
-                Check(ringsHash == expected[$"RingMeters_{theme}"], $"RingMeters_{theme} pixel buffer must match baseline exactly.");
+                Check(ringsHash == expected[$"RingMeters_{theme}"], $"RingMeters_{theme} pixel buffer must match baseline exactly. Actual: {ringsHash}");
 
                 // Force value change and back to verify cached Pen invalidation/re-render is pixel-identical.
                 firstRing!.Value = 0.42;
