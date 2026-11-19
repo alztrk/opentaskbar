@@ -334,7 +334,8 @@ internal static class WidgetViewChecks
                 {
                     RequiredName<TabControl>(settings, "SettingsTabs").SelectedItem = RequiredName<TabItem>(settings, "WidgetsTab");
                     var list = RequiredName<ItemsControl>(settings, "WidgetOptionsList");
-                    var selections = ((IEnumerable<DockWidgetOption>)list.ItemsSource).ToArray();
+                    var groups = ((IEnumerable<OpenTaskbar.SettingsWindow.WidgetCategoryGroup>)list.ItemsSource).ToArray();
+                    var selections = groups.SelectMany(group => group.Widgets).ToArray();
                     SetPreviewFixtures(selections);
                     var page = (FrameworkElement)settings.Content;
                     foreach (var width in new[] { 560d, 740d })
@@ -413,30 +414,32 @@ internal static class WidgetViewChecks
                     weatherExpandBtn.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                     Check(!weatherOption.IsSettingsExpanded, "Clicking weather settings button again must collapse it.");
 
-                    // Test Category Filtering
-                    var aiFilterRadio = RequiredName<RadioButton>(settings, "WidgetCategoryAiRadio");
-                    var allFilterRadio = RequiredName<RadioButton>(settings, "WidgetCategoryAllRadio");
-                    var systemFilterRadio = RequiredName<RadioButton>(settings, "WidgetCategorySystemRadio");
-
-                    aiFilterRadio.IsChecked = true;
-                    aiFilterRadio.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    // Categories are section labels with their widgets underneath, not tabs/filters.
                     Layout(settings);
-                    var aiCards = Descendants<WidgetCatalogItem>(list).ToArray();
-                    Check(aiCards.Length == 7 && aiCards.All(card => ((DockWidgetOption)card.DataContext).Category == DockWidgetCategory.AiQuotas),
-                        "Selecting AI category filter must display only the 7 AI widgets.");
-
-                    systemFilterRadio.IsChecked = true;
-                    systemFilterRadio.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Layout(settings);
-                    var systemCards = Descendants<WidgetCatalogItem>(list).ToArray();
-                    Check(systemCards.Length == 5 && systemCards.All(card => ((DockWidgetOption)card.DataContext).Category == DockWidgetCategory.SystemAndHardware),
-                        "Selecting System category filter must display only the 5 system widgets.");
-
-                    allFilterRadio.IsChecked = true;
-                    allFilterRadio.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Layout(settings);
+                    var expectedOrder = new[]
+                    {
+                        DockWidgetCategory.TimeAndWeather,
+                        DockWidgetCategory.SystemAndHardware,
+                        DockWidgetCategory.AiQuotas,
+                        DockWidgetCategory.MediaAndControls,
+                        DockWidgetCategory.Productivity
+                    };
+                    Check(groups.Select(group => group.Category).SequenceEqual(expectedOrder),
+                        "All five category sections must be listed in enum order.");
+                    Check(groups.All(group => !string.IsNullOrEmpty(group.Label)),
+                        "Every category section must expose a localized label.");
+                    Check(groups.SelectMany(group => group.Widgets).Count() == 24,
+                        "All 24 widgets must be listed under their category labels.");
+                    var aiGroup = groups.Single(group => group.Category == DockWidgetCategory.AiQuotas);
+                    Check(aiGroup.Widgets.Count == 7 && aiGroup.Widgets.All(option => option.Category == DockWidgetCategory.AiQuotas),
+                        "The AI category section must contain all 7 AI widgets.");
+                    var systemGroup = groups.Single(group => group.Category == DockWidgetCategory.SystemAndHardware);
+                    Check(systemGroup.Widgets.Count == 5 && systemGroup.Widgets.All(option => option.Category == DockWidgetCategory.SystemAndHardware),
+                        "The system category section must contain all 5 system widgets.");
                     var allCards = Descendants<WidgetCatalogItem>(list).ToArray();
-                    Check(allCards.Length == 24, "Selecting All category filter must restore all 24 widgets in the catalog.");
+                    Check(allCards.Length == 24, "All 24 widgets must be visible at once without any category filter.");
+                    Check(settings.FindName("WidgetCategoryAiRadio") is null,
+                        "Widget categories must be labels, not a segmented tab filter.");
                 }
                 finally
                 {

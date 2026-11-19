@@ -153,9 +153,9 @@ void CatalogChecks()
             Enum.GetValues<AiProviders>().Where(provider => provider is not (AiProviders.None or AiProviders.All)).Order())
         && DockWidgetService.AiUsageWidgets.All(definition => options.SingleOrDefault(option => option.Id == definition.Id) is { } aiOption
             && aiOption.Label == UiText.Get(definition.LabelKey) && aiOption.Description == UiText.Get(definition.LabelKey + "Description")
-            && aiOption.HasSettings)
+            && !aiOption.HasSettings)
         && options.All(option => option.Id != "AiUsage"),
-        "Every AI provider must be its own catalog widget with a localized card and settings panel.");
+        "Every AI provider must be its own catalog widget with a localized card and no settings panel.");
     var legacy = DockSettingsStore.MigrateLegacyAiUsage(new DockSettings(
         Widgets: ["AiUsage", "Clock"], InstalledWidgets: ["AiUsage", "Clock"], WidgetOrder: ["Clock", "AiUsage"],
         DockItemOrder: ["start", "widget:AiUsage"], AiUsageProviders: AiProviders.Claude | AiProviders.Codex,

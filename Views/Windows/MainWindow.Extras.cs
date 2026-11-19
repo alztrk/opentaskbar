@@ -166,9 +166,62 @@ public partial class MainWindow
     internal static BitmapSource? CreateStackIcon(DockStack stack, int targetSize = 128)
     {
         var size = Math.Max(16, targetSize);
-        return ApplicationIconProvider.GetForShellItem(stack.Path, size, iconOnly: true)
-               ?? ApplicationIconProvider.GetForFile(stack.Path, size)
-               ?? RenderModernFolderIcon(size);
+        var icon = ApplicationIconProvider.GetForShellItem(stack.Path, size, iconOnly: true)
+                   ?? ApplicationIconProvider.GetForFile(stack.Path, size)
+                   ?? RenderModernFolderIcon(size);
+        return icon is null ? null : FillSquare(icon, size);
+    }
+
+    /// <summary>
+    /// Windows shell folder icons leave large transparent margins (measured 112x88 visible pixels in a
+    /// 128x128 icon, i.e. 88% wide and only 69% tall) while application icons fill the whole square.
+    /// That makes every folder look smaller than its neighboring app icons. Trim the transparent bounds
+    /// and stretch the artwork to fill the same square so both icon kinds match visually.
+    /// </summary>
+    private static BitmapSource FillSquare(BitmapSource icon, int size)
+    {
+        try
+        {
+            var bgra = new FormatConvertedBitmap(icon, PixelFormats.Bgra32, null, 0);
+            var width = bgra.PixelWidth;
+            var height = bgra.PixelHeight;
+            var stride = width * 4;
+            var pixels = new byte[stride * height];
+            bgra.CopyPixels(pixels, stride, 0);
+
+            int minX = width, minY = height, maxX = -1, maxY = -1;
+            for (var y = 0; y < height; y++)
+            {
+                var row = y * stride;
+                for (var x = 0; x < width; x++)
+                {
+                    if (pixels[row + x * 4 + 3] <= 16) continue;
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+
+            if (maxX < minX || maxY < minY) return icon;
+            var crop = new CroppedBitmap(bgra, new Int32Rect(minX, minY, maxX - minX + 1, maxY - minY + 1));
+            var visual = new DrawingVisual();
+            RenderOptions.SetBitmapScalingMode(visual, BitmapScalingMode.HighQuality);
+            using (var dc = visual.RenderOpen())
+            {
+                dc.DrawImage(crop, new Rect(0, 0, size, size));
+            }
+
+            var result = new RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
+            result.Render(visual);
+            result.Freeze();
+            return result;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warning($"Stack icon resize failed: {ex.Message}");
+            return icon;
+        }
     }
 
     private IEnumerable<Button> GetExtraDockButtons()
