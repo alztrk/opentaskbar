@@ -197,7 +197,7 @@
                                            RenderOptions.BitmapScalingMode="HighQuality" />
                                     <Path x:Name="StartLogo" Width="{DynamicResource StartLogoSize}" Height="{DynamicResource StartLogoSize}" Stretch="Uniform" Fill="{DynamicResource WindowsLogoBrush}"
                                           MaxWidth="{DynamicResource DockIconSize}" MaxHeight="{DynamicResource DockIconSize}"
-                                          Data="M0,0 H10 V10 H0 Z M12,0 H22 V10 H12 Z M0,12 H10 V22 H0 Z M12,12 H22 V22 H12 Z">
+                                          Data="M1.5,0 H8.5 A1.5,1.5 0 0 1 10,1.5 V8.5 A1.5,1.5 0 0 1 8.5,10 H1.5 A1.5,1.5 0 0 1 0,8.5 V1.5 A1.5,1.5 0 0 1 1.5,0 Z M13.5,0 H20.5 A1.5,1.5 0 0 1 22,1.5 V8.5 A1.5,1.5 0 0 1 20.5,10 H13.5 A1.5,1.5 0 0 1 12,8.5 V1.5 A1.5,1.5 0 0 1 13.5,0 Z M1.5,12 H8.5 A1.5,1.5 0 0 1 10,13.5 V20.5 A1.5,1.5 0 0 1 8.5,22 H1.5 A1.5,1.5 0 0 1 0,20.5 V13.5 A1.5,1.5 0 0 1 1.5,12 Z M13.5,12 H20.5 A1.5,1.5 0 0 1 22,13.5 V20.5 A1.5,1.5 0 0 1 20.5,22 H13.5 A1.5,1.5 0 0 1 12,20.5 V13.5 A1.5,1.5 0 0 1 13.5,12 Z">
                                         <Path.Effect>
                                             <DropShadowEffect BlurRadius="6" ShadowDepth="2" Direction="270" Color="#000000" Opacity="0.32" />
                                         </Path.Effect>

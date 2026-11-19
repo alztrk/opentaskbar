@@ -301,8 +301,10 @@ public partial class MainWindow
     private void RefreshRecycleBinIcon()
     {
         var full = _recycleBinFull == true;
-        RecycleBinIcon.Source = ThemePacks.ApplyIcon(full ? RecycleBin.FullIcon : RecycleBin.EmptyIcon, null,
+        var raw = full ? RecycleBin.FullIcon : RecycleBin.EmptyIcon;
+        var themed = ThemePacks.ApplyIcon(raw, null,
             specialKey: full ? IconPack.RecycleBinFullKey : IconPack.RecycleBinKey);
+        RecycleBinIcon.Source = ThemePacks.PlateIcon(themed);
     }
 
     private void RecycleBin_Click(object sender, RoutedEventArgs e)

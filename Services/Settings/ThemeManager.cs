@@ -14,9 +14,11 @@ public static class ThemeManager
     private static readonly ResourceDictionary Overrides = new();
     private static readonly Dictionary<string, Brush> MaterialSources = new(StringComparer.Ordinal);
     private static double _opacity = 0.9;
+    public static AppTheme Current { get; private set; } = AppTheme.Dark;
 
     public static void Apply(AppTheme theme, double opacity = 0.9)
     {
+        Current = theme;
         var source = $"/OpenTaskbar;component/Design/Palettes/{theme}.xaml";
         var dictionaries = Application.Current.Resources.MergedDictionaries;
         if (_palette?.Source?.OriginalString != source)

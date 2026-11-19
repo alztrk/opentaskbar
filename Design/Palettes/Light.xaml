@@ -4,10 +4,11 @@
     <SolidColorBrush x:Key="TextPrimary" Color="#FF202329" />
     <SolidColorBrush x:Key="TextSecondary" Color="#FF5E6570" />
     <SolidColorBrush x:Key="TextMuted" Color="#805E6570" />
+    <!-- Fluent Blue Windows 11 logo with refined luminance. -->
     <LinearGradientBrush x:Key="WindowsLogoBrush" StartPoint="0,0" EndPoint="1,1">
-        <GradientStop Color="#FF14B8A6" Offset="0" />
+        <GradientStop Color="#FF0EA5E9" Offset="0" />
         <GradientStop Color="#FF0284C7" Offset="0.55" />
-        <GradientStop Color="#FF6366F1" Offset="1" />
+        <GradientStop Color="#FF0369A1" Offset="1" />
     </LinearGradientBrush>
     <RadialGradientBrush x:Key="IconHoverGlow" GradientOrigin="0.5,0.8" Center="0.5,0.75" RadiusX="0.6" RadiusY="0.6">
         <GradientStop Color="#300284C7" Offset="0" />
@@ -24,6 +25,8 @@
         <GradientStop Color="#00000000" Offset="0.65" />
         <GradientStop Color="#14000000" Offset="1" />
     </LinearGradientBrush>
+    <SolidColorBrush x:Key="StartTileBackground" Color="#0C000000" />
+    <SolidColorBrush x:Key="StartTileStroke" Color="#18000000" />
     <SolidColorBrush x:Key="StartTileHover" Color="#1E000000" />
     <SolidColorBrush x:Key="StartTilePressed" Color="#30000000" />
     <SolidColorBrush x:Key="WidgetIsland" Color="#0A000000" />

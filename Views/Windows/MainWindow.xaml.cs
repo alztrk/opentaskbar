@@ -607,7 +607,8 @@ public partial class MainWindow : Window
                 var executablePath = group.Key;
                 var hasNotification = _preferences.Current.NotificationBadgesEnabled && group.Any(window => window.HasNotification);
                 // The topmost window decides identity icons, as ApplicationFrameHost hosts several Store apps.
-                var icon = _runningAppIcons.Get(executablePath, group.First().Handle);
+                var rawIcon = _runningAppIcons.Get(executablePath, group.First().Handle);
+                var icon = ThemePacks.PlateIcon(rawIcon);
                 var isForeground = group.Any(window => window.Handle == _foregroundWindow);
                 var windowCount = group.Count();
                 if (currentApps.TryGetValue(executablePath, out var existingApp))
@@ -1756,13 +1757,20 @@ public partial class MainWindow : Window
         _settingsWindow.Activate();
     }
 
-    private System.Windows.Media.Imaging.BitmapSource? ApplyApplicationIcon(string executablePath) =>
-        ApplicationIconProvider.GetForFile(executablePath);
+    private System.Windows.Media.Imaging.BitmapSource? ApplyApplicationIcon(string executablePath)
+    {
+        var raw = ApplicationIconProvider.GetForFile(executablePath);
+        return ThemePacks.PlateIcon(raw);
+    }
 
     private void ThemePacks_Changed(object? sender, EventArgs e)
     {
         RefreshRecycleBinIcon();
         ApplyStartIcon();
+        foreach (var app in _pinnedApps)
+        {
+            app.Icon = ApplyApplicationIcon(app.ExecutablePath);
+        }
         if (_windowTracker is not null)
         {
             WindowTracker_WindowsChanged(this, _windowTracker.Snapshot);
