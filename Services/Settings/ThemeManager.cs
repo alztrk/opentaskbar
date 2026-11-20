@@ -50,7 +50,12 @@ public static class ThemeManager
             else Overrides[key] = value;
         }
 
-        if (_palette is not null) { SetSurfaceOpacity(_opacity); SetSettingsOpacity(_settingsOpacity); }
+        if (Overrides.TryGetValue("DockBackgroundMode", out var modeValue) && modeValue is "None")
+        {
+            Overrides["DockBorderMaterial"] = Brushes.Transparent;
+            Overrides["DockHighlight"] = Brushes.Transparent;
+        }
+        if (_palette is not null) { SetSurfaceOpacity(_opacity); SetSettingsOpacity(ThemeSettingsOpacity()); }
     }
 
     public static void SetSurfaceOpacity(double opacity)
@@ -69,6 +74,7 @@ public static class ThemeManager
                 ? Brushes.Transparent
                 : WithAlpha(source, key == "DockMaterial" && mode == "Solid" ? byte.MaxValue : alpha);
         }
+        Materials["DockShadowMaterial"] = mode == "None" ? null : Application.Current.TryFindResource("ShadowDock");
     }
 
     private static double ThemeSettingsOpacity()
