@@ -693,7 +693,7 @@ public partial class MainWindow
 
         if (added > 0)
         {
-            if (_windowTracker is not null) UpdateRunningApps(VisibleSnapshot);
+            if (_windowTracker is not null) RefreshRunningApps();
             ResizeDockToContent();
             _replacementSession?.RefreshPosition();
         }

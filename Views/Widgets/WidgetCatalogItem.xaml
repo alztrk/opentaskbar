@@ -10,16 +10,20 @@
             <Setter Property="Margin" Value="{StaticResource WidgetCatalogItemMargin}" />
         </Style>
     </UserControl.Style>
-    <Border x:Name="CardBorder" Background="{DynamicResource SurfaceSelected}"
-            BorderBrush="{DynamicResource StrokeSubtle}" BorderThickness="1"
-            CornerRadius="{StaticResource DockWidgetRadius}">
+    <Border x:Name="CardBorder" BorderThickness="1"
+            CornerRadius="{DynamicResource DockWidgetRadius}">
         <Border.Style>
             <Style TargetType="Border">
+                <Setter Property="Background" Value="{DynamicResource SurfaceSelected}" />
+                <Setter Property="BorderBrush" Value="{DynamicResource StrokeSubtle}" />
                 <Style.Triggers>
                     <DataTrigger Binding="{Binding IsInstalled}" Value="True">
                         <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}" />
                         <Setter Property="Background" Value="{DynamicResource SurfaceKeyboardFocus}" />
                     </DataTrigger>
+                    <Trigger Property="IsMouseOver" Value="True">
+                        <Setter Property="Background" Value="{DynamicResource WidgetCardHover}" />
+                    </Trigger>
                 </Style.Triggers>
             </Style>
         </Border.Style>

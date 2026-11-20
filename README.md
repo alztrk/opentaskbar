@@ -34,7 +34,7 @@ OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replaceme
 - **Aurora Visual Language:** Dark (Midnight Obsidian) and Light glass materials with top specular sheen, 1px optical bevel, and soft ambient drop shadows.
 - **Dock Edge Placement:** Position the dock at the Bottom, Left, or Right edge of your primary screen, with independent alignment (Center, Left, Right, or Full-Width).
 - **Size, Scale & Corner Radius:** Choose between Compact (48 DIP), Medium (58 DIP), and Large (66 DIP) presets, fine-tune scale from 75% to 150%, and customize frame corner radius from 0 px (sharp) to 32 px while screen edge spacing adjusts automatically from the active profile.
-- **Surface Opacity:** Adjust background glass opacity between 60% and 100% with immediate real-time preview.
+- **Per-Surface Materials:** Configure the dock, menus, widgets and Settings window independently. Each surface has Glass (translucent), Solid (fully opaque) or None (background, rim and shadow completely removed) with its own 0–100% opacity and live preview.
 - **Two-Sided Dock Resizing & Edge Scrolling:** Drag either outer border to narrow or expand the dock while keeping widgets at full width. Overflowing items scroll smoothly via mouse wheel, middle-click panning, or clickable edge chevrons with directional gradient scrims aligned to the outer dock borders.
 
 ### Theme Packs
@@ -83,7 +83,7 @@ OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replaceme
 ### Foolproof Taskbar Recovery
 - **Zero Risk:** State journaling records every taskbar replacement action. On exit, system shutdown, or unexpected termination, OpenTaskbar automatically restores the native Windows taskbar.
 - **Verified Restore:** Recovery re-asserts the original taskbar state and visibility several times and keeps the journal until the taskbar is actually visible, so an Explorer restart cannot silently lose the recovery state.
-- **Self-Healing Startup:** A pending journal is repaired before any mode is selected, including `--preview` and `--inspect` (which never hide the taskbar themselves).
+- **Self-Healing Startup:** A pending journal is repaired after the singleton check and before the dock starts, including for `--inspect` sessions.
 - **Crash Watchdog:** A detached lightweight native C Win32 helper (`tools/watchdog/watchdog.c`) handles cases no in-process handler can (End Task, `taskkill /F`, FailFast, or unexpected exit), restores the Windows taskbar, and exits immediately.
 - **Manual Escape Hatch:** `OpenTaskbar.exe --restore` forces the native taskbar back at any time, even when OpenTaskbar is not running.
 
@@ -136,8 +136,8 @@ cd opentaskbar
 # Run directly from source
 dotnet run --project OpenTaskbar.csproj
 
-# Run in preview mode with Settings window open (keeps Windows taskbar visible)
-dotnet run --project OpenTaskbar.csproj -- --preview --settings
+# Run with the Settings window open on startup
+dotnet run --project OpenTaskbar.csproj -- --settings
 
 # Build self-contained portable executable (outputs to release\OpenTaskbar.exe)
 powershell -ExecutionPolicy Bypass -File ".\scripts\publish-portable.ps1"

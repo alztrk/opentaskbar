@@ -25,13 +25,18 @@ public partial class MainWindow
     private double _effectiveMaxScale = DockMetrics.HoverScale;
     private readonly Dictionary<FrameworkElement, double> _magnificationScaleTargets = [];
     private readonly Dictionary<FrameworkElement, double> _magnificationVelocity = [];
+    private readonly Dictionary<FrameworkElement, bool> _hoverIconStates = [];
     private bool _magnificationRendering;
     private TimeSpan? _magnificationLastFrame;
+    private double _lastMagnificationPointerAxis;
+    private bool _hasMagnificationPointer;
     private readonly System.Runtime.CompilerServices.ConditionalWeakTable<Image, BitmapSource> _restingIcons = new();
 
     internal void InvalidateMagnificationTargets()
     {
-        if (_updatingMagnificationLayout || _magnificationLayoutActive) return;
+        // Slot-size writes fire LayoutUpdated every frame; rebuilding targets from rest geometry while the spring
+        // is animating is wasted work and a visible hitch.
+        if (_updatingMagnificationLayout || _magnificationLayoutActive || _magnificationRendering) return;
         _magnificationTargetsDirty = true;
     }
 
@@ -47,6 +52,10 @@ public partial class MainWindow
             if (button.ActualWidth <= 0 || button.ActualHeight <= 0) continue;
             if (!button.IsDescendantOf(DockHost)) continue;
             if (GetButtonIcon(button) is not { } icon) continue;
+            // Native shell buttons (Start, Search, Task View, tray, Show Desktop, Recycle Bin) are Windows'
+            // own surfaces. Magnifying them makes the dock fight the native flyouts they open, so keep the
+            // fisheye for application icons and stacks only.
+            if (IsNativeShellButton(button)) continue;
 
             var center = button.TranslatePoint(new Point(button.ActualWidth / 2, button.ActualHeight / 2), DockHost);
             var restCenter = IsVertical ? center.Y : center.X;
@@ -55,8 +64,42 @@ public partial class MainWindow
             _magnificationTargets.Add(new MagnificationTarget(button, icon, restCenter, baseSize));
         }
 
-        CaptureMagnificationExpansionBudget();
+        // Never sample the expansion budget from geometry that magnification itself has grown or an in-flight
+        // width animation is still moving; that feedback is what made the same hover bloom to different sizes.
+        if (!_magnificationRendering && !_magnificationLayoutActive)
+        {
+            CaptureMagnificationExpansionBudget();
+            if (_hasMagnificationPointer) UpdateMagnificationTargetsForPointer(_lastMagnificationPointerAxis);
+        }
         _magnificationTargetsDirty = false;
+    }
+
+    /// <summary>
+    /// Rebuilds the spring goals from the last known pointer position. Called on mouse move and whenever the
+    /// cap/radius changes, so a stationary pointer still gets the peak scale that is currently affordable.
+    /// </summary>
+    private void UpdateMagnificationTargetsForPointer(double pointerAxis)
+    {
+        if (_magnificationTargets.Count == 0) return;
+        var fraction = DockFisheyeLayout.ComputeExpansionFraction(
+            Profile.Cell, DockMetrics.HoverScale, _availableExpansion);
+        var radius = DockFisheyeLayout.InfluenceRadiusForExpansion(Profile.Cell, fraction);
+
+        _currentMagnifiedBuffer.Clear();
+        _magnificationScaleTargets.Clear();
+        foreach (var target in _magnificationTargets)
+        {
+            var scale = DockFisheyeLayout.ComputeTargetScale(pointerAxis - target.RestCenter, radius, _effectiveMaxScale);
+            _magnificationScaleTargets[target.Icon] = scale;
+            if (scale > HoverIconThreshold) _currentMagnifiedBuffer.Add(target.Icon);
+        }
+
+        foreach (var icon in _magnifiedIcons)
+        {
+            if (!_magnificationScaleTargets.ContainsKey(icon)) _magnificationScaleTargets[icon] = 1.0;
+        }
+        _magnifiedIcons.Clear();
+        foreach (var icon in _currentMagnifiedBuffer) _magnifiedIcons.Add(icon);
     }
 
     /// <summary>Live peak magnification scale coupled to available slot expansion room.</summary>
@@ -73,6 +116,8 @@ public partial class MainWindow
 
     private void CaptureMagnificationExpansionBudget()
     {
+        // Resting geometry must be sampled while the dock is at rest, not while slots are expanded.
+        if (_magnificationRendering || _magnificationLayoutActive) return;
         var margin = DockSurface.Margin;
         if (IsVertical)
         {
@@ -146,6 +191,31 @@ public partial class MainWindow
     private static FrameworkElement? GetButtonIcon(Button button) =>
         button.Content as FrameworkElement ?? (FrameworkElement?)FindVisualChild<Image>(button) ?? FindVisualChild<System.Windows.Shapes.Path>(button);
 
+    /// <summary>
+    /// Buttons that launch Windows-owned UI. Uses both direct references (fallback dock order) and the free-form
+    /// order tokens, so a shell button keeps behaving the same after drag-and-drop reordering.
+    /// </summary>
+    private bool IsNativeShellButton(Button button)
+    {
+        if (ReferenceEquals(button, StartButton) || ReferenceEquals(button, SearchButton)
+            || ReferenceEquals(button, TaskViewButton) || ReferenceEquals(button, TrayButton)
+            || ReferenceEquals(button, ShowDesktopButton) || ReferenceEquals(button, RecycleBinButton))
+        {
+            return true;
+        }
+
+        foreach (var (token, element) in _dockItemElements)
+        {
+            if (!ShellDockTokens.Contains(token, StringComparer.OrdinalIgnoreCase)) continue;
+            if (ReferenceEquals(element, button)
+                || ReferenceEquals(FindVisualChild<Button>(element), button))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private IEnumerable<Button> GetAllDockButtons()
     {
         if (_dockItemElements.Count > 0)
@@ -202,6 +272,8 @@ public partial class MainWindow
             {
                 return true;
             }
+            // Hovering a native shell button must not magnify its neighbours either.
+            if (current is Button button && IsNativeShellButton(button)) return true;
 
             if (current is FrameworkElement fe)
             {
@@ -277,29 +349,9 @@ public partial class MainWindow
 
         var mousePos = e.GetPosition(DockHost);
         var mouseAxis = IsVertical ? mousePos.Y : mousePos.X;
-        var constrained = _availableExpansion <= 0.5;
-        var influenceRadius = DockFisheyeLayout.InfluenceRadiusForCell(Profile.Cell, constrained);
-        var maxScale = _effectiveMaxScale;
-
-        _currentMagnifiedBuffer.Clear();
-        _magnificationScaleTargets.Clear();
-
-        foreach (var target in _magnificationTargets)
-        {
-            var targetScale = DockFisheyeLayout.ComputeTargetScale(mouseAxis - target.RestCenter, influenceRadius, maxScale);
-            _magnificationScaleTargets[target.Icon] = targetScale;
-            if (targetScale > HoverIconThreshold) _currentMagnifiedBuffer.Add(target.Icon);
-        }
-
-        foreach (var icon in _magnifiedIcons)
-        {
-            if (!_magnificationScaleTargets.ContainsKey(icon))
-                _magnificationScaleTargets[icon] = 1.0;
-        }
-
-        _magnifiedIcons.Clear();
-        foreach (var icon in _currentMagnifiedBuffer)
-            _magnifiedIcons.Add(icon);
+        _hasMagnificationPointer = true;
+        _lastMagnificationPointerAxis = mouseAxis;
+        UpdateMagnificationTargetsForPointer(mouseAxis);
 
         StartMagnificationRendering();
     }
@@ -334,14 +386,16 @@ public partial class MainWindow
         if (_magnificationTargetsDirty && !_magnificationLayoutActive)
         {
             RebuildMagnificationTargets();
+            // The rebuilt targets already use the fresh cap; refresh the spring goals in the same frame.
+            if (_hasMagnificationPointer) UpdateMagnificationTargetsForPointer(_lastMagnificationPointerAxis);
         }
 
         var frameTime = e is RenderingEventArgs frame ? frame.RenderingTime : TimeSpan.Zero;
         var elapsedMs = _magnificationLastFrame is { } last
-            ? Math.Clamp((frameTime - last).TotalMilliseconds, 1, 50) : 16.7;
+            ? (frameTime - last).TotalMilliseconds : 16.7;
         _magnificationLastFrame = frameTime;
 
-        var dtSeconds = Math.Min(elapsedMs, 32.0) / 1000.0;
+        var dtSeconds = Math.Clamp(elapsedMs, 1.0, 50.0) / 1000.0;
         var settled = true;
         var maxScale = _effectiveMaxScale;
         var profile = Profile;
@@ -361,7 +415,15 @@ public partial class MainWindow
 
             if (Math.Abs(current - next) >= 0.0001 || iconSettled)
             {
-                UseHoverIcon(icon, next > HoverIconThreshold);
+                // Swapping the bitmap is comparatively expensive (visual-tree walk, binding, CWT write); do it only
+                // when the icon crosses the magnification threshold, with hysteresis to avoid boundary flicker.
+                var wasHover = _hoverIconStates.TryGetValue(icon, out var state) && state;
+                var wantHover = wasHover ? next > 1.06 : next > HoverIconThreshold;
+                if (wantHover != wasHover)
+                {
+                    _hoverIconStates[icon] = wantHover;
+                    UseHoverIcon(icon, wantHover);
+                }
                 scale.ScaleX = next;
                 scale.ScaleY = next;
             }
@@ -425,35 +487,51 @@ public partial class MainWindow
                 ClearMagnificationZIndexes();
                 _magnificationScaleTargets.Clear();
                 _magnifiedIcons.Clear();
+                _hoverIconStates.Clear();
+                StopMagnificationRendering();
             }
-
-            StopMagnificationRendering();
+            // While the pointer still sits over a magnified icon, keep the loop alive (it becomes nearly free once
+            // the transforms stop changing). Detaching here used to discard velocity and restart the spring at zero
+            // on the next mouse move, which felt like a stutter.
         }
     }
 
     private void ApplyMagnificationSlotLayout(ReadOnlySpan<double> extras, double totalActualExtra, bool vertical)
     {
-        if (totalActualExtra > 0.05)
+        if (totalActualExtra > 0.01)
         {
             _updatingMagnificationLayout = true;
             try
             {
                 _magnificationLayoutActive = true;
+                // Skipping sub-pixel writes avoids a full dock layout pass on most frames - the main source of judder.
                 for (var i = 0; i < _magnificationTargets.Count; i++)
                 {
                     var target = _magnificationTargets[i];
                     var slotSize = target.BaseSize + extras[i];
-                    if (vertical) target.Button.Height = slotSize;
-                    else target.Button.Width = slotSize;
+                    if (vertical)
+                    {
+                        if (Math.Abs(target.Button.Height - slotSize) >= 0.25) target.Button.Height = slotSize;
+                    }
+                    else if (Math.Abs(target.Button.Width - slotSize) >= 0.25)
+                    {
+                        target.Button.Width = slotSize;
+                    }
                 }
 
                 if (_canExpandSurface && _restSurfaceWidth > 0)
                 {
-                    DockSurface.BeginAnimation(WidthProperty, null);
-                    DockSurface.Width = _restSurfaceWidth + totalActualExtra;
+                    var surfaceWidth = _restSurfaceWidth + totalActualExtra;
+                    if (Math.Abs(DockSurface.Width - surfaceWidth) >= 0.25)
+                    {
+                        DockSurface.BeginAnimation(WidthProperty, null);
+                        DockSurface.Width = surfaceWidth;
+                    }
                     if (double.IsFinite(_restScrollMaxWidth))
                     {
-                        DockScrollViewer.MaxWidth = _restScrollMaxWidth + totalActualExtra;
+                        var maxWidth = _restScrollMaxWidth + totalActualExtra;
+                        if (Math.Abs(DockScrollViewer.MaxWidth - maxWidth) >= 0.25)
+                            DockScrollViewer.MaxWidth = maxWidth;
                     }
                 }
             }
@@ -531,6 +609,7 @@ public partial class MainWindow
 
     private void DockSurface_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
     {
+        _hasMagnificationPointer = false;
         ResetMagnification();
         _autoHideController?.OnMouseLeaveDock();
         NativeMemoryMethods.ScheduleIdleTrim(TimeSpan.FromSeconds(2));
@@ -541,6 +620,7 @@ public partial class MainWindow
 
     private void ResetMagnification(bool immediate = false)
     {
+        _hasMagnificationPointer = false;
         var iconsToReset = _magnificationScaleTargets.Keys
             .Concat(_magnifiedIcons)
             .Concat(_magnificationTargets.Select(t => t.Icon))

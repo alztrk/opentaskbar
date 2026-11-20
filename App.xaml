@@ -11,6 +11,7 @@
                 <ResourceDictionary Source="Design/Tokens/Radii.xaml" />
                 <ResourceDictionary Source="Design/Tokens/Layout.xaml" />
                 <ResourceDictionary Source="Design/Tokens/Motion.xaml" />
+                <ResourceDictionary Source="Design/Tokens/Effects.xaml" />
                 <ResourceDictionary Source="Design/Palettes/Dark.xaml" />
                 <!-- Icons before control styles: ContextMenus.xaml uses StaticResource IconCheck/IconChevronRight. -->
                 <ResourceDictionary Source="Design/Icons/Navigation.xaml" />

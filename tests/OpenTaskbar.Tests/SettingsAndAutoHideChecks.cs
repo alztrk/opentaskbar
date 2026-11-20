@@ -95,7 +95,10 @@ internal static class SettingsAndAutoHideChecks
                 AutoHide: AutoHideMode.Smart,
                 StartPlacement: StartButtonPlacement.End,
                 Size: DockSize.Compact,
-                SurfaceOpacity: 0.6,
+                DockOpacity: 0.6,
+                MenuOpacity: 0.6,
+                WidgetOpacity: 0.6,
+                SettingsOpacity: 0.6,
                 LauncherHotkey: HotkeyChoice.CtrlSpace,
                 DockHotkey: HotkeyChoice.WinAltD,
                 Widgets: ["Clock", "Media", "SystemStats"],
@@ -157,7 +160,7 @@ internal static class SettingsAndAutoHideChecks
                 && reloaded.Settings.InstalledWidgets?.SequenceEqual(["Clock", "Media", "SystemStats"]) == true,
                 "Installed widgets must not be wiped when SettingsWindow is reopened.");
             check(Math.Abs(loadedOpacity(reloaded.Settings) - 0.6) < 0.001,
-                "SurfaceOpacity preference must survive SettingsWindow reopen.");
+                "Per-surface opacity preferences must survive SettingsWindow reopen.");
         }
         finally
         {
@@ -165,7 +168,7 @@ internal static class SettingsAndAutoHideChecks
             File.Delete(path + ".tmp");
         }
 
-        static double loadedOpacity(DockSettings s) => s.SurfaceOpacity;
+        static double loadedOpacity(DockSettings s) => s.DockOpacity;
 
         static SettingsWindow CreateOffscreenSettings(ApplicationPreferences prefs) => new(prefs)
         {

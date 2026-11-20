@@ -45,7 +45,7 @@
                 <ControlTemplate TargetType="Button">
                     <Border x:Name="Surface" Background="{TemplateBinding Background}"
                             BorderBrush="Transparent" BorderThickness="0"
-                            CornerRadius="{StaticResource ControlRadius}" Padding="{TemplateBinding Padding}">
+                            CornerRadius="{DynamicResource ControlRadius}" Padding="{TemplateBinding Padding}">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="*" />
@@ -81,22 +81,74 @@
         </Setter>
     </Style>
 
-    <!-- Clean Start button template aligned to the same vertical baseline as DockButton -->
-    <Style x:Key="StartDockButton" TargetType="Button" BasedOn="{StaticResource DockButton}">
-        <Setter Property="Template">
-            <Setter.Value>
-                <ControlTemplate TargetType="Button">
-                    <Grid Width="{TemplateBinding Width}" Height="{TemplateBinding Height}">
-                        <Grid.RowDefinitions>
-                            <RowDefinition Height="*" />
-                            <RowDefinition Height="6" />
-                        </Grid.RowDefinitions>
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
-                    </Grid>
-                </ControlTemplate>
-            </Setter.Value>
-        </Setter>
+    <!--
+        Permanent shell buttons stay transparent at rest. Two stacked layers fade in on hover/press; only their
+        Opacity is animated, so the brushes remain DynamicResources that theme packs can recolor at runtime.
+    -->
+    <ControlTemplate x:Key="ShellDockButtonTemplate" TargetType="Button">
+        <Border x:Name="Surface" Background="Transparent" CornerRadius="{DynamicResource ControlRadius}">
+            <Grid Width="{TemplateBinding Width}" Height="{TemplateBinding Height}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="6" />
+                </Grid.RowDefinitions>
+                <Border x:Name="HoverSurface" Background="{DynamicResource ShellButtonHover}"
+                        CornerRadius="{DynamicResource ControlRadius}" Opacity="0" IsHitTestVisible="False" />
+                <Border x:Name="PressedSurface" Background="{DynamicResource ShellButtonPressed}"
+                        CornerRadius="{DynamicResource ControlRadius}" Opacity="0" IsHitTestVisible="False" />
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Grid>
+        </Border>
+        <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+                <Trigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetName="HoverSurface" Storyboard.TargetProperty="Opacity"
+                                             To="1" Duration="0:0:0.12" FillBehavior="HoldEnd" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </Trigger.EnterActions>
+                <Trigger.ExitActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetName="HoverSurface" Storyboard.TargetProperty="Opacity"
+                                             To="0" Duration="0:0:0.18" FillBehavior="HoldEnd" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </Trigger.ExitActions>
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+                <Trigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetName="PressedSurface" Storyboard.TargetProperty="Opacity"
+                                             To="1" Duration="0:0:0.08" FillBehavior="HoldEnd" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </Trigger.EnterActions>
+                <Trigger.ExitActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetName="PressedSurface" Storyboard.TargetProperty="Opacity"
+                                             To="0" Duration="0:0:0.15" FillBehavior="HoldEnd" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </Trigger.ExitActions>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="Surface" Property="Opacity" Value="0.48" />
+            </Trigger>
+        </ControlTemplate.Triggers>
+    </ControlTemplate>
+
+    <Style x:Key="ShellDockButton" TargetType="Button" BasedOn="{StaticResource DockButton}">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Template" Value="{StaticResource ShellDockButtonTemplate}" />
     </Style>
+
+    <!-- Start shares the exact same hidden-until-hover surface as the other permanent shell buttons. -->
+    <Style x:Key="StartDockButton" TargetType="Button" BasedOn="{StaticResource ShellDockButton}" />
 
     <Style x:Key="DockScrollIndicatorButton" TargetType="Button">
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />

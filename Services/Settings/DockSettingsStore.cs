@@ -52,6 +52,8 @@ public sealed class DockSettingsStore
                 settings = MigrateRemovedWidgets(settings);
             if (settings is not null)
                 settings = MigrateLegacyAiUsage(settings);
+            if (settings is not null)
+                settings = MigrateSurfaceStyles(settings, document.RootElement);
             if (settings is null || !IsValid(settings))
             {
                 return (CreateDefaultSettings(), "ErrorDockSettingsInvalid");
@@ -164,6 +166,28 @@ public sealed class DockSettingsStore
         };
     }
 
+    /// <summary>
+    /// The retired single SurfaceOpacity slider fed every glass surface. Copy its value into the four
+    /// independent styles once so upgrading users keep exactly the same appearance.
+    /// </summary>
+    private static DockSettings MigrateSurfaceStyles(DockSettings settings, JsonElement root)
+    {
+        if (root.TryGetProperty(nameof(DockSettings.DockBackground), out _)
+            || !root.TryGetProperty(nameof(DockSettings.SurfaceOpacity), out var legacy)
+            || legacy.ValueKind != JsonValueKind.Number
+            || !legacy.TryGetDouble(out var value)
+            || !double.IsFinite(value) || value is < 0.6 or > 1)
+            return settings;
+
+        return settings with
+        {
+            DockOpacity = value,
+            MenuOpacity = value,
+            WidgetOpacity = value,
+            SettingsOpacity = value
+        };
+    }
+
     public string? Save(DockSettings settings)
     {
         if (!IsValid(settings))
@@ -207,6 +231,12 @@ public sealed class DockSettingsStore
         && settings.FocusBreakMinutes is >= 1 and <= 30
         && settings.FocusSessions is >= 1 and <= 8
         && double.IsFinite(settings.SurfaceOpacity) && settings.SurfaceOpacity is >= 0.6 and <= 1
+        && Enum.IsDefined(settings.DockBackground) && Enum.IsDefined(settings.MenuBackground)
+        && Enum.IsDefined(settings.WidgetBackground) && Enum.IsDefined(settings.SettingsBackground)
+        && double.IsFinite(settings.DockOpacity) && settings.DockOpacity is >= 0 and <= 1
+        && double.IsFinite(settings.MenuOpacity) && settings.MenuOpacity is >= 0 and <= 1
+        && double.IsFinite(settings.WidgetOpacity) && settings.WidgetOpacity is >= 0 and <= 1
+        && double.IsFinite(settings.SettingsOpacity) && settings.SettingsOpacity is >= 0 and <= 1
         && double.IsFinite(settings.DockScale) && settings.DockScale is >= 0.75 and <= 1.5
         && settings.PinOrder?.Any(string.IsNullOrWhiteSpace) != true
         && settings.PinOrder?.Distinct(StringComparer.OrdinalIgnoreCase).Count() == settings.PinOrder?.Count

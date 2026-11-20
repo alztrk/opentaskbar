@@ -39,10 +39,10 @@ internal static class TaskbarRecoveryChecks
         const string token = "abc123";
         var arguments = TaskbarRecoveryWatchdog.BuildArguments(parentPid, token);
         Check(TaskbarRecoveryWatchdog.IsWatchdogInvocation([arguments]), "Watchdog arguments must be recognized.");
-        Check(!TaskbarRecoveryWatchdog.IsWatchdogInvocation(["--preview"]), "Normal arguments must not start the watchdog.");
+        Check(!TaskbarRecoveryWatchdog.IsWatchdogInvocation(["--inspect"]), "Normal arguments must not start the watchdog.");
         Check(TaskbarRecoveryWatchdog.TryParseArguments([arguments], out var pid, out var parsedToken)
             && pid == parentPid && parsedToken == token, "Watchdog arguments must round-trip.");
-        Check(TaskbarRecoveryWatchdog.TryParseArguments(["--preview", arguments], out pid, out parsedToken)
+        Check(TaskbarRecoveryWatchdog.TryParseArguments(["--inspect", arguments], out pid, out parsedToken)
             && pid == parentPid && parsedToken == token, "Watchdog arguments must be found among other switches.");
 
         foreach (var malformed in new[] { "--watchdog=0:abc", "--watchdog=-1:abc", "--watchdog=42",

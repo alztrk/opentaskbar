@@ -17,11 +17,11 @@ public partial class App : Application
     private Mutex? _instanceMutex;
     private int _crashHandled;
     public ApplicationPreferences Preferences { get; private set; } = new(new DockSettingsStore());
-    public bool IsPreview { get; private set; }
     public bool IsInspection { get; private set; }
     public bool IsDev { get; private set; }
     public bool OpenSettingsOnStartup { get; private set; }
     private DevReloadService? _devReload;
+    private WindowsPaletteListener? _paletteListener;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -49,30 +49,24 @@ public partial class App : Application
 
         AppLog.Initialize();
         StartupStopwatch.Mark("OnStartup entered");
-        // A previous instance may have been killed while the taskbar was hidden. Heal before choosing a mode:
-        // --preview and --inspect never start a replacement session, so they would otherwise leave it hidden.
-        var healError = TaskbarReplacementSession.HealPendingRecovery();
-        StartupStopwatch.Mark("taskbar recovery healed");
-        if (healError is not null) AppLog.Error($"Startup taskbar self-heal failed: {healError}");
         DispatcherUnhandledException += App_DispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
         TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
         SystemEvents.SessionSwitch += SystemEvents_SessionSwitch;
+        Preferences.Changed += Preferences_Changed;
+        _paletteListener = new WindowsPaletteListener();
+        _paletteListener.Changed += PaletteListener_Changed;
 
-        IsPreview = e.Args.Contains("--preview", StringComparer.Ordinal);
         IsInspection = e.Args.Contains("--inspect", StringComparer.Ordinal);
         OpenSettingsOnStartup = e.Args.Contains("--settings", StringComparer.Ordinal);
         IsDev = e.Args.Contains("--dev", StringComparer.Ordinal);
         var sourceArg = e.Args.FirstOrDefault(arg => arg.StartsWith("--source=", StringComparison.OrdinalIgnoreCase));
         var sourceRoot = sourceArg?["--source=".Length..];
-        if (IsPreview)
-            Preferences = new ApplicationPreferences(new DockSettingsStore(Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "OpenTaskbar", "preview-settings.json")));
         UiText.Current.SetLanguage(Preferences.Current.Language);
-        ThemeManager.Apply(Preferences.Current.Theme, Preferences.Current.SurfaceOpacity);
+        ThemeManager.Apply(Preferences.Current.Theme, Preferences.Current);
+        ApplyWindowsPalette();
         _instanceMutex = new Mutex(initiallyOwned: true,
-            name: IsDev ? "Local\\OpenTaskbar.Dev" : IsPreview ? "Local\\OpenTaskbar.Preview" : "Local\\OpenTaskbar.Singleton", out var createdNew);
+            name: IsDev ? "Local\\OpenTaskbar.Dev" : "Local\\OpenTaskbar.Singleton", out var createdNew);
         if (!createdNew)
         {
             AppLog.ReportError("AlreadyRunning");
@@ -81,6 +75,12 @@ public partial class App : Application
             Shutdown();
             return;
         }
+
+        // Heal only after winning the singleton race: a second instance must never consume the live instance's
+        // recovery journal.
+        var healError = TaskbarReplacementSession.HealPendingRecovery();
+        StartupStopwatch.Mark("taskbar recovery healed");
+        if (healError is not null) AppLog.Error($"Startup taskbar self-heal failed: {healError}");
 
         var themeInstallError = ThemePacks.InstallBuiltInThemes();
         // Before any window exists, so a widget pack's sizes and fonts are in place when styles are first built.
@@ -112,6 +112,24 @@ public partial class App : Application
             (MainWindow as OpenTaskbar.MainWindow)?.ResetTransientUiStateForSessionSwitch(unlocking)));
     }
 
+    private void ApplyWindowsPalette()
+    {
+        WindowsPalette.Refresh(ThemeManager.Current);
+        ThemeManager.SetWindowsPalette(WindowsPalette.Current);
+    }
+
+    private void Preferences_Changed(object? sender, EventArgs e)
+    {
+        // A saved theme change rebuilds the palette; re-derive the Windows colors for the new mode.
+        Dispatcher.BeginInvoke(new Action(ApplyWindowsPalette));
+    }
+
+    private void PaletteListener_Changed(object? sender, EventArgs e)
+    {
+        // Broadcasts arrive on a worker thread; resource changes must happen on the dispatcher.
+        Dispatcher.BeginInvoke(new Action(ApplyWindowsPalette));
+    }
+
     private void StartDevReload(string? sourceRoot)
     {
         var root = sourceRoot;
@@ -135,6 +153,13 @@ public partial class App : Application
     {
         TaskbarRecoveryWatchdog.NotifyCleanExit();
         SystemEvents.SessionSwitch -= SystemEvents_SessionSwitch;
+        Preferences.Changed -= Preferences_Changed;
+        if (_paletteListener is not null)
+        {
+            _paletteListener.Changed -= PaletteListener_Changed;
+            _paletteListener.Dispose();
+            _paletteListener = null;
+        }
         var error = (MainWindow as OpenTaskbar.MainWindow)?.RestoreWindowsTaskbar();
         if (error is not null)
         {
@@ -166,15 +191,10 @@ public partial class App : Application
 
     protected override void OnSessionEnding(SessionEndingCancelEventArgs e)
     {
-        TaskbarRecoveryWatchdog.NotifyCleanExit();
-        var error = (MainWindow as OpenTaskbar.MainWindow)?.RestoreWindowsTaskbar();
-        if (error is not null) AppLog.Error(error);
-        if (TaskbarReplacementSession.HasPendingRecovery)
-        {
-            error = TaskbarReplacementSession.ForceRestoreNativeTaskbar();
-            if (error is not null) AppLog.Error(error);
-        }
-
+        // Another application can veto logoff after this event. Tearing the replacement down here would leave
+        // the dock running with the native taskbar restored and no watchdog. OnExit performs the real restore;
+        // if the session ends before it runs, the still-armed watchdog is the safety net.
+        AppLog.Info("Session ending; taskbar restore deferred to OnExit.");
         base.OnSessionEnding(e);
     }
 
@@ -201,6 +221,8 @@ public partial class App : Application
     {
         if (Interlocked.Exchange(ref _crashHandled, 1) != 0) return;
         AppLog.Error($"Unhandled exception on {origin}: {exception}");
+        // A crash must not leave the shell flyouts anchored to a dock that is about to disappear.
+        ShellShortcuts.RestoreShellFlyoutPositions();
         var hasSession = TaskbarReplacementSession.HasActiveSession;
         if (!hasSession && !TaskbarReplacementSession.HasPendingRecovery)
         {

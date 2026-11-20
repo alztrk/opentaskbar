@@ -74,10 +74,10 @@ public partial class MainWindow : Window
     private DockApp? _draggedApp;
     private DockAutoHideController? _autoHideController;
     private double? _dockWidthOverride;
+    private (DockSize Size, double Scale)? _appliedDockGeometry;
     private bool _resizingDock;
     private bool _resizePending;
     private bool _resizingFromLeft;
-    private readonly bool _isPreview = ((App)Application.Current).IsPreview;
     private readonly bool _isInspection = ((App)Application.Current).IsInspection;
     // Failures are written to the log only; the dock never displays error popups.
     private readonly WidgetCoordinator _widgetCoordinator;
@@ -126,7 +126,7 @@ public partial class MainWindow : Window
         _widgetPanel = new WidgetPanelHost(this);
         _widgetPanel.IsOpenChanged += WidgetPanel_IsOpenChanged;
         _widgetPanel.OperationFailed += ReportError;
-        ShowInTaskbar = _isPreview || _isInspection;
+        ShowInTaskbar = _isInspection;
         if (((App)Application.Current).OpenSettingsOnStartup)
         {
             RoutedEventHandler? openSettingsOnce = null;
@@ -271,7 +271,7 @@ public partial class MainWindow : Window
         _source = source;
         _source.AddHook(WindowProc);
         _taskbarCreatedMessage = RegisterWindowMessage("TaskbarCreated");
-        if (!_isPreview && !_isInspection && !ExcludeFromTaskSwitcher(source.Handle))
+        if (!_isInspection && !ExcludeFromTaskSwitcher(source.Handle))
         {
             ReportError("ErrorAltTabExclude");
         }
@@ -388,7 +388,7 @@ public partial class MainWindow : Window
 
         // Dev mode uses the real taskbar replacement so the dock sits exactly where the taskbar is,
         // just like release. Only the data hot-reload service differs.
-        if (!_isPreview) StartReplacementMode();
+        StartReplacementMode();
         StartupStopwatch.Mark("taskbar replacement started");
         InitializeFeatures();
         StartupStopwatch.Mark("features initialized");
@@ -428,11 +428,6 @@ public partial class MainWindow : Window
 
         var targetDisplay = DisplayService.GetTargetDisplay(_preferences.Current.TargetDisplay);
         var workArea = targetDisplay.WorkArea;
-        if (_isPreview)
-        {
-            _dockArea = new Size(workArea.Width, Height);
-            Width = workArea.Width;
-        }
         ResizeDockToContent();
         ApplyDockAlignment();
         Left = _dockPosition switch
@@ -462,6 +457,7 @@ public partial class MainWindow : Window
         session.LayoutChanged += ApplyTaskbarLayout;
         session.FullScreenChanged += OnFullScreenChanged;
         session.ShelfHeight = Profile.Shelf;
+        _appliedDockGeometry = (_preferences.Current.Size, _preferences.Current.DockScale);
         session.Edge = Edge;
         session.TargetMonitor = targetDisplay.Handle;
         _replacementSession = session;
@@ -568,30 +564,27 @@ public partial class MainWindow : Window
 
     private void WindowTracker_WindowsChanged(object? sender, IReadOnlyList<TrackedWindow> windows)
     {
-        _runningAppIcons.Retain(windows);
         windows = FilterWindows(windows);
+        _runningAppIcons.Retain(windows);
         var foreground = NativeWindowTracker.GetForegroundApplicationWindow();
         if (foreground != 0)
         {
             _replacementSession?.UpdateForeground(foreground);
             _autoHideController?.CheckForegroundWindow(foreground);
         }
-        var trackedPaths = windows.Where(window => window.ExecutablePath is not null)
-            .Select(window => window.ExecutablePath!)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        foreach (var path in _lastSelectedWindows.Keys.Where(path => !trackedPaths.Contains(path)).ToList())
+        // A stored HWND can outlive its window and be recycled, so validate the handle as well as the path.
+        foreach (var (path, handle) in _lastSelectedWindows.ToList())
         {
-            _lastSelectedWindows.Remove(path);
+            if (!windows.Any(window => window.Handle == handle
+                    && string.Equals(window.ExecutablePath, path, StringComparison.OrdinalIgnoreCase)))
+            {
+                _lastSelectedWindows.Remove(path);
+            }
         }
-        UpdateNotificationBadges(_pinnedApps, windows);
-        UpdateWindowIndicators(windows);
-        if (UpdateRunningApps(windows))
-        {
-            RebuildDockOrder();
-            ResizeDockToContent();
-            _replacementSession?.RefreshPosition();
-        }
-
+        var states = RunningWindowStates();
+        UpdateNotificationBadges(_pinnedApps, states);
+        UpdateWindowIndicators(states);
+        RefreshRunningApps(RunningCandidates());
         UpdateSecondaryDocks();
         // Store app windows often publish their identity shortly after they appear, without another window event.
         if (_runningAppIcons.HasPendingLookups && !_iconRetryTimer.IsEnabled)
@@ -637,13 +630,11 @@ public partial class MainWindow : Window
 
     private void UpdateNotificationBadges(
         ObservableCollection<DockApp> apps,
-        IReadOnlyList<TrackedWindow> windows)
+        IReadOnlyList<RunningAppCandidate> candidates)
     {
-        var notificationPaths = _preferences.Current.NotificationBadgesEnabled
-            ? windows.Where(window => window.HasNotification && window.ExecutablePath is not null)
-                .Select(window => window.ExecutablePath!)
-                .ToHashSet(StringComparer.OrdinalIgnoreCase)
-            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var notificationPaths = candidates.Where(candidate => candidate.HasNotification)
+            .Select(candidate => candidate.ExecutablePath)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         for (var index = 0; index < apps.Count; index++)
         {
@@ -656,17 +647,39 @@ public partial class MainWindow : Window
         }
     }
 
-    private bool UpdateRunningApps(IReadOnlyList<TrackedWindow> windows)
+    /// <summary>
+    /// Every running window, including pinned apps. Badges and running indicators must see pinned apps too;
+    /// only the running-app strip excludes them to avoid duplicate buttons.
+    /// </summary>
+    private IReadOnlyList<RunningAppCandidate> RunningWindowStates() =>
+        RunningAppProjection.Project(VisibleSnapshot,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase), _foregroundWindow,
+            _preferences.Current.NotificationBadgesEnabled, static _ => true);
+
+    /// <summary>Current running apps after every gate: eligibility, virtual desktop, profile, pinned and disk path.</summary>
+    private IReadOnlyList<RunningAppCandidate> RunningCandidates()
     {
         // Apps hidden by the active profile still show up among running apps while they have windows.
         var pinnedPaths = _pinnedApps.Where(app => !IsHiddenByProfile(app)).Select(app => app.ExecutablePath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var candidates = windows
-            .Where(window => window.ExecutablePath is not null
-                && File.Exists(window.ExecutablePath)
-                && !pinnedPaths.Contains(window.ExecutablePath))
-            .ToList();
-        var desiredPaths = candidates.Select(window => window.ExecutablePath!)
+        return RunningAppProjection.Project(VisibleSnapshot, pinnedPaths, _foregroundWindow,
+            _preferences.Current.NotificationBadgesEnabled, File.Exists);
+    }
+
+    /// <summary>Updates running apps and their layout together, including callers outside the window-event path.</summary>
+    private void RefreshRunningApps(IReadOnlyList<RunningAppCandidate>? candidates = null)
+    {
+        if (UpdateRunningApps(candidates ?? RunningCandidates()))
+        {
+            RebuildDockOrder();
+            ResizeDockToContent();
+            _replacementSession?.RefreshPosition();
+        }
+    }
+
+    private bool UpdateRunningApps(IReadOnlyList<RunningAppCandidate> candidates)
+    {
+        var desiredPaths = candidates.Select(candidate => candidate.ExecutablePath)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
         foreach (var executablePath in desiredPaths)
         {
@@ -675,33 +688,27 @@ public partial class MainWindow : Window
 
         var currentApps = _runningApps.ToDictionary(app => app.ExecutablePath, StringComparer.OrdinalIgnoreCase);
         var desiredApps = candidates
-            .GroupBy(window => window.ExecutablePath!, StringComparer.OrdinalIgnoreCase)
-            .Select(group =>
+            .Select(candidate =>
             {
-                var executablePath = group.Key;
-                var hasNotification = _preferences.Current.NotificationBadgesEnabled && group.Any(window => window.HasNotification);
-                // The topmost window decides identity icons, as ApplicationFrameHost hosts several Store apps.
-                var window = group.First().Handle;
-                var icon = _runningAppIcons.Get(executablePath, window);
-                var isForeground = group.Any(candidate => candidate.Handle == _foregroundWindow);
-                var windowCount = group.Count();
+                var executablePath = candidate.ExecutablePath;
+                var icon = _runningAppIcons.Get(executablePath, candidate.IconWindow);
                 if (currentApps.TryGetValue(executablePath, out var existingApp))
                 {
                     // While this app's icon loads in the background, keep showing the current one. Other apps must
                     // still be free to update theirs.
-                    if (icon is not null || !_runningAppIcons.IsLoadingFor(executablePath, window)) existingApp.Icon = icon;
-                    existingApp.HasNotification = hasNotification;
-                    existingApp.IsForeground = isForeground;
-                    existingApp.WindowCount = windowCount;
+                    if (icon is not null || !_runningAppIcons.IsLoadingFor(executablePath, candidate.IconWindow)) existingApp.Icon = icon;
+                    existingApp.HasNotification = candidate.HasNotification;
+                    existingApp.IsForeground = candidate.IsForeground;
+                    existingApp.WindowCount = candidate.WindowCount;
                     return existingApp;
                 }
 
                 return new DockApp(GetApplicationName(executablePath), executablePath)
                 {
                     Icon = icon,
-                    HasNotification = hasNotification,
-                    IsForeground = isForeground,
-                    WindowCount = windowCount
+                    HasNotification = candidate.HasNotification,
+                    IsForeground = candidate.IsForeground,
+                    WindowCount = candidate.WindowCount
                 };
             })
             .OrderBy(app =>
@@ -1273,24 +1280,19 @@ public partial class MainWindow : Window
         return matchingWindows[(previousIndex + 1) % matchingWindows.Count];
     }
 
-    private void UpdateWindowIndicators(IReadOnlyList<TrackedWindow> windows)
+    private void UpdateWindowIndicators(IReadOnlyList<RunningAppCandidate> candidates)
     {
-        var states = new Dictionary<string, (int Count, bool IsForeground)>(StringComparer.OrdinalIgnoreCase);
-        foreach (var window in windows)
-        {
-            if (window.ExecutablePath is null) continue;
-            states.TryGetValue(window.ExecutablePath, out var state);
-            states[window.ExecutablePath] = (
-                state.Count + 1,
-                state.IsForeground || window.Handle == _foregroundWindow);
-        }
+        var states = candidates.ToDictionary(
+            candidate => candidate.ExecutablePath,
+            candidate => (candidate.WindowCount, candidate.IsForeground),
+            StringComparer.OrdinalIgnoreCase);
 
         for (var index = 0; index < _pinnedApps.Count; index++)
         {
             var app = _pinnedApps[index];
             states.TryGetValue(app.ExecutablePath, out var state);
             var isForeground = state.IsForeground;
-            var count = state.Count;
+            var count = state.WindowCount;
             if (app.IsRunning != (count > 0) || app.IsForeground != isForeground || app.WindowCount != count)
             {
                 app.IsForeground = isForeground;
@@ -1312,9 +1314,25 @@ public partial class MainWindow : Window
 
     private void WindowTracker_ForegroundWindowChanged(nint windowHandle)
     {
+        var previousForeground = _foregroundWindow;
+        // Publish the new handle before secondary docks and indicators read it; otherwise they keep the
+        // previous app active until the next snapshot change or the 10-second fallback timer.
+        if (previousForeground != windowHandle)
+        {
+            _foregroundWindow = windowHandle;
+            var candidates = RunningWindowStates();
+            UpdateWindowIndicators(candidates);
+            foreach (var app in _runningApps)
+            {
+                var isForeground = candidates.Any(candidate => candidate.IsForeground
+                    && string.Equals(candidate.ExecutablePath, app.ExecutablePath, StringComparison.OrdinalIgnoreCase));
+                if (app.IsForeground != isForeground) app.IsForeground = isForeground;
+            }
+        }
+
+        UpdateSecondaryDocks();
         _replacementSession?.UpdateForeground(windowHandle);
         _autoHideController?.CheckForegroundWindow(windowHandle);
-        UpdateSecondaryDocks();
         GetWindowThreadProcessId(windowHandle, out var processId);
         // Dock buttons, thumbnail hosts, and menus must not replace the last external foreground window.
         if (processId == Environment.ProcessId) return;
@@ -1324,20 +1342,11 @@ public partial class MainWindow : Window
             _lastApplicationWindow = windowHandle;
         if (_openContextMenu is not null
             && windowHandle != 0
-            && windowHandle != _foregroundWindow
+            && windowHandle != previousForeground
             && windowHandle != _foregroundAtMenuOpen
             && (DateTime.UtcNow - _contextMenuOpenedAtUtc).TotalMilliseconds > 250)
         {
             _openContextMenu.IsOpen = false;
-        }
-        if (_foregroundWindow == windowHandle) return;
-        _foregroundWindow = windowHandle;
-        UpdateWindowIndicators(VisibleSnapshot);
-        var foregroundPath = VisibleSnapshot.FirstOrDefault(window => window.Handle == windowHandle)?.ExecutablePath;
-        foreach (var app in _runningApps)
-        {
-            app.IsForeground = foregroundPath is not null
-                && string.Equals(foregroundPath, app.ExecutablePath, StringComparison.OrdinalIgnoreCase);
         }
     }
 
@@ -1405,7 +1414,6 @@ public partial class MainWindow : Window
         {
             var isWidget = _contextTargetWidget is not null;
             SetMenuItemVisibility(contextMenu, "RemoveWidgetMenu", isWidget);
-            SetSeparatorVisibility(contextMenu, "RemoveWidgetDivider", isWidget);
             FocusContextMenu(contextMenu);
             return;
         }
@@ -1696,7 +1704,7 @@ public partial class MainWindow : Window
             SavePinOrder();
             if (_windowTracker is not null)
             {
-                UpdateRunningApps(VisibleSnapshot);
+                RefreshRunningApps();
             }
 
             ResizeDockToContent();
@@ -1906,8 +1914,9 @@ public partial class MainWindow : Window
         ResetMagnification();
         if (_windowTracker is not null)
         {
-            UpdateNotificationBadges(_pinnedApps, VisibleSnapshot);
-            UpdateNotificationBadges(_runningApps, VisibleSnapshot);
+            var states = RunningWindowStates();
+            UpdateNotificationBadges(_pinnedApps, states);
+            UpdateNotificationBadges(_runningApps, states);
         }
         var targetDisplay = DisplayService.GetTargetDisplay(_preferences.Current.TargetDisplay);
         if (_replacementSession?.IsActive == true)
@@ -1919,6 +1928,44 @@ public partial class MainWindow : Window
         {
             PositionDock();
         }
+
+        // Windows only recalculates the work area when the AppBar is first registered. A size/scale change
+        // therefore needs a fresh replacement session to move the reserved taskbar strip, exactly as a restart does.
+        var geometry = (_preferences.Current.Size, _preferences.Current.DockScale);
+        if (_appliedDockGeometry is { } applied && applied != geometry && _replacementSession is not null)
+        {
+            AnimateDockScaleChange();
+            RestartReplacementSession();
+        }
+        _appliedDockGeometry = geometry;
+    }
+
+    /// <summary>Subtle settle animation when a new size/scale profile is committed.</summary>
+    private void AnimateDockScaleChange()
+    {
+        if (!_preferences.Current.AnimationsEnabled) return;
+        DockScaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+        DockScaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+        var animation = new DoubleAnimation(0.94, 1.0, TimeSpan.FromMilliseconds(220))
+        {
+            EasingFunction = new BackEase { Amplitude = 0.35, EasingMode = EasingMode.EaseOut }
+        };
+        DockScaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, animation);
+        DockScaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, animation);
+    }
+
+    private void RestartReplacementSession()
+    {
+        var session = _replacementSession;
+        if (session is null) return;
+        var error = session.StopForRestart();
+        session.OperationReported -= ReportOperationStatus;
+        session.LayoutChanged -= ApplyTaskbarLayout;
+        session.FullScreenChanged -= OnFullScreenChanged;
+        session.Dispose();
+        _replacementSession = null;
+        if (error is not null) ReportError(error);
+        StartReplacementMode();
     }
 
     private void RemoveDockWidget(string id)
@@ -2017,7 +2064,6 @@ public partial class MainWindow : Window
         if (settings.StartPlacement != StartButtonPlacement.Hidden) tokens.Add("start");
         if (settings.ShowSearchButton) tokens.Add("search");
         if (settings.ShowTaskViewButton) tokens.Add("taskview");
-        if (settings.ShowTrayButton) tokens.Add("tray");
         if (settings.ShowDesktopButton) tokens.Add("peek");
 
         var groupedPaths = (settings.AppGroups ?? []).SelectMany(g => g.ExecutablePaths)
@@ -2048,6 +2094,8 @@ public partial class MainWindow : Window
                 tokens.Add(token);
             }
         }
+        // Background apps is pinned to the far right and re-applied by DockItemOrdering on every rebuild.
+        if (settings.ShowTrayButton) tokens.Add("tray");
         return tokens;
     }
 
@@ -2211,12 +2259,9 @@ public partial class MainWindow : Window
                         }
                     }
                 }
-                else if (string.Equals(token, "search", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(token, "taskview", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(token, "tray", StringComparison.OrdinalIgnoreCase)
-                    || string.Equals(token, "peek", StringComparison.OrdinalIgnoreCase))
+                else if (string.Equals(token, "peek", StringComparison.OrdinalIgnoreCase))
                 {
-                    // Orders saved before these shell buttons existed keep them beside Start instead of appending them.
+                    // Orders saved before Show Desktop existed keep it beside Start instead of appending it.
                     var startIndex = tokens.FindIndex(t => string.Equals(t, "start", StringComparison.OrdinalIgnoreCase));
                     var searchIndex = tokens.FindIndex(t => string.Equals(t, "search", StringComparison.OrdinalIgnoreCase));
                     var insertAt = startIndex >= 0 ? startIndex + 1 : 0;
@@ -2230,7 +2275,8 @@ public partial class MainWindow : Window
             }
         }
 
-        return tokens;
+        // The Windows-native group and the background-apps group ignore the persisted order entirely.
+        return DockItemOrdering.ApplyPinnedGroups(tokens, settings).ToList();
     }
 
     /// <summary>Rebuilds the single dock strip from the persisted free-form item order.</summary>
@@ -2250,16 +2296,33 @@ public partial class MainWindow : Window
 
             foreach (var element in _dockItemElements.Values) DockContents.Children.Remove(element);
             _dockItemElements.Clear();
+            DockContents.Children.Remove(NativeGroupDivider);
+            DockContents.Children.Remove(TrayGroupDivider);
 
             var insertAt = DockContents.Children.IndexOf(StatusText);
             if (insertAt < 0) insertAt = DockContents.Children.Count;
-            foreach (var (token, element) in pairs)
+
+            var leadCount = pairs.Count(pair => DockItemOrdering.PinnedLeadTokens.Contains(pair.Token, StringComparer.OrdinalIgnoreCase));
+            var trayIndex = pairs.FindIndex(pair => string.Equals(pair.Token, "tray", StringComparison.OrdinalIgnoreCase));
+            var showLeadDivider = leadCount > 0 && leadCount < pairs.Count;
+            var showTrayDivider = trayIndex > 0;
+
+            for (var i = 0; i < pairs.Count; i++)
             {
+                if (i == leadCount && showLeadDivider)
+                    DockContents.Children.Insert(insertAt++, NativeGroupDivider);
+                if (i == trayIndex && showTrayDivider)
+                    DockContents.Children.Insert(insertAt++, TrayGroupDivider);
+
+                var (token, element) = pairs[i];
                 // A UIElement cannot be a logical child of two panels; detach from the old grouped host first.
                 if (element.Parent is Panel oldPanel) oldPanel.Children.Remove(element);
                 DockContents.Children.Insert(insertAt++, element);
                 _dockItemElements[token] = element;
             }
+
+            NativeGroupDivider.Visibility = showLeadDivider ? Visibility.Visible : Visibility.Collapsed;
+            TrayGroupDivider.Visibility = showTrayDivider ? Visibility.Visible : Visibility.Collapsed;
             InvalidateMagnificationTargets();
         }
         finally
@@ -2463,6 +2526,7 @@ public partial class MainWindow : Window
     internal void SetSizePreview(DockSize? size, double? scale)
     {
         _sizePreviewOverride = size is { } s && scale is { } sc ? (s, sc) : null;
+        if (_replacementSession is not null) _replacementSession.DeferReservation = _sizePreviewOverride is not null;
         ApplySizeProfile();
         if (_replacementSession?.IsActive == true)
         {
@@ -2488,6 +2552,8 @@ public partial class MainWindow : Window
         UpdatePreferredIconPixels();
         var profile = Profile;
         var radius = EffectiveCornerRadius;
+        // One master radius drives every nested corner in the application.
+        RadiusManager.Apply((int)Math.Round(radius));
         Application.Current.Resources["DockCellSize"] = profile.Cell;
         Application.Current.Resources["DockCellHeight"] = profile.Cell;
         Application.Current.Resources["DockIconSize"] = profile.Icon;
@@ -2519,6 +2585,7 @@ public partial class MainWindow : Window
         {
             Height = DockMetrics.Headroom + profile.Shelf;
         }
+        ApplySecondaryShelf();
     }
 
     private void UpdatePreferredIconPixels()
@@ -2530,7 +2597,9 @@ public partial class MainWindow : Window
         ApplicationIconProvider.PreferredIconPixels = pixels;
         ApplicationIconProvider.HoverIconPixels = ApplicationIconProvider.ComputeHoverIconPixels(pixels, DockMetrics.HoverScale);
         ThemePacks.PreferredIconPixels = pixels;
-        var appIconSize = Math.Max(36.0, pixels / Math.Max(1.0, dpiScale));
+        // The extracted bitmap must never be drawn larger than its dock cell: any overshoot used to land on the
+        // right and bottom because the image was top-left aligned, which read as a clipped icon (e.g. LibreWolf).
+        var appIconSize = DockMetrics.AppIconDipSize(Profile.Icon, pixels, dpiScale);
         Application.Current.Resources["DockApplicationIconSize"] = appIconSize;
         Application.Current.Resources["StartLogoSize"] = appIconSize;
     }
@@ -2577,8 +2646,8 @@ public partial class MainWindow : Window
         _replacementSession?.RefreshPosition();
     }
 
-    private void ApplyBackdropHitTesting() => DockBackdrop.Visibility = !_isPreview
-        && _preferences.Current.AutoHide == AutoHideMode.Disabled ? Visibility.Visible : Visibility.Collapsed;
+    private void ApplyBackdropHitTesting() => DockBackdrop.Visibility =
+        _preferences.Current.AutoHide == AutoHideMode.Disabled ? Visibility.Visible : Visibility.Collapsed;
 
     private void ApplyTaskbarLayout(Size area)
     {
@@ -2644,6 +2713,7 @@ public partial class MainWindow : Window
         if (_openContextMenu is not null) _openContextMenu.IsOpen = false;
         DockFlyout.CloseAll();
         ResetMagnification();
+        UpdateSecondaryDocks();
     }
 
     private void ResizeDockToContent()
@@ -2803,18 +2873,26 @@ public partial class MainWindow : Window
 
     internal string? RestoreWindowsTaskbar()
     {
-        // Hand tray icons back to Explorer before its taskbar becomes visible again.
-        TrayHost.Current?.Dispose();
-        var session = _replacementSession;
-        if (session is null) return null;
-        var error = session.Stop();
-        if (session.IsActive) return error;
-        session.OperationReported -= ReportOperationStatus;
-        session.LayoutChanged -= ApplyTaskbarLayout;
-        session.FullScreenChanged -= OnFullScreenChanged;
-        session.Dispose();
-        _replacementSession = null;
-        return error;
+        try
+        {
+            // Hand tray icons back to Explorer before its taskbar becomes visible again.
+            TrayHost.Current?.Dispose();
+            var session = _replacementSession;
+            if (session is null) return null;
+            var error = session.Stop();
+            if (session.IsActive) return error;
+            session.OperationReported -= ReportOperationStatus;
+            session.LayoutChanged -= ApplyTaskbarLayout;
+            session.FullScreenChanged -= OnFullScreenChanged;
+            session.Dispose();
+            _replacementSession = null;
+            return error;
+        }
+        finally
+        {
+            // Start, Search and Control Center are long-lived: move them back before this process goes away.
+            ShellShortcuts.RestoreShellFlyoutPositions();
+        }
     }
 
     private void Window_Closing(object? sender, CancelEventArgs e)

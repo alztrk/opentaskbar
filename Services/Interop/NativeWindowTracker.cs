@@ -14,6 +14,8 @@ public sealed class NativeWindowTracker : IDisposable
     private const uint EventObjectHide = 0x8003;
     private const uint EventObjectLocationChange = 0x800B;
     private const uint EventObjectNameChange = 0x800C;
+    private const uint EventObjectCloaked = 0x8017;
+    private const uint EventObjectUncloaked = 0x8018;
     private const uint EventSystemAlert = 0x0002;
     private const uint EventSystemForeground = 0x0003;
     private const uint WineventOutOfContext = 0x0000;
@@ -23,8 +25,6 @@ public sealed class NativeWindowTracker : IDisposable
     private const int ChildIdSelf = 0;
     private const int WindowOwner = 4;
     private const int GwlExStyle = -20;
-    private const long WsExAppWindow = 0x00040000;
-    private const long WsExToolWindow = 0x00000080;
     private const uint GaRootOwner = 3;
     private const uint WmClose = 0x0010;
     private const int ShowRestore = 9;
@@ -32,7 +32,6 @@ public sealed class NativeWindowTracker : IDisposable
     private const uint ProcessQueryLimitedInformation = 0x1000;
     private const int ErrorInsufficientBuffer = 122;
     private const int DwmwaCloaked = 14;
-    private const int DwmCloakedShell = 0x00000002;
     private static readonly string WindowsSystemAppsDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.Windows), "SystemApps") + Path.DirectorySeparatorChar;
 
@@ -42,7 +41,9 @@ public sealed class NativeWindowTracker : IDisposable
     private readonly WinEventDelegate _eventCallback;
     private readonly EnumWindowsDelegate _enumCallback;
     private readonly HashSet<nint> _notificationWindows = [];
-    private readonly HashSet<nint> _ignoredWindows = [];
+    // Only suppresses redundant name-change events from helper windows. Eligibility is always re-evaluated
+    // during enumeration: a cached "ignore" entry would otherwise survive style changes and HWND reuse.
+    private readonly HashSet<nint> _quietWindows = [];
     private readonly HashSet<nint> _snapshotHandles = [];
     private readonly Dictionary<nint, TrackedWindow> _previousByHandle = [];
     private readonly List<TrackedWindow> _pendingWindows = [];
@@ -51,10 +52,12 @@ public sealed class NativeWindowTracker : IDisposable
     private nint _windowHook;
     private nint _locationHook;
     private nint _nameChangeHook;
+    private nint _cloakHook;
     private nint _systemEventHook;
     private nint _excludedWindow;
     private nint _lastForegroundWindow;
     private nint _pendingLocationForeground;
+    private bool _foregroundPublished;
     private int _refreshQueued;
     private int _urgentRefresh;
     private bool _disposed;
@@ -103,24 +106,47 @@ public sealed class NativeWindowTracker : IDisposable
             throw new InvalidOperationException("ErrorWindowTitleHook");
         }
 
+        // Cloak changes are the only notification for a suspended/background UWP frame becoming (in)visible;
+        // without them the snapshot can keep a phantom app button until an unrelated window event arrives.
+        _cloakHook = SetWinEventHook(EventObjectCloaked, EventObjectUncloaked, 0, _eventCallback, 0, 0, WinEventFlags);
         _locationHook = SetWinEventHook(EventObjectLocationChange, EventObjectLocationChange, 0, _eventCallback, 0, 0, WinEventFlags);
         _systemEventHook = SetWinEventHook(EventSystemAlert, EventSystemForeground, 0, _eventCallback, 0, 0, WinEventFlags);
         RefreshWindows();
-        var foregroundWindow = GetForegroundWindow();
-        if (foregroundWindow != 0)
+        PublishForeground(NormalizedForeground());
+    }
+
+    private nint NormalizedForeground()
+    {
+        var foreground = GetForegroundWindow();
+        return foreground != 0 ? NormalizeRootWindow(foreground) : 0;
+    }
+
+    /// <summary>Publishes a foreground change once, including the 0 handle when focus returns to the desktop.</summary>
+    private void PublishForeground(nint target)
+    {
+        if (_foregroundPublished && _lastForegroundWindow == target) return;
+        _foregroundPublished = true;
+        _lastForegroundWindow = target;
+        ForegroundWindowChanged?.Invoke(target);
+    }
+
+    // This callback is invoked from native code; an exception escaping it is undefined behaviour and can take
+    // down the process, so isolate all work (including subscriber callbacks) behind a logged guard.
+    private void OnWinEvent(nint hook, uint eventType, nint windowHandle, int objectId, int childId, uint eventThread, uint eventTime)
+    {
+        try
         {
-            var normalized = NormalizeRootWindow(foregroundWindow);
-            _lastForegroundWindow = normalized;
-            ForegroundWindowChanged?.Invoke(normalized);
+            HandleWinEvent(eventType, windowHandle, objectId, childId);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warning($"Window event {eventType:X} failed: {ex.Message}");
         }
     }
 
-    private void OnWinEvent(nint hook, uint eventType, nint windowHandle, int objectId, int childId, uint eventThread, uint eventTime)
+    private void HandleWinEvent(uint eventType, nint windowHandle, int objectId, int childId)
     {
-        if (_disposed)
-        {
-            return;
-        }
+        if (_disposed) return;
 
         if (eventType == EventObjectLocationChange)
         {
@@ -133,10 +159,7 @@ public sealed class NativeWindowTracker : IDisposable
                     if (windowHandle == foreground || windowHandle == foregroundRoot)
                     {
                         _pendingLocationForeground = foregroundRoot;
-                        if (!_locationTimer.IsEnabled)
-                        {
-                            _locationTimer.Start();
-                        }
+                        if (!_locationTimer.IsEnabled) _locationTimer.Start();
                     }
                 }
             }
@@ -154,34 +177,34 @@ public sealed class NativeWindowTracker : IDisposable
             return;
         }
 
-        if (eventType == EventSystemForeground && windowHandle != 0)
+        if (eventType == EventSystemForeground)
         {
-            var target = NormalizeRootWindow(windowHandle);
+            var target = windowHandle != 0 ? NormalizeRootWindow(windowHandle) : 0;
             _notificationWindows.Remove(windowHandle);
             _notificationWindows.Remove(target);
-            _lastForegroundWindow = target;
             _locationTimer.Stop();
             QueueRefresh(urgent: true);
-            ForegroundWindowChanged?.Invoke(target);
+            PublishForeground(target);
             return;
         }
 
         if (objectId != ObjectWindow || childId != ChildIdSelf
-            || eventType is not (EventObjectCreate or EventObjectDestroy or EventObjectShow or EventObjectHide or EventObjectNameChange))
+            || eventType is not (EventObjectCreate or EventObjectDestroy or EventObjectShow or EventObjectHide
+                or EventObjectNameChange or EventObjectCloaked or EventObjectUncloaked))
         {
             return;
         }
 
         if (eventType is EventObjectCreate or EventObjectDestroy)
         {
-            _ignoredWindows.Remove(windowHandle);
+            _quietWindows.Remove(windowHandle);
         }
-        else if (_ignoredWindows.Contains(windowHandle) && eventType == EventObjectNameChange)
+        else if (_quietWindows.Contains(windowHandle) && eventType == EventObjectNameChange)
         {
             return;
         }
 
-        QueueRefresh(urgent: eventType is EventObjectShow or EventObjectDestroy
+        QueueRefresh(urgent: eventType is EventObjectShow or EventObjectDestroy or EventObjectCloaked or EventObjectUncloaked
             || (eventType == EventObjectNameChange && !_snapshotHandles.Contains(windowHandle)));
     }
 
@@ -191,11 +214,8 @@ public sealed class NativeWindowTracker : IDisposable
         if (_disposed) return;
         var foreground = GetForegroundWindow();
         var target = foreground != 0 ? NormalizeRootWindow(foreground) : _pendingLocationForeground;
-        if (target != 0 && IsWindow(target))
-        {
-            _lastForegroundWindow = target;
-            ForegroundWindowChanged?.Invoke(target);
-        }
+        _pendingLocationForeground = 0;
+        if (target != 0 && IsWindow(target)) PublishForeground(target);
     }
 
     private void QueueRefresh(bool urgent = false)
@@ -236,27 +256,17 @@ public sealed class NativeWindowTracker : IDisposable
     public void ResyncForeground()
     {
         _refreshTimer.Stop();
+        _locationTimer.Stop();
         _pendingLocationForeground = 0;
         RefreshWindows();
-        var foreground = GetForegroundWindow();
-        _lastForegroundWindow = foreground != 0 ? NormalizeRootWindow(foreground) : 0;
-        if (_lastForegroundWindow != 0) ForegroundWindowChanged?.Invoke(_lastForegroundWindow);
+        PublishForeground(NormalizedForeground());
     }
 
     private void FlushRefresh()
     {
         _refreshTimer.Stop();
         RefreshWindows();
-        var currentForeground = GetForegroundWindow();
-        if (currentForeground != 0)
-        {
-            var normalized = NormalizeRootWindow(currentForeground);
-            if (normalized != _lastForegroundWindow)
-            {
-                _lastForegroundWindow = normalized;
-                ForegroundWindowChanged?.Invoke(normalized);
-            }
-        }
+        PublishForeground(NormalizedForeground());
     }
 
     private void RefreshWindows()
@@ -272,7 +282,7 @@ public sealed class NativeWindowTracker : IDisposable
         EnumWindows(_enumCallback, 0);
 
         _notificationWindows.RemoveWhere(windowHandle => !IsWindow(windowHandle));
-        _ignoredWindows.RemoveWhere(windowHandle => !IsWindow(windowHandle));
+        _quietWindows.RemoveWhere(windowHandle => !IsWindow(windowHandle));
 
         if (Snapshot.SequenceEqual(_pendingWindows))
         {
@@ -292,26 +302,40 @@ public sealed class NativeWindowTracker : IDisposable
         WindowsChanged?.Invoke(this, next);
     }
 
+    // EnumWindows invokes this delegate from native code; never let an exception cross that boundary.
     private bool CollectWindow(nint windowHandle, nint state)
     {
-        if (windowHandle == _excludedWindow || _ignoredWindows.Contains(windowHandle)
-            || !IsWindowVisible(windowHandle) || GetWindow(windowHandle, WindowOwner) != 0)
+        try
         {
+            return CollectWindowCore(windowHandle);
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warning($"Window enumeration failed for {windowHandle}: {ex.Message}");
             return true;
         }
+    }
+
+    private bool CollectWindowCore(nint windowHandle)
+    {
+        if (windowHandle == _excludedWindow || !IsWindowVisible(windowHandle)) return true;
 
         GetWindowThreadProcessId(windowHandle, out var processId);
         if (processId == Environment.ProcessId) return true;
 
         var extendedStyle = GetWindowLongPtr(windowHandle, GwlExStyle).ToInt64();
-        if ((extendedStyle & WsExToolWindow) != 0 && (extendedStyle & WsExAppWindow) == 0)
+        // Tray-only apps leave visible helper windows behind: non-activatable overlays, windows removed by
+        // ITaskbarList::DeleteTab, tool windows and hidden immersive frames. Match the shell's rules so none
+        // of them is promoted to a normal running-app button.
+        if (!TaskbarWindowRules.HasTaskbarButton(extendedStyle, GetWindow(windowHandle, WindowOwner) != 0,
+                GetProp(windowHandle, TaskbarWindowRules.DeletedFromTaskbarProperty) != 0))
         {
             return true;
         }
 
-        // Skip DWM-cloaked suspended/hidden UWP frames while keeping other-virtual-desktop windows (DWM_CLOAKED_SHELL).
+        // DWM_CLOAKED_SHELL is kept for windows on other virtual desktops; all other cloak reasons hide the window.
         if (DwmGetWindowAttribute(windowHandle, DwmwaCloaked, out var cloaked, sizeof(int)) == 0
-            && (cloaked & ~DwmCloakedShell) != 0)
+            && TaskbarWindowRules.IsHiddenCloak(cloaked))
         {
             return true;
         }
@@ -320,39 +344,29 @@ public sealed class NativeWindowTracker : IDisposable
         if (classLength > 0)
         {
             ReadOnlySpan<char> cls = _classBuffer.AsSpan(0, classLength);
-            // UWP hosted core windows (e.g. SystemSettings.exe) are internal surfaces of ApplicationFrameWindow;
-            // tracking them directly creates duplicate taskbar entries with legacy icons.
-            if (cls.SequenceEqual("Windows.UI.Core.CoreWindow"))
+            if (TaskbarWindowRules.IsHiddenImmersiveFrame(cls, extendedStyle))
             {
-                _ignoredWindows.Add(windowHandle);
+                _quietWindows.Add(windowHandle);
                 return true;
             }
         }
 
         var titleLength = GetWindowTextLength(windowHandle);
-        if (titleLength <= 0)
-        {
-            return true;
-        }
+        if (titleLength <= 0) return true;
 
         var readCapacity = Math.Min(titleLength + 1, _titleBuffer.Length);
         var actualLength = GetWindowText(windowHandle, _titleBuffer, readCapacity);
-        if (actualLength <= 0)
-        {
-            return true;
-        }
+        if (actualLength <= 0) return true;
 
         ReadOnlySpan<char> trimmedSpan = _titleBuffer.AsSpan(0, actualLength).Trim();
-        if (trimmedSpan.IsEmpty)
-        {
-            return true;
-        }
+        if (trimmedSpan.IsEmpty) return true;
 
         _previousByHandle.TryGetValue(windowHandle, out var previous);
-        var executablePath = previous is not null ? previous.ExecutablePath : GetExecutablePath(windowHandle);
+        // A first lookup can fail for a just-starting process; retry it instead of hiding the app forever.
+        var executablePath = previous?.ExecutablePath ?? GetExecutablePath(windowHandle);
         if (IsWindowsSystemApp(executablePath) || IsExplorerShellWindow(executablePath, windowHandle))
         {
-            _ignoredWindows.Add(windowHandle);
+            _quietWindows.Add(windowHandle);
             return true;
         }
 
@@ -360,16 +374,11 @@ public sealed class NativeWindowTracker : IDisposable
         if (previous is not null)
         {
             var title = trimmedSpan.SequenceEqual(previous.Title) ? previous.Title : trimmedSpan.ToString();
-            _pendingWindows.Add(previous with
-            {
-                Title = title,
-                HasNotification = hasNotification
-            });
+            _pendingWindows.Add(previous with { Title = title, HasNotification = hasNotification });
         }
         else
         {
-            _pendingWindows.Add(new TrackedWindow(windowHandle, trimmedSpan.ToString(),
-                executablePath, hasNotification));
+            _pendingWindows.Add(new TrackedWindow(windowHandle, trimmedSpan.ToString(), executablePath, hasNotification));
         }
 
         return true;
@@ -511,6 +520,12 @@ public sealed class NativeWindowTracker : IDisposable
             _nameChangeHook = 0;
         }
 
+        if (_cloakHook != 0)
+        {
+            UnhookWinEvent(_cloakHook);
+            _cloakHook = 0;
+        }
+
         if (_systemEventHook != 0)
         {
             UnhookWinEvent(_systemEventHook);
@@ -518,10 +533,14 @@ public sealed class NativeWindowTracker : IDisposable
         }
 
         _notificationWindows.Clear();
-        _ignoredWindows.Clear();
+        _quietWindows.Clear();
         _snapshotHandles.Clear();
         _previousByHandle.Clear();
         _pendingWindows.Clear();
+        _excludedWindow = 0;
+        _lastForegroundWindow = 0;
+        _pendingLocationForeground = 0;
+        _foregroundPublished = false;
         Snapshot = [];
     }
 
@@ -556,6 +575,9 @@ public sealed class NativeWindowTracker : IDisposable
 
     [DllImport("user32.dll")]
     private static extern nint GetWindow(nint windowHandle, int command);
+
+    [DllImport("user32.dll", EntryPoint = "GetPropW", CharSet = CharSet.Unicode)]
+    private static extern nint GetProp(nint windowHandle, string propertyName);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetWindowText(nint windowHandle, char[] text, int maximumCount);
@@ -691,8 +713,15 @@ public sealed class NativeWindowTracker : IDisposable
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetApplicationUserModelId(nint processHandle, ref uint length, char[]? applicationUserModelId);
 
-    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
-    private static extern nint GetWindowLongPtr(nint windowHandle, int index);
+    // GetWindowLongPtrW does not exist on 32-bit Windows; there it is a macro for GetWindowLongW.
+    private static nint GetWindowLongPtr(nint windowHandle, int index) =>
+        IntPtr.Size == 8 ? GetWindowLongPtr64(windowHandle, index) : GetWindowLong32(windowHandle, index);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+    private static extern nint GetWindowLongPtr64(nint windowHandle, int index);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    private static extern int GetWindowLong32(nint windowHandle, int index);
 
     [DllImport("user32.dll")]
     private static extern nint GetForegroundWindow();

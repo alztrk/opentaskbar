@@ -80,11 +80,32 @@ public static class DockFisheyeLayout
     {
         if (!double.IsFinite(configuredMaxScale) || configuredMaxScale <= 1.0) return 1.0;
         var noOverlapMax = ComputeNoOverlapMaxScale(cellSize, visualIconSize, configuredMaxScale);
-        if (!double.IsFinite(availableExpansion) || availableExpansion <= 0.5) return noOverlapMax;
-
-        var fullExpansionNeed = FullArchWeightSum * (configuredMaxScale - 1.0) * Math.Max(1.0, cellSize) * SlotExpansionFactor;
-        var fraction = Math.Clamp(availableExpansion / Math.Max(1.0, fullExpansionNeed), 0.0, 1.0);
+        var fraction = ComputeExpansionFraction(cellSize, configuredMaxScale, availableExpansion);
         return noOverlapMax + (configuredMaxScale - noOverlapMax) * fraction;
+    }
+
+    /// <summary>How much of the configured magnification the current expansion budget can afford, from 0 to 1.</summary>
+    public static double ComputeExpansionFraction(double cellSize, double configuredMaxScale, double availableExpansion)
+    {
+        if (!double.IsFinite(configuredMaxScale) || configuredMaxScale <= 1.0
+            || !double.IsFinite(availableExpansion) || availableExpansion <= 0.0)
+        {
+            return 0.0;
+        }
+        var fullExpansionNeed = FullArchWeightSum * (configuredMaxScale - 1.0) * Math.Max(1.0, cellSize) * SlotExpansionFactor;
+        return Math.Clamp(availableExpansion / Math.Max(1.0, fullExpansionNeed), 0.0, 1.0);
+    }
+
+    /// <summary>
+    /// Influence radius derived from the same expansion fraction as the peak scale. The old boolean switch
+    /// changed the radius abruptly whenever the budget crossed 0.5 DIP, making an identical hover look wider.
+    /// </summary>
+    public static double InfluenceRadiusForExpansion(double cellSize, double expansionFraction)
+    {
+        if (!double.IsFinite(cellSize) || cellSize <= 0) return DockMetrics.InfluenceRadius;
+        var constrained = Math.Max(95.0, cellSize * 2.1);
+        var free = Math.Max(110.0, cellSize * 2.8);
+        return constrained + (free - constrained) * Math.Clamp(expansionFraction, 0.0, 1.0);
     }
 
     /// <summary>Computes the target magnification scale for an item at a given resting distance from the pointer.</summary>
@@ -99,17 +120,26 @@ public static class DockFisheyeLayout
     public static (double Value, double Velocity, bool Settled) StepSpring(
         double current, double target, double velocity, double dtSeconds, double maxScale)
     {
-        var dt = double.IsFinite(dtSeconds) ? Math.Clamp(dtSeconds, 0.001, 0.032) : 0.016;
-        velocity += (target - current) * SpringStiffness * dt;
-        velocity *= Math.Exp(-SpringDamping * dt);
-        var next = Math.Clamp(current + velocity * dt, 1.0, Math.Max(1.0, maxScale) + 0.02);
+        // Closed-form damped spring: exact for any dt, so a dropped frame never changes the animation's duration.
+        var dt = double.IsFinite(dtSeconds) ? Math.Clamp(dtSeconds, 0.001, 0.05) : 0.016;
+        var omega = Math.Sqrt(SpringStiffness);
+        var eta = SpringDamping / 2.0;
+        var omegaD = Math.Sqrt(Math.Max(1.0, omega * omega - eta * eta));
+        var decay = Math.Exp(-eta * dt);
+        var cos = Math.Cos(omegaD * dt);
+        var sin = Math.Sin(omegaD * dt);
+        var offset = current - target;
+        var temp = (velocity + eta * offset) / omegaD;
+        var next = target + decay * (offset * cos + temp * sin);
+        var nextVelocity = decay * (velocity * cos - (omegaD * offset + eta * temp) * sin);
+        next = Math.Clamp(next, 1.0, Math.Max(1.0, maxScale) + 0.02);
 
-        if (Math.Abs(target - next) < 0.002 && Math.Abs(velocity) < 0.015)
+        if (Math.Abs(target - next) < 0.004 && Math.Abs(nextVelocity) < 0.02)
         {
             return (target, 0.0, true);
         }
 
-        return (next, velocity, false);
+        return (next, nextVelocity, false);
     }
 
     /// <summary>
@@ -131,7 +161,7 @@ public static class DockFisheyeLayout
             totalDesired += desired;
         }
 
-        if (totalDesired <= 0.001 || !double.IsFinite(availableExpansion) || availableExpansion <= 0.5)
+        if (totalDesired <= 0.001 || !double.IsFinite(availableExpansion) || availableExpansion <= 0.0)
         {
             extrasOut[..count].Clear();
             return 0.0;

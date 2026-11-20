@@ -137,7 +137,7 @@ public sealed class DockFlyout
             CornerRadius = new CornerRadius(15, 15, 0, 0),
             IsHitTestVisible = false
         };
-        topSheen.SetResourceReference(Border.BackgroundProperty, "DockHighlight");
+        topSheen.SetResourceReference(Border.BackgroundProperty, "MenuSheenMaterial");
 
         var bodyGrid = new Grid();
         bodyGrid.Children.Add(topSheen);
@@ -152,7 +152,7 @@ public sealed class DockFlyout
             Child = bodyGrid
         };
         _frame.SetResourceReference(Border.BackgroundProperty, "MenuMaterial");
-        _frame.SetResourceReference(Border.BorderBrushProperty, "MenuStroke");
+        _frame.SetResourceReference(Border.BorderBrushProperty, "MenuStrokeMaterial");
         _frame.SetResourceReference(TextElement.ForegroundProperty, "TextPrimary");
         _frame.SetResourceReference(TextElement.FontFamilyProperty, "InterfaceFont");
 

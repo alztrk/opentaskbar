@@ -32,6 +32,17 @@ internal static class SettingsBackdrop
         return true;
     }
 
+    /// <summary>Removes the native acrylic so a "no background" surface really shows the desktop.</summary>
+    public static void Disable(Window window)
+    {
+        var handle = new WindowInteropHelper(window).Handle;
+        if (handle == 0) return;
+        var backdrop = 0; // DWMSBT_NONE
+        DwmSetWindowAttribute(handle, 38, ref backdrop, sizeof(int));
+        var margins = new Margins(0);
+        DwmExtendFrameIntoClientArea(handle, ref margins);
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     private struct Margins(int value)
     {

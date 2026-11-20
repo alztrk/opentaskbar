@@ -39,8 +39,6 @@
             <MenuItem Header="{local:Loc Terminate}" Icon="{StaticResource IconTerminate}" Style="{StaticResource DestructiveMenuItem}" Tag="TerminateDockApp" Click="TerminateDockApp_Click" />
         </ContextMenu>
         <ContextMenu x:Key="DockContextMenu" Opened="DockContextMenu_Opened" Closed="DockContextMenu_Closed">
-            <MenuItem Header="{local:Loc RemoveWidget}" Icon="{StaticResource IconTrash}" Tag="RemoveWidgetMenu" Visibility="Collapsed" Click="RemoveWidgetMenu_Click" />
-            <Separator Tag="RemoveWidgetDivider" Visibility="Collapsed" />
             <MenuItem Header="{local:Loc OpenLauncher}" Icon="{StaticResource IconSearch}" Click="OpenSearch_Click" />
             <MenuItem Header="{local:Loc AddStack}" Icon="{StaticResource IconFolderPlus}" Click="AddStack_Click" />
             <MenuItem Header="{local:Loc NewGroup}" Icon="{StaticResource IconLayers}" Tag="NewGroup" Click="NewGroup_Click" />
@@ -52,6 +50,7 @@
             <MenuItem Header="{local:Loc TaskManager}" Icon="{StaticResource IconTaskManager}" Click="OpenTaskManager_Click" />
             <MenuItem Header="{local:Loc Settings}" Icon="{StaticResource IconSettings}" Click="OpenSettings_Click" />
             <Separator />
+            <MenuItem Header="{local:Loc RemoveWidget}" Icon="{StaticResource IconTrash}" Tag="RemoveWidgetMenu" Visibility="Collapsed" Click="RemoveWidgetMenu_Click" />
             <MenuItem Header="{local:Loc Exit}" Icon="{StaticResource IconExit}" Click="ExitOpenTaskbar_Click" />
         </ContextMenu>
         <ContextMenu x:Key="GroupContextMenu" Opened="DockContextMenu_Opened" Closed="DockContextMenu_Closed">
@@ -104,6 +103,7 @@
                 <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}"
                       RenderTransformOrigin="0.5,0.5">
                     <Image Source="{Binding Icon}" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
+                           HorizontalAlignment="Center" VerticalAlignment="Center"
                            Stretch="Uniform" ClipToBounds="True" RenderOptions.BitmapScalingMode="HighQuality" />
                     <Ellipse Width="9" Height="9" Fill="{DynamicResource NotificationBrush}"
                              Stroke="{DynamicResource SurfacePopup}" StrokeThickness="1"
@@ -122,7 +122,8 @@
                     PreviewMouseMove="DockGroup_PreviewMouseMove"
                     MouseEnter="DockApp_MouseEnter" MouseLeave="DockApp_MouseLeave" MouseUp="DockApp_MouseUp">
                 <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}" RenderTransformOrigin="0.5,0.5">
-                    <Grid Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}">
+                    <Grid Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
+                          HorizontalAlignment="Center" VerticalAlignment="Center">
                         <TextBlock Text="{Binding Initial}"
                                    FontSize="20" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center"
                                    Foreground="{DynamicResource TextPrimary}" />
@@ -187,18 +188,21 @@
         <!-- Catches clicks only while the shelf area is reserved (auto-hide off); otherwise windows below stay clickable. -->
         <Border x:Name="DockBackdrop" Grid.Row="1" Background="#01000000" ContextMenu="{StaticResource DockContextMenu}" />
         <Grid x:Name="DockSurface" Grid.Row="1" HorizontalAlignment="Stretch"
-              Margin="{StaticResource DockInset}" VerticalAlignment="Bottom"
+              Margin="{StaticResource DockInset}" VerticalAlignment="Bottom" RenderTransformOrigin="0.5,1"
               ContextMenu="{StaticResource DockContextMenu}"
               PreviewMouseMove="DockSurface_PreviewMouseMove"
               MouseEnter="DockSurface_MouseEnter" MouseMove="DockSurface_MouseMove" MouseLeave="DockSurface_MouseLeave"
               MouseWheel="DockSurface_MouseWheel">
             <Grid.RenderTransform>
-                <TranslateTransform x:Name="DockSurfaceTranslate" Y="0" />
+                <TransformGroup>
+                    <TranslateTransform x:Name="DockSurfaceTranslate" Y="0" />
+                    <ScaleTransform x:Name="DockScaleTransform" ScaleX="1" ScaleY="1" />
+                </TransformGroup>
             </Grid.RenderTransform>
             <Border x:Name="DockFrame" Padding="{StaticResource DockPadding}"
                     Background="{DynamicResource DockMaterial}" BorderBrush="{DynamicResource DockBorderMaterial}"
-                    BorderThickness="{StaticResource ControlStroke}" CornerRadius="{StaticResource DockRadius}"
-                    Effect="{StaticResource ShadowDock}">
+                    BorderThickness="{StaticResource ControlStroke}" CornerRadius="{DynamicResource DockRadius}"
+                    Effect="{DynamicResource DockShadow}">
                 <Grid x:Name="DockFrameRoot">
                     <Grid x:Name="DockLayoutRoot">
                         <Grid.ColumnDefinitions>
@@ -211,8 +215,6 @@
                                     Margin="3,0,0,0" AllowDrop="True" DragOver="DockLeadControls_DragOver" Drop="DockLeadControls_Drop">
                             <Button x:Name="StartButton" Style="{StaticResource StartDockButton}" Click="StartButton_Click"
                                     PreviewMouseLeftButtonDown="StartButton_PreviewMouseLeftButtonDown"
-                                    PreviewMouseMove="StartButton_PreviewMouseMove"
-                                    PreviewMouseLeftButtonUp="StartButton_PreviewMouseLeftButtonUp"
                                     AutomationProperties.Name="{local:Loc Start}" ToolTip="{local:Loc Start}" ToolTipService.InitialShowDelay="650">
                                 <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}"
                                       RenderTransformOrigin="0.5,0.5">
@@ -235,7 +237,7 @@
                                     </Path>
                                 </Grid>
                             </Button>
-                            <Button x:Name="SearchButton" Style="{StaticResource DockButton}" Click="SearchButton_Click"
+                            <Button x:Name="SearchButton" Style="{StaticResource ShellDockButton}" Click="SearchButton_Click"
                                     PreviewMouseLeftButtonDown="ShellButton_PreviewMouseLeftButtonDown"
                                     PreviewMouseMove="ShellButton_PreviewMouseMove"
                                     PreviewMouseLeftButtonUp="ShellButton_PreviewMouseLeftButtonUp"
@@ -256,7 +258,7 @@
                                                     Foreground="{DynamicResource TextPrimary}" />
                                 </Grid>
                             </Button>
-                            <Button x:Name="TaskViewButton" Style="{StaticResource DockButton}" Click="TaskViewButton_Click"
+                            <Button x:Name="TaskViewButton" Style="{StaticResource ShellDockButton}" Click="TaskViewButton_Click"
                                     PreviewMouseLeftButtonDown="ShellButton_PreviewMouseLeftButtonDown"
                                     PreviewMouseMove="ShellButton_PreviewMouseMove"
                                     PreviewMouseLeftButtonUp="ShellButton_PreviewMouseLeftButtonUp"
@@ -285,7 +287,7 @@
                                                     Foreground="{DynamicResource TextPrimary}" />
                                 </Grid>
                             </Button>
-                            <shell:TrayShellButton x:Name="TrayButton" Style="{StaticResource DockButton}"
+                            <shell:TrayShellButton x:Name="TrayButton" Style="{StaticResource ShellDockButton}"
                                                    PreviewMouseLeftButtonDown="ShellButton_PreviewMouseLeftButtonDown"
                                                    PreviewMouseMove="ShellButton_PreviewMouseMove"
                                                    PreviewMouseLeftButtonUp="ShellButton_PreviewMouseLeftButtonUp"
@@ -316,6 +318,11 @@
                                         <ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate>
                                     </ItemsControl.ItemsPanel>
                                 </ItemsControl>
+                                <!-- Boundaries of the two pinned shell groups; positioned by RebuildDockOrder. -->
+                                <Border x:Name="NativeGroupDivider" Width="1" Height="22" Background="{DynamicResource StrokeSubtle}"
+                                        Margin="4,0,6,0" IsHitTestVisible="False" Visibility="Collapsed" />
+                                <Border x:Name="TrayGroupDivider" Width="1" Height="22" Background="{DynamicResource StrokeSubtle}"
+                                        Margin="6,0,4,0" IsHitTestVisible="False" Visibility="Collapsed" />
                                 <TextBlock x:Name="StatusText" Foreground="{DynamicResource DangerText}" FontSize="{StaticResource TextSizeCaption}"
                                            MaxWidth="280" VerticalAlignment="Center" Margin="8,0" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
                                            ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}">
@@ -351,6 +358,7 @@
                                         </TransformGroup>
                                     </Grid.RenderTransform>
                                     <Image x:Name="RecycleBinIcon" Width="{DynamicResource DockApplicationIconSize}" Height="{DynamicResource DockApplicationIconSize}"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"
                                            Stretch="Uniform" RenderOptions.BitmapScalingMode="HighQuality">
 
                                     </Image>

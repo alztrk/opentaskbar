@@ -19,7 +19,7 @@
             <Setter.Value>
                 <ControlTemplate TargetType="TextBox">
                     <Border x:Name="Surface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{StaticResource WidgetFieldRadius}">
+                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{DynamicResource WidgetFieldRadius}">
                         <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" />
                     </Border>
                     <ControlTemplate.Triggers>
@@ -46,10 +46,10 @@
                 <ControlTemplate TargetType="Button">
                     <Border x:Name="Surface" Background="{TemplateBinding Background}"
                             BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
-                            CornerRadius="{StaticResource DockWidgetActionRadius}">
+                            CornerRadius="{DynamicResource DockWidgetActionRadius}">
                         <Grid>
                             <Border x:Name="HoverLayer" Background="{DynamicResource SurfaceHover}"
-                                    CornerRadius="{StaticResource DockWidgetActionRadius}" Opacity="0" IsHitTestVisible="False" />
+                                    CornerRadius="{DynamicResource DockWidgetActionRadius}" Opacity="0" IsHitTestVisible="False" />
                             <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" />
                         </Grid>
                     </Border>

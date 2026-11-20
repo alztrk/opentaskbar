@@ -40,6 +40,14 @@ public enum ClockDateStyle { DayAndShortDate, ShortDateOnly, NumericDate, Hidden
 public enum SecondaryAppScope { CurrentMonitorOnly, AllMonitors }
 public enum WidgetDensityMode { Auto, Compact, Full }
 
+/// <summary>How a translucent UI surface is filled. None removes the fill, its rim and its shadow.</summary>
+public enum SurfaceBackground { Glass, Solid, None }
+
+/// <summary>The independently configurable parts of the application.</summary>
+public enum SurfaceKind { Dock, Menu, Widget, Settings }
+
+public readonly record struct SurfaceStyle(SurfaceBackground Background, double Opacity);
+
 /// <summary>The individual meters of the System meters widget; a cleared flag hides that meter.</summary>
 [Flags]
 public enum SystemMeters
@@ -76,7 +84,16 @@ public sealed record DockSettings(
     bool PreviewsEnabled = true,
     bool NotificationBadgesEnabled = true,
     AutoHideMode AutoHide = AutoHideMode.Disabled,
+    // Legacy: migrated into the four per-surface styles on load, no longer edited by the UI.
     double SurfaceOpacity = 0.9,
+    SurfaceBackground DockBackground = SurfaceBackground.Glass,
+    double DockOpacity = 0.9,
+    SurfaceBackground MenuBackground = SurfaceBackground.Glass,
+    double MenuOpacity = 0.9,
+    SurfaceBackground WidgetBackground = SurfaceBackground.Glass,
+    double WidgetOpacity = 0.9,
+    SurfaceBackground SettingsBackground = SurfaceBackground.Glass,
+    double SettingsOpacity = 0.9,
     IReadOnlyList<string>? Widgets = null,
     IReadOnlyList<string>? InstalledWidgets = null,
     DockLayout Layout = DockLayout.Floating,

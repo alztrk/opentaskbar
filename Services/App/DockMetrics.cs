@@ -9,6 +9,14 @@ namespace OpenTaskbar.Services;
 /// </summary>
 public static class DockMetrics
 {
+    /// <summary>
+    /// Artwork is never drawn wider or taller than its dock cell. Snapped extraction sizes can be larger than the
+    /// cell at some DPI/profile combinations; clipping that overshoot is what made icons look cut on the right and
+    /// bottom instead of sitting evenly in the button.
+    /// </summary>
+    public static double AppIconDipSize(double iconDip, int preferredPixels, double dpiScale) =>
+        Math.Min(iconDip, preferredPixels / Math.Max(1.0, dpiScale));
+
     // Vertical layout (DIP).
     public const double Headroom = 24;
     public const double ShelfHeight = 66;

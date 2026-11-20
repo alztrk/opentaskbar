@@ -252,7 +252,7 @@ public partial class MainWindow
         _profileFilterApplied = true;
         var view = CollectionViewSource.GetDefaultView(_pinnedApps);
         view.Filter = signature is null ? null : item => item is DockApp app && !IsHiddenByProfile(app);
-        if (_windowTracker is not null) UpdateRunningApps(VisibleSnapshot);
+        if (_windowTracker is not null) RefreshRunningApps();
         ResizeDockToContent();
         _replacementSession?.RefreshPosition();
     }
@@ -472,6 +472,7 @@ public partial class MainWindow
         foreach (var dock in _secondaryDocks)
         {
             dock.Configure(_preferences.Current.SecondaryApps, _preferences.Current.SecondaryWidgets);
+            dock.ApplyShelfHeight(Profile.Shelf);
             dock.PositionOnMonitor();
         }
         if (_secondaryDocks.Count > 0)
@@ -485,6 +486,19 @@ public partial class MainWindow
         }
 
         UpdateSecondaryDocks();
+    }
+
+    /// <summary>Propagates a size/scale change to the secondary docks' reserved shelves.</summary>
+    private void ApplySecondaryShelf()
+    {
+        if (_secondaryDocks.Count == 0) return;
+        var shelf = Profile.Shelf;
+        foreach (var dock in _secondaryDocks)
+        {
+            if (Math.Abs(dock.ShelfHeight - shelf) < 0.01) continue;
+            dock.ApplyShelfHeight(shelf);
+            dock.PositionOnMonitor();
+        }
     }
 
     private DispatcherTimer CreateSecondaryTimer()
@@ -502,8 +516,8 @@ public partial class MainWindow
     private void UpdateSecondaryDocks()
     {
         if (_secondaryDocks.Count == 0) return;
-        var windows = VisibleSnapshot;
-        foreach (var dock in _secondaryDocks) dock.Update(windows, _foregroundWindow);
+        var candidates = RunningCandidates();
+        foreach (var dock in _secondaryDocks) dock.Update(candidates, _foregroundWindow);
     }
 
     private void DisposeFeatures()

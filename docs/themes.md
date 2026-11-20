@@ -113,7 +113,7 @@ A value's type follows the token it replaces:
 
 Brushes and colors change at once. Sizes, radii and fonts are read when a view is first built, so they take effect after OpenTaskbar restarts. Unknown tokens and values of the wrong type are skipped and written to `%LOCALAPPDATA%\OpenTaskbar\log.txt`.
 
-The dock and menu glass (`DockMaterial`, `MenuMaterial`) keep the **Surface opacity** setting: their colors come from the theme and their opacity from Settings.
+The dock and menu glass (`DockMaterial`, `MenuMaterial`) take their colors from the theme. Their alpha comes from the per-surface **Surfaces** settings in Settings → Appearance; a theme pack can change the source colors, but the user's Glass/Solid/None mode and opacity always win. The widget panel reuses `MenuMaterial` as its source with an independent style.
 
 Token names are listed in [Design/Tokens/](../Design/Tokens/) (`Typography`, `Spacing`, `Radii`, `Layout`, `Motion`), [Design/Palettes/Dark.xaml](../Design/Palettes/Dark.xaml), and [Design/Widgets.xaml](../Design/Widgets.xaml).
 

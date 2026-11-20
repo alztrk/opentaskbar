@@ -5,6 +5,7 @@ using System.Windows.Automation;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using OpenTaskbar.Models;
@@ -16,7 +17,7 @@ internal static class WidgetViewChecks
     // Mirrors App.xaml's modular resource order so UI tests load exactly what the app loads.
     private static readonly string[] ModularResources =
     [
-        "Tokens/Typography", "Tokens/Spacing", "Tokens/Radii", "Tokens/Layout", "Tokens/Motion",
+        "Tokens/Typography", "Tokens/Spacing", "Tokens/Radii", "Tokens/Layout", "Tokens/Motion", "Tokens/Effects",
         "Palettes/Dark",
         "Icons/Navigation", "Icons/Actions", "Icons/Status", "Icons/Media", "Icons/Brand", "Icons/GeometryTemplate",
         "Controls/Tooltip", "Controls/ScrollBar",
@@ -89,6 +90,21 @@ internal static class WidgetViewChecks
             var borderB = new Border { Style = borderStyle };
             Check(!ReferenceEquals(borderA.Background, borderB.Background),
                 "Each widget card must own its background brush so hover animations stay isolated.");
+
+            var interfaceFont = (FontFamily)app.FindResource("InterfaceFont");
+            Check(interfaceFont.Source.Contains("#Inter", StringComparison.OrdinalIgnoreCase),
+                "The UI must use the embedded Inter font instead of a machine-dependent system font.");
+            Check(((FontFamily)app.FindResource("WidgetActionFont")).Source.Contains("MDL2", StringComparison.OrdinalIgnoreCase),
+                "Segoe MDL2 Assets must remain the icon font.");
+
+            var shellStyle = (Style)app.FindResource("ShellDockButton");
+            var shellTemplate = (ControlTemplate)shellStyle.Setters.OfType<Setter>()
+                .Single(setter => setter.Property == Control.TemplateProperty).Value;
+            var hoverTrigger = shellTemplate.Triggers.OfType<Trigger>()
+                .SingleOrDefault(t => t.Property == UIElement.IsMouseOverProperty);
+            Check(hoverTrigger?.EnterActions.Any(action => action is BeginStoryboard) == true
+                  && hoverTrigger.ExitActions.Any(action => action is BeginStoryboard),
+                "Shell buttons must fade a quiet surface in and out on hover.");
 
             foreach (var (key, height) in new[]
                      {

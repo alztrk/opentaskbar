@@ -14,6 +14,7 @@ WidgetCategoryChecks();
 LocalizationChecks();
 TaskManagerTextChecks();
 SettingsChecks();
+RadiusChecks();
 InitialLanguageChecks();
 MultiMonitorChecks();
 DockIconPixelChecks();
@@ -22,9 +23,13 @@ AppLaunchChecks();
 TrayListChecks();
 ShellTokenChecks();
 checks += RunningAppChecks.Run();
+checks += TaskbarWindowChecks.Run();
+checks += RunningAppProjectionChecks.Run();
+checks += ShellFlyoutPositionChecks.Run();
 checks += AiUsageChecks.Run();
 if (!headless) checks += WidgetViewChecks.Run();
 checks += ThemePackChecks.Run();
+if (!headless) checks += SurfaceStyleChecks.Run();
 checks += ThemeTransferChecks.Run();
 checks += TaskbarRecoveryChecks.Run();
 checks += ApplicationJumpListChecks.Run();
@@ -68,6 +73,17 @@ void ShellTokenChecks()
             : token == "tray" ? settings.ShowTrayButton
             : token == "peek" && settings.ShowDesktopButton)),
         "Shell button visibility must be independently controllable through DockSettings.");
+
+    var pinned = DockItemOrdering.ApplyPinnedGroups(
+        ["app:a", "tray", "app:b", "taskview", "start", "search"],
+        new DockSettings(ShowTaskViewButton: true));
+    Check(pinned.SequenceEqual(["start", "search", "taskview", "app:a", "app:b", "tray"], StringComparer.OrdinalIgnoreCase),
+        "Native shell buttons must lead and background apps must trail regardless of the saved order.");
+    var hiddenPinned = DockItemOrdering.ApplyPinnedGroups(
+        ["app:a", "tray", "start", "search", "taskview"],
+        new DockSettings(ShowSearchButton: false, ShowTaskViewButton: false, ShowTrayButton: false));
+    Check(hiddenPinned.SequenceEqual(["start", "app:a"], StringComparer.OrdinalIgnoreCase),
+        "Hidden pinned buttons must be omitted rather than leave gaps between the groups.");
 }
 
 void CountdownChecks()
@@ -316,6 +332,15 @@ void TaskManagerTextChecks()
     }
 }
 
+void RadiusChecks()
+{
+    Check(RadiusManager.Derive(20, 20, 12) == 12, "At the reference radius a derived radius must keep its value.");
+    Check(RadiusManager.Derive(32, 20, 12) == 24, "Nested radii must step up with the dock radius.");
+    Check(RadiusManager.Derive(16, 20, 5) == 1, "Nested radii must step down with the dock radius.");
+    Check(RadiusManager.Derive(0, 20, 12) == 0, "A sharp dock must make every nested corner sharp as well.");
+    Check(RadiusManager.Derive(20, 20, 18) == 18, "Theme packs with a larger nested radius must keep that offset.");
+}
+
 void SettingsChecks()
 {
     var path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
@@ -337,6 +362,19 @@ void SettingsChecks()
             "Unknown widget identifiers must be rejected.");
         Check(store.Save(new DockSettings(InstalledWidgets: ["Clock", "Clock"])) is not null,
             "Duplicate installations must be rejected.");
+        File.WriteAllText(path, "{\"SurfaceOpacity\":0.65}");
+        var migratedSurfaces = store.Load();
+        Check(migratedSurfaces.Error is null
+            && Math.Abs(migratedSurfaces.Settings.DockOpacity - 0.65) < 0.001
+            && Math.Abs(migratedSurfaces.Settings.MenuOpacity - 0.65) < 0.001
+            && Math.Abs(migratedSurfaces.Settings.WidgetOpacity - 0.65) < 0.001
+            && Math.Abs(migratedSurfaces.Settings.SettingsOpacity - 0.65) < 0.001,
+            "The legacy SurfaceOpacity must migrate into all four surface styles.");
+        Check(store.Save(new DockSettings(DockBackground: SurfaceBackground.None, DockOpacity: 0)) is null
+            && store.Load().Settings.DockBackground == SurfaceBackground.None,
+            "A fully transparent dock style must persist and reload.");
+        Check(store.Save(new DockSettings(MenuOpacity: 1.2)) is not null,
+            "Out-of-range surface opacity must be rejected.");
         Check(store.Save(new DockSettings(Widgets: [], InstalledWidgets: ["Countdown"])) is null,
             "An installed widget may remain hidden.");
         var hidden = store.Load();
@@ -477,6 +515,13 @@ void DockIconPixelChecks()
     Check(ApplicationIconProvider.ComputeHoverIconPixels(40, 1.28) == 64, "A 40 px icon magnified to 52 px must use 64 px artwork.");
     Check(ApplicationIconProvider.ComputeHoverIconPixels(300, 1.28) == 384, "Beyond the largest native size the exact magnified size is used.");
     Check(ApplicationIconProvider.GetHoverVariant(null) is null, "A missing icon has no hover variant.");
+
+    // A snapped bitmap must not be drawn past its cell: that extra width/height used to appear only on the right
+    // and bottom (LibreWolf at medium dock size), reading as a clipped icon.
+    Check(DockMetrics.AppIconDipSize(34, 32, 1.0) == 32, "A 32 px source fits a 34 DIP cell without overshoot.");
+    Check(DockMetrics.AppIconDipSize(28, 24, 1.0) == 24, "Compact icons are capped by their cell, not the old 36 DIP floor.");
+    Check(DockMetrics.AppIconDipSize(38, 40, 1.0) == 38, "A larger native bitmap is capped to the dock cell.");
+    Check(DockMetrics.AppIconDipSize(57, 81, 1.5) == 54, "DPI is divided out before capping so the drawn size stays in DIP.");
 }
 
 void StartMenuAndOverlayChecks()
@@ -518,20 +563,24 @@ void StartMenuAndOverlayChecks()
     Check(!state.WasOpenAtPress(openNow: false, pressTimestamp: later),
         "A later click must not be treated as open at press.");
 
-    // Start menu positioning: full-screen CoreWindow container offset math
-    // On 2560x1440 screen at 100% DPI, Start button at X=570, Y=1379:
-    // Window width is 2560, height is 1374. Flyout is 642x724.
-    // flyoutLocalX = (2560 - 642) / 2 = 959.
-    // desiredFlyoutX = 570 - 8 = 562.
-    // targetX = 562 - 959 = -397.
-    // Resulting screen flyout X: targetX + flyoutLocalX = -397 + 959 = 562 (directly above Start button!).
+    // Start menu positioning must follow the dock's actual Start button, wherever the user placed it (here X=570).
+    // On the full-screen canvas the flyout sits centered when Windows taskbar alignment is centered, so the
+    // canvas is offset by -397 to bring the flyout above the button.
     var (fullX, fullY) = ShellShortcuts.ComputeStartMenuPosition(
         windowWidth: 2560, windowHeight: 1374,
         workLeft: 0, workTop: 0, workRight: 2560, workBottom: 1374,
         anchorLeft: 570, anchorTop: 1379, anchorRight: 620, anchorBottom: 1429,
         edge: DockEdge.Bottom, dpiScale: 1.0, isLeftAligned: false);
-    Check(fullX == -397, "Full-screen container must offset horizontally so flyout aligns over the Start button.");
+    Check(fullX == -397, "Full-screen container must offset horizontally so the flyout aligns over the dock's Start button.");
     Check(fullY == 4, "Full-screen container must offset vertically to sit right above the dock.");
+
+    // A left-aligned taskbar still follows the dock's Start button.
+    var (leftX, _) = ShellShortcuts.ComputeStartMenuPosition(
+        windowWidth: 2560, windowHeight: 1374,
+        workLeft: 0, workTop: 0, workRight: 2560, workBottom: 1374,
+        anchorLeft: 570, anchorTop: 1379, anchorRight: 620, anchorBottom: 1429,
+        edge: DockEdge.Bottom, dpiScale: 1.0, isLeftAligned: true);
+    Check(leftX == 550, "A left-aligned taskbar must still offset the flyout above the dock's Start button.");
 
     // Discrete window (e.g. Windows 10 or custom shell, 642x724):
     var (discreteX, discreteY) = ShellShortcuts.ComputeStartMenuPosition(
@@ -539,7 +588,7 @@ void StartMenuAndOverlayChecks()
         workLeft: 0, workTop: 0, workRight: 2560, workBottom: 1374,
         anchorLeft: 570, anchorTop: 1379, anchorRight: 620, anchorBottom: 1429,
         edge: DockEdge.Bottom, dpiScale: 1.0, isLeftAligned: false);
-    Check(discreteX == 562, "Discrete window must be positioned directly at the clamped anchor X.");
+    Check(discreteX == 562, "Discrete window must be positioned above the dock's actual Start button.");
     Check(discreteY == 642, "Discrete window must be clamped to the work area above the dock.");
 }
 

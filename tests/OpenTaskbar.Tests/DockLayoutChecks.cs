@@ -460,6 +460,26 @@ internal static class DockLayoutChecks
             Check(button.ActualWidth == profile.Cell && button.ActualHeight == profile.Cell,
                 $"DockButton must dynamically resize to {profile.Cell} DIP for {size}@{scale}.");
         }
+        // The scale slider must change the height Windows reserves for the taskbar, including the default
+        // Compact size where smaller scales produce a shelf below Explorer's native 48 DIP strip.
+        var compactReservations = new[] { 0.75, 0.9, 1.0, 1.25, 1.5 }
+            .Select(scale => DockLayoutMetrics.Calculate(DockMetrics.For(DockSize.Compact, scale).Shelf, 0, 0, 96).ShelfPixels)
+            .ToArray();
+        for (var index = 1; index < compactReservations.Length; index++)
+        {
+            Check(compactReservations[index] > compactReservations[index - 1],
+                "Raising the taskbar scale must grow the reserved shelf at every step.");
+        }
+
+        // Secondary docks must use the same scaled shelf rather than the unscaled constant.
+        var compactSmall = DockMetrics.For(DockSize.Compact, 0.75).Shelf;
+        var compactFull = DockMetrics.For(DockSize.Compact, 1.0).Shelf;
+        Check(SecondaryDockWindow.NeedsOwnShelf(0, 96, compactSmall),
+            "A scaled Compact shelf must still reserve a secondary-dock shelf when Explorer releases its strip.");
+        Check(SecondaryDockWindow.MissingShelfPixels(0, 0, 96, compactSmall)
+                < SecondaryDockWindow.MissingShelfPixels(0, 0, 96, compactFull),
+            "The secondary dock shelf must follow the taskbar scale.");
+
         app.Resources["DockCellSize"] = DockMetrics.CellSize;
         app.Resources["DockCellHeight"] = DockMetrics.CellSize;
         app.Resources["DockIconSize"] = DockMetrics.IconSize;
@@ -1005,6 +1025,23 @@ internal static class DockLayoutChecks
                 var growth = p.Icon * (DockMetrics.HoverScale - 1.0);
                 Check(lift >= 0 && growth + lift <= availableHeadroom + 0.01,
                     $"Magnified icon growth + lift must fit inside headroom for {size}@{scale}.");
+            }
+
+            // Expansion must map continuously to both peak scale and influence radius: no boolean cliff at 0.5 DIP.
+            {
+                Check(DockFisheyeLayout.ComputeExpansionFraction(50, DockMetrics.HoverScale, 0) == 0,
+                    "No expansion budget must mean the constrained magnification peak.");
+                Check(Math.Abs(DockFisheyeLayout.ComputeExpansionFraction(50, DockMetrics.HoverScale, 33.25) - 0.5) < 0.01
+                      && DockFisheyeLayout.ComputeExpansionFraction(50, DockMetrics.HoverScale, 200) == 1.0,
+                    "Expansion fraction must ramp smoothly from constrained to full magnification.");
+                var constrainedRadius = DockFisheyeLayout.InfluenceRadiusForCell(50, constrained: true);
+                var freeRadius = DockFisheyeLayout.InfluenceRadiusForCell(50);
+                Check(Math.Abs(DockFisheyeLayout.InfluenceRadiusForExpansion(50, 0) - constrainedRadius) < 0.01
+                      && Math.Abs(DockFisheyeLayout.InfluenceRadiusForExpansion(50, 1) - freeRadius) < 0.01,
+                    "Influence radius endpoints must match the legacy radii.");
+                var midRadius = DockFisheyeLayout.InfluenceRadiusForExpansion(50, 0.5);
+                Check(midRadius > constrainedRadius && midRadius < freeRadius,
+                    "Influence radius must interpolate instead of switching abruptly with the budget.");
             }
 
             // Constrained docks (zero expansion budget) must cap peak scale so adjacent icons never overlap.

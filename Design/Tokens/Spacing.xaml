@@ -14,7 +14,7 @@
     <Thickness x:Key="WidgetPanelSectionMargin">0,16,0,0</Thickness>
     <Thickness x:Key="WidgetPanelFieldMargin">0,6,0,0</Thickness>
     <Thickness x:Key="WidgetPanelFieldPadding">10,6</Thickness>
-    <Thickness x:Key="SettingsPageInset">24,16,24,20</Thickness>
+    <Thickness x:Key="SettingsPageInset">28,20,28,24</Thickness>
     <Thickness x:Key="WidgetCatalogItemMargin">0,0,12,12</Thickness>
     <Thickness x:Key="WidgetCatalogPreviewPadding">12</Thickness>
 </ResourceDictionary>

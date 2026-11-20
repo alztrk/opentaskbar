@@ -50,7 +50,7 @@ public static class TextPrompt
         body.Children.Add(buttons);
         var frame = new Border { CornerRadius = new CornerRadius(12), BorderThickness = new Thickness(1), Padding = new Thickness(18), Child = body };
         frame.SetResourceReference(Border.BackgroundProperty, "MenuMaterial");
-        frame.SetResourceReference(Border.BorderBrushProperty, "MenuStroke");
+        frame.SetResourceReference(Border.BorderBrushProperty, "MenuStrokeMaterial");
         frame.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
         frame.MouseLeftButtonDown += (_, args) =>
         {

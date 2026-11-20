@@ -41,6 +41,9 @@ public partial class SettingsWindow : Window
     private HwndSource? _source;
     private readonly string _radioGroupScope = Guid.NewGuid().ToString("N");
     private readonly RoutedEventHandler _preferenceEditedHandler;
+    private readonly Dictionary<SurfaceKind, Slider> _surfaceSliders = [];
+    private readonly Dictionary<SurfaceKind, TextBlock> _surfaceValues = [];
+    private readonly Dictionary<SurfaceKind, RadioButton[]> _surfaceModes = [];
 
     internal bool IsClosingOrClosed => _isClosing || _closed;
 
@@ -55,6 +58,10 @@ public partial class SettingsWindow : Window
         TitleVersionText.Text = versionString;
         AppVersionText.Text = versionString;
         ScopeRadioGroups(this);
+        RegisterSurface(SurfaceKind.Dock, DockOpacitySlider, DockOpacityValue, DockGlass, DockSolid, DockNone);
+        RegisterSurface(SurfaceKind.Menu, MenuOpacitySlider, MenuOpacityValue, MenuGlass, MenuSolid, MenuNone);
+        RegisterSurface(SurfaceKind.Widget, WidgetOpacitySlider, WidgetOpacityValue, WidgetGlass, WidgetSolid, WidgetNone);
+        RegisterSurface(SurfaceKind.Settings, SettingsOpacitySlider, SettingsOpacityValue, SettingsGlass, SettingsSolid, SettingsNone);
         foreach (var option in _widgetPreviewService.CreateOptions(_applied.InstalledWidgets, _applied.Widgets))
         {
             _widgetOptions.Add(option);
@@ -90,7 +97,7 @@ public partial class SettingsWindow : Window
             _widgetGroups.Clear();
             _widgetDensityBoxes.Clear();
             WeatherCountryBox.ItemsSource = null;
-            ThemeManager.SetSurfaceOpacity(_preferences.Current.SurfaceOpacity);
+            ThemeManager.Apply(_preferences.Current.Theme, _preferences.Current);
             (Application.Current.MainWindow as MainWindow)?.SetSizePreview(null, null);
             (Application.Current.MainWindow as MainWindow)?.SetGeometryPreview(null);
         };
@@ -102,11 +109,8 @@ public partial class SettingsWindow : Window
         AnimationsToggle.IsChecked = _applied.AnimationsEnabled;
         PreviewsToggle.IsChecked = _applied.PreviewsEnabled;
         BadgesToggle.IsChecked = _applied.NotificationBadgesEnabled;
-        AutoHideDisabled.IsChecked = _applied.AutoHide == AutoHideMode.Disabled;
-        AutoHideSmart.IsChecked = _applied.AutoHide == AutoHideMode.Smart;
-        AutoHideAlways.IsChecked = _applied.AutoHide == AutoHideMode.Always;
-        OpacitySlider.Value = _applied.SurfaceOpacity * 100;
-        UpdateOpacityLabel();
+        SelectAutoHide(_applied.AutoHide);
+        LoadSurfaceStyles(_applied);
         MagnificationToggle.IsChecked = _applied.MagnificationEnabled;
         CompactSize.IsChecked = _applied.Size == DockSize.Compact;
         MediumSize.IsChecked = _applied.Size == DockSize.Medium;
@@ -253,8 +257,8 @@ public partial class SettingsWindow : Window
             foreach (var group in _widgetGroups) group.RefreshLabel();
             foreach (var widget in _livePreviewWidgets) widget.ApplySettings(_preferences.Current);
         }
-        ThemeManager.SetSurfaceOpacity(Math.Round(OpacitySlider.Value) / 100);
-        UpdateOpacityLabel();
+        ThemeManager.Apply(_preferences.Current.Theme, _preferences.Current);
+        LoadSurfaceStyles(_preferences.Current);
         UpdateDockScaleLabel();
         UpdateWidgetOptionState();
         UpdateBackdrop();
@@ -263,6 +267,18 @@ public partial class SettingsWindow : Window
     private void UpdateBackdrop()
     {
         if (!_sourceReady) return;
+        var chrome = WindowChrome.GetWindowChrome(this);
+        // A native WindowChrome window cannot paint a transparent client area without AllowsTransparency,
+        // which cannot be switched on after the HWND exists. "None" therefore drops the glass and the DWM
+        // acrylic and falls back to the same opaque surface used on unsupported systems.
+        if (ThemeManager.GetSurface(SurfaceKind.Settings).Background == SurfaceBackground.None)
+        {
+            SettingsBackdrop.Disable(this);
+            SettingsFrame.SetResourceReference(System.Windows.Controls.Border.BackgroundProperty, "SettingsBackground");
+            chrome.GlassFrameThickness = new Thickness(0);
+            SettingsFrame.CornerRadius = new CornerRadius(0);
+            return;
+        }
         var glass = SettingsBackdrop.TryEnable(this, _preferences.Current.Theme);
         SettingsFrame.SetResourceReference(System.Windows.Controls.Border.BackgroundProperty, glass ? "SettingsGlassMaterial" : "SettingsBackground");
         if (glass)
@@ -292,11 +308,18 @@ public partial class SettingsWindow : Window
             AnimationsEnabled = AnimationsToggle.IsChecked == true,
             PreviewsEnabled = PreviewsToggle.IsChecked == true,
             NotificationBadgesEnabled = BadgesToggle.IsChecked == true,
-            AutoHide = AutoHideAlways.IsChecked == true ? AutoHideMode.Always : AutoHideSmart.IsChecked == true ? AutoHideMode.Smart : AutoHideMode.Disabled,
+            AutoHide = ReadAutoHide(),
             GlobalWidgetDensity = DensityCompact.IsChecked == true ? WidgetDensityMode.Compact
                 : DensityFull.IsChecked == true ? WidgetDensityMode.Full : WidgetDensityMode.Auto,
             WidgetDensityOverrides = ReadWidgetDensityOverrides(),
-            SurfaceOpacity = Math.Round(OpacitySlider.Value) / 100,
+            DockBackground = SurfaceBackgroundOf(SurfaceKind.Dock),
+            DockOpacity = Math.Round(_surfaceSliders[SurfaceKind.Dock].Value) / 100,
+            MenuBackground = SurfaceBackgroundOf(SurfaceKind.Menu),
+            MenuOpacity = Math.Round(_surfaceSliders[SurfaceKind.Menu].Value) / 100,
+            WidgetBackground = SurfaceBackgroundOf(SurfaceKind.Widget),
+            WidgetOpacity = Math.Round(_surfaceSliders[SurfaceKind.Widget].Value) / 100,
+            SettingsBackground = SurfaceBackgroundOf(SurfaceKind.Settings),
+            SettingsOpacity = Math.Round(_surfaceSliders[SurfaceKind.Settings].Value) / 100,
             Widgets = enabledWidgets,
             InstalledWidgets = installedWidgets,
             MagnificationEnabled = MagnificationToggle.IsChecked == true,
@@ -787,6 +810,38 @@ public partial class SettingsWindow : Window
         RightPosition.IsChecked = !fullWidth && settings.Position == DockPosition.Right;
     }
 
+    private static int AutoHideIndex(AutoHideMode mode) => mode switch
+    {
+        AutoHideMode.Smart => 1,
+        AutoHideMode.Always => 2,
+        _ => 0
+    };
+
+    private void SelectAutoHide(AutoHideMode mode) => AutoHideBox.SelectedIndex = AutoHideIndex(mode);
+
+    private AutoHideMode ReadAutoHide() => AutoHideBox.SelectedIndex switch
+    {
+        1 => AutoHideMode.Smart,
+        2 => AutoHideMode.Always,
+        _ => AutoHideMode.Disabled
+    };
+
+    private void AutoHideBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e) =>
+        PreferenceEdited(sender, e);
+
+    private static void OpenActions(object sender)
+    {
+        if (sender is Button button && button.ContextMenu is { } menu)
+        {
+            menu.PlacementTarget = button;
+            menu.IsOpen = true;
+        }
+    }
+
+    private void ThemePackActions_Click(object sender, RoutedEventArgs e) => OpenActions(sender);
+
+    private void BackupActions_Click(object sender, RoutedEventArgs e) => OpenActions(sender);
+
     private void LoadFeatureSelection(DockSettings settings)
     {
         RecycleBinToggle.IsChecked = settings.ShowRecycleBin;
@@ -1076,11 +1131,8 @@ public partial class SettingsWindow : Window
         AnimationsToggle.IsChecked = settings.AnimationsEnabled;
         PreviewsToggle.IsChecked = settings.PreviewsEnabled;
         BadgesToggle.IsChecked = settings.NotificationBadgesEnabled;
-        AutoHideDisabled.IsChecked = settings.AutoHide == AutoHideMode.Disabled;
-        AutoHideSmart.IsChecked = settings.AutoHide == AutoHideMode.Smart;
-        AutoHideAlways.IsChecked = settings.AutoHide == AutoHideMode.Always;
-        OpacitySlider.Value = settings.SurfaceOpacity * 100;
-        UpdateOpacityLabel();
+        SelectAutoHide(settings.AutoHide);
+        LoadSurfaceStyles(settings);
         MagnificationToggle.IsChecked = settings.MagnificationEnabled;
         CompactSize.IsChecked = settings.Size == DockSize.Compact;
         MediumSize.IsChecked = settings.Size == DockSize.Medium;
@@ -1218,7 +1270,67 @@ public partial class SettingsWindow : Window
         }
     }
 
-    private void UpdateOpacityLabel() => OpacityValue.Text = UiText.Format("OpacityPercent", (int)Math.Round(OpacitySlider.Value));
+    private void RegisterSurface(SurfaceKind kind, Slider slider, TextBlock value, params RadioButton[] modes)
+    {
+        _surfaceSliders[kind] = slider;
+        _surfaceValues[kind] = value;
+        _surfaceModes[kind] = modes;
+    }
+
+    private static SurfaceKind SurfaceOf(object sender) =>
+        (sender as FrameworkElement)?.Tag is string tag && Enum.TryParse(tag, out SurfaceKind kind) ? kind : SurfaceKind.Dock;
+
+    private SurfaceBackground SurfaceBackgroundOf(SurfaceKind kind)
+    {
+        var modes = _surfaceModes[kind];
+        if (modes[0].IsChecked == true) return SurfaceBackground.Glass;
+        if (modes[1].IsChecked == true) return SurfaceBackground.Solid;
+        return SurfaceBackground.None;
+    }
+
+    private void LoadSurfaceStyles(DockSettings settings)
+    {
+        var previous = _initializing;
+        _initializing = true;
+        try
+        {
+            LoadSurface(SurfaceKind.Dock, settings.DockBackground, settings.DockOpacity);
+            LoadSurface(SurfaceKind.Menu, settings.MenuBackground, settings.MenuOpacity);
+            LoadSurface(SurfaceKind.Widget, settings.WidgetBackground, settings.WidgetOpacity);
+            LoadSurface(SurfaceKind.Settings, settings.SettingsBackground, settings.SettingsOpacity);
+        }
+        finally
+        {
+            _initializing = previous;
+        }
+    }
+
+    private void LoadSurface(SurfaceKind kind, SurfaceBackground background, double opacity)
+    {
+        _surfaceModes[kind][(int)background].IsChecked = true;
+        _surfaceSliders[kind].Value = Math.Clamp(opacity * 100, 0, 100);
+        _surfaceSliders[kind].IsEnabled = background != SurfaceBackground.None;
+        _surfaceValues[kind].Text = UiText.Format("OpacityPercent", (int)Math.Round(_surfaceSliders[kind].Value));
+    }
+
+    private void SurfaceStyle_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_initializing) return;
+        var kind = SurfaceOf(sender);
+        var background = SurfaceBackgroundOf(kind);
+        _surfaceSliders[kind].IsEnabled = background != SurfaceBackground.None;
+        ThemeManager.SetSurface(kind, background, Math.Round(_surfaceSliders[kind].Value) / 100);
+        if (kind == SurfaceKind.Settings) UpdateBackdrop();
+    }
+
+    private void SurfaceOpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_initializing) return;
+        var kind = SurfaceOf(sender);
+        _surfaceValues[kind].Text = UiText.Format("OpacityPercent", (int)Math.Round(e.NewValue));
+        ThemeManager.SetSurface(kind, SurfaceBackgroundOf(kind), Math.Round(e.NewValue) / 100);
+        PreferenceEdited(sender, e);
+    }
 
     private void UpdateDockScaleLabel() => DockScaleValue.Text = UiText.Format("OpacityPercent", (int)Math.Round(DockScaleSlider.Value));
 
@@ -1239,12 +1351,17 @@ public partial class SettingsWindow : Window
         PreferenceEdited(sender, e);
     }
 
-    private void OpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    // Applying the scale commits the work-area reservation, which needs a fresh replacement session. Doing that on
+    // every tick of a drag would be expensive, so commit once when the user lets go of the slider instead.
+    private void DockScaleSlider_PreviewMouseUp(object sender, MouseButtonEventArgs e) => CommitDockScale();
+
+    private void DockScaleSlider_KeyUp(object sender, KeyEventArgs e) => CommitDockScale();
+
+    private void CommitDockScale()
     {
-        if (_initializing) return;
-        UpdateOpacityLabel();
-        ThemeManager.SetSurfaceOpacity(Math.Round(e.NewValue) / 100);
-        PreferenceEdited(sender, e);
+        if (_initializing || _closed) return;
+        _autoSaveTimer.Stop();
+        SaveSettings();
     }
 
     private void Minimize_Click(object sender, RoutedEventArgs e) => SystemCommands.MinimizeWindow(this);
@@ -1257,6 +1374,12 @@ public partial class SettingsWindow : Window
 
     internal void CloseForShutdown()
     {
+        // Window_Closing returns immediately during application shutdown, so flush the debounced edits here.
+        if (_autoSaveTimer.IsEnabled)
+        {
+            _autoSaveTimer.Stop();
+            SaveSettings();
+        }
         _closingApplication = true;
         Close();
     }

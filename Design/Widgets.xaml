@@ -47,7 +47,7 @@
         </Setter>
         <Setter Property="BorderBrush" Value="Transparent" />
         <Setter Property="BorderThickness" Value="0" />
-        <Setter Property="CornerRadius" Value="{StaticResource WidgetRadius}" />
+        <Setter Property="CornerRadius" Value="{DynamicResource WidgetRadius}" />
         <Setter Property="Height" Value="{StaticResource WidgetHeight}" />
         <Setter Property="Padding" Value="8,0" />
         <Setter Property="Margin" Value="{StaticResource WidgetSpacing}" />
@@ -166,11 +166,11 @@
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
                     <Border x:Name="Surface" Background="{TemplateBinding Background}" BorderBrush="Transparent"
-                            BorderThickness="0" CornerRadius="{StaticResource WidgetRadius}"
+                            BorderThickness="0" CornerRadius="{DynamicResource WidgetRadius}"
                             SnapsToDevicePixels="True">
                         <Grid>
                             <Border x:Name="HoverLayer" Background="{DynamicResource SurfaceHover}"
-                                    CornerRadius="{StaticResource WidgetRadius}" Opacity="0" IsHitTestVisible="False" />
+                                    CornerRadius="{DynamicResource WidgetRadius}" Opacity="0" IsHitTestVisible="False" />
                             <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Grid>
                     </Border>
