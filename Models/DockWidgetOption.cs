@@ -13,6 +13,22 @@ public sealed class DockWidgetOption(string id, string label, string description
     private bool _isSettingsExpanded;
 
     public string Id { get; } = id;
+    public string Category => Id switch
+    {
+        "Clock" or "DayProgress" or "Weather" or "Stopwatch" or "Countdown" => "Time & Weather",
+        "SystemStats" or "NetSpeed" or "BluetoothBattery" or "Battery" or "Storage" => "System & Hardware",
+        "AiUsage" => "AI Quotas",
+        "Focus" or "Search" or "Desktops" => "Productivity",
+        _ => "Media & Controls"
+    };
+    public int CategoryOrder => Category switch
+    {
+        "Time & Weather" => 0,
+        "System & Hardware" => 1,
+        "AI Quotas" => 2,
+        "Productivity" => 3,
+        _ => 4
+    };
     public string Label => _label;
     public string Description => _description;
     public DockWidgetItem Preview { get; } = preview;
