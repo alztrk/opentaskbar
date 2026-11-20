@@ -106,6 +106,10 @@ public sealed class WidgetPack
                 double => value.ValueKind == JsonValueKind.Number && value.GetDouble() is var d && double.IsFinite(d) && d >= 0 && d <= MaxDimension ? d : null,
                 FontFamily => value.ValueKind == JsonValueKind.String && value.GetString() is { Length: <= 128 } && !string.IsNullOrWhiteSpace(value.GetString())
                     ? new FontFamily(value.GetString()!) : null,
+                string currentMode => value.ValueKind == JsonValueKind.String
+                    && currentMode is "Glass" or "Solid" or "None"
+                    && value.GetString() is "Glass" or "Solid" or "None"
+                        ? value.GetString() : null,
                 _ => null
             };
         }
@@ -142,8 +146,35 @@ public sealed class WidgetPack
             "diagonal" => new Point(1, 1),
             _ => new Point(0, 1)
         };
-        var gradient = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = end };
-        for (var i = 0; i < colors.Count; i++) gradient.GradientStops.Add(new GradientStop(colors[i], (double)i / (colors.Count - 1)));
+        var start = new Point(0, 0);
+        if (value.TryGetProperty("angle", out var angleValue) && angleValue.ValueKind == JsonValueKind.Number)
+        {
+            var angle = angleValue.GetDouble();
+            if (!double.IsFinite(angle) || angle is < 0 or > 360) return null;
+            var radians = angle * Math.PI / 180;
+            start = new Point(.5 - Math.Sin(radians) / 2, .5 + Math.Cos(radians) / 2);
+            end = new Point(.5 + Math.Sin(radians) / 2, .5 - Math.Cos(radians) / 2);
+        }
+
+        var positions = new double[colors.Count];
+        if (value.TryGetProperty("positions", out var pos) && pos.ValueKind == JsonValueKind.Array)
+        {
+            if (pos.GetArrayLength() != colors.Count) return null;
+            for (var i = 0; i < colors.Count; i++)
+            {
+                if (pos[i].ValueKind != JsonValueKind.Number) return null;
+                var number = pos[i].GetDouble();
+                if (!double.IsFinite(number) || number is < 0 or > 100) return null;
+                positions[i] = number / 100;
+            }
+        }
+        else
+            for (var i = 0; i < colors.Count; i++)
+                positions[i] = (double)i / (colors.Count - 1);
+
+        var gradient = new LinearGradientBrush { StartPoint = start, EndPoint = end };
+        for (var i = 0; i < colors.Count; i++)
+            gradient.GradientStops.Add(new GradientStop(colors[i], positions[i]));
         gradient.Freeze();
         return gradient;
     }
