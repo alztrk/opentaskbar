@@ -56,6 +56,7 @@ public partial class App : Application
         AppDomain.CurrentDomain.UnhandledException += CurrentDomain_UnhandledException;
         TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
         SystemEvents.SessionSwitch += SystemEvents_SessionSwitch;
+        SystemEvents.UserPreferenceChanged += SystemEvents_UserPreferenceChanged;
 
         IsPreview = e.Args.Contains("--preview", StringComparer.Ordinal);
         IsInspection = e.Args.Contains("--inspect", StringComparer.Ordinal);
@@ -96,6 +97,17 @@ public partial class App : Application
             StartDevReload(sourceRoot);
     }
 
+    private void SystemEvents_UserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
+    {
+        if (Preferences.Current.Theme != OpenTaskbar.Models.AppTheme.System || Dispatcher.HasShutdownStarted) return;
+        // SystemEvents uses a different thread; replay the current preferences on the UI dispatcher.
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (Dispatcher.HasShutdownStarted || Preferences.Current.Theme != OpenTaskbar.Models.AppTheme.System) return;
+            if (Preferences.Save(Preferences.Current) is { } error) AppLog.Warning(error);
+        }));
+    }
+
     private void SystemEvents_SessionSwitch(object sender, SessionSwitchEventArgs e)
     {
         var unlocking = e.Reason is SessionSwitchReason.SessionUnlock or SessionSwitchReason.SessionLogon;
@@ -130,6 +142,7 @@ public partial class App : Application
     {
         TaskbarRecoveryWatchdog.NotifyCleanExit();
         SystemEvents.SessionSwitch -= SystemEvents_SessionSwitch;
+        SystemEvents.UserPreferenceChanged -= SystemEvents_UserPreferenceChanged;
         var error = (MainWindow as OpenTaskbar.MainWindow)?.RestoreWindowsTaskbar();
         if (error is not null)
         {
