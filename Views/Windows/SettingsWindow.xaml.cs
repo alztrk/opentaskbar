@@ -254,6 +254,7 @@ public partial class SettingsWindow : Window
         }
         ThemeManager.SetSurfaceOpacity(Math.Round(OpacitySlider.Value) / 100);
         ThemeManager.SetSettingsOpacity(Math.Round(SettingsOpacitySlider.Value) / 100);
+        CustomThemeEditor.LoadTheme((ThemePackBox.SelectedItem as ThemePackChoice)?.Id, _preferences.Current.Theme);
         UpdateOpacityLabel();
         UpdateSettingsOpacityLabel();
         UpdateDockScaleLabel();
@@ -434,6 +435,7 @@ public partial class SettingsWindow : Window
         ThemePackBox.SelectedItem = choices.FirstOrDefault(choice => string.Equals(choice.Id, selected, StringComparison.OrdinalIgnoreCase))
             ?? choices[0];
         UpdateThemePackDetails();
+        CustomThemeEditor.LoadTheme(selected, _applied.Theme);
     }
 
     private static string DescribeThemePack(ThemePack pack)
@@ -456,6 +458,9 @@ public partial class SettingsWindow : Window
     private void ThemePackBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         UpdateThemePackDetails();
+        if (!_initializing)
+            CustomThemeEditor.LoadTheme((ThemePackBox.SelectedItem as ThemePackChoice)?.Id,
+                LightTheme.IsChecked == true ? AppTheme.Light : AppTheme.Dark);
         PreferenceEdited(sender, e);
     }
 
