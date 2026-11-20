@@ -59,9 +59,15 @@ public static class ThemeManager
         if (_palette is null) throw new InvalidOperationException("The theme must be initialized before its materials.");
         _opacity = opacity;
         var alpha = (byte)Math.Round(opacity * 255);
+        var mode = Overrides.TryGetValue("DockBackgroundMode", out var overrideMode)
+            ? overrideMode as string
+            : Application.Current.Resources["DockBackgroundMode"] as string;
         foreach (var key in MaterialKeys)
         {
-            Materials[key] = WithAlpha(MaterialSources.TryGetValue(key, out var custom) ? custom : (Brush)_palette[key], alpha);
+            var source = MaterialSources.TryGetValue(key, out var custom) ? custom : (Brush)_palette[key];
+            Materials[key] = key == "DockMaterial" && mode == "None"
+                ? Brushes.Transparent
+                : WithAlpha(source, key == "DockMaterial" && mode == "Solid" ? byte.MaxValue : alpha);
         }
     }
 
