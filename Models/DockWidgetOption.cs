@@ -21,6 +21,22 @@ public sealed class DockWidgetOption(
     private bool _isSettingsExpanded;
 
     public string Id { get; } = id;
+    public string Category => CategoryEnum switch
+    {
+        DockWidgetCategory.TimeAndWeather => "Time & Weather",
+        DockWidgetCategory.SystemAndHardware => "System & Hardware",
+        DockWidgetCategory.AiQuotas => "AI Quotas",
+        DockWidgetCategory.Productivity => "Productivity",
+        _ => "Media & Controls"
+    };
+    public int CategoryOrder => Category switch
+    {
+        "Time & Weather" => 0,
+        "System & Hardware" => 1,
+        "AI Quotas" => 2,
+        "Productivity" => 3,
+        _ => 4
+    };
     public string Label => _label;
     public string Description => _description;
     public DockWidgetItem Preview { get; } = preview;
@@ -41,10 +57,22 @@ public sealed class DockWidgetOption(
     }
 
     public object PreviewContent => (object?)_livePreview ?? Preview;
-    public FrameworkElement? SettingsView { get; set; }
-    public DockWidgetCategory Category { get; } = category;
 
-    public string CategoryLabel => Category switch
+    private object? _nativePreview;
+    public object? NativePreview
+    {
+        get => _nativePreview ?? Preview;
+        set
+        {
+            if (ReferenceEquals(_nativePreview, value)) return;
+            _nativePreview = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(NativePreview)));
+        }
+    }
+    public FrameworkElement? SettingsView { get; set; }
+    public DockWidgetCategory CategoryEnum { get; } = category;
+
+    public string CategoryLabel => CategoryEnum switch
     {
         DockWidgetCategory.TimeAndWeather => UiText.Get("WidgetCategoryTime"),
         DockWidgetCategory.SystemAndHardware => UiText.Get("WidgetCategorySystem"),
@@ -61,6 +89,9 @@ public sealed class DockWidgetOption(
         || string.Equals(Id, "Media", StringComparison.OrdinalIgnoreCase)
         || string.Equals(Id, "Audio", StringComparison.OrdinalIgnoreCase)
         || string.Equals(Id, "QuickSettings", StringComparison.OrdinalIgnoreCase);
+
+    public string InstallActionLabel => UiText.Get(IsInstalled ? "WidgetRemove" : "WidgetInstall");
+    public string InstallStatus => UiText.Get(IsInstalled ? "WidgetInstalled" : "WidgetAvailable");
 
     public Visibility HasSettingsVisibility => HasSettings ? Visibility.Visible : Visibility.Collapsed;
 
@@ -104,10 +135,22 @@ public sealed class DockWidgetOption(
         }
     }
 
+    public void RefreshInstallLabels()
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstallActionLabel)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstallStatus)));
+    }
+
     public bool IsInstalled
     {
         get => _isInstalled;
-        set => Set(ref _isInstalled, value, nameof(IsInstalled));
+        set
+        {
+            if (_isInstalled == value) return;
+            Set(ref _isInstalled, value, nameof(IsInstalled));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstallActionLabel)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstallStatus)));
+        }
     }
 
     public bool IsEnabled

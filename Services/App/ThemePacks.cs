@@ -229,11 +229,13 @@ public static class ThemePacks
     /// </summary>
     public static IReadOnlyList<string> ApplyWidgets(AppTheme theme)
     {
+        if (theme == AppTheme.System) theme = ThemeManager.EffectiveTheme;
         var problems = new List<string>();
         var resources = Application.Current?.Resources;
         if (resources is null) return problems;
         RestoreMetrics();
         ThemeManager.SetOverrides(new Dictionary<string, object>());
+        ThemeManager.UseWindowsAccent(Current?.Widgets is null);
         var pack = Current?.Widgets;
         if (pack is null) return problems;
 

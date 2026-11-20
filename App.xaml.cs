@@ -56,6 +56,7 @@ public partial class App : Application
         Preferences.Changed += Preferences_Changed;
         _paletteListener = new WindowsPaletteListener();
         _paletteListener.Changed += PaletteListener_Changed;
+        SystemEvents.UserPreferenceChanged += SystemEvents_UserPreferenceChanged;
 
         IsInspection = e.Args.Contains("--inspect", StringComparer.Ordinal);
         OpenSettingsOnStartup = e.Args.Contains("--settings", StringComparer.Ordinal);
@@ -99,6 +100,17 @@ public partial class App : Application
 
         if (IsDev)
             StartDevReload(sourceRoot);
+    }
+
+    private void SystemEvents_UserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
+    {
+        if (Preferences.Current.Theme != OpenTaskbar.Models.AppTheme.System || Dispatcher.HasShutdownStarted) return;
+        // SystemEvents uses a different thread; replay the current preferences on the UI dispatcher.
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (Dispatcher.HasShutdownStarted || Preferences.Current.Theme != OpenTaskbar.Models.AppTheme.System) return;
+            if (Preferences.Save(Preferences.Current) is { } error) AppLog.Warning(error);
+        }));
     }
 
     private void SystemEvents_SessionSwitch(object sender, SessionSwitchEventArgs e)
@@ -160,6 +172,7 @@ public partial class App : Application
             _paletteListener.Dispose();
             _paletteListener = null;
         }
+        SystemEvents.UserPreferenceChanged -= SystemEvents_UserPreferenceChanged;
         var error = (MainWindow as OpenTaskbar.MainWindow)?.RestoreWindowsTaskbar();
         if (error is not null)
         {

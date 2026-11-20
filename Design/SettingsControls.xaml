@@ -95,15 +95,38 @@
 
     <!-- Typography -->
     <Style x:Key="SettingsHeading" TargetType="TextBlock">
-        <Setter Property="FontSize" Value="24" />
+        <Setter Property="FontSize" Value="22" />
         <Setter Property="FontWeight" Value="SemiBold" />
-        <Setter Property="Margin" Value="0,0,0,6" />
+        <Setter Property="Margin" Value="0,0,0,12" />
     </Style>
     <Style x:Key="SettingsSectionHeading" TargetType="TextBlock">
         <Setter Property="FontSize" Value="12" />
         <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
-        <Setter Property="Margin" Value="0,20,0,8" />
+        <Setter Property="Margin" Value="0,24,0,10" />
+    </Style>
+    <Style x:Key="SettingsRow" TargetType="Border">
+        <Setter Property="MinHeight" Value="46" />
+        <Setter Property="Padding" Value="2,10" />
+        <Setter Property="Margin" Value="0" />
+        <Setter Property="CornerRadius" Value="0" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0,0,0,1" />
+        <Setter Property="BorderBrush" Value="{DynamicResource StrokeSubtle}" />
+    </Style>
+    <Style x:Key="CompactSettingsRow" TargetType="Border">
+        <Setter Property="MinHeight" Value="40" />
+        <Setter Property="Padding" Value="12,8" />
+        <Setter Property="Margin" Value="0,0,0,4" />
+        <Setter Property="CornerRadius" Value="6" />
+        <Setter Property="Background" Value="{DynamicResource SurfaceSelected}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="BorderBrush" Value="{DynamicResource StrokeSubtle}" />
+        <Style.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+                <Setter Property="Background" Value="{DynamicResource SurfaceHover}" />
+            </Trigger>
+        </Style.Triggers>
     </Style>
     <Style x:Key="SettingsRowLabel" TargetType="TextBlock">
         <Setter Property="VerticalAlignment" Value="Center" />
@@ -128,31 +151,8 @@
         <Setter Property="Margin" Value="0,0,0,16" />
         <Setter Property="SnapsToDevicePixels" Value="True" />
     </Style>
-    <Style x:Key="SettingsRow" TargetType="Border">
-        <Setter Property="MinHeight" Value="56" />
-        <Setter Property="Padding" Value="12,14" />
-        <Setter Property="Margin" Value="2,0" />
-        <Setter Property="CornerRadius" Value="8" />
-        <Setter Property="BorderBrush" Value="{DynamicResource MenuDivider}" />
-        <Setter Property="BorderThickness" Value="0,0,1,0" />
-        <Style.Triggers>
-            <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource SettingsControlHover}" /></Trigger>
-        </Style.Triggers>
-    </Style>
     <Style x:Key="SettingsRowLast" TargetType="Border" BasedOn="{StaticResource SettingsRow}">
         <Setter Property="BorderThickness" Value="0" />
-    </Style>
-    <Style x:Key="CompactSettingsRow" TargetType="Border">
-        <Setter Property="MinHeight" Value="38" />
-        <Setter Property="Padding" Value="10,12" />
-        <Setter Property="Margin" Value="0,0,6,0" />
-        <Setter Property="CornerRadius" Value="6" />
-        <Setter Property="Background" Value="{DynamicResource SettingsControl}" />
-        <Setter Property="BorderBrush" Value="{DynamicResource StrokeSubtle}" />
-        <Setter Property="BorderThickness" Value="1" />
-        <Style.Triggers>
-            <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource SettingsControlHover}" /></Trigger>
-        </Style.Triggers>
     </Style>
 
     <!-- Segmented / choice controls: muted track with an elevated, neutral selected item. -->
@@ -510,16 +510,16 @@
     <!-- Vertical TabsList / TabsTrigger -->
     <Style TargetType="TabItem">
         <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
-        <Setter Property="Padding" Value="10,12" />
+        <Setter Property="Padding" Value="12,10" />
         <Setter Property="Margin" Value="0,2" />
-        <Setter Property="MinHeight" Value="40" />
+        <Setter Property="MinHeight" Value="42" />
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="TabItem">
                     <Grid>
-                        <Border x:Name="Surface" Padding="{TemplateBinding Padding}" CornerRadius="8" Background="Transparent"
+                        <Border x:Name="Surface" Padding="{TemplateBinding Padding}" CornerRadius="6" Background="Transparent"
                                 BorderBrush="Transparent" BorderThickness="1">
                             <Grid>
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="16" /><ColumnDefinition Width="12" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
@@ -535,9 +535,8 @@
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Surface" Property="Background" Value="{DynamicResource SettingsControlHover}" /></Trigger>
                         <Trigger Property="IsSelected" Value="True">
-                            <Setter TargetName="Surface" Property="Background" Value="{DynamicResource SettingsControl}" />
-                            <Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource StrokeSubtle}" />
-                            <Setter TargetName="SelectionMark" Property="Visibility" Value="Visible" />
+                            <Setter TargetName="Surface" Property="Background" Value="{DynamicResource SurfaceSelected}" />
+
                             <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
                             <Setter TargetName="HeaderHost" Property="TextElement.FontWeight" Value="SemiBold" />
                         </Trigger>

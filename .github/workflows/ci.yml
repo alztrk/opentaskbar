@@ -4,9 +4,11 @@ on:
   push:
     branches:
       - master
+      - settings-redesign-theme-opacity
   pull_request:
     branches:
       - master
+      - redesign
 
 permissions:
   contents: read

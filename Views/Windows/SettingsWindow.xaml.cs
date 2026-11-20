@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Windows.Data;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
@@ -67,9 +68,11 @@ public partial class SettingsWindow : Window
             _widgetOptions.Add(option);
         }
         AttachWidgetSettingsPanels();
-        AttachLiveWidgetPreviews();
-        RebuildWidgetGroups();
-        WidgetOptionsList.ItemsSource = _widgetGroups;
+        CustomThemeEditor.ThemeSaved += (_, _) => ReloadThemePacks((ThemePackBox.SelectedItem as ThemePackChoice)?.Id);
+        var widgetView = new ListCollectionView(_widgetOptions);
+        widgetView.SortDescriptions.Add(new SortDescription(nameof(DockWidgetOption.CategoryOrder), ListSortDirection.Ascending));
+        widgetView.GroupDescriptions.Add(new PropertyGroupDescription(nameof(DockWidgetOption.Category)));
+        WidgetOptionsList.ItemsSource = widgetView;
         WeatherCountryBox.ItemsSource = CountryCityService.GetInitialCountries().Select(c => c.Name).ToList();
         _ = InitializeWeatherLocationsAsync(_applied.WeatherCity);
         _preferences.Changed += Preferences_Changed;
@@ -93,6 +96,8 @@ public partial class SettingsWindow : Window
             _preferences.Changed -= Preferences_Changed;
             if (_source is { IsDisposed: false }) _source.RemoveHook(WindowProc);
             WidgetOptionsList.ItemsSource = null;
+            foreach (var option in _widgetOptions)
+                if (option.NativePreview is OpenTaskbar.Widgets.DockWidget preview) preview.Dispose();
             _widgetOptions.Clear();
             _widgetGroups.Clear();
             _widgetDensityBoxes.Clear();
@@ -102,6 +107,7 @@ public partial class SettingsWindow : Window
             (Application.Current.MainWindow as MainWindow)?.SetGeometryPreview(null);
         };
         DarkTheme.IsChecked = _applied.Theme == AppTheme.Dark;
+        SystemTheme.IsChecked = _applied.Theme == AppTheme.System;
         LightTheme.IsChecked = _applied.Theme == AppTheme.Light;
         LanguageBox.ItemsSource = UiText.Languages;
         SelectLanguage(_applied.Language);
@@ -252,6 +258,7 @@ public partial class SettingsWindow : Window
             {
                 var localized = localizedOptions[option.Id];
                 option.UpdateText(localized.Label, localized.Description);
+                option.RefreshInstallLabels();
             }
             RefreshWidgetPreviews();
             foreach (var group in _widgetGroups) group.RefreshLabel();
@@ -259,6 +266,16 @@ public partial class SettingsWindow : Window
         }
         ThemeManager.Apply(_preferences.Current.Theme, _preferences.Current);
         LoadSurfaceStyles(_preferences.Current);
+        foreach (var option in _widgetOptions)
+        {
+            if (option.NativePreview is OpenTaskbar.Widgets.DockWidget native)
+            {
+                native.ApplySettings(_preferences.Current);
+                native.Visibility = Visibility.Visible;
+            }
+        }
+        CustomThemeEditor.LoadTheme((ThemePackBox.SelectedItem as ThemePackChoice)?.Id, ThemeManager.EffectiveTheme);
+        UpdateOpacityLabel();
         UpdateDockScaleLabel();
         UpdateWidgetOptionState();
         UpdateBackdrop();
@@ -279,7 +296,7 @@ public partial class SettingsWindow : Window
             SettingsFrame.CornerRadius = new CornerRadius(0);
             return;
         }
-        var glass = SettingsBackdrop.TryEnable(this, _preferences.Current.Theme);
+        var glass = SettingsBackdrop.TryEnable(this, ThemeManager.EffectiveTheme);
         SettingsFrame.SetResourceReference(System.Windows.Controls.Border.BackgroundProperty, glass ? "SettingsGlassMaterial" : "SettingsBackground");
         if (glass)
         {
@@ -300,7 +317,7 @@ public partial class SettingsWindow : Window
         bool IsEnabled(string id) => enabledWidgets.Contains(id, StringComparer.OrdinalIgnoreCase);
         return _preferences.Current with
         {
-            Theme = LightTheme.IsChecked == true ? AppTheme.Light : AppTheme.Dark,
+            Theme = SystemTheme.IsChecked == true ? AppTheme.System : LightTheme.IsChecked == true ? AppTheme.Light : AppTheme.Dark,
             Language = LanguageBox.SelectedItem is AppLanguage language ? language : _preferences.Current.Language,
             // Full width keeps the last floating alignment so switching back restores it.
             Position = RightPosition.IsChecked == true ? DockPosition.Right : LeftPosition.IsChecked == true ? DockPosition.Left
@@ -453,6 +470,7 @@ public partial class SettingsWindow : Window
         ThemePackBox.SelectedItem = choices.FirstOrDefault(choice => string.Equals(choice.Id, selected, StringComparison.OrdinalIgnoreCase))
             ?? choices[0];
         UpdateThemePackDetails();
+        CustomThemeEditor.LoadTheme(selected, ThemeManager.EffectiveTheme);
     }
 
     private static string DescribeThemePack(ThemePack pack)
@@ -476,6 +494,9 @@ public partial class SettingsWindow : Window
     {
         UpdateThemePackDetails();
         PreferenceEdited(sender, e);
+        if (!_initializing)
+            CustomThemeEditor.LoadTheme((ThemePackBox.SelectedItem as ThemePackChoice)?.Id,
+                ThemeManager.EffectiveTheme);
     }
 
     private void ThemePackOpenFolder_Click(object sender, RoutedEventArgs e)
@@ -717,7 +738,7 @@ public partial class SettingsWindow : Window
         _widgetGroups.Clear();
         foreach (var category in Enum.GetValues<DockWidgetCategory>())
         {
-            var widgets = _widgetOptions.Where(option => option.Category == category).ToList();
+            var widgets = _widgetOptions.Where(option => option.CategoryEnum == category).ToList();
             if (widgets.Count > 0) _widgetGroups.Add(new WidgetCategoryGroup(category, widgets));
         }
     }
@@ -745,32 +766,21 @@ public partial class SettingsWindow : Window
     private void WidgetSettings_Click(object sender, RoutedEventArgs e)
     {
         if (e.OriginalSource is not FrameworkElement { DataContext: DockWidgetOption option }) return;
-        if (!option.HasSettings) return;
-
-        if (!option.IsInstalled)
+        var expand = !option.IsSettingsExpanded;
+        foreach (var other in _widgetOptions)
+            other.IsSettingsExpanded = ReferenceEquals(other, option) && expand;
+        if (expand && ReferenceEquals(option.NativePreview, option.Preview))
         {
-            _initializing = true;
-            option.IsInstalled = true;
-            option.IsEnabled = true;
-            _initializing = false;
-            SaveSettings();
-        }
-
-        option.IsSettingsExpanded = !option.IsSettingsExpanded;
-        UpdateWidgetOptionState();
-
-        if (option.IsSettingsExpanded)
-        {
-            FrameworkElement? target = option.Id switch
+            var native = WidgetCoordinator.CreatePreviewWidget(option.Id);
+            if (native is not null)
             {
-                "Clock" => ClockOptions,
-                "Weather" => WeatherOptions,
-                "Focus" => FocusOptions,
-                "SystemStats" => StatsOptions,
-                _ => null
-            };
-            target?.BringIntoView();
+                native.ApplySettings(ReadSelection());
+                native.Visibility = Visibility.Visible;
+                option.NativePreview = native;
+            }
         }
+        UpdateWidgetOptionState();
+        WidgetOptionsList.InvalidateMeasure();
     }
 
     private void CollapseClockOptions_Click(object sender, RoutedEventArgs e)
@@ -1125,6 +1135,7 @@ public partial class SettingsWindow : Window
     private void LoadAllSelections(DockSettings settings)
     {
         DarkTheme.IsChecked = settings.Theme == AppTheme.Dark;
+        SystemTheme.IsChecked = settings.Theme == AppTheme.System;
         LightTheme.IsChecked = settings.Theme == AppTheme.Light;
         SelectLanguage(settings.Language);
         SelectAlignment(settings);
@@ -1333,6 +1344,33 @@ public partial class SettingsWindow : Window
     }
 
     private void UpdateDockScaleLabel() => DockScaleValue.Text = UiText.Format("OpacityPercent", (int)Math.Round(DockScaleSlider.Value));
+
+    private void UpdateOpacityLabel()
+    {
+        if (OpacityValue is not null && OpacitySlider is not null)
+            OpacityValue.Text = UiText.Format("OpacityPercent", (int)Math.Round(OpacitySlider.Value));
+    }
+
+    private void UpdateBottomGapLabel()
+    {
+        if (BottomGapValue is not null && BottomGapSlider is not null)
+            BottomGapValue.Text = $"{(int)Math.Round(BottomGapSlider.Value)} px";
+    }
+
+    private void BottomGapSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_initializing) return;
+        UpdateBottomGapLabel();
+        PreferenceEdited(sender, e);
+    }
+
+    private void OpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_initializing) return;
+        UpdateOpacityLabel();
+        ThemeManager.SetSurfaceOpacity(Math.Round(e.NewValue) / 100);
+        PreferenceEdited(sender, e);
+    }
 
     private void UpdateCornerRadiusLabel() => CornerRadiusValue.Text = $"{(int)Math.Round(CornerRadiusSlider.Value)} px";
 

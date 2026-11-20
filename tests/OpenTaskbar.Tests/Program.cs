@@ -242,7 +242,7 @@ void WidgetCategoryChecks()
 
     Check(options.Count == 21, "Catalog must define exactly 21 widgets.");
 
-    var timeWidgets = options.Where(o => o.Category == DockWidgetCategory.TimeAndWeather).Select(o => o.Id).ToArray();
+    var timeWidgets = options.Where(o => o.CategoryEnum == DockWidgetCategory.TimeAndWeather).Select(o => o.Id).ToArray();
     Check(timeWidgets.Length == 5
         && timeWidgets.Contains(DockWidgetService.ClockId)
         && timeWidgets.Contains(DockWidgetService.WeatherId)
@@ -251,7 +251,7 @@ void WidgetCategoryChecks()
         && timeWidgets.Contains(DockWidgetService.CountdownId),
         "TimeAndWeather category must contain Clock, Weather, DayProgress, Stopwatch and Countdown.");
 
-    var systemWidgets = options.Where(o => o.Category == DockWidgetCategory.SystemAndHardware).Select(o => o.Id).ToArray();
+    var systemWidgets = options.Where(o => o.CategoryEnum == DockWidgetCategory.SystemAndHardware).Select(o => o.Id).ToArray();
     Check(systemWidgets.Length == 5
         && systemWidgets.Contains(DockWidgetService.SystemStatsId)
         && systemWidgets.Contains(DockWidgetService.NetSpeedId)
@@ -260,24 +260,24 @@ void WidgetCategoryChecks()
         && systemWidgets.Contains("Storage"),
         "SystemAndHardware category must contain SystemStats, NetSpeed, Battery, BluetoothBattery and Storage.");
 
-    var aiWidgets = options.Where(o => o.Category == DockWidgetCategory.AiQuotas).Select(o => o.Id).ToArray();
+    var aiWidgets = options.Where(o => o.CategoryEnum == DockWidgetCategory.AiQuotas).Select(o => o.Id).ToArray();
     Check(aiWidgets.Length == 7
         && DockWidgetService.AiUsageWidgets.All(w => aiWidgets.Contains(w.Id)),
         "AiQuotas category must contain all 7 AI provider widgets.");
 
-    var mediaWidgets = options.Where(o => o.Category == DockWidgetCategory.MediaAndControls).Select(o => o.Id).ToArray();
+    var mediaWidgets = options.Where(o => o.CategoryEnum == DockWidgetCategory.MediaAndControls).Select(o => o.Id).ToArray();
     Check(mediaWidgets.Length == 3
         && mediaWidgets.Contains(DockWidgetService.MediaId)
         && mediaWidgets.Contains(DockWidgetService.AudioId)
         && mediaWidgets.Contains(DockWidgetService.QuickSettingsId),
         "MediaAndControls category must contain Media, Audio and QuickSettings.");
 
-    var prodWidgets = options.Where(o => o.Category == DockWidgetCategory.Productivity).Select(o => o.Id).ToArray();
+    var prodWidgets = options.Where(o => o.CategoryEnum == DockWidgetCategory.Productivity).Select(o => o.Id).ToArray();
     Check(prodWidgets.Length == 1 && prodWidgets.Contains(DockWidgetService.FocusId),
         "Productivity category must contain only Focus.");
 
     UiText.Current.SetLanguage(AppLanguage.Turkish);
-    var sample = options.First(o => o.Category == DockWidgetCategory.AiQuotas);
+    var sample = options.First(o => o.CategoryEnum == DockWidgetCategory.AiQuotas);
     Check(sample.CategoryLabel == "Yapay Zekâ", "Category label must be localized in Turkish.");
     UiText.Current.SetLanguage(AppLanguage.English);
     Check(sample.CategoryLabel == "AI Quotas", "Category label must be localized in English.");

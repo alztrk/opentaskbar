@@ -8,11 +8,11 @@ public partial class WidgetCatalogItem : UserControl
 {
     public static readonly RoutedEvent InstallationRequestedEvent = EventManager.RegisterRoutedEvent(
         nameof(InstallationRequested), RoutingStrategy.Bubble, typeof(RoutedEventHandler), typeof(WidgetCatalogItem));
-
     public static readonly RoutedEvent SettingsRequestedEvent = EventManager.RegisterRoutedEvent(
         nameof(SettingsRequested), RoutingStrategy.Bubble, typeof(RoutedEventHandler), typeof(WidgetCatalogItem));
 
     public WidgetCatalogItem() => InitializeComponent();
+
     public event RoutedEventHandler InstallationRequested
     {
         add => AddHandler(InstallationRequestedEvent, value);
@@ -27,17 +27,14 @@ public partial class WidgetCatalogItem : UserControl
 
     private void Preview_Click(object sender, RoutedEventArgs e)
     {
-        if (DataContext is DockWidgetOption) RequestInstallationChange();
+        if (DataContext is DockWidgetOption)
+            RaiseEvent(new RoutedEventArgs(SettingsRequestedEvent, this));
     }
 
-    private void RequestInstallationChange() => RaiseEvent(new RoutedEventArgs(InstallationRequestedEvent, this));
-
-    private void SettingsExpandButton_Click(object sender, RoutedEventArgs e)
+    private void Install_Click(object sender, RoutedEventArgs e)
     {
         e.Handled = true;
         if (DataContext is DockWidgetOption)
-        {
-            RaiseEvent(new RoutedEventArgs(SettingsRequestedEvent, this));
-        }
+            RaiseEvent(new RoutedEventArgs(InstallationRequestedEvent, this));
     }
 }
