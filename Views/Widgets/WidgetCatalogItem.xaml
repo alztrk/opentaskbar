@@ -7,7 +7,7 @@
     <Border x:Name="CardBorder" BorderThickness="1"
             BorderBrush="{DynamicResource StrokeSubtle}"
             Background="{DynamicResource SettingsControl}"
-            CornerRadius="7" Margin="0,0,0,1">
+            CornerRadius="7" Margin="0,0,0,8">
         <Border.Style>
             <Style TargetType="Border">
                 <Style.Triggers>
@@ -25,13 +25,14 @@
                 </Grid.ColumnDefinitions>
                 <Button x:Name="PreviewButton" Click="Preview_Click" Cursor="Hand"
                         Background="Transparent" BorderThickness="0"
+                        Foreground="{DynamicResource TextPrimary}"
                         HorizontalContentAlignment="Stretch"
                         AutomationProperties.Name="{Binding Label}"
                         AutomationProperties.HelpText="{Binding Description}">
                     <Grid Margin="12,0,6,0">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                         <TextBlock Text="{Binding Label}" FontSize="13" VerticalAlignment="Center"
-                                   TextTrimming="CharacterEllipsis"/>
+                                   TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextPrimary}"/>
                         <TextBlock Grid.Column="1" Text="{Binding SettingsGlyph}" FontFamily="Segoe MDL2 Assets"
                                    FontSize="10" VerticalAlignment="Center" Margin="7,0,0,0"
                                    Foreground="{DynamicResource TextSecondary}"/>
@@ -39,6 +40,7 @@
                 </Button>
                 <Button x:Name="InstallButton" Grid.Column="1" Width="38" MinHeight="38" Margin="0,5,5,5"
                         Click="Install_Click" Background="Transparent" BorderThickness="0"
+                        Foreground="{DynamicResource TextSecondary}"
                         ToolTip="{Binding InstallActionLabel}" Cursor="Hand"
                         AutomationProperties.Name="{Binding InstallActionLabel}"
                         AutomationProperties.ItemStatus="{Binding InstallStatus}">
@@ -73,7 +75,7 @@
                         <ColumnDefinition Width="3*"/>
                     </Grid.ColumnDefinitions>
                     <StackPanel>
-                        <TextBlock Text="{Binding Label}" FontWeight="SemiBold" FontSize="13" Margin="0,0,0,12"/>
+                        <TextBlock Text="{Binding Label}" FontWeight="SemiBold" FontSize="13" Margin="0,0,0,12" Foreground="{DynamicResource TextPrimary}"/>
                         <Border Background="{DynamicResource SettingsBackground}" BorderBrush="{DynamicResource StrokeSubtle}"
                                 BorderThickness="1" CornerRadius="6" Padding="8" MinHeight="82">
                             <ContentControl Content="{Binding NativePreview}" HorizontalAlignment="Center"
@@ -82,7 +84,7 @@
                         </Border>
                     </StackPanel>
                     <StackPanel Grid.Column="2">
-                        <TextBlock Text="{local:Loc WidgetSettings}" FontSize="13" FontWeight="SemiBold"
+                        <TextBlock Text="{local:Loc WidgetSettings}" Foreground="{DynamicResource TextPrimary}" FontSize="13" FontWeight="SemiBold"
                                    Margin="0,0,0,12"/>
                         <ContentControl Content="{Binding SettingsView}" Focusable="False"/>
                     </StackPanel>
