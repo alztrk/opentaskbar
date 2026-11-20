@@ -40,7 +40,6 @@ public sealed class ThemePropertyEditor : UserControl
     private TextBox? _name;
     private TextBox? _author;
     private TextBox? _description;
-    private bool _isUpdating;
 
     public event EventHandler? ThemeSaved;
 
@@ -234,7 +233,7 @@ public sealed class ThemePropertyEditor : UserControl
 
     private void UpdateToken(string key, JsonNode? value)
     {
-        if (_widgetPack is null || _id is null || _isUpdating) return;
+        if (_widgetPack is null || _id is null) return;
         var section = _mode == AppTheme.Dark ? "dark" : "light";
         if (_widgetPack[section] is not JsonObject sectionNode)
         {
