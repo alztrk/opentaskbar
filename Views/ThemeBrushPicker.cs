@@ -302,12 +302,14 @@ public sealed class ThemeBrushPicker : Window
     {
         var color = CurrentColor();
         var (hue, saturation, brightness) = ColorToHsv(color);
-        _hue = hue;
+        // Preserve the selected hue while editing achromatic colors (white, grey, black).
+        var effectiveHue = saturation == 0 || brightness == 0 ? _hue : hue;
+        _hue = effectiveHue;
         _sat = saturation;
         _value = brightness;
         _updating = true;
-        _hueSlider.Value = hue;
-        _colorField.Background = new SolidColorBrush(ColorFromHsv(hue, 1, 1));
+        _hueSlider.Value = effectiveHue;
+        _colorField.Background = new SolidColorBrush(ColorFromHsv(effectiveHue, 1, 1));
         Canvas.SetLeft(_colorCursor, Math.Clamp(saturation * _colorField.Width - 6, -6, _colorField.Width - 6));
         Canvas.SetTop(_colorCursor, Math.Clamp((1 - brightness) * _colorField.Height - 6, -6, _colorField.Height - 6));
         _updating = false;
