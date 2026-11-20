@@ -94,6 +94,7 @@ public partial class SettingsWindow : Window
             _widgetOptions.Clear();
         };
         DarkTheme.IsChecked = _applied.Theme == AppTheme.Dark;
+        SystemTheme.IsChecked = _applied.Theme == AppTheme.System;
         LightTheme.IsChecked = _applied.Theme == AppTheme.Light;
         LanguageBox.ItemsSource = UiText.Languages;
         SelectLanguage(_applied.Language);
@@ -261,7 +262,7 @@ public partial class SettingsWindow : Window
             }
         }
         ThemeManager.SetSurfaceOpacity(Math.Round(OpacitySlider.Value) / 100);
-        CustomThemeEditor.LoadTheme((ThemePackBox.SelectedItem as ThemePackChoice)?.Id, _preferences.Current.Theme);
+        CustomThemeEditor.LoadTheme((ThemePackBox.SelectedItem as ThemePackChoice)?.Id, ThemeManager.EffectiveTheme);
         UpdateOpacityLabel();
         UpdateDockScaleLabel();
         UpdateWidgetOptionState();
@@ -271,7 +272,7 @@ public partial class SettingsWindow : Window
     private void UpdateBackdrop()
     {
         if (!_sourceReady) return;
-        var glass = SettingsBackdrop.TryEnable(this, _preferences.Current.Theme);
+        var glass = SettingsBackdrop.TryEnable(this, ThemeManager.EffectiveTheme);
         SettingsFrame.SetResourceReference(System.Windows.Controls.Border.BackgroundProperty, "SettingsGlassMaterial");
         if (glass)
         {
@@ -292,7 +293,7 @@ public partial class SettingsWindow : Window
         bool IsEnabled(string id) => enabledWidgets.Contains(id, StringComparer.OrdinalIgnoreCase);
         return _preferences.Current with
         {
-            Theme = LightTheme.IsChecked == true ? AppTheme.Light : AppTheme.Dark,
+            Theme = SystemTheme.IsChecked == true ? AppTheme.System : LightTheme.IsChecked == true ? AppTheme.Light : AppTheme.Dark,
             Language = LanguageBox.SelectedItem is AppLanguage language ? language : _preferences.Current.Language,
             // Full width keeps the last floating alignment so switching back restores it.
             Position = RightPosition.IsChecked == true ? DockPosition.Right : LeftPosition.IsChecked == true ? DockPosition.Left
@@ -440,7 +441,7 @@ public partial class SettingsWindow : Window
         ThemePackBox.SelectedItem = choices.FirstOrDefault(choice => string.Equals(choice.Id, selected, StringComparison.OrdinalIgnoreCase))
             ?? choices[0];
         UpdateThemePackDetails();
-        CustomThemeEditor.LoadTheme(selected, _applied.Theme);
+        CustomThemeEditor.LoadTheme(selected, ThemeManager.EffectiveTheme);
     }
 
     private static string DescribeThemePack(ThemePack pack)
@@ -466,7 +467,7 @@ public partial class SettingsWindow : Window
         PreferenceEdited(sender, e);
         if (!_initializing)
             CustomThemeEditor.LoadTheme((ThemePackBox.SelectedItem as ThemePackChoice)?.Id,
-                LightTheme.IsChecked == true ? AppTheme.Light : AppTheme.Dark);
+                ThemeManager.EffectiveTheme);
     }
 
     private void ThemePackOpenFolder_Click(object sender, RoutedEventArgs e)
@@ -1030,6 +1031,7 @@ public partial class SettingsWindow : Window
     private void LoadAllSelections(DockSettings settings)
     {
         DarkTheme.IsChecked = settings.Theme == AppTheme.Dark;
+        SystemTheme.IsChecked = settings.Theme == AppTheme.System;
         LightTheme.IsChecked = settings.Theme == AppTheme.Light;
         SelectLanguage(settings.Language);
         SelectAlignment(settings);
