@@ -58,6 +58,7 @@ public partial class SettingsWindow : Window
             _widgetOptions.Add(option);
         }
         AttachWidgetSettingsPanels();
+        CustomThemeEditor.ThemeSaved += (_, _) => ReloadThemePacks((ThemePackBox.SelectedItem as ThemePackChoice)?.Id);
         var widgetView = new ListCollectionView(_widgetOptions);
         widgetView.SortDescriptions.Add(new SortDescription(nameof(DockWidgetOption.CategoryOrder), ListSortDirection.Ascending));
         widgetView.GroupDescriptions.Add(new PropertyGroupDescription(nameof(DockWidgetOption.Category)));
@@ -453,10 +454,10 @@ public partial class SettingsWindow : Window
     private void ThemePackBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         UpdateThemePackDetails();
+        PreferenceEdited(sender, e);
         if (!_initializing)
             CustomThemeEditor.LoadTheme((ThemePackBox.SelectedItem as ThemePackChoice)?.Id,
                 LightTheme.IsChecked == true ? AppTheme.Light : AppTheme.Dark);
-        PreferenceEdited(sender, e);
     }
 
     private void ThemePackOpenFolder_Click(object sender, RoutedEventArgs e)
