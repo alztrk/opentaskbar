@@ -235,56 +235,46 @@ internal static class WidgetViewChecks
                     option.Preview.Value = option.Preview is CountdownDockWidget ? string.Empty : "00:00:00";
                     var card = new WidgetCatalogItem { DataContext = option };
                     Layout(card);
-                    var install = RequiredName<Button>(card, "PreviewButton");
-                    var preview = Descendants<ContentControl>(install).Single(control => ReferenceEquals(control.Content, option.Preview));
-                    Check(ReferenceEquals(preview.Content, option.Preview) && !preview.IsHitTestVisible
-                        && System.Windows.Input.KeyboardNavigation.GetTabNavigation(preview) == System.Windows.Input.KeyboardNavigationMode.None,
-                        "Catalog previews must reuse real widget templates without exposing nested interactive targets.");
-                    Check(preview.LayoutTransform is ScaleTransform { ScaleX: > 1, ScaleY: > 1 },
-                        "Catalog previews must scale up to fill their gallery card.");
-                    Check(AutomationProperties.GetName(install) == option.Label
-                        && AutomationProperties.GetItemStatus(install) == UiText.Get("WidgetAvailable"),
-                        "Preview installation must expose its name and available state.");
+                    var expand = RequiredName<Button>(card, "PreviewButton");
+                    var install = RequiredName<Button>(card, "InstallButton");
+                    var preview = Descendants<ContentControl>(card)
+                        .Single(control => ReferenceEquals(control.Content, option.NativePreview));
+                    Check(!preview.IsHitTestVisible
+                        && System.Windows.Input.KeyboardNavigation.GetTabNavigation(preview)
+                            == System.Windows.Input.KeyboardNavigationMode.None,
+                        "Expanded previews must remain non-interactive.");
+                    Check(AutomationProperties.GetName(expand) == option.Label,
+                        "Expandable widget rows must announce the widget label.");
                     Check(!Descendants<TextBlock>(card).Any(text => text.Text == option.Description),
-                        "Available previews must omit descriptions.");
-                    Check(!Descendants<CheckBox>(card).Any(),
-                        "The card must omit separate management controls.");
+                        "Compact rows must omit verbose widget descriptions.");
+                    var expansions = 0;
+                    card.SettingsRequested += (_, _) => expansions++;
+                    expand.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Check(expansions == 1 && !option.IsInstalled,
+                        "Expanding a widget must not automatically install it.");
                     var installations = 0;
                     card.InstallationRequested += (_, _) => installations++;
                     install.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Check(installations == 1 && !option.IsInstalled
-                        && (option.Preview is not ITimedDockWidget timedPreview || !timedPreview.IsRunning),
-                        "Tapping a preview must request installation without starting its time widget.");
-                    option.IsInstalled = true;
-                    option.IsEnabled = true;
-                    Layout(card);
-                    Check(AutomationProperties.GetItemStatus(install) == UiText.Get("WidgetInstalled"),
-                        "Installed previews must expose their installed state.");
-                    install.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Check(installations == 2, "Tapping an installed preview must request uninstallation.");
-                    Check(Descendants<FrameworkElement>(card).Where(element => element is Button).All(element =>
-                    {
-                        var left = element.TranslatePoint(new Point(), card).X;
-                        return left >= 0 && left + element.ActualWidth <= card.ActualWidth;
-                    }), "All preview controls must fit inside their gallery item.");
+                    Check(installations == 1 && !option.IsInstalled,
+                        "The dedicated management action must request installation.");
                     option.UpdateText("Localized widget", "Localized description");
                     Check(option.Preview.Label == option.Label, "Preview labels must follow catalog localization.");
                 }
 
                 foreach (var width in new[] { 292d, 500d, 720d })
                 {
-                    var gallery = new WrapPanel { Width = width };
+                    var gallery = new OpenTaskbar.Views.ExpandableWidgetGrid { Width = width, MinItemWidth = 270 };
                     foreach (var option in options) gallery.Children.Add(new WidgetCatalogItem { DataContext = option });
                     Layout(gallery);
                     Check(gallery.Children.Cast<FrameworkElement>().All(item =>
                     {
                         var point = item.TranslatePoint(new Point(), gallery);
                         return point.X >= 0 && point.X + item.ActualWidth <= width;
-                    }), "The gallery must wrap without horizontal overflow at narrow and wide settings sizes.");
+                    }), "The widget catalogue must avoid horizontal overflow.");
                     var second = (FrameworkElement)gallery.Children[1];
-                    Check(width < 488 ? second.TranslatePoint(new Point(), gallery).Y > 0
+                    Check(width < 540 ? second.TranslatePoint(new Point(), gallery).Y > 0
                         : second.TranslatePoint(new Point(), gallery).Y == 0,
-                        "The gallery must adapt its column count to the available width.");
+                        "The widget catalogue must use one or two columns based on available width.");
                 }
             }
             UiText.Current.SetLanguage(AppLanguage.Turkish);
