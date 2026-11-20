@@ -50,7 +50,7 @@ public static class ThemeManager
             else Overrides[key] = value;
         }
 
-        if (Overrides.TryGetValue("DockBackgroundMode", out var modeValue) && modeValue is "None")
+        if (Overrides.Contains("DockBackgroundMode") && Overrides["DockBackgroundMode"] is "None")
         {
             Overrides["DockBorderMaterial"] = Brushes.Transparent;
             Overrides["DockHighlight"] = Brushes.Transparent;
@@ -64,8 +64,8 @@ public static class ThemeManager
         if (_palette is null) throw new InvalidOperationException("The theme must be initialized before its materials.");
         _opacity = opacity;
         var alpha = (byte)Math.Round(opacity * 255);
-        var mode = Overrides.TryGetValue("DockBackgroundMode", out var overrideMode)
-            ? overrideMode as string
+        var mode = Overrides.Contains("DockBackgroundMode")
+            ? Overrides["DockBackgroundMode"] as string
             : Application.Current.Resources["DockBackgroundMode"] as string;
         foreach (var key in MaterialKeys)
         {
@@ -79,7 +79,7 @@ public static class ThemeManager
 
     private static double ThemeSettingsOpacity()
     {
-        if (Overrides.TryGetValue("SettingsBackgroundOpacity", out var value) && value is double themed)
+        if (Overrides.Contains("SettingsBackgroundOpacity") && Overrides["SettingsBackgroundOpacity"] is double themed)
             return Math.Clamp(themed, 0.6, 1);
         return Application.Current.TryFindResource("SettingsBackgroundOpacity") is double fallback
             ? Math.Clamp(fallback, 0.6, 1) : 0.95;
