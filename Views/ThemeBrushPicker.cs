@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Media;
 using System.Windows.Input;
 using System.Windows.Shapes;
@@ -22,6 +24,7 @@ public sealed class ThemeBrushPicker : Window
 
     private readonly List<Stop> _stops = [];
     private readonly ListBox _stopList = new() { MinHeight = 82, MaxHeight = 130 };
+    private readonly StackPanel _stopChoices = new();
     private readonly Border _preview = new() { Height = 38, CornerRadius = new CornerRadius(5), Margin = new Thickness(0, 12, 0, 10) };
     private readonly Slider[] _channels = new Slider[3];
     private readonly Grid _colorField = new() { Width = 305, Height = 126, ClipToBounds = true };
@@ -36,10 +39,13 @@ public sealed class ThemeBrushPicker : Window
         Minimum = 0, Maximum = 360, Width = 305,
         TickFrequency = 1, IsSnapToTickEnabled = true
     };
+    private readonly Slider _alphaSlider = new() { Minimum = 0, Maximum = 255, TickFrequency = 1, IsSnapToTickEnabled = true };
+    private readonly TextBlock _alphaValue = new() { Width = 42, TextAlignment = TextAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
     private double _hue, _sat, _value;
 
     private readonly TextBox _hex = new() { Width = 105, Margin = new Thickness(8, 0, 0, 0) };
     private readonly Slider _angle = new() { Minimum = 0, Maximum = 360, Value = 90, Width = 180 };
+    private readonly TextBlock _angleValue = new() { Width = 42, TextAlignment = TextAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
     private TabControl _tabs = null!;
     private bool _updating;
     private Color _solid;
@@ -57,8 +63,21 @@ public sealed class ThemeBrushPicker : Window
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
         Background = (Brush)Application.Current.Resources["SettingsBackground"];
         Foreground = (Brush)Application.Current.Resources["TextPrimary"];
-        FontFamily = new FontFamily("Segoe UI");
+        SetResourceReference(Control.FontFamilyProperty, "InterfaceFont");
         FontSize = 13;
+        _hueSlider.SetResourceReference(FrameworkElement.StyleProperty, "SettingsOpacitySlider");
+        _angle.SetResourceReference(FrameworkElement.StyleProperty, "SettingsOpacitySlider");
+        _stopList.SetResourceReference(Control.BackgroundProperty, "SettingsControl");
+        _stopList.SetResourceReference(Control.ForegroundProperty, "TextPrimary");
+        _stopList.SetResourceReference(Control.BorderBrushProperty, "StrokeSubtle");
+        var stopItemStyle = new Style(typeof(ListBoxItem));
+        stopItemStyle.Setters.Add(new Setter(Control.ForegroundProperty, new DynamicResourceExtension("TextPrimary")));
+        stopItemStyle.Setters.Add(new Setter(Control.BackgroundProperty, Brushes.Transparent));
+        stopItemStyle.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(4, 2, 4, 2)));
+        var selectedStop = new Trigger { Property = ListBoxItem.IsSelectedProperty, Value = true };
+        selectedStop.Setters.Add(new Setter(Control.BackgroundProperty, new DynamicResourceExtension("SurfaceSelected")));
+        stopItemStyle.Triggers.Add(selectedStop);
+        _stopList.ItemContainerStyle = stopItemStyle;
 
         _solid = source is SolidColorBrush single ? single.Color : Colors.SlateGray;
         if (source is LinearGradientBrush gradient)
@@ -76,6 +95,9 @@ public sealed class ThemeBrushPicker : Window
         }
 
         var outer = new DockPanel { Margin = new Thickness(18) };
+        outer.SetResourceReference(TextElement.ForegroundProperty, "TextPrimary");
+        outer.SetResourceReference(TextElement.FontFamilyProperty, "InterfaceFont");
+        outer.SetResourceReference(Panel.BackgroundProperty, "SettingsBackground");
         Content = outer;
         var footer = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right,
             Margin = new Thickness(0, 15, 0, 0) };
@@ -94,16 +116,19 @@ public sealed class ThemeBrushPicker : Window
         var body = new StackPanel();
         scroll.Content = body;
         _tabs = new TabControl();
+        _tabs.SetResourceReference(Control.BackgroundProperty, "SettingsBackground");
+        _tabs.SetResourceReference(Control.ForegroundProperty, "TextPrimary");
+        _tabs.SetResourceReference(Control.BorderBrushProperty, "StrokeSubtle");
         body.Children.Add(_tabs);
 
         var solid = new StackPanel { Margin = new Thickness(7) };
         solid.Children.Add(new TextBlock { Text = "Choose a single color.", Margin = new Thickness(0, 8, 0, 8) });
-        _tabs.Items.Add(new TabItem { Header = "Solid", Content = solid });
+        _tabs.Items.Add(CreateTab("Solid", solid));
 
         var grad = new StackPanel { Margin = new Thickness(7) };
         grad.Children.Add(new TextBlock { Text = "Select a stop to edit its color.", Margin = new Thickness(0, 8, 0, 8) });
         _stopList.SelectionChanged += (_, _) => SyncChannels();
-        grad.Children.Add(_stopList);
+        grad.Children.Add(_stopChoices);
         var tools = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 7, 0, 9) };
         var add = Button("+ Stop");
         add.Click += (_, _) =>
@@ -126,28 +151,42 @@ public sealed class ThemeBrushPicker : Window
         tools.Children.Add(remove);
         grad.Children.Add(tools);
         var position = new Slider { Minimum = 0, Maximum = 100, TickFrequency = 1, IsSnapToTickEnabled = true };
+        position.SetResourceReference(FrameworkElement.StyleProperty, "SettingsOpacitySlider");
+        var positionValue = new TextBlock { Width = 42, TextAlignment = TextAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
+        positionValue.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
         position.ValueChanged += (_, _) =>
         {
             if (_updating || _stopList.SelectedIndex < 0) return;
             _stops[_stopList.SelectedIndex].Offset = position.Value / 100;
+            positionValue.Text = Math.Round(position.Value).ToString(CultureInfo.InvariantCulture) + "%";
             RefreshStops(_stopList.SelectedIndex);
             UpdatePreview();
         };
         _stopList.SelectionChanged += (_, _) =>
         {
+            UpdateStopChoices();
             if (_stopList.SelectedIndex < 0) return;
             _updating = true;
             position.Value = _stops[_stopList.SelectedIndex].Offset * 100;
+            positionValue.Text = Math.Round(position.Value).ToString(CultureInfo.InvariantCulture) + "%";
             _updating = false;
         };
         grad.Children.Add(new TextBlock { Text = "Stop position", Margin = new Thickness(0, 3, 0, 5) });
-        grad.Children.Add(position);
+        var positionRow = new DockPanel();
+        DockPanel.SetDock(positionValue, Dock.Right);
+        positionRow.Children.Add(positionValue);
+        positionRow.Children.Add(position);
+        grad.Children.Add(positionRow);
         var angleRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 12, 0, 0) };
         angleRow.Children.Add(new TextBlock { Text = "Angle", Width = 85, VerticalAlignment = VerticalAlignment.Center });
         _angle.ValueChanged += (_, _) => UpdatePreview();
         angleRow.Children.Add(_angle);
+        _angleValue.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+        _angleValue.Text = Math.Round(_angle.Value).ToString(CultureInfo.InvariantCulture) + "°";
+        _angle.ValueChanged += (_, _) => _angleValue.Text = Math.Round(_angle.Value).ToString(CultureInfo.InvariantCulture) + "°";
+        angleRow.Children.Add(_angleValue);
         grad.Children.Add(angleRow);
-        _tabs.Items.Add(new TabItem { Header = "Gradient", Content = grad });
+        _tabs.Items.Add(CreateTab("Gradient", grad));
         _tabs.SelectionChanged += (_, e) => { if (ReferenceEquals(e.Source, _tabs)) { SyncChannels(); UpdatePreview(); } };
         _tabs.SelectedIndex = source is LinearGradientBrush ? 1 : 0;
 
@@ -213,17 +252,39 @@ public sealed class ThemeBrushPicker : Window
                 VerticalAlignment = VerticalAlignment.Center });
             var slider = new Slider { Minimum = 0, Maximum = 255, Width = 230, TickFrequency = 1,
                 IsSnapToTickEnabled = true };
+            slider.SetResourceReference(FrameworkElement.StyleProperty, "SettingsOpacitySlider");
             _channels[i] = slider;
             slider.ValueChanged += (_, _) => SetChannel(index, (byte)Math.Round(slider.Value));
             row.Children.Add(slider);
             body.Children.Add(row);
         }
 
+        var alphaRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
+        alphaRow.Children.Add(new TextBlock { Text = "Opacity", Width = 55, VerticalAlignment = VerticalAlignment.Center });
+        _alphaSlider.Width = 200;
+        _alphaSlider.VerticalAlignment = VerticalAlignment.Center;
+        AutomationProperties.SetName(_alphaSlider, "Color opacity");
+        _alphaSlider.SetResourceReference(FrameworkElement.StyleProperty, "SettingsOpacitySlider");
+        _alphaSlider.ValueChanged += (_, _) =>
+        {
+            if (!_updating)
+            {
+                var current = CurrentColor();
+                SetColor(Color.FromArgb((byte)Math.Round(_alphaSlider.Value), current.R, current.G, current.B));
+            }
+        };
+        alphaRow.Children.Add(_alphaSlider);
+        alphaRow.Children.Add(_alphaValue);
+        body.Children.Add(alphaRow);
+
         var hexRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 14, 0, 0) };
         hexRow.Children.Add(new TextBlock { Text = "HEX", Width = 55, VerticalAlignment = VerticalAlignment.Center });
         hexRow.Children.Add(_hex);
         _hex.LostFocus += (_, _) => ParseHex();
         _hex.KeyDown += (_, e) => { if (e.Key == System.Windows.Input.Key.Return) ParseHex(); };
+        _hex.SetResourceReference(Control.BackgroundProperty, "SettingsControl");
+        _hex.SetResourceReference(Control.ForegroundProperty, "TextPrimary");
+        _hex.SetResourceReference(Control.BorderBrushProperty, "StrokeSubtle");
         body.Children.Add(hexRow);
         RefreshStops();
         _stopList.SelectedIndex = 0;
@@ -233,8 +294,41 @@ public sealed class ThemeBrushPicker : Window
 
     private static Button Button(string label) => new()
     {
-        Content = label, MinWidth = 72, MinHeight = 31, Padding = new Thickness(10, 4, 10, 4)
+        Content = label, MinWidth = 72, MinHeight = 31, Padding = new Thickness(10, 4, 10, 4),
+        Style = (Style)Application.Current.FindResource("SettingsButton")
     };
+
+    private static TabItem CreateTab(string header, UIElement content)
+    {
+        var tab = new TabItem { Header = header, Content = content, Template = CreateTabTemplate() };
+        tab.SetResourceReference(Control.ForegroundProperty, "TextPrimary");
+        tab.SetResourceReference(Control.BackgroundProperty, "SettingsControl");
+        tab.SetResourceReference(Control.BorderBrushProperty, "StrokeSubtle");
+        tab.Padding = new Thickness(9, 4, 9, 4);
+        return tab;
+    }
+
+    private static ControlTemplate CreateTabTemplate()
+    {
+        var template = new ControlTemplate(typeof(TabItem));
+        var border = new FrameworkElementFactory(typeof(Border)) { Name = "TabBorder" };
+        border.SetValue(Border.BackgroundProperty, new DynamicResourceExtension("SettingsControl"));
+        border.SetValue(Border.BorderBrushProperty, new DynamicResourceExtension("StrokeSubtle"));
+        border.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+        var header = new FrameworkElementFactory(typeof(ContentPresenter));
+        header.SetValue(ContentPresenter.ContentSourceProperty, "Header");
+        header.SetValue(ContentPresenter.RecognizesAccessKeyProperty, true);
+        header.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        header.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+        header.SetValue(FrameworkElement.MarginProperty, new Thickness(9, 4, 9, 4));
+        border.AppendChild(header);
+        template.VisualTree = border;
+        var selected = new Trigger { Property = TabItem.IsSelectedProperty, Value = true };
+        selected.Setters.Add(new Setter(Border.BackgroundProperty,
+            new DynamicResourceExtension("SurfaceSelected"), "TabBorder"));
+        template.Triggers.Add(selected);
+        return template;
+    }
 
     private Color CurrentColor() => _tabs.SelectedIndex == 1 && _stopList.SelectedIndex >= 0
         ? _stops[_stopList.SelectedIndex].Color : _solid;
@@ -279,6 +373,8 @@ public sealed class ThemeBrushPicker : Window
         _channels[0].Value = c.R;
         _channels[1].Value = c.G;
         _channels[2].Value = c.B;
+        _alphaSlider.Value = c.A;
+        _alphaValue.Text = Math.Round(c.A / 255d * 100).ToString(CultureInfo.InvariantCulture) + "%";
         _hex.Text = c.ToString(CultureInfo.InvariantCulture);
         _updating = false;
         RefreshColorField();
@@ -287,8 +383,33 @@ public sealed class ThemeBrushPicker : Window
     private void RefreshStops(int selected = -1)
     {
         _stopList.ItemsSource = null;
-        _stopList.ItemsSource = _stops.ToArray();
+        _stopList.Items.Clear();
+        foreach (var stop in _stops)
+        {
+            var label = new TextBlock { Text = $"{stop.Color} · {stop.Offset * 100:0}%", Margin = new Thickness(6, 3, 6, 3) };
+            label.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+            _stopList.Items.Add(new ListBoxItem { Content = label, HorizontalContentAlignment = HorizontalAlignment.Stretch });
+        }
         if (selected >= 0 && selected < _stops.Count) _stopList.SelectedIndex = selected;
+        UpdateStopChoices();
+    }
+
+    private void UpdateStopChoices()
+    {
+        _stopChoices.Children.Clear();
+        for (var index = 0; index < _stops.Count; index++)
+        {
+            var stop = _stops[index];
+            var button = Button($"Stop {index + 1} · {stop.Color} · {stop.Offset * 100:0}%");
+            button.HorizontalAlignment = HorizontalAlignment.Stretch;
+            button.HorizontalContentAlignment = HorizontalAlignment.Left;
+            button.Margin = new Thickness(0, 0, 0, 5);
+            if (index == _stopList.SelectedIndex)
+                button.SetResourceReference(Control.BackgroundProperty, "SurfaceSelectedStrong");
+            var selectedIndex = index;
+            button.Click += (_, _) => _stopList.SelectedIndex = selectedIndex;
+            _stopChoices.Children.Add(button);
+        }
     }
 
     private void ChooseColorAt(Point position)

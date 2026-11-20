@@ -340,6 +340,38 @@ internal static class WidgetViewChecks
                     && Descendants<Button>(themeEditor).Any(button => button.Content is string label
                         && label == "Create editable theme"),
                     "Default appearance must show color swatches and customization controls.");
+                var solidPicker = new OpenTaskbar.Views.ThemeBrushPicker(
+                    new SolidColorBrush(Color.FromArgb(128, 220, 80, 40)));
+                var solidPickerContent = (FrameworkElement)solidPicker.Content;
+                solidPicker.Content = null;
+                var solidSurface = new Border { Background = (Brush)app.Resources["SettingsBackground"], Child = solidPickerContent };
+                Layout(solidSurface);
+                var solidOpacity = Descendants<Slider>(solidPickerContent).Single(slider =>
+                    AutomationProperties.GetName(slider) == "Color opacity");
+                Check(solidOpacity.Value == 128, "Solid color opacity must load into the picker.");
+                solidOpacity.Value = 64;
+                Check(Descendants<TextBox>(solidPickerContent).Single().Text == "#40DC5028",
+                    "Changing solid color opacity must preserve RGB and update the alpha channel.");
+                Render(solidSurface, Path.Combine(directory, $"color-picker-solid-{theme.ToString().ToLowerInvariant()}.png"));
+
+                var gradient = new LinearGradientBrush();
+                gradient.GradientStops.Add(new GradientStop(Color.FromArgb(96, 25, 80, 140), 0));
+                gradient.GradientStops.Add(new GradientStop(Color.FromArgb(200, 180, 90, 40), 1));
+                var gradientPicker = new OpenTaskbar.Views.ThemeBrushPicker(gradient);
+                var gradientPickerContent = (FrameworkElement)gradientPicker.Content;
+                gradientPicker.Content = null;
+                var gradientSurface = new Border { Background = (Brush)app.Resources["SettingsBackground"], Child = gradientPickerContent };
+                Layout(gradientSurface);
+                var gradientOpacity = Descendants<Slider>(gradientPickerContent).Single(slider =>
+                    AutomationProperties.GetName(slider) == "Color opacity");
+                Check(gradientOpacity.Value == 96, "Gradient stop opacity must load into the picker.");
+                Check(Descendants<Button>(gradientPickerContent).Any(button => button.Content is string label
+                    && label.StartsWith("Stop 1 · #6019508C · 0%", StringComparison.Ordinal)),
+                    "Gradient stops must display their color and editable position.");
+                gradientOpacity.Value = 48;
+                Check(Descendants<TextBox>(gradientPickerContent).Single().Text == "#3019508C",
+                    "Changing gradient stop opacity must preserve the stop's RGB values.");
+                Render(gradientSurface, Path.Combine(directory, $"color-picker-gradient-{theme.ToString().ToLowerInvariant()}.png"));
                 var strip = new StackPanel { Orientation = Orientation.Horizontal };
                 strip.Children.Add(new ContentControl { Content = stopwatch });
                 strip.Children.Add(new ContentControl { Content = timer });

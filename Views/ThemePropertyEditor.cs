@@ -26,9 +26,9 @@ public sealed class ThemePropertyEditor : UserControl
                   "DockRadius", "DockInnerRadius", "DockWidgetPadding", "DockShadowBlur", "DockShadowOpacity", "DockShadowColor"]),
         ("Widgets", ["WidgetCard", "WidgetCardStroke", "WidgetTrack", "WidgetAccent",
                      "DockWidgetSurface", "DockWidgetRadius"]),
-        ("Windows & Popups", ["MenuMaterial", "MenuDivider", "SurfacePopup", "MenuLabelWidth", "PopupRadius", "PopupInnerRadius"]),
-        ("Settings window", ["SettingsBackground", "SettingsBackgroundOpacity", "SettingsControl", "SettingsControlHover", "SettingsSidebarOverlay"]),
-        ("Typography and spacing", ["InterfaceFont", "TextSizeBody", "TextSizeCaption",
+        ("Windows & Popups", ["MenuMaterial", "MenuDivider", "SurfacePopup", "MenuLabelWidth", "PopupRadius", "PopupInnerRadius",
+                               "SettingsBackground", "SettingsBackgroundOpacity", "SettingsControl", "SettingsControlHover", "SettingsSidebarOverlay"]),
+        ("Typography & Geometry", ["InterfaceFont", "TextSizeBody", "TextSizeCaption",
                                     "ControlRadius", "SettingsPageInset"])
     ];
 
@@ -92,8 +92,13 @@ public sealed class ThemePropertyEditor : UserControl
         _name = AddTextField("Name", ReadManifest("Name") ?? pack.DisplayName);
         _author = AddTextField("Author", ReadManifest("Author") ?? string.Empty);
         _description = AddTextField("Description", ReadManifest("Description") ?? string.Empty);
+        var categoryTabs = new TabControl { MinHeight = 300, Margin = new Thickness(0, 10, 0, 0) };
+        _body.Children.Add(categoryTabs);
         foreach (var (title, keys) in Sections)
         {
+            var panel = new StackPanel { Margin = new Thickness(10, 4, 10, 12) };
+            categoryTabs.Items.Add(new TabItem { Header = title, Content = panel });
+            _fieldHost = panel;
             SectionHeader(title);
             foreach (var key in keys)
             {
@@ -109,16 +114,9 @@ public sealed class ThemePropertyEditor : UserControl
         }
 
         var covered = Sections.SelectMany(section => section.Keys).ToHashSet(StringComparer.Ordinal);
-        var advanced = new Expander
-        {
-            Header = "Advanced theme tokens",
-            IsExpanded = false,
-            Margin = new Thickness(0, 20, 0, 0)
-        };
-        var advancedPanel = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
-        advanced.Content = advancedPanel;
-        _body.Children.Add(advanced);
-        _fieldHost = advancedPanel;
+        var advancedFields = new StackPanel { Margin = new Thickness(10, 12, 10, 12) };
+        categoryTabs.Items.Add(new TabItem { Header = "Advanced", Content = advancedFields });
+        _fieldHost = advancedFields;
         foreach (var key in AllThemeKeys(Application.Current.Resources)
                      .Where(key => !covered.Contains(key))
                      .Distinct(StringComparer.Ordinal)
@@ -238,7 +236,7 @@ public sealed class ThemePropertyEditor : UserControl
         var divider = new Border { Height = 1 };
         divider.SetResourceReference(Border.BackgroundProperty, "StrokeSubtle");
         stack.Children.Add(divider);
-        _body.Children.Add(stack);
+        _fieldHost.Children.Add(stack);
     }
 
     private Grid AddRow(string label)
