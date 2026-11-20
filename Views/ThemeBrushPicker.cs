@@ -342,7 +342,7 @@ public sealed class ThemeBrushPicker : Window
         var chroma = brightness * saturation;
         var x = chroma * (1 - Math.Abs((hue / 60) % 2 - 1));
         var shift = brightness - chroma;
-        var (red, green, blue) = hue / 60 switch
+        var (red, green, blue) = (hue / 60) switch
         {
             < 1 => (chroma, x, 0d),
             < 2 => (x, chroma, 0d),
