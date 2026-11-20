@@ -26,7 +26,7 @@ public sealed class ThemePropertyEditor : UserControl
         ("Dock geometry", ["DockRadius", "DockInnerRadius", "DockWidgetPadding"]),
         ("Widgets", ["WidgetCard", "WidgetCardStroke", "WidgetTrack", "WidgetAccent",
                      "DockWidgetSurface", "DockWidgetRadius"]),
-        ("Settings window", ["SettingsBackground", "SettingsControl", "SettingsControlHover", "SettingsSidebarOverlay"]),
+        ("Settings window", ["SettingsBackground", "SettingsBackgroundOpacity", "SettingsControl", "SettingsControlHover", "SettingsSidebarOverlay"]),
         ("Typography and spacing", ["InterfaceFont", "TextSizeBody", "TextSizeCaption",
                                     "ControlRadius", "PopupRadius", "SettingsPageInset"])
     ];
@@ -155,7 +155,7 @@ public sealed class ThemePropertyEditor : UserControl
 
     private void AddNumberField(string key, double initial)
     {
-        var row = AddRow(key);
+        var row = AddRow(key == "SettingsBackgroundOpacity" ? "Window background opacity (0.6–1)" : key);
         var field = new TextBox { Text = initial.ToString("0.##", CultureInfo.InvariantCulture),
             Padding = new Thickness(8, 4, 8, 4), MinHeight = 29 };
         Grid.SetColumn(field, 1);
@@ -163,7 +163,7 @@ public sealed class ThemePropertyEditor : UserControl
         field.LostFocus += (_, _) =>
         {
             if (double.TryParse(field.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
-                && value is >= 0 and <= 2048)
+                && value >= (key == "SettingsBackgroundOpacity" ? 0.6 : 0) && value <= (key == "SettingsBackgroundOpacity" ? 1 : 2048))
                 UpdateToken(key, JsonValue.Create(value));
             else field.Text = initial.ToString("0.##", CultureInfo.InvariantCulture);
         };
