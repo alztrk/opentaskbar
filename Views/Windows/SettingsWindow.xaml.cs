@@ -424,8 +424,8 @@ public partial class SettingsWindow : Window
     private void SelectLanguage(AppLanguage language)
     {
         var selected = UiText.Languages.FirstOrDefault(candidate => candidate == language);
-        LanguageBox.SelectedItem = UiText.Languages.FirstOrDefault(candidate => candidate == selected)
-            ?? UiText.Languages.FirstOrDefault(candidate => candidate == AppLanguage.English);
+        var activeLanguage = UiText.Languages.FirstOrDefault(candidate => candidate == selected);
+        LanguageBox.SelectedItem = LanguageCatalog.IsSupported(activeLanguage) ? activeLanguage : AppLanguage.English;
         if (LanguageBox.SelectedIndex < 0 && LanguageBox.Items.Count > 0) LanguageBox.SelectedIndex = 0;
     }
 
