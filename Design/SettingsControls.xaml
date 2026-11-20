@@ -399,7 +399,7 @@
             </Setter.Value>
         </Setter>
     </Style>
-    <Style TargetType="TabItem">
+    <Style x:Key="SettingsSidebarTab" TargetType="TabItem">
         <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
         <Setter Property="Padding" Value="12,10" />
         <Setter Property="Margin" Value="0,2" />
@@ -442,7 +442,7 @@
             </Setter.Value>
         </Setter>
     </Style>
-    <Style TargetType="TabControl">
+    <Style x:Key="SettingsSidebarTabs" TargetType="TabControl">
         <Setter Property="HorizontalContentAlignment" Value="Stretch" />
         <Setter Property="VerticalContentAlignment" Value="Stretch" />
         <Setter Property="Template">
