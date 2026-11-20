@@ -75,7 +75,7 @@
                         <TextBlock Text="{Binding Label}" FontWeight="SemiBold" FontSize="13" Margin="0,0,0,12"/>
                         <Border Background="{DynamicResource SettingsBackground}" BorderBrush="{DynamicResource StrokeSubtle}"
                                 BorderThickness="1" CornerRadius="6" Padding="8" MinHeight="82">
-                            <ContentControl Content="{Binding Preview}" HorizontalAlignment="Center"
+                            <ContentControl Content="{Binding NativePreview}" HorizontalAlignment="Center"
                                             VerticalAlignment="Center" Focusable="False"
                                             IsHitTestVisible="False" KeyboardNavigation.TabNavigation="None"/>
                         </Border>
