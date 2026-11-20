@@ -17,7 +17,7 @@
     <Window.Resources>
         <ResourceDictionary>
             <DataTemplate x:Key="SettingsWidgetOptionTemplate">
-                <widgets:WidgetCatalogItem Width="Auto" HorizontalAlignment="Stretch" Margin="6"
+                <widgets:WidgetCatalogItem HorizontalAlignment="Stretch" Margin="0,0,0,9"
                                            InstallationRequested="WidgetInstallation_Click"
                                            SettingsRequested="WidgetSettings_Click" />
             </DataTemplate>
@@ -413,11 +413,22 @@
                             <TextBlock Text="{local:Loc SectionWidgetsCatalog}" Style="{StaticResource SettingsSectionHeading}" Margin="0,0,0,12" />
                             <ItemsControl x:Name="WidgetOptionsList" ItemTemplate="{StaticResource SettingsWidgetOptionTemplate}"
                                           HorizontalAlignment="Stretch">
-                                <ItemsControl.ItemsPanel>
-                                    <ItemsPanelTemplate>
-                                        <views:AdaptiveGrid MinItemWidth="230" />
-                                    </ItemsPanelTemplate>
-                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.GroupStyle>
+                                    <GroupStyle>
+                                        <GroupStyle.HeaderTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold"
+                                                           Foreground="{DynamicResource TextSecondary}"
+                                                           Margin="0,18,0,10"/>
+                                            </DataTemplate>
+                                        </GroupStyle.HeaderTemplate>
+                                        <GroupStyle.Panel>
+                                            <ItemsPanelTemplate>
+                                                <views:ExpandableWidgetGrid MinItemWidth="270"/>
+                                            </ItemsPanelTemplate>
+                                        </GroupStyle.Panel>
+                                    </GroupStyle>
+                                </ItemsControl.GroupStyle>
                             </ItemsControl>
                             <Grid x:Name="WidgetPanelsPool" Visibility="Collapsed">
                                 <Border x:Name="ClockOptions" Visibility="Collapsed" Background="Transparent" BorderThickness="0">
