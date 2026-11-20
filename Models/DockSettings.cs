@@ -9,7 +9,7 @@ public enum DockPosition
     Right
 }
 
-public enum AppTheme { Dark, Light }
+public enum AppTheme { Dark, Light, System }
 public readonly record struct AppLanguage
 {
     private readonly string? _cultureName;
@@ -67,7 +67,7 @@ public sealed record DockProfile(string Name, IReadOnlyList<string> HiddenApps);
 public sealed record DockSettings(
     DockPosition Position = DockPosition.Center,
     IReadOnlyList<string>? PinOrder = null,
-    AppTheme Theme = AppTheme.Dark,
+    AppTheme Theme = AppTheme.System,
     AppLanguage Language = default,
     bool AnimationsEnabled = true,
     bool PreviewsEnabled = true,
