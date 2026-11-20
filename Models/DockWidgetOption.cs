@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.Windows;
+using OpenTaskbar.Services;
 
 namespace OpenTaskbar.Models;
 
@@ -56,6 +57,9 @@ public sealed class DockWidgetOption(string id, string label, string description
         || string.Equals(Id, "Search", StringComparison.OrdinalIgnoreCase)
         || string.Equals(Id, "AiUsage", StringComparison.OrdinalIgnoreCase);
 
+    public string InstallActionLabel => UiText.Get(IsInstalled ? "WidgetRemove" : "WidgetInstall");
+    public string InstallStatus => UiText.Get(IsInstalled ? "WidgetInstalled" : "WidgetAvailable");
+
     public Visibility HasSettingsVisibility => HasSettings ? Visibility.Visible : Visibility.Collapsed;
 
     public bool IsSettingsExpanded
@@ -89,12 +93,20 @@ public sealed class DockWidgetOption(string id, string label, string description
             _description = description;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Description)));
         }
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstallActionLabel)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstallStatus)));
     }
 
     public bool IsInstalled
     {
         get => _isInstalled;
-        set => Set(ref _isInstalled, value, nameof(IsInstalled));
+        set
+        {
+            if (_isInstalled == value) return;
+            Set(ref _isInstalled, value, nameof(IsInstalled));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstallActionLabel)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstallStatus)));
+        }
     }
 
     public bool IsEnabled
