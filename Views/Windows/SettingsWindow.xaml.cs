@@ -1,5 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Windows.Data;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
@@ -56,7 +58,10 @@ public partial class SettingsWindow : Window
             _widgetOptions.Add(option);
         }
         AttachWidgetSettingsPanels();
-        WidgetOptionsList.ItemsSource = _widgetOptions;
+        var widgetView = new ListCollectionView(_widgetOptions);
+        widgetView.SortDescriptions.Add(new SortDescription(nameof(DockWidgetOption.CategoryOrder), ListSortDirection.Ascending));
+        widgetView.GroupDescriptions.Add(new PropertyGroupDescription(nameof(DockWidgetOption.Category)));
+        WidgetOptionsList.ItemsSource = widgetView;
         WeatherCountryBox.ItemsSource = CountryCityService.GetInitialCountries().Select(c => c.Name).ToList();
         _ = InitializeWeatherLocationsAsync(_applied.WeatherCity);
         _preferences.Changed += Preferences_Changed;
@@ -638,33 +643,11 @@ public partial class SettingsWindow : Window
     private void WidgetSettings_Click(object sender, RoutedEventArgs e)
     {
         if (e.OriginalSource is not FrameworkElement { DataContext: DockWidgetOption option }) return;
-        if (!option.HasSettings) return;
-
-        if (!option.IsInstalled)
-        {
-            _initializing = true;
-            option.IsInstalled = true;
-            option.IsEnabled = true;
-            _initializing = false;
-            SaveSettings();
-        }
-
-        option.IsSettingsExpanded = !option.IsSettingsExpanded;
+        var expand = !option.IsSettingsExpanded;
+        foreach (var other in _widgetOptions)
+            other.IsSettingsExpanded = ReferenceEquals(other, option) && expand;
         UpdateWidgetOptionState();
-
-        if (option.IsSettingsExpanded)
-        {
-            FrameworkElement? target = option.Id switch
-            {
-                "Clock" => ClockOptions,
-                "Weather" => WeatherOptions,
-                "AiUsage" => AiUsageOptions,
-                "Focus" => FocusOptions,
-                "SystemStats" => StatsOptions,
-                _ => null
-            };
-            target?.BringIntoView();
-        }
+        WidgetOptionsList.InvalidateMeasure();
     }
 
     private void CollapseClockOptions_Click(object sender, RoutedEventArgs e)
