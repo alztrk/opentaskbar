@@ -39,8 +39,9 @@
                 </Button>
                 <Button x:Name="InstallButton" Grid.Column="1" Width="38" MinHeight="38" Margin="0,5,5,5"
                         Click="Install_Click" Background="Transparent" BorderThickness="0"
-                        ToolTip="{local:Loc WidgetInstall}" Cursor="Hand"
-                        AutomationProperties.Name="{local:Loc WidgetInstall}">
+                        ToolTip="{Binding InstallActionLabel}" Cursor="Hand"
+                        AutomationProperties.Name="{Binding InstallActionLabel}"
+                        AutomationProperties.ItemStatus="{Binding InstallStatus}">
                     <TextBlock Style="{StaticResource WidgetCatalogInstallMark}" HorizontalAlignment="Center"
                                VerticalAlignment="Center"/>
                 </Button>
