@@ -93,7 +93,20 @@ public static class ThemeManager
                 ? Brushes.Transparent
                 : WithAlpha(source, key == "DockMaterial" && mode == "Solid" ? byte.MaxValue : alpha);
         }
-        Materials["DockShadowMaterial"] = mode == "None" ? null : Application.Current.TryFindResource("ShadowDock");
+        var blur = Application.Current.TryFindResource("DockShadowBlur") is double b ? Math.Clamp(b, 0, 80) : 28;
+        var shadowOpacity = Application.Current.TryFindResource("DockShadowOpacity") is double op ? Math.Clamp(op, 0, 1) : 0.45;
+        var shadowColor = Application.Current.TryFindResource("DockShadowColor") is SolidColorBrush colorBrush
+            ? colorBrush.Color : Colors.Black;
+        var shadow = new System.Windows.Media.Effects.DropShadowEffect
+        {
+            BlurRadius = blur,
+            ShadowDepth = 4,
+            Direction = 270,
+            Color = shadowColor,
+            Opacity = mode == "None" ? 0 : shadowOpacity
+        };
+        shadow.Freeze();
+        Materials["DockShadowMaterial"] = shadow;
     }
 
     public static void UseWindowsAccent(bool enabled)
