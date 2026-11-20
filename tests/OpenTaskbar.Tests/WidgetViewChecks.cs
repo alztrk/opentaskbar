@@ -333,6 +333,13 @@ internal static class WidgetViewChecks
             foreach (var theme in new[] { AppTheme.Dark, AppTheme.Light })
             {
                 ThemeManager.Apply(theme);
+                var themeEditor = new OpenTaskbar.Views.ThemePropertyEditor();
+                themeEditor.LoadTheme(null, theme);
+                Layout(themeEditor);
+                Check(Descendants<TextBlock>(themeEditor).Any(text => text.Text == "Color palette")
+                    && Descendants<Button>(themeEditor).Any(button => button.Content is string label
+                        && label == "Create editable theme"),
+                    "Default appearance must show color swatches and customization controls.");
                 var strip = new StackPanel { Orientation = Orientation.Horizontal };
                 strip.Children.Add(new ContentControl { Content = stopwatch });
                 strip.Children.Add(new ContentControl { Content = timer });

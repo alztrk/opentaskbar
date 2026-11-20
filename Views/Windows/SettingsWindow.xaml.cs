@@ -69,6 +69,7 @@ public partial class SettingsWindow : Window
         }
         AttachWidgetSettingsPanels();
         CustomThemeEditor.ThemeSaved += (_, _) => ReloadThemePacks((ThemePackBox.SelectedItem as ThemePackChoice)?.Id);
+        CustomThemeEditor.ThemeCreated += (_, id) => ReloadThemePacks(id);
         var widgetView = new ListCollectionView(_widgetOptions);
         widgetView.SortDescriptions.Add(new SortDescription(nameof(DockWidgetOption.CategoryOrder), ListSortDirection.Ascending));
         widgetView.GroupDescriptions.Add(new PropertyGroupDescription(nameof(DockWidgetOption.Category)));
@@ -115,7 +116,9 @@ public partial class SettingsWindow : Window
         AnimationsToggle.IsChecked = _applied.AnimationsEnabled;
         PreviewsToggle.IsChecked = _applied.PreviewsEnabled;
         BadgesToggle.IsChecked = _applied.NotificationBadgesEnabled;
-        SelectAutoHide(_applied.AutoHide);
+        AutoHideDisabled.IsChecked = _applied.AutoHide == AutoHideMode.Disabled;
+        AutoHideSmart.IsChecked = _applied.AutoHide == AutoHideMode.Smart;
+        AutoHideAlways.IsChecked = _applied.AutoHide == AutoHideMode.Always;
         LoadSurfaceStyles(_applied);
         MagnificationToggle.IsChecked = _applied.MagnificationEnabled;
         CompactSize.IsChecked = _applied.Size == DockSize.Compact;
@@ -325,7 +328,7 @@ public partial class SettingsWindow : Window
             AnimationsEnabled = AnimationsToggle.IsChecked == true,
             PreviewsEnabled = PreviewsToggle.IsChecked == true,
             NotificationBadgesEnabled = BadgesToggle.IsChecked == true,
-            AutoHide = ReadAutoHide(),
+            AutoHide = AutoHideAlways.IsChecked == true ? AutoHideMode.Always : AutoHideSmart.IsChecked == true ? AutoHideMode.Smart : AutoHideMode.Disabled,
             GlobalWidgetDensity = DensityCompact.IsChecked == true ? WidgetDensityMode.Compact
                 : DensityFull.IsChecked == true ? WidgetDensityMode.Full : WidgetDensityMode.Auto,
             WidgetDensityOverrides = ReadWidgetDensityOverrides(),
@@ -451,7 +454,9 @@ public partial class SettingsWindow : Window
     private void SelectLanguage(AppLanguage language)
     {
         var selected = UiText.Languages.FirstOrDefault(candidate => candidate == language);
-        LanguageBox.SelectedItem = LanguageCatalog.IsSupported(selected) ? selected : AppLanguage.English;
+        var activeLanguage = UiText.Languages.FirstOrDefault(candidate => candidate == selected);
+        LanguageBox.SelectedItem = LanguageCatalog.IsSupported(activeLanguage) ? activeLanguage : AppLanguage.English;
+        if (LanguageBox.SelectedIndex < 0 && LanguageBox.Items.Count > 0) LanguageBox.SelectedIndex = 0;
     }
 
     private void LanguageBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => PreferenceEdited(sender, e);
@@ -497,6 +502,21 @@ public partial class SettingsWindow : Window
         if (!_initializing)
             CustomThemeEditor.LoadTheme((ThemePackBox.SelectedItem as ThemePackChoice)?.Id,
                 ThemeManager.EffectiveTheme);
+    }
+
+    private void OpenGithub_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            using var _ = Process.Start(new ProcessStartInfo("https://github.com/alztrk/opentaskbar")
+            {
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            AppLog.Warning("Cannot open the OpenTaskbar GitHub page: " + ex.Message);
+        }
     }
 
     private void ThemePackOpenFolder_Click(object sender, RoutedEventArgs e)
@@ -591,11 +611,14 @@ public partial class SettingsWindow : Window
 
     private void ReloadThemePacks(string? selected)
     {
+        var wasInitializing = _initializing;
         _initializing = true;
-        LoadThemePacks(selected);
-        _initializing = false;
+        try { LoadThemePacks(selected); }
+        finally { _initializing = wasInitializing; }
         ThemePacks.Select(selected, reload: true);
         ThemePacks.ApplyWidgets(_preferences.Current.Theme);
+        // New, duplicated, and imported packs should remain selected after restart.
+        if (!wasInitializing) TriggerAutoSave(immediate: true);
     }
 
     private SystemMeters ReadStatsMeters() =>
@@ -819,25 +842,6 @@ public partial class SettingsWindow : Window
         CenterPosition.IsChecked = !fullWidth && settings.Position == DockPosition.Center;
         RightPosition.IsChecked = !fullWidth && settings.Position == DockPosition.Right;
     }
-
-    private static int AutoHideIndex(AutoHideMode mode) => mode switch
-    {
-        AutoHideMode.Smart => 1,
-        AutoHideMode.Always => 2,
-        _ => 0
-    };
-
-    private void SelectAutoHide(AutoHideMode mode) => AutoHideBox.SelectedIndex = AutoHideIndex(mode);
-
-    private AutoHideMode ReadAutoHide() => AutoHideBox.SelectedIndex switch
-    {
-        1 => AutoHideMode.Smart,
-        2 => AutoHideMode.Always,
-        _ => AutoHideMode.Disabled
-    };
-
-    private void AutoHideBox_SelectionChanged(object sender, System.Windows.Controls.SelectionChangedEventArgs e) =>
-        PreferenceEdited(sender, e);
 
     private static void OpenActions(object sender)
     {
@@ -1142,7 +1146,9 @@ public partial class SettingsWindow : Window
         AnimationsToggle.IsChecked = settings.AnimationsEnabled;
         PreviewsToggle.IsChecked = settings.PreviewsEnabled;
         BadgesToggle.IsChecked = settings.NotificationBadgesEnabled;
-        SelectAutoHide(settings.AutoHide);
+        AutoHideDisabled.IsChecked = settings.AutoHide == AutoHideMode.Disabled;
+        AutoHideSmart.IsChecked = settings.AutoHide == AutoHideMode.Smart;
+        AutoHideAlways.IsChecked = settings.AutoHide == AutoHideMode.Always;
         LoadSurfaceStyles(settings);
         MagnificationToggle.IsChecked = settings.MagnificationEnabled;
         CompactSize.IsChecked = settings.Size == DockSize.Compact;

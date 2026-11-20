@@ -43,6 +43,7 @@ public sealed class ThemePropertyEditor : UserControl
     private TextBox? _description;
 
     public event EventHandler? ThemeSaved;
+    public event EventHandler<string>? ThemeCreated;
 
     public ThemePropertyEditor()
     {
@@ -55,20 +56,17 @@ public sealed class ThemePropertyEditor : UserControl
     public void LoadTheme(string? id, AppTheme mode)
     {
         _id = id;
-        _mode = mode;
+        _mode = mode == AppTheme.System ? ThemeManager.EffectiveTheme : mode;
+        _widgetPack = null;
+        _manifest = null;
         _body.Children.Clear();
         _fieldHost = _body;
         _body.Children.Add(_message);
 
         var pack = ThemePacks.Discover().FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));
-        if (pack is null)
+        if (pack is null || ThemePack.IsBuiltInTheme(pack.Id))
         {
-            _message.Text = "Select a theme to manage its properties.";
-            return;
-        }
-        if (ThemePack.IsBuiltInTheme(pack.Id))
-        {
-            _message.Text = "This is a built-in theme. Duplicate it to edit its colors and layout.";
+            ShowCurrentAppearance(pack?.DisplayName ?? "Windows appearance");
             return;
         }
 
@@ -87,7 +85,8 @@ public sealed class ThemePropertyEditor : UserControl
             return;
         }
 
-        _message.Text = "Edit the selected theme. Changes are stored in its theme pack.";
+        _message.Text = "Editing " + pack.DisplayName + " · Changes are saved to the theme pack.";
+        ShowColorSwatches();
         SectionHeader("Theme information");
         _name = AddTextField("Name", ReadManifest("Name") ?? pack.DisplayName);
         _author = AddTextField("Author", ReadManifest("Author") ?? string.Empty);
@@ -101,8 +100,8 @@ public sealed class ThemePropertyEditor : UserControl
                 if (existing is null) continue;
                 if (key == "DockBackgroundMode") AddModeField(key, existing.ToString() ?? "Glass");
                 else if (existing is Brush brush) AddBrushField(key, brush);
-                else if (existing is CornerRadius radius) AddNumberField(key, radius.TopLeft);
-                else if (existing is Thickness thickness) AddNumberField(key, thickness.Left);
+                else if (existing is CornerRadius radius) AddCornerField(key, radius);
+                else if (existing is Thickness thickness) AddThicknessField(key, thickness);
                 else if (existing is double value) AddNumberField(key, value);
                 else if (existing is FontFamily family) AddTextTokenField(key, family.Source);
             }
@@ -127,7 +126,7 @@ public sealed class ThemePropertyEditor : UserControl
             var existing = Application.Current.TryFindResource(key);
             if (existing is Brush brush) AddBrushField(key, brush);
             else if (existing is Color color) AddBrushField(key, new SolidColorBrush(color));
-            else if (existing is CornerRadius radius) AddNumberField(key, radius.TopLeft);
+            else if (existing is CornerRadius radius) AddCornerField(key, radius);
             else if (existing is Thickness thickness) AddNumberField(key, thickness.Left);
             else if (existing is double number) AddNumberField(key, number);
             else if (existing is FontFamily family) AddTextTokenField(key, family.Source);
@@ -139,6 +138,87 @@ public sealed class ThemePropertyEditor : UserControl
         save.Click += (_, _) => SaveTheme();
         actions.Children.Add(save);
         _body.Children.Add(actions);
+    }
+
+    private static readonly (string Label, string Key)[] ColorOverview =
+    [
+        ("Accent", "AccentBrush"),
+        ("Background", "SettingsBackground"),
+        ("Surface", "SettingsControl"),
+        ("Text", "TextPrimary"),
+        ("Secondary", "TextSecondary"),
+        ("Border", "StrokeSubtle")
+    ];
+
+    private void ShowColorSwatches()
+    {
+        SectionHeader("Color palette");
+        var strip = new WrapPanel { Margin = new Thickness(0, 0, 0, 3) };
+        foreach (var (label, key) in ColorOverview)
+        {
+            if (Application.Current.TryFindResource(key) is not Brush brush) continue;
+            var cell = new StackPanel { Width = 92, Margin = new Thickness(0, 0, 10, 6) };
+            cell.Children.Add(new Border
+            {
+                Background = brush.CloneCurrentValue(),
+                Height = 34, CornerRadius = new CornerRadius(6),
+                BorderThickness = new Thickness(1),
+                BorderBrush = Application.Current.TryFindResource("StrokeSubtle") as Brush
+            });
+            var caption = new TextBlock { Text = label, FontSize = 11, Margin = new Thickness(0, 7, 0, 0) };
+            caption.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+            cell.Children.Add(caption);
+            strip.Children.Add(cell);
+        }
+        _body.Children.Add(strip);
+    }
+
+    private void ShowCurrentAppearance(string title)
+    {
+        _message.Text = title + " · Windows colors are used until you choose a custom theme.";
+        ShowColorSwatches();
+        SectionHeader("Dock background");
+        var dock = new Border
+        {
+            CornerRadius = new CornerRadius(12),
+            Height = 52,
+            MaxWidth = 350,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Padding = new Thickness(18, 10, 18, 10),
+            Margin = new Thickness(0, 0, 0, 12),
+            Background = Application.Current.TryFindResource("DockMaterial") as Brush
+                ?? Application.Current.TryFindResource("SettingsControl") as Brush
+        };
+        var caption = new TextBlock { Text = "Dock · Glass / Solid / None", VerticalAlignment = VerticalAlignment.Center };
+        caption.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+        dock.Child = caption;
+        _body.Children.Add(dock);
+
+        SectionHeader("Customize appearance");
+        var prompt = new TextBlock
+        {
+            Text = "Create an editable copy to change colors, gradients, fonts, widget spacing and window transparency.",
+            TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(0, 0, 0, 12)
+        };
+        prompt.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+        _body.Children.Add(prompt);
+        var create = Button("Create editable theme");
+        create.HorizontalAlignment = HorizontalAlignment.Left;
+        create.Click += (_, _) =>
+        {
+            try
+            {
+                var id = ThemePackTransfer.CreateTheme("My " + (_mode == AppTheme.Light ? "Light" : "Dark") + " Theme",
+                    null, _id);
+                ThemeCreated?.Invoke(this, id);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                _message.Text = "Theme creation failed: " + ex.Message;
+            }
+        };
+        _body.Children.Add(create);
     }
 
     private static IEnumerable<string> AllThemeKeys(ResourceDictionary dictionary)
@@ -164,12 +244,21 @@ public sealed class ThemePropertyEditor : UserControl
     {
         var grid = new Grid { MinHeight = 43, Margin = new Thickness(0, 0, 0, 2) };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(230) });
-        var text = new TextBlock { Text = label, FontSize = 13, VerticalAlignment = VerticalAlignment.Center,
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(204) });
+        var text = new TextBlock { Text = PrettyName(label), FontSize = 13, VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 10, 0), TextWrapping = TextWrapping.Wrap };
         grid.Children.Add(text);
         _fieldHost.Children.Add(grid);
         return grid;
+    }
+
+    private static string PrettyName(string token)
+    {
+        if (token == "SettingsBackgroundOpacity") return "Settings background opacity";
+        if (token == "DockBackgroundMode") return "Dock material";
+        var result = System.Text.RegularExpressions.Regex.Replace(token,
+            @"(?<!^)([A-Z])", " $1");
+        return result.Replace(" Ui ", " UI ").Replace(" Ai ", " AI ");
     }
 
     private TextBox AddTextField(string label, string initial)
@@ -191,17 +280,77 @@ public sealed class ThemePropertyEditor : UserControl
 
     private void AddNumberField(string key, double initial)
     {
-        var row = AddRow(key == "SettingsBackgroundOpacity" ? "Window background opacity (0.6–1)" : key);
+        var row = AddRow(key);
+        if (key is "SettingsBackgroundOpacity" or "DockShadowOpacity")
+        {
+            var group = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            var slider = new Slider
+            {
+                Minimum = key == "SettingsBackgroundOpacity" ? 60 : 0,
+                Maximum = 100,
+                Value = Math.Clamp(initial * 100, key == "SettingsBackgroundOpacity" ? 60 : 0, 100),
+                TickFrequency = 1,
+                IsSnapToTickEnabled = true,
+                Width = 148,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            slider.SetResourceReference(FrameworkElement.StyleProperty, "SettingsOpacitySlider");
+            var percent = new TextBlock { Width = 45, Margin = new Thickness(9, 0, 0, 0),
+                TextAlignment = TextAlignment.Right, VerticalAlignment = VerticalAlignment.Center,
+                Text = Math.Round(slider.Value).ToString(CultureInfo.InvariantCulture) + "%" };
+            percent.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+            group.Children.Add(slider);
+            group.Children.Add(percent);
+            Grid.SetColumn(group, 1);
+            row.Children.Add(group);
+            slider.ValueChanged += (_, _) =>
+            {
+                percent.Text = Math.Round(slider.Value).ToString(CultureInfo.InvariantCulture) + "%";
+                UpdateToken(key, JsonValue.Create(Math.Round(slider.Value) / 100));
+            };
+            return;
+        }
+
         var field = new TextBox { Text = initial.ToString("0.##", CultureInfo.InvariantCulture),
             Padding = new Thickness(8, 4, 8, 4), MinHeight = 29 };
+        field.SetResourceReference(TextBox.ForegroundProperty, "TextPrimary");
         Grid.SetColumn(field, 1);
         row.Children.Add(field);
         field.LostFocus += (_, _) =>
         {
             if (double.TryParse(field.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
-                && value >= (key == "SettingsBackgroundOpacity" ? 0.6 : 0) && value <= (key is "SettingsBackgroundOpacity" or "DockShadowOpacity" ? 1 : 2048))
+                && value is >= 0 and <= 2048)
                 UpdateToken(key, JsonValue.Create(value));
             else field.Text = initial.ToString("0.##", CultureInfo.InvariantCulture);
+        };
+    }
+
+    private void AddThicknessField(string key, Thickness initial)
+    {
+        var value = string.Join(",", new[] { initial.Left, initial.Top, initial.Right, initial.Bottom }
+            .Select(x => x.ToString("0.##", CultureInfo.InvariantCulture)));
+        AddFourValueField(key, value);
+    }
+
+    private void AddCornerField(string key, CornerRadius initial)
+    {
+        var value = string.Join(",", new[] { initial.TopLeft, initial.TopRight, initial.BottomRight, initial.BottomLeft }
+            .Select(x => x.ToString("0.##", CultureInfo.InvariantCulture)));
+        AddFourValueField(key, value);
+    }
+
+    private void AddFourValueField(string key, string initial)
+    {
+        var field = AddTextField(key, initial);
+        field.ToolTip = "Four values separated by commas, in WPF order.";
+        field.LostFocus += (_, _) =>
+        {
+            var parts = field.Text.Split(',', StringSplitOptions.TrimEntries);
+            var valid = parts.Length == 4 && parts.All(part =>
+                double.TryParse(part, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
+                && number is >= 0 and <= 2048);
+            if (valid) UpdateToken(key, JsonValue.Create(field.Text));
+            else field.Text = initial;
         };
     }
 
@@ -222,23 +371,38 @@ public sealed class ThemePropertyEditor : UserControl
     private void AddBrushField(string key, Brush initial)
     {
         var row = AddRow(key);
-        var button = Button("Edit color / gradient");
+        var button = Button("");
         button.HorizontalAlignment = HorizontalAlignment.Stretch;
         button.HorizontalContentAlignment = HorizontalAlignment.Left;
-        button.Background = initial.CloneCurrentValue();
-        button.Foreground = (Brush)Application.Current.Resources["TextPrimary"];
+        button.SetResourceReference(System.Windows.Controls.Button.BackgroundProperty, "SettingsControl");
+        button.SetResourceReference(System.Windows.Controls.Button.ForegroundProperty, "TextPrimary");
+        var content = new StackPanel { Orientation = Orientation.Horizontal };
+        var swatch = new Border
+        {
+            Width = 33,
+            Height = 23,
+            Background = initial.CloneCurrentValue(),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(5),
+            Margin = new Thickness(0, 0, 10, 0)
+        };
+        swatch.SetResourceReference(Border.BorderBrushProperty, "StrokeSubtle");
+        content.Children.Add(swatch);
+        var title = new TextBlock { Text = initial is LinearGradientBrush ? "Gradient" : "Solid",
+            VerticalAlignment = VerticalAlignment.Center, FontSize = 12 };
+        title.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+        content.Children.Add(title);
+        button.Content = content;
         Grid.SetColumn(button, 1);
         row.Children.Add(button);
         button.Click += (_, _) =>
         {
             if (Window.GetWindow(this) is not { } owner) return;
-            var picker = new ThemeBrushPicker(button.Background)
-            {
-                Owner = owner
-            };
+            var picker = new ThemeBrushPicker(swatch.Background) { Owner = owner };
             if (picker.ShowDialog() == true && picker.Result is { } brush)
             {
-                button.Background = brush;
+                swatch.Background = brush;
+                title.Text = brush is LinearGradientBrush ? "Gradient" : "Solid";
                 UpdateToken(key, BrushToNode(brush));
             }
         };
