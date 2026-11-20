@@ -69,7 +69,7 @@ public static class ThemeManager
             else Overrides[key] = value;
         }
 
-        if (Overrides.Contains("DockBackgroundMode") && Overrides["DockBackgroundMode"] is "None")
+        if ((Overrides.Contains("DockBackgroundMode") ? Overrides["DockBackgroundMode"] : Application.Current.TryFindResource("DockBackgroundMode")) is "None")
         {
             Overrides["DockBorderMaterial"] = Brushes.Transparent;
             Overrides["DockHighlight"] = Brushes.Transparent;
@@ -94,6 +94,23 @@ public static class ThemeManager
                 : WithAlpha(source, key == "DockMaterial" && mode == "Solid" ? byte.MaxValue : alpha);
         }
         Materials["DockShadowMaterial"] = mode == "None" ? null : Application.Current.TryFindResource("ShadowDock");
+    }
+
+    public static void UseWindowsAccent(bool enabled)
+    {
+        if (!enabled)
+        {
+            Materials.Remove("AccentBrush");
+            Materials.Remove("AccentText");
+            return;
+        }
+        var original = SystemParameters.WindowGlassColor;
+        if (original.A == 0) return;
+        var brush = new SolidColorBrush(Color.FromRgb(original.R, original.G, original.B));
+        brush.Freeze();
+        Materials["AccentBrush"] = brush;
+        var brightness = (original.R * 0.2126 + original.G * 0.7152 + original.B * 0.0722) / 255;
+        Materials["AccentText"] = brightness > 0.56 ? Brushes.Black : Brushes.White;
     }
 
     private static double ThemeSettingsOpacity()
