@@ -8,7 +8,7 @@
         Title="{local:Loc SettingsTitle}" Width="980" Height="680" MinWidth="580" MinHeight="440" MaxWidth="1280" MaxHeight="920"
         WindowStyle="None" ResizeMode="CanResize" Background="Transparent"
         WindowStartupLocation="CenterScreen" Foreground="{DynamicResource TextPrimary}"
-        FontFamily="{StaticResource InterfaceFont}" FontSize="{StaticResource TextSizeBody}"
+        FontFamily="{DynamicResource InterfaceFont}" FontSize="{DynamicResource TextSizeBody}"
         UseLayoutRounding="True" SnapsToDevicePixels="True"
         Closing="Window_Closing" PreviewKeyDown="Window_PreviewKeyDown">
     <shell:WindowChrome.WindowChrome>
