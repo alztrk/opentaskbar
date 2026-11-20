@@ -357,23 +357,7 @@
                                 </StackPanel>
                             </DockPanel></Border>
 
-                            <Border Style="{StaticResource SettingsRow}">
-                                <DockPanel>
-                                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Width="240" VerticalAlignment="Center">
-                                        <Slider x:Name="SettingsOpacitySlider" Width="176" Minimum="60" Maximum="100" Value="95"
-                                                TickFrequency="1" IsSnapToTickEnabled="True" SmallChange="1"
-                                                Style="{StaticResource SettingsOpacitySlider}"
-                                                ValueChanged="SettingsOpacitySlider_ValueChanged"
-                                                AutomationProperties.Name="Settings window opacity"/>
-                                        <TextBlock x:Name="SettingsOpacityValue" Width="56" TextAlignment="Right"
-                                                   Foreground="{DynamicResource TextSecondary}" VerticalAlignment="Center" Margin="8,0,0,0"/>
-                                    </StackPanel>
-                                    <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
-                                        <TextBlock Text="Settings window opacity" Style="{StaticResource SettingsRowLabel}"/>
-                                        <TextBlock Text="Independent from dock transparency" Style="{StaticResource SettingsRowDescription}"/>
-                                    </StackPanel>
-                                </DockPanel>
-                            </Border>
+                            
                             <Border Style="{StaticResource SettingsRow}"><DockPanel>
                                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Width="240" VerticalAlignment="Center">
                                     <Slider x:Name="OpacitySlider" Width="176" Minimum="60" Maximum="100" Value="90" TickFrequency="5"
