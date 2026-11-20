@@ -32,6 +32,17 @@ public sealed class DockWidgetOption(string id, string label, string description
     public string Label => _label;
     public string Description => _description;
     public DockWidgetItem Preview { get; } = preview;
+    private object? _nativePreview;
+    public object? NativePreview
+    {
+        get => _nativePreview ?? Preview;
+        set
+        {
+            if (ReferenceEquals(_nativePreview, value)) return;
+            _nativePreview = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(NativePreview)));
+        }
+    }
     public FrameworkElement? SettingsView { get; set; }
 
     public bool HasSettings => string.Equals(Id, "Clock", StringComparison.OrdinalIgnoreCase)
