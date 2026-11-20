@@ -32,6 +32,7 @@ public sealed class ThemePropertyEditor : UserControl
     ];
 
     private readonly StackPanel _body = new();
+    private Panel _fieldHost;
     private readonly TextBlock _message = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 10, 0, 14) };
     private string? _id;
     private AppTheme _mode;
@@ -45,6 +46,7 @@ public sealed class ThemePropertyEditor : UserControl
 
     public ThemePropertyEditor()
     {
+        _fieldHost = _body;
         Content = _body;
         Margin = new Thickness(0, 8, 0, 0);
         _message.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
@@ -55,6 +57,7 @@ public sealed class ThemePropertyEditor : UserControl
         _id = id;
         _mode = mode;
         _body.Children.Clear();
+        _fieldHost = _body;
         _body.Children.Add(_message);
 
         var pack = ThemePacks.Discover().FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));
@@ -105,11 +108,45 @@ public sealed class ThemePropertyEditor : UserControl
             }
         }
 
+        var covered = Sections.SelectMany(section => section.Keys).ToHashSet(StringComparer.Ordinal);
+        var advanced = new Expander
+        {
+            Header = "Advanced theme tokens",
+            IsExpanded = false,
+            Margin = new Thickness(0, 20, 0, 0)
+        };
+        var advancedPanel = new StackPanel { Margin = new Thickness(0, 10, 0, 0) };
+        advanced.Content = advancedPanel;
+        _body.Children.Add(advanced);
+        _fieldHost = advancedPanel;
+        foreach (var key in AllThemeKeys(Application.Current.Resources)
+                     .Where(key => !covered.Contains(key))
+                     .Distinct(StringComparer.Ordinal)
+                     .OrderBy(key => key, StringComparer.OrdinalIgnoreCase))
+        {
+            var existing = Application.Current.TryFindResource(key);
+            if (existing is Brush brush) AddBrushField(key, brush);
+            else if (existing is Color color) AddBrushField(key, new SolidColorBrush(color));
+            else if (existing is CornerRadius radius) AddNumberField(key, radius.TopLeft);
+            else if (existing is Thickness thickness) AddNumberField(key, thickness.Left);
+            else if (existing is double number) AddNumberField(key, number);
+            else if (existing is FontFamily family) AddTextTokenField(key, family.Source);
+        }
+        _fieldHost = _body;
+
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 22, 0, 18) };
         var save = Button("Save theme");
         save.Click += (_, _) => SaveTheme();
         actions.Children.Add(save);
         _body.Children.Add(actions);
+    }
+
+    private static IEnumerable<string> AllThemeKeys(ResourceDictionary dictionary)
+    {
+        foreach (var key in dictionary.Keys)
+            if (key is string text) yield return text;
+        foreach (var child in dictionary.MergedDictionaries)
+            foreach (var key in AllThemeKeys(child)) yield return key;
     }
 
     private void SectionHeader(string title)
@@ -131,7 +168,7 @@ public sealed class ThemePropertyEditor : UserControl
         var text = new TextBlock { Text = label, FontSize = 13, VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 0, 10, 0), TextWrapping = TextWrapping.Wrap };
         grid.Children.Add(text);
-        _body.Children.Add(grid);
+        _fieldHost.Children.Add(grid);
         return grid;
     }
 
