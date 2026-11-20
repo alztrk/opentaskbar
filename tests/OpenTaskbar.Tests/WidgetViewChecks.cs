@@ -52,6 +52,25 @@ internal static class WidgetViewChecks
             checks += NetSpeedChecks.Run(app);
             checks += BluetoothBatteryChecks.Run(app);
 
+            // The widget catalogue is derived from registered widget definitions.
+            var availableWidgets = new DockWidgetService(TimeProvider.System).CreateOptions([], []);
+            Check(availableWidgets.Any(x => x.Id == "Clock" && x.Category == "Time & Weather")
+                && availableWidgets.Any(x => x.Id == "AiUsage" && x.Category == "AI Quotas"),
+                "Widget categories must be derived from the real catalogue.");
+            var expanded = availableWidgets.First(x => x.Id == "Clock");
+            var adjacent = availableWidgets.First(x => x.Id == "Weather");
+            expanded.IsSettingsExpanded = true;
+            var catalogueGrid = new OpenTaskbar.Views.ExpandableWidgetGrid { MinItemWidth = 270 };
+            var expandedItem = new Border { DataContext = expanded, Height = 120 };
+            var otherItem = new Border { DataContext = adjacent, Height = 45 };
+            catalogueGrid.Children.Add(expandedItem);
+            catalogueGrid.Children.Add(otherItem);
+            catalogueGrid.Measure(new Size(620, double.PositiveInfinity));
+            catalogueGrid.Arrange(new Rect(0, 0, 620, 220));
+            Check(Math.Abs(expandedItem.ActualWidth - 620) < 1
+                && otherItem.TranslatePoint(new Point(), catalogueGrid).Y >= expandedItem.ActualHeight,
+                "An expanded widget must span the full row and push following items downward.");
+
             var settingsAction = new Button { Content = UiText.Get("Apply") };
             var selectedTab = new TabItem { Header = UiText.Get("General"), Content = settingsAction };
             var settingsTabs = new TabControl { Items = { selectedTab }, SelectedIndex = 0 };
