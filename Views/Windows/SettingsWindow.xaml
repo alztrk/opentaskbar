@@ -247,6 +247,7 @@
                                 </WrapPanel>
                             </StackPanel></Border>
 
+                            <views:ThemePropertyEditor x:Name="CustomThemeEditor"/>
                             <Border Style="{StaticResource SettingsRow}"><DockPanel>
                                 <ComboBox x:Name="LanguageBox" DockPanel.Dock="Right" Width="220" VerticalAlignment="Center"
                                           AutomationProperties.Name="{local:Loc Language}"
