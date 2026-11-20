@@ -15,10 +15,29 @@ public static class ThemeManager
     private static readonly Dictionary<string, Brush> MaterialSources = new(StringComparer.Ordinal);
     private static double _opacity = 0.9;
     private static double _settingsOpacity = 0.95;
+    public static AppTheme EffectiveTheme { get; private set; } = AppTheme.Dark;
+
+    private static AppTheme WindowsTheme()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+            return key?.GetValue("AppsUseLightTheme") is int light && light != 0
+                ? AppTheme.Light : AppTheme.Dark;
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException)
+        {
+            return AppTheme.Dark;
+        }
+    }
+
+
 
     public static void Apply(AppTheme theme, double opacity = 0.9)
     {
-        var source = $"/OpenTaskbar;component/Design/Palettes/{theme}.xaml";
+        EffectiveTheme = theme == AppTheme.System ? WindowsTheme() : theme;
+        var source = $"/OpenTaskbar;component/Design/Palettes/{EffectiveTheme}.xaml";
         var dictionaries = Application.Current.Resources.MergedDictionaries;
         if (_palette?.Source?.OriginalString != source)
         {
