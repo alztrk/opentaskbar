@@ -250,6 +250,7 @@ public partial class SettingsWindow : Window
             {
                 var localized = localizedOptions[option.Id];
                 option.UpdateText(localized.Label, localized.Description);
+                option.RefreshInstallLabels();
             }
             RefreshWidgetPreviews();
         }
