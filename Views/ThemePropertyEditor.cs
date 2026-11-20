@@ -100,8 +100,8 @@ public sealed class ThemePropertyEditor : UserControl
                 if (existing is null) continue;
                 if (key == "DockBackgroundMode") AddModeField(key, existing.ToString() ?? "Glass");
                 else if (existing is Brush brush) AddBrushField(key, brush);
-                else if (existing is CornerRadius radius) AddNumberField(key, radius.TopLeft);
-                else if (existing is Thickness thickness) AddNumberField(key, thickness.Left);
+                else if (existing is CornerRadius radius) AddCornerField(key, radius);
+                else if (existing is Thickness thickness) AddThicknessField(key, thickness);
                 else if (existing is double value) AddNumberField(key, value);
                 else if (existing is FontFamily family) AddTextTokenField(key, family.Source);
             }
@@ -126,7 +126,7 @@ public sealed class ThemePropertyEditor : UserControl
             var existing = Application.Current.TryFindResource(key);
             if (existing is Brush brush) AddBrushField(key, brush);
             else if (existing is Color color) AddBrushField(key, new SolidColorBrush(color));
-            else if (existing is CornerRadius radius) AddNumberField(key, radius.TopLeft);
+            else if (existing is CornerRadius radius) AddCornerField(key, radius);
             else if (existing is Thickness thickness) AddNumberField(key, thickness.Left);
             else if (existing is double number) AddNumberField(key, number);
             else if (existing is FontFamily family) AddTextTokenField(key, family.Source);
@@ -322,6 +322,35 @@ public sealed class ThemePropertyEditor : UserControl
                 && value is >= 0 and <= 2048)
                 UpdateToken(key, JsonValue.Create(value));
             else field.Text = initial.ToString("0.##", CultureInfo.InvariantCulture);
+        };
+    }
+
+    private void AddThicknessField(string key, Thickness initial)
+    {
+        var value = string.Join(",", new[] { initial.Left, initial.Top, initial.Right, initial.Bottom }
+            .Select(x => x.ToString("0.##", CultureInfo.InvariantCulture)));
+        AddFourValueField(key, value);
+    }
+
+    private void AddCornerField(string key, CornerRadius initial)
+    {
+        var value = string.Join(",", new[] { initial.TopLeft, initial.TopRight, initial.BottomRight, initial.BottomLeft }
+            .Select(x => x.ToString("0.##", CultureInfo.InvariantCulture)));
+        AddFourValueField(key, value);
+    }
+
+    private void AddFourValueField(string key, string initial)
+    {
+        var field = AddTextField(key, initial);
+        field.ToolTip = "Four values separated by commas, in WPF order.";
+        field.LostFocus += (_, _) =>
+        {
+            var parts = field.Text.Split(',', StringSplitOptions.TrimEntries);
+            var valid = parts.Length == 4 && parts.All(part =>
+                double.TryParse(part, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
+                && number is >= 0 and <= 2048);
+            if (valid) UpdateToken(key, JsonValue.Create(field.Text));
+            else field.Text = initial;
         };
     }
 
