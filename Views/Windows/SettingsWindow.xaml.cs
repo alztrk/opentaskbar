@@ -58,6 +58,7 @@ public partial class SettingsWindow : Window
         }
         AttachWidgetSettingsPanels();
         CustomThemeEditor.ThemeSaved += (_, _) => ReloadThemePacks((ThemePackBox.SelectedItem as ThemePackChoice)?.Id);
+        CustomThemeEditor.ThemeCreated += (_, id) => ReloadThemePacks(id);
         var widgetView = new ListCollectionView(_widgetOptions);
         widgetView.SortDescriptions.Add(new SortDescription(nameof(DockWidgetOption.CategoryOrder), ListSortDirection.Ascending));
         widgetView.GroupDescriptions.Add(new PropertyGroupDescription(nameof(DockWidgetOption.Category)));
@@ -423,7 +424,9 @@ public partial class SettingsWindow : Window
     private void SelectLanguage(AppLanguage language)
     {
         var selected = UiText.Languages.FirstOrDefault(candidate => candidate == language);
-        LanguageBox.SelectedItem = LanguageCatalog.IsSupported(selected) ? selected : AppLanguage.English;
+        LanguageBox.SelectedItem = UiText.Languages.FirstOrDefault(candidate => candidate == selected)
+            ?? UiText.Languages.FirstOrDefault(candidate => candidate == AppLanguage.English);
+        if (LanguageBox.SelectedIndex < 0 && LanguageBox.Items.Count > 0) LanguageBox.SelectedIndex = 0;
     }
 
     private void LanguageBox_SelectionChanged(object sender, SelectionChangedEventArgs e) => PreferenceEdited(sender, e);
@@ -563,11 +566,14 @@ public partial class SettingsWindow : Window
 
     private void ReloadThemePacks(string? selected)
     {
+        var wasInitializing = _initializing;
         _initializing = true;
-        LoadThemePacks(selected);
-        _initializing = false;
+        try { LoadThemePacks(selected); }
+        finally { _initializing = wasInitializing; }
         ThemePacks.Select(selected, reload: true);
         ThemePacks.ApplyWidgets(_preferences.Current.Theme);
+        // New, duplicated, and imported packs should remain selected after restart.
+        if (!wasInitializing) TriggerAutoSave(immediate: true);
     }
 
     private AiProviders ReadAiProviders() =>
