@@ -262,7 +262,7 @@ public partial class SettingsWindow : Window
     {
         if (!_sourceReady) return;
         var glass = SettingsBackdrop.TryEnable(this, _preferences.Current.Theme);
-        SettingsFrame.SetResourceReference(System.Windows.Controls.Border.BackgroundProperty, glass ? "SettingsGlassMaterial" : "SettingsBackground");
+        SettingsFrame.SetResourceReference(System.Windows.Controls.Border.BackgroundProperty, "SettingsGlassMaterial");
         if (glass)
         {
             WindowChrome.GetWindowChrome(this).GlassFrameThickness = new Thickness(-1);
