@@ -474,6 +474,21 @@ public partial class SettingsWindow : Window
                 ThemeManager.EffectiveTheme);
     }
 
+    private void OpenGithub_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            using var _ = Process.Start(new ProcessStartInfo("https://github.com/alztrk/opentaskbar")
+            {
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        {
+            AppLog.Warning("Cannot open the OpenTaskbar GitHub page: " + ex.Message);
+        }
+    }
+
     private void ThemePackOpenFolder_Click(object sender, RoutedEventArgs e)
     {
         try
