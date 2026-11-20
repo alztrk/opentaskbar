@@ -85,6 +85,8 @@ public partial class SettingsWindow : Window
             _preferences.Changed -= Preferences_Changed;
             if (_source is { IsDisposed: false }) _source.RemoveHook(WindowProc);
             WidgetOptionsList.ItemsSource = null;
+            foreach (var option in _widgetOptions)
+                if (option.NativePreview is OpenTaskbar.Widgets.DockWidget preview) preview.Dispose();
             _widgetOptions.Clear();
             _widgetDensityBoxes.Clear();
             WeatherCountryBox.ItemsSource = null;
@@ -250,6 +252,14 @@ public partial class SettingsWindow : Window
                 option.UpdateText(localized.Label, localized.Description);
             }
             RefreshWidgetPreviews();
+        }
+        foreach (var option in _widgetOptions)
+        {
+            if (option.NativePreview is OpenTaskbar.Widgets.DockWidget native)
+            {
+                native.ApplySettings(_preferences.Current);
+                native.Visibility = Visibility.Visible;
+            }
         }
         ThemeManager.SetSurfaceOpacity(Math.Round(OpacitySlider.Value) / 100);
         CustomThemeEditor.LoadTheme((ThemePackBox.SelectedItem as ThemePackChoice)?.Id, _preferences.Current.Theme);
@@ -647,6 +657,16 @@ public partial class SettingsWindow : Window
         var expand = !option.IsSettingsExpanded;
         foreach (var other in _widgetOptions)
             other.IsSettingsExpanded = ReferenceEquals(other, option) && expand;
+        if (expand && ReferenceEquals(option.NativePreview, option.Preview))
+        {
+            var native = WidgetCoordinator.CreatePreviewWidget(option.Id);
+            if (native is not null)
+            {
+                native.ApplySettings(ReadSelection());
+                native.Visibility = Visibility.Visible;
+                option.NativePreview = native;
+            }
+        }
         UpdateWidgetOptionState();
         WidgetOptionsList.InvalidateMeasure();
     }
