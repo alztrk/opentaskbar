@@ -93,6 +93,10 @@ public sealed class DockWidgetOption(string id, string label, string description
             _description = description;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Description)));
         }
+    }
+
+    public void RefreshInstallLabels()
+    {
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstallActionLabel)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(InstallStatus)));
     }
