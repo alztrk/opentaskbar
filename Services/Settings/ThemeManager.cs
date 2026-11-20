@@ -14,6 +14,7 @@ public static class ThemeManager
     private static readonly ResourceDictionary Overrides = new();
     private static readonly Dictionary<string, Brush> MaterialSources = new(StringComparer.Ordinal);
     private static double _opacity = 0.9;
+    private static double _settingsOpacity = 0.95;
 
     public static void Apply(AppTheme theme, double opacity = 0.9)
     {
@@ -31,6 +32,7 @@ public static class ThemeManager
         dictionaries.Add(Materials);
         dictionaries.Add(Overrides);
         SetSurfaceOpacity(opacity);
+        SetSettingsOpacity(_settingsOpacity);
     }
 
     /// <summary>True for the dictionaries this class owns, which theme packs must not treat as token definitions.</summary>
@@ -48,7 +50,7 @@ public static class ThemeManager
             else Overrides[key] = value;
         }
 
-        if (_palette is not null) SetSurfaceOpacity(_opacity);
+        if (_palette is not null) { SetSurfaceOpacity(_opacity); SetSettingsOpacity(_settingsOpacity); }
     }
 
     public static void SetSurfaceOpacity(double opacity)
@@ -57,12 +59,19 @@ public static class ThemeManager
         if (_palette is null) throw new InvalidOperationException("The theme must be initialized before its materials.");
         _opacity = opacity;
         var alpha = (byte)Math.Round(opacity * 255);
-        var settingsSource = Overrides.Contains("SettingsBackground") ? Overrides["SettingsBackground"] : _palette["SettingsBackground"];
-        Materials["SettingsGlassMaterial"] = WithAlpha((Brush)settingsSource, alpha);
         foreach (var key in MaterialKeys)
         {
             Materials[key] = WithAlpha(MaterialSources.TryGetValue(key, out var custom) ? custom : (Brush)_palette[key], alpha);
         }
+    }
+
+    public static void SetSettingsOpacity(double opacity)
+    {
+        if (!double.IsFinite(opacity) || opacity is < 0.6 or > 1) throw new ArgumentOutOfRangeException(nameof(opacity));
+        if (_palette is null) throw new InvalidOperationException("The theme must be initialized before its materials.");
+        _settingsOpacity = opacity;
+        var source = Overrides.Contains("SettingsBackground") ? Overrides["SettingsBackground"] : _palette["SettingsBackground"];
+        Materials["SettingsGlassMaterial"] = WithAlpha((Brush)source, (byte)Math.Round(opacity * 255));
     }
 
     private static Brush WithAlpha(Brush source, byte alpha)
