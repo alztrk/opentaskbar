@@ -465,8 +465,16 @@
                             <Border Style="{StaticResource SettingsRow}"><StackPanel>
                                 <DockPanel>
                                     <ComboBox x:Name="ThemePackBox" DockPanel.Dock="Right" Width="220" VerticalAlignment="Center"
-                                              DisplayMemberPath="Name" AutomationProperties.Name="{local:Loc ThemePack}"
-                                              SelectionChanged="ThemePackBox_SelectionChanged" />
+                                              Foreground="{DynamicResource TextPrimary}"
+                                              AutomationProperties.Name="{local:Loc ThemePack}"
+                                              SelectionChanged="ThemePackBox_SelectionChanged">
+                                        <ComboBox.ItemTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding Name}" Foreground="{DynamicResource TextPrimary}"
+                                                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+                                            </DataTemplate>
+                                        </ComboBox.ItemTemplate>
+                                    </ComboBox>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
                                         <TextBlock Text="{local:Loc ThemePack}" Style="{StaticResource SettingsRowLabel}" />
                                         <TextBlock Text="Choose or create a theme to customize dock, widgets and settings surfaces." Style="{StaticResource SettingsRowDescription}" />
@@ -607,6 +615,7 @@
 
                             <Border Style="{StaticResource SettingsRow}"><DockPanel>
                                 <ComboBox x:Name="LanguageBox" DockPanel.Dock="Right" Width="220" VerticalAlignment="Center"
+                                          Foreground="{DynamicResource TextPrimary}"
                                           AutomationProperties.Name="{local:Loc Language}"
                                           SelectionChanged="LanguageBox_SelectionChanged">
                                     <ComboBox.ItemTemplate>
@@ -616,7 +625,7 @@
                                                     <Image Source="{Binding FlagImage}" Width="22" Height="15"
                                                            Stretch="UniformToFill" RenderOptions.BitmapScalingMode="HighQuality" />
                                                 </Border>
-                                                <TextBlock Text="{Binding NativeName}" VerticalAlignment="Center" />
+                                                <TextBlock Text="{Binding NativeName}" VerticalAlignment="Center" Foreground="{DynamicResource TextPrimary}"/>
                                             </StackPanel>
                                         </DataTemplate>
                                     </ComboBox.ItemTemplate>
