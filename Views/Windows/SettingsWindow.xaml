@@ -649,6 +649,15 @@
                                 </StackPanel>
                             </DockPanel></Border>
 
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+                <TabItem Header="About" Tag="&#xE946;">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False" HorizontalContentAlignment="Stretch">
+                        <StackPanel Margin="{StaticResource SettingsPageInset}" MaxWidth="{StaticResource SettingsReadingWidth}" HorizontalAlignment="Stretch">
+                            <TextBlock Text="About OpenTaskbar" Style="{StaticResource SettingsHeading}"/>
+                            <TextBlock Text="An open-source taskbar for Windows." Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,18"/>
+                            <TextBlock Text="Application" Style="{StaticResource SettingsSectionHeading}"/>
                             <TextBlock Text="{local:Loc Diagnostics}" Style="{StaticResource SettingsSectionHeading}" />
                             <Border Style="{StaticResource SettingsRow}" Padding="16,14"><DockPanel>
                                 <TextBlock x:Name="AppVersionText" DockPanel.Dock="Right" Style="{StaticResource SettingsRowLabel}" Foreground="{DynamicResource TextSecondary}" VerticalAlignment="Center" />
@@ -662,6 +671,13 @@
                                 <TextBlock Text="{local:Loc OpenLogFile}" Style="{StaticResource SettingsRowLabel}" VerticalAlignment="Center" />
                             </DockPanel></Border>
 
+
+                            <Border Style="{StaticResource SettingsRow}">
+                                <DockPanel>
+                                    <Button Content="GitHub repository" DockPanel.Dock="Right" Style="{StaticResource SettingsButton}" Click="OpenGithub_Click"/>
+                                    <TextBlock Text="Source code" Style="{StaticResource SettingsRowLabel}" VerticalAlignment="Center"/>
+                                </DockPanel>
+                            </Border>
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>
