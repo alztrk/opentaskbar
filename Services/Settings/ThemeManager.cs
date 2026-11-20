@@ -32,7 +32,7 @@ public static class ThemeManager
         dictionaries.Add(Materials);
         dictionaries.Add(Overrides);
         SetSurfaceOpacity(opacity);
-        SetSettingsOpacity(_settingsOpacity);
+        SetSettingsOpacity(ThemeSettingsOpacity());
     }
 
     /// <summary>True for the dictionaries this class owns, which theme packs must not treat as token definitions.</summary>
@@ -71,13 +71,41 @@ public static class ThemeManager
         }
     }
 
+    private static double ThemeSettingsOpacity()
+    {
+        if (Overrides.TryGetValue("SettingsBackgroundOpacity", out var value) && value is double themed)
+            return Math.Clamp(themed, 0.6, 1);
+        return Application.Current.TryFindResource("SettingsBackgroundOpacity") is double fallback
+            ? Math.Clamp(fallback, 0.6, 1) : 0.95;
+    }
+
+    private static Brush WithScaledAlpha(Brush source, double opacity)
+    {
+        var brush = source.Clone();
+        if (brush is SolidColorBrush solid)
+        {
+            var c = solid.Color;
+            solid.Color = Color.FromArgb((byte)Math.Round(c.A * opacity), c.R, c.G, c.B);
+        }
+        else if (brush is GradientBrush gradient)
+        {
+            foreach (var stop in gradient.GradientStops)
+            {
+                var c = stop.Color;
+                stop.Color = Color.FromArgb((byte)Math.Round(c.A * opacity), c.R, c.G, c.B);
+            }
+        }
+        brush.Freeze();
+        return brush;
+    }
+
     public static void SetSettingsOpacity(double opacity)
     {
         if (!double.IsFinite(opacity) || opacity is < 0.6 or > 1) throw new ArgumentOutOfRangeException(nameof(opacity));
         if (_palette is null) throw new InvalidOperationException("The theme must be initialized before its materials.");
         _settingsOpacity = opacity;
         var source = Overrides.Contains("SettingsBackground") ? Overrides["SettingsBackground"] : _palette["SettingsBackground"];
-        Materials["SettingsGlassMaterial"] = WithAlpha((Brush)source, (byte)Math.Round(opacity * 255));
+        Materials["SettingsGlassMaterial"] = WithScaledAlpha((Brush)source, opacity);
     }
 
     private static Brush WithAlpha(Brush source, byte alpha)
