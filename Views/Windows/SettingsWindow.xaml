@@ -95,8 +95,8 @@
                                 <CheckBox x:Name="UpdatesToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
                                           AutomationProperties.Name="{local:Loc CheckUpdatesSetting}" />
                                 <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
-                                    <TextBlock Text="{local:Loc DockEdge}" Style="{StaticResource SettingsRowLabel}" />
-                                    <TextBlock Text="{local:Loc DockEdgeDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    <TextBlock Text="{local:Loc CheckUpdatesSetting}" Style="{StaticResource SettingsRowLabel}" />
+                                    <TextBlock Text="{local:Loc CheckUpdatesSettingDescription}" Style="{StaticResource SettingsRowDescription}" />
                                 </StackPanel>
                             </DockPanel></Border>
                             </StackPanel></Border>
@@ -600,21 +600,6 @@
                                     </GroupStyle>
                                 </ItemsControl.GroupStyle>
                             </ItemsControl>
-<TextBlock Text="{local:Loc WidgetDensity}" Style="{StaticResource SettingsSectionHeading}" />
-                            <!-- Widget density -->
-                            <Border Style="{StaticResource SettingsRow}"><DockPanel>
-                                <Border DockPanel.Dock="Right" Width="240" Height="32" CornerRadius="7" Background="{DynamicResource SettingsControl}" BorderBrush="{DynamicResource StrokeSubtle}" BorderThickness="1" Padding="2" VerticalAlignment="Center">
-                                    <UniformGrid Columns="3">
-                                        <RadioButton  GroupName="WidgetDensity" Content="{local:Loc WidgetDensityAuto}" Style="{StaticResource SettingsSegmentChoice}" />
-                                        <RadioButton  GroupName="WidgetDensity" Content="{local:Loc WidgetDensityCompact}" Style="{StaticResource SettingsSegmentChoice}" />
-                                        <RadioButton  GroupName="WidgetDensity" Content="{local:Loc WidgetDensityFull}" Style="{StaticResource SettingsSegmentChoice}" />
-                                    </UniformGrid>
-                                </Border>
-                                <StackPanel VerticalAlignment="Center" Margin="0,0,16,0">
-                                    <TextBlock Text="{local:Loc WidgetDensity}" Style="{StaticResource SettingsRowLabel}" />
-                                </StackPanel>
-                            </DockPanel></Border>
-
                             <Grid x:Name="WidgetPanelsPool" Visibility="Collapsed">
                                 <Border x:Name="ClockOptions" Visibility="Collapsed" Background="Transparent" BorderThickness="0">
                                     <StackPanel>

@@ -22,13 +22,14 @@ public sealed class ThemePropertyEditor : UserControl
     [
         ("Colors", ["TextPrimary", "TextSecondary", "AccentBrush", "AccentText", "StrokeSubtle",
                     "StrokeFocus", "SurfaceSelected", "SurfaceHover"]),
-        ("Dock background", ["DockBackgroundMode", "DockMaterial", "DockBorderMaterial", "DockHighlight"]),
-        ("Dock geometry", ["DockRadius", "DockInnerRadius", "DockWidgetPadding", "DockShadowBlur", "DockShadowOpacity", "DockShadowColor"]),
+        ("Dock", ["DockBackgroundMode", "DockMaterial", "DockBorderMaterial", "DockHighlight",
+                  "DockRadius", "DockInnerRadius", "DockWidgetPadding", "DockShadowBlur", "DockShadowOpacity", "DockShadowColor"]),
         ("Widgets", ["WidgetCard", "WidgetCardStroke", "WidgetTrack", "WidgetAccent",
                      "DockWidgetSurface", "DockWidgetRadius"]),
+        ("Windows & Popups", ["MenuMaterial", "MenuDivider", "SurfacePopup", "MenuLabelWidth", "PopupRadius", "PopupInnerRadius"]),
         ("Settings window", ["SettingsBackground", "SettingsBackgroundOpacity", "SettingsControl", "SettingsControlHover", "SettingsSidebarOverlay"]),
         ("Typography and spacing", ["InterfaceFont", "TextSizeBody", "TextSizeCaption",
-                                    "ControlRadius", "PopupRadius", "SettingsPageInset"])
+                                    "ControlRadius", "SettingsPageInset"])
     ];
 
     private readonly StackPanel _body = new();
