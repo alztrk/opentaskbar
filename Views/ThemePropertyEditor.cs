@@ -23,7 +23,7 @@ public sealed class ThemePropertyEditor : UserControl
         ("Colors", ["TextPrimary", "TextSecondary", "AccentBrush", "AccentText", "StrokeSubtle",
                     "StrokeFocus", "SurfaceSelected", "SurfaceHover"]),
         ("Dock background", ["DockBackgroundMode", "DockMaterial", "DockBorderMaterial", "DockHighlight"]),
-        ("Dock geometry", ["DockRadius", "DockInnerRadius", "DockWidgetPadding"]),
+        ("Dock geometry", ["DockRadius", "DockInnerRadius", "DockWidgetPadding", "DockShadowBlur", "DockShadowOpacity", "DockShadowColor"]),
         ("Widgets", ["WidgetCard", "WidgetCardStroke", "WidgetTrack", "WidgetAccent",
                      "DockWidgetSurface", "DockWidgetRadius"]),
         ("Settings window", ["SettingsBackground", "SettingsBackgroundOpacity", "SettingsControl", "SettingsControlHover", "SettingsSidebarOverlay"]),
@@ -199,7 +199,7 @@ public sealed class ThemePropertyEditor : UserControl
         field.LostFocus += (_, _) =>
         {
             if (double.TryParse(field.Text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value)
-                && value >= (key == "SettingsBackgroundOpacity" ? 0.6 : 0) && value <= (key == "SettingsBackgroundOpacity" ? 1 : 2048))
+                && value >= (key == "SettingsBackgroundOpacity" ? 0.6 : 0) && value <= (key is "SettingsBackgroundOpacity" or "DockShadowOpacity" ? 1 : 2048))
                 UpdateToken(key, JsonValue.Create(value));
             else field.Text = initial.ToString("0.##", CultureInfo.InvariantCulture);
         };
