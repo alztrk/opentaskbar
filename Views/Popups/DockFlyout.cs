@@ -83,7 +83,7 @@ public sealed class DockFlyout
             CleanRegistry();
             for (var i = 0; i < FlyoutRegistry.Count; i++)
             {
-                if (FlyoutRegistry[i].TryGetTarget(out var flyout) && flyout._popup.IsOpen)
+                if (FlyoutRegistry[i].TryGetTarget(out var flyout) && flyout._popup.Dispatcher.CheckAccess() && flyout._popup.IsOpen)
                     return true;
             }
             return false;
@@ -97,7 +97,7 @@ public sealed class DockFlyout
             CleanRegistry();
             for (var i = 0; i < FlyoutRegistry.Count; i++)
             {
-                if (FlyoutRegistry[i].TryGetTarget(out var flyout) && flyout._popup.IsOpen)
+                if (FlyoutRegistry[i].TryGetTarget(out var flyout) && flyout._popup.Dispatcher.CheckAccess() && flyout._popup.IsOpen)
                 {
                     if (flyout._root.IsMouseOver || flyout._frame.IsMouseOver)
                         return true;
@@ -112,8 +112,14 @@ public sealed class DockFlyout
         CleanRegistry();
         for (var i = 0; i < FlyoutRegistry.Count; i++)
         {
-            if (FlyoutRegistry[i].TryGetTarget(out var flyout) && flyout._popup.IsOpen)
-                flyout.Close(restoreFocus);
+            if (!FlyoutRegistry[i].TryGetTarget(out var flyout)) continue;
+            var dispatcher = flyout._popup.Dispatcher;
+            if (dispatcher.CheckAccess())
+            {
+                if (flyout._popup.IsOpen) flyout.Close(restoreFocus);
+            }
+            else if (!dispatcher.HasShutdownStarted && !dispatcher.HasShutdownFinished)
+                dispatcher.BeginInvoke(new Action(() => flyout.Close(restoreFocus)));
         }
     }
 
@@ -294,10 +300,14 @@ public sealed class DockFlyout
         CleanRegistry();
         for (var i = 0; i < FlyoutRegistry.Count; i++)
         {
-            if (FlyoutRegistry[i].TryGetTarget(out var flyout) && !ReferenceEquals(flyout, this) && flyout._popup.IsOpen)
+            if (!FlyoutRegistry[i].TryGetTarget(out var flyout) || ReferenceEquals(flyout, this)) continue;
+            var dispatcher = flyout._popup.Dispatcher;
+            if (dispatcher.CheckAccess())
             {
-                flyout.Close();
+                if (flyout._popup.IsOpen) flyout.Close();
             }
+            else if (!dispatcher.HasShutdownStarted && !dispatcher.HasShutdownFinished)
+                dispatcher.BeginInvoke(new Action(() => flyout.Close()));
         }
         if (_currentTarget is not null && !ReferenceEquals(_currentTarget, target))
         {
