@@ -91,6 +91,25 @@ public sealed class WidgetCoordinator : IDisposable
     /// <summary>When true, the host window owns widget placement so all dock item kinds share one strip.</summary>
     public bool ExternalLayout { get; set; }
 
+    /// <summary>Create a visual preview using the real widget control without activating its background polling.</summary>
+    public static DockWidget? CreatePreviewWidget(string id) => id switch
+    {
+        "Clock" => new ClockWidget(),
+        "Media" => new MediaWidget(),
+        "Desktops" => new DesktopsWidget(),
+        "SystemStats" => new SystemStatsWidget(),
+        "Focus" => new FocusWidget(),
+        "Weather" => new WeatherWidget(),
+        "NetSpeed" => new NetSpeedWidget(),
+        "BluetoothBattery" => new BluetoothBatteryWidget(),
+        "AiUsage" => new AiUsageWidget(),
+        "Audio" => new AudioWidget(),
+        "QuickSettings" => new QuickSettingsWidget(),
+        "Tray" => new TrayWidget(),
+        "Search" => new SearchWidget(),
+        _ => null
+    };
+
     public IReadOnlyDictionary<string, DockWidget> ActiveWidgets => _widgets
         .Where(slot => slot.Widget is not null)
         .ToDictionary(slot => slot.Id, slot => slot.Widget!);
