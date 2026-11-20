@@ -86,9 +86,9 @@ public sealed class ThemePropertyEditor : UserControl
 
         _message.Text = "Edit the selected theme. Changes are stored in its theme pack.";
         SectionHeader("Theme information");
-        _name = AddTextField("Name", _manifest["name"]?.ToString() ?? pack.DisplayName);
-        _author = AddTextField("Author", _manifest["author"]?.ToString() ?? string.Empty);
-        _description = AddTextField("Description", _manifest["description"]?.ToString() ?? string.Empty);
+        _name = AddTextField("Name", ReadManifest("Name") ?? pack.DisplayName);
+        _author = AddTextField("Author", ReadManifest("Author") ?? string.Empty);
+        _description = AddTextField("Description", ReadManifest("Description") ?? string.Empty);
         foreach (var (title, keys) in Sections)
         {
             SectionHeader(title);
@@ -244,6 +244,16 @@ public sealed class ThemePropertyEditor : UserControl
         _message.Text = "Unsaved changes";
     }
 
+    private string? ReadManifest(string name) =>
+        _manifest?.FirstOrDefault(property => string.Equals(property.Key, name, StringComparison.OrdinalIgnoreCase)).Value?.ToString();
+
+    private void SetManifest(string name, string value)
+    {
+        if (_manifest is null) return;
+        var key = _manifest.FirstOrDefault(property => string.Equals(property.Key, name, StringComparison.OrdinalIgnoreCase)).Key ?? name;
+        _manifest[key] = value;
+    }
+
     private void SaveTheme()
     {
         if (_id is null || _widgetPack is null || _manifest is null) return;
@@ -258,9 +268,9 @@ public sealed class ThemePropertyEditor : UserControl
                 _message.Text = "Theme name must contain 1–120 characters.";
                 return;
             }
-            _manifest["name"] = name;
-            _manifest["author"] = _author?.Text.Trim() ?? string.Empty;
-            _manifest["description"] = _description?.Text.Trim() ?? string.Empty;
+            SetManifest("Name", name);
+            SetManifest("Author", _author?.Text.Trim() ?? string.Empty);
+            SetManifest("Description", _description?.Text.Trim() ?? string.Empty);
 
             var widgetDirectory = Path.Combine(pack.Directory, ThemePack.WidgetFolder);
             Directory.CreateDirectory(widgetDirectory);
