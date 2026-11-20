@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - master
-      - settings-redesign-theme-opacity
+      - redesign
   pull_request:
     branches:
       - master
