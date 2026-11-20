@@ -5,6 +5,8 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Input;
+using System.Windows.Shapes;
 
 namespace OpenTaskbar.Views;
 
@@ -22,6 +24,20 @@ public sealed class ThemeBrushPicker : Window
     private readonly ListBox _stopList = new() { MinHeight = 82, MaxHeight = 130 };
     private readonly Border _preview = new() { Height = 38, CornerRadius = new CornerRadius(5), Margin = new Thickness(0, 12, 0, 10) };
     private readonly Slider[] _channels = new Slider[3];
+    private readonly Grid _colorField = new() { Width = 305, Height = 126, ClipToBounds = true };
+    private readonly Canvas _colorCursorLayer = new() { IsHitTestVisible = false };
+    private readonly Ellipse _colorCursor = new()
+    {
+        Width = 12, Height = 12, Stroke = Brushes.White, StrokeThickness = 2,
+        Fill = Brushes.Transparent, IsHitTestVisible = false
+    };
+    private readonly Slider _hueSlider = new()
+    {
+        Minimum = 0, Maximum = 360, Width = 305,
+        TickFrequency = 1, IsSnapToTickEnabled = true
+    };
+    private double _hue, _sat, _value;
+
     private readonly TextBox _hex = new() { Width = 105, Margin = new Thickness(8, 0, 0, 0) };
     private readonly Slider _angle = new() { Minimum = 0, Maximum = 360, Value = 90, Width = 180 };
     private TabControl _tabs = null!;
@@ -33,8 +49,8 @@ public sealed class ThemeBrushPicker : Window
     public ThemeBrushPicker(Brush source)
     {
         Title = "Color";
-        Width = 390;
-        Height = 565;
+        Width = 398;
+        Height = 655;
         MinWidth = 350;
         MinHeight = 480;
         ResizeMode = ResizeMode.CanResize;
@@ -135,6 +151,59 @@ public sealed class ThemeBrushPicker : Window
         _tabs.SelectionChanged += (_, e) => { if (ReferenceEquals(e.Source, _tabs)) { SyncChannels(); UpdatePreview(); } };
         _tabs.SelectedIndex = source is LinearGradientBrush ? 1 : 0;
 
+        var colorArea = new StackPanel { Margin = new Thickness(6, 12, 0, 8) };
+        colorArea.Children.Add(new TextBlock
+        {
+            Text = "Color", FontWeight = FontWeights.SemiBold,
+            Margin = new Thickness(0, 0, 0, 9)
+        });
+        _colorField.Children.Add(new Rectangle
+        {
+            Fill = new LinearGradientBrush(Colors.White, Color.FromArgb(0, 255, 255, 255),
+                new Point(0, 0), new Point(1, 0))
+        });
+        _colorField.Children.Add(new Rectangle
+        {
+            Fill = new LinearGradientBrush(Color.FromArgb(0, 0, 0, 0), Colors.Black,
+                new Point(0, 0), new Point(0, 1))
+        });
+        _colorCursorLayer.Children.Add(_colorCursor);
+        _colorField.Children.Add(_colorCursorLayer);
+        _colorField.MouseLeftButtonDown += (_, e) =>
+        {
+            _colorField.CaptureMouse();
+            ChooseColorAt(e.GetPosition(_colorField));
+        };
+        _colorField.MouseMove += (_, e) =>
+        {
+            if (e.LeftButton == MouseButtonState.Pressed && _colorField.IsMouseCaptured)
+                ChooseColorAt(e.GetPosition(_colorField));
+        };
+        _colorField.MouseLeftButtonUp += (_, _) => _colorField.ReleaseMouseCapture();
+        colorArea.Children.Add(_colorField);
+
+        var rainbow = new LinearGradientBrush { StartPoint = new Point(0, 0), EndPoint = new Point(1, 0) };
+        rainbow.GradientStops.Add(new GradientStop(Colors.Red, 0));
+        rainbow.GradientStops.Add(new GradientStop(Colors.Yellow, 1d / 6));
+        rainbow.GradientStops.Add(new GradientStop(Colors.Lime, 2d / 6));
+        rainbow.GradientStops.Add(new GradientStop(Colors.Cyan, 3d / 6));
+        rainbow.GradientStops.Add(new GradientStop(Colors.Blue, 4d / 6));
+        rainbow.GradientStops.Add(new GradientStop(Colors.Magenta, 5d / 6));
+        rainbow.GradientStops.Add(new GradientStop(Colors.Red, 1));
+        colorArea.Children.Add(new Border
+        {
+            Height = 8, Width = 305, Background = rainbow,
+            CornerRadius = new CornerRadius(4), Margin = new Thickness(0, 12, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Left
+        });
+        _hueSlider.ValueChanged += (_, _) =>
+        {
+            if (_updating) return;
+            _hue = _hueSlider.Value;
+            SetColor(ColorFromHsv(_hue, _sat, _value, CurrentColor().A));
+        };
+        colorArea.Children.Add(_hueSlider);
+        body.Children.Add(colorArea);
         body.Children.Add(_preview);
         for (var i = 0; i < 3; i++)
         {
