@@ -281,6 +281,7 @@ public sealed class ThemeBrushPicker : Window
         _channels[2].Value = c.B;
         _hex.Text = c.ToString(CultureInfo.InvariantCulture);
         _updating = false;
+        RefreshColorField();
     }
 
     private void RefreshStops(int selected = -1)
@@ -288,6 +289,70 @@ public sealed class ThemeBrushPicker : Window
         _stopList.ItemsSource = null;
         _stopList.ItemsSource = _stops.ToArray();
         if (selected >= 0 && selected < _stops.Count) _stopList.SelectedIndex = selected;
+    }
+
+    private void ChooseColorAt(Point position)
+    {
+        _sat = Math.Clamp(position.X / _colorField.Width, 0, 1);
+        _value = Math.Clamp(1 - position.Y / _colorField.Height, 0, 1);
+        SetColor(ColorFromHsv(_hue, _sat, _value, CurrentColor().A));
+    }
+
+    private void RefreshColorField()
+    {
+        var color = CurrentColor();
+        var (hue, saturation, brightness) = ColorToHsv(color);
+        _hue = hue;
+        _sat = saturation;
+        _value = brightness;
+        _updating = true;
+        _hueSlider.Value = hue;
+        _colorField.Background = new SolidColorBrush(ColorFromHsv(hue, 1, 1));
+        Canvas.SetLeft(_colorCursor, Math.Clamp(saturation * _colorField.Width - 6, -6, _colorField.Width - 6));
+        Canvas.SetTop(_colorCursor, Math.Clamp((1 - brightness) * _colorField.Height - 6, -6, _colorField.Height - 6));
+        _updating = false;
+    }
+
+    private static (double Hue, double Saturation, double Brightness) ColorToHsv(Color color)
+    {
+        var red = color.R / 255d;
+        var green = color.G / 255d;
+        var blue = color.B / 255d;
+        var max = Math.Max(red, Math.Max(green, blue));
+        var min = Math.Min(red, Math.Min(green, blue));
+        var diff = max - min;
+        var hue = 0d;
+        if (diff > 0)
+        {
+            if (max == red) hue = 60 * ((green - blue) / diff % 6);
+            else if (max == green) hue = 60 * ((blue - red) / diff + 2);
+            else hue = 60 * ((red - green) / diff + 4);
+        }
+        if (hue < 0) hue += 360;
+        return (hue, max <= 0 ? 0 : diff / max, max);
+    }
+
+    private static Color ColorFromHsv(double hue, double saturation, double brightness, byte alpha = 255)
+    {
+        hue = (hue % 360 + 360) % 360;
+        saturation = Math.Clamp(saturation, 0, 1);
+        brightness = Math.Clamp(brightness, 0, 1);
+        var chroma = brightness * saturation;
+        var x = chroma * (1 - Math.Abs((hue / 60) % 2 - 1));
+        var shift = brightness - chroma;
+        var (red, green, blue) = hue / 60 switch
+        {
+            < 1 => (chroma, x, 0d),
+            < 2 => (x, chroma, 0d),
+            < 3 => (0d, chroma, x),
+            < 4 => (0d, x, chroma),
+            < 5 => (x, 0d, chroma),
+            _ => (chroma, 0d, x)
+        };
+        return Color.FromArgb(alpha,
+            (byte)Math.Round((red + shift) * 255),
+            (byte)Math.Round((green + shift) * 255),
+            (byte)Math.Round((blue + shift) * 255));
     }
 
     private Brush BuildBrush()
