@@ -98,6 +98,8 @@ public partial class SettingsWindow : Window
         AutoHideSmart.IsChecked = _applied.AutoHide == AutoHideMode.Smart;
         AutoHideAlways.IsChecked = _applied.AutoHide == AutoHideMode.Always;
         OpacitySlider.Value = _applied.SurfaceOpacity * 100;
+        SettingsOpacitySlider.Value = _applied.SettingsOpacity * 100;
+        UpdateSettingsOpacityLabel();
         UpdateOpacityLabel();
         MagnificationToggle.IsChecked = _applied.MagnificationEnabled;
         CompactSize.IsChecked = _applied.Size == DockSize.Compact;
@@ -246,7 +248,9 @@ public partial class SettingsWindow : Window
             RefreshWidgetPreviews();
         }
         ThemeManager.SetSurfaceOpacity(Math.Round(OpacitySlider.Value) / 100);
+        ThemeManager.SetSettingsOpacity(Math.Round(SettingsOpacitySlider.Value) / 100);
         UpdateOpacityLabel();
+        UpdateSettingsOpacityLabel();
         UpdateDockScaleLabel();
         UpdateWidgetOptionState();
         UpdateBackdrop();
@@ -289,6 +293,7 @@ public partial class SettingsWindow : Window
                 : DensityFull.IsChecked == true ? WidgetDensityMode.Full : WidgetDensityMode.Auto,
             WidgetDensityOverrides = ReadWidgetDensityOverrides(),
             SurfaceOpacity = Math.Round(OpacitySlider.Value) / 100,
+            SettingsOpacity = Math.Round(SettingsOpacitySlider.Value) / 100,
             Widgets = enabledWidgets,
             InstalledWidgets = installedWidgets,
             MagnificationEnabled = MagnificationToggle.IsChecked == true,
@@ -1032,6 +1037,8 @@ public partial class SettingsWindow : Window
         AutoHideSmart.IsChecked = settings.AutoHide == AutoHideMode.Smart;
         AutoHideAlways.IsChecked = settings.AutoHide == AutoHideMode.Always;
         OpacitySlider.Value = settings.SurfaceOpacity * 100;
+        SettingsOpacitySlider.Value = settings.SettingsOpacity * 100;
+        UpdateSettingsOpacityLabel();
         UpdateOpacityLabel();
         MagnificationToggle.IsChecked = settings.MagnificationEnabled;
         CompactSize.IsChecked = settings.Size == DockSize.Compact;
@@ -1173,6 +1180,8 @@ public partial class SettingsWindow : Window
         }
     }
 
+    private void UpdateSettingsOpacityLabel() => SettingsOpacityValue.Text = UiText.Format("OpacityPercent", (int)Math.Round(SettingsOpacitySlider.Value));
+
     private void UpdateOpacityLabel() => OpacityValue.Text = UiText.Format("OpacityPercent", (int)Math.Round(OpacitySlider.Value));
 
     private void UpdateDockScaleLabel() => DockScaleValue.Text = UiText.Format("OpacityPercent", (int)Math.Round(DockScaleSlider.Value));
@@ -1213,6 +1222,14 @@ public partial class SettingsWindow : Window
         if (_initializing) return;
         UpdateOpacityLabel();
         ThemeManager.SetSurfaceOpacity(Math.Round(e.NewValue) / 100);
+        PreferenceEdited(sender, e);
+    }
+
+    private void SettingsOpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_initializing) return;
+        UpdateSettingsOpacityLabel();
+        ThemeManager.SetSettingsOpacity(Math.Round(e.NewValue) / 100);
         PreferenceEdited(sender, e);
     }
 
