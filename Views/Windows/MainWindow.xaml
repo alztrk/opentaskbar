@@ -152,19 +152,16 @@
         <Grid x:Name="DockSurface" Grid.Row="1" HorizontalAlignment="Stretch"
               Margin="{StaticResource DockInset}" VerticalAlignment="Bottom"
               ContextMenu="{StaticResource DockContextMenu}"
+              PreviewMouseMove="DockSurface_PreviewMouseMove"
               MouseEnter="DockSurface_MouseEnter" MouseMove="DockSurface_MouseMove" MouseLeave="DockSurface_MouseLeave"
               MouseWheel="DockSurface_MouseWheel">
             <Grid.RenderTransform>
                 <TranslateTransform x:Name="DockSurfaceTranslate" Y="0" />
             </Grid.RenderTransform>
-            <!-- Pure-WPF concentric shadow rings avoid DropShadowEffect pixel shaders and offscreen render targets. -->
-            <Border x:Name="DockShadow4" Margin="-12,-8,-12,-16" CornerRadius="36" BorderThickness="4" BorderBrush="#0505070B" Background="Transparent" IsHitTestVisible="False" />
-            <Border x:Name="DockShadow3" Margin="-8,-5,-8,-11" CornerRadius="31" BorderThickness="3" BorderBrush="#0A05070B" Background="Transparent" IsHitTestVisible="False" />
-            <Border x:Name="DockShadow2" Margin="-5,-3,-5,-7" CornerRadius="27" BorderThickness="3" BorderBrush="#1205070B" Background="Transparent" IsHitTestVisible="False" />
-            <Border x:Name="DockShadow1" Margin="-2,-1,-2,-3" CornerRadius="24" BorderThickness="2" BorderBrush="#1C05070B" Background="Transparent" IsHitTestVisible="False" />
             <Border x:Name="DockFrame" Padding="{StaticResource DockPadding}"
                     Background="{DynamicResource DockMaterial}" BorderBrush="{DynamicResource DockBorderMaterial}"
-                    BorderThickness="{StaticResource ControlStroke}" CornerRadius="{StaticResource DockRadius}">
+                    BorderThickness="{StaticResource ControlStroke}" CornerRadius="{StaticResource DockRadius}"
+                    Effect="{StaticResource ShadowDock}">
                 <Grid x:Name="DockFrameRoot">
                     <Grid x:Name="DockLayoutRoot">
                         <Grid.ColumnDefinitions>
@@ -274,15 +271,34 @@
                                         SizeChanged="WidgetStrip_SizeChanged" />
                         </Border>
                     </Grid>
-                    <!-- Dual-layer optical glass bevel refraction highlight line -->
-                    <Border x:Name="DockInnerBevel" BorderThickness="1"
-                            BorderBrush="{DynamicResource DockInnerBevelMaterial}"
-                            CornerRadius="{StaticResource DockInnerRadius}"
-                            Margin="-9,-3,-9,-3" IsHitTestVisible="False" />
-                    <!-- Specular ambient sheen curving across the top half of the glass dock -->
-                    <Border x:Name="DockSheen" Height="20" VerticalAlignment="Top" Margin="6,-3,6,0"
-                            CornerRadius="{StaticResource DockSheenRadius}"
-                            Background="{DynamicResource DockHighlight}" IsHitTestVisible="False" />
+                    <!-- Internal legacy bevel collapsed to prevent duplicate inner box borders -->
+                    <Border x:Name="DockInnerBevel" Visibility="Collapsed" IsHitTestVisible="False" />
+                    <!-- Smooth full-frame glass shoulder sheen with smooth exponential roll-off -->
+                    <Border x:Name="DockSheen" Background="{DynamicResource DockHighlight}"
+                            CornerRadius="{StaticResource DockRadius}"
+                            Margin="-10,-4,-10,-4" IsHitTestVisible="False" />
+                    <!-- Dynamic interactive specular glint on the top border rail tracking the mouse -->
+                    <Border x:Name="DockDynamicGlintBorder" Height="2" VerticalAlignment="Top"
+                            Margin="-10,-4,-10,0" CornerRadius="20,20,0,0" IsHitTestVisible="False" Opacity="0">
+                        <Border.Background>
+                            <LinearGradientBrush x:Name="DockSpecularGlintBrush" StartPoint="0,0" EndPoint="1,0">
+                                <GradientStop x:Name="DockSpecularGlintStop0" Color="#00FFFFFF" Offset="0.38" />
+                                <GradientStop x:Name="DockSpecularGlintStop1" Color="#FFFFFFFF" Offset="0.5" />
+                                <GradientStop x:Name="DockSpecularGlintStop2" Color="#00FFFFFF" Offset="0.62" />
+                            </LinearGradientBrush>
+                        </Border.Background>
+                    </Border>
+                    <!-- Dynamic diffuse glass shoulder glow tracking the cursor -->
+                    <Border x:Name="DockDynamicGlowBorder" Height="24" VerticalAlignment="Top"
+                            Margin="-10,-4,-10,0" CornerRadius="20,20,0,0" IsHitTestVisible="False" Opacity="0">
+                        <Border.Background>
+                            <RadialGradientBrush x:Name="DockSpecularGlow" Center="0.5,0.0" GradientOrigin="0.5,0.0" RadiusX="0.18" RadiusY="1.0">
+                                <GradientStop Color="#45FFFFFF" Offset="0.0" />
+                                <GradientStop Color="#14FFFFFF" Offset="0.45" />
+                                <GradientStop Color="#00FFFFFF" Offset="1.0" />
+                            </RadialGradientBrush>
+                        </Border.Background>
+                    </Border>
                 </Grid>
             </Border>
             <Thumb x:Name="LeftResizeThumb" HorizontalAlignment="Left" VerticalAlignment="Stretch"

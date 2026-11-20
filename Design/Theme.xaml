@@ -41,9 +41,9 @@
     <Thickness x:Key="DockScrollContentInset">6,0</Thickness>
     <x:Static x:Key="DockPadding" Member="svc:DockMetrics.Padding" />
     <Thickness x:Key="ControlStroke">1</Thickness>
-    <CornerRadius x:Key="DockRadius">18</CornerRadius>
-    <CornerRadius x:Key="DockInnerRadius">17</CornerRadius>
-    <CornerRadius x:Key="DockSheenRadius">17,17,0,0</CornerRadius>
+    <CornerRadius x:Key="DockRadius">20</CornerRadius>
+    <CornerRadius x:Key="DockInnerRadius">19</CornerRadius>
+    <CornerRadius x:Key="DockSheenRadius">19,19,0,0</CornerRadius>
     <CornerRadius x:Key="ControlRadius">12</CornerRadius>
     <CornerRadius x:Key="DockWidgetRadius">12</CornerRadius>
     <CornerRadius x:Key="PopupRadius">12</CornerRadius>
@@ -76,6 +76,7 @@
 
     <Style TargetType="ScrollBar">
         <Setter Property="Width" Value="4" />
+        <Setter Property="MinWidth" Value="4" />
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="Template">
             <Setter.Value>
@@ -85,12 +86,18 @@
                            Value="{TemplateBinding Value}" ViewportSize="{TemplateBinding ViewportSize}">
                         <Track.DecreaseRepeatButton><RepeatButton Command="ScrollBar.PageUpCommand" Opacity="0" Focusable="False" /></Track.DecreaseRepeatButton>
                         <Track.Thumb>
-                            <Thumb Margin="0,1" MinHeight="20">
+                            <Thumb Margin="0,2" MinHeight="24">
                                 <Thumb.Style>
                                     <Style TargetType="Thumb">
                                         <Setter Property="Background" Value="{DynamicResource MenuDivider}" />
+                                        <Setter Property="Opacity" Value="0.7" />
                                         <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Thumb"><Border Background="{TemplateBinding Background}" CornerRadius="2" /></ControlTemplate></Setter.Value></Setter>
-                                        <Style.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource TextSecondary}" /></Trigger></Style.Triggers>
+                                        <Style.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter Property="Background" Value="{DynamicResource TextSecondary}" />
+                                                <Setter Property="Opacity" Value="1" />
+                                            </Trigger>
+                                        </Style.Triggers>
                                     </Style>
                                 </Thumb.Style>
                             </Thumb>

@@ -37,5 +37,5 @@ jobs:
       - name: Verify portable EXE starts without sidecar DLLs
         shell: pwsh
         run: |
-          & "scripts/publish-portable.ps1" -OutputDir dist
-          & "scripts/check-portable.ps1" -OutputDir dist
+          & "scripts/publish-portable.ps1" -OutputDir release
+          & "scripts/check-portable.ps1" -OutputDir release

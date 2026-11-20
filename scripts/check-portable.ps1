@@ -1,6 +1,6 @@
 # Verify that the exact executable uploaded in a release can start without any sidecar DLLs.
 param (
-    [string]$OutputDir = "$PSScriptRoot\..\dist"
+    [string]$OutputDir = "$PSScriptRoot\..\release"
 )
 
 $ErrorActionPreference = "Stop"

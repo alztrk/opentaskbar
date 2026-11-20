@@ -5,6 +5,7 @@
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="UI/UILibrary.xaml" />
                 <ResourceDictionary Source="Design/Theme.xaml" />
                 <ResourceDictionary Source="Design/DockControls.xaml" />
                 <ResourceDictionary Source="Design/ContextMenus.xaml" />

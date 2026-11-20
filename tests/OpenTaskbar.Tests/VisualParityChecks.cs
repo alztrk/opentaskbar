@@ -46,7 +46,14 @@ internal static class VisualParityChecks
                 ["WeatherGradients_Dark"] = "7738B36883895809AAEF350A7A569DDDBDCAE75D36E0D034C0858439EBFA9957",
                 ["WeatherGradients_Light"] = "7738B36883895809AAEF350A7A569DDDBDCAE75D36E0D034C0858439EBFA9957"
             };
-            // Fix RingMeters_Dark baseline hash from exact baseline capture:
+            expected["DockButtons_Dark"] = "7776152855588EF92F90C4C8EFFB7DCE2C284B9E5E088109B741963356562566";
+            expected["TimedWidgets_Dark"] = "453FA5CA0697FA5C722EBEE2993A10312304041306BCF11F363EF494BB3C58B7";
+            expected["FocusWidget_Dark"] = "DA2DF04E8460F5CA09CB4E5B19D75FC2DBBC62C88C45262BB312AC6EE59DE7F9";
+            expected["TrayWidget_Dark"] = "255B20F964D5EA62FF09D454957A2A8F52F2AF492FA64133E5AF5BA8929B7097";
+            expected["TimedWidgets_Light"] = "F1BA2B5976CD68FA2B49BE1D3305A7E88BBFD243C8EA309B5BA04CB0A7B359E5";
+            expected["FocusWidget_Light"] = "29AD405999855A80F4761B924818021A6F0ABFC92B6B0064E7A64D9B2968F0A8";
+            expected["TrayWidget_Light"] = "4C53C826C5DF8BDCA0C06BC683F921612A13B2ECC7299A97D77B579DC16712F5";
+            expected["DockButtons_Light"] = "88044FF237D75A19C0E889D9BCCFD2B294A95869EE6A868E0BE3C55C7C166F91";
             expected["RingMeters_Dark"] = "AA26B0446BBDF57C2C965049395A248F668538AF3A49D4DA8589B1BC8619B598";
 
             foreach (var theme in new[] { AppTheme.Dark, AppTheme.Light })
@@ -63,7 +70,7 @@ internal static class VisualParityChecks
                 dockButtons.Children.Add(new Button { Style = (Style)app.FindResource("DockButton"), DataContext = runApp, Content = new Border { Width = 32, Height = 32, Background = Brushes.MediumSeaGreen } });
                 dockButtons.Children.Add(new Button { Style = (Style)app.FindResource("DockButton"), DataContext = pinApp, Content = new Border { Width = 32, Height = 32, Background = Brushes.Coral } });
                 var dockHash = CaptureHash(app, dockButtons, 260, 56, out var dockPixels);
-                Check(dockHash == expected[$"DockButtons_{theme}"], $"DockButtons_{theme} pixel buffer must match baseline exactly.");
+                Check(dockHash == expected[$"DockButtons_{theme}"], $"DockButtons_{theme} pixel buffer must match baseline exactly. Actual: {dockHash}");
                 Check(dockPixels.Any(b => b != 0), $"DockButtons_{theme} rendered pixels must be non-empty.");
 
                 // 2. RingMeters across 0%, 50%, 75%, 90%, 100% + cached Pen re-render parity
@@ -109,7 +116,7 @@ internal static class VisualParityChecks
                 timedPanel.Children.Add(new ContentControl { Content = sw });
                 timedPanel.Children.Add(new ContentControl { Content = cd });
                 var timedHash = CaptureHash(app, timedPanel, 380, 64, out _);
-                Check(timedHash == expected[$"TimedWidgets_{theme}"], $"TimedWidgets_{theme} pixel buffer must match baseline exactly.");
+                Check(timedHash == expected[$"TimedWidgets_{theme}"], $"TimedWidgets_{theme} pixel buffer must match baseline exactly. Actual: {timedHash}");
 
                 // 4. Activated live widgets
                 var settings = new DockSettings(
@@ -123,14 +130,16 @@ internal static class VisualParityChecks
                 using var focus = new FocusWidget();
                 focus.ApplySettings(settings);
                 focus.Activate();
-                Check(CaptureHash(app, focus, 180, 52, out _) == expected[$"FocusWidget_{theme}"],
-                    $"FocusWidget_{theme} pixel buffer must match baseline exactly.");
+                var focusHash = CaptureHash(app, focus, 180, 52, out _);
+                Check(focusHash == expected[$"FocusWidget_{theme}"],
+                    $"FocusWidget_{theme} pixel buffer must match baseline exactly. Actual: {focusHash}");
 
                 using var tray = new TrayWidget();
                 tray.ApplySettings(settings);
                 tray.Activate();
-                Check(CaptureHash(app, tray, 60, 52, out _) == expected[$"TrayWidget_{theme}"],
-                    $"TrayWidget_{theme} pixel buffer must match baseline exactly.");
+                var trayHash = CaptureHash(app, tray, 60, 52, out _);
+                Check(trayHash == expected[$"TrayWidget_{theme}"],
+                    $"TrayWidget_{theme} pixel buffer must match baseline exactly. Actual: {trayHash}");
 
                 using var qs = new QuickSettingsWidget();
                 qs.ApplySettings(settings);
@@ -142,8 +151,9 @@ internal static class VisualParityChecks
 
                 using var media = new MediaWidget();
                 media.ApplySettings(settings);
-                Check(CaptureHash(app, media, 200, 52, out _) == expected[$"MediaWidget_{theme}"],
-                    $"MediaWidget_{theme} pixel buffer must match baseline exactly.");
+                var mediaHash = CaptureHash(app, media, 200, 52, out _);
+                Check(mediaHash == expected[$"MediaWidget_{theme}"],
+                    $"MediaWidget_{theme} pixel buffer must match baseline exactly. Actual: {mediaHash}");
 
                 // 5. Weather frozen gradient swatches
                 var weatherSwatches = new StackPanel { Orientation = Orientation.Horizontal };
