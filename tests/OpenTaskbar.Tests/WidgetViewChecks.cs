@@ -366,7 +366,8 @@ internal static class WidgetViewChecks
                     AutomationProperties.GetName(slider) == "Color opacity");
                 Check(gradientOpacity.Value == 96, "Gradient stop opacity must load into the picker.");
                 Check(Descendants<Button>(gradientPickerContent).Any(button => button.Content is string label
-                    && label.StartsWith("Stop 1 · #6019508C · 0%", StringComparison.Ordinal)),
+                    && label.StartsWith("Stop 1 · #6019508C · 0%", StringComparison.Ordinal)
+                    && button.Visibility == Visibility.Visible && button.ActualHeight > 0),
                     "Gradient stops must display their color and editable position.");
                 gradientOpacity.Value = 48;
                 Check(Descendants<TextBox>(gradientPickerContent).Single().Text == "#3019508C",
