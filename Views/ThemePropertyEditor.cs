@@ -345,8 +345,8 @@ public sealed class ThemePropertyEditor : UserControl
         var button = Button("");
         button.HorizontalAlignment = HorizontalAlignment.Stretch;
         button.HorizontalContentAlignment = HorizontalAlignment.Left;
-        button.SetResourceReference(Button.BackgroundProperty, "SettingsControl");
-        button.SetResourceReference(Button.ForegroundProperty, "TextPrimary");
+        button.SetResourceReference(System.Windows.Controls.Button.BackgroundProperty, "SettingsControl");
+        button.SetResourceReference(System.Windows.Controls.Button.ForegroundProperty, "TextPrimary");
         var content = new StackPanel { Orientation = Orientation.Horizontal };
         var swatch = new Border
         {
