@@ -161,7 +161,7 @@
             <Border x:Name="DockFrame" Padding="{StaticResource DockPadding}"
                     Background="{DynamicResource DockMaterial}" BorderBrush="{DynamicResource DockBorderMaterial}"
                     BorderThickness="{StaticResource ControlStroke}" CornerRadius="{StaticResource DockRadius}"
-                    Effect="{StaticResource ShadowDock}">
+                    Effect="{DynamicResource DockShadowMaterial}">
                 <Grid x:Name="DockFrameRoot">
                     <Grid x:Name="DockLayoutRoot">
                         <Grid.ColumnDefinitions>
