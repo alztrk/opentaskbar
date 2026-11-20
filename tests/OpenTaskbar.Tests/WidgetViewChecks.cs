@@ -325,7 +325,7 @@ internal static class WidgetViewChecks
                 {
                     RequiredName<TabControl>(settings, "SettingsTabs").SelectedItem = RequiredName<TabItem>(settings, "WidgetsTab");
                     var list = RequiredName<ItemsControl>(settings, "WidgetOptionsList");
-                    var selections = ((IEnumerable<DockWidgetOption>)list.ItemsSource).ToArray();
+                    var selections = ((System.Windows.Data.ListCollectionView)list.ItemsSource).SourceCollection.Cast<DockWidgetOption>().ToArray();
                     SetPreviewFixtures(selections);
                     var page = (FrameworkElement)settings.Content;
                     foreach (var width in new[] { 560d, 740d })
@@ -343,54 +343,48 @@ internal static class WidgetViewChecks
                     }
                     var firstCard = Descendants<WidgetCatalogItem>(list).First();
                     var selection = (DockWidgetOption)firstCard.DataContext;
-                    RequiredName<Button>(firstCard, "PreviewButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Check(selection.IsInstalled && selection.IsEnabled, "A preview tap in Settings must install and enable its widget.");
+                    RequiredName<Button>(firstCard, "InstallButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Check(selection.IsInstalled && selection.IsEnabled, "The install button must install and enable the widget.");
                     Check(preferences.Current.InstalledWidgets?.Contains(selection.Id) == true
                         && preferences.Current.Widgets?.Contains(selection.Id) == true,
-                        "A preview tap must auto-save the installed and visible widget selections.");
+                        "Installation must auto-save the enabled widget selection.");
                     Layout(page);
                     var currentCard = Descendants<WidgetCatalogItem>(list).Single(card => ReferenceEquals(card.DataContext, selection));
-                    RequiredName<Button>(currentCard, "PreviewButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Check(!selection.IsInstalled && !selection.IsEnabled, "Tapping an installed preview in Settings must uninstall and disable its widget.");
+                    RequiredName<Button>(currentCard, "InstallButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Check(!selection.IsInstalled && !selection.IsEnabled, "The install button must remove an installed widget.");
                     Check(preferences.Current.InstalledWidgets?.Contains(selection.Id) != true
                         && preferences.Current.Widgets?.Contains(selection.Id) != true,
-                        "Tapping an installed preview must auto-save removal of the widget.");
+                        "Removal must auto-save the widget selection.");
 
                     var clockCard = Descendants<WidgetCatalogItem>(list).Single(card => ((DockWidgetOption)card.DataContext).Id == DockWidgetService.ClockId);
                     var clockOption = (DockWidgetOption)clockCard.DataContext;
-                    Check(clockOption.HasSettings && clockOption.HasSettingsVisibility == Visibility.Visible,
-                        "Clock widget option must report having settings and show settings expand visibility.");
-                    Check(clockOption.SettingsGlyph == "\uE70D", "Initial settings glyph must be downward chevron.");
-                    var clockExpandBtn = RequiredName<Button>(clockCard, "SettingsExpandButton");
-                    Check(clockExpandBtn.Visibility == Visibility.Visible, "Clock card must show settings expand button.");
+                    var clockExpandBtn = RequiredName<Button>(clockCard, "PreviewButton");
                     clockExpandBtn.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Check(clockOption.IsSettingsExpanded && clockOption.SettingsGlyph == "\uE70E",
-                        "Clicking expand button must set IsSettingsExpanded and change glyph to upward chevron.");
+                    Check(clockOption.IsSettingsExpanded, "Clicking the widget row must expand it inline.");
                     Check(RequiredName<FrameworkElement>(settings, "ClockOptions").Visibility == Visibility.Visible,
-                        "Clicking settings expand button must make ClockOptions visible.");
+                        "An expanded clock row must show its native settings.");
 
                     var secondsToggle = RequiredName<CheckBox>(settings, "ClockSecondsToggle");
                     secondsToggle.IsChecked = true;
                     Check(preferences.Current.ClockShowSeconds,
-                        "Checking ClockSecondsToggle must auto-save preferences immediately without a manual apply button.");
+                        "Clock settings must auto-save changes without an apply button.");
 
                     clockExpandBtn.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Check(!clockOption.IsSettingsExpanded && clockOption.SettingsGlyph == "\uE70D",
-                        "Clicking settings expand button again must collapse settings and restore downward chevron.");
+                    Check(!clockOption.IsSettingsExpanded, "Clicking the row again must collapse it.");
                     Check(RequiredName<FrameworkElement>(settings, "ClockOptions").Visibility == Visibility.Collapsed,
-                        "Collapsing settings must set ClockOptions visibility to Collapsed.");
+                        "Collapsing the row must hide its settings.");
 
                     var trayCard = Descendants<WidgetCatalogItem>(list).Single(card => ((DockWidgetOption)card.DataContext).Id == DockWidgetService.TrayId);
                     var trayOption = (DockWidgetOption)trayCard.DataContext;
-                    Check(!trayOption.HasSettings && RequiredName<Button>(trayCard, "SettingsExpandButton").Visibility == Visibility.Collapsed,
-                        "Widgets without custom settings must hide the settings expand button.");
+                    RequiredName<Button>(trayCard, "PreviewButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Check(trayOption.IsSettingsExpanded, "Widgets without custom settings must still offer inline previews.");
 
                     var weatherCard = Descendants<WidgetCatalogItem>(list).Single(card => ((DockWidgetOption)card.DataContext).Id == DockWidgetService.WeatherId);
                     var weatherOption = (DockWidgetOption)weatherCard.DataContext;
-                    var weatherExpandBtn = RequiredName<Button>(weatherCard, "SettingsExpandButton");
+                    var weatherExpandBtn = RequiredName<Button>(weatherCard, "PreviewButton");
                     weatherExpandBtn.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Check(weatherOption.IsSettingsExpanded, "Weather card must expand when settings button is clicked.");
-                    Check(weatherOption.SettingsView != null, "Weather card must host its settings view inside the card.");
+                    Check(weatherOption.IsSettingsExpanded, "Weather must expand from its widget row.");
+                    Check(weatherOption.SettingsView is not null, "Weather must retain its native settings view.");
                     var countryBox = RequiredName<ComboBox>(settings, "WeatherCountryBox");
                     var cityContainer = RequiredName<FrameworkElement>(settings, "WeatherCityContainer");
                     var cityCombo = RequiredName<ComboBox>(settings, "WeatherCityCombo");
