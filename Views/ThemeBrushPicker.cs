@@ -9,6 +9,7 @@ using System.Windows.Documents;
 using System.Windows.Media;
 using System.Windows.Input;
 using System.Windows.Shapes;
+using OpenTaskbar.Services;
 
 namespace OpenTaskbar.Views;
 
@@ -54,7 +55,7 @@ public sealed class ThemeBrushPicker : Window
 
     public ThemeBrushPicker(Brush source)
     {
-        Title = "Color";
+        Title = UiText.Get("ColorTitle");
         Width = 398;
         Height = 655;
         MinWidth = 350;
@@ -103,9 +104,9 @@ public sealed class ThemeBrushPicker : Window
             Margin = new Thickness(0, 15, 0, 0) };
         DockPanel.SetDock(footer, Dock.Bottom);
         outer.Children.Add(footer);
-        var cancel = Button("Cancel");
+        var cancel = Button(UiText.Get("ColorCancel"));
         cancel.Click += (_, _) => { DialogResult = false; Close(); };
-        var accept = Button("Use color");
+        var accept = Button(UiText.Get("ColorUse"));
         accept.Margin = new Thickness(8, 0, 0, 0);
         accept.Click += (_, _) => { Result = BuildBrush(); DialogResult = true; Close(); };
         footer.Children.Add(cancel);
@@ -122,15 +123,15 @@ public sealed class ThemeBrushPicker : Window
         body.Children.Add(_tabs);
 
         var solid = new StackPanel { Margin = new Thickness(7) };
-        solid.Children.Add(new TextBlock { Text = "Choose a single color.", Margin = new Thickness(0, 8, 0, 8) });
+        solid.Children.Add(new TextBlock { Text = UiText.Get("ColorSelectSingle"), Margin = new Thickness(0, 8, 0, 8) });
         _tabs.Items.Add(CreateTab("Solid", solid));
 
         var grad = new StackPanel { Margin = new Thickness(7) };
-        grad.Children.Add(new TextBlock { Text = "Select a stop to edit its color.", Margin = new Thickness(0, 8, 0, 8) });
+        grad.Children.Add(new TextBlock { Text = UiText.Get("ColorSelectStop"), Margin = new Thickness(0, 8, 0, 8) });
         _stopList.SelectionChanged += (_, _) => SyncChannels();
         grad.Children.Add(_stopChoices);
         var tools = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 7, 0, 9) };
-        var add = Button("+ Stop");
+        var add = Button(UiText.Get("ColorAddStop"));
         add.Click += (_, _) =>
         {
             if (_stops.Count >= 16) return;
@@ -138,7 +139,7 @@ public sealed class ThemeBrushPicker : Window
             RefreshStops();
             _stopList.SelectedIndex = _stops.Count - 1;
         };
-        var remove = Button("Remove");
+        var remove = Button(UiText.Get("ColorRemove"));
         remove.Margin = new Thickness(8, 0, 0, 0);
         remove.Click += (_, _) =>
         {
@@ -171,14 +172,14 @@ public sealed class ThemeBrushPicker : Window
             positionValue.Text = Math.Round(position.Value).ToString(CultureInfo.InvariantCulture) + "%";
             _updating = false;
         };
-        grad.Children.Add(new TextBlock { Text = "Stop position", Margin = new Thickness(0, 3, 0, 5) });
+        grad.Children.Add(new TextBlock { Text = UiText.Get("ColorStopPosition"), Margin = new Thickness(0, 3, 0, 5) });
         var positionRow = new DockPanel();
         DockPanel.SetDock(positionValue, Dock.Right);
         positionRow.Children.Add(positionValue);
         positionRow.Children.Add(position);
         grad.Children.Add(positionRow);
         var angleRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 12, 0, 0) };
-        angleRow.Children.Add(new TextBlock { Text = "Angle", Width = 85, VerticalAlignment = VerticalAlignment.Center });
+        angleRow.Children.Add(new TextBlock { Text = UiText.Get("ColorAngle"), Width = 85, VerticalAlignment = VerticalAlignment.Center });
         _angle.ValueChanged += (_, _) => UpdatePreview();
         angleRow.Children.Add(_angle);
         _angleValue.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
@@ -193,7 +194,7 @@ public sealed class ThemeBrushPicker : Window
         var colorArea = new StackPanel { Margin = new Thickness(6, 12, 0, 8) };
         colorArea.Children.Add(new TextBlock
         {
-            Text = "Color", FontWeight = FontWeights.SemiBold,
+            Text = UiText.Get("ColorTitle"), FontWeight = FontWeights.SemiBold,
             Margin = new Thickness(0, 0, 0, 9)
         });
         _colorField.Children.Add(new Rectangle
@@ -248,7 +249,7 @@ public sealed class ThemeBrushPicker : Window
         {
             var index = i;
             var row = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 5, 0, 5) };
-            row.Children.Add(new TextBlock { Text = new[] { "Red", "Green", "Blue" }[i], Width = 55,
+            row.Children.Add(new TextBlock { Text = new[] { UiText.Get("ColorRed"), UiText.Get("ColorGreen"), UiText.Get("ColorBlue") }[i], Width = 55,
                 VerticalAlignment = VerticalAlignment.Center });
             var slider = new Slider { Minimum = 0, Maximum = 255, Width = 230, TickFrequency = 1,
                 IsSnapToTickEnabled = true };
@@ -260,7 +261,7 @@ public sealed class ThemeBrushPicker : Window
         }
 
         var alphaRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 8, 0, 0) };
-        alphaRow.Children.Add(new TextBlock { Text = "Opacity", Width = 55, VerticalAlignment = VerticalAlignment.Center });
+        alphaRow.Children.Add(new TextBlock { Text = UiText.Get("ColorOpacity"), Width = 55, VerticalAlignment = VerticalAlignment.Center });
         _alphaSlider.Width = 200;
         _alphaSlider.VerticalAlignment = VerticalAlignment.Center;
         AutomationProperties.SetName(_alphaSlider, "Color opacity");
@@ -278,7 +279,7 @@ public sealed class ThemeBrushPicker : Window
         body.Children.Add(alphaRow);
 
         var hexRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 14, 0, 0) };
-        hexRow.Children.Add(new TextBlock { Text = "HEX", Width = 55, VerticalAlignment = VerticalAlignment.Center });
+        hexRow.Children.Add(new TextBlock { Text = UiText.Get("ColorHEX"), Width = 55, VerticalAlignment = VerticalAlignment.Center });
         hexRow.Children.Add(_hex);
         _hex.LostFocus += (_, _) => ParseHex();
         _hex.KeyDown += (_, e) => { if (e.Key == System.Windows.Input.Key.Return) ParseHex(); };

@@ -336,9 +336,9 @@ internal static class WidgetViewChecks
                 var themeEditor = new OpenTaskbar.Views.ThemePropertyEditor();
                 themeEditor.LoadTheme(null, theme);
                 Layout(themeEditor);
-                Check(Descendants<TextBlock>(themeEditor).Any(text => text.Text == "Color palette")
+                Check(Descendants<TextBlock>(themeEditor).Any(text => text.Text == UiText.Get("ColorPalette"))
                     && Descendants<Button>(themeEditor).Any(button => button.Content is string label
-                        && label == "Create editable theme"),
+                        && label == UiText.Get("ThemeCreateEditable")),
                     "Default appearance must show color swatches and customization controls.");
                 var solidPicker = new OpenTaskbar.Views.ThemeBrushPicker(
                     new SolidColorBrush(Color.FromArgb(128, 220, 80, 40)));

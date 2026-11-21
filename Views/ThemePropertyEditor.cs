@@ -67,7 +67,7 @@ public sealed class ThemePropertyEditor : UserControl
         var pack = ThemePacks.Discover().FirstOrDefault(p => string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));
         if (pack is null || ThemePack.IsBuiltInTheme(pack.Id))
         {
-            ShowCurrentAppearance(pack?.DisplayName ?? "Windows appearance");
+            ShowCurrentAppearance(pack?.DisplayName ?? UiText.Get("ThemeWindowsAppearance"));
             return;
         }
 
@@ -82,13 +82,13 @@ public sealed class ThemePropertyEditor : UserControl
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            _message.Text = "Unable to load theme: " + ex.Message;
+            _message.Text = UiText.Format("ThemeLoadFailed", ex.Message);
             return;
         }
 
-        _message.Text = "Editing " + pack.DisplayName + " · Changes are saved to the theme pack.";
+        _message.Text = UiText.Format("ThemeEditing", pack.DisplayName);
         ShowColorSwatches();
-        SectionHeader("Theme information");
+        SectionHeader(UiText.Get("ThemeInformation"));
         _name = AddTextField("Name", ReadManifest("Name") ?? pack.DisplayName);
         _author = AddTextField("Author", ReadManifest("Author") ?? string.Empty);
         _description = AddTextField("Description", ReadManifest("Description") ?? string.Empty);
@@ -137,10 +137,10 @@ public sealed class ThemePropertyEditor : UserControl
         _fieldHost = _body;
 
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 20, 0, 12) };
-        var save = Button("Save changes");
+        var save = Button(UiText.Get("ThemeSaveChanges"));
         save.SetResourceReference(FrameworkElement.StyleProperty, "SettingsPrimaryButton");
         save.Click += (_, _) => SaveTheme();
-        var discard = Button("Discard edits");
+        var discard = Button(UiText.Get("ThemeDiscardEdits"));
         discard.SetResourceReference(FrameworkElement.StyleProperty, "SettingsGhostButton");
         discard.Margin = new Thickness(8, 0, 0, 0);
         discard.Click += (_, _) => LoadTheme(_id, _mode);
@@ -161,7 +161,7 @@ public sealed class ThemePropertyEditor : UserControl
 
     private void ShowColorSwatches()
     {
-        SectionHeader("Color palette");
+        SectionHeader(UiText.Get("ColorPalette"));
         var strip = new WrapPanel { Margin = new Thickness(0, 0, 0, 3) };
         foreach (var (label, key) in ColorOverview)
         {
@@ -184,9 +184,9 @@ public sealed class ThemePropertyEditor : UserControl
 
     private void ShowCurrentAppearance(string title)
     {
-        _message.Text = title + " · Windows colors are used until you choose a custom theme.";
+        _message.Text = title + " · " + UiText.Get("ThemeWindowsAppearanceHelp");
         ShowColorSwatches();
-        SectionHeader("Dock background");
+        SectionHeader(UiText.Get("DockBackground"));
         var dock = new Border
         {
             CornerRadius = new CornerRadius(12),
@@ -198,12 +198,12 @@ public sealed class ThemePropertyEditor : UserControl
             Background = Application.Current.TryFindResource("DockMaterial") as Brush
                 ?? Application.Current.TryFindResource("SettingsControl") as Brush
         };
-        var caption = new TextBlock { Text = "Dock · Glass / Solid / None", VerticalAlignment = VerticalAlignment.Center };
+        var caption = new TextBlock { Text = UiText.Get("DockSurfacePreview"), VerticalAlignment = VerticalAlignment.Center };
         caption.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
         dock.Child = caption;
         _body.Children.Add(dock);
 
-        SectionHeader("Widget surface");
+        SectionHeader(UiText.Get("WidgetSurface"));
         var widgetCard = new Border
         {
             CornerRadius = new CornerRadius(7),
@@ -233,22 +233,22 @@ public sealed class ThemePropertyEditor : UserControl
         };
         meter.Child = fill;
         widgetContent.Children.Add(meter);
-        var widgetText = new TextBlock { Text = "Widget surface preview", VerticalAlignment = VerticalAlignment.Center, FontSize = 12.5 };
+        var widgetText = new TextBlock { Text = UiText.Get("WidgetSurfacePreview"), VerticalAlignment = VerticalAlignment.Center, FontSize = 12.5 };
         widgetText.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
         widgetContent.Children.Add(widgetText);
         widgetCard.Child = widgetContent;
         _body.Children.Add(widgetCard);
 
-        SectionHeader("Customize appearance");
+        SectionHeader(UiText.Get("CustomizeAppearance"));
         var prompt = new TextBlock
         {
-            Text = "Create an editable copy to change colors, gradients, fonts, widget spacing and window transparency.",
+            Text = UiText.Get("ThemeCreateEditableHelp"),
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 0, 0, 12)
         };
         prompt.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
         _body.Children.Add(prompt);
-        var create = Button("Create editable theme");
+        var create = Button(UiText.Get("ThemeCreateEditable"));
         create.Style = (Style)Application.Current.FindResource("SettingsPrimaryButton");
         create.HorizontalAlignment = HorizontalAlignment.Left;
         create.Click += (_, _) =>
@@ -261,7 +261,7 @@ public sealed class ThemePropertyEditor : UserControl
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
-                _message.Text = "Theme creation failed: " + ex.Message;
+                _message.Text = UiText.Format("ThemeCreationFailed", ex.Message);
             }
         };
         _body.Children.Add(create);
@@ -523,7 +523,7 @@ public sealed class ThemePropertyEditor : UserControl
         };
         swatch.SetResourceReference(Border.BorderBrushProperty, "StrokeSubtle");
         content.Children.Add(swatch);
-        var title = new TextBlock { Text = initial is LinearGradientBrush ? "Gradient" : "Solid",
+        var title = new TextBlock { Text = initial is LinearGradientBrush ? UiText.Get("SurfaceGradient") : UiText.Get("SurfaceSolid"),
             VerticalAlignment = VerticalAlignment.Center, FontSize = 12 };
         title.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
         content.Children.Add(title);
@@ -582,7 +582,7 @@ public sealed class ThemePropertyEditor : UserControl
             _widgetPack[section] = sectionNode;
         }
         sectionNode[key] = value;
-        _message.Text = "Unsaved changes";
+        _message.Text = UiText.Get("ThemeUnsavedChanges");
     }
 
     private string? ReadManifest(string name) =>
@@ -606,7 +606,7 @@ public sealed class ThemePropertyEditor : UserControl
             var name = _name?.Text.Trim() ?? string.Empty;
             if (name.Length is < 1 or > 120)
             {
-                _message.Text = "Theme name must contain 1–120 characters.";
+                _message.Text = UiText.Get("ThemeNameInvalid");
                 return;
             }
             SetManifest("Name", name);
@@ -621,12 +621,12 @@ public sealed class ThemePropertyEditor : UserControl
 
             ThemePacks.Select(_id, reload: true);
             ThemePacks.ApplyWidgets(_mode);
-            _message.Text = "Theme saved.";
+            _message.Text = UiText.Get("ThemeSavedMessage");
             ThemeSaved?.Invoke(this, EventArgs.Empty);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
-            _message.Text = "Unable to save theme: " + ex.Message;
+            _message.Text = UiText.Format("ThemeSaveFailed", ex.Message);
         }
     }
 

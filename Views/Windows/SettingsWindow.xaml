@@ -64,15 +64,15 @@
                 <TabControl.Resources>
                     <Style TargetType="TabItem" BasedOn="{StaticResource SettingsSidebarTab}"/>
                 </TabControl.Resources>
-                <TabItem Header="Dock" Tag="{StaticResource IconNavDock}">
+                <TabItem Header="{local:Loc Dock}" Tag="{StaticResource IconNavDock}">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False" HorizontalContentAlignment="Stretch">
                         <StackPanel Margin="{StaticResource SettingsPageInset}" MaxWidth="{StaticResource SettingsReadingWidth}" HorizontalAlignment="Stretch">
                             <DockPanel Margin="0,0,0,26">
-                                <Button DockPanel.Dock="Right" Content="Reset defaults" Style="{StaticResource SettingsGhostButton}"
+                                <Button DockPanel.Dock="Right" Content="{local:Loc ResetDefaults}" Style="{StaticResource SettingsGhostButton}"
                                         VerticalAlignment="Top" Padding="9,5" FontSize="11.5" Click="ResetDockDefaults_Click" />
                                 <StackPanel Margin="0,0,16,0">
-                                    <TextBlock Text="Dock" Style="{StaticResource SettingsHeading}" />
-                                    <TextBlock Text="Position, size and behavior of the taskbar." Style="{StaticResource SettingsPageSubtitle}" />
+                                    <TextBlock Text="{local:Loc Dock}" Style="{StaticResource SettingsHeading}" />
+                                    <TextBlock Text="{local:Loc SettingsPageDock}" Style="{StaticResource SettingsPageSubtitle}" />
                                 </StackPanel>
                             </DockPanel>
 
@@ -124,7 +124,7 @@
                             </StackPanel></Border>
 
                             <!-- Dimensions -->
-                            <TextBlock Text="Dimensions" Style="{StaticResource SettingsSectionHeading}" />
+                            <TextBlock Text="{local:Loc Dimensions}" Style="{StaticResource SettingsSectionHeading}" />
                             <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
                                 <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
                                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Width="230" VerticalAlignment="Center">
@@ -453,25 +453,25 @@
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>
-                <TabItem Header="Themes" Tag="{StaticResource IconNavThemes}">
+                <TabItem Header="{local:Loc Themes}" Tag="{StaticResource IconNavThemes}">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False" HorizontalContentAlignment="Stretch">
                         <StackPanel Margin="{StaticResource SettingsPageInset}" MaxWidth="{StaticResource SettingsReadingWidth}" HorizontalAlignment="Stretch">
                             <DockPanel Margin="0,0,0,24">
                                 <Button DockPanel.Dock="Right" Content="{local:Loc ThemePackNew}" Style="{StaticResource SettingsButton}"
                                         VerticalAlignment="Top" Click="ThemePackNew_Click" />
                                 <StackPanel Margin="0,0,16,0">
-                                    <TextBlock Text="Themes" Style="{StaticResource SettingsHeading}" />
-                                    <TextBlock Text="Use a preset or make your own." Style="{StaticResource SettingsPageSubtitle}" />
+                                    <TextBlock Text="{local:Loc Themes}" Style="{StaticResource SettingsHeading}" />
+                                    <TextBlock Text="{local:Loc SettingsPageThemes}" Style="{StaticResource SettingsPageSubtitle}" />
                                 </StackPanel>
                             </DockPanel>
 
                             <!-- Theme Library (HTML prototype 3-column Built-in + My themes grid) -->
-                            <TextBlock Text="Built-in" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,6" />
+                            <TextBlock Text="{local:Loc BuiltInThemes}" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,6" />
                             <UniformGrid x:Name="ThemeGalleryBuiltIn" Columns="3" Margin="0,0,0,14" />
 
-                            <TextBlock Text="My themes" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondary}" Margin="0,2,0,6" />
+                            <TextBlock Text="{local:Loc MyThemes}" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondary}" Margin="0,2,0,6" />
                             <UniformGrid x:Name="ThemeGalleryCustom" Columns="3" />
-                            <TextBlock x:Name="ThemeGalleryCustomEmpty" Text="No custom themes yet" FontSize="11.5"
+                            <TextBlock x:Name="ThemeGalleryCustomEmpty" Text="{local:Loc NoCustomThemes}" FontSize="11.5"
                                        Foreground="{DynamicResource TextSecondary}" Margin="0,2,0,10" Visibility="Collapsed" />
 
                             <Border BorderThickness="0,0,0,1" BorderBrush="{DynamicResource StrokeSubtle}" Padding="0,8,0,16" Margin="0,0,0,16">
@@ -495,13 +495,13 @@
                                 <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
                                     <Border DockPanel.Dock="Right" Width="230" Style="{StaticResource SettingsSegmentHost}">
                                         <UniformGrid Columns="3">
-                                            <RadioButton x:Name="SystemTheme" GroupName="Theme" Content="Windows" Style="{StaticResource SettingsSegmentChoice}" />
+                                            <RadioButton x:Name="SystemTheme" GroupName="Theme" Content="{local:Loc Windows}" Style="{StaticResource SettingsSegmentChoice}" />
                                             <RadioButton x:Name="DarkTheme" GroupName="Theme" Content="{local:Loc Dark}" Style="{StaticResource SettingsSegmentChoice}" />
                                             <RadioButton x:Name="LightTheme" GroupName="Theme" Content="{local:Loc Light}" Style="{StaticResource SettingsSegmentChoice}" />
                                         </UniformGrid>
                                     </Border>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
-                                        <TextBlock Text="Color mode" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc ColorMode}" Style="{StaticResource SettingsRowLabel}" />
                                         <TextBlock Text="{local:Loc ThemeHelp}" Style="{StaticResource SettingsRowDescription}" />
                                     </StackPanel>
                                 </DockPanel></Border>
@@ -510,7 +510,7 @@
                             <views:ThemePropertyEditor x:Name="CustomThemeEditor"/>
 
                             <!-- Dock geometry -->
-                            <TextBlock Text="Dock geometry" Style="{StaticResource SettingsSectionHeading}"/>
+                            <TextBlock Text="{local:Loc DockGeometry}" Style="{StaticResource SettingsSectionHeading}"/>
                             <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
                                 <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
                                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Width="230" VerticalAlignment="Center">
@@ -626,7 +626,7 @@
                         <StackPanel Margin="{StaticResource SettingsPageInset}" MaxWidth="{StaticResource SettingsReadingWidth}" HorizontalAlignment="Stretch">
                             <StackPanel Margin="0,0,0,26">
                                 <TextBlock Text="{local:Loc Shortcuts}" Style="{StaticResource SettingsHeading}" />
-                                <TextBlock Text="Keyboard shortcuts and dock interactions." Style="{StaticResource SettingsPageSubtitle}" />
+                                <TextBlock Text="{local:Loc SettingsPageShortcuts}" Style="{StaticResource SettingsPageSubtitle}" />
                             </StackPanel>
 
                             <!-- Hotkeys -->
@@ -675,12 +675,12 @@
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>
-                <TabItem Header="Preferences" Tag="{StaticResource IconNavPreferences}">
+                <TabItem Header="{local:Loc Preferences}" Tag="{StaticResource IconNavPreferences}">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False" HorizontalContentAlignment="Stretch">
                         <StackPanel Margin="{StaticResource SettingsPageInset}" MaxWidth="{StaticResource SettingsReadingWidth}" HorizontalAlignment="Stretch">
                             <StackPanel Margin="0,0,0,26">
-                                <TextBlock Text="Preferences" Style="{StaticResource SettingsHeading}" />
-                                <TextBlock Text="Application settings." Style="{StaticResource SettingsPageSubtitle}" />
+                                <TextBlock Text="{local:Loc Preferences}" Style="{StaticResource SettingsHeading}" />
+                                <TextBlock Text="{local:Loc SettingsPagePreferences}" Style="{StaticResource SettingsPageSubtitle}" />
                             </StackPanel>
 
                             <!-- General -->
@@ -744,23 +744,23 @@
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>
-                <TabItem Header="About" Tag="{StaticResource IconNavAbout}">
+                <TabItem Header="{local:Loc About}" Tag="{StaticResource IconNavAbout}">
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False" HorizontalContentAlignment="Stretch">
                         <StackPanel Margin="{StaticResource SettingsPageInset}" MaxWidth="{StaticResource SettingsReadingWidth}" HorizontalAlignment="Stretch">
                             <StackPanel Margin="0,0,0,26">
-                                <TextBlock Text="About OpenTaskbar" Style="{StaticResource SettingsHeading}" />
-                                <TextBlock Text="An open-source taskbar for Windows." Style="{StaticResource SettingsPageSubtitle}" />
+                                <TextBlock Text="{local:Loc AboutTitle}" Style="{StaticResource SettingsHeading}" />
+                                <TextBlock Text="{local:Loc SettingsPageAbout}" Style="{StaticResource SettingsPageSubtitle}" />
                             </StackPanel>
 
-                            <TextBlock Text="Application" Style="{StaticResource SettingsSectionHeading}" Margin="0,0,0,8" />
+                            <TextBlock Text="{local:Loc Application}" Style="{StaticResource SettingsSectionHeading}" Margin="0,0,0,8" />
                             <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
                                 <Border Style="{StaticResource SettingsRow}"><DockPanel>
                                     <TextBlock x:Name="AppVersionText" DockPanel.Dock="Right" Style="{StaticResource SettingsRowLabel}" Foreground="{DynamicResource TextSecondary}" VerticalAlignment="Center" />
-                                    <TextBlock Text="Version" Style="{StaticResource SettingsRowLabel}" VerticalAlignment="Center" />
+                                    <TextBlock Text="{local:Loc Version}" Style="{StaticResource SettingsRowLabel}" VerticalAlignment="Center" />
                                 </DockPanel></Border>
                                 <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
-                                    <Button Content="GitHub repository ↗" DockPanel.Dock="Right" Style="{StaticResource SettingsButton}" Click="OpenGithub_Click" VerticalAlignment="Center"/>
-                                    <TextBlock Text="Source code" Style="{StaticResource SettingsRowLabel}" VerticalAlignment="Center"/>
+                                    <Button Content="{local:Loc GitHubRepository}" DockPanel.Dock="Right" Style="{StaticResource SettingsButton}" Click="OpenGithub_Click" VerticalAlignment="Center"/>
+                                    <TextBlock Text="{local:Loc SourceCode}" Style="{StaticResource SettingsRowLabel}" VerticalAlignment="Center"/>
                                 </DockPanel></Border>
                             </StackPanel></Border>
 
@@ -770,7 +770,7 @@
                                     <Button Content="{local:Loc OpenLogFile}" DockPanel.Dock="Right" Style="{StaticResource SettingsButton}" Click="OpenLogFile_Click" VerticalAlignment="Center" />
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
                                         <TextBlock Text="{local:Loc OpenLogFile}" Style="{StaticResource SettingsRowLabel}" />
-                                        <TextBlock Text="View runtime diagnostic logs." Style="{StaticResource SettingsRowDescription}" />
+                                        <TextBlock Text="{local:Loc OpenLogFileDescription}" Style="{StaticResource SettingsRowDescription}" />
                                     </StackPanel>
                                 </DockPanel></Border>
                             </StackPanel></Border>
