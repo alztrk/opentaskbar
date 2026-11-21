@@ -12,9 +12,9 @@ using OpenTaskbar.Services;
 namespace OpenTaskbar.Widgets;
 
 /// <summary>
-/// V19 horizontal liquid-fill battery indicator. Transparent by default with no icon or outer border;
-/// a single continuous liquid silhouette fills to the exact charge percentage and gently morphs its
-/// trailing wave boundary while charging.
+/// V19 horizontal liquid-fill battery indicator. Displays the real charge percentage with a
+/// level-colored liquid fill, a crisp charging bolt icon, a continuous scrolling wave boundary,
+/// and a soft left-to-right charging sheen while charging.
 /// </summary>
 public sealed class BatteryWidget : DockWidget
 {
@@ -22,22 +22,26 @@ public sealed class BatteryWidget : DockWidget
 
     private const double MinCardWidth = 96;
     private const double WaveHeight = 46;
+    private const double WaveAmplitude = 3.2;
+    private const double SheenWidth = 54;
     private const long PollIntervalMs = 15000;
 
     private readonly Border _card;
     private readonly Grid _surface;
-    private readonly Path _liquidPath;
-    private readonly PathFigure _figure;
-    private readonly LineSegment _topEdge;
-    private readonly BezierSegment _upperWave;
-    private readonly BezierSegment _lowerWave;
-    private readonly LineSegment _bottomLeft;
+    private readonly Border _trackLayer;
+    private readonly Rectangle _liquidFill;
+    private readonly TranslateTransform _waveTransform;
+    private readonly Grid _sheenClipHost;
+    private readonly Border _chargeSheen;
+    private readonly TranslateTransform _sheenTransform;
+    private readonly ContentControl _boltShadow;
+    private readonly ContentControl _boltIcon;
     private readonly TextBlock _percentShadow;
     private readonly TextBlock _percentText;
 
     private BatteryStatus _status;
     private bool _hasSample;
-    private bool _isAnimatingWave;
+    private bool _isAnimatingCharging;
     private long _lastPollMs;
     private int _renderedPercent = -1;
     private bool _renderedCharging;
@@ -52,33 +56,95 @@ public sealed class BatteryWidget : DockWidget
 
     public BatteryWidget()
     {
-        _topEdge = new LineSegment(new Point(0, 0), isStroked: false);
-        _upperWave = new BezierSegment(new Point(0, 8), new Point(0, 16), new Point(0, 23), isStroked: false);
-        _lowerWave = new BezierSegment(new Point(0, 31), new Point(0, 39), new Point(0, WaveHeight), isStroked: false);
-        _bottomLeft = new LineSegment(new Point(0, WaveHeight), isStroked: false);
-
-        _figure = new PathFigure
+        _trackLayer = new Border
         {
-            StartPoint = new Point(0, 0),
-            IsClosed = true,
-            IsFilled = true,
-            Segments = { _topEdge, _upperWave, _lowerWave, _bottomLeft }
-        };
-
-        _liquidPath = new Path
-        {
-            Data = new PathGeometry { Figures = { _figure } },
-            Stretch = Stretch.None,
+            CornerRadius = new CornerRadius(10),
+            Opacity = 0.28,
             IsHitTestVisible = false,
             Visibility = Visibility.Collapsed
         };
+        _trackLayer.SetResourceReference(Border.BackgroundProperty, "WidgetTrack");
+
+        _waveTransform = new TranslateTransform(0, 0);
+        _liquidFill = new Rectangle
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            IsHitTestVisible = false,
+            Visibility = Visibility.Collapsed
+        };
+
+        _sheenTransform = new TranslateTransform(-SheenWidth - 28, 0);
+        var sheenBrush = new LinearGradientBrush
+        {
+            StartPoint = new Point(0, 0),
+            EndPoint = new Point(1, 0),
+            GradientStops = new GradientStopCollection
+            {
+                new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 0.00),
+                new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 0.10),
+                new GradientStop(Color.FromArgb(0x16, 0xFF, 0xFF, 0xFF), 0.30),
+                new GradientStop(Color.FromArgb(0x34, 0xFF, 0xFF, 0xFF), 0.50),
+                new GradientStop(Color.FromArgb(0x16, 0xFF, 0xFF, 0xFF), 0.70),
+                new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 0.90),
+                new GradientStop(Color.FromArgb(0x00, 0xFF, 0xFF, 0xFF), 1.00)
+            }
+        };
+        sheenBrush.Freeze();
+
+        var sheenTransforms = new TransformGroup();
+        sheenTransforms.Children.Add(new SkewTransform(-22, 0));
+        sheenTransforms.Children.Add(_sheenTransform);
+
+        _chargeSheen = new Border
+        {
+            Width = SheenWidth,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            Background = sheenBrush,
+            RenderTransform = sheenTransforms,
+            IsHitTestVisible = false,
+            Visibility = Visibility.Collapsed
+        };
+
+        _sheenClipHost = new Grid
+        {
+            ClipToBounds = true,
+            IsHitTestVisible = false
+        };
+        _sheenClipHost.Children.Add(_chargeSheen);
+
+        _boltShadow = new ContentControl
+        {
+            Width = 11,
+            Height = 11,
+            Margin = new Thickness(0, 1, 3, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = new SolidColorBrush(Color.FromArgb(0x58, 0x00, 0x00, 0x00)),
+            IsHitTestVisible = false,
+            Visibility = Visibility.Collapsed
+        };
+        _boltShadow.SetResourceReference(StyleProperty, "WidgetGlyph");
+        _boltShadow.SetResourceReference(ContentProperty, "IconZap");
+
+        _boltIcon = new ContentControl
+        {
+            Width = 11,
+            Height = 11,
+            Margin = new Thickness(0, 0, 3, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            Foreground = Brushes.White,
+            IsHitTestVisible = false,
+            Visibility = Visibility.Collapsed
+        };
+        _boltIcon.SetResourceReference(StyleProperty, "WidgetGlyph");
+        _boltIcon.SetResourceReference(ContentProperty, "IconZap");
 
         _percentShadow = new TextBlock
         {
             FontSize = 13,
             FontWeight = FontWeights.Bold,
             Foreground = new SolidColorBrush(Color.FromArgb(0x58, 0x00, 0x00, 0x00)),
-            HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(0, 1, 0, 0),
             IsHitTestVisible = false,
@@ -90,12 +156,31 @@ public sealed class BatteryWidget : DockWidget
             Text = "—",
             FontSize = 13,
             FontWeight = FontWeights.Bold,
-            HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             IsHitTestVisible = false,
             Typography = { NumeralAlignment = FontNumeralAlignment.Tabular }
         };
         _percentText.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+
+        var shadowRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            IsHitTestVisible = false
+        };
+        shadowRow.Children.Add(_boltShadow);
+        shadowRow.Children.Add(_percentShadow);
+
+        var labelRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            IsHitTestVisible = false
+        };
+        labelRow.Children.Add(_boltIcon);
+        labelRow.Children.Add(_percentText);
 
         var hoverOverlay = new Border
         {
@@ -111,10 +196,12 @@ public sealed class BatteryWidget : DockWidget
             ClipToBounds = true,
             Background = Brushes.Transparent
         };
-        _surface.Children.Add(_liquidPath);
+        _surface.Children.Add(_trackLayer);
+        _surface.Children.Add(_liquidFill);
+        _surface.Children.Add(_sheenClipHost);
         _surface.Children.Add(hoverOverlay);
-        _surface.Children.Add(_percentShadow);
-        _surface.Children.Add(_percentText);
+        _surface.Children.Add(shadowRow);
+        _surface.Children.Add(labelRow);
         _surface.SizeChanged += (_, _) => UpdateLiquidGeometry(forceAnimationRestart: false);
 
         _card = new Border
@@ -148,12 +235,12 @@ public sealed class BatteryWidget : DockWidget
 
     protected override void OnDeactivated()
     {
-        StopWaveAnimation();
+        StopChargingAnimation();
     }
 
     protected override void OnDisposed()
     {
-        StopWaveAnimation();
+        StopChargingAnimation();
     }
 
     protected override void OnSettingsChanged()
@@ -212,8 +299,11 @@ public sealed class BatteryWidget : DockWidget
 
         if (!present)
         {
-            StopWaveAnimation();
-            _liquidPath.Visibility = Visibility.Collapsed;
+            StopChargingAnimation();
+            _trackLayer.Visibility = Visibility.Collapsed;
+            _liquidFill.Visibility = Visibility.Collapsed;
+            _boltIcon.Visibility = Visibility.Collapsed;
+            _boltShadow.Visibility = Visibility.Collapsed;
             _percentShadow.Visibility = Visibility.Collapsed;
             _percentText.Text = "—";
             _percentText.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
@@ -223,8 +313,13 @@ public sealed class BatteryWidget : DockWidget
             return;
         }
 
-        _liquidPath.Visibility = Visibility.Visible;
-        _liquidPath.Fill = CreatePaletteBrush(percent);
+        _trackLayer.Visibility = Visibility.Visible;
+        _liquidFill.Visibility = Visibility.Visible;
+        _liquidFill.Fill = CreatePaletteBrush(percent);
+
+        var boltVis = charging ? Visibility.Visible : Visibility.Collapsed;
+        _boltIcon.Visibility = boltVis;
+        _boltShadow.Visibility = boltVis;
 
         var percentLabel = $"{percent.ToString(CultureInfo.InvariantCulture)}%";
         _percentText.Text = percentLabel;
@@ -262,84 +357,137 @@ public sealed class BatteryWidget : DockWidget
         var width = _surface.ActualWidth > 1 ? _surface.ActualWidth : MinCardWidth;
         var height = _surface.ActualHeight > 1 ? _surface.ActualHeight : WaveHeight;
         _surface.Clip = new RectangleGeometry(new Rect(0, 0, width, height), 10, 10);
+
         var fillRatio = Math.Clamp(_renderedPercent, 2, 100) / 100.0;
         var edgeX = width * fillRatio;
 
         var shouldAnimate = _renderedCharging
             && IsActive
             && Settings.AnimationsEnabled
-            && SystemParameters.ClientAreaAnimation
-            && _renderedPercent < 100;
+            && SystemParameters.ClientAreaAnimation;
 
         if (!shouldAnimate)
         {
-            StopWaveAnimation();
-            SetStaticWave(edgeX, height);
+            StopChargingAnimation();
+            _liquidFill.Clip = BuildStaticFillGeometry(edgeX, height);
             return;
         }
 
-        if (_isAnimatingWave && !forceAnimationRestart) return;
+        if (_isAnimatingCharging && !forceAnimationRestart) return;
 
-        StartWaveAnimation(edgeX, height);
+        StartChargingAnimation(edgeX, height, animateWave: _renderedPercent < 100);
     }
 
-    private void SetStaticWave(double edgeX, double height)
+    private static PathGeometry BuildStaticFillGeometry(double edgeX, double height)
     {
-        var midY = height * 0.5;
-        _topEdge.Point = new Point(edgeX, 0);
-        _upperWave.Point1 = new Point(edgeX, height * 0.16);
-        _upperWave.Point2 = new Point(edgeX, height * 0.34);
-        _upperWave.Point3 = new Point(edgeX, midY);
-        _lowerWave.Point1 = new Point(edgeX, height * 0.68);
-        _lowerWave.Point2 = new Point(edgeX, height * 0.84);
-        _lowerWave.Point3 = new Point(edgeX, height);
-        _bottomLeft.Point = new Point(0, height);
-    }
-
-    private void StartWaveAnimation(double edgeX, double height)
-    {
-        StopWaveAnimation();
-        _isAnimatingWave = true;
-
-        var midY = height * 0.5;
-        var halfCycle = TimeSpan.FromMilliseconds(1850);
-        var ease = new SineEase { EasingMode = EasingMode.EaseInOut };
-
-        PointAnimation MakeAnim(Point from, Point to) => new(from, to, halfCycle)
+        var figure = new PathFigure
         {
-            AutoReverse = true,
-            RepeatBehavior = RepeatBehavior.Forever,
-            EasingFunction = ease
+            StartPoint = new Point(0, 0),
+            IsClosed = true,
+            IsFilled = true,
+            Segments =
+            {
+                new LineSegment(new Point(edgeX, 0), isStroked: false),
+                new LineSegment(new Point(edgeX, height), isStroked: false),
+                new LineSegment(new Point(0, height), isStroked: false)
+            }
         };
-
-        // Stationary liquid body; only the trailing right-hand boundary gently morphs.
-        _bottomLeft.Point = new Point(0, height);
-        _topEdge.BeginAnimation(LineSegment.PointProperty,
-            MakeAnim(new Point(edgeX - 1.6, 0), new Point(edgeX - 1.0, 0)));
-        _upperWave.BeginAnimation(BezierSegment.Point1Property,
-            MakeAnim(new Point(edgeX + 1.4, height * 0.16), new Point(edgeX - 2.2, height * 0.16)));
-        _upperWave.BeginAnimation(BezierSegment.Point2Property,
-            MakeAnim(new Point(edgeX - 2.2, height * 0.34), new Point(edgeX + 1.5, height * 0.34)));
-        _upperWave.BeginAnimation(BezierSegment.Point3Property,
-            MakeAnim(new Point(edgeX - 0.5, midY), new Point(edgeX - 0.6, midY)));
-        _lowerWave.BeginAnimation(BezierSegment.Point1Property,
-            MakeAnim(new Point(edgeX + 1.4, height * 0.68), new Point(edgeX - 2.2, height * 0.68)));
-        _lowerWave.BeginAnimation(BezierSegment.Point2Property,
-            MakeAnim(new Point(edgeX - 1.9, height * 0.84), new Point(edgeX + 1.4, height * 0.84)));
-        _lowerWave.BeginAnimation(BezierSegment.Point3Property,
-            MakeAnim(new Point(edgeX - 1.0, height), new Point(edgeX - 1.6, height)));
+        var geometry = new PathGeometry { Figures = { figure } };
+        geometry.Freeze();
+        return geometry;
     }
 
-    private void StopWaveAnimation()
+    /// <summary>
+    /// Builds a 2-period periodic sinusoidal meniscus along <paramref name="edgeX"/> so translating Y
+    /// from 0 to -<paramref name="height"/> loops seamlessly without reversing direction.
+    /// </summary>
+    private PathGeometry BuildScrollingWaveGeometry(double edgeX, double height)
     {
-        if (!_isAnimatingWave) return;
-        _isAnimatingWave = false;
-        _topEdge.BeginAnimation(LineSegment.PointProperty, null);
-        _upperWave.BeginAnimation(BezierSegment.Point1Property, null);
-        _upperWave.BeginAnimation(BezierSegment.Point2Property, null);
-        _upperWave.BeginAnimation(BezierSegment.Point3Property, null);
-        _lowerWave.BeginAnimation(BezierSegment.Point1Property, null);
-        _lowerWave.BeginAnimation(BezierSegment.Point2Property, null);
-        _lowerWave.BeginAnimation(BezierSegment.Point3Property, null);
+        var amp = Math.Min(WaveAmplitude, edgeX * 0.35);
+        var half = height * 0.5;
+        var figure = new PathFigure
+        {
+            StartPoint = new Point(0, 0),
+            IsClosed = true,
+            IsFilled = true,
+            Segments =
+            {
+                new LineSegment(new Point(edgeX, 0), isStroked: false),
+                // Period 1: 0 -> height
+                new BezierSegment(
+                    new Point(edgeX + amp, half * 0.36),
+                    new Point(edgeX + amp, half * 0.64),
+                    new Point(edgeX, half), isStroked: false),
+                new BezierSegment(
+                    new Point(edgeX - amp, half + half * 0.36),
+                    new Point(edgeX - amp, half + half * 0.64),
+                    new Point(edgeX, height), isStroked: false),
+                // Period 2: height -> 2 * height (identical to period 1 for seamless tiling)
+                new BezierSegment(
+                    new Point(edgeX + amp, height + half * 0.36),
+                    new Point(edgeX + amp, height + half * 0.64),
+                    new Point(edgeX, height + half), isStroked: false),
+                new BezierSegment(
+                    new Point(edgeX - amp, height + half + half * 0.36),
+                    new Point(edgeX - amp, height + half + half * 0.64),
+                    new Point(edgeX, height * 2), isStroked: false),
+                new LineSegment(new Point(0, height * 2), isStroked: false)
+            }
+        };
+        var geometry = new PathGeometry { Figures = { figure }, Transform = _waveTransform };
+        return geometry;
+    }
+
+    private void StartChargingAnimation(double edgeX, double height, bool animateWave)
+    {
+        StopChargingAnimation();
+        _isAnimatingCharging = true;
+
+        if (animateWave)
+        {
+            // Keep _liquidFill stationary so its vertical gradient never drifts; animate only the wave clip geometry.
+            var waveClip = BuildScrollingWaveGeometry(edgeX, height);
+            _liquidFill.Clip = waveClip;
+            _sheenClipHost.Clip = waveClip;
+            var waveAnim = new DoubleAnimation(0, -height, TimeSpan.FromMilliseconds(1600))
+            {
+                RepeatBehavior = RepeatBehavior.Forever
+            };
+            _waveTransform.BeginAnimation(TranslateTransform.YProperty, waveAnim);
+        }
+        else
+        {
+            var staticClip = BuildStaticFillGeometry(edgeX, height);
+            _liquidFill.Clip = staticClip;
+            _sheenClipHost.Clip = staticClip;
+        }
+
+        // Slanted soft charging sheen with a calm pause between sweeps.
+        _chargeSheen.Visibility = Visibility.Visible;
+        var startX = -SheenWidth - 28;
+        var endX = edgeX + 28;
+        var sheenAnim = new DoubleAnimationUsingKeyFrames
+        {
+            Duration = TimeSpan.FromMilliseconds(2800),
+            RepeatBehavior = RepeatBehavior.Forever
+        };
+        sheenAnim.KeyFrames.Add(new DiscreteDoubleKeyFrame(startX, KeyTime.FromTimeSpan(TimeSpan.Zero)));
+        sheenAnim.KeyFrames.Add(new EasingDoubleKeyFrame(
+            endX,
+            KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(1400)),
+            new CubicEase { EasingMode = EasingMode.EaseInOut }));
+        sheenAnim.KeyFrames.Add(new DiscreteDoubleKeyFrame(endX, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(2800))));
+        _sheenTransform.BeginAnimation(TranslateTransform.XProperty, sheenAnim);
+    }
+
+    private void StopChargingAnimation()
+    {
+        if (!_isAnimatingCharging) return;
+        _isAnimatingCharging = false;
+        _waveTransform.BeginAnimation(TranslateTransform.YProperty, null);
+        _waveTransform.Y = 0;
+        _sheenTransform.BeginAnimation(TranslateTransform.XProperty, null);
+        _sheenTransform.X = -SheenWidth;
+        _chargeSheen.Visibility = Visibility.Collapsed;
     }
 }
