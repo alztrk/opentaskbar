@@ -32,6 +32,13 @@ public class DockWidget : UserControl, IDisposable
 
     /// <summary>Raised when the widget appears or disappears, so the dock can refit its widget area.</summary>
     public event EventHandler? AvailabilityChanged;
+
+    /// <summary>
+    /// Raised when the widget's internal content changes its measured width without changing the widget's own
+    /// visibility, e.g. a system-stat meter becoming available or unavailable. The dock must refit for this too.
+    /// </summary>
+    public event EventHandler? ContentWidthChanged;
+
     protected bool IsActive { get; private set; }
     protected DockSettings Settings { get; private set; } = new();
     public virtual bool SupportsCompactMode => false;
@@ -108,6 +115,25 @@ public class DockWidget : UserControl, IDisposable
         if (IsActive) OnTick(now);
     }
 
+    /// <summary>
+    /// True when this widget can paint a meaningful frame without activating background services.
+    /// Settings only creates native previews for widgets that opt in.
+    /// </summary>
+    public virtual bool SupportsStaticPreview => false;
+
+    /// <summary>
+    /// Renders a single frame for the Settings catalog preview without activating the widget.
+    /// No background polling or service subscriptions are started. The default is a no-op;
+    /// widgets with safe, local-only rendering override this method.
+    /// </summary>
+    public void RenderPreview()
+    {
+        if (_disposed || IsActive) return;
+        OnRenderPreview();
+    }
+
+    protected virtual void OnRenderPreview() { }
+
     protected virtual void OnActivated() { }
     protected virtual void OnDeactivated() { }
     protected virtual void OnDisposed() { }
@@ -124,6 +150,9 @@ public class DockWidget : UserControl, IDisposable
     {
         if (error is not null) ReportError?.Invoke(error);
     }
+
+    /// <summary>Notify the host that the widget's measured width changed.</summary>
+    protected void RaiseContentWidthChanged() => ContentWidthChanged?.Invoke(this, EventArgs.Empty);
 
     private void UpdateVisibility()
     {

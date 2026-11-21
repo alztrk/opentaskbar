@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using OpenTaskbar.Models;
+using OpenTaskbar.Services;
 using OpenTaskbar.Widgets;
 
 namespace OpenTaskbar;
@@ -48,7 +49,7 @@ public partial class MainWindow
             _foregroundAtAppPress = null;
             _previewCloseTimer.Stop();
             _thumbnailPreview.Hide();
-            ResetMagnification();
+            ResetMagnification(immediate: true);
             AnimateAppDrag(button, app);
         }
     }
@@ -265,61 +266,76 @@ public partial class MainWindow
         e.Handled = true;
     }
 
-    // ---- Start Button Drag & Drop ----
+    // ---- Permanent shell button drag & drop ----
 
-    private Point _startDragStartPoint;
-    private bool _isStartPressing;
+    private Point _shellDragStartPoint;
+    private Button? _shellDragButton;
+    private string? _shellDragToken;
+
+    private void ShellButton_PreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (sender is not Button button) return;
+        _shellDragButton = button;
+        // Start, Search, Task View and Background apps are pinned groups; only Show Desktop can move.
+        _shellDragToken = button.Name switch
+        {
+            nameof(ShowDesktopButton) => "peek",
+            _ => null
+        };
+        _shellDragStartPoint = e.GetPosition(this);
+    }
+
+    private void ShellButton_PreviewMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        _shellDragButton = null;
+        _shellDragToken = null;
+    }
+
+    private void ShellButton_PreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (_shellDragButton is null || _shellDragToken is null
+            || e.LeftButton != System.Windows.Input.MouseButtonState.Pressed) return;
+        var diff = _shellDragStartPoint - e.GetPosition(this);
+        if (Math.Abs(diff.X) <= SystemParameters.MinimumHorizontalDragDistance
+            && Math.Abs(diff.Y) <= SystemParameters.MinimumVerticalDragDistance) return;
+
+        var button = _shellDragButton;
+        var token = _shellDragToken;
+        _shellDragButton = null;
+        _shellDragToken = null;
+        _previewCloseTimer.Stop();
+        _thumbnailPreview.Hide();
+        ResetMagnification(immediate: true);
+        button.Opacity = 0.55;
+        try
+        {
+            DragDrop.DoDragDrop(button, token, DragDropEffects.Move);
+        }
+        finally
+        {
+            button.Opacity = 1.0;
+        }
+    }
+
+    // ---- Start Button press tracking (Start itself is pinned and never dragged) ----
 
     private void StartButton_PreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
-        _startDragStartPoint = e.GetPosition(this);
-        _isStartPressing = true;
         // Snapshot at press: the press itself light-dismisses an open Start menu before the click runs.
         var pressTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
         _startMenuOpenAtPress = _startMenu.WasOpenAtPress(_startMenu.IsStartMenuOpenNow(), pressTimestamp);
     }
 
-    private void StartButton_PreviewMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
-    {
-        _isStartPressing = false;
-    }
-
-    private void StartButton_PreviewMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
-    {
-        if (e.LeftButton != System.Windows.Input.MouseButtonState.Pressed || !_isStartPressing) return;
-
-        var currentPoint = e.GetPosition(this);
-        var diff = _startDragStartPoint - currentPoint;
-        if (Math.Abs(diff.X) > SystemParameters.MinimumHorizontalDragDistance
-            || Math.Abs(diff.Y) > SystemParameters.MinimumVerticalDragDistance)
-        {
-            _isStartPressing = false;
-            _previewCloseTimer.Stop();
-            _thumbnailPreview.Hide();
-            ResetMagnification();
-
-            StartButton.Opacity = 0.55;
-            try
-            {
-                DragDrop.DoDragDrop(StartButton, new StartButtonDragData(), DragDropEffects.Move);
-            }
-            finally
-            {
-                StartButton.Opacity = 1.0;
-            }
-        }
-    }
-
     private static bool TryGetDockItemToken(DragEventArgs e, out string token)
     {
-        if (e.Data.GetDataPresent(typeof(StartButtonDragData)))
-        {
-            token = "start";
-            return true;
-        }
         if (e.Data.GetData(typeof(DockApp)) is DockApp app)
         {
             token = "app:" + app.ExecutablePath;
+            return true;
+        }
+        if (e.Data.GetData(typeof(DockAppGroup)) is DockAppGroup group)
+        {
+            token = "group:" + group.Id;
             return true;
         }
         if (e.Data.GetData(typeof(DockStack)) is DockStack stack)
@@ -332,13 +348,23 @@ public partial class MainWindow
             token = "widget:" + widget.WidgetId;
             return true;
         }
+        if (e.Data.GetData(typeof(string)) is string shellToken)
+        {
+            if (ShellDockTokens.Contains(shellToken, StringComparer.OrdinalIgnoreCase)
+                && !DockItemOrdering.IsPinned(shellToken))
+            {
+                token = shellToken;
+                return true;
+            }
+        }
         token = string.Empty;
         return false;
     }
 
     // Collapsed or zero-size widgets do not occupy a drop slot.
     private IEnumerable<KeyValuePair<string, FrameworkElement>> VisibleDockItems() =>
-        _dockItemElements.Where(item => item.Value.IsVisible
+        _dockItemElements.Where(item => !DockItemOrdering.IsPinned(item.Key)
+            && item.Value.IsVisible
             && (IsVertical ? item.Value.ActualHeight : item.Value.ActualWidth) > 0);
 
     private int GetDockInsertionIndex(DragEventArgs e)

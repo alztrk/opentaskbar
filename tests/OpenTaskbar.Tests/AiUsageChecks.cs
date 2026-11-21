@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Windows.Controls;
 using OpenTaskbar.Models;
 using OpenTaskbar.Services;
 using OpenTaskbar.Widgets;
@@ -337,8 +338,8 @@ internal static class AiUsageChecks
             var settings = new DockSettings(AiUsageProviders: AiProviders.All);
             var store = new DockSettingsStore(path);
             Check(!DockSettingsStore.Validate(settings with { AiUsageProviders = (AiProviders)128 }), "Unknown AI provider flags must be rejected.");
-            Check(store.Save(settings) is null && store.Load().Settings.AiUsageProviders == AiProviders.All,
-                "Provider flags must round-trip through settings.");
+            Check(store.Save(settings) is null && store.Load().Settings.AiUsageProviders == AiProviders.None,
+                "Legacy provider flags must be consumed by the per-provider widget migration.");
             File.WriteAllText(path, "{}");
             Check(store.Load().Settings is { AiUsageProviders: AiProviders.None, AiUsageRing: AiUsageRing.Highest },
                 "Legacy settings must leave providers disabled and the ring on the highest window.");
@@ -375,7 +376,7 @@ internal static class AiUsageChecks
         Check(AiUsageWidget.RetryDelay(null, 0, null).TotalSeconds is >= 300 and <= 330, "Successful loads must refresh after five minutes plus jitter.");
 
         string[] keys = ["WidgetAiUsage", "WidgetAiUsageDescription", "AiUsageSettingsHeading", "AiUsageProviderHint",
-            "AiUsageUnofficialNote", "AiUsageSession", "AiUsageWeekly", "AiUsageMonthly", "AiUsageWeeklyModel", "AiUsageGroupGemini", "AiUsageGroupClaudeGpt", "AiUsageResetsIn", "AiUsageResetsAt",
+            "AiUsageUnofficialNote", "AiUsageSession", "AiUsageWeekly", "AiUsageSessionShort", "AiUsageWeeklyShort", "AiUsageMonthly", "AiUsageWeeklyModel", "AiUsageGroupGemini", "AiUsageGroupClaudeGpt", "AiUsageResetsIn", "AiUsageResetsAt",
             "AiUsageUpdated", "AiUsageRefresh", "AiUsageOpenDashboard", "AiUsageNoProviders", "AiUsageRingLabel",
             "AiUsageRingHighest", "AiUsageRingSession", "AiUsageLimitReached", "AiUsageStatusOk", "AiUsageStatusSignIn",
             "AiUsageStatusStale", "AiUsageStatusNearLimit", "AiUsageStatusHigh", "AiUsageStatusUnavailable", "AiUsageStatusLoading", "AiUsagePaceIn", "AiUsagePaceAt", "AiUsagePaceMarker", "HoursMinutesFormat",
@@ -413,12 +414,17 @@ internal static class AiUsageChecks
             (_, _) => pending.Task,
             (provider, _) => Task.FromResult<(AiUsageReport?, string?)>((new(provider, null, [], DateTimeOffset.UtcNow), null))
         ];
+        foreach (var provider in new[] { AiProviders.None, AiProviders.All })
+        {
+            try { _ = new AiUsageWidget(provider); }
+            catch (ArgumentOutOfRangeException) { checks++; continue; }
+            throw new InvalidOperationException("An AI usage widget must require exactly one provider.");
+        }
         foreach (var loader in loaders)
-            foreach (var providers in new[] { AiProviders.None, AiProviders.Claude, AiProviders.All })
+            foreach (var provider in new[] { AiProviders.OpenCode, AiProviders.OpenRouter })
                 foreach (var compact in new[] { false, true })
                 {
-                    using var widget = new AiUsageWidget(loader);
-                    widget.ApplySettings(new DockSettings(AiUsageProviders: providers));
+                    using var widget = new AiUsageWidget(provider, loader);
                     widget.Activate();
                     widget.SetCompactState(compact);
                     widget.Tick(DateTime.Now.AddMinutes(1));
@@ -427,6 +433,157 @@ internal static class AiUsageChecks
                     widget.SetCompactState(!compact);
                     checks++;
                 }
+
+        // Dual quota widget checks (Codex, Claude): dual progress bars, no ring, no flyout menu, localized 5h/7d labels
+        foreach (var dualProvider in new[] { AiProviders.Codex, AiProviders.Claude })
+        {
+            using var dualWidget = new AiUsageWidget(dualProvider, (provider, _) =>
+            {
+                var report = new AiUsageReport(provider, "Pro",
+                [
+                    new("AiUsageSession", 0.50, DateTimeOffset.UtcNow.AddHours(2), 18000L),
+                    new("AiUsageWeekly", 0.25, DateTimeOffset.UtcNow.AddDays(4), 604800L)
+                ], DateTimeOffset.UtcNow);
+                return Task.FromResult<(AiUsageReport?, string?)>((report, null));
+            });
+            dualWidget.Activate();
+            if (dualWidget.BuildHoverFlyoutContent() is not null)
+                throw new InvalidOperationException($"{dualProvider} must have no hover flyout content.");
+
+            var cardField = typeof(AiUsageWidget).GetField("_card", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+            var cardObj = cardField.GetValue(dualWidget)!;
+            var ringProp = cardObj.GetType().GetProperty("Ring")!;
+            if (ringProp.GetValue(cardObj) is not null)
+                throw new InvalidOperationException($"{dualProvider} must not use a RingMeter.");
+
+            var codexBarsProp = cardObj.GetType().GetProperty("Codex")!;
+            var codexBars = codexBarsProp.GetValue(cardObj);
+            if (codexBars is null)
+                throw new InvalidOperationException($"{dualProvider} must have dual quota bars container.");
+
+            var sessionLabelProp = codexBars.GetType().GetProperty("SessionLabel")!;
+            var sessionLabel = (TextBlock)sessionLabelProp.GetValue(codexBars)!;
+            var weeklyLabelProp = codexBars.GetType().GetProperty("WeeklyLabel")!;
+            var weeklyLabel = (TextBlock)weeklyLabelProp.GetValue(codexBars)!;
+            var sessionResetProp = codexBars.GetType().GetProperty("SessionReset")!;
+            var sessionReset = (TextBlock)sessionResetProp.GetValue(codexBars)!;
+            var weeklyResetProp = codexBars.GetType().GetProperty("WeeklyReset")!;
+            var weeklyReset = (TextBlock)weeklyResetProp.GetValue(codexBars)!;
+            var sessionFillProp = codexBars.GetType().GetProperty("SessionFill")!;
+            var sessionFill = (Border)sessionFillProp.GetValue(codexBars)!;
+            var weeklyFillProp = codexBars.GetType().GetProperty("WeeklyFill")!;
+            var weeklyFill = (Border)weeklyFillProp.GetValue(codexBars)!;
+
+            // Turkish test
+            UiText.Current.SetLanguage(AppLanguage.Turkish);
+            dualWidget.Tick(DateTime.Now.AddMinutes(1));
+            if (sessionLabel.Text != "5s" || weeklyLabel.Text != "7g")
+                throw new InvalidOperationException($"{dualProvider} labels must be localized in Turkish: expected 5s/7g, got {sessionLabel.Text}/{weeklyLabel.Text}");
+            if (sessionFill.Width <= 0 || weeklyFill.Width <= 0)
+                throw new InvalidOperationException($"{dualProvider} progress bars must reflect loaded quota.");
+
+            // English test
+            UiText.Current.SetLanguage(AppLanguage.English);
+            dualWidget.Tick(DateTime.Now.AddMinutes(2));
+            if (sessionLabel.Text != "5h" || weeklyLabel.Text != "7d")
+                throw new InvalidOperationException($"{dualProvider} labels must be localized in English: expected 5h/7d, got {sessionLabel.Text}/{weeklyLabel.Text}");
+
+            // Check name visibility is collapsed
+            var nameProp = cardObj.GetType().GetProperty("Name")!;
+            var nameBlock = (TextBlock)nameProp.GetValue(cardObj)!;
+            if (nameBlock.Visibility != System.Windows.Visibility.Collapsed)
+                throw new InvalidOperationException($"{dualProvider} card must hide its provider name text.");
+
+            UiText.Current.SetLanguage(AppLanguage.Turkish);
+            checks += 7;
+        }
+
+        // Antigravity widget checks: dynamic columns with vertical dividers, headers on top, no empty quotas, no name, no ring, no flyout menu
+        using var agyWidget = new AiUsageWidget(AiProviders.Antigravity, (provider, _) =>
+        {
+            var agyReport = new AiUsageReport(provider, "Google AI Pro",
+            [
+                new("AiUsageSession", 0.40, DateTimeOffset.UtcNow.AddHours(3), 18000L, Group: "AiUsageGroupGemini"),
+                new("AiUsageWeekly", 0.60, DateTimeOffset.UtcNow.AddDays(5), 604800L, Group: "AiUsageGroupGemini"),
+                // Claude group only has weekly quota, no 5h session data
+                new("AiUsageWeekly", 0.30, DateTimeOffset.UtcNow.AddDays(4), 604800L, Group: "AiUsageGroupClaudeGpt")
+            ], DateTimeOffset.UtcNow);
+            return Task.FromResult<(AiUsageReport?, string?)>((agyReport, null));
+        });
+        agyWidget.Activate();
+        if (agyWidget.BuildHoverFlyoutContent() is not null)
+            throw new InvalidOperationException("Antigravity must have no hover flyout content.");
+
+        var agyCardField = typeof(AiUsageWidget).GetField("_card", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
+        var agyCardObj = agyCardField.GetValue(agyWidget)!;
+        var agyRingProp = agyCardObj.GetType().GetProperty("Ring")!;
+        if (agyRingProp.GetValue(agyCardObj) is not null)
+            throw new InvalidOperationException("Antigravity must not use a RingMeter.");
+
+        var agyProp = agyCardObj.GetType().GetProperty("Antigravity")!;
+        var agyCard = agyProp.GetValue(agyCardObj);
+        if (agyCard is null)
+            throw new InvalidOperationException("Antigravity must have AntigravityCard container.");
+
+        var agyNameProp = agyCardObj.GetType().GetProperty("Name")!;
+        var agyNameBlock = (TextBlock)agyNameProp.GetValue(agyCardObj)!;
+        if (agyNameBlock.Visibility != System.Windows.Visibility.Collapsed)
+            throw new InvalidOperationException("Antigravity card must hide its provider name text.");
+
+        var containerProp = agyCard.GetType().GetProperty("Container")!;
+        var container = (StackPanel)containerProp.GetValue(agyCard)!;
+        // 2 groups (Gemini, Claude) separated by 1 divider = 3 children in container
+        if (container.Children.Count != 3)
+            throw new InvalidOperationException($"Antigravity container must have 3 children (2 columns + 1 divider), got {container.Children.Count}");
+
+        var columnsProp = agyCard.GetType().GetProperty("Columns")!;
+        var columnsList = (System.Collections.IList)columnsProp.GetValue(agyCard)!;
+        if (columnsList.Count != 2)
+            throw new InvalidOperationException($"Antigravity must have 2 columns, got {columnsList.Count}");
+
+        // Column 1 (Gemini) has 2 slots (5h + weekly) and header "Gemini" on top
+        var col1 = columnsList[0]!;
+        var col1SlotsProp = col1.GetType().GetProperty("Slots")!;
+        var col1Slots = (System.Collections.IList)col1SlotsProp.GetValue(col1)!;
+        if (col1Slots.Count != 2)
+            throw new InvalidOperationException($"Gemini column must have 2 quota slots, got {col1Slots.Count}");
+        var col1ElemProp = col1.GetType().GetProperty("Element")!;
+        var col1Panel = (StackPanel)col1ElemProp.GetValue(col1)!;
+        if (col1Panel.Orientation != Orientation.Vertical || ((TextBlock)col1Panel.Children[0]).Text != "Gemini")
+            throw new InvalidOperationException("Gemini column must be vertical StackPanel with 'Gemini' header on top.");
+
+        // Column 2 (Claude) has only 1 slot (weekly only, no missing 5h slot) and header "Claude" on top
+        var col2 = columnsList[1]!;
+        var col2SlotsProp = col2.GetType().GetProperty("Slots")!;
+        var col2Slots = (System.Collections.IList)col2SlotsProp.GetValue(col2)!;
+        if (col2Slots.Count != 1)
+            throw new InvalidOperationException($"Claude column must only have 1 quota slot when 5h data is missing, got {col2Slots.Count}");
+        var col2ElemProp = col2.GetType().GetProperty("Element")!;
+        var col2Panel = (StackPanel)col2ElemProp.GetValue(col2)!;
+        if (col2Panel.Orientation != Orientation.Vertical || ((TextBlock)col2Panel.Children[0]).Text != "Claude")
+            throw new InvalidOperationException("Claude column must be vertical StackPanel with 'Claude' header on top.");
+
+        // Now test 3 pools format
+        using var agyPoolWidget = new AiUsageWidget(AiProviders.Antigravity, (provider, _) =>
+        {
+            var agyPoolReport = new AiUsageReport(provider, "Google AI Pro",
+            [
+                new("AiUsagePool:Gemini Pro", 0.45, DateTimeOffset.UtcNow.AddHours(2), 18000L),
+                new("AiUsagePool:Gemini Flash", 0.20, DateTimeOffset.UtcNow.AddHours(3), 18000L),
+                new("AiUsagePool:Claude", 0.95, DateTimeOffset.UtcNow.AddMinutes(45), 18000L)
+            ], DateTimeOffset.UtcNow);
+            return Task.FromResult<(AiUsageReport?, string?)>((agyPoolReport, null));
+        });
+        agyPoolWidget.Activate();
+        var agyPoolCardObj = agyCardField.GetValue(agyPoolWidget)!;
+        var agyPoolCard = agyProp.GetValue(agyPoolCardObj)!;
+        var poolContainer = (StackPanel)containerProp.GetValue(agyPoolCard)!;
+        // 3 pools separated by 2 dividers = 5 children
+        if (poolContainer.Children.Count != 5)
+            throw new InvalidOperationException($"Antigravity pool container must have 5 children (3 columns + 2 dividers), got {poolContainer.Children.Count}");
+
+        checks += 8;
+
         pending.SetCanceled();
         return checks;
     }

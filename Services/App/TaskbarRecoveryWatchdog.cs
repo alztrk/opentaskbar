@@ -20,6 +20,9 @@ internal static class TaskbarRecoveryWatchdog
     private const string HeartbeatPrefix = @"Local\OpenTaskbar.Heartbeat.";
     private const int HeartbeatIntervalMs = 1000;
     private const int HeartbeatTimeoutMs = 4000;
+    // A single delayed heartbeat (GC, thread-pool starvation) must never be mistaken for a hung dock and
+    // trigger a restore that would delete a live session's journals.
+    private const int HeartbeatMissesRequired = 3;
 
     private static EventWaitHandle? _cleanExit;
     private static EventWaitHandle? _heartbeat;
@@ -95,6 +98,7 @@ internal static class TaskbarRecoveryWatchdog
             using (processWaitHandle)
             {
                 var exitedCleanly = false;
+                var heartbeatMisses = 0;
                 WaitHandle[] waitHandles = [cleanExit, processWaitHandle, heartbeat];
 
                 while (true)
@@ -117,8 +121,10 @@ internal static class TaskbarRecoveryWatchdog
 
                     if (signaled == WaitHandle.WaitTimeout)
                     {
-                        break;
+                        if (++heartbeatMisses >= HeartbeatMissesRequired) break;
+                        continue;
                     }
+                    heartbeatMisses = 0;
                 }
 
                 if (exitedCleanly) return;
@@ -151,7 +157,12 @@ internal static class TaskbarRecoveryWatchdog
             }
 
             _heartbeat.Set();
-            _heartbeatTimer = new Timer(_ => _heartbeat?.Set(), null, HeartbeatIntervalMs, HeartbeatIntervalMs);
+            _heartbeatTimer = new Timer(_ =>
+            {
+                // NotifyCleanExit disposes the timer and event while a callback may already be in flight.
+                try { _heartbeat?.Set(); }
+                catch (ObjectDisposedException) { }
+            }, null, HeartbeatIntervalMs, HeartbeatIntervalMs);
 
             var watchdogExecutable = EnsureWatchdogExecutable(executablePath);
 
@@ -208,13 +219,17 @@ internal static class TaskbarRecoveryWatchdog
 
                     if (needsWrite)
                     {
-                        File.WriteAllBytes(watchdogExe, resourceBytes);
+                        // A kill mid-write must not leave a truncated watchdog that cannot start next time.
+                        var temporary = watchdogExe + ".tmp";
+                        File.WriteAllBytes(temporary, resourceBytes);
+                        File.Move(temporary, watchdogExe, overwrite: true);
                     }
                 }
                 catch (IOException)
                 {
+                    // Fall through: only return a path that actually exists and can be launched.
                 }
-                return watchdogExe;
+                if (File.Exists(watchdogExe)) return watchdogExe;
             }
 
             var appDir = Path.GetDirectoryName(mainExecutablePath) ?? string.Empty;

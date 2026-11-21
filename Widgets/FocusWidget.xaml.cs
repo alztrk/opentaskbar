@@ -147,6 +147,10 @@ public partial class FocusWidget : DockWidget
         Render();
     }
 
+    /// <summary>Renders the configured focus duration locally; no timers or sensors are started.</summary>
+    public override bool SupportsStaticPreview => true;
+    protected override void OnRenderPreview() => Render();
+
     protected override void OnTick(DateTime now)
     {
         if (!IsRunning) return;

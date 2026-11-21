@@ -1,8 +1,38 @@
+using OpenTaskbar.Models;
+
 namespace OpenTaskbar.Services;
 
 /// <summary>Converts a drop position in the visible dock into the saved item order.</summary>
 internal static class DockItemOrdering
 {
+    /// <summary>Windows-native shell buttons that are always pinned to the left edge of the dock.</summary>
+    internal static readonly string[] PinnedLeadTokens = ["start", "search", "taskview"];
+
+    /// <summary>The background-apps button is always pinned to the right edge of the dock.</summary>
+    internal static readonly string[] PinnedTrailTokens = ["tray"];
+
+    private static readonly string[] PinnedTokens = [.. PinnedLeadTokens, .. PinnedTrailTokens];
+
+    internal static bool IsPinned(string token) =>
+        PinnedTokens.Contains(token, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Rewrites a persisted order so the pinned shell groups always lead and trail the strip. Hidden buttons are
+    /// omitted; every other item keeps its saved position between the two groups.
+    /// </summary>
+    internal static IReadOnlyList<string> ApplyPinnedGroups(IReadOnlyList<string> order, DockSettings settings)
+    {
+        var lead = new List<string>();
+        if (settings.StartPlacement != StartButtonPlacement.Hidden) lead.Add("start");
+        if (settings.ShowSearchButton) lead.Add("search");
+        if (settings.ShowTaskViewButton) lead.Add("taskview");
+
+        var result = new List<string>(lead);
+        result.AddRange(order.Where(token => !IsPinned(token)));
+        if (settings.ShowTrayButton) result.Add("tray");
+        return result;
+    }
+
     internal static IReadOnlyList<string> MoveVisibleItem(
         IReadOnlyList<string> savedOrder,
         IReadOnlyList<string> visibleOrder,

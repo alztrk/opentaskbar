@@ -48,10 +48,11 @@ internal static class NativeMemoryMethods
 
         try
         {
-            System.Runtime.GCSettings.LargeObjectHeapCompactionMode = System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
-            GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
-            GC.WaitForPendingFinalizers();
-            GC.Collect(2, GCCollectionMode.Aggressive, blocking: true, compacting: true);
+            // These trims run on the UI dispatcher. Two blocking, compacting Gen2 collections plus a
+            // finalizer wait froze the dock for a noticeable moment right after it first appeared.
+            // A gentle non-blocking collection is enough to release the short-lived startup garbage;
+            // EmptyWorkingSet below is what actually returns pages to the OS.
+            GC.Collect(2, GCCollectionMode.Optimized, blocking: false, compacting: false);
 
             var handle = Process.GetCurrentProcess().Handle;
             if (handle != 0)

@@ -5,6 +5,7 @@ using System.Windows.Automation;
 using System.Windows.Automation.Peers;
 using System.Windows.Controls;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using OpenTaskbar.Models;
@@ -13,6 +14,16 @@ using OpenTaskbar.Views.Widgets;
 
 internal static class WidgetViewChecks
 {
+    // Mirrors App.xaml's modular resource order so UI tests load exactly what the app loads.
+    private static readonly string[] ModularResources =
+    [
+        "Tokens/Typography", "Tokens/Spacing", "Tokens/Radii", "Tokens/Layout", "Tokens/Motion", "Tokens/Effects",
+        "Palettes/Dark",
+        "Icons/Navigation", "Icons/Actions", "Icons/Status", "Icons/Media", "Icons/Brand", "Icons/GeometryTemplate",
+        "Controls/Tooltip", "Controls/ScrollBar",
+        "DockControls", "ContextMenus", "Widgets", "WidgetControls", "SettingsControls"
+    ];
+
     public static int Run()
     {
         Exception? failure = null;
@@ -35,7 +46,7 @@ internal static class WidgetViewChecks
         var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         try
         {
-            foreach (var resource in new[] { "Theme", "DockControls", "ContextMenus", "Widgets", "WidgetControls", "SettingsControls" })
+            foreach (var resource in ModularResources)
                 app.Resources.MergedDictionaries.Add(new ResourceDictionary
                 {
                     Source = new Uri($"/OpenTaskbar;component/Design/{resource}.xaml", UriKind.Relative)
@@ -51,6 +62,78 @@ internal static class WidgetViewChecks
             checks += AdaptiveWidgetAndConfirmChecks.Run(app);
             checks += NetSpeedChecks.Run(app);
             checks += BluetoothBatteryChecks.Run(app);
+            checks += SystemStatsAvailabilityChecks.Run(app);
+
+            var cardStyle = (Style)app.FindResource("WidgetCardButton");
+            var cardTemplate = (ControlTemplate)cardStyle.Setters.OfType<Setter>()
+                .Single(setter => setter.Property == Control.TemplateProperty).Value;
+            Check(!cardTemplate.Triggers.OfType<Trigger>()
+                    .Any(trigger => trigger.Property == UIElement.IsKeyboardFocusedProperty),
+                "Widget cards must not paint a focus border when clicked.");
+
+            // Hover feedback must fade in/out instead of snapping the surface instantly.
+            static bool HasHoverFade(ControlTemplate template) =>
+                template.Triggers.OfType<EventTrigger>().Any(t => t.RoutedEvent == UIElement.MouseEnterEvent)
+                && template.Triggers.OfType<EventTrigger>().Any(t => t.RoutedEvent == UIElement.MouseLeaveEvent);
+            foreach (var key in new[] { "WidgetCardButton", "WidgetIconButton", "WidgetPill", "FlyoutButton", "WidgetButton" })
+            {
+                var template = (ControlTemplate)((Style)app.FindResource(key)).Setters.OfType<Setter>()
+                    .Single(s => s.Property == Control.TemplateProperty).Value;
+                Check(HasHoverFade(template), $"{key} must animate hover with MouseEnter/MouseLeave EventTriggers.");
+            }
+            var borderStyle = (Style)app.FindResource("WidgetCardBorder");
+            var borderTriggers = borderStyle.Triggers.OfType<EventTrigger>().ToList();
+            Check(borderTriggers.Any(t => t.RoutedEvent == UIElement.MouseEnterEvent)
+                  && borderTriggers.Any(t => t.RoutedEvent == UIElement.MouseLeaveEvent),
+                "WidgetCardBorder must animate its surface color on hover.");
+            var borderA = new Border { Style = borderStyle };
+            var borderB = new Border { Style = borderStyle };
+            Check(!ReferenceEquals(borderA.Background, borderB.Background),
+                "Each widget card must own its background brush so hover animations stay isolated.");
+
+            var interfaceFont = (FontFamily)app.FindResource("InterfaceFont");
+            Check(interfaceFont.Source.Contains("#Inter", StringComparison.OrdinalIgnoreCase),
+                "The UI must use the embedded Inter font instead of a machine-dependent system font.");
+            Check(((FontFamily)app.FindResource("WidgetActionFont")).Source.Contains("MDL2", StringComparison.OrdinalIgnoreCase),
+                "Segoe MDL2 Assets must remain the icon font.");
+
+            var shellStyle = (Style)app.FindResource("ShellDockButton");
+            var shellTemplate = (ControlTemplate)shellStyle.Setters.OfType<Setter>()
+                .Single(setter => setter.Property == Control.TemplateProperty).Value;
+            var hoverTrigger = shellTemplate.Triggers.OfType<Trigger>()
+                .SingleOrDefault(t => t.Property == UIElement.IsMouseOverProperty);
+            Check(hoverTrigger?.EnterActions.Any(action => action is BeginStoryboard) == true
+                  && hoverTrigger.ExitActions.Any(action => action is BeginStoryboard),
+                "Shell buttons must fade a quiet surface in and out on hover.");
+
+            foreach (var (key, height) in new[]
+                     {
+                         ("LogoCopilot", 20.04), ("LogoDeepSeek", 17.66), ("LogoOpenRouter", 20.31)
+                     })
+            {
+                var geometry = (System.Windows.Media.StreamGeometry)app.FindResource(key);
+                Check(Math.Abs(geometry.Bounds.Width - 24) < 0.5 && Math.Abs(geometry.Bounds.Height - height) < 0.5,
+                    $"{key} must keep the official 24x24 brand silhouette.");
+            }
+
+            // The widget catalogue is derived from registered widget definitions.
+            var availableWidgets = new DockWidgetService(TimeProvider.System).CreateOptions([], []);
+            Check(availableWidgets.Any(x => x.Id == "Clock" && x.Category == "Time & Weather")
+                && availableWidgets.Any(x => DockWidgetService.AiUsageWidgets.Any(ai => ai.Id == x.Id) && x.Category == "AI Quotas"),
+                "Widget categories must be derived from the real catalogue.");
+            var expanded = availableWidgets.First(x => x.Id == "Clock");
+            var adjacent = availableWidgets.First(x => x.Id == "Weather");
+            expanded.IsSettingsExpanded = true;
+            var catalogueGrid = new OpenTaskbar.Views.ExpandableWidgetGrid { MinItemWidth = 270 };
+            var expandedItem = new Border { DataContext = expanded, Height = 120 };
+            var otherItem = new Border { DataContext = adjacent, Height = 45 };
+            catalogueGrid.Children.Add(expandedItem);
+            catalogueGrid.Children.Add(otherItem);
+            catalogueGrid.Measure(new Size(620, double.PositiveInfinity));
+            catalogueGrid.Arrange(new Rect(0, 0, 620, 220));
+            Check(Math.Abs(expandedItem.ActualWidth - 620) < 1
+                && otherItem.TranslatePoint(new Point(), catalogueGrid).Y >= expandedItem.ActualHeight,
+                "An expanded widget must span the full row and push following items downward.");
 
             var settingsAction = new Button { Content = UiText.Get("Apply") };
             var selectedTab = new TabItem { Header = UiText.Get("General"), Content = settingsAction };
@@ -66,30 +149,6 @@ internal static class WidgetViewChecks
                 if (!condition) throw new InvalidOperationException(name);
                 checks++;
             }
-
-            // Re-clicking Search must work even if Windows closes its flyout.
-            var nativeSearchOpen = false;
-            var searchOpenRequests = 0;
-            var search = new OpenTaskbar.Widgets.SearchWidget
-            {
-                IsSearchOpen = () => nativeSearchOpen,
-                OpenSearch = _ =>
-                {
-                    searchOpenRequests++;
-                    nativeSearchOpen = true;
-                    return null;
-                }
-            };
-            search.Activate();
-            Layout(search);
-            search.HandleSearchClick();
-            Check(searchOpenRequests == 1, "Clicking search widget must open Windows Search.");
-            search.HandleSearchClick();
-            Check(searchOpenRequests == 1, "Clicking while Windows Search is open must not reopen it.");
-            nativeSearchOpen = false;
-            search.HandleSearchClick();
-            Check(searchOpenRequests == 2, "After Windows Search closes, clicking search widget again must reopen it.");
-            search.Dispose();
 
             var clock = new TestClock();
             var timer = new CountdownDockWidget(clock);
@@ -216,56 +275,45 @@ internal static class WidgetViewChecks
                     option.Preview.Value = option.Preview is CountdownDockWidget ? string.Empty : "00:00:00";
                     var card = new WidgetCatalogItem { DataContext = option };
                     Layout(card);
-                    var install = RequiredName<Button>(card, "PreviewButton");
-                    var preview = Descendants<ContentControl>(install).Single(control => ReferenceEquals(control.Content, option.Preview));
-                    Check(ReferenceEquals(preview.Content, option.Preview) && !preview.IsHitTestVisible
-                        && System.Windows.Input.KeyboardNavigation.GetTabNavigation(preview) == System.Windows.Input.KeyboardNavigationMode.None,
-                        "Catalog previews must reuse real widget templates without exposing nested interactive targets.");
-                    Check(preview.LayoutTransform is ScaleTransform { ScaleX: > 1, ScaleY: > 1 },
-                        "Catalog previews must scale up to fill their gallery card.");
-                    Check(AutomationProperties.GetName(install) == option.Label
-                        && AutomationProperties.GetItemStatus(install) == UiText.Get("WidgetAvailable"),
-                        "Preview installation must expose its name and available state.");
+                    var expand = RequiredName<Button>(card, "PreviewButton");
+                    var install = RequiredName<Button>(card, "InstallButton");
+                    var preview = Descendants<ContentControl>(card)
+                        .Single(control => ReferenceEquals(control.Content, option.NativePreview));
+                    Check(!preview.IsHitTestVisible
+                        && System.Windows.Input.KeyboardNavigation.GetTabNavigation(preview)
+                            == System.Windows.Input.KeyboardNavigationMode.None,
+                        "Expanded previews must remain non-interactive.");
+                    Check(AutomationProperties.GetName(expand) == option.Label,
+                        "Expandable widget rows must announce the widget label.");
                     Check(!Descendants<TextBlock>(card).Any(text => text.Text == option.Description),
-                        "Available previews must omit descriptions.");
-                    Check(!Descendants<CheckBox>(card).Any(),
-                        "The card must omit separate management controls.");
+                        "Compact rows must omit verbose widget descriptions.");
+                    var expansions = 0;
+                    card.SettingsRequested += (_, _) => expansions++;
+                    expand.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Check(expansions == 1 && !option.IsInstalled,
+                        "Expanding a widget must not automatically install it.");
                     var installations = 0;
                     card.InstallationRequested += (_, _) => installations++;
                     install.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Check(installations == 1 && !option.IsInstalled
-                        && (option.Preview is not ITimedDockWidget timedPreview || !timedPreview.IsRunning),
-                        "Tapping a preview must request installation without starting its time widget.");
-                    option.IsInstalled = true;
-                    option.IsEnabled = true;
-                    Layout(card);
-                    Check(AutomationProperties.GetItemStatus(install) == UiText.Get("WidgetInstalled"),
-                        "Installed previews must expose their installed state.");
-                    install.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Check(installations == 2, "Tapping an installed preview must request uninstallation.");
-                    Check(Descendants<FrameworkElement>(card).Where(element => element is Button).All(element =>
-                    {
-                        var left = element.TranslatePoint(new Point(), card).X;
-                        return left >= 0 && left + element.ActualWidth <= card.ActualWidth;
-                    }), "All preview controls must fit inside their gallery item.");
+                    Check(installations == 1 && !option.IsInstalled,
+                        "The dedicated management action must request installation.");
                     option.UpdateText("Localized widget", "Localized description");
                     Check(option.Preview.Label == option.Label, "Preview labels must follow catalog localization.");
                 }
 
                 foreach (var width in new[] { 292d, 500d, 720d })
                 {
-                    var gallery = new WrapPanel { Width = width };
+                    var gallery = new OpenTaskbar.Views.ExpandableWidgetGrid { Width = width, MinItemWidth = 270 };
                     foreach (var option in options) gallery.Children.Add(new WidgetCatalogItem { DataContext = option });
                     Layout(gallery);
                     Check(gallery.Children.Cast<FrameworkElement>().All(item =>
                     {
                         var point = item.TranslatePoint(new Point(), gallery);
                         return point.X >= 0 && point.X + item.ActualWidth <= width;
-                    }), "The gallery must wrap without horizontal overflow at narrow and wide settings sizes.");
+                    }), "The widget catalogue must avoid horizontal overflow.");
                     var second = (FrameworkElement)gallery.Children[1];
-                    Check(width < 488 ? second.TranslatePoint(new Point(), gallery).Y > 0
-                        : second.TranslatePoint(new Point(), gallery).Y == 0,
-                        "The gallery must adapt its column count to the available width.");
+                    Check(second.TranslatePoint(new Point(), gallery).Y > 0,
+                        "The widget catalogue must use a single full-width column for every category.");
                 }
             }
             UiText.Current.SetLanguage(AppLanguage.Turkish);
@@ -284,6 +332,46 @@ internal static class WidgetViewChecks
             foreach (var theme in new[] { AppTheme.Dark, AppTheme.Light })
             {
                 ThemeManager.Apply(theme);
+                var themeEditor = new OpenTaskbar.Views.ThemePropertyEditor();
+                themeEditor.LoadTheme(null, theme);
+                Layout(themeEditor);
+                Check(Descendants<TextBlock>(themeEditor).Any(text => text.Text == UiText.Get("ColorPalette"))
+                    && Descendants<Button>(themeEditor).Any(button => button.Content is string label
+                        && label == UiText.Get("ThemeCreateEditable")),
+                    "Default appearance must show color swatches and customization controls.");
+                var solidPicker = new OpenTaskbar.Views.ThemeBrushPicker(
+                    new SolidColorBrush(Color.FromArgb(128, 220, 80, 40)));
+                var solidPickerContent = (FrameworkElement)solidPicker.Content;
+                solidPicker.Content = null;
+                var solidSurface = new Border { Background = (Brush)app.Resources["SettingsBackground"], Child = solidPickerContent };
+                Layout(solidSurface);
+                var solidOpacity = Descendants<Slider>(solidPickerContent).Single(slider =>
+                    AutomationProperties.GetName(slider) == "Color opacity");
+                Check(solidOpacity.Value == 128, "Solid color opacity must load into the picker.");
+                solidOpacity.Value = 64;
+                Check(Descendants<TextBox>(solidPickerContent).Single().Text == "#40DC5028",
+                    "Changing solid color opacity must preserve RGB and update the alpha channel.");
+                Render(solidSurface, Path.Combine(directory, $"color-picker-solid-{theme.ToString().ToLowerInvariant()}.png"));
+
+                var gradient = new LinearGradientBrush();
+                gradient.GradientStops.Add(new GradientStop(Color.FromArgb(96, 25, 80, 140), 0));
+                gradient.GradientStops.Add(new GradientStop(Color.FromArgb(200, 180, 90, 40), 1));
+                var gradientPicker = new OpenTaskbar.Views.ThemeBrushPicker(gradient);
+                var gradientPickerContent = (FrameworkElement)gradientPicker.Content;
+                gradientPicker.Content = null;
+                var gradientSurface = new Border { Background = (Brush)app.Resources["SettingsBackground"], Child = gradientPickerContent };
+                Layout(gradientSurface);
+                var gradientOpacity = Descendants<Slider>(gradientPickerContent).Single(slider =>
+                    AutomationProperties.GetName(slider) == "Color opacity");
+                Check(gradientOpacity.Value == 96, "Gradient stop opacity must load into the picker.");
+                Check(Descendants<Button>(gradientPickerContent).Any(button => button.Content is string label
+                    && label.StartsWith("Stop 1 · #6019508C · 0%", StringComparison.Ordinal)
+                    && button.Visibility == Visibility.Visible && button.ActualHeight > 0),
+                    "Gradient stops must display their color and editable position.");
+                gradientOpacity.Value = 48;
+                Check(Descendants<TextBox>(gradientPickerContent).Single().Text == "#3019508C",
+                    "Changing gradient stop opacity must preserve the stop's RGB values.");
+                Render(gradientSurface, Path.Combine(directory, $"color-picker-gradient-{theme.ToString().ToLowerInvariant()}.png"));
                 var strip = new StackPanel { Orientation = Orientation.Horizontal };
                 strip.Children.Add(new ContentControl { Content = stopwatch });
                 strip.Children.Add(new ContentControl { Content = timer });
@@ -314,9 +402,19 @@ internal static class WidgetViewChecks
                 var settings = new OpenTaskbar.SettingsWindow(preferences);
                 try
                 {
+                    // Segment choices are ComboBoxes whose selected item Tag carries the enum value. Verify the
+                    // real window maps its loaded settings onto the selected items instead of leaving them blank.
+                    string SelectedTag(string name) =>
+                        (RequiredName<ComboBox>(settings, name).SelectedItem as ComboBoxItem)?.Tag as string ?? string.Empty;
+                    Check(SelectedTag("ThemeBox") == theme.ToString(), "Theme dropdown must reflect the loaded theme.");
+                    Check(SelectedTag("EdgeBox") == "Bottom", "Dock edge dropdown must reflect the default edge.");
+                    Check(SelectedTag("SizeBox") == "Compact", "Dock size dropdown must reflect the default size.");
+                    Check(SelectedTag("AutoHideBox") == "Disabled", "Auto-hide dropdown must reflect the default mode.");
+                    Check(SelectedTag("PositionBox") == "Center", "Dock alignment dropdown must reflect the default position.");
+                    Check(SelectedTag("DockSurfaceBox") == "Glass", "Surface dropdown must reflect the loaded material.");
                     RequiredName<TabControl>(settings, "SettingsTabs").SelectedItem = RequiredName<TabItem>(settings, "WidgetsTab");
                     var list = RequiredName<ItemsControl>(settings, "WidgetOptionsList");
-                    var selections = ((IEnumerable<DockWidgetOption>)list.ItemsSource).ToArray();
+                    var selections = ((System.Windows.Data.ListCollectionView)list.ItemsSource).SourceCollection.Cast<DockWidgetOption>().ToArray();
                     SetPreviewFixtures(selections);
                     var page = (FrameworkElement)settings.Content;
                     foreach (var width in new[] { 560d, 740d })
@@ -334,54 +432,48 @@ internal static class WidgetViewChecks
                     }
                     var firstCard = Descendants<WidgetCatalogItem>(list).First();
                     var selection = (DockWidgetOption)firstCard.DataContext;
-                    RequiredName<Button>(firstCard, "PreviewButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Check(selection.IsInstalled && selection.IsEnabled, "A preview tap in Settings must install and enable its widget.");
+                    RequiredName<Button>(firstCard, "InstallButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Check(selection.IsInstalled && selection.IsEnabled, "The install button must install and enable the widget.");
                     Check(preferences.Current.InstalledWidgets?.Contains(selection.Id) == true
                         && preferences.Current.Widgets?.Contains(selection.Id) == true,
-                        "A preview tap must auto-save the installed and visible widget selections.");
+                        "Installation must auto-save the enabled widget selection.");
                     Layout(page);
                     var currentCard = Descendants<WidgetCatalogItem>(list).Single(card => ReferenceEquals(card.DataContext, selection));
-                    RequiredName<Button>(currentCard, "PreviewButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Check(!selection.IsInstalled && !selection.IsEnabled, "Tapping an installed preview in Settings must uninstall and disable its widget.");
+                    RequiredName<Button>(currentCard, "InstallButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Check(!selection.IsInstalled && !selection.IsEnabled, "The install button must remove an installed widget.");
                     Check(preferences.Current.InstalledWidgets?.Contains(selection.Id) != true
                         && preferences.Current.Widgets?.Contains(selection.Id) != true,
-                        "Tapping an installed preview must auto-save removal of the widget.");
+                        "Removal must auto-save the widget selection.");
 
                     var clockCard = Descendants<WidgetCatalogItem>(list).Single(card => ((DockWidgetOption)card.DataContext).Id == DockWidgetService.ClockId);
                     var clockOption = (DockWidgetOption)clockCard.DataContext;
-                    Check(clockOption.HasSettings && clockOption.HasSettingsVisibility == Visibility.Visible,
-                        "Clock widget option must report having settings and show settings expand visibility.");
-                    Check(clockOption.SettingsGlyph == "\uE70D", "Initial settings glyph must be downward chevron.");
-                    var clockExpandBtn = RequiredName<Button>(clockCard, "SettingsExpandButton");
-                    Check(clockExpandBtn.Visibility == Visibility.Visible, "Clock card must show settings expand button.");
+                    var clockExpandBtn = RequiredName<Button>(clockCard, "PreviewButton");
                     clockExpandBtn.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Check(clockOption.IsSettingsExpanded && clockOption.SettingsGlyph == "\uE70E",
-                        "Clicking expand button must set IsSettingsExpanded and change glyph to upward chevron.");
+                    Check(clockOption.IsSettingsExpanded, "Clicking the widget row must expand it inline.");
                     Check(RequiredName<FrameworkElement>(settings, "ClockOptions").Visibility == Visibility.Visible,
-                        "Clicking settings expand button must make ClockOptions visible.");
+                        "An expanded clock row must show its native settings.");
 
                     var secondsToggle = RequiredName<CheckBox>(settings, "ClockSecondsToggle");
                     secondsToggle.IsChecked = true;
                     Check(preferences.Current.ClockShowSeconds,
-                        "Checking ClockSecondsToggle must auto-save preferences immediately without a manual apply button.");
+                        "Clock settings must auto-save changes without an apply button.");
 
                     clockExpandBtn.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Check(!clockOption.IsSettingsExpanded && clockOption.SettingsGlyph == "\uE70D",
-                        "Clicking settings expand button again must collapse settings and restore downward chevron.");
+                    Check(!clockOption.IsSettingsExpanded, "Clicking the row again must collapse it.");
                     Check(RequiredName<FrameworkElement>(settings, "ClockOptions").Visibility == Visibility.Collapsed,
-                        "Collapsing settings must set ClockOptions visibility to Collapsed.");
+                        "Collapsing the row must hide its settings.");
 
-                    var trayCard = Descendants<WidgetCatalogItem>(list).Single(card => ((DockWidgetOption)card.DataContext).Id == DockWidgetService.TrayId);
+                    var trayCard = Descendants<WidgetCatalogItem>(list).Single(card => ((DockWidgetOption)card.DataContext).Id == DockWidgetService.NetSpeedId);
                     var trayOption = (DockWidgetOption)trayCard.DataContext;
-                    Check(!trayOption.HasSettings && RequiredName<Button>(trayCard, "SettingsExpandButton").Visibility == Visibility.Collapsed,
-                        "Widgets without custom settings must hide the settings expand button.");
+                    RequiredName<Button>(trayCard, "PreviewButton").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                    Check(trayOption.IsSettingsExpanded, "Widgets without custom settings must still offer inline previews.");
 
                     var weatherCard = Descendants<WidgetCatalogItem>(list).Single(card => ((DockWidgetOption)card.DataContext).Id == DockWidgetService.WeatherId);
                     var weatherOption = (DockWidgetOption)weatherCard.DataContext;
-                    var weatherExpandBtn = RequiredName<Button>(weatherCard, "SettingsExpandButton");
+                    var weatherExpandBtn = RequiredName<Button>(weatherCard, "PreviewButton");
                     weatherExpandBtn.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                    Check(weatherOption.IsSettingsExpanded, "Weather card must expand when settings button is clicked.");
-                    Check(weatherOption.SettingsView != null, "Weather card must host its settings view inside the card.");
+                    Check(weatherOption.IsSettingsExpanded, "Weather must expand from its widget row.");
+                    Check(weatherOption.SettingsView is not null, "Weather must retain its native settings view.");
                     var countryBox = RequiredName<ComboBox>(settings, "WeatherCountryBox");
                     var cityContainer = RequiredName<FrameworkElement>(settings, "WeatherCityContainer");
                     var cityCombo = RequiredName<ComboBox>(settings, "WeatherCityCombo");
@@ -394,6 +486,21 @@ internal static class WidgetViewChecks
                     Check(preferences.Current.WeatherCity == "İzmir", "Selecting a city in the dropdown must auto-save WeatherCity.");
                     weatherExpandBtn.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                     Check(!weatherOption.IsSettingsExpanded, "Clicking weather settings button again must collapse it.");
+
+                    // Categories are section labels with their widgets underneath, not tabs/filters.
+                    Layout(settings);
+                    Check(selections.Length == 21, "All 21 widgets must be listed.");
+                    Check(selections.Select(option => option.CategoryEnum).Distinct().OrderBy(c => c).SequenceEqual(
+                            Enum.GetValues<DockWidgetCategory>().OrderBy(c => c)),
+                        "All five widget categories must be represented.");
+                    Check(selections.Count(option => option.CategoryEnum == DockWidgetCategory.AiQuotas) == 7,
+                        "The AI category must contain all 7 AI widgets.");
+                    Check(selections.Count(option => option.CategoryEnum == DockWidgetCategory.SystemAndHardware) == 5,
+                        "The system category must contain all 5 system widgets.");
+                    var allCards = Descendants<WidgetCatalogItem>(list).ToArray();
+                    Check(allCards.Length == 21, "All 21 widgets must be visible at once without any category filter.");
+                    Check(settings.FindName("WidgetCategoryAiRadio") is null,
+                        "Widget categories must be labels, not a segmented tab filter.");
                 }
                 finally
                 {
@@ -424,10 +531,7 @@ internal static class WidgetViewChecks
                 DockWidgetService.WeatherId => "21°",
                 DockWidgetService.NetSpeedId => "↓ 12 MB/s · ↑ 2 MB/s",
                 DockWidgetService.BluetoothBatteryId => "53%",
-                DockWidgetService.AiUsageId => "CL · CX",
-                DockWidgetService.DesktopsId => "1 / 2",
-                DockWidgetService.TrayId => "▲",
-                DockWidgetService.SearchId => "Alt+Space",
+                var id when id.StartsWith("AiUsage", StringComparison.Ordinal) => string.Empty,
                 DockWidgetService.BatteryId => UiText.Get("SystemDataUnavailable"),
                 "Storage" => "128,5 GiB",
                 "DayProgress" => "61%",

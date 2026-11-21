@@ -22,7 +22,7 @@ public sealed class ApplicationPreferences
         Current = settings;
         LoadError = null;
         UiText.Current.SetLanguage(settings.Language);
-        ThemeManager.Apply(settings.Theme, settings.SurfaceOpacity);
+        ThemeManager.Apply(settings.Theme, settings);
         ThemePacks.Select(settings.ThemePack);
         ThemePacks.ApplyWidgets(settings.Theme);
         Changed?.Invoke(this, EventArgs.Empty);

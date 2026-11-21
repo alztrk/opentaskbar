@@ -5,10 +5,18 @@ using OpenTaskbar.Models;
 namespace OpenTaskbar.Services;
 
 /// <summary>
-/// Single source of truth for dock geometry and motion. XAML reads these through x:Static in Design/Theme.xaml.
+/// Single source of truth for dock geometry and motion. XAML reads these through x:Static in Design/Tokens/Layout.xaml.
 /// </summary>
 public static class DockMetrics
 {
+    /// <summary>
+    /// Artwork is never drawn wider or taller than its dock cell. Snapped extraction sizes can be larger than the
+    /// cell at some DPI/profile combinations; clipping that overshoot is what made icons look cut on the right and
+    /// bottom instead of sitting evenly in the button.
+    /// </summary>
+    public static double AppIconDipSize(double iconDip, int preferredPixels, double dpiScale) =>
+        Math.Min(iconDip, preferredPixels / Math.Max(1.0, dpiScale));
+
     // Vertical layout (DIP).
     public const double Headroom = 24;
     public const double ShelfHeight = 66;
@@ -23,9 +31,9 @@ public static class DockMetrics
     public const double MinCellSize = 24;
     public const double IconSize = 42;
 
-    // Magnification.
-    public const double HoverScale = 1.28;
-    public const double InfluenceRadius = 90;
+    // Magnification. Icons grow to 1.5x and push neighbours aside along the dock axis.
+    public const double HoverScale = 1.5;
+    public const double InfluenceRadius = 135;
 
     // Previews.
     public const double PreviewGap = 18;

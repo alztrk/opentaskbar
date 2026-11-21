@@ -5,8 +5,10 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using OpenTaskbar;
 using OpenTaskbar.Models;
 using OpenTaskbar.Services;
+using OpenTaskbar.Views.Shell;
 using OpenTaskbar.Widgets;
 
 internal static class ApplicationInteractionChecks
@@ -27,11 +29,10 @@ internal static class ApplicationInteractionChecks
         var buttons = new StackPanel { Orientation = Orientation.Horizontal, Children = { firstButton, secondButton } };
         var strip = new StackPanel();
         using var coordinator = new WidgetCoordinator(strip, Dispatcher.CurrentDispatcher, _ => { });
-        var tray = strip.Children.OfType<TrayWidget>().Single();
+        var tray = new TrayShellButton();
         string? closePath = null;
         string? terminatePath = null;
-        coordinator.CloseApplicationRequested += path => closePath = path;
-        coordinator.TerminateApplicationRequested += path => terminatePath = path;
+        tray.Initialize(_ => { }, path => closePath = path, path => terminatePath = path);
         var trayApp = new TrayApp("Background app test", "tray-test.exe", null);
         var content = (StackPanel)tray.BuildContent([trayApp]);
         var row = content.Children.OfType<DockPanel>().Single();
@@ -61,6 +62,29 @@ internal static class ApplicationInteractionChecks
             && empty.Children.OfType<TextBlock>().Any(text => text.Text == UiText.Get("TrayEmpty")),
             "An empty tray must show its empty state without application actions.");
 
+        var testFlyout = new DockFlyout();
+        var testHost = new Button();
+        var testMenu = new ContextMenu();
+        testHost.ContextMenu = testMenu;
+        testFlyout.Show(testHost, testHost, animate: false);
+        Check(testFlyout.IsOpen, "Flyout must be open initially.");
+        var args = (ContextMenuEventArgs)Activator.CreateInstance(typeof(ContextMenuEventArgs),
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance, null, [testHost, true], null)!;
+        testHost.RaiseEvent(args);
+        Check(testFlyout.StaysOpen, "Opening a context menu on an element inside the flyout must keep the flyout open.");
+        DockFlyout.CloseAll(force: false);
+        Check(testFlyout.IsOpen, "CloseAll(force: false) must not close a flyout while its context menu is active.");
+        testFlyout.Close();
+        Check(!testFlyout.IsOpen && !testFlyout.StaysOpen, "Closing the flyout must reset StaysOpen.");
+
+        testFlyout.Show(testHost, testHost, animate: false);
+        testFlyout.RetainForExternalContextMenu(0);
+        Check(testFlyout.StaysOpen, "RetainForExternalContextMenu must keep the flyout open for external app menus.");
+        DockFlyout.CloseAll(force: false);
+        Check(testFlyout.IsOpen, "External deactivation must not close a flyout retained for an app context menu.");
+        testFlyout.Close();
+        Check(!testFlyout.IsOpen && !testFlyout.StaysOpen, "Explicit close must reset external retention.");
+
         var panel = new StackPanel { Children = { buttons, content } };
         panel.SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, "TextPrimary");
         panel.SetResourceReference(System.Windows.Documents.TextElement.FontFamilyProperty, "InterfaceFont");
@@ -85,18 +109,18 @@ internal static class ApplicationInteractionChecks
                 Flush();
                 var firstSurface = (Border)firstButton.Template.FindName("Surface", firstButton);
                 var secondSurface = (Border)secondButton.Template.FindName("Surface", secondButton);
-                Check(firstSurface.Background == application.FindResource("SurfaceSelectedStrong"),
-                    "The foreground application must have a background without keyboard focus.");
+                Check(IsTransparent(firstSurface.Background),
+                    "The foreground application must maintain a clean transparent dock background without artificial card boxes.");
                 Check(secondButton.IsKeyboardFocused && IsTransparent(secondSurface.Background),
                     "Keyboard focus on a background app must not create an active background.");
-                Check(secondSurface.BorderBrush == application.FindResource("StrokeFocus"),
-                    "Keyboard navigation must retain a visible focus outline.");
+                Check(IsTransparent(secondSurface.BorderBrush),
+                    "Dock buttons must retain a clean borderless appearance without focus borders.");
                 first.IsForeground = false;
                 second.IsForeground = true;
                 Flush();
                 Check(IsTransparent(firstSurface.Background)
-                    && secondSurface.Background == application.FindResource("SurfaceSelectedStrong"),
-                    "Switching applications must move the foreground background immediately.");
+                    && IsTransparent(secondSurface.Background),
+                    "Switching applications must keep dock icon backgrounds completely transparent.");
                 second.IsForeground = false;
                 Flush();
                 Check(secondButton.IsKeyboardFocused && IsTransparent(secondSurface.Background),

@@ -14,13 +14,10 @@ public partial class MainWindow
 
     private bool IsVertical => Edge != DockEdge.Bottom;
 
-    /// <summary>Icons grow away from the screen edge.</summary>
-    private Point IconScaleOrigin => Edge switch
-    {
-        DockEdge.Left => new Point(0.05, 0.5),
-        DockEdge.Right => new Point(0.95, 0.5),
-        _ => new Point(0.5, 0.95)
-    };
+    /// <summary>Icons grow from the edge opposite the screen edge, so magnification lifts them away from it.</summary>
+    private Point IconScaleOrigin => IsVertical
+        ? new Point(Edge == DockEdge.Left ? 0.0 : 1.0, 0.5)
+        : new Point(0.5, 1.0);
 
     /// <summary>Launch bounce runs away from the edge: up for the bottom dock, sideways for side docks.</summary>
     private double BounceDirection => Edge == DockEdge.Left ? -1 : 1;
@@ -30,6 +27,7 @@ public partial class MainWindow
         var edge = Edge;
         if (_appliedEdge == edge) return;
         _appliedEdge = edge;
+        ResetMagnification(immediate: true);
         var vertical = edge != DockEdge.Bottom;
         DockFlyout.Edge = edge;
         if (_autoHideController is not null)
@@ -89,7 +87,8 @@ public partial class MainWindow
         RunningApps.ItemsPanel = panel;
         StackItems.ItemsPanel = panel;
         DockWidgets.ItemsPanel = panel;
-        foreach (var divider in new[] { StartDivider, RunningAppsDivider, ExtrasDivider, WidgetDivider })
+        foreach (var divider in new[] { StartDivider, RunningAppsDivider, ExtrasDivider, WidgetDivider,
+            NativeGroupDivider, TrayGroupDivider })
         {
             divider.Width = vertical ? 22 : 1;
             divider.Height = vertical ? 1 : 22;
@@ -106,8 +105,8 @@ public partial class MainWindow
             if (GetButtonIcon(button) is { } icon) icon.RenderTransformOrigin = IconScaleOrigin;
         }
 
-        ApplySizeProfile();
         if (_replacementSession is not null) _replacementSession.Edge = edge;
+        ApplySizeProfile();
         ApplyLayoutMode();
     }
 

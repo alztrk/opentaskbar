@@ -9,6 +9,12 @@ namespace OpenTaskbar.Services;
 public sealed class DockSettingsStore
 {
     private const string RemovedMemoryWidgetId = "Memory";
+    private const string RemovedSearchWidgetId = "Search";
+    private const string RemovedDesktopsWidgetId = "Desktops";
+    private const string RemovedTrayWidgetId = "Tray";
+    private const string LegacyAiUsageWidgetId = "AiUsage";
+    private static readonly string[] RemovedIds =
+        [RemovedMemoryWidgetId, RemovedSearchWidgetId, RemovedDesktopsWidgetId, RemovedTrayWidgetId];
     private static readonly JsonSerializerOptions JsonOptions = CreateJsonOptions();
 
     private readonly string _path;
@@ -40,13 +46,14 @@ public sealed class DockSettingsStore
             // Normalize the legacy enabled-only format before enforcing the installed subset invariant.
             if (settings is { InstalledWidgets: null })
                 settings = settings with { InstalledWidgets = settings.Widgets ?? Array.Empty<string>() };
-            // The standalone memory widget was removed in favor of System Meters; drop stale identifiers.
+            // The standalone memory widget was removed in favor of System Meters; Search is now a dock button.
+            // Drop the retired identifiers before enforcing the installed subset invariant.
             if (settings is not null)
-                settings = settings with
-                {
-                    Widgets = settings.Widgets?.Where(id => id != RemovedMemoryWidgetId).ToArray(),
-                    InstalledWidgets = settings.InstalledWidgets?.Where(id => id != RemovedMemoryWidgetId).ToArray()
-                };
+                settings = MigrateRemovedWidgets(settings);
+            if (settings is not null)
+                settings = MigrateLegacyAiUsage(settings);
+            if (settings is not null)
+                settings = MigrateSurfaceStyles(settings, document.RootElement);
             if (settings is null || !IsValid(settings))
             {
                 return (CreateDefaultSettings(), "ErrorDockSettingsInvalid");
@@ -69,6 +76,117 @@ public sealed class DockSettingsStore
     }
 
     private DockSettings CreateDefaultSettings() => new(Language: _defaultLanguage);
+
+    /// <summary>
+    /// Drops identifiers for retired widgets from every setting that can carry one. Search stopped being a widget
+    /// and became a dock button beside Start; its enabled state carries over to <see cref="DockSettings.ShowSearchButton"/>.
+    /// </summary>
+    public static DockSettings MigrateRemovedWidgets(DockSettings settings)
+    {
+        static bool Contains(IReadOnlyList<string>? ids, string value) =>
+            ids?.Contains(value, StringComparer.OrdinalIgnoreCase) == true;
+
+        static IReadOnlyList<string>? Without(IReadOnlyList<string>? ids, params string[] removed) =>
+            ids?.Where(id => !removed.Any(value => string.Equals(id, value, StringComparison.OrdinalIgnoreCase))).ToArray();
+
+        static bool IsRemoved(string key) =>
+            RemovedIds.Any(value => string.Equals(key, value, StringComparison.OrdinalIgnoreCase));
+
+        var enabledSearch = Contains(settings.Widgets, RemovedSearchWidgetId);
+        var mentionedSearch = enabledSearch
+            || Contains(settings.InstalledWidgets, RemovedSearchWidgetId)
+            || Contains(settings.WidgetOrder, RemovedSearchWidgetId)
+            || Contains(settings.DockItemOrder, "widget:" + RemovedSearchWidgetId);
+        var enabledDesktops = Contains(settings.Widgets, RemovedDesktopsWidgetId);
+        var mentionedDesktops = enabledDesktops
+            || Contains(settings.InstalledWidgets, RemovedDesktopsWidgetId)
+            || Contains(settings.WidgetOrder, RemovedDesktopsWidgetId)
+            || Contains(settings.DockItemOrder, "widget:" + RemovedDesktopsWidgetId);
+        var enabledTray = Contains(settings.Widgets, RemovedTrayWidgetId);
+        var mentionedTray = enabledTray
+            || Contains(settings.InstalledWidgets, RemovedTrayWidgetId)
+            || Contains(settings.WidgetOrder, RemovedTrayWidgetId)
+            || Contains(settings.DockItemOrder, "widget:" + RemovedTrayWidgetId);
+
+        var densities = settings.WidgetDensityOverrides;
+        if (densities is not null && densities.Keys.Any(IsRemoved))
+        {
+            densities = densities.Where(pair => !IsRemoved(pair.Key))
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+        }
+        var removedTokens = RemovedIds.Select(id => "widget:" + id).ToArray();
+
+        return settings with
+        {
+            Widgets = Without(settings.Widgets, RemovedIds),
+            InstalledWidgets = Without(settings.InstalledWidgets, RemovedIds),
+            WidgetOrder = Without(settings.WidgetOrder, RemovedIds),
+            DockItemOrder = Without(settings.DockItemOrder, removedTokens),
+            WidgetDensityOverrides = densities,
+            // Only override the default when the file actually mentioned the old widget.
+            ShowSearchButton = mentionedSearch ? enabledSearch : settings.ShowSearchButton,
+            ShowTaskViewButton = mentionedDesktops ? enabledDesktops : settings.ShowTaskViewButton,
+            ShowTrayButton = mentionedTray ? enabledTray : settings.ShowTrayButton
+        };
+    }
+
+    /// <summary>
+    /// Splits the retired single AI usage widget into one widget per provider: the providers it had enabled stay
+    /// enabled, and every provider becomes available in the catalog, order and density settings.
+    /// </summary>
+    public static DockSettings MigrateLegacyAiUsage(DockSettings settings)
+    {
+        var all = DockWidgetService.AiUsageWidgets.Select(widget => widget.Id).ToArray();
+        var enabled = DockWidgetService.AiUsageWidgets
+            .Where(widget => settings.AiUsageProviders.HasFlag(widget.Provider)).Select(widget => widget.Id).ToArray();
+
+        static IReadOnlyList<string>? Replace(IReadOnlyList<string>? ids, string legacy, IEnumerable<string> replacement) =>
+            ids is null || !ids.Contains(legacy, StringComparer.OrdinalIgnoreCase)
+                ? ids
+                : ids.SelectMany(id => string.Equals(id, legacy, StringComparison.OrdinalIgnoreCase) ? replacement : [id])
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+
+        var densities = settings.WidgetDensityOverrides;
+        if (densities is not null && densities.TryGetValue(LegacyAiUsageWidgetId, out var density))
+        {
+            var migrated = densities.Where(pair => !string.Equals(pair.Key, LegacyAiUsageWidgetId, StringComparison.OrdinalIgnoreCase))
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+            foreach (var id in all) migrated[id] = density;
+            densities = migrated;
+        }
+
+        return settings with
+        {
+            Widgets = Replace(settings.Widgets, LegacyAiUsageWidgetId, enabled),
+            InstalledWidgets = Replace(settings.InstalledWidgets, LegacyAiUsageWidgetId, all),
+            WidgetOrder = Replace(settings.WidgetOrder, LegacyAiUsageWidgetId, all),
+            DockItemOrder = Replace(settings.DockItemOrder, "widget:" + LegacyAiUsageWidgetId, all.Select(id => "widget:" + id)),
+            WidgetDensityOverrides = densities,
+            AiUsageProviders = AiProviders.None
+        };
+    }
+
+    /// <summary>
+    /// The retired single SurfaceOpacity slider fed every glass surface. Copy its value into the four
+    /// independent styles once so upgrading users keep exactly the same appearance.
+    /// </summary>
+    private static DockSettings MigrateSurfaceStyles(DockSettings settings, JsonElement root)
+    {
+        if (root.TryGetProperty(nameof(DockSettings.DockBackground), out _)
+            || !root.TryGetProperty(nameof(DockSettings.SurfaceOpacity), out var legacy)
+            || legacy.ValueKind != JsonValueKind.Number
+            || !legacy.TryGetDouble(out var value)
+            || !double.IsFinite(value) || value is < 0.6 or > 1)
+            return settings;
+
+        return settings with
+        {
+            DockOpacity = value,
+            MenuOpacity = value,
+            WidgetOpacity = value,
+            SettingsOpacity = value
+        };
+    }
 
     public string? Save(DockSettings settings)
     {
@@ -113,6 +231,12 @@ public sealed class DockSettingsStore
         && settings.FocusBreakMinutes is >= 1 and <= 30
         && settings.FocusSessions is >= 1 and <= 8
         && double.IsFinite(settings.SurfaceOpacity) && settings.SurfaceOpacity is >= 0.6 and <= 1
+        && Enum.IsDefined(settings.DockBackground) && Enum.IsDefined(settings.MenuBackground)
+        && Enum.IsDefined(settings.WidgetBackground) && Enum.IsDefined(settings.SettingsBackground)
+        && double.IsFinite(settings.DockOpacity) && settings.DockOpacity is >= 0 and <= 1
+        && double.IsFinite(settings.MenuOpacity) && settings.MenuOpacity is >= 0 and <= 1
+        && double.IsFinite(settings.WidgetOpacity) && settings.WidgetOpacity is >= 0 and <= 1
+        && double.IsFinite(settings.SettingsOpacity) && settings.SettingsOpacity is >= 0 and <= 1
         && double.IsFinite(settings.DockScale) && settings.DockScale is >= 0.75 and <= 1.5
         && settings.PinOrder?.Any(string.IsNullOrWhiteSpace) != true
         && settings.PinOrder?.Distinct(StringComparer.OrdinalIgnoreCase).Count() == settings.PinOrder?.Count
@@ -133,8 +257,14 @@ public sealed class DockSettingsStore
         && settings.WidgetOrder?.Distinct(StringComparer.OrdinalIgnoreCase).Count() == settings.WidgetOrder?.Count
         && settings.Profiles?.Any(profile => string.IsNullOrWhiteSpace(profile.Name) || profile.HiddenApps is null) != true
         && settings.Profiles?.Select(profile => profile.Name).Distinct(StringComparer.CurrentCultureIgnoreCase).Count() == settings.Profiles?.Count
-        && (settings.DockCornerRadius is null || settings.DockCornerRadius is >= 0 and <= 48)
-        && (settings.DockBottomGap is null || settings.DockBottomGap is >= 0 and <= 48);
+        && settings.AppGroups?.Any(group => string.IsNullOrWhiteSpace(group.Id)
+            || string.IsNullOrWhiteSpace(group.Name) || group.ExecutablePaths is null) != true
+        && settings.AppGroups?.Select(group => group.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count() == settings.AppGroups?.Count
+        && settings.AppGroups?.Select(group => group.Name).Distinct(StringComparer.CurrentCultureIgnoreCase).Count() == settings.AppGroups?.Count
+        && settings.AppGroups?.SelectMany(group => group.ExecutablePaths ?? [])
+            .Distinct(StringComparer.OrdinalIgnoreCase).Count()
+            == settings.AppGroups?.Sum(group => (group.ExecutablePaths ?? []).Count)
+        && (settings.DockCornerRadius is null || settings.DockCornerRadius is >= 0 and <= 48);
 
     public static bool Validate(DockSettings settings) => IsValid(settings);
 

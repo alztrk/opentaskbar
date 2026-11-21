@@ -68,6 +68,10 @@ public partial class ClockWidget : DockWidget
 
     public ClockWidget() => InitializeComponent();
 
+    // The clock renders from the local system time only, so a single frame is safe in Settings.
+    public override bool SupportsStaticPreview => true;
+    protected override void OnRenderPreview() => OnTick(DateTime.Now);
+
     private CultureInfo Culture => Settings.Language.Culture;
 
     protected override void OnActivated()
@@ -94,8 +98,6 @@ public partial class ClockWidget : DockWidget
         {
             _currentPeriod = period;
             var theme = GetTheme(period);
-            ClockButton.Background = theme.Background;
-            ClockButton.BorderBrush = theme.Border;
             TimeOfDayIcon.Content = FindResource(theme.IconKey);
             TimeOfDayIcon.Foreground = theme.Accent;
             DayOfWeekText.Foreground = theme.Accent;
@@ -160,7 +162,7 @@ public partial class ClockWidget : DockWidget
 
         var header = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
         var previous = NavButton("IconChevronLeft", -1, host);
-        var next = NavButton("IconChevronNext", 1, host);
+        var next = NavButton("IconChevronRight", 1, host);
         DockPanel.SetDock(previous, Dock.Left);
         DockPanel.SetDock(next, Dock.Right);
         header.Children.Add(previous);

@@ -1,10 +1,12 @@
 ﻿using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using OpenTaskbar.Models;
 using OpenTaskbar.Services;
 
@@ -83,7 +85,7 @@ public sealed class DockFlyout
             CleanRegistry();
             for (var i = 0; i < FlyoutRegistry.Count; i++)
             {
-                if (FlyoutRegistry[i].TryGetTarget(out var flyout) && flyout._popup.IsOpen)
+                if (FlyoutRegistry[i].TryGetTarget(out var flyout) && flyout._popup.Dispatcher.CheckAccess() && flyout._popup.IsOpen)
                     return true;
             }
             return false;
@@ -97,7 +99,7 @@ public sealed class DockFlyout
             CleanRegistry();
             for (var i = 0; i < FlyoutRegistry.Count; i++)
             {
-                if (FlyoutRegistry[i].TryGetTarget(out var flyout) && flyout._popup.IsOpen)
+                if (FlyoutRegistry[i].TryGetTarget(out var flyout) && flyout._popup.Dispatcher.CheckAccess() && flyout._popup.IsOpen)
                 {
                     if (flyout._root.IsMouseOver || flyout._frame.IsMouseOver)
                         return true;
@@ -107,12 +109,12 @@ public sealed class DockFlyout
         }
     }
 
-    public static void CloseAll(bool restoreFocus = true)
+    public static void CloseAll(bool restoreFocus = true, bool force = false)
     {
         CleanRegistry();
         for (var i = 0; i < FlyoutRegistry.Count; i++)
         {
-            if (FlyoutRegistry[i].TryGetTarget(out var flyout) && flyout._popup.IsOpen)
+            if (FlyoutRegistry[i].TryGetTarget(out var flyout) && flyout._popup.IsOpen && (force || !flyout._popup.StaysOpen))
                 flyout.Close(restoreFocus);
         }
     }
@@ -122,30 +124,44 @@ public sealed class DockFlyout
         FlyoutRegistry.Add(new WeakReference<DockFlyout>(this));
         _innerBevel = new Border
         {
-            BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(13),
-            Padding = new Thickness(12),
-            Background = System.Windows.Media.Brushes.Transparent
+            BorderThickness = new Thickness(0),
+            CornerRadius = new CornerRadius(15),
+            Padding = new Thickness(14),
+            Background = Brushes.Transparent
         };
-        _innerBevel.SetResourceReference(Border.BorderBrushProperty, "DockInnerBevelMaterial");
+
+        var topSheen = new Border
+        {
+            Height = 36,
+            VerticalAlignment = VerticalAlignment.Top,
+            CornerRadius = new CornerRadius(15, 15, 0, 0),
+            IsHitTestVisible = false
+        };
+        topSheen.SetResourceReference(Border.BackgroundProperty, "MenuSheenMaterial");
+
+        var bodyGrid = new Grid();
+        bodyGrid.Children.Add(topSheen);
+        bodyGrid.Children.Add(_innerBevel);
 
         _frame = new Border
         {
             BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(14),
+            CornerRadius = new CornerRadius(16),
             Padding = new Thickness(0),
-            Child = _innerBevel
+            ClipToBounds = true,
+            Child = bodyGrid
         };
         _frame.SetResourceReference(Border.BackgroundProperty, "MenuMaterial");
-        _frame.SetResourceReference(Border.BorderBrushProperty, "MenuStroke");
+        _frame.SetResourceReference(Border.BorderBrushProperty, "MenuStrokeMaterial");
         _frame.SetResourceReference(TextElement.ForegroundProperty, "TextPrimary");
         _frame.SetResourceReference(TextElement.FontFamilyProperty, "InterfaceFont");
 
         var contentHost = new Grid();
-        AttachSoftShadow(contentHost, 14);
+        AttachSoftShadow(contentHost, 16);
         contentHost.Children.Add(_frame);
 
-        _root = new Grid { Margin = new Thickness(12, 10, 12, 14), Children = { contentHost } };
+        var translate = new TranslateTransform();
+        _root = new Grid { Margin = new Thickness(10, 8, 10, 12), RenderTransform = translate, Children = { contentHost } };
         _popup = new Popup
         {
             AllowsTransparency = true,
@@ -155,8 +171,67 @@ public sealed class DockFlyout
             Placement = PlacementMode.Custom,
             CustomPopupPlacementCallback = Place
         };
+        _popup.Opened += (_, _) =>
+        {
+            if (!SystemParameters.ClientAreaAnimation)
+            {
+                translate.X = 0;
+                translate.Y = 0;
+                _root.Opacity = 1;
+                return;
+            }
+
+            var duration = TimeSpan.FromMilliseconds(160);
+            var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+            var isBottom = Edge == DockEdge.Bottom;
+            var isLeft = Edge == DockEdge.Left;
+            var isRight = Edge == DockEdge.Right;
+
+            var prop = (isLeft || isRight) ? TranslateTransform.XProperty : TranslateTransform.YProperty;
+            var fromVal = isBottom ? 5.0 : (isLeft ? -5.0 : 5.0);
+
+            translate.BeginAnimation(prop, new DoubleAnimation(fromVal, 0.0, duration) { EasingFunction = ease });
+            _root.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(140)) { EasingFunction = ease });
+        };
+        _root.AddHandler(FrameworkElement.ContextMenuOpeningEvent, new ContextMenuEventHandler((_, e) =>
+        {
+            _popup.StaysOpen = true;
+            ContextMenu? cm = null;
+            if (e.Source is FrameworkElement fe && fe.ContextMenu is not null)
+                cm = fe.ContextMenu;
+            else if (e.OriginalSource is DependencyObject dep)
+            {
+                var cur = dep;
+                while (cur is not null && cm is null)
+                {
+                    if (cur is FrameworkElement el && el.ContextMenu is not null)
+                        cm = el.ContextMenu;
+                    cur = VisualTreeHelper.GetParent(cur) ?? LogicalTreeHelper.GetParent(cur);
+                }
+            }
+            if (cm is not null)
+            {
+                RoutedEventHandler? onClosed = null;
+                onClosed = (_, _) =>
+                {
+                    cm.Closed -= onClosed;
+                    _popup.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, () =>
+                    {
+                        if (!_popup.IsOpen) return;
+                        _popup.StaysOpen = false;
+                        if (!IsCursorOver(_frame) && !IsCursorOver(_currentTarget))
+                        {
+                            Close();
+                        }
+                    });
+                };
+                cm.Closed += onClosed;
+            }
+        }), handledEventsToo: true);
         _popup.Closed += (_, _) =>
         {
+            UnhookMouse();
+            _popup.StaysOpen = false;
             _isOpenState = false;
             var target = _currentTarget ?? _popup.PlacementTarget;
             var isClosingTargetClick = !_explicitClose && target is not null && (_suppressNextClick || IsCursorOver(target));
@@ -201,6 +276,14 @@ public sealed class DockFlyout
 
     public bool IsOpen => _isOpenState || _popup.IsOpen;
 
+    public bool StaysOpen
+    {
+        get => _popup.StaysOpen;
+        set => _popup.StaysOpen = value;
+    }
+
+    public System.Windows.Threading.Dispatcher Dispatcher => _popup.Dispatcher;
+
     private void Target_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
         AppLog.Info($"[DockFlyout.PreviewMouseDown] sender={sender.GetType().Name}, IsOpen={_popup.IsOpen}");
@@ -210,6 +293,164 @@ public sealed class DockFlyout
             _closedTarget = new WeakReference<UIElement>((UIElement)sender);
         }
     }
+
+    private nint _mouseHook;
+    private HookProc? _mouseHookDelegate;
+    private uint _contextMenuProcessId;
+
+    public void RetainForExternalContextMenu(nint appHwnd = 0)
+    {
+        _popup.StaysOpen = true;
+        if (appHwnd != 0)
+        {
+            GetWindowThreadProcessId(appHwnd, out _contextMenuProcessId);
+        }
+        if (_mouseHook == 0)
+        {
+            _mouseHookDelegate = MouseHookCallback;
+            try
+            {
+                _mouseHook = SetWindowsHookEx(WH_MOUSE_LL, _mouseHookDelegate, GetModuleHandle(null), 0);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warning($"Failed to set mouse hook: {ex.Message}");
+            }
+        }
+    }
+
+    private void UnhookMouse()
+    {
+        if (_mouseHook != 0)
+        {
+            try
+            {
+                UnhookWindowsHookEx(_mouseHook);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warning($"Failed to unhook mouse: {ex.Message}");
+            }
+            _mouseHook = 0;
+            _mouseHookDelegate = null;
+        }
+        _contextMenuProcessId = 0;
+    }
+
+    private nint MouseHookCallback(int nCode, nint wParam, nint lParam)
+    {
+        if (nCode >= 0 && (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN || wParam == WM_MBUTTONDOWN ||
+                           wParam == WM_NCLBUTTONDOWN || wParam == WM_NCRBUTTONDOWN || wParam == WM_NCMBUTTONDOWN))
+        {
+            try
+            {
+                var hookStruct = Marshal.PtrToStructure<MSLLHOOKSTRUCT>(lParam);
+                var pt = hookStruct.pt;
+
+                // Check if click is inside the flyout frame or target button
+                if (IsPointInside(_frame, pt) || IsPointInside(_currentTarget, pt))
+                {
+                    return CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+                }
+
+                // Check if click is on the external context menu
+                var clickedHwnd = WindowFromPoint(pt);
+                if (clickedHwnd != 0)
+                {
+                    var rootHwnd = GetAncestor(clickedHwnd, GA_ROOT);
+                    var effectiveHwnd = rootHwnd != 0 ? rootHwnd : clickedHwnd;
+
+                    var className = GetClassNameString(effectiveHwnd);
+                    if (string.Equals(className, "#32768", StringComparison.Ordinal))
+                    {
+                        return CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+                    }
+
+                    if (_contextMenuProcessId != 0)
+                    {
+                        GetWindowThreadProcessId(effectiveHwnd, out var clickPid);
+                        if (clickPid == _contextMenuProcessId)
+                        {
+                            return CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+                        }
+                    }
+                }
+
+                // Click was outside the flyout AND outside the context menu!
+                _popup.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Normal, () =>
+                {
+                    Close();
+                });
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warning($"Mouse hook callback error: {ex.Message}");
+            }
+        }
+        return CallNextHookEx(_mouseHook, nCode, wParam, lParam);
+    }
+
+    private static bool IsPointInside(UIElement? element, NativePoint pt)
+    {
+        if (element is null || !element.IsVisible) return false;
+        if (element is FrameworkElement fe && TryGetScreenBounds(fe, padding: 6, out var bounds))
+        {
+            return pt.X >= bounds.Left && pt.X <= bounds.Right && pt.Y >= bounds.Top && pt.Y <= bounds.Bottom;
+        }
+        return false;
+    }
+
+    private static string GetClassNameString(nint hwnd)
+    {
+        var sb = new StringBuilder(256);
+        return GetClassName(hwnd, sb, sb.Capacity) > 0 ? sb.ToString() : string.Empty;
+    }
+
+    private const int WH_MOUSE_LL = 14;
+    private const nint WM_LBUTTONDOWN = 0x0201;
+    private const nint WM_RBUTTONDOWN = 0x0204;
+    private const nint WM_MBUTTONDOWN = 0x0207;
+    private const nint WM_NCLBUTTONDOWN = 0x00A1;
+    private const nint WM_NCRBUTTONDOWN = 0x00A4;
+    private const nint WM_NCMBUTTONDOWN = 0x00A7;
+    private const uint GA_ROOT = 2;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MSLLHOOKSTRUCT
+    {
+        public NativePoint pt;
+        public uint mouseData;
+        public uint flags;
+        public uint time;
+        public nint dwExtraInfo;
+    }
+
+    private delegate nint HookProc(int nCode, nint wParam, nint lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern nint SetWindowsHookEx(int idHook, HookProc lpfn, nint hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnhookWindowsHookEx(nint hhk);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern nint CallNextHookEx(nint hhk, int nCode, nint wParam, nint lParam);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern nint GetModuleHandle(string? lpModuleName);
+
+    [DllImport("user32.dll")]
+    private static extern nint WindowFromPoint(NativePoint point);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(nint hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetAncestor(nint hwnd, uint gaFlags);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern int GetClassName(nint hWnd, StringBuilder lpClassName, int nMaxCount);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativePoint
@@ -265,15 +506,16 @@ public sealed class DockFlyout
 
     public void Show(UIElement target, UIElement content, bool animate = true, bool focusable = false)
     {
+        UnhookMouse();
         _isOpenState = true;
         _explicitClose = false;
         _suppressNextClick = false;
         _closedTarget = null;
         _root.Margin = Edge switch
         {
-            DockEdge.Left => new Thickness(12, 10, 14, 14),
-            DockEdge.Right => new Thickness(14, 10, 12, 14),
-            _ => new Thickness(12, 10, 12, 14)
+            DockEdge.Left => new Thickness(10, 8, 12, 12),
+            DockEdge.Right => new Thickness(12, 8, 10, 12),
+            _ => new Thickness(10, 8, 10, 12)
         };
         _innerBevel.Child = content;
         _popup.StaysOpen = false;
@@ -281,10 +523,14 @@ public sealed class DockFlyout
         CleanRegistry();
         for (var i = 0; i < FlyoutRegistry.Count; i++)
         {
-            if (FlyoutRegistry[i].TryGetTarget(out var flyout) && !ReferenceEquals(flyout, this) && flyout._popup.IsOpen)
+            if (!FlyoutRegistry[i].TryGetTarget(out var flyout) || ReferenceEquals(flyout, this)) continue;
+            var dispatcher = flyout._popup.Dispatcher;
+            if (dispatcher.CheckAccess())
             {
-                flyout.Close();
+                if (flyout._popup.IsOpen) flyout.Close();
             }
+            else if (!dispatcher.HasShutdownStarted && !dispatcher.HasShutdownFinished)
+                dispatcher.BeginInvoke(new Action(() => flyout.Close()));
         }
         if (_currentTarget is not null && !ReferenceEquals(_currentTarget, target))
         {
@@ -356,6 +602,8 @@ public sealed class DockFlyout
     /// <summary>Closes flyout; clears focus restoration when explicitly requested.</summary>
     public void Close(bool restoreFocus = true)
     {
+        UnhookMouse();
+        _popup.StaysOpen = false;
         _explicitClose = true;
         _isOpenState = false;
         if (!restoreFocus) _restoreFocus = false;
@@ -387,13 +635,14 @@ public sealed class DockFlyout
 
     public static TextBlock Heading(string text)
     {
-        var block = new TextBlock { Text = text, FontWeight = FontWeights.SemiBold, FontSize = 13, Margin = new Thickness(4, 0, 4, 8) };
+        var block = new TextBlock { Text = text, FontWeight = FontWeights.SemiBold, FontSize = 12.5, Margin = new Thickness(4, 0, 4, 8) };
+        block.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
         return block;
     }
 
     public static TextBlock Caption(string text)
     {
-        var block = new TextBlock { Text = text, FontSize = 11.5, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4, 2, 4, 2) };
+        var block = new TextBlock { Text = text, FontSize = 11, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4, 2, 4, 2) };
         block.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
         return block;
     }

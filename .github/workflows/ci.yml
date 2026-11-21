@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - master
+      - redesign
 
 permissions:
   contents: read
@@ -37,5 +38,14 @@ jobs:
       - name: Verify portable EXE starts without sidecar DLLs
         shell: pwsh
         run: |
-          & "scripts/publish-portable.ps1" -OutputDir dist
-          & "scripts/check-portable.ps1" -OutputDir dist
+          & "scripts/publish-portable.ps1" -OutputDir release
+          & "scripts/check-portable.ps1" -OutputDir release
+
+      - name: Upload Windows preview build
+        if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenTaskbar-redesign-preview
+          path: release/
+          if-no-files-found: error
+          retention-days: 7

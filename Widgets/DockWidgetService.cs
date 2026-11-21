@@ -19,40 +19,56 @@ public sealed class DockWidgetService(TimeProvider timeProvider)
     public const string FocusId = "Focus";
     public const string AudioId = "Audio";
     public const string QuickSettingsId = "QuickSettings";
-    public const string DesktopsId = "Desktops";
-    public const string TrayId = "Tray";
     public const string WeatherId = "Weather";
-    public const string AiUsageId = "AiUsage";
     public const string BatteryId = "Battery";
     public const string StopwatchId = "Stopwatch";
     public const string CountdownId = "Countdown";
-    public const string SearchId = "Search";
     public const string NetSpeedId = "NetSpeed";
     public const string BluetoothBatteryId = "BluetoothBattery";
 
-    private sealed record WidgetDefinition(string Id, string LabelKey, Func<CultureInfo, string>? Read);
+    private sealed record WidgetDefinition(string Id, string LabelKey, Func<CultureInfo, string>? Read, DockWidgetCategory Category = DockWidgetCategory.TimeAndWeather);
+
+    public sealed record AiUsageWidgetDefinition(string Id, AiProviders Provider, string LabelKey);
+
+    /// <summary>Every AI provider is its own widget so each can be added, ordered and removed independently.</summary>
+    public static IReadOnlyList<AiUsageWidgetDefinition> AiUsageWidgets { get; } =
+    [
+        new("AiUsageClaude", AiProviders.Claude, "WidgetAiUsageClaude"),
+        new("AiUsageCodex", AiProviders.Codex, "WidgetAiUsageCodex"),
+        new("AiUsageAntigravity", AiProviders.Antigravity, "WidgetAiUsageAntigravity"),
+        new("AiUsageOpenCode", AiProviders.OpenCode, "WidgetAiUsageOpenCode"),
+        new("AiUsageCopilot", AiProviders.Copilot, "WidgetAiUsageCopilot"),
+        new("AiUsageDeepSeek", AiProviders.DeepSeek, "WidgetAiUsageDeepSeek"),
+        new("AiUsageOpenRouter", AiProviders.OpenRouter, "WidgetAiUsageOpenRouter")
+    ];
 
     private static readonly WidgetDefinition[] Definitions =
     [
-        new(ClockId, "WidgetClock", culture => DateTime.Now.ToString("HH:mm", culture)),
-        new(MediaId, "WidgetMedia", _ => "▶ · 02:15"),
-        new(AudioId, "WidgetAudio", _ => "100%"),
-        new(QuickSettingsId, "WidgetQuickSettings", _ => "Wi-Fi · BT"),
-        new(SystemStatsId, "WidgetSystemStats", _ => "CPU · RAM"),
-        new(FocusId, "WidgetFocus", _ => "25:00"),
-        new(WeatherId, "WidgetWeather", _ => "21°"),
-        new(NetSpeedId, "WidgetNetSpeed", _ => "↓ 0 B/s · ↑ 0 B/s"),
-        new(BluetoothBatteryId, "WidgetBluetoothBattery", _ => "53% · 🔋"),
-        new(AiUsageId, "WidgetAiUsage", _ => "CL · CX"),
-        new(DesktopsId, "WidgetDesktops", _ => "1 / 2"),
-        new(TrayId, "WidgetTray", _ => "▲"),
-        new(BatteryId, "WidgetBattery", _ => ReadBatteryStatus()),
-        new("Storage", "WidgetStorage", SystemWidgetData.ReadStorage),
+        // Time & Weather
+        new(ClockId, "WidgetClock", culture => DateTime.Now.ToString("HH:mm", culture), DockWidgetCategory.TimeAndWeather),
+        new(WeatherId, "WidgetWeather", _ => "21°", DockWidgetCategory.TimeAndWeather),
         new("DayProgress", "WidgetDayProgress", culture =>
-            (DateTime.Now.TimeOfDay.TotalSeconds / TimeSpan.FromDays(1).TotalSeconds).ToString("P0", culture)),
-        new(SearchId, "WidgetLauncher", _ => "Win+S"),
-        new(StopwatchId, "WidgetStopwatch", null),
-        new(CountdownId, "WidgetCountdown", null)
+            (DateTime.Now.TimeOfDay.TotalSeconds / TimeSpan.FromDays(1).TotalSeconds).ToString("P0", culture), DockWidgetCategory.TimeAndWeather),
+        new(StopwatchId, "WidgetStopwatch", null, DockWidgetCategory.TimeAndWeather),
+        new(CountdownId, "WidgetCountdown", null, DockWidgetCategory.TimeAndWeather),
+
+        // System & Hardware
+        new(SystemStatsId, "WidgetSystemStats", _ => "CPU · RAM", DockWidgetCategory.SystemAndHardware),
+        new(NetSpeedId, "WidgetNetSpeed", _ => "↓ 0 B/s · ↑ 0 B/s", DockWidgetCategory.SystemAndHardware),
+        new(BatteryId, "WidgetBattery", _ => ReadBatteryStatus(), DockWidgetCategory.SystemAndHardware),
+        new(BluetoothBatteryId, "WidgetBluetoothBattery", _ => "53% · 🔋", DockWidgetCategory.SystemAndHardware),
+        new("Storage", "WidgetStorage", SystemWidgetData.ReadStorage, DockWidgetCategory.SystemAndHardware),
+
+        // AI Quotas
+        .. AiUsageWidgets.Select(widget => new WidgetDefinition(widget.Id, widget.LabelKey, null, DockWidgetCategory.AiQuotas)),
+
+        // Media & Controls
+        new(MediaId, "WidgetMedia", _ => "▶ · 02:15", DockWidgetCategory.MediaAndControls),
+        new(AudioId, "WidgetAudio", _ => "100%", DockWidgetCategory.MediaAndControls),
+        new(QuickSettingsId, "WidgetQuickSettings", _ => "Wi-Fi · BT", DockWidgetCategory.MediaAndControls),
+
+        // Productivity
+        new(FocusId, "WidgetFocus", _ => "25:00", DockWidgetCategory.Productivity)
     ];
 
     public static IReadOnlyCollection<string> SupportedIds { get; } =
@@ -76,10 +92,11 @@ public sealed class DockWidgetService(TimeProvider timeProvider)
         Definitions.Select(definition => new DockWidgetOption(
             definition.Id,
             UiText.Get(definition.LabelKey),
-            UiText.Get(definition.LabelKey + "Description"),
+            UiText.TryGet(definition.LabelKey + "Description", out var description) ? description : string.Empty,
             installed?.Contains(definition.Id, StringComparer.Ordinal) == true,
             selected?.Contains(definition.Id, StringComparer.Ordinal) == true,
-            CreateWidget(definition)))
+            CreateWidget(definition),
+            definition.Category))
             .ToArray();
 
     public static void Refresh(IEnumerable<DockWidgetItem> widgets, AppLanguage language)

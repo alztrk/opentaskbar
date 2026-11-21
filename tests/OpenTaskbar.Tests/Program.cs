@@ -10,19 +10,26 @@ var checks = 0;
 CountdownChecks();
 StopwatchChecks();
 CatalogChecks();
+WidgetCategoryChecks();
 LocalizationChecks();
 TaskManagerTextChecks();
 SettingsChecks();
+RadiusChecks();
 InitialLanguageChecks();
 MultiMonitorChecks();
 DockIconPixelChecks();
 StartMenuAndOverlayChecks();
 AppLaunchChecks();
 TrayListChecks();
+ShellTokenChecks();
 checks += RunningAppChecks.Run();
+checks += TaskbarWindowChecks.Run();
+checks += RunningAppProjectionChecks.Run();
+checks += ShellFlyoutPositionChecks.Run();
 checks += AiUsageChecks.Run();
 if (!headless) checks += WidgetViewChecks.Run();
 checks += ThemePackChecks.Run();
+if (!headless) checks += SurfaceStyleChecks.Run();
 checks += ThemeTransferChecks.Run();
 checks += TaskbarRecoveryChecks.Run();
 checks += ApplicationJumpListChecks.Run();
@@ -49,9 +56,34 @@ void TrayListChecks()
     IReadOnlyList<TrayApp> sameWithNewIcons = [new("OneDrive", @"c:\apps\onedrive.exe", null), new("Teams", @"C:\Apps\Teams.exe", null)];
     IReadOnlyList<TrayApp> renamed = [new("OneDrive - Personal", @"C:\Apps\OneDrive.exe", null), new("Teams", @"C:\Apps\Teams.exe", null)];
     IReadOnlyList<TrayApp> shorter = [new("OneDrive", @"C:\Apps\OneDrive.exe", null)];
-    Check(OpenTaskbar.Widgets.TrayWidget.SameApps(first, sameWithNewIcons), "Path casing alone must not rebuild the open tray list.");
-    Check(!OpenTaskbar.Widgets.TrayWidget.SameApps(first, renamed), "A changed app name must refresh the open tray list.");
-    Check(!OpenTaskbar.Widgets.TrayWidget.SameApps(first, shorter), "An app that exited must refresh the open tray list.");
+    Check(OpenTaskbar.Views.Shell.TrayShellButton.SameApps(first, sameWithNewIcons), "Path casing alone must not rebuild the open tray list.");
+    Check(!OpenTaskbar.Views.Shell.TrayShellButton.SameApps(first, renamed), "A changed app name must refresh the open tray list.");
+    Check(!OpenTaskbar.Views.Shell.TrayShellButton.SameApps(first, shorter), "An app that exited must refresh the open tray list.");
+}
+
+// Permanent shell buttons must be addressable by a free-form dock-order token, including Show Desktop.
+void ShellTokenChecks()
+{
+    var expected = new[] { "start", "search", "taskview", "tray", "peek", "bin" };
+    Check(OpenTaskbar.MainWindow.ShellDockTokens.SequenceEqual(expected, StringComparer.OrdinalIgnoreCase),
+        "Every permanent shell button must have a stable dock-order token.");
+    var settings = new DockSettings(ShowTaskViewButton: false, ShowTrayButton: false, ShowDesktopButton: false);
+    Check(!expected.Skip(2).Any(token => OpenTaskbar.MainWindow.ShellDockTokens.Contains(token, StringComparer.OrdinalIgnoreCase)
+        && (token == "taskview" ? settings.ShowTaskViewButton
+            : token == "tray" ? settings.ShowTrayButton
+            : token == "peek" && settings.ShowDesktopButton)),
+        "Shell button visibility must be independently controllable through DockSettings.");
+
+    var pinned = DockItemOrdering.ApplyPinnedGroups(
+        ["app:a", "tray", "app:b", "taskview", "start", "search"],
+        new DockSettings(ShowTaskViewButton: true));
+    Check(pinned.SequenceEqual(["start", "search", "taskview", "app:a", "app:b", "tray"], StringComparer.OrdinalIgnoreCase),
+        "Native shell buttons must lead and background apps must trail regardless of the saved order.");
+    var hiddenPinned = DockItemOrdering.ApplyPinnedGroups(
+        ["app:a", "tray", "start", "search", "taskview"],
+        new DockSettings(ShowSearchButton: false, ShowTaskViewButton: false, ShowTrayButton: false));
+    Check(hiddenPinned.SequenceEqual(["start", "app:a"], StringComparer.OrdinalIgnoreCase),
+        "Hidden pinned buttons must be omitted rather than leave gaps between the groups.");
 }
 
 void CountdownChecks()
@@ -142,15 +174,51 @@ void CatalogChecks()
     Check(catalog.CreateWidgets(null).Count == 0, "New settings must not install widgets implicitly.");
     Check(catalog.CreateOptions([], []).All(option => !option.IsInstalled && !option.IsEnabled),
         "The available catalog must be optional.");
-    var searchOption = catalog.CreateOptions([], []).SingleOrDefault(option => option.Id == DockWidgetService.SearchId);
-    Check(searchOption is not null && searchOption.Label == UiText.Get("WidgetLauncher")
-        && searchOption.Description == UiText.Get("WidgetLauncherDescription") && searchOption.HasSettings,
-        "The Search widget must be listed in Settings with a localized label, description and options panel.");
+    Check(catalog.CreateOptions([], []).All(option => option.Id != "Search"),
+        "Search must be a dock button, not a catalog widget.");
+    var legacySearch = DockSettingsStore.MigrateRemovedWidgets(new DockSettings(
+        Widgets: ["Search", "Clock"], InstalledWidgets: ["Search", "Clock"], WidgetOrder: ["Search", "Clock"],
+        DockItemOrder: ["start", "widget:Search", "widget:Clock"],
+        WidgetDensityOverrides: new Dictionary<string, WidgetDensityMode> { ["Search"] = WidgetDensityMode.Compact }));
+    Check(legacySearch.Widgets!.SequenceEqual(["Clock"])
+        && legacySearch.InstalledWidgets!.SequenceEqual(["Clock"])
+        && legacySearch.WidgetOrder!.SequenceEqual(["Clock"])
+        && legacySearch.DockItemOrder!.SequenceEqual(["start", "widget:Clock"])
+        && legacySearch.WidgetDensityOverrides!.Count == 0
+        && legacySearch.ShowSearchButton
+        && DockSettingsStore.Validate(legacySearch),
+        "The retired Search widget must migrate into a visible dock search button.");
+    var legacyShell = DockSettingsStore.MigrateRemovedWidgets(new DockSettings(
+        Widgets: ["Desktops", "Clock"], InstalledWidgets: ["Desktops", "Tray", "Clock"],
+        WidgetOrder: ["Desktops", "Tray", "Clock"], DockItemOrder: ["start", "widget:Desktops", "widget:Tray", "widget:Clock"],
+        ShowTaskViewButton: false, ShowTrayButton: false));
+    Check(legacyShell.Widgets!.SequenceEqual(["Clock"])
+        && legacyShell.InstalledWidgets!.SequenceEqual(["Clock"])
+        && legacyShell.WidgetOrder!.SequenceEqual(["Clock"])
+        && legacyShell.DockItemOrder!.SequenceEqual(["start", "widget:Clock"])
+        && legacyShell.ShowTaskViewButton && !legacyShell.ShowTrayButton
+        && DockSettingsStore.Validate(legacyShell),
+        "The retired Desktops and Tray widgets must migrate into dock shell buttons with their enabled state.");
     var first = catalog.CreateWidgets([DockWidgetService.StopwatchId, DockWidgetService.CountdownId]);
-    var aiOption = catalog.CreateOptions([], []).SingleOrDefault(option => option.Id == DockWidgetService.AiUsageId);
-    Check(aiOption is not null && aiOption.Label == UiText.Get("WidgetAiUsage")
-        && aiOption.Description == UiText.Get("WidgetAiUsageDescription") && aiOption.HasSettings,
-        "AI Usage must have a localized catalog card and settings panel.");
+    var options = catalog.CreateOptions([], []);
+    Check(DockWidgetService.AiUsageWidgets.Select(definition => definition.Provider).Order().SequenceEqual(
+            Enum.GetValues<AiProviders>().Where(provider => provider is not (AiProviders.None or AiProviders.All)).Order())
+        && DockWidgetService.AiUsageWidgets.All(definition => options.SingleOrDefault(option => option.Id == definition.Id) is { } aiOption
+            && aiOption.Label == UiText.Get(definition.LabelKey) && aiOption.Description == UiText.Get(definition.LabelKey + "Description")
+            && !aiOption.HasSettings)
+        && options.All(option => option.Id != "AiUsage"),
+        "Every AI provider must be its own catalog widget with a localized card and no settings panel.");
+    var legacy = DockSettingsStore.MigrateLegacyAiUsage(new DockSettings(
+        Widgets: ["AiUsage", "Clock"], InstalledWidgets: ["AiUsage", "Clock"], WidgetOrder: ["Clock", "AiUsage"],
+        DockItemOrder: ["start", "widget:AiUsage"], AiUsageProviders: AiProviders.Claude | AiProviders.Codex,
+        WidgetDensityOverrides: new Dictionary<string, WidgetDensityMode> { ["AiUsage"] = WidgetDensityMode.Compact }));
+    Check(legacy.Widgets!.SequenceEqual(["AiUsageClaude", "AiUsageCodex", "Clock"])
+        && legacy.InstalledWidgets!.Count == DockWidgetService.AiUsageWidgets.Count + 1
+        && legacy.WidgetOrder!.Count == DockWidgetService.AiUsageWidgets.Count + 1 && legacy.WidgetOrder[0] == "Clock"
+        && legacy.DockItemOrder!.Contains("widget:AiUsageOpenRouter") && !legacy.DockItemOrder!.Contains("widget:AiUsage")
+        && legacy.WidgetDensityOverrides!["AiUsageCopilot"] == WidgetDensityMode.Compact && !legacy.WidgetDensityOverrides.ContainsKey("AiUsage")
+        && legacy.AiUsageProviders == AiProviders.None && DockSettingsStore.Validate(legacy),
+        "The retired single AI usage widget must migrate into one valid widget per provider.");
     Check(first.Count == 2 && first.OfType<ITimedDockWidget>().Count() == 2, "Both time widgets must be available.");
     var stopwatch = first.OfType<StopwatchDockWidget>().Single();
     var timer = first.OfType<CountdownDockWidget>().Single();
@@ -166,6 +234,56 @@ void CatalogChecks()
     Check(stopwatch.Value == "00:00:30" && timer.Value == "00:00:30", "Hidden widgets must retain elapsed time.");
 }
 
+void WidgetCategoryChecks()
+{
+    var clock = new TestClock();
+    var catalog = new DockWidgetService(clock);
+    var options = catalog.CreateOptions([], []);
+
+    Check(options.Count == 21, "Catalog must define exactly 21 widgets.");
+
+    var timeWidgets = options.Where(o => o.CategoryEnum == DockWidgetCategory.TimeAndWeather).Select(o => o.Id).ToArray();
+    Check(timeWidgets.Length == 5
+        && timeWidgets.Contains(DockWidgetService.ClockId)
+        && timeWidgets.Contains(DockWidgetService.WeatherId)
+        && timeWidgets.Contains("DayProgress")
+        && timeWidgets.Contains(DockWidgetService.StopwatchId)
+        && timeWidgets.Contains(DockWidgetService.CountdownId),
+        "TimeAndWeather category must contain Clock, Weather, DayProgress, Stopwatch and Countdown.");
+
+    var systemWidgets = options.Where(o => o.CategoryEnum == DockWidgetCategory.SystemAndHardware).Select(o => o.Id).ToArray();
+    Check(systemWidgets.Length == 5
+        && systemWidgets.Contains(DockWidgetService.SystemStatsId)
+        && systemWidgets.Contains(DockWidgetService.NetSpeedId)
+        && systemWidgets.Contains(DockWidgetService.BatteryId)
+        && systemWidgets.Contains(DockWidgetService.BluetoothBatteryId)
+        && systemWidgets.Contains("Storage"),
+        "SystemAndHardware category must contain SystemStats, NetSpeed, Battery, BluetoothBattery and Storage.");
+
+    var aiWidgets = options.Where(o => o.CategoryEnum == DockWidgetCategory.AiQuotas).Select(o => o.Id).ToArray();
+    Check(aiWidgets.Length == 7
+        && DockWidgetService.AiUsageWidgets.All(w => aiWidgets.Contains(w.Id)),
+        "AiQuotas category must contain all 7 AI provider widgets.");
+
+    var mediaWidgets = options.Where(o => o.CategoryEnum == DockWidgetCategory.MediaAndControls).Select(o => o.Id).ToArray();
+    Check(mediaWidgets.Length == 3
+        && mediaWidgets.Contains(DockWidgetService.MediaId)
+        && mediaWidgets.Contains(DockWidgetService.AudioId)
+        && mediaWidgets.Contains(DockWidgetService.QuickSettingsId),
+        "MediaAndControls category must contain Media, Audio and QuickSettings.");
+
+    var prodWidgets = options.Where(o => o.CategoryEnum == DockWidgetCategory.Productivity).Select(o => o.Id).ToArray();
+    Check(prodWidgets.Length == 1 && prodWidgets.Contains(DockWidgetService.FocusId),
+        "Productivity category must contain only Focus.");
+
+    UiText.Current.SetLanguage(AppLanguage.Turkish);
+    var sample = options.First(o => o.CategoryEnum == DockWidgetCategory.AiQuotas);
+    Check(sample.CategoryLabel == "Yapay Zekâ", "Category label must be localized in Turkish.");
+    UiText.Current.SetLanguage(AppLanguage.English);
+    Check(sample.CategoryLabel == "AI Quotas", "Category label must be localized in English.");
+    UiText.Current.SetLanguage(AppLanguage.Turkish);
+}
+
 void LocalizationChecks()
 {
     var option = new DockWidgetOption("Clock", "Saat", "Yerel saat", true, false, new DockWidget("Clock", "Saat"));
@@ -173,7 +291,7 @@ void LocalizationChecks()
     option.PropertyChanged += (_, e) => changes.Add(e.PropertyName);
     option.UpdateText("Clock", "Local time");
     Check(option.IsInstalled && !option.IsEnabled, "Localization must preserve installation and visibility.");
-    Check(changes.SequenceEqual([nameof(option.Label), nameof(option.Description)]), "Both localized fields must notify bindings.");
+    Check(changes.SequenceEqual([nameof(option.Label), nameof(option.Description), nameof(option.CategoryLabel)]), "All localized fields must notify bindings.");
     changes.Clear();
     option.UpdateText("Clock", "Local time");
     Check(changes.Count == 0, "Unchanged text must not notify.");
@@ -189,6 +307,11 @@ void LocalizationChecks()
     UiText.Current.SetLanguage(AppLanguage.Turkish);
     Check(!UiText.Current.IsEnglish && UiText.Current.Language == AppLanguage.Turkish, "UiText must reflect Turkish language selection.");
     Check(UiText.Get("ErrorDockAttach") == "Dock penceresi Windows'a bağlanamadı.", "Error keys must resolve to Turkish.");
+    // Theme editor labels are composed as ThemeField<token>; the key spelling must match the catalogs.
+    Check(UiText.TryGet("ThemeFieldTextPrimary", out var primary) && primary == "Birincil metin",
+        "Theme editor token labels must resolve in Turkish.");
+    Check(UiText.TryGet("ThemeFieldDescription", out var description) && description == "Açıklama",
+        "Theme editor form labels must resolve in Turkish without character corruption.");
     Check(AppLog.ResolveMessage("ErrorDockAttach") == "Dock penceresi Windows'a bağlanamadı.",
         "Structured log entries must resolve the same text shown to the user.");
     Check(AppLog.ResolveMessage("raw exception text") == "raw exception text",
@@ -214,6 +337,15 @@ void TaskManagerTextChecks()
     }
 }
 
+void RadiusChecks()
+{
+    Check(RadiusManager.Derive(20, 20, 12) == 12, "At the reference radius a derived radius must keep its value.");
+    Check(RadiusManager.Derive(32, 20, 12) == 24, "Nested radii must step up with the dock radius.");
+    Check(RadiusManager.Derive(16, 20, 5) == 1, "Nested radii must step down with the dock radius.");
+    Check(RadiusManager.Derive(0, 20, 12) == 0, "A sharp dock must make every nested corner sharp as well.");
+    Check(RadiusManager.Derive(20, 20, 18) == 18, "Theme packs with a larger nested radius must keep that offset.");
+}
+
 void SettingsChecks()
 {
     var path = Path.Combine(Path.GetTempPath(), Path.GetRandomFileName());
@@ -235,6 +367,19 @@ void SettingsChecks()
             "Unknown widget identifiers must be rejected.");
         Check(store.Save(new DockSettings(InstalledWidgets: ["Clock", "Clock"])) is not null,
             "Duplicate installations must be rejected.");
+        File.WriteAllText(path, "{\"SurfaceOpacity\":0.65}");
+        var migratedSurfaces = store.Load();
+        Check(migratedSurfaces.Error is null
+            && Math.Abs(migratedSurfaces.Settings.DockOpacity - 0.65) < 0.001
+            && Math.Abs(migratedSurfaces.Settings.MenuOpacity - 0.65) < 0.001
+            && Math.Abs(migratedSurfaces.Settings.WidgetOpacity - 0.65) < 0.001
+            && Math.Abs(migratedSurfaces.Settings.SettingsOpacity - 0.65) < 0.001,
+            "The legacy SurfaceOpacity must migrate into all four surface styles.");
+        Check(store.Save(new DockSettings(DockBackground: SurfaceBackground.None, DockOpacity: 0)) is null
+            && store.Load().Settings.DockBackground == SurfaceBackground.None,
+            "A fully transparent dock style must persist and reload.");
+        Check(store.Save(new DockSettings(MenuOpacity: 1.2)) is not null,
+            "Out-of-range surface opacity must be rejected.");
         Check(store.Save(new DockSettings(Widgets: [], InstalledWidgets: ["Countdown"])) is null,
             "An installed widget may remain hidden.");
         var hidden = store.Load();
@@ -375,6 +520,13 @@ void DockIconPixelChecks()
     Check(ApplicationIconProvider.ComputeHoverIconPixels(40, 1.28) == 64, "A 40 px icon magnified to 52 px must use 64 px artwork.");
     Check(ApplicationIconProvider.ComputeHoverIconPixels(300, 1.28) == 384, "Beyond the largest native size the exact magnified size is used.");
     Check(ApplicationIconProvider.GetHoverVariant(null) is null, "A missing icon has no hover variant.");
+
+    // A snapped bitmap must not be drawn past its cell: that extra width/height used to appear only on the right
+    // and bottom (LibreWolf at medium dock size), reading as a clipped icon.
+    Check(DockMetrics.AppIconDipSize(34, 32, 1.0) == 32, "A 32 px source fits a 34 DIP cell without overshoot.");
+    Check(DockMetrics.AppIconDipSize(28, 24, 1.0) == 24, "Compact icons are capped by their cell, not the old 36 DIP floor.");
+    Check(DockMetrics.AppIconDipSize(38, 40, 1.0) == 38, "A larger native bitmap is capped to the dock cell.");
+    Check(DockMetrics.AppIconDipSize(57, 81, 1.5) == 54, "DPI is divided out before capping so the drawn size stays in DIP.");
 }
 
 void StartMenuAndOverlayChecks()
@@ -415,6 +567,34 @@ void StartMenuAndOverlayChecks()
     var later = System.Diagnostics.Stopwatch.GetTimestamp() + (long)(0.5 * System.Diagnostics.Stopwatch.Frequency);
     Check(!state.WasOpenAtPress(openNow: false, pressTimestamp: later),
         "A later click must not be treated as open at press.");
+
+    // Start menu positioning must follow the dock's actual Start button, wherever the user placed it (here X=570).
+    // On the full-screen canvas the flyout sits centered when Windows taskbar alignment is centered, so the
+    // canvas is offset by -397 to bring the flyout above the button.
+    var (fullX, fullY) = ShellShortcuts.ComputeStartMenuPosition(
+        windowWidth: 2560, windowHeight: 1374,
+        workLeft: 0, workTop: 0, workRight: 2560, workBottom: 1374,
+        anchorLeft: 570, anchorTop: 1379, anchorRight: 620, anchorBottom: 1429,
+        edge: DockEdge.Bottom, dpiScale: 1.0, isLeftAligned: false);
+    Check(fullX == -397, "Full-screen container must offset horizontally so the flyout aligns over the dock's Start button.");
+    Check(fullY == 4, "Full-screen container must offset vertically to sit right above the dock.");
+
+    // A left-aligned taskbar still follows the dock's Start button.
+    var (leftX, _) = ShellShortcuts.ComputeStartMenuPosition(
+        windowWidth: 2560, windowHeight: 1374,
+        workLeft: 0, workTop: 0, workRight: 2560, workBottom: 1374,
+        anchorLeft: 570, anchorTop: 1379, anchorRight: 620, anchorBottom: 1429,
+        edge: DockEdge.Bottom, dpiScale: 1.0, isLeftAligned: true);
+    Check(leftX == 550, "A left-aligned taskbar must still offset the flyout above the dock's Start button.");
+
+    // Discrete window (e.g. Windows 10 or custom shell, 642x724):
+    var (discreteX, discreteY) = ShellShortcuts.ComputeStartMenuPosition(
+        windowWidth: 642, windowHeight: 724,
+        workLeft: 0, workTop: 0, workRight: 2560, workBottom: 1374,
+        anchorLeft: 570, anchorTop: 1379, anchorRight: 620, anchorBottom: 1429,
+        edge: DockEdge.Bottom, dpiScale: 1.0, isLeftAligned: false);
+    Check(discreteX == 562, "Discrete window must be positioned above the dock's actual Start button.");
+    Check(discreteY == 642, "Discrete window must be clamped to the work area above the dock.");
 }
 
 sealed class TestClock : TimeProvider

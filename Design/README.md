@@ -17,11 +17,11 @@ OpenTaskbar uses a lightweight, vector-driven design system implemented in pure 
 | `DockCellSize` | `52 DIP` | Fixed width of each application cell; never compressed to fit content |
 | `DockCellHeight` | `52 DIP` | Height of an individual dock application item cell |
 | `DockIconSize` | 28 / 34 / 42 DIP | Icon display size per dock size (`42 DIP` base) |
-| `DockHoverScale` | `1.28x` | Maximum magnification scale; constrained to fit the current icon cell |
-| `DockRadius` | 16 / 19 / 22 DIP | Surface corner radius per dock size (`18 DIP` default token) |
+| `DockHoverScale` | `1.50x` | Peak magnification scale when slots can expand; automatically capped (e.g. ~`1.27x` at Large) on constrained/full-width docks so adjacent icons keep a >= 4 DIP gap |
+| `DockRadius` | 16 / 19 / 22 DIP | Default surface corner radius per dock size (`20 DIP` token, user-customizable `0–32 DIP`); screen edge spacing (`3 / 5 / 6 DIP`) is computed automatically from the active size and scale profile |
 | `ControlRadius` | `12 DIP` | Standard control and button corner radius |
-| `PopupRadius` | `10 DIP` | Context menu and window preview corner radius |
-| `PreviewGap` | `18 DIP` | Vertical elevation gap between dock icons and thumbnail preview cards |
+| `PopupRadius` | `12 DIP` | Context menu and window preview corner radius |
+| `PreviewGap` | `18 DIP` | Base vertical elevation gap between dock icons and thumbnail preview cards; dynamically augmented via `WindowThumbnailPreview.ExtraGapDips` when magnification is enabled |
 | `StatusDotSize` | `4 DIP / 5 DIP` | Running and active application indicator dot diameter |
 | `DockResizeGripWidth` | `8 DIP` | Invisible pointer target on each outside border; cursor indicates resizing |
 
@@ -38,15 +38,17 @@ OpenTaskbar uses a lightweight, vector-driven design system implemented in pure 
 
 ## Visual Materials
 
-- **Settings Glass:** Native Desktop Acrylic (`DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_TRANSIENTWINDOW`) on Windows 11 build 22621+. `WindowChrome` provides the custom 48 DIP caption and native resize border. Text and icons remain opaque while settings, dock, and menu background brushes share the persisted surface opacity (60–100%, default 90%). No layered-window opacity or software blur is used. Unsupported systems and high-contrast mode use an opaque settings surface.
-- **Compact Settings Layout:** One caption, a 148 DIP navigation column, 52 DIP general rows, and a clean full-height page view without an Apply footer. Auto-save applies all changes immediately in real-time. Short auto-hide options form a vertical list. Uniform choice groups share aligned edges. The default 740 × 600 DIP window fits all general settings; smaller sizes scroll to the final option. Custom maximize sizing follows the current monitor work area and DPI.
-- **Preference Feedback:** All settings (general switches, choices, themes, sizes, scales, widget selections, and widget-specific options) auto-save immediately or with brief input debouncing. Surface-opacity changes preview immediately and persist. Configurable widget cards feature a top-right chevron button to expand or collapse their dedicated settings section inline with direct auto-scroll.
+- **Settings Glass:** Native Desktop Acrylic (`DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_TRANSIENTWINDOW`) on Windows 11 build 22621+. `WindowChrome` provides the custom 48 DIP caption and native resize border. Text and icons remain opaque. Each of the four surfaces (dock, menus, widgets, Settings) has its own Glass/Solid/None mode and 0–100% opacity, defaulting to Glass at 90%; "None" also removes the rim, sheen and shadow and disables DWM acrylic. No layered-window opacity or software blur is used. Unsupported systems and high-contrast mode use an opaque settings surface.
+- **Compact Settings Layout:** One caption, a 200 DIP navigation column, clean full-height page views without an Apply footer, and adaptive 3-column widget catalog cards (`MinItemWidth = 230 DIP`). Settings are grouped into quiet slate section cards whose rows are separated by hairline dividers instead of separate boxes; segment hosts and sliders use a shared inset track. Auto-save applies all changes immediately in real-time. Short auto-hide options form a vertical list; uniform choice groups share aligned edges. The default `980 × 680 DIP` window (`Min 580 × 440`, `Max 1280 × 920`) fits general settings and the catalog cleanly; smaller sizes scroll to the final option. Custom maximize sizing follows the current monitor work area and DPI.
+- **Preference Feedback:** All settings (general switches, choices, themes, sizes, scales, widget selections, and widget-specific options) auto-save immediately or with brief input debouncing. Per-surface material changes preview immediately and persist. Configurable widget cards feature a top-right chevron button to expand or collapse their dedicated settings section inline with direct auto-scroll.
 
 ### "Aurora" visual language
 
 One accent gradient, teal `#5EEAD4` → sky `#38BDF8` (→ indigo `#818CF8` on the Start mark), carries every active state. Surfaces stay neutral so application icons keep their own colors.
 
-- **Graphite Glass:** Three-stop dock material (`#CC222833` → `#D9161A22` → `#E60F1218` in Dark), its alpha set by the surface opacity. Corner radius 16 / 19 / 22 DIP per size.
+The default look takes its colors from the user's Windows personalization settings: `AccentPalette` (RGBA light→dark ramp) and `DWM\AccentColor` supply the accent used only for interactive controls — primary buttons, switches, focus rings, selection marks and meter fills. Chrome surfaces stay neutral and follow the Windows Settings app: a tinted dark backdrop, a distinct navigation column and slightly elevated cards (`#1B2029` / `#171C26` / `#252B37` in dark, `#F3F3F3` / `#EEEEEE` / `#FFFFFF` in light). `WindowsPalette` generates the brushes and `ThemeManager` layers them below any explicitly selected theme pack, so a pack keeps control of the keys it defines. A hidden HWND listens for `WM_SETTINGCHANGE("ImmersiveColorSet")`, `WM_THEMECHANGED`, `WM_SYSCOLORCHANGE` and `WM_DWMCOLORIZATIONCOLORCHANGED`, so changing the Windows accent updates the app live. The static `Dark.xaml` / `Light.xaml` files remain as the fallback when no Windows accent is available.
+
+- **Graphite Glass:** Three-stop dock material (`#CC222833` → `#D9161A22` → `#E60F1218` in Dark), its alpha set by the dock's own surface opacity. Corner radius 16 / 19 / 22 DIP per size.
 - **Sheen:** A 1 DIP `DockHighlight` line on the top border, fading out before the rounded corners (`DockSheen`, bottom dock only).
 - **Ambient Shadow:** `BlurRadius="30"`, `ShadowDepth="5"`, `Color="#05070B"`, `Opacity="0.5"`. Outside border hit targets remain invisible and show the resize cursor.
 - **Hover Light:** A radial `IconHoverGlow` pool under the hovered icon instead of a hover box.
@@ -63,16 +65,18 @@ One accent gradient, teal `#5EEAD4` → sky `#38BDF8` (→ indigo `#818CF8` on t
 ## Interaction & Motion
 
 ### Continuous Fisheye Magnification
-- Pointer movement across the dock calculates a continuous parabolic/cosine wave scaling factor:
-  $$S(d) = 1.0 + (S_{peak} - 1.0) \times \cos\left(\frac{\pi \cdot d}{2 \cdot R}\right)^2$$
-- Magnification smoothly affects the hovered icon and immediate neighbors within a 90 DIP influence radius ($R$).
-- Items scale anchored at `(0.5, 0.95)`, expanding upward into the 24 DIP transparent headroom without horizontal layout displacement or icon clipping.
-- Status dots remain stationary at the dock base.
+- Implemented via the pure layout helper `Services/App/DockFisheyeLayout.cs` and `Views/Windows/MainWindow.Magnification.cs`.
+- Pointer movement calculates a $C^1$-smooth raised-cosine bell curve from invariant resting centers captured in `DockHost` coordinates:
+  $$f(d) = \frac{1 + \cos(\pi \cdot d / R)}{2}, \quad S(d) = 1.0 + (S_{\text{eff}} - 1.0) \cdot f(d)$$
+- Influence radius scales with the active cell size (`cell * 2.8`, min `110 DIP`; tightened to `cell * 2.1`, min `95 DIP` on constrained docks).
+- Frame-rate independent spring physics (`stiffness = 280`, `damping = 30`) drives both growth and settle smoothly without oscillation.
+- When monitor space allows, button slots (`SlotExpansionFactor = 0.95`) and the floating `DockSurface` expand synchronously so icons, active indicator dots, tooltips, and click targets move together with zero overlap. When the dock is full-width, scrolling, or width-locked, `ComputeEffectiveMaxScale` smoothly caps peak scale to guarantee at least `4 DIP` clearance between adjacent icons.
+- Items scale anchored at `IconScaleOrigin` (`(0.5, 1.0)` on bottom edge, `(0.0, 0.5)` on left, `(1.0, 0.5)` on right) with a subtle headroom-clamped lift (`<= 1.0 DIP`). Hovering widgets, resize thumbs, or edge scroll chevrons smoothly settles magnification so interactive controls never shift under the pointer.
 
 ### Multi-Window Live Thumbnails
 - Interactive live DWM thumbnails are created using `DwmRegisterThumbnail`.
 - Thumbnails fade and scale in from 95% over 160 ms with cubic ease-out.
-- The preview strip floats 18 DIPs (`PreviewGap`) above the dock to prevent overlapping magnified icons.
+- The preview strip floats `PreviewGap` (`18 DIP`) plus `DockFisheyeLayout.ComputePreviewClearance` above the dock when magnification is active so cards never touch magnified icons.
 - Each preview card features the application icon, window title, close button, and live window preview.
 
 ### Smart Auto-Hide (IntelliHide)
@@ -101,7 +105,7 @@ One accent gradient, teal `#5EEAD4` → sky `#38BDF8` (→ indigo `#818CF8` on t
 - **Floating:** The dock hugs its content and follows the Left/Center/Right alignment. Widgets sit after the applications inside the same surface.
 - **Full width:** The surface spans the monitor with a 6 DIP side inset. Applications stay left and widgets are pinned to the right edge. Alignment is disabled.
 - **Sizing:** Widgets keep their natural width.
-- **Widget card** (`WidgetCardBorder` / `WidgetCardButton`): 46 DIP high, 12 DIP radius, a `WidgetCard` fill with a 1 DIP `WidgetCardStroke`, and 3 DIP horizontal spacing.
+- **Widget card** (`WidgetCardBorder` / `WidgetCardButton`): 46 DIP high, 12 DIP radius, transparent resting surface with a soft, eased 140/180 ms hover fade (`SurfaceHover`, driven by an animated overlay/`SurfaceHoverColor` token) and 3 DIP horizontal spacing. No instant background swaps.
 - **Widget Height Uniformity Rule:** All dock widgets must strictly have a uniform height governed by `{StaticResource WidgetHeight}` (46 DIP). Every top-level widget container must use `WidgetCardBorder` or `WidgetCardButton` and must never specify a hardcoded or one-off `Height` (such as `Height = 32`). This invariant guarantees that all dock widgets align symmetrically and flush within the dock shelf across all configurations.
 - **Colors:**
   - `WidgetAccent` (sky blue): meter values and the on state.
@@ -117,16 +121,20 @@ One accent gradient, teal `#5EEAD4` → sky `#38BDF8` (→ indigo `#818CF8` on t
 
 ## Project Structure
 
-- `Theme.xaml`: Core design system definitions, standard sizing tokens, brushes, and base control templates.
-- `Palettes/Dark.xaml`: Dark theme color palette and material brushes.
-- `Palettes/Light.xaml`: Light theme color palette and material brushes.
-- `ContextMenus.xaml`: Vector outline icon styles, Jump List headers, and menu item templates.
-- `SettingsControls.xaml`: Segmented controls, toggles, radio buttons, and preferences layout.
-- `WidgetControls.xaml` & `Widgets.xaml`: Widget tokens, card/button/pill/slider styles, and widget icon geometries.
+The design system is modular: every token category, icon family and control family lives in its own XAML file. `App.xaml` merges them in dependency order (tokens → palette → icons → controls); `ThemeManager` swaps the palette and appends theme-pack overrides last.
+
+- `Design/Tokens/`: `Typography.xaml`, `Spacing.xaml`, `Radii.xaml`, `Layout.xaml`, `Motion.xaml` — every shared token, one category per file. Theme packs override these by key.
+- `Design/Palettes/Dark.xaml` & `Light.xaml`: Theme color palettes and material brushes swapped dynamically by `ThemeManager`.
+- `Design/Icons/`: `Navigation.xaml`, `Actions.xaml`, `Status.xaml`, `Media.xaml`, `Brand.xaml`, `GeometryTemplate.xaml` — all vector geometries, grouped by meaning, plus the shared geometry `DataTemplate`.
+- `Design/Controls/Tooltip.xaml` & `ScrollBar.xaml`: Implicit base-control styles.
+- `Design/DockControls.xaml`: Dock buttons (`DockButton`, `StartDockButton` with aligned 6 DIP bottom baseline), resize thumbs, and scroll viewer/indicator templates.
+- `Design/ContextMenus.xaml`: Menu item templates, Jump List headers and the destructive action style.
+- `Design/SettingsControls.xaml`: Settings window controls.
+- `Design/WidgetControls.xaml` & `Design/Widgets.xaml`: Widget card/button/pill/slider styles with full-surface `HoverLayer` alignment.
 
 ### Settings navigation
 
-The 160 DIP sidebar uses 44 DIP minimum-height tabs with a consistent 16 DIP Segoe MDL2 icon column. Selection is marked by a slim accent bar and a subtle neutral surface; hover and keyboard focus have separate treatments. Native TabControl keyboard/selection behavior is retained. Decorative navigation glyphs are non-focusable template children; the actual tab header supplies its accessible name.
+The 200 DIP sidebar uses 44 DIP minimum-height tabs with an 18 DIP Segoe MDL2 icon column and a subtle right divider. Selection is marked by a slim accent bar and a subtle neutral surface; hover and keyboard focus have separate treatments. Native TabControl keyboard/selection behavior is retained. Decorative navigation glyphs are non-focusable template children; the actual tab header supplies its accessible name.
 
 ## Settings verification
 

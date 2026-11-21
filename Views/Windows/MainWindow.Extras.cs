@@ -39,17 +39,32 @@ public partial class MainWindow
 
     private static readonly Brush StackTileBrush = CreateFrozenStackBrush(Color.FromArgb(0x35, 0xFF, 0xFF, 0xFF));
     private static readonly Brush StackTileStroke = CreateFrozenStackBrush(Color.FromArgb(0x55, 0xFF, 0xFF, 0xFF));
-    private static readonly Brush CardShadowBrush1 = CreateFrozenStackBrush(Color.FromArgb(0x35, 0x00, 0x00, 0x00));
-    private static readonly Brush CardShadowBrush2 = CreateFrozenStackBrush(Color.FromArgb(0x18, 0x00, 0x00, 0x00));
-    private static readonly Brush CardDeckBackBrush = CreateFrozenStackBrush(Color.FromArgb(0x28, 0xFF, 0xFF, 0xFF));
-    private static readonly Brush CardDeckBackStroke = CreateFrozenStackBrush(Color.FromArgb(0x38, 0xFF, 0xFF, 0xFF));
+    private static readonly Brush CardShadowBrush1 = CreateFrozenStackBrush(Color.FromArgb(0x40, 0x00, 0x00, 0x00));
+    private static readonly Brush CardShadowBrush2 = CreateFrozenStackBrush(Color.FromArgb(0x55, 0x00, 0x00, 0x00));
+    private static readonly Brush CardDeckBackBrush = CreateFrozenStackBrush(Color.FromArgb(0x35, 0x1E, 0x24, 0x30));
+    private static readonly Brush CardDeckBackStroke = CreateFrozenStackBrush(Color.FromArgb(0x35, 0xFF, 0xFF, 0xFF));
     private static readonly Brush CardDeckMidBrush = CreateFrozenStackBrush(Color.FromArgb(0x3C, 0xFF, 0xFF, 0xFF));
     private static readonly Brush CardDeckMidStroke = CreateFrozenStackBrush(Color.FromArgb(0x50, 0xFF, 0xFF, 0xFF));
     private static readonly Brush CardDeckFrontBrush = CreateFrozenStackBrush(Color.FromArgb(0x50, 0xFF, 0xFF, 0xFF));
     private static readonly Brush CardDeckFrontStroke = CreateFrozenStackBrush(Color.FromArgb(0x75, 0xFF, 0xFF, 0xFF));
-    private static readonly Brush BadgeBackdropBrush = CreateFrozenStackBrush(Color.FromArgb(0xE0, 0x1E, 0x29, 0x3B));
-    private static readonly Brush BadgeStrokeBrush = CreateFrozenStackBrush(Color.FromArgb(0x60, 0xFF, 0xFF, 0xFF));
-    private static readonly Brush BadgeIconBrush = CreateFrozenStackBrush(Color.FromArgb(0xF0, 0x60, 0xA5, 0xFA));
+    private static readonly Brush BadgeBackdropBrush = CreateFrozenStackBrush(Color.FromArgb(0xEB, 0x0F, 0x17, 0x2A));
+    private static readonly Brush BadgeStrokeBrush = CreateFrozenStackBrush(Color.FromArgb(0x60, 0x38, 0xBD, 0xF8));
+    private static readonly Brush BadgeIconBrush = CreateFrozenStackBrush(Color.FromArgb(0xFF, 0x38, 0xBD, 0xF8));
+
+    private static readonly Brush FolderTabBrush = CreateFrozenStackBrush(Color.FromArgb(0xFF, 0x02, 0x84, 0xC7));
+    private static readonly Brush FolderBackBrush = CreateFrozenStackBrush(Color.FromArgb(0xFF, 0x03, 0x69, 0xA1));
+    private static readonly Brush FolderPaperBrush = CreateFrozenStackBrush(Color.FromArgb(0xD8, 0xF0, 0xF9, 0xFF));
+    private static readonly Brush FolderFrontBrush = CreateFrozenGradient(
+        Color.FromArgb(0xFF, 0x38, 0xBD, 0xF8),
+        Color.FromArgb(0xFF, 0x02, 0x84, 0xC7));
+    private static readonly Brush FolderFrontStroke = CreateFrozenStackBrush(Color.FromArgb(0x60, 0xFF, 0xFF, 0xFF));
+
+    private static Brush CreateFrozenGradient(Color top, Color bottom)
+    {
+        var brush = new LinearGradientBrush(top, bottom, new Point(0, 0), new Point(0, 1));
+        brush.Freeze();
+        return brush;
+    }
 
     private static Brush CreateFrozenStackBrush(Color color)
     {
@@ -112,93 +127,101 @@ public partial class MainWindow
         return geom;
     }
 
-    internal static BitmapSource? CreateStackIcon(DockStack stack, int targetSize = 128)
+    internal static BitmapSource RenderModernFolderIcon(int size)
     {
-        var size = Math.Max(16, targetSize);
-        var entries = stack.RecentEntries(3);
-        if (entries.Count == 0)
-        {
-            return ApplicationIconProvider.GetForShellItem(stack.Path, size, iconOnly: true);
-        }
-
-        var scale = size / 128.0;
-
+        var target = Math.Max(16, size);
+        var scale = target / 128.0;
         var visual = new DrawingVisual();
         using (var dc = visual.RenderOpen())
         {
-            // 1. Back card (top-right depth)
-            var rectBack = new Rect(24 * scale, 8 * scale, 76 * scale, 76 * scale);
-            var cornerBack = 14 * scale;
-            dc.DrawRoundedRectangle(CardShadowBrush2, null, new Rect(rectBack.X, rectBack.Y + 3 * scale, rectBack.Width, rectBack.Height), cornerBack, cornerBack);
-            var penBack = new Pen(CardDeckBackStroke, Math.Max(0.5, 1.2 * scale));
-            penBack.Freeze();
-            dc.DrawRoundedRectangle(CardDeckBackBrush, penBack, rectBack, cornerBack, cornerBack);
-            if (entries.Count >= 3)
-            {
-                var iconBack = ApplicationIconProvider.GetForShellItem(entries[2].FullName, (int)Math.Ceiling(44 * scale), iconOnly: true);
-                if (iconBack is not null)
-                {
-                    dc.DrawImage(iconBack, new Rect(rectBack.X + (rectBack.Width - 44 * scale) / 2, rectBack.Y + (rectBack.Height - 44 * scale) / 2, 44 * scale, 44 * scale));
-                }
-            }
+            // 1. Ambient drop shadow under folder
+            var shadowRect = new Rect(14 * scale, 34 * scale, 100 * scale, 74 * scale);
+            dc.DrawRoundedRectangle(CardShadowBrush1, null, new Rect(shadowRect.X, shadowRect.Y + 4 * scale, shadowRect.Width, shadowRect.Height), 16 * scale, 16 * scale);
 
-            // 2. Middle card (intermediate layer)
-            var rectMid = new Rect(16 * scale, 20 * scale, 82 * scale, 82 * scale);
-            var cornerMid = 15 * scale;
-            dc.DrawRoundedRectangle(CardShadowBrush1, null, new Rect(rectMid.X, rectMid.Y + 3 * scale, rectMid.Width, rectMid.Height), cornerMid, cornerMid);
-            var penMid = new Pen(CardDeckMidStroke, Math.Max(0.5, 1.4 * scale));
-            penMid.Freeze();
-            dc.DrawRoundedRectangle(CardDeckMidBrush, penMid, rectMid, cornerMid, cornerMid);
-            if (entries.Count >= 2)
-            {
-                var iconMid = ApplicationIconProvider.GetForShellItem(entries[1].FullName, (int)Math.Ceiling(50 * scale), iconOnly: true);
-                if (iconMid is not null)
-                {
-                    dc.DrawImage(iconMid, new Rect(rectMid.X + (rectMid.Width - 50 * scale) / 2, rectMid.Y + (rectMid.Height - 50 * scale) / 2, 50 * scale, 50 * scale));
-                }
-            }
+            // 2. Folder Tab (back layer)
+            var tabRect = new Rect(18 * scale, 24 * scale, 42 * scale, 22 * scale);
+            dc.DrawRoundedRectangle(FolderTabBrush, null, tabRect, 8 * scale, 8 * scale);
 
-            // 3. Front card (prominent foreground hero card)
-            var rectFront = new Rect(8 * scale, 32 * scale, 88 * scale, 88 * scale);
-            var cornerFront = 16 * scale;
-            dc.DrawRoundedRectangle(CardShadowBrush1, null, new Rect(rectFront.X, rectFront.Y + 4 * scale, rectFront.Width, rectFront.Height), cornerFront, cornerFront);
-            var penFront = new Pen(CardDeckFrontStroke, Math.Max(0.5, 1.6 * scale));
-            penFront.Freeze();
-            dc.DrawRoundedRectangle(CardDeckFrontBrush, penFront, rectFront, cornerFront, cornerFront);
-            if (entries.Count >= 1)
-            {
-                var iconFront = ApplicationIconProvider.GetForShellItem(entries[0].FullName, (int)Math.Ceiling(58 * scale), iconOnly: true);
-                if (iconFront is not null)
-                {
-                    dc.DrawImage(iconFront, new Rect(rectFront.X + (rectFront.Width - 58 * scale) / 2, rectFront.Y + (rectFront.Height - 58 * scale) / 2, 58 * scale, 58 * scale));
-                }
-            }
+            // 3. Folder Back Body
+            var backBodyRect = new Rect(14 * scale, 30 * scale, 100 * scale, 76 * scale);
+            dc.DrawRoundedRectangle(FolderBackBrush, null, backBodyRect, 14 * scale, 14 * scale);
 
-            // 4. Folder badge pill (bottom-right corner emblem)
-            var badgeCenter = new Point(size - 22 * scale, size - 22 * scale);
-            var badgeRadius = 18 * scale;
-            dc.DrawEllipse(CardShadowBrush1, null, new Point(badgeCenter.X, badgeCenter.Y + 2 * scale), badgeRadius + 1 * scale, badgeRadius + 1 * scale);
-            var badgePen = new Pen(BadgeStrokeBrush, Math.Max(0.5, 1.5 * scale));
-            badgePen.Freeze();
-            dc.DrawEllipse(BadgeBackdropBrush, badgePen, badgeCenter, badgeRadius, badgeRadius);
+            // 4. White paper sheet inside
+            var paperRect = new Rect(24 * scale, 26 * scale, 80 * scale, 48 * scale);
+            dc.DrawRoundedRectangle(FolderPaperBrush, null, paperRect, 6 * scale, 6 * scale);
 
-            var iconSize = 18 * scale;
-            var scaleGeom = iconSize / 24.0;
-            var originX = badgeCenter.X - (iconSize / 2);
-            var originY = badgeCenter.Y - (iconSize / 2);
-            dc.PushTransform(new TranslateTransform(originX, originY));
-            dc.PushTransform(new ScaleTransform(scaleGeom, scaleGeom));
-            var iconPen = new Pen(BadgeIconBrush, 2.0);
-            iconPen.Freeze();
-            dc.DrawGeometry(null, iconPen, FolderBadgeGeometry);
-            dc.Pop();
-            dc.Pop();
+            // 5. Front Pocket with rich modern gradient and top highlight
+            var frontRect = new Rect(14 * scale, 46 * scale, 100 * scale, 60 * scale);
+            var frontPen = new Pen(FolderFrontStroke, Math.Max(0.5, 1.0 * scale));
+            frontPen.Freeze();
+            dc.DrawRoundedRectangle(FolderFrontBrush, frontPen, frontRect, 14 * scale, 14 * scale);
         }
 
-        var rtb = new System.Windows.Media.Imaging.RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
+        var rtb = new RenderTargetBitmap(target, target, 96, 96, PixelFormats.Pbgra32);
         rtb.Render(visual);
         rtb.Freeze();
         return rtb;
+    }
+
+    internal static BitmapSource? CreateStackIcon(DockStack stack, int targetSize = 128)
+    {
+        var size = Math.Max(16, targetSize);
+        var icon = ApplicationIconProvider.GetForShellItem(stack.Path, size, iconOnly: true)
+                   ?? ApplicationIconProvider.GetForFile(stack.Path, size)
+                   ?? RenderModernFolderIcon(size);
+        return icon is null ? null : FillSquare(icon, size);
+    }
+
+    /// <summary>
+    /// Windows shell folder icons leave large transparent margins (measured 112x88 visible pixels in a
+    /// 128x128 icon, i.e. 88% wide and only 69% tall) while application icons fill the whole square.
+    /// That makes every folder look smaller than its neighboring app icons. Trim the transparent bounds
+    /// and stretch the artwork to fill the same square so both icon kinds match visually.
+    /// </summary>
+    private static BitmapSource FillSquare(BitmapSource icon, int size)
+    {
+        try
+        {
+            var bgra = new FormatConvertedBitmap(icon, PixelFormats.Bgra32, null, 0);
+            var width = bgra.PixelWidth;
+            var height = bgra.PixelHeight;
+            var stride = width * 4;
+            var pixels = new byte[stride * height];
+            bgra.CopyPixels(pixels, stride, 0);
+
+            int minX = width, minY = height, maxX = -1, maxY = -1;
+            for (var y = 0; y < height; y++)
+            {
+                var row = y * stride;
+                for (var x = 0; x < width; x++)
+                {
+                    if (pixels[row + x * 4 + 3] <= 16) continue;
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
+            }
+
+            if (maxX < minX || maxY < minY) return icon;
+            var crop = new CroppedBitmap(bgra, new Int32Rect(minX, minY, maxX - minX + 1, maxY - minY + 1));
+            var visual = new DrawingVisual();
+            RenderOptions.SetBitmapScalingMode(visual, BitmapScalingMode.HighQuality);
+            using (var dc = visual.RenderOpen())
+            {
+                dc.DrawImage(crop, new Rect(0, 0, size, size));
+            }
+
+            var result = new RenderTargetBitmap(size, size, 96, 96, PixelFormats.Pbgra32);
+            result.Render(visual);
+            result.Freeze();
+            return result;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warning($"Stack icon resize failed: {ex.Message}");
+            return icon;
+        }
     }
 
     private IEnumerable<Button> GetExtraDockButtons()
@@ -257,8 +280,10 @@ public partial class MainWindow
     private void RefreshRecycleBinIcon()
     {
         var full = _recycleBinFull == true;
-        RecycleBinIcon.Source = ThemePacks.ApplyIcon(full ? RecycleBin.FullIcon : RecycleBin.EmptyIcon, null,
+        var raw = full ? RecycleBin.FullIcon : RecycleBin.EmptyIcon;
+        var themed = ThemePacks.ApplyIcon(raw, null,
             specialKey: full ? IconPack.RecycleBinFullKey : IconPack.RecycleBinKey);
+        RecycleBinIcon.Source = themed;
     }
 
     private void RecycleBin_Click(object sender, RoutedEventArgs e)
@@ -668,7 +693,7 @@ public partial class MainWindow
 
         if (added > 0)
         {
-            if (_windowTracker is not null) UpdateRunningApps(VisibleSnapshot);
+            if (_windowTracker is not null) RefreshRunningApps();
             ResizeDockToContent();
             _replacementSession?.RefreshPosition();
         }

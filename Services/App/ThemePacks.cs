@@ -229,11 +229,13 @@ public static class ThemePacks
     /// </summary>
     public static IReadOnlyList<string> ApplyWidgets(AppTheme theme)
     {
+        if (theme == AppTheme.System) theme = ThemeManager.EffectiveTheme;
         var problems = new List<string>();
         var resources = Application.Current?.Resources;
         if (resources is null) return problems;
         RestoreMetrics();
         ThemeManager.SetOverrides(new Dictionary<string, object>());
+        ThemeManager.UseWindowsAccent(Current?.Widgets is null);
         var pack = Current?.Widgets;
         if (pack is null) return problems;
 
@@ -274,6 +276,100 @@ public static class ThemePacks
         }
 
         return dictionary.Contains(key) && !ThemeManager.IsManagedDictionary(dictionary) ? dictionary : null;
+    }
+
+    private static BitmapSource? _nativeWindowsLogo;
+
+    /// <summary>
+    /// Loads the authentic Windows logo directly from native Windows system assets.
+    /// </summary>
+    public static BitmapSource? GetNativeWindowsLogo()
+    {
+        if (_nativeWindowsLogo is not null) return _nativeWindowsLogo;
+        try
+        {
+            var winDir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            var candidates = new[]
+            {
+                Path.Combine(winDir, "System32", "@WLOGO_96x96.png"),
+                Path.Combine(winDir, "WinSxS", "amd64_microsoft-windows-oobe-user_31bf3856ad364e35_10.0.26100.9818_none_fc02451902096475", "@WLOGO_96x96.png"),
+                Path.Combine(winDir, "WinSxS", "amd64_microsoft-windows-oobe-user_31bf3856ad364e35_10.0.26100.9549_none_fc259ef301ee7648", "@WLOGO_96x96.png")
+            };
+
+            foreach (var path in candidates)
+            {
+                if (File.Exists(path))
+                {
+                    _nativeWindowsLogo = LoadBitmapFromFile(path);
+                    if (_nativeWindowsLogo is not null) return _nativeWindowsLogo;
+                }
+            }
+
+            var winsxsDir = Path.Combine(winDir, "WinSxS");
+            if (Directory.Exists(winsxsDir))
+            {
+                foreach (var matchDir in Directory.EnumerateDirectories(winsxsDir, "amd64_microsoft-windows-oobe-user_*"))
+                {
+                    var wlogo = Path.Combine(matchDir, "@WLOGO_96x96.png");
+                    if (File.Exists(wlogo))
+                    {
+                        _nativeWindowsLogo = LoadBitmapFromFile(wlogo);
+                        if (_nativeWindowsLogo is not null) return _nativeWindowsLogo;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warning($"Failed to load native Windows logo: {ex.Message}");
+        }
+        return null;
+    }
+
+    private static BitmapSource? LoadBitmapFromFile(string path)
+    {
+        try
+        {
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.CreateOptions = BitmapCreateOptions.IgnoreColorProfile;
+            bitmap.UriSource = new Uri(path, UriKind.Absolute);
+            bitmap.EndInit();
+            bitmap.Freeze();
+            return bitmap;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warning($"Failed to read bitmap '{path}': {ex.Message}");
+            return null;
+        }
+    }
+
+    private static readonly IconPackFallback DefaultSquircleFallback = new(
+        Shape: IconPackShape.Rounded,
+        CornerRadius: 0.24,
+        Background: "auto",
+        IconScale: 0.72);
+
+    /// <summary>
+    /// Plates an arbitrary Windows executable icon onto a refined squircle tile matching macOS Big Sur styling.
+    /// </summary>
+    public static BitmapSource? PlateIcon(BitmapSource? original)
+    {
+        if (original is null) return null;
+        if (Plated.TryGetValue(original, out var plated)) return plated;
+        try
+        {
+            plated = RenderPlate(original, DefaultSquircleFallback);
+            Plated.AddOrUpdate(original, plated);
+            return plated;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or OutOfMemoryException)
+        {
+            AppLog.Warning($"Icon plate failed: {ex.Message}");
+            return original;
+        }
     }
 
     /// <summary>The theme's image for an app or special item, the original placed on the theme's plate, or the original.</summary>
@@ -415,11 +511,14 @@ public static class ThemePacks
     {
         const double size = RenderSize;
         var shape = CreateShape(fallback, size);
-        var plate = ParseColor(fallback.Background) ?? AutoBackground(icon);
+        var isDark = ThemeManager.Current == AppTheme.Dark;
+        var plate = ParseColor(fallback.Background) ?? (isDark ? DarkPlateColor(icon) : AutoBackground(icon));
         // A soft top-to-bottom shade gives the flat plate the depth of hand-drawn launcher icons.
-        var fill = new LinearGradientBrush(Lighten(plate, 0.18), Darken(plate, 0.08), 90);
+        var fill = new LinearGradientBrush(Lighten(plate, isDark ? 0.22 : 0.18), Darken(plate, isDark ? 0.12 : 0.08), 90);
         fill.Freeze();
+
         var visual = new DrawingVisual();
+        RenderOptions.SetBitmapScalingMode(visual, BitmapScalingMode.HighQuality);
         using (var context = visual.RenderOpen())
         {
             context.DrawGeometry(fill, null, shape);
@@ -431,7 +530,6 @@ public static class ThemePacks
             context.Pop();
         }
 
-        RenderOptions.SetBitmapScalingMode(visual, BitmapScalingMode.HighQuality);
         var bitmap = new RenderTargetBitmap(RenderSize, RenderSize, 96, 96, PixelFormats.Pbgra32);
         bitmap.Render(visual);
         bitmap.Freeze();
@@ -457,8 +555,15 @@ public static class ThemePacks
         }
     }
 
-    /// <summary>A pale tint of the icon's average opaque color, light enough for the icon to stay readable on it.</summary>
-    internal static Color AutoBackground(BitmapSource icon)
+    internal static Color DarkPlateColor(BitmapSource icon)
+    {
+        var (r, g, b, weight) = SampleIconChannels(icon);
+        if (weight == 0) return Color.FromRgb(24, 28, 36);
+        static byte DarkTint(double channel, byte baseVal) => (byte)Math.Clamp(Math.Round(baseVal + channel * 0.16), 0, 255);
+        return Color.FromRgb(DarkTint(r / weight, 22), DarkTint(g / weight, 26), DarkTint(b / weight, 34));
+    }
+
+    private static (double r, double g, double b, double weight) SampleIconChannels(BitmapSource icon)
     {
         var source = icon.Format == PixelFormats.Bgra32 || icon.Format == PixelFormats.Pbgra32
             ? icon
@@ -479,7 +584,13 @@ public static class ThemePacks
             r += pixels[i + 2] / a;
             weight++;
         }
+        return (r, g, b, weight);
+    }
 
+    /// <summary>A pale tint of the icon's average opaque color, light enough for the icon to stay readable on it.</summary>
+    internal static Color AutoBackground(BitmapSource icon)
+    {
+        var (r, g, b, weight) = SampleIconChannels(icon);
         if (weight == 0) return Colors.White;
         static byte Tint(double channel) => (byte)Math.Clamp(Math.Round(channel * 0.22 + 255 * 0.78), 0, 255);
         return Color.FromRgb(Tint(r / weight), Tint(g / weight), Tint(b / weight));

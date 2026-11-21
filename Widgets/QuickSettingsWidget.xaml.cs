@@ -71,14 +71,14 @@ public partial class QuickSettingsWidget : DockWidget
         {
             row1.Children.Add(MakeActionChip("IconWifi", UiText.Get("WiFi"), () =>
                 ConfirmAndToggle(_wifi, WifiPill, WifiToggle, "WiFi")));
-            row1.Children.Add(MakeActionChip("IconChevronNext", UiText.Format("RadioSettings", UiText.Get("WiFi")),
+            row1.Children.Add(MakeActionChip("IconChevronRight", UiText.Format("RadioSettings", UiText.Get("WiFi")),
                 () => OpenWifiDetails(this)));
         }
         if (_bluetooth is not null || !_radioAccess)
         {
             row1.Children.Add(MakeActionChip("IconBluetooth", UiText.Get("Bluetooth"), () =>
                 ConfirmAndToggle(_bluetooth, BluetoothPill, BluetoothToggle, "Bluetooth")));
-            row1.Children.Add(MakeActionChip("IconChevronNext", UiText.Format("RadioSettings", UiText.Get("Bluetooth")),
+            row1.Children.Add(MakeActionChip("IconChevronRight", UiText.Format("RadioSettings", UiText.Get("Bluetooth")),
                 () => _ = OpenBluetoothDetailsAsync(this)));
         }
         row1.Children.Add(MakeActionChip("IconCast", UiText.Get("Display"), () => Report(ShellShortcuts.OpenProjection(this))));

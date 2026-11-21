@@ -20,41 +20,57 @@ public sealed class WidgetCoordinator : IDisposable
 
     public static readonly string[] DefaultWidgetOrder =
     [
-        "Search",
         "Media",
-        "Desktops",
         "SystemStats",
         "Focus",
         "Weather",
         "NetSpeed",
         "BluetoothBattery",
-        "AiUsage",
+        .. DockWidgetService.AiUsageWidgets.Select(widget => widget.Id),
         "Audio",
         "QuickSettings",
-        "Tray",
         "Clock"
     ];
 
     public static string? GetLabelKey(string id) => id switch
     {
-        "Search" => "WidgetLauncher",
         "Media" => "WidgetMedia",
-        "Desktops" => "WidgetDesktops",
         "SystemStats" => "WidgetSystemStats",
         "Focus" => "WidgetFocus",
         "Weather" => "WidgetWeather",
         "NetSpeed" => "WidgetNetSpeed",
         "BluetoothBattery" => "WidgetBluetoothBattery",
-        "AiUsage" => "WidgetAiUsage",
         "Audio" => "WidgetAudio",
         "QuickSettings" => "WidgetQuickSettings",
-        "Tray" => "WidgetTray",
         "Clock" => "WidgetClock",
-        _ => null
+        _ => DockWidgetService.AiUsageWidgets.FirstOrDefault(widget => widget.Id == id)?.LabelKey
     };
 
     public static bool HandlesWidget(string id) =>
         DefaultWidgetOrder.Contains(id, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Creates the same real widget instance the dock uses. Settings uses this for live catalog previews so the
+    /// cards show the actual widget visuals and data instead of hand-authored static mock templates.
+    /// </summary>
+    public static DockWidget CreateWidget(string id)
+    {
+        var aiDefinition = DockWidgetService.AiUsageWidgets.FirstOrDefault(definition => definition.Id == id);
+        if (aiDefinition is not null) return new AiUsageWidget(aiDefinition.Provider);
+        return id switch
+        {
+            "Media" => new MediaWidget(),
+            "SystemStats" => new SystemStatsWidget(),
+            "Focus" => new FocusWidget(),
+            "Weather" => new WeatherWidget(),
+            "NetSpeed" => new NetSpeedWidget(),
+            "BluetoothBattery" => new BluetoothBatteryWidget(),
+            "Audio" => new AudioWidget(),
+            "QuickSettings" => new QuickSettingsWidget(),
+            "Clock" => new ClockWidget(),
+            _ => throw new ArgumentException($"Unknown widget id '{id}'.", nameof(id))
+        };
+    }
 
     private sealed class WidgetSlot(string id, string labelKey, Func<DockWidget> factory, Func<DockSettings, bool> isEnabled)
     {
@@ -79,8 +95,6 @@ public sealed class WidgetCoordinator : IDisposable
 
     public Action<IReadOnlyList<string>>? OrderChanged { get; set; }
     public event Action? WidgetsPlaced;
-    public event Action<string>? CloseApplicationRequested;
-    public event Action<string>? TerminateApplicationRequested;
     public event Action<string>? WidgetRemoveRequested;
 
     /// <summary>Lets the host wire its context-menu open/close handlers so auto-hide stays locked while the menu is up.</summary>
@@ -90,6 +104,10 @@ public sealed class WidgetCoordinator : IDisposable
 
     /// <summary>When true, the host window owns widget placement so all dock item kinds share one strip.</summary>
     public bool ExternalLayout { get; set; }
+
+    /// <summary>Create a visual preview using the real widget control without activating its background polling.</summary>
+    public static DockWidget? CreatePreviewWidget(string id) =>
+        HandlesWidget(id) ? CreateWidget(id) : null;
 
     public IReadOnlyDictionary<string, DockWidget> ActiveWidgets => _widgets
         .Where(slot => slot.Widget is not null)
@@ -126,19 +144,17 @@ public sealed class WidgetCoordinator : IDisposable
             onHoverLayoutChanged ?? (_ => { }));
         _widgets =
         [
-            new("Search", "WidgetLauncher", CreateSearchWidget, s => IsCatalogEnabled(s, "Search")),
-            new("Media", "WidgetMedia", () => new MediaWidget(), s => IsCatalogEnabled(s, "Media")),
-            new("Desktops", "WidgetDesktops", () => new DesktopsWidget(), s => IsCatalogEnabled(s, "Desktops")),
-            new("SystemStats", "WidgetSystemStats", () => new SystemStatsWidget(), s => IsCatalogEnabled(s, "SystemStats")),
-            new("Focus", "WidgetFocus", () => new FocusWidget(), s => IsCatalogEnabled(s, "Focus")),
-            new("Weather", "WidgetWeather", () => new WeatherWidget(), s => IsCatalogEnabled(s, "Weather")),
-            new("NetSpeed", "WidgetNetSpeed", () => new NetSpeedWidget(), s => IsCatalogEnabled(s, "NetSpeed")),
-            new("BluetoothBattery", "WidgetBluetoothBattery", () => new BluetoothBatteryWidget(), s => IsCatalogEnabled(s, "BluetoothBattery")),
-            new("AiUsage", "WidgetAiUsage", () => new AiUsageWidget(), s => IsCatalogEnabled(s, "AiUsage")),
-            new("Audio", "WidgetAudio", () => new AudioWidget(), s => IsCatalogEnabled(s, "Audio")),
-            new("QuickSettings", "WidgetQuickSettings", () => new QuickSettingsWidget(), s => IsCatalogEnabled(s, "QuickSettings")),
-            new("Tray", "WidgetTray", CreateTrayWidget, s => IsCatalogEnabled(s, "Tray")),
-            new("Clock", "WidgetClock", () => new ClockWidget(), s => IsCatalogEnabled(s, "Clock") || IsCatalogEnabled(s, "Date"))
+            new("Media", "WidgetMedia", () => CreateWidget("Media"), s => IsCatalogEnabled(s, "Media")),
+            new("SystemStats", "WidgetSystemStats", () => CreateWidget("SystemStats"), s => IsCatalogEnabled(s, "SystemStats")),
+            new("Focus", "WidgetFocus", () => CreateWidget("Focus"), s => IsCatalogEnabled(s, "Focus")),
+            new("Weather", "WidgetWeather", () => CreateWidget("Weather"), s => IsCatalogEnabled(s, "Weather")),
+            new("NetSpeed", "WidgetNetSpeed", () => CreateWidget("NetSpeed"), s => IsCatalogEnabled(s, "NetSpeed")),
+            new("BluetoothBattery", "WidgetBluetoothBattery", () => CreateWidget("BluetoothBattery"), s => IsCatalogEnabled(s, "BluetoothBattery")),
+            .. DockWidgetService.AiUsageWidgets.Select(definition => new WidgetSlot(definition.Id, definition.LabelKey,
+                () => CreateWidget(definition.Id), s => IsCatalogEnabled(s, definition.Id))),
+            new("Audio", "WidgetAudio", () => CreateWidget("Audio"), s => IsCatalogEnabled(s, "Audio")),
+            new("QuickSettings", "WidgetQuickSettings", () => CreateWidget("QuickSettings"), s => IsCatalogEnabled(s, "QuickSettings")),
+            new("Clock", "WidgetClock", () => CreateWidget("Clock"), s => IsCatalogEnabled(s, "Clock") || IsCatalogEnabled(s, "Date"))
         ];
 
         if (!lazy)
@@ -155,18 +171,8 @@ public sealed class WidgetCoordinator : IDisposable
         _timer.Tick += Timer_Tick;
     }
 
-    private TrayWidget CreateTrayWidget()
-    {
-        var tray = new TrayWidget();
-        tray.CloseApplicationRequested += path => CloseApplicationRequested?.Invoke(path);
-        tray.TerminateApplicationRequested += path => TerminateApplicationRequested?.Invoke(path);
-        return tray;
-    }
-
     public string? GetWidgetId(DockWidget widget) =>
         (widget.Tag as string) ?? _widgets.FirstOrDefault(s => ReferenceEquals(s.Widget, widget))?.Id;
-
-    private SearchWidget CreateSearchWidget() => new();
 
     private DockWidget EnsureWidget(WidgetSlot slot)
     {
@@ -182,6 +188,7 @@ public sealed class WidgetCoordinator : IDisposable
         widget.DragLeave += Widget_DragLeave;
         widget.Drop += Widget_Drop;
         widget.AvailabilityChanged += Widget_AvailabilityChanged;
+        widget.ContentWidthChanged += Widget_AvailabilityChanged;
 
         widget.ContextMenu = CreateWidgetContextMenu?.Invoke(slot.Id) ?? CreateDefaultWidgetMenu(slot.Id);
 
@@ -309,26 +316,13 @@ public sealed class WidgetCoordinator : IDisposable
 
     private void AnimateWidgetDrag(DockWidget widget, string widgetId)
     {
-        widget.Opacity = 0.55;
-        var (scale, translate) = GetWidgetTransforms(widget);
-        var animDuration = TimeSpan.FromMilliseconds(130);
-        var easeOut = new CubicEase { EasingMode = EasingMode.EaseOut };
-
-        scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.05, animDuration) { EasingFunction = easeOut });
-        scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.05, animDuration) { EasingFunction = easeOut });
-        translate.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(-4, animDuration) { EasingFunction = easeOut });
-
         try
         {
-            DragDrop.DoDragDrop(widget, new WidgetDragPayload(widgetId), DragDropEffects.Move);
+            DragGhost.DoDragDrop(widget, new WidgetDragPayload(widgetId), DragDropEffects.Move);
         }
         finally
         {
-            widget.Opacity = 1.0;
             ResetWidgetDisplacements();
-            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(1.0, animDuration) { EasingFunction = easeOut });
-            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(1.0, animDuration) { EasingFunction = easeOut });
-            translate.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(0, animDuration) { EasingFunction = easeOut });
         }
     }
 
@@ -658,6 +652,7 @@ public sealed class WidgetCoordinator : IDisposable
             widget.DragLeave -= Widget_DragLeave;
             widget.Drop -= Widget_Drop;
             widget.AvailabilityChanged -= Widget_AvailabilityChanged;
+            widget.ContentWidthChanged -= Widget_AvailabilityChanged;
             widget.Dispose();
         }
     }

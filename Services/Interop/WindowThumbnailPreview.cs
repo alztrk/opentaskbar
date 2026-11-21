@@ -18,6 +18,7 @@ public sealed class WindowThumbnailPreview : IDisposable
     private const uint DwmThumbnailOpacity = 0x00000004;
     private const uint DwmThumbnailVisible = 0x00000008;
     private const uint MonitorDefaultToNearest = 2;
+    private const double ExitDurationMs = 140;
     private const uint SwpNoActivate = 0x0010;
     private const uint SwpNoOwnerZOrder = 0x0200;
     private static readonly nint HwndTopmost = new(-1);
@@ -37,6 +38,10 @@ public sealed class WindowThumbnailPreview : IDisposable
     private bool _disposed;
     private bool _windowClosed;
     private bool _closeWindowClosed;
+    private FrameworkElement? _anchor;
+    private BitmapSource? _icon;
+    private int _transition;
+    private readonly Dictionary<nint, (Border Surface, Border Overlay)> _cards = [];
 
     public WindowThumbnailPreview(Style closeButtonStyle)
     {
@@ -146,13 +151,23 @@ public sealed class WindowThumbnailPreview : IDisposable
     public bool IsVisible => _window?.IsVisible == true;
     public bool AnimationsEnabled { get; set; } = true;
 
+    /// <summary>Extra clearance (DIP) above <see cref="DockMetrics.PreviewGap"/> so previews clear magnified icons.</summary>
+    public double ExtraGapDips { get; set; }
+
     public nint SourceHandle => _sourceHandle;
 
     public IReadOnlyList<nint> ActiveHandles => _activeThumbnails.Select(t => t.Source).ToList();
 
-    public bool ShowForWindows(IReadOnlyList<TrackedWindow> windows, FrameworkElement anchor, BitmapSource? defaultIcon)
+    public FrameworkElement? Anchor => _anchor;
+
+    public bool ShowForWindows(IReadOnlyList<TrackedWindow> windows, FrameworkElement anchor, BitmapSource? defaultIcon,
+        bool allowEntrance = true)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        _transition++;
+        _anchor = anchor;
+        _icon = defaultIcon;
+        _cards.Clear();
         var validWindows = windows.Where(w => w.Handle != 0 && IsWindow(w.Handle)).Take(6).ToList();
         if (validWindows.Count == 0)
         {
@@ -190,7 +205,7 @@ public sealed class WindowThumbnailPreview : IDisposable
         closeWindow.Width = totalWidth;
         closeWindow.Height = totalHeight;
 
-        var animateEntrance = AnimationsEnabled && SystemParameters.ClientAreaAnimation
+        var animateEntrance = allowEntrance && AnimationsEnabled && SystemParameters.ClientAreaAnimation
             && (!previewWindow.IsVisible || !_activeThumbnails.Select(t => t.Source).SequenceEqual(validWindows.Select(w => w.Handle)));
 
         _entranceTimer.Stop();
@@ -353,6 +368,7 @@ public sealed class WindowThumbnailPreview : IDisposable
             };
 
             overlayContainer.Children.Add(overlayCard);
+            _cards[handle] = (surfaceCard, overlayCard);
 
             if (DwmRegisterThumbnail(_destinationHandle, handle, out var thumbnail) == 0 && thumbnail != 0)
             {
@@ -425,15 +441,13 @@ public sealed class WindowThumbnailPreview : IDisposable
         var eased = 1 - Math.Pow(1 - progress, 3);
         var opacity = (byte)Math.Round(byte.MaxValue * eased);
 
-        foreach (var (_, thumb, target) in _activeThumbnails)
+        // Only fade in. Re-sending a different destination rectangle every frame makes DWM
+        // re-rasterise the live thumbnail and leaves smeared/duplicated pixels behind.
+        foreach (var (_, thumb, _) in _activeThumbnails)
         {
-            var insetX = (int)Math.Round((target.Right - target.Left) * 0.025 * (1 - eased));
-            var insetY = (int)Math.Round((target.Bottom - target.Top) * 0.025 * (1 - eased));
             var frame = new DwmThumbnailProperties
             {
-                Flags = DwmThumbnailRectDestination | DwmThumbnailOpacity | DwmThumbnailVisible,
-                Destination = new NativeRect(target.Left + insetX, target.Top + insetY,
-                    target.Right - insetX, target.Bottom - insetY),
+                Flags = DwmThumbnailOpacity | DwmThumbnailVisible,
                 Opacity = opacity,
                 Visible = true
             };
@@ -443,8 +457,53 @@ public sealed class WindowThumbnailPreview : IDisposable
         if (progress >= 1) _entranceTimer.Stop();
     }
 
+    /// <summary>
+    /// Fades out the cards of windows that no longer exist, then rebuilds the preview with the remaining
+    /// windows so the pointer never has to re-hover. Hides the preview when nothing remains.
+    /// </summary>
+    public void RemoveClosed(IReadOnlyCollection<nint> closed, IReadOnlyList<TrackedWindow> remaining)
+    {
+        var anchor = _anchor;
+        if (anchor is null || !IsVisible) return;
+        var token = ++_transition;
+        _entranceTimer.Stop();
+        foreach (var (source, thumbnail, _) in _activeThumbnails.Where(t => closed.Contains(t.Source)).ToList())
+        {
+            _ = DwmUnregisterThumbnail(thumbnail);
+            _activeThumbnails.RemoveAll(t => t.Source == source);
+        }
+
+        void Finish()
+        {
+            if (token != _transition || _disposed) return;
+            if (remaining.Count == 0) Hide();
+            else ShowForWindows(remaining, anchor, _icon, false);
+        }
+
+        var cards = closed.Where(_cards.ContainsKey).Select(h => _cards[h]).ToList();
+        if (cards.Count == 0 || !AnimationsEnabled || !SystemParameters.ClientAreaAnimation)
+        {
+            Finish();
+            return;
+        }
+
+        DoubleAnimation Fade() => new(1, 0, TimeSpan.FromMilliseconds(ExitDurationMs))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+        };
+        var last = Fade();
+        last.Completed += (_, _) => Finish();
+        foreach (var (surface, overlay) in cards)
+        {
+            surface.BeginAnimation(UIElement.OpacityProperty, Fade());
+            overlay.BeginAnimation(UIElement.OpacityProperty, ReferenceEquals(overlay, cards[^1].Overlay) ? last : Fade());
+        }
+    }
+
     public void Hide()
     {
+        _transition++;
+        _cards.Clear();
         _entranceTimer.Stop();
         ReleaseThumbnails();
         _sourceHandle = 0;
@@ -527,7 +586,7 @@ public sealed class WindowThumbnailPreview : IDisposable
         width = Math.Min(width, monitorInfo.Monitor.Right - monitorInfo.Monitor.Left);
         height = Math.Min(height, monitorInfo.Monitor.Bottom - monitorInfo.Monitor.Top);
 
-        var gapDips = DockMetrics.PreviewGap;
+        var gapDips = DockMetrics.PreviewGap + Math.Max(0.0, ExtraGapDips);
         var gap = (int)Math.Round(gapDips * dpi / 96d);
         if (DockFlyout.Edge != Models.DockEdge.Bottom)
         {

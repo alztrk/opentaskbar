@@ -237,6 +237,19 @@ internal static class ThemePackChecks
             is LinearGradientBrush { GradientStops.Count: 3, EndPoint.X: 1, EndPoint.Y: 0 }, "Gradient tokens must become linear gradients.");
         check(WidgetPack.Convert(Json("\"4,2\""), new Thickness()) is Thickness { Left: 4, Top: 2, Right: 4, Bottom: 2 },
             "Two numbers must become a horizontal and vertical thickness.");
+        check(WidgetPack.Convert(Json("""{ "stops": ["#FF000000", "#FFFFFFFF"], "positions": [15, 90], "angle": 135 }"""), Brushes.Teal)
+            is LinearGradientBrush customGradient
+            && Math.Abs(customGradient.GradientStops[0].Offset - 0.15) < 0.001
+            && Math.Abs(customGradient.GradientStops[1].Offset - 0.90) < 0.001,
+            "Custom gradient stops and angles must be preserved.");
+        check(WidgetPack.Convert(Json("""{ "stops": ["#FF000000", "#FFFFFFFF"], "positions": [0, 120] }"""), Brushes.Teal) is null,
+            "Gradient stop positions outside 0-100 must be rejected.");
+        check(WidgetPack.Convert(Json("\"None\""), "Glass") is "None"
+            && WidgetPack.Convert(Json("\"Solid\""), "Glass") is "Solid"
+            && WidgetPack.Convert(Json("\"Unknown\""), "Glass") is null,
+            "Dock material mode must support only known values.");
+        check(WidgetPack.Convert(Json("0.82"), 0.95) is 0.82,
+            "Theme opacity must be parsed as a numeric token.");
         check(WidgetPack.Convert(Json("13.5"), 12.0) is 13.5, "Sizes must accept numbers.");
         check(WidgetPack.Convert(Json("\"Segoe UI Variable\""), new FontFamily("Segoe UI")) is FontFamily { Source: "Segoe UI Variable" },
             "Fonts must accept a family name.");

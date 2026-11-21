@@ -64,6 +64,8 @@ public partial class MainWindow
         else _desktopTimer?.Stop();
         _filteredSource = null;
         ApplyStartPlacement();
+        ApplySearchButton();
+        ApplyShellButtons();
         ApplyEdge();
         ApplySecondaryDocks();
         ApplyProfileFilter();
@@ -80,6 +82,40 @@ public partial class MainWindow
         // The divider belonged to the old grouped layout and is no longer rendered.
         StartDivider.Visibility = Visibility.Collapsed;
     }
+
+    /// <summary>Only controls visibility; the unified dock order decides where the Search button sits.</summary>
+    private void ApplySearchButton()
+    {
+        SearchButton.Visibility = _preferences.Current.ShowSearchButton
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+    }
+
+    /// <summary>Visibility for the permanent shell buttons; their position comes from the unified dock order.</summary>
+    private void ApplyShellButtons()
+    {
+        TaskViewButton.Visibility = _preferences.Current.ShowTaskViewButton
+            ? Visibility.Visible : Visibility.Collapsed;
+        TrayButton.Visibility = _preferences.Current.ShowTrayButton
+            ? Visibility.Visible : Visibility.Collapsed;
+        ShowDesktopButton.Visibility = _preferences.Current.ShowDesktopButton
+            ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void TaskViewButton_Click(object sender, RoutedEventArgs e) =>
+        ReportResult(VirtualDesktops.TaskView());
+
+    private void PreviousDesktop_Click(object sender, RoutedEventArgs e) =>
+        ReportResult(VirtualDesktops.Previous());
+
+    private void NextDesktop_Click(object sender, RoutedEventArgs e) =>
+        ReportResult(VirtualDesktops.Next());
+
+    private void NewDesktop_Click(object sender, RoutedEventArgs e) =>
+        ReportResult(VirtualDesktops.Create());
+
+    private void ShowDesktop_Click(object sender, RoutedEventArgs e) =>
+        ReportResult(ShellShortcuts.ToggleShowDesktop());
 
     // ---- Global hotkeys (#2) ----
 
@@ -131,6 +167,9 @@ public partial class MainWindow
         }
     }
 
+    private void SearchButton_Click(object sender, RoutedEventArgs e) =>
+        ReportResult(ShellShortcuts.OpenWindowsSearch(SearchButton));
+
     private void OpenSearch_Click(object sender, RoutedEventArgs e) => ReportResult(ShellShortcuts.OpenWindowsSearch());
 
     private void OpenTaskManager_Click(object sender, RoutedEventArgs e) => ReportResult(ShellShortcuts.OpenTaskManager());
@@ -174,8 +213,10 @@ public partial class MainWindow
         }
 
         if (key != forward && key != backward && key != Key.Home && key != Key.End) return;
-        var buttons = GetAllDockButtons().Where(button => button.IsVisible)
-            .OrderBy(button => vertical ? button.TranslatePoint(default, DockContents).Y : button.TranslatePoint(default, DockContents).X)
+        // Buttons live in several Grid columns (lead strip, scroller, trail strip), so translate against the shared
+        // surface rather than DockContents: absolute coordinates keep navigation in visual order in every edge mode.
+        var buttons = GetAllDockButtons().Where(button => button.IsVisible && button.ActualWidth > 0)
+            .OrderBy(button => vertical ? button.TranslatePoint(default, DockSurface).Y : button.TranslatePoint(default, DockSurface).X)
             .ToList();
         if (buttons.Count == 0) return;
         var current = buttons.FindIndex(button => button.IsKeyboardFocusWithin);
@@ -211,7 +252,7 @@ public partial class MainWindow
         _profileFilterApplied = true;
         var view = CollectionViewSource.GetDefaultView(_pinnedApps);
         view.Filter = signature is null ? null : item => item is DockApp app && !IsHiddenByProfile(app);
-        if (_windowTracker is not null) UpdateRunningApps(VisibleSnapshot);
+        if (_windowTracker is not null) RefreshRunningApps();
         ResizeDockToContent();
         _replacementSession?.RefreshPosition();
     }
@@ -431,6 +472,7 @@ public partial class MainWindow
         foreach (var dock in _secondaryDocks)
         {
             dock.Configure(_preferences.Current.SecondaryApps, _preferences.Current.SecondaryWidgets);
+            dock.ApplyShelfHeight(Profile.Shelf);
             dock.PositionOnMonitor();
         }
         if (_secondaryDocks.Count > 0)
@@ -444,6 +486,19 @@ public partial class MainWindow
         }
 
         UpdateSecondaryDocks();
+    }
+
+    /// <summary>Propagates a size/scale change to the secondary docks' reserved shelves.</summary>
+    private void ApplySecondaryShelf()
+    {
+        if (_secondaryDocks.Count == 0) return;
+        var shelf = Profile.Shelf;
+        foreach (var dock in _secondaryDocks)
+        {
+            if (Math.Abs(dock.ShelfHeight - shelf) < 0.01) continue;
+            dock.ApplyShelfHeight(shelf);
+            dock.PositionOnMonitor();
+        }
     }
 
     private DispatcherTimer CreateSecondaryTimer()
@@ -461,8 +516,8 @@ public partial class MainWindow
     private void UpdateSecondaryDocks()
     {
         if (_secondaryDocks.Count == 0) return;
-        var windows = VisibleSnapshot;
-        foreach (var dock in _secondaryDocks) dock.Update(windows, _foregroundWindow);
+        var candidates = RunningCandidates();
+        foreach (var dock in _secondaryDocks) dock.Update(candidates, _foregroundWindow);
     }
 
     private void DisposeFeatures()

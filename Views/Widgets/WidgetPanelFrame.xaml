@@ -6,10 +6,11 @@
              FontSize="{StaticResource TextSizeBody}" Foreground="{DynamicResource TextPrimary}"
              KeyboardNavigation.TabNavigation="Cycle">
     <Border Background="{DynamicResource MenuMaterial}" BorderBrush="{DynamicResource MenuStroke}" BorderThickness="1"
-            CornerRadius="{StaticResource PopupRadius}">
-        <Border BorderBrush="{DynamicResource DockInnerBevelMaterial}" BorderThickness="1"
-                CornerRadius="{StaticResource PopupInnerRadius}" Padding="{StaticResource WidgetPanelPadding}" Background="Transparent">
-            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            CornerRadius="16" ClipToBounds="True">
+        <Grid>
+            <Border Height="36" VerticalAlignment="Top" CornerRadius="15,15,0,0"
+                    Background="{DynamicResource DockHighlight}" IsHitTestVisible="False" />
+            <ScrollViewer Padding="{StaticResource WidgetPanelPadding}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                 <StackPanel>
                     <DockPanel>
                         <Button DockPanel.Dock="Right" Content="&#xE8BB;" Style="{StaticResource WidgetButton}"
@@ -24,6 +25,6 @@
                                       Margin="{StaticResource WidgetPanelFieldMargin}" />
                 </StackPanel>
             </ScrollViewer>
-        </Border>
+        </Grid>
     </Border>
 </UserControl>

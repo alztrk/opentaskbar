@@ -1,18 +1,22 @@
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Media;
 using OpenTaskbar.Services;
 
-namespace OpenTaskbar.Widgets;
+namespace OpenTaskbar.Views.Shell;
 
-/// <summary>Stands in for the hidden notification area: lists running background apps that own a tray icon.</summary>
-public sealed class TrayWidget : DockWidget
+/// <summary>
+/// Permanent notification-area button. Stands in for the hidden tray: lists running background apps that own a
+/// tray icon. The rich flyout logic used to live in <c>TrayWidget</c>; it is now hosted directly by a dock button.
+/// </summary>
+public sealed class TrayShellButton : Button
 {
-    private readonly Button _button;
     private readonly DockFlyout _flyout = new();
     private int _requestVersion;
     private IReadOnlyList<TrayApp>? _lastApps;
     private Task<IReadOnlyList<TrayApp>>? _refresh;
+    private Action<string>? _reportError;
 
     /// <summary>Seam for tests: enumerates the tray apps (registry snapshot plus every running process).</summary>
     internal Func<IReadOnlyList<TrayApp>> AppsReader { get; set; } = TrayIcons.RunningApps;
@@ -20,26 +24,65 @@ public sealed class TrayWidget : DockWidget
     public event Action<string>? CloseApplicationRequested;
     public event Action<string>? TerminateApplicationRequested;
 
-    public TrayWidget()
+    public TrayShellButton()
     {
-        var glyph = new ContentControl { Content = FindResource("IconChevronUp"), Width = 16, Height = 16 };
+        // Same Grid + TransformGroup cell as the other shell buttons so magnification and edge-origin updates
+        // can drive the existing transforms instead of allocating one on first hover.
+        var glyph = new ContentControl
+        {
+            Content = FindResource("IconChevronUp"),
+            Width = (double)Application.Current.Resources["DockUtilityGlyphSize"],
+            Height = (double)Application.Current.Resources["DockUtilityGlyphSize"],
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center
+        };
         glyph.SetResourceReference(StyleProperty, "WidgetIcon");
         glyph.SetResourceReference(ForegroundProperty, "TextPrimary");
-        _button = new Button { Content = glyph, Padding = new Thickness(10, 0, 10, 0) };
-        _button.SetResourceReference(StyleProperty, "WidgetCardButton");
-        _button.Click += Button_Click;
+        var cell = new Grid
+        {
+            Width = (double)Application.Current.Resources["DockIconSize"],
+            Height = (double)Application.Current.Resources["DockIconSize"],
+            RenderTransformOrigin = new Point(0.5, 0.5)
+        };
+        cell.RenderTransform = new TransformGroup
+        {
+            Children =
+            {
+                new ScaleTransform(1, 1),
+                new TranslateTransform()
+            }
+        };
+        cell.Children.Add(glyph);
+        Content = cell;
+        Click += Button_Click;
         // Warm the list while the pointer approaches, so a click can show it at once.
-        _button.MouseEnter += (_, _) => RefreshAppsQuietly();
-        Localize();
-        Content = _button;
-    }
-
-    protected override void OnActivated()
-    {
+        MouseEnter += (_, _) => _ = RefreshAppsQuietlyAsync();
+        Unloaded += (_, _) =>
+        {
+            UiText.Current.PropertyChanged -= UiText_PropertyChanged;
+            _flyout.Close();
+        };
         UiText.Current.PropertyChanged += UiText_PropertyChanged;
         Localize();
-        RefreshAppsQuietly();
     }
+
+    private void UiText_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
+    {
+        Localize();
+        if (_flyout.IsOpen && _lastApps is not null)
+            _flyout.Show(this, BuildContent(_lastApps), animate: false);
+    }
+
+    /// <summary>Wires the dock's error reporter and process actions. Called once from MainWindow.</summary>
+    public void Initialize(Action<string> reportError,
+        Action<string> closeApplication, Action<string> terminateApplication)
+    {
+        _reportError = reportError;
+        CloseApplicationRequested += closeApplication;
+        TerminateApplicationRequested += terminateApplication;
+    }
+
+    private void Report(string? message) => _reportError?.Invoke(message ?? string.Empty);
 
     /// <summary>
     /// One enumeration at a time, shared by every caller. It reads the tray registry snapshot and every running
@@ -49,17 +92,10 @@ public sealed class TrayWidget : DockWidget
     {
         if (_refresh is { IsCompleted: false } running) return running;
         var reader = AppsReader;
-        return _refresh = LoadAsync();
-
-        async Task<IReadOnlyList<TrayApp>> LoadAsync()
-        {
-            var apps = await Task.Run(reader);
-            _lastApps = apps;
-            return apps;
-        }
+        return _refresh = Task.Run(reader);
     }
 
-    private async void RefreshAppsQuietly()
+    private async Task RefreshAppsQuietlyAsync()
     {
         try
         {
@@ -77,25 +113,15 @@ public sealed class TrayWidget : DockWidget
             pair.First.Name == pair.Second.Name
             && string.Equals(pair.First.ExecutablePath, pair.Second.ExecutablePath, StringComparison.OrdinalIgnoreCase));
 
-    protected override void OnDeactivated()
-    {
-        UiText.Current.PropertyChanged -= UiText_PropertyChanged;
-        _requestVersion++;
-        _flyout.Close();
-    }
-
-    private void UiText_PropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e) => Localize();
-
-
     private void Localize()
     {
-        _button.ToolTip = UiText.Get("TrayApps");
-        System.Windows.Automation.AutomationProperties.SetName(_button, UiText.Get("TrayApps"));
+        ToolTip = UiText.Get("TrayApps");
+        System.Windows.Automation.AutomationProperties.SetName(this, UiText.Get("TrayApps"));
     }
 
     private async void Button_Click(object sender, RoutedEventArgs e)
     {
-        if (_flyout.IsOpen || _flyout.RecentlyClosed(_button))
+        if (_flyout.IsOpen || _flyout.RecentlyClosed(this))
         {
             _flyout.Close();
             return;
@@ -104,26 +130,27 @@ public sealed class TrayWidget : DockWidget
         var requestVersion = ++_requestVersion;
         if (TrayHost.Current is { IsRunning: true } host)
         {
-            _flyout.Show(_button, BuildLiveContent(host.AppIcons()));
+            _flyout.Show(this, BuildLiveContent(host.AppIcons()));
             return;
         }
 
         // Show the last known list at once instead of waiting for a fresh enumeration; update it in place if the
         // fresh list differs. Only the very first open, with nothing cached yet, waits for the enumeration.
         var cached = _lastApps;
-        if (cached is not null) _flyout.Show(_button, BuildContent(cached));
+        if (cached is not null) _flyout.Show(this, BuildContent(cached));
         try
         {
             var apps = await RefreshAppsAsync();
-            if (!IsActive || requestVersion != _requestVersion) return;
-            if (cached is null) _flyout.Show(_button, BuildContent(apps));
-            else if (_flyout.IsOpen && !SameApps(cached, apps)) _flyout.Show(_button, BuildContent(apps), animate: false);
+            _lastApps = apps;
+            if (requestVersion != _requestVersion) return;
+            if (cached is null) _flyout.Show(this, BuildContent(apps));
+            else if (_flyout.IsOpen && !SameApps(cached, apps)) _flyout.Show(this, BuildContent(apps), animate: false);
         }
         catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException
             or System.ComponentModel.Win32Exception or InvalidOperationException)
         {
             AppLog.Warning($"Tray enumeration failed: {ex.Message}");
-            if (cached is null && IsActive && requestVersion == _requestVersion) Report(UiText.Get("SystemDataUnavailable"));
+            if (cached is null && requestVersion == _requestVersion) Report(UiText.Get("SystemDataUnavailable"));
         }
     }
 
@@ -148,7 +175,7 @@ public sealed class TrayWidget : DockWidget
             row.Children.Add(image);
             row.Children.Add(new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis });
             var open = DockFlyout.FlatButton(row, (_, _) => ForwardClick(icon, System.Windows.Input.MouseButton.Left), name);
-            // The app draws its own menu; close the flyout first so the menu keeps the foreground.
+            open.PreviewMouseRightButtonDown += (_, _) => _flyout.RetainForExternalContextMenu(icon.HWnd);
             open.PreviewMouseRightButtonUp += (_, e) =>
             {
                 e.Handled = true;
@@ -186,9 +213,21 @@ public sealed class TrayWidget : DockWidget
 
     private void ForwardClick(ManagedShell.WindowsTray.NotifyIcon icon, System.Windows.Input.MouseButton button)
     {
-        _flyout.Close();
-        // Let the flyout finish closing before the app takes the foreground for its window or menu.
-        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => TrayHost.Click(icon, button));
+        if (button == System.Windows.Input.MouseButton.Left)
+        {
+            _flyout.Close();
+            // Let the flyout finish closing before the app takes the foreground for its window.
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () => TrayHost.Click(icon, button));
+        }
+        else
+        {
+            // Right-clicks open the app's context menu; retain the flyout open.
+            _flyout.RetainForExternalContextMenu(icon.HWnd);
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Background, () =>
+            {
+                TrayHost.Click(icon, button);
+            });
+        }
     }
 
     internal UIElement BuildContent(IReadOnlyList<TrayApp> apps)
@@ -224,6 +263,8 @@ public sealed class TrayWidget : DockWidget
             };
             menu.Items.Add(closeItem);
             menu.Items.Add(terminateItem);
+            // DockFlyout hooks ContextMenuOpening at its root and owns StaysOpen for every flyout context menu;
+            // duplicating that logic here used to double-manage the same popup state.
             open.ContextMenu = menu;
 
             // Tray apps may keep running after WM_CLOSE; force quit uses the dock's existing confirmation flow.

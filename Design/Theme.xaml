@@ -6,6 +6,11 @@
         <ResourceDictionary Source="Palettes/Dark.xaml" />
     </ResourceDictionary.MergedDictionaries>
     <FontFamily x:Key="InterfaceFont">Segoe UI</FontFamily>
+    <sys:String x:Key="DockBackgroundMode">Glass</sys:String>
+    <sys:Double x:Key="SettingsBackgroundOpacity">0.95</sys:Double>
+    <sys:Double x:Key="DockShadowBlur">28</sys:Double>
+    <sys:Double x:Key="DockShadowOpacity">0.45</sys:Double>
+    <SolidColorBrush x:Key="DockShadowColor" Color="#FF000000"/>
     <sys:Double x:Key="MenuLabelWidth">286</sys:Double>
     <Thickness x:Key="MenuRowPadding">10,7</Thickness>
     <Thickness x:Key="MenuDividerInset">12,7</Thickness>
@@ -41,9 +46,9 @@
     <Thickness x:Key="DockScrollContentInset">6,0</Thickness>
     <x:Static x:Key="DockPadding" Member="svc:DockMetrics.Padding" />
     <Thickness x:Key="ControlStroke">1</Thickness>
-    <CornerRadius x:Key="DockRadius">18</CornerRadius>
-    <CornerRadius x:Key="DockInnerRadius">17</CornerRadius>
-    <CornerRadius x:Key="DockSheenRadius">17,17,0,0</CornerRadius>
+    <CornerRadius x:Key="DockRadius">20</CornerRadius>
+    <CornerRadius x:Key="DockInnerRadius">19</CornerRadius>
+    <CornerRadius x:Key="DockSheenRadius">19,19,0,0</CornerRadius>
     <CornerRadius x:Key="ControlRadius">12</CornerRadius>
     <CornerRadius x:Key="DockWidgetRadius">12</CornerRadius>
     <CornerRadius x:Key="PopupRadius">12</CornerRadius>

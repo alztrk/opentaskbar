@@ -106,21 +106,7 @@ internal static class WidgetScreenshotCapture
             weatherWidget.Visibility = Visibility.Visible;
             SavePng(app, weatherWidget, 120, 62, $"weather_{suffix}.png");
 
-            // 13. Desktops Widget
-            using var desktopsWidget = new DesktopsWidget();
-            desktopsWidget.ApplySettings(settings);
-            desktopsWidget.Activate();
-            desktopsWidget.Visibility = Visibility.Visible;
-            SavePng(app, desktopsWidget, 150, 62, $"desktops_{suffix}.png");
-
-            // 14. Tray Widget
-            using var trayWidget = new TrayWidget();
-            trayWidget.ApplySettings(settings);
-            trayWidget.Activate();
-            trayWidget.Visibility = Visibility.Visible;
-            SavePng(app, trayWidget, 80, 62, $"tray_{suffix}.png");
-
-            // 15. Stack Icon
+            // 13. Stack Icon
             var stack = new DockStack(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"), app.Dispatcher);
             var stackIcon = MainWindow.CreateStackIcon(stack, 128);
             if (stackIcon is not null)

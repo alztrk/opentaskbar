@@ -5,23 +5,7 @@
                     xmlns:local="clr-namespace:OpenTaskbar.Services"
                     xmlns:widgets="clr-namespace:OpenTaskbar.Views.Widgets"
                     xmlns:w="clr-namespace:OpenTaskbar.Widgets">
-    <sys:Double x:Key="TimedWidgetMinimumWidth">160</sys:Double>
-    <sys:Double x:Key="TextSizeTimedWidgetValue">20</sys:Double>
-    <sys:Double x:Key="WidgetQuickActionSize">36</sys:Double>
-    <CornerRadius x:Key="WidgetQuickActionRadius">18</CornerRadius>
-    <sys:Double x:Key="WidgetPanelWidth">320</sys:Double>
-    <sys:Double x:Key="WidgetPanelGap">8</sys:Double>
-    <sys:Double x:Key="WidgetPanelValueSize">32</sys:Double>
-    <sys:Double x:Key="WidgetPanelActionHeight">36</sys:Double>
-    <sys:Double x:Key="WidgetPanelHeadingSize">16</sys:Double>
-    <sys:Double x:Key="WidgetActionGlyphSize">14</sys:Double>
-    <Thickness x:Key="WidgetTileMargin">3,0</Thickness>
-    <Thickness x:Key="WidgetPanelPadding">18</Thickness>
-    <Thickness x:Key="WidgetPanelSectionMargin">0,16,0,0</Thickness>
-    <Thickness x:Key="WidgetPanelFieldMargin">0,6,0,0</Thickness>
-    <Thickness x:Key="WidgetPanelFieldPadding">10,6</Thickness>
-    <FontFamily x:Key="WidgetActionFont">Segoe MDL2 Assets</FontFamily>
-    <CornerRadius x:Key="WidgetFieldRadius">7</CornerRadius>
+    <!-- Soft, eased hover/release for widget buttons (no more instant surface swap). -->
     <Style x:Key="WidgetTextField" TargetType="TextBox">
         <Setter Property="Padding" Value="{StaticResource WidgetPanelFieldPadding}" />
         <Setter Property="MinHeight" Value="{StaticResource WidgetPanelActionHeight}" />
@@ -35,7 +19,7 @@
             <Setter.Value>
                 <ControlTemplate TargetType="TextBox">
                     <Border x:Name="Surface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{StaticResource WidgetFieldRadius}">
+                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{DynamicResource WidgetFieldRadius}">
                         <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" />
                     </Border>
                     <ControlTemplate.Triggers>
@@ -49,16 +33,6 @@
         </Setter>
     </Style>
 
-    <Style x:Key="DockWidgetFrame" TargetType="Border">
-        <Setter Property="MinWidth" Value="{StaticResource DockWidgetMinimumWidth}" />
-        <Setter Property="MinHeight" Value="{StaticResource DockWidgetMinimumHeight}" />
-        <Setter Property="Margin" Value="{StaticResource WidgetTileMargin}" />
-        <Setter Property="Padding" Value="{StaticResource DockWidgetPadding}" />
-        <Setter Property="CornerRadius" Value="{StaticResource DockWidgetRadius}" />
-        <Setter Property="Background" Value="{DynamicResource DockWidgetSurface}" />
-        <Setter Property="BorderBrush" Value="{DynamicResource StrokeSubtle}" />
-        <Setter Property="BorderThickness" Value="1" />
-    </Style>
     <Style x:Key="WidgetButton" TargetType="Button">
         <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
         <Setter Property="Background" Value="Transparent" />
@@ -72,11 +46,32 @@
                 <ControlTemplate TargetType="Button">
                     <Border x:Name="Surface" Background="{TemplateBinding Background}"
                             BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
-                            Padding="{TemplateBinding Padding}" CornerRadius="{StaticResource DockWidgetActionRadius}">
-                        <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" />
+                            CornerRadius="{DynamicResource DockWidgetActionRadius}">
+                        <Grid>
+                            <Border x:Name="HoverLayer" Background="{DynamicResource SurfaceHover}"
+                                    CornerRadius="{DynamicResource DockWidgetActionRadius}" Opacity="0" IsHitTestVisible="False" />
+                            <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" />
+                        </Grid>
                     </Border>
                     <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Surface" Property="Background" Value="{DynamicResource SurfaceHover}" /></Trigger>
+                        <EventTrigger RoutedEvent="MouseEnter">
+                            <BeginStoryboard>
+                                <Storyboard>
+                                    <DoubleAnimation Storyboard.TargetName="HoverLayer" Storyboard.TargetProperty="Opacity"
+                                                     To="1" Duration="{StaticResource WidgetHoverInDuration}"
+                                                     EasingFunction="{StaticResource WidgetHoverEase}" />
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </EventTrigger>
+                        <EventTrigger RoutedEvent="MouseLeave">
+                            <BeginStoryboard>
+                                <Storyboard>
+                                    <DoubleAnimation Storyboard.TargetName="HoverLayer" Storyboard.TargetProperty="Opacity"
+                                                     To="0" Duration="{StaticResource WidgetHoverOutDuration}"
+                                                     EasingFunction="{StaticResource WidgetHoverEase}" />
+                                </Storyboard>
+                            </BeginStoryboard>
+                        </EventTrigger>
                         <Trigger Property="IsPressed" Value="True"><Setter TargetName="Surface" Property="Background" Value="{DynamicResource SurfacePressed}" /></Trigger>
                         <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource StrokeFocus}" /></Trigger>
                         <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Surface" Property="Opacity" Value="0.45" /></Trigger>
@@ -84,48 +79,6 @@
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
-    </Style>
-    <Style x:Key="WidgetQuickAction" TargetType="Button" BasedOn="{StaticResource WidgetButton}">
-        <Setter Property="Width" Value="{StaticResource WidgetQuickActionSize}" />
-        <Setter Property="Height" Value="{StaticResource WidgetQuickActionSize}" />
-        <Setter Property="HorizontalContentAlignment" Value="Center" />
-        <Setter Property="Background" Value="{DynamicResource AccentBrush}" />
-        <Setter Property="Foreground" Value="{DynamicResource AccentText}" />
-        <Setter Property="FontFamily" Value="{StaticResource WidgetActionFont}" />
-        <Setter Property="FontSize" Value="{StaticResource WidgetActionGlyphSize}" />
-        <Setter Property="Content" Value="&#xE768;" />
-        <Setter Property="AutomationProperties.Name" Value="{local:Loc TimedWidgetStart}" />
-        <Setter Property="ToolTip" Value="{local:Loc TimedWidgetStart}" />
-        <Setter Property="Template">
-            <Setter.Value>
-                <ControlTemplate TargetType="Button">
-                    <Border x:Name="Surface" Background="{TemplateBinding Background}"
-                            BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
-                            CornerRadius="{StaticResource WidgetQuickActionRadius}">
-                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
-                    </Border>
-                    <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Surface" Property="Opacity" Value="0.88" /></Trigger>
-                        <Trigger Property="IsPressed" Value="True"><Setter TargetName="Surface" Property="Opacity" Value="0.72" /></Trigger>
-                        <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource StrokeFocus}" /></Trigger>
-                    </ControlTemplate.Triggers>
-                </ControlTemplate>
-            </Setter.Value>
-        </Setter>
-        <Style.Triggers>
-            <DataTrigger Binding="{Binding IsRunning}" Value="True">
-                <Setter Property="Content" Value="&#xE769;" />
-                <Setter Property="AutomationProperties.Name" Value="{local:Loc TimedWidgetPause}" />
-                <Setter Property="ToolTip" Value="{local:Loc TimedWidgetPause}" />
-            </DataTrigger>
-            <DataTrigger Binding="{Binding CanToggle}" Value="False">
-                <Setter Property="Content" Value="&#xE713;" />
-                <Setter Property="Background" Value="{DynamicResource SurfaceSelected}" />
-                <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
-                <Setter Property="AutomationProperties.Name" Value="{local:Loc WidgetSetDuration}" />
-                <Setter Property="ToolTip" Value="{local:Loc WidgetSetDuration}" />
-            </DataTrigger>
-        </Style.Triggers>
     </Style>
     <Style x:Key="WidgetPanelAction" TargetType="Button" BasedOn="{StaticResource WidgetButton}">
         <Setter Property="Height" Value="{StaticResource WidgetPanelActionHeight}" />
@@ -316,29 +269,69 @@
                 </Border>
             </StackPanel>
 
-            <!-- AI usage widget taskbar preview (one card per provider: logo, name, usage ring) -->
-            <StackPanel x:Name="AiUsagePreview" Orientation="Horizontal" Visibility="Collapsed">
-                <Border Style="{StaticResource WidgetCardBorder}" Padding="10,0">
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <Path Data="{StaticResource LogoClaude}" Width="16" Height="16" Stretch="Uniform" Margin="0,0,6,0"
-                              Fill="{DynamicResource TextPrimary}" VerticalAlignment="Center" />
-                        <TextBlock Text="Claude" Width="44" Margin="0,0,6,0" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
-                                   Foreground="{DynamicResource TextPrimary}" TextTrimming="CharacterEllipsis" />
-                        <w:RingMeter Width="34" Height="34" StrokeThickness="3" FontSize="10.5" Value="0.42" Text="42"
-                                     TrackBrush="{DynamicResource TextMuted}" ValueBrush="{DynamicResource WidgetAccent}" Foreground="{DynamicResource TextPrimary}" />
-                    </StackPanel>
-                </Border>
-                <Border Style="{StaticResource WidgetCardBorder}" Padding="10,0">
-                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                        <Path Data="{StaticResource LogoCodex}" Width="16" Height="16" Stretch="Uniform" Margin="0,0,6,0"
-                              Fill="{DynamicResource TextPrimary}" VerticalAlignment="Center" />
-                        <TextBlock Text="Codex" Width="44" Margin="0,0,6,0" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
-                                   Foreground="{DynamicResource TextPrimary}" TextTrimming="CharacterEllipsis" />
-                        <w:RingMeter Width="34" Height="34" StrokeThickness="3" FontSize="10.5" Value="0.78" Text="78"
-                                     TrackBrush="{DynamicResource TextMuted}" ValueBrush="{DynamicResource WidgetWarning}" Foreground="{DynamicResource TextPrimary}" />
-                    </StackPanel>
-                </Border>
-            </StackPanel>
+            <!-- AI usage widget taskbar preview (one provider: logo, name, usage ring) -->
+            <Border x:Name="AiUsagePreview" Style="{StaticResource WidgetCardBorder}" Padding="10,0" Visibility="Collapsed">
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <Path Width="16" Height="16" Stretch="Uniform" Margin="0,0,6,0" VerticalAlignment="Center"
+                          Fill="{DynamicResource TextPrimary}">
+                        <Path.Style>
+                            <Style TargetType="Path">
+                                <Setter Property="Data" Value="{StaticResource LogoClaude}" />
+                                <Style.Triggers>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageCodex">
+                                    <Setter Property="Data" Value="{StaticResource LogoCodex}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageAntigravity">
+                                    <Setter Property="Data" Value="{StaticResource LogoAntigravity}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageOpenCode">
+                                    <Setter Property="Data" Value="{StaticResource LogoOpenCode}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageCopilot">
+                                    <Setter Property="Data" Value="{StaticResource LogoCopilot}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageDeepSeek">
+                                    <Setter Property="Data" Value="{StaticResource LogoDeepSeek}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageOpenRouter">
+                                    <Setter Property="Data" Value="{StaticResource LogoOpenRouter}" />
+                                </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Path.Style>
+                    </Path>
+                    <TextBlock Width="44" Margin="0,0,6,0" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center"
+                               Foreground="{DynamicResource TextPrimary}" TextTrimming="CharacterEllipsis">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Text" Value="Claude" />
+                                <Style.Triggers>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageCodex">
+                                    <Setter Property="Text" Value="Codex" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageAntigravity">
+                                    <Setter Property="Text" Value="Antigravity" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageOpenCode">
+                                    <Setter Property="Text" Value="OpenCode" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageCopilot">
+                                    <Setter Property="Text" Value="Copilot" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageDeepSeek">
+                                    <Setter Property="Text" Value="DeepSeek" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding Id}" Value="AiUsageOpenRouter">
+                                    <Setter Property="Text" Value="OpenRouter" />
+                                </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                    <w:RingMeter Width="34" Height="34" StrokeThickness="3" FontSize="10.5" Value="0.42" Text="42"
+                                 TrackBrush="{DynamicResource TextMuted}" ValueBrush="{DynamicResource WidgetAccent}" Foreground="{DynamicResource TextPrimary}" />
+                </StackPanel>
+            </Border>
             <!-- Focus (Pomodoro) widget taskbar preview -->
             <Border x:Name="FocusPreview" Style="{StaticResource WidgetCardBorder}" BorderThickness="1.5" Padding="12,0,8,0" Visibility="Collapsed">
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
@@ -370,7 +363,7 @@
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                     <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconChevronLeft}" Width="14" Height="14" Margin="3,0" Foreground="{DynamicResource TextSecondary}" />
                     <TextBlock Text="{Binding Value}" Style="{StaticResource WidgetText}" Margin="6,0" />
-                    <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconChevronNext}" Width="14" Height="14" Margin="3,0" Foreground="{DynamicResource TextPrimary}" />
+                    <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconChevronRight}" Width="14" Height="14" Margin="3,0" Foreground="{DynamicResource TextPrimary}" />
                     <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconPlus}" Width="14" Height="14" Margin="5,0,2,0" Foreground="{DynamicResource TextPrimary}" />
                 </StackPanel>
             </Border>
@@ -403,7 +396,31 @@
                 <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
                 <Setter TargetName="SystemStatsPreview" Property="Visibility" Value="Visible" />
             </DataTrigger>
-            <DataTrigger Binding="{Binding Id}" Value="AiUsage">
+            <DataTrigger Binding="{Binding Id}" Value="AiUsageClaude">
+                <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
+                <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Id}" Value="AiUsageCodex">
+                <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
+                <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Id}" Value="AiUsageAntigravity">
+                <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
+                <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Id}" Value="AiUsageOpenCode">
+                <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
+                <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Id}" Value="AiUsageCopilot">
+                <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
+                <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Id}" Value="AiUsageDeepSeek">
+                <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
+                <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
+            </DataTrigger>
+            <DataTrigger Binding="{Binding Id}" Value="AiUsageOpenRouter">
                 <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
                 <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
             </DataTrigger>

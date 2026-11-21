@@ -3,7 +3,7 @@
     Repeatable CPU / memory / allocation baseline for OpenTaskbar magnification and idle work.
 
 .DESCRIPTION
-    Launches the app in --preview mode with a deterministic settings file, then measures two phases:
+    Launches the app with a deterministic settings file, then measures two phases:
 
       Phase A (idle)  : no pointer movement over the dock.
       Phase B (sweep) : a synthetic pointer sweeps across the dock at ~80 Hz, exercising the
@@ -12,8 +12,8 @@
     The delta between the two phases isolates the magnification cost from background timers.
     Raw dotnet-counters CSVs plus a compact summary.json are written to artifacts/perf/<Label>.
 
-    No production code is modified. The preview settings file and the Windows taskbar are restored
-    on exit. The app is never started in replacement mode.
+    No production code is modified. The settings file and the Windows taskbar are restored on exit.
+    The app runs in its normal replacement mode during measurement.
 
 .PARAMETER Label
     Output folder name. Use e.g. "baseline", then "after-p0" for the comparison run.
@@ -150,8 +150,8 @@ $outputDir = Join-Path $repoRoot "artifacts\perf\$Label"
 New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
 
 $settingsDir = Join-Path $env:LOCALAPPDATA 'OpenTaskbar'
-$settingsPath = Join-Path $settingsDir 'preview-settings.json'
-$settingsBackup = Join-Path $outputDir 'preview-settings.original.json'
+$settingsPath = Join-Path $settingsDir 'settings.json'
+$settingsBackup = Join-Path $outputDir 'settings.original.json'
 $settingsExisted = Test-Path $settingsPath
 if ($settingsExisted) { Copy-Item $settingsPath $settingsBackup -Force }
 
@@ -166,7 +166,14 @@ New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
   "PreviewsEnabled": false,
   "NotificationBadgesEnabled": true,
   "AutoHide": "Disabled",
-  "SurfaceOpacity": 0.9,
+  "DockBackground": "Glass",
+  "DockOpacity": 0.9,
+  "MenuBackground": "Glass",
+  "MenuOpacity": 0.9,
+  "WidgetBackground": "Glass",
+  "WidgetOpacity": 0.9,
+  "SettingsBackground": "Glass",
+  "SettingsOpacity": 0.9,
   "Widgets": ["SystemStats", "Clock", "Focus", "Audio", "QuickSettings", "Tray", "Desktops", "Media"],
   "InstalledWidgets": ["SystemStats", "Clock", "Focus", "Audio", "QuickSettings", "Tray", "Desktops", "Media"],
   "Layout": "Floating",
@@ -198,7 +205,7 @@ Write-Timeline "measurement started; notepad launch PIDs: $($notepads.Id -join '
 
 $app = $null
 try {
-    $app = Start-Process -FilePath $exe -ArgumentList '--preview' -PassThru
+    $app = Start-Process -FilePath $exe -PassThru
     Write-Timeline "app launched PID $($app.Id)"
 
     $deadline = (Get-Date).AddSeconds(15)
@@ -206,7 +213,7 @@ try {
         Start-Sleep -Milliseconds 250
         $app.Refresh()
     } while ($app.MainWindowHandle -eq 0 -and (Get-Date) -lt $deadline)
-    if ($app.MainWindowHandle -eq 0) { throw 'Preview window handle could not be found.' }
+    if ($app.MainWindowHandle -eq 0) { throw 'Dock window handle could not be found.' }
 
     $hwnd = $app.MainWindowHandle
     [PerfNative]::SetForegroundWindow($hwnd) | Out-Null

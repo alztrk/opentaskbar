@@ -23,6 +23,8 @@ public sealed class TaskbarReplacementSession : IDisposable
     private const uint AbsAlwaysOnTop = 0x00000002;
     private const uint AbeBottom = 3;
     private const int GwlStyle = -16;
+    private const int GwlExStyle = -20;
+    private const int WindowOwner = 4;
     private const long WsCaption = 0x00C00000;
     private const uint SupportedTaskbarState = AbsAutoHide | AbsAlwaysOnTop;
     private const uint AbnStateChange = 0;
@@ -58,6 +60,7 @@ public sealed class TaskbarReplacementSession : IDisposable
     private double _nativeBottomTaskbarHeight;
     private bool _nativeTaskbarAtBottom = true;
     private DispatcherTimer? _hideRetryTimer;
+    private DispatcherTimer? _fullScreenPollTimer;
     private int _hideRetryAttempts;
     private bool _hideRetryPending;
     private double? _cachedHeadroomDips;
@@ -81,10 +84,16 @@ public sealed class TaskbarReplacementSession : IDisposable
 
     public bool IsActive => _active || _stateChangeStarted;
 
+    /// <summary>Skip AppBar work-area updates while the user is still dragging a size/scale slider.</summary>
+    public bool DeferReservation { get; set; }
+
     // Explorer's hidden taskbar keeps reserving the work area; auto-hide releases it for the dock's hide modes and
-    // for side docks, which would otherwise leave an empty strip along the bottom.
+    // for side docks, which would otherwise leave an empty strip along the bottom. It is also released when the
+    // user scales the shelf below the native taskbar height, otherwise that strip would pin the work area there.
     private uint ReplacementState => (_previousTaskbarState & AbsAlwaysOnTop)
-        | (_autoHideEnabled || IsVertical || !_nativeTaskbarAtBottom ? AbsAutoHide : 0);
+        | (_autoHideEnabled || IsVertical || !_nativeTaskbarAtBottom || ReleaseNativeStrip ? AbsAutoHide : 0);
+
+    private bool ReleaseNativeStrip => !IsVertical && _nativeTaskbarAtBottom && ShelfHeight < _nativeBottomTaskbarHeight;
 
     private Models.DockEdge _edge = Models.DockEdge.Bottom;
     private bool IsVertical => _edge != Models.DockEdge.Bottom;
@@ -161,8 +170,8 @@ public sealed class TaskbarReplacementSession : IDisposable
     public static bool HasPendingRecovery => File.Exists(JournalPath);
 
     /// <summary>
-    /// Startup self-heal: a crashed or killed instance can leave the taskbar hidden. Restore it before any dock
-    /// mode (including --preview and --inspect, which never replace the taskbar) is selected.
+    /// Startup self-heal: a crashed or killed instance can leave the taskbar hidden. Restore it before the dock
+    /// starts, including for --inspect sessions.
     /// </summary>
     public static string? HealPendingRecovery() => HasPendingRecovery ? ForceRestoreNativeTaskbar() : null;
 
@@ -174,7 +183,8 @@ public sealed class TaskbarReplacementSession : IDisposable
     public static string? ForceRestoreNativeTaskbar()
     {
         var state = 0u;
-        if (File.Exists(JournalPath))
+        var hasJournal = File.Exists(JournalPath);
+        if (hasJournal)
         {
             try
             {
@@ -185,10 +195,27 @@ public sealed class TaskbarReplacementSession : IDisposable
             {
                 state = 0;
             }
+
+            // A journal left behind when a previous clean exit failed to delete it must not overwrite a taskbar
+            // state the user has since changed. After a hard kill the taskbar is hidden, so the recorded state
+            // is still applied in that case.
+            if (IsNativeTaskbarVisible())
+            {
+                var current = GetTaskbarState() & SupportedTaskbarState;
+                if (current != (state & SupportedTaskbarState))
+                {
+                    AppLog.Info("Ignoring a stale taskbar journal: taskbar is already visible with a different state.");
+                    state = current;
+                }
+            }
         }
 
         var error = RestoreWithVerification(state, 0);
         if (error is not null) return error;
+        // The managed recovery paths (--restore, startup heal, fallback watchdog) have no in-memory registry.
+        ShellShortcuts.RestoreFlyoutPositionsFromJournal();
+        // A killed tray host leaves icons registered with its destroyed window; ask apps to re-add them.
+        TrayHost.BroadcastTaskbarCreated();
         return DeleteJournal();
     }
 
@@ -201,18 +228,15 @@ public sealed class TaskbarReplacementSession : IDisposable
     public void UpdateForeground(nint windowHandle)
     {
         if (!_active || Volatile.Read(ref _stopInProgress) != 0) return;
-        GetWindowThreadProcessId(windowHandle, out var processId);
-        if (processId == Environment.ProcessId)
-        {
-            SetFullScreenSuppression(false);
-            return;
-        }
-        SetFullScreenSuppression(IsFullScreen(windowHandle));
+        // Do not trust that the passed HWND is still the fullscreen window: Chromium's Esc bubble can briefly own
+        // focus, and focus can fall back to this process without the video leaving fullscreen.
+        SetFullScreenSuppression(IsAnyFullScreenOnDockMonitor());
     }
 
-    private static bool HasPendingRecoveryFile(out string? error)
+    private static bool HasPendingRecoveryFile(out string? error, out uint state)
     {
         error = null;
+        state = 0;
         if (!File.Exists(JournalPath))
         {
             return false;
@@ -220,7 +244,8 @@ public sealed class TaskbarReplacementSession : IDisposable
 
         try
         {
-            _ = ReadJournal();
+            // Return the parsed value so the journal is never re-read after another recovery path deleted it.
+            state = ReadJournal();
             return true;
         }
         catch (InvalidDataException)
@@ -247,13 +272,13 @@ public sealed class TaskbarReplacementSession : IDisposable
             return;
         }
 
-        var pending = HasPendingRecoveryFile(out var recoveryError);
+        var pending = HasPendingRecoveryFile(out var recoveryError, out var pendingState);
         if (recoveryError is not null)
         {
             throw new InvalidOperationException(recoveryError);
         }
 
-        _previousTaskbarState = pending ? ReadJournal() : GetTaskbarState();
+        _previousTaskbarState = pending ? pendingState : GetTaskbarState();
         ReadNativeTaskbarHeight();
         try
         {
@@ -270,6 +295,10 @@ public sealed class TaskbarReplacementSession : IDisposable
         {
             throw new InvalidOperationException("ErrorTaskbarJournalWriteAccess", ex);
         }
+
+        // Arm recovery as soon as the journal exists: a kill between the writes below and dock positioning must
+        // still have an out-of-process restorer. Extraction/SmartScreen scanning runs off the UI thread.
+        _ = Task.Run(() => TaskbarRecoveryWatchdog.Start(Environment.ProcessId));
 
         try
         {
@@ -296,8 +325,15 @@ public sealed class TaskbarReplacementSession : IDisposable
             _reservation = null;
             _lastWindowPos = null;
             _active = true;
+            // Browsers enter fullscreen by resizing the already-foreground HWND (no foreground-change event) and
+            // only notify the native taskbar via ITaskbarList2. Poll the window list so our dock hides too.
+            _fullScreenPollTimer = new DispatcherTimer(DispatcherPriority.Background, _window.Dispatcher)
+            {
+                Interval = TimeSpan.FromMilliseconds(500)
+            };
+            _fullScreenPollTimer.Tick += FullScreenPollTimer_Tick;
+            _fullScreenPollTimer.Start();
             PositionDockWindow(throwOnFailure: true);
-            TaskbarRecoveryWatchdog.Start(Environment.ProcessId);
         }
         catch
         {
@@ -365,15 +401,10 @@ public sealed class TaskbarReplacementSession : IDisposable
                     PositionDockWindow();
                     return true;
                 case AbnFullScreenApp:
-                    if (lParam != 0)
-                    {
-                        UpdateForeground(GetForegroundWindow());
-                    }
-                    else
-                    {
-                        SetFullScreenSuppression(false);
-                        PositionDockWindow();
-                    }
+                    // Another app leaving fullscreen must not clear ours if a different fullscreen window is
+                    // still covering the dock. Re-scan instead of trusting lParam from a single app.
+                    SetFullScreenSuppression(IsAnyFullScreenOnDockMonitor());
+                    PositionDockWindow();
                     return true;
                 case AbnStateChange:
                     EnforceNativeTaskbarHidden();
@@ -400,6 +431,41 @@ public sealed class TaskbarReplacementSession : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// Ends the session without restoring and re-verifying Explorer's taskbar. Used when the dock is about to
+    /// re-register immediately (e.g. a taskbar scale change): the taskbar stays hidden, so the slow show/verify
+    /// cycle is unnecessary and would visibly delay the work-area resize.
+    /// </summary>
+    public string? StopForRestart()
+    {
+        if (Interlocked.CompareExchange(ref _stopInProgress, 1, 0) != 0)
+        {
+            return "ErrorTaskbarRestoreInProgress";
+        }
+
+        try
+        {
+            _active = false;
+            _fullScreenPollTimer?.Stop();
+            if (_fullScreenSuppressed) SetFullScreenSuppression(false);
+            _hideRetryTimer?.Stop();
+            _hideRetryPending = false;
+            if (_registered)
+            {
+                var data = CreateData();
+                SHAppBarMessage(AbmRemove, ref data);
+                _registered = false;
+                _reservation = null;
+            }
+            _stateChangeStarted = false;
+            return null;
+        }
+        finally
+        {
+            Volatile.Write(ref _stopInProgress, 0);
+        }
+    }
+
     public string? Stop()
     {
         if (Interlocked.CompareExchange(ref _stopInProgress, 1, 0) != 0)
@@ -415,6 +481,8 @@ public sealed class TaskbarReplacementSession : IDisposable
 
             // Stop enforcing hidden state before Shell calls can reenter our AppBar callback.
             _active = false;
+            _fullScreenPollTimer?.Stop();
+            if (_fullScreenSuppressed) SetFullScreenSuppression(false);
             _hideRetryTimer?.Stop();
             _hideRetryPending = false;
             if (_registered)
@@ -427,10 +495,17 @@ public sealed class TaskbarReplacementSession : IDisposable
 
             var restoreError = RestoreWithVerification(_previousTaskbarState, _handle);
             _stateChangeStarted = false;
-            TaskbarRecoveryWatchdog.NotifyCleanExit();
-            if (restoreError is not null) return restoreError;
-
-            return DeleteJournal();
+            if (restoreError is null)
+            {
+                // Restore the shell flyouts before dismissing the watchdog: a kill in this window must still
+                // leave both journals and an armed out-of-process restorer.
+                ShellShortcuts.RestoreShellFlyoutPositions();
+                restoreError = DeleteJournal();
+            }
+            // The watchdog must keep watching until both the taskbar and its journals are gone. Signaling earlier
+            // leaves no safety net when Explorer is restarting and the in-process restore fails.
+            if (restoreError is null) TaskbarRecoveryWatchdog.NotifyCleanExit();
+            return restoreError;
         }
         finally
         {
@@ -498,8 +573,10 @@ public sealed class TaskbarReplacementSession : IDisposable
         }
 
         var headroomDips = _cachedHeadroomDips ??= _window.TryFindResource("DockHeadroom") as double? ?? DockHeadroomDips;
-        var metrics = DockLayoutMetrics.Calculate(ShelfHeight, _nativeBottomTaskbarHeight, headroomDips, dpi);
-        ReserveShelf(monitorInfo.rcMonitor, metrics, dpi);
+        // The shelf comes from the user's size + scale profile. Any Explorer strip that is still present is
+        // accounted for in ReserveShelf via the current work area, so it must not impose a height floor here.
+        var metrics = DockLayoutMetrics.Calculate(ShelfHeight, 0, headroomDips, dpi);
+        ReserveShelf(monitorInfo.rcMonitor, monitorInfo.rcWork, metrics, dpi);
         var height = metrics.ShelfPixels;
         var totalHeight = metrics.WindowPixels;
         var layout = new Size((monitorInfo.rcMonitor.Right - monitorInfo.rcMonitor.Left) * 96d / dpi,
@@ -534,30 +611,47 @@ public sealed class TaskbarReplacementSession : IDisposable
     {
         var taskbar = NativeTaskbarWindow.Find();
         var data = CreateData();
-        if (taskbar == 0 || SHAppBarMessage(AbmGetTaskbarPos, ref data) == 0)
-            throw new InvalidOperationException("ErrorTaskbarDimensions");
-        var dpi = GetDpiForWindow(taskbar);
-        if (dpi == 0 || data.rc.Bottom <= data.rc.Top || data.rc.Right <= data.rc.Left)
-            throw new InvalidOperationException("ErrorTaskbarDimensions");
-        _nativeTaskbarAtBottom = data.uEdge == AbeBottom;
-        _nativeBottomTaskbarHeight = _nativeTaskbarAtBottom ? (data.rc.Bottom - data.rc.Top) * 96d / dpi : 0;
+        if (taskbar != 0 && SHAppBarMessage(AbmGetTaskbarPos, ref data) != 0)
+        {
+            var dpi = GetDpiForWindow(taskbar);
+            if (dpi != 0 && data.rc.Bottom > data.rc.Top && data.rc.Right > data.rc.Left)
+            {
+                _nativeTaskbarAtBottom = data.uEdge == AbeBottom;
+                _nativeBottomTaskbarHeight = _nativeTaskbarAtBottom ? (data.rc.Bottom - data.rc.Top) * 96d / dpi : 0;
+                AppLog.Info($"Native taskbar measured: {_nativeBottomTaskbarHeight:0.#} DIP, bottom={_nativeTaskbarAtBottom}.");
+                return;
+            }
+        }
+
+        // When Explorer's taskbar is hidden (e.g. recovering from a killed session or transient restart),
+        // ABM_GETTASKBARPOS can fail. Fall back to standard dimensions so the replacement session can still start.
+        _nativeTaskbarAtBottom = true;
+        _nativeBottomTaskbarHeight = 48;
     }
 
-    private void ReserveShelf(Rect monitor, DockLayoutMetrics metrics, uint dpi)
+    private void ReserveShelf(Rect monitor, Rect workArea, DockLayoutMetrics metrics, uint dpi)
     {
-        if (!_registered) return;
-        var nativePixels = _autoHideEnabled ? 0 : (int)Math.Ceiling(_nativeBottomTaskbarHeight * dpi / 96d);
+        if (!_registered || DeferReservation) return;
+        var totalBottomStrip = Math.Max(0, monitor.Bottom - workArea.Bottom);
+        var ownReserved = _reservation?.ExtraHeight ?? 0;
+        var existingExternal = Math.Max(0, totalBottomStrip - ownReserved);
+        var nativePixels = _autoHideEnabled ? 0 : Math.Min(existingExternal, metrics.ShelfPixels);
         var extraHeight = metrics.AdditionalReservation(nativePixels, _autoHideEnabled);
         var request = (monitor.Left, monitor.Bottom, nativePixels, extraHeight);
         if (_reservation == request) return;
         _reservation = request;
         var data = CreateData();
         data.uEdge = AbeBottom;
+        // End the rectangle at the current work-area boundary, not at the screen bottom. ABM_QUERYPOS can return
+        // the screen bottom after Explorer's strip is briefly released; a rect ending there is accepted but does
+        // not move the work area, leaving the dock taller than its slot.
         var bottom = monitor.Bottom - nativePixels;
         data.rc = new Rect(monitor.Left, bottom - extraHeight, monitor.Right, bottom);
-        SHAppBarMessage(AbmQueryPos, ref data);
-        data.rc.Top = data.rc.Bottom - extraHeight;
-        SHAppBarMessage(AbmSetPos, ref data);
+        if (SHAppBarMessage(AbmSetPos, ref data) == 0 && _reservation == request)
+        {
+            AppLog.Warning($"Could not reserve the {extraHeight}px taskbar shelf; the work area may keep its old height.");
+            _reservation = null;
+        }
     }
 
     /// <summary>
@@ -648,6 +742,54 @@ public sealed class TaskbarReplacementSession : IDisposable
         var style = GetWindowLongPtr(targetHandle, GwlStyle).ToInt64();
         var zoomed = IsZoomed(targetHandle);
         return IsFullScreenBounds(rect, style, zoomed, monitor.rcMonitor, monitor.rcWork);
+    }
+
+    private void FullScreenPollTimer_Tick(object? sender, EventArgs e)
+    {
+        if (!_active || Volatile.Read(ref _stopInProgress) != 0) return;
+        SetFullScreenSuppression(IsAnyFullScreenOnDockMonitor());
+    }
+
+    /// <summary>
+    /// Checks every visible top-level window on the dock's monitor. A fullscreen browser owns the foreground for
+    /// its video, but its Esc bubble or another popup can briefly take focus; testing only GetForegroundWindow()
+    /// would flicker the dock back on top of the video.
+    /// </summary>
+    private bool IsAnyFullScreenOnDockMonitor()
+    {
+        var found = false;
+        EnumWindows((handle, _) =>
+        {
+            if (found) return false;
+            GetWindowThreadProcessId(handle, out var processId);
+            if (processId == Environment.ProcessId) return true;
+            if (!IsFullScreen(handle)) return true;
+            // Monitor-sized shell surfaces (desktop, IME, GPU overlays) must never hide the dock. Only a real
+            // application window that owns a taskbar button counts as a fullscreen app. Static shell classes
+            // are excluded even when their style would otherwise look eligible (e.g. TextInputHost).
+            if (!HasTaskbarButtonWindow(handle)) return true;
+            var className = new StringBuilder(128);
+            GetClassName(handle, className, className.Capacity);
+            if (className.ToString() is "Progman" or "WorkerW" or "Shell_TrayWnd"
+                or "LogonUI" or "LockAppWindow" or "Windows.UI.Core.CoreWindow")
+            {
+                return true;
+            }
+            found = true;
+            return false;
+        }, 0);
+        return found;
+    }
+
+    private static bool HasTaskbarButtonWindow(nint handle)
+    {
+        var extendedStyle = GetWindowLongPtr(handle, GwlExStyle).ToInt64();
+        var appWindow = (extendedStyle & TaskbarWindowRules.AppWindow) != 0;
+        var noActivate = (extendedStyle & TaskbarWindowRules.NoActivate) != 0;
+        var toolWindow = (extendedStyle & TaskbarWindowRules.ToolWindow) != 0;
+        return GetWindow(handle, WindowOwner) == 0
+            ? (!noActivate || appWindow) && !toolWindow
+            : appWindow;
     }
 
     private static bool IsLockScreenWindow(nint handle)
@@ -769,7 +911,13 @@ public sealed class TaskbarReplacementSession : IDisposable
     private static bool IsNativeTaskbarVisible()
     {
         var taskbar = NativeTaskbarWindow.Find();
-        return taskbar != 0 && IsWindowVisible(taskbar);
+        if (taskbar == 0 || !IsWindowVisible(taskbar)) return false;
+        // A primary-only check could delete the journal while secondary trays are still hidden.
+        foreach (var secondary in FindSecondaryTaskbars())
+        {
+            if (!IsWindowVisible(secondary)) return false;
+        }
+        return true;
     }
 
     /// <summary>
@@ -854,11 +1002,8 @@ public sealed class TaskbarReplacementSession : IDisposable
     {
         // Explorer can notify us about our own update; an identical state must not publish another one.
         var current = GetTaskbarState();
-        if ((current & SupportedTaskbarState) == (state & SupportedTaskbarState) ||
-            (current & AbsAutoHide) == (state & AbsAutoHide))
-        {
-            return true;
-        }
+        // Comparing only the auto-hide bit silently loses ABS_ALWAYSONTOP on restore.
+        if ((current & SupportedTaskbarState) == (state & SupportedTaskbarState)) return true;
 
         var taskbarHandle = NativeTaskbarWindow.Find();
         var data = new AppBarData
@@ -869,8 +1014,7 @@ public sealed class TaskbarReplacementSession : IDisposable
         };
         SHAppBarMessage(AbmSetState, ref data);
         current = GetTaskbarState();
-        return (current & SupportedTaskbarState) == (state & SupportedTaskbarState) ||
-               (current & AbsAutoHide) == (state & AbsAutoHide);
+        return (current & SupportedTaskbarState) == (state & SupportedTaskbarState);
     }
 
     private AppBarData CreateData() => new()
@@ -958,6 +1102,12 @@ public sealed class TaskbarReplacementSession : IDisposable
         if (error is not null) Trace.TraceError(error);
         if (IsActive) return;
         _disposed = true;
+        _fullScreenPollTimer?.Stop();
+        if (_fullScreenPollTimer is not null)
+        {
+            _fullScreenPollTimer.Tick -= FullScreenPollTimer_Tick;
+            _fullScreenPollTimer = null;
+        }
         _hideRetryTimer?.Stop();
         if (_hideRetryTimer is not null)
         {
@@ -1040,6 +1190,9 @@ public sealed class TaskbarReplacementSession : IDisposable
     private static extern nint GetAncestor(nint hwnd, uint flags);
 
     [DllImport("user32.dll")]
+    private static extern nint GetWindow(nint hwnd, int command);
+
+    [DllImport("user32.dll")]
     private static extern nint GetForegroundWindow();
 
     [DllImport("user32.dll")]
@@ -1053,8 +1206,14 @@ public sealed class TaskbarReplacementSession : IDisposable
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool IsZoomed(nint windowHandle);
 
+    private static nint GetWindowLongPtr(nint windowHandle, int index) =>
+        IntPtr.Size == 8 ? GetWindowLongPtr64(windowHandle, index) : GetWindowLong32(windowHandle, index);
+
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
-    private static extern nint GetWindowLongPtr(nint windowHandle, int index);
+    private static extern nint GetWindowLongPtr64(nint windowHandle, int index);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+    private static extern int GetWindowLong32(nint windowHandle, int index);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

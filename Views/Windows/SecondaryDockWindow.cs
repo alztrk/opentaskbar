@@ -42,6 +42,7 @@ public sealed class SecondaryDockWindow : Window
     private readonly List<AppSlot> _slots = [];
     private SecondaryAppScope _scope;
     private bool _showWidgets;
+    private double _shelfHeight = DockMetrics.ShelfHeight;
     private string _lastClockText = string.Empty;
     private nint _handle;
     private bool _stripAvailable = true;
@@ -144,8 +145,8 @@ public sealed class SecondaryDockWindow : Window
         var stripHeight = Math.Max(0, info.Monitor.Bottom - info.Work.Bottom);
         int height;
 
-        var metrics = DockLayoutMetrics.Calculate(DockMetrics.ShelfHeight, 0, 0, dpi);
-        var additional = MissingShelfPixels(stripHeight, _reservation?.Height ?? 0, dpi);
+        var metrics = DockLayoutMetrics.Calculate(_shelfHeight, 0, 0, dpi);
+        var additional = MissingShelfPixels(stripHeight, _reservation?.Height ?? 0, dpi, _shelfHeight);
         if (additional == 0)
         {
             // Explorer still reserves enough space here: reuse it and drop any shelf we reserved earlier.
@@ -196,12 +197,13 @@ public sealed class SecondaryDockWindow : Window
     }
 
     /// <summary>True when Explorer released the secondary taskbar strip and the dock must reserve its own shelf.</summary>
-    internal static bool NeedsOwnShelf(int stripHeight, uint dpi) => MissingShelfPixels(stripHeight, 0, dpi) > 0;
+    internal static bool NeedsOwnShelf(int stripHeight, uint dpi, double shelfHeight = DockMetrics.ShelfHeight) =>
+        MissingShelfPixels(stripHeight, 0, dpi, shelfHeight) > 0;
 
     // A monitor's work-area strip contains both the Explorer reservation and our own shelf.
     // Only the external portion should determine whether our shelf is still needed.
-    internal static int MissingShelfPixels(int totalStripHeight, int ownReservedHeight, uint dpi) =>
-        DockLayoutMetrics.Calculate(DockMetrics.ShelfHeight, 0, 0, dpi)
+    internal static int MissingShelfPixels(int totalStripHeight, int ownReservedHeight, uint dpi, double shelfHeight = DockMetrics.ShelfHeight) =>
+        DockLayoutMetrics.Calculate(shelfHeight, 0, 0, dpi)
             .AdditionalReservation(Math.Max(0, totalStripHeight - Math.Max(0, ownReservedHeight)), false);
 
     // A hidden fullscreen dock must not be re-shown by a subsequent position refresh.
@@ -243,7 +245,17 @@ public sealed class SecondaryDockWindow : Window
         _quickSettingsButton.Visibility = showWidgets ? Visibility.Visible : Visibility.Collapsed;
     }
 
-    public void Update(IReadOnlyList<TrackedWindow> windows, nint foreground)
+    /// <summary>Current shelf in DIPs, derived from the active size + scale profile.</summary>
+    public double ShelfHeight => _shelfHeight;
+
+    /// <summary>Applies the active size + scale profile so the reserved shelf follows the taskbar scale.</summary>
+    public void ApplyShelfHeight(double shelfHeight) => _shelfHeight = shelfHeight;
+
+    /// <summary>
+    /// Consumes the same projected running apps as the primary dock, so a background window can never become an
+    /// icon here while it is correctly hidden on the main display.
+    /// </summary>
+    public void Update(IReadOnlyList<RunningAppCandidate> apps, nint foreground)
     {
         var clockText = DateTime.Now.ToString("t", UiText.Current.Language.Culture);
         if (!string.Equals(clockText, _lastClockText, StringComparison.Ordinal))
@@ -251,22 +263,26 @@ public sealed class SecondaryDockWindow : Window
             _lastClockText = clockText;
             _clock.Text = clockText;
         }
-        var mine = windows
-            .Where(window => window.ExecutablePath is not null
-                && (_scope == SecondaryAppScope.AllMonitors || MonitorFromWindow(window.Handle, 2) == _monitor))
-            .GroupBy(window => window.ExecutablePath!, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        var mine = new List<(string Path, IReadOnlyList<TrackedWindow> Windows, BitmapSource? Icon)>();
+        foreach (var app in apps)
+        {
+            var windows = _scope == SecondaryAppScope.AllMonitors
+                ? app.Windows
+                : app.Windows.Where(window => MonitorFromWindow(window.Handle, 2) == _monitor).ToList();
+            if (windows.Count == 0) continue;
+            mine.Add((app.ExecutablePath, windows, _icons.Get(app.ExecutablePath, app.IconWindow)));
+        }
         // Captionless windows covering the display (games, video) hide this dock like the main one.
         _fullScreen = foreground != 0 && MonitorFromWindow(foreground, 2) == _monitor && IsFullScreen(foreground);
         ApplyVisibility();
 
-        var icons = mine.Select(group => _icons.Get(group.Key, group.First().Handle)).ToList();
+        var icons = mine.Select(entry => entry.Icon).ToList();
         var sameStructure = mine.Count == _slots.Count;
         if (sameStructure)
         {
             for (var i = 0; i < mine.Count; i++)
             {
-                if (!string.Equals(mine[i].Key, _slots[i].Path, StringComparison.OrdinalIgnoreCase)
+                if (!string.Equals(mine[i].Path, _slots[i].Path, StringComparison.OrdinalIgnoreCase)
                     || !ReferenceEquals(icons[i], _slots[i].Icon))
                 {
                     sameStructure = false;
@@ -279,10 +295,10 @@ public sealed class SecondaryDockWindow : Window
         {
             for (var i = 0; i < mine.Count; i++)
             {
-                var group = mine[i];
+                var entry = mine[i];
                 var slot = _slots[i];
-                var first = group.First();
-                var active = group.FirstOrDefault(window => window.Handle == foreground) ?? first;
+                var first = entry.Windows[0];
+                var active = entry.Windows.FirstOrDefault(window => window.Handle == foreground) ?? first;
                 var isForeground = active.Handle == foreground;
                 slot.TargetHandle = active.Handle;
                 if (!string.Equals(slot.Title, first.Title, StringComparison.Ordinal))
@@ -299,7 +315,8 @@ public sealed class SecondaryDockWindow : Window
                     slot.IsForeground = isForeground;
                     slot.Dot.Width = isForeground ? 5 : 4;
                     slot.Dot.Height = isForeground ? 5 : 4;
-                    slot.Dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, isForeground ? "IndicatorForegroundBrush" : "IndicatorBrush");
+                    slot.Dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "AccentBrush");
+                    slot.Dot.Opacity = isForeground ? 1.0 : 0.4;
                 }
             }
             return;
@@ -309,16 +326,17 @@ public sealed class SecondaryDockWindow : Window
         _apps.Children.Clear();
         for (var index = 0; index < mine.Count; index++)
         {
-            var group = mine[index];
-            var path = group.Key;
+            var entry = mine[index];
+            var path = entry.Path;
             var icon = icons[index];
-            var first = group.First();
-            var active = group.FirstOrDefault(window => window.Handle == foreground) ?? first;
+            var first = entry.Windows[0];
+            var active = entry.Windows.FirstOrDefault(window => window.Handle == foreground) ?? first;
             var isForeground = active.Handle == foreground;
             var image = new Image { Source = icon, Width = 26, Height = 26 };
             RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
             var dot = new System.Windows.Shapes.Ellipse { Width = isForeground ? 5 : 4, Height = isForeground ? 5 : 4, Margin = new Thickness(0, 2, 0, 0) };
-            dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, isForeground ? "IndicatorForegroundBrush" : "IndicatorBrush");
+            dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "AccentBrush");
+            dot.Opacity = isForeground ? 1.0 : 0.4;
             var cell = new StackPanel();
             cell.Children.Add(image);
             cell.Children.Add(dot);

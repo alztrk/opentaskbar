@@ -32,7 +32,51 @@ public static class ShellShortcuts
     private const int ErrorCancelled = 1223;
     private static CancellationTokenSource? _repositionCts;
     private static CancellationTokenSource? _searchRepositionCts;
+    private static CancellationTokenSource? _startMenuRepositionCts;
+    private static readonly ShellFlyoutPositionRegistry FlyoutPositions = new(
+        handle => { GetWindowThreadProcessId(handle, out var processId); return processId; },
+        IsWindow,
+        (handle, x, y) => SetWindowPos(handle, 0, x, y, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate),
+        positions => ShellFlyoutPositionJournal.Write(positions),
+        () => ShellFlyoutPositionJournal.Delete());
     public static Func<bool>? IsMediaWidgetActive { get; set; }
+
+    /// <summary>
+    /// Cancels every pending anchoring pass and puts Start, Search and Control Center back where Windows had them.
+    /// Called on every taskbar shutdown path; restoring twice is harmless because the saved positions are cleared.
+    /// </summary>
+    public static void RestoreShellFlyoutPositions()
+    {
+        _repositionCts?.Cancel();
+        _searchRepositionCts?.Cancel();
+        _startMenuRepositionCts?.Cancel();
+        FlyoutPositions.Restore();
+    }
+
+    /// <summary>
+    /// Recovery path for a hard kill, when the in-process registry died with the app: use the journal the dock
+    /// wrote before moving each flyout. Handles are PID-checked because Windows recycles HWNDs.
+    /// </summary>
+    public static void RestoreFlyoutPositionsFromJournal()
+    {
+        var ownedBySomeoneElse = false;
+        foreach (var position in ShellFlyoutPositionJournal.Read())
+        {
+            if (!IsWindow(position.Handle)) continue;
+            GetWindowThreadProcessId(position.Handle, out var processId);
+            if (processId != position.ProcessId)
+            {
+                ownedBySomeoneElse = true;
+                continue;
+            }
+            SetWindowPos(position.Handle, 0, position.Left, position.Top, 0, 0,
+                SwpNoSize | SwpNoZOrder | SwpNoActivate);
+        }
+        if (!ownedBySomeoneElse) ShellFlyoutPositionJournal.Delete();
+    }
+
+    private static bool CanMoveShellWindow(int generation, CancellationToken cancellation) =>
+        !cancellation.IsCancellationRequested && FlyoutPositions.Generation == generation;
 
     /// <summary>Win+A: Quick Settings (Windows 11) or Action Center (Windows 10), anchored above the clicked button when given.</summary>
     public static string? OpenQuickSettings(FrameworkElement? anchor = null)
@@ -286,6 +330,7 @@ public static class ShellShortcuts
         }
 
         var edge = DockFlyout.Edge;
+        var generation = FlyoutPositions.Generation;
         AppLog.Info($"RepositionSearchAsync: anchor bounds [{topLeft.X:F0},{topLeft.Y:F0} - {bottomRight.X:F0},{bottomRight.Y:F0}], edge: {edge}");
 
         try
@@ -312,6 +357,7 @@ public static class ShellShortcuts
                 var width = rect.Right - rect.Left;
                 var height = rect.Bottom - rect.Top;
                 if (width < 100 || height < 100) continue;
+                FlyoutPositions.Remember(mainHwnd, rect.Left, rect.Top);
 
                 var centerX = (int)Math.Round((topLeft.X + bottomRight.X) / 2);
                 var centerY = (int)Math.Round((topLeft.Y + bottomRight.Y) / 2);
@@ -338,6 +384,7 @@ public static class ShellShortcuts
                         break;
                 }
 
+                if (!CanMoveShellWindow(generation, cancellation)) return;
                 AppLog.Info($"RepositionSearchAsync: moving main window {mainHwnd:X} ({width}x{height}) from ({rect.Left},{rect.Top}) to ({targetX},{targetY})");
                 SetWindowPos(mainHwnd, 0, targetX, targetY, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
 
@@ -349,6 +396,8 @@ public static class ShellShortcuts
                         var auxH = auxRect.Bottom - auxRect.Top;
                         var auxX = Math.Clamp(centerX - auxW / 2, monitorInfo.Work.Left + 8, monitorInfo.Work.Right - auxW - 8);
                         var auxY = Math.Clamp((int)Math.Round(topLeft.Y) - auxH - 8, minY, maxY);
+                        FlyoutPositions.Remember(aux, auxRect.Left, auxRect.Top);
+                        if (!CanMoveShellWindow(generation, cancellation)) return;
                         AppLog.Info($"RepositionSearchAsync: moving aux window {aux:X} ({auxW}x{auxH}) to ({auxX},{auxY})");
                         SetWindowPos(aux, 0, auxX, auxY, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
                     }
@@ -357,6 +406,255 @@ public static class ShellShortcuts
                 for (var frame = 0; frame < 5; frame++)
                 {
                     await Task.Delay(30, cancellation);
+                    if (!CanMoveShellWindow(generation, cancellation)) return;
+                    EnsureNativeTaskbarHidden();
+                    SetWindowPos(mainHwnd, 0, targetX, targetY, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
+                }
+                break;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    /// <summary>
+    /// Anchors and repositions the native Windows Start menu directly above or beside the dock Start button.
+    /// </summary>
+    public static void ScheduleStartMenuReposition(FrameworkElement anchor, nint hintHwnd = 0)
+    {
+        AppLog.Info("ScheduleStartMenuReposition: scheduled.");
+        var next = new CancellationTokenSource();
+        var previous = Interlocked.Exchange(ref _startMenuRepositionCts, next);
+        previous?.Cancel();
+        previous?.Dispose();
+        _ = RepositionStartMenuAsync(anchor, hintHwnd, next.Token);
+    }
+
+    public static List<nint> FindStartMenuWindows()
+    {
+        var list = new List<nint>();
+        try
+        {
+            var pids = Process.GetProcessesByName("StartMenuExperienceHost")
+                .Select(p => (uint)p.Id)
+                .ToHashSet();
+
+            if (pids.Count > 0)
+            {
+                EnumWindows((hwnd, _) =>
+                {
+                    if (!IsWindowVisible(hwnd) || IsWindowCloaked(hwnd)) return true;
+                    GetWindowThreadProcessId(hwnd, out var pid);
+                    if (pids.Contains(pid))
+                    {
+                        if (GetWindowRect(hwnd, out var rect))
+                        {
+                            var w = rect.Right - rect.Left;
+                            var h = rect.Bottom - rect.Top;
+                            if (w > 100 && h > 100)
+                            {
+                                list.Add(hwnd);
+                            }
+                        }
+                    }
+                    return true;
+                }, 0);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warning($"FindStartMenuWindows exception: {ex.Message}");
+        }
+
+        if (list.Count == 0)
+        {
+            foreach (var title in new[] { "Start", "Başlat" })
+            {
+                var h = FindWindow("Windows.UI.Core.CoreWindow", title);
+                if (h != 0 && IsWindowVisible(h) && !IsWindowCloaked(h))
+                {
+                    list.Add(h);
+                    break;
+                }
+            }
+        }
+
+        return list;
+    }
+
+    /// <summary>
+    /// Computes the host window coordinates required to place the Windows Start menu flyout directly above
+    /// or beside the Start button. Handles both discrete popup windows and Windows 11 full-screen CoreWindow canvases.
+    /// </summary>
+    public static (int TargetX, int TargetY) ComputeStartMenuPosition(
+        int windowWidth, int windowHeight,
+        int workLeft, int workTop, int workRight, int workBottom,
+        double anchorLeft, double anchorTop, double anchorRight, double anchorBottom,
+        DockEdge edge, double dpiScale = 1.0, bool isLeftAligned = false)
+    {
+        var workWidth = workRight - workLeft;
+        var isFullScreenContainer = windowWidth >= workWidth - 100;
+
+        if (!isFullScreenContainer)
+        {
+            var centerY = (int)Math.Round((anchorTop + anchorBottom) / 2);
+            var minY = workTop + 8;
+            var maxY = Math.Max(minY, workBottom - windowHeight - 8);
+
+            return edge switch
+            {
+                DockEdge.Left => (
+                    (int)Math.Round(anchorRight) + 12,
+                    Math.Clamp(centerY - windowHeight / 2, minY, maxY)
+                ),
+                DockEdge.Right => (
+                    (int)Math.Round(anchorLeft) - windowWidth - 12,
+                    Math.Clamp(centerY - windowHeight / 2, minY, maxY)
+                ),
+                _ => (
+                    Math.Clamp((int)Math.Round(anchorLeft - 8), workLeft + 8, Math.Max(workLeft + 8, workRight - windowWidth - 8)),
+                    Math.Clamp((int)Math.Round(anchorTop) - windowHeight - 12, minY, maxY)
+                )
+            };
+        }
+
+        var flyoutWidth = (int)Math.Round(642 * dpiScale);
+        var flyoutHeight = (int)Math.Round(724 * dpiScale);
+
+        int flyoutLocalX = isLeftAligned ? (int)Math.Round(12 * dpiScale) : (windowWidth - flyoutWidth) / 2;
+        int flyoutLocalY = windowHeight - flyoutHeight - (int)Math.Round(12 * dpiScale);
+
+        var workMinY = workTop + 8;
+        var workMaxY = Math.Max(workMinY, workBottom - flyoutHeight - 8);
+
+        int desiredFlyoutX;
+        int desiredFlyoutY;
+
+        switch (edge)
+        {
+            case DockEdge.Left:
+                desiredFlyoutX = (int)Math.Round(anchorRight) + 12;
+                var centerY = (int)Math.Round((anchorTop + anchorBottom) / 2);
+                desiredFlyoutY = Math.Clamp(centerY - flyoutHeight / 2, workMinY, workMaxY);
+                break;
+            case DockEdge.Right:
+                desiredFlyoutX = (int)Math.Round(anchorLeft) - flyoutWidth - 12;
+                var rCenterY = (int)Math.Round((anchorTop + anchorBottom) / 2);
+                desiredFlyoutY = Math.Clamp(rCenterY - flyoutHeight / 2, workMinY, workMaxY);
+                break;
+            default:
+                var minX = workLeft + 8;
+                var maxX = Math.Max(minX, workRight - flyoutWidth - 8);
+                // The dock's Start button can be anywhere (StartFirst/StartLast, full-width docks, drag reorder),
+                // so always derive the flyout position from its real screen rect rather than a registry assumption.
+                desiredFlyoutX = Math.Clamp((int)Math.Round(anchorLeft - 8), minX, maxX);
+                desiredFlyoutY = Math.Clamp((int)Math.Round(anchorTop) - flyoutHeight - 12, workMinY, workMaxY);
+                break;
+        }
+
+        return (desiredFlyoutX - flyoutLocalX, desiredFlyoutY - flyoutLocalY);
+    }
+
+    private static async Task RepositionStartMenuAsync(FrameworkElement anchor, nint hintHwnd, CancellationToken cancellation)
+    {
+        if (PresentationSource.FromVisual(anchor) is not HwndSource source || source.Handle == 0)
+        {
+            AppLog.Warning("RepositionStartMenuAsync: PresentationSource is null.");
+            return;
+        }
+
+        Point topLeft;
+        Point bottomRight;
+        try
+        {
+            topLeft = anchor.PointToScreen(new Point(0, 0));
+            bottomRight = anchor.PointToScreen(new Point(anchor.ActualWidth, anchor.ActualHeight));
+        }
+        catch (InvalidOperationException ex)
+        {
+            AppLog.Warning($"RepositionStartMenuAsync PointToScreen failed: {ex.Message}");
+            return;
+        }
+
+        var monitor = MonitorFromWindow(source.Handle, MonitorDefaultToNearest);
+        var monitorInfo = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+        if (monitor == 0 || !GetMonitorInfo(monitor, ref monitorInfo))
+        {
+            AppLog.Warning("RepositionStartMenuAsync: GetMonitorInfo failed.");
+            return;
+        }
+
+        var edge = DockFlyout.Edge;
+        var generation = FlyoutPositions.Generation;
+        AppLog.Info($"RepositionStartMenuAsync: anchor bounds [{topLeft.X:F0},{topLeft.Y:F0} - {bottomRight.X:F0},{bottomRight.Y:F0}], edge: {edge}");
+
+        try
+        {
+            for (var attempt = 0; attempt < 40; attempt++)
+            {
+                await Task.Delay(20, cancellation);
+                if (cancellation.IsCancellationRequested) return;
+
+                EnsureNativeTaskbarHidden();
+
+                var startWindows = hintHwnd != 0 && IsWindowVisible(hintHwnd) && !IsWindowCloaked(hintHwnd)
+                    ? new List<nint> { hintHwnd }
+                    : FindStartMenuWindows();
+
+                if (startWindows.Count == 0) continue;
+
+                var mainHwnd = startWindows.OrderByDescending(h =>
+                {
+                    if (GetWindowRect(h, out var r)) return (long)(r.Right - r.Left) * (r.Bottom - r.Top);
+                    return 0L;
+                }).First();
+
+                if (!GetWindowRect(mainHwnd, out var rect)) continue;
+                var width = rect.Right - rect.Left;
+                var height = rect.Bottom - rect.Top;
+                if (width < 100 || height < 100) continue;
+                // The Start canvas is monitor-sized and natively sits at the work-area origin. A previous
+                // OpenTaskbar session may have left it displaced; remembering that rect would make every later
+                // restore put it back in the wrong place.
+                var canvasWorkWidth = monitorInfo.Work.Right - monitorInfo.Work.Left;
+                var isFullScreenCanvas = width >= canvasWorkWidth - 100;
+                FlyoutPositions.Remember(mainHwnd,
+                    isFullScreenCanvas ? monitorInfo.Work.Left : rect.Left,
+                    isFullScreenCanvas ? monitorInfo.Work.Top : rect.Top);
+
+                var dpi = GetDpiForWindow(mainHwnd);
+                if (dpi == 0) dpi = 96;
+                var dpiScale = dpi / 96.0;
+
+                var isLeftAligned = false;
+                try
+                {
+                    using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced");
+                    if (key?.GetValue("TaskbarAl") is int al && al == 0)
+                    {
+                        isLeftAligned = true;
+                    }
+                }
+                catch
+                {
+                }
+
+                var (targetX, targetY) = ComputeStartMenuPosition(
+                    width, height,
+                    monitorInfo.Work.Left, monitorInfo.Work.Top, monitorInfo.Work.Right, monitorInfo.Work.Bottom,
+                    topLeft.X, topLeft.Y, bottomRight.X, bottomRight.Y,
+                    edge, dpiScale, isLeftAligned);
+
+                if (!CanMoveShellWindow(generation, cancellation)) return;
+                AppLog.Info($"RepositionStartMenuAsync: moving start menu window {mainHwnd:X} ({width}x{height}) to ({targetX},{targetY})");
+                SetWindowPos(mainHwnd, 0, targetX, targetY, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
+
+                // Settle across extra frames to smoothly complete shell entrance transitions
+                for (var frame = 0; frame < 6; frame++)
+                {
+                    await Task.Delay(25, cancellation);
+                    if (!CanMoveShellWindow(generation, cancellation)) return;
                     EnsureNativeTaskbarHidden();
                     SetWindowPos(mainHwnd, 0, targetX, targetY, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
                 }
@@ -402,6 +700,7 @@ public static class ShellShortcuts
         var monitorInfo = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
         if (monitor == 0 || !GetMonitorInfo(monitor, ref monitorInfo)) return;
         var edge = DockFlyout.Edge;
+        var generation = FlyoutPositions.Generation;
         var movedOnce = false;
 
         try
@@ -415,6 +714,7 @@ public static class ShellShortcuts
                 var width = rect.Right - rect.Left;
                 var height = rect.Bottom - rect.Top;
                 if (width < 80 || height < 80) continue;
+                FlyoutPositions.Remember(hwnd, rect.Left, rect.Top);
 
                 var centerX = (int)Math.Round((topLeft.X + bottomRight.X) / 2);
                 var centerY = (int)Math.Round((topLeft.Y + bottomRight.Y) / 2);
@@ -440,17 +740,24 @@ public static class ShellShortcuts
                         break;
                 }
 
+                if (!CanMoveShellWindow(generation, cancellation)) return;
                 SetWindowPos(hwnd, 0, targetX, targetY, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
                 if (movedOnce) break;
                 movedOnce = true;
                 // Re-apply once more after ShellHost finishes its entrance animation.
                 await Task.Delay(75, cancellation);
+                if (!CanMoveShellWindow(generation, cancellation)) return;
+                SetWindowPos(hwnd, 0, targetX, targetY, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
+                break;
             }
         }
         catch (OperationCanceledException)
         {
         }
     }
+
+    /// <summary>Win+D: toggles the desktop. Used by the slim trailing Show Desktop strip.</summary>
+    public static string? ToggleShowDesktop() => SendWindowsShortcut(VkD);
 
     public static string? OpenUri(string uri) => Start(uri, "ErrorSettingsPageOpen");
 
@@ -539,6 +846,10 @@ public static class ShellShortcuts
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindow(nint hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetWindowRect(nint hWnd, out NativeRect lpRect);
 
     [DllImport("user32.dll")]
@@ -551,4 +862,7 @@ public static class ShellShortcuts
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetWindowPos(nint hWnd, nint hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(nint hwnd);
 }

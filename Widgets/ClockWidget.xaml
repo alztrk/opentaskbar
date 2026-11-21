@@ -3,7 +3,7 @@
               xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
               xmlns:w="clr-namespace:OpenTaskbar.Widgets"
               xmlns:local="clr-namespace:OpenTaskbar.Services">
-    <Button x:Name="ClockButton" Style="{StaticResource WidgetCardButton}" Padding="9,2,11,2" Click="ClockButton_Click"
+    <Button x:Name="ClockButton" Style="{StaticResource WidgetCardButton}" Padding="8,2,8,2" Click="ClockButton_Click"
             AutomationProperties.Name="{local:Loc Calendar}">
         <Grid VerticalAlignment="Center">
             <Grid.ColumnDefinitions>
@@ -15,22 +15,22 @@
             <!-- Column 0: Time of Day Icon (Sun / Moon) -->
             <ContentControl x:Name="TimeOfDayIcon" Grid.Column="0"
                             Style="{StaticResource WidgetIcon}"
-                            Width="16" Height="16"
+                            Width="15" Height="15"
                             VerticalAlignment="Center"
-                            Margin="0,0,8,0" />
+                            Margin="0,0,6,0" />
 
             <!-- Column 1: Day name & Date -->
-            <StackPanel x:Name="DateColumn" Grid.Column="1" VerticalAlignment="Center" Margin="0,0,10,0">
-                <TextBlock x:Name="DayOfWeekText" FontSize="9" FontWeight="Bold"
+            <StackPanel x:Name="DateColumn" Grid.Column="1" VerticalAlignment="Center" Margin="0,0,8,0">
+                <TextBlock x:Name="DayOfWeekText" FontSize="9" FontWeight="SemiBold"
                            TextAlignment="Left" HorizontalAlignment="Left" />
-                <TextBlock x:Name="DateText" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"
+                <TextBlock x:Name="DateText" FontSize="12.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"
                            TextAlignment="Left" HorizontalAlignment="Left" Margin="0,-1,0,0" />
             </StackPanel>
 
             <!-- Column 2: Time -->
             <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right">
-                <TextBlock x:Name="TimeText" FontSize="15" FontWeight="Bold" Foreground="{DynamicResource TextPrimary}"
-                           HorizontalAlignment="Right" />
+                <TextBlock x:Name="TimeText" FontSize="14" FontWeight="Bold" Foreground="{DynamicResource TextPrimary}"
+                           HorizontalAlignment="Right" Typography.NumeralAlignment="Tabular" />
             </StackPanel>
         </Grid>
     </Button>

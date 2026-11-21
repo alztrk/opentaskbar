@@ -1,5 +1,60 @@
 # Changelog
 
+## Unreleased
+
+- Settings UI consistency pass: unified input metrics (34 DIP controls, one border/radius vocabulary), removed per-row padding overrides, replaced the auto-hide radio list and the side-by-side backup/theme-pack button rows with dropdowns, and gave the sidebar a deliberate header/nav hierarchy. Scrollbars are now thin rounded pills. Widget catalog hover paints only the outer card surface (inner preview no longer changes color or carries top corner radii).
+
+## 0.3.0 - 2026-11-20
+
+- Fixed the dock staying visible over fullscreen browser videos. Fullscreen is now re-evaluated from a 500 ms scan of all top-level windows on the dock's monitor, so resizing an already-foreground window (how browsers enter fullscreen) hides the dock. Focus popups such as Chromium's Esc bubble no longer bring it back, and secondary docks follow the same state. The scan only counts real app windows with a taskbar button, so monitor-sized shell surfaces (desktop, IME, GPU overlays) cannot hide the dock at startup. This also fixes the dock disappearing right after launch when `TextInputHost` (the Windows login/IME surface) was misdetected as a fullscreen app.
+
+- The default palette now follows Windows Settings > Personalization > Colors: the Windows accent (from `AccentPalette`/`DWM\AccentColor`) is used only for interactive controls such as primary buttons, switches, focus rings and selection marks, while backgrounds and cards use neutral Windows Settings-like surfaces. Windows accent changes apply live; explicitly selected theme packs still override these generated colors. Static palettes remain as fallback.
+- Rebuilt the Settings components with a shadcn/ui-inspired vocabulary: muted inset tracks, rounded-md controls, ghost/outline/primary button hierarchy, elevated thumb switches and sliders, a real focus-ring treatment, and card sections with rounded row hover.
+- Redesigned the Settings page and its controls: grouped section cards with hairline dividers, shared inset tracks for segmented controls and sliders, filled accent states for switches and buttons, and a cleaner sidebar hierarchy.
+- Replaced the system-dependent Segoe UI interface font with embedded Inter (Regular/Medium/SemiBold/Bold under `Fonts/`, SIL OFL license included). Segoe MDL2 Assets remains the icon font, so glyphs are unchanged.
+
+- Fixed running indicators and notification badges disappearing from pinned apps. They now use the full window projection (including pinned apps) while the running-app strip still excludes pins to avoid duplicate buttons. Inactive running apps show the low-opacity dot again and the foreground app the bright one.
+
+- Fixed the Start menu staying misaligned after OpenTaskbar exits. The saved "original" position could already be a displaced rect left by an earlier session; the full-screen Start canvas now records the work-area origin as its native position, so restore and watchdog put it back where Windows expects it. While the dock is active, the flyout is still anchored to the dock's actual Start button wherever the user placed it.
+
+- Fixed the Windows Start menu opening on the left when the native taskbar is centered: anchored positioning now only follows the dock's Start button for a left-aligned taskbar, while a centered taskbar keeps the flyout centered on the work area (relevant for full-width docks where the Start button sits at the far left).
+
+- Redesigned the Settings page and its controls: sections now group rows into quiet slate cards with hairline dividers, segmented controls and sliders share a consistent inset track, switches and buttons use filled accent states, and the sidebar/divider hierarchy is cleaner. The default palette shifts to a Tailwind-inspired slate ramp with a sky accent in both themes.
+- Stabilized the fisheye peak so an identical hover no longer blooms to different sizes: the expansion budget is sampled only from resting geometry, spring goals are refreshed whenever the cap changes (even with a stationary pointer), and influence radius now interpolates with the same expansion fraction instead of switching abruptly at a 0.5 DIP threshold.
+
+- Removed hover magnification (fisheye) from the native shell buttons (Start, Search, Task View, tray and Recycle Bin) and stopped neighbouring icons from magnifying while the pointer is over them. Application icons keep the fisheye effect.
+
+- Fixed app icons looking clipped on the right and bottom (notably LibreWolf). The icon image is now centered in its dock cell and its drawn DIP size is capped to that cell, so snapped pixel sizes can no longer overflow one edge.
+
+- Replaced the single Surface opacity slider with independent per-surface materials for the dock, menus, widgets and Settings. Each surface now has Glass / Solid / None with its own 0–100% opacity and live preview; None removes the fill, rim, sheen and shadow (and DWM acrylic for Settings, which stays opaque due to native window composition). Existing `SurfaceOpacity` values migrate to all four surfaces on load.
+
+- Gave the permanent Search, Task View and tray buttons a quiet rounded surface with hover/press feedback via a dedicated `ShellDockButton` style, so they remain readable next to the deliberately transparent app icons and widgets without changing the normal app-button baseline.
+
+- Removed the `--preview` launch mode. The dock now always runs in replacement mode with full journaling and watchdog protection; `--inspect` remains for visual inspection with the dock visible in the taskbar.
+- Fixed logoff teardown leaving the dock broken when another application vetoes the shutdown: restore is deferred to application exit, with the watchdog still armed in the meantime.
+- Added a staleness check so a leftover taskbar journal cannot overwrite a taskbar state the user changed since, and made the managed watchdog require three consecutive missed heartbeats before treating the dock as hung.
+
+- Hardened crash recovery: the watchdog now keeps the taskbar journal until the taskbar is verified visible, re-broadcasts `TaskbarCreated` so tray icons return to Explorer, masks corrupted state values, and preserves flyout journals whose window handles were recycled. Clean-exit signalling is delayed until both restore and journal deletion succeed.
+- Fixed restore dropping the "always on top" taskbar bit when only auto-hide matched, and recovery declaring success while secondary taskbars were still hidden.
+- Fixed pending Settings edits being lost on application shutdown, startup heal consuming a running instance's journal before the singleton check, and watchdog armament starting after the taskbar had already been hidden.
+- Made watchdog binary extraction atomic and guarded the heartbeat callback against disposal races.
+
+- Fixed Start, Search and Control Center staying anchored to the dock after OpenTaskbar exits. Their original positions are remembered before the first move, restored on normal shutdown, and journaled to `flyout-positions.txt` so the native watchdog (or managed recovery) can restore them after a hard kill; pending anchoring passes are cancelled during exit.
+- Fixed tray-only and background apps appearing as normal running apps in the dock. Window tracking now follows the Windows shell's taskbar rules (owned opt-in, non-activatable helpers, `ITaskbarList::DeleteTab`, cloaked and hidden immersive frames) and reacts to cloak/uncloak changes. Running-app projection is now shared by the primary dock, secondary docks, badges and indicators, so hidden or missing apps stay hidden everywhere.
+- Promoted Task View, Tray and Show Desktop to permanent dock shell buttons. Task View is a single icon with a right-click menu (previous/next/new desktop), Tray keeps its rich flyout in a fixed button, and Show Desktop is a slim trailing strip (Win+D). Each has a Settings toggle; legacy `Desktops`/`Tray` widget entries migrate into the new button state.
+- Moved Search out of the widget strip into a dedicated Start-adjacent dock button (`MainWindow.xaml`, `MainWindow.xaml.cs`) sized to the dock cell with an optically matched glyph, and added a `ShowSearchButton` Settings toggle. Legacy `Search` widget entries in `settings.json` migrate to the new button state.
+
+- Overhauled dock fisheye magnification (`Services/App/DockFisheyeLayout.cs`, `MainWindow.Magnification.cs`) with C1-smooth raised-cosine falloff, critically-damped spring physics, synchronized slot and floating dock-frame expansion, overlap-free scale capping on constrained/scrolling docks, `StartDockButton` baseline alignment, and dynamic thumbnail preview clearance.
+- Added application groups (`MainWindow.Groups.cs`) with context-menu grouping, drag-and-drop membership, and group member count badges.
+- Moved dock scroll chevrons (`‹` / `›`) and directional gradient scrims to the outer dock resize edges (`DockSurface`), inset cleanly inside `DockFrame` bounds and synced to the active inner corner radius.
+- Added Bluetooth Battery widget with device-type icons and live Windows PnP active-node filtering (`System.Devices.Present` and `LastArrivalDate`) so stale disconnected PnP nodes never override current battery readings.
+- Removed the manual Screen edge spacing setting in favor of automatic profile-based spacing from `DockMetrics.For(size, scale)`, while keeping legacy `settings.json` files backward-compatible.
+- Updated Settings widget catalog to display inline category headings with live widget previews, and fixed widget/flyout hover highlight templates (`WidgetCardButton`, `WidgetPill`, `FlyoutButton`, `WidgetButton`) so hover fills the full outer button surface matching pressed state.
+- Replaced managed watchdog runtime overhead with a lightweight native C Win32 watchdog (`tools/watchdog/watchdog.c`) that restores the native taskbar and exits immediately, with incremental `build.ps1` skipping rebuilds when `watchdog.c` is unchanged.
+- Added graceful fallback taskbar dimensions when starting while Explorer's taskbar is already hidden, and preserved desktop work area when switching dock screen edges.
+- Rebuilt the UI as a modular design system: tokens (`Design/Tokens/{Typography,Spacing,Radii,Layout,Motion}.xaml`), vector icons (`Design/Icons/{Navigation,Actions,Status,Media,Brand,GeometryTemplate}.xaml`) and base controls (`Design/Controls/{Tooltip,ScrollBar}.xaml`) now live in one file per concern and are merged in dependency order by `App.xaml`. Theme-pack overrides keep working by key.
+- Removed the unused parallel `UI/UILibrary.xaml` design system and consolidated the shipped UI entirely under `Design/*`; unified the duplicated dock/widget context menus and de-duplicated shared icon geometries and hover-animation tokens.
+
 ## 0.2.11 - 2026-11-19
 
 - Added GitHub Copilot, DeepSeek, and OpenRouter quota and balance providers to the AI usage widget, including credential discovery, status rings, and settings toggles (#58, #59, #60).

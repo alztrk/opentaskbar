@@ -9,7 +9,7 @@
     <UseWPF>true</UseWPF>
     <AssemblyName>OpenTaskbar</AssemblyName>
     <RootNamespace>OpenTaskbar</RootNamespace>
-    <Version>0.2.11</Version>
+    <Version>0.3.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ServerGarbageCollection>false</ServerGarbageCollection>
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
@@ -26,6 +26,8 @@
     <Compile Remove="tests/**/*.cs" />
     <Compile Remove="tmp/**/*.cs" />
     <InternalsVisibleTo Include="OpenTaskbar.Tests" />
+    <Resource Include="Fonts\*.ttf" />
+    <None Include="Fonts\LICENSE.txt" />
     <EmbeddedResource Include="themes\**\*.*" LogicalName="OpenTaskbar.BuiltInThemes/%(RecursiveDir)%(Filename)%(Extension)" />
     <EmbeddedResource Include="Services\Localization\Languages\*.json" LogicalName="OpenTaskbar.Localization.Languages.%(Filename)%(Extension)" />
     <EmbeddedResource Include="Services\Localization\Flags\*.png" LogicalName="OpenTaskbar.Localization.Flags.%(Filename)%(Extension)" />

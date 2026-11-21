@@ -96,6 +96,20 @@ internal static class DockLayoutChecks
                 "A returning native taskbar must release our shelf.");
         }
 
+        // Primary replacement session shelf reservation when returning from side dock (Explorer strip released)
+        foreach (var dpi in new uint[] { 96, 120, 144, 192 })
+        foreach (var size in new[] { DockSize.Compact, DockSize.Medium, DockSize.Large })
+        {
+            var profile = DockMetrics.For(size);
+            var metrics = DockLayoutMetrics.Calculate(profile.Shelf, 0, DockMetrics.Headroom, dpi);
+            Check(metrics.AdditionalReservation(0, false) == metrics.ShelfPixels,
+                $"Returning from side dock with released strip must reserve the full shelf for {size}@{dpi}dpi.");
+            var nativePixels = (int)Math.Ceiling(48d * dpi / 96d);
+            var expectedExtra = Math.Max(0, metrics.ShelfPixels - nativePixels);
+            Check(metrics.AdditionalReservation(nativePixels, false) == expectedExtra,
+                $"Existing native taskbar strip must reduce the primary dock reservation for {size}@{dpi}dpi.");
+        }
+
         Check((SecondaryDockWindow.PositionFlags(false) & 0x0040u) == 0,
             "Positioning a fullscreen-hidden secondary dock must not force it visible.");
         Check((SecondaryDockWindow.PositionFlags(true) & 0x0040u) != 0,
@@ -256,13 +270,51 @@ internal static class DockLayoutChecks
                     "Plain wheel must scroll horizontal-only overflow; zero input must do nothing.");
                 viewer.ScrollToHorizontalOffset(0);
                 Layout();
+                var prevIndicator = viewer.Template.FindName("PART_PreviousButton", viewer) as Button;
+                var nextIndicator = viewer.Template.FindName("PART_NextButton", viewer) as Button;
+                Check(prevIndicator is not null && nextIndicator is not null, "DockScrollViewer must provide Previous and Next chevron indicator buttons.");
+                if (prevIndicator is null || nextIndicator is null) throw new InvalidOperationException("Indicator buttons not found.");
+                Check(prevIndicator.Visibility == Visibility.Collapsed && nextIndicator.Visibility == Visibility.Visible,
+                    "At offset 0 with overflow, previous indicator must be collapsed and next indicator visible.");
                 viewer.ScrollByWheel(int.MinValue, ModifierKeys.Control | ModifierKeys.Shift);
                 Layout();
                 Check(viewer.HorizontalOffset == viewer.ScrollableWidth && viewer.VerticalOffset == 0,
                     "Forward scrolling must stop at the content end without vertical movement.");
+                Check(prevIndicator.Visibility == Visibility.Visible && nextIndicator.Visibility == Visibility.Collapsed,
+                    "At maximum offset, previous indicator must be visible and next indicator collapsed.");
+                viewer.ScrollToHorizontalOffset(cellWidth);
+                Layout();
+                Check(prevIndicator.Visibility == Visibility.Visible && nextIndicator.Visibility == Visibility.Visible,
+                    "When scrolled in between both ends, both indicators must be visible.");
                 viewer.ScrollByWheel(int.MaxValue, ModifierKeys.Shift);
                 Layout();
                 Check(viewer.HorizontalOffset == 0, "Backward scrolling must stop at the content start.");
+
+                // External edge overlays (mounted in DockSurface beside the resize thumbs) must take over
+                // indicator visibility and stay bounded inside the shelf border without HoverHeadroom offset.
+                var extPrev = new Button { Style = (Style)app.FindResource("DockScrollIndicatorButton") };
+                var extNext = new Button { Style = (Style)app.FindResource("DockScrollIndicatorButton") };
+                viewer.ExternalIndicatorCornerRadius = 19;
+                viewer.SetExternalIndicators(extPrev, extNext);
+                Layout();
+                Check(prevIndicator.Visibility == Visibility.Collapsed && nextIndicator.Visibility == Visibility.Collapsed,
+                    "Internal template scroll buttons must stay collapsed when external dock-edge overlays are registered.");
+                Check(extPrev.Visibility == Visibility.Collapsed && extNext.Visibility == Visibility.Visible,
+                    "At offset 0 with external overlays, only the right dock-edge overlay must be visible.");
+                Check(extPrev.Margin == new Thickness(1, 1, 0, 1) && extNext.Margin == new Thickness(0, 1, 1, 1),
+                    "External dock-edge overlays must inset by 1 DIP inside DockFrame without HoverHeadroom top offset.");
+                Check(extPrev.Tag is CornerRadius prevCorner && prevCorner == new CornerRadius(19, 0, 0, 19)
+                    && extNext.Tag is CornerRadius nextCorner && nextCorner == new CornerRadius(0, 19, 19, 0),
+                    "External dock-edge overlays must match DockFrame inner corner radii.");
+                Check(extPrev.Background is not null && extNext.Background is not null,
+                    "External dock-edge overlays must carry the directional edge scrim brushes.");
+                viewer.ScrollToHorizontalOffset(cellWidth);
+                Layout();
+                Check(extPrev.Visibility == Visibility.Visible && extNext.Visibility == Visibility.Visible,
+                    "Mid-scroll with external overlays must show both left and right dock-edge indicators.");
+                viewer.ScrollToHorizontalOffset(0);
+                viewer.SetExternalIndicators(null, null);
+                Layout();
             }
             else Check(!viewer.ScrollByWheel(-120, ModifierKeys.Control), "A dock that already fits must not consume modifier wheel scrolling.");
         }
@@ -408,6 +460,26 @@ internal static class DockLayoutChecks
             Check(button.ActualWidth == profile.Cell && button.ActualHeight == profile.Cell,
                 $"DockButton must dynamically resize to {profile.Cell} DIP for {size}@{scale}.");
         }
+        // The scale slider must change the height Windows reserves for the taskbar, including the default
+        // Compact size where smaller scales produce a shelf below Explorer's native 48 DIP strip.
+        var compactReservations = new[] { 0.75, 0.9, 1.0, 1.25, 1.5 }
+            .Select(scale => DockLayoutMetrics.Calculate(DockMetrics.For(DockSize.Compact, scale).Shelf, 0, 0, 96).ShelfPixels)
+            .ToArray();
+        for (var index = 1; index < compactReservations.Length; index++)
+        {
+            Check(compactReservations[index] > compactReservations[index - 1],
+                "Raising the taskbar scale must grow the reserved shelf at every step.");
+        }
+
+        // Secondary docks must use the same scaled shelf rather than the unscaled constant.
+        var compactSmall = DockMetrics.For(DockSize.Compact, 0.75).Shelf;
+        var compactFull = DockMetrics.For(DockSize.Compact, 1.0).Shelf;
+        Check(SecondaryDockWindow.NeedsOwnShelf(0, 96, compactSmall),
+            "A scaled Compact shelf must still reserve a secondary-dock shelf when Explorer releases its strip.");
+        Check(SecondaryDockWindow.MissingShelfPixels(0, 0, 96, compactSmall)
+                < SecondaryDockWindow.MissingShelfPixels(0, 0, 96, compactFull),
+            "The secondary dock shelf must follow the taskbar scale.");
+
         app.Resources["DockCellSize"] = DockMetrics.CellSize;
         app.Resources["DockCellHeight"] = DockMetrics.CellSize;
         app.Resources["DockIconSize"] = DockMetrics.IconSize;
@@ -490,7 +562,7 @@ internal static class DockLayoutChecks
         Check(app.FindResource("StartDockButton") is Style, "StartDockButton tactile tile style must be defined.");
 
         // Verify WidgetCoordinator ordering, reordering and validation
-        Check(WidgetCoordinator.DefaultWidgetOrder.Length == 13, "WidgetCoordinator must have 13 default widgets.");
+        Check(WidgetCoordinator.DefaultWidgetOrder.Length == 16, "WidgetCoordinator must have 16 default widgets (one per AI provider).");
         Check(WidgetCoordinator.GetLabelKey("Clock") == "WidgetClock", "Clock widget label key must match.");
         Check(WidgetCoordinator.GetLabelKey("Media") == "WidgetMedia", "Media widget label key must match.");
         Check(WidgetCoordinator.GetLabelKey("NetSpeed") == "WidgetNetSpeed", "NetSpeed widget label key must match.");
@@ -510,7 +582,7 @@ internal static class DockLayoutChecks
         coordinator.ApplyOrder(["Clock", "Focus", "Media"]);
         Check(coordinator.CurrentOrder[0] == "Clock" && coordinator.CurrentOrder[1] == "Focus" && coordinator.CurrentOrder[2] == "Media",
             "ApplyOrder must reorder widgets per specified order.");
-        Check(testStrip.Children.Count == 13, "Strip children count must remain 13 after reordering.");
+        Check(testStrip.Children.Count == 16, "Strip children count must remain 16 after reordering.");
         var unspecified = coordinator.CurrentOrder.Skip(3).ToArray();
         coordinator.ApplyOrder(["Clock", "Focus", "Media"]);
         Check(coordinator.CurrentOrder.Skip(3).SequenceEqual(unspecified),
@@ -681,8 +753,8 @@ internal static class DockLayoutChecks
         Check((double)app.FindResource("SettingsReadingWidth") >= 960, "SettingsReadingWidth must accommodate wider layout.");
 
         var panelFrame = new OpenTaskbar.Views.Widgets.WidgetPanelFrame { Heading = "Test" };
-        Check(panelFrame.Content is Border outerBorder && outerBorder.Child is Border innerBevel && innerBevel.Child is ScrollViewer,
-            "WidgetPanelFrame must feature outer glass frame and inner optical bevel border.");
+        Check(panelFrame.Content is Border outerBorder && outerBorder.Child is Grid bodyGrid && bodyGrid.Children.Count == 2 && bodyGrid.Children[0] is Border && bodyGrid.Children[1] is ScrollViewer,
+            "WidgetPanelFrame must feature outer glass frame, top specular sheen, and scroll viewer.");
 
         var flyout = new DockFlyout();
         var flyoutAnchor = new Button();
@@ -859,14 +931,14 @@ internal static class DockLayoutChecks
         Check(tokensWithLegacy.IndexOf("widget:Stopwatch") > tokensWithLegacy.IndexOf("widget:Media"),
             "Legacy widgets must follow the order tokens in the unified dock strip.");
 
-        // Verify taskbar corner radius and bottom gap settings validation
-        var customGeometrySettings = new DockSettings(DockCornerRadius: 24, DockBottomGap: 8);
+        // Verify taskbar corner radius validation and automatic screen edge spacing
+        var customGeometrySettings = new DockSettings(DockCornerRadius: 24);
         Check(OpenTaskbar.Services.DockSettingsStore.Validate(customGeometrySettings),
-            "Valid DockCornerRadius and DockBottomGap must pass validation.");
+            "Valid DockCornerRadius must pass validation.");
 
-        var sharpCornerSettings = new DockSettings(DockCornerRadius: 0, DockBottomGap: 0);
+        var sharpCornerSettings = new DockSettings(DockCornerRadius: 0);
         Check(OpenTaskbar.Services.DockSettingsStore.Validate(sharpCornerSettings),
-            "Zero DockCornerRadius (sharp) and zero DockBottomGap must pass validation.");
+            "Zero DockCornerRadius (sharp) must pass validation.");
 
         var invalidRadiusSettings = new DockSettings(DockCornerRadius: -5);
         Check(!OpenTaskbar.Services.DockSettingsStore.Validate(invalidRadiusSettings),
@@ -876,9 +948,124 @@ internal static class DockLayoutChecks
         Check(!OpenTaskbar.Services.DockSettingsStore.Validate(excessiveRadiusSettings),
             "Excessive DockCornerRadius must fail validation.");
 
-        var invalidGapSettings = new DockSettings(DockBottomGap: -2);
-        Check(!OpenTaskbar.Services.DockSettingsStore.Validate(invalidGapSettings),
-            "Negative DockBottomGap must fail validation.");
+        foreach (var size in new[] { DockSize.Compact, DockSize.Medium, DockSize.Large })
+        foreach (var scale in new[] { 0.75, 1.0, 1.25, 1.5 })
+        {
+            var autoProfile = DockMetrics.For(size, scale);
+            Check(autoProfile.BottomGap >= 2 && autoProfile.Shelf >= autoProfile.SurfaceHeight + autoProfile.BottomGap,
+                $"Screen edge spacing must be computed automatically from profile for {size}@{scale}.");
+        }
+
+        // Legacy settings files containing the removed DockBottomGap key must still load cleanly.
+        var legacyJson = """{"DockCornerRadius":18,"DockBottomGap":12}""";
+        var deserializedLegacy = System.Text.Json.JsonSerializer.Deserialize<DockSettings>(
+            legacyJson, OpenTaskbar.Services.DockSettingsStore.SerializerOptions);
+        Check(deserializedLegacy is { DockCornerRadius: 18 } && OpenTaskbar.Services.DockSettingsStore.Validate(deserializedLegacy),
+            "Legacy settings JSON containing DockBottomGap must deserialize and validate cleanly.");
+
+        // Verify macOS-style fisheye magnification math: smoothness, monotonicity, budget capping, and headroom safety.
+        {
+            var radius = DockFisheyeLayout.InfluenceRadiusForCell(50);
+            Check(radius >= 110 && Math.Abs(radius - 140) < 0.01, "Influence radius must scale proportionally with cell size.");
+            Check(Math.Abs(DockFisheyeLayout.ComputeFalloff(0, radius) - 1.0) < 1e-6, "Falloff must peak at 1.0 directly under the pointer.");
+            Check(DockFisheyeLayout.ComputeFalloff(radius, radius) == 0.0 && DockFisheyeLayout.ComputeFalloff(radius + 20, radius) == 0.0,
+                "Falloff must reach 0 at and beyond the influence radius.");
+            var prevFalloff = 1.0;
+            for (var d = 1.0; d <= radius; d += 1.0)
+            {
+                var nextFalloff = DockFisheyeLayout.ComputeFalloff(d, radius);
+                Check(nextFalloff <= prevFalloff + 1e-9 && nextFalloff >= 0.0,
+                    "Falloff must decrease monotonically with distance without jumps.");
+                Check(Math.Abs(prevFalloff - nextFalloff) < 0.03,
+                    "Falloff must be continuous with no single-pixel discontinuities across icon centers.");
+                prevFalloff = nextFalloff;
+            }
+
+            // Spring must converge smoothly to both target peak and resting 1.0 without oscillating out of bounds.
+            var val = 1.0;
+            var vel = 0.0;
+            var settledUp = false;
+            for (var f = 0; f < 60; f++)
+            {
+                (val, vel, settledUp) = DockFisheyeLayout.StepSpring(val, DockMetrics.HoverScale, vel, 1.0 / 60.0, DockMetrics.HoverScale);
+                Check(val >= 1.0 && val <= DockMetrics.HoverScale + 0.02, "Spring scale must stay bounded during bloom.");
+            }
+            Check(settledUp && Math.Abs(val - DockMetrics.HoverScale) < 0.005, "Spring must converge cleanly to target scale.");
+
+            var settledDown = false;
+            for (var f = 0; f < 60; f++)
+            {
+                (val, vel, settledDown) = DockFisheyeLayout.StepSpring(val, 1.0, vel, 1.0 / 60.0, DockMetrics.HoverScale);
+                Check(val >= 1.0 && val <= DockMetrics.HoverScale + 0.02, "Spring scale must stay bounded during settle.");
+            }
+            Check(settledDown && Math.Abs(val - 1.0) < 0.005, "Spring must converge cleanly back to 1.0.");
+
+            // Slot expansion must push outward proportionally, preserve non-overlapping visual slots, and never exceed budget.
+            ReadOnlySpan<double> scales = [1.0, 1.25, 1.5, 1.25, 1.0];
+            ReadOnlySpan<double> baseSizes = [50, 50, 50, 50, 50];
+            Span<double> extras = stackalloc double[5];
+            var unconstrained = DockFisheyeLayout.ComputeSlotExtras(scales, baseSizes, 500, extras);
+            Check(unconstrained > 0 && extras[2] > extras[1] && Math.Abs(extras[1] - extras[3]) < 1e-6 && extras[0] == 0 && extras[4] == 0,
+                "Slot expansion must be symmetric, peak at the hovered icon, and stay zero for unmagnified items.");
+            Check(50 + extras[2] >= 38 * 1.5, "Peak expanded slot width must contain the magnified icon without overlapping neighbours.");
+
+            var capped = DockFisheyeLayout.ComputeSlotExtras(scales, baseSizes, 20, extras);
+            Check(capped <= 20.001 && capped >= 19.99, "Slot expansion must scale down smoothly to stay within available monitor budget.");
+
+            var blocked = DockFisheyeLayout.ComputeSlotExtras(scales, baseSizes, 0, extras);
+            Check(blocked == 0 && extras[2] == 0, "Zero expansion budget (scrolling or width-locked dock) must produce zero layout shift.");
+
+            // Safe lift must stay inside DockHeadroom + vertical padding at every size and scale.
+            foreach (var size in new[] { DockSize.Compact, DockSize.Medium, DockSize.Large })
+            foreach (var scale in new[] { 0.75, 1.0, 1.25, 1.5 })
+            {
+                var p = DockMetrics.For(size, scale);
+                var availableHeadroom = DockMetrics.Headroom + p.VerticalPadding;
+                var lift = DockFisheyeLayout.ComputeSafeLift(DockMetrics.HoverScale, DockMetrics.HoverScale, p.Icon, availableHeadroom);
+                var growth = p.Icon * (DockMetrics.HoverScale - 1.0);
+                Check(lift >= 0 && growth + lift <= availableHeadroom + 0.01,
+                    $"Magnified icon growth + lift must fit inside headroom for {size}@{scale}.");
+            }
+
+            // Expansion must map continuously to both peak scale and influence radius: no boolean cliff at 0.5 DIP.
+            {
+                Check(DockFisheyeLayout.ComputeExpansionFraction(50, DockMetrics.HoverScale, 0) == 0,
+                    "No expansion budget must mean the constrained magnification peak.");
+                Check(Math.Abs(DockFisheyeLayout.ComputeExpansionFraction(50, DockMetrics.HoverScale, 33.25) - 0.5) < 0.01
+                      && DockFisheyeLayout.ComputeExpansionFraction(50, DockMetrics.HoverScale, 200) == 1.0,
+                    "Expansion fraction must ramp smoothly from constrained to full magnification.");
+                var constrainedRadius = DockFisheyeLayout.InfluenceRadiusForCell(50, constrained: true);
+                var freeRadius = DockFisheyeLayout.InfluenceRadiusForCell(50);
+                Check(Math.Abs(DockFisheyeLayout.InfluenceRadiusForExpansion(50, 0) - constrainedRadius) < 0.01
+                      && Math.Abs(DockFisheyeLayout.InfluenceRadiusForExpansion(50, 1) - freeRadius) < 0.01,
+                    "Influence radius endpoints must match the legacy radii.");
+                var midRadius = DockFisheyeLayout.InfluenceRadiusForExpansion(50, 0.5);
+                Check(midRadius > constrainedRadius && midRadius < freeRadius,
+                    "Influence radius must interpolate instead of switching abruptly with the budget.");
+            }
+
+            // Constrained docks (zero expansion budget) must cap peak scale so adjacent icons never overlap.
+            {
+                var largeConstrained = DockFisheyeLayout.ComputeEffectiveMaxScale(50, 38, DockMetrics.HoverScale, 0);
+                var largeFree = DockFisheyeLayout.ComputeEffectiveMaxScale(50, 38, DockMetrics.HoverScale, 400);
+                var constrainedRadius = DockFisheyeLayout.InfluenceRadiusForCell(50, constrained: true);
+                var neighbourScale = DockFisheyeLayout.ComputeTargetScale(50, constrainedRadius, largeConstrained);
+                var combinedHalfWidths = 38 * (largeConstrained + neighbourScale) / 2.0;
+                Check(largeConstrained > 1.15 && largeConstrained < DockMetrics.HoverScale,
+                    "Constrained full-width dock must still magnify visibly while capping below full expansion scale.");
+                Check(combinedHalfWidths <= 50.0 - DockFisheyeLayout.MinimumNoOverlapGapDips + 0.1,
+                    "Constrained peak + neighbour icons must preserve a clean non-overlapping gap.");
+                Check(Math.Abs(largeFree - DockMetrics.HoverScale) < 1e-6,
+                    "Unconstrained floating dock must unlock full HoverScale.");
+
+                var previewClearanceFull = DockFisheyeLayout.ComputePreviewClearance(38, DockMetrics.HoverScale);
+                var previewClearanceConstrained = DockFisheyeLayout.ComputePreviewClearance(38, largeConstrained);
+                Check(DockMetrics.PreviewGap + previewClearanceFull >= 38 * (DockMetrics.HoverScale - 1.0) + DockFisheyeLayout.MaxLiftDips + 9.0,
+                    "Thumbnail preview must clear full magnified icon peak with comfortable breathing room.");
+                Check(previewClearanceConstrained >= 0 && previewClearanceConstrained <= previewClearanceFull,
+                    "Preview clearance must scale down proportionally when peak magnification is constrained.");
+            }
+        }
 
         return checks;
     }

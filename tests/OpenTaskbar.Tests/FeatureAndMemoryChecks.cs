@@ -41,9 +41,10 @@ internal static class FeatureAndMemoryChecks
                     "Lazy WidgetCoordinator must instantiate only enabled widgets on demand.");
 
                 var reordered = false;
+                var firstWidget = lazyCoordinator.CurrentOrder[0];
                 lazyCoordinator.OrderChanged = _ => reordered = true;
                 lazyCoordinator.ReorderWidgets(0, 1);
-                Check(reordered && lazyCoordinator.CurrentOrder[0] != "Search",
+                Check(reordered && lazyCoordinator.CurrentOrder[0] != firstWidget,
                     "Lazy WidgetCoordinator must support drag reordering.");
 
                 // Enable all live widgets + SystemMeters.All
@@ -55,18 +56,17 @@ internal static class FeatureAndMemoryChecks
             }
 
             var aiLoads = 0;
-            using (var ai = new AiUsageWidget((_, _) =>
+            using (var ai = new AiUsageWidget(AiProviders.OpenCode, (_, _) =>
             {
                 aiLoads++;
                 return Task.FromResult<(AiUsageReport?, string?)>((null, "ErrorAiUsageSignIn"));
             }))
             {
-                ai.Activate();
                 ai.Tick(DateTime.Now);
-                Check(aiLoads == 0, "AI Usage must not load while all providers are disabled.");
-                ai.ApplySettings(new DockSettings(AiUsageProviders: AiProviders.Claude));
+                Check(aiLoads == 0, "An inactive AI usage widget must not load.");
+                ai.Activate();
                 Check(aiLoads == 1 && ai.Visibility == Visibility.Visible
-                    && AiCards(ai) is [{ ToolTip: string hint }] && hint.Contains("claude", StringComparison.Ordinal),
+                    && AiCards(ai) is [{ ToolTip: string hint }] && hint.Contains("opencode", StringComparison.Ordinal),
                     "AI Usage must keep sign-in failures visible with a localized CLI hint.");
                 ai.Tick(DateTime.Now);
                 Check(aiLoads == 1, "A sign-in failure must not poll again without changed credentials.");
@@ -79,51 +79,44 @@ internal static class FeatureAndMemoryChecks
 
             var pending = new TaskCompletionSource<(AiUsageReport?, string?)>();
             CancellationToken aiCancellation = default;
-            using (var ai = new AiUsageWidget((_, cancellation) =>
+            using (var ai = new AiUsageWidget(AiProviders.Codex, (_, cancellation) =>
             {
                 aiCancellation = cancellation;
                 return pending.Task;
             }))
             {
-                ai.ApplySettings(new DockSettings(AiUsageProviders: AiProviders.Codex));
                 ai.Activate();
-                ai.ApplySettings(new DockSettings());
-                Check(aiCancellation.IsCancellationRequested, "Disabling AI providers must cancel their pending request.");
+                ai.Deactivate();
+                Check(aiCancellation.IsCancellationRequested, "Disabling an AI widget must cancel its pending request.");
                 pending.SetResult((new(AiProviders.Codex, "fixture", [new("AiUsageSession", 0.5, null, 18000)], DateTimeOffset.UtcNow), null));
                 Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.Background);
-                Check(AiCards(ai) is [{ ToolTip: string hint }] && hint == UiText.Get("AiUsageNoProviders"),
-                    "A late AI response must not restore a disabled provider.");
+                Check(AiCards(ai) is [{ ToolTip: "Codex" }], "A late AI response must not restore a disabled widget.");
             }
 
             var aiNow = DateTimeOffset.UtcNow;
-            using (var ai = new AiUsageWidget((provider, _) => Task.FromResult<(AiUsageReport?, string?)>((new(provider, "Plus",
-                [new("AiUsageSession", 0.42, aiNow.AddHours(3), 18000), new("AiUsageWeekly", provider == AiProviders.Codex ? 0.9 : 0.29,
-                    aiNow.AddDays(5), 604800)], aiNow) { LimitReached = provider == AiProviders.Codex }, null))))
+            AiUsageWidget CreateAiWidget(AiProviders provider) => new(provider, (p, _) => Task.FromResult<(AiUsageReport?, string?)>((new(p, "Plus",
+                [new("AiUsageSession", 0.42, aiNow.AddHours(3), 18000), new("AiUsageWeekly", p == AiProviders.Codex ? 0.9 : 0.29,
+                    aiNow.AddDays(5), 604800)], aiNow) { LimitReached = p == AiProviders.Codex }, null)));
+            using (var claude = CreateAiWidget(AiProviders.Claude))
+            using (var codex = CreateAiWidget(AiProviders.Codex))
             {
-                ai.ApplySettings(new DockSettings(AiUsageProviders: AiProviders.All));
-                ai.Activate();
+                claude.Activate();
+                codex.Activate();
                 Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.Background);
-                var cards = AiCards(ai);
-                Check(cards.Length == 7 && cards.All(card => card.Content is StackPanel { Children: [System.Windows.Shapes.Path { Data: not null }, TextBlock, RingMeter] })
-                    && cards[0].Content is StackPanel { Children: [_, TextBlock { Text: "Claude" }, RingMeter { Value: 0.42, Text: "42" }] }
-                    && cards[1].Content is StackPanel { Children: [_, TextBlock { Text: "Codex" }, RingMeter { Value: 0.9 }] }
-                    && cards[2].Content is StackPanel { Children: [_, TextBlock { Text: "Antigravity" }, RingMeter { Value: 0.42, Text: "42" }] }
-                    && cards[3].Content is StackPanel { Children: [_, TextBlock { Text: "OpenCode" }, RingMeter { Value: 0.42, Text: "42" }] }
-                    && cards[4].Content is StackPanel { Children: [_, TextBlock { Text: "Copilot" }, RingMeter { Value: 0.42, Text: "42" }] }
-                    && cards[5].Content is StackPanel { Children: [_, TextBlock { Text: "DeepSeek" }, RingMeter { Value: 0.42, Text: "42" }] }
-                    && cards[6].Content is StackPanel { Children: [_, TextBlock { Text: "OpenRouter" }, RingMeter { Value: 0.42, Text: "42" }] }
-                    && cards[0].ToolTip is string claudeTip && claudeTip.StartsWith("Claude Code 42%", StringComparison.Ordinal)
+                Check(AiCards(claude) is [{ Content: StackPanel { Children: [System.Windows.Shapes.Path { Data: not null }, TextBlock { Text: "Claude" }, StackPanel { Children: [StackPanel, StackPanel] }] } } claudeCard]
+                    && claudeCard.ToolTip is string claudeTip && claudeTip.StartsWith("Claude Code 42%", StringComparison.Ordinal)
                     && claudeTip.Contains("Weekly 29%", StringComparison.Ordinal) && claudeTip.Contains("Resets in", StringComparison.Ordinal)
-                    && cards[1].ToolTip is string codexTip && codexTip.Contains(UiText.Get("AiUsageLimitReached"), StringComparison.Ordinal),
-                    "AI Usage must show one card per provider with logo, name, usage ring and a one-line summary.");
-                ai.ApplySettings(new DockSettings(AiUsageProviders: AiProviders.All, AiUsageRing: AiUsageRing.Weekly));
-                Check(AiCards(ai)[0].ToolTip is string weeklyTip && weeklyTip.StartsWith("Claude Code 29%", StringComparison.Ordinal),
+                    && AiCards(codex) is [{ Content: StackPanel { Children: [_, TextBlock { Text: "Codex" }, StackPanel { Children: [StackPanel, StackPanel] }] } } codexCard]
+                    && codexCard.ToolTip is string codexTip && codexTip.Contains(UiText.Get("AiUsageLimitReached"), StringComparison.Ordinal),
+                    "Each AI usage widget must show one card with logo, name, usage indicators and a one-line summary.");
+                claude.ApplySettings(new DockSettings(AiUsageRing: AiUsageRing.Weekly));
+                Check(AiCards(claude)[0].ToolTip is string weeklyTip && weeklyTip.StartsWith("Claude Code 29%", StringComparison.Ordinal),
                     "The ring setting must choose the window the dock shows.");
-                ai.SetCompactState(true);
-                Check(AiCards(ai) is [{ ToolTip: string compactTip }] && compactTip.Contains('\n'),
-                    "Compact AI Usage must collapse to one card that summarizes every provider.");
-                Check(ai.BuildHoverFlyoutContent() is StackPanel aiFlyout && aiFlyout.Children.Count > 4,
-                    "The AI Usage flyout must build sections for every provider.");
+                claude.SetCompactState(true);
+                Check(AiCards(claude) is [{ Content: StackPanel { Children: [_, TextBlock { Visibility: Visibility.Collapsed }, _] } }],
+                    "Compact AI Usage must keep the logo and indicators and drop the name.");
+                Check(claude.BuildHoverFlyoutContent() is null && codex.BuildHoverFlyoutContent() is null,
+                    "Claude and Codex have inline indicators and no hover flyout.");
             }
 
             // 2. SystemStats + on-demand SystemSensors parity & disposal
@@ -199,21 +192,6 @@ internal static class FeatureAndMemoryChecks
             Check(ReferenceEquals(dockItem1.ContextMenu, dockItem2.ContextMenu),
                 "Shared ContextMenu must be reused across dock items without per-item duplication.");
 
-            var search = new SearchWidget();
-            search.Activate();
-            Check(search.BuildHoverFlyoutContent() is not null,
-                "Search widget must provide hover content.");
-            var tray = new TrayWidget();
-            tray.Activate();
-            search.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            tray.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            Check(Math.Abs(search.DesiredSize.Height - tray.DesiredSize.Height) < 0.001,
-                $"Search widget ({search.DesiredSize.Height}) and Tray widget ({tray.DesiredSize.Height}) must have identical desired heights.");
-            Check(Math.Abs(search.DesiredSize.Width - tray.DesiredSize.Width) < 0.001,
-                $"Search widget ({search.DesiredSize.Width}) and Tray widget ({tray.DesiredSize.Width}) must have identical desired widths.");
-            tray.Deactivate();
-            search.Deactivate();
-
             // Verify MediaWidget lifecycle, hover flyout, density and tick safety
             using (var mediaWidget = new MediaWidget())
             {
@@ -238,8 +216,8 @@ internal static class FeatureAndMemoryChecks
                     Position: DockPosition.Center,
                     Theme: AppTheme.Dark,
                     Language: AppLanguage.English,
-                    Widgets: ["Media", "Desktops", "SystemStats", "Focus", "Weather", "Audio", "QuickSettings", "Tray", "Clock", "Storage", "DayProgress", "Stopwatch", "Countdown"],
-                    InstalledWidgets: ["Media", "Desktops", "SystemStats", "Focus", "Weather", "Audio", "QuickSettings", "Tray", "Clock", "Storage", "DayProgress", "Stopwatch", "Countdown"],
+                    Widgets: ["Media", "SystemStats", "Focus", "Weather", "Audio", "QuickSettings", "Clock", "Storage", "DayProgress", "Stopwatch", "Countdown"],
+                    InstalledWidgets: ["Media", "SystemStats", "Focus", "Weather", "Audio", "QuickSettings", "Clock", "Storage", "DayProgress", "Stopwatch", "Countdown"],
                     ShowRecycleBin: true,
                     ShowOnAllMonitors: true,
                     StatsMeters: SystemMeters.All,
@@ -247,8 +225,8 @@ internal static class FeatureAndMemoryChecks
                     ActiveProfile: "Work");
                 Check(store.Save(heavy) is null, "Heavy DockSettings must save without errors.");
                 var (loaded, loadErr) = store.Load();
-                Check(loadErr is null && loaded.StatsMeters == SystemMeters.All && loaded.Widgets?.Count == 13 && loaded.ShowOnAllMonitors,
-                    "Heavy DockSettings must round-trip all 13 widgets, SystemMeters.All, and multi-monitor flags.");
+                Check(loadErr is null && loaded.StatsMeters == SystemMeters.All && loaded.Widgets?.Count == 11 && loaded.ShowOnAllMonitors,
+                    "Heavy DockSettings must round-trip all 11 widgets, SystemMeters.All, and multi-monitor flags.");
             }
             finally
             {
@@ -273,12 +251,10 @@ internal static class FeatureAndMemoryChecks
                 Check(ownerPid != (uint)Environment.ProcessId, "NativeTaskbarWindow.Find must never return a window owned by OpenTaskbar.");
             }
             Check(!TrayHost.IsBroadcasting, "TrayHost.IsBroadcasting must be false when idle.");
-            using (var testTray = new TrayWidget())
-            {
-                var liveEmptyContent = testTray.BuildLiveContent(Array.Empty<ManagedShell.WindowsTray.NotifyIcon>());
-                Check(liveEmptyContent is StackPanel sp && sp.Children.Count >= 2,
-                    "TrayWidget.BuildLiveContent must render a heading, empty caption and settings for an empty icon list.");
-            }
+            var testTray = new OpenTaskbar.Views.Shell.TrayShellButton();
+            var liveEmptyContent = testTray.BuildLiveContent(Array.Empty<ManagedShell.WindowsTray.NotifyIcon>());
+            Check(liveEmptyContent is StackPanel sp && sp.Children.Count >= 2,
+                "TrayShellButton.BuildLiveContent must render a heading, empty caption and settings for an empty icon list.");
         }
         finally
         {
@@ -327,7 +303,7 @@ internal static class FeatureAndMemoryChecks
     }
 
     private static Button[] AiCards(AiUsageWidget widget) =>
-        ((Panel)widget.Content).Children.OfType<Button>().Where(card => card.Visibility == Visibility.Visible).ToArray();
+        widget.Content is Button { Visibility: Visibility.Visible } card ? [card] : [];
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(nint windowHandle, out uint processId);

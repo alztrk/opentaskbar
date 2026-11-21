@@ -5,7 +5,24 @@
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
-                <ResourceDictionary Source="Design/Theme.xaml" />
+                <!-- Tokens first: StaticResources resolve at parse time. Palette is replaced by ThemeManager at runtime. -->
+                <ResourceDictionary Source="Design/Tokens/Typography.xaml" />
+                <ResourceDictionary Source="Design/Tokens/Spacing.xaml" />
+                <ResourceDictionary Source="Design/Tokens/Radii.xaml" />
+                <ResourceDictionary Source="Design/Tokens/Layout.xaml" />
+                <ResourceDictionary Source="Design/Tokens/Motion.xaml" />
+                <ResourceDictionary Source="Design/Tokens/Effects.xaml" />
+                <ResourceDictionary Source="Design/Palettes/Dark.xaml" />
+                <!-- Icons before control styles: ContextMenus.xaml uses StaticResource IconCheck/IconChevronRight. -->
+                <ResourceDictionary Source="Design/Icons/Navigation.xaml" />
+                <ResourceDictionary Source="Design/Icons/Actions.xaml" />
+                <ResourceDictionary Source="Design/Icons/Status.xaml" />
+                <ResourceDictionary Source="Design/Icons/Media.xaml" />
+                <ResourceDictionary Source="Design/Icons/Brand.xaml" />
+                <ResourceDictionary Source="Design/Icons/GeometryTemplate.xaml" />
+                <!-- Controls: implicit styles and cross-file BasedOn chains are ordered inside each file. -->
+                <ResourceDictionary Source="Design/Controls/Tooltip.xaml" />
+                <ResourceDictionary Source="Design/Controls/ScrollBar.xaml" />
                 <ResourceDictionary Source="Design/DockControls.xaml" />
                 <ResourceDictionary Source="Design/ContextMenus.xaml" />
                 <ResourceDictionary Source="Design/Widgets.xaml" />

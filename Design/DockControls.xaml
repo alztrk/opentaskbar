@@ -39,59 +39,43 @@
         <Setter Property="Margin" Value="0" />
         <Setter Property="Padding" Value="0" />
         <Setter Property="Cursor" Value="Hand" />
-        <Setter Property="RenderTransformOrigin" Value="0.5,0.95" />
+        <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
                     <Border x:Name="Surface" Background="{TemplateBinding Background}"
-                            BorderBrush="Transparent" BorderThickness="{StaticResource ControlStroke}"
-                            CornerRadius="{StaticResource ControlRadius}" Padding="{TemplateBinding Padding}">
+                            BorderBrush="Transparent" BorderThickness="0"
+                            CornerRadius="{DynamicResource ControlRadius}" Padding="{TemplateBinding Padding}">
                         <Grid>
                             <Grid.RowDefinitions>
                                 <RowDefinition Height="*" />
                                 <RowDefinition Height="6" />
                             </Grid.RowDefinitions>
-                            <!-- Aurora hover: a soft light pool under the icon instead of a hover box. -->
-                            <Ellipse x:Name="HoverGlow" Grid.RowSpan="2" Margin="-6,0,-6,-4" Fill="{DynamicResource IconHoverGlow}"
-                                     Opacity="0" IsHitTestVisible="False" />
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
-                            <!-- Running apps get a refined luminous dot; the foreground app a vibrant glowing mini capsule. -->
-                            <Rectangle x:Name="ActiveIndicatorGlow" Grid.Row="1" Height="6" Width="14" RadiusX="3" RadiusY="3"
-                                       Fill="#4538BDF8" VerticalAlignment="Center" HorizontalAlignment="Center"
-                                       Visibility="Collapsed" IsHitTestVisible="False" />
+                            <!-- Calm macOS-style active running indicator dot -->
                             <Rectangle x:Name="ActiveIndicator" Grid.Row="1" Height="4" Width="4" RadiusX="2" RadiusY="2"
-                                       Fill="{DynamicResource IndicatorBrush}" VerticalAlignment="Center"
+                                       Fill="{DynamicResource AccentBrush}" VerticalAlignment="Center"
                                        HorizontalAlignment="Center" Visibility="Collapsed" />
                         </Grid>
                     </Border>
                     <ControlTemplate.Triggers>
-                        <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="Surface" Property="Background" Value="Transparent" />
-                            <Setter TargetName="HoverGlow" Property="Opacity" Value="1" />
-                        </Trigger>
-                        <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="Surface" Property="Background" Value="{DynamicResource SurfacePressed}" />
-                        </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="Surface" Property="Opacity" Value="0.48" />
                         </Trigger>
-                        <Trigger Property="IsKeyboardFocused" Value="True">
-                            <Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource StrokeFocus}" />
-                        </Trigger>
+                        <!-- Running (inactive): theme accent at low opacity. -->
                         <DataTrigger Binding="{Binding IsRunning}" Value="True">
                             <Setter TargetName="ActiveIndicator" Property="Visibility" Value="Visible" />
-                            <Setter TargetName="ActiveIndicator" Property="Opacity" Value="0.75" />
+                            <Setter TargetName="ActiveIndicator" Property="Opacity" Value="0.4" />
                         </DataTrigger>
+                        <!-- Foreground (active): same theme accent, full opacity. -->
                         <DataTrigger Binding="{Binding IsForeground}" Value="True">
-                            <Setter TargetName="Surface" Property="Background" Value="{DynamicResource SurfaceSelectedStrong}" />
-                            <Setter TargetName="ActiveIndicatorGlow" Property="Visibility" Value="Visible" />
                             <Setter TargetName="ActiveIndicator" Property="Visibility" Value="Visible" />
+                            <Setter TargetName="ActiveIndicator" Property="Fill" Value="{DynamicResource AccentBrush}" />
                             <Setter TargetName="ActiveIndicator" Property="Opacity" Value="1.0" />
-                            <Setter TargetName="ActiveIndicator" Property="Width" Value="8" />
-                            <Setter TargetName="ActiveIndicator" Property="Height" Value="4" />
-                            <Setter TargetName="ActiveIndicator" Property="RadiusX" Value="2" />
-                            <Setter TargetName="ActiveIndicator" Property="RadiusY" Value="2" />
-                            <Setter TargetName="ActiveIndicator" Property="Fill" Value="{DynamicResource IndicatorForegroundBrush}" />
+                            <Setter TargetName="ActiveIndicator" Property="Width" Value="5" />
+                            <Setter TargetName="ActiveIndicator" Property="Height" Value="5" />
+                            <Setter TargetName="ActiveIndicator" Property="RadiusX" Value="2.5" />
+                            <Setter TargetName="ActiveIndicator" Property="RadiusY" Value="2.5" />
                         </DataTrigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -99,27 +83,112 @@
         </Setter>
     </Style>
 
-    <!-- Tactile recessed glass tile for the Start button matching Lumabar's hardware-button look. -->
-    <Style x:Key="StartDockButton" TargetType="Button" BasedOn="{StaticResource DockButton}">
+    <!--
+        Permanent shell buttons stay transparent at rest. Two stacked layers fade in on hover/press; only their
+        Opacity is animated, so the brushes remain DynamicResources that theme packs can recolor at runtime.
+    -->
+    <ControlTemplate x:Key="ShellDockButtonTemplate" TargetType="Button">
+        <Border x:Name="Surface" Background="Transparent" CornerRadius="{DynamicResource ControlRadius}">
+            <Grid Width="{TemplateBinding Width}" Height="{TemplateBinding Height}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="6" />
+                </Grid.RowDefinitions>
+                <Border x:Name="HoverSurface" Background="{DynamicResource ShellButtonHover}"
+                        CornerRadius="{DynamicResource ControlRadius}" Opacity="0" IsHitTestVisible="False" />
+                <Border x:Name="PressedSurface" Background="{DynamicResource ShellButtonPressed}"
+                        CornerRadius="{DynamicResource ControlRadius}" Opacity="0" IsHitTestVisible="False" />
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Grid>
+        </Border>
+        <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+                <Trigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetName="HoverSurface" Storyboard.TargetProperty="Opacity"
+                                             To="1" Duration="0:0:0.12" FillBehavior="HoldEnd" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </Trigger.EnterActions>
+                <Trigger.ExitActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetName="HoverSurface" Storyboard.TargetProperty="Opacity"
+                                             To="0" Duration="0:0:0.18" FillBehavior="HoldEnd" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </Trigger.ExitActions>
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+                <Trigger.EnterActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetName="PressedSurface" Storyboard.TargetProperty="Opacity"
+                                             To="1" Duration="0:0:0.08" FillBehavior="HoldEnd" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </Trigger.EnterActions>
+                <Trigger.ExitActions>
+                    <BeginStoryboard>
+                        <Storyboard>
+                            <DoubleAnimation Storyboard.TargetName="PressedSurface" Storyboard.TargetProperty="Opacity"
+                                             To="0" Duration="0:0:0.15" FillBehavior="HoldEnd" />
+                        </Storyboard>
+                    </BeginStoryboard>
+                </Trigger.ExitActions>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="Surface" Property="Opacity" Value="0.48" />
+            </Trigger>
+        </ControlTemplate.Triggers>
+    </ControlTemplate>
+
+    <Style x:Key="ShellDockButton" TargetType="Button" BasedOn="{StaticResource DockButton}">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Template" Value="{StaticResource ShellDockButtonTemplate}" />
+    </Style>
+
+    <!-- Start shares the exact same hidden-until-hover surface as the other permanent shell buttons. -->
+    <Style x:Key="StartDockButton" TargetType="Button" BasedOn="{StaticResource ShellDockButton}" />
+
+    <Style x:Key="DockScrollIndicatorButton" TargetType="Button">
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="Focusable" Value="False" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="Width" Value="28" />
+        <Setter Property="Visibility" Value="Collapsed" />
+        <Setter Property="Panel.ZIndex" Value="10" />
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="Button">
-                    <Grid Width="{TemplateBinding Width}" Height="{TemplateBinding Height}">
-                        <Border x:Name="StartTile" Margin="3,3,3,3"
-                                CornerRadius="10"
-                                Background="Transparent"
-                                BorderBrush="Transparent"
-                                BorderThickness="1">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
-                        </Border>
-                    </Grid>
+                    <Border Background="{TemplateBinding Background}" BorderThickness="0"
+                            CornerRadius="{Binding Tag, RelativeSource={RelativeSource TemplatedParent}}"
+                            Padding="{TemplateBinding Padding}">
+                        <Path x:Name="IndicatorGlyph"
+                              Data="{Binding Content, RelativeSource={RelativeSource TemplatedParent}}"
+                              Stroke="{DynamicResource TextPrimary}"
+                              StrokeThickness="2"
+                              StrokeStartLineCap="Round"
+                              StrokeEndLineCap="Round"
+                              StrokeLineJoin="Round"
+                              MaxWidth="12" MaxHeight="14"
+                              Stretch="Uniform"
+                              Opacity="0.85"
+                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}">
+                            <Path.Effect>
+                                <DropShadowEffect BlurRadius="4" ShadowDepth="1" Direction="270" Color="#000000" Opacity="0.55" />
+                            </Path.Effect>
+                        </Path>
+                    </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsMouseOver" Value="True">
-                            <Setter TargetName="StartTile" Property="Background" Value="{DynamicResource StartTileHover}" />
-                            <Setter TargetName="StartTile" Property="BorderBrush" Value="{DynamicResource StrokeFocus}" />
+                            <Setter TargetName="IndicatorGlyph" Property="Opacity" Value="1.0" />
+                            <Setter TargetName="IndicatorGlyph" Property="Stroke" Value="{DynamicResource IndicatorForegroundBrush}" />
                         </Trigger>
                         <Trigger Property="IsPressed" Value="True">
-                            <Setter TargetName="StartTile" Property="Background" Value="{DynamicResource StartTilePressed}" />
+                            <Setter TargetName="IndicatorGlyph" Property="Opacity" Value="0.5" />
                         </Trigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
@@ -137,13 +206,27 @@
         <Setter Property="Template">
             <Setter.Value>
                 <ControlTemplate TargetType="{x:Type views:DockScrollViewer}">
-                    <Grid>
+                    <Grid ClipToBounds="True">
                         <ScrollContentPresenter x:Name="PART_ScrollContentPresenter" CanContentScroll="False">
                             <ScrollContentPresenter.Content>
                                 <ContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
                                                   Margin="{TemplateBinding Padding}" />
                             </ScrollContentPresenter.Content>
                         </ScrollContentPresenter>
+                        <Button x:Name="PART_PreviousButton" Style="{StaticResource DockScrollIndicatorButton}"
+                                Background="{DynamicResource DockScrollScrimStart}"
+                                HorizontalAlignment="Left" VerticalAlignment="Stretch" Width="28"
+                                Margin="{TemplateBinding Padding}"
+                                HorizontalContentAlignment="Left" Padding="5,0,0,0"
+                                Tag="16,0,0,16"
+                                AutomationProperties.Name="{local:Loc ScrollDockHelp}" ToolTip="{local:Loc ScrollDockHelp}" />
+                        <Button x:Name="PART_NextButton" Style="{StaticResource DockScrollIndicatorButton}"
+                                Background="{DynamicResource DockScrollScrimEnd}"
+                                HorizontalAlignment="Right" VerticalAlignment="Stretch" Width="28"
+                                Margin="{TemplateBinding Padding}"
+                                HorizontalContentAlignment="Right" Padding="0,0,5,0"
+                                Tag="0,16,16,0"
+                                AutomationProperties.Name="{local:Loc ScrollDockHelp}" ToolTip="{local:Loc ScrollDockHelp}" />
                     </Grid>
                 </ControlTemplate>
             </Setter.Value>
