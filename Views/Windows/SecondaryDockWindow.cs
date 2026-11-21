@@ -315,7 +315,8 @@ public sealed class SecondaryDockWindow : Window
                     slot.IsForeground = isForeground;
                     slot.Dot.Width = isForeground ? 5 : 4;
                     slot.Dot.Height = isForeground ? 5 : 4;
-                    slot.Dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, isForeground ? "IndicatorForegroundBrush" : "IndicatorBrush");
+                    slot.Dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "AccentBrush");
+                    slot.Dot.Opacity = isForeground ? 1.0 : 0.4;
                 }
             }
             return;
@@ -334,7 +335,8 @@ public sealed class SecondaryDockWindow : Window
             var image = new Image { Source = icon, Width = 26, Height = 26 };
             RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
             var dot = new System.Windows.Shapes.Ellipse { Width = isForeground ? 5 : 4, Height = isForeground ? 5 : 4, Margin = new Thickness(0, 2, 0, 0) };
-            dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, isForeground ? "IndicatorForegroundBrush" : "IndicatorBrush");
+            dot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "AccentBrush");
+            dot.Opacity = isForeground ? 1.0 : 0.4;
             var cell = new StackPanel();
             cell.Children.Add(image);
             cell.Children.Add(dot);

@@ -116,7 +116,6 @@ public partial class SettingsWindow : Window
         SelectAlignment(_applied);
         AnimationsToggle.IsChecked = _applied.AnimationsEnabled;
         PreviewsToggle.IsChecked = _applied.PreviewsEnabled;
-        BadgesToggle.IsChecked = _applied.NotificationBadgesEnabled;
         SelectChoice(AutoHideBox, _applied.AutoHide.ToString());
         LoadSurfaceStyles(_applied);
         MagnificationToggle.IsChecked = _applied.MagnificationEnabled;
@@ -337,7 +336,7 @@ public partial class SettingsWindow : Window
                 ? position : _preferences.Current.Position,
             AnimationsEnabled = AnimationsToggle.IsChecked == true,
             PreviewsEnabled = PreviewsToggle.IsChecked == true,
-            NotificationBadgesEnabled = BadgesToggle.IsChecked == true,
+            NotificationBadgesEnabled = true,
             AutoHide = Enum.TryParse<AutoHideMode>(Choice(AutoHideBox), out var autoHide) ? autoHide : AutoHideMode.Disabled,
             GlobalWidgetDensity = Enum.TryParse<WidgetDensityMode>(Choice(DensityBox), out var density) ? density : WidgetDensityMode.Auto,
             WidgetDensityOverrides = ReadWidgetDensityOverrides(),
@@ -1332,7 +1331,6 @@ public partial class SettingsWindow : Window
         SelectAlignment(settings);
         AnimationsToggle.IsChecked = settings.AnimationsEnabled;
         PreviewsToggle.IsChecked = settings.PreviewsEnabled;
-        BadgesToggle.IsChecked = settings.NotificationBadgesEnabled;
         SelectChoice(AutoHideBox, settings.AutoHide.ToString());
         LoadSurfaceStyles(settings);
         MagnificationToggle.IsChecked = settings.MagnificationEnabled;
@@ -1369,7 +1367,6 @@ public partial class SettingsWindow : Window
             AnimationsToggle.IsChecked = defaults.AnimationsEnabled;
             MagnificationToggle.IsChecked = defaults.MagnificationEnabled;
             PreviewsToggle.IsChecked = defaults.PreviewsEnabled;
-            BadgesToggle.IsChecked = defaults.NotificationBadgesEnabled;
             RecycleBinToggle.IsChecked = defaults.ShowRecycleBin;
             CurrentDesktopToggle.IsChecked = defaults.CurrentDesktopOnly;
             SearchButtonToggle.IsChecked = defaults.ShowSearchButton;

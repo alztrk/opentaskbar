@@ -54,7 +54,7 @@
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
                             <!-- Calm macOS-style active running indicator dot -->
                             <Rectangle x:Name="ActiveIndicator" Grid.Row="1" Height="4" Width="4" RadiusX="2" RadiusY="2"
-                                       Fill="{DynamicResource IndicatorBrush}" VerticalAlignment="Center"
+                                       Fill="{DynamicResource AccentBrush}" VerticalAlignment="Center"
                                        HorizontalAlignment="Center" Visibility="Collapsed" />
                         </Grid>
                     </Border>
@@ -62,18 +62,20 @@
                         <Trigger Property="IsEnabled" Value="False">
                             <Setter TargetName="Surface" Property="Opacity" Value="0.48" />
                         </Trigger>
+                        <!-- Running (inactive): theme accent at low opacity. -->
                         <DataTrigger Binding="{Binding IsRunning}" Value="True">
                             <Setter TargetName="ActiveIndicator" Property="Visibility" Value="Visible" />
-                            <Setter TargetName="ActiveIndicator" Property="Opacity" Value="0.75" />
+                            <Setter TargetName="ActiveIndicator" Property="Opacity" Value="0.4" />
                         </DataTrigger>
+                        <!-- Foreground (active): same theme accent, full opacity. -->
                         <DataTrigger Binding="{Binding IsForeground}" Value="True">
                             <Setter TargetName="ActiveIndicator" Property="Visibility" Value="Visible" />
+                            <Setter TargetName="ActiveIndicator" Property="Fill" Value="{DynamicResource AccentBrush}" />
                             <Setter TargetName="ActiveIndicator" Property="Opacity" Value="1.0" />
                             <Setter TargetName="ActiveIndicator" Property="Width" Value="5" />
                             <Setter TargetName="ActiveIndicator" Property="Height" Value="5" />
                             <Setter TargetName="ActiveIndicator" Property="RadiusX" Value="2.5" />
                             <Setter TargetName="ActiveIndicator" Property="RadiusY" Value="2.5" />
-                            <Setter TargetName="ActiveIndicator" Property="Fill" Value="{DynamicResource IndicatorForegroundBrush}" />
                         </DataTrigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>

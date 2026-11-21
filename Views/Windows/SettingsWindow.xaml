@@ -179,14 +179,6 @@
                                     </StackPanel>
                                 </DockPanel></Border>
                                 <Border Style="{StaticResource SettingsRow}"><DockPanel>
-                                    <CheckBox x:Name="BadgesToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
-                                              AutomationProperties.Name="{local:Loc Badges}" AutomationProperties.HelpText="{local:Loc BadgesDescription}" />
-                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
-                                        <TextBlock Text="{local:Loc Badges}" Style="{StaticResource SettingsRowLabel}" />
-                                        <TextBlock Text="{local:Loc BadgesDescription}" Style="{StaticResource SettingsRowDescription}" />
-                                    </StackPanel>
-                                </DockPanel></Border>
-                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
                                     <CheckBox x:Name="RecycleBinToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
                                               AutomationProperties.Name="{local:Loc ShowRecycleBin}" />
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
