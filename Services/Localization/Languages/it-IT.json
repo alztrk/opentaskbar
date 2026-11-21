@@ -1,4 +1,4 @@
-﻿{
+{
   "Settings": "Impostazioni",
   "SettingsTitle": "Impostazioni di OpenTaskbar",
   "General": "Generale",
@@ -731,6 +731,12 @@
   "DockWidthPixels": "Pixel fissi",
   "DockWidthPercent": "% dello schermo",
   "DockWidthFill": "Intera larghezza (senza margini)",
+  "DockTopGap": "Spaziatura superiore",
+  "DockTopGapDescription": "Spazio sopra il dock (0 = a filo).",
+  "DockTopGapUnit": "Unita superiore",
+  "DockBottomGap": "Spaziatura inferiore",
+  "DockBottomGapDescription": "Spazio sotto il dock (0 = a filo).",
+  "DockBottomGapUnit": "Unita inferiore",
   "DockWidthValue": "Larghezza",
   "DockWidthValueDescription": "Valore della larghezza per la modalità scelta."
 }

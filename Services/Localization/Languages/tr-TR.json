@@ -1,4 +1,4 @@
-﻿{
+{
   "Settings": "Ayarlar",
   "SettingsTitle": "OpenTaskbar ayarları",
   "General": "Genel",
@@ -397,6 +397,7 @@
   "AiUsageUnofficialNote": "Resmî olmayan veri kaynakları kullanılır; kullanılabilirlik değişebilir.",
   "AiUsageSession": "Oturum (5 saat)",
   "AiUsageWeekly": "Haftalık",
+  "AiUsageRingWeekly": "Haftalık",
   "AiUsageSessionShort": "5s",
   "AiUsageWeeklyShort": "7g",
   "AiUsageMonthly": "Aylık",
@@ -644,6 +645,8 @@
   "ThemeUnsavedChanges": "Kaydedilmemiş değişiklikler",
   "Version": "Sürüm",
   "WidgetPreviewUnavailable": "Önizleme, widget servisinden canlı veri gerektirir. Görmek için dock üzerinde etkinleştirin.",
+  "PreviewFlyout": "Açılır paneli önizle",
+  "WidgetUnavailable": "Bu cihazda kullanılamıyor",
   "WidgetSurface": "Widget yüzeyi",
   "WidgetSurfacePreview": "Widget yüzeyi önizlemesi",
   "SurfaceOpacity": "Opaklık",
@@ -747,6 +750,12 @@
   "DockWidthPixels": "Sabit piksel",
   "DockWidthPercent": "Ekranın %",
   "DockWidthFill": "Tam genişlik (kenardan kenara)",
+  "DockTopGap": "Ust bosluk",
+  "DockTopGapDescription": "Gorev cubugunun ustundeki bosluk (0 = kenara yapisik).",
+  "DockTopGapUnit": "Ust birim",
+  "DockBottomGap": "Alt bosluk",
+  "DockBottomGapDescription": "Gorev cubugunun altindaki bosluk (0 = kenara yapisik).",
+  "DockBottomGapUnit": "Alt birim",
   "DockWidthValue": "Genişlik",
   "DockWidthValueDescription": "Seçili mod için genişlik değeri."
 }

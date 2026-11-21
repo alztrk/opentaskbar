@@ -182,7 +182,7 @@
 
     <Grid x:Name="DockHost" ToolTipService.Placement="Custom">
         <Grid.RowDefinitions>
-            <RowDefinition Height="{Binding Source={StaticResource DockHeadroom}}" />
+            <RowDefinition x:Name="DockHeadroomRow" Height="{Binding Source={StaticResource DockHeadroom}}" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
         <!-- Catches clicks only while the shelf area is reserved (auto-hide off); otherwise windows below stay clickable. -->

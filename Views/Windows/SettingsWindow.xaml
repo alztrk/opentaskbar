@@ -164,6 +164,41 @@
                                         <TextBlock Text="{local:Loc DockScaleHelp}" Style="{StaticResource SettingsRowDescription}" />
                                     </StackPanel>
                                 </DockPanel></Border>
+                                <!-- External spacing above and below the dock (outside the visible bar). Set to zero to sit flush. -->
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center">
+                                        <ComboBox x:Name="DockTopGapUnitBox" Width="58" VerticalAlignment="Center" SelectionChanged="DockTopGapUnitBox_SelectionChanged"
+                                                  AutomationProperties.Name="{local:Loc DockTopGapUnit}">
+                                            <ComboBoxItem Content="px" Tag="Pixels" />
+                                            <ComboBoxItem Content="%" Tag="Percent" />
+                                        </ComboBox>
+                                        <Slider x:Name="DockTopGapSlider" Width="104" Minimum="0" Maximum="100" Value="0" TickFrequency="1"
+                                                IsSnapToTickEnabled="True" Style="{StaticResource SettingsOpacitySlider}"
+                                                AutomationProperties.Name="{local:Loc DockTopGap}" ValueChanged="DockTopGapSlider_ValueChanged" VerticalAlignment="Center" Margin="6,0,0,0" />
+                                        <TextBlock x:Name="DockTopGapValue" Width="40" TextAlignment="Right" Foreground="{DynamicResource TextSecondary}" FontSize="11.5" VerticalAlignment="Center" Margin="6,0,0,0" />
+                                    </StackPanel>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc DockTopGap}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc DockTopGapDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+                                <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
+                                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center">
+                                        <ComboBox x:Name="DockBottomGapUnitBox" Width="58" VerticalAlignment="Center" SelectionChanged="DockBottomGapUnitBox_SelectionChanged"
+                                                  AutomationProperties.Name="{local:Loc DockBottomGapUnit}">
+                                            <ComboBoxItem Content="px" Tag="Pixels" />
+                                            <ComboBoxItem Content="%" Tag="Percent" />
+                                        </ComboBox>
+                                        <Slider x:Name="DockBottomGapSlider" Width="104" Minimum="0" Maximum="100" Value="6" TickFrequency="1"
+                                                IsSnapToTickEnabled="True" Style="{StaticResource SettingsOpacitySlider}"
+                                                AutomationProperties.Name="{local:Loc DockBottomGap}" ValueChanged="DockBottomGapSlider_ValueChanged" VerticalAlignment="Center" Margin="6,0,0,0" />
+                                        <TextBlock x:Name="DockBottomGapValue" Width="40" TextAlignment="Right" Foreground="{DynamicResource TextSecondary}" FontSize="11.5" VerticalAlignment="Center" Margin="6,0,0,0" />
+                                    </StackPanel>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc DockBottomGap}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc DockBottomGapDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
                             </StackPanel></Border>
 
                             <!-- Behavior -->

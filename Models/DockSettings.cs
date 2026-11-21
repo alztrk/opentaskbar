@@ -42,6 +42,9 @@ public enum WidgetDensityMode { Auto, Compact, Full }
 /// <summary>How the dock's horizontal width is determined. Auto fits content; Fixed/Pin modes pin it; Fill spans edge-to-edge.</summary>
 public enum DockWidthMode { Auto, Pixels, Percent, Fill }
 
+/// <summary>Unit used for the dock's external top/bottom spacing.</summary>
+public enum DockGapUnit { Pixels, Percent }
+
 /// <summary>How a translucent UI surface is filled. None removes the fill, its rim and its shadow.</summary>
 public enum SurfaceBackground { Glass, Solid, None }
 
@@ -161,4 +164,12 @@ public sealed record DockSettings(
     // Pixels pins an exact DIP width; Percent pins a share of the target monitor.
     DockWidthMode DockWidthMode = DockWidthMode.Auto,
     int DockWidthPixels = 900,
-    int DockWidthPercent = 60);
+    int DockWidthPercent = 60,
+    // External spacing around the dock surface (outside the visible bar, not inner padding). Each side can be
+    // zero to sit flush against the screen edge, and can be expressed in pixels or a share of the screen.
+    DockGapUnit DockTopGapUnit = DockGapUnit.Pixels,
+    int DockTopGapPixels = 0,
+    int DockTopGapPercent = 0,
+    DockGapUnit DockBottomGapUnit = DockGapUnit.Pixels,
+    int DockBottomGapPixels = 6,
+    int DockBottomGapPercent = 0);

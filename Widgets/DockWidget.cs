@@ -14,6 +14,7 @@ namespace OpenTaskbar.Widgets;
 public class DockWidget : UserControl, IDisposable
 {
     private bool _hasData = true;
+    private bool _hardwareAvailable = true;
     private bool _disposed;
 
     public DockWidget()
@@ -71,6 +72,31 @@ public class DockWidget : UserControl, IDisposable
     }
 
     public virtual UIElement? BuildHoverFlyoutContent() => null;
+
+    /// <summary>
+    /// Optional flyout content for the Settings catalog preview. Widgets that open a hover or click
+    /// flyout override this so the catalog can render the same panel inline (popups need a real
+    /// pointer and a separate window, neither of which the preview card provides).
+    /// </summary>
+    public virtual UIElement? BuildPreviewFlyoutContent() => BuildHoverFlyoutContent();
+
+    /// <summary>
+    /// False when the required hardware is absent (e.g. a desktop without a battery). Such widgets
+    /// are hidden from the dock and disabled in the Settings catalog.
+    /// </summary>
+    public bool IsHardwareAvailable
+    {
+        get => _hardwareAvailable;
+        protected set
+        {
+            if (_hardwareAvailable == value) return;
+            _hardwareAvailable = value;
+            UpdateVisibility();
+            HardwareAvailabilityChanged?.Invoke(this, EventArgs.Empty);
+        }
+    }
+
+    public event EventHandler? HardwareAvailabilityChanged;
 
     protected virtual void OnCompactChanged(bool compact) { }
     protected virtual void OnHoverExpandedChanged(bool expanded) { }
@@ -156,7 +182,7 @@ public class DockWidget : UserControl, IDisposable
 
     private void UpdateVisibility()
     {
-        var visibility = IsActive && _hasData ? Visibility.Visible : Visibility.Collapsed;
+        var visibility = IsActive && _hasData && _hardwareAvailable ? Visibility.Visible : Visibility.Collapsed;
         if (Visibility == visibility) return;
         Visibility = visibility;
         AvailabilityChanged?.Invoke(this, EventArgs.Empty);

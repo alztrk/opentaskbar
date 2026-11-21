@@ -114,6 +114,18 @@ public static class DockMetrics
     public const double WidgetDesignHeight = 46;
 
     /// <summary>
+    /// Resolves an external dock gap to DIPs. Pixels are used as-is; percent is a share of the full screen extent
+    /// along the relevant axis. Negative values are clamped to zero so a user can make the gap flush.
+    /// </summary>
+    public static double ResolveGap(DockGapUnit unit, int pixels, int percent, double screenExtent)
+    {
+        var value = unit == DockGapUnit.Percent
+            ? Math.Max(0, screenExtent) * Math.Clamp(percent, 0, 100) / 100.0
+            : pixels;
+        return Math.Max(0.0, value);
+    }
+
+    /// <summary>
     /// Geometry for each dock size and user scale factor (0.75–1.50). Surface = cell + 2 × vertical padding + 2 (border);
     /// it plus the bottom gap fits the shelf. Compact at 100% matches the Windows 11 taskbar height (48 DIP).
     /// </summary>

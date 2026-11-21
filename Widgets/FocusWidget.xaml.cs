@@ -81,6 +81,7 @@ public partial class FocusWidget : DockWidget
     }
 
     public override UIElement? BuildHoverFlyoutContent() => null;
+    public override UIElement? BuildPreviewFlyoutContent() => BuildFocusFlyout();
 
     private TimeSpan PhaseLength
     {

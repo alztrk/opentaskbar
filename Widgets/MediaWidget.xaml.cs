@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -86,6 +87,31 @@ public partial class MediaWidget : DockWidget
 
     // V19: Media widget uses its own compact hover volume popover and does not open a large generic flyout.
     public override UIElement? BuildHoverFlyoutContent() => null;
+
+    public override UIElement? BuildPreviewFlyoutContent()
+    {
+        var root = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
+        var percent = new TextBlock
+        {
+            Text = "67%",
+            FontSize = 11.5,
+            FontWeight = FontWeights.SemiBold,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Margin = new Thickness(0, 0, 0, 8)
+        };
+        percent.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+        var slider = new Slider
+        {
+            Height = 104,
+            Value = 67,
+            IsHitTestVisible = false,
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+        slider.SetResourceReference(StyleProperty, "WidgetVerticalSlider");
+        root.Children.Add(percent);
+        root.Children.Add(slider);
+        return root;
+    }
 
     protected override async void OnActivated()
     {

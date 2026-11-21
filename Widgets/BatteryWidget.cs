@@ -287,6 +287,9 @@ public sealed class BatteryWidget : DockWidget
         if (!_hasSample) return;
 
         var present = _status.Present;
+        // A desktop has no battery; hide the widget from the dock and disable it in the catalog
+        // instead of showing a permanently empty "—" card.
+        IsHardwareAvailable = present;
         var percent = Math.Clamp(_status.Percent, 0, 100);
         var charging = present && _status.Charging;
 

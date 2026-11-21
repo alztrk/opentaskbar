@@ -58,6 +58,56 @@ public sealed class DockWidgetOption(
 
     public object PreviewContent => (object?)_livePreview ?? Preview;
 
+    private UIElement? _previewFlyoutContent;
+    private bool _showFlyoutPreview;
+
+    /// <summary>Flyout panel rendered inline in the catalog when the user asks to preview it.</summary>
+    public UIElement? PreviewFlyoutContent
+    {
+        get => _previewFlyoutContent;
+        set
+        {
+            if (ReferenceEquals(_previewFlyoutContent, value)) return;
+            _previewFlyoutContent = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(PreviewFlyoutContent)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(PreviewFlyoutVisibility)));
+        }
+    }
+
+    public bool ShowFlyoutPreview
+    {
+        get => _showFlyoutPreview;
+        set
+        {
+            if (_showFlyoutPreview == value) return;
+            _showFlyoutPreview = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ShowFlyoutPreview)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(PreviewFlyoutVisibility)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(FlyoutPreviewGlyph)));
+        }
+    }
+
+    public Visibility PreviewFlyoutVisibility =>
+        _showFlyoutPreview && _previewFlyoutContent is not null ? Visibility.Visible : Visibility.Collapsed;
+
+    public string FlyoutPreviewGlyph => _showFlyoutPreview ? "\uE70E" : "\uE70D";
+
+    private bool _isHardwareAvailable = true;
+    /// <summary>False when the widget's required hardware is absent (e.g. no battery on a desktop).</summary>
+    public bool IsHardwareAvailable
+    {
+        get => _isHardwareAvailable;
+        set
+        {
+            if (_isHardwareAvailable == value) return;
+            _isHardwareAvailable = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsHardwareAvailable)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(UnavailableVisibility)));
+        }
+    }
+
+    public Visibility UnavailableVisibility => _isHardwareAvailable ? Visibility.Collapsed : Visibility.Visible;
+
     private object? _nativePreview;
     public object? NativePreview
     {

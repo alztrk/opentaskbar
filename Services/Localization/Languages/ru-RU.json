@@ -1,4 +1,4 @@
-﻿{
+{
   "Settings": "Параметры",
   "SettingsTitle": "Параметры OpenTaskbar",
   "General": "Общие",
@@ -731,6 +731,12 @@
   "DockWidthPixels": "Фикс. пиксели",
   "DockWidthPercent": "% экрана",
   "DockWidthFill": "На всю ширину (без полей)",
+  "DockTopGap": "Verkhniy otstup",
+  "DockTopGapDescription": "Otstup nad panel-yu (0 = vroven).",
+  "DockTopGapUnit": "Edinitsa sverkhu",
+  "DockBottomGap": "Nizhniy otstup",
+  "DockBottomGapDescription": "Otstup pod panel-yu (0 = vroven).",
+  "DockBottomGapUnit": "Edinitsa snizu",
   "DockWidthValue": "Ширина",
   "DockWidthValueDescription": "Значение ширины для выбранного режима."
 }

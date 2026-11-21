@@ -147,6 +147,13 @@ public partial class ClockWidget : DockWidget
         ClockButton.ToolTip = now.ToString("D", culture);
     }
 
+    public override UIElement? BuildPreviewFlyoutContent()
+    {
+        var host = new ContentControl();
+        host.Content = BuildCalendar(host);
+        return host;
+    }
+
     private void ClockButton_Click(object sender, RoutedEventArgs e)
     {
         var today = DateOnly.FromDateTime(DateTime.Today);

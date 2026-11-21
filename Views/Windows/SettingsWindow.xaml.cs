@@ -127,6 +127,7 @@ public partial class SettingsWindow : Window
         UpdateDockScaleLabel();
         SelectChoice(DockWidthModeBox, _applied.DockWidthMode.ToString());
         UpdateDockWidthControls();
+        LoadDockGapControls(_applied);
         var initialProfile = DockMetrics.For(_applied.Size, _applied.DockScale);
         CornerRadiusSlider.Value = _applied.DockCornerRadius ?? (int)Math.Round(initialProfile.Radius);
         UpdateCornerRadiusLabel();
@@ -363,6 +364,12 @@ public partial class SettingsWindow : Window
             DockWidthMode = Enum.TryParse<DockWidthMode>(Choice(DockWidthModeBox), out var widthMode) ? widthMode : DockWidthMode.Auto,
             DockWidthPixels = widthMode == DockWidthMode.Pixels ? (int)Math.Round(DockWidthSlider.Value) : _preferences.Current.DockWidthPixels,
             DockWidthPercent = widthMode == DockWidthMode.Percent ? (int)Math.Round(DockWidthSlider.Value) : _preferences.Current.DockWidthPercent,
+            DockTopGapUnit = GapUnit(DockTopGapUnitBox),
+            DockTopGapPixels = (int)Math.Round(DockTopGapSlider.Value),
+            DockTopGapPercent = (int)Math.Round(DockTopGapSlider.Value),
+            DockBottomGapUnit = GapUnit(DockBottomGapUnitBox),
+            DockBottomGapPixels = (int)Math.Round(DockBottomGapSlider.Value),
+            DockBottomGapPercent = (int)Math.Round(DockBottomGapSlider.Value),
             DockCornerRadius = (int)Math.Round(CornerRadiusSlider.Value),
             ShowClock = IsEnabled("Clock"),
             ShowMedia = IsEnabled("Media"),
@@ -1054,10 +1061,15 @@ public partial class SettingsWindow : Window
                 widget.ApplySettings(_applied);
                 widget.Activate();
                 widget.Tick(DateTime.Now);
+                // Reflect hardware availability (e.g. a desktop without a battery) in the catalog.
+                option.IsHardwareAvailable = widget.IsHardwareAvailable;
+                widget.HardwareAvailabilityChanged += (_, _) => option.IsHardwareAvailable = widget.IsHardwareAvailable;
                 // An inactive data source (no media session, no providers signed in) must not blank the card.
-                widget.Visibility = Visibility.Visible;
+                widget.Visibility = widget.IsHardwareAvailable ? Visibility.Visible : Visibility.Collapsed;
                 option.LivePreview = widget;
                 option.NativePreview = widget;
+                // Build the flyout panel once; widget settings changes refresh it below.
+                option.PreviewFlyoutContent = widget.BuildPreviewFlyoutContent();
                 _livePreviewWidgets.Add(widget);
             }
             catch (Exception ex)
@@ -1073,7 +1085,8 @@ public partial class SettingsWindow : Window
             foreach (var widget in _livePreviewWidgets)
             {
                 widget.Tick(now);
-                if (widget.Visibility != Visibility.Visible) widget.Visibility = Visibility.Visible;
+                if (widget.IsHardwareAvailable && widget.Visibility != Visibility.Visible)
+                    widget.Visibility = Visibility.Visible;
             }
         };
         _livePreviewTimer.Start();
@@ -1085,12 +1098,17 @@ public partial class SettingsWindow : Window
     /// </summary>
     private void ApplySettingsToLivePreviews(DockSettings settings)
     {
-        foreach (var widget in _livePreviewWidgets)
+        foreach (var option in _widgetOptions)
         {
+            if (option.LivePreview is not OpenTaskbar.Widgets.DockWidget widget) continue;
             widget.ApplySettings(settings);
             // Some widgets hide themselves when their data source is inactive (e.g. media with no
             // session). A preview must stay visible so the card never collapses to an empty tile.
-            if (widget.Visibility != Visibility.Visible) widget.Visibility = Visibility.Visible;
+            if (widget.IsHardwareAvailable && widget.Visibility != Visibility.Visible)
+                widget.Visibility = Visibility.Visible;
+            option.IsHardwareAvailable = widget.IsHardwareAvailable;
+            // Rebuild the inline flyout preview so it reflects the just-applied settings.
+            if (option.ShowFlyoutPreview) option.PreviewFlyoutContent = widget.BuildPreviewFlyoutContent();
         }
     }
 
@@ -1347,7 +1365,7 @@ public partial class SettingsWindow : Window
         var combo = new ComboBox { MinWidth = 128 };
         combo.Items.Add(new ComboBoxItem { Content = UiText.Get("AiUsageRingHighest"), Tag = nameof(AiUsageRing.Highest) });
         combo.Items.Add(new ComboBoxItem { Content = UiText.Get("AiUsageRingSession"), Tag = nameof(AiUsageRing.Session) });
-        combo.Items.Add(new ComboBoxItem { Content = UiText.Get("AiUsageWeekly"), Tag = nameof(AiUsageRing.Weekly) });
+        combo.Items.Add(new ComboBoxItem { Content = UiText.Get("AiUsageRingWeekly"), Tag = nameof(AiUsageRing.Weekly) });
 
         combo.SelectedItem = combo.Items.OfType<ComboBoxItem>().FirstOrDefault(item => string.Equals(item.Tag as string, _aiUsageRing.ToString(), StringComparison.Ordinal))
             ?? combo.Items[0];
@@ -1357,6 +1375,7 @@ public partial class SettingsWindow : Window
             if (!_initializing && combo.SelectedItem is ComboBoxItem { Tag: string tag } && Enum.TryParse<AiUsageRing>(tag, out var ring))
             {
                 _aiUsageRing = ring;
+                ApplySettingsToLivePreviews(ReadSelection());
                 TriggerAutoSave(immediate: true);
             }
         };
@@ -1394,7 +1413,11 @@ public partial class SettingsWindow : Window
         combo.SelectedIndex = 0;
         combo.SelectionChanged += (_, _) =>
         {
-            if (!_initializing) TriggerAutoSave(immediate: true);
+            if (!_initializing)
+            {
+                ApplySettingsToLivePreviews(ReadSelection());
+                TriggerAutoSave(immediate: true);
+            }
         };
         Grid.SetColumn(combo, 1);
         row.Children.Add(combo);
@@ -1610,6 +1633,7 @@ public partial class SettingsWindow : Window
             DockScaleSlider.Value = Math.Round(defaults.DockScale * 100);
             SelectChoice(DockWidthModeBox, defaults.DockWidthMode.ToString());
             UpdateDockWidthControls();
+            LoadDockGapControls(defaults);
             UpdateDockScaleLabel();
             SelectChoice(AutoHideBox, defaults.AutoHide.ToString());
             AnimationsToggle.IsChecked = defaults.AnimationsEnabled;
@@ -1829,6 +1853,68 @@ public partial class SettingsWindow : Window
     private void DockWidthSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
         UpdateDockWidthLabel();
+        if (!_initializing) PreferenceEdited(sender, e);
+    }
+
+    private static DockGapUnit GapUnit(ComboBox box) =>
+        Enum.TryParse<DockGapUnit>(Choice(box), out var unit) ? unit : DockGapUnit.Pixels;
+
+    private void LoadDockGapControls(DockSettings settings)
+    {
+        // Caller controls _initializing (constructor / reset both set it). Do not toggle it here: setting it to
+        // false early would let slider/checkbox events fire and mark preferences as edited during load.
+        SelectChoice(DockTopGapUnitBox, settings.DockTopGapUnit.ToString());
+        ConfigureGapSlider(DockTopGapSlider, settings.DockTopGapUnit, settings.DockTopGapPixels, settings.DockTopGapPercent);
+        SelectChoice(DockBottomGapUnitBox, settings.DockBottomGapUnit.ToString());
+        ConfigureGapSlider(DockBottomGapSlider, settings.DockBottomGapUnit, settings.DockBottomGapPixels, settings.DockBottomGapPercent);
+        UpdateDockGapLabels();
+    }
+
+    private static void ConfigureGapSlider(Slider slider, DockGapUnit unit, int pixels, int percent)
+    {
+        slider.Minimum = 0;
+        slider.Maximum = unit == DockGapUnit.Percent ? 100 : 200;
+        slider.TickFrequency = 1;
+        slider.Value = unit == DockGapUnit.Percent ? percent : pixels;
+    }
+
+    private void UpdateDockGapLabels()
+    {
+        // XAML sets slider Values during InitializeComponent, before the unit ComboBoxes exist.
+        if (DockTopGapValue is null || DockBottomGapValue is null) return;
+        DockTopGapValue.Text = Math.Round(DockTopGapSlider.Value) + (DockTopGapUnitBox is not null && GapUnit(DockTopGapUnitBox) == DockGapUnit.Percent ? "%" : "px");
+        DockBottomGapValue.Text = Math.Round(DockBottomGapSlider.Value) + (DockBottomGapUnitBox is not null && GapUnit(DockBottomGapUnitBox) == DockGapUnit.Percent ? "%" : "px");
+    }
+
+    private void DockTopGapUnitBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_initializing) return;
+        var unit = GapUnit(DockTopGapUnitBox);
+        var value = Math.Round(DockTopGapSlider.Value);
+        ConfigureGapSlider(DockTopGapSlider, unit, (int)value, (int)value);
+        UpdateDockGapLabels();
+        PreferenceEdited(sender, e);
+    }
+
+    private void DockBottomGapUnitBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_initializing) return;
+        var unit = GapUnit(DockBottomGapUnitBox);
+        var value = Math.Round(DockBottomGapSlider.Value);
+        ConfigureGapSlider(DockBottomGapSlider, unit, (int)value, (int)value);
+        UpdateDockGapLabels();
+        PreferenceEdited(sender, e);
+    }
+
+    private void DockTopGapSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        UpdateDockGapLabels();
+        if (!_initializing) PreferenceEdited(sender, e);
+    }
+
+    private void DockBottomGapSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        UpdateDockGapLabels();
         if (!_initializing) PreferenceEdited(sender, e);
     }
 

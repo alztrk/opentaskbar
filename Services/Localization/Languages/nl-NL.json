@@ -1,4 +1,4 @@
-﻿{
+{
   "Settings": "Instellingen",
   "SettingsTitle": "OpenTaskbar-instellingen",
   "General": "Algemeen",
@@ -731,6 +731,12 @@
   "DockWidthPixels": "Vaste pixels",
   "DockWidthPercent": "% van het scherm",
   "DockWidthFill": "Volledige breedte (randloos)",
+  "DockTopGap": "Bovenste tussenruimte",
+  "DockTopGapDescription": "Ruimte boven de dock (0 = gelijk).",
+  "DockTopGapUnit": "Bovenste eenheid",
+  "DockBottomGap": "Onderste tussenruimte",
+  "DockBottomGapDescription": "Ruimte onder de dock (0 = gelijk).",
+  "DockBottomGapUnit": "Onderste eenheid",
   "DockWidthValue": "Breedte",
   "DockWidthValueDescription": "Breedtewaarde voor de gekozen modus."
 }

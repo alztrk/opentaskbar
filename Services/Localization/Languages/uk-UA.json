@@ -1,4 +1,4 @@
-﻿{
+{
   "Settings": "Налаштування",
   "SettingsTitle": "Налаштування OpenTaskbar",
   "General": "Загальні",
@@ -731,6 +731,12 @@
   "DockWidthPixels": "Фікс. пікселі",
   "DockWidthPercent": "% екрана",
   "DockWidthFill": "На всю ширину (без полів)",
+  "DockTopGap": "Verkhnii vidstup",
+  "DockTopGapDescription": "Vidstup nad panelliu (0 = vriven).",
+  "DockTopGapUnit": "Odynytsia zhori",
+  "DockBottomGap": "Nyzhnii vidstup",
+  "DockBottomGapDescription": "Vidstup pid panelliu (0 = vriven).",
+  "DockBottomGapUnit": "Odynytsia znyzu",
   "DockWidthValue": "Ширина",
   "DockWidthValueDescription": "Значення ширини для обраного режиму."
 }

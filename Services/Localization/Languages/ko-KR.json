@@ -1,4 +1,4 @@
-﻿{
+{
   "Settings": "설정",
   "SettingsTitle": "OpenTaskbar 설정",
   "General": "일반",
@@ -731,6 +731,12 @@
   "DockWidthPixels": "고정 픽셀",
   "DockWidthPercent": "화면의 %",
   "DockWidthFill": "전체 너비 (여백 없음)",
+  "DockTopGap": "Top spacing",
+  "DockTopGapDescription": "Space above the dock (0 = flush).",
+  "DockTopGapUnit": "Top unit",
+  "DockBottomGap": "Bottom spacing",
+  "DockBottomGapDescription": "Space below the dock (0 = flush).",
+  "DockBottomGapUnit": "Bottom unit",
   "DockWidthValue": "너비",
   "DockWidthValueDescription": "선택한 모드의 너비 값입니다."
 }

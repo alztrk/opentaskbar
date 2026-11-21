@@ -1,4 +1,4 @@
-﻿{
+{
   "Settings": "Settings",
   "SettingsTitle": "OpenTaskbar settings",
   "General": "General",
@@ -7,6 +7,8 @@
   "WidgetsDescription": "Install the widgets you want on the dock.",
   "WidgetSettings": "Widget settings",
   "WidgetPreviewUnavailable": "Preview needs live data from the widget's service. Enable it on the dock to see it.",
+  "PreviewFlyout": "Preview flyout",
+  "WidgetUnavailable": "Unavailable on this device",
   "WidgetInstall": "Install",
   "WidgetRemove": "Remove",
   "RemoveWidget": "Remove Widget",
@@ -398,6 +400,7 @@
   "AiUsageUnofficialNote": "Uses unofficial endpoints; availability may change.",
   "AiUsageSession": "Session (5 h)",
   "AiUsageWeekly": "Weekly",
+  "AiUsageRingWeekly": "Weekly",
   "AiUsageSessionShort": "5h",
   "AiUsageWeeklyShort": "7d",
   "AiUsageMonthly": "Monthly",
@@ -747,6 +750,12 @@
   "DockWidthPixels": "Fixed pixels",
   "DockWidthPercent": "% of screen",
   "DockWidthFill": "Fill (edge-to-edge)",
+  "DockTopGap": "Top spacing",
+  "DockTopGapDescription": "Space above the dock (0 = flush).",
+  "DockTopGapUnit": "Top unit",
+  "DockBottomGap": "Bottom spacing",
+  "DockBottomGapDescription": "Space below the dock (0 = flush).",
+  "DockBottomGapUnit": "Bottom unit",
   "DockWidthValue": "Width",
   "DockWidthValueDescription": "Width value for the selected mode."
 }

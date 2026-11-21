@@ -87,6 +87,9 @@
                         <TextBlock Grid.Column="1" Text="{Binding Label}" FontSize="12.5" FontWeight="Medium"
                                    VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
                                    Foreground="{DynamicResource TextPrimary}"/>
+                        <TextBlock Grid.Column="1" Text="{local:Loc WidgetUnavailable}" FontSize="10"
+                                   VerticalAlignment="Center" HorizontalAlignment="Right" Margin="0,0,6,0"
+                                   Foreground="{DynamicResource TextSecondary}" Visibility="{Binding UnavailableVisibility}"/>
                         <TextBlock Grid.Column="2" Text="{Binding SettingsGlyph}" FontFamily="Segoe MDL2 Assets"
                                    FontSize="9" VerticalAlignment="Center" Margin="8,0,2,0"
                                    Foreground="{DynamicResource TextSecondary}"/>
@@ -94,6 +97,7 @@
                 </Button>
                 <Button x:Name="InstallButton" Grid.Column="1" Width="38" MinHeight="38" Margin="0,5,6,5"
                         Click="Install_Click" Background="Transparent" BorderThickness="0"
+                        IsEnabled="{Binding IsHardwareAvailable}"
                         Foreground="{DynamicResource TextSecondary}"
                         ToolTip="{Binding InstallActionLabel}" Cursor="Hand"
                         AutomationProperties.Name="{Binding InstallActionLabel}"
@@ -144,9 +148,34 @@
                             <ColumnDefinition Width="3*"/>
                         </Grid.ColumnDefinitions>
                         <Border VerticalAlignment="Top" Background="Transparent" Padding="0,6">
-                            <ContentControl Content="{Binding PreviewContent}" HorizontalAlignment="Left"
-                                            VerticalAlignment="Center" Focusable="False"
-                                            IsHitTestVisible="False" KeyboardNavigation.TabNavigation="None"/>
+                            <StackPanel>
+                                <DockPanel>
+                                    <Button DockPanel.Dock="Right" Click="FlyoutPreview_Click" Cursor="Hand"
+                                            Background="Transparent" BorderThickness="0" Padding="4,2"
+                                            VerticalAlignment="Top" ToolTip="{local:Loc PreviewFlyout}"
+                                            AutomationProperties.Name="{local:Loc PreviewFlyout}">
+                                        <Button.Template>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                                                    <ContentPresenter />
+                                                </Border>
+                                            </ControlTemplate>
+                                        </Button.Template>
+                                        <TextBlock Text="{Binding FlyoutPreviewGlyph}" FontFamily="Segoe MDL2 Assets"
+                                                   FontSize="11" Foreground="{DynamicResource TextSecondary}" />
+                                    </Button>
+                                    <ContentControl Content="{Binding PreviewContent}" HorizontalAlignment="Left"
+                                                    VerticalAlignment="Center" Focusable="False"
+                                                    IsHitTestVisible="False" KeyboardNavigation.TabNavigation="None"/>
+                                </DockPanel>
+                                <Border Visibility="{Binding PreviewFlyoutVisibility}" Margin="0,10,0,0" Padding="10"
+                                        CornerRadius="8" Background="{DynamicResource MenuMaterial}"
+                                        BorderThickness="1" BorderBrush="{DynamicResource MenuStrokeMaterial}"
+                                        HorizontalAlignment="Left" MaxWidth="320">
+                                    <ContentControl Content="{Binding PreviewFlyoutContent}" Focusable="False"
+                                                    IsHitTestVisible="False" />
+                                </Border>
+                            </StackPanel>
                         </Border>
                         <StackPanel Grid.Column="2">
                             <TextBlock Text="{local:Loc WidgetSettings}" Foreground="{DynamicResource TextPrimary}" FontSize="12" FontWeight="SemiBold"
@@ -155,6 +184,7 @@
                                 <DockPanel>
                                     <CheckBox IsChecked="{Binding IsInstalled, Mode=OneWay}" Click="Install_Click"
                                               DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              IsEnabled="{Binding IsHardwareAvailable}"
                                               AutomationProperties.Name="{Binding Label}" />
                                     <TextBlock Text="{local:Loc WidgetShow}" Style="{StaticResource SettingsRowLabel}"
                                                FontSize="12" VerticalAlignment="Center" />

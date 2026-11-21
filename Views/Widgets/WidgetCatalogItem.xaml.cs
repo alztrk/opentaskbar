@@ -27,7 +27,7 @@ public partial class WidgetCatalogItem : UserControl
 
     private void Preview_Click(object sender, RoutedEventArgs e)
     {
-        if (DataContext is DockWidgetOption)
+        if (DataContext is DockWidgetOption option && option.IsHardwareAvailable)
             RaiseEvent(new RoutedEventArgs(SettingsRequestedEvent, this));
     }
 
@@ -36,6 +36,12 @@ public partial class WidgetCatalogItem : UserControl
         e.Handled = true;
         if (DataContext is DockWidgetOption)
             RaiseEvent(new RoutedEventArgs(InstallationRequestedEvent, this));
+    }
+
+    private void FlyoutPreview_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is DockWidgetOption option) option.ShowFlyoutPreview = !option.ShowFlyoutPreview;
     }
 
     private void Close_Click(object sender, RoutedEventArgs e)

@@ -1,4 +1,4 @@
-﻿{
+{
   "Settings": "設定",
   "SettingsTitle": "OpenTaskbar の設定",
   "General": "全般",
@@ -731,6 +731,12 @@
   "DockWidthPixels": "固定ピクセル",
   "DockWidthPercent": "画面の %",
   "DockWidthFill": "全幅（余白なし）",
+  "DockTopGap": "Top spacing",
+  "DockTopGapDescription": "Space above the dock (0 = flush).",
+  "DockTopGapUnit": "Top unit",
+  "DockBottomGap": "Bottom spacing",
+  "DockBottomGapDescription": "Space below the dock (0 = flush).",
+  "DockBottomGapUnit": "Bottom unit",
   "DockWidthValue": "幅",
   "DockWidthValueDescription": "選択したモードの幅の値。"
 }

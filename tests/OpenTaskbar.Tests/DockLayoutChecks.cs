@@ -26,6 +26,13 @@ internal static class DockLayoutChecks
         // Edge-to-edge fill mode must be a valid width mode so users can span the dock across the whole screen.
         Check(Enum.IsDefined(DockWidthMode.Fill), "DockWidthMode.Fill must be a defined width mode.");
 
+        // External top/bottom gaps: pixels and percent resolve correctly, zero is allowed, negatives are clamped.
+        Check(DockMetrics.ResolveGap(DockGapUnit.Pixels, 12, 0, 1920) == 12, "Pixel gap must resolve to its pixel value.");
+        Check(DockMetrics.ResolveGap(DockGapUnit.Percent, 0, 25, 1920) == 480, "Percent gap must resolve to a share of the screen extent.");
+        Check(DockMetrics.ResolveGap(DockGapUnit.Pixels, 0, 0, 1920) == 0, "Gap must allow zero (flush against the edge).");
+        Check(DockMetrics.ResolveGap(DockGapUnit.Percent, 0, 0, 1920) == 0, "Percent gap must allow zero.");
+        Check(DockMetrics.ResolveGap(DockGapUnit.Pixels, -5, 0, 1920) == 0, "Negative gap must clamp to zero.");
+
         // Drop coordinates count visible elements, not hidden entries in the saved order.
         var dragItems = new[] { "app:A", "app:B", "widget:Clock", "widget:Audio" };
         Check(DockItemOrdering.MoveVisibleItem(dragItems, dragItems, "widget:Clock", 2).SequenceEqual(dragItems),

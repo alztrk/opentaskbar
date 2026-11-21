@@ -1,4 +1,4 @@
-﻿{
+{
   "Settings": "Ustawienia",
   "SettingsTitle": "Ustawienia OpenTaskbar",
   "General": "Ogólne",
@@ -731,6 +731,12 @@
   "DockWidthPixels": "Stałe piksele",
   "DockWidthPercent": "% ekranu",
   "DockWidthFill": "Pełna szerokość (bez marginesów)",
+  "DockTopGap": "Gorny odstep",
+  "DockTopGapDescription": "Odstep nad dokiem (0 = na rowno).",
+  "DockTopGapUnit": "Jednostka gorna",
+  "DockBottomGap": "Dolny odstep",
+  "DockBottomGapDescription": "Odstep pod dokiem (0 = na rowno).",
+  "DockBottomGapUnit": "Jednostka dolna",
   "DockWidthValue": "Szerokość",
   "DockWidthValueDescription": "Wartość szerokości dla wybranego trybu."
 }
