@@ -31,6 +31,22 @@ public partial class MainWindow
         ResetMagnification(immediate: true);
         var vertical = edge != DockEdge.Bottom;
         DockFlyout.Edge = edge;
+        TrayButton.SetEdge(edge);
+        Application.Current.Resources["DockIndicatorHorizontalAlignment"] = edge switch
+        {
+            DockEdge.Left => HorizontalAlignment.Left,
+            DockEdge.Right => HorizontalAlignment.Right,
+            _ => HorizontalAlignment.Center
+        };
+        Application.Current.Resources["DockIndicatorVerticalAlignment"] = vertical
+            ? VerticalAlignment.Center
+            : VerticalAlignment.Bottom;
+        Application.Current.Resources["DockIndicatorMargin"] = edge switch
+        {
+            DockEdge.Left => new Thickness(1, 0, 0, 0),
+            DockEdge.Right => new Thickness(0, 0, 1, 0),
+            _ => new Thickness(0, 0, 0, 1)
+        };
         if (_autoHideController is not null)
         {
             _autoHideController.Edge = edge;

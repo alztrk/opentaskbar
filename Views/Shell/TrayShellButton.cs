@@ -13,6 +13,7 @@ namespace OpenTaskbar.Views.Shell;
 public sealed class TrayShellButton : Button
 {
     private readonly DockFlyout _flyout = new();
+    private readonly ContentControl _glyph;
     private int _requestVersion;
     private IReadOnlyList<TrayApp>? _lastApps;
     private Task<IReadOnlyList<TrayApp>>? _refresh;
@@ -28,7 +29,7 @@ public sealed class TrayShellButton : Button
     {
         // Same Grid + TransformGroup cell as the other shell buttons so magnification and edge-origin updates
         // can drive the existing transforms instead of allocating one on first hover.
-        var glyph = new ContentControl
+        _glyph = new ContentControl
         {
             Content = FindResource("IconChevronUp"),
             Width = (double)Application.Current.Resources["DockUtilityGlyphSize"],
@@ -36,8 +37,8 @@ public sealed class TrayShellButton : Button
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center
         };
-        glyph.SetResourceReference(StyleProperty, "WidgetIcon");
-        glyph.SetResourceReference(ForegroundProperty, "TextPrimary");
+        _glyph.SetResourceReference(StyleProperty, "WidgetIcon");
+        _glyph.SetResourceReference(ForegroundProperty, "TextPrimary");
         var cell = new Grid
         {
             Width = (double)Application.Current.Resources["DockIconSize"],
@@ -52,7 +53,7 @@ public sealed class TrayShellButton : Button
                 new TranslateTransform()
             }
         };
-        cell.Children.Add(glyph);
+        cell.Children.Add(_glyph);
         Content = cell;
         Click += Button_Click;
         // Warm the list while the pointer approaches, so a click can show it at once.
@@ -71,6 +72,18 @@ public sealed class TrayShellButton : Button
         Localize();
         if (_flyout.IsOpen && _lastApps is not null)
             _flyout.Show(this, BuildContent(_lastApps), animate: false);
+    }
+
+    /// <summary>Points the chevron toward the direction the background-apps flyout opens.</summary>
+    public void SetEdge(OpenTaskbar.Models.DockEdge edge)
+    {
+        var key = edge switch
+        {
+            OpenTaskbar.Models.DockEdge.Left => "IconChevronRight",
+            OpenTaskbar.Models.DockEdge.Right => "IconChevronLeft",
+            _ => "IconChevronUp"
+        };
+        _glyph.Content = TryFindResource(key) ?? FindResource("IconChevronUp");
     }
 
     /// <summary>Wires the dock's error reporter and process actions. Called once from MainWindow.</summary>

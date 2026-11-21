@@ -122,6 +122,7 @@ public sealed class TaskbarReplacementSession : IDisposable
             }
 
             SetTaskbarState(ReplacementState, _handle);
+            EnforceNativeTaskbarHidden();
             PositionDockWindow();
         }
     }
@@ -568,7 +569,7 @@ public sealed class TaskbarReplacementSession : IDisposable
         if (dpi == 0) throw new InvalidOperationException("ErrorDisplayDimensions");
         if (IsVertical)
         {
-            PositionSideDock(monitorInfo.rcMonitor, dpi);
+            PositionSideDock(monitorInfo.rcMonitor, monitorInfo.rcWork, dpi);
             return;
         }
 
@@ -658,27 +659,35 @@ public sealed class TaskbarReplacementSession : IDisposable
     /// Left/right dock: a full-height column. The shelf width is reserved as an AppBar unless auto-hide is on;
     /// the headroom beside it (for magnified icons) overlaps windows like the bottom dock's headroom does.
     /// </summary>
-    private void PositionSideDock(Rect monitor, uint dpi)
+    private void PositionSideDock(Rect monitor, Rect workArea, uint dpi)
     {
         var thickness = Math.Max(1, (int)Math.Round(ShelfHeight * dpi / 96d));
         var headroom = (int)Math.Round(DockHeadroomDips * dpi / 96d);
         var total = thickness + headroom;
         var height = monitor.Bottom - monitor.Top;
         var edge = _edge == Models.DockEdge.Left ? AbeLeft : AbeRight;
-        var request = (edge == AbeLeft ? monitor.Left : monitor.Right, monitor.Top, (int)edge, _autoHideEnabled ? 0 : thickness);
-        if (_registered && _sideReservation != request)
+        var reserved = _autoHideEnabled ? 0 : thickness;
+        var actualReserved = edge == AbeLeft
+            ? Math.Max(0, workArea.Left - monitor.Left)
+            : Math.Max(0, monitor.Right - workArea.Right);
+        var request = (edge == AbeLeft ? monitor.Left : monitor.Right, monitor.Top, (int)edge, reserved);
+        // Re-apply when our cached request changed OR Windows has not actually moved the work area yet
+        // (e.g. Explorer just released its bottom strip asynchronously after switching to a side edge).
+        if (_registered && !DeferReservation && (_sideReservation != request || actualReserved != reserved))
         {
             _sideReservation = request;
             var data = CreateData();
             data.uEdge = edge;
-            var reserved = _autoHideEnabled ? 0 : thickness;
             data.rc = edge == AbeLeft
                 ? new Rect(monitor.Left, monitor.Top, monitor.Left + reserved, monitor.Bottom)
                 : new Rect(monitor.Right - reserved, monitor.Top, monitor.Right, monitor.Bottom);
             SHAppBarMessage(AbmQueryPos, ref data);
             if (edge == AbeLeft) data.rc.Right = data.rc.Left + reserved;
             else data.rc.Left = data.rc.Right - reserved;
-            SHAppBarMessage(AbmSetPos, ref data);
+            if (SHAppBarMessage(AbmSetPos, ref data) == 0 && _sideReservation == request)
+            {
+                _sideReservation = null;
+            }
         }
 
         var layout = new Size(thickness * 96d / dpi, height * 96d / dpi);

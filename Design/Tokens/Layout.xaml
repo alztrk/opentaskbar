@@ -35,4 +35,7 @@
     <sys:Double x:Key="PreviewDurationMs">160</sys:Double>
     <x:Static x:Key="DockInset" Member="svc:DockMetrics.Inset" />
     <x:Static x:Key="DockPadding" Member="svc:DockMetrics.Padding" />
+    <HorizontalAlignment x:Key="DockIndicatorHorizontalAlignment">Center</HorizontalAlignment>
+    <VerticalAlignment x:Key="DockIndicatorVerticalAlignment">Bottom</VerticalAlignment>
+    <Thickness x:Key="DockIndicatorMargin">0,0,0,1</Thickness>
 </ResourceDictionary>
