@@ -45,6 +45,17 @@ public sealed class TrayShellButton : Button
             Height = (double)Application.Current.Resources["DockIconSize"],
             RenderTransformOrigin = new Point(0.5, 0.5)
         };
+        // Vertical docks can make the button shorter than DockIconSize. Keep the
+        // transform cell inside the button so the glyph stays centered.
+        SizeChanged += (_, _) =>
+        {
+            var size = Math.Min(ActualWidth, ActualHeight);
+            if (size > 0)
+            {
+                cell.Width = size;
+                cell.Height = size;
+            }
+        };
         cell.RenderTransform = new TransformGroup
         {
             Children =
