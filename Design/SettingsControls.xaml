@@ -352,7 +352,26 @@
                     <Grid>
                         <Border x:Name="Surface" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}"
                                 CornerRadius="6" BorderBrush="{DynamicResource StrokeSubtle}" BorderThickness="1">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center">
+                                <Path x:Name="Glyph" Data="{TemplateBinding views:IconGlyph.Glyph}"
+                                      Width="{TemplateBinding views:IconGlyph.Size}" Height="{TemplateBinding views:IconGlyph.Size}"
+                                      Margin="{TemplateBinding views:IconGlyph.Margin}"
+                                      Stretch="Uniform" Stroke="{TemplateBinding Foreground}" StrokeThickness="1.7"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                      VerticalAlignment="Center">
+                                    <Path.Style>
+                                        <Style TargetType="Path">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Path=(views:IconGlyph.Glyph), RelativeSource={RelativeSource TemplatedParent}}" Value="{x:Null}">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Path.Style>
+                                </Path>
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                            </StackPanel>
                         </Border>
                         <Border x:Name="FocusRing" CornerRadius="8" BorderThickness="2" BorderBrush="Transparent"
                                 Margin="-2" IsHitTestVisible="False" Visibility="Collapsed" />
@@ -380,7 +399,26 @@
                     <Grid>
                         <Border x:Name="Surface" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}"
                                 CornerRadius="6" BorderBrush="{TemplateBinding Background}" BorderThickness="1">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center">
+                                <Path x:Name="Glyph" Data="{TemplateBinding views:IconGlyph.Glyph}"
+                                      Width="{TemplateBinding views:IconGlyph.Size}" Height="{TemplateBinding views:IconGlyph.Size}"
+                                      Margin="{TemplateBinding views:IconGlyph.Margin}"
+                                      Stretch="Uniform" Stroke="{TemplateBinding Foreground}" StrokeThickness="1.7"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                      VerticalAlignment="Center">
+                                    <Path.Style>
+                                        <Style TargetType="Path">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Path=(views:IconGlyph.Glyph), RelativeSource={RelativeSource TemplatedParent}}" Value="{x:Null}">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Path.Style>
+                                </Path>
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                            </StackPanel>
                         </Border>
                         <Border x:Name="FocusRing" CornerRadius="8" BorderThickness="2" BorderBrush="Transparent"
                                 Margin="-2" IsHitTestVisible="False" Visibility="Collapsed" />
@@ -408,7 +446,26 @@
                     <Grid>
                         <Border x:Name="Surface" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}"
                                 CornerRadius="6" BorderBrush="Transparent" BorderThickness="1">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center">
+                                <Path x:Name="Glyph" Data="{TemplateBinding views:IconGlyph.Glyph}"
+                                      Width="{TemplateBinding views:IconGlyph.Size}" Height="{TemplateBinding views:IconGlyph.Size}"
+                                      Margin="{TemplateBinding views:IconGlyph.Margin}"
+                                      Stretch="Uniform" Stroke="{TemplateBinding Foreground}" StrokeThickness="1.7"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+                                      VerticalAlignment="Center">
+                                    <Path.Style>
+                                        <Style TargetType="Path">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding Path=(views:IconGlyph.Glyph), RelativeSource={RelativeSource TemplatedParent}}" Value="{x:Null}">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Path.Style>
+                                </Path>
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                            </StackPanel>
                         </Border>
                         <Border x:Name="FocusRing" CornerRadius="8" BorderThickness="2" BorderBrush="Transparent"
                                 Margin="-2" IsHitTestVisible="False" Visibility="Collapsed" />
@@ -780,12 +837,55 @@
                                      Foreground="{DynamicResource TextPrimary}" CaretBrush="{DynamicResource TextPrimary}"
                                      BorderThickness="0" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"
                                      IsReadOnly="{TemplateBinding IsReadOnly}" Visibility="Hidden" />
-                            <ContentPresenter x:Name="ContentSite" IsHitTestVisible="False"
-                                              Content="{TemplateBinding SelectionBoxItem}"
-                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
-                                              ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
-                                              TextElement.Foreground="{DynamicResource TextPrimary}"
-                                              Margin="{TemplateBinding Padding}" VerticalAlignment="Center" HorizontalAlignment="Left" />
+                            <StackPanel Orientation="Horizontal" VerticalAlignment="Center" HorizontalAlignment="Left" Margin="10,0,0,0" IsHitTestVisible="False">
+
+                                <Path x:Name="ComboGlyph" Data="{TemplateBinding views:IconGlyph.Glyph}"
+
+                                      Width="{TemplateBinding views:IconGlyph.Size}" Height="{TemplateBinding views:IconGlyph.Size}"
+
+                                      Margin="{TemplateBinding views:IconGlyph.Margin}"
+
+                                      Stretch="Uniform" Stroke="{TemplateBinding Foreground}" StrokeThickness="1.7"
+
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round"
+
+                                      VerticalAlignment="Center">
+
+                                    <Path.Style>
+
+                                        <Style TargetType="Path">
+
+                                            <Setter Property="Visibility" Value="Visible" />
+
+                                            <Style.Triggers>
+
+                                                <DataTrigger Binding="{Binding Path=(views:IconGlyph.Glyph), RelativeSource={RelativeSource TemplatedParent}}" Value="{x:Null}">
+
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+
+                                                </DataTrigger>
+
+                                            </Style.Triggers>
+
+                                        </Style>
+
+                                    </Path.Style>
+
+                                </Path>
+
+                                <ContentPresenter x:Name="ContentSite" IsHitTestVisible="False"
+
+                                                  Content="{TemplateBinding SelectionBoxItem}"
+
+                                                  ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+
+                                                  ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
+
+                                                  TextElement.Foreground="{DynamicResource TextPrimary}"
+
+                                                  VerticalAlignment="Center" HorizontalAlignment="Left" />
+
+                            </StackPanel>
                             <ToggleButton x:Name="DropDownToggle" Grid.ColumnSpan="2" Style="{StaticResource ComboBoxToggleButton}"
                                           Background="Transparent" BorderThickness="0" Focusable="False"
                                           IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" />

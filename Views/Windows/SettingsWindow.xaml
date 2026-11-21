@@ -68,7 +68,7 @@
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False" HorizontalContentAlignment="Stretch">
                         <StackPanel Margin="{StaticResource SettingsPageInset}" MaxWidth="{StaticResource SettingsReadingWidth}" HorizontalAlignment="Stretch">
                             <DockPanel Margin="0,0,0,26">
-                                <Button DockPanel.Dock="Right" Content="{local:Loc ResetDefaults}" Style="{StaticResource SettingsGhostButton}"
+                                <Button DockPanel.Dock="Right" Content="{local:Loc ResetDefaults}" Style="{StaticResource SettingsGhostButton}" views:IconGlyph.Glyph="{StaticResource IconRotate}"
                                         VerticalAlignment="Top" Padding="9,5" FontSize="11.5" Click="ResetDockDefaults_Click" />
                                 <StackPanel Margin="0,0,16,0">
                                     <TextBlock Text="{local:Loc Dock}" Style="{StaticResource SettingsHeading}" />
@@ -80,7 +80,7 @@
                             <TextBlock Text="{local:Loc SectionDockLayout}" Style="{StaticResource SettingsSectionHeading}" Margin="0,0,0,8" />
                             <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
                                 <Border Style="{StaticResource SettingsRow}"><DockPanel>
-                                    <ComboBox x:Name="EdgeBox" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
+                                    <ComboBox x:Name="EdgeBox" views:IconGlyph.Glyph="{StaticResource IconLayers}" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
                                               AutomationProperties.Name="{local:Loc DockEdge}" SelectionChanged="SegmentChoice_SelectionChanged">
                                         <ComboBoxItem Content="{local:Loc EdgeBottom}" Tag="Bottom" />
                                         <ComboBoxItem Content="{local:Loc EdgeLeft}" Tag="Left" />
@@ -93,7 +93,7 @@
                                 </DockPanel></Border>
 
                                 <Border x:Name="PositionRow" Style="{StaticResource SettingsRow}"><DockPanel>
-                                    <ComboBox x:Name="PositionBox" DockPanel.Dock="Right" MinWidth="150" MaxWidth="280" Width="Auto" VerticalAlignment="Center"
+                                    <ComboBox x:Name="PositionBox" views:IconGlyph.Glyph="{StaticResource IconMonitor}" DockPanel.Dock="Right" MinWidth="150" MaxWidth="280" Width="Auto" VerticalAlignment="Center"
                                               AutomationProperties.Name="{local:Loc DockAlignment}" SelectionChanged="SegmentChoice_SelectionChanged">
                                         <ComboBoxItem Content="{local:Loc Left}" Tag="Left" />
                                         <ComboBoxItem Content="{local:Loc Center}" Tag="Center" />
@@ -107,7 +107,7 @@
                                 </DockPanel></Border>
 
                                 <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
-                                    <ComboBox x:Name="SizeBox" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
+                                    <ComboBox x:Name="SizeBox" views:IconGlyph.Glyph="{StaticResource IconSliders}" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
                                               AutomationProperties.Name="{local:Loc DockSize}" SelectionChanged="SegmentChoice_SelectionChanged">
                                         <ComboBoxItem Content="{local:Loc SizeCompact}" Tag="Compact" />
                                         <ComboBoxItem Content="{local:Loc SizeMedium}" Tag="Medium" />
@@ -144,7 +144,7 @@
                             <TextBlock Text="{local:Loc SectionBehavior}" Style="{StaticResource SettingsSectionHeading}" />
                             <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
                                 <Border Style="{StaticResource SettingsRow}"><DockPanel>
-                                    <ComboBox x:Name="AutoHideBox" DockPanel.Dock="Right" MinWidth="150" MaxWidth="250" Width="Auto" VerticalAlignment="Center"
+                                    <ComboBox x:Name="AutoHideBox" views:IconGlyph.Glyph="{StaticResource IconEyeOff}" DockPanel.Dock="Right" MinWidth="150" MaxWidth="250" Width="Auto" VerticalAlignment="Center"
                                               AutomationProperties.Name="{local:Loc AutoHide}" SelectionChanged="SegmentChoice_SelectionChanged">
                                         <ComboBoxItem Content="{local:Loc AutoHideDisabled}" Tag="Disabled" />
                                         <ComboBoxItem Content="{local:Loc AutoHideSmart}" Tag="Smart" />
@@ -240,7 +240,7 @@
                             <TextBlock Text="{local:Loc SectionDisplays}" Style="{StaticResource SettingsSectionHeading}" />
                             <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
                                 <Border Style="{StaticResource SettingsRow}"><DockPanel>
-                                    <ComboBox x:Name="TargetDisplayBox" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
+                                    <ComboBox x:Name="TargetDisplayBox" views:IconGlyph.Glyph="{StaticResource IconMonitor}" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
                                               DisplayMemberPath="DisplayName"
                                               AutomationProperties.Name="{local:Loc TargetDisplay}"
                                               SelectionChanged="TargetDisplayBox_SelectionChanged" />
@@ -258,7 +258,7 @@
                                     </StackPanel>
                                 </DockPanel></Border>
                                 <Border x:Name="SecondaryAppsRow" Style="{StaticResource SettingsRow}"><DockPanel>
-                                    <ComboBox x:Name="SecondaryAppsBox" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
+                                    <ComboBox x:Name="SecondaryAppsBox" views:IconGlyph.Glyph="{StaticResource IconLayers}" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
                                               DisplayMemberPath="DisplayName"
                                               AutomationProperties.Name="{local:Loc SecondaryApps}"
                                               SelectionChanged="SecondaryAppsBox_SelectionChanged" />
@@ -316,7 +316,7 @@
                             <TextBlock Text="{local:Loc WidgetDensity}" Style="{StaticResource SettingsSectionHeading}" />
                             <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
                                 <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
-                                    <ComboBox x:Name="DensityBox" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
+                                    <ComboBox x:Name="DensityBox" views:IconGlyph.Glyph="{StaticResource IconSliders}" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
                                               AutomationProperties.Name="{local:Loc WidgetDensity}" SelectionChanged="SegmentChoice_SelectionChanged">
                                         <ComboBoxItem Content="{local:Loc WidgetDensityAuto}" Tag="Auto" />
                                         <ComboBoxItem Content="{local:Loc WidgetDensityCompact}" Tag="Compact" />
@@ -346,7 +346,7 @@
                                             <TextBlock Text="{local:Loc ClockShowSeconds}" Style="{StaticResource SettingsRowLabel}" FontSize="12" />
                                         </DockPanel></Border>
                                         <Border Style="{StaticResource CompactSettingsRow}"><DockPanel>
-                                            <ComboBox x:Name="DateStyleBox" DockPanel.Dock="Right" MinWidth="130" MaxWidth="170" Width="Auto" VerticalAlignment="Center"
+                                            <ComboBox x:Name="DateStyleBox" views:IconGlyph.Glyph="{StaticResource IconCalendar}" DockPanel.Dock="Right" MinWidth="130" MaxWidth="170" Width="Auto" VerticalAlignment="Center"
                                                       AutomationProperties.Name="{local:Loc ClockDateStyleLabel}" SelectionChanged="SegmentChoice_SelectionChanged">
                                                 <ComboBoxItem Content="{local:Loc DateStyleDayShort}" Tag="DayAndShortDate" />
                                                 <ComboBoxItem Content="{local:Loc DateStyleShort}" Tag="ShortDateOnly" />
@@ -361,14 +361,14 @@
                                     <StackPanel>
                                         <Button x:Name="CollapseWeatherOptionsButton" Visibility="Collapsed" Click="CollapseWeatherOptions_Click" />
                                         <Border Style="{StaticResource CompactSettingsRow}"><DockPanel>
-                                            <ComboBox x:Name="WeatherCountryBox" DockPanel.Dock="Right" MinWidth="130" MaxWidth="170" Width="Auto" Height="32" VerticalAlignment="Center" IsEditable="True"
+                                            <ComboBox x:Name="WeatherCountryBox" views:IconGlyph.Glyph="{StaticResource IconGlobe}" DockPanel.Dock="Right" MinWidth="130" MaxWidth="170" Width="Auto" Height="32" VerticalAlignment="Center" IsEditable="True"
                                                       AutomationProperties.Name="{local:Loc Country}"
                                                       SelectionChanged="WeatherCountryBox_SelectionChanged"
                                                       KeyUp="WeatherCountryBox_KeyUp" />
                                             <TextBlock Text="{local:Loc Country}" Style="{StaticResource SettingsRowLabel}" FontSize="12" VerticalAlignment="Center" Margin="0,0,12,0" />
                                         </DockPanel></Border>
                                         <Border x:Name="WeatherCityContainer" Visibility="Collapsed" Style="{StaticResource CompactSettingsRow}"><DockPanel>
-                                            <ComboBox x:Name="WeatherCityCombo" DockPanel.Dock="Right" MinWidth="130" MaxWidth="170" Width="Auto" Height="32" VerticalAlignment="Center" IsEditable="True"
+                                            <ComboBox x:Name="WeatherCityCombo" views:IconGlyph.Glyph="{StaticResource IconSearch}" DockPanel.Dock="Right" MinWidth="130" MaxWidth="170" Width="Auto" Height="32" VerticalAlignment="Center" IsEditable="True"
                                                       AutomationProperties.Name="{local:Loc WeatherCity}"
                                                       SelectionChanged="WeatherCityCombo_SelectionChanged"
                                                       KeyUp="WeatherCityCombo_KeyUp" />
@@ -454,7 +454,7 @@
                     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False" HorizontalContentAlignment="Stretch">
                         <StackPanel Margin="{StaticResource SettingsPageInset}" MaxWidth="{StaticResource SettingsReadingWidth}" HorizontalAlignment="Stretch">
                             <DockPanel Margin="0,0,0,24">
-                                <Button DockPanel.Dock="Right" Content="{local:Loc ThemePackNew}" Style="{StaticResource SettingsButton}"
+                                <Button DockPanel.Dock="Right" Content="{local:Loc ThemePackNew}" Style="{StaticResource SettingsButton}" views:IconGlyph.Glyph="{StaticResource IconPlus}"
                                         VerticalAlignment="Top" Click="ThemePackNew_Click" />
                                 <StackPanel Margin="0,0,16,0">
                                     <TextBlock Text="{local:Loc Themes}" Style="{StaticResource SettingsHeading}" />
@@ -464,10 +464,10 @@
 
                             <!-- Theme Library (HTML prototype 3-column Built-in + My themes grid) -->
                             <TextBlock Text="{local:Loc BuiltInThemes}" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,6" />
-                            <UniformGrid x:Name="ThemeGalleryBuiltIn" Columns="3" Margin="0,0,0,14" />
+                            <UniformGrid x:Name="ThemeGalleryBuiltIn" Columns="2" Margin="0,0,0,6" />
 
-                            <TextBlock Text="{local:Loc MyThemes}" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondary}" Margin="0,2,0,6" />
-                            <UniformGrid x:Name="ThemeGalleryCustom" Columns="3" />
+                            <TextBlock Text="{local:Loc MyThemes}" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondary}" Margin="0,6,0,6" />
+                            <UniformGrid x:Name="ThemeGalleryCustom" Columns="2" />
                             <TextBlock x:Name="ThemeGalleryCustomEmpty" Text="{local:Loc NoCustomThemes}" FontSize="11.5"
                                        Foreground="{DynamicResource TextSecondary}" Margin="0,2,0,10" Visibility="Collapsed" />
 
@@ -476,12 +476,12 @@
                                     <TextBlock x:Name="ThemePackDetails" FontSize="11" Foreground="{DynamicResource TextSecondary}"
                                                TextWrapping="Wrap" Margin="0,0,0,10" Visibility="Collapsed" />
                                     <WrapPanel>
-                                        <Button Content="{local:Loc ThemePackImport}" Style="{StaticResource SettingsGhostButton}" Click="ThemePackImport_Click" Margin="0,0,6,4" />
-                                        <Button Content="{local:Loc ThemePackDuplicate}" Style="{StaticResource SettingsGhostButton}" Click="ThemePackDuplicate_Click" Margin="0,0,6,4" />
-                                        <Button Content="{local:Loc ThemePackExport}" Style="{StaticResource SettingsGhostButton}" Click="ThemePackExport_Click" Margin="0,0,6,4" />
-                                        <Button Content="{local:Loc ThemePackOpenFolder}" Style="{StaticResource SettingsGhostButton}" Click="ThemePackOpenFolder_Click" Margin="0,0,6,4" />
-                                        <Button Content="{local:Loc ThemePackReload}" Style="{StaticResource SettingsGhostButton}" Click="ThemePackReload_Click" Margin="0,0,6,4" />
-                                        <Button Content="{local:Loc ThemePackDelete}" Style="{StaticResource SettingsGhostButton}" Foreground="{DynamicResource DangerText}" Click="ThemePackDelete_Click" Margin="0,0,0,4" />
+                                        <Button Content="{local:Loc ThemePackImport}" Style="{StaticResource SettingsGhostButton}" views:IconGlyph.Glyph="{StaticResource IconUpload}" Click="ThemePackImport_Click" Margin="0,0,6,4" />
+                                        <Button Content="{local:Loc ThemePackDuplicate}" Style="{StaticResource SettingsGhostButton}" views:IconGlyph.Glyph="{StaticResource IconDuplicate}" Click="ThemePackDuplicate_Click" Margin="0,0,6,4" />
+                                        <Button Content="{local:Loc ThemePackExport}" Style="{StaticResource SettingsGhostButton}" views:IconGlyph.Glyph="{StaticResource IconDownload}" Click="ThemePackExport_Click" Margin="0,0,6,4" />
+                                        <Button Content="{local:Loc ThemePackOpenFolder}" Style="{StaticResource SettingsGhostButton}" views:IconGlyph.Glyph="{StaticResource IconFolder}" Click="ThemePackOpenFolder_Click" Margin="0,0,6,4" />
+                                        <Button Content="{local:Loc ThemePackReload}" Style="{StaticResource SettingsGhostButton}" views:IconGlyph.Glyph="{StaticResource IconRefresh}" Click="ThemePackReload_Click" Margin="0,0,6,4" />
+                                        <Button Content="{local:Loc ThemePackDelete}" Style="{StaticResource SettingsGhostButton}" Foreground="{DynamicResource DangerText}" views:IconGlyph.Glyph="{StaticResource IconTrash}" Click="ThemePackDelete_Click" Margin="0,0,0,4" />
                                     </WrapPanel>
                                 </StackPanel>
                             </Border>
@@ -490,7 +490,7 @@
                             <TextBlock Text="{local:Loc Theme}" Style="{StaticResource SettingsSectionHeading}" Margin="0,4,0,8" />
                             <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
                                 <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
-                                    <ComboBox x:Name="ThemeBox" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
+                                    <ComboBox x:Name="ThemeBox" views:IconGlyph.Glyph="{StaticResource IconPalette}" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
                                               AutomationProperties.Name="{local:Loc ColorMode}" SelectionChanged="SegmentChoice_SelectionChanged">
                                         <ComboBoxItem Content="{local:Loc Windows}" Tag="System" />
                                         <ComboBoxItem Content="{local:Loc Dark}" Tag="Dark" />
@@ -528,7 +528,7 @@
                             <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
                                 <Border Style="{StaticResource SettingsRow}"><DockPanel>
                                     <StackPanel DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center">
-                                        <ComboBox x:Name="DockSurfaceBox" Tag="Dock" VerticalAlignment="Center"
+                                        <ComboBox x:Name="DockSurfaceBox" views:IconGlyph.Glyph="{StaticResource IconLayers}" Tag="Dock" VerticalAlignment="Center"
                                                   SelectionChanged="SurfaceStyle_Changed"
                                                   AutomationProperties.Name="{local:Loc SurfaceDock}">
                                             <ComboBoxItem Content="{local:Loc SurfaceGlass}" Tag="Glass" />
@@ -550,7 +550,7 @@
 
                                 <Border Style="{StaticResource SettingsRow}"><DockPanel>
                                     <StackPanel DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center">
-                                        <ComboBox x:Name="MenuSurfaceBox" Tag="Menu" VerticalAlignment="Center"
+                                        <ComboBox x:Name="MenuSurfaceBox" views:IconGlyph.Glyph="{StaticResource IconLayers}" Tag="Menu" VerticalAlignment="Center"
                                                   SelectionChanged="SurfaceStyle_Changed"
                                                   AutomationProperties.Name="{local:Loc SurfaceMenu}">
                                             <ComboBoxItem Content="{local:Loc SurfaceGlass}" Tag="Glass" />
@@ -572,7 +572,7 @@
 
                                 <Border Style="{StaticResource SettingsRow}"><DockPanel>
                                     <StackPanel DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center">
-                                        <ComboBox x:Name="WidgetSurfaceBox" Tag="Widget" VerticalAlignment="Center"
+                                        <ComboBox x:Name="WidgetSurfaceBox" views:IconGlyph.Glyph="{StaticResource IconLayers}" Tag="Widget" VerticalAlignment="Center"
                                                   SelectionChanged="SurfaceStyle_Changed"
                                                   AutomationProperties.Name="{local:Loc SurfaceWidget}">
                                             <ComboBoxItem Content="{local:Loc SurfaceGlass}" Tag="Glass" />
@@ -594,7 +594,7 @@
 
                                 <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
                                     <StackPanel DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center">
-                                        <ComboBox x:Name="SettingsSurfaceBox" Tag="Settings" VerticalAlignment="Center"
+                                        <ComboBox x:Name="SettingsSurfaceBox" views:IconGlyph.Glyph="{StaticResource IconLayers}" Tag="Settings" VerticalAlignment="Center"
                                                   SelectionChanged="SurfaceStyle_Changed"
                                                   AutomationProperties.Name="{local:Loc SurfaceSettings}">
                                             <ComboBoxItem Content="{local:Loc SurfaceGlass}" Tag="Glass" />
@@ -629,7 +629,7 @@
                             <TextBlock Text="{local:Loc SectionHotkeys}" Style="{StaticResource SettingsSectionHeading}" Margin="0,0,0,8" />
                             <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
                                 <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
-                                    <ComboBox x:Name="HotkeyBox" DockPanel.Dock="Right" MinWidth="150" MaxWidth="250" Width="Auto" VerticalAlignment="Center"
+                                    <ComboBox x:Name="HotkeyBox" views:IconGlyph.Glyph="{StaticResource IconKeyboard}" DockPanel.Dock="Right" MinWidth="150" MaxWidth="250" Width="Auto" VerticalAlignment="Center"
                                               AutomationProperties.Name="{local:Loc DockHotkey}" SelectionChanged="SegmentChoice_SelectionChanged">
                                         <ComboBoxItem Content="Ctrl+Alt+D" Tag="CtrlAltD" />
                                         <ComboBoxItem Content="{local:Loc HotkeyDisabled}" Tag="Disabled" />
@@ -645,7 +645,7 @@
                             <TextBlock Text="{local:Loc SectionInteractions}" Style="{StaticResource SettingsSectionHeading}" />
                             <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
                                 <Border Style="{StaticResource SettingsRow}"><DockPanel>
-                                    <ComboBox x:Name="StartPlacementBox" DockPanel.Dock="Right" MinWidth="150" MaxWidth="250" Width="Auto" VerticalAlignment="Center"
+                                    <ComboBox x:Name="StartPlacementBox" views:IconGlyph.Glyph="{StaticResource IconMouse}" DockPanel.Dock="Right" MinWidth="150" MaxWidth="250" Width="Auto" VerticalAlignment="Center"
                                               AutomationProperties.Name="{local:Loc StartPlacement}" SelectionChanged="SegmentChoice_SelectionChanged">
                                         <ComboBoxItem Content="{local:Loc PlacementStart}" Tag="Start" />
                                         <ComboBoxItem Content="{local:Loc PlacementEnd}" Tag="End" />
@@ -726,8 +726,8 @@
                             <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
                                 <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
                                     <StackPanel Orientation="Horizontal" DockPanel.Dock="Right" VerticalAlignment="Center">
-                                        <Button Content="{local:Loc ExportSettings}" Style="{StaticResource SettingsButton}" Click="ExportSettings_Click" Margin="0,0,8,0" />
-                                        <Button Content="{local:Loc ImportSettings}" Style="{StaticResource SettingsButton}" Click="ImportSettings_Click" />
+                                        <Button Content="{local:Loc ExportSettings}" Style="{StaticResource SettingsButton}" views:IconGlyph.Glyph="{StaticResource IconDownload}" Click="ExportSettings_Click" Margin="0,0,8,0" />
+                                        <Button Content="{local:Loc ImportSettings}" Style="{StaticResource SettingsButton}" views:IconGlyph.Glyph="{StaticResource IconUpload}" Click="ImportSettings_Click" />
                                     </StackPanel>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
                                         <TextBlock Text="{local:Loc Backup}" Style="{StaticResource SettingsRowLabel}" />
@@ -753,7 +753,7 @@
                                     <TextBlock Text="{local:Loc Version}" Style="{StaticResource SettingsRowLabel}" VerticalAlignment="Center" />
                                 </DockPanel></Border>
                                 <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
-                                    <Button Content="{local:Loc GitHubRepository}" DockPanel.Dock="Right" Style="{StaticResource SettingsButton}" Click="OpenGithub_Click" VerticalAlignment="Center"/>
+                                    <Button Content="{local:Loc GitHubRepository}" DockPanel.Dock="Right" Style="{StaticResource SettingsButton}" views:IconGlyph.Glyph="{StaticResource IconGitHub}" views:IconGlyph.Size="16" views:IconGlyph.Margin="0,0,7,0" Click="OpenGithub_Click" VerticalAlignment="Center"/>
                                     <TextBlock Text="{local:Loc SourceCode}" Style="{StaticResource SettingsRowLabel}" VerticalAlignment="Center"/>
                                 </DockPanel></Border>
                             </StackPanel></Border>
@@ -761,7 +761,7 @@
                             <TextBlock Text="{local:Loc Diagnostics}" Style="{StaticResource SettingsSectionHeading}" />
                             <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
                                 <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
-                                    <Button Content="{local:Loc OpenLogFile}" DockPanel.Dock="Right" Style="{StaticResource SettingsButton}" Click="OpenLogFile_Click" VerticalAlignment="Center" />
+                                    <Button Content="{local:Loc OpenLogFile}" DockPanel.Dock="Right" Style="{StaticResource SettingsButton}" views:IconGlyph.Glyph="{StaticResource IconFileText}" Click="OpenLogFile_Click" VerticalAlignment="Center" />
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
                                         <TextBlock Text="{local:Loc OpenLogFile}" Style="{StaticResource SettingsRowLabel}" />
                                         <TextBlock Text="{local:Loc OpenLogFileDescription}" Style="{StaticResource SettingsRowDescription}" />

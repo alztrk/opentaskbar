@@ -530,45 +530,60 @@ public partial class SettingsWindow : Window
         };
         chipBrush.Freeze();
 
+        // Card-style theme entry: swatch + name in a bordered tile with even spacing.
         var chip = new Border
         {
-            Width = 22,
-            Height = 22,
-            CornerRadius = new CornerRadius(5),
+            Width = 34,
+            Height = 34,
+            CornerRadius = new CornerRadius(7),
             BorderThickness = new Thickness(1),
             Background = chipBrush,
-            Margin = new Thickness(0, 0, 10, 0),
+            Margin = new Thickness(0, 0, 12, 0),
             VerticalAlignment = VerticalAlignment.Center
         };
         chip.SetResourceReference(Border.BorderBrushProperty, "StrokeSubtle");
+
+        var textStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
+        var nameText = new TextBlock
+        {
+            Text = choice.Name,
+            FontSize = 12.5,
+            FontWeight = isActive ? FontWeights.SemiBold : FontWeights.Normal,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        nameText.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+        textStack.Children.Add(nameText);
+        if (!string.IsNullOrWhiteSpace(choice.Details))
+        {
+            var desc = new TextBlock
+            {
+                Text = choice.Details,
+                FontSize = 10.5,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                Margin = new Thickness(0, 2, 0, 0)
+            };
+            desc.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+            textStack.Children.Add(desc);
+        }
 
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.Children.Add(chip);
-
-        var nameText = new TextBlock
-        {
-            Text = choice.Name,
-            FontSize = 12,
-            FontWeight = isActive ? FontWeights.SemiBold : FontWeights.Normal,
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        nameText.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
-        Grid.SetColumn(nameText, 1);
-        grid.Children.Add(nameText);
+        Grid.SetColumn(textStack, 1);
+        grid.Children.Add(textStack);
 
         if (isActive)
         {
             var check = new System.Windows.Shapes.Path
             {
                 Data = Application.Current.TryFindResource("IconCheck") as Geometry,
-                Width = 13,
-                Height = 13,
+                Width = 14,
+                Height = 14,
                 Stretch = Stretch.Uniform,
-                StrokeThickness = 1.8,
+                StrokeThickness = 2,
                 StrokeStartLineCap = PenLineCap.Round,
                 StrokeEndLineCap = PenLineCap.Round,
                 StrokeLineJoin = PenLineJoin.Round,
@@ -580,20 +595,32 @@ public partial class SettingsWindow : Window
             grid.Children.Add(check);
         }
 
+        var cardBorder = new Border
+        {
+            Child = grid,
+            CornerRadius = new CornerRadius(7),
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(10, 9, 10, 9),
+            Background = isActive
+                ? (Brush)Application.Current.FindResource("SurfaceSelectedStrong")
+                : Brushes.Transparent
+        };
+        cardBorder.SetResourceReference(Border.BorderBrushProperty,
+            isActive ? "StrokeFocus" : "StrokeSubtle");
+        if (isActive) cardBorder.BorderThickness = new Thickness(1.5);
+
         var btn = new Button
         {
-            Content = grid,
-            MinHeight = 41,
-            Padding = new Thickness(9, 7, 9, 7),
-            Margin = new Thickness(0, 0, 8, 4),
+            Content = cardBorder,
+            MinHeight = 56,
+            Padding = new Thickness(0),
+            Margin = new Thickness(0, 0, 10, 8),
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
             VerticalContentAlignment = VerticalAlignment.Center,
-            Style = (Style)Application.Current.FindResource(isActive ? "SettingsButton" : "SettingsGhostButton")
+            Style = (Style)Application.Current.FindResource("SettingsGhostButton"),
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0)
         };
-        if (isActive)
-        {
-            btn.SetResourceReference(Control.BackgroundProperty, "SurfaceSelectedStrong");
-        }
         System.Windows.Automation.AutomationProperties.SetName(btn, choice.Name);
         btn.Click += (_, e) =>
         {
