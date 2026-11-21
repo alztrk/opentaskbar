@@ -30,6 +30,8 @@ public partial class MainWindow : Window
     private const uint SwpFrameChanged = 0x0020;
     private const int WmMouseActivate = 0x0021;
     private const int MaNoActivate = 3;
+    private const int WmNcHitTest = 0x0084;
+    private const int HtTransparent = -1;
 
     private readonly ObservableCollection<DockApp> _pinnedApps = [];
     private readonly ObservableCollection<DockApp> _runningApps = [];
@@ -496,6 +498,14 @@ public partial class MainWindow : Window
             return IntPtr.Zero;
         }
 
+        // The external top/bottom gaps are transparent parts of this window. Make them click-through so windows
+        // behind the taskbar stay interactive and Windows does not treat the empty band as taskbar surface.
+        if (message == WmNcHitTest && IsInExternalGap(lParam))
+        {
+            handled = true;
+            return new IntPtr(HtTransparent);
+        }
+
         // Keep the application's foreground state intact on left/middle clicks until the dock command runs.
         // Right-clicks open a ContextMenu, which needs window activation so WPF Popup mouse capture and focus stay open.
         if (message == WmMouseActivate)
@@ -532,6 +542,31 @@ public partial class MainWindow : Window
         }
 
         return IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// True when a WM_NCHITTEST screen point falls in the transparent external gap around the dock surface rather
+    /// than on the visible bar. Those regions must be click-through so maximized windows behind the gap stay
+    /// interactive and the empty band is not treated as part of the taskbar by other applications.
+    /// </summary>
+    private bool IsInExternalGap(IntPtr lParam)
+    {
+        if (!IsLoaded || DockSurface is null || DockSurface.ActualWidth <= 0 || DockSurface.ActualHeight <= 0) return false;
+        try
+        {
+            var coordinates = lParam.ToInt64();
+            var screenX = (int)(short)(coordinates & 0xFFFF);
+            var screenY = (int)(short)((coordinates >> 16) & 0xFFFF);
+            var surfaceTopLeft = DockSurface.PointToScreen(new Point(0, 0));
+            var surfaceBottomRight = DockSurface.PointToScreen(new Point(DockSurface.ActualWidth, DockSurface.ActualHeight));
+            var withinSurface = screenX >= surfaceTopLeft.X && screenX <= surfaceBottomRight.X
+                && screenY >= surfaceTopLeft.Y && screenY <= surfaceBottomRight.Y;
+            return !withinSurface;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     private void LoadPinnedApps(IReadOnlyList<string>? preferredOrder = null)
@@ -2671,22 +2706,26 @@ public partial class MainWindow : Window
         var bevelH = -9;
         var bevelV = -profile.VerticalPadding + 1;
         DockInnerBevel.Margin = IsVertical ? new Thickness(bevelV, bevelH, bevelV, bevelH) : new Thickness(bevelH, bevelV, bevelH, bevelV);
-        if (IsVertical) DockFrame.Padding = new Thickness(profile.VerticalPadding, 10, profile.VerticalPadding, 10);
+        if (IsVertical) DockFrame.Padding = new Thickness(profile.VerticalPadding + 4, 10, profile.VerticalPadding + 4, 10);
         var scale = profile.WidgetScale;
         var widgetTransform = Math.Abs(scale - 1) > 0.001 ? new ScaleTransform(scale, scale) : Transform.Identity;
         WidgetStrip.LayoutTransform = widgetTransform;
         DockWidgets.LayoutTransform = widgetTransform;
+        var effectiveShelf = IsVertical ? profile.Shelf + 16 : profile.Shelf;
         if (_replacementSession is not null)
         {
-            _replacementSession.ShelfHeight = profile.Shelf;
+            _replacementSession.ShelfHeight = effectiveShelf;
+            // The external top gap is part of the dock's headroom: let the window grow with it, exactly like the
+            // size/scale setting does, instead of compressing the bar inside a fixed-height window.
+            _replacementSession.HeadroomHeight = EffectiveHeadroom;
         }
         else if (IsVertical)
         {
-            Width = EffectiveHeadroom + profile.Shelf;
+            Width = EffectiveHeadroom + effectiveShelf;
         }
         else
         {
-            Height = DockMetrics.Headroom + profile.Shelf;
+            Height = EffectiveHeadroom + profile.Shelf;
         }
         ApplySecondaryShelf();
     }
@@ -2702,13 +2741,15 @@ public partial class MainWindow : Window
     private void UpdatePreferredIconPixels()
     {
         var dpiScale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        // Use the native-snapped icon size directly. The forced 128 px extraction backfired: Shell returned
+        // upscaled/soft bitmaps that looked blurry once drawn at the small dock size.
         var pixels = ApplicationIconProvider.ComputeApplicationIconPixels(Math.Max(18, Profile.Icon * 0.95), dpiScale);
-        var extractPixels = ApplicationIconProvider.ComputeExtractionPixels(pixels);
-        ApplicationIconProvider.PreferredIconPixels = extractPixels;
-        ApplicationIconProvider.HoverIconPixels = ApplicationIconProvider.ComputeHoverIconPixels(extractPixels, DockMetrics.HoverScale);
-        ThemePacks.PreferredIconPixels = extractPixels;
-        // Keep app artwork crisp and capped to its dock cell (never shrinking Compact from 28 DIP down to 24 DIP).
-        var appIconSize = DockMetrics.AppIconDipSize(Profile.Icon, extractPixels, dpiScale);
+        ApplicationIconProvider.PreferredIconPixels = pixels;
+        ApplicationIconProvider.HoverIconPixels = ApplicationIconProvider.ComputeHoverIconPixels(pixels, DockMetrics.HoverScale);
+        ThemePacks.PreferredIconPixels = pixels;
+        // Draw the snapped bitmap at its native pixel size, capped to the dock cell so it never clips on the
+        // right/bottom (e.g. LibreWolf at medium dock size).
+        var appIconSize = DockMetrics.AppIconDipSize(Profile.Icon, pixels, dpiScale);
         Application.Current.Resources["DockApplicationIconSize"] = appIconSize;
         Application.Current.Resources["StartLogoSize"] = appIconSize;
     }

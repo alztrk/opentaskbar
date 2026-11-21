@@ -63,10 +63,9 @@ public sealed class TaskbarReplacementSession : IDisposable
     private DispatcherTimer? _fullScreenPollTimer;
     private int _hideRetryAttempts;
     private bool _hideRetryPending;
-    private double? _cachedHeadroomDips;
     private double _shelfHeight = DockMetrics.ShelfHeight;
+    private double _headroomHeight = DockMetrics.Headroom;
     private (int Coordinate, int Top, int Edge, int Reserved)? _sideReservation;
-    private const double DockHeadroomDips = DockMetrics.Headroom;
     private bool _autoHideEnabled;
     private bool _positioning;
     private (int Left, int Bottom, int NativePixels, int ExtraHeight)? _reservation;
@@ -124,7 +123,28 @@ public sealed class TaskbarReplacementSession : IDisposable
             SetTaskbarState(ReplacementState, _handle);
             EnforceNativeTaskbarHidden();
             PositionDockWindow();
+            ScheduleEdgeReservationSync();
         }
+    }
+
+    // Explorer releases its bottom strip asynchronously after ABS_AUTOHIDE; re-apply the new edge's AppBar
+    // reservation once after a short settle delay so the work area moves immediately without a restart.
+    private void ScheduleEdgeReservationSync()
+    {
+        var timer = new DispatcherTimer(DispatcherPriority.Background, _window.Dispatcher)
+        {
+            Interval = TimeSpan.FromMilliseconds(260)
+        };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            if (!_active || _disposed || Volatile.Read(ref _stopInProgress) != 0) return;
+            _reservation = null;
+            _sideReservation = null;
+            EnforceNativeTaskbarHidden();
+            PositionDockWindow();
+        };
+        timer.Start();
     }
 
     private nint _targetMonitor;
@@ -573,7 +593,7 @@ public sealed class TaskbarReplacementSession : IDisposable
             return;
         }
 
-        var headroomDips = _cachedHeadroomDips ??= _window.TryFindResource("DockHeadroom") as double? ?? DockHeadroomDips;
+        var headroomDips = HeadroomHeight;
         // The shelf comes from the user's size + scale profile. Any Explorer strip that is still present is
         // accounted for in ReserveShelf via the current work area, so it must not impose a height floor here.
         var metrics = DockLayoutMetrics.Calculate(ShelfHeight, 0, headroomDips, dpi);
@@ -662,7 +682,7 @@ public sealed class TaskbarReplacementSession : IDisposable
     private void PositionSideDock(Rect monitor, Rect workArea, uint dpi)
     {
         var thickness = Math.Max(1, (int)Math.Round(ShelfHeight * dpi / 96d));
-        var headroom = (int)Math.Round(DockHeadroomDips * dpi / 96d);
+        var headroom = (int)Math.Round(HeadroomHeight * dpi / 96d);
         var total = thickness + headroom;
         var height = monitor.Bottom - monitor.Top;
         var edge = _edge == Models.DockEdge.Left ? AbeLeft : AbeRight;
@@ -720,6 +740,21 @@ public sealed class TaskbarReplacementSession : IDisposable
         {
             if (_shelfHeight == value) return;
             _shelfHeight = value;
+            if (_active && Volatile.Read(ref _stopInProgress) == 0) PositionDockWindow();
+        }
+    }
+
+    /// <summary>
+    /// Headroom in DIPs above the shelf. Driven by the user's external top-gap setting so the dock window grows
+    /// with the gap instead of compressing the bar inside a fixed-height window.
+    /// </summary>
+    public double HeadroomHeight
+    {
+        get => _headroomHeight;
+        set
+        {
+            if (Math.Abs(_headroomHeight - value) < 0.01) return;
+            _headroomHeight = value;
             if (_active && Volatile.Read(ref _stopInProgress) == 0) PositionDockWindow();
         }
     }

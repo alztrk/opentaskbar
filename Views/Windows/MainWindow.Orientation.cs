@@ -43,8 +43,8 @@ public partial class MainWindow
             : VerticalAlignment.Bottom;
         Application.Current.Resources["DockIndicatorMargin"] = edge switch
         {
-            DockEdge.Left => new Thickness(1, 0, 0, 0),
-            DockEdge.Right => new Thickness(0, 0, 1, 0),
+            DockEdge.Left => new Thickness(2, 0, 0, 0),
+            DockEdge.Right => new Thickness(0, 0, 2, 0),
             _ => new Thickness(0, 0, 0, 1)
         };
         if (_autoHideController is not null)
@@ -224,9 +224,10 @@ public partial class MainWindow
         ScrollNextOverlay.Visibility = Visibility.Collapsed;
         DockSurface.Width = double.NaN;
 
+        const double verticalExtraWidth = 8;
         if (IsFullWidth || IsEdgeToEdge)
         {
-            Application.Current.Resources["DockCellSize"] = Profile.Cell;
+            Application.Current.Resources["DockCellSize"] = Profile.Cell + verticalExtraWidth;
             Application.Current.Resources["DockCellHeight"] = Profile.Cell;
             DockLayoutRoot.MinHeight = Math.Max(0, maximumSurfaceHeight - verticalChrome);
             DockScrollViewer.MaxHeight = Math.Max(Profile.Cell, maximumSurfaceHeight - verticalChrome);
@@ -237,7 +238,7 @@ public partial class MainWindow
         if (_dockWidthOverride is { } fixedHeight)
         {
             var targetHeight = Math.Clamp(fixedHeight, Math.Min(MinimumDockSurfaceWidth, maximumSurfaceHeight), maximumSurfaceHeight);
-            Application.Current.Resources["DockCellSize"] = Profile.Cell;
+            Application.Current.Resources["DockCellSize"] = Profile.Cell + verticalExtraWidth;
             Application.Current.Resources["DockCellHeight"] = Profile.Cell;
             DockLayoutRoot.MinHeight = 0;
             DockScrollViewer.MaxHeight = Math.Max(Profile.Cell, targetHeight - verticalChrome);
@@ -246,7 +247,7 @@ public partial class MainWindow
         }
 
         var frame = verticalChrome + marginV + 24;
-        Application.Current.Resources["DockCellSize"] = Profile.Cell;
+        Application.Current.Resources["DockCellSize"] = Profile.Cell + verticalExtraWidth;
         Application.Current.Resources["DockCellHeight"] = Math.Min(Profile.Cell,
             Math.Max(DockMetrics.MinCellSize, (available - frame) / count));
         DockLayoutRoot.MinHeight = 0;
