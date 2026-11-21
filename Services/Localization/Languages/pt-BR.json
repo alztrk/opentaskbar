@@ -1,4 +1,4 @@
-{
+﻿{
   "Settings": "Configurações",
   "SettingsTitle": "Configurações do OpenTaskbar",
   "General": "Geral",
@@ -724,5 +724,12 @@
   "ThemeFieldTextPrimary": "Primary text",
   "ThemeFieldWidgetCard": "Widget surface",
   "ThemeFieldDockWidgetRadius": "Dock widget radius",
-  "ThemeFieldSettingsPageInset": "Page padding"
+  "ThemeFieldSettingsPageInset": "Page padding",
+  "DockWidthMode": "Largura da barra",
+  "DockWidthModeDescription": "Como a largura da barra é determinada.",
+  "DockWidthAuto": "Ajustar ao conteúdo",
+  "DockWidthPixels": "Pixels fixos",
+  "DockWidthPercent": "% da tela",
+  "DockWidthValue": "Largura",
+  "DockWidthValueDescription": "Valor da largura para o modo selecionado."
 }

@@ -3,7 +3,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:local="clr-namespace:OpenTaskbar.Services"
              Focusable="False" Foreground="{DynamicResource TextPrimary}" FontFamily="{StaticResource InterfaceFont}">
-    <Border Style="{StaticResource WidgetCardBorder}" Padding="8,0,8,0">
+    <Border Style="{StaticResource WidgetCardBorder}" Padding="10,0,6,0">
         <Grid VerticalAlignment="Center">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
@@ -11,43 +11,56 @@
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <!-- Leading Icon: Watch/Hourglass icon -->
             <ContentControl x:Name="TileIcon" Grid.Column="0"
-                            Style="{StaticResource WidgetIcon}"
                             Content="{StaticResource IconTimer}"
                             Width="16" Height="16"
                             VerticalAlignment="Center"
-                            Margin="2,0,8,0"
-                            Foreground="{DynamicResource WidgetAccent}" />
+                            Margin="0,0,7,0">
+                <ContentControl.Style>
+                    <Style TargetType="ContentControl" BasedOn="{StaticResource WidgetIcon}">
+                        <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsRunning}" Value="True">
+                                <Setter Property="Foreground" Value="{DynamicResource WidgetSelectedForeground}" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </ContentControl.Style>
+            </ContentControl>
 
-            <!-- Details Trigger Button & Labels -->
-            <Button x:Name="DetailsButton" Grid.Column="1" Style="{StaticResource WidgetButton}" Padding="4,0,6,0" Click="Details_Click"
-                    HorizontalContentAlignment="Left" ToolTip="{local:Loc WidgetOpenDetails}"
+            <Button x:Name="DetailsButton" Grid.Column="1" Background="Transparent" BorderThickness="0" Padding="2,0,4,0"
+                    Cursor="Hand" FocusVisualStyle="{x:Null}" Click="Details_Click"
+                    HorizontalContentAlignment="Left" VerticalContentAlignment="Center" ToolTip="{local:Loc WidgetOpenDetails}"
                     AutomationProperties.Name="{Binding Title, RelativeSource={RelativeSource AncestorType=UserControl}}"
                     AutomationProperties.HelpText="{local:Loc WidgetOpenDetails}" AutomationProperties.ItemStatus="{Binding Value}">
-                <Grid VerticalAlignment="Center">
-                    <TextBlock x:Name="ValueText" Typography.NumeralAlignment="Tabular" FontWeight="Bold"
-                               FontSize="14.5" Foreground="{DynamicResource TextPrimary}" VerticalAlignment="Center">
-                        <TextBlock.Style>
-                            <Style TargetType="TextBlock">
-                                <Setter Property="Text" Value="{Binding Value}" />
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding Value}" Value="">
-                                        <Setter Property="Text" Value="{local:Loc WidgetSetDuration}" />
-                                        <Setter Property="FontSize" Value="11.5" />
-                                        <Setter Property="FontWeight" Value="SemiBold" />
-                                        <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </TextBlock.Style>
-                    </TextBlock>
-                </Grid>
+                <Button.Template>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="Transparent" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Border>
+                    </ControlTemplate>
+                </Button.Template>
+                <TextBlock x:Name="ValueText" Typography.NumeralAlignment="Tabular" FontWeight="SemiBold"
+                           FontSize="13" Foreground="{DynamicResource TextPrimary}" VerticalAlignment="Center">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Text" Value="{Binding Value}" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Value}" Value="">
+                                    <Setter Property="Text" Value="{local:Loc WidgetSetDuration}" />
+                                    <Setter Property="FontSize" Value="11.5" />
+                                    <Setter Property="FontWeight" Value="SemiBold" />
+                                    <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
             </Button>
 
-            <!-- Quick Action Button -->
             <Button x:Name="QuickActionButton" Grid.Column="2"
-                    Width="36" Height="36" Margin="4,0,2,0" VerticalAlignment="Center" Click="QuickAction_Click">
+                    Width="36" Height="36" Margin="4,0,0,0" VerticalAlignment="Center" Click="QuickAction_Click">
                 <Button.Style>
                     <Style TargetType="Button" BasedOn="{StaticResource WidgetIconButton}">
                         <Setter Property="ToolTip" Value="{local:Loc TimedWidgetStart}" />
@@ -64,38 +77,28 @@
                         </Style.Triggers>
                     </Style>
                 </Button.Style>
-                <Grid>
-                    <Ellipse x:Name="ActionBackdrop" Width="32" Height="32">
-                        <Ellipse.Style>
-                            <Style TargetType="Ellipse">
-                                <Setter Property="Fill" Value="{DynamicResource SurfaceHover}" />
-                                <Style.Triggers>
-                                    <DataTrigger Binding="{Binding IsRunning}" Value="True">
-                                        <Setter Property="Fill" Value="{DynamicResource SurfaceDanger}" />
-                                        <DataTrigger.EnterActions>
-                                            <BeginStoryboard x:Name="PulseRunning">
-                                                <Storyboard RepeatBehavior="Forever" AutoReverse="True">
-                                                    <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0.75" To="1.0" Duration="0:0:0.8" />
-                                                </Storyboard>
-                                            </BeginStoryboard>
-                                        </DataTrigger.EnterActions>
-                                        <DataTrigger.ExitActions>
-                                            <StopStoryboard BeginStoryboardName="PulseRunning" />
-                                        </DataTrigger.ExitActions>
-                                    </DataTrigger>
-                                </Style.Triggers>
-                            </Style>
-                        </Ellipse.Style>
-                    </Ellipse>
-                    <ContentControl x:Name="ActionGlyph" Width="12" Height="12">
+                <Border Width="26" Height="26" CornerRadius="7" BorderThickness="1">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="Background" Value="Transparent" />
+                            <Setter Property="BorderBrush" Value="Transparent" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsRunning}" Value="True">
+                                    <Setter Property="Background" Value="{DynamicResource WidgetSelectedFill}" />
+                                    <Setter Property="BorderBrush" Value="{DynamicResource WidgetSelectedStroke}" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <ContentControl x:Name="ActionGlyph" Width="12" Height="12" HorizontalAlignment="Center" VerticalAlignment="Center">
                         <ContentControl.Style>
                             <Style TargetType="ContentControl" BasedOn="{StaticResource WidgetGlyph}">
                                 <Setter Property="Content" Value="{StaticResource IconPlayFill}" />
-                                <Setter Property="Foreground" Value="{DynamicResource AccentBrush}" />
+                                <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
                                 <Style.Triggers>
                                     <DataTrigger Binding="{Binding IsRunning}" Value="True">
                                         <Setter Property="Content" Value="{StaticResource IconPauseFill}" />
-                                        <Setter Property="Foreground" Value="#FFFFFFFF" />
+                                        <Setter Property="Foreground" Value="{DynamicResource WidgetSelectedForeground}" />
                                     </DataTrigger>
                                     <DataTrigger Binding="{Binding CanToggle}" Value="False">
                                         <Setter Property="Content" Value="{StaticResource IconReset}" />
@@ -105,7 +108,7 @@
                             </Style>
                         </ContentControl.Style>
                     </ContentControl>
-                </Grid>
+                </Border>
             </Button>
         </Grid>
     </Border>

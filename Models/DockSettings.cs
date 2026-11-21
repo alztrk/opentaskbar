@@ -39,6 +39,8 @@ public enum StartButtonPlacement { Start, End, Hidden, InWidgets }
 public enum ClockDateStyle { DayAndShortDate, ShortDateOnly, NumericDate, Hidden }
 public enum SecondaryAppScope { CurrentMonitorOnly, AllMonitors }
 public enum WidgetDensityMode { Auto, Compact, Full }
+/// <summary>How the dock's horizontal width is determined. Auto fits content; the other modes pin it.</summary>
+public enum DockWidthMode { Auto, Pixels, Percent }
 
 /// <summary>How a translucent UI surface is filled. None removes the fill, its rim and its shadow.</summary>
 public enum SurfaceBackground { Glass, Solid, None }
@@ -154,4 +156,9 @@ public sealed record DockSettings(
     // Permanent shell buttons that used to be (or would have been) widgets.
     bool ShowTaskViewButton = true,
     bool ShowTrayButton = true,
-    bool ShowDesktopButton = true);
+    bool ShowDesktopButton = true,
+    // Optional fixed dock width. Auto keeps the current content-fitted behaviour;
+    // Pixels pins an exact DIP width; Percent pins a share of the target monitor.
+    DockWidthMode DockWidthMode = DockWidthMode.Auto,
+    int DockWidthPixels = 900,
+    int DockWidthPercent = 60);

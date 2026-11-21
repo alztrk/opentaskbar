@@ -3,19 +3,26 @@
               xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
               xmlns:w="clr-namespace:OpenTaskbar.Widgets"
               xmlns:local="clr-namespace:OpenTaskbar.Services">
-    <Border x:Name="Card" Style="{StaticResource WidgetCardBorder}" Padding="6,0,8,0" MouseWheel="Card_MouseWheel" MouseLeftButtonUp="Card_MouseLeftButtonUp" Cursor="Hand">
-        <Grid VerticalAlignment="Center">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-            <Button x:Name="MuteButton" Grid.Column="0" VerticalAlignment="Center" Style="{StaticResource WidgetIconButton}" Width="24" Height="24" Click="MuteButton_Click"
-                    ToolTip="{local:Loc MuteToggle}" AutomationProperties.Name="{local:Loc MuteToggle}" Margin="0,0,4,0">
-                <ContentControl x:Name="VolumeIcon" Style="{StaticResource WidgetIcon}" Content="{StaticResource IconVolume}" Width="15" Height="15" />
-            </Button>
-            <TextBlock x:Name="DeviceText" Grid.Column="1" Style="{StaticResource WidgetText}" FontSize="11.5" VerticalAlignment="Center" Margin="2,0,4,0" TextTrimming="CharacterEllipsis" Visibility="Collapsed" />
-            <TextBlock x:Name="LevelText" Grid.Column="2" Style="{StaticResource WidgetCaption}" FontWeight="SemiBold" VerticalAlignment="Center" Typography.NumeralAlignment="Tabular" />
-        </Grid>
-    </Border>
+    <Button x:Name="ComboButton" Style="{StaticResource WidgetCardButton}" Padding="11,0"
+            Click="ComboButton_Click" MouseWheel="Card_MouseWheel"
+            MouseMove="ComboButton_MouseMove" MouseLeave="ComboButton_MouseLeave"
+            AutomationProperties.Name="{local:Loc WidgetAudio}">
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <ContentControl x:Name="OutputIcon" Style="{StaticResource WidgetIcon}" Content="{StaticResource IconHeadphones}"
+                            Width="15" Height="15" VerticalAlignment="Center" Margin="0,0,6,0"
+                            Foreground="{DynamicResource TextSecondary}" />
+            <TextBlock x:Name="OutputDeviceText" Style="{StaticResource WidgetText}" FontSize="12" FontWeight="SemiBold"
+                       MaxWidth="82" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+            <Border x:Name="DeviceSeparator" Width="1" Height="16" Background="{DynamicResource StrokeSubtle}"
+                    Margin="8,0" VerticalAlignment="Center" />
+            <ContentControl x:Name="InputIcon" Style="{StaticResource WidgetIcon}" Content="{StaticResource IconMic}"
+                            Width="14" Height="14" VerticalAlignment="Center" Margin="0,0,6,0"
+                            Foreground="{DynamicResource TextSecondary}" />
+            <TextBlock x:Name="InputDeviceText" Style="{StaticResource WidgetText}" FontSize="12" FontWeight="SemiBold"
+                       MaxWidth="82" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+            <ContentControl x:Name="ChevronIcon" Style="{StaticResource WidgetIcon}" Content="{StaticResource IconChevronDown}"
+                            Width="13" Height="13" VerticalAlignment="Center" Margin="7,0,0,0" Opacity="0.75"
+                            Foreground="{DynamicResource TextSecondary}" />
+        </StackPanel>
+    </Button>
 </w:DockWidget>

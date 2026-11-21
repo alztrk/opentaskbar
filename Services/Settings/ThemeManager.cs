@@ -104,6 +104,9 @@ public static class ThemeManager
             if (MaterialKeys.Contains(key) && value is Brush brush) SystemMaterialSources[key] = brush;
             else SystemOverrides[key] = value;
         }
+        if (SystemOverrides.Contains("SurfaceHover") && !SystemOverrides.Contains("SurfaceHoverColor")
+            && SystemOverrides["SurfaceHover"] is SolidColorBrush systemHover)
+            SystemOverrides["SurfaceHoverColor"] = systemHover.Color;
 
         if (_palette is not null)
             foreach (var kind in Enum.GetValues<SurfaceKind>()) Rebuild(kind);
@@ -120,6 +123,9 @@ public static class ThemeManager
             if (MaterialKeys.Contains(key) && value is Brush brush) MaterialSources[key] = brush;
             else Overrides[key] = value;
         }
+        if (Overrides.Contains("SurfaceHover") && !Overrides.Contains("SurfaceHoverColor")
+            && Overrides["SurfaceHover"] is SolidColorBrush overrideHover)
+            Overrides["SurfaceHoverColor"] = overrideHover.Color;
 
         if ((Overrides.Contains("DockBackgroundMode")
                 ? Overrides["DockBackgroundMode"] : Application.Current.TryFindResource("DockBackgroundMode")) is "None")

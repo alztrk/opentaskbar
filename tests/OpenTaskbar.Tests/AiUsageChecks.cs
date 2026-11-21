@@ -421,15 +421,15 @@ internal static class AiUsageChecks
             throw new InvalidOperationException("An AI usage widget must require exactly one provider.");
         }
         foreach (var loader in loaders)
-            foreach (var provider in new[] { AiProviders.OpenCode, AiProviders.OpenRouter })
+            foreach (var provider in new[] { AiProviders.OpenCode, AiProviders.Copilot, AiProviders.DeepSeek, AiProviders.OpenRouter })
                 foreach (var compact in new[] { false, true })
                 {
                     using var widget = new AiUsageWidget(provider, loader);
                     widget.Activate();
                     widget.SetCompactState(compact);
                     widget.Tick(DateTime.Now.AddMinutes(1));
-                    if (widget.BuildHoverFlyoutContent() is null)
-                        throw new InvalidOperationException("AI Usage must build a flyout without any loaded report.");
+                    if (widget.BuildHoverFlyoutContent() is not null)
+                        throw new InvalidOperationException($"{provider} must render inline without a generic hover flyout.");
                     widget.SetCompactState(!compact);
                     checks++;
                 }

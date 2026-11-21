@@ -160,8 +160,16 @@ public sealed class DockFlyout
         AttachSoftShadow(contentHost, 16);
         contentHost.Children.Add(_frame);
 
+        var scale = new ScaleTransform(1, 1);
         var translate = new TranslateTransform();
-        _root = new Grid { Margin = new Thickness(10, 8, 10, 12), RenderTransform = translate, Children = { contentHost } };
+        var transformGroup = new TransformGroup { Children = { scale, translate } };
+        _root = new Grid
+        {
+            Margin = new Thickness(10, 8, 10, DockMetrics.FlyoutContentInset),
+            RenderTransform = transformGroup,
+            RenderTransformOrigin = new Point(0.5, 0.5),
+            Children = { contentHost }
+        };
         _popup = new Popup
         {
             AllowsTransparency = true,
@@ -177,21 +185,26 @@ public sealed class DockFlyout
             {
                 translate.X = 0;
                 translate.Y = 0;
+                scale.ScaleX = 1;
+                scale.ScaleY = 1;
                 _root.Opacity = 1;
                 return;
             }
 
-            var duration = TimeSpan.FromMilliseconds(160);
+            // Subtle V19 flyout entrance: 190 ms ease-out, 0 -> 1 opacity, 7 DIP slide, 0.985 -> 1 scale.
+            var duration = TimeSpan.FromMilliseconds(190);
             var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
             var isBottom = Edge == DockEdge.Bottom;
             var isLeft = Edge == DockEdge.Left;
             var isRight = Edge == DockEdge.Right;
 
             var prop = (isLeft || isRight) ? TranslateTransform.XProperty : TranslateTransform.YProperty;
-            var fromVal = isBottom ? 5.0 : (isLeft ? -5.0 : 5.0);
+            var fromVal = isBottom ? 7.0 : (isLeft ? -7.0 : 7.0);
 
             translate.BeginAnimation(prop, new DoubleAnimation(fromVal, 0.0, duration) { EasingFunction = ease });
-            _root.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(140)) { EasingFunction = ease });
+            scale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(0.985, 1.0, duration) { EasingFunction = ease });
+            scale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(0.985, 1.0, duration) { EasingFunction = ease });
+            _root.BeginAnimation(UIElement.OpacityProperty, new DoubleAnimation(0.0, 1.0, duration) { EasingFunction = ease });
         };
         _root.AddHandler(FrameworkElement.ContextMenuOpeningEvent, new ContextMenuEventHandler((_, e) =>
         {
@@ -511,11 +524,12 @@ public sealed class DockFlyout
         _explicitClose = false;
         _suppressNextClick = false;
         _closedTarget = null;
+        var inset = DockMetrics.FlyoutContentInset;
         _root.Margin = Edge switch
         {
-            DockEdge.Left => new Thickness(10, 8, 12, 12),
-            DockEdge.Right => new Thickness(12, 8, 10, 12),
-            _ => new Thickness(10, 8, 10, 12)
+            DockEdge.Left => new Thickness(10, 8, 12, inset),
+            DockEdge.Right => new Thickness(12, 8, 10, inset),
+            _ => new Thickness(10, 8, 10, inset)
         };
         _innerBevel.Child = content;
         _popup.StaysOpen = false;
@@ -610,17 +624,28 @@ public sealed class DockFlyout
         _popup.IsOpen = false;
     }
 
-    private const double FlyoutGap = 10;
-
     private static CustomPopupPlacement[] Place(Size popupSize, Size targetSize, Point offset)
     {
-        var point = Edge switch
+        // Gap is derived from the current dock profile, keeping the visible flyout ~5–10 px off the dock edge.
+        var gap = DockMetrics.FlyoutGap;
+        return Edge switch
         {
-            DockEdge.Left => new Point(targetSize.Width + FlyoutGap, (targetSize.Height - popupSize.Height) / 2),
-            DockEdge.Right => new Point(-popupSize.Width - FlyoutGap, (targetSize.Height - popupSize.Height) / 2),
-            _ => new Point((targetSize.Width - popupSize.Width) / 2, -popupSize.Height - FlyoutGap)
+            DockEdge.Left =>
+            [
+                new CustomPopupPlacement(new Point(targetSize.Width + gap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical),
+                new CustomPopupPlacement(new Point(-popupSize.Width - gap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical)
+            ],
+            DockEdge.Right =>
+            [
+                new CustomPopupPlacement(new Point(-popupSize.Width - gap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical),
+                new CustomPopupPlacement(new Point(targetSize.Width + gap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical)
+            ],
+            _ =>
+            [
+                new CustomPopupPlacement(new Point((targetSize.Width - popupSize.Width) / 2, -popupSize.Height - gap), PopupPrimaryAxis.Horizontal),
+                new CustomPopupPlacement(new Point((targetSize.Width - popupSize.Width) / 2, targetSize.Height + gap), PopupPrimaryAxis.Horizontal)
+            ]
         };
-        return [new CustomPopupPlacement(point, PopupPrimaryAxis.None)];
     }
 
     /// <summary>Flat, borderless button used for flyout rows and tiles.</summary>

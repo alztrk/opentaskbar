@@ -595,6 +595,23 @@ void StartMenuAndOverlayChecks()
         edge: DockEdge.Bottom, dpiScale: 1.0, isLeftAligned: false);
     Check(discreteX == 562, "Discrete window must be positioned above the dock's actual Start button.");
     Check(discreteY == 642, "Discrete window must be clamped to the work area above the dock.");
+
+    // Wide / full-width dock: the Start button sits at the far left. The real Start flyout can be a little wider
+    // than the 642 DIP the placement math assumes, which shifts it left by half the difference. Its computed screen
+    // position (window X plus its REAL local offset inside the canvas) must still stay inside the work area.
+    foreach (var scale in new[] { 1.0, 1.25, 1.5 })
+    {
+        var (wideX, _) = ShellShortcuts.ComputeStartMenuPosition(
+            windowWidth: 1920, windowHeight: 1080,
+            workLeft: 0, workTop: 0, workRight: 1920, workBottom: 1032,
+            anchorLeft: 6, anchorTop: 1037, anchorRight: 56, anchorBottom: 1087,
+            edge: DockEdge.Bottom, dpiScale: scale, isLeftAligned: false);
+        var realFlyoutWidth = (int)Math.Round(720 * scale);
+        const int canvasWidth = 1920;
+        var realFlyoutLocalX = (canvasWidth - realFlyoutWidth) / 2;
+        Check(wideX + realFlyoutLocalX >= 8,
+            $"Wide dock Start flyout at scale {scale} must stay fully on screen (left edge >= 8).");
+    }
 }
 
 sealed class TestClock : TimeProvider

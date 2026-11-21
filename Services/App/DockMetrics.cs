@@ -38,6 +38,42 @@ public static class DockMetrics
     // Previews.
     public const double PreviewGap = 18;
 
+    /// <summary>
+    /// Visible gap (DIP) between a flyout and the dock edge. Kept in the 5–10 px band and recalculated from the
+    /// current size profile in <see cref="MainWindow.ApplySizeProfile"/>, so changing the dock height/scale keeps
+    /// the spacing consistent instead of letting it drift with a fixed, hard-coded offset.
+    /// </summary>
+    public const double FlyoutGapMin = 5;
+    public const double FlyoutGapMax = 10;
+    public const double FlyoutContentInset = 4;
+
+    /// <summary>Desired visible gap (DIP) from the dock edge to the flyout's visible frame.</summary>
+    public const double DesiredFlyoutGap = 7;
+
+    private static double _flyoutGap = DesiredFlyoutGap;
+
+    /// <summary>
+    /// Current placement gap (DIP) from the anchor to the popup window. All flyout placement callbacks read this
+    /// single value; it is recomputed from the dock profile in <see cref="MainWindow.ApplySizeProfile"/>.
+    /// </summary>
+    public static double FlyoutGap
+    {
+        get => _flyoutGap;
+        set => _flyoutGap = double.IsFinite(value) ? Math.Clamp(value, FlyoutGapMin, FlyoutGapMax) : DesiredFlyoutGap;
+    }
+
+    /// <summary>
+    /// Derives the placement gap from the dock profile so the visible gap to the dock stays near
+    /// <see cref="DesiredFlyoutGap"/> (and inside the 5–10 px band). The anchor sits <c>VerticalPadding + 1</c>
+    /// inside the dock frame, which grows with dock size/scale; subtracting the popup's bottom content inset makes
+    /// the resulting gap measured to the visible flyout frame instead of the popup window edge.
+    /// </summary>
+    public static double ComputeFlyoutGap(DockSizeProfile profile)
+    {
+        var anchorInset = profile.VerticalPadding + 1;
+        return Math.Clamp(anchorInset + DesiredFlyoutGap - FlyoutContentInset, FlyoutGapMin, FlyoutGapMax);
+    }
+
     // Motion (ms).
     public const double AutoHideDelayMs = 400;
     public const double RevealMs = 220;
@@ -53,22 +89,23 @@ public static class DockMetrics
 
     public static CustomPopupPlacement[] PlaceDockTooltip(Size popupSize, Size targetSize, Point offset)
     {
+        var gap = FlyoutGap;
         return DockFlyout.Edge switch
         {
             DockEdge.Left =>
             [
-                new CustomPopupPlacement(new Point(targetSize.Width + 8, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.None),
-                new CustomPopupPlacement(new Point(-popupSize.Width - 8, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.None)
+                new CustomPopupPlacement(new Point(targetSize.Width + gap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.None),
+                new CustomPopupPlacement(new Point(-popupSize.Width - gap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.None)
             ],
             DockEdge.Right =>
             [
-                new CustomPopupPlacement(new Point(-popupSize.Width - 8, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.None),
-                new CustomPopupPlacement(new Point(targetSize.Width + 8, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.None)
+                new CustomPopupPlacement(new Point(-popupSize.Width - gap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.None),
+                new CustomPopupPlacement(new Point(targetSize.Width + gap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.None)
             ],
             _ =>
             [
-                new CustomPopupPlacement(new Point((targetSize.Width - popupSize.Width) / 2, -popupSize.Height - 8), PopupPrimaryAxis.None),
-                new CustomPopupPlacement(new Point((targetSize.Width - popupSize.Width) / 2, targetSize.Height + 8), PopupPrimaryAxis.None)
+                new CustomPopupPlacement(new Point((targetSize.Width - popupSize.Width) / 2, -popupSize.Height - gap), PopupPrimaryAxis.None),
+                new CustomPopupPlacement(new Point((targetSize.Width - popupSize.Width) / 2, targetSize.Height + gap), PopupPrimaryAxis.None)
             ]
         };
     }

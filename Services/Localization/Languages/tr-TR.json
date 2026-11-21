@@ -1,4 +1,4 @@
-{
+﻿{
   "Settings": "Ayarlar",
   "SettingsTitle": "OpenTaskbar ayarları",
   "General": "Genel",
@@ -724,5 +724,28 @@
   "ThemeFieldTextPrimary": "Birincil metin",
   "ThemeFieldWidgetCard": "Widget yüzeyi",
   "ThemeFieldDockWidgetRadius": "Dock widget yarıçapı",
-  "ThemeFieldSettingsPageInset": "Sayfa dolgusu"
+  "ThemeFieldSettingsPageInset": "Sayfa dolgusu",
+  "Today": "Bugün",
+  "GoToToday": "Bugüne git",
+  "PreviousYear": "Önceki yıl",
+  "NextYear": "Sonraki yıl",
+  "AudioOutput": "Çıkış",
+  "AudioInput": "Giriş",
+  "AudioApps": "Uygulamalar",
+  "FocusSessionsCount": "{0} oturum",
+  "MinutesShort": "{0} dk",
+  "StopwatchLap": "Tur",
+  "StopwatchNoLaps": "Henüz tur yok",
+  "DayProgressUnit": "gün",
+  "NightLight": "Gece ışığı",
+  "AiUsageHourlyShort": "Saat",
+  "AiUsageMonthlyShort": "Ay",
+  "WeatherTomorrow": "Yarın",
+  "DockWidthMode": "Görev çubuğu genişliği",
+  "DockWidthModeDescription": "Görev çubuğunun genişliği nasıl belirlenir.",
+  "DockWidthAuto": "İçeriğe sığdır",
+  "DockWidthPixels": "Sabit piksel",
+  "DockWidthPercent": "Ekranın %",
+  "DockWidthValue": "Genişlik",
+  "DockWidthValueDescription": "Seçili mod için genişlik değeri."
 }

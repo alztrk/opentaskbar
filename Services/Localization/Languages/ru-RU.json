@@ -1,4 +1,4 @@
-{
+﻿{
   "Settings": "Параметры",
   "SettingsTitle": "Параметры OpenTaskbar",
   "General": "Общие",
@@ -724,5 +724,12 @@
   "ThemeFieldTextPrimary": "Primary text",
   "ThemeFieldWidgetCard": "Widget surface",
   "ThemeFieldDockWidgetRadius": "Dock widget radius",
-  "ThemeFieldSettingsPageInset": "Page padding"
+  "ThemeFieldSettingsPageInset": "Page padding",
+  "DockWidthMode": "Ширина панели",
+  "DockWidthModeDescription": "Как определяется ширина панели.",
+  "DockWidthAuto": "По содержимому",
+  "DockWidthPixels": "Фикс. пиксели",
+  "DockWidthPercent": "% экрана",
+  "DockWidthValue": "Ширина",
+  "DockWidthValueDescription": "Значение ширины для выбранного режима."
 }

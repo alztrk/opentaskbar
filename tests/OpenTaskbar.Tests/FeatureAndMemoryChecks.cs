@@ -71,7 +71,7 @@ internal static class FeatureAndMemoryChecks
                 ai.Tick(DateTime.Now);
                 Check(aiLoads == 1, "A sign-in failure must not poll again without changed credentials.");
                 ai.SetCompactState(true);
-                Check(ai.BuildHoverFlyoutContent() is not null, "AI Usage must provide compact hover details.");
+                Check(ai.BuildHoverFlyoutContent() is null, "AI Usage renders inline without a generic hover flyout.");
                 ai.Deactivate();
                 ai.Tick(DateTime.Now.AddHours(1));
                 Check(aiLoads == 1, "Inactive AI widgets must not call their loader.");
@@ -192,11 +192,11 @@ internal static class FeatureAndMemoryChecks
             Check(ReferenceEquals(dockItem1.ContextMenu, dockItem2.ContextMenu),
                 "Shared ContextMenu must be reused across dock items without per-item duplication.");
 
-            // Verify MediaWidget lifecycle, hover flyout, density and tick safety
+            // Verify MediaWidget lifecycle, density and tick safety (V19 uses dedicated volume hover popover, no generic flyout)
             using (var mediaWidget = new MediaWidget())
             {
                 mediaWidget.Activate();
-                Check(mediaWidget.BuildHoverFlyoutContent() is not null, "MediaWidget must provide rich hover flyout content.");
+                Check(mediaWidget.BuildHoverFlyoutContent() is null, "MediaWidget must use its dedicated volume popover instead of a generic flyout.");
                 Check(mediaWidget.SupportsCompactMode, "MediaWidget must declare compact mode support.");
                 Check(mediaWidget.FullWidthEstimate > mediaWidget.CompactWidthEstimate, "MediaWidget full width must exceed compact width.");
                 mediaWidget.Tick(DateTime.Now);

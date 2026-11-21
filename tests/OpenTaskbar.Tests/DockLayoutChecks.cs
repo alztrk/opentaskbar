@@ -429,18 +429,18 @@ internal static class DockLayoutChecks
         var bottomPlacements = DockMetrics.PlaceDockTooltip(popupSize, targetSize, new Point(0, 0));
         Check(bottomPlacements.Length == 2, "Bottom dock tooltip must provide primary and fallback placements.");
         Check(bottomPlacements[0].Point.X == (targetSize.Width - popupSize.Width) / 2, "Bottom dock tooltip primary placement must be horizontally centered.");
-        Check(bottomPlacements[0].Point.Y == -popupSize.Height - 8, "Bottom dock tooltip primary placement must sit 8 DIPs above the button.");
+        Check(bottomPlacements[0].Point.Y == -popupSize.Height - DockMetrics.FlyoutGap, "Bottom dock tooltip primary placement must sit the current flyout gap above the button.");
         Check(bottomPlacements[1].Point.X == (targetSize.Width - popupSize.Width) / 2, "Bottom dock tooltip fallback placement must be horizontally centered.");
-        Check(bottomPlacements[1].Point.Y == targetSize.Height + 8, "Bottom dock tooltip fallback placement must sit 8 DIPs below the button.");
+        Check(bottomPlacements[1].Point.Y == targetSize.Height + DockMetrics.FlyoutGap, "Bottom dock tooltip fallback placement must sit the current flyout gap below the button.");
 
         DockFlyout.Edge = DockEdge.Left;
         var leftPlacements = DockMetrics.PlaceDockTooltip(popupSize, targetSize, new Point(0, 0));
-        Check(leftPlacements[0].Point.X == targetSize.Width + 8, "Left edge primary placement must be to the right of the dock.");
+        Check(leftPlacements[0].Point.X == targetSize.Width + DockMetrics.FlyoutGap, "Left edge primary placement must be to the right of the dock.");
         Check(leftPlacements[0].Point.Y == (targetSize.Height - popupSize.Height) / 2, "Left edge primary placement must be vertically centered.");
 
         DockFlyout.Edge = DockEdge.Right;
         var rightPlacements = DockMetrics.PlaceDockTooltip(popupSize, targetSize, new Point(0, 0));
-        Check(rightPlacements[0].Point.X == -popupSize.Width - 8, "Right edge primary placement must be to the left of the dock.");
+        Check(rightPlacements[0].Point.X == -popupSize.Width - DockMetrics.FlyoutGap, "Right edge primary placement must be to the left of the dock.");
         Check(rightPlacements[0].Point.Y == (targetSize.Height - popupSize.Height) / 2, "Right edge primary placement must be vertically centered.");
         DockFlyout.Edge = DockEdge.Bottom;
 
@@ -448,6 +448,9 @@ internal static class DockLayoutChecks
         foreach (var scale in new[] { 0.75, 1.0, 1.25, 1.5 })
         {
             var profile = DockMetrics.For(size, scale);
+            var flyoutGap = DockMetrics.ComputeFlyoutGap(profile);
+            Check(flyoutGap >= DockMetrics.FlyoutGapMin && flyoutGap <= DockMetrics.FlyoutGapMax,
+                $"Flyout gap for {size}@{scale} must stay within {DockMetrics.FlyoutGapMin}–{DockMetrics.FlyoutGapMax} px of the dock.");
             Check(Math.Round(DockMetrics.WidgetDesignHeight * profile.WidgetScale) + 2 <= profile.Cell,
                 $"Widget strip scale for {size}@{scale} must fit inside the dock cell height.");
             app.Resources["DockCellSize"] = profile.Cell;
@@ -562,11 +565,14 @@ internal static class DockLayoutChecks
         Check(app.FindResource("StartDockButton") is Style, "StartDockButton tactile tile style must be defined.");
 
         // Verify WidgetCoordinator ordering, reordering and validation
-        Check(WidgetCoordinator.DefaultWidgetOrder.Length == 16, "WidgetCoordinator must have 16 default widgets (one per AI provider).");
+        Check(WidgetCoordinator.DefaultWidgetOrder.Length == 19, "WidgetCoordinator must have 19 default widgets (including Battery, Storage, DayProgress, and one per AI provider).");
         Check(WidgetCoordinator.GetLabelKey("Clock") == "WidgetClock", "Clock widget label key must match.");
         Check(WidgetCoordinator.GetLabelKey("Media") == "WidgetMedia", "Media widget label key must match.");
         Check(WidgetCoordinator.GetLabelKey("NetSpeed") == "WidgetNetSpeed", "NetSpeed widget label key must match.");
         Check(WidgetCoordinator.GetLabelKey("BluetoothBattery") == "WidgetBluetoothBattery", "BluetoothBattery widget label key must match.");
+        Check(WidgetCoordinator.GetLabelKey("Battery") == "WidgetBattery", "Battery widget label key must match.");
+        Check(WidgetCoordinator.GetLabelKey("Storage") == "WidgetStorage", "Storage widget label key must match.");
+        Check(WidgetCoordinator.GetLabelKey("DayProgress") == "WidgetDayProgress", "DayProgress widget label key must match.");
 
         UiText.Current.SetLanguage(AppLanguage.Turkish);
         Check(UiText.Get("WidgetOrderHeading") == "Widget Sıralaması", "WidgetOrderHeading must localize to Turkish.");
@@ -582,7 +588,7 @@ internal static class DockLayoutChecks
         coordinator.ApplyOrder(["Clock", "Focus", "Media"]);
         Check(coordinator.CurrentOrder[0] == "Clock" && coordinator.CurrentOrder[1] == "Focus" && coordinator.CurrentOrder[2] == "Media",
             "ApplyOrder must reorder widgets per specified order.");
-        Check(testStrip.Children.Count == 16, "Strip children count must remain 16 after reordering.");
+        Check(testStrip.Children.Count == 19, "Strip children count must remain 19 after reordering.");
         var unspecified = coordinator.CurrentOrder.Skip(3).ToArray();
         coordinator.ApplyOrder(["Clock", "Focus", "Media"]);
         Check(coordinator.CurrentOrder.Skip(3).SequenceEqual(unspecified),
@@ -620,11 +626,11 @@ internal static class DockLayoutChecks
         var dayText = clockWidget.FindName("DayOfWeekText") as TextBlock;
         var dateText = clockWidget.FindName("DateText") as TextBlock;
         var timeText = clockWidget.FindName("TimeText") as TextBlock;
-        Check(dayText?.Text == "MONDAY", "ClockWidget must display uppercase day of week.");
+        Check(dayText?.Text == "Mon", "ClockWidget must display concise sentence-case day of week.");
         Check(dateText?.Text == "Nov 16", "ClockWidget must display date format.");
         Check(timeText?.Text.Contains("20") == true || timeText?.Text.Contains("8") == true, "ClockWidget must display time.");
         clockWidget.Tick(new DateTime(2026, 11, 17, 20, 16, 0));
-        Check(dayText?.Text == "TUESDAY" && dateText?.Text == "Nov 17", "Date changes must refresh even when the displayed time is unchanged.");
+        Check(dayText?.Text == "Tue" && dateText?.Text == "Nov 17", "Date changes must refresh even when the displayed time is unchanged.");
         clockWidget.ApplySettings(new DockSettings(Language: AppLanguage.English, DateStyle: ClockDateStyle.ShortDateOnly));
         clockWidget.Tick(new DateTime(2026, 11, 17, 20, 16, 0));
         var shortDate = dateText?.Text;

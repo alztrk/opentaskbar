@@ -16,11 +16,20 @@ internal static class VisualParityChecks
         SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(Dispatcher.CurrentDispatcher));
         var checks = 0;
         var previousLanguage = UiText.Current.Language;
+        var mismatches = new List<string>();
         try
         {
             void Check(bool condition, string message)
             {
-                if (!condition) throw new InvalidOperationException(message);
+                if (!condition)
+                {
+                    if (message.Contains("Actual: ", StringComparison.Ordinal))
+                    {
+                        mismatches.Add(message);
+                        return;
+                    }
+                    throw new InvalidOperationException(message);
+                }
                 checks++;
             }
 
@@ -45,10 +54,10 @@ internal static class VisualParityChecks
                 ["WeatherGradients_Light"] = "7738B36883895809AAEF350A7A569DDDBDCAE75D36E0D034C0858439EBFA9957"
             };
             expected["DockButtons_Dark"] = "B2C91EA3ABE2EAF023810079527E91DA0E82D172182CA042889BF3778D4210AD";
-            expected["TimedWidgets_Dark"] = "D2C6213235F7A4B93C432348A8D1DC764C36F6988857D0F24CFC591F2C6D060A";
-            expected["FocusWidget_Dark"] = "6E37A0F0C4AC1C8D4F1E29B8F3BA3E6BFD2440A3698A4A0BB5758E6964514723";
-            expected["TimedWidgets_Light"] = "3FBFE20C280C306476772DC70F5C1B7889C6D1813CCED0C50DD497715C90CF7D";
-            expected["FocusWidget_Light"] = "E30058F6A627D889B95AA28CA888B537F8F53DC706B39D05617648B4DC475EE0";
+            expected["TimedWidgets_Dark"] = "F6B49A06909A58F43B655B60BEB5723E1E887219109A7B5AADEAE341B169BEB8";
+            expected["FocusWidget_Dark"] = "B5DCC8FF883A757BC9D94CC0D1AEA1047836022A1C070D6A3D506170B829064E";
+            expected["TimedWidgets_Light"] = "F690785A779794DBA8301213423F8991F6F763EE70E3098E03828F10A2D79EC0";
+            expected["FocusWidget_Light"] = "CA316159398269633F9230748BAE78056409A0180FFD0C154781F3EBF52BC6D3";
             expected["DockButtons_Light"] = "16DF87E5312101A1892414F4C7720F1E2A54A486040874EAEC9D3F2EB7446352";
             expected["RingMeters_Dark"] = "4485A2303E3DD04C04C3C219801FAEC8593A51B6B9CE98493F84CFD98C2EBDD8";
             expected["RingMeters_Light"] = "39B56D023DB7F9A23858DBB228837AD930765D7328D965B9CBF63DDF98A4E2D5";
@@ -168,6 +177,10 @@ internal static class VisualParityChecks
             }
 
             ThemeManager.Apply(AppTheme.Dark);
+            if (mismatches.Count > 0)
+            {
+                throw new InvalidOperationException(string.Join(Environment.NewLine, mismatches));
+            }
         }
         finally
         {

@@ -33,4 +33,9 @@
     <StreamGeometry x:Key="IconCloudLightning">M6 16.33A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 .5 8.97 M13 11l-4 6h6l-4 6</StreamGeometry>
     <StreamGeometry x:Key="IconArrowDown">M12 5v14 M19 12l-7 7-7-7</StreamGeometry>
     <StreamGeometry x:Key="IconArrowUp">M12 19V5 M5 12l7-7 7 7</StreamGeometry>
+    <StreamGeometry x:Key="IconCpu">M5 5h14v14H5z M9 9h6v6H9z M9 1v4 M15 1v4 M9 19v4 M15 19v4 M1 9h4 M1 15h4 M19 9h4 M19 15h4</StreamGeometry>
+    <StreamGeometry x:Key="IconClock">M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z M12 7v5l3 2</StreamGeometry>
+    <StreamGeometry x:Key="IconTarget">M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z M12 7a5 5 0 1 0 0 10a5 5 0 1 0 0-10z M12 11a1 1 0 1 0 0 2a1 1 0 1 0 0-2z</StreamGeometry>
+    <StreamGeometry x:Key="IconChevronsLeft">M11 17l-5-5 5-5 M18 17l-5-5 5-5</StreamGeometry>
+    <StreamGeometry x:Key="IconChevronsRight">M6 17l5-5-5-5 M13 17l5-5-5-5</StreamGeometry>
 </ResourceDictionary>

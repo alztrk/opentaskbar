@@ -20,7 +20,6 @@
     <sys:Double x:Key="WidgetHeight">46</sys:Double>
     <sys:Double x:Key="WidgetQuickActionSize">36</sys:Double>
     <sys:Double x:Key="WidgetPanelWidth">320</sys:Double>
-    <sys:Double x:Key="WidgetPanelGap">8</sys:Double>
     <sys:Double x:Key="WidgetPanelValueSize">32</sys:Double>
     <sys:Double x:Key="WidgetPanelActionHeight">36</sys:Double>
     <sys:Double x:Key="WidgetPanelHeadingSize">16</sys:Double>
