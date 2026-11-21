@@ -1810,9 +1810,14 @@ public partial class SettingsWindow : Window
         if (fixedMode)
         {
             var settings = _preferences.Current;
-            var value = mode == nameof(DockWidthMode.Pixels) ? settings.DockWidthPixels : settings.DockWidthPercent;
-            DockWidthSlider.Minimum = mode == nameof(DockWidthMode.Pixels) ? 100 : 10;
-            DockWidthSlider.Maximum = mode == nameof(DockWidthMode.Pixels) ? 5000 : 100;
+            var isPercent = mode == nameof(DockWidthMode.Percent);
+            var value = isPercent ? settings.DockWidthPercent : settings.DockWidthPixels;
+            DockWidthSlider.Minimum = isPercent ? 10 : 100;
+            DockWidthSlider.Maximum = isPercent ? 100 : 5000;
+            // A 50-step tick over the 10–100 percent range only exposes 10, 60 and 100. Snap to whole percents
+            // instead so the user can pick any percentage; pixels keep the coarse 50 px cadence.
+            DockWidthSlider.TickFrequency = isPercent ? 1 : 50;
+            DockWidthSlider.IsSnapToTickEnabled = true;
             DockWidthSlider.Value = value;
             UpdateDockWidthLabel();
         }
