@@ -68,6 +68,10 @@ public partial class ClockWidget : DockWidget
 
     public ClockWidget() => InitializeComponent();
 
+    // The clock renders from the local system time only, so a single frame is safe in Settings.
+    public override bool SupportsStaticPreview => true;
+    protected override void OnRenderPreview() => OnTick(DateTime.Now);
+
     private CultureInfo Culture => Settings.Language.Culture;
 
     protected override void OnActivated()

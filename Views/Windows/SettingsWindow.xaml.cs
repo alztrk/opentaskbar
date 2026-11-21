@@ -940,13 +940,26 @@ public partial class SettingsWindow : Window
         if (expand && ReferenceEquals(option.NativePreview, option.Preview))
         {
             var native = WidgetCoordinator.CreatePreviewWidget(option.Id);
-            if (native is not null)
+            if (native is not null && native.SupportsStaticPreview)
             {
                 native.ApplySettings(ReadSelection());
                 native.Visibility = Visibility.Visible;
                 // Paint one frame with real widget code; no activation, no polling.
                 native.RenderPreview();
                 option.NativePreview = native;
+            }
+            else
+            {
+                // No honest static frame is available; don't invent sample data or start services.
+                native?.Dispose();
+                option.NativePreview = new TextBlock
+                {
+                    Text = UiText.Get("WidgetPreviewUnavailable"),
+                    Foreground = TryFindResource("TextSecondary") as System.Windows.Media.Brush,
+                    FontSize = 12,
+                    TextWrapping = TextWrapping.Wrap,
+                    MaxWidth = 260
+                };
             }
         }
         UpdateWidgetOptionState();

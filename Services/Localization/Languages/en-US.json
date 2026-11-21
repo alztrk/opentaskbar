@@ -6,6 +6,7 @@
   "Widgets": "Widgets",
   "WidgetsDescription": "Install the widgets you want on the dock.",
   "WidgetSettings": "Widget settings",
+  "WidgetPreviewUnavailable": "Preview needs live data from the widget's service. Enable it on the dock to see it.",
   "WidgetInstall": "Install",
   "WidgetRemove": "Remove",
   "RemoveWidget": "Remove Widget",

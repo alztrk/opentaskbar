@@ -364,14 +364,14 @@
                                     <StackPanel>
                                         <Button x:Name="CollapseWeatherOptionsButton" Visibility="Collapsed" Click="CollapseWeatherOptions_Click" />
                                         <Border Style="{StaticResource CompactSettingsRow}"><DockPanel>
-                                            <ComboBox x:Name="WeatherCountryBox" DockPanel.Dock="Right" Width="170" IsEditable="True"
+                                            <ComboBox x:Name="WeatherCountryBox" DockPanel.Dock="Right" Width="170" Height="32" VerticalAlignment="Center" IsEditable="True"
                                                       AutomationProperties.Name="{local:Loc Country}"
                                                       SelectionChanged="WeatherCountryBox_SelectionChanged"
                                                       KeyUp="WeatherCountryBox_KeyUp" />
                                             <TextBlock Text="{local:Loc Country}" Style="{StaticResource SettingsRowLabel}" FontSize="12" VerticalAlignment="Center" Margin="0,0,12,0" />
                                         </DockPanel></Border>
                                         <Border x:Name="WeatherCityContainer" Visibility="Collapsed" Style="{StaticResource CompactSettingsRow}"><DockPanel>
-                                            <ComboBox x:Name="WeatherCityCombo" DockPanel.Dock="Right" Width="170" IsEditable="True"
+                                            <ComboBox x:Name="WeatherCityCombo" DockPanel.Dock="Right" Width="170" Height="32" VerticalAlignment="Center" IsEditable="True"
                                                       AutomationProperties.Name="{local:Loc WeatherCity}"
                                                       SelectionChanged="WeatherCityCombo_SelectionChanged"
                                                       KeyUp="WeatherCityCombo_KeyUp" />
@@ -709,7 +709,8 @@
                                               SelectionChanged="LanguageBox_SelectionChanged">
                                         <ComboBox.ItemTemplate>
                                             <DataTemplate>
-                                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                                <StackPanel Orientation="Horizontal" VerticalAlignment="Center"
+                                                            AutomationProperties.Name="{Binding NativeName}">
                                                     <Border Style="{StaticResource LanguageBadge}" Margin="0,0,10,0">
                                                         <Image Source="{Binding FlagImage}" Width="22" Height="15"
                                                                Stretch="UniformToFill" RenderOptions.BitmapScalingMode="HighQuality" />

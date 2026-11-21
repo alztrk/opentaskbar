@@ -111,7 +111,7 @@ public sealed class ThemePropertyEditor : UserControl
                 else if (existing is CornerRadius radius) AddCornerField(key, radius);
                 else if (existing is Thickness thickness) AddThicknessField(key, thickness);
                 else if (existing is double value) AddNumberField(key, value);
-                else if (existing is FontFamily family) AddTextTokenField(key, family.Source);
+                else if (existing is FontFamily family) AddFontField(key, family);
             }
         }
 
@@ -132,7 +132,7 @@ public sealed class ThemePropertyEditor : UserControl
             else if (existing is CornerRadius radius) AddCornerField(key, radius);
             else if (existing is Thickness thickness) AddNumberField(key, thickness.Left);
             else if (existing is double number) AddNumberField(key, number);
-            else if (existing is FontFamily family) AddTextTokenField(key, family.Source);
+            else if (existing is FontFamily family) AddFontField(key, family);
         }
         _fieldHost = _body;
 
@@ -220,6 +220,7 @@ public sealed class ThemePropertyEditor : UserControl
         var meter = new Border
         {
             Width = 60, Height = 4, CornerRadius = new CornerRadius(2),
+            Margin = new Thickness(12, 0, 0, 0),
             Background = Application.Current.TryFindResource("SettingsTrack") as Brush,
             VerticalAlignment = VerticalAlignment.Center
         };
@@ -380,6 +381,34 @@ public sealed class ThemePropertyEditor : UserControl
         field.LostFocus += (_, _) => UpdateToken(key, JsonValue.Create(field.Text));
     }
 
+    /// <summary>Shows "Inter" for a pack URI such as pack://application:,,,/Fonts/#Inter.</summary>
+    private static string FriendlyFontName(FontFamily family)
+    {
+        var source = family.Source;
+        var hash = source.LastIndexOf('#');
+        if (hash >= 0 && hash < source.Length - 1) return source[(hash + 1)..];
+        if (family.FamilyNames.Count > 0) return family.FamilyNames.First().Value;
+        return source;
+    }
+
+    private void AddFontField(string key, FontFamily family)
+    {
+        var source = family.Source;
+        var field = AddTextField(key, FriendlyFontName(family));
+        field.ToolTip = "Font family name. Embedded fonts are resolved automatically.";
+        field.Tag = key;
+        field.LostFocus += (_, _) =>
+        {
+            // Preserve the original pack URI when the user did not change the visible name.
+            var text = field.Text.Trim();
+            if (text.Length == 0) { field.Text = FriendlyFontName(family); return; }
+            var value = string.Equals(text, FriendlyFontName(family), StringComparison.OrdinalIgnoreCase)
+                ? source
+                : text;
+            UpdateToken(key, JsonValue.Create(value));
+        };
+    }
+
     private void AddNumberField(string key, double initial)
     {
         var row = AddRow(key);
@@ -426,32 +455,37 @@ public sealed class ThemePropertyEditor : UserControl
         };
     }
 
-    private void AddThicknessField(string key, Thickness initial)
-    {
-        var value = string.Join(",", new[] { initial.Left, initial.Top, initial.Right, initial.Bottom }
-            .Select(x => x.ToString("0.##", CultureInfo.InvariantCulture)));
-        AddFourValueField(key, value);
-    }
+    private void AddThicknessField(string key, Thickness initial) =>
+        AddFourValueField(key,
+            [initial.Left, initial.Top, initial.Right, initial.Bottom]);
 
-    private void AddCornerField(string key, CornerRadius initial)
-    {
-        var value = string.Join(",", new[] { initial.TopLeft, initial.TopRight, initial.BottomRight, initial.BottomLeft }
-            .Select(x => x.ToString("0.##", CultureInfo.InvariantCulture)));
-        AddFourValueField(key, value);
-    }
+    private void AddCornerField(string key, CornerRadius initial) =>
+        AddFourValueField(key,
+            [initial.TopLeft, initial.TopRight, initial.BottomRight, initial.BottomLeft]);
 
-    private void AddFourValueField(string key, string initial)
+    private void AddFourValueField(string key, double[] values)
     {
+        var allEqual = values.All(v => Math.Abs(v - values[0]) < 0.01);
+        var initial = allEqual
+            ? values[0].ToString("0.##", CultureInfo.InvariantCulture)
+            : string.Join(",", values.Select(v => v.ToString("0.##", CultureInfo.InvariantCulture)));
         var field = AddTextField(key, initial);
-        field.ToolTip = "Four values separated by commas, in WPF order.";
+        field.ToolTip = "One value for all sides, or four values separated by commas.";
         field.LostFocus += (_, _) =>
         {
             var parts = field.Text.Split(',', StringSplitOptions.TrimEntries);
-            var valid = parts.Length == 4 && parts.All(part =>
-                double.TryParse(part, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
-                && number is >= 0 and <= 2048);
-            if (valid) UpdateToken(key, JsonValue.Create(field.Text));
-            else field.Text = initial;
+            if (parts.Length is not (1 or 4) || !parts.All(part =>
+                    double.TryParse(part, NumberStyles.Float, CultureInfo.InvariantCulture, out var number)
+                    && number is >= 0 and <= 2048))
+            {
+                field.Text = initial;
+                return;
+            }
+            // Always persist the full four-value form the theme pack expects.
+            var stored = parts.Length == 1
+                ? string.Join(",", Enumerable.Repeat(parts[0], 4))
+                : field.Text;
+            UpdateToken(key, JsonValue.Create(stored));
         };
     }
 

@@ -116,9 +116,15 @@ public class DockWidget : UserControl, IDisposable
     }
 
     /// <summary>
+    /// True when this widget can paint a meaningful frame without activating background services.
+    /// Settings only creates native previews for widgets that opt in.
+    /// </summary>
+    public virtual bool SupportsStaticPreview => false;
+
+    /// <summary>
     /// Renders a single frame for the Settings catalog preview without activating the widget.
-    /// No background polling or service subscriptions are started. Widgets that fetch remote data
-    /// override OnRenderPreview so they only paint their placeholder state.
+    /// No background polling or service subscriptions are started. The default is a no-op;
+    /// widgets with safe, local-only rendering override this method.
     /// </summary>
     public void RenderPreview()
     {
@@ -126,7 +132,7 @@ public class DockWidget : UserControl, IDisposable
         OnRenderPreview();
     }
 
-    protected virtual void OnRenderPreview() => OnTick(DateTime.Now);
+    protected virtual void OnRenderPreview() { }
 
     protected virtual void OnActivated() { }
     protected virtual void OnDeactivated() { }
