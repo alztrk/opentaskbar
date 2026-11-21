@@ -746,6 +746,7 @@
   "DockWidthAuto": "Fit to content",
   "DockWidthPixels": "Fixed pixels",
   "DockWidthPercent": "% of screen",
+  "DockWidthFill": "Fill (edge-to-edge)",
   "DockWidthValue": "Width",
   "DockWidthValueDescription": "Width value for the selected mode."
 }

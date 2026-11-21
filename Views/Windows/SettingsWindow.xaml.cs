@@ -70,6 +70,9 @@ public partial class SettingsWindow : Window
             _widgetOptions.Add(option);
         }
         AttachWidgetSettingsPanels();
+        // Catalog previews are the very same widget classes the dock runs (activated + ticked),
+        // so the cards reflect the real taskbar widgets instead of hand-authored mock tiles.
+        AttachLiveWidgetPreviews();
         CustomThemeEditor.ThemeSaved += (_, _) => ReloadThemePacks(_selectedThemePackId);
         CustomThemeEditor.ThemeCreated += (_, id) => ReloadThemePacks(id);
         var widgetView = new ListCollectionView(_widgetOptions);
@@ -276,13 +279,14 @@ public partial class SettingsWindow : Window
             }
             RefreshWidgetPreviews();
             foreach (var group in _widgetGroups) group.RefreshLabel();
-            foreach (var widget in _livePreviewWidgets) widget.ApplySettings(_preferences.Current);
         }
         ThemeManager.Apply(_preferences.Current.Theme, _preferences.Current);
         LoadSurfaceStyles(_preferences.Current);
+        ApplySettingsToLivePreviews(_preferences.Current);
         foreach (var option in _widgetOptions)
         {
-            if (option.NativePreview is OpenTaskbar.Widgets.DockWidget native)
+            if (option.NativePreview is OpenTaskbar.Widgets.DockWidget native
+                && !_livePreviewWidgets.Contains(native))
             {
                 native.ApplySettings(_preferences.Current);
                 native.Visibility = Visibility.Visible;
@@ -979,7 +983,6 @@ public partial class SettingsWindow : Window
     private SystemMeters ReadStatsMeters() =>
         (StatsCpuToggle.IsChecked == true ? SystemMeters.Cpu : 0)
         | (StatsMemoryToggle.IsChecked == true ? SystemMeters.Memory : 0)
-        | (StatsBatteryToggle.IsChecked == true ? SystemMeters.Battery : 0)
         | (StatsCpuTemperatureToggle.IsChecked == true ? SystemMeters.CpuTemperature : 0)
         | (StatsGpuToggle.IsChecked == true ? SystemMeters.Gpu : 0)
         | (StatsGpuTemperatureToggle.IsChecked == true ? SystemMeters.GpuTemperature : 0);
@@ -1054,6 +1057,7 @@ public partial class SettingsWindow : Window
                 // An inactive data source (no media session, no providers signed in) must not blank the card.
                 widget.Visibility = Visibility.Visible;
                 option.LivePreview = widget;
+                option.NativePreview = widget;
                 _livePreviewWidgets.Add(widget);
             }
             catch (Exception ex)
@@ -1075,13 +1079,37 @@ public partial class SettingsWindow : Window
         _livePreviewTimer.Start();
     }
 
+    /// <summary>
+    /// Pushes the current settings into every catalog preview immediately. The previews are genuine
+    /// widget instances, so this re-renders them exactly as the taskbar widgets would after a save.
+    /// </summary>
+    private void ApplySettingsToLivePreviews(DockSettings settings)
+    {
+        foreach (var widget in _livePreviewWidgets)
+        {
+            widget.ApplySettings(settings);
+            // Some widgets hide themselves when their data source is inactive (e.g. media with no
+            // session). A preview must stay visible so the card never collapses to an empty tile.
+            if (widget.Visibility != Visibility.Visible) widget.Visibility = Visibility.Visible;
+        }
+    }
+
     private void StopAndDisposeLivePreviews()
     {
         _livePreviewTimer?.Stop();
         _livePreviewTimer = null;
+        var liveWidgets = new HashSet<OpenTaskbar.Widgets.DockWidget>(_livePreviewWidgets);
         foreach (var widget in _livePreviewWidgets) widget.Dispose();
         _livePreviewWidgets.Clear();
-        foreach (var option in _widgetOptions) option.LivePreview = null;
+        foreach (var option in _widgetOptions)
+        {
+            option.LivePreview = null;
+            // Detach the disposed live widget so callers (and the Closed handler) never touch it again.
+            // Any other standalone preview widget is ours to dispose here.
+            if (option.NativePreview is OpenTaskbar.Widgets.DockWidget standalone && !liveWidgets.Contains(standalone))
+                standalone.Dispose();
+            if (option.NativePreview is OpenTaskbar.Widgets.DockWidget) option.NativePreview = option.Preview;
+        }
     }
 
     /// <summary>A localized category label followed by the widgets that belong to it.</summary>
@@ -1149,20 +1177,20 @@ public partial class SettingsWindow : Window
             other.IsSettingsExpanded = ReferenceEquals(other, option) && expand;
         if (expand && ReferenceEquals(option.NativePreview, option.Preview))
         {
-            var native = WidgetCoordinator.CreatePreviewWidget(option.Id);
-            if (native is not null && native.SupportsStaticPreview)
+            // Prefer the already-running live widget so the drawer shows exactly what the dock shows.
+            var live = option.LivePreview as OpenTaskbar.Widgets.DockWidget;
+            var native = live ?? WidgetCoordinator.CreatePreviewWidget(option.Id);
+            if (native is not null)
             {
                 native.ApplySettings(ReadSelection());
                 native.Visibility = Visibility.Visible;
-                // Paint one frame with real widget code; no activation, no polling.
-                native.RenderPreview();
+                // Only widgets with local-only rendering paint an extra frame when they are not
+                // already activated; the rest keep their constructor's honest placeholder state.
+                if (live is null && native.SupportsStaticPreview) native.RenderPreview();
                 option.NativePreview = native;
             }
             else
             {
-                // Use the real DockWidgetItem tile (app's own widget template) with its
-                // built-in sample value. No services are started and nothing is installed.
-                native?.Dispose();
                 option.NativePreview = option.Preview;
             }
         }
@@ -1258,7 +1286,6 @@ public partial class SettingsWindow : Window
         }
         StatsCpuToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Cpu);
         StatsMemoryToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Memory);
-        StatsBatteryToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Battery);
         StatsCpuTemperatureToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.CpuTemperature);
         StatsGpuToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Gpu);
         StatsGpuTemperatureToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.GpuTemperature);
@@ -1708,6 +1735,9 @@ public partial class SettingsWindow : Window
         (Application.Current.MainWindow as MainWindow)?.SetSizePreview(selectedSize, Math.Round(DockScaleSlider.Value) / 100);
         UpdateWidgetOptionState();
         UpdateMultiMonitorControls();
+        // Reflect widget-related edits in the catalog immediately, without waiting for the
+        // debounced save. Every live preview is a real widget, so ApplySettings re-renders it.
+        ApplySettingsToLivePreviews(ReadSelection());
         TriggerAutoSave(immediate: sender is not (Slider or TextBox));
     }
 

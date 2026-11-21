@@ -730,6 +730,7 @@
   "DockWidthAuto": "Dopasuj do zawartości",
   "DockWidthPixels": "Stałe piksele",
   "DockWidthPercent": "% ekranu",
+  "DockWidthFill": "Pełna szerokość (bez marginesów)",
   "DockWidthValue": "Szerokość",
   "DockWidthValueDescription": "Wartość szerokości dla wybranego trybu."
 }

@@ -569,6 +569,78 @@ public static class ShellShortcuts
         return (desiredFlyoutX - flyoutLocalX, desiredFlyoutY - flyoutLocalY);
     }
 
+    /// <summary>
+    /// Finds the real Start flyout panel inside the full-screen canvas window via UI Automation. The canvas is
+    /// monitor-sized while the actual flyout is a much smaller panel inside it; hard-coding its size/offset drifts
+    /// across Windows builds and DPI settings, which can push the flyout off screen. Returning the measured rect
+    /// lets positioning derive the exact offset instead of guessing.
+    /// </summary>
+    private static bool TryGetStartFlyoutBounds(nint hwnd, out System.Windows.Rect bounds)
+    {
+        bounds = default;
+        try
+        {
+            var root = AutomationElement.FromHandle(hwnd);
+            if (root is null) return false;
+            var rootRect = root.Current.BoundingRectangle;
+
+            bool LooksLikeFlyout(System.Windows.Rect r) =>
+                r.Width is >= 350 and <= 1100 && r.Height is >= 400
+                && r.Left >= rootRect.Left - 2 && r.Right <= rootRect.Right + 2
+                && r.Top >= rootRect.Top - 2 && r.Bottom <= rootRect.Bottom + 2;
+
+            AutomationElement? best = null;
+            double bestArea = double.MaxValue;
+
+            // Preferred: the search box is a reliable landmark inside every Start flyout. Walk up its ancestors to
+            // the smallest container that still spans the whole panel.
+            var editCondition = new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit);
+            var search = root.FindFirst(TreeScope.Descendants, editCondition);
+            if (search is not null)
+            {
+                var current = TreeWalker.RawViewWalker.GetParent(search);
+                while (current is not null && current != root)
+                {
+                    var r = current.Current.BoundingRectangle;
+                    if (LooksLikeFlyout(r) && r.Width * r.Height < bestArea)
+                    {
+                        best = current;
+                        bestArea = r.Width * r.Height;
+                    }
+                    current = TreeWalker.RawViewWalker.GetParent(current);
+                }
+            }
+
+            // Fallback: scan descendants for panels that look like the flyout (covers cases where the search box is
+            // hosted in a separate XAML island and not reachable from the canvas's automation tree).
+            if (best is null)
+            {
+                var all = root.FindAll(TreeScope.Descendants, System.Windows.Automation.Condition.TrueCondition);
+                var largestArea = 0.0;
+                foreach (AutomationElement element in all)
+                {
+                    var r = element.Current.BoundingRectangle;
+                    if (LooksLikeFlyout(r) && r.Width * r.Height > largestArea)
+                    {
+                        best = element;
+                        largestArea = r.Width * r.Height;
+                        bestArea = largestArea;
+                    }
+                }
+            }
+
+            if (best is null) return false;
+            var boundsRect = best.Current.BoundingRectangle;
+            bounds = new System.Windows.Rect(boundsRect.Left, boundsRect.Top, boundsRect.Width, boundsRect.Height);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppLog.Warning($"[TryGetStartFlyoutBounds] UI Automation error: {ex.Message}");
+            return false;
+        }
+    }
+
     private static async Task RepositionStartMenuAsync(FrameworkElement anchor, nint hintHwnd, CancellationToken cancellation)
     {
         if (PresentationSource.FromVisual(anchor) is not HwndSource source || source.Handle == 0)
@@ -659,16 +731,47 @@ public static class ShellShortcuts
                     topLeft.X, topLeft.Y, bottomRight.X, bottomRight.Y,
                     edge, dpiScale, isLeftAligned);
 
+                // When the real flyout panel can be measured, correct the horizontal offset: ComputeStartMenuPosition
+                // assumes a fixed flyout size, and any drift makes the panel land off screen for a wide dock whose
+                // Start button sits at the left edge. Deriving the offset from the measured panel keeps it aligned.
+                if (isFullScreenCanvas && edge == DockEdge.Bottom && TryGetStartFlyoutBounds(mainHwnd, out var flyoutBounds))
+                {
+                    // WPF anchor coords are DIPs; window/flyout rects and the work area are physical pixels. Convert
+                    // before mixing them so the correction also holds on scaled displays.
+                    var desiredXDips = topLeft.X - 8;
+                    var desiredXPhysical = (int)Math.Round(desiredXDips * dpiScale);
+                    var measuredLocalX = (int)Math.Round(flyoutBounds.Left - rect.Left);
+                    var minX = monitorInfo.Work.Left + 8;
+                    var maxX = Math.Max(minX, monitorInfo.Work.Right - (int)Math.Round(flyoutBounds.Width) - 8);
+                    var desiredX = Math.Clamp(desiredXPhysical, minX, maxX);
+                    targetX = desiredX - measuredLocalX;
+                    AppLog.Info($"RepositionStartMenuAsync: measured flyout bounds [{flyoutBounds.Left:F0},{flyoutBounds.Top:F0} {flyoutBounds.Width:F0}x{flyoutBounds.Height:F0}], localX={measuredLocalX}, corrected X={targetX}");
+                }
+
                 if (!CanMoveShellWindow(generation, cancellation)) return;
                 AppLog.Info($"RepositionStartMenuAsync: moving start menu window {mainHwnd:X} ({width}x{height}) to ({targetX},{targetY})");
                 SetWindowPos(mainHwnd, 0, targetX, targetY, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
 
-                // Settle across extra frames to smoothly complete shell entrance transitions
+                // Settle across extra frames to smoothly complete shell entrance transitions. Re-measure the real
+                // flyout each frame: if Windows finishes repositioning it after our first measurement, nudge the
+                // canvas so the flyout truly ends up inside the work area.
                 for (var frame = 0; frame < 6; frame++)
                 {
                     await Task.Delay(25, cancellation);
                     if (!CanMoveShellWindow(generation, cancellation)) return;
                     EnsureNativeTaskbarHidden();
+                    if (edge == DockEdge.Bottom && TryGetStartFlyoutBounds(mainHwnd, out var settled))
+                    {
+                        var minX = monitorInfo.Work.Left + 8;
+                        var maxX = Math.Max(minX, monitorInfo.Work.Right - (int)Math.Round(settled.Width) - 8);
+                        var correctedLeft = Math.Clamp(settled.Left, minX, maxX);
+                        var delta = (int)Math.Round(correctedLeft - settled.Left);
+                        if (delta != 0)
+                        {
+                            targetX += delta;
+                            AppLog.Info($"RepositionStartMenuAsync: re-measured flyout left {settled.Left:F0}, nudging canvas X by {delta} to {targetX}");
+                        }
+                    }
                     SetWindowPos(mainHwnd, 0, targetX, targetY, 0, 0, SwpNoSize | SwpNoZOrder | SwpNoActivate);
                 }
                 break;

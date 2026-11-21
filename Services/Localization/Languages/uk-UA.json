@@ -730,6 +730,7 @@
   "DockWidthAuto": "За вмістом",
   "DockWidthPixels": "Фікс. пікселі",
   "DockWidthPercent": "% екрана",
+  "DockWidthFill": "На всю ширину (без полів)",
   "DockWidthValue": "Ширина",
   "DockWidthValueDescription": "Значення ширини для обраного режиму."
 }

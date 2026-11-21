@@ -258,12 +258,12 @@
             <!-- SystemStats widget taskbar preview (CPU & RAM rings) -->
             <StackPanel x:Name="SystemStatsPreview" Orientation="Horizontal" Visibility="Collapsed">
                 <Border Style="{StaticResource WidgetCardBorder}" Width="{StaticResource WidgetHeight}" Padding="3">
-                    <w:RingMeter Width="38" Height="38" StrokeThickness="3" FontSize="11.5" Caption="CPU" Value="0.24" Text="24"
+                    <w:RingMeter Width="38" Height="38" StrokeThickness="3" FontSize="11.5" Caption="CPU" Value="0" Text="—"
                                  CaptionBrush="{DynamicResource TextSecondary}" TrackBrush="{DynamicResource WidgetTrack}"
                                  ValueBrush="{DynamicResource WidgetAccent}" Foreground="{DynamicResource TextPrimary}" />
                 </Border>
                 <Border Style="{StaticResource WidgetCardBorder}" Width="{StaticResource WidgetHeight}" Padding="3">
-                    <w:RingMeter Width="38" Height="38" StrokeThickness="3" FontSize="11.5" Caption="RAM" Value="0.58" Text="58"
+                    <w:RingMeter Width="38" Height="38" StrokeThickness="3" FontSize="11.5" Caption="RAM" Value="0" Text="—"
                                  CaptionBrush="{DynamicResource TextSecondary}" TrackBrush="{DynamicResource WidgetTrack}"
                                  ValueBrush="{DynamicResource WidgetAccent}" Foreground="{DynamicResource TextPrimary}" />
                 </Border>
@@ -328,8 +328,8 @@
                             </Style>
                         </TextBlock.Style>
                     </TextBlock>
-                    <w:RingMeter Width="34" Height="34" StrokeThickness="3" FontSize="10.5" Value="0.42" Text="42"
-                                 TrackBrush="{DynamicResource TextMuted}" ValueBrush="{DynamicResource WidgetAccent}" Foreground="{DynamicResource TextPrimary}" />
+                    <TextBlock FontSize="11" VerticalAlignment="Center" Margin="2,0,0,0"
+                               Foreground="{DynamicResource TextMuted}" Text="—" />
                 </StackPanel>
             </Border>
             <!-- Focus (Pomodoro) widget taskbar preview -->

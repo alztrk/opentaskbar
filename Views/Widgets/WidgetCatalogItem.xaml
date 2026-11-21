@@ -144,7 +144,7 @@
                             <ColumnDefinition Width="3*"/>
                         </Grid.ColumnDefinitions>
                         <Border VerticalAlignment="Top" Background="Transparent" Padding="0,6">
-                            <ContentControl Content="{Binding NativePreview}" HorizontalAlignment="Left"
+                            <ContentControl Content="{Binding PreviewContent}" HorizontalAlignment="Left"
                                             VerticalAlignment="Center" Focusable="False"
                                             IsHitTestVisible="False" KeyboardNavigation.TabNavigation="None"/>
                         </Border>

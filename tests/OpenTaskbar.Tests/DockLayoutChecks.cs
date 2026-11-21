@@ -23,6 +23,9 @@ internal static class DockLayoutChecks
             checks++;
         }
 
+        // Edge-to-edge fill mode must be a valid width mode so users can span the dock across the whole screen.
+        Check(Enum.IsDefined(DockWidthMode.Fill), "DockWidthMode.Fill must be a defined width mode.");
+
         // Drop coordinates count visible elements, not hidden entries in the saved order.
         var dragItems = new[] { "app:A", "app:B", "widget:Clock", "widget:Audio" };
         Check(DockItemOrdering.MoveVisibleItem(dragItems, dragItems, "widget:Clock", 2).SequenceEqual(dragItems),

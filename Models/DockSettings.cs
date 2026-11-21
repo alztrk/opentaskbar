@@ -39,8 +39,8 @@ public enum StartButtonPlacement { Start, End, Hidden, InWidgets }
 public enum ClockDateStyle { DayAndShortDate, ShortDateOnly, NumericDate, Hidden }
 public enum SecondaryAppScope { CurrentMonitorOnly, AllMonitors }
 public enum WidgetDensityMode { Auto, Compact, Full }
-/// <summary>How the dock's horizontal width is determined. Auto fits content; the other modes pin it.</summary>
-public enum DockWidthMode { Auto, Pixels, Percent }
+/// <summary>How the dock's horizontal width is determined. Auto fits content; Fixed/Pin modes pin it; Fill spans edge-to-edge.</summary>
+public enum DockWidthMode { Auto, Pixels, Percent, Fill }
 
 /// <summary>How a translucent UI surface is filled. None removes the fill, its rim and its shadow.</summary>
 public enum SurfaceBackground { Glass, Solid, None }
@@ -61,7 +61,7 @@ public enum SystemMeters
     CpuTemperature = 8,
     Gpu = 16,
     GpuTemperature = 32,
-    All = Cpu | Memory | Battery | CpuTemperature | Gpu | GpuTemperature
+    All = Cpu | Memory | CpuTemperature | Gpu | GpuTemperature
 }
 
 [Flags]

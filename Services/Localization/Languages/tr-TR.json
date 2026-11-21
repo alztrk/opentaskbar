@@ -746,6 +746,7 @@
   "DockWidthAuto": "İçeriğe sığdır",
   "DockWidthPixels": "Sabit piksel",
   "DockWidthPercent": "Ekranın %",
+  "DockWidthFill": "Tam genişlik (kenardan kenara)",
   "DockWidthValue": "Genişlik",
   "DockWidthValueDescription": "Seçili mod için genişlik değeri."
 }

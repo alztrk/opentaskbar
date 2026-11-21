@@ -730,6 +730,7 @@
   "DockWidthAuto": "Ajustar ao conteúdo",
   "DockWidthPixels": "Pixels fixos",
   "DockWidthPercent": "% da tela",
+  "DockWidthFill": "Largura total (sem bordas)",
   "DockWidthValue": "Largura",
   "DockWidthValueDescription": "Valor da largura para o modo selecionado."
 }

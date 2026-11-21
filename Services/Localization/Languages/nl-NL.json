@@ -730,6 +730,7 @@
   "DockWidthAuto": "Aan inhoud aanpassen",
   "DockWidthPixels": "Vaste pixels",
   "DockWidthPercent": "% van het scherm",
+  "DockWidthFill": "Volledige breedte (randloos)",
   "DockWidthValue": "Breedte",
   "DockWidthValueDescription": "Breedtewaarde voor de gekozen modus."
 }

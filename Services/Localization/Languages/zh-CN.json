@@ -730,6 +730,7 @@
   "DockWidthAuto": "适应内容",
   "DockWidthPixels": "固定像素",
   "DockWidthPercent": "屏幕百分比",
+  "DockWidthFill": "全宽（无边距）",
   "DockWidthValue": "宽度",
   "DockWidthValueDescription": "所选模式的宽度值。"
 }

@@ -129,6 +129,7 @@
                                         <ComboBoxItem Content="{local:Loc DockWidthAuto}" Tag="Auto" />
                                         <ComboBoxItem Content="{local:Loc DockWidthPixels}" Tag="Pixels" />
                                         <ComboBoxItem Content="{local:Loc DockWidthPercent}" Tag="Percent" />
+                                        <ComboBoxItem Content="{local:Loc DockWidthFill}" Tag="Fill" />
                                     </ComboBox>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
                                         <TextBlock Text="{local:Loc DockWidthMode}" Style="{StaticResource SettingsRowLabel}" />
@@ -439,11 +440,6 @@
                                             <CheckBox x:Name="StatsMemoryToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
                                                       AutomationProperties.Name="{local:Loc Memory}" />
                                             <TextBlock Text="{local:Loc Memory}" Style="{StaticResource SettingsRowLabel}" FontSize="12" />
-                                        </DockPanel></Border>
-                                        <Border Style="{StaticResource CompactSettingsRow}"><DockPanel>
-                                            <CheckBox x:Name="StatsBatteryToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
-                                                      AutomationProperties.Name="{local:Loc Battery}" />
-                                            <TextBlock Text="{local:Loc Battery}" Style="{StaticResource SettingsRowLabel}" FontSize="12" />
                                         </DockPanel></Border>
                                         <Border Style="{StaticResource CompactSettingsRow}"><DockPanel>
                                             <CheckBox x:Name="StatsCpuTemperatureToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
