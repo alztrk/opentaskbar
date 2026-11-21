@@ -35,20 +35,29 @@ internal static class WidgetScreenshotCapture
                 FocusSessions: 4,
                 StatsMeters: SystemMeters.Cpu | SystemMeters.Memory);
 
-            // 1. Battery Card
-            var batteryItem = new DockWidgetItem(DockWidgetService.BatteryId, "Pil") { Value = "85% · Şarj oluyor" };
-            var batteryHost = new ContentControl { Content = batteryItem };
-            SavePng(app, batteryHost, 200, 62, $"battery_{suffix}.png");
+            // 1. Battery Widget (V19 liquid fill)
+            using var batteryWidget = new BatteryWidget();
+            batteryWidget.ApplySettings(settings);
+            batteryWidget.ApplyStatus(new BatteryStatus(Present: true, Percent: 76, Charging: false, PluggedIn: true));
+            batteryWidget.Visibility = Visibility.Visible;
+            SavePng(app, batteryWidget, 140, 62, $"battery_{suffix}.png");
 
-            // 2. Storage Card
-            var storageItem = new DockWidgetItem("Storage", "Depolama") { Value = "142.5 GiB boş" };
-            var storageHost = new ContentControl { Content = storageItem };
-            SavePng(app, storageHost, 200, 62, $"storage_{suffix}.png");
+            // 2. Storage Widget (V19 horizontal multi-drive)
+            using var storageWidget = new StorageWidget();
+            storageWidget.ApplySettings(settings);
+            storageWidget.ApplyDrives([
+                new DriveStorageInfo("C:", 213L * 1024 * 1024 * 1024, 476L * 1024 * 1024 * 1024),
+                new DriveStorageInfo("D:", (long)(1.2 * 1024 * 1024 * 1024 * 1024), (long)(1.8 * 1024 * 1024 * 1024 * 1024))
+            ]);
+            storageWidget.Visibility = Visibility.Visible;
+            SavePng(app, storageWidget, 280, 62, $"storage_{suffix}.png");
 
-            // 3. DayProgress Card
-            var dayProgressItem = new DockWidgetItem("DayProgress", "Günün İlerlemesi") { Value = "68%" };
-            var dayProgressHost = new ContentControl { Content = dayProgressItem };
-            SavePng(app, dayProgressHost, 180, 62, $"dayprogress_{suffix}.png");
+            // 3. DayProgress Widget (V19 ring + percent + unit)
+            using var dayProgressWidget = new DayProgressWidget();
+            dayProgressWidget.ApplySettings(settings);
+            dayProgressWidget.Render(new DateTime(2026, 11, 18, 16, 20, 0), force: true);
+            dayProgressWidget.Visibility = Visibility.Visible;
+            SavePng(app, dayProgressWidget, 140, 62, $"dayprogress_{suffix}.png");
 
             // 4. Stopwatch Widget
             var clock = new ParityClock(new DateTimeOffset(2026, 11, 18, 14, 30, 0, TimeSpan.Zero));
@@ -100,11 +109,29 @@ internal static class WidgetScreenshotCapture
             focusWidget.Visibility = Visibility.Visible;
             SavePng(app, focusWidget, 200, 62, $"focus_{suffix}.png");
 
-            // 12. Weather Widget
+            // 12. Weather Widget (V19 inline)
             using var weatherWidget = new WeatherWidget();
             weatherWidget.ApplySettings(settings);
+            weatherWidget.ApplyReport(new WeatherReport(
+                "İstanbul", 18, 2, 17,
+                [
+                    new WeatherDay(new DateOnly(2026, 11, 18), 2, 14, 21),
+                    new WeatherDay(new DateOnly(2026, 11, 19), 2, 13, 19),
+                    new WeatherDay(new DateOnly(2026, 11, 20), 61, 12, 17),
+                    new WeatherDay(new DateOnly(2026, 11, 21), 0, 11, 16)
+                ],
+                Humidity: 58,
+                WindSpeed: 12));
             weatherWidget.Visibility = Visibility.Visible;
-            SavePng(app, weatherWidget, 120, 62, $"weather_{suffix}.png");
+            SavePng(app, weatherWidget, 620, 62, $"weather_{suffix}.png");
+
+            // 12b. Audio Flyout (V19 3-section vertical mixer)
+            var audioFlyout = audioWidget.BuildFlyoutContent();
+            SavePng(app, (FrameworkElement)audioFlyout, 340, 380, $"audio_flyout_{suffix}.png");
+
+            // 12c. Focus Flyout (V19 presets + progress)
+            var focusFlyout = focusWidget.BuildFocusFlyout();
+            SavePng(app, (FrameworkElement)focusFlyout, 340, 260, $"focus_flyout_{suffix}.png");
 
             // 13. Stack Icon
             var stack = new DockStack(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"), app.Dispatcher);

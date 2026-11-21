@@ -210,8 +210,8 @@ internal static class AdaptiveWidgetAndConfirmChecks
         hover.Attach(qsWidget);
         hover.Attach(audioWidget);
         check(!hover.IsHoverActive, "WidgetHoverCoordinator must remain inactive at rest.");
-        check(qsWidget.BuildHoverFlyoutContent() is not null && audioWidget.BuildHoverFlyoutContent() is not null,
-            "Compact-capable widgets must produce hover flyout content cleanly.");
+        check(qsWidget.BuildHoverFlyoutContent() is null && audioWidget.BuildHoverFlyoutContent() is not null,
+            "QuickSettings toggles directly without a hover flyout; Audio produces its mixer flyout cleanly.");
         hover.CollapseActive();
         check(!hover.IsHoverActive, "CollapseActive must reset hover active state.");
     }

@@ -3,8 +3,9 @@ using System.Media;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
-using System.Windows.Documents;
-using System.Windows.Data;
+using System.Windows.Controls.Primitives;
+using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Media.Animation;
 using OpenTaskbar.Models;
 using OpenTaskbar.Services;
@@ -12,32 +13,44 @@ using OpenTaskbar.Services;
 namespace OpenTaskbar.Widgets;
 
 /// <summary>
-/// Pomodoro-style focus timer: focus → break → next focus session, cycling through the configured session count.
-/// A finished focus phase rolls straight into its break; a finished break waits for the user to start the next session.
+/// V19 Focus timer widget: compact target icon + tabular remaining time + play/pause on the dock;
+/// distinct Focus flyout with prominent remaining time, horizontal progress bar, 15/25/50 min presets,
+/// session count, reset, and start/pause.
 /// </summary>
 public partial class FocusWidget : DockWidget
 {
     private enum Phase { Focus, Break }
 
+    private static readonly int[] FocusPresets = [15, 25, 50];
+
     private Phase _phase = Phase.Focus;
     private int _session = 1;
+    private int _completedSessions;
+    private int _activePresetMinutes;
     private TimeSpan _remaining;
     private TimeSpan _lastFullLength;
     private long? _startedAt;
     private readonly TimeProvider _clock;
+    private readonly DockFlyout _flyout = new();
     private bool _initialized;
 
     private int _renderedSeconds = -1;
     private Phase? _renderedPhase;
-    private int _renderedSession = -1;
-    private int _renderedSessionsTotal = -1;
     private bool? _renderedRunning;
     private AppLanguage? _renderedLanguage;
 
+    private Border? _flyoutContainer;
+    private TextBlock? _flyoutTimeText;
+    private Border? _flyoutProgressFill;
+    private ColumnDefinition? _flyoutProgressFillCol;
+    private ColumnDefinition? _flyoutProgressEmptyCol;
+    private TextBlock? _flyoutSessionCount;
+    private Button? _flyoutToggleButton;
+
     public override bool SupportsCompactMode => true;
     public override int ShrinkPriority => 50;
-    public override double FullWidthEstimate => 162;
-    public override double CompactWidthEstimate => 100;
+    public override double FullWidthEstimate => 118;
+    public override double CompactWidthEstimate => 96;
 
     public FocusWidget() : this(TimeProvider.System) { }
 
@@ -45,6 +58,16 @@ public partial class FocusWidget : DockWidget
     {
         _clock = clock;
         InitializeComponent();
+        _flyout.Closed += (_, _) =>
+        {
+            _flyoutContainer = null;
+            _flyoutTimeText = null;
+            _flyoutProgressFill = null;
+            _flyoutProgressFillCol = null;
+            _flyoutProgressEmptyCol = null;
+            _flyoutSessionCount = null;
+            _flyoutToggleButton = null;
+        };
     }
 
     protected override void OnCompactChanged(bool compact) => ApplyDensityLayout();
@@ -53,59 +76,25 @@ public partial class FocusWidget : DockWidget
     private void ApplyDensityLayout()
     {
         var compact = IsCompact && !IsHoverExpanded;
-        PhaseRow.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
-        SkipButton.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
-        Card.Padding = compact ? new Thickness(10, 0, 6, 0) : new Thickness(12, 0, 8, 0);
+        Card.Padding = compact ? new Thickness(7, 0, 6, 0) : new Thickness(10, 0, 8, 0);
+        FocusIcon.Margin = compact ? new Thickness(0, 0, 5, 0) : new Thickness(0, 0, 7, 0);
     }
 
-    public override UIElement? BuildHoverFlyoutContent()
+    public override UIElement? BuildHoverFlyoutContent() => null;
+
+    private TimeSpan PhaseLength
     {
-        var root = new StackPanel { Width = 200 };
-        var heading = DockFlyout.Heading($"{PhaseText.Text} {SessionText.Text}".Trim());
-        var headingBinding = new MultiBinding { StringFormat = "{0}{1}" };
-        headingBinding.Bindings.Add(new Binding("Text") { Source = PhaseText });
-        headingBinding.Bindings.Add(new Binding("Text") { Source = SessionText });
-        heading.SetBinding(TextBlock.TextProperty, headingBinding);
-        root.Children.Add(heading);
-        var timer = new TextBlock { FontSize = 24, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 2, 0, 8) };
-        timer.SetResourceReference(StyleProperty, "WidgetText");
-        timer.SetBinding(TextBlock.TextProperty, new Binding("Text") { Source = RemainingText, Mode = BindingMode.OneWay });
-        root.Children.Add(timer);
-
-        var row = new StackPanel { Orientation = Orientation.Horizontal };
-        var toggle = new Button { Width = 34, Height = 34, Content = new ContentControl { Content = FindResource(IsRunning ? "IconPauseFill" : "IconPlayFill"), Width = 14, Height = 14 } };
-        toggle.SetResourceReference(StyleProperty, "WidgetIconButton");
-        if (toggle.Content is ContentControl tc)
+        get
         {
-            tc.SetResourceReference(StyleProperty, "WidgetGlyph");
-            tc.SetBinding(ContentControl.ContentProperty, new Binding("Content") { Source = ToggleGlyph, Mode = BindingMode.OneWay });
+            if (_phase == Phase.Focus)
+            {
+                var mins = _activePresetMinutes > 0 ? _activePresetMinutes : Settings.FocusMinutes;
+                return TimeSpan.FromMinutes(Math.Max(1, mins));
+            }
+            return TimeSpan.FromMinutes(Math.Max(1, Settings.FocusBreakMinutes));
         }
-        toggle.SetBinding(Button.ToolTipProperty, new Binding("ToolTip") { Source = PlayButton, Mode = BindingMode.OneWay });
-        System.Windows.Automation.AutomationProperties.SetName(toggle, UiText.Get(IsRunning ? "FocusPause" : "FocusStart"));
-        toggle.Click += Toggle_Click;
-
-        var skip = new Button { Width = 34, Height = 34, Margin = new Thickness(6, 0, 0, 0), Content = new ContentControl { Content = FindResource("IconSkip"), Width = 14, Height = 14 } };
-        skip.SetResourceReference(StyleProperty, "WidgetIconButton");
-        if (skip.Content is ContentControl sc) sc.SetResourceReference(StyleProperty, "WidgetIcon");
-        skip.ToolTip = UiText.Get("FocusSkip");
-        System.Windows.Automation.AutomationProperties.SetName(skip, UiText.Get("FocusSkip"));
-        skip.Click += Skip_Click;
-
-        var reset = new Button { Width = 34, Height = 34, Margin = new Thickness(6, 0, 0, 0), Content = new ContentControl { Content = FindResource("IconReset"), Width = 14, Height = 14 } };
-        reset.SetResourceReference(StyleProperty, "WidgetIconButton");
-        if (reset.Content is ContentControl rc) rc.SetResourceReference(StyleProperty, "WidgetIcon");
-        reset.ToolTip = UiText.Get("FocusReset");
-        System.Windows.Automation.AutomationProperties.SetName(reset, UiText.Get("FocusReset"));
-        reset.Click += Reset_Click;
-
-        row.Children.Add(toggle);
-        row.Children.Add(skip);
-        row.Children.Add(reset);
-        root.Children.Add(row);
-        return root;
     }
 
-    private TimeSpan PhaseLength => TimeSpan.FromMinutes(_phase == Phase.Focus ? Settings.FocusMinutes : Settings.FocusBreakMinutes);
     private bool IsRunning => _startedAt is not null;
     private TimeSpan CurrentRemaining => _startedAt is { } startedAt
         ? _remaining - _clock.GetElapsedTime(startedAt)
@@ -114,11 +103,19 @@ public partial class FocusWidget : DockWidget
     protected override void OnActivated()
     {
         UiText.Current.PropertyChanged += UiText_PropertyChanged;
+        if (!_initialized)
+        {
+            _activePresetMinutes = Settings.FocusMinutes;
+            _remaining = PhaseLength;
+            _lastFullLength = _remaining;
+            _initialized = true;
+        }
         Render();
     }
 
     protected override void OnDeactivated()
     {
+        _flyout.Close();
         UiText.Current.PropertyChanged -= UiText_PropertyChanged;
         if (IsRunning)
         {
@@ -126,6 +123,11 @@ public partial class FocusWidget : DockWidget
             _startedAt = null;
         }
         Card.BeginAnimation(OpacityProperty, null);
+    }
+
+    protected override void OnDisposed()
+    {
+        _flyout.Close();
     }
 
     private void UiText_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -136,9 +138,9 @@ public partial class FocusWidget : DockWidget
     protected override void OnSettingsChanged()
     {
         _session = Math.Min(_session, Settings.FocusSessions);
-        // Idle timers follow edited lengths immediately; a running phase keeps its deadline.
         if (!_initialized || (!IsRunning && _remaining == _lastFullLength))
         {
+            _activePresetMinutes = Settings.FocusMinutes;
             _remaining = PhaseLength;
             _initialized = true;
         }
@@ -147,9 +149,18 @@ public partial class FocusWidget : DockWidget
         Render();
     }
 
-    /// <summary>Renders the configured focus duration locally; no timers or sensors are started.</summary>
     public override bool SupportsStaticPreview => true;
-    protected override void OnRenderPreview() => Render();
+    protected override void OnRenderPreview()
+    {
+        if (!_initialized)
+        {
+            _activePresetMinutes = Settings.FocusMinutes;
+            _remaining = PhaseLength;
+            _lastFullLength = _remaining;
+            _initialized = true;
+        }
+        Render();
+    }
 
     protected override void OnTick(DateTime now)
     {
@@ -164,6 +175,7 @@ public partial class FocusWidget : DockWidget
         Pulse();
         if (_phase == Phase.Focus)
         {
+            _completedSessions++;
             StartPhase(Phase.Break, run: true);
         }
         else
@@ -179,6 +191,138 @@ public partial class FocusWidget : DockWidget
         _remaining = PhaseLength;
         _lastFullLength = _remaining;
         _startedAt = run ? _clock.GetTimestamp() : null;
+    }
+
+    private void Card_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (e.OriginalSource is DependencyObject dep && IsDescendantOf(dep, PlayButton))
+            return;
+
+        _flyout.Toggle(Card, BuildFocusFlyout, animate: true, focusable: false);
+        e.Handled = true;
+    }
+
+    internal UIElement BuildFocusFlyout()
+    {
+        var container = new Border { Width = 316 };
+        _flyoutContainer = container;
+        PopulateFocusFlyout(container);
+        return container;
+    }
+
+    private void PopulateFocusFlyout(Border container)
+    {
+        var root = new StackPanel();
+
+        // Header: Focus/Break label + completed session count
+        var header = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
+        var sessionCount = new TextBlock
+        {
+            Text = UiText.Format("FocusSessionsCount", _completedSessions),
+            FontSize = 12,
+            FontWeight = FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center,
+            Typography = { NumeralAlignment = FontNumeralAlignment.Tabular }
+        };
+        sessionCount.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+        DockPanel.SetDock(sessionCount, Dock.Right);
+        header.Children.Add(sessionCount);
+
+        var title = new TextBlock
+        {
+            Text = UiText.Get(_phase == Phase.Focus ? "Focus" : "Break"),
+            FontSize = 12.5,
+            FontWeight = FontWeights.Bold,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        title.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+        header.Children.Add(title);
+        root.Children.Add(header);
+        _flyoutSessionCount = sessionCount;
+
+        // Prominent remaining time
+        var timeText = new TextBlock
+        {
+            Text = FormatRemaining(),
+            FontSize = 48,
+            FontWeight = FontWeights.Bold,
+            Margin = new Thickness(0, 2, 0, 12),
+            Typography = { NumeralAlignment = FontNumeralAlignment.Tabular }
+        };
+        timeText.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+        root.Children.Add(timeText);
+        _flyoutTimeText = timeText;
+
+        // Horizontal progress track
+        var pct = RemainingFraction();
+        var track = new Border { Height = 7, CornerRadius = new CornerRadius(3.5), Margin = new Thickness(0, 0, 0, 14), ClipToBounds = true };
+        track.SetResourceReference(Border.BackgroundProperty, "WidgetTrack");
+        var trackGrid = new Grid();
+        var fillCol = new ColumnDefinition { Width = new GridLength(pct, GridUnitType.Star) };
+        var emptyCol = new ColumnDefinition { Width = new GridLength(Math.Max(0, 1 - pct), GridUnitType.Star) };
+        trackGrid.ColumnDefinitions.Add(fillCol);
+        trackGrid.ColumnDefinitions.Add(emptyCol);
+        var fill = new Border { CornerRadius = new CornerRadius(3.5) };
+        fill.SetResourceReference(Border.BackgroundProperty, "WidgetBlue");
+        Grid.SetColumn(fill, 0);
+        trackGrid.Children.Add(fill);
+        track.Child = trackGrid;
+        root.Children.Add(track);
+        _flyoutProgressFill = fill;
+        _flyoutProgressFillCol = fillCol;
+        _flyoutProgressEmptyCol = emptyCol;
+
+        // 15 / 25 / 50 minute preset row
+        var presetsGrid = new UniformGrid { Columns = FocusPresets.Length, Margin = new Thickness(0, 0, 0, 10) };
+        var currentMins = (int)Math.Round(PhaseLength.TotalMinutes);
+        for (var i = 0; i < FocusPresets.Length; i++)
+        {
+            var mins = FocusPresets[i];
+            var isSelected = _phase == Phase.Focus && currentMins == mins;
+            var presetBtn = new Button
+            {
+                Content = UiText.Format("MinutesShort", mins),
+                Margin = new Thickness(i == 0 ? 0 : 4, 0, i == FocusPresets.Length - 1 ? 0 : 4, 0)
+            };
+            presetBtn.SetResourceReference(StyleProperty, isSelected ? "WidgetFlyoutPrimaryButton" : "WidgetFlyoutActionButton");
+            presetBtn.Click += (_, _) =>
+            {
+                _phase = Phase.Focus;
+                _activePresetMinutes = mins;
+                _remaining = TimeSpan.FromMinutes(mins);
+                _lastFullLength = _remaining;
+                _startedAt = null;
+                Render();
+                if (_flyoutContainer is not null) PopulateFocusFlyout(_flyoutContainer);
+            };
+            presetsGrid.Children.Add(presetBtn);
+        }
+        root.Children.Add(presetsGrid);
+
+        // Reset + Start/Pause action row
+        var actionsGrid = new UniformGrid { Columns = 2 };
+        var resetBtn = new Button
+        {
+            Content = UiText.Get("FocusReset"),
+            Margin = new Thickness(0, 0, 4, 0)
+        };
+        resetBtn.SetResourceReference(StyleProperty, "WidgetFlyoutActionButton");
+        resetBtn.Click += Reset_Click;
+
+        var toggleBtn = new Button
+        {
+            Content = UiText.Get(IsRunning ? "FocusPause" : "FocusStart"),
+            Margin = new Thickness(4, 0, 0, 0)
+        };
+        toggleBtn.SetResourceReference(StyleProperty, "WidgetFlyoutPrimaryButton");
+        toggleBtn.Click += Toggle_Click;
+        _flyoutToggleButton = toggleBtn;
+
+        actionsGrid.Children.Add(resetBtn);
+        actionsGrid.Children.Add(toggleBtn);
+        root.Children.Add(actionsGrid);
+
+        container.Child = root;
     }
 
     private void Toggle_Click(object sender, RoutedEventArgs e)
@@ -197,22 +341,6 @@ public partial class FocusWidget : DockWidget
         Render();
     }
 
-    private void Skip_Click(object sender, RoutedEventArgs e)
-    {
-        var wasRunning = IsRunning;
-        if (_phase == Phase.Focus)
-        {
-            StartPhase(Phase.Break, wasRunning);
-        }
-        else
-        {
-            _session = _session >= Settings.FocusSessions ? 1 : _session + 1;
-            StartPhase(Phase.Focus, wasRunning);
-        }
-
-        Render();
-    }
-
     private void Reset_Click(object sender, RoutedEventArgs e)
     {
         _session = 1;
@@ -220,16 +348,44 @@ public partial class FocusWidget : DockWidget
         Render();
     }
 
+    private string FormatRemaining()
+    {
+        var elapsed = CurrentRemaining;
+        var remaining = elapsed < TimeSpan.Zero ? TimeSpan.Zero : elapsed;
+        var seconds = (int)Math.Ceiling(remaining.TotalSeconds);
+        return $"{seconds / 60:00}:{seconds % 60:00}";
+    }
+
+    private double RemainingFraction()
+    {
+        var total = Math.Max(1.0, PhaseLength.TotalSeconds);
+        var rem = Math.Clamp(CurrentRemaining.TotalSeconds, 0, total);
+        return rem / total;
+    }
+
     private void Render()
     {
         var elapsed = CurrentRemaining;
         var remaining = elapsed < TimeSpan.Zero ? TimeSpan.Zero : elapsed;
-        // Round up so the display reads 25:00 at the start and 00:00 only at the end.
         var seconds = (int)Math.Ceiling(remaining.TotalSeconds);
         if (_renderedSeconds != seconds)
         {
             _renderedSeconds = seconds;
-            RemainingText.Text = $"{seconds / 60:00}:{seconds % 60:00}";
+            var formatted = $"{seconds / 60:00}:{seconds % 60:00}";
+            RemainingText.Text = formatted;
+            if (_flyoutTimeText is not null) _flyoutTimeText.Text = formatted;
+        }
+
+        if (_flyoutProgressFillCol is not null && _flyoutProgressEmptyCol is not null)
+        {
+            var pct = RemainingFraction();
+            _flyoutProgressFillCol.Width = new GridLength(pct, GridUnitType.Star);
+            _flyoutProgressEmptyCol.Width = new GridLength(Math.Max(0, 1 - pct), GridUnitType.Star);
+        }
+
+        if (_flyoutSessionCount is not null)
+        {
+            _flyoutSessionCount.Text = UiText.Format("FocusSessionsCount", _completedSessions);
         }
 
         var lang = UiText.Current.Language;
@@ -237,21 +393,12 @@ public partial class FocusWidget : DockWidget
         var runningChanged = _renderedRunning != IsRunning;
         var langChanged = _renderedLanguage != lang;
 
-        if (phaseChanged || langChanged)
-        {
-            PhaseText.Text = UiText.Get(_phase == Phase.Focus ? "Focus" : "Break");
-        }
-
-        if (_renderedSession != _session || _renderedSessionsTotal != Settings.FocusSessions)
-        {
-            _renderedSession = _session;
-            _renderedSessionsTotal = Settings.FocusSessions;
-            SessionText.Text = $" {_session}/{Settings.FocusSessions}";
-        }
-
         if (runningChanged)
         {
             ToggleGlyph.Content = FindResource(IsRunning ? "IconPauseFill" : "IconPlayFill");
+            FocusIcon.SetResourceReference(ForegroundProperty, IsRunning ? "WidgetSelectedForeground" : "TextSecondary");
+            PlayButton.SetResourceReference(BackgroundProperty, IsRunning ? "WidgetSelectedFill" : "Transparent");
+            PlayButton.SetResourceReference(ForegroundProperty, IsRunning ? "WidgetSelectedForeground" : "TextPrimary");
         }
 
         if (runningChanged || langChanged)
@@ -259,19 +406,10 @@ public partial class FocusWidget : DockWidget
             var playLabel = UiText.Get(IsRunning ? "FocusPause" : "FocusStart");
             PlayButton.ToolTip = playLabel;
             AutomationProperties.SetName(PlayButton, playLabel);
+            if (_flyoutToggleButton is not null) _flyoutToggleButton.Content = playLabel;
         }
 
-        if (runningChanged || phaseChanged)
-        {
-            Card.SetResourceReference(Border.BorderBrushProperty,
-                IsRunning ? (_phase == Phase.Focus ? "WidgetFocusAccent" : "WidgetAccent") : "WidgetTrack");
-        }
-
-        if (phaseChanged)
-        {
-            PhaseText.SetResourceReference(TextElement.ForegroundProperty,
-                _phase == Phase.Focus ? "WidgetFocusAccent" : "WidgetAccent");
-        }
+        Card.ToolTip = $"{UiText.Get(_phase == Phase.Focus ? "Focus" : "Break")} · {RemainingText.Text}";
 
         _renderedPhase = _phase;
         _renderedRunning = IsRunning;
@@ -288,5 +426,18 @@ public partial class FocusWidget : DockWidget
         };
         pulse.Completed += (_, _) => Card.BeginAnimation(OpacityProperty, null);
         Card.BeginAnimation(OpacityProperty, pulse);
+    }
+
+    private static bool IsDescendantOf(DependencyObject node, DependencyObject target)
+    {
+        var current = node;
+        while (current is not null)
+        {
+            if (ReferenceEquals(current, target)) return true;
+            current = current is Visual || current is System.Windows.Media.Media3D.Visual3D
+                ? VisualTreeHelper.GetParent(current)
+                : LogicalTreeHelper.GetParent(current);
+        }
+        return false;
     }
 }

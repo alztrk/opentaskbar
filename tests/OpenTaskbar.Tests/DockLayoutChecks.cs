@@ -562,11 +562,14 @@ internal static class DockLayoutChecks
         Check(app.FindResource("StartDockButton") is Style, "StartDockButton tactile tile style must be defined.");
 
         // Verify WidgetCoordinator ordering, reordering and validation
-        Check(WidgetCoordinator.DefaultWidgetOrder.Length == 16, "WidgetCoordinator must have 16 default widgets (one per AI provider).");
+        Check(WidgetCoordinator.DefaultWidgetOrder.Length == 19, "WidgetCoordinator must have 19 default widgets (including Battery, Storage, DayProgress, and one per AI provider).");
         Check(WidgetCoordinator.GetLabelKey("Clock") == "WidgetClock", "Clock widget label key must match.");
         Check(WidgetCoordinator.GetLabelKey("Media") == "WidgetMedia", "Media widget label key must match.");
         Check(WidgetCoordinator.GetLabelKey("NetSpeed") == "WidgetNetSpeed", "NetSpeed widget label key must match.");
         Check(WidgetCoordinator.GetLabelKey("BluetoothBattery") == "WidgetBluetoothBattery", "BluetoothBattery widget label key must match.");
+        Check(WidgetCoordinator.GetLabelKey("Battery") == "WidgetBattery", "Battery widget label key must match.");
+        Check(WidgetCoordinator.GetLabelKey("Storage") == "WidgetStorage", "Storage widget label key must match.");
+        Check(WidgetCoordinator.GetLabelKey("DayProgress") == "WidgetDayProgress", "DayProgress widget label key must match.");
 
         UiText.Current.SetLanguage(AppLanguage.Turkish);
         Check(UiText.Get("WidgetOrderHeading") == "Widget Sıralaması", "WidgetOrderHeading must localize to Turkish.");
@@ -582,7 +585,7 @@ internal static class DockLayoutChecks
         coordinator.ApplyOrder(["Clock", "Focus", "Media"]);
         Check(coordinator.CurrentOrder[0] == "Clock" && coordinator.CurrentOrder[1] == "Focus" && coordinator.CurrentOrder[2] == "Media",
             "ApplyOrder must reorder widgets per specified order.");
-        Check(testStrip.Children.Count == 16, "Strip children count must remain 16 after reordering.");
+        Check(testStrip.Children.Count == 19, "Strip children count must remain 19 after reordering.");
         var unspecified = coordinator.CurrentOrder.Skip(3).ToArray();
         coordinator.ApplyOrder(["Clock", "Focus", "Media"]);
         Check(coordinator.CurrentOrder.Skip(3).SequenceEqual(unspecified),
@@ -620,11 +623,11 @@ internal static class DockLayoutChecks
         var dayText = clockWidget.FindName("DayOfWeekText") as TextBlock;
         var dateText = clockWidget.FindName("DateText") as TextBlock;
         var timeText = clockWidget.FindName("TimeText") as TextBlock;
-        Check(dayText?.Text == "MONDAY", "ClockWidget must display uppercase day of week.");
+        Check(dayText?.Text == "Mon", "ClockWidget must display concise sentence-case day of week.");
         Check(dateText?.Text == "Nov 16", "ClockWidget must display date format.");
         Check(timeText?.Text.Contains("20") == true || timeText?.Text.Contains("8") == true, "ClockWidget must display time.");
         clockWidget.Tick(new DateTime(2026, 11, 17, 20, 16, 0));
-        Check(dayText?.Text == "TUESDAY" && dateText?.Text == "Nov 17", "Date changes must refresh even when the displayed time is unchanged.");
+        Check(dayText?.Text == "Tue" && dateText?.Text == "Nov 17", "Date changes must refresh even when the displayed time is unchanged.");
         clockWidget.ApplySettings(new DockSettings(Language: AppLanguage.English, DateStyle: ClockDateStyle.ShortDateOnly));
         clockWidget.Tick(new DateTime(2026, 11, 17, 20, 16, 0));
         var shortDate = dateText?.Text;

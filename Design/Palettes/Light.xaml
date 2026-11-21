@@ -49,8 +49,8 @@
     <SolidColorBrush x:Key="SurfacePopup" Color="#F7FFFFFF" />
     <SolidColorBrush x:Key="StrokeSubtle" Color="#FFE5E5E5" />
     <SolidColorBrush x:Key="StrokeFocus" Color="#FF0369A1" />
-    <SolidColorBrush x:Key="SurfaceHover" Color="#0D000000" />
-    <Color x:Key="SurfaceHoverColor">#0D000000</Color>
+    <SolidColorBrush x:Key="SurfaceHover" Color="#10162038" />
+    <Color x:Key="SurfaceHoverColor">#10162038</Color>
     <SolidColorBrush x:Key="SurfacePressed" Color="#16000000" />
         <!-- Shell buttons have no resting fill; their hover/press feedback must stay clearly visible on glass. -->
         <SolidColorBrush x:Key="ShellButtonHover" Color="#1A000000" />
@@ -104,6 +104,14 @@
     <SolidColorBrush x:Key="WidgetFocusAccent" Color="#FFDC2626" />
     <SolidColorBrush x:Key="WidgetOnStroke" Color="#FF2563EB" />
     <SolidColorBrush x:Key="WidgetWarning" Color="#FFD97706" />
+    <SolidColorBrush x:Key="WidgetSelectedFill" Color="#262474E9" />
+    <SolidColorBrush x:Key="WidgetSelectedStroke" Color="#702C74E9" />
+    <SolidColorBrush x:Key="WidgetSelectedForeground" Color="#FF1D66D7" />
+    <SolidColorBrush x:Key="WidgetDangerHover" Color="#1FDF4B53" />
+    <SolidColorBrush x:Key="WidgetDangerStroke" Color="#3ADF4B53" />
+    <SolidColorBrush x:Key="WidgetDangerForeground" Color="#FFDC2626" />
+    <SolidColorBrush x:Key="WidgetGreen" Color="#FF0D9E78" />
+    <SolidColorBrush x:Key="WidgetBlue" Color="#FF1D66D7" />
     <!-- Dock scroll edge scrims: soft directional gradient shadows for overflowing content -->
     <LinearGradientBrush x:Key="DockScrollScrimStart" StartPoint="0,0" EndPoint="1,0">
         <GradientStop Color="#60FFFFFF" Offset="0" />

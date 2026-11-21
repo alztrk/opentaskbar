@@ -1,7 +1,9 @@
 using System.Globalization;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Input;
 using System.Windows.Media;
 using OpenTaskbar.Models;
 using OpenTaskbar.Services;
@@ -63,10 +65,20 @@ public partial class ClockWidget : DockWidget
 
     private readonly DockFlyout _calendar = new();
     private string _lastRenderKey = string.Empty;
-    private TimeOfDayPeriod? _currentPeriod;
     private DateOnly _shownMonth;
+    private DateOnly? _selectedDate;
+    private TextBlock? _flyoutLiveTime;
 
-    public ClockWidget() => InitializeComponent();
+    public ClockWidget()
+    {
+        InitializeComponent();
+        _calendar.Closed += (_, _) => _flyoutLiveTime = null;
+    }
+
+    public override bool SupportsCompactMode => true;
+    public override int ShrinkPriority => 80;
+    public override double FullWidthEstimate => 148;
+    public override double CompactWidthEstimate => 84;
 
     // The clock renders from the local system time only, so a single frame is safe in Settings.
     public override bool SupportsStaticPreview => true;
@@ -77,14 +89,18 @@ public partial class ClockWidget : DockWidget
     protected override void OnActivated()
     {
         _lastRenderKey = string.Empty;
-        _currentPeriod = null;
         OnTick(DateTime.Now);
     }
 
     protected override void OnSettingsChanged()
     {
         _lastRenderKey = string.Empty;
-        _currentPeriod = null;
+        if (IsActive) OnTick(DateTime.Now);
+    }
+
+    protected override void OnCompactChanged(bool compact)
+    {
+        _lastRenderKey = string.Empty;
         if (IsActive) OnTick(DateTime.Now);
     }
 
@@ -93,97 +109,184 @@ public partial class ClockWidget : DockWidget
     protected override void OnTick(DateTime now)
     {
         var culture = Culture;
-        var period = GetPeriod(now.Hour);
-        if (_currentPeriod != period)
-        {
-            _currentPeriod = period;
-            var theme = GetTheme(period);
-            TimeOfDayIcon.Content = FindResource(theme.IconKey);
-            TimeOfDayIcon.Foreground = theme.Accent;
-            DayOfWeekText.Foreground = theme.Accent;
-        }
-
         var timeFormat = Settings.Clock24Hour
             ? (Settings.ClockShowSeconds ? "HH:mm:ss" : "HH:mm")
             : (Settings.ClockShowSeconds ? "hh:mm:ss tt" : "hh:mm tt");
         var timeString = now.ToString(timeFormat, culture);
-        var renderKey = $"{now:yyyyMMdd}|{timeString}|{Settings.DateStyle}|{Settings.Language}|{period}";
-        if (renderKey != _lastRenderKey)
+        if (_flyoutLiveTime is not null) _flyoutLiveTime.Text = timeString;
+
+        var renderKey = $"{now:yyyyMMdd}|{timeString}|{Settings.DateStyle}|{Settings.Language}|{IsCompact}";
+        if (renderKey == _lastRenderKey) return;
+
+        _lastRenderKey = renderKey;
+        TimeText.Text = timeString;
+        if (IsCompact || Settings.DateStyle == ClockDateStyle.Hidden)
         {
-            _lastRenderKey = renderKey;
-            TimeText.Text = timeString;
+            DateColumn.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            DateColumn.Visibility = Visibility.Visible;
             switch (Settings.DateStyle)
             {
                 case ClockDateStyle.DayAndShortDate:
-                    DateColumn.Visibility = Visibility.Visible;
                     DayOfWeekText.Visibility = Visibility.Visible;
-                    DayOfWeekText.Text = now.ToString("dddd", culture).ToUpper(culture);
                     DateText.Text = now.ToString(culture.DateTimeFormat.MonthDayPattern.Replace("MMMM", "MMM"), culture);
+                    DayOfWeekText.Text = now.ToString("ddd", culture);
                     break;
                 case ClockDateStyle.ShortDateOnly:
-                    DateColumn.Visibility = Visibility.Visible;
                     DayOfWeekText.Visibility = Visibility.Collapsed;
                     DateText.Text = now.ToString("MMM d", culture);
                     break;
                 case ClockDateStyle.NumericDate:
-                    DateColumn.Visibility = Visibility.Visible;
                     DayOfWeekText.Visibility = Visibility.Collapsed;
                     DateText.Text = now.ToString("d", culture);
                     break;
-                case ClockDateStyle.Hidden:
-                    DateColumn.Visibility = Visibility.Collapsed;
-                    break;
             }
-            ClockButton.ToolTip = now.ToString("D", culture);
         }
+        ClockButton.ToolTip = now.ToString("D", culture);
     }
 
     private void ClockButton_Click(object sender, RoutedEventArgs e)
     {
-        _shownMonth = DateOnly.FromDateTime(DateTime.Today);
-        _shownMonth = new DateOnly(_shownMonth.Year, _shownMonth.Month, 1);
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        _shownMonth = new DateOnly(today.Year, today.Month, 1);
+        _selectedDate = null;
         var root = new ContentControl();
         root.Content = BuildCalendar(root);
         _calendar.Toggle(ClockButton, () => root);
     }
 
-    /// <summary>Month view with the user's first day of week; arrows rebuild it in place.</summary>
-    private UIElement BuildCalendar(ContentControl host)
+    internal static string FormatLocalTimeZone()
+    {
+        var tz = TimeZoneInfo.Local;
+        var offset = tz.GetUtcOffset(DateTime.Now);
+        var sign = offset < TimeSpan.Zero ? "-" : "+";
+        var abs = offset.Duration();
+        var utc = abs.Minutes == 0
+            ? $"UTC{sign}{abs.Hours}"
+            : $"UTC{sign}{abs.Hours}:{abs.Minutes:00}";
+        var name = tz.IsDaylightSavingTime(DateTime.Now) ? tz.DaylightName : tz.StandardName;
+        return string.IsNullOrWhiteSpace(name) ? utc : $"{utc} · {name}";
+    }
+
+    /// <summary>V19 calendar flyout with live clock, system timezone, month/year navigation, selection, and Today jump.</summary>
+    internal UIElement BuildCalendar(ContentControl host)
     {
         var culture = Culture;
-        var today = DateOnly.FromDateTime(DateTime.Today);
-        var theme = GetTheme(GetPeriod(DateTime.Now.Hour));
+        var now = DateTime.Now;
+        var today = DateOnly.FromDateTime(now.Date);
+        if (_shownMonth == default) _shownMonth = new DateOnly(today.Year, today.Month, 1);
 
-        var root = new StackPanel { Width = 280 };
-        root.Children.Add(new TextBlock
+        var root = new StackPanel { Width = 312 };
+
+        // Top header: large live time + full date on left, actual system timezone on right.
+        var topRow = new DockPanel { Margin = new Thickness(2, 0, 2, 14) };
+
+        var zoneText = new TextBlock
         {
-            Text = DateTime.Today.ToString("D", culture), FontWeight = FontWeights.SemiBold, FontSize = 14, Margin = new Thickness(0, 0, 0, 8)
-        });
+            Text = FormatLocalTimeZone(),
+            FontSize = 10.5,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(8, 6, 0, 0),
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            MaxWidth = 135
+        };
+        zoneText.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+        DockPanel.SetDock(zoneText, Dock.Right);
+        topRow.Children.Add(zoneText);
 
-        var header = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
-        var previous = NavButton("IconChevronLeft", -1, host);
-        var next = NavButton("IconChevronRight", 1, host);
-        DockPanel.SetDock(previous, Dock.Left);
-        DockPanel.SetDock(next, Dock.Right);
-        header.Children.Add(previous);
-        header.Children.Add(next);
-        var title = _shownMonth.ToString("MMMM yyyy", culture);
-        header.Children.Add(new TextBlock
+        var timeFormat = Settings.Clock24Hour
+            ? (Settings.ClockShowSeconds ? "HH:mm:ss" : "HH:mm")
+            : (Settings.ClockShowSeconds ? "hh:mm:ss tt" : "hh:mm tt");
+        var timeStack = new StackPanel();
+        var liveTime = new TextBlock
         {
-            Text = culture.TextInfo.ToTitleCase(title), HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center, FontWeight = FontWeights.SemiBold, FontSize = 13
-        });
-        root.Children.Add(header);
+            Text = now.ToString(timeFormat, culture),
+            FontSize = 28,
+            FontWeight = FontWeights.Bold,
+            Typography = { NumeralAlignment = FontNumeralAlignment.Tabular }
+        };
+        liveTime.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+        _flyoutLiveTime = liveTime;
 
+        var fullDate = new TextBlock
+        {
+            Text = now.ToString("dddd, d MMMM", culture),
+            FontSize = 12,
+            Margin = new Thickness(0, 1, 0, 0)
+        };
+        fullDate.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+        timeStack.Children.Add(liveTime);
+        timeStack.Children.Add(fullDate);
+        topRow.Children.Add(timeStack);
+        root.Children.Add(topRow);
+
+        // Month & year navigation bar.
+        var nav = new Grid { Margin = new Thickness(0, 0, 0, 10) };
+        nav.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        nav.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        nav.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        nav.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        nav.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var prevYear = NavButton("IconChevronsLeft", -12, "PreviousYear", host);
+        var prevMonth = NavButton("IconChevronLeft", -1, "PreviousMonth", host);
+        var nextMonth = NavButton("IconChevronRight", 1, "NextMonth", host);
+        var nextYear = NavButton("IconChevronsRight", 12, "NextYear", host);
+
+        var monthTitleText = culture.TextInfo.ToTitleCase(_shownMonth.ToString("MMMM yyyy", culture));
+        var monthButton = new Button
+        {
+            Content = new TextBlock
+            {
+                Text = monthTitleText,
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 13,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            },
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Padding = new Thickness(8, 4, 8, 4),
+            ToolTip = UiText.Get("GoToToday")
+        };
+        monthButton.SetResourceReference(StyleProperty, "FlyoutButton");
+        monthButton.Click += (_, _) =>
+        {
+            _shownMonth = new DateOnly(today.Year, today.Month, 1);
+            _selectedDate = today;
+            host.Content = BuildCalendar(host);
+        };
+
+        Grid.SetColumn(prevYear, 0);
+        Grid.SetColumn(prevMonth, 1);
+        Grid.SetColumn(monthButton, 2);
+        Grid.SetColumn(nextMonth, 3);
+        Grid.SetColumn(nextYear, 4);
+        nav.Children.Add(prevYear);
+        nav.Children.Add(prevMonth);
+        nav.Children.Add(monthButton);
+        nav.Children.Add(nextMonth);
+        nav.Children.Add(nextYear);
+        root.Children.Add(nav);
+
+        // 7-column calendar grid with localized FirstDayOfWeek.
         var grid = new UniformGrid { Columns = 7, Margin = new Thickness(0, 0, 0, 4) };
         var firstDay = culture.DateTimeFormat.FirstDayOfWeek;
         for (var index = 0; index < 7; index++)
         {
             var day = (DayOfWeek)(((int)firstDay + index) % 7);
-            var name = DockFlyout.Caption(culture.DateTimeFormat.GetShortestDayName(day));
-            name.HorizontalAlignment = HorizontalAlignment.Center;
-            name.Margin = new Thickness(0, 0, 0, 4);
-            grid.Children.Add(name);
+            var dow = new TextBlock
+            {
+                Text = culture.DateTimeFormat.GetShortestDayName(day),
+                FontSize = 11,
+                FontWeight = FontWeights.Medium,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 6)
+            };
+            dow.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+            grid.Children.Add(dow);
         }
 
         var offset = ((int)_shownMonth.DayOfWeek - (int)firstDay + 7) % 7;
@@ -191,42 +294,119 @@ public partial class ClockWidget : DockWidget
         for (var cell = 0; cell < 42; cell++)
         {
             var date = start.AddDays(cell);
+            var isToday = date == today;
+            var isSelected = _selectedDate == date && !isToday;
+            var isCurrentMonth = date.Month == _shownMonth.Month;
+
             var label = new TextBlock
             {
-                Text = date.Day.ToString(culture), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
-                FontSize = 12
+                Text = date.Day.ToString(culture),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                FontSize = 12,
+                FontWeight = isToday || isSelected ? FontWeights.SemiBold : FontWeights.Normal,
+                Typography = { NumeralAlignment = FontNumeralAlignment.Tabular }
             };
-            var border = new Border { Width = 32, Height = 30, CornerRadius = new CornerRadius(15), Child = label, Margin = new Thickness(1) };
-            if (date == today)
+
+            var cellBorder = new Border
             {
-                border.Background = theme.Accent;
-                label.SetResourceReference(TextBlock.ForegroundProperty, "WidgetAccentText");
-                label.FontWeight = FontWeights.SemiBold;
+                Height = 31,
+                CornerRadius = new CornerRadius(7),
+                Margin = new Thickness(1.5),
+                Cursor = Cursors.Hand,
+                Child = label
+            };
+
+            if (isToday)
+            {
+                cellBorder.SetResourceReference(Border.BackgroundProperty, "WidgetSelectedFill");
+                cellBorder.SetResourceReference(Border.BorderBrushProperty, "WidgetSelectedStroke");
+                cellBorder.BorderThickness = new Thickness(1);
+                label.SetResourceReference(TextBlock.ForegroundProperty, "WidgetSelectedForeground");
             }
-            else if (date.Month != _shownMonth.Month)
+            else if (isSelected)
             {
-                label.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
-                label.Opacity = 0.5;
+                cellBorder.SetResourceReference(Border.BackgroundProperty, "SurfaceSelectedStrong");
+                cellBorder.SetResourceReference(Border.BorderBrushProperty, "StrokeSubtle");
+                cellBorder.BorderThickness = new Thickness(1);
+                label.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+            }
+            else
+            {
+                cellBorder.Background = Brushes.Transparent;
+                if (isCurrentMonth)
+                {
+                    label.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+                }
+                else
+                {
+                    label.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+                    label.Opacity = 0.42;
+                }
             }
 
-            grid.Children.Add(border);
+            var capturedDate = date;
+            cellBorder.MouseLeftButtonUp += (_, _) =>
+            {
+                _selectedDate = capturedDate;
+                if (capturedDate.Month != _shownMonth.Month || capturedDate.Year != _shownMonth.Year)
+                {
+                    _shownMonth = new DateOnly(capturedDate.Year, capturedDate.Month, 1);
+                }
+                host.Content = BuildCalendar(host);
+            };
+
+            grid.Children.Add(cellBorder);
         }
 
         root.Children.Add(grid);
 
+        // Footer divider + Today summary & quick jump button.
+        var divider = new Border { Height = 1, Margin = new Thickness(0, 8, 0, 8) };
+        divider.SetResourceReference(Border.BackgroundProperty, "StrokeSubtle");
+        root.Children.Add(divider);
+
+        var footer = new DockPanel();
+        var todayBtn = new Button
+        {
+            Content = new TextBlock { Text = UiText.Get("GoToToday"), FontSize = 11, FontWeight = FontWeights.SemiBold },
+            Padding = new Thickness(8, 4, 8, 4),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        todayBtn.SetResourceReference(StyleProperty, "FlyoutButton");
+        todayBtn.Click += (_, _) =>
+        {
+            _shownMonth = new DateOnly(today.Year, today.Month, 1);
+            _selectedDate = today;
+            host.Content = BuildCalendar(host);
+        };
+        DockPanel.SetDock(todayBtn, Dock.Right);
+        footer.Children.Add(todayBtn);
+
+        var todaySummary = new TextBlock
+        {
+            Text = $"{UiText.Get("Today")} · {now.ToString("d MMMM, dddd", culture)}",
+            FontSize = 10.5,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        todaySummary.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+        footer.Children.Add(todaySummary);
+        root.Children.Add(footer);
+
         return root;
     }
 
-    private Button NavButton(string icon, int months, ContentControl host)
+    private Button NavButton(string icon, int months, string labelKey, ContentControl host)
     {
         var glyph = new ContentControl { Content = FindResource(icon), Width = 14, Height = 14 };
         glyph.SetResourceReference(StyleProperty, "WidgetIcon");
         glyph.SetResourceReference(ForegroundProperty, "TextPrimary");
-        var button = new Button { Content = glyph };
+        var button = new Button { Content = glyph, Width = 26, Height = 26 };
         button.SetResourceReference(StyleProperty, "WidgetIconButton");
-        var key = months < 0 ? "PreviousMonth" : "NextMonth";
-        button.ToolTip = UiText.Get(key);
-        System.Windows.Automation.AutomationProperties.SetName(button, UiText.Get(key));
+        var label = UiText.Get(labelKey);
+        button.ToolTip = label;
+        AutomationProperties.SetName(button, label);
         button.Click += (_, _) =>
         {
             _shownMonth = _shownMonth.AddMonths(months);

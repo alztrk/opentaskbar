@@ -724,5 +724,21 @@
   "ThemeFieldTextPrimary": "Primary text",
   "ThemeFieldWidgetCard": "Widget surface",
   "ThemeFieldDockWidgetRadius": "Dock widget radius",
-  "ThemeFieldSettingsPageInset": "Page padding"
+  "ThemeFieldSettingsPageInset": "Page padding",
+  "Today": "Today",
+  "GoToToday": "Go to today",
+  "PreviousYear": "Previous year",
+  "NextYear": "Next year",
+  "AudioOutput": "Output",
+  "AudioInput": "Input",
+  "AudioApps": "Applications",
+  "FocusSessionsCount": "{0} sessions",
+  "MinutesShort": "{0} min",
+  "StopwatchLap": "Lap",
+  "StopwatchNoLaps": "No laps yet",
+  "DayProgressUnit": "day",
+  "NightLight": "Night light",
+  "AiUsageHourlyShort": "1h",
+  "AiUsageMonthlyShort": "30d",
+  "WeatherTomorrow": "Tomorrow"
 }
