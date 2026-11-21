@@ -56,6 +56,7 @@ public partial class MainWindow : Window
     private TaskbarReplacementSession? _replacementSession;
     private HwndSource? _source;
     private nint _foregroundWindow;
+    private readonly DispatcherTimer _foregroundPollTimer;
     private readonly List<FrameworkElement> _magnifiedIcons = [];
     private ContextMenu? _openContextMenu;
     private OpenTaskbar.Widgets.DockWidget? _contextTargetWidget;
@@ -165,6 +166,13 @@ public partial class MainWindow : Window
             Interval = TimeSpan.FromSeconds(1)
         };
         _timedWidgetRefreshTimer.Tick += TimedWidgetRefreshTimer_Tick;
+        // WinEvents are not raised for every focus transition (minimize, alt-tab,
+        // desktop switches). Poll lightly so indicator dots never stay stale.
+        _foregroundPollTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+        {
+            Interval = TimeSpan.FromMilliseconds(400)
+        };
+        _foregroundPollTimer.Tick += ForegroundPollTimer_Tick;
         _widgetCoordinator = new WidgetCoordinator(
             WidgetStrip, Dispatcher, ReportError, lazy: true,
             canExpandInline: CanExpandWidgetInline,
@@ -371,6 +379,7 @@ public partial class MainWindow : Window
             try
             {
                 _windowTracker.Start(_source!.Handle);
+                if (!_foregroundPollTimer.IsEnabled) _foregroundPollTimer.Start();
                 if (!_windowTracker.NotificationsAvailable)
                 {
                     ReportError("ErrorNotificationBadge");
@@ -1311,6 +1320,18 @@ public partial class MainWindow : Window
 
     private bool IsShellOverlayWindow(nint windowHandle) =>
         _startMenu.IsStartMenuWindow(windowHandle) || ShellOverlayWindows.IsTaskSwitcher(windowHandle);
+
+    /// <summary>
+    /// Lightweight fallback for focus transitions that do not raise EVENT_SYSTEM_FOREGROUND
+    /// (minimizing, alt-tab, switching desktops). Keeps indicator dots in sync.
+    /// </summary>
+    private void ForegroundPollTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_windowTracker is null) return;
+        var current = NativeWindowTracker.GetForegroundApplicationWindow();
+        if (current != _foregroundWindow)
+            WindowTracker_ForegroundWindowChanged(current);
+    }
 
     private void WindowTracker_ForegroundWindowChanged(nint windowHandle)
     {
@@ -2950,6 +2971,8 @@ public partial class MainWindow : Window
         _iconRetryTimer.Tick -= IconRetryTimer_Tick;
         _timedWidgetRefreshTimer.Stop();
         _timedWidgetRefreshTimer.Tick -= TimedWidgetRefreshTimer_Tick;
+        _foregroundPollTimer.Stop();
+        _foregroundPollTimer.Tick -= ForegroundPollTimer_Tick;
         foreach (var widget in _widgets.OfType<ITimedDockWidget>()) widget.PropertyChanged -= TimedWidget_PropertyChanged;
         _thumbnailPreview.PointerEntered -= ThumbnailPreview_PointerEntered;
         _thumbnailPreview.PointerLeft -= ThumbnailPreview_PointerLeft;
