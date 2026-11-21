@@ -24,6 +24,10 @@ public sealed class UiText : INotifyPropertyChanged
 
     public static string Get(string key) => Current[key];
 
+    /// <summary>Non-throwing lookup for dynamically composed keys; returns false when no catalog has the key.</summary>
+    public static bool TryGet(string key, out string value) =>
+        LanguageCatalog.TryGet(key, Current._language, out value);
+
     public static IReadOnlyCollection<string> GetTranslations(string key) => LanguageCatalog.GetTranslations(key);
 
     public static string Format(string key, params object[] values) =>

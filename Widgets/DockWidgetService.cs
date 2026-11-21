@@ -92,7 +92,7 @@ public sealed class DockWidgetService(TimeProvider timeProvider)
         Definitions.Select(definition => new DockWidgetOption(
             definition.Id,
             UiText.Get(definition.LabelKey),
-            UiText.Get(definition.LabelKey + "Description"),
+            UiText.TryGet(definition.LabelKey + "Description", out var description) ? description : string.Empty,
             installed?.Contains(definition.Id, StringComparer.Ordinal) == true,
             selected?.Contains(definition.Id, StringComparer.Ordinal) == true,
             CreateWidget(definition),

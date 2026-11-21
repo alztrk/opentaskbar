@@ -94,6 +94,21 @@ public static class LanguageCatalog
         throw new KeyNotFoundException($"Localization key '{key}' is missing from the English catalog.");
     }
 
+    /// <summary>Non-throwing lookup for dynamically composed keys (e.g. ThemeField_&lt;token&gt;).</summary>
+    public static bool TryGet(string key, AppLanguage language, out string value)
+    {
+        if (Catalogs.TryGetValue(language.CultureName, out var exactCatalog)
+            && exactCatalog.TryGetValue(key, out value!))
+            return true;
+        foreach (var catalog in GetLanguageFallbacks(language.Culture))
+            if (catalog.TryGetValue(key, out value!)) return true;
+        if (Catalogs.TryGetValue(AppLanguage.English.CultureName, out var english)
+            && english.TryGetValue(key, out value!))
+            return true;
+        value = string.Empty;
+        return false;
+    }
+
     public static IReadOnlyCollection<string> GetTranslations(string key) => Catalogs.Values
         .Where(catalog => catalog.ContainsKey(key))
         .Select(catalog => catalog[key])

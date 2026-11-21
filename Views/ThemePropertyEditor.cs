@@ -374,8 +374,7 @@ public sealed class ThemePropertyEditor : UserControl
     {
         // TokenLabels is the English fallback; localized catalogs carry ThemeField_<token> keys so every
         // editor label follows the user's language instead of staying hardcoded English.
-        var localized = UiText.Get("ThemeField_" + token);
-        if (!string.Equals(localized, "ThemeField_" + token, StringComparison.Ordinal)) return localized;
+        if (UiText.TryGet("ThemeField_" + token, out var localized) && localized.Length > 0) return localized;
         if (TokenLabels.TryGetValue(token, out var friendly)) return friendly;
         var result = System.Text.RegularExpressions.Regex.Replace(token,
             @"(?<!^)([A-Z])", " $1");
