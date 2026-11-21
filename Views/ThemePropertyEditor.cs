@@ -372,9 +372,9 @@ public sealed class ThemePropertyEditor : UserControl
 
     private static string PrettyName(string token)
     {
-        // TokenLabels is the English fallback; localized catalogs carry ThemeField_<token> keys so every
+        // TokenLabels is the English fallback; localized catalogs carry ThemeField<token> keys so every
         // editor label follows the user's language instead of staying hardcoded English.
-        if (UiText.TryGet("ThemeField_" + token, out var localized) && localized.Length > 0) return localized;
+        if (UiText.TryGet("ThemeField" + token, out var localized) && localized.Length > 0) return localized;
         if (TokenLabels.TryGetValue(token, out var friendly)) return friendly;
         var result = System.Text.RegularExpressions.Regex.Replace(token,
             @"(?<!^)([A-Z])", " $1");
