@@ -307,6 +307,11 @@ void LocalizationChecks()
     UiText.Current.SetLanguage(AppLanguage.Turkish);
     Check(!UiText.Current.IsEnglish && UiText.Current.Language == AppLanguage.Turkish, "UiText must reflect Turkish language selection.");
     Check(UiText.Get("ErrorDockAttach") == "Dock penceresi Windows'a bağlanamadı.", "Error keys must resolve to Turkish.");
+    // Theme editor labels are composed as ThemeField<token>; the key spelling must match the catalogs.
+    Check(UiText.TryGet("ThemeFieldTextPrimary", out var primary) && primary == "Birincil metin",
+        "Theme editor token labels must resolve in Turkish.");
+    Check(UiText.TryGet("ThemeFieldDescription", out var description) && description == "Açıklama",
+        "Theme editor form labels must resolve in Turkish without character corruption.");
     Check(AppLog.ResolveMessage("ErrorDockAttach") == "Dock penceresi Windows'a bağlanamadı.",
         "Structured log entries must resolve the same text shown to the user.");
     Check(AppLog.ResolveMessage("raw exception text") == "raw exception text",
