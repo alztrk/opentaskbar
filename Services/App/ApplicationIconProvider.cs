@@ -10,9 +10,15 @@ public static class ApplicationIconProvider
 {
     private const uint ShellIcon = 0x00000100;
     private const int DefaultIconResolution = 64;
+    // Always extract at >= 128 px so Windows Shell / icon resources hand back native high-res PNGs
+    // (128/256 px) instead of GDI-stretching 32 px icons to odd DPI sizes like 36 px or 40 px.
+    internal const int MinHighResExtractionPixels = 128;
 
     /// <summary>Target icon pixel size matching current dock icon DIP and display DPI.</summary>
     public static int PreferredIconPixels { get; set; } = DefaultIconResolution;
+
+    internal static int ComputeExtractionPixels(int requestedPixels) =>
+        Math.Max(MinHighResExtractionPixels, requestedPixels);
 
     public static int ComputeTargetPixels(double iconDip, double dpiScale) =>
         Math.Max(16, (int)Math.Ceiling(iconDip * Math.Max(1.0, dpiScale)));
@@ -101,21 +107,21 @@ public static class ApplicationIconProvider
     public static BitmapSource? GetForFile(string path, int targetSize = 0)
     {
         if (targetSize <= 0) return RememberHoverVariant(GetForFile(path, PreferredIconPixels), size => GetForFile(path, size));
-        var size = targetSize;
-        if (string.Equals(Path.GetExtension(path), ".exe", StringComparison.OrdinalIgnoreCase))
+        var extractSize = ComputeExtractionPixels(targetSize);
+
+        // Prefer IShellItemImageFactory first so Windows returns native high-res PNG icons without GDI aliasing.
+        if (File.Exists(path) || Directory.Exists(path))
         {
-            var executableIcon = GetExecutableIcon(path, 0, size);
+            var shellIcon = LoadShellItemImage(path, extractSize, iconOnly: true);
+            if (shellIcon is not null) return shellIcon;
+        }
+
+        if (string.Equals(Path.GetExtension(path), ".exe", StringComparison.OrdinalIgnoreCase) || File.Exists(path))
+        {
+            var executableIcon = GetExecutableIcon(path, 0, extractSize);
             if (executableIcon is not null)
             {
                 return executableIcon;
-            }
-        }
-        else if (File.Exists(path))
-        {
-            var directIcon = GetExecutableIcon(path, 0, size);
-            if (directIcon is not null)
-            {
-                return directIcon;
             }
         }
 
@@ -140,9 +146,20 @@ public static class ApplicationIconProvider
     {
         var expanded = Environment.ExpandEnvironmentVariables(path);
         if (!File.Exists(expanded)) return null;
-        if (targetSize > 0) return GetExecutableIcon(expanded, index, targetSize);
-        return RememberHoverVariant(GetExecutableIcon(expanded, index, PreferredIconPixels),
-            size => GetExecutableIcon(expanded, index, size));
+        if (targetSize <= 0)
+        {
+            return RememberHoverVariant(GetForResource(expanded, index, PreferredIconPixels),
+                size => GetForResource(expanded, index, size));
+        }
+
+        var extractSize = ComputeExtractionPixels(targetSize);
+        if (index == 0)
+        {
+            var shellIcon = LoadShellItemImage(expanded, extractSize, iconOnly: true);
+            if (shellIcon is not null) return shellIcon;
+        }
+
+        return GetExecutableIcon(expanded, index, extractSize);
     }
 
     /// <summary>
@@ -150,10 +167,11 @@ public static class ApplicationIconProvider
     /// </summary>
     public static BitmapSource? GetForShellItem(string parsingName, int size = 64, bool iconOnly = false)
     {
-        var icon = LoadShellItemImage(parsingName, size, iconOnly);
+        var extractSize = iconOnly ? ComputeExtractionPixels(size) : size;
+        var icon = LoadShellItemImage(parsingName, extractSize, iconOnly);
         // Dock icons are requested at the preferred size; give those a sharper variant for magnification.
         return size == PreferredIconPixels
-            ? RememberHoverVariant(icon, hoverSize => LoadShellItemImage(parsingName, hoverSize, iconOnly))
+            ? RememberHoverVariant(icon, hoverSize => LoadShellItemImage(parsingName, ComputeExtractionPixels(hoverSize), iconOnly))
             : icon;
     }
 
@@ -169,8 +187,9 @@ public static class ApplicationIconProvider
         nint bitmap = 0;
         try
         {
-            // SIIGBF_BIGGERSIZEOK | (ICONONLY) | SIIGBF_SCALEUP
-            var flags = 0x1 | (iconOnly ? 0x4 : 0) | 0x100;
+            // SIIGBF_BIGGERSIZEOK | SIIGBF_ICONONLY (omit SIIGBF_SCALEUP for icons so small legacy icons are
+            // not nearest-neighbor upscaled by Shell; WPF's HighQuality sampler handles final scaling).
+            var flags = iconOnly ? (0x1 | 0x4) : (0x1 | 0x100);
             if (factory.GetImage(new NativeSize { Width = size, Height = size }, flags, out bitmap) != 0 || bitmap == 0)
             {
                 return null;

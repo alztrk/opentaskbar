@@ -103,6 +103,16 @@ public sealed class RunningAppIconCache
         return icon;
     }
 
+    /// <summary>Clears cached icon bitmaps so a DPI or display change reloads icons cleanly.</summary>
+    public void Clear()
+    {
+        _resourceIcons.Clear();
+        _fileIcons.Clear();
+        _appIcons.Clear();
+        _appIconMisses.Clear();
+        _windows.Clear();
+    }
+
     /// <summary>Drops entries for windows and executables that are no longer tracked, so the caches stay bounded.</summary>
     public void Retain(IReadOnlyList<TrackedWindow> windows)
     {

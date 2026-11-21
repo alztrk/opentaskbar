@@ -527,6 +527,12 @@ void DockIconPixelChecks()
     Check(DockMetrics.AppIconDipSize(28, 24, 1.0) == 24, "Compact icons are capped by their cell, not the old 36 DIP floor.");
     Check(DockMetrics.AppIconDipSize(38, 40, 1.0) == 38, "A larger native bitmap is capped to the dock cell.");
     Check(DockMetrics.AppIconDipSize(57, 81, 1.5) == 54, "DPI is divided out before capping so the drawn size stays in DIP.");
+
+    // Extraction must never drop below 128 px so Shell / icon resources deliver native high-res artwork
+    // instead of GDI-upscaled 24/36/40 px bitmaps on 1440p and HiDPI displays.
+    Check(ApplicationIconProvider.ComputeExtractionPixels(24) == 128, "Compact 100% DPI icons must extract at >= 128 px.");
+    Check(ApplicationIconProvider.ComputeExtractionPixels(40) == 128, "125% DPI 1440p icons must extract at >= 128 px.");
+    Check(ApplicationIconProvider.ComputeExtractionPixels(256) == 256, "Extraction sizes above 128 px must be preserved.");
 }
 
 void StartMenuAndOverlayChecks()

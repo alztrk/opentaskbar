@@ -279,6 +279,7 @@ public partial class MainWindow : Window
 
         _source = source;
         _source.AddHook(WindowProc);
+        UpdatePreferredIconPixels();
         _taskbarCreatedMessage = RegisterWindowMessage("TaskbarCreated");
         if (!_isInspection && !ExcludeFromTaskSwitcher(source.Handle))
         {
@@ -1918,10 +1919,10 @@ public partial class MainWindow : Window
     {
         var settings = _preferences.Current;
         var fixedMode = settings.DockWidthMode is DockWidthMode.Pixels or DockWidthMode.Percent;
-        LeftResizeThumb.Visibility = fixedMode ? Visibility.Collapsed : Visibility.Visible;
-        RightResizeThumb.Visibility = fixedMode ? Visibility.Collapsed : Visibility.Visible;
+        LeftResizeThumb.Visibility = fixedMode || IsEdgeToEdge ? Visibility.Collapsed : Visibility.Visible;
+        RightResizeThumb.Visibility = fixedMode || IsEdgeToEdge ? Visibility.Collapsed : Visibility.Visible;
 
-        if (!fixedMode || IsFullWidth)
+        if (!fixedMode || IsEdgeToEdge)
         {
             _dockWidthOverride = null;
             return;
@@ -2539,7 +2540,8 @@ public partial class MainWindow : Window
         }
     }
 
-    private bool IsFullWidth => _preferences.Current.Layout == DockLayout.FullWidth;
+    private bool IsEdgeToEdge => _preferences.Current.DockWidthMode == DockWidthMode.Fill;
+    private bool IsFullWidth => _preferences.Current.Layout == DockLayout.FullWidth || IsEdgeToEdge;
 
     private void ApplyLayoutMode()
     {
@@ -2553,7 +2555,9 @@ public partial class MainWindow : Window
 
     private void ApplyDockMargin()
     {
-        var side = IsFullWidth ? DockMetrics.FullWidthSideInset : DockMetrics.SideInset;
+        // Edge-to-edge fill removes the side gaps entirely (Windows-style full-width taskbar); regular full-width
+        // keeps its small inset so the rounded surface does not clip against the screen edge.
+        var side = IsEdgeToEdge ? 0 : IsFullWidth ? DockMetrics.FullWidthSideInset : DockMetrics.SideInset;
         var bottomGap = Profile.BottomGap;
         DockSurface.Margin = Edge switch
         {
@@ -2563,9 +2567,11 @@ public partial class MainWindow : Window
         };
     }
 
-    private double EffectiveCornerRadius => _radiusPreviewOverride ?? (_preferences.Current.DockCornerRadius is { } customRadius && customRadius >= 0
-        ? customRadius
-        : Profile.Radius);
+    private double EffectiveCornerRadius => IsEdgeToEdge && _radiusPreviewOverride is null
+        ? 0 // Windows-style edge-to-edge fill: square corners flush with the screen edges.
+        : _radiusPreviewOverride ?? (_preferences.Current.DockCornerRadius is { } customRadius && customRadius >= 0
+            ? customRadius
+            : Profile.Radius);
 
     private DockSizeProfile Profile => _sizePreviewOverride is { } preview
         ? DockMetrics.For(preview.Size, preview.Scale)
@@ -2638,18 +2644,24 @@ public partial class MainWindow : Window
         ApplySecondaryShelf();
     }
 
+    protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
+    {
+        base.OnDpiChanged(oldDpi, newDpi);
+        UpdatePreferredIconPixels();
+        _runningAppIcons.Clear();
+        ThemePacks_Changed(this, EventArgs.Empty);
+    }
+
     private void UpdatePreferredIconPixels()
     {
         var dpiScale = VisualTreeHelper.GetDpi(this).DpiScaleX;
-        // Keep app artwork visually balanced with neighboring compact widgets without shrinking the clickable
-        // dock cell or changing its drag/drop geometry; the size is snapped so icons are drawn 1:1 in pixels.
         var pixels = ApplicationIconProvider.ComputeApplicationIconPixels(Math.Max(18, Profile.Icon * 0.95), dpiScale);
-        ApplicationIconProvider.PreferredIconPixels = pixels;
-        ApplicationIconProvider.HoverIconPixels = ApplicationIconProvider.ComputeHoverIconPixels(pixels, DockMetrics.HoverScale);
-        ThemePacks.PreferredIconPixels = pixels;
-        // The extracted bitmap must never be drawn larger than its dock cell: any overshoot used to land on the
-        // right and bottom because the image was top-left aligned, which read as a clipped icon (e.g. LibreWolf).
-        var appIconSize = DockMetrics.AppIconDipSize(Profile.Icon, pixels, dpiScale);
+        var extractPixels = ApplicationIconProvider.ComputeExtractionPixels(pixels);
+        ApplicationIconProvider.PreferredIconPixels = extractPixels;
+        ApplicationIconProvider.HoverIconPixels = ApplicationIconProvider.ComputeHoverIconPixels(extractPixels, DockMetrics.HoverScale);
+        ThemePacks.PreferredIconPixels = extractPixels;
+        // Keep app artwork crisp and capped to its dock cell (never shrinking Compact from 28 DIP down to 24 DIP).
+        var appIconSize = DockMetrics.AppIconDipSize(Profile.Icon, extractPixels, dpiScale);
         Application.Current.Resources["DockApplicationIconSize"] = appIconSize;
         Application.Current.Resources["StartLogoSize"] = appIconSize;
     }
