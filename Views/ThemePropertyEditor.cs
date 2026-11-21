@@ -92,14 +92,16 @@ public sealed class ThemePropertyEditor : UserControl
         _name = AddTextField("Name", ReadManifest("Name") ?? pack.DisplayName);
         _author = AddTextField("Author", ReadManifest("Author") ?? string.Empty);
         _description = AddTextField("Description", ReadManifest("Description") ?? string.Empty);
-        var categoryTabs = new TabControl { MinHeight = 300, Margin = new Thickness(0, 10, 0, 0) };
+        var categoryTabs = new TabControl { MinHeight = 260, Margin = new Thickness(0, 14, 0, 0) };
+        categoryTabs.SetResourceReference(FrameworkElement.StyleProperty, "ThemeEditorTabControl");
         _body.Children.Add(categoryTabs);
         foreach (var (title, keys) in Sections)
         {
-            var panel = new StackPanel { Margin = new Thickness(10, 4, 10, 12) };
-            categoryTabs.Items.Add(new TabItem { Header = title, Content = panel });
+            var panel = new StackPanel { Margin = new Thickness(0, 2, 0, 8) };
+            var tabItem = new TabItem { Header = title, Content = panel };
+            tabItem.SetResourceReference(FrameworkElement.StyleProperty, "ThemeEditorTabItem");
+            categoryTabs.Items.Add(tabItem);
             _fieldHost = panel;
-            SectionHeader(title);
             foreach (var key in keys)
             {
                 var existing = Application.Current.Resources[key];
@@ -114,8 +116,10 @@ public sealed class ThemePropertyEditor : UserControl
         }
 
         var covered = Sections.SelectMany(section => section.Keys).ToHashSet(StringComparer.Ordinal);
-        var advancedFields = new StackPanel { Margin = new Thickness(10, 12, 10, 12) };
-        categoryTabs.Items.Add(new TabItem { Header = "Advanced", Content = advancedFields });
+        var advancedFields = new StackPanel { Margin = new Thickness(0, 2, 0, 8) };
+        var advancedTab = new TabItem { Header = "Advanced", Content = advancedFields };
+        advancedTab.SetResourceReference(FrameworkElement.StyleProperty, "ThemeEditorTabItem");
+        categoryTabs.Items.Add(advancedTab);
         _fieldHost = advancedFields;
         foreach (var key in AllThemeKeys(Application.Current.Resources)
                      .Where(key => !covered.Contains(key))
@@ -132,10 +136,16 @@ public sealed class ThemePropertyEditor : UserControl
         }
         _fieldHost = _body;
 
-        var actions = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 22, 0, 18) };
-        var save = Button("Save theme");
+        var actions = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 20, 0, 12) };
+        var save = Button("Save changes");
+        save.SetResourceReference(FrameworkElement.StyleProperty, "SettingsPrimaryButton");
         save.Click += (_, _) => SaveTheme();
+        var discard = Button("Discard edits");
+        discard.SetResourceReference(FrameworkElement.StyleProperty, "SettingsGhostButton");
+        discard.Margin = new Thickness(8, 0, 0, 0);
+        discard.Click += (_, _) => LoadTheme(_id, _mode);
         actions.Children.Add(save);
+        actions.Children.Add(discard);
         _body.Children.Add(actions);
     }
 
@@ -193,6 +203,41 @@ public sealed class ThemePropertyEditor : UserControl
         dock.Child = caption;
         _body.Children.Add(dock);
 
+        SectionHeader("Widget surface");
+        var widgetCard = new Border
+        {
+            CornerRadius = new CornerRadius(7),
+            Height = 44,
+            MaxWidth = 350,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Padding = new Thickness(14, 8, 14, 8),
+            Margin = new Thickness(0, 0, 0, 16),
+            BorderThickness = new Thickness(1),
+            BorderBrush = Application.Current.TryFindResource("StrokeSubtle") as Brush,
+            Background = Application.Current.TryFindResource("SettingsControl") as Brush
+        };
+        var widgetContent = new DockPanel();
+        var meter = new Border
+        {
+            Width = 60, Height = 4, CornerRadius = new CornerRadius(2),
+            Background = Application.Current.TryFindResource("SettingsTrack") as Brush,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        DockPanel.SetDock(meter, Dock.Right);
+        var fill = new Border
+        {
+            Width = 36, Height = 4, CornerRadius = new CornerRadius(2),
+            Background = Application.Current.TryFindResource("AccentBrush") as Brush,
+            HorizontalAlignment = HorizontalAlignment.Left
+        };
+        meter.Child = fill;
+        widgetContent.Children.Add(meter);
+        var widgetText = new TextBlock { Text = "Widget surface preview", VerticalAlignment = VerticalAlignment.Center, FontSize = 12.5 };
+        widgetText.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+        widgetContent.Children.Add(widgetText);
+        widgetCard.Child = widgetContent;
+        _body.Children.Add(widgetCard);
+
         SectionHeader("Customize appearance");
         var prompt = new TextBlock
         {
@@ -203,6 +248,7 @@ public sealed class ThemePropertyEditor : UserControl
         prompt.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
         _body.Children.Add(prompt);
         var create = Button("Create editable theme");
+        create.Style = (Style)Application.Current.FindResource("SettingsPrimaryButton");
         create.HorizontalAlignment = HorizontalAlignment.Left;
         create.Click += (_, _) =>
         {
@@ -230,9 +276,11 @@ public sealed class ThemePropertyEditor : UserControl
 
     private void SectionHeader(string title)
     {
-        var stack = new StackPanel { Margin = new Thickness(0, 22, 0, 9) };
-        stack.Children.Add(new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, FontSize = 14,
-            Margin = new Thickness(0, 0, 0, 9) });
+        var stack = new StackPanel { Margin = new Thickness(0, 20, 0, 8) };
+        var heading = new TextBlock { Text = title, FontWeight = FontWeights.SemiBold, FontSize = 12,
+            Margin = new Thickness(0, 0, 0, 8) };
+        heading.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+        stack.Children.Add(heading);
         var divider = new Border { Height = 1 };
         divider.SetResourceReference(Border.BackgroundProperty, "StrokeSubtle");
         stack.Children.Add(divider);
@@ -241,20 +289,75 @@ public sealed class ThemePropertyEditor : UserControl
 
     private Grid AddRow(string label)
     {
-        var grid = new Grid { MinHeight = 43, Margin = new Thickness(0, 0, 0, 2) };
+        var rowBorder = new Border
+        {
+            BorderThickness = new Thickness(0, 0, 0, 1),
+            Padding = new Thickness(0, 8, 0, 8),
+            MinHeight = 46,
+            SnapsToDevicePixels = true
+        };
+        rowBorder.SetResourceReference(Border.BorderBrushProperty, "StrokeSubtle");
+        var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(204) });
-        var text = new TextBlock { Text = PrettyName(label), FontSize = 13, VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 10, 0), TextWrapping = TextWrapping.Wrap };
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(210) });
+        var text = new TextBlock { Text = PrettyName(label), FontSize = 12.5, VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 12, 0), TextWrapping = TextWrapping.Wrap };
+        text.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
         grid.Children.Add(text);
-        _fieldHost.Children.Add(grid);
+        rowBorder.Child = grid;
+        _fieldHost.Children.Add(rowBorder);
         return grid;
     }
 
+    private static readonly Dictionary<string, string> TokenLabels = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["TextPrimary"] = "Primary text",
+        ["TextSecondary"] = "Secondary text",
+        ["AccentBrush"] = "Accent color",
+        ["AccentText"] = "Accent text color",
+        ["StrokeSubtle"] = "Border color",
+        ["StrokeFocus"] = "Focus ring color",
+        ["SurfaceSelected"] = "Selected surface",
+        ["SurfaceHover"] = "Hover surface",
+        ["DockBackgroundMode"] = "Dock material",
+        ["DockMaterial"] = "Dock background",
+        ["DockBorderMaterial"] = "Dock border",
+        ["DockHighlight"] = "Dock highlight",
+        ["DockRadius"] = "Dock corner radius",
+        ["DockInnerRadius"] = "Dock inner radius",
+        ["DockWidgetPadding"] = "Widget padding",
+        ["DockShadowBlur"] = "Shadow blur",
+        ["DockShadowOpacity"] = "Shadow opacity",
+        ["DockShadowColor"] = "Shadow color",
+        ["WidgetCard"] = "Widget surface",
+        ["WidgetCardStroke"] = "Widget border",
+        ["WidgetTrack"] = "Widget meter track",
+        ["WidgetAccent"] = "Widget meter fill",
+        ["DockWidgetSurface"] = "Dock widget background",
+        ["DockWidgetRadius"] = "Dock widget radius",
+        ["WidgetSpacing"] = "Widget spacing",
+        ["WidgetBackground"] = "Widget background",
+        ["SettingsBackground"] = "Settings window background",
+        ["SettingsBackgroundOpacity"] = "Settings window opacity",
+        ["SettingsControl"] = "Control surface",
+        ["SettingsControlHover"] = "Control hover surface",
+        ["SettingsSidebarOverlay"] = "Sidebar surface",
+        ["MenuMaterial"] = "Menu background",
+        ["MenuDivider"] = "Menu divider",
+        ["SurfacePopup"] = "Popup surface",
+        ["MenuLabelWidth"] = "Menu label width",
+        ["PopupRadius"] = "Popup corner radius",
+        ["PopupInnerRadius"] = "Popup inner radius",
+        ["InterfaceFont"] = "Font family",
+        ["TextSizeBody"] = "Body font size",
+        ["TextSizeCaption"] = "Caption font size",
+        ["ControlRadius"] = "Control corner radius",
+        ["SettingsPageInset"] = "Page padding"
+    };
+
     private static string PrettyName(string token)
     {
-        if (token == "SettingsBackgroundOpacity") return "Settings background opacity";
-        if (token == "DockBackgroundMode") return "Dock material";
+        if (TokenLabels.TryGetValue(token, out var friendly)) return friendly;
         var result = System.Text.RegularExpressions.Regex.Replace(token,
             @"(?<!^)([A-Z])", " $1");
         return result.Replace(" Ui ", " UI ").Replace(" Ai ", " AI ");
@@ -262,8 +365,8 @@ public sealed class ThemePropertyEditor : UserControl
 
     private TextBox AddTextField(string label, string initial)
     {
-        var field = new TextBox { Text = initial, MinHeight = 29, Padding = new Thickness(8, 4, 8, 4),
-            VerticalContentAlignment = VerticalAlignment.Center };
+        var field = new TextBox { Text = initial };
+        field.SetResourceReference(FrameworkElement.StyleProperty, "SettingsTextBox");
         var row = AddRow(label);
         Grid.SetColumn(field, 1);
         row.Children.Add(field);
@@ -310,9 +413,8 @@ public sealed class ThemePropertyEditor : UserControl
             return;
         }
 
-        var field = new TextBox { Text = initial.ToString("0.##", CultureInfo.InvariantCulture),
-            Padding = new Thickness(8, 4, 8, 4), MinHeight = 29 };
-        field.SetResourceReference(TextBox.ForegroundProperty, "TextPrimary");
+        var field = new TextBox { Text = initial.ToString("0.##", CultureInfo.InvariantCulture) };
+        field.SetResourceReference(FrameworkElement.StyleProperty, "SettingsTextBox");
         Grid.SetColumn(field, 1);
         row.Children.Add(field);
         field.LostFocus += (_, _) =>
@@ -407,10 +509,15 @@ public sealed class ThemePropertyEditor : UserControl
         };
     }
 
-    private static Button Button(string text) => new()
+    private static Button Button(string text)
     {
-        Content = text, MinHeight = 31, Padding = new Thickness(10, 5, 10, 5), MinWidth = 108
-    };
+        var btn = new Button
+        {
+            Content = text, MinHeight = 31, Padding = new Thickness(12, 5, 12, 5), MinWidth = 96
+        };
+        btn.SetResourceReference(FrameworkElement.StyleProperty, "SettingsButton");
+        return btn;
+    }
 
     private static JsonNode BrushToNode(Brush brush)
     {

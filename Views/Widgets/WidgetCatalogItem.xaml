@@ -5,25 +5,34 @@
              FontFamily="{DynamicResource InterfaceFont}"
              Foreground="{DynamicResource TextPrimary}" Focusable="False">
     <Border x:Name="CardBorder" BorderThickness="1"
-            BorderBrush="{DynamicResource StrokeSubtle}"
-            Background="{DynamicResource SettingsControl}"
-            CornerRadius="7" Margin="0,0,0,8">
+            CornerRadius="7" Margin="0" SnapsToDevicePixels="True">
         <Border.Style>
             <Style TargetType="Border">
-                <Setter Property="Background" Value="{DynamicResource SurfaceSelected}" />
+                <Setter Property="Background" Value="Transparent" />
                 <Setter Property="BorderBrush" Value="{DynamicResource StrokeSubtle}" />
                 <Style.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True">
+                        <Setter Property="Background" Value="{DynamicResource SettingsControlHover}" />
+                    </Trigger>
                     <DataTrigger Binding="{Binding IsSettingsExpanded}" Value="True">
+                        <Setter Property="Background" Value="Transparent" />
                         <Setter Property="BorderBrush" Value="{DynamicResource StrokeFocus}"/>
                     </DataTrigger>
-                    <Trigger Property="IsMouseOver" Value="True">
-                        <Setter Property="Background" Value="{DynamicResource WidgetCardHover}" />
-                    </Trigger>
                 </Style.Triggers>
             </Style>
         </Border.Style>
         <StackPanel>
             <Grid MinHeight="48">
+                <Grid.Style>
+                    <Style TargetType="Grid">
+                        <Setter Property="Background" Value="Transparent" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsSettingsExpanded}" Value="True">
+                                <Setter Property="Background" Value="{DynamicResource SurfaceSelected}" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Grid.Style>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
@@ -31,30 +40,64 @@
                 <Button x:Name="PreviewButton" Click="Preview_Click" Cursor="Hand"
                         Background="Transparent" BorderThickness="0"
                         Foreground="{DynamicResource TextPrimary}"
-                        HorizontalContentAlignment="Stretch"
+                        HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center"
                         AutomationProperties.Name="{Binding Label}"
                         AutomationProperties.HelpText="{Binding Description}">
-                    <Grid Margin="12,0,6,0">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                        <TextBlock Text="{Binding Label}" FontSize="13" VerticalAlignment="Center"
-                                   TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextPrimary}"/>
-                        <TextBlock Grid.Column="1" Text="{Binding SettingsGlyph}" FontFamily="Segoe MDL2 Assets"
-                                   FontSize="10" VerticalAlignment="Center" Margin="7,0,0,0"
-                                   Foreground="{DynamicResource TextSecondary}"/>
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                                <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                  VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+                            </Border>
+                        </ControlTemplate>
+                    </Button.Template>
+                    <Grid Margin="13,0,8,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="{Binding Label}" FontSize="12.5" FontWeight="Medium"
+                                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                                   Foreground="{DynamicResource TextPrimary}"/>
+                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Ellipse Width="6" Height="6" VerticalAlignment="Center" Margin="0,0,8,0"
+                                     IsHitTestVisible="False">
+                                <Ellipse.Style>
+                                    <Style TargetType="Ellipse">
+                                        <Setter Property="Fill" Value="{DynamicResource StrokeSubtle}" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsInstalled}" Value="True">
+                                                <Setter Property="Fill" Value="{DynamicResource AccentBrush}" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Ellipse.Style>
+                            </Ellipse>
+                            <TextBlock Text="{Binding SettingsGlyph}" FontFamily="Segoe MDL2 Assets"
+                                       FontSize="9" VerticalAlignment="Center" Margin="0,0,2,0"
+                                       Foreground="{DynamicResource TextSecondary}"/>
+                        </StackPanel>
                     </Grid>
                 </Button>
-                <Button x:Name="InstallButton" Grid.Column="1" Width="38" MinHeight="38" Margin="0,5,5,5"
+                <Button x:Name="InstallButton" Grid.Column="1" Width="38" MinHeight="38" Margin="0,5,6,5"
                         Click="Install_Click" Background="Transparent" BorderThickness="0"
                         Foreground="{DynamicResource TextSecondary}"
                         ToolTip="{Binding InstallActionLabel}" Cursor="Hand"
                         AutomationProperties.Name="{Binding InstallActionLabel}"
                         AutomationProperties.ItemStatus="{Binding InstallStatus}">
+                    <Button.Template>
+                        <ControlTemplate TargetType="Button">
+                            <Border Background="{TemplateBinding Background}">
+                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                        </ControlTemplate>
+                    </Button.Template>
                     <TextBlock Style="{StaticResource WidgetCatalogInstallMark}" HorizontalAlignment="Center"
                                VerticalAlignment="Center"/>
                 </Button>
             </Grid>
             <Border x:Name="SettingsDrawer" BorderThickness="0,1,0,0" BorderBrush="{DynamicResource StrokeSubtle}"
-                    Padding="16,15,16,18">
+                    Padding="20,16,20,18">
                 <Border.Style>
                     <Style TargetType="Border">
                         <Setter Property="Visibility" Value="Collapsed"/>
@@ -73,27 +116,41 @@
                         </Style.Triggers>
                     </Style>
                 </Border.Style>
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="2*" MinWidth="150"/>
-                        <ColumnDefinition Width="18"/>
-                        <ColumnDefinition Width="3*"/>
-                    </Grid.ColumnDefinitions>
-                    <StackPanel>
-                        <TextBlock Text="{Binding Label}" FontWeight="SemiBold" FontSize="13" Margin="0,0,0,12" Foreground="{DynamicResource TextPrimary}"/>
-                        <Border Background="{DynamicResource SettingsBackground}" BorderBrush="{DynamicResource StrokeSubtle}"
-                                BorderThickness="1" CornerRadius="6" Padding="8" MinHeight="82">
-                            <ContentControl Content="{Binding NativePreview}" HorizontalAlignment="Center"
+                <StackPanel>
+                    <DockPanel Margin="0,0,0,14">
+                        <Button x:Name="CloseButton" DockPanel.Dock="Right" Content="{local:Loc Close}"
+                                Style="{StaticResource SettingsGhostButton}" VerticalAlignment="Center"
+                                Click="Close_Click" Padding="9,4" FontSize="11.5" />
+                        <TextBlock Text="{Binding Label}" FontWeight="SemiBold" FontSize="15"
+                                   VerticalAlignment="Center" Foreground="{DynamicResource TextPrimary}" />
+                    </DockPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="2*" MinWidth="160" MaxWidth="280"/>
+                            <ColumnDefinition Width="22"/>
+                            <ColumnDefinition Width="3*"/>
+                        </Grid.ColumnDefinitions>
+                        <Border VerticalAlignment="Top" Background="Transparent" Padding="0,6">
+                            <ContentControl Content="{Binding NativePreview}" HorizontalAlignment="Left"
                                             VerticalAlignment="Center" Focusable="False"
                                             IsHitTestVisible="False" KeyboardNavigation.TabNavigation="None"/>
                         </Border>
-                    </StackPanel>
-                    <StackPanel Grid.Column="2">
-                        <TextBlock Text="{local:Loc WidgetSettings}" Foreground="{DynamicResource TextPrimary}" FontSize="13" FontWeight="SemiBold"
-                                   Margin="0,0,0,12"/>
-                        <ContentControl Content="{Binding SettingsView}" Focusable="False"/>
-                    </StackPanel>
-                </Grid>
+                        <StackPanel Grid.Column="2">
+                            <TextBlock Text="{local:Loc WidgetSettings}" Foreground="{DynamicResource TextPrimary}" FontSize="12" FontWeight="SemiBold"
+                                       Margin="0,0,0,6"/>
+                            <Border BorderThickness="0,1,0,1" BorderBrush="{DynamicResource StrokeSubtle}" Padding="0,8" MinHeight="43">
+                                <DockPanel>
+                                    <CheckBox IsChecked="{Binding IsInstalled, Mode=OneWay}" Click="Install_Click"
+                                              DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              AutomationProperties.Name="{Binding Label}" />
+                                    <TextBlock Text="{local:Loc WidgetShow}" Style="{StaticResource SettingsRowLabel}"
+                                               FontSize="12" VerticalAlignment="Center" />
+                                </DockPanel>
+                            </Border>
+                            <ContentControl Content="{Binding SettingsView}" Focusable="False" Margin="0,2,0,0"/>
+                        </StackPanel>
+                    </Grid>
+                </StackPanel>
             </Border>
         </StackPanel>
     </Border>

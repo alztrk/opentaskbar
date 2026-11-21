@@ -115,6 +115,19 @@ public class DockWidget : UserControl, IDisposable
         if (IsActive) OnTick(now);
     }
 
+    /// <summary>
+    /// Renders a single frame for the Settings catalog preview without activating the widget.
+    /// No background polling or service subscriptions are started. Widgets that fetch remote data
+    /// override OnRenderPreview so they only paint their placeholder state.
+    /// </summary>
+    public void RenderPreview()
+    {
+        if (_disposed || IsActive) return;
+        OnRenderPreview();
+    }
+
+    protected virtual void OnRenderPreview() => OnTick(DateTime.Now);
+
     protected virtual void OnActivated() { }
     protected virtual void OnDeactivated() { }
     protected virtual void OnDisposed() { }

@@ -26,6 +26,7 @@ public partial class SettingsWindow : Window
     private readonly ObservableCollection<DockWidgetOption> _widgetOptions = [];
     private readonly ObservableCollection<WidgetCategoryGroup> _widgetGroups = [];
     private readonly Dictionary<string, ComboBox> _widgetDensityBoxes = [];
+    private readonly List<ComboBox> _aiRingBoxes = [];
     private readonly DockWidgetService _widgetPreviewService = new(TimeProvider.System);
     private readonly DispatcherTimer _widgetPreviewTimer = new() { Interval = TimeSpan.FromSeconds(15) };
     private readonly List<OpenTaskbar.Widgets.DockWidget> _livePreviewWidgets = [];
@@ -34,6 +35,7 @@ public partial class SettingsWindow : Window
     private bool _startupEnabled;
     private bool _startupAvailable;
     private DockSettings _applied;
+    private string? _selectedThemePackId;
     private bool _closingApplication;
     private bool _initializing = true;
     private AiUsageRing _aiUsageRing;
@@ -68,7 +70,7 @@ public partial class SettingsWindow : Window
             _widgetOptions.Add(option);
         }
         AttachWidgetSettingsPanels();
-        CustomThemeEditor.ThemeSaved += (_, _) => ReloadThemePacks((ThemePackBox.SelectedItem as ThemePackChoice)?.Id);
+        CustomThemeEditor.ThemeSaved += (_, _) => ReloadThemePacks(_selectedThemePackId);
         CustomThemeEditor.ThemeCreated += (_, id) => ReloadThemePacks(id);
         var widgetView = new ListCollectionView(_widgetOptions);
         widgetView.SortDescriptions.Add(new SortDescription(nameof(DockWidgetOption.CategoryOrder), ListSortDirection.Ascending));
@@ -102,6 +104,7 @@ public partial class SettingsWindow : Window
             _widgetOptions.Clear();
             _widgetGroups.Clear();
             _widgetDensityBoxes.Clear();
+            _aiRingBoxes.Clear();
             WeatherCountryBox.ItemsSource = null;
             ThemeManager.Apply(_preferences.Current.Theme, _preferences.Current);
             (Application.Current.MainWindow as MainWindow)?.SetSizePreview(null, null);
@@ -277,8 +280,8 @@ public partial class SettingsWindow : Window
                 native.Visibility = Visibility.Visible;
             }
         }
-        CustomThemeEditor.LoadTheme((ThemePackBox.SelectedItem as ThemePackChoice)?.Id, ThemeManager.EffectiveTheme);
-        UpdateOpacityLabel();
+        CustomThemeEditor.LoadTheme(_selectedThemePackId, ThemeManager.EffectiveTheme);
+        BuildThemeGallery(_selectedThemePackId);
         UpdateDockScaleLabel();
         UpdateWidgetOptionState();
         UpdateBackdrop();
@@ -387,12 +390,12 @@ public partial class SettingsWindow : Window
                 : ClockDateStyle.DayAndShortDate,
             StatsMeters = ReadStatsMeters(),
             AiUsageRing = _aiUsageRing,
-            ThemePack = (ThemePackBox.SelectedItem as ThemePackChoice)?.Id,
+            ThemePack = _selectedThemePackId,
             ThemeApplicationIcons = false
         };
     }
 
-    private sealed record ThemePackChoice(string? Id, string Name, string Details);
+    private sealed record ThemePackChoice(string? Id, string Name, string Details, ThemePack? Pack = null);
     private sealed record DisplayChoice(string? DeviceName, string DisplayName);
     private sealed record SecondaryAppChoice(SecondaryAppScope Scope, string DisplayName);
 
@@ -453,9 +456,14 @@ public partial class SettingsWindow : Window
 
     private void SelectLanguage(AppLanguage language)
     {
-        var selected = UiText.Languages.FirstOrDefault(candidate => candidate == language);
-        var activeLanguage = UiText.Languages.FirstOrDefault(candidate => candidate == selected);
-        LanguageBox.SelectedItem = LanguageCatalog.IsSupported(activeLanguage) ? activeLanguage : AppLanguage.English;
+        if (LanguageBox.ItemsSource is IEnumerable<AppLanguage> languages)
+        {
+            var match = languages.FirstOrDefault(cand => string.Equals(cand.CultureName, language.CultureName, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrEmpty(match.CultureName) || match == AppLanguage.English)
+            {
+                LanguageBox.SelectedItem = match;
+            }
+        }
         if (LanguageBox.SelectedIndex < 0 && LanguageBox.Items.Count > 0) LanguageBox.SelectedIndex = 0;
     }
 
@@ -463,19 +471,172 @@ public partial class SettingsWindow : Window
 
     private void LoadThemePacks(string? selected)
     {
-        var choices = new List<ThemePackChoice> { new(null, UiText.Get("ThemePackNone"), string.Empty) };
-        choices.AddRange(ThemePacks.Discover().Select(pack => new ThemePackChoice(pack.Id, pack.DisplayName, DescribeThemePack(pack))));
-        // A stored theme whose folder is gone stays listed so an unrelated edit does not silently clear it.
-        if (!string.IsNullOrWhiteSpace(selected) && !choices.Any(choice => string.Equals(choice.Id, selected, StringComparison.OrdinalIgnoreCase)))
+        _selectedThemePackId = string.IsNullOrWhiteSpace(selected) ? null : selected;
+        BuildThemeGallery(_selectedThemePackId);
+        CustomThemeEditor.LoadTheme(_selectedThemePackId, ThemeManager.EffectiveTheme);
+    }
+
+    private void BuildThemeGallery(string? selected)
+    {
+        var discovered = ThemePacks.Discover();
+        var builtIn = new List<ThemePackChoice> { new(null, UiText.Get("ThemePackNone"), string.Empty) };
+        var custom = new List<ThemePackChoice>();
+
+        foreach (var pack in discovered)
         {
-            choices.Add(new ThemePackChoice(selected, selected + " (?)", UiText.Get("ThemePackMissing")));
+            var choice = new ThemePackChoice(pack.Id, pack.DisplayName, DescribeThemePack(pack), pack);
+            if (ThemePack.IsBuiltInTheme(pack.Id)) builtIn.Add(choice);
+            else custom.Add(choice);
         }
 
-        ThemePackBox.ItemsSource = choices;
-        ThemePackBox.SelectedItem = choices.FirstOrDefault(choice => string.Equals(choice.Id, selected, StringComparison.OrdinalIgnoreCase))
-            ?? choices[0];
-        UpdateThemePackDetails();
-        CustomThemeEditor.LoadTheme(selected, ThemeManager.EffectiveTheme);
+        // A stored theme whose folder is gone stays listed so an unrelated edit does not silently clear it.
+        if (!string.IsNullOrWhiteSpace(selected)
+            && !builtIn.Any(c => string.Equals(c.Id, selected, StringComparison.OrdinalIgnoreCase))
+            && !custom.Any(c => string.Equals(c.Id, selected, StringComparison.OrdinalIgnoreCase)))
+        {
+            custom.Add(new ThemePackChoice(selected, selected + " (?)", UiText.Get("ThemePackMissing")));
+        }
+
+        ThemeGalleryBuiltIn.Children.Clear();
+        foreach (var choice in builtIn)
+            ThemeGalleryBuiltIn.Children.Add(CreateThemeEntryButton(choice, string.Equals(choice.Id, selected, StringComparison.OrdinalIgnoreCase)));
+
+        ThemeGalleryCustom.Children.Clear();
+        foreach (var choice in custom)
+            ThemeGalleryCustom.Children.Add(CreateThemeEntryButton(choice, string.Equals(choice.Id, selected, StringComparison.OrdinalIgnoreCase)));
+
+        ThemeGalleryCustomEmpty.Visibility = custom.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        var activeChoice = builtIn.Concat(custom).FirstOrDefault(c => string.Equals(c.Id, selected, StringComparison.OrdinalIgnoreCase)) ?? builtIn[0];
+        ThemePackDetails.Text = activeChoice.Details;
+        ThemePackDetails.Visibility = activeChoice.Details.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private Button CreateThemeEntryButton(ThemePackChoice choice, bool isActive)
+    {
+        var (bgColor, accentColor) = ResolveThemePreviewColors(choice.Pack);
+        var chipBrush = new LinearGradientBrush
+        {
+            StartPoint = new Point(0, 0),
+            EndPoint = new Point(1, 1),
+            GradientStops =
+            {
+                new GradientStop(bgColor, 0.0),
+                new GradientStop(bgColor, 0.48),
+                new GradientStop(accentColor, 0.50),
+                new GradientStop(accentColor, 1.0)
+            }
+        };
+        chipBrush.Freeze();
+
+        var chip = new Border
+        {
+            Width = 22,
+            Height = 22,
+            CornerRadius = new CornerRadius(5),
+            BorderThickness = new Thickness(1),
+            Background = chipBrush,
+            Margin = new Thickness(0, 0, 10, 0),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        chip.SetResourceReference(Border.BorderBrushProperty, "StrokeSubtle");
+
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.Children.Add(chip);
+
+        var nameText = new TextBlock
+        {
+            Text = choice.Name,
+            FontSize = 12,
+            FontWeight = isActive ? FontWeights.SemiBold : FontWeights.Normal,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        nameText.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+        Grid.SetColumn(nameText, 1);
+        grid.Children.Add(nameText);
+
+        if (isActive)
+        {
+            var check = new System.Windows.Shapes.Path
+            {
+                Data = Application.Current.TryFindResource("IconCheck") as Geometry,
+                Width = 13,
+                Height = 13,
+                Stretch = Stretch.Uniform,
+                StrokeThickness = 1.8,
+                StrokeStartLineCap = PenLineCap.Round,
+                StrokeEndLineCap = PenLineCap.Round,
+                StrokeLineJoin = PenLineJoin.Round,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(8, 0, 2, 0)
+            };
+            check.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "AccentBrush");
+            Grid.SetColumn(check, 2);
+            grid.Children.Add(check);
+        }
+
+        var btn = new Button
+        {
+            Content = grid,
+            MinHeight = 41,
+            Padding = new Thickness(9, 7, 9, 7),
+            Margin = new Thickness(0, 0, 8, 4),
+            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+            VerticalContentAlignment = VerticalAlignment.Center,
+            Style = (Style)Application.Current.FindResource(isActive ? "SettingsButton" : "SettingsGhostButton")
+        };
+        if (isActive)
+        {
+            btn.SetResourceReference(Control.BackgroundProperty, "SurfaceSelectedStrong");
+        }
+        System.Windows.Automation.AutomationProperties.SetName(btn, choice.Name);
+        btn.Click += (_, e) =>
+        {
+            if (string.Equals(_selectedThemePackId, choice.Id, StringComparison.OrdinalIgnoreCase)) return;
+            _selectedThemePackId = choice.Id;
+            ThemePacks.Select(_selectedThemePackId, reload: true);
+            ThemePacks.ApplyWidgets(_preferences.Current.Theme);
+            BuildThemeGallery(_selectedThemePackId);
+            CustomThemeEditor.LoadTheme(_selectedThemePackId, ThemeManager.EffectiveTheme);
+            PreferenceEdited(btn, e);
+        };
+        return btn;
+    }
+
+    private static (Color Bg, Color Accent) ResolveThemePreviewColors(ThemePack? pack)
+    {
+        var dark = ThemeManager.EffectiveTheme == AppTheme.Dark;
+        var defaultBg = dark ? Color.FromRgb(0x1B, 0x20, 0x29) : Color.FromRgb(0xF3, 0xF3, 0xF3);
+        var defaultAccent = dark ? Color.FromRgb(0x38, 0xBD, 0xF8) : Color.FromRgb(0x03, 0x69, 0xA1);
+        if (pack?.Widgets?.Manifest is not { } manifest) return (defaultBg, defaultAccent);
+
+        var map = dark ? manifest.Dark : manifest.Light;
+        return ( TryReadColor(map, manifest.Tokens, "SettingsBackground", defaultBg),
+                 TryReadColor(map, manifest.Tokens, "AccentBrush", defaultAccent) );
+
+        static Color TryReadColor(IReadOnlyDictionary<string, System.Text.Json.JsonElement>? primary,
+            IReadOnlyDictionary<string, System.Text.Json.JsonElement>? fallback, string key, Color defaultColor)
+        {
+            if ((primary is not null && primary.TryGetValue(key, out var elem))
+                || (fallback is not null && fallback.TryGetValue(key, out elem)))
+            {
+                if (elem.ValueKind == System.Text.Json.JsonValueKind.String
+                    && elem.GetString() is { } text
+                    && text.StartsWith('#'))
+                {
+                    try
+                    {
+                        if (ColorConverter.ConvertFromString(text) is Color c) return Color.FromRgb(c.R, c.G, c.B);
+                    }
+                    catch (FormatException) { }
+                }
+            }
+            return defaultColor;
+        }
     }
 
     private static string DescribeThemePack(ThemePack pack)
@@ -486,22 +647,6 @@ public partial class SettingsWindow : Window
         var contents = string.Join(" · ", parts);
         var author = string.IsNullOrWhiteSpace(pack.Manifest.Author) ? string.Empty : " — " + pack.Manifest.Author;
         return contents + author;
-    }
-
-    private void UpdateThemePackDetails()
-    {
-        var details = (ThemePackBox.SelectedItem as ThemePackChoice)?.Details ?? string.Empty;
-        ThemePackDetails.Text = details;
-        ThemePackDetails.Visibility = details.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
-    }
-
-    private void ThemePackBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        UpdateThemePackDetails();
-        PreferenceEdited(sender, e);
-        if (!_initializing)
-            CustomThemeEditor.LoadTheme((ThemePackBox.SelectedItem as ThemePackChoice)?.Id,
-                ThemeManager.EffectiveTheme);
     }
 
     private void OpenGithub_Click(object sender, RoutedEventArgs e)
@@ -534,7 +679,7 @@ public partial class SettingsWindow : Window
 
     private void ThemePackReload_Click(object sender, RoutedEventArgs e)
     {
-        var selected = (ThemePackBox.SelectedItem as ThemePackChoice)?.Id;
+        var selected = _selectedThemePackId;
         _initializing = true;
         LoadThemePacks(selected);
         _initializing = false;
@@ -553,7 +698,7 @@ public partial class SettingsWindow : Window
 
     private void ThemePackDuplicate_Click(object sender, RoutedEventArgs e)
     {
-        var selected = (ThemePackBox.SelectedItem as ThemePackChoice)?.Id;
+        var selected = _selectedThemePackId;
         if (string.IsNullOrWhiteSpace(selected)) { AppLog.ReportError("ErrorThemeMissing"); return; }
         var pack = ThemePacks.Discover().FirstOrDefault(p => string.Equals(p.Id, selected, StringComparison.OrdinalIgnoreCase));
         var name = TextPrompt.Ask(UiText.Get("ThemePackDuplicate"), UiText.Get("ThemePackDuplicate"),
@@ -566,7 +711,7 @@ public partial class SettingsWindow : Window
 
     private void ThemePackExport_Click(object sender, RoutedEventArgs e)
     {
-        var selected = (ThemePackBox.SelectedItem as ThemePackChoice)?.Id;
+        var selected = _selectedThemePackId;
         if (string.IsNullOrWhiteSpace(selected)) { AppLog.ReportError("ErrorThemeMissing"); return; }
         var dialog = new Microsoft.Win32.SaveFileDialog
         {
@@ -598,7 +743,7 @@ public partial class SettingsWindow : Window
 
     private void ThemePackDelete_Click(object sender, RoutedEventArgs e)
     {
-        var selected = (ThemePackBox.SelectedItem as ThemePackChoice)?.Id;
+        var selected = _selectedThemePackId;
         if (string.IsNullOrWhiteSpace(selected)) { AppLog.ReportError("ErrorThemeMissing"); return; }
         var result = MessageBox.Show(this, UiText.Format("ThemePackDeleteConfirm", selected), "OpenTaskbar",
             MessageBoxButton.YesNo, MessageBoxImage.Question);
@@ -799,6 +944,8 @@ public partial class SettingsWindow : Window
             {
                 native.ApplySettings(ReadSelection());
                 native.Visibility = Visibility.Visible;
+                // Paint one frame with real widget code; no activation, no polling.
+                native.RenderPreview();
                 option.NativePreview = native;
             }
         }
@@ -893,6 +1040,17 @@ public partial class SettingsWindow : Window
         DateStyleHidden.IsChecked = settings.DateStyle == ClockDateStyle.Hidden;
         WeatherCityBox.Text = settings.WeatherCity;
         _aiUsageRing = settings.AiUsageRing;
+        foreach (var combo in _aiRingBoxes)
+        {
+            foreach (var item in combo.Items)
+            {
+                if (item is ComboBoxItem cbi && string.Equals(cbi.Tag as string, _aiUsageRing.ToString(), StringComparison.Ordinal))
+                {
+                    combo.SelectedItem = cbi;
+                    break;
+                }
+            }
+        }
         StatsCpuToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Cpu);
         StatsMemoryToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Memory);
         StatsBatteryToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Battery);
@@ -913,6 +1071,7 @@ public partial class SettingsWindow : Window
     {
         WidgetPanelsPool.Children.Clear();
         _widgetDensityBoxes.Clear();
+        _aiRingBoxes.Clear();
         if (_widgetOptions.FirstOrDefault(o => o.Id == "Clock") is { } clock) clock.SettingsView = ClockOptions;
         if (_widgetOptions.FirstOrDefault(o => o.Id == "Weather") is { } weather) weather.SettingsView = WeatherOptions;
         if (_widgetOptions.FirstOrDefault(o => o.Id == "Focus") is { } focus)
@@ -925,13 +1084,57 @@ public partial class SettingsWindow : Window
             AttachDensityRow("SystemStats", StatsOptions);
             stats.SettingsView = StatsOptions;
         }
-        foreach (var id in new[] { "Media", "Audio", "QuickSettings" })
+        var aiUsageIds = new HashSet<string>(DockWidgetService.AiUsageWidgets.Select(w => w.Id), StringComparer.Ordinal);
+        foreach (var option in _widgetOptions)
         {
-            if (_widgetOptions.FirstOrDefault(o => o.Id == id) is not { } option) continue;
+            if (option.SettingsView is not null) continue;
             var panel = new StackPanel();
-            AttachDensityRow(id, panel);
+            AttachDensityRow(option.Id, panel);
+            if (aiUsageIds.Contains(option.Id))
+            {
+                AttachAiRingRow(panel);
+            }
             option.SettingsView = panel;
         }
+    }
+
+    private void AttachAiRingRow(Panel panel)
+    {
+        var row = new Grid { Margin = new Thickness(0, 0, 0, panel.Children.Count > 0 ? 8 : 0) };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+        var label = new TextBlock
+        {
+            Text = UiText.Get("AiUsageRingLabel"),
+            FontSize = 12,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 12, 0)
+        };
+        label.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+        Grid.SetColumn(label, 0);
+        row.Children.Add(label);
+
+        var combo = new ComboBox { MinWidth = 128 };
+        combo.Items.Add(new ComboBoxItem { Content = UiText.Get("AiUsageRingHighest"), Tag = nameof(AiUsageRing.Highest) });
+        combo.Items.Add(new ComboBoxItem { Content = UiText.Get("AiUsageRingSession"), Tag = nameof(AiUsageRing.Session) });
+        combo.Items.Add(new ComboBoxItem { Content = UiText.Get("AiUsageWeekly"), Tag = nameof(AiUsageRing.Weekly) });
+
+        combo.SelectedItem = combo.Items.OfType<ComboBoxItem>().FirstOrDefault(item => string.Equals(item.Tag as string, _aiUsageRing.ToString(), StringComparison.Ordinal))
+            ?? combo.Items[0];
+
+        combo.SelectionChanged += (_, _) =>
+        {
+            if (!_initializing && combo.SelectedItem is ComboBoxItem { Tag: string tag } && Enum.TryParse<AiUsageRing>(tag, out var ring))
+            {
+                _aiUsageRing = ring;
+                TriggerAutoSave(immediate: true);
+            }
+        };
+        Grid.SetColumn(combo, 1);
+        row.Children.Add(combo);
+        _aiRingBoxes.Add(combo);
+        panel.Children.Add(row);
     }
 
     private void AttachDensityRow(string widgetId, FrameworkElement container)
@@ -1166,9 +1369,50 @@ public partial class SettingsWindow : Window
             option.IsEnabled = settings.Widgets?.Contains(option.Id, StringComparer.Ordinal) == true;
         }
         FocusMinutesSlider.Value = settings.FocusMinutes;
-        BreakMinutesSlider.Value = _applied.FocusBreakMinutes;
+        BreakMinutesSlider.Value = settings.FocusBreakMinutes;
         FocusSessionsSlider.Value = settings.FocusSessions;
         LoadFeatureSelection(settings);
+    }
+
+    private void ResetDockDefaults_Click(object sender, RoutedEventArgs e)
+    {
+        var defaults = new DockSettings();
+        _initializing = true;
+        try
+        {
+            BottomEdge.IsChecked = defaults.Edge == DockEdge.Bottom;
+            LeftEdge.IsChecked = defaults.Edge == DockEdge.Left;
+            RightEdge.IsChecked = defaults.Edge == DockEdge.Right;
+            SelectAlignment(defaults);
+            CompactSize.IsChecked = defaults.Size == DockSize.Compact;
+            MediumSize.IsChecked = defaults.Size == DockSize.Medium;
+            LargeSize.IsChecked = defaults.Size == DockSize.Large;
+            DockScaleSlider.Value = Math.Round(defaults.DockScale * 100);
+            UpdateDockScaleLabel();
+            AutoHideDisabled.IsChecked = defaults.AutoHide == AutoHideMode.Disabled;
+            AutoHideSmart.IsChecked = defaults.AutoHide == AutoHideMode.Smart;
+            AutoHideAlways.IsChecked = defaults.AutoHide == AutoHideMode.Always;
+            AnimationsToggle.IsChecked = defaults.AnimationsEnabled;
+            MagnificationToggle.IsChecked = defaults.MagnificationEnabled;
+            PreviewsToggle.IsChecked = defaults.PreviewsEnabled;
+            BadgesToggle.IsChecked = defaults.NotificationBadgesEnabled;
+            RecycleBinToggle.IsChecked = defaults.ShowRecycleBin;
+            CurrentDesktopToggle.IsChecked = defaults.CurrentDesktopOnly;
+            SearchButtonToggle.IsChecked = defaults.ShowSearchButton;
+            TaskViewButtonToggle.IsChecked = defaults.ShowTaskViewButton;
+            TrayButtonToggle.IsChecked = defaults.ShowTrayButton;
+            ShowDesktopButtonToggle.IsChecked = defaults.ShowDesktopButton;
+            LoadDisplayChoices(defaults.TargetDisplay);
+            AllMonitorsToggle.IsChecked = defaults.ShowOnAllMonitors;
+            LoadSecondaryAppChoices(defaults.SecondaryApps);
+            SecondaryWidgetsToggle.IsChecked = defaults.SecondaryWidgets;
+            UpdateMultiMonitorControls();
+        }
+        finally
+        {
+            _initializing = false;
+        }
+        PreferenceEdited(sender, e);
     }
 
     private void UpdateWidgetOptionState()
@@ -1265,6 +1509,9 @@ public partial class SettingsWindow : Window
     {
         if (_initializing || _closed) return;
         if (e.OriginalSource is ToggleButton { TemplatedParent: ComboBox }) return;
+        // Unnamed switches inside a widget card are the install toggles; their Click handler
+        // saves explicitly. Named switches live in the per-widget settings panels and auto-save.
+        if (e.OriginalSource is CheckBox { DataContext: DockWidgetOption, Name: "" }) return;
         var selectedSize = LargeSize.IsChecked == true ? DockSize.Large : MediumSize.IsChecked == true ? DockSize.Medium : DockSize.Compact;
         (Application.Current.MainWindow as MainWindow)?.SetSizePreview(selectedSize, Math.Round(DockScaleSlider.Value) / 100);
         UpdateWidgetOptionState();
@@ -1350,33 +1597,6 @@ public partial class SettingsWindow : Window
     }
 
     private void UpdateDockScaleLabel() => DockScaleValue.Text = UiText.Format("OpacityPercent", (int)Math.Round(DockScaleSlider.Value));
-
-    private void UpdateOpacityLabel()
-    {
-        if (OpacityValue is not null && OpacitySlider is not null)
-            OpacityValue.Text = UiText.Format("OpacityPercent", (int)Math.Round(OpacitySlider.Value));
-    }
-
-    private void UpdateBottomGapLabel()
-    {
-        if (BottomGapValue is not null && BottomGapSlider is not null)
-            BottomGapValue.Text = $"{(int)Math.Round(BottomGapSlider.Value)} px";
-    }
-
-    private void BottomGapSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-    {
-        if (_initializing) return;
-        UpdateBottomGapLabel();
-        PreferenceEdited(sender, e);
-    }
-
-    private void OpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
-    {
-        if (_initializing) return;
-        UpdateOpacityLabel();
-        ThemeManager.SetSurfaceOpacity(Math.Round(e.NewValue) / 100);
-        PreferenceEdited(sender, e);
-    }
 
     private void UpdateCornerRadiusLabel() => CornerRadiusValue.Text = $"{(int)Math.Round(CornerRadiusSlider.Value)} px";
 

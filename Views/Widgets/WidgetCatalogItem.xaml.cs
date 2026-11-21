@@ -37,4 +37,13 @@ public partial class WidgetCatalogItem : UserControl
         if (DataContext is DockWidgetOption)
             RaiseEvent(new RoutedEventArgs(InstallationRequestedEvent, this));
     }
+
+    private void Close_Click(object sender, RoutedEventArgs e)
+    {
+        e.Handled = true;
+        if (DataContext is DockWidgetOption option)
+        {
+            option.IsSettingsExpanded = false;
+        }
+    }
 }
