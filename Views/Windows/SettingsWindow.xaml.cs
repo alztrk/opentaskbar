@@ -554,18 +554,6 @@ public partial class SettingsWindow : Window
         };
         nameText.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
         textStack.Children.Add(nameText);
-        if (!string.IsNullOrWhiteSpace(choice.Details))
-        {
-            var desc = new TextBlock
-            {
-                Text = choice.Details,
-                FontSize = 10.5,
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                Margin = new Thickness(0, 2, 0, 0)
-            };
-            desc.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
-            textStack.Children.Add(desc);
-        }
 
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -612,7 +600,8 @@ public partial class SettingsWindow : Window
         var btn = new Button
         {
             Content = cardBorder,
-            MinHeight = 56,
+            Width = 344,
+            MinHeight = 46,
             Padding = new Thickness(0),
             Margin = new Thickness(0, 0, 10, 8),
             HorizontalContentAlignment = HorizontalAlignment.Stretch,

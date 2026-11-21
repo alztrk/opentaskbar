@@ -464,10 +464,10 @@
 
                             <!-- Theme Library (HTML prototype 3-column Built-in + My themes grid) -->
                             <TextBlock Text="{local:Loc BuiltInThemes}" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,6" />
-                            <UniformGrid x:Name="ThemeGalleryBuiltIn" Columns="2" Margin="0,0,0,6" />
+                            <WrapPanel x:Name="ThemeGalleryBuiltIn" Margin="0,0,0,6" />
 
                             <TextBlock Text="{local:Loc MyThemes}" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondary}" Margin="0,6,0,6" />
-                            <UniformGrid x:Name="ThemeGalleryCustom" Columns="2" />
+                            <WrapPanel x:Name="ThemeGalleryCustom" />
                             <TextBlock x:Name="ThemeGalleryCustomEmpty" Text="{local:Loc NoCustomThemes}" FontSize="11.5"
                                        Foreground="{DynamicResource TextSecondary}" Margin="0,2,0,10" Visibility="Collapsed" />
 

@@ -8,7 +8,7 @@
 [![Runtime](https://img.shields.io/badge/.NET-10.0%20WPF-512BD4?style=flat-square&logo=dotnet)](https://github.com/alztrk/opentaskbar)
 [![Architecture](https://img.shields.io/badge/Architecture-x64-blue?style=flat-square)](https://github.com/alztrk/opentaskbar)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-2658%20Passing-brightgreen?style=flat-square)](tests/OpenTaskbar.Tests)
+[![Tests](https://img.shields.io/badge/Tests-2296%20Passing-brightgreen?style=flat-square)](tests/OpenTaskbar.Tests)
 
 <br />
 
@@ -96,6 +96,14 @@ OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replaceme
 | Settings Dashboard | Interactive Widget Gallery |
 | :---: | :---: |
 | <img src="docs/screenshots/settings-general.jpg" alt="Settings Dashboard" width="460" /> | <img src="docs/screenshots/widget-gallery.png" alt="Widget Gallery" width="460" /> |
+
+</div>
+
+### Star Growth
+
+<div align="center">
+
+<img src="https://api.star-history.com/svg?repos=alztrk/opentaskbar&type=Date" alt="OpenTaskbar star growth over time" width="100%" />
 
 </div>
 

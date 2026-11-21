@@ -352,8 +352,12 @@
                     <Grid>
                         <Border x:Name="Surface" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}"
                                 CornerRadius="6" BorderBrush="{DynamicResource StrokeSubtle}" BorderThickness="1">
-                            <StackPanel Orientation="Horizontal" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center">
-                                <Path x:Name="Glyph" Data="{TemplateBinding views:IconGlyph.Glyph}"
+                            <Grid VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Path x:Name="Glyph" Data="{TemplateBinding views:IconGlyph.Glyph}"
                                       Width="{TemplateBinding views:IconGlyph.Size}" Height="{TemplateBinding views:IconGlyph.Size}"
                                       Margin="{TemplateBinding views:IconGlyph.Margin}"
                                       Stretch="Uniform" Stroke="{TemplateBinding Foreground}" StrokeThickness="1.7"
@@ -370,8 +374,8 @@
                                         </Style>
                                     </Path.Style>
                                 </Path>
-                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
-                            </StackPanel>
+                                    <ContentPresenter Grid.Column="1" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                                </Grid>
                         </Border>
                         <Border x:Name="FocusRing" CornerRadius="8" BorderThickness="2" BorderBrush="Transparent"
                                 Margin="-2" IsHitTestVisible="False" Visibility="Collapsed" />
@@ -399,8 +403,12 @@
                     <Grid>
                         <Border x:Name="Surface" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}"
                                 CornerRadius="6" BorderBrush="{TemplateBinding Background}" BorderThickness="1">
-                            <StackPanel Orientation="Horizontal" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center">
-                                <Path x:Name="Glyph" Data="{TemplateBinding views:IconGlyph.Glyph}"
+                            <Grid VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Path x:Name="Glyph" Data="{TemplateBinding views:IconGlyph.Glyph}"
                                       Width="{TemplateBinding views:IconGlyph.Size}" Height="{TemplateBinding views:IconGlyph.Size}"
                                       Margin="{TemplateBinding views:IconGlyph.Margin}"
                                       Stretch="Uniform" Stroke="{TemplateBinding Foreground}" StrokeThickness="1.7"
@@ -417,8 +425,8 @@
                                         </Style>
                                     </Path.Style>
                                 </Path>
-                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
-                            </StackPanel>
+                                    <ContentPresenter Grid.Column="1" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                                </Grid>
                         </Border>
                         <Border x:Name="FocusRing" CornerRadius="8" BorderThickness="2" BorderBrush="Transparent"
                                 Margin="-2" IsHitTestVisible="False" Visibility="Collapsed" />
@@ -446,8 +454,12 @@
                     <Grid>
                         <Border x:Name="Surface" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}"
                                 CornerRadius="6" BorderBrush="Transparent" BorderThickness="1">
-                            <StackPanel Orientation="Horizontal" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center">
-                                <Path x:Name="Glyph" Data="{TemplateBinding views:IconGlyph.Glyph}"
+                            <Grid VerticalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <Path x:Name="Glyph" Data="{TemplateBinding views:IconGlyph.Glyph}"
                                       Width="{TemplateBinding views:IconGlyph.Size}" Height="{TemplateBinding views:IconGlyph.Size}"
                                       Margin="{TemplateBinding views:IconGlyph.Margin}"
                                       Stretch="Uniform" Stroke="{TemplateBinding Foreground}" StrokeThickness="1.7"
@@ -464,8 +476,8 @@
                                         </Style>
                                     </Path.Style>
                                 </Path>
-                                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
-                            </StackPanel>
+                                    <ContentPresenter Grid.Column="1" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                                </Grid>
                         </Border>
                         <Border x:Name="FocusRing" CornerRadius="8" BorderThickness="2" BorderBrush="Transparent"
                                 Margin="-2" IsHitTestVisible="False" Visibility="Collapsed" />
@@ -873,7 +885,7 @@
 
                                 </Path>
 
-                                <ContentPresenter x:Name="ContentSite" IsHitTestVisible="False"
+                                <ContentPresenter x:Name="ContentSite" Grid.Column="1" IsHitTestVisible="False"
 
                                                   Content="{TemplateBinding SelectionBoxItem}"
 
