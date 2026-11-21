@@ -97,6 +97,14 @@ public sealed class BatteryWidget : DockWidget
         };
         _percentText.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
 
+        var hoverOverlay = new Border
+        {
+            CornerRadius = new CornerRadius(10),
+            Opacity = 0,
+            IsHitTestVisible = false
+        };
+        hoverOverlay.SetResourceReference(Border.BackgroundProperty, "SurfaceHover");
+
         _surface = new Grid
         {
             MinWidth = MinCardWidth,
@@ -104,6 +112,7 @@ public sealed class BatteryWidget : DockWidget
             Background = Brushes.Transparent
         };
         _surface.Children.Add(_liquidPath);
+        _surface.Children.Add(hoverOverlay);
         _surface.Children.Add(_percentShadow);
         _surface.Children.Add(_percentText);
         _surface.SizeChanged += (_, _) => UpdateLiquidGeometry(forceAnimationRestart: false);
@@ -118,6 +127,13 @@ public sealed class BatteryWidget : DockWidget
         };
         _card.SetResourceReference(StyleProperty, "WidgetCardBorder");
         _card.Padding = new Thickness(0);
+        // Hover is rendered by hoverOverlay above _liquidPath so the opaque fill never hides it
+        // and the unfilled portion never double-stacks with WidgetCardBorder's Background.
+        _card.Background = new SolidColorBrush(Colors.Transparent);
+        _card.MouseEnter += (_, _) => hoverOverlay.BeginAnimation(OpacityProperty,
+            new DoubleAnimation(1, TimeSpan.FromMilliseconds(160)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
+        _card.MouseLeave += (_, _) => hoverOverlay.BeginAnimation(OpacityProperty,
+            new DoubleAnimation(0, TimeSpan.FromMilliseconds(160)) { EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut } });
         _card.MouseLeftButtonUp += (_, _) => OpenPowerSettingsAction();
 
         Content = _card;

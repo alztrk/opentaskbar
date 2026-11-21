@@ -52,8 +52,8 @@
     <SolidColorBrush x:Key="SurfacePopup" Color="#F7252B37" />
     <SolidColorBrush x:Key="StrokeSubtle" Color="#FF3A4352" />
     <SolidColorBrush x:Key="StrokeFocus" Color="#FF38BDF8" />
-    <SolidColorBrush x:Key="SurfaceHover" Color="#14FFFFFF" />
-    <Color x:Key="SurfaceHoverColor">#14FFFFFF</Color>
+    <SolidColorBrush x:Key="SurfaceHover" Color="#18FFFFFF" />
+    <Color x:Key="SurfaceHoverColor">#18FFFFFF</Color>
     <SolidColorBrush x:Key="SurfacePressed" Color="#22FFFFFF" />
         <!-- Shell buttons have no resting fill; their hover/press feedback must stay clearly visible on glass. -->
         <SolidColorBrush x:Key="ShellButtonHover" Color="#2AFFFFFF" />

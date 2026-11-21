@@ -5,7 +5,7 @@
              FontFamily="{DynamicResource InterfaceFont}"
              Foreground="{DynamicResource TextPrimary}" Focusable="False">
     <Border x:Name="CardBorder" BorderThickness="1"
-            CornerRadius="7" Margin="0" SnapsToDevicePixels="True">
+            CornerRadius="8" Margin="0,0,0,7" SnapsToDevicePixels="True">
         <Border.Style>
             <Style TargetType="Border">
                 <Setter Property="Background" Value="Transparent" />
@@ -53,30 +53,43 @@
                     </Button.Template>
                     <Grid Margin="13,0,8,0">
                         <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                             <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
-                        <TextBlock Text="{Binding Label}" FontSize="12.5" FontWeight="Medium"
+                        <ContentControl Grid.Column="0" Content="{Binding IconGeometry}" Width="16" Height="16"
+                                        Margin="0,0,10,0" VerticalAlignment="Center" IsHitTestVisible="False">
+                            <ContentControl.Style>
+                                <Style TargetType="ContentControl" BasedOn="{StaticResource WidgetIcon}">
+                                    <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsFilledIcon}" Value="True">
+                                            <Setter Property="Template">
+                                                <Setter.Value>
+                                                    <ControlTemplate TargetType="ContentControl">
+                                                        <Viewbox>
+                                                            <Canvas Width="24" Height="24">
+                                                                <Path Data="{Binding Content, RelativeSource={RelativeSource TemplatedParent}}"
+                                                                      Fill="{TemplateBinding Foreground}" />
+                                                            </Canvas>
+                                                        </Viewbox>
+                                                    </ControlTemplate>
+                                                </Setter.Value>
+                                            </Setter>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsInstalled}" Value="True">
+                                            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </ContentControl.Style>
+                        </ContentControl>
+                        <TextBlock Grid.Column="1" Text="{Binding Label}" FontSize="12.5" FontWeight="Medium"
                                    VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
                                    Foreground="{DynamicResource TextPrimary}"/>
-                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
-                            <Ellipse Width="6" Height="6" VerticalAlignment="Center" Margin="0,0,8,0"
-                                     IsHitTestVisible="False">
-                                <Ellipse.Style>
-                                    <Style TargetType="Ellipse">
-                                        <Setter Property="Fill" Value="{DynamicResource StrokeSubtle}" />
-                                        <Style.Triggers>
-                                            <DataTrigger Binding="{Binding IsInstalled}" Value="True">
-                                                <Setter Property="Fill" Value="{DynamicResource AccentBrush}" />
-                                            </DataTrigger>
-                                        </Style.Triggers>
-                                    </Style>
-                                </Ellipse.Style>
-                            </Ellipse>
-                            <TextBlock Text="{Binding SettingsGlyph}" FontFamily="Segoe MDL2 Assets"
-                                       FontSize="9" VerticalAlignment="Center" Margin="0,0,2,0"
-                                       Foreground="{DynamicResource TextSecondary}"/>
-                        </StackPanel>
+                        <TextBlock Grid.Column="2" Text="{Binding SettingsGlyph}" FontFamily="Segoe MDL2 Assets"
+                                   FontSize="9" VerticalAlignment="Center" Margin="8,0,2,0"
+                                   Foreground="{DynamicResource TextSecondary}"/>
                     </Grid>
                 </Button>
                 <Button x:Name="InstallButton" Grid.Column="1" Width="38" MinHeight="38" Margin="0,5,6,5"

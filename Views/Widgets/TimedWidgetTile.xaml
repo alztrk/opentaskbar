@@ -28,10 +28,19 @@
                 </ContentControl.Style>
             </ContentControl>
 
-            <Button x:Name="DetailsButton" Grid.Column="1" Style="{StaticResource WidgetButton}" Padding="2,0,4,0" Click="Details_Click"
-                    HorizontalContentAlignment="Left" ToolTip="{local:Loc WidgetOpenDetails}"
+            <Button x:Name="DetailsButton" Grid.Column="1" Background="Transparent" BorderThickness="0" Padding="2,0,4,0"
+                    Cursor="Hand" FocusVisualStyle="{x:Null}" Click="Details_Click"
+                    HorizontalContentAlignment="Left" VerticalContentAlignment="Center" ToolTip="{local:Loc WidgetOpenDetails}"
                     AutomationProperties.Name="{Binding Title, RelativeSource={RelativeSource AncestorType=UserControl}}"
                     AutomationProperties.HelpText="{local:Loc WidgetOpenDetails}" AutomationProperties.ItemStatus="{Binding Value}">
+                <Button.Template>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="Transparent" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Border>
+                    </ControlTemplate>
+                </Button.Template>
                 <TextBlock x:Name="ValueText" Typography.NumeralAlignment="Tabular" FontWeight="SemiBold"
                            FontSize="13" Foreground="{DynamicResource TextPrimary}" VerticalAlignment="Center">
                     <TextBlock.Style>

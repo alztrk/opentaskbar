@@ -109,6 +109,36 @@ public sealed class DockWidgetOption(
 
     public string SettingsGlyph => _isSettingsExpanded ? "\uE70E" : "\uE70D";
 
+    public string IconKey => Id switch
+    {
+        "Clock" or "Date" => "IconClock",
+        "Weather" => "IconCloudSun",
+        "DayProgress" => "IconCalendar",
+        "Stopwatch" => "IconTimer",
+        "Countdown" => "IconHourglass",
+        "SystemStats" => "IconCpu",
+        "NetSpeed" => "IconWifi",
+        "Battery" => "IconBattery",
+        "BluetoothBattery" => "IconBluetooth",
+        "Storage" => "IconHardDrive",
+        "AiUsageClaude" => "LogoClaude",
+        "AiUsageCodex" => "LogoCodex",
+        "AiUsageAntigravity" => "LogoAntigravity",
+        "AiUsageOpenCode" => "LogoOpenCode",
+        "AiUsageCopilot" => "LogoCopilot",
+        "AiUsageDeepSeek" => "LogoDeepSeek",
+        "AiUsageOpenRouter" => "LogoOpenRouter",
+        "Media" => "IconMusic",
+        "Audio" => "IconVolume",
+        "QuickSettings" => "IconSliders",
+        "Focus" => "IconTarget",
+        _ => "IconLayers"
+    };
+
+    public bool IsFilledIcon => Id.StartsWith("AiUsage", StringComparison.OrdinalIgnoreCase);
+
+    public object? IconGeometry => Application.Current?.TryFindResource(IconKey);
+
     public bool MatchesSearch(string query, CultureInfo culture) =>
         culture.CompareInfo.IndexOf(Label, query, CompareOptions.IgnoreCase) >= 0
         || culture.CompareInfo.IndexOf(Description, query, CompareOptions.IgnoreCase) >= 0;
