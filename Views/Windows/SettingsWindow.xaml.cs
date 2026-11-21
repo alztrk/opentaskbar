@@ -122,6 +122,8 @@ public partial class SettingsWindow : Window
         SelectChoice(SizeBox, _applied.Size.ToString());
         DockScaleSlider.Value = Math.Round(_applied.DockScale * 100);
         UpdateDockScaleLabel();
+        SelectChoice(DockWidthModeBox, _applied.DockWidthMode.ToString());
+        UpdateDockWidthControls();
         var initialProfile = DockMetrics.For(_applied.Size, _applied.DockScale);
         CornerRadiusSlider.Value = _applied.DockCornerRadius ?? (int)Math.Round(initialProfile.Radius);
         UpdateCornerRadiusLabel();
@@ -354,6 +356,9 @@ public partial class SettingsWindow : Window
             Layout = Choice(PositionBox) == "FullWidth" ? DockLayout.FullWidth : DockLayout.Floating,
             Size = Enum.TryParse<DockSize>(Choice(SizeBox), out var size) ? size : DockSize.Compact,
             DockScale = Math.Round(DockScaleSlider.Value) / 100,
+            DockWidthMode = Enum.TryParse<DockWidthMode>(Choice(DockWidthModeBox), out var widthMode) ? widthMode : DockWidthMode.Auto,
+            DockWidthPixels = widthMode == DockWidthMode.Pixels ? (int)Math.Round(DockWidthSlider.Value) : _preferences.Current.DockWidthPixels,
+            DockWidthPercent = widthMode == DockWidthMode.Percent ? (int)Math.Round(DockWidthSlider.Value) : _preferences.Current.DockWidthPercent,
             DockCornerRadius = (int)Math.Round(CornerRadiusSlider.Value),
             ShowClock = IsEnabled("Clock"),
             ShowMedia = IsEnabled("Media"),
@@ -510,82 +515,241 @@ public partial class SettingsWindow : Window
         var activeChoice = builtIn.Concat(custom).FirstOrDefault(c => string.Equals(c.Id, selected, StringComparison.OrdinalIgnoreCase)) ?? builtIn[0];
         ThemePackDetails.Text = activeChoice.Details;
         ThemePackDetails.Visibility = activeChoice.Details.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+
+        var hasSelectedPack = !string.IsNullOrWhiteSpace(selected);
+        ThemePackDuplicateButton.IsEnabled = hasSelectedPack;
+        ThemePackExportButton.IsEnabled = hasSelectedPack;
+        ThemePackDeleteButton.IsEnabled = hasSelectedPack && !ThemePack.IsBuiltInTheme(selected);
     }
 
     private Button CreateThemeEntryButton(ThemePackChoice choice, bool isActive)
     {
-        var (bgColor, accentColor) = ResolveThemePreviewColors(choice.Pack);
+        var (bgColor, dockColor, accentColor, textColor) = ResolveThemePreviewColors(choice.Pack);
 
-        // Large preview swatch: the theme's surface color as the base with its
-        // accent as a band, so each card reads as a miniature of the theme.
-        var swatch = new Border
+        // Miniature desktop backdrop with a floating dock pill previewing the theme's real dock surface and accent.
+        var backdropBrush = new LinearGradientBrush
         {
-            Height = 64,
-            CornerRadius = new CornerRadius(6),
-            BorderThickness = new Thickness(1),
+            StartPoint = new Point(0, 0),
+            EndPoint = new Point(1, 1),
+            GradientStops = new GradientStopCollection
+            {
+                new GradientStop(BlendColors(bgColor, accentColor, 0.14), 0),
+                new GradientStop(bgColor, 0.65),
+                new GradientStop(BlendColors(bgColor, Colors.Black, ThemeManager.EffectiveTheme == AppTheme.Dark ? 0.25 : 0.06), 1)
+            }
+        };
+
+        var previewStage = new Border
+        {
+            Height = 76,
+            Background = backdropBrush,
+            CornerRadius = new CornerRadius(8, 8, 0, 0),
             ClipToBounds = true
         };
-        swatch.SetResourceReference(Border.BorderBrushProperty, "StrokeSubtle");
-        var swatchGrid = new Grid();
-        swatchGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        swatchGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        var accentBand = new Border { Background = new SolidColorBrush(accentColor) };
-        Grid.SetRow(accentBand, 1);
-        swatchGrid.Children.Add(new Border { Background = new SolidColorBrush(bgColor) });
-        swatchGrid.Children.Add(accentBand);
-        swatch.Child = swatchGrid;
+
+        // Subtle miniature app tiles + active accent dot + mini clock inside a floating dock pill.
+        var dockItems = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Center
+        };
+
+        // Start / accent tile
+        dockItems.Children.Add(new Border
+        {
+            Width = 10,
+            Height = 10,
+            CornerRadius = new CornerRadius(3),
+            Margin = new Thickness(0, 0, 5, 0),
+            Background = new SolidColorBrush(Color.FromArgb(0xCC, accentColor.R, accentColor.G, accentColor.B))
+        });
+
+        // Active app tile with accent indicator dot underneath
+        var activeAppStack = new StackPanel
+        {
+            Margin = new Thickness(0, 1, 5, 0),
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        activeAppStack.Children.Add(new Border
+        {
+            Width = 10,
+            Height = 10,
+            CornerRadius = new CornerRadius(3),
+            Background = new SolidColorBrush(Color.FromArgb(0x3D, textColor.R, textColor.G, textColor.B))
+        });
+        activeAppStack.Children.Add(new Border
+        {
+            Width = 3,
+            Height = 2,
+            CornerRadius = new CornerRadius(1),
+            Margin = new Thickness(0, 1.5, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Background = new SolidColorBrush(accentColor)
+        });
+        dockItems.Children.Add(activeAppStack);
+
+        // Two resting app tiles
+        for (var i = 0; i < 2; i++)
+        {
+            dockItems.Children.Add(new Border
+            {
+                Width = 10,
+                Height = 10,
+                CornerRadius = new CornerRadius(3),
+                Margin = new Thickness(0, 0, 5, 0),
+                Background = new SolidColorBrush(Color.FromArgb(0x28, textColor.R, textColor.G, textColor.B))
+            });
+        }
+
+        // Divider + mini clock widget placeholder
+        dockItems.Children.Add(new Border
+        {
+            Width = 1,
+            Height = 11,
+            Margin = new Thickness(1, 0, 6, 0),
+            Background = new SolidColorBrush(Color.FromArgb(0x24, textColor.R, textColor.G, textColor.B))
+        });
+        var miniClock = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+        miniClock.Children.Add(new Border
+        {
+            Width = 18,
+            Height = 3.5,
+            CornerRadius = new CornerRadius(1.5),
+            Background = new SolidColorBrush(Color.FromArgb(0x99, textColor.R, textColor.G, textColor.B))
+        });
+        miniClock.Children.Add(new Border
+        {
+            Width = 12,
+            Height = 2.5,
+            CornerRadius = new CornerRadius(1),
+            Margin = new Thickness(0, 2, 0, 0),
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Background = new SolidColorBrush(Color.FromArgb(0x4D, textColor.R, textColor.G, textColor.B))
+        });
+        dockItems.Children.Add(miniClock);
+
+        var dockPill = new Border
+        {
+            Height = 26,
+            CornerRadius = new CornerRadius(7),
+            Padding = new Thickness(8, 0, 8, 0),
+            Margin = new Thickness(10, 0, 10, 10),
+            VerticalAlignment = VerticalAlignment.Bottom,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Background = new SolidColorBrush(Color.FromArgb(0xEB, dockColor.R, dockColor.G, dockColor.B)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0x44, accentColor.R, accentColor.G, accentColor.B)),
+            BorderThickness = new Thickness(1),
+            Child = dockItems
+        };
+        previewStage.Child = dockPill;
+
+        // Footer: left-aligned theme name + right-aligned active checkmark badge or palette dots.
+        var footer = new Grid { Margin = new Thickness(10, 8, 10, 9) };
+        footer.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        footer.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
         var nameText = new TextBlock
         {
             Text = choice.Name,
-            FontSize = 11.5,
-            FontWeight = isActive ? FontWeights.SemiBold : FontWeights.Normal,
+            FontSize = 12,
+            FontWeight = isActive ? FontWeights.SemiBold : FontWeights.Medium,
             TextTrimming = TextTrimming.CharacterEllipsis,
-            TextAlignment = TextAlignment.Center,
-            Margin = new Thickness(0, 8, 0, 0)
+            VerticalAlignment = VerticalAlignment.Center,
+            ToolTip = choice.Name
         };
         nameText.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+        Grid.SetColumn(nameText, 0);
+        footer.Children.Add(nameText);
 
-        var stack = new StackPanel { HorizontalAlignment = HorizontalAlignment.Stretch };
-        stack.Children.Add(swatch);
-        stack.Children.Add(nameText);
-
-        var cardBorder = new Border
-        {
-            Child = stack,
-            CornerRadius = new CornerRadius(8),
-            BorderThickness = new Thickness(1),
-            Padding = new Thickness(8, 8, 8, 10),
-            Background = isActive
-                ? (Brush)Application.Current.FindResource("AccentBrush")
-                : Brushes.Transparent,
-            Opacity = 1
-        };
-        // Selected cards get a filled accent background; keep text readable by
-        // using the accent-text brush for the name when active.
         if (isActive)
         {
-            cardBorder.SetResourceReference(Border.BorderBrushProperty, "AccentBrush");
-            nameText.SetResourceReference(TextBlock.ForegroundProperty, "AccentText");
+            var checkIcon = new ContentControl
+            {
+                Width = 10,
+                Height = 10,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Content = Application.Current.TryFindResource("IconCheck")
+            };
+            checkIcon.SetResourceReference(StyleProperty, "WidgetIcon");
+            checkIcon.SetResourceReference(Control.ForegroundProperty, "AccentText");
+
+            var badge = new Border
+            {
+                Width = 18,
+                Height = 18,
+                CornerRadius = new CornerRadius(9),
+                Margin = new Thickness(8, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = checkIcon
+            };
+            badge.SetResourceReference(Border.BackgroundProperty, "AccentBrush");
+            Grid.SetColumn(badge, 1);
+            footer.Children.Add(badge);
         }
         else
         {
-            cardBorder.SetResourceReference(Border.BorderBrushProperty, "StrokeSubtle");
+            var dots = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(8, 0, 0, 0)
+            };
+            dots.Children.Add(new Border
+            {
+                Width = 8,
+                Height = 8,
+                CornerRadius = new CornerRadius(4),
+                Margin = new Thickness(0, 0, 3, 0),
+                Background = new SolidColorBrush(dockColor),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(0x40, textColor.R, textColor.G, textColor.B)),
+                BorderThickness = new Thickness(1)
+            });
+            dots.Children.Add(new Border
+            {
+                Width = 8,
+                Height = 8,
+                CornerRadius = new CornerRadius(4),
+                Background = new SolidColorBrush(accentColor)
+            });
+            Grid.SetColumn(dots, 1);
+            footer.Children.Add(dots);
         }
+
+        var divider = new Border { Height = 1 };
+        divider.SetResourceReference(Border.BackgroundProperty, "StrokeSubtle");
+
+        var cardBody = new StackPanel { HorizontalAlignment = HorizontalAlignment.Stretch };
+        cardBody.Children.Add(previewStage);
+        cardBody.Children.Add(divider);
+        cardBody.Children.Add(footer);
+
+        var cardBorder = new Border
+        {
+            Child = cardBody,
+            CornerRadius = new CornerRadius(9),
+            BorderThickness = new Thickness(isActive ? 1.5 : 1),
+            ClipToBounds = true,
+            SnapsToDevicePixels = true
+        };
+        cardBorder.SetResourceReference(Border.BackgroundProperty, "SettingsControl");
+        cardBorder.SetResourceReference(Border.BorderBrushProperty, isActive ? "AccentBrush" : "StrokeSubtle");
 
         var btn = new Button
         {
             Content = cardBorder,
-            Width = 148,
-            MinHeight = 108,
             Padding = new Thickness(0),
-            Margin = new Thickness(0, 0, 10, 10),
+            Margin = new Thickness(5, 0, 5, 10),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
             VerticalContentAlignment = VerticalAlignment.Top,
-            Style = (Style)Application.Current.FindResource("SettingsGhostButton"),
+            Cursor = Cursors.Hand,
             Background = Brushes.Transparent,
-            BorderThickness = new Thickness(0)
+            BorderThickness = new Thickness(0),
+            FocusVisualStyle = null
         };
+        btn.Template = CreateThemeCardButtonTemplate();
         System.Windows.Automation.AutomationProperties.SetName(btn, choice.Name);
         btn.Click += (_, e) =>
         {
@@ -600,16 +764,57 @@ public partial class SettingsWindow : Window
         return btn;
     }
 
-    private static (Color Bg, Color Accent) ResolveThemePreviewColors(ThemePack? pack)
+    private static ControlTemplate CreateThemeCardButtonTemplate()
+    {
+        var template = new ControlTemplate(typeof(Button));
+        var grid = new FrameworkElementFactory(typeof(Grid));
+        var presenter = new FrameworkElementFactory(typeof(ContentPresenter));
+        presenter.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Stretch);
+        presenter.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Stretch);
+
+        var hoverOverlay = new FrameworkElementFactory(typeof(Border));
+        hoverOverlay.Name = "HoverOverlay";
+        hoverOverlay.SetValue(Border.CornerRadiusProperty, new CornerRadius(9));
+        hoverOverlay.SetResourceReference(Border.BackgroundProperty, "SurfaceHover");
+        hoverOverlay.SetValue(UIElement.OpacityProperty, 0.0);
+        hoverOverlay.SetValue(UIElement.IsHitTestVisibleProperty, false);
+
+        grid.AppendChild(presenter);
+        grid.AppendChild(hoverOverlay);
+        template.VisualTree = grid;
+
+        var hoverTrigger = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+        hoverTrigger.Setters.Add(new Setter(UIElement.OpacityProperty, 1.0, "HoverOverlay"));
+        template.Triggers.Add(hoverTrigger);
+        return template;
+    }
+
+    private static Color BlendColors(Color baseColor, Color tint, double amount)
+    {
+        var t = Math.Clamp(amount, 0, 1);
+        var inv = 1 - t;
+        return Color.FromRgb(
+            (byte)Math.Round(baseColor.R * inv + tint.R * t),
+            (byte)Math.Round(baseColor.G * inv + tint.G * t),
+            (byte)Math.Round(baseColor.B * inv + tint.B * t));
+    }
+
+    private static (Color Bg, Color Dock, Color Accent, Color Text) ResolveThemePreviewColors(ThemePack? pack)
     {
         var dark = ThemeManager.EffectiveTheme == AppTheme.Dark;
-        var defaultBg = dark ? Color.FromRgb(0x1B, 0x20, 0x29) : Color.FromRgb(0xF3, 0xF3, 0xF3);
+        var defaultBg = dark ? Color.FromRgb(0x1B, 0x20, 0x29) : Color.FromRgb(0xEB, 0xEE, 0xF3);
+        var defaultDock = dark ? Color.FromRgb(0x25, 0x2B, 0x37) : Color.FromRgb(0xFF, 0xFF, 0xFF);
         var defaultAccent = dark ? Color.FromRgb(0x38, 0xBD, 0xF8) : Color.FromRgb(0x03, 0x69, 0xA1);
-        if (pack?.Widgets?.Manifest is not { } manifest) return (defaultBg, defaultAccent);
+        var defaultText = dark ? Color.FromRgb(0xF3, 0xF4, 0xF6) : Color.FromRgb(0x1B, 0x1B, 0x1B);
+        if (pack?.Widgets?.Manifest is not { } manifest) return (defaultBg, defaultDock, defaultAccent, defaultText);
 
         var map = dark ? manifest.Dark : manifest.Light;
-        return ( TryReadColor(map, manifest.Tokens, "SettingsBackground", defaultBg),
-                 TryReadColor(map, manifest.Tokens, "AccentBrush", defaultAccent) );
+        var bg = TryReadColor(map, manifest.Tokens, "SettingsBackground", defaultBg);
+        var dock = TryReadColor(map, manifest.Tokens, "DockMaterial", bg);
+        var accent = TryReadColor(map, manifest.Tokens, "AccentBrush",
+            TryReadColor(map, manifest.Tokens, "WidgetAccent", defaultAccent));
+        var text = TryReadColor(map, manifest.Tokens, "TextPrimary", defaultText);
+        return (bg, dock, accent, text);
 
         static Color TryReadColor(IReadOnlyDictionary<string, System.Text.Json.JsonElement>? primary,
             IReadOnlyDictionary<string, System.Text.Json.JsonElement>? fallback, string key, Color defaultColor)
@@ -617,13 +822,25 @@ public partial class SettingsWindow : Window
             if ((primary is not null && primary.TryGetValue(key, out var elem))
                 || (fallback is not null && fallback.TryGetValue(key, out elem)))
             {
-                if (elem.ValueKind == System.Text.Json.JsonValueKind.String
-                    && elem.GetString() is { } text
-                    && text.StartsWith('#'))
+                string? hex = null;
+                if (elem.ValueKind == System.Text.Json.JsonValueKind.String)
+                {
+                    hex = elem.GetString();
+                }
+                else if (elem.ValueKind == System.Text.Json.JsonValueKind.Object
+                    && elem.TryGetProperty("stops", out var stops)
+                    && stops.ValueKind == System.Text.Json.JsonValueKind.Array
+                    && stops.GetArrayLength() > 0
+                    && stops[0].ValueKind == System.Text.Json.JsonValueKind.String)
+                {
+                    hex = stops[0].GetString();
+                }
+
+                if (hex is not null && hex.StartsWith('#'))
                 {
                     try
                     {
-                        if (ColorConverter.ConvertFromString(text) is Color c) return Color.FromRgb(c.R, c.G, c.B);
+                        if (ColorConverter.ConvertFromString(hex) is Color c) return Color.FromRgb(c.R, c.G, c.B);
                     }
                     catch (FormatException) { }
                 }
@@ -1336,6 +1553,8 @@ public partial class SettingsWindow : Window
         MagnificationToggle.IsChecked = settings.MagnificationEnabled;
         SelectChoice(SizeBox, settings.Size.ToString());
         DockScaleSlider.Value = Math.Round(settings.DockScale * 100);
+        SelectChoice(DockWidthModeBox, settings.DockWidthMode.ToString());
+        UpdateDockWidthControls();
         UpdateDockScaleLabel();
         var reloadProfile = DockMetrics.For(settings.Size, settings.DockScale);
         CornerRadiusSlider.Value = settings.DockCornerRadius ?? (int)Math.Round(reloadProfile.Radius);
@@ -1362,6 +1581,8 @@ public partial class SettingsWindow : Window
             SelectAlignment(defaults);
             SelectChoice(SizeBox, defaults.Size.ToString());
             DockScaleSlider.Value = Math.Round(defaults.DockScale * 100);
+            SelectChoice(DockWidthModeBox, defaults.DockWidthMode.ToString());
+            UpdateDockWidthControls();
             UpdateDockScaleLabel();
             SelectChoice(AutoHideBox, defaults.AutoHide.ToString());
             AnimationsToggle.IsChecked = defaults.AnimationsEnabled;
@@ -1567,6 +1788,41 @@ public partial class SettingsWindow : Window
         _surfaceValues[kind].Text = UiText.Format("OpacityPercent", (int)Math.Round(e.NewValue));
         ThemeManager.SetSurface(kind, SurfaceBackgroundOf(kind), Math.Round(e.NewValue) / 100);
         PreferenceEdited(sender, e);
+    }
+
+    private void DockWidthModeBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        UpdateDockWidthControls();
+        if (!_initializing) PreferenceEdited(sender, e);
+    }
+
+    private void DockWidthSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        UpdateDockWidthLabel();
+        if (!_initializing) PreferenceEdited(sender, e);
+    }
+
+    private void UpdateDockWidthControls()
+    {
+        var mode = Choice(DockWidthModeBox) ?? nameof(DockWidthMode.Auto);
+        var fixedMode = mode is nameof(DockWidthMode.Pixels) or nameof(DockWidthMode.Percent);
+        DockWidthValueRow.Visibility = fixedMode ? Visibility.Visible : Visibility.Collapsed;
+        if (fixedMode)
+        {
+            var settings = _preferences.Current;
+            var value = mode == nameof(DockWidthMode.Pixels) ? settings.DockWidthPixels : settings.DockWidthPercent;
+            DockWidthSlider.Minimum = mode == nameof(DockWidthMode.Pixels) ? 100 : 10;
+            DockWidthSlider.Maximum = mode == nameof(DockWidthMode.Pixels) ? 5000 : 100;
+            DockWidthSlider.Value = value;
+            UpdateDockWidthLabel();
+        }
+    }
+
+    private void UpdateDockWidthLabel()
+    {
+        if (DockWidthValue is null || DockWidthSlider is null) return;
+        var suffix = (Choice(DockWidthModeBox) ?? nameof(DockWidthMode.Auto)) == nameof(DockWidthMode.Percent) ? "%" : "px";
+        DockWidthValue.Text = Math.Round(DockWidthSlider.Value) + suffix;
     }
 
     private void UpdateDockScaleLabel() => DockScaleValue.Text = UiText.Format("OpacityPercent", (int)Math.Round(DockScaleSlider.Value));

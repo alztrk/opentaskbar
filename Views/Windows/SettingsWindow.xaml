@@ -123,6 +123,31 @@
                             <!-- Dimensions -->
                             <TextBlock Text="{local:Loc Dimensions}" Style="{StaticResource SettingsSectionHeading}" />
                             <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <ComboBox x:Name="DockWidthModeBox" views:IconGlyph.Glyph="{StaticResource IconMonitor}" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
+                                              AutomationProperties.Name="{local:Loc DockWidthMode}" SelectionChanged="DockWidthModeBox_SelectionChanged">
+                                        <ComboBoxItem Content="{local:Loc DockWidthAuto}" Tag="Auto" />
+                                        <ComboBoxItem Content="{local:Loc DockWidthPixels}" Tag="Pixels" />
+                                        <ComboBoxItem Content="{local:Loc DockWidthPercent}" Tag="Percent" />
+                                    </ComboBox>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc DockWidthMode}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc DockWidthModeDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+                                <Border x:Name="DockWidthValueRow" Style="{StaticResource SettingsRow}" Visibility="Collapsed"><DockPanel>
+                                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center">
+                                        <Slider x:Name="DockWidthSlider" Width="174" Minimum="100" Maximum="5000" Value="900" TickFrequency="50"
+                                                IsSnapToTickEnabled="True" Style="{StaticResource SettingsOpacitySlider}"
+                                                AutomationProperties.Name="{local:Loc DockWidthValue}"
+                                                ValueChanged="DockWidthSlider_ValueChanged" VerticalAlignment="Center" />
+                                        <TextBlock x:Name="DockWidthValue" Width="48" TextAlignment="Right" Foreground="{DynamicResource TextSecondary}" FontSize="11.5" VerticalAlignment="Center" Margin="8,0,0,0" />
+                                    </StackPanel>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc DockWidthValue}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc DockWidthValueDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
                                 <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
                                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center">
                                         <Slider x:Name="DockScaleSlider" Width="174" Minimum="75" Maximum="150" Value="100" TickFrequency="5"
@@ -454,12 +479,12 @@
                                 </StackPanel>
                             </DockPanel>
 
-                            <!-- Theme Library (HTML prototype 3-column Built-in + My themes grid) -->
-                            <TextBlock Text="{local:Loc BuiltInThemes}" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,6" />
-                            <WrapPanel x:Name="ThemeGalleryBuiltIn" Margin="0,0,0,6" />
+                            <!-- Theme Library (responsive AdaptiveGrid Built-in + My themes) -->
+                            <TextBlock Text="{local:Loc BuiltInThemes}" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,8" />
+                            <views:AdaptiveGrid x:Name="ThemeGalleryBuiltIn" MinItemWidth="195" Margin="-5,0,-5,8" />
 
-                            <TextBlock Text="{local:Loc MyThemes}" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondary}" Margin="0,6,0,6" />
-                            <WrapPanel x:Name="ThemeGalleryCustom" />
+                            <TextBlock Text="{local:Loc MyThemes}" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextSecondary}" Margin="0,8,0,8" />
+                            <views:AdaptiveGrid x:Name="ThemeGalleryCustom" MinItemWidth="195" Margin="-5,0,-5,4" />
                             <TextBlock x:Name="ThemeGalleryCustomEmpty" Text="{local:Loc NoCustomThemes}" FontSize="11.5"
                                        Foreground="{DynamicResource TextSecondary}" Margin="0,2,0,10" Visibility="Collapsed" />
 
@@ -467,13 +492,14 @@
                                 <StackPanel>
                                     <TextBlock x:Name="ThemePackDetails" FontSize="11" Foreground="{DynamicResource TextSecondary}"
                                                TextWrapping="Wrap" Margin="0,0,0,10" Visibility="Collapsed" />
-                                    <WrapPanel>
+                                    <WrapPanel VerticalAlignment="Center">
                                         <Button Content="{local:Loc ThemePackImport}" Style="{StaticResource SettingsGhostButton}" views:IconGlyph.Glyph="{StaticResource IconUpload}" Click="ThemePackImport_Click" Margin="0,0,6,4" />
-                                        <Button Content="{local:Loc ThemePackDuplicate}" Style="{StaticResource SettingsGhostButton}" views:IconGlyph.Glyph="{StaticResource IconDuplicate}" Click="ThemePackDuplicate_Click" Margin="0,0,6,4" />
-                                        <Button Content="{local:Loc ThemePackExport}" Style="{StaticResource SettingsGhostButton}" views:IconGlyph.Glyph="{StaticResource IconDownload}" Click="ThemePackExport_Click" Margin="0,0,6,4" />
                                         <Button Content="{local:Loc ThemePackOpenFolder}" Style="{StaticResource SettingsGhostButton}" views:IconGlyph.Glyph="{StaticResource IconFolder}" Click="ThemePackOpenFolder_Click" Margin="0,0,6,4" />
-                                        <Button Content="{local:Loc ThemePackReload}" Style="{StaticResource SettingsGhostButton}" views:IconGlyph.Glyph="{StaticResource IconRefresh}" Click="ThemePackReload_Click" Margin="0,0,6,4" />
-                                        <Button Content="{local:Loc ThemePackDelete}" Style="{StaticResource SettingsGhostButton}" Foreground="{DynamicResource DangerText}" views:IconGlyph.Glyph="{StaticResource IconTrash}" Click="ThemePackDelete_Click" Margin="0,0,0,4" />
+                                        <Button Content="{local:Loc ThemePackReload}" Style="{StaticResource SettingsGhostButton}" views:IconGlyph.Glyph="{StaticResource IconRefresh}" Click="ThemePackReload_Click" Margin="0,0,8,4" />
+                                        <Border Width="1" Height="16" Background="{DynamicResource StrokeSubtle}" Margin="0,0,8,4" VerticalAlignment="Center" />
+                                        <Button x:Name="ThemePackDuplicateButton" Content="{local:Loc ThemePackDuplicate}" Style="{StaticResource SettingsGhostButton}" views:IconGlyph.Glyph="{StaticResource IconDuplicate}" Click="ThemePackDuplicate_Click" Margin="0,0,6,4" />
+                                        <Button x:Name="ThemePackExportButton" Content="{local:Loc ThemePackExport}" Style="{StaticResource SettingsGhostButton}" views:IconGlyph.Glyph="{StaticResource IconDownload}" Click="ThemePackExport_Click" Margin="0,0,6,4" />
+                                        <Button x:Name="ThemePackDeleteButton" Content="{local:Loc ThemePackDelete}" Style="{StaticResource SettingsGhostButton}" Foreground="{DynamicResource DangerText}" views:IconGlyph.Glyph="{StaticResource IconTrash}" Click="ThemePackDelete_Click" Margin="0,0,0,4" />
                                     </WrapPanel>
                                 </StackPanel>
                             </Border>
