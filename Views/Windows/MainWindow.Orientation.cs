@@ -177,8 +177,9 @@ public partial class MainWindow
             divider.Margin = vertical ? new Thickness(0, 4, 0, 4) : new Thickness(4, 0, 4, 0);
         }
 
-        // Widgets are designed for a horizontal shelf; side docks keep only the apps.
-        DockScrollViewer.HoverHeadroom = vertical ? 0 : DockMetrics.Headroom;
+        // Allow magnified icons to expand past the dock edge on Bottom, Left, and Right docks alike.
+        DockScrollViewer.DockEdge = edge;
+        DockScrollViewer.HoverHeadroom = DockMetrics.Headroom;
         WidgetIsland.Visibility = vertical ? Visibility.Collapsed : Visibility.Visible;
         DockSheen.Visibility = vertical ? Visibility.Collapsed : Visibility.Visible;
         LeftResizeThumb.Visibility = RightResizeThumb.Visibility = vertical ? Visibility.Collapsed : Visibility.Visible;
