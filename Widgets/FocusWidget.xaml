@@ -3,32 +3,23 @@
               xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
               xmlns:w="clr-namespace:OpenTaskbar.Widgets"
               xmlns:local="clr-namespace:OpenTaskbar.Services">
-    <Border x:Name="Card" Style="{StaticResource WidgetCardBorder}" BorderThickness="1.5" Padding="12,0,8,0">
+    <Border x:Name="Card" Style="{StaticResource WidgetCardBorder}" Padding="10,0,8,0"
+            MouseLeftButtonUp="Card_MouseLeftButtonUp" Cursor="Hand">
         <Border.ContextMenu>
             <ContextMenu>
                 <MenuItem Header="{local:Loc FocusReset}" Icon="{StaticResource IconReset}" Click="Reset_Click" />
             </ContextMenu>
         </Border.ContextMenu>
-        <StackPanel Orientation="Horizontal">
-            <StackPanel VerticalAlignment="Center" MinWidth="54">
-                <TextBlock x:Name="PhaseRow" Style="{StaticResource WidgetCaption}">
-                    <Run x:Name="PhaseText" FontWeight="SemiBold" Foreground="{DynamicResource WidgetFocusAccent}" />
-                    <Run x:Name="SessionText" />
-                </TextBlock>
-                <TextBlock x:Name="RemainingText" Style="{StaticResource WidgetText}" FontSize="20" Margin="0,-3,0,0"
-                           MinWidth="54" Typography.NumeralAlignment="Tabular" />
-            </StackPanel>
-            <Button x:Name="SkipButton" Style="{StaticResource WidgetIconButton}" Margin="8,0,2,0" Click="Skip_Click"
-                    ToolTip="{local:Loc FocusSkip}" AutomationProperties.Name="{local:Loc FocusSkip}">
-                <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconSkip}" Width="14" Height="14" />
-            </Button>
-            <Button x:Name="PlayButton" Style="{StaticResource WidgetIconButton}" Width="30" Height="30" Margin="2,0,0,0"
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <ContentControl x:Name="FocusIcon" Style="{StaticResource WidgetIcon}" Content="{StaticResource IconTarget}"
+                            Width="16" Height="16" Margin="0,0,7,0" VerticalAlignment="Center"
+                            Foreground="{DynamicResource TextSecondary}" />
+            <TextBlock x:Name="RemainingText" Style="{StaticResource WidgetText}" FontSize="13" FontWeight="SemiBold"
+                       VerticalAlignment="Center" Typography.NumeralAlignment="Tabular" />
+            <Button x:Name="PlayButton" Style="{StaticResource WidgetIconButton}" Width="26" Height="26" Margin="8,0,0,0"
                     Click="Toggle_Click">
-                <Grid>
-                    <Ellipse Width="28" Height="28" Fill="{DynamicResource WidgetFocusAccent}" />
-                    <ContentControl x:Name="ToggleGlyph" Style="{StaticResource WidgetGlyph}" Content="{StaticResource IconPlayFill}"
-                                    Width="13" Height="13" Foreground="#FFFFFFFF" />
-                </Grid>
+                <ContentControl x:Name="ToggleGlyph" Style="{StaticResource WidgetGlyph}" Content="{StaticResource IconPlayFill}"
+                                Width="12" Height="12" />
             </Button>
         </StackPanel>
     </Border>

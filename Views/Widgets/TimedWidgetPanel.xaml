@@ -3,9 +3,31 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:local="clr-namespace:OpenTaskbar.Services" Focusable="False">
     <UserControl.Resources>
+        <!-- Distinct V19 Countdown layout: large time, horizontal progress, 5/10/15/30 presets, custom duration input -->
         <DataTemplate DataType="{x:Type local:CountdownDockWidget}">
             <StackPanel>
-                <TextBlock Text="{local:Loc CountdownMinutes}" />
+                <TextBlock Text="{Binding Value}" FontSize="42" FontWeight="Bold" HorizontalAlignment="Center"
+                           Typography.NumeralAlignment="Tabular" Foreground="{DynamicResource TextPrimary}" Margin="0,0,0,10">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding Value}" Value="">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+                <ProgressBar Value="{Binding ProgressPercent, Mode=OneWay}" Minimum="0" Maximum="100"
+                             Height="7" Margin="0,0,0,12" Background="{DynamicResource WidgetTrack}"
+                             Foreground="{DynamicResource WidgetBlue}" BorderThickness="0" />
+                <UniformGrid Columns="2" Margin="0,0,0,10">
+                    <Button Content="5 min" Tag="5" Style="{StaticResource WidgetFlyoutActionButton}" Height="36" Margin="0,0,4,6" Click="CountdownPreset_Click" />
+                    <Button Content="10 min" Tag="10" Style="{StaticResource WidgetFlyoutActionButton}" Height="36" Margin="4,0,0,6" Click="CountdownPreset_Click" />
+                    <Button Content="15 min" Tag="15" Style="{StaticResource WidgetFlyoutActionButton}" Height="36" Margin="0,0,4,0" Click="CountdownPreset_Click" />
+                    <Button Content="30 min" Tag="30" Style="{StaticResource WidgetFlyoutActionButton}" Height="36" Margin="4,0,0,0" Click="CountdownPreset_Click" />
+                </UniformGrid>
+                <TextBlock Text="{local:Loc CountdownMinutes}" FontSize="11.5" Foreground="{DynamicResource TextSecondary}" />
                 <TextBox Text="{Binding MinutesText, UpdateSourceTrigger=PropertyChanged}"
                          Margin="{StaticResource WidgetPanelFieldMargin}"
                          AutomationProperties.Name="{local:Loc CountdownMinutes}" AutomationProperties.HelpText="{Binding StatusText}">
@@ -16,7 +38,7 @@
                     </TextBox.Style>
                 </TextBox>
                 <TextBlock Text="{Binding StatusText}" TextWrapping="Wrap" Margin="{StaticResource WidgetPanelFieldMargin}"
-                           AutomationProperties.LiveSetting="Polite">
+                           FontSize="11.5" AutomationProperties.LiveSetting="Polite">
                     <TextBlock.Style>
                         <Style TargetType="TextBlock">
                             <Setter Property="Foreground" Value="{DynamicResource TextSecondary}" />
@@ -27,22 +49,54 @@
                         </Style>
                     </TextBlock.Style>
                 </TextBlock>
-                <TextBlock Text="{Binding DurationHelpText}" TextWrapping="Wrap"
+                <TextBlock Text="{Binding DurationHelpText}" TextWrapping="Wrap" FontSize="11"
                            Margin="{StaticResource WidgetPanelFieldMargin}" Foreground="{DynamicResource TextSecondary}" />
             </StackPanel>
         </DataTemplate>
+
+        <!-- Distinct V19 Stopwatch layout: large elapsed time, Lap button, scrollable lap history -->
         <DataTemplate DataType="{x:Type local:StopwatchDockWidget}">
-            <TextBlock Text="{local:Loc StopwatchSessionHelp}" TextWrapping="Wrap" Foreground="{DynamicResource TextSecondary}" />
+            <StackPanel>
+                <TextBlock Text="{Binding DetailedValue}" FontSize="44" FontWeight="Bold" HorizontalAlignment="Center"
+                           Typography.NumeralAlignment="Tabular" Foreground="{DynamicResource TextPrimary}" Margin="0,2,0,12" />
+                <Button Content="{local:Loc StopwatchLap}" Style="{StaticResource WidgetFlyoutActionButton}"
+                        HorizontalAlignment="Stretch" Margin="0,0,0,10" Click="Lap_Click" />
+                <ScrollViewer MaxHeight="145" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <ItemsControl ItemsSource="{Binding Laps}">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Border BorderThickness="0,1,0,0" BorderBrush="{DynamicResource StrokeSubtle}" Padding="4,7">
+                                    <DockPanel>
+                                        <TextBlock Text="{Binding FormattedTime}" DockPanel.Dock="Right" FontSize="12"
+                                                   FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"
+                                                   Typography.NumeralAlignment="Tabular" />
+                                        <TextBlock Text="{Binding Number, StringFormat='{}{0:00}'}" FontSize="12"
+                                                   Foreground="{DynamicResource TextSecondary}"
+                                                   Typography.NumeralAlignment="Tabular" />
+                                    </DockPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+                <TextBlock Text="{local:Loc StopwatchNoLaps}" HorizontalAlignment="Center" FontSize="11.5"
+                           Foreground="{DynamicResource TextSecondary}" Margin="0,8,0,4">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Visibility" Value="Visible" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding HasLaps}" Value="True">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+            </StackPanel>
         </DataTemplate>
     </UserControl.Resources>
     <StackPanel>
-        <TextBlock Text="{Binding Value}" FontSize="{StaticResource WidgetPanelValueSize}" FontWeight="SemiBold"
-                   Typography.NumeralAlignment="Tabular" Foreground="{DynamicResource TextPrimary}">
-            <TextBlock.Style>
-                <Style TargetType="TextBlock"><Style.Triggers><DataTrigger Binding="{Binding Value}" Value=""><Setter Property="Visibility" Value="Collapsed" /></DataTrigger></Style.Triggers></Style>
-            </TextBlock.Style>
-        </TextBlock>
-        <ContentControl Content="{Binding}" Margin="{StaticResource WidgetPanelSectionMargin}" />
+        <ContentControl Content="{Binding}" />
         <Grid Margin="{StaticResource WidgetPanelSectionMargin}">
             <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
             <Button x:Name="PrimaryActionButton" Style="{StaticResource WidgetPanelPrimaryAction}" IsEnabled="{Binding CanToggle}" Click="Toggle_Click" />

@@ -169,12 +169,13 @@ public sealed class TrayShellButton : Button
             var name = string.IsNullOrWhiteSpace(title)
                 ? (string.IsNullOrWhiteSpace(icon.Path) ? UiText.Get("TrayApps") : System.IO.Path.GetFileNameWithoutExtension(icon.Path))
                 : title;
-            var image = new Image { Source = icon.Icon, Width = 20, Height = 20, Margin = new Thickness(0, 0, 10, 0) };
+            var image = new Image { Source = icon.Icon, Width = 24, Height = 24, Margin = new Thickness(0, 0, 10, 0), VerticalAlignment = VerticalAlignment.Center };
             RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
             var row = new DockPanel();
             row.Children.Add(image);
-            row.Children.Add(new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis });
+            row.Children.Add(new TextBlock { Text = name, FontSize = 12.5, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis });
             var open = DockFlyout.FlatButton(row, (_, _) => ForwardClick(icon, System.Windows.Input.MouseButton.Left), name);
+            open.Padding = new Thickness(8, 7, 8, 7);
             open.PreviewMouseRightButtonDown += (_, _) => _flyout.RetainForExternalContextMenu(icon.HWnd);
             open.PreviewMouseRightButtonUp += (_, e) =>
             {
@@ -182,18 +183,26 @@ public sealed class TrayShellButton : Button
                 ForwardClick(icon, System.Windows.Input.MouseButton.Right);
             };
 
-            var appRow = new DockPanel();
+            var appRow = new DockPanel { Margin = new Thickness(0, 1, 0, 1) };
             if (!string.IsNullOrEmpty(icon.Path))
             {
-                var quitIcon = new ContentControl { Content = FindResource("IconTerminate"), Width = 16, Height = 16 };
+                var quitIcon = new ContentControl { Content = FindResource("IconClose"), Width = 14, Height = 14 };
                 quitIcon.SetResourceReference(StyleProperty, "WidgetIcon");
-                quitIcon.SetResourceReference(ForegroundProperty, "TextPrimary");
                 var path = icon.Path;
-                var quit = DockFlyout.FlatButton(quitIcon, (_, _) =>
+                var quit = new Button
+                {
+                    Content = quitIcon,
+                    ToolTip = $"{name}: {UiText.Get("Terminate")}",
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(4, 0, 0, 0)
+                };
+                quit.SetResourceReference(StyleProperty, "WidgetDangerIconButton");
+                AutomationProperties.SetName(quit, $"{name}: {UiText.Get("Terminate")}");
+                quit.Click += (_, _) =>
                 {
                     _flyout.Close();
                     TerminateApplicationRequested?.Invoke(path);
-                }, $"{name}: {UiText.Get("Terminate")}");
+                };
                 DockPanel.SetDock(quit, Dock.Right);
                 appRow.Children.Add(quit);
             }
@@ -201,13 +210,6 @@ public sealed class TrayShellButton : Button
             root.Children.Add(appRow);
         }
 
-        var settings = DockFlyout.FlatButton(new TextBlock { Text = UiText.Get("TraySettings"), FontWeight = FontWeights.SemiBold }, (_, _) =>
-        {
-            _flyout.Close();
-            Report(ShellShortcuts.OpenUri("ms-settings:taskbar"));
-        });
-        settings.Margin = new Thickness(0, 6, 0, 0);
-        root.Children.Add(settings);
         return root;
     }
 
@@ -237,16 +239,17 @@ public sealed class TrayShellButton : Button
         if (apps.Count == 0) root.Children.Add(DockFlyout.Caption(UiText.Get("TrayEmpty")));
         foreach (var app in apps)
         {
-            var image = new Image { Source = app.Icon, Width = 20, Height = 20, Margin = new Thickness(0, 0, 10, 0) };
+            var image = new Image { Source = app.Icon, Width = 24, Height = 24, Margin = new Thickness(0, 0, 10, 0), VerticalAlignment = VerticalAlignment.Center };
             RenderOptions.SetBitmapScalingMode(image, BitmapScalingMode.HighQuality);
             var row = new DockPanel();
             row.Children.Add(image);
-            row.Children.Add(new TextBlock { Text = app.Name, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis });
+            row.Children.Add(new TextBlock { Text = app.Name, FontSize = 12.5, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis });
             var open = DockFlyout.FlatButton(row, (_, _) =>
             {
                 _flyout.Close();
                 Report(TrayIcons.Open(app));
             }, app.Name);
+            open.Padding = new Thickness(8, 7, 8, 7);
             var menu = new ContextMenu();
             var closeItem = new MenuItem { Header = UiText.Get("CloseApplication"), Icon = FindResource("IconClose") };
             closeItem.Click += (_, _) =>
@@ -270,30 +273,30 @@ public sealed class TrayShellButton : Button
             // Tray apps may keep running after WM_CLOSE; force quit uses the dock's existing confirmation flow.
             var quitIcon = new ContentControl
             {
-                Content = FindResource("IconTerminate"), Width = 16, Height = 16
+                Content = FindResource("IconClose"), Width = 14, Height = 14
             };
             quitIcon.SetResourceReference(StyleProperty, "WidgetIcon");
-            quitIcon.SetResourceReference(ForegroundProperty, "TextPrimary");
-            var quit = DockFlyout.FlatButton(quitIcon, (_, _) =>
+            var quit = new Button
+            {
+                Content = quitIcon,
+                ToolTip = $"{app.Name}: {UiText.Get("Terminate")}",
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(4, 0, 0, 0)
+            };
+            quit.SetResourceReference(StyleProperty, "WidgetDangerIconButton");
+            AutomationProperties.SetName(quit, $"{app.Name}: {UiText.Get("Terminate")}");
+            quit.Click += (_, _) =>
             {
                 _flyout.Close();
                 TerminateApplicationRequested?.Invoke(app.ExecutablePath);
-            }, $"{app.Name}: {UiText.Get("Terminate")}");
-            var appRow = new DockPanel();
+            };
+            var appRow = new DockPanel { Margin = new Thickness(0, 1, 0, 1) };
             DockPanel.SetDock(quit, Dock.Right);
             appRow.Children.Add(quit);
             appRow.Children.Add(open);
             root.Children.Add(appRow);
         }
 
-        var settings = DockFlyout.FlatButton(new TextBlock { Text = UiText.Get("TraySettings"), FontWeight = FontWeights.SemiBold }, (_, _) =>
-        {
-            _flyout.Close();
-            Report(ShellShortcuts.OpenUri("ms-settings:taskbar"));
-        });
-        settings.Margin = new Thickness(0, 6, 0, 0);
-        root.Children.Add(settings);
-        root.Children.Add(DockFlyout.Caption(UiText.Get("TrayNote")));
         return root;
     }
 }

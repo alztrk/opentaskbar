@@ -65,20 +65,55 @@ public sealed class AiUsageWidget : DockWidget
         StackPanel Container,
         List<AntigravityColumn> Columns);
 
+    private sealed record OpenCodeQuotaBars(
+        TextBlock HourLabel,
+        TextBlock HourPercent,
+        Border HourFill,
+        TextBlock HourReset,
+        TextBlock WeekLabel,
+        TextBlock WeekPercent,
+        Border WeekFill,
+        TextBlock WeekReset,
+        TextBlock MonthLabel,
+        TextBlock MonthPercent,
+        Border MonthFill,
+        TextBlock MonthReset);
+
+    private sealed record SimpleInlineQuota(
+        TextBlock ValueText,
+        TextBlock MetaText,
+        Border? MiniBarTrack,
+        Border? MiniBarFill);
+
     private sealed record Card(
         Button Button,
         System.Windows.Shapes.Path Logo,
         TextBlock Name,
         RingMeter? Ring,
         DualQuotaBars? Bars,
-        AntigravityCard? Antigravity)
+        AntigravityCard? Antigravity,
+        OpenCodeQuotaBars? OpenCode = null,
+        SimpleInlineQuota? Simple = null)
     {
         public DualQuotaBars? Codex => Bars;
     }
 
     private static bool UsesDualQuota(AiProviders provider) => provider is AiProviders.Codex or AiProviders.Claude;
+    private static bool UsesTripleQuota(AiProviders provider) => provider is AiProviders.OpenCode;
+    private static bool UsesSimpleInline(AiProviders provider) => provider is AiProviders.Copilot or AiProviders.DeepSeek or AiProviders.OpenRouter;
     private static bool HidesName(AiProviders provider) => provider is AiProviders.Codex or AiProviders.Claude or AiProviders.Antigravity;
-    private static bool UsesCustomCard(AiProviders provider) => provider is AiProviders.Codex or AiProviders.Claude or AiProviders.Antigravity;
+
+    private static readonly SolidColorBrush ClaudeBrandBrush = FreezeBrush(Color.FromRgb(0xD9, 0x77, 0x57));
+    private static readonly SolidColorBrush CodexBrandBrush = FreezeBrush(Color.FromRgb(0x8D, 0x99, 0xFF));
+    private static readonly SolidColorBrush DeepSeekBrandBrush = FreezeBrush(Color.FromRgb(0x4D, 0x6B, 0xFE));
+    private static readonly SolidColorBrush CopilotBrandBrush = FreezeBrush(Color.FromRgb(0x9F, 0x9F, 0xF2));
+
+    private static SolidColorBrush FreezeBrush(Color color)
+    {
+        var b = new SolidColorBrush(color);
+        b.Freeze();
+        return b;
+    }
 
     public AiUsageWidget(AiProviders provider, Func<AiProviders, CancellationToken, Task<(AiUsageReport?, string?)>>? loader = null)
     {
@@ -103,9 +138,15 @@ public sealed class AiUsageWidget : DockWidget
         provider switch
         {
             AiProviders.Codex or AiProviders.Claude =>
-                CardPaddingAndBorder + LogoSize + Gap + 120,
+                CardPaddingAndBorder + LogoSize + Gap + 148,
             AiProviders.Antigravity =>
-                CardPaddingAndBorder + LogoSize + Gap + 220,
+                CardPaddingAndBorder + LogoSize + Gap + 236,
+            AiProviders.OpenCode =>
+                CardPaddingAndBorder + LogoSize + Gap + (compact ? 0 : 62) + 196,
+            AiProviders.Copilot =>
+                CardPaddingAndBorder + LogoSize + Gap + (compact ? 0 : 52) + 96,
+            AiProviders.DeepSeek or AiProviders.OpenRouter =>
+                CardPaddingAndBorder + LogoSize + Gap + (compact ? 0 : 68) + 64,
             _ =>
                 CardPaddingAndBorder + LogoSize + Gap + (compact ? 0 : NameWidth + Gap) + RingSize
         };
@@ -138,7 +179,8 @@ public sealed class AiUsageWidget : DockWidget
     protected override void OnSettingsChanged() => Render();
     protected override void OnLanguageChanged() => Refresh();
     protected override void OnCompactChanged(bool compact) => Render();
-    public override UIElement? BuildHoverFlyoutContent() => UsesCustomCard(_provider) ? null : BuildFlyout(_hoverCountdowns);
+    // V19: All AI usage widgets display their quotas and reset times inline without any generic flyout.
+    public override UIElement? BuildHoverFlyoutContent() => null;
 
     /// <summary>Settings preview shows the real widget chrome with placeholder quota, no service calls.</summary>
     public override bool SupportsStaticPreview => true;
@@ -509,17 +551,95 @@ public sealed class AiUsageWidget : DockWidget
             return new(button, logo, label, null, dualBars, null);
         }
 
+        if (UsesTripleQuota(_provider))
+        {
+            var (hCol, hLbl, hPct, hFill, hReset) = CreateInlineQuotaColumn(UiText.Get("AiUsageHourlyShort"));
+            var (wCol, wLbl, wPct, wFill, wReset) = CreateInlineQuotaColumn(UiText.Get("AiUsageWeeklyShort"));
+            var (mCol, mLbl, mPct, mFill, mReset) = CreateInlineQuotaColumn(UiText.Get("AiUsageMonthlyShort"));
+
+            var cols = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            cols.Children.Add(hCol);
+            cols.Children.Add(wCol);
+            cols.Children.Add(mCol);
+
+            var openCodeBars = new OpenCodeQuotaBars(hLbl, hPct, hFill, hReset, wLbl, wPct, wFill, wReset, mLbl, mPct, mFill, mReset);
+            var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Children = { logo, label, cols } };
+            var button = new Button { Content = row, Cursor = System.Windows.Input.Cursors.Arrow };
+            button.SetResourceReference(StyleProperty, "WidgetCardButton");
+            return new(button, logo, label, null, null, null, openCodeBars, null);
+        }
+
+        if (UsesSimpleInline(_provider))
+        {
+            var sep = CreateVerticalDivider();
+            sep.Height = 20;
+            sep.Margin = new Thickness(2, 0, 8, 0);
+
+            var valText = Text("—", 12, "TextPrimary");
+            valText.FontWeight = FontWeights.SemiBold;
+            Typography.SetNumeralAlignment(valText, FontNumeralAlignment.Tabular);
+
+            var metaKey = _provider switch
+            {
+                AiProviders.DeepSeek => "AiUsageBalance",
+                AiProviders.OpenRouter => "AiUsageCreditsLabel",
+                _ => "AiUsageMonthly"
+            };
+            var metaText = Text(UiText.Get(metaKey), 9.5, "TextSecondary");
+            var valStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Children = { valText, metaText } };
+
+            Border? miniTrack = null;
+            Border? miniFill = null;
+            var row = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Children = { logo, label, sep, valStack } };
+            if (_provider == AiProviders.Copilot)
+            {
+                miniTrack = new Border { Width = 31, Height = 4, CornerRadius = new CornerRadius(2), VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 0, 0) };
+                miniTrack.SetResourceReference(Border.BackgroundProperty, "WidgetTrack");
+                miniFill = new Border { Height = 4, CornerRadius = new CornerRadius(2), HorizontalAlignment = HorizontalAlignment.Left, Width = 0, Background = CopilotBrandBrush };
+                miniTrack.Child = miniFill;
+                row.Children.Add(miniTrack);
+            }
+
+            var simple = new SimpleInlineQuota(valText, metaText, miniTrack, miniFill);
+            var button = new Button { Content = row, Cursor = System.Windows.Input.Cursors.Arrow };
+            button.SetResourceReference(StyleProperty, "WidgetCardButton");
+            return new(button, logo, label, null, null, null, null, simple);
+        }
+
         var ring = new RingMeter { Width = RingSize, Height = RingSize, StrokeThickness = 3, FontSize = 10.5, Text = "—", IsHitTestVisible = false };
         ring.SetResourceReference(RingMeter.TrackBrushProperty, "TextMuted");
         var defaultRow = new StackPanel { Orientation = Orientation.Horizontal, Children = { logo, label, ring } };
-        var defaultButton = new Button { Content = defaultRow };
+        var defaultButton = new Button { Content = defaultRow, Cursor = System.Windows.Input.Cursors.Arrow };
         defaultButton.SetResourceReference(StyleProperty, "WidgetCardButton");
-        defaultButton.Click += (_, _) => _flyout.Toggle(defaultButton, () =>
-        {
-            _flyoutHost.Content = BuildFlyout(_countdowns);
-            return _flyoutHost;
-        });
         return new(defaultButton, logo, label, ring, null, null);
+    }
+
+    private static (StackPanel Column, TextBlock Label, TextBlock Percent, Border Fill, TextBlock Reset) CreateInlineQuotaColumn(string shortLabel)
+    {
+        var head = new DockPanel();
+        var pct = Text("—", 10.5, "TextPrimary");
+        pct.FontWeight = FontWeights.SemiBold;
+        Typography.SetNumeralAlignment(pct, FontNumeralAlignment.Tabular);
+        DockPanel.SetDock(pct, Dock.Right);
+        head.Children.Add(pct);
+
+        var lbl = Text(shortLabel, 9.5, "TextSecondary");
+        head.Children.Add(lbl);
+
+        var track = new Border { Width = 54, Height = 3, CornerRadius = new CornerRadius(1.5), Margin = new Thickness(0, 2, 0, 1) };
+        track.SetResourceReference(Border.BackgroundProperty, "WidgetTrack");
+        var fill = new Border { Height = 3, CornerRadius = new CornerRadius(1.5), HorizontalAlignment = HorizontalAlignment.Left, Width = 0 };
+        fill.SetResourceReference(Border.BackgroundProperty, "WidgetGreen");
+        track.Child = fill;
+
+        var reset = Text("—", 8.5, "TextSecondary");
+        Typography.SetNumeralAlignment(reset, FontNumeralAlignment.Tabular);
+
+        var col = new StackPanel { Width = 54, Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
+        col.Children.Add(head);
+        col.Children.Add(track);
+        col.Children.Add(reset);
+        return (col, lbl, pct, fill, reset);
     }
 
     private void Render()
@@ -537,13 +657,23 @@ public sealed class AiUsageWidget : DockWidget
         var foreground = stale ? "TextMuted" : "TextPrimary";
         var secondary = stale ? "TextMuted" : "TextSecondary";
         _card.Name.SetResourceReference(TextBlock.ForegroundProperty, foreground);
-        _card.Logo.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, foreground);
+        if (!stale && _provider == AiProviders.Claude) _card.Logo.Fill = ClaudeBrandBrush;
+        else if (!stale && _provider == AiProviders.DeepSeek) _card.Logo.Fill = DeepSeekBrandBrush;
+        else _card.Logo.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, foreground);
         _card.Button.ToolTip = toolTip;
         AutomationProperties.SetName(_card.Button, $"{UiText.Get("WidgetAiUsage")}: {toolTip}");
 
         if (_card.Antigravity is { } agy)
         {
             RebuildAntigravity(agy, stale);
+        }
+        else if (_card.OpenCode is { } oc)
+        {
+            UpdateOpenCodeCard(oc, secondary);
+        }
+        else if (_card.Simple is { } simple)
+        {
+            UpdateSimpleInlineCard(simple, main, secondary);
         }
         else if (_card.Bars is { } bars)
         {
@@ -591,6 +721,100 @@ public sealed class AiUsageWidget : DockWidget
             ring.SetResourceReference(RingMeter.ValueBrushProperty, main is null ? "TextMuted" : Accent(main.Used, main.Severity));
             ring.SetResourceReference(RingMeter.ForegroundProperty, foreground);
         }
+    }
+
+    private void UpdateOpenCodeCard(OpenCodeQuotaBars oc, string secondary)
+    {
+        var windows = _report?.Windows ?? [];
+        var hourly = windows.FirstOrDefault(w => w.LabelKey == "AiUsageSession" || (w.WindowSeconds is > 0 and <= 21600));
+        var weekly = windows.FirstOrDefault(w => w.LabelKey == "AiUsageWeekly" || (w.WindowSeconds is > 21600 and <= 691200));
+        var monthly = windows.FirstOrDefault(w => w.LabelKey == "AiUsageMonthly" || (w.WindowSeconds is > 691200));
+
+        ApplyColumn(oc.HourLabel, oc.HourPercent, oc.HourFill, oc.HourReset, UiText.Get("AiUsageHourlyShort"), hourly, isShort: true);
+        ApplyColumn(oc.WeekLabel, oc.WeekPercent, oc.WeekFill, oc.WeekReset, UiText.Get("AiUsageWeeklyShort"), weekly, isShort: false);
+        ApplyColumn(oc.MonthLabel, oc.MonthPercent, oc.MonthFill, oc.MonthReset, UiText.Get("AiUsageMonthlyShort"), monthly, isShort: false);
+
+        void ApplyColumn(TextBlock lbl, TextBlock pct, Border fill, TextBlock reset, string text, AiUsageWindow? win, bool isShort)
+        {
+            lbl.Text = text;
+            lbl.SetResourceReference(TextBlock.ForegroundProperty, secondary);
+            if (win is null)
+            {
+                pct.Text = "—";
+                fill.Width = 0;
+                reset.Text = "—";
+                return;
+            }
+
+            var used = Math.Clamp(win.Used, 0, 1);
+            pct.Text = $"{(int)Math.Round(used * 100)}%";
+            fill.Width = Math.Max(0, Math.Min(54, 54 * used));
+            fill.SetResourceReference(Border.BackgroundProperty, used >= 0.75 ? Accent(used, win.Severity) : "WidgetGreen");
+            if (win.ResetsAt is { } r)
+            {
+                var rem = r - DateTimeOffset.UtcNow;
+                reset.Text = isShort && rem < RelativeLimit
+                    ? (rem > TimeSpan.Zero ? Duration(rem) : Duration(TimeSpan.Zero))
+                    : When(r);
+            }
+            else
+            {
+                reset.Text = "—";
+            }
+        }
+    }
+
+    private void UpdateSimpleInlineCard(SimpleInlineQuota simple, AiUsageWindow? main, string secondary)
+    {
+        if (_provider == AiProviders.Copilot)
+        {
+            if (main is not null)
+            {
+                var used = Math.Clamp(main.Used, 0, 1);
+                simple.ValueText.Text = Percent(used);
+                simple.MetaText.Text = main.ResetsAt is { } reset ? When(reset) : UiText.Get("AiUsageMonthly");
+                if (simple.MiniBarFill is not null)
+                {
+                    simple.MiniBarFill.Width = Math.Max(0, Math.Min(31, 31 * used));
+                    if (used >= 0.75) simple.MiniBarFill.SetResourceReference(Border.BackgroundProperty, Accent(used, main.Severity));
+                    else simple.MiniBarFill.Background = CopilotBrandBrush;
+                }
+            }
+            else
+            {
+                simple.ValueText.Text = "—";
+                simple.MetaText.Text = _error == "ErrorAiUsageSignIn" ? UiText.Get("AiUsageStatusSignIn") : UiText.Get("AiUsageMonthly");
+                if (simple.MiniBarFill is not null) simple.MiniBarFill.Width = 0;
+            }
+            simple.MetaText.SetResourceReference(TextBlock.ForegroundProperty, secondary);
+            return;
+        }
+
+        // DeepSeek / OpenRouter balance or credit display from real provider data.
+        var labelKey = _provider == AiProviders.DeepSeek ? "AiUsageBalance" : "AiUsageCreditsLabel";
+        if (_report?.Spend is { } spend)
+        {
+            var symbol = string.Equals(spend.Currency, "USD", StringComparison.OrdinalIgnoreCase) ? "$" : spend.Currency + " ";
+            var amount = spend.Limit is { } lim ? Math.Max(0m, lim - spend.Used) : spend.Used;
+            simple.ValueText.Text = $"{symbol}{amount.ToString("0.00", Culture)}";
+            simple.MetaText.Text = UiText.Get(labelKey);
+        }
+        else if (_report?.Credits is { } credits)
+        {
+            simple.ValueText.Text = $"${credits.ToString("0.00", Culture)}";
+            simple.MetaText.Text = UiText.Get(labelKey);
+        }
+        else if (main is not null)
+        {
+            simple.ValueText.Text = Percent(main.Used);
+            simple.MetaText.Text = UiText.Get(labelKey);
+        }
+        else
+        {
+            simple.ValueText.Text = "—";
+            simple.MetaText.Text = _error == "ErrorAiUsageSignIn" ? UiText.Get("AiUsageStatusSignIn") : UiText.Get(labelKey);
+        }
+        simple.MetaText.SetResourceReference(TextBlock.ForegroundProperty, secondary);
     }
 
     private static Border CreateVerticalDivider()

@@ -2,8 +2,10 @@ using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
-using System.Windows.Data;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using OpenTaskbar.Models;
@@ -16,16 +18,18 @@ using MediaSessionManager = Windows.Media.Control.GlobalSystemMediaTransportCont
 namespace OpenTaskbar.Widgets;
 
 /// <summary>
-/// Shows and controls the system's current media session (Spotify, browsers, players) through the
-/// Global System Media Transport Controls, including track progress and audio output volume.
+/// V19 horizontal taskbar media player: Thumbnail -> Song Info -> Progress -> Prev / Play-Pause / Next -> Volume hover popover.
+/// Backed by Windows GSMTC and Core Audio.
 /// </summary>
 public partial class MediaWidget : DockWidget
 {
     private const int AlbumArtDecodePixels = 68;
+    private static readonly Color DefaultArtTint = Color.FromRgb(0x52, 0x6D, 0x84);
 
     private MediaSessionManager? _manager;
     private MediaSession? _session;
     private AudioEndpointMonitor.SharedHandle? _audio;
+    private readonly DispatcherTimer _volumeHoverCloseTimer;
     private int _activationVersion;
     private int _refreshVersion;
     private TimeSpan _startTime;
@@ -48,12 +52,19 @@ public partial class MediaWidget : DockWidget
 
     public override bool SupportsCompactMode => true;
     public override int ShrinkPriority => 10;
-    public override double FullWidthEstimate => 322;
-    public override double CompactWidthEstimate => 94;
+    public override double FullWidthEstimate => 420;
+    public override double CompactWidthEstimate => 164;
 
     public MediaWidget()
     {
         InitializeComponent();
+        VolumePopup.CustomPopupPlacementCallback = PlaceVolumePopover;
+        VolumePopup.Opened += VolumePopup_Opened;
+        _volumeHoverCloseTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+        {
+            Interval = TimeSpan.FromMilliseconds(160)
+        };
+        _volumeHoverCloseTimer.Tick += VolumeHoverCloseTimer_Tick;
         HasData = false;
     }
 
@@ -63,151 +74,18 @@ public partial class MediaWidget : DockWidget
     private void ApplyDensityLayout()
     {
         var compact = IsCompact && !IsHoverExpanded;
-        Card.Width = compact ? 88 : 316;
-        Card.Padding = compact ? new Thickness(6, 0, 6, 0) : new Thickness(6, 0, 8, 0);
-        InfoPanel.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
+        Card.Padding = compact ? new Thickness(6, 0, 6, 0) : new Thickness(9, 0, 9, 0);
+        InfoPanel.Width = compact ? 76 : 96;
+        ArtistText.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
+        ProgressPanel.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         PreviousButton.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         NextButton.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         VolumePanel.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
+        if (compact && VolumePopup.IsOpen) CloseVolumePopover();
     }
 
-    public override UIElement? BuildHoverFlyoutContent()
-    {
-        var root = new System.Windows.Controls.StackPanel { Width = 286 };
-
-        var header = new System.Windows.Controls.Grid { Margin = new Thickness(0, 0, 0, 8) };
-        header.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = GridLength.Auto });
-        header.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-        var art = new System.Windows.Controls.Border
-        {
-            Width = 42,
-            Height = 42,
-            CornerRadius = new CornerRadius(8),
-            ClipToBounds = true
-        };
-        art.SetResourceReference(System.Windows.Controls.Border.BackgroundProperty, "WidgetTrack");
-        var artGrid = new System.Windows.Controls.Grid();
-        var albumImage = new System.Windows.Controls.Image { Stretch = System.Windows.Media.Stretch.UniformToFill };
-        albumImage.SetBinding(System.Windows.Controls.Image.SourceProperty, new Binding("Source") { Source = ArtImage, Mode = BindingMode.OneWay });
-        var placeholder = new System.Windows.Controls.ContentControl { Content = FindResource("IconMusic"), Width = 18, Height = 18 };
-        placeholder.SetResourceReference(StyleProperty, "WidgetIcon");
-        placeholder.SetBinding(VisibilityProperty, new Binding("Visibility") { Source = ArtPlaceholder, Mode = BindingMode.OneWay });
-        artGrid.Children.Add(placeholder);
-        artGrid.Children.Add(albumImage);
-        art.Child = artGrid;
-
-        var meta = new System.Windows.Controls.StackPanel { Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
-        var title = new System.Windows.Controls.TextBlock
-        {
-            Text = TitleText.Text,
-            FontWeight = FontWeights.SemiBold,
-            TextTrimming = TextTrimming.CharacterEllipsis
-        };
-        title.SetResourceReference(StyleProperty, "WidgetText");
-        title.SetBinding(System.Windows.Controls.TextBlock.TextProperty, new Binding("Text") { Source = TitleText, Mode = BindingMode.OneWay });
-        var artist = new System.Windows.Controls.TextBlock
-        {
-            Text = ArtistText.Text,
-            FontSize = 11.5,
-            TextTrimming = TextTrimming.CharacterEllipsis
-        };
-        artist.SetResourceReference(StyleProperty, "WidgetCaption");
-        artist.SetBinding(System.Windows.Controls.TextBlock.TextProperty, new Binding("Text") { Source = ArtistText, Mode = BindingMode.OneWay });
-        meta.Children.Add(title);
-        meta.Children.Add(artist);
-        System.Windows.Controls.Grid.SetColumn(art, 0);
-        System.Windows.Controls.Grid.SetColumn(meta, 1);
-        header.Children.Add(art);
-        header.Children.Add(meta);
-        root.Children.Add(header);
-
-        var controls = new System.Windows.Controls.StackPanel
-        {
-            Orientation = System.Windows.Controls.Orientation.Horizontal,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            Margin = new Thickness(0, 2, 0, 6)
-        };
-        var prevBtn = new System.Windows.Controls.Button { Width = 32, Height = 32, Content = new System.Windows.Controls.ContentControl { Content = FindResource("IconPreviousFill"), Width = 12, Height = 12 } };
-        prevBtn.SetResourceReference(StyleProperty, "WidgetIconButton");
-        if (prevBtn.Content is System.Windows.Controls.ContentControl pc) pc.SetResourceReference(StyleProperty, "WidgetGlyph");
-        prevBtn.SetBinding(IsEnabledProperty, new Binding("IsEnabled") { Source = PreviousButton, Mode = BindingMode.OneWay });
-        prevBtn.ToolTip = UiText.Get("MediaPrevious");
-        System.Windows.Automation.AutomationProperties.SetName(prevBtn, UiText.Get("MediaPrevious"));
-        prevBtn.Click += Previous_Click;
-
-        var playBtn = new System.Windows.Controls.Button { Width = 36, Height = 36, Margin = new Thickness(8, 0, 8, 0), Content = new System.Windows.Controls.ContentControl { Content = FindResource(_playing ? "IconPauseFill" : "IconPlayFill"), Width = 15, Height = 15 } };
-        playBtn.SetResourceReference(StyleProperty, "WidgetIconButton");
-        if (playBtn.Content is System.Windows.Controls.ContentControl plc) plc.SetResourceReference(StyleProperty, "WidgetGlyph");
-        if (playBtn.Content is System.Windows.Controls.ContentControl playGlyph)
-            playGlyph.SetBinding(System.Windows.Controls.ContentControl.ContentProperty, new Binding("Content") { Source = PlayPauseGlyph, Mode = BindingMode.OneWay });
-        playBtn.SetBinding(IsEnabledProperty, new Binding("IsEnabled") { Source = PlayPauseButton, Mode = BindingMode.OneWay });
-        playBtn.ToolTip = UiText.Get("MediaPlayPause");
-        System.Windows.Automation.AutomationProperties.SetName(playBtn, UiText.Get("MediaPlayPause"));
-        playBtn.Click += PlayPause_Click;
-
-        var nextBtn = new System.Windows.Controls.Button { Width = 32, Height = 32, Content = new System.Windows.Controls.ContentControl { Content = FindResource("IconNextFill"), Width = 12, Height = 12 } };
-        nextBtn.SetResourceReference(StyleProperty, "WidgetIconButton");
-        if (nextBtn.Content is System.Windows.Controls.ContentControl nc) nc.SetResourceReference(StyleProperty, "WidgetGlyph");
-        nextBtn.SetBinding(IsEnabledProperty, new Binding("IsEnabled") { Source = NextButton, Mode = BindingMode.OneWay });
-        nextBtn.ToolTip = UiText.Get("MediaNext");
-        System.Windows.Automation.AutomationProperties.SetName(nextBtn, UiText.Get("MediaNext"));
-        nextBtn.Click += Next_Click;
-
-        controls.Children.Add(prevBtn);
-        controls.Children.Add(playBtn);
-        controls.Children.Add(nextBtn);
-        root.Children.Add(controls);
-
-        if (_audio?.HasDevice == true)
-        {
-            var volRow = new System.Windows.Controls.Grid { Margin = new Thickness(0, 4, 0, 0) };
-            volRow.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = GridLength.Auto });
-            volRow.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-            var muteBtn = new System.Windows.Controls.Button
-            {
-                Width = 26,
-                Height = 26,
-                Content = new System.Windows.Controls.ContentControl { Content = VolumeIcon.Content, Width = 14, Height = 14 }
-            };
-            muteBtn.SetResourceReference(StyleProperty, "WidgetIconButton");
-            if (muteBtn.Content is System.Windows.Controls.ContentControl mc) mc.SetResourceReference(StyleProperty, "WidgetIcon");
-            if (muteBtn.Content is System.Windows.Controls.ContentControl muteGlyph)
-                muteGlyph.SetBinding(System.Windows.Controls.ContentControl.ContentProperty, new Binding("Content") { Source = VolumeIcon, Mode = BindingMode.OneWay });
-            muteBtn.SetBinding(IsEnabledProperty, new Binding("IsEnabled") { Source = MuteButton, Mode = BindingMode.OneWay });
-            muteBtn.ToolTip = UiText.Get("MuteToggle");
-            System.Windows.Automation.AutomationProperties.SetName(muteBtn, UiText.Get("MuteToggle"));
-            muteBtn.Click += MuteButton_Click;
-
-            var slider = new System.Windows.Controls.Slider
-            {
-                Minimum = 0,
-                Maximum = 100,
-                Value = VolumeSlider.Value,
-                Margin = new Thickness(8, 0, 0, 0),
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            slider.SetResourceReference(StyleProperty, "WidgetSlider");
-            slider.SetBinding(System.Windows.Controls.Slider.ValueProperty, new Binding("Value") { Source = VolumeSlider, Mode = BindingMode.OneWay });
-            slider.SetBinding(IsEnabledProperty, new Binding("IsEnabled") { Source = VolumeSlider, Mode = BindingMode.OneWay });
-            System.Windows.Automation.AutomationProperties.SetName(slider, UiText.Get("Volume"));
-            slider.ValueChanged += (_, args) =>
-            {
-                if (_updatingVolume || _audio is null) return;
-                if (_audio.SetVolume((float)(args.NewValue / 100.0))) RenderVolume();
-                else Report(UiText.Get("ErrorVolumeChange"));
-            };
-
-            System.Windows.Controls.Grid.SetColumn(muteBtn, 0);
-            System.Windows.Controls.Grid.SetColumn(slider, 1);
-            volRow.Children.Add(muteBtn);
-            volRow.Children.Add(slider);
-            root.Children.Add(volRow);
-        }
-
-        return root;
-    }
+    // V19: Media widget uses its own compact hover volume popover and does not open a large generic flyout.
+    public override UIElement? BuildHoverFlyoutContent() => null;
 
     protected override async void OnActivated()
     {
@@ -251,6 +129,7 @@ public partial class MediaWidget : DockWidget
     protected override void OnDeactivated()
     {
         _activationVersion++;
+        CloseVolumePopover();
         UiText.Current.PropertyChanged -= UiText_PropertyChanged;
         BindSession(null);
         ClearAlbumArt();
@@ -270,11 +149,18 @@ public partial class MediaWidget : DockWidget
         }
     }
 
+    protected override void OnDisposed()
+    {
+        _volumeHoverCloseTimer.Stop();
+        _volumeHoverCloseTimer.Tick -= VolumeHoverCloseTimer_Tick;
+        VolumePopup.Opened -= VolumePopup_Opened;
+        CloseVolumePopover();
+    }
+
     protected override void OnTick(DateTime now)
     {
         if (!IsActive || _manager is null) return;
 
-        // Auto-discover playing sessions (e.g. YouTube in a browser) if unbound or current session is inactive.
         var candidate = GetActiveSession();
         if (ShouldSwitchSession(candidate))
         {
@@ -284,10 +170,8 @@ public partial class MediaWidget : DockWidget
 
         if (_session is null || _draggingProgress) return;
 
-        // Actively poll timeline properties so duration updates (e.g. YouTube video buffering) are picked up immediately.
         RefreshTimeline();
 
-        // Keep playback status in sync even if Windows drops an event.
         try
         {
             var pb = _session.GetPlaybackInfo();
@@ -337,6 +221,208 @@ public partial class MediaWidget : DockWidget
     {
         ArtImage.Source = null;
         ArtPlaceholder.Visibility = Visibility.Visible;
+        AnimateArtTint(DefaultArtTint);
+    }
+
+    private void AnimateArtTint(Color targetColor)
+    {
+        if (!Settings.AnimationsEnabled || !SystemParameters.ClientAreaAnimation)
+        {
+            ArtTintBrush.BeginAnimation(SolidColorBrush.ColorProperty, null);
+            ArtTintBrush.Color = targetColor;
+            return;
+        }
+
+        var anim = new ColorAnimation(targetColor, TimeSpan.FromMilliseconds(280))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+        };
+        ArtTintBrush.BeginAnimation(SolidColorBrush.ColorProperty, anim);
+    }
+
+    private static Color DeriveSubtleTintColor(BitmapSource bitmap)
+    {
+        try
+        {
+            var bgra = new FormatConvertedBitmap(bitmap, PixelFormats.Bgra32, null, 0);
+            var w = bgra.PixelWidth;
+            var h = bgra.PixelHeight;
+            if (w <= 0 || h <= 0) return DefaultArtTint;
+            var stride = w * 4;
+            var pixels = new byte[stride * h];
+            bgra.CopyPixels(pixels, stride, 0);
+
+            long sumR = 0, sumG = 0, sumB = 0, count = 0;
+            var stepY = Math.Max(1, h / 16);
+            var stepX = Math.Max(1, w / 16);
+            for (var y = 0; y < h; y += stepY)
+            {
+                var row = y * stride;
+                for (var x = 0; x < w; x += stepX)
+                {
+                    var idx = row + x * 4;
+                    if (pixels[idx + 3] < 128) continue;
+                    sumB += pixels[idx];
+                    sumG += pixels[idx + 1];
+                    sumR += pixels[idx + 2];
+                    count++;
+                }
+            }
+            if (count == 0) return DefaultArtTint;
+
+            // Clamp luminance and softly mute saturation so the thumbnail tint stays refined and readable.
+            var r = (byte)Math.Clamp(sumR / count * 0.72 + 24, 34, 155);
+            var g = (byte)Math.Clamp(sumG / count * 0.72 + 24, 34, 155);
+            var b = (byte)Math.Clamp(sumB / count * 0.72 + 24, 34, 155);
+            return Color.FromRgb(r, g, b);
+        }
+        catch
+        {
+            return DefaultArtTint;
+        }
+    }
+
+    private static CustomPopupPlacement[] PlaceVolumePopover(System.Windows.Size popupSize, System.Windows.Size targetSize, System.Windows.Point offset)
+    {
+        return DockFlyout.Edge switch
+        {
+            DockEdge.Left =>
+            [
+                new CustomPopupPlacement(new System.Windows.Point(targetSize.Width + 4, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical)
+            ],
+            DockEdge.Right =>
+            [
+                new CustomPopupPlacement(new System.Windows.Point(-popupSize.Width - 4, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical)
+            ],
+            _ =>
+            [
+                new CustomPopupPlacement(new System.Windows.Point((targetSize.Width - popupSize.Width) / 2, -popupSize.Height - 4), PopupPrimaryAxis.Horizontal),
+                new CustomPopupPlacement(new System.Windows.Point((targetSize.Width - popupSize.Width) / 2, targetSize.Height + 4), PopupPrimaryAxis.Horizontal)
+            ]
+        };
+    }
+
+    private void VolumePopup_Opened(object? sender, EventArgs e)
+    {
+        if (!Settings.AnimationsEnabled || !SystemParameters.ClientAreaAnimation)
+        {
+            VolumePopoverSurface.Opacity = 1;
+            VolumePopoverTranslate.Y = 0;
+            VolumePopoverScale.ScaleX = 1;
+            VolumePopoverScale.ScaleY = 1;
+            return;
+        }
+
+        var duration = TimeSpan.FromMilliseconds(160);
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        VolumePopoverTranslate.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(6, 0, duration) { EasingFunction = ease });
+        VolumePopoverScale.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(0.96, 1, duration) { EasingFunction = ease });
+        VolumePopoverScale.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(0.96, 1, duration) { EasingFunction = ease });
+        VolumePopoverSurface.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, duration) { EasingFunction = ease });
+    }
+
+    private void VolumeTrigger_MouseEnter(object sender, MouseEventArgs e)
+    {
+        if (_audio?.HasDevice != true) return;
+        _volumeHoverCloseTimer.Stop();
+        if (!VolumePopup.IsOpen) VolumePopup.IsOpen = true;
+    }
+
+    private void VolumeTrigger_MouseLeave(object sender, MouseEventArgs e)
+    {
+        if (VolumePopup.IsOpen && !_volumeHoverCloseTimer.IsEnabled)
+            _volumeHoverCloseTimer.Start();
+    }
+
+    private void VolumePopover_MouseEnter(object sender, MouseEventArgs e)
+    {
+        _volumeHoverCloseTimer.Stop();
+    }
+
+    private void VolumePopover_MouseLeave(object sender, MouseEventArgs e)
+    {
+        if (VolumePopup.IsOpen && !_volumeHoverCloseTimer.IsEnabled)
+            _volumeHoverCloseTimer.Start();
+    }
+
+    private void VolumeHoverCloseTimer_Tick(object? sender, EventArgs e)
+    {
+        if (!VolumePopup.IsOpen)
+        {
+            _volumeHoverCloseTimer.Stop();
+            return;
+        }
+
+        // Keep open while dragging the slider thumb or while the cursor is anywhere in the trigger-to-popover bridge.
+        if (IsSliderCaptured() || IsCursorInVolumeHoverBridge())
+        {
+            return;
+        }
+
+        CloseVolumePopover();
+    }
+
+    private void CloseVolumePopover()
+    {
+        _volumeHoverCloseTimer.Stop();
+        if (VolumePopup.IsOpen) VolumePopup.IsOpen = false;
+    }
+
+    private bool IsSliderCaptured()
+    {
+        if (Mouse.Captured is not DependencyObject captured) return false;
+        var current = captured;
+        while (current is not null)
+        {
+            if (ReferenceEquals(current, VolumePopoverSurface) || ReferenceEquals(current, VolumeSlider))
+                return true;
+            current = VisualTreeHelper.GetParent(current) ?? LogicalTreeHelper.GetParent(current);
+        }
+        return false;
+    }
+
+    private bool IsCursorInVolumeHoverBridge()
+    {
+        if (VolumePanel.IsMouseOver || VolumePopoverSurface.IsMouseOver) return true;
+        if (!GetCursorPos(out var pt)) return false;
+
+        if (TryGetScreenRect(VolumePanel, 8, out var trigger)
+            && TryGetScreenRect(VolumePopoverSurface, 10, out var popover))
+        {
+            if (Contains(trigger, pt) || Contains(popover, pt)) return true;
+
+            // Continuous hover-safe corridor between the trigger icon and the popover above it.
+            var bridgeLeft = Math.Min(trigger.Left, popover.Left);
+            var bridgeRight = Math.Max(trigger.Right, popover.Right);
+            var bridgeTop = Math.Min(trigger.Top, popover.Top);
+            var bridgeBottom = Math.Max(trigger.Bottom, popover.Bottom);
+            return pt.X >= bridgeLeft && pt.X <= bridgeRight && pt.Y >= bridgeTop && pt.Y <= bridgeBottom;
+        }
+
+        return false;
+    }
+
+    private static bool Contains((double Left, double Top, double Right, double Bottom) r, NativePoint pt) =>
+        pt.X >= r.Left && pt.X <= r.Right && pt.Y >= r.Top && pt.Y <= r.Bottom;
+
+    private static bool TryGetScreenRect(FrameworkElement element, double pad, out (double Left, double Top, double Right, double Bottom) rect)
+    {
+        rect = default;
+        var source = PresentationSource.FromVisual(element);
+        if (source?.CompositionTarget is null || element.ActualWidth <= 0 || element.ActualHeight <= 0) return false;
+        try
+        {
+            var dx = source.CompositionTarget.TransformToDevice.M11 * pad;
+            var dy = source.CompositionTarget.TransformToDevice.M22 * pad;
+            var tl = element.PointToScreen(new System.Windows.Point(0, 0));
+            var br = element.PointToScreen(new System.Windows.Point(element.ActualWidth, element.ActualHeight));
+            rect = (tl.X - dx, tl.Y - dy, br.X + dx, br.Y + dy);
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     private void Audio_VolumeChanged() => Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
@@ -363,6 +449,7 @@ public partial class MediaWidget : DockWidget
             _lastAudioLevel = -1;
             MuteButton.IsEnabled = false;
             VolumeSlider.IsEnabled = false;
+            VolumePercentText.Text = "—";
             SetVolumeIcon("IconVolumeMute");
             return;
         }
@@ -385,9 +472,11 @@ public partial class MediaWidget : DockWidget
         MuteButton.IsEnabled = true;
         VolumeSlider.IsEnabled = true;
         SetVolumeIcon(muted || level == 0 ? "IconVolumeMute" : level < 50 ? "IconVolumeLow" : "IconVolume");
-        VolumeSlider.ToolTip = muted ? UiText.Get("MuteToggle") : $"{deviceName ?? UiText.Get("Volume")}: {UiText.Format("Percent", level)}";
+        var displayed = muted ? 0 : level;
+        VolumePercentText.Text = $"{displayed}%";
+        MuteButton.ToolTip = muted ? UiText.Get("MuteToggle") : $"{deviceName ?? UiText.Get("Volume")}: {UiText.Format("Percent", level)}";
         _updatingVolume = true;
-        VolumeSlider.Value = level;
+        VolumeSlider.Value = displayed;
         _updatingVolume = false;
     }
 
@@ -427,16 +516,13 @@ public partial class MediaWidget : DockWidget
         if (_session is null) return true;
         if (IsSameSession(candidate, _session)) return false;
 
-        // If candidate is playing and current session is not playing, switch to candidate.
         if (!_playing)
         {
             try
             {
                 var pb = candidate.GetPlaybackInfo();
                 if (pb?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
-                {
                     return true;
-                }
             }
             catch { }
         }
@@ -448,7 +534,6 @@ public partial class MediaWidget : DockWidget
     {
         if (_manager is null) return null;
 
-        // 1. If Windows reports an active current session that is actively playing, use it.
         MediaSession? current = null;
         try { current = _manager.GetCurrentSession(); } catch { }
 
@@ -458,14 +543,11 @@ public partial class MediaWidget : DockWidget
             {
                 var pb = current.GetPlaybackInfo();
                 if (pb?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
-                {
                     return current;
-                }
             }
             catch { }
         }
 
-        // 2. Scan all sessions: prefer any session actively playing (e.g. YouTube in Chrome/Firefox/Edge).
         try
         {
             var sessions = _manager.GetSessions();
@@ -477,16 +559,13 @@ public partial class MediaWidget : DockWidget
                     {
                         var pb = s.GetPlaybackInfo();
                         if (pb?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing)
-                        {
                             return s;
-                        }
                     }
                     catch { }
                 }
 
                 if (current is not null) return current;
 
-                // If none are playing, pick the first open/paused session.
                 foreach (var s in sessions)
                 {
                     try
@@ -558,9 +637,7 @@ public partial class MediaWidget : DockWidget
             var start = timeline.StartTime;
             var end = timeline.EndTime;
             if (end <= TimeSpan.Zero && timeline.MaxSeekTime > TimeSpan.Zero)
-            {
                 end = timeline.MaxSeekTime;
-            }
 
             var pos = timeline.Position;
             var updatedAt = timeline.LastUpdatedTime;
@@ -588,6 +665,8 @@ public partial class MediaWidget : DockWidget
             ProgressSlider.Value = 0;
             ProgressSlider.IsEnabled = false;
             ProgressSlider.ToolTip = null;
+            ElapsedText.Text = "0:00";
+            TotalText.Text = "0:00";
             _updatingProgress = false;
             return;
         }
@@ -597,19 +676,22 @@ public partial class MediaWidget : DockWidget
         {
             var delta = (DateTimeOffset.UtcNow - _positionUpdatedAt).TotalSeconds;
             if (delta > -2)
-            {
                 elapsed += Math.Max(0, delta);
-            }
         }
 
         elapsed = Math.Clamp(elapsed, 0, duration.TotalSeconds);
+        var elapsedText = FormatTime(TimeSpan.FromSeconds(elapsed));
+        var totalText = FormatTime(duration);
+
         _updatingProgress = true;
         ProgressSlider.Maximum = duration.TotalSeconds;
         ProgressSlider.Value = elapsed;
         ProgressSlider.IsEnabled = true;
         ProgressSlider.IsHitTestVisible = _canSeek;
         ProgressSlider.Focusable = _canSeek;
-        ProgressSlider.ToolTip = $"{FormatTime(TimeSpan.FromSeconds(elapsed))} / {FormatTime(duration)}";
+        ElapsedText.Text = elapsedText;
+        TotalText.Text = totalText;
+        ProgressSlider.ToolTip = $"{elapsedText} / {totalText}";
         _updatingProgress = false;
     }
 
@@ -618,7 +700,6 @@ public partial class MediaWidget : DockWidget
 
     private async void Refresh(bool includeProperties)
     {
-        // Only property fetches are versioned; a playback-only update must not cancel an in-flight title fetch.
         var version = includeProperties ? ++_refreshVersion : _refreshVersion;
         var activationVersion = _activationVersion;
         var session = _session;
@@ -664,7 +745,6 @@ public partial class MediaWidget : DockWidget
         }
         catch (Exception ex) when (ex is COMException or InvalidOperationException)
         {
-            // Sessions vanish while their owning app exits; the next CurrentSessionChanged rebinds.
             AppLog.Warning($"Media session refresh failed: {ex.Message}");
             if (version == _refreshVersion && activationVersion == _activationVersion)
             {
@@ -676,11 +756,9 @@ public partial class MediaWidget : DockWidget
 
     private async Task LoadArtAsync(GlobalSystemMediaTransportControlsSessionMediaProperties properties, int version, int activationVersion)
     {
-        // Artwork can change even when the title and artist remain the same.
         if (properties.Thumbnail is null)
         {
-            ArtImage.Source = null;
-            ArtPlaceholder.Visibility = Visibility.Visible;
+            ClearAlbumArt();
             return;
         }
 
@@ -689,7 +767,7 @@ public partial class MediaWidget : DockWidget
             using var stream = await properties.Thumbnail.OpenReadAsync();
             if (version != _refreshVersion || activationVersion != _activationVersion || !IsActive) return;
 
-            var image = await Task.Run(() =>
+            var (image, tint) = await Task.Run(() =>
             {
                 using var managed = stream.AsStreamForRead();
                 using var copy = new MemoryStream();
@@ -703,12 +781,13 @@ public partial class MediaWidget : DockWidget
                 bitmap.StreamSource = copy;
                 bitmap.EndInit();
                 bitmap.Freeze();
-                return bitmap;
+                return (bitmap, DeriveSubtleTintColor(bitmap));
             });
 
             if (version != _refreshVersion || activationVersion != _activationVersion || !IsActive) return;
             ArtImage.Source = image;
             ArtPlaceholder.Visibility = Visibility.Collapsed;
+            AnimateArtTint(tint);
         }
         catch (Exception ex) when (ex is COMException or IOException or NotSupportedException or FileFormatException)
         {
@@ -739,7 +818,12 @@ public partial class MediaWidget : DockWidget
 
     private async void ProgressSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_updatingProgress || _draggingProgress) return;
+        if (_updatingProgress) return;
+        if (_draggingProgress)
+        {
+            ElapsedText.Text = FormatTime(TimeSpan.FromSeconds(Math.Max(0, e.NewValue)));
+            return;
+        }
         var mouseSeek = ProgressSlider.IsMouseOver && Mouse.LeftButton == MouseButtonState.Pressed;
         var keyboardSeek = ProgressSlider.IsKeyboardFocusWithin;
         if (!mouseSeek && !keyboardSeek) return;
@@ -790,4 +874,15 @@ public partial class MediaWidget : DockWidget
             Report(UiText.Get("ErrorMediaControl"));
         }
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetCursorPos(out NativePoint pt);
 }

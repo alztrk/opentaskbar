@@ -3,35 +3,20 @@
               xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
               xmlns:w="clr-namespace:OpenTaskbar.Widgets"
               xmlns:local="clr-namespace:OpenTaskbar.Services">
-    <Button x:Name="ClockButton" Style="{StaticResource WidgetCardButton}" Padding="8,2,8,2" Click="ClockButton_Click"
+    <Button x:Name="ClockButton" Style="{StaticResource WidgetCardButton}" Padding="10,0" Click="ClockButton_Click"
             AutomationProperties.Name="{local:Loc Calendar}">
-        <Grid VerticalAlignment="Center">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="Auto" />
-            </Grid.ColumnDefinitions>
-
-            <!-- Column 0: Time of Day Icon (Sun / Moon) -->
-            <ContentControl x:Name="TimeOfDayIcon" Grid.Column="0"
-                            Style="{StaticResource WidgetIcon}"
-                            Width="15" Height="15"
-                            VerticalAlignment="Center"
-                            Margin="0,0,6,0" />
-
-            <!-- Column 1: Day name & Date -->
-            <StackPanel x:Name="DateColumn" Grid.Column="1" VerticalAlignment="Center" Margin="0,0,8,0">
-                <TextBlock x:Name="DayOfWeekText" FontSize="9" FontWeight="SemiBold"
-                           TextAlignment="Left" HorizontalAlignment="Left" />
-                <TextBlock x:Name="DateText" FontSize="12.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"
-                           TextAlignment="Left" HorizontalAlignment="Left" Margin="0,-1,0,0" />
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <ContentControl x:Name="ClockIcon" Style="{StaticResource WidgetIcon}" Content="{StaticResource IconClock}"
+                            Width="15" Height="15" VerticalAlignment="Center" Margin="0,0,8,0"
+                            Foreground="{DynamicResource TextSecondary}" />
+            <TextBlock x:Name="TimeText" FontSize="15" FontWeight="Bold" Foreground="{DynamicResource TextPrimary}"
+                       VerticalAlignment="Center" Typography.NumeralAlignment="Tabular" />
+            <StackPanel x:Name="DateColumn" VerticalAlignment="Center" Margin="9,0,0,0">
+                <TextBlock x:Name="DateText" FontSize="11.5" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"
+                           LineHeight="13" TextAlignment="Left" HorizontalAlignment="Left" />
+                <TextBlock x:Name="DayOfWeekText" FontSize="10.5" Foreground="{DynamicResource TextSecondary}"
+                           LineHeight="12" TextAlignment="Left" HorizontalAlignment="Left" />
             </StackPanel>
-
-            <!-- Column 2: Time -->
-            <StackPanel Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right">
-                <TextBlock x:Name="TimeText" FontSize="14" FontWeight="Bold" Foreground="{DynamicResource TextPrimary}"
-                           HorizontalAlignment="Right" Typography.NumeralAlignment="Tabular" />
-            </StackPanel>
-        </Grid>
+        </StackPanel>
     </Button>
 </w:DockWidget>

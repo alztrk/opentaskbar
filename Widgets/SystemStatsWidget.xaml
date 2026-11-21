@@ -3,56 +3,57 @@
               xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
               xmlns:w="clr-namespace:OpenTaskbar.Widgets"
               xmlns:local="clr-namespace:OpenTaskbar.Services">
-    <StackPanel Orientation="Horizontal">
-        <Button x:Name="CompactSummaryButton" Style="{StaticResource WidgetCardButton}" Width="82" Padding="7,2"
-                Visibility="Collapsed" Click="TaskManager_Click">
-            <StackPanel VerticalAlignment="Center">
-                <TextBlock x:Name="CompactCpuText" Style="{StaticResource WidgetText}" FontSize="11"
-                           Typography.NumeralAlignment="Tabular" Text="CPU —" />
-                <TextBlock x:Name="CompactRamText" Style="{StaticResource WidgetCaption}" FontSize="10.5"
-                           Typography.NumeralAlignment="Tabular" Text="RAM —" Margin="0,-1,0,0" />
+    <Button x:Name="StatsCardButton" Style="{StaticResource WidgetCardButton}" Padding="10,0"
+            Click="StatsCardButton_Click" AutomationProperties.Name="{local:Loc WidgetSystemStats}">
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconCpu}"
+                            Width="15" Height="15" Margin="0,0,8,0" VerticalAlignment="Center"
+                            Foreground="{DynamicResource TextSecondary}" />
+
+            <!-- CPU metric -->
+            <StackPanel x:Name="CpuButton" VerticalAlignment="Center" Orientation="Vertical">
+                <TextBlock x:Name="CpuLabel" Text="CPU" FontSize="10" LineHeight="11"
+                           Foreground="{DynamicResource TextSecondary}" />
+                <TextBlock x:Name="CpuValueText" Text="—" FontSize="12.5" FontWeight="SemiBold" LineHeight="14"
+                           Foreground="{DynamicResource TextPrimary}" Typography.NumeralAlignment="Tabular" />
             </StackPanel>
-        </Button>
-        <Button x:Name="BatteryButton" Style="{StaticResource WidgetCardButton}" Width="{StaticResource WidgetHeight}"
-                Padding="3" Visibility="Collapsed" Click="BatteryButton_Click">
-            <Grid>
-                <w:RingMeter x:Name="BatteryRing" Width="38" Height="38" StrokeThickness="3" FontSize="11.5" Caption="BAT"
-                             CaptionBrush="{DynamicResource TextSecondary}" TrackBrush="{DynamicResource WidgetTrack}"
-                             ValueBrush="{DynamicResource WidgetAccent}" Foreground="{DynamicResource TextPrimary}" />
-                <ContentControl x:Name="ChargingIcon" Style="{StaticResource WidgetIcon}" Content="{StaticResource IconZap}"
-                                Width="9" Height="9" Foreground="{DynamicResource WidgetAccent}"
-                                HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,1,1,0" Visibility="Collapsed" />
-            </Grid>
-        </Button>
-        <Button x:Name="CpuButton" Style="{StaticResource WidgetCardButton}" Width="{StaticResource WidgetHeight}" Padding="3"
-                Click="TaskManager_Click">
-            <w:RingMeter x:Name="CpuRing" Width="38" Height="38" StrokeThickness="3" FontSize="11.5" Caption="CPU" CaptionBrush="{DynamicResource TextSecondary}"
-                         TrackBrush="{DynamicResource WidgetTrack}" ValueBrush="{DynamicResource WidgetAccent}"
-                         Foreground="{DynamicResource TextPrimary}" />
-        </Button>
-        <Button x:Name="MemoryButton" Style="{StaticResource WidgetCardButton}" Width="{StaticResource WidgetHeight}" Padding="3"
-                Click="TaskManager_Click">
-            <w:RingMeter x:Name="MemoryRing" Width="38" Height="38" StrokeThickness="3" FontSize="11.5" Caption="RAM" CaptionBrush="{DynamicResource TextSecondary}"
-                         TrackBrush="{DynamicResource WidgetTrack}" ValueBrush="{DynamicResource WidgetAccent}"
-                         Foreground="{DynamicResource TextPrimary}" />
-        </Button>
-        <Button x:Name="CpuTemperatureButton" Style="{StaticResource WidgetCardButton}" Width="{StaticResource WidgetHeight}" Padding="3"
-                Visibility="Collapsed" Click="TaskManager_Click">
-            <w:RingMeter x:Name="CpuTemperatureRing" Width="38" Height="38" StrokeThickness="3" FontSize="11.5" Caption="CPU°" CaptionBrush="{DynamicResource TextSecondary}"
-                         TrackBrush="{DynamicResource WidgetTrack}" ValueBrush="{DynamicResource WidgetAccent}"
-                         Foreground="{DynamicResource TextPrimary}" />
-        </Button>
-        <Button x:Name="GpuButton" Style="{StaticResource WidgetCardButton}" Width="{StaticResource WidgetHeight}" Padding="3"
-                Visibility="Collapsed" Click="TaskManager_Click">
-            <w:RingMeter x:Name="GpuRing" Width="38" Height="38" StrokeThickness="3" FontSize="11.5" Caption="GPU" CaptionBrush="{DynamicResource TextSecondary}"
-                         TrackBrush="{DynamicResource WidgetTrack}" ValueBrush="{DynamicResource WidgetAccent}"
-                         Foreground="{DynamicResource TextPrimary}" />
-        </Button>
-        <Button x:Name="GpuTemperatureButton" Style="{StaticResource WidgetCardButton}" Width="{StaticResource WidgetHeight}" Padding="3"
-                Visibility="Collapsed" Click="TaskManager_Click">
-            <w:RingMeter x:Name="GpuTemperatureRing" Width="38" Height="38" StrokeThickness="3" FontSize="11.5" Caption="GPU°" CaptionBrush="{DynamicResource TextSecondary}"
-                         TrackBrush="{DynamicResource WidgetTrack}" ValueBrush="{DynamicResource WidgetAccent}"
-                         Foreground="{DynamicResource TextPrimary}" />
-        </Button>
-    </StackPanel>
+
+            <!-- RAM metric -->
+            <Border x:Name="RamDivider" Width="1" Height="18" Background="{DynamicResource StrokeSubtle}"
+                    Margin="9,0" VerticalAlignment="Center" />
+            <StackPanel x:Name="MemoryButton" VerticalAlignment="Center" Orientation="Vertical">
+                <TextBlock x:Name="RamLabel" Text="RAM" FontSize="10" LineHeight="11"
+                           Foreground="{DynamicResource TextSecondary}" />
+                <TextBlock x:Name="RamValueText" Text="—" FontSize="12.5" FontWeight="SemiBold" LineHeight="14"
+                           Foreground="{DynamicResource TextPrimary}" Typography.NumeralAlignment="Tabular" />
+            </StackPanel>
+
+            <!-- GPU metric (shown once validated) -->
+            <Border x:Name="GpuDivider" Width="1" Height="18" Background="{DynamicResource StrokeSubtle}"
+                    Margin="9,0" VerticalAlignment="Center" Visibility="Collapsed" />
+            <StackPanel x:Name="GpuButton" VerticalAlignment="Center" Orientation="Vertical" Visibility="Collapsed">
+                <TextBlock x:Name="GpuLabel" Text="GPU" FontSize="10" LineHeight="11"
+                           Foreground="{DynamicResource TextSecondary}" />
+                <TextBlock x:Name="GpuValueText" Text="—" FontSize="12.5" FontWeight="SemiBold" LineHeight="14"
+                           Foreground="{DynamicResource TextPrimary}" Typography.NumeralAlignment="Tabular" />
+            </StackPanel>
+
+            <!-- Optional temperatures (validated sensor slots; kept for Settings.StatsMeters and tests) -->
+            <Border x:Name="CpuTempDivider" Width="1" Height="18" Background="{DynamicResource StrokeSubtle}"
+                    Margin="9,0" VerticalAlignment="Center" Visibility="Collapsed" />
+            <StackPanel x:Name="CpuTemperatureButton" VerticalAlignment="Center" Orientation="Vertical" Visibility="Collapsed">
+                <TextBlock Text="CPU°" FontSize="10" LineHeight="11" Foreground="{DynamicResource TextSecondary}" />
+                <TextBlock x:Name="CpuTempValueText" Text="—" FontSize="12.5" FontWeight="SemiBold" LineHeight="14"
+                           Foreground="{DynamicResource TextPrimary}" Typography.NumeralAlignment="Tabular" />
+            </StackPanel>
+
+            <Border x:Name="GpuTempDivider" Width="1" Height="18" Background="{DynamicResource StrokeSubtle}"
+                    Margin="9,0" VerticalAlignment="Center" Visibility="Collapsed" />
+            <StackPanel x:Name="GpuTemperatureButton" VerticalAlignment="Center" Orientation="Vertical" Visibility="Collapsed">
+                <TextBlock Text="GPU°" FontSize="10" LineHeight="11" Foreground="{DynamicResource TextSecondary}" />
+                <TextBlock x:Name="GpuTempValueText" Text="—" FontSize="12.5" FontWeight="SemiBold" LineHeight="14"
+                           Foreground="{DynamicResource TextPrimary}" Typography.NumeralAlignment="Tabular" />
+            </StackPanel>
+        </StackPanel>
+    </Button>
 </w:DockWidget>

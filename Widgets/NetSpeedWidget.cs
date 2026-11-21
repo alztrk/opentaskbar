@@ -83,22 +83,35 @@ public sealed class NetSpeedWidget : DockWidget
 
     public NetSpeedWidget()
     {
+        var wifiIcon = new ContentControl
+        {
+            Content = FindResource("IconWifi"),
+            Width = 15,
+            Height = 15,
+            Margin = new Thickness(0, 0, 8, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            IsHitTestVisible = false
+        };
+        wifiIcon.SetResourceReference(StyleProperty, "WidgetIcon");
+        wifiIcon.SetResourceReference(ForegroundProperty, "TextSecondary");
+
         _downIcon = new ContentControl
         {
             Content = FindResource("IconArrowDown"),
-            Width = 12,
-            Height = 12,
+            Width = 11,
+            Height = 11,
             VerticalAlignment = VerticalAlignment.Center,
             IsHitTestVisible = false
         };
         _downIcon.SetResourceReference(StyleProperty, "WidgetIcon");
-        _downIcon.SetResourceReference(ForegroundProperty, "WidgetAccent");
+        _downIcon.SetResourceReference(ForegroundProperty, "WidgetGreen");
 
         _downloadText = new TextBlock
         {
             Text = "0 B/s",
             FontSize = 11.5,
             FontWeight = FontWeights.SemiBold,
+            MinWidth = 56,
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(4, 0, 0, 0),
             Typography = { NumeralAlignment = FontNumeralAlignment.Tabular }
@@ -116,19 +129,20 @@ public sealed class NetSpeedWidget : DockWidget
         _upIcon = new ContentControl
         {
             Content = FindResource("IconArrowUp"),
-            Width = 12,
-            Height = 12,
+            Width = 11,
+            Height = 11,
             VerticalAlignment = VerticalAlignment.Center,
             IsHitTestVisible = false
         };
         _upIcon.SetResourceReference(StyleProperty, "WidgetIcon");
-        _upIcon.SetResourceReference(ForegroundProperty, "TextSecondary");
+        _upIcon.SetResourceReference(ForegroundProperty, "WidgetBlue");
 
         _uploadText = new TextBlock
         {
             Text = "0 B/s",
             FontSize = 11.5,
             FontWeight = FontWeights.SemiBold,
+            MinWidth = 56,
             VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(4, 0, 0, 0),
             Typography = { NumeralAlignment = FontNumeralAlignment.Tabular }
@@ -139,10 +153,18 @@ public sealed class NetSpeedWidget : DockWidget
         {
             Orientation = Orientation.Horizontal,
             VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(10, 0, 0, 0)
+            Margin = new Thickness(0, 2, 0, 0)
         };
         _uploadGroup.Children.Add(_upIcon);
         _uploadGroup.Children.Add(_uploadText);
+
+        var speedLines = new StackPanel
+        {
+            Orientation = Orientation.Vertical,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        speedLines.Children.Add(downGroup);
+        speedLines.Children.Add(_uploadGroup);
 
         var contentRow = new StackPanel
         {
@@ -150,8 +172,8 @@ public sealed class NetSpeedWidget : DockWidget
             VerticalAlignment = VerticalAlignment.Center,
             HorizontalAlignment = HorizontalAlignment.Center
         };
-        contentRow.Children.Add(downGroup);
-        contentRow.Children.Add(_uploadGroup);
+        contentRow.Children.Add(wifiIcon);
+        contentRow.Children.Add(speedLines);
 
         _cardButton = new Button
         {

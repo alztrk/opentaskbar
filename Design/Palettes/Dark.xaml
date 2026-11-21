@@ -107,6 +107,14 @@
     <SolidColorBrush x:Key="WidgetFocusAccent" Color="#FFEF4444" />
     <SolidColorBrush x:Key="WidgetOnStroke" Color="#FF4F8EF7" />
     <SolidColorBrush x:Key="WidgetWarning" Color="#FFFBBF24" />
+    <SolidColorBrush x:Key="WidgetSelectedFill" Color="#335B92FF" />
+    <SolidColorBrush x:Key="WidgetSelectedStroke" Color="#7891B8FF" />
+    <SolidColorBrush x:Key="WidgetSelectedForeground" Color="#FFA2C0FF" />
+    <SolidColorBrush x:Key="WidgetDangerHover" Color="#22DF4B53" />
+    <SolidColorBrush x:Key="WidgetDangerStroke" Color="#42DF4B53" />
+    <SolidColorBrush x:Key="WidgetDangerForeground" Color="#FFF36C74" />
+    <SolidColorBrush x:Key="WidgetGreen" Color="#FF58D8B2" />
+    <SolidColorBrush x:Key="WidgetBlue" Color="#FFA2C0FF" />
     <!-- Dock scroll edge scrims: soft directional gradient shadows for overflowing content -->
     <LinearGradientBrush x:Key="DockScrollScrimStart" StartPoint="0,0" EndPoint="1,0">
         <GradientStop Color="#55000000" Offset="0" />

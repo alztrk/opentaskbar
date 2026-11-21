@@ -187,27 +187,30 @@ public sealed class BluetoothBatteryWidget : DockWidget
         else
         {
             _deviceTiles.Children.Clear();
-            foreach (var device in connected) _deviceTiles.Children.Add(CreateDeviceTile(device));
+            for (var i = 0; i < connected.Count; i++)
+            {
+                _deviceTiles.Children.Add(CreateDeviceTile(connected[i], isLast: i == connected.Count - 1));
+            }
             _cardButton.Content = _deviceTiles;
             _cardButton.ToolTip = string.Join("\n", connected.Select(device =>
                 $"{device.Name}: {(device.BatteryLevel >= 0 ? device.BatteryLevel + "%" : "—")}"));
             AutomationProperties.SetName(_cardButton,
                 $"{UiText.Get("WidgetBluetoothBattery")}: {string.Join(", ", connected.Select(device => device.Name))}");
-            _fullWidth = Math.Max(78, connected.Count * 56 + 12);
-            _compactWidth = Math.Max(46, connected.Count * 22 + 8);
+            _fullWidth = Math.Max(78, connected.Count * 62 + 12);
+            _compactWidth = Math.Max(46, connected.Count * 24 + 8);
         }
         RaiseContentWidthChanged();
     }
 
-    private FrameworkElement CreateDeviceTile(BluetoothDeviceBatteryInfo device)
+    private FrameworkElement CreateDeviceTile(BluetoothDeviceBatteryInfo device, bool isLast)
     {
         var icon = CreateDeviceIcon(device.Kind);
         var percent = new TextBlock
         {
             Text = device.BatteryLevel >= 0 ? $"{device.BatteryLevel}%" : "—",
-            FontSize = 11.5,
+            FontSize = 12,
             FontWeight = FontWeights.SemiBold,
-            Margin = new Thickness(4, 0, 0, 0),
+            Margin = new Thickness(5, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center,
             Typography = { NumeralAlignment = FontNumeralAlignment.Tabular },
             Visibility = IsCompact ? Visibility.Collapsed : Visibility.Visible
@@ -219,12 +222,17 @@ public sealed class BluetoothBatteryWidget : DockWidget
         var stack = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         stack.Children.Add(icon);
         stack.Children.Add(percent);
-        return new Border
+        var border = new Border
         {
             Child = stack,
-            Margin = new Thickness(0, 0, 8, 0),
+            Height = 20,
+            Padding = new Thickness(0, 0, isLast ? 0 : 9, 0),
+            Margin = new Thickness(0, 0, isLast ? 0 : 9, 0),
+            BorderThickness = new Thickness(0, 0, isLast ? 0 : 1, 0),
             ToolTip = $"{device.Name}: {percent.Text}"
         };
+        if (!isLast) border.SetResourceReference(Border.BorderBrushProperty, "StrokeSubtle");
+        return border;
     }
 
     private static ContentControl CreateDeviceIcon(BluetoothDeviceKind kind)
@@ -233,13 +241,13 @@ public sealed class BluetoothBatteryWidget : DockWidget
         {
             Content = Application.Current?.TryFindResource(IconKey(kind))
                       ?? Application.Current?.TryFindResource("IconBluetooth"),
-            Width = 14,
-            Height = 14,
+            Width = 15,
+            Height = 15,
             VerticalAlignment = VerticalAlignment.Center,
             IsHitTestVisible = false
         };
         icon.SetResourceReference(StyleProperty, "WidgetIcon");
-        icon.SetResourceReference(ForegroundProperty, "WidgetAccent");
+        icon.SetResourceReference(ForegroundProperty, "TextSecondary");
         return icon;
     }
 

@@ -3,48 +3,24 @@
               xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
               xmlns:w="clr-namespace:OpenTaskbar.Widgets"
               xmlns:local="clr-namespace:OpenTaskbar.Services">
-    <Border Style="{StaticResource WidgetCardBorder}" Padding="7,0">
+    <Border Style="{StaticResource WidgetCardBorder}" Padding="8,0">
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-            <!-- Split pills: the icon toggles the radio, the chevron opens its settings page. -->
-            <Border x:Name="WifiPill" CornerRadius="16" BorderThickness="1.5" Background="{DynamicResource SurfaceSelected}" BorderBrush="{DynamicResource StrokeSubtle}" Margin="2,0">
-                <StackPanel Orientation="Horizontal">
-                    <ToggleButton x:Name="WifiToggle" Style="{StaticResource WidgetIconButton}" Width="32" Height="29" Click="WifiToggle_Click">
-                        <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconWifi}" />
-                    </ToggleButton>
-                    <Rectangle x:Name="WifiSettingsDivider" Width="1" Height="16" Fill="{DynamicResource StrokeSubtle}" />
-                    <Button x:Name="WifiSettings" Style="{StaticResource WidgetIconButton}" Width="28" Height="29" Click="WifiSettings_Click">
-                        <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconChevronRight}" Width="13" Height="13" />
-                    </Button>
-                </StackPanel>
+            <Border x:Name="WifiPill" CornerRadius="7" BorderThickness="1" Background="Transparent" BorderBrush="Transparent" Margin="0,0,4,0">
+                <ToggleButton x:Name="WifiToggle" Style="{StaticResource WidgetIconButton}" Width="27" Height="27" Click="WifiToggle_Click">
+                    <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconWifi}" Width="15" Height="15" />
+                </ToggleButton>
             </Border>
-            <Button x:Name="DisplayButton" Style="{StaticResource WidgetPill}" Margin="2,0" Click="Display_Click"
-                    ToolTip="{local:Loc Display}" AutomationProperties.Name="{local:Loc Display}">
-                <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconCast}" />
-            </Button>
-            <Border x:Name="BluetoothPill" CornerRadius="16" BorderThickness="1.5" Background="{DynamicResource SurfaceSelected}" BorderBrush="{DynamicResource StrokeSubtle}" Margin="2,0">
-                <StackPanel Orientation="Horizontal">
-                    <ToggleButton x:Name="BluetoothToggle" Style="{StaticResource WidgetIconButton}" Width="32" Height="29" Click="BluetoothToggle_Click">
-                        <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconBluetooth}" />
-                    </ToggleButton>
-                    <Rectangle x:Name="BluetoothSettingsDivider" Width="1" Height="16" Fill="{DynamicResource StrokeSubtle}" />
-                    <Button x:Name="BluetoothSettings" Style="{StaticResource WidgetIconButton}" Width="28" Height="29" Click="BluetoothSettings_Click">
-                        <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconChevronRight}" Width="13" Height="13" />
-                    </Button>
-                </StackPanel>
+            <Border x:Name="BluetoothPill" CornerRadius="7" BorderThickness="1" Background="Transparent" BorderBrush="Transparent" Margin="0,0,4,0">
+                <ToggleButton x:Name="BluetoothToggle" Style="{StaticResource WidgetIconButton}" Width="27" Height="27" Click="BluetoothToggle_Click">
+                    <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconBluetooth}" Width="15" Height="15" />
+                </ToggleButton>
             </Border>
-            <Button x:Name="HotspotButton" Style="{StaticResource WidgetPill}" Margin="2,0" Click="Hotspot_Click"
-                    ToolTip="{local:Loc Hotspot}" AutomationProperties.Name="{local:Loc Hotspot}">
-                <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconHotspot}" />
-            </Button>
-            <Rectangle x:Name="ActionsDivider" Width="1" Height="18" Fill="{DynamicResource StrokeSubtle}" Margin="5,0" />
-            <Button x:Name="QuickSettingsButton" Style="{StaticResource WidgetIconButton}" Width="32" Height="32" Margin="1,0" Click="QuickSettings_Click"
-                    ToolTip="{local:Loc QuickSettingsPanel}" AutomationProperties.Name="{local:Loc QuickSettingsPanel}">
-                <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconSettings}" />
-            </Button>
-            <Button x:Name="NotificationsButton" Style="{StaticResource WidgetIconButton}" Width="32" Height="32" Margin="1,0" Click="Notifications_Click"
-                    ToolTip="{local:Loc NotificationCenter}" AutomationProperties.Name="{local:Loc NotificationCenter}">
-                <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconBell}" />
-            </Button>
+            <Border x:Name="NightLightPill" CornerRadius="7" BorderThickness="1" Background="Transparent" BorderBrush="Transparent">
+                <ToggleButton x:Name="NightLightToggle" Style="{StaticResource WidgetIconButton}" Width="27" Height="27" Click="NightLightToggle_Click"
+                              ToolTip="{local:Loc NightLight}" AutomationProperties.Name="{local:Loc NightLight}">
+                    <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconMoon}" Width="15" Height="15" />
+                </ToggleButton>
+            </Border>
         </StackPanel>
     </Border>
 </w:DockWidget>
