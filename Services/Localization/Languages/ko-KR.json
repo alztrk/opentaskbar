@@ -738,5 +738,9 @@
   "DockBottomGapDescription": "Space below the dock (0 = flush).",
   "DockBottomGapUnit": "Bottom unit",
   "DockWidthValue": "너비",
-  "DockWidthValueDescription": "선택한 모드의 너비 값입니다."
+  "DockWidthValueDescription": "선택한 모드의 너비 값입니다.",
+  "DockHeightMode": "독 높이",
+  "DockHeightModeDescription": "독의 높이를 결정하는 방법.",
+  "DockHeightValue": "높이",
+  "DockHeightValueDescription": "선택한 모드의 높이 값입니다."
 }

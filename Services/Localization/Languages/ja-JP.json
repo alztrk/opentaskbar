@@ -738,5 +738,9 @@
   "DockBottomGapDescription": "Space below the dock (0 = flush).",
   "DockBottomGapUnit": "Bottom unit",
   "DockWidthValue": "幅",
-  "DockWidthValueDescription": "選択したモードの幅の値。"
+  "DockWidthValueDescription": "選択したモードの幅の値。",
+  "DockHeightMode": "ドックの高さ",
+  "DockHeightModeDescription": "ドックの高さを決定する方法。",
+  "DockHeightValue": "高さ",
+  "DockHeightValueDescription": "選択したモードの高さの値。"
 }

@@ -757,5 +757,9 @@
   "DockBottomGapDescription": "Space below the dock (0 = flush).",
   "DockBottomGapUnit": "Bottom unit",
   "DockWidthValue": "Width",
-  "DockWidthValueDescription": "Width value for the selected mode."
+  "DockWidthValueDescription": "Width value for the selected mode.",
+  "DockHeightMode": "Dock height",
+  "DockHeightModeDescription": "How the dock determines its height.",
+  "DockHeightValue": "Height",
+  "DockHeightValueDescription": "Height value for the selected mode."
 }

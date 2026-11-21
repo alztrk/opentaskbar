@@ -132,8 +132,8 @@
                                         <ComboBoxItem Content="{local:Loc DockWidthFill}" Tag="Fill" />
                                     </ComboBox>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
-                                        <TextBlock Text="{local:Loc DockWidthMode}" Style="{StaticResource SettingsRowLabel}" />
-                                        <TextBlock Text="{local:Loc DockWidthModeDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                        <TextBlock x:Name="DockWidthModeLabel" Text="{local:Loc DockWidthMode}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock x:Name="DockWidthModeDescription" Text="{local:Loc DockWidthModeDescription}" Style="{StaticResource SettingsRowDescription}" />
                                     </StackPanel>
                                 </DockPanel></Border>
                                 <Border x:Name="DockWidthValueRow" Style="{StaticResource SettingsRow}" Visibility="Collapsed"><DockPanel>
@@ -145,8 +145,8 @@
                                         <TextBlock x:Name="DockWidthValue" Width="48" TextAlignment="Right" Foreground="{DynamicResource TextSecondary}" FontSize="11.5" VerticalAlignment="Center" Margin="8,0,0,0" />
                                     </StackPanel>
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
-                                        <TextBlock Text="{local:Loc DockWidthValue}" Style="{StaticResource SettingsRowLabel}" />
-                                        <TextBlock Text="{local:Loc DockWidthValueDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                        <TextBlock x:Name="DockWidthValueLabel" Text="{local:Loc DockWidthValue}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock x:Name="DockWidthValueDescription" Text="{local:Loc DockWidthValueDescription}" Style="{StaticResource SettingsRowDescription}" />
                                     </StackPanel>
                                 </DockPanel></Border>
                                 <Border Style="{StaticResource SettingsRowLast}"><DockPanel>

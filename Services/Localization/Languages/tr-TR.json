@@ -757,5 +757,9 @@
   "DockBottomGapDescription": "Gorev cubugunun altindaki bosluk (0 = kenara yapisik).",
   "DockBottomGapUnit": "Alt birim",
   "DockWidthValue": "Genişlik",
-  "DockWidthValueDescription": "Seçili mod için genişlik değeri."
+  "DockWidthValueDescription": "Seçili mod için genişlik değeri.",
+  "DockHeightMode": "Görev çubuğu yüksekliği",
+  "DockHeightModeDescription": "Görev çubuğunun yüksekliği nasıl belirlenir.",
+  "DockHeightValue": "Yükseklik",
+  "DockHeightValueDescription": "Seçili mod için yükseklik değeri."
 }

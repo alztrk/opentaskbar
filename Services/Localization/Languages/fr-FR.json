@@ -738,5 +738,9 @@
   "DockBottomGapDescription": "Espace sous le dock (0 = affleurant).",
   "DockBottomGapUnit": "Unite inferieure",
   "DockWidthValue": "Largeur",
-  "DockWidthValueDescription": "Valeur de largeur pour le mode choisi."
+  "DockWidthValueDescription": "Valeur de largeur pour le mode choisi.",
+  "DockHeightMode": "Hauteur du dock",
+  "DockHeightModeDescription": "Comment le dock détermine sa hauteur.",
+  "DockHeightValue": "Hauteur",
+  "DockHeightValueDescription": "Valeur de hauteur pour le mode sélectionné."
 }

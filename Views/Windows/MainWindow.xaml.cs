@@ -1919,8 +1919,8 @@ public partial class MainWindow : Window
     {
         var settings = _preferences.Current;
         var fixedMode = settings.DockWidthMode is DockWidthMode.Pixels or DockWidthMode.Percent;
-        LeftResizeThumb.Visibility = fixedMode || IsEdgeToEdge ? Visibility.Collapsed : Visibility.Visible;
-        RightResizeThumb.Visibility = fixedMode || IsEdgeToEdge ? Visibility.Collapsed : Visibility.Visible;
+        LeftResizeThumb.Visibility = IsVertical || fixedMode || IsEdgeToEdge ? Visibility.Collapsed : Visibility.Visible;
+        RightResizeThumb.Visibility = IsVertical || fixedMode || IsEdgeToEdge ? Visibility.Collapsed : Visibility.Visible;
 
         if (!fixedMode || IsEdgeToEdge)
         {
@@ -1929,11 +1929,13 @@ public partial class MainWindow : Window
         }
 
         var target = DisplayService.GetTargetDisplay(settings.TargetDisplay);
-        var monitorWidth = target.Width > 0 ? target.Width : SystemParameters.WorkArea.Width;
-        var width = settings.DockWidthMode == DockWidthMode.Pixels
+        var monitorExtent = IsVertical
+            ? (target.Height > 0 ? target.Height : SystemParameters.WorkArea.Height)
+            : (target.Width > 0 ? target.Width : SystemParameters.WorkArea.Width);
+        var length = settings.DockWidthMode == DockWidthMode.Pixels
             ? settings.DockWidthPixels
-            : monitorWidth * settings.DockWidthPercent / 100.0;
-        _dockWidthOverride = Math.Max(MinimumDockSurfaceWidth, Math.Min(width, monitorWidth));
+            : monitorExtent * settings.DockWidthPercent / 100.0;
+        _dockWidthOverride = Math.Max(MinimumDockSurfaceWidth, Math.Min(length, monitorExtent));
     }
 
     private void Preferences_Changed(object? sender, EventArgs e)
@@ -2341,6 +2343,8 @@ public partial class MainWindow : Window
             var pairs = new List<(string Token, FrameworkElement Element)>();
             foreach (var token in tokens.Distinct(StringComparer.OrdinalIgnoreCase))
             {
+                // Horizontal widgets are hidden on narrow vertical side docks so they never widen or clip the strip.
+                if (IsVertical && token.StartsWith("widget:", StringComparison.OrdinalIgnoreCase)) continue;
                 if (CreateDockItemElement(token) is { } element) pairs.Add((token, element));
             }
 

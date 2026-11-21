@@ -738,5 +738,9 @@
   "DockBottomGapDescription": "Ruimte onder de dock (0 = gelijk).",
   "DockBottomGapUnit": "Onderste eenheid",
   "DockWidthValue": "Breedte",
-  "DockWidthValueDescription": "Breedtewaarde voor de gekozen modus."
+  "DockWidthValueDescription": "Breedtewaarde voor de gekozen modus.",
+  "DockHeightMode": "Dockhoogte",
+  "DockHeightModeDescription": "Hoe het dock zijn hoogte bepaalt.",
+  "DockHeightValue": "Hoogte",
+  "DockHeightValueDescription": "Hoogtewaarde voor de geselecteerde modus."
 }

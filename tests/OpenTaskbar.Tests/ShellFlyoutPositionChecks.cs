@@ -70,6 +70,49 @@ internal static class ShellFlyoutPositionChecks
             File.Delete(journal + ".tmp");
         }
 
+        // Side-dock Start and Search flyout clamping: top, middle, and bottom anchors on tall side docks
+        // must never place the flyout outside the work area.
+        const int workL = 0, workT = 0, workR = 2560, workB = 1440;
+        const int searchW = 780, searchH = 740;
+        foreach (var edge in new[] { OpenTaskbar.Models.DockEdge.Left, OpenTaskbar.Models.DockEdge.Right })
+        {
+            var anchorL = edge == OpenTaskbar.Models.DockEdge.Left ? 0.0 : 2504.0;
+            var anchorR = edge == OpenTaskbar.Models.DockEdge.Left ? 56.0 : 2560.0;
+            foreach (var anchorY in new[] { 12.0, 700.0, 1380.0 })
+            {
+                var (sx, sy) = ShellShortcuts.ComputeSearchPosition(
+                    searchW, searchH, workL, workT, workR, workB,
+                    anchorL, anchorY, anchorR, anchorY + 44, edge);
+                Check(sx >= workL + 8 && sx + searchW <= workR - 8,
+                    $"Search X must stay inside work area for {edge} at anchorY={anchorY}.");
+                Check(sy >= workT + 8 && sy + searchH <= workB - 8,
+                    $"Search Y must stay inside work area for {edge} at anchorY={anchorY}.");
+
+                var (stx, sty) = ShellShortcuts.ComputeStartMenuPosition(
+                    642, 724, workL, workT, workR, workB,
+                    anchorL, anchorY, anchorR, anchorY + 44, edge, dpiScale: 1.0);
+                Check(stx >= workL + 8 && stx + 642 <= workR - 8,
+                    $"Discrete Start X must stay inside work area for {edge} at anchorY={anchorY}.");
+                Check(sty >= workT + 8 && sty + 724 <= workB - 8,
+                    $"Discrete Start Y must stay inside work area for {edge} at anchorY={anchorY}.");
+
+                // Full-screen canvas Start menu: verify resolved flyout rect stays strictly inside work area.
+                var (cx, cy) = ShellShortcuts.ComputeStartMenuPosition(
+                    2560, 1440, workL, workT, workR, workB,
+                    anchorL, anchorY, anchorR, anchorY + 44, edge, dpiScale: 1.25);
+                var flyW = (int)Math.Round(642 * 1.25);
+                var flyH = (int)Math.Round(724 * 1.25);
+                var localX = (2560 - flyW) / 2;
+                var localY = 1440 - flyH - (int)Math.Round(12 * 1.25);
+                var resolvedX = cx + localX;
+                var resolvedY = cy + localY;
+                Check(resolvedX >= workL + 8 && resolvedX + flyW <= workR - 8,
+                    $"Canvas Start flyout X must stay inside work area for {edge} at anchorY={anchorY}.");
+                Check(resolvedY >= workT + 8 && resolvedY + flyH <= workB - 8,
+                    $"Canvas Start flyout Y must stay inside work area for {edge} at anchorY={anchorY}.");
+            }
+        }
+
         return checks;
     }
 }

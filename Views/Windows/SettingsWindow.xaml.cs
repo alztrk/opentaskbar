@@ -1821,6 +1821,7 @@ public partial class SettingsWindow : Window
     private void SegmentChoice_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_initializing) return;
+        if (ReferenceEquals(sender, EdgeBox)) UpdateDockWidthControls();
         PreferenceEdited(sender, e);
     }
 
@@ -1920,6 +1921,15 @@ public partial class SettingsWindow : Window
 
     private void UpdateDockWidthControls()
     {
+        var vertical = Choice(EdgeBox) is nameof(DockEdge.Left) or nameof(DockEdge.Right);
+        if (DockWidthModeLabel is not null)
+        {
+            DockWidthModeLabel.Text = UiText.Get(vertical ? "DockHeightMode" : "DockWidthMode");
+            DockWidthModeDescription.Text = UiText.Get(vertical ? "DockHeightModeDescription" : "DockWidthModeDescription");
+            DockWidthValueLabel.Text = UiText.Get(vertical ? "DockHeightValue" : "DockWidthValue");
+            DockWidthValueDescription.Text = UiText.Get(vertical ? "DockHeightValueDescription" : "DockWidthValueDescription");
+        }
+
         var mode = Choice(DockWidthModeBox) ?? nameof(DockWidthMode.Auto);
         var fixedMode = mode is nameof(DockWidthMode.Pixels) or nameof(DockWidthMode.Percent);
         DockWidthValueRow.Visibility = fixedMode ? Visibility.Visible : Visibility.Collapsed;
@@ -1929,12 +1939,12 @@ public partial class SettingsWindow : Window
             var isPercent = mode == nameof(DockWidthMode.Percent);
             var value = isPercent ? settings.DockWidthPercent : settings.DockWidthPixels;
             DockWidthSlider.Minimum = isPercent ? 10 : 100;
-            DockWidthSlider.Maximum = isPercent ? 100 : 5000;
+            DockWidthSlider.Maximum = isPercent ? 100 : (vertical ? 3000 : 5000);
             // A 50-step tick over the 10–100 percent range only exposes 10, 60 and 100. Snap to whole percents
             // instead so the user can pick any percentage; pixels keep the coarse 50 px cadence.
             DockWidthSlider.TickFrequency = isPercent ? 1 : 50;
             DockWidthSlider.IsSnapToTickEnabled = true;
-            DockWidthSlider.Value = value;
+            DockWidthSlider.Value = Math.Clamp(value, DockWidthSlider.Minimum, DockWidthSlider.Maximum);
             UpdateDockWidthLabel();
         }
     }

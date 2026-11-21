@@ -738,5 +738,9 @@
   "DockBottomGapDescription": "Odstep pod dokiem (0 = na rowno).",
   "DockBottomGapUnit": "Jednostka dolna",
   "DockWidthValue": "Szerokość",
-  "DockWidthValueDescription": "Wartość szerokości dla wybranego trybu."
+  "DockWidthValueDescription": "Wartość szerokości dla wybranego trybu.",
+  "DockHeightMode": "Wysokość paska",
+  "DockHeightModeDescription": "Jak pasek określa swoją wysokość.",
+  "DockHeightValue": "Wysokość",
+  "DockHeightValueDescription": "Wartość wysokości dla wybranego trybu."
 }

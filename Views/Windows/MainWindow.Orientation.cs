@@ -102,7 +102,10 @@ public partial class MainWindow
 
             DockLayoutRoot.MinWidth = 0;
             DockScrollViewer.MaxWidth = double.PositiveInfinity;
+            DockScrollViewer.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            DockScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;
             DockScrollViewer.ScrollToHorizontalOffset(0);
+            DockScrollViewer.ScrollToVerticalOffset(0);
             ScrollPrevOverlay.Visibility = Visibility.Collapsed;
             ScrollNextOverlay.Visibility = Visibility.Collapsed;
         }
@@ -119,6 +122,10 @@ public partial class MainWindow
             Grid.SetRow(WidgetIsland, 0); Grid.SetColumn(WidgetIsland, 3);
 
             DockLayoutRoot.MinHeight = 0;
+            DockScrollViewer.MaxHeight = double.PositiveInfinity;
+            DockScrollViewer.HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden;
+            DockScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            DockScrollViewer.ScrollToVerticalOffset(0);
         }
 
         DockLeadControls.Orientation = orientation;
@@ -165,7 +172,9 @@ public partial class MainWindow
         }
 
         if (_replacementSession is not null) _replacementSession.Edge = edge;
+        RebuildDockOrder();
         ApplySizeProfile();
+        ApplyDockWidthMode();
         ApplyLayoutMode();
     }
 
@@ -178,27 +187,53 @@ public partial class MainWindow
         else if (_headroomDefinition is ColumnDefinition column) column.Width = headroom;
     }
 
-    /// <summary>Side docks: cells shrink in height when many apps are open; the surface hugs its content.</summary>
+    /// <summary>Side docks: honors Auto/Pixels/Percent/Fill height modes and enables vertical scrolling on overflow.</summary>
     private void ResizeSideDockToContent()
     {
         var available = _dockArea.Height > 0 ? _dockArea.Height : DisplayService.GetTargetDisplay(_preferences.Current.TargetDisplay).Height;
+        var marginV = DockSurface.Margin.Top + DockSurface.Margin.Bottom;
+        var maximumSurfaceHeight = Math.Max(1, available - marginV);
+        var verticalChrome = DockFrame.Padding.Top + DockFrame.Padding.Bottom + 4;
         var shellCount = (StartButtonShown ? 1 : 0)
             + (_preferences.Current.ShowSearchButton ? 1 : 0)
             + (_preferences.Current.ShowTaskViewButton ? 1 : 0)
             + (_preferences.Current.ShowTrayButton ? 1 : 0);
         var count = Math.Max(1, shellCount + VisiblePinnedCount + _runningApps.Count + ExtraButtonCount);
-        var frame = DockFrame.Padding.Top + DockFrame.Padding.Bottom + DockSurface.Margin.Top + DockSurface.Margin.Bottom + 24;
-        Application.Current.Resources["DockCellSize"] = Profile.Cell;
-        Application.Current.Resources["DockCellHeight"] = Math.Min(Profile.Cell,
-            Math.Max(DockMetrics.MinCellSize, (available - frame) / count));
+
         DockSurface.BeginAnimation(WidthProperty, null);
         DockLayoutRoot.MinWidth = 0;
-        DockLayoutRoot.MinHeight = IsFullWidth ? Math.Max(0, available - frame) : 0;
         DockScrollViewer.MaxWidth = double.PositiveInfinity;
         ScrollPrevOverlay.Visibility = Visibility.Collapsed;
         ScrollNextOverlay.Visibility = Visibility.Collapsed;
-        // The surface sizes itself to its content; cells above already shrink so the content fits the screen.
         DockSurface.Width = double.NaN;
+
+        if (IsFullWidth || IsEdgeToEdge)
+        {
+            Application.Current.Resources["DockCellSize"] = Profile.Cell;
+            Application.Current.Resources["DockCellHeight"] = Profile.Cell;
+            DockLayoutRoot.MinHeight = Math.Max(0, maximumSurfaceHeight - verticalChrome);
+            DockScrollViewer.MaxHeight = Math.Max(Profile.Cell, maximumSurfaceHeight - verticalChrome);
+            DockSurface.Height = double.NaN;
+            return;
+        }
+
+        if (_dockWidthOverride is { } fixedHeight)
+        {
+            var targetHeight = Math.Clamp(fixedHeight, Math.Min(MinimumDockSurfaceWidth, maximumSurfaceHeight), maximumSurfaceHeight);
+            Application.Current.Resources["DockCellSize"] = Profile.Cell;
+            Application.Current.Resources["DockCellHeight"] = Profile.Cell;
+            DockLayoutRoot.MinHeight = 0;
+            DockScrollViewer.MaxHeight = Math.Max(Profile.Cell, targetHeight - verticalChrome);
+            DockSurface.Height = targetHeight;
+            return;
+        }
+
+        var frame = verticalChrome + marginV + 24;
+        Application.Current.Resources["DockCellSize"] = Profile.Cell;
+        Application.Current.Resources["DockCellHeight"] = Math.Min(Profile.Cell,
+            Math.Max(DockMetrics.MinCellSize, (available - frame) / count));
+        DockLayoutRoot.MinHeight = 0;
+        DockScrollViewer.MaxHeight = Math.Max(Profile.Cell, maximumSurfaceHeight - verticalChrome);
         DockSurface.Height = double.NaN;
     }
 }

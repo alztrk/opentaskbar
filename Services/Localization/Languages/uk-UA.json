@@ -738,5 +738,9 @@
   "DockBottomGapDescription": "Vidstup pid panelliu (0 = vriven).",
   "DockBottomGapUnit": "Odynytsia znyzu",
   "DockWidthValue": "Ширина",
-  "DockWidthValueDescription": "Значення ширини для обраного режиму."
+  "DockWidthValueDescription": "Значення ширини для обраного режиму.",
+  "DockHeightMode": "Висота панелі",
+  "DockHeightModeDescription": "Як панель визначає свою висоту.",
+  "DockHeightValue": "Висота",
+  "DockHeightValueDescription": "Значення висоти для вибраного режиму."
 }

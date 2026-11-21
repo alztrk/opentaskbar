@@ -738,5 +738,9 @@
   "DockBottomGapDescription": "Espaco abaixo da dock (0 = alinhado).",
   "DockBottomGapUnit": "Unidade inferior",
   "DockWidthValue": "Largura",
-  "DockWidthValueDescription": "Valor da largura para o modo selecionado."
+  "DockWidthValueDescription": "Valor da largura para o modo selecionado.",
+  "DockHeightMode": "Altura da barra",
+  "DockHeightModeDescription": "Como a barra determina sua altura.",
+  "DockHeightValue": "Altura",
+  "DockHeightValueDescription": "Valor de altura para o modo selecionado."
 }

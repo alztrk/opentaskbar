@@ -738,5 +738,9 @@
   "DockBottomGapDescription": "Space below the dock (0 = flush).",
   "DockBottomGapUnit": "Bottom unit",
   "DockWidthValue": "宽度",
-  "DockWidthValueDescription": "所选模式的宽度值。"
+  "DockWidthValueDescription": "所选模式的宽度值。",
+  "DockHeightMode": "任务栏高度",
+  "DockHeightModeDescription": "任务栏确定高度的方式。",
+  "DockHeightValue": "高度",
+  "DockHeightValueDescription": "所选模式的高度值。"
 }

@@ -63,9 +63,10 @@ public sealed class DockScrollViewer : ScrollViewer
     public bool ScrollByWheel(int delta, ModifierKeys modifiers, bool animate = false)
     {
         if (delta == 0) return false;
-        // When only the horizontal axis overflows (e.g. too many dock items), a plain wheel scrolls it.
+        // When only one axis overflows (horizontal bottom dock or vertical side dock), a plain wheel scrolls it.
         var horizontalOnly = ScrollableHeight <= 0 && ScrollableWidth > 0;
-        if (!horizontalOnly && (modifiers & (ModifierKeys.Shift | ModifierKeys.Control)) == 0) return false;
+        var verticalOnly = ScrollableWidth <= 0 && ScrollableHeight > 0;
+        if (!horizontalOnly && !verticalOnly && (modifiers & (ModifierKeys.Shift | ModifierKeys.Control)) == 0) return false;
         var cellSize = TryFindResource("DockCellSize") as double? ?? 52d;
         var multiplier = animate ? 2.0 : 1.0;
         var distance = delta / (double)Mouse.MouseWheelDeltaForOneLine * cellSize * multiplier;

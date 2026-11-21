@@ -738,5 +738,9 @@
   "DockBottomGapDescription": "Abstand unter dem Dock (0 = buendig).",
   "DockBottomGapUnit": "Untere Einheit",
   "DockWidthValue": "Breite",
-  "DockWidthValueDescription": "Breitenwert für den gewählten Modus."
+  "DockWidthValueDescription": "Breitenwert für den gewählten Modus.",
+  "DockHeightMode": "Dock-Höhe",
+  "DockHeightModeDescription": "Wie das Dock seine Höhe bestimmt.",
+  "DockHeightValue": "Höhe",
+  "DockHeightValueDescription": "Höhenwert für den ausgewählten Modus."
 }

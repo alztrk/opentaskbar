@@ -738,5 +738,9 @@
   "DockBottomGapDescription": "Otstup pod panel-yu (0 = vroven).",
   "DockBottomGapUnit": "Edinitsa snizu",
   "DockWidthValue": "Ширина",
-  "DockWidthValueDescription": "Значение ширины для выбранного режима."
+  "DockWidthValueDescription": "Значение ширины для выбранного режима.",
+  "DockHeightMode": "Высота панели",
+  "DockHeightModeDescription": "Как панель определяет свою высоту.",
+  "DockHeightValue": "Высота",
+  "DockHeightValueDescription": "Значение высоты для выбранного режима."
 }
