@@ -9,6 +9,7 @@ namespace OpenTaskbar;
 public partial class MainWindow
 {
     private DockEdge? _appliedEdge;
+    private DefinitionBase? _headroomDefinition;
 
     private DockEdge Edge => _preferences.Current.Edge;
 
@@ -41,22 +42,25 @@ public partial class MainWindow
         // Window grid: headroom row above the shelf, or a headroom column beside it.
         DockHost.RowDefinitions.Clear();
         DockHost.ColumnDefinitions.Clear();
-        var headroom = new GridLength(DockMetrics.Headroom);
+        var headroom = new GridLength(EffectiveHeadroom);
         var shelf = new GridLength(1, GridUnitType.Star);
         var shelfIndex = 1;
         switch (edge)
         {
             case DockEdge.Left:
                 DockHost.ColumnDefinitions.Add(new ColumnDefinition { Width = shelf });
-                DockHost.ColumnDefinitions.Add(new ColumnDefinition { Width = headroom });
+                _headroomDefinition = new ColumnDefinition { Width = headroom };
+                DockHost.ColumnDefinitions.Add((ColumnDefinition)_headroomDefinition);
                 shelfIndex = 0;
                 break;
             case DockEdge.Right:
-                DockHost.ColumnDefinitions.Add(new ColumnDefinition { Width = headroom });
+                _headroomDefinition = new ColumnDefinition { Width = headroom };
+                DockHost.ColumnDefinitions.Add((ColumnDefinition)_headroomDefinition);
                 DockHost.ColumnDefinitions.Add(new ColumnDefinition { Width = shelf });
                 break;
             default:
-                DockHost.RowDefinitions.Add(new RowDefinition { Height = headroom });
+                _headroomDefinition = new RowDefinition { Height = headroom };
+                DockHost.RowDefinitions.Add((RowDefinition)_headroomDefinition);
                 DockHost.RowDefinitions.Add(new RowDefinition { Height = shelf });
                 break;
         }
@@ -78,6 +82,61 @@ public partial class MainWindow
         DockEdgeTrigger.Height = vertical ? double.NaN : DockMetrics.EdgeTriggerHeight;
 
         var orientation = vertical ? Orientation.Vertical : Orientation.Horizontal;
+
+        // Flip the outer layout grid between 4 horizontal columns (Bottom) and 4 vertical rows (Left/Right)
+        // so lead shell controls, apps, and trailing controls stack into a single vertical strip.
+        DockLayoutRoot.RowDefinitions.Clear();
+        DockLayoutRoot.ColumnDefinitions.Clear();
+        if (vertical)
+        {
+            DockLayoutRoot.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            DockLayoutRoot.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            DockLayoutRoot.RowDefinitions.Add(new RowDefinition { Height = IsFullWidth ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
+            DockLayoutRoot.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            DockLayoutRoot.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+
+            Grid.SetRow(DockLeadControls, 0); Grid.SetColumn(DockLeadControls, 0);
+            Grid.SetRow(DockScrollViewer, 1); Grid.SetColumn(DockScrollViewer, 0);
+            Grid.SetRow(DockTrailControls, 2); Grid.SetColumn(DockTrailControls, 0);
+            Grid.SetRow(WidgetIsland, 3); Grid.SetColumn(WidgetIsland, 0);
+
+            DockLayoutRoot.MinWidth = 0;
+            DockScrollViewer.MaxWidth = double.PositiveInfinity;
+            DockScrollViewer.ScrollToHorizontalOffset(0);
+            ScrollPrevOverlay.Visibility = Visibility.Collapsed;
+            ScrollNextOverlay.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            DockLayoutRoot.ColumnDefinitions.Add(LeadColumn);
+            DockLayoutRoot.ColumnDefinitions.Add(AppsColumn);
+            DockLayoutRoot.ColumnDefinitions.Add(TrailColumn);
+            DockLayoutRoot.ColumnDefinitions.Add(WidgetColumn);
+
+            Grid.SetRow(DockLeadControls, 0); Grid.SetColumn(DockLeadControls, 0);
+            Grid.SetRow(DockScrollViewer, 0); Grid.SetColumn(DockScrollViewer, 1);
+            Grid.SetRow(DockTrailControls, 0); Grid.SetColumn(DockTrailControls, 2);
+            Grid.SetRow(WidgetIsland, 0); Grid.SetColumn(WidgetIsland, 3);
+
+            DockLayoutRoot.MinHeight = 0;
+        }
+
+        DockLeadControls.Orientation = orientation;
+        DockLeadControls.HorizontalAlignment = vertical ? HorizontalAlignment.Center : HorizontalAlignment.Left;
+        DockLeadControls.VerticalAlignment = vertical ? VerticalAlignment.Top : VerticalAlignment.Center;
+        DockLeadControls.Margin = vertical ? new Thickness(0, 3, 0, 0) : new Thickness(3, 0, 0, 0);
+
+        DockTrailControls.Orientation = orientation;
+        DockTrailControls.HorizontalAlignment = vertical ? HorizontalAlignment.Center : HorizontalAlignment.Left;
+        DockTrailControls.VerticalAlignment = vertical ? VerticalAlignment.Bottom : VerticalAlignment.Center;
+        DockTrailControls.Margin = vertical ? new Thickness(0, 0, 0, 3) : new Thickness(0, 0, 3, 0);
+
+        ShowDesktopButton.Width = vertical ? double.NaN : 6;
+        ShowDesktopButton.Height = vertical ? 6 : double.NaN;
+        ShowDesktopButton.HorizontalAlignment = vertical ? HorizontalAlignment.Stretch : HorizontalAlignment.Center;
+        ShowDesktopButton.VerticalAlignment = vertical ? VerticalAlignment.Center : VerticalAlignment.Stretch;
+        ShowDesktopButton.Margin = vertical ? new Thickness(0, 3, 0, 0) : new Thickness(3, 0, 0, 0);
+
         DockContents.Orientation = orientation;
         DockContents.HorizontalAlignment = vertical ? HorizontalAlignment.Center : HorizontalAlignment.Left;
         DockContents.VerticalAlignment = vertical ? VerticalAlignment.Top : VerticalAlignment.Center;
@@ -110,15 +169,34 @@ public partial class MainWindow
         ApplyLayoutMode();
     }
 
+    /// <summary>Updates the headroom row/column in place when the external top gap setting changes.</summary>
+    private void ApplyHeadroom()
+    {
+        if (_headroomDefinition is null) return;
+        var headroom = new GridLength(EffectiveHeadroom);
+        if (_headroomDefinition is RowDefinition row) row.Height = headroom;
+        else if (_headroomDefinition is ColumnDefinition column) column.Width = headroom;
+    }
+
     /// <summary>Side docks: cells shrink in height when many apps are open; the surface hugs its content.</summary>
     private void ResizeSideDockToContent()
     {
         var available = _dockArea.Height > 0 ? _dockArea.Height : DisplayService.GetTargetDisplay(_preferences.Current.TargetDisplay).Height;
-        var count = Math.Max(1, (StartButtonShown ? 1 : 0) + VisiblePinnedCount + _runningApps.Count + ExtraButtonCount);
+        var shellCount = (StartButtonShown ? 1 : 0)
+            + (_preferences.Current.ShowSearchButton ? 1 : 0)
+            + (_preferences.Current.ShowTaskViewButton ? 1 : 0)
+            + (_preferences.Current.ShowTrayButton ? 1 : 0);
+        var count = Math.Max(1, shellCount + VisiblePinnedCount + _runningApps.Count + ExtraButtonCount);
         var frame = DockFrame.Padding.Top + DockFrame.Padding.Bottom + DockSurface.Margin.Top + DockSurface.Margin.Bottom + 24;
         Application.Current.Resources["DockCellSize"] = Profile.Cell;
         Application.Current.Resources["DockCellHeight"] = Math.Min(Profile.Cell,
             Math.Max(DockMetrics.MinCellSize, (available - frame) / count));
+        DockSurface.BeginAnimation(WidthProperty, null);
+        DockLayoutRoot.MinWidth = 0;
+        DockLayoutRoot.MinHeight = IsFullWidth ? Math.Max(0, available - frame) : 0;
+        DockScrollViewer.MaxWidth = double.PositiveInfinity;
+        ScrollPrevOverlay.Visibility = Visibility.Collapsed;
+        ScrollNextOverlay.Visibility = Visibility.Collapsed;
         // The surface sizes itself to its content; cells above already shrink so the content fits the screen.
         DockSurface.Width = double.NaN;
         DockSurface.Height = double.NaN;

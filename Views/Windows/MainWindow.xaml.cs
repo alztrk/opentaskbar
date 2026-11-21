@@ -1954,6 +1954,7 @@ public partial class MainWindow : Window
         RebuildDockOrder();
         ApplyExtrasSettings();
         ApplyFeatureSettings();
+        ApplyHeadroom();
         ApplySizeProfile();
         ApplyLayoutMode();
         ApplyDockWidthMode();
@@ -2545,12 +2546,49 @@ public partial class MainWindow : Window
 
     private void ApplyLayoutMode()
     {
-        AppsColumn.Width = IsFullWidth ? GridLength.Auto : new GridLength(1, GridUnitType.Star);
-        WidgetColumn.Width = IsFullWidth ? new GridLength(1, GridUnitType.Star) : GridLength.Auto;
-        WidgetIsland.HorizontalAlignment = IsFullWidth ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+        if (IsVertical)
+        {
+            if (DockLayoutRoot.RowDefinitions.Count > 1)
+                DockLayoutRoot.RowDefinitions[1].Height = IsFullWidth ? new GridLength(1, GridUnitType.Star) : GridLength.Auto;
+        }
+        else
+        {
+            AppsColumn.Width = IsFullWidth ? GridLength.Auto : new GridLength(1, GridUnitType.Star);
+            WidgetColumn.Width = IsFullWidth ? new GridLength(1, GridUnitType.Star) : GridLength.Auto;
+            WidgetIsland.HorizontalAlignment = IsFullWidth ? HorizontalAlignment.Right : HorizontalAlignment.Left;
+        }
         ApplyDockMargin();
         ApplyDockAlignment();
         ResizeDockToContent();
+    }
+
+    /// <summary>Headroom above the dock surface: the user's external top gap (zero sits flush).</summary>
+    private double EffectiveHeadroom => ExternalTopGap;
+
+    /// <summary>External spacing above the visible bar, resolved from the user's pixels/percent preference.</summary>
+    private double ExternalTopGap
+    {
+        get
+        {
+            var settings = _preferences.Current;
+            var target = DisplayService.GetTargetDisplay(settings.TargetDisplay);
+            var extent = IsVertical ? target.Height : target.Width;
+            if (extent <= 0) extent = IsVertical ? SystemParameters.WorkArea.Height : SystemParameters.WorkArea.Width;
+            return DockMetrics.ResolveGap(settings.DockTopGapUnit, settings.DockTopGapPixels, settings.DockTopGapPercent, extent);
+        }
+    }
+
+    /// <summary>External spacing below the visible bar, resolved from the user's pixels/percent preference.</summary>
+    private double ExternalBottomGap
+    {
+        get
+        {
+            var settings = _preferences.Current;
+            var target = DisplayService.GetTargetDisplay(settings.TargetDisplay);
+            var extent = IsVertical ? target.Height : target.Width;
+            if (extent <= 0) extent = IsVertical ? SystemParameters.WorkArea.Height : SystemParameters.WorkArea.Width;
+            return DockMetrics.ResolveGap(settings.DockBottomGapUnit, settings.DockBottomGapPixels, settings.DockBottomGapPercent, extent);
+        }
     }
 
     private void ApplyDockMargin()
@@ -2558,12 +2596,13 @@ public partial class MainWindow : Window
         // Edge-to-edge fill removes the side gaps entirely (Windows-style full-width taskbar); regular full-width
         // keeps its small inset so the rounded surface does not clip against the screen edge.
         var side = IsEdgeToEdge ? 0 : IsFullWidth ? DockMetrics.FullWidthSideInset : DockMetrics.SideInset;
-        var bottomGap = Profile.BottomGap;
+        var bottomGap = ExternalBottomGap;
+        // The headroom row/column already supplies the external top gap; the surface only needs its bottom spacing.
         DockSurface.Margin = Edge switch
         {
-            DockEdge.Left => new Thickness(bottomGap, side, _dockTopGap, side),
-            DockEdge.Right => new Thickness(_dockTopGap, side, bottomGap, side),
-            _ => new Thickness(side, _dockTopGap, side, bottomGap)
+            DockEdge.Left => new Thickness(bottomGap, side, 0, side),
+            DockEdge.Right => new Thickness(0, side, bottomGap, side),
+            _ => new Thickness(side, 0, side, bottomGap)
         };
     }
 
@@ -2636,6 +2675,10 @@ public partial class MainWindow : Window
         if (_replacementSession is not null)
         {
             _replacementSession.ShelfHeight = profile.Shelf;
+        }
+        else if (IsVertical)
+        {
+            Width = EffectiveHeadroom + profile.Shelf;
         }
         else
         {
