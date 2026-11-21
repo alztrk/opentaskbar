@@ -579,11 +579,12 @@ public sealed class DockScrollViewer : ScrollViewer
         switch (viewer.DockEdge)
         {
             case OpenTaskbar.Models.DockEdge.Left:
-                viewer.SetCurrentValue(MarginProperty, new Thickness(inset.Left, inset.Top, inset.Right - headroom, inset.Bottom));
+                // Side docks do not use horizontal ContentInset; keep left and right padding symmetric.
+                viewer.SetCurrentValue(MarginProperty, new Thickness(0, 0, -headroom, 0));
                 viewer.SetCurrentValue(PaddingProperty, new Thickness(0, 0, headroom, 0));
                 break;
             case OpenTaskbar.Models.DockEdge.Right:
-                viewer.SetCurrentValue(MarginProperty, new Thickness(inset.Left - headroom, inset.Top, inset.Right, inset.Bottom));
+                viewer.SetCurrentValue(MarginProperty, new Thickness(-headroom, 0, 0, 0));
                 viewer.SetCurrentValue(PaddingProperty, new Thickness(headroom, 0, 0, 0));
                 break;
             default:

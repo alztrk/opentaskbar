@@ -133,7 +133,7 @@ public sealed class TaskbarReplacementSession : IDisposable
     {
         var timer = new DispatcherTimer(DispatcherPriority.Background, _window.Dispatcher)
         {
-            Interval = TimeSpan.FromMilliseconds(260)
+            Interval = TimeSpan.FromMilliseconds(120)
         };
         timer.Tick += (_, _) =>
         {
@@ -682,7 +682,7 @@ public sealed class TaskbarReplacementSession : IDisposable
     private void PositionSideDock(Rect monitor, Rect workArea, uint dpi)
     {
         var thickness = Math.Max(1, (int)Math.Round(ShelfHeight * dpi / 96d));
-        var headroom = (int)Math.Round(HeadroomHeight * dpi / 96d);
+        var headroom = (int)Math.Round(Math.Max(DockMetrics.Headroom, HeadroomHeight) * dpi / 96d);
         var total = thickness + headroom;
         var height = monitor.Bottom - monitor.Top;
         var edge = _edge == Models.DockEdge.Left ? AbeLeft : AbeRight;

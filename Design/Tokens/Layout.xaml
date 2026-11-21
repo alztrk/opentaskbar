@@ -38,4 +38,5 @@
     <HorizontalAlignment x:Key="DockIndicatorHorizontalAlignment">Center</HorizontalAlignment>
     <VerticalAlignment x:Key="DockIndicatorVerticalAlignment">Bottom</VerticalAlignment>
     <Thickness x:Key="DockIndicatorMargin">0,0,0,1</Thickness>
+    <GridLength x:Key="DockIndicatorRowHeight">6</GridLength>
 </ResourceDictionary>

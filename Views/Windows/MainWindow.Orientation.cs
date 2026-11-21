@@ -15,9 +15,9 @@ public partial class MainWindow
 
     private bool IsVertical => Edge != DockEdge.Bottom;
 
-    /// <summary>Icons grow from the edge opposite the screen edge, so magnification lifts them away from it.</summary>
+    /// <summary>Scale around icon center on side docks (lift handles edge clearance) and bottom-center on bottom dock.</summary>
     private Point IconScaleOrigin => IsVertical
-        ? new Point(Edge == DockEdge.Left ? 0.0 : 1.0, 0.5)
+        ? new Point(0.5, 0.5)
         : new Point(0.5, 1.0);
 
     /// <summary>Launch bounce runs away from the edge: up for the bottom dock, sideways for side docks.</summary>
@@ -47,6 +47,9 @@ public partial class MainWindow
             DockEdge.Right => new Thickness(0, 0, 2, 0),
             _ => new Thickness(0, 0, 0, 1)
         };
+        Application.Current.Resources["DockIndicatorRowHeight"] = vertical
+            ? new GridLength(0)
+            : new GridLength(6);
         if (_autoHideController is not null)
         {
             _autoHideController.Edge = edge;
@@ -188,9 +191,11 @@ public partial class MainWindow
             if (GetButtonIcon(button) is { } icon) icon.RenderTransformOrigin = IconScaleOrigin;
         }
 
-        if (_replacementSession is not null) _replacementSession.Edge = edge;
         RebuildDockOrder();
+        // Apply size profile BEFORE switching _replacementSession.Edge so the first AppBar reservation
+        // immediately claims the full vertical shelf width instead of the stale horizontal height.
         ApplySizeProfile();
+        if (_replacementSession is not null) _replacementSession.Edge = edge;
         ApplyDockWidthMode();
         ApplyLayoutMode();
     }
