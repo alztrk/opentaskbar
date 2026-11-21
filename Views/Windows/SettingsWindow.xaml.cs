@@ -46,7 +46,7 @@ public partial class SettingsWindow : Window
     private readonly RoutedEventHandler _preferenceEditedHandler;
     private readonly Dictionary<SurfaceKind, Slider> _surfaceSliders = [];
     private readonly Dictionary<SurfaceKind, TextBlock> _surfaceValues = [];
-    private readonly Dictionary<SurfaceKind, RadioButton[]> _surfaceModes = [];
+    private readonly Dictionary<SurfaceKind, ComboBox> _surfaceBoxes = [];
 
     internal bool IsClosingOrClosed => _isClosing || _closed;
 
@@ -61,10 +61,10 @@ public partial class SettingsWindow : Window
         TitleVersionText.Text = versionString;
         AppVersionText.Text = versionString;
         ScopeRadioGroups(this);
-        RegisterSurface(SurfaceKind.Dock, DockOpacitySlider, DockOpacityValue, DockGlass, DockSolid, DockNone);
-        RegisterSurface(SurfaceKind.Menu, MenuOpacitySlider, MenuOpacityValue, MenuGlass, MenuSolid, MenuNone);
-        RegisterSurface(SurfaceKind.Widget, WidgetOpacitySlider, WidgetOpacityValue, WidgetGlass, WidgetSolid, WidgetNone);
-        RegisterSurface(SurfaceKind.Settings, SettingsOpacitySlider, SettingsOpacityValue, SettingsGlass, SettingsSolid, SettingsNone);
+        RegisterSurface(SurfaceKind.Dock, DockOpacitySlider, DockOpacityValue, DockSurfaceBox);
+        RegisterSurface(SurfaceKind.Menu, MenuOpacitySlider, MenuOpacityValue, MenuSurfaceBox);
+        RegisterSurface(SurfaceKind.Widget, WidgetOpacitySlider, WidgetOpacityValue, WidgetSurfaceBox);
+        RegisterSurface(SurfaceKind.Settings, SettingsOpacitySlider, SettingsOpacityValue, SettingsSurfaceBox);
         foreach (var option in _widgetPreviewService.CreateOptions(_applied.InstalledWidgets, _applied.Widgets))
         {
             _widgetOptions.Add(option);
@@ -110,23 +110,17 @@ public partial class SettingsWindow : Window
             (Application.Current.MainWindow as MainWindow)?.SetSizePreview(null, null);
             (Application.Current.MainWindow as MainWindow)?.SetGeometryPreview(null);
         };
-        DarkTheme.IsChecked = _applied.Theme == AppTheme.Dark;
-        SystemTheme.IsChecked = _applied.Theme == AppTheme.System;
-        LightTheme.IsChecked = _applied.Theme == AppTheme.Light;
+        SelectChoice(ThemeBox, _applied.Theme.ToString());
         LanguageBox.ItemsSource = UiText.Languages;
         SelectLanguage(_applied.Language);
         SelectAlignment(_applied);
         AnimationsToggle.IsChecked = _applied.AnimationsEnabled;
         PreviewsToggle.IsChecked = _applied.PreviewsEnabled;
         BadgesToggle.IsChecked = _applied.NotificationBadgesEnabled;
-        AutoHideDisabled.IsChecked = _applied.AutoHide == AutoHideMode.Disabled;
-        AutoHideSmart.IsChecked = _applied.AutoHide == AutoHideMode.Smart;
-        AutoHideAlways.IsChecked = _applied.AutoHide == AutoHideMode.Always;
+        SelectChoice(AutoHideBox, _applied.AutoHide.ToString());
         LoadSurfaceStyles(_applied);
         MagnificationToggle.IsChecked = _applied.MagnificationEnabled;
-        CompactSize.IsChecked = _applied.Size == DockSize.Compact;
-        MediumSize.IsChecked = _applied.Size == DockSize.Medium;
-        LargeSize.IsChecked = _applied.Size == DockSize.Large;
+        SelectChoice(SizeBox, _applied.Size.ToString());
         DockScaleSlider.Value = Math.Round(_applied.DockScale * 100);
         UpdateDockScaleLabel();
         var initialProfile = DockMetrics.For(_applied.Size, _applied.DockScale);
@@ -158,10 +152,23 @@ public partial class SettingsWindow : Window
         Width = Math.Min(Width, workArea.Width);
         AddHandler(ToggleButton.CheckedEvent, _preferenceEditedHandler);
         AddHandler(ToggleButton.UncheckedEvent, _preferenceEditedHandler);
-        DensityAuto.Checked += (_, _) => TriggerAutoSave(immediate: true);
-        DensityCompact.Checked += (_, _) => TriggerAutoSave(immediate: true);
-        DensityFull.Checked += (_, _) => TriggerAutoSave(immediate: true);
         _initializing = false;
+    }
+
+    // Segment controls are now ComboBoxes whose items carry the enum name in Tag. These helpers keep the
+    // read/write sites terse and avoid sprinkling SelectedItem casts across initialization and save paths.
+    private static string? Choice(ComboBox box) =>
+        (box.SelectedItem as ComboBoxItem)?.Tag as string;
+
+    private static void SelectChoice(ComboBox box, string? tag)
+    {
+        foreach (var item in box.Items.OfType<ComboBoxItem>())
+            if (string.Equals(item.Tag as string, tag, StringComparison.Ordinal))
+            {
+                box.SelectedItem = item;
+                return;
+            }
+        box.SelectedIndex = -1;
     }
 
     // Scope RadioButton.GroupName per window instance so closing one SettingsWindow cannot uncheck
@@ -323,17 +330,16 @@ public partial class SettingsWindow : Window
         bool IsEnabled(string id) => enabledWidgets.Contains(id, StringComparer.OrdinalIgnoreCase);
         return _preferences.Current with
         {
-            Theme = SystemTheme.IsChecked == true ? AppTheme.System : LightTheme.IsChecked == true ? AppTheme.Light : AppTheme.Dark,
+            Theme = Enum.TryParse<AppTheme>(Choice(ThemeBox), out var theme) ? theme : AppTheme.Dark,
             Language = LanguageBox.SelectedItem is AppLanguage language ? language : _preferences.Current.Language,
             // Full width keeps the last floating alignment so switching back restores it.
-            Position = RightPosition.IsChecked == true ? DockPosition.Right : LeftPosition.IsChecked == true ? DockPosition.Left
-                : CenterPosition.IsChecked == true ? DockPosition.Center : _preferences.Current.Position,
+            Position = Choice(PositionBox) is { } alignment && alignment != "FullWidth" && Enum.TryParse<DockPosition>(alignment, out var position)
+                ? position : _preferences.Current.Position,
             AnimationsEnabled = AnimationsToggle.IsChecked == true,
             PreviewsEnabled = PreviewsToggle.IsChecked == true,
             NotificationBadgesEnabled = BadgesToggle.IsChecked == true,
-            AutoHide = AutoHideAlways.IsChecked == true ? AutoHideMode.Always : AutoHideSmart.IsChecked == true ? AutoHideMode.Smart : AutoHideMode.Disabled,
-            GlobalWidgetDensity = DensityCompact.IsChecked == true ? WidgetDensityMode.Compact
-                : DensityFull.IsChecked == true ? WidgetDensityMode.Full : WidgetDensityMode.Auto,
+            AutoHide = Enum.TryParse<AutoHideMode>(Choice(AutoHideBox), out var autoHide) ? autoHide : AutoHideMode.Disabled,
+            GlobalWidgetDensity = Enum.TryParse<WidgetDensityMode>(Choice(DensityBox), out var density) ? density : WidgetDensityMode.Auto,
             WidgetDensityOverrides = ReadWidgetDensityOverrides(),
             DockBackground = SurfaceBackgroundOf(SurfaceKind.Dock),
             DockOpacity = Math.Round(_surfaceSliders[SurfaceKind.Dock].Value) / 100,
@@ -346,8 +352,8 @@ public partial class SettingsWindow : Window
             Widgets = enabledWidgets,
             InstalledWidgets = installedWidgets,
             MagnificationEnabled = MagnificationToggle.IsChecked == true,
-            Layout = FullWidthLayout.IsChecked == true ? DockLayout.FullWidth : DockLayout.Floating,
-            Size = LargeSize.IsChecked == true ? DockSize.Large : MediumSize.IsChecked == true ? DockSize.Medium : DockSize.Compact,
+            Layout = Choice(PositionBox) == "FullWidth" ? DockLayout.FullWidth : DockLayout.Floating,
+            Size = Enum.TryParse<DockSize>(Choice(SizeBox), out var size) ? size : DockSize.Compact,
             DockScale = Math.Round(DockScaleSlider.Value) / 100,
             DockCornerRadius = (int)Math.Round(CornerRadiusSlider.Value),
             ShowClock = IsEnabled("Clock"),
@@ -370,24 +376,19 @@ public partial class SettingsWindow : Window
             SecondaryWidgets = SecondaryWidgetsToggle.IsChecked == true,
             CurrentDesktopOnly = CurrentDesktopToggle.IsChecked == true,
             CheckUpdates = UpdatesToggle.IsChecked == true,
-            Edge = LeftEdge.IsChecked == true ? DockEdge.Left : RightEdge.IsChecked == true ? DockEdge.Right : DockEdge.Bottom,
+            Edge = Enum.TryParse<DockEdge>(Choice(EdgeBox), out var edge) ? edge : DockEdge.Bottom,
             ShowWeather = IsEnabled("Weather"),
             WeatherCity = WeatherCityBox.Text.Trim(),
             LauncherHotkey = _preferences.Current.LauncherHotkey,
-            DockHotkey = DockCtrlAltD.IsChecked == true ? HotkeyChoice.CtrlAltD : HotkeyChoice.Disabled,
+            DockHotkey = Choice(HotkeyBox) == "CtrlAltD" ? HotkeyChoice.CtrlAltD : HotkeyChoice.Disabled,
             StartAction = StartButtonAction.WindowsStart,
-            StartPlacement = StartHidden.IsChecked == true ? StartButtonPlacement.Hidden
-                : StartLast.IsChecked == true ? StartButtonPlacement.End
-                : StartFirst.IsChecked == true ? StartButtonPlacement.Start
-                : _preferences.Current.StartPlacement,
+            StartPlacement = Enum.TryParse<StartButtonPlacement>(Choice(StartPlacementBox), out var placement)
+                ? placement : _preferences.Current.StartPlacement,
             StartWidgetIndex = _preferences.Current.StartWidgetIndex,
             WheelVolume = WheelVolumeToggle.IsChecked == true,
-            Clock24Hour = Clock12HourRadio.IsChecked != true,
+            Clock24Hour = Choice(ClockFormatBox) != "12",
             ClockShowSeconds = ClockSecondsToggle.IsChecked == true,
-            DateStyle = DateStyleHidden.IsChecked == true ? ClockDateStyle.Hidden
-                : DateStyleNumeric.IsChecked == true ? ClockDateStyle.NumericDate
-                : DateStyleShort.IsChecked == true ? ClockDateStyle.ShortDateOnly
-                : ClockDateStyle.DayAndShortDate,
+            DateStyle = Enum.TryParse<ClockDateStyle>(Choice(DateStyleBox), out var dateStyle) ? dateStyle : ClockDateStyle.DayAndShortDate,
             StatsMeters = ReadStatsMeters(),
             AiUsageRing = _aiUsageRing,
             ThemePack = _selectedThemePackId,
@@ -950,16 +951,10 @@ public partial class SettingsWindow : Window
             }
             else
             {
-                // No honest static frame is available; don't invent sample data or start services.
+                // Use the real DockWidgetItem tile (app's own widget template) with its
+                // built-in sample value. No services are started and nothing is installed.
                 native?.Dispose();
-                option.NativePreview = new TextBlock
-                {
-                    Text = UiText.Get("WidgetPreviewUnavailable"),
-                    Foreground = TryFindResource("TextSecondary") as System.Windows.Media.Brush,
-                    FontSize = 12,
-                    TextWrapping = TextWrapping.Wrap,
-                    MaxWidth = 260
-                };
+                option.NativePreview = option.Preview;
             }
         }
         UpdateWidgetOptionState();
@@ -996,11 +991,7 @@ public partial class SettingsWindow : Window
 
     private void SelectAlignment(DockSettings settings)
     {
-        var fullWidth = settings.Layout == DockLayout.FullWidth;
-        FullWidthLayout.IsChecked = fullWidth;
-        LeftPosition.IsChecked = !fullWidth && settings.Position == DockPosition.Left;
-        CenterPosition.IsChecked = !fullWidth && settings.Position == DockPosition.Center;
-        RightPosition.IsChecked = !fullWidth && settings.Position == DockPosition.Right;
+        SelectChoice(PositionBox, settings.Layout == DockLayout.FullWidth ? "FullWidth" : settings.Position.ToString());
     }
 
     private static void OpenActions(object sender)
@@ -1023,9 +1014,7 @@ public partial class SettingsWindow : Window
         TaskViewButtonToggle.IsChecked = settings.ShowTaskViewButton;
         TrayButtonToggle.IsChecked = settings.ShowTrayButton;
         ShowDesktopButtonToggle.IsChecked = settings.ShowDesktopButton;
-        DensityAuto.IsChecked = settings.GlobalWidgetDensity == WidgetDensityMode.Auto;
-        DensityCompact.IsChecked = settings.GlobalWidgetDensity == WidgetDensityMode.Compact;
-        DensityFull.IsChecked = settings.GlobalWidgetDensity == WidgetDensityMode.Full;
+        SelectChoice(DensityBox, settings.GlobalWidgetDensity.ToString());
         foreach (var (id, combo) in _widgetDensityBoxes)
         {
             var tag = settings.WidgetDensityOverrides is not null
@@ -1041,16 +1030,10 @@ public partial class SettingsWindow : Window
         UpdateMultiMonitorControls();
         CurrentDesktopToggle.IsChecked = settings.CurrentDesktopOnly;
         UpdatesToggle.IsChecked = settings.CheckUpdates;
-        BottomEdge.IsChecked = settings.Edge == DockEdge.Bottom;
-        LeftEdge.IsChecked = settings.Edge == DockEdge.Left;
-        RightEdge.IsChecked = settings.Edge == DockEdge.Right;
-        Clock24HourRadio.IsChecked = settings.Clock24Hour;
-        Clock12HourRadio.IsChecked = !settings.Clock24Hour;
+        SelectChoice(EdgeBox, settings.Edge.ToString());
+        SelectChoice(ClockFormatBox, settings.Clock24Hour ? "24" : "12");
         ClockSecondsToggle.IsChecked = settings.ClockShowSeconds;
-        DateStyleDayShort.IsChecked = settings.DateStyle == ClockDateStyle.DayAndShortDate;
-        DateStyleShort.IsChecked = settings.DateStyle == ClockDateStyle.ShortDateOnly;
-        DateStyleNumeric.IsChecked = settings.DateStyle == ClockDateStyle.NumericDate;
-        DateStyleHidden.IsChecked = settings.DateStyle == ClockDateStyle.Hidden;
+        SelectChoice(DateStyleBox, settings.DateStyle.ToString());
         WeatherCityBox.Text = settings.WeatherCity;
         _aiUsageRing = settings.AiUsageRing;
         foreach (var combo in _aiRingBoxes)
@@ -1071,11 +1054,8 @@ public partial class SettingsWindow : Window
         StatsGpuToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Gpu);
         StatsGpuTemperatureToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.GpuTemperature);
         // WinAltD is retired: existing selections fall back to the equivalent Ctrl+Alt+D.
-        DockCtrlAltD.IsChecked = settings.DockHotkey is HotkeyChoice.CtrlAltD or HotkeyChoice.WinAltD;
-        DockOff.IsChecked = settings.DockHotkey is not (HotkeyChoice.CtrlAltD or HotkeyChoice.WinAltD);
-        StartFirst.IsChecked = settings.StartPlacement == StartButtonPlacement.Start;
-        StartLast.IsChecked = settings.StartPlacement == StartButtonPlacement.End;
-        StartHidden.IsChecked = settings.StartPlacement == StartButtonPlacement.Hidden;
+        SelectChoice(HotkeyBox, settings.DockHotkey is HotkeyChoice.CtrlAltD or HotkeyChoice.WinAltD ? "CtrlAltD" : "Disabled");
+        SelectChoice(StartPlacementBox, settings.StartPlacement.ToString());
         WheelVolumeToggle.IsChecked = settings.WheelVolume;
         _ = InitializeWeatherLocationsAsync(settings.WeatherCity);
     }
@@ -1354,22 +1334,16 @@ public partial class SettingsWindow : Window
 
     private void LoadAllSelections(DockSettings settings)
     {
-        DarkTheme.IsChecked = settings.Theme == AppTheme.Dark;
-        SystemTheme.IsChecked = settings.Theme == AppTheme.System;
-        LightTheme.IsChecked = settings.Theme == AppTheme.Light;
+        SelectChoice(ThemeBox, settings.Theme.ToString());
         SelectLanguage(settings.Language);
         SelectAlignment(settings);
         AnimationsToggle.IsChecked = settings.AnimationsEnabled;
         PreviewsToggle.IsChecked = settings.PreviewsEnabled;
         BadgesToggle.IsChecked = settings.NotificationBadgesEnabled;
-        AutoHideDisabled.IsChecked = settings.AutoHide == AutoHideMode.Disabled;
-        AutoHideSmart.IsChecked = settings.AutoHide == AutoHideMode.Smart;
-        AutoHideAlways.IsChecked = settings.AutoHide == AutoHideMode.Always;
+        SelectChoice(AutoHideBox, settings.AutoHide.ToString());
         LoadSurfaceStyles(settings);
         MagnificationToggle.IsChecked = settings.MagnificationEnabled;
-        CompactSize.IsChecked = settings.Size == DockSize.Compact;
-        MediumSize.IsChecked = settings.Size == DockSize.Medium;
-        LargeSize.IsChecked = settings.Size == DockSize.Large;
+        SelectChoice(SizeBox, settings.Size.ToString());
         DockScaleSlider.Value = Math.Round(settings.DockScale * 100);
         UpdateDockScaleLabel();
         var reloadProfile = DockMetrics.For(settings.Size, settings.DockScale);
@@ -1393,18 +1367,12 @@ public partial class SettingsWindow : Window
         _initializing = true;
         try
         {
-            BottomEdge.IsChecked = defaults.Edge == DockEdge.Bottom;
-            LeftEdge.IsChecked = defaults.Edge == DockEdge.Left;
-            RightEdge.IsChecked = defaults.Edge == DockEdge.Right;
+            SelectChoice(EdgeBox, defaults.Edge.ToString());
             SelectAlignment(defaults);
-            CompactSize.IsChecked = defaults.Size == DockSize.Compact;
-            MediumSize.IsChecked = defaults.Size == DockSize.Medium;
-            LargeSize.IsChecked = defaults.Size == DockSize.Large;
+            SelectChoice(SizeBox, defaults.Size.ToString());
             DockScaleSlider.Value = Math.Round(defaults.DockScale * 100);
             UpdateDockScaleLabel();
-            AutoHideDisabled.IsChecked = defaults.AutoHide == AutoHideMode.Disabled;
-            AutoHideSmart.IsChecked = defaults.AutoHide == AutoHideMode.Smart;
-            AutoHideAlways.IsChecked = defaults.AutoHide == AutoHideMode.Always;
+            SelectChoice(AutoHideBox, defaults.AutoHide.ToString());
             AnimationsToggle.IsChecked = defaults.AnimationsEnabled;
             MagnificationToggle.IsChecked = defaults.MagnificationEnabled;
             PreviewsToggle.IsChecked = defaults.PreviewsEnabled;
@@ -1525,7 +1493,7 @@ public partial class SettingsWindow : Window
         // Unnamed switches inside a widget card are the install toggles; their Click handler
         // saves explicitly. Named switches live in the per-widget settings panels and auto-save.
         if (e.OriginalSource is CheckBox { DataContext: DockWidgetOption, Name: "" }) return;
-        var selectedSize = LargeSize.IsChecked == true ? DockSize.Large : MediumSize.IsChecked == true ? DockSize.Medium : DockSize.Compact;
+        var selectedSize = Enum.TryParse<DockSize>(Choice(SizeBox), out var size) ? size : DockSize.Compact;
         (Application.Current.MainWindow as MainWindow)?.SetSizePreview(selectedSize, Math.Round(DockScaleSlider.Value) / 100);
         UpdateWidgetOptionState();
         UpdateMultiMonitorControls();
@@ -1547,23 +1515,18 @@ public partial class SettingsWindow : Window
         }
     }
 
-    private void RegisterSurface(SurfaceKind kind, Slider slider, TextBlock value, params RadioButton[] modes)
+    private void RegisterSurface(SurfaceKind kind, Slider slider, TextBlock value, ComboBox box)
     {
         _surfaceSliders[kind] = slider;
         _surfaceValues[kind] = value;
-        _surfaceModes[kind] = modes;
+        _surfaceBoxes[kind] = box;
     }
 
     private static SurfaceKind SurfaceOf(object sender) =>
         (sender as FrameworkElement)?.Tag is string tag && Enum.TryParse(tag, out SurfaceKind kind) ? kind : SurfaceKind.Dock;
 
-    private SurfaceBackground SurfaceBackgroundOf(SurfaceKind kind)
-    {
-        var modes = _surfaceModes[kind];
-        if (modes[0].IsChecked == true) return SurfaceBackground.Glass;
-        if (modes[1].IsChecked == true) return SurfaceBackground.Solid;
-        return SurfaceBackground.None;
-    }
+    private SurfaceBackground SurfaceBackgroundOf(SurfaceKind kind) =>
+        Enum.TryParse<SurfaceBackground>(Choice(_surfaceBoxes[kind]), out var background) ? background : SurfaceBackground.None;
 
     private void LoadSurfaceStyles(DockSettings settings)
     {
@@ -1584,13 +1547,19 @@ public partial class SettingsWindow : Window
 
     private void LoadSurface(SurfaceKind kind, SurfaceBackground background, double opacity)
     {
-        _surfaceModes[kind][(int)background].IsChecked = true;
+        SelectChoice(_surfaceBoxes[kind], background.ToString());
         _surfaceSliders[kind].Value = Math.Clamp(opacity * 100, 0, 100);
         _surfaceSliders[kind].IsEnabled = background != SurfaceBackground.None;
         _surfaceValues[kind].Text = UiText.Format("OpacityPercent", (int)Math.Round(_surfaceSliders[kind].Value));
     }
 
-    private void SurfaceStyle_Changed(object sender, RoutedEventArgs e)
+    private void SegmentChoice_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_initializing) return;
+        PreferenceEdited(sender, e);
+    }
+
+    private void SurfaceStyle_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (_initializing) return;
         var kind = SurfaceOf(sender);
@@ -1598,6 +1567,7 @@ public partial class SettingsWindow : Window
         _surfaceSliders[kind].IsEnabled = background != SurfaceBackground.None;
         ThemeManager.SetSurface(kind, background, Math.Round(_surfaceSliders[kind].Value) / 100);
         if (kind == SurfaceKind.Settings) UpdateBackdrop();
+        PreferenceEdited(sender, e);
     }
 
     private void SurfaceOpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)

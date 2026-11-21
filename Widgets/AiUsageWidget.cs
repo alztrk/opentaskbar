@@ -140,6 +140,10 @@ public sealed class AiUsageWidget : DockWidget
     protected override void OnCompactChanged(bool compact) => Render();
     public override UIElement? BuildHoverFlyoutContent() => UsesCustomCard(_provider) ? null : BuildFlyout(_hoverCountdowns);
 
+    /// <summary>Settings preview shows the real widget chrome with placeholder quota, no service calls.</summary>
+    public override bool SupportsStaticPreview => true;
+    protected override void OnRenderPreview() => Render();
+
     protected override void OnTick(DateTime now)
     {
         if (_loading is null) _ = LoadAsync();

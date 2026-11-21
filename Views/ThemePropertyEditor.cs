@@ -28,9 +28,22 @@ public sealed class ThemePropertyEditor : UserControl
                      "DockWidgetSurface", "DockWidgetRadius"]),
         ("Windows & Popups", ["MenuMaterial", "MenuDivider", "SurfacePopup", "MenuLabelWidth", "PopupRadius", "PopupInnerRadius",
                                "SettingsBackground", "SettingsBackgroundOpacity", "SettingsControl", "SettingsControlHover", "SettingsSidebarOverlay"]),
+        ("Icons", ["IconForeground", "WindowsLogoBrush", "IconHoverGlow", "StartTileBackground",
+                   "StartTileStroke", "StartTileHover", "WidgetAccent", "WidgetWarning", "WidgetFocusAccent"]),
         ("Typography & Geometry", ["InterfaceFont", "TextSizeBody", "TextSizeCaption",
                                     "ControlRadius", "SettingsPageInset"])
     ];
+
+    private static string SectionTitle(string title) => title switch
+    {
+        "Colors" => UiText.Get("ThemeSectionColors"),
+        "Dock" => UiText.Get("ThemeSectionDock"),
+        "Widgets" => UiText.Get("ThemeSectionWidgets"),
+        "Windows & Popups" => UiText.Get("ThemeSectionWindows"),
+        "Icons" => UiText.Get("ThemeSectionIcons"),
+        "Typography & Geometry" => UiText.Get("ThemeSectionTypography"),
+        _ => title
+    };
 
     private readonly StackPanel _body = new();
     private Panel _fieldHost;
@@ -78,7 +91,7 @@ public sealed class ThemePropertyEditor : UserControl
             var widgetPath = Path.Combine(pack.Directory, ThemePack.WidgetFolder, WidgetPack.ManifestFileName);
             _widgetPack = File.Exists(widgetPath)
                 ? JsonNode.Parse(File.ReadAllText(widgetPath)) as JsonObject ?? new JsonObject()
-                : new JsonObject { ["name"] = pack.DisplayName + " Widgets" };
+                : new JsonObject { ["name"] = pack.DisplayName + " " + UiText.Get("ThemeWidgetPackSuffix") };
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         {
@@ -89,16 +102,16 @@ public sealed class ThemePropertyEditor : UserControl
         _message.Text = UiText.Format("ThemeEditing", pack.DisplayName);
         ShowColorSwatches();
         SectionHeader(UiText.Get("ThemeInformation"));
-        _name = AddTextField("Name", ReadManifest("Name") ?? pack.DisplayName);
-        _author = AddTextField("Author", ReadManifest("Author") ?? string.Empty);
-        _description = AddTextField("Description", ReadManifest("Description") ?? string.Empty);
+        _name = AddTextField(UiText.Get("ThemeFieldName"), ReadManifest("Name") ?? pack.DisplayName);
+        _author = AddTextField(UiText.Get("ThemeFieldAuthor"), ReadManifest("Author") ?? string.Empty);
+        _description = AddTextField(UiText.Get("ThemeFieldDescription"), ReadManifest("Description") ?? string.Empty);
         var categoryTabs = new TabControl { MinHeight = 260, Margin = new Thickness(0, 14, 0, 0) };
         categoryTabs.SetResourceReference(FrameworkElement.StyleProperty, "ThemeEditorTabControl");
         _body.Children.Add(categoryTabs);
         foreach (var (title, keys) in Sections)
         {
             var panel = new StackPanel { Margin = new Thickness(0, 2, 0, 8) };
-            var tabItem = new TabItem { Header = title, Content = panel };
+            var tabItem = new TabItem { Header = SectionTitle(title), Content = panel };
             tabItem.SetResourceReference(FrameworkElement.StyleProperty, "ThemeEditorTabItem");
             categoryTabs.Items.Add(tabItem);
             _fieldHost = panel;
@@ -117,7 +130,7 @@ public sealed class ThemePropertyEditor : UserControl
 
         var covered = Sections.SelectMany(section => section.Keys).ToHashSet(StringComparer.Ordinal);
         var advancedFields = new StackPanel { Margin = new Thickness(0, 2, 0, 8) };
-        var advancedTab = new TabItem { Header = "Advanced", Content = advancedFields };
+        var advancedTab = new TabItem { Header = UiText.Get("ThemeSectionAdvanced"), Content = advancedFields };
         advancedTab.SetResourceReference(FrameworkElement.StyleProperty, "ThemeEditorTabItem");
         categoryTabs.Items.Add(advancedTab);
         _fieldHost = advancedFields;
@@ -184,7 +197,7 @@ public sealed class ThemePropertyEditor : UserControl
 
     private void ShowCurrentAppearance(string title)
     {
-        _message.Text = title + " · " + UiText.Get("ThemeWindowsAppearanceHelp");
+        _message.Text = title;
         ShowColorSwatches();
         SectionHeader(UiText.Get("DockBackground"));
         var dock = new Border
@@ -240,14 +253,6 @@ public sealed class ThemePropertyEditor : UserControl
         _body.Children.Add(widgetCard);
 
         SectionHeader(UiText.Get("CustomizeAppearance"));
-        var prompt = new TextBlock
-        {
-            Text = UiText.Get("ThemeCreateEditableHelp"),
-            TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 0, 0, 12)
-        };
-        prompt.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
-        _body.Children.Add(prompt);
         var create = Button(UiText.Get("ThemeCreateEditable"));
         create.Style = (Style)Application.Current.FindResource("SettingsPrimaryButton");
         create.HorizontalAlignment = HorizontalAlignment.Left;
@@ -255,7 +260,8 @@ public sealed class ThemePropertyEditor : UserControl
         {
             try
             {
-                var id = ThemePackTransfer.CreateTheme("My " + (_mode == AppTheme.Light ? "Light" : "Dark") + " Theme",
+                var id = ThemePackTransfer.CreateTheme(UiText.Format("ThemeNewEditableName",
+                    UiText.Get(_mode == AppTheme.Light ? "Light" : "Dark")),
                     null, _id);
                 ThemeCreated?.Invoke(this, id);
             }
@@ -334,6 +340,14 @@ public sealed class ThemePropertyEditor : UserControl
         ["WidgetCardStroke"] = "Widget border",
         ["WidgetTrack"] = "Widget meter track",
         ["WidgetAccent"] = "Widget meter fill",
+        ["IconForeground"] = "Utility icon color",
+        ["WindowsLogoBrush"] = "Start logo color",
+        ["IconHoverGlow"] = "Icon hover glow",
+        ["StartTileBackground"] = "Start tile background",
+        ["StartTileStroke"] = "Start tile border",
+        ["StartTileHover"] = "Start tile hover",
+        ["WidgetWarning"] = "Widget warning color",
+        ["WidgetFocusAccent"] = "Widget focus color",
         ["DockWidgetSurface"] = "Dock widget background",
         ["DockWidgetRadius"] = "Dock widget radius",
         ["WidgetSpacing"] = "Widget spacing",
@@ -358,6 +372,10 @@ public sealed class ThemePropertyEditor : UserControl
 
     private static string PrettyName(string token)
     {
+        // TokenLabels is the English fallback; localized catalogs carry ThemeField_<token> keys so every
+        // editor label follows the user's language instead of staying hardcoded English.
+        var localized = UiText.Get("ThemeField_" + token);
+        if (!string.Equals(localized, "ThemeField_" + token, StringComparison.Ordinal)) return localized;
         if (TokenLabels.TryGetValue(token, out var friendly)) return friendly;
         var result = System.Text.RegularExpressions.Regex.Replace(token,
             @"(?<!^)([A-Z])", " $1");
@@ -395,7 +413,7 @@ public sealed class ThemePropertyEditor : UserControl
     {
         var source = family.Source;
         var field = AddTextField(key, FriendlyFontName(family));
-        field.ToolTip = "Font family name. Embedded fonts are resolved automatically.";
+        field.ToolTip = UiText.Get("ThemeFontFieldHelp");
         field.Tag = key;
         field.LostFocus += (_, _) =>
         {
@@ -470,7 +488,7 @@ public sealed class ThemePropertyEditor : UserControl
             ? values[0].ToString("0.##", CultureInfo.InvariantCulture)
             : string.Join(",", values.Select(v => v.ToString("0.##", CultureInfo.InvariantCulture)));
         var field = AddTextField(key, initial);
-        field.ToolTip = "One value for all sides, or four values separated by commas.";
+        field.ToolTip = UiText.Get("ThemeFourValueFieldHelp");
         field.LostFocus += (_, _) =>
         {
             var parts = field.Text.Split(',', StringSplitOptions.TrimEntries);
@@ -491,14 +509,24 @@ public sealed class ThemePropertyEditor : UserControl
 
     private void AddModeField(string key, string initial)
     {
-        var row = AddRow("Dock background");
-        var combo = new ComboBox { MinHeight = 30, ItemsSource = new[] { "Glass", "Solid", "None" } };
-        combo.SelectedItem = initial is "Glass" or "Solid" or "None" ? initial : "Glass";
+        var row = AddRow(UiText.Get("ThemeFieldDockMaterial"));
+        var combo = new ComboBox
+        {
+            MinHeight = 30,
+            ItemsSource = new[]
+            {
+                new ComboBoxItem { Content = UiText.Get("SurfaceGlass"), Tag = "Glass" },
+                new ComboBoxItem { Content = UiText.Get("SurfaceSolid"), Tag = "Solid" },
+                new ComboBoxItem { Content = UiText.Get("SurfaceNone"), Tag = "None" }
+            }
+        };
+        var initialMode = initial is "Glass" or "Solid" or "None" ? initial : "Glass";
+        combo.SelectedItem = combo.Items.OfType<ComboBoxItem>().First(item => (string)item.Tag == initialMode);
         Grid.SetColumn(combo, 1);
         row.Children.Add(combo);
         combo.SelectionChanged += (_, _) =>
         {
-            if (combo.SelectedItem is string mode)
+            if ((combo.SelectedItem as ComboBoxItem)?.Tag is string mode)
                 UpdateToken(key, JsonValue.Create(mode));
         };
     }
@@ -537,7 +565,7 @@ public sealed class ThemePropertyEditor : UserControl
             if (picker.ShowDialog() == true && picker.Result is { } brush)
             {
                 swatch.Background = brush;
-                title.Text = brush is LinearGradientBrush ? "Gradient" : "Solid";
+                title.Text = UiText.Get(brush is LinearGradientBrush ? "SurfaceGradient" : "SurfaceSolid");
                 UpdateToken(key, BrushToNode(brush));
             }
         };

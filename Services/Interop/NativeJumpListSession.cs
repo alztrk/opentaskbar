@@ -28,13 +28,21 @@ internal sealed class NativeJumpListSession : IDisposable
     private static readonly PropertyKey HostEnvironmentKey = new(AppIdKey.Format, 14);
     private static readonly PropertyKey ActivationContextKey = new(AppIdKey.Format, 20);
     private static readonly PropertyKey TitleKey = new(new("F29F85E0-4FF9-1068-AB91-08002B27B3D9"), 2);
+    // Firefox/LibreWolf jump list tasks store -private-window in the property store (PKEY_Link_Arguments)
+    // rather than in IShellLink::GetArguments, so a direct launch without this lookup loses the task flag.
+    private static readonly PropertyKey LinkArgumentsKey = new(new("436F2667-14E2-4FEB-B30A-146C53B5B674"), 100);
     private const uint SLgpRawPath = 4;
     private readonly Dictionary<int, ShellComObject> _commands = [];
     private int _nextCommand;
+    // The owning application window the jump list was read for. Shell activation contexts must be derived
+    // from this window, not from OpenTaskbar's own hwnd, or single-instance apps (Firefox/LibreWolf) lose
+    // task flags such as -private-window when the already-running instance handles the launch.
+    private nint _targetWindow;
 
     public ApplicationJumpList Read(long sessionId, nint window, string? shortcut, CancellationToken cancellation)
     {
         if (IntPtr.Size != 8) return new(sessionId, JumpListStatus.Unsupported, []);
+        _targetWindow = window;
         var appId = ResolveIdentity(window, shortcut);
         if (string.IsNullOrWhiteSpace(appId)) return new(sessionId, JumpListStatus.IdentityUnavailable, []);
         cancellation.ThrowIfCancellationRequested();
@@ -257,21 +265,30 @@ internal sealed class NativeJumpListSession : IDisposable
         }
         // Unpackaged tasks (Firefox, LibreWolf, ...) carry their target and arguments in a shell link. Invoking
         // the link through IContextMenu with OUR hwnd makes ShellExecute derive the activation context from
-        // OpenTaskbar, so a second instance starts and hits the app's profile/single-instance lock. Launching the
-        // link's target directly is the same path the dock already uses for normal app launches and preserves
-        // the app's own IPC. Keep the shell path as a fallback for items that are not shell links.
-        if (TryLaunchShellLink(item)) return;
-
-        using var direct = item.Query(ContextMenuInterface);
-        if (direct is not null)
+        // OpenTaskbar, so the running app's single-instance IPC drops task flags such as -private-window and
+        // opens a normal tab/window. Invoke through IContextMenu with the TARGET app's hwnd instead, which is
+        // the same activation context Explorer's taskbar supplies. Fall back to launching the link target
+        // directly only when no shell menu is available (rare; e.g. synthetic links without a handler).
+        nint contextOwner = _targetWindow != 0 ? _targetWindow : owner;
+        using (var direct = item.Query(ContextMenuInterface))
         {
-            InvokeDefault(direct, owner, null);
-            return;
+            if (direct is not null)
+            {
+                InvokeDefault(direct, contextOwner, null);
+                return;
+            }
         }
-        using var shellItem = item.Query(ShellItemInterface);
-        if (shellItem is null) throw new COMException("No Shell invocation interface.");
-        using var bound = Bind(shellItem, new("3981E225-F559-11D3-8E3A-00C04F6837D5"), ContextMenuInterface);
-        InvokeDefault(bound, owner, null);
+        using (var shellItem = item.Query(ShellItemInterface))
+        {
+            if (shellItem is not null)
+            {
+                using var bound = Bind(shellItem, new("3981E225-F559-11D3-8E3A-00C04F6837D5"), ContextMenuInterface);
+                InvokeDefault(bound, contextOwner, null);
+                return;
+            }
+        }
+        if (TryLaunchShellLink(item)) return;
+        throw new COMException("No Shell invocation interface.");
     }
 
     /// <summary>
@@ -290,6 +307,11 @@ internal sealed class NativeJumpListSession : IDisposable
         var arguments = new StringBuilder(2048);
         var args = link.Method<GetLinkArguments>(9)(link.Handle, arguments, arguments.Capacity) >= 0
             ? arguments.ToString() : string.Empty;
+        if (string.IsNullOrWhiteSpace(args))
+        {
+            using var store = item.Query(PropertyStoreInterface);
+            args = store is null ? string.Empty : ReadString(store, LinkArgumentsKey) ?? string.Empty;
+        }
         var directory = new StringBuilder(260);
         var workingDirectory = link.Method<GetLinkWorkingDirectory>(11)(link.Handle, directory, directory.Capacity) >= 0
             ? directory.ToString() : string.Empty;

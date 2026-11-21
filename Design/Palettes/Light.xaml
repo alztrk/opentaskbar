@@ -5,6 +5,8 @@
     <SolidColorBrush x:Key="TextPrimary" Color="#FF1B1B1B" />
     <SolidColorBrush x:Key="TextSecondary" Color="#FF61666E" />
     <SolidColorBrush x:Key="TextMuted" Color="#807C8698" />
+    <!-- Color of the monochrome utility glyphs on the dock (search, task view, etc.). -->
+    <SolidColorBrush x:Key="IconForeground" Color="#FF1B1B1B" />
     <!-- Fluent Blue Windows 11 logo with refined luminance. -->
     <LinearGradientBrush x:Key="WindowsLogoBrush" StartPoint="0,0" EndPoint="1,1">
         <GradientStop Color="#FF0EA5E9" Offset="0" />

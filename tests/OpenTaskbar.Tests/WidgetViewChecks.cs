@@ -312,9 +312,8 @@ internal static class WidgetViewChecks
                         return point.X >= 0 && point.X + item.ActualWidth <= width;
                     }), "The widget catalogue must avoid horizontal overflow.");
                     var second = (FrameworkElement)gallery.Children[1];
-                    Check(width < 540 ? second.TranslatePoint(new Point(), gallery).Y > 0
-                        : second.TranslatePoint(new Point(), gallery).Y == 0,
-                        "The widget catalogue must use one or two columns based on available width.");
+                    Check(second.TranslatePoint(new Point(), gallery).Y > 0,
+                        "The widget catalogue must use a single full-width column for every category.");
                 }
             }
             UiText.Current.SetLanguage(AppLanguage.Turkish);
@@ -403,6 +402,16 @@ internal static class WidgetViewChecks
                 var settings = new OpenTaskbar.SettingsWindow(preferences);
                 try
                 {
+                    // Segment choices are ComboBoxes whose selected item Tag carries the enum value. Verify the
+                    // real window maps its loaded settings onto the selected items instead of leaving them blank.
+                    string SelectedTag(string name) =>
+                        (RequiredName<ComboBox>(settings, name).SelectedItem as ComboBoxItem)?.Tag as string ?? string.Empty;
+                    Check(SelectedTag("ThemeBox") == theme.ToString(), "Theme dropdown must reflect the loaded theme.");
+                    Check(SelectedTag("EdgeBox") == "Bottom", "Dock edge dropdown must reflect the default edge.");
+                    Check(SelectedTag("SizeBox") == "Compact", "Dock size dropdown must reflect the default size.");
+                    Check(SelectedTag("AutoHideBox") == "Disabled", "Auto-hide dropdown must reflect the default mode.");
+                    Check(SelectedTag("PositionBox") == "Center", "Dock alignment dropdown must reflect the default position.");
+                    Check(SelectedTag("DockSurfaceBox") == "Glass", "Surface dropdown must reflect the loaded material.");
                     RequiredName<TabControl>(settings, "SettingsTabs").SelectedItem = RequiredName<TabItem>(settings, "WidgetsTab");
                     var list = RequiredName<ItemsControl>(settings, "WidgetOptionsList");
                     var selections = ((System.Windows.Data.ListCollectionView)list.ItemsSource).SourceCollection.Cast<DockWidgetOption>().ToArray();

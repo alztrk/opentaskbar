@@ -37,9 +37,10 @@ public sealed class ExpandableWidgetGrid : Panel
         if (double.IsInfinity(width) || width <= 0)
             width = ActualWidth > 0 ? ActualWidth : 680;
 
-        var columns = width >= Math.Max(250, MinItemWidth) * 2 ? 2 : 1;
+        // Single-column layout: each category is a full-width row and widgets stack inside it.
+        const int columns = 1;
         const double gap = 10;
-        var half = (width - (columns == 2 ? gap : 0)) / columns;
+        var half = width;
         var y = 0.0;
         var pending = -1;
         var pendingHeight = 0.0;

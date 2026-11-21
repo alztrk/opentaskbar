@@ -586,14 +586,14 @@
             <Setter.Value>
                 <ControlTemplate TargetType="TabControl">
                     <Grid KeyboardNavigation.TabNavigation="Local">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="205" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="185" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
                         <Border Background="{DynamicResource SettingsSidebarOverlay}" BorderBrush="{DynamicResource StrokeSubtle}"
                                 BorderThickness="0,0,1,0" Padding="10,18,10,14" SnapsToDevicePixels="True">
                             <views:SidebarNavPanel IsItemsHost="True" BottomCount="2"
                                                    KeyboardNavigation.TabIndex="1" KeyboardNavigation.TabNavigation="Once"
                                                    KeyboardNavigation.DirectionalNavigation="Contained" />
                         </Border>
-                        <Border Grid.Column="1" Background="{DynamicResource SettingsBackground}" />
+                        <Border Grid.Column="1" Background="{DynamicResource SettingsContentGlass}" />
                         <ContentPresenter x:Name="PART_SelectedContentHost" Grid.Column="1"
                                           HorizontalAlignment="Stretch" VerticalAlignment="Stretch"
                                           ContentSource="SelectedContent" KeyboardNavigation.TabIndex="2" />
@@ -794,7 +794,7 @@
                                IsOpen="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
                                Placement="Bottom" PopupAnimation="Slide" Focusable="False" VerticalOffset="6">
                             <Border x:Name="DropDownBorder" MinWidth="{Binding ActualWidth, ElementName=MainGrid}" MaxHeight="240"
-                                    Background="{DynamicResource MenuMaterial}" BorderBrush="{DynamicResource MenuStrokeMaterial}"
+                                    Background="{DynamicResource SettingsControl}" BorderBrush="{DynamicResource StrokeSubtle}"
                                     BorderThickness="1" CornerRadius="10" Effect="{DynamicResource MenuShadow}" Padding="4">
                                 <ScrollViewer CanContentScroll="True" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
                                     <ItemsPresenter x:Name="ItemsPresenter" KeyboardNavigation.DirectionalNavigation="Contained" />
