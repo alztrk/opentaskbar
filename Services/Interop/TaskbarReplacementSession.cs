@@ -104,6 +104,7 @@ public sealed class TaskbarReplacementSession : IDisposable
         set
         {
             if (_edge == value) return;
+            var previousEdge = _edge;
             _edge = value;
             _reservation = null;
             _sideReservation = null;
@@ -112,10 +113,9 @@ public sealed class TaskbarReplacementSession : IDisposable
             if (!_active || Volatile.Read(ref _stopInProgress) != 0) return;
             if (_registered)
             {
-                // Drop the old edge's reservation before claiming the new one.
+                // Drop the old edge's reservation cleanly before claiming the new one.
+                ZeroAndRemoveAppBar(previousEdge);
                 var data = CreateData();
-                SHAppBarMessage(AbmRemove, ref data);
-                data = CreateData();
                 data.uCallbackMessage = CallbackMessage;
                 _registered = SHAppBarMessage(AbmNew, ref data) != 0;
             }
@@ -473,10 +473,7 @@ public sealed class TaskbarReplacementSession : IDisposable
             _hideRetryPending = false;
             if (_registered)
             {
-                var data = CreateData();
-                SHAppBarMessage(AbmRemove, ref data);
-                _registered = false;
-                _reservation = null;
+                ZeroAndRemoveAppBar();
             }
             _stateChangeStarted = false;
             return null;
@@ -508,10 +505,7 @@ public sealed class TaskbarReplacementSession : IDisposable
             _hideRetryPending = false;
             if (_registered)
             {
-                var data = CreateData();
-                SHAppBarMessage(AbmRemove, ref data);
-                _registered = false;
-                _reservation = null;
+                ZeroAndRemoveAppBar();
             }
 
             var restoreError = RestoreWithVerification(_previousTaskbarState, _handle);
@@ -1059,6 +1053,30 @@ public sealed class TaskbarReplacementSession : IDisposable
         SHAppBarMessage(AbmSetState, ref data);
         current = GetTaskbarState();
         return (current & SupportedTaskbarState) == (state & SupportedTaskbarState);
+    }
+
+    /// <summary>
+    /// Collapses the AppBar reservation to zero thickness via ABM_SETPOS before calling ABM_REMOVE so
+    /// Explorer immediately restores the work area and resizes maximized windows on exit or edge switch.
+    /// </summary>
+    private void ZeroAndRemoveAppBar(Models.DockEdge? edgeOverride = null)
+    {
+        var edge = edgeOverride ?? _edge;
+        var data = CreateData();
+        data.uEdge = edge switch
+        {
+            Models.DockEdge.Left => AbeLeft,
+            Models.DockEdge.Right => AbeRight,
+            _ => AbeBottom
+        };
+        data.rc = new Rect(0, 0, 0, 0);
+        SHAppBarMessage(AbmSetPos, ref data);
+
+        var remove = CreateData();
+        SHAppBarMessage(AbmRemove, ref remove);
+        _registered = false;
+        _reservation = null;
+        _sideReservation = null;
     }
 
     private AppBarData CreateData() => new()
