@@ -1,4 +1,4 @@
-{
+﻿{
   "Settings": "Instellingen",
   "SettingsTitle": "OpenTaskbar-instellingen",
   "General": "Algemeen",
@@ -724,5 +724,12 @@
   "ThemeFieldTextPrimary": "Primary text",
   "ThemeFieldWidgetCard": "Widget surface",
   "ThemeFieldDockWidgetRadius": "Dock widget radius",
-  "ThemeFieldSettingsPageInset": "Page padding"
+  "ThemeFieldSettingsPageInset": "Page padding",
+  "DockWidthMode": "Dock-breedte",
+  "DockWidthModeDescription": "Hoe de breedte van de dock wordt bepaald.",
+  "DockWidthAuto": "Aan inhoud aanpassen",
+  "DockWidthPixels": "Vaste pixels",
+  "DockWidthPercent": "% van het scherm",
+  "DockWidthValue": "Breedte",
+  "DockWidthValueDescription": "Breedtewaarde voor de gekozen modus."
 }

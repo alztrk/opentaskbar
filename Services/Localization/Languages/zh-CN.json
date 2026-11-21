@@ -1,4 +1,4 @@
-{
+﻿{
   "Settings": "设置",
   "SettingsTitle": "OpenTaskbar 设置",
   "General": "常规",
@@ -724,5 +724,12 @@
   "ThemeFieldTextPrimary": "Primary text",
   "ThemeFieldWidgetCard": "Widget surface",
   "ThemeFieldDockWidgetRadius": "Dock widget radius",
-  "ThemeFieldSettingsPageInset": "Page padding"
+  "ThemeFieldSettingsPageInset": "Page padding",
+  "DockWidthMode": "任务栏宽度",
+  "DockWidthModeDescription": "任务栏宽度的确定方式。",
+  "DockWidthAuto": "适应内容",
+  "DockWidthPixels": "固定像素",
+  "DockWidthPercent": "屏幕百分比",
+  "DockWidthValue": "宽度",
+  "DockWidthValueDescription": "所选模式的宽度值。"
 }

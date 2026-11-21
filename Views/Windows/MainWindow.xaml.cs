@@ -250,6 +250,7 @@ public partial class MainWindow : Window
         DockScrollViewer.SetExternalIndicators(ScrollPrevOverlay, ScrollNextOverlay);
         ApplySizeProfile();
         ApplyLayoutMode();
+        ApplyDockWidthMode();
         PositionDock();
         NotificationService.UpdateRequested += OnUpdateNotificationRequested;
         startup.Finish("constructor total");
@@ -1909,6 +1910,31 @@ public partial class MainWindow : Window
         StartLogo.Visibility = image is null ? Visibility.Visible : Visibility.Collapsed;
     }
 
+    /// <summary>
+    /// Applies the configured width mode. A fixed width reuses the manual-resize pin so
+    /// content fitting never grows past it; resize thumbs are hidden in fixed modes.
+    /// </summary>
+    private void ApplyDockWidthMode()
+    {
+        var settings = _preferences.Current;
+        var fixedMode = settings.DockWidthMode is DockWidthMode.Pixels or DockWidthMode.Percent;
+        LeftResizeThumb.Visibility = fixedMode ? Visibility.Collapsed : Visibility.Visible;
+        RightResizeThumb.Visibility = fixedMode ? Visibility.Collapsed : Visibility.Visible;
+
+        if (!fixedMode || IsFullWidth)
+        {
+            _dockWidthOverride = null;
+            return;
+        }
+
+        var target = DisplayService.GetTargetDisplay(settings.TargetDisplay);
+        var monitorWidth = target.Width > 0 ? target.Width : SystemParameters.WorkArea.Width;
+        var width = settings.DockWidthMode == DockWidthMode.Pixels
+            ? settings.DockWidthPixels
+            : monitorWidth * settings.DockWidthPercent / 100.0;
+        _dockWidthOverride = Math.Max(MinimumDockSurfaceWidth, Math.Min(width, monitorWidth));
+    }
+
     private void Preferences_Changed(object? sender, EventArgs e)
     {
         _sizePreviewOverride = null;
@@ -1929,6 +1955,7 @@ public partial class MainWindow : Window
         ApplyFeatureSettings();
         ApplySizeProfile();
         ApplyLayoutMode();
+        ApplyDockWidthMode();
         ResizeDockToContent();
         _thumbnailPreview.Hide();
         if (_openContextMenu is not null) _openContextMenu.IsOpen = false;
@@ -2573,6 +2600,8 @@ public partial class MainWindow : Window
         UpdatePreferredIconPixels();
         var profile = Profile;
         var radius = EffectiveCornerRadius;
+        // Flyouts read this gap so their spacing from the dock follows the adjustable dock height/scale.
+        DockMetrics.FlyoutGap = DockMetrics.ComputeFlyoutGap(profile);
         // One master radius drives every nested corner in the application.
         RadiusManager.Apply((int)Math.Round(radius));
         Application.Current.Resources["DockCellSize"] = profile.Cell;

@@ -1,4 +1,4 @@
-{
+﻿{
   "Settings": "설정",
   "SettingsTitle": "OpenTaskbar 설정",
   "General": "일반",
@@ -724,5 +724,12 @@
   "ThemeFieldTextPrimary": "Primary text",
   "ThemeFieldWidgetCard": "Widget surface",
   "ThemeFieldDockWidgetRadius": "Dock widget radius",
-  "ThemeFieldSettingsPageInset": "Page padding"
+  "ThemeFieldSettingsPageInset": "Page padding",
+  "DockWidthMode": "독 너비",
+  "DockWidthModeDescription": "독 너비를 결정하는 방법입니다.",
+  "DockWidthAuto": "내용에 맞춤",
+  "DockWidthPixels": "고정 픽셀",
+  "DockWidthPercent": "화면의 %",
+  "DockWidthValue": "너비",
+  "DockWidthValueDescription": "선택한 모드의 너비 값입니다."
 }

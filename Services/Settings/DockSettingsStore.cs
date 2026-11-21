@@ -226,6 +226,9 @@ public sealed class DockSettingsStore
     private static bool IsValid(DockSettings settings) => Enum.IsDefined(settings.Position)
         && Enum.IsDefined(settings.Theme) && LanguageCatalog.IsSupported(settings.Language)
         && Enum.IsDefined(settings.AutoHide) && Enum.IsDefined(settings.Layout) && Enum.IsDefined(settings.Size)
+        && Enum.IsDefined(settings.DockWidthMode)
+        && settings.DockWidthPixels is >= 100 and <= 5000
+        && settings.DockWidthPercent is >= 10 and <= 100
         // Keep these ranges identical to the Widgets tab sliders.
         && settings.FocusMinutes is >= 1 and <= 90
         && settings.FocusBreakMinutes is >= 1 and <= 30

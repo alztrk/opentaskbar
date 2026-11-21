@@ -284,20 +284,21 @@ public partial class MediaWidget : DockWidget
 
     private static CustomPopupPlacement[] PlaceVolumePopover(System.Windows.Size popupSize, System.Windows.Size targetSize, System.Windows.Point offset)
     {
+        var gap = DockMetrics.FlyoutGap;
         return DockFlyout.Edge switch
         {
             DockEdge.Left =>
             [
-                new CustomPopupPlacement(new System.Windows.Point(targetSize.Width + 4, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical)
+                new CustomPopupPlacement(new System.Windows.Point(targetSize.Width + gap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical)
             ],
             DockEdge.Right =>
             [
-                new CustomPopupPlacement(new System.Windows.Point(-popupSize.Width - 4, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical)
+                new CustomPopupPlacement(new System.Windows.Point(-popupSize.Width - gap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical)
             ],
             _ =>
             [
-                new CustomPopupPlacement(new System.Windows.Point((targetSize.Width - popupSize.Width) / 2, -popupSize.Height - 4), PopupPrimaryAxis.Horizontal),
-                new CustomPopupPlacement(new System.Windows.Point((targetSize.Width - popupSize.Width) / 2, targetSize.Height + 4), PopupPrimaryAxis.Horizontal)
+                new CustomPopupPlacement(new System.Windows.Point((targetSize.Width - popupSize.Width) / 2, -popupSize.Height - gap), PopupPrimaryAxis.Horizontal),
+                new CustomPopupPlacement(new System.Windows.Point((targetSize.Width - popupSize.Width) / 2, targetSize.Height + gap), PopupPrimaryAxis.Horizontal)
             ]
         };
     }

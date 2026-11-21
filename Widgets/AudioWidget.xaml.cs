@@ -31,6 +31,10 @@ public partial class AudioWidget : DockWidget
     private string? _lastInputIconKey;
     private AppLanguage _lastLanguage;
 
+    // Which half of the card the cursor is over: null = none, true = output (left), false = input (right).
+    private bool? _hoveredSide;
+    private const int MaxDeviceNameChars = 14;
+
     private Border? _flyoutContainer;
     private Slider? _flyoutSlider;
     private TextBlock? _flyoutLevelText;
@@ -73,6 +77,8 @@ public partial class AudioWidget : DockWidget
         DeviceSeparator.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         InputIcon.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         InputDeviceText.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
+        _hoveredSide = null;
+        UpdateDeviceTooltip();
     }
 
     public override UIElement? BuildHoverFlyoutContent() => BuildFlyoutContent();
@@ -615,12 +621,98 @@ public partial class AudioWidget : DockWidget
         || name.Contains("buds", StringComparison.OrdinalIgnoreCase)
         || name.Contains("airpod", StringComparison.OrdinalIgnoreCase));
 
+    private static readonly string[] GenericDevicePrefixes =
+    [
+        "microphone", "headphones", "headphone", "headset", "speakers", "speaker",
+        "kulaklık", "kulaklik", "mikrofon", "hoparlör", "hoparlor"
+    ];
+
     private static string ShortDeviceLabel(string? fullName, string fallback)
     {
         if (string.IsNullOrWhiteSpace(fullName)) return fallback;
-        var paren = fullName.IndexOf('(');
-        var trimmed = paren > 1 ? fullName[..paren].Trim() : fullName.Trim();
-        return string.IsNullOrWhiteSpace(trimmed) ? fullName.Trim() : trimmed;
+
+        var name = fullName.Trim();
+        var open = name.IndexOf('(');
+        var close = name.LastIndexOf(')');
+
+        // WASAPI friendly names look like "Microphone (2- Razer Seiren V3 Chroma)".
+        // Prefer the descriptive part inside the parentheses instead of the generic prefix.
+        if (open >= 0 && close > open)
+        {
+            var inner = name[(open + 1)..close].Trim();
+            inner = StripIndexPrefix(inner);
+            if (inner.Length > 0 && !IsGenericName(inner)) return inner;
+            // Parentheses held only a generic label (e.g. "Microphone (Microphone)") — fall through
+            // to the prefix so we don't lose the only descriptive text.
+        }
+
+        var beforeParen = (open > 0 ? name[..open] : name).Trim();
+        var cleaned = StripIndexPrefix(beforeParen);
+        return cleaned.Length > 0 ? cleaned : name;
+    }
+
+    private static string StripIndexPrefix(string name)
+    {
+        // Remove leading "2- ", "1 - ", "3-" etc. added by Windows for duplicate endpoints.
+        var index = 0;
+        while (index < name.Length && char.IsDigit(name[index])) index++;
+        if (index > 0 && index < name.Length)
+        {
+            var rest = name[index..].TrimStart();
+            if (rest.StartsWith('-')) return rest[1..].Trim();
+        }
+        return name.Trim();
+    }
+
+    private static bool IsGenericName(string name) => GenericDevicePrefixes.Any(prefix =>
+        string.Equals(name, prefix, StringComparison.OrdinalIgnoreCase));
+
+    // Card labels show a bounded device name so long names never dominate the widget.
+    private static string LimitedDeviceLabel(string? fullName, string fallback)
+    {
+        var label = ShortDeviceLabel(fullName, fallback);
+        return label.Length <= MaxDeviceNameChars
+            ? label
+            : string.Concat(label.AsSpan(0, MaxDeviceNameChars - 1), "…");
+    }
+
+    private void UpdateDeviceTooltip()
+    {
+        var outputName = _monitor?.HasDevice == true
+            ? _monitor.DeviceName ?? UiText.Get("AudioOutput")
+            : UiText.Get("NoAudioDevice");
+        var inputName = _monitor?.HasMicDevice == true
+            ? _monitor.MicDeviceName ?? UiText.Get("Microphone")
+            : UiText.Get("NoMicDevice");
+
+        // In compact mode the input side is hidden, so always show the output name.
+        var compact = IsCompact && !IsHoverExpanded;
+        if (!compact && _hoveredSide == false)
+        {
+            ComboButton.ToolTip = inputName;
+            return;
+        }
+
+        ComboButton.ToolTip = outputName;
+    }
+
+    private void ComboButton_MouseMove(object sender, MouseEventArgs e)
+    {
+        var x = e.GetPosition(ComboButton).X;
+        var mid = ComboButton.ActualWidth / 2;
+        var side = x < mid; // true = output (left), false = input (right)
+
+        if (_hoveredSide == side) return;
+        _hoveredSide = side;
+        if (IsCompact && !IsHoverExpanded) return; // compact keeps the output name
+        UpdateDeviceTooltip();
+    }
+
+    private void ComboButton_MouseLeave(object sender, MouseEventArgs e)
+    {
+        if (_hoveredSide is null) return;
+        _hoveredSide = null;
+        UpdateDeviceTooltip();
     }
 
     protected override void OnActivated()
@@ -715,7 +807,7 @@ public partial class AudioWidget : DockWidget
     {
         var hasMic = _monitor?.HasMicDevice == true;
         var micName = hasMic
-            ? ShortDeviceLabel(_monitor!.MicDeviceName, UiText.Get("Microphone"))
+            ? LimitedDeviceLabel(_monitor!.MicDeviceName, UiText.Get("Microphone"))
             : UiText.Get("NoMicDevice");
         var micMuted = _monitor?.MicMuted == true;
         var micLevel = hasMic ? (int)Math.Round(_monitor!.MicVolume * 100) : 0;
@@ -725,6 +817,7 @@ public partial class AudioWidget : DockWidget
             _lastMicDeviceName = micName;
             _lastMicMuted = micMuted;
             InputDeviceText.Text = micName;
+            UpdateDeviceTooltip();
             var inKey = micMuted ? "IconMicMute" : "IconMic";
             if (_lastInputIconKey != inKey)
             {
@@ -753,7 +846,7 @@ public partial class AudioWidget : DockWidget
             _lastLanguage = lang;
             _lastLevel = -1;
             OutputDeviceText.Text = UiText.Get("NoAudioDevice");
-            ComboButton.ToolTip = OutputDeviceText.Text;
+            UpdateDeviceTooltip();
             SetOutputIcon("IconVolumeMute");
             if (_flyoutSlider is not null) _flyoutSlider.IsEnabled = false;
             if (_flyoutLevelText is not null) _flyoutLevelText.Text = "—";
@@ -776,12 +869,12 @@ public partial class AudioWidget : DockWidget
         _lastDeviceName = deviceName;
         _lastLanguage = lang;
 
-        OutputDeviceText.Text = ShortDeviceLabel(deviceName, UiText.Get("AudioOutput"));
+        OutputDeviceText.Text = LimitedDeviceLabel(deviceName, UiText.Get("AudioOutput"));
         var micLabel = _monitor.HasMicDevice
-            ? ShortDeviceLabel(_monitor.MicDeviceName, UiText.Get("Microphone"))
+            ? LimitedDeviceLabel(_monitor.MicDeviceName, UiText.Get("Microphone"))
             : UiText.Get("NoMicDevice");
         InputDeviceText.Text = micLabel;
-        ComboButton.ToolTip = $"{deviceName} ({(muted ? "0%" : UiText.Format("Percent", level))}) · {micLabel}";
+        UpdateDeviceTooltip();
 
         var iconKey = muted || level == 0
             ? "IconVolumeMute"

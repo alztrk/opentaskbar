@@ -165,7 +165,7 @@ public sealed class DockFlyout
         var transformGroup = new TransformGroup { Children = { scale, translate } };
         _root = new Grid
         {
-            Margin = new Thickness(10, 8, 10, 12),
+            Margin = new Thickness(10, 8, 10, DockMetrics.FlyoutContentInset),
             RenderTransform = transformGroup,
             RenderTransformOrigin = new Point(0.5, 0.5),
             Children = { contentHost }
@@ -524,11 +524,12 @@ public sealed class DockFlyout
         _explicitClose = false;
         _suppressNextClick = false;
         _closedTarget = null;
+        var inset = DockMetrics.FlyoutContentInset;
         _root.Margin = Edge switch
         {
-            DockEdge.Left => new Thickness(10, 8, 12, 12),
-            DockEdge.Right => new Thickness(12, 8, 10, 12),
-            _ => new Thickness(10, 8, 10, 12)
+            DockEdge.Left => new Thickness(10, 8, 12, inset),
+            DockEdge.Right => new Thickness(12, 8, 10, inset),
+            _ => new Thickness(10, 8, 10, inset)
         };
         _innerBevel.Child = content;
         _popup.StaysOpen = false;
@@ -623,26 +624,26 @@ public sealed class DockFlyout
         _popup.IsOpen = false;
     }
 
-    private const double FlyoutGap = 10;
-
     private static CustomPopupPlacement[] Place(Size popupSize, Size targetSize, Point offset)
     {
+        // Gap is derived from the current dock profile, keeping the visible flyout ~5–10 px off the dock edge.
+        var gap = DockMetrics.FlyoutGap;
         return Edge switch
         {
             DockEdge.Left =>
             [
-                new CustomPopupPlacement(new Point(targetSize.Width + FlyoutGap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical),
-                new CustomPopupPlacement(new Point(-popupSize.Width - FlyoutGap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical)
+                new CustomPopupPlacement(new Point(targetSize.Width + gap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical),
+                new CustomPopupPlacement(new Point(-popupSize.Width - gap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical)
             ],
             DockEdge.Right =>
             [
-                new CustomPopupPlacement(new Point(-popupSize.Width - FlyoutGap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical),
-                new CustomPopupPlacement(new Point(targetSize.Width + FlyoutGap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical)
+                new CustomPopupPlacement(new Point(-popupSize.Width - gap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical),
+                new CustomPopupPlacement(new Point(targetSize.Width + gap, (targetSize.Height - popupSize.Height) / 2), PopupPrimaryAxis.Vertical)
             ],
             _ =>
             [
-                new CustomPopupPlacement(new Point((targetSize.Width - popupSize.Width) / 2, -popupSize.Height - FlyoutGap), PopupPrimaryAxis.Horizontal),
-                new CustomPopupPlacement(new Point((targetSize.Width - popupSize.Width) / 2, targetSize.Height + FlyoutGap), PopupPrimaryAxis.Horizontal)
+                new CustomPopupPlacement(new Point((targetSize.Width - popupSize.Width) / 2, -popupSize.Height - gap), PopupPrimaryAxis.Horizontal),
+                new CustomPopupPlacement(new Point((targetSize.Width - popupSize.Width) / 2, targetSize.Height + gap), PopupPrimaryAxis.Horizontal)
             ]
         };
     }

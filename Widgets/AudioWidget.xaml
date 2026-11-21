@@ -5,6 +5,7 @@
               xmlns:local="clr-namespace:OpenTaskbar.Services">
     <Button x:Name="ComboButton" Style="{StaticResource WidgetCardButton}" Padding="11,0"
             Click="ComboButton_Click" MouseWheel="Card_MouseWheel"
+            MouseMove="ComboButton_MouseMove" MouseLeave="ComboButton_MouseLeave"
             AutomationProperties.Name="{local:Loc WidgetAudio}">
         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
             <ContentControl x:Name="OutputIcon" Style="{StaticResource WidgetIcon}" Content="{StaticResource IconHeadphones}"

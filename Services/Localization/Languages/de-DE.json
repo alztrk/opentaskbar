@@ -1,4 +1,4 @@
-{
+﻿{
   "Settings": "Einstellungen",
   "SettingsTitle": "OpenTaskbar-Einstellungen",
   "General": "Allgemein",
@@ -724,5 +724,12 @@
   "ThemeFieldTextPrimary": "Primärer Text",
   "ThemeFieldWidgetCard": "Widget-Oberfläche",
   "ThemeFieldDockWidgetRadius": "Dock-Widget-Radius",
-  "ThemeFieldSettingsPageInset": "Seitenabstand"
+  "ThemeFieldSettingsPageInset": "Seitenabstand",
+  "DockWidthMode": "Dock-Breite",
+  "DockWidthModeDescription": "Wie die Dock-Breite bestimmt wird.",
+  "DockWidthAuto": "An Inhalt anpassen",
+  "DockWidthPixels": "Feste Pixel",
+  "DockWidthPercent": "% des Bildschirms",
+  "DockWidthValue": "Breite",
+  "DockWidthValueDescription": "Breitenwert für den gewählten Modus."
 }

@@ -519,11 +519,19 @@ public static class ShellShortcuts
             };
         }
 
-        var flyoutWidth = (int)Math.Round(642 * dpiScale);
+        const int assumedFlyoutWidthDip = 642;
+        const int maxFlyoutWidthDip = 720;
+        var flyoutWidth = (int)Math.Round(assumedFlyoutWidthDip * dpiScale);
         var flyoutHeight = (int)Math.Round(724 * dpiScale);
 
-        int flyoutLocalX = isLeftAligned ? (int)Math.Round(12 * dpiScale) : (windowWidth - flyoutWidth) / 2;
-        int flyoutLocalY = windowHeight - flyoutHeight - (int)Math.Round(12 * dpiScale);
+        var workHeight = workBottom - workTop;
+
+        // Use work-area dimensions, not the raw window rect: the canvas covers the work area, and GetWindowRect can
+        // report DPI-virtualized sizes on scaled displays, which would mis-place the flyout inside the canvas.
+        var canvasWidth = isFullScreenContainer ? workWidth : windowWidth;
+        var canvasHeight = isFullScreenContainer ? workHeight : windowHeight;
+        int flyoutLocalX = isLeftAligned ? (int)Math.Round(12 * dpiScale) : (canvasWidth - flyoutWidth) / 2;
+        int flyoutLocalY = canvasHeight - flyoutHeight - (int)Math.Round(12 * dpiScale);
 
         var workMinY = workTop + 8;
         var workMaxY = Math.Max(workMinY, workBottom - flyoutHeight - 8);
@@ -544,7 +552,12 @@ public static class ShellShortcuts
                 desiredFlyoutY = Math.Clamp(rCenterY - flyoutHeight / 2, workMinY, workMaxY);
                 break;
             default:
-                var minX = workLeft + 8;
+                // The real Start flyout can be wider than the size used to compute its local offset inside the
+                // canvas (the hard-coded 642 DIP drifts across Windows builds). A wider flyout ends up shifted left
+                // by half the difference, so when the dock's Start button is near the left edge — as with a wide /
+                // full-width taskbar — reserve that slack to keep the whole flyout on screen instead of clipping it.
+                var widthSlack = (int)Math.Round((maxFlyoutWidthDip - assumedFlyoutWidthDip) / 2.0 * dpiScale);
+                var minX = workLeft + 8 + widthSlack;
                 var maxX = Math.Max(minX, workRight - flyoutWidth - 8);
                 // The dock's Start button can be anywhere (StartFirst/StartLast, full-width docks, drag reorder),
                 // so always derive the flyout position from its real screen rect rather than a registry assumption.

@@ -1,4 +1,4 @@
-{
+﻿{
   "Settings": "Ayarlar",
   "SettingsTitle": "OpenTaskbar ayarları",
   "General": "Genel",
@@ -740,5 +740,12 @@
   "NightLight": "Gece ışığı",
   "AiUsageHourlyShort": "Saat",
   "AiUsageMonthlyShort": "Ay",
-  "WeatherTomorrow": "Yarın"
+  "WeatherTomorrow": "Yarın",
+  "DockWidthMode": "Görev çubuğu genişliği",
+  "DockWidthModeDescription": "Görev çubuğunun genişliği nasıl belirlenir.",
+  "DockWidthAuto": "İçeriğe sığdır",
+  "DockWidthPixels": "Sabit piksel",
+  "DockWidthPercent": "Ekranın %",
+  "DockWidthValue": "Genişlik",
+  "DockWidthValueDescription": "Seçili mod için genişlik değeri."
 }

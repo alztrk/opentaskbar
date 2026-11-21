@@ -27,7 +27,7 @@ public sealed class WidgetPanelHost : IDisposable
             AllowsTransparency = true,
             StaysOpen = false,
             Placement = PlacementMode.Top,
-            VerticalOffset = -(double)owner.FindResource("WidgetPanelGap"),
+            VerticalOffset = -DockMetrics.FlyoutGap,
             PopupAnimation = PopupAnimation.None,
             Child = _frame
         };
@@ -75,7 +75,8 @@ public sealed class WidgetPanelHost : IDisposable
         _restoreFocus = true;
         _frame.Heading = heading;
         _frame.Body = body;
-        var gap = (double)_owner.FindResource("WidgetPanelGap");
+        var gap = DockMetrics.FlyoutGap;
+        _popup.VerticalOffset = -gap;
         _frame.MaxWidth = Math.Max(1, SystemParameters.WorkArea.Width - gap * 2);
         _frame.MaxHeight = Math.Max(1, SystemParameters.WorkArea.Height - gap * 2);
         _popup.HorizontalOffset = (anchor.ActualWidth - Math.Min(_frame.Width, _frame.MaxWidth)) / 2;

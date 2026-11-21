@@ -1,4 +1,4 @@
-{
+﻿{
   "Settings": "Settings",
   "SettingsTitle": "OpenTaskbar settings",
   "General": "General",
@@ -740,5 +740,12 @@
   "NightLight": "Night light",
   "AiUsageHourlyShort": "1h",
   "AiUsageMonthlyShort": "30d",
-  "WeatherTomorrow": "Tomorrow"
+  "WeatherTomorrow": "Tomorrow",
+  "DockWidthMode": "Dock width",
+  "DockWidthModeDescription": "How the dock determines its width.",
+  "DockWidthAuto": "Fit to content",
+  "DockWidthPixels": "Fixed pixels",
+  "DockWidthPercent": "% of screen",
+  "DockWidthValue": "Width",
+  "DockWidthValueDescription": "Width value for the selected mode."
 }
