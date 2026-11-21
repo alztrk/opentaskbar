@@ -169,8 +169,12 @@
                             BorderThickness="0" CornerRadius="{DynamicResource WidgetRadius}"
                             SnapsToDevicePixels="True">
                         <Grid>
-                            <Border x:Name="HoverLayer" Background="{DynamicResource SurfaceHover}"
-                                    CornerRadius="{DynamicResource WidgetRadius}" Opacity="0" IsHitTestVisible="False" />
+                            <Border x:Name="HoverLayer" CornerRadius="{DynamicResource WidgetRadius}"
+                                    Opacity="0" IsHitTestVisible="False">
+                                <Border.Background>
+                                    <SolidColorBrush Color="{DynamicResource SurfaceHoverColor}" />
+                                </Border.Background>
+                            </Border>
                             <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="Center" VerticalAlignment="Center" />
                         </Grid>
                     </Border>
