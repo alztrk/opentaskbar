@@ -179,8 +179,8 @@ public sealed class AiUsageWidget : DockWidget
     protected override void OnSettingsChanged() => Render();
     protected override void OnLanguageChanged() => Refresh();
     protected override void OnCompactChanged(bool compact) => Render();
-    // V19: All AI usage widgets display their quotas and reset times inline without any generic flyout.
-    public override UIElement? BuildHoverFlyoutContent() => null;
+    // Use the shared hover flyout so every widget has the same hover background.
+    public override UIElement? BuildHoverFlyoutContent() => BuildFlyout(_hoverCountdowns);
 
     /// <summary>Settings preview shows the real widget chrome with placeholder quota, no service calls.</summary>
     public override bool SupportsStaticPreview => true;

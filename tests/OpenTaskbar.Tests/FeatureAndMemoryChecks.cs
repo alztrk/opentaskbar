@@ -71,7 +71,7 @@ internal static class FeatureAndMemoryChecks
                 ai.Tick(DateTime.Now);
                 Check(aiLoads == 1, "A sign-in failure must not poll again without changed credentials.");
                 ai.SetCompactState(true);
-                Check(ai.BuildHoverFlyoutContent() is null, "AI Usage renders inline without a generic hover flyout.");
+                Check(ai.BuildHoverFlyoutContent() is not null, "AI Usage must use the shared hover flyout.");
                 ai.Deactivate();
                 ai.Tick(DateTime.Now.AddHours(1));
                 Check(aiLoads == 1, "Inactive AI widgets must not call their loader.");
@@ -115,8 +115,8 @@ internal static class FeatureAndMemoryChecks
                 claude.SetCompactState(true);
                 Check(AiCards(claude) is [{ Content: StackPanel { Children: [_, TextBlock { Visibility: Visibility.Collapsed }, _] } }],
                     "Compact AI Usage must keep the logo and indicators and drop the name.");
-                Check(claude.BuildHoverFlyoutContent() is null && codex.BuildHoverFlyoutContent() is null,
-                    "Claude and Codex have inline indicators and no hover flyout.");
+                Check(claude.BuildHoverFlyoutContent() is not null && codex.BuildHoverFlyoutContent() is not null,
+                    "Claude and Codex must use the shared hover flyout.");
             }
 
             // 2. SystemStats + on-demand SystemSensors parity & disposal

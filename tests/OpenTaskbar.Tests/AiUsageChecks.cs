@@ -428,8 +428,8 @@ internal static class AiUsageChecks
                     widget.Activate();
                     widget.SetCompactState(compact);
                     widget.Tick(DateTime.Now.AddMinutes(1));
-                    if (widget.BuildHoverFlyoutContent() is not null)
-                        throw new InvalidOperationException($"{provider} must render inline without a generic hover flyout.");
+                    if (widget.BuildHoverFlyoutContent() is null)
+                        throw new InvalidOperationException($"{provider} must use the shared hover flyout.");
                     widget.SetCompactState(!compact);
                     checks++;
                 }
@@ -447,8 +447,8 @@ internal static class AiUsageChecks
                 return Task.FromResult<(AiUsageReport?, string?)>((report, null));
             });
             dualWidget.Activate();
-            if (dualWidget.BuildHoverFlyoutContent() is not null)
-                throw new InvalidOperationException($"{dualProvider} must have no hover flyout content.");
+            if (dualWidget.BuildHoverFlyoutContent() is null)
+                throw new InvalidOperationException($"{dualProvider} must use the shared hover flyout.");
 
             var cardField = typeof(AiUsageWidget).GetField("_card", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
             var cardObj = cardField.GetValue(dualWidget)!;
@@ -511,8 +511,8 @@ internal static class AiUsageChecks
             return Task.FromResult<(AiUsageReport?, string?)>((agyReport, null));
         });
         agyWidget.Activate();
-        if (agyWidget.BuildHoverFlyoutContent() is not null)
-            throw new InvalidOperationException("Antigravity must have no hover flyout content.");
+        if (agyWidget.BuildHoverFlyoutContent() is null)
+            throw new InvalidOperationException("Antigravity must use the shared hover flyout.");
 
         var agyCardField = typeof(AiUsageWidget).GetField("_card", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
         var agyCardObj = agyCardField.GetValue(agyWidget)!;
