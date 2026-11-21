@@ -199,59 +199,9 @@ public sealed class ThemePropertyEditor : UserControl
     {
         _message.Text = title;
         ShowColorSwatches();
-        SectionHeader(UiText.Get("DockBackground"));
-        var dock = new Border
-        {
-            CornerRadius = new CornerRadius(12),
-            Height = 52,
-            MaxWidth = 350,
-            HorizontalAlignment = HorizontalAlignment.Left,
-            Padding = new Thickness(18, 10, 18, 10),
-            Margin = new Thickness(0, 0, 0, 12),
-            Background = Application.Current.TryFindResource("DockMaterial") as Brush
-                ?? Application.Current.TryFindResource("SettingsControl") as Brush
-        };
-        var caption = new TextBlock { Text = UiText.Get("DockSurfacePreview"), VerticalAlignment = VerticalAlignment.Center };
-        caption.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
-        dock.Child = caption;
-        _body.Children.Add(dock);
 
-        SectionHeader(UiText.Get("WidgetSurface"));
-        var widgetCard = new Border
-        {
-            CornerRadius = new CornerRadius(7),
-            Height = 44,
-            MaxWidth = 350,
-            HorizontalAlignment = HorizontalAlignment.Left,
-            Padding = new Thickness(14, 8, 14, 8),
-            Margin = new Thickness(0, 0, 0, 16),
-            BorderThickness = new Thickness(1),
-            BorderBrush = Application.Current.TryFindResource("StrokeSubtle") as Brush,
-            Background = Application.Current.TryFindResource("SettingsControl") as Brush
-        };
-        var widgetContent = new DockPanel();
-        var meter = new Border
-        {
-            Width = 60, Height = 4, CornerRadius = new CornerRadius(2),
-            Margin = new Thickness(12, 0, 0, 0),
-            Background = Application.Current.TryFindResource("SettingsTrack") as Brush,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        DockPanel.SetDock(meter, Dock.Right);
-        var fill = new Border
-        {
-            Width = 36, Height = 4, CornerRadius = new CornerRadius(2),
-            Background = Application.Current.TryFindResource("AccentBrush") as Brush,
-            HorizontalAlignment = HorizontalAlignment.Left
-        };
-        meter.Child = fill;
-        widgetContent.Children.Add(meter);
-        var widgetText = new TextBlock { Text = UiText.Get("WidgetSurfacePreview"), VerticalAlignment = VerticalAlignment.Center, FontSize = 12.5 };
-        widgetText.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
-        widgetContent.Children.Add(widgetText);
-        widgetCard.Child = widgetContent;
-        _body.Children.Add(widgetCard);
-
+        // A built-in theme is read-only. One clear action is enough — fake
+        // "surface preview" boxes only added clutter without any function.
         SectionHeader(UiText.Get("CustomizeAppearance"));
         var create = Button(UiText.Get("ThemeCreateEditable"));
         create.Style = (Style)Application.Current.FindResource("SettingsPrimaryButton");

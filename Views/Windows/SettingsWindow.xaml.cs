@@ -516,96 +516,73 @@ public partial class SettingsWindow : Window
     private Button CreateThemeEntryButton(ThemePackChoice choice, bool isActive)
     {
         var (bgColor, accentColor) = ResolveThemePreviewColors(choice.Pack);
-        var chipBrush = new LinearGradientBrush
-        {
-            StartPoint = new Point(0, 0),
-            EndPoint = new Point(1, 1),
-            GradientStops =
-            {
-                new GradientStop(bgColor, 0.0),
-                new GradientStop(bgColor, 0.48),
-                new GradientStop(accentColor, 0.50),
-                new GradientStop(accentColor, 1.0)
-            }
-        };
-        chipBrush.Freeze();
 
-        // Card-style theme entry: swatch + name in a bordered tile with even spacing.
-        var chip = new Border
+        // Large preview swatch: the theme's surface color as the base with its
+        // accent as a band, so each card reads as a miniature of the theme.
+        var swatch = new Border
         {
-            Width = 34,
-            Height = 34,
-            CornerRadius = new CornerRadius(7),
+            Height = 64,
+            CornerRadius = new CornerRadius(6),
             BorderThickness = new Thickness(1),
-            Background = chipBrush,
-            Margin = new Thickness(0, 0, 12, 0),
-            VerticalAlignment = VerticalAlignment.Center
+            ClipToBounds = true
         };
-        chip.SetResourceReference(Border.BorderBrushProperty, "StrokeSubtle");
+        swatch.SetResourceReference(Border.BorderBrushProperty, "StrokeSubtle");
+        var swatchGrid = new Grid();
+        swatchGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        swatchGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        var accentBand = new Border { Background = new SolidColorBrush(accentColor) };
+        Grid.SetRow(accentBand, 1);
+        swatchGrid.Children.Add(new Border { Background = new SolidColorBrush(bgColor) });
+        swatchGrid.Children.Add(accentBand);
+        swatch.Child = swatchGrid;
 
-        var textStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Left };
         var nameText = new TextBlock
         {
             Text = choice.Name,
-            FontSize = 12.5,
+            FontSize = 11.5,
             FontWeight = isActive ? FontWeights.SemiBold : FontWeights.Normal,
             TextTrimming = TextTrimming.CharacterEllipsis,
-            VerticalAlignment = VerticalAlignment.Center
+            TextAlignment = TextAlignment.Center,
+            Margin = new Thickness(0, 8, 0, 0)
         };
         nameText.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
-        textStack.Children.Add(nameText);
 
-        var grid = new Grid();
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        grid.Children.Add(chip);
-        Grid.SetColumn(textStack, 1);
-        grid.Children.Add(textStack);
-
-        if (isActive)
-        {
-            var check = new System.Windows.Shapes.Path
-            {
-                Data = Application.Current.TryFindResource("IconCheck") as Geometry,
-                Width = 14,
-                Height = 14,
-                Stretch = Stretch.Uniform,
-                StrokeThickness = 2,
-                StrokeStartLineCap = PenLineCap.Round,
-                StrokeEndLineCap = PenLineCap.Round,
-                StrokeLineJoin = PenLineJoin.Round,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(8, 0, 2, 0)
-            };
-            check.SetResourceReference(System.Windows.Shapes.Shape.StrokeProperty, "AccentBrush");
-            Grid.SetColumn(check, 2);
-            grid.Children.Add(check);
-        }
+        var stack = new StackPanel { HorizontalAlignment = HorizontalAlignment.Stretch };
+        stack.Children.Add(swatch);
+        stack.Children.Add(nameText);
 
         var cardBorder = new Border
         {
-            Child = grid,
-            CornerRadius = new CornerRadius(7),
+            Child = stack,
+            CornerRadius = new CornerRadius(8),
             BorderThickness = new Thickness(1),
-            Padding = new Thickness(10, 9, 10, 9),
+            Padding = new Thickness(8, 8, 8, 10),
             Background = isActive
-                ? (Brush)Application.Current.FindResource("SurfaceSelectedStrong")
-                : Brushes.Transparent
+                ? (Brush)Application.Current.FindResource("AccentBrush")
+                : Brushes.Transparent,
+            Opacity = 1
         };
-        cardBorder.SetResourceReference(Border.BorderBrushProperty,
-            isActive ? "StrokeFocus" : "StrokeSubtle");
-        if (isActive) cardBorder.BorderThickness = new Thickness(1.5);
+        // Selected cards get a filled accent background; keep text readable by
+        // using the accent-text brush for the name when active.
+        if (isActive)
+        {
+            cardBorder.SetResourceReference(Border.BorderBrushProperty, "AccentBrush");
+            nameText.SetResourceReference(TextBlock.ForegroundProperty, "AccentText");
+        }
+        else
+        {
+            cardBorder.SetResourceReference(Border.BorderBrushProperty, "StrokeSubtle");
+        }
 
         var btn = new Button
         {
             Content = cardBorder,
-            Width = 344,
-            MinHeight = 46,
+            Width = 148,
+            MinHeight = 108,
             Padding = new Thickness(0),
-            Margin = new Thickness(0, 0, 10, 8),
+            Margin = new Thickness(0, 0, 10, 10),
             HorizontalContentAlignment = HorizontalAlignment.Stretch,
-            VerticalContentAlignment = VerticalAlignment.Center,
+            VerticalContentAlignment = VerticalAlignment.Top,
             Style = (Style)Application.Current.FindResource("SettingsGhostButton"),
             Background = Brushes.Transparent,
             BorderThickness = new Thickness(0)
