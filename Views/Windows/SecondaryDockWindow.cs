@@ -137,6 +137,7 @@ public sealed class SecondaryDockWindow : Window
         base.OnSourceInitialized(e);
         _handle = new WindowInteropHelper(this).Handle;
         MainWindow.ExcludeFromTaskSwitcher(_handle);
+        WindowThumbnailPreview.ExcludeFromPeek(_handle);
         // Tool window + no-activate: out of Alt+Tab, out of the running-app list, and clicks never steal focus.
         var style = GetWindowLongPtr(_handle, -20).ToInt64();
         SetWindowLongPtr(_handle, -20, new nint((style | 0x80 | 0x08000000) & ~0x40000));

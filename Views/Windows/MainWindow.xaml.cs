@@ -291,6 +291,7 @@ public partial class MainWindow : Window
         {
             ReportError("ErrorAltTabExclude");
         }
+        WindowThumbnailPreview.ExcludeFromPeek(source.Handle);
 
         _windowTracker = new NativeWindowTracker(Dispatcher);
         _windowTracker.WindowsChanged += WindowTracker_WindowsChanged;

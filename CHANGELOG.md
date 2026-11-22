@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added Aero Peek when hovering over window previews (respecting Windows' Enable Peek setting) and middle-click on preview cards to close windows.
 - Added a one-click Focus Mode toggle in the dock/tray context menu and Preferences that hides notification badges and widgets, pauses widget polling, and disables animations without overwriting saved settings.
 - Added combined `.otbackup` archives for exporting and importing settings, pinned apps, and the active custom theme, with backup validation and optional theme restoration.
 - Added custom keyboard shortcut recording with conflict detection and per-shortcut reset for dock focus and launcher/search.

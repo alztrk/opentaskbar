@@ -8,6 +8,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
+using Microsoft.Win32;
 using OpenTaskbar.Models;
 
 namespace OpenTaskbar.Services;
@@ -21,10 +22,14 @@ public sealed class WindowThumbnailPreview : IDisposable
     private const double ExitDurationMs = 140;
     private const uint SwpNoActivate = 0x0010;
     private const uint SwpNoOwnerZOrder = 0x0200;
+    private const int DwmwaExcludedFromPeek = 12;
+    private static readonly TimeSpan DefaultPeekDelay = TimeSpan.FromMilliseconds(500);
+    private const long PeekSwitchGraceMs = 250;
     private static readonly nint HwndTopmost = new(-1);
 
     private readonly Style _closeButtonStyle;
     private readonly DispatcherTimer _entranceTimer;
+    private readonly DispatcherTimer _peekTimer;
     private readonly double _entranceDurationMs;
     private readonly List<(nint Source, nint Thumbnail, NativeRect TargetRect)> _activeThumbnails = [];
     private Window? _window;
@@ -42,6 +47,18 @@ public sealed class WindowThumbnailPreview : IDisposable
     private BitmapSource? _icon;
     private int _transition;
     private readonly Dictionary<nint, (Border Surface, Border Overlay)> _cards = [];
+    private nint _peekCandidate;
+    private nint _peekedWindow;
+    private nint _peekCaller;
+    private long _peekEndedAt;
+
+    internal Func<bool> PeekEnabledCheck { get; set; } = IsPeekEnabled;
+    internal Func<nint, bool> WindowExistsCheck { get; set; } = IsWindow;
+    internal Action<bool, nint, nint> PeekAction { get; set; } = InvokePeekWindow;
+    internal Func<long> ClockMs { get; set; } = () => Environment.TickCount64;
+    internal TimeSpan PeekDelay { get => _peekTimer.Interval; set => _peekTimer.Interval = value; }
+    internal nint PeekedWindow => _peekedWindow;
+    internal Border? GetOverlayCardForTesting(nint handle) => _cards.TryGetValue(handle, out var pair) ? pair.Overlay : null;
 
     public WindowThumbnailPreview(Style closeButtonStyle)
     {
@@ -53,6 +70,11 @@ public sealed class WindowThumbnailPreview : IDisposable
             Interval = TimeSpan.FromMilliseconds(16)
         };
         _entranceTimer.Tick += EntranceTimer_Tick;
+        _peekTimer = new DispatcherTimer(DispatcherPriority.Normal)
+        {
+            Interval = DefaultPeekDelay
+        };
+        _peekTimer.Tick += PeekTimer_Tick;
     }
 
     private void EnsureWindows()
@@ -167,8 +189,9 @@ public sealed class WindowThumbnailPreview : IDisposable
         _transition++;
         _anchor = anchor;
         _icon = defaultIcon;
+        EndPeek(recordEndedAt: false);
         _cards.Clear();
-        var validWindows = windows.Where(w => w.Handle != 0 && IsWindow(w.Handle)).Take(6).ToList();
+        var validWindows = windows.Where(w => w.Handle != 0 && WindowExistsCheck(w.Handle)).Take(6).ToList();
         if (validWindows.Count == 0)
         {
             Hide();
@@ -225,6 +248,8 @@ public sealed class WindowThumbnailPreview : IDisposable
         }
 
         _destinationHandle = new WindowInteropHelper(previewWindow).Handle;
+        _peekCaller = Window.GetWindow(anchor) is { } dockWindow ? new WindowInteropHelper(dockWindow).Handle : 0;
+        if (_peekCaller != 0) ExcludeFromPeek(_peekCaller);
         if (_destinationHandle == 0 || !PositionWindow(anchor, totalWidth, totalHeight))
         {
             Hide();
@@ -282,6 +307,7 @@ public sealed class WindowThumbnailPreview : IDisposable
             closeBtn.Click += (_, e) =>
             {
                 e.Handled = true;
+                EndPeek(recordEndedAt: false);
                 _sourceHandle = handle;
                 CloseRequested?.Invoke(this, EventArgs.Empty);
             };
@@ -351,20 +377,31 @@ public sealed class WindowThumbnailPreview : IDisposable
             {
                 headerSurface.BorderBrush = focusStroke;
                 bodySurface.BorderBrush = focusStroke;
+                SchedulePeek(handle);
             };
             overlayCard.MouseLeave += (_, _) =>
             {
                 headerSurface.BorderBrush = strokeBrush;
                 bodySurface.BorderBrush = strokeBrush;
+                EndPeek(recordEndedAt: true);
             };
             overlayCard.MouseLeftButtonDown += (_, e) =>
             {
                 if (!closeBtn.IsMouseOver)
                 {
                     e.Handled = true;
+                    EndPeek(recordEndedAt: false);
                     _sourceHandle = handle;
                     PreviewClicked?.Invoke(this, EventArgs.Empty);
                 }
+            };
+            overlayCard.MouseUp += (_, e) =>
+            {
+                if (e.ChangedButton != System.Windows.Input.MouseButton.Middle) return;
+                e.Handled = true;
+                EndPeek(recordEndedAt: false);
+                _sourceHandle = handle;
+                CloseRequested?.Invoke(this, EventArgs.Empty);
             };
 
             overlayContainer.Children.Add(overlayCard);
@@ -465,6 +502,11 @@ public sealed class WindowThumbnailPreview : IDisposable
     {
         var anchor = _anchor;
         if (anchor is null || !IsVisible) return;
+        if ((_peekedWindow != 0 && closed.Contains(_peekedWindow))
+            || (_peekCandidate != 0 && closed.Contains(_peekCandidate)))
+        {
+            EndPeek(recordEndedAt: false);
+        }
         var token = ++_transition;
         _entranceTimer.Stop();
         foreach (var (source, thumbnail, _) in _activeThumbnails.Where(t => closed.Contains(t.Source)).ToList())
@@ -503,10 +545,12 @@ public sealed class WindowThumbnailPreview : IDisposable
     public void Hide()
     {
         _transition++;
+        EndPeek(recordEndedAt: false);
         _cards.Clear();
         _entranceTimer.Stop();
         ReleaseThumbnails();
         _sourceHandle = 0;
+        _peekCaller = 0;
         if (_window is null || _closeButtonWindow is null) return;
         _closeButtonWindow.BeginAnimation(UIElement.OpacityProperty, null);
         _surfaceContainer?.Children.Clear();
@@ -532,6 +576,7 @@ public sealed class WindowThumbnailPreview : IDisposable
         Hide();
         _disposed = true;
         _entranceTimer.Tick -= EntranceTimer_Tick;
+        _peekTimer.Tick -= PeekTimer_Tick;
         if (_window is not null)
         {
             _window.Closed -= Window_Closed;
@@ -674,10 +719,12 @@ public sealed class WindowThumbnailPreview : IDisposable
 
     private void Window_Closed(object? sender, EventArgs e)
     {
+        EndPeek(recordEndedAt: false);
         _windowClosed = true;
         ReleaseThumbnails();
         _destinationHandle = 0;
         _sourceHandle = 0;
+        _peekCaller = 0;
         if (!_closeWindowClosed && _closeButtonWindow is not null)
         {
             _closeButtonWindow.Close();
@@ -699,6 +746,7 @@ public sealed class WindowThumbnailPreview : IDisposable
         if (sender is Window window && PresentationSource.FromVisual(window) is HwndSource source)
         {
             MainWindow.ExcludeFromTaskSwitcher(source.Handle);
+            ExcludeFromPeek(source.Handle);
             source.AddHook(PreviewWindowProc);
         }
     }
@@ -719,6 +767,94 @@ public sealed class WindowThumbnailPreview : IDisposable
     private void Window_MouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
     {
         PointerLeft?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void SchedulePeek(nint window)
+    {
+        if (!PeekEnabledCheck()) return;
+        _peekTimer.Stop();
+        _peekCandidate = window;
+        if (_peekEndedAt != 0 && ClockMs() - _peekEndedAt < PeekSwitchGraceMs)
+        {
+            Peek(window);
+            return;
+        }
+
+        _peekTimer.Start();
+    }
+
+    private void PeekTimer_Tick(object? sender, EventArgs e)
+    {
+        _peekTimer.Stop();
+        if (_peekCandidate != 0 && _window is { IsVisible: true })
+        {
+            Peek(_peekCandidate);
+        }
+    }
+
+    private void Peek(nint window)
+    {
+        if (!WindowExistsCheck(window) || _peekedWindow == window) return;
+        if (TryInvokePeek(true, window, _peekCaller))
+        {
+            _peekedWindow = window;
+        }
+    }
+
+    private void EndPeek(bool recordEndedAt = false)
+    {
+        _peekTimer.Stop();
+        _peekCandidate = 0;
+        if (_peekedWindow == 0)
+        {
+            if (!recordEndedAt) _peekEndedAt = 0;
+            return;
+        }
+
+        var peeked = _peekedWindow;
+        _peekedWindow = 0;
+        _peekEndedAt = recordEndedAt ? ClockMs() : 0;
+        _ = TryInvokePeek(false, peeked, _peekCaller);
+    }
+
+    internal static bool IsPeekEnabled()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\DWM");
+            return key?.GetValue("EnableAeroPeek") is not int enabled || enabled != 0;
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or System.IO.IOException)
+        {
+            AppLog.Warning($"Unable to read EnableAeroPeek: {ex.Message}");
+            return false;
+        }
+    }
+
+    internal static void ExcludeFromPeek(nint window)
+    {
+        if (window == 0) return;
+        var excluded = 1;
+        _ = DwmSetWindowAttribute(window, DwmwaExcludedFromPeek, ref excluded, sizeof(int));
+    }
+
+    private static void InvokePeekWindow(bool show, nint target, nint caller)
+    {
+        ManagedShell.Common.Helpers.WindowHelper.PeekWindow(show, target, caller);
+    }
+
+    private bool TryInvokePeek(bool show, nint target, nint caller)
+    {
+        try
+        {
+            PeekAction(show, target, caller);
+            return true;
+        }
+        catch (Exception ex) when (ex is EntryPointNotFoundException or DllNotFoundException or ExternalException)
+        {
+            AppLog.Warning($"Window peek failed: {ex.Message}");
+            return false;
+        }
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -768,6 +904,9 @@ public sealed class WindowThumbnailPreview : IDisposable
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmUnregisterThumbnail(nint thumbnail);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(nint windowHandle, int attribute, ref int value, int size);
 
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

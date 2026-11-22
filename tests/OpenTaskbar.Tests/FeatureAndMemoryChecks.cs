@@ -242,6 +242,9 @@ internal static class FeatureAndMemoryChecks
 
             // 15. Settings search indexing and filtering (issue #74)
             CheckSettingsSearch(app, Check);
+
+            // 16. Thumbnail preview peek delay, grace window, and middle-click close (issue #93)
+            CheckThumbnailPreviewPeekAndMiddleClick(app, Check);
         }
         finally
         {
@@ -579,6 +582,158 @@ internal static class FeatureAndMemoryChecks
         timer.Start();
         Dispatcher.PushFrame(frame);
         timer.Stop();
+    }
+
+    private static void CheckThumbnailPreviewPeekAndMiddleClick(Application app, Action<bool, string> Check)
+    {
+        var anchor = new Border { Width = 80, Height = 32 };
+        var host = new Window
+        {
+            Left = -10000,
+            Top = -10000,
+            Width = 120,
+            Height = 40,
+            ShowInTaskbar = false,
+            ShowActivated = false,
+            Content = anchor
+        };
+        WindowThumbnailPreview? preview = null;
+        try
+        {
+            host.Show();
+            PumpDispatcher(app.Dispatcher, 50);
+
+            const nint hwnd1 = 0x1111;
+            const nint hwnd2 = 0x2222;
+            var win1 = new TrackedWindow(hwnd1, "One", null);
+            var win2 = new TrackedWindow(hwnd2, "Two", null);
+            var clock = 10_000L;
+            var peekCalls = new List<(bool Show, nint Target, nint Caller)>();
+            preview = new WindowThumbnailPreview((Style)app.FindResource("DockButton"))
+            {
+                PeekDelay = TimeSpan.FromMilliseconds(40),
+                WindowExistsCheck = _ => true,
+                ClockMs = () => clock,
+                PeekAction = (show, target, caller) => peekCalls.Add((show, target, caller)),
+                AnimationsEnabled = false
+            };
+
+            var dockHwnd = new System.Windows.Interop.WindowInteropHelper(host).Handle;
+            Check(dockHwnd != 0, "The offscreen preview host must have a window handle.");
+
+            void Enter(Border card) =>
+                card.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = UIElement.MouseEnterEvent });
+            void Leave(Border card) =>
+                card.RaiseEvent(new MouseEventArgs(Mouse.PrimaryDevice, Environment.TickCount) { RoutedEvent = UIElement.MouseLeaveEvent });
+
+            (Border Card1, Border Card2) ShowBoth()
+            {
+                Check(preview.ShowForWindows([win1, win2], anchor, null),
+                    "Thumbnail preview must open for both tracked windows.");
+                var card1 = preview.GetOverlayCardForTesting(hwnd1);
+                var card2 = preview.GetOverlayCardForTesting(hwnd2);
+                Check(card1 is not null && card2 is not null,
+                    "Thumbnail preview must build an overlay card for each tracked window.");
+                return (card1!, card2!);
+            }
+
+            void PeekAfterDelay(Border card, nint hwnd)
+            {
+                var before = peekCalls.Count;
+                Enter(card);
+                Check(peekCalls.Count == before && preview.PeekedWindow == 0,
+                    "Peek must not fire before the delay elapses.");
+                PumpDispatcher(app.Dispatcher, 90);
+                Check(peekCalls.Count == before + 1 && peekCalls[^1] == (true, hwnd, dockHwnd) && preview.PeekedWindow == hwnd,
+                    "Peek must show the hovered window for the dock after the delay.");
+            }
+
+            var (card1, card2) = ShowBoth();
+
+            preview.PeekEnabledCheck = () => false;
+            Enter(card1);
+            PumpDispatcher(app.Dispatcher, 80);
+            Check(peekCalls.Count == 0 && preview.PeekedWindow == 0,
+                "Disabled peek must ignore hover and leave PeekedWindow at zero.");
+
+            preview.PeekEnabledCheck = () => true;
+            Leave(card1);
+            Enter(card1);
+            Check(peekCalls.Count == 0 && preview.PeekedWindow == 0,
+                "Peek must wait for the delay and must not fire at 0ms.");
+            PumpDispatcher(app.Dispatcher, 90);
+            Check(peekCalls.Count == 1 && peekCalls[0] == (true, hwnd1, dockHwnd) && preview.PeekedWindow == hwnd1,
+                "Peek must show hwnd1 for the dock after the delay.");
+
+            Leave(card1);
+            Check(peekCalls.Count == 2 && peekCalls[1] == (false, hwnd1, dockHwnd) && preview.PeekedWindow == 0,
+                "Leaving a card must end the active peek.");
+
+            clock += 50;
+            var beforeSwitch = peekCalls.Count;
+            Enter(card2);
+            Check(peekCalls.Count == beforeSwitch + 1 && peekCalls[^1] == (true, hwnd2, dockHwnd) && preview.PeekedWindow == hwnd2,
+                "A card switch inside the grace window must peek the new window immediately.");
+
+            Leave(card2);
+            Check(peekCalls[^1] == (false, hwnd2, dockHwnd) && preview.PeekedWindow == 0,
+                "Leaving card 2 must end its peek before the grace window can expire.");
+            clock += 400;
+            var beforeExpired = peekCalls.Count;
+            Enter(card1);
+            Check(peekCalls.Count == beforeExpired && preview.PeekedWindow == 0,
+                "A hover after the grace window must not peek until the timer elapses.");
+            PumpDispatcher(app.Dispatcher, 90);
+            Check(peekCalls[^1] == (true, hwnd1, dockHwnd) && preview.PeekedWindow == hwnd1,
+                "Peek must start for card 1 once the delay elapses.");
+
+            var previewClicks = 0;
+            preview.PreviewClicked += (_, _) => previewClicks++;
+            card1.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Left)
+            {
+                RoutedEvent = UIElement.MouseLeftButtonDownEvent
+            });
+            Check(previewClicks == 1 && preview.SourceHandle == hwnd1
+                && peekCalls[^1] == (false, hwnd1, dockHwnd) && preview.PeekedWindow == 0,
+                "Primary click must raise PreviewClicked, select hwnd1, and end peek.");
+
+            (card1, _) = ShowBoth();
+            PeekAfterDelay(card1, hwnd1);
+            preview.Hide();
+            Check(peekCalls[^1] == (false, hwnd1, dockHwnd) && preview.PeekedWindow == 0,
+                "Hide must end the active peek.");
+
+            (card1, _) = ShowBoth();
+            PeekAfterDelay(card1, hwnd1);
+            preview.RemoveClosed([hwnd1], [win2]);
+            Check(peekCalls[^1] == (false, hwnd1, dockHwnd) && preview.PeekedWindow == 0,
+                "RemoveClosed must end peek for the closed card.");
+
+            (card1, card2) = ShowBoth();
+            var closeCount = 0;
+            var clickCount = 0;
+            preview.CloseRequested += (_, _) => closeCount++;
+            preview.PreviewClicked += (_, _) => clickCount++;
+            PeekAfterDelay(card2, hwnd2);
+            card2.RaiseEvent(new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, MouseButton.Middle)
+            {
+                RoutedEvent = UIElement.MouseUpEvent
+            });
+            Check(closeCount == 1 && preview.SourceHandle == hwnd2 && clickCount == 0 && preview.PeekedWindow == 0,
+                "Middle-click must close only the hovered preview window and end peek.");
+
+            preview.PeekAction = (_, _, _) => throw new ExternalException("simulated DWM failure");
+            Enter(card1);
+            PumpDispatcher(app.Dispatcher, 90);
+            Check(preview.PeekedWindow == 0,
+                "A failing peek must stay unhandled-exception free and leave PeekedWindow at zero.");
+        }
+        finally
+        {
+            preview?.Dispose();
+            host.Close();
+            PumpDispatcher(app.Dispatcher, 50);
+        }
     }
 
     private static void CheckDockProfiles(Action<bool, string> Check)
