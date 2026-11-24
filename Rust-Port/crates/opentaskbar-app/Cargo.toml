@@ -1,0 +1,23 @@
+[package]
+name = "opentaskbar-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "OpenTaskBar"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+gpui.workspace = true
+opentaskbar-core = { path = "../opentaskbar-core" }
+opentaskbar-shell = { path = "../opentaskbar-shell" }
+raw-window-handle.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

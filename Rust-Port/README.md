@@ -1,20 +1,8 @@
-# OpenTaskBar-Rust
+# OpenTaskbar (Rust + GPUI)
 
-A Rust port of [OpenTaskbar](https://github.com/alztrk/opentaskbar), the macOS-inspired floating dock and taskbar replacement for Windows 10 and 11.
+Clean-sheet Rust + GPUI Windows taskbar replacement focused on fast startup and low memory overhead.
 
-Goals: the same dock with a fraction of the GPU, CPU and memory cost, stutter-free magnification, and an animated first-run setup wizard.
-
-Status: early port. See [docs/PORTING_PLAN.md](docs/PORTING_PLAN.md) for the phases.
-
-## Build
-
-Requirements: Rust (stable, MSVC toolchain) and Visual Studio Build Tools with the C++ x64 tools and the Windows SDK.
-
-```powershell
-cargo build --release
-cargo test
-```
-
-## License
-
-MIT. Based on OpenTaskbar, © OpenTaskbar contributors.
+## Crates
+- `opentaskbar-core`: C# `settings.json` compatible settings model, minimal logger, single-instance lock.
+- `opentaskbar-shell`: Non-blocking Explorer taskbar hide/restore, recovery journal, out-of-process `--watchdog`, running-window tracker.
+- `opentaskbar-app`: GPUI floating dock (`WindowKind::PopUp`, transparent borderless Win32 `HWND` bridge), fisheye hover magnification, persistent raw-BGRA icon disk cache + short-lived `--extract-icons` worker.
