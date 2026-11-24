@@ -43,7 +43,8 @@ use crate::icon_cache::{self, RawIcon};
 use crate::pins::{self, PinnedApp};
 use crate::preview::{PreviewItem, PreviewPopup};
 use crate::settings_ui;
-use crate::widgets::{self, SystemStatsSampler};
+use crate::tray;
+use crate::widgets::{self, WidgetRuntime};
 use crate::win32::{
     self, AppContextAction, ContextAction, MonitorInfo, RecycleBinAction, TaskViewAction,
 };
@@ -55,8 +56,6 @@ const FISHEYE_PEAK: f32 = 0.42;
 const FISHEYE_RADIUS_SLOTS: f32 = 2.4;
 const BOUNCE_DURATION_SECS: f32 = 0.42;
 const DRAG_THRESHOLD_PX: f32 = 6.0;
-const CLOCK_W_DIPS: f32 = 66.0;
-const STATS_W_DIPS: f32 = 68.0;
 const SHOW_DESKTOP_W_DIPS: f32 = 8.0;
 
 const TIMER_POLL: usize = 1;
@@ -94,11 +93,8 @@ fn widgets_section_width(settings: &DockSettings) -> f32 {
     if settings.show_recycle_bin {
         w += settings.icon_dips() + 6.0;
     }
-    if settings.show_system_stats_widget {
-        w += STATS_W_DIPS + 6.0;
-    }
-    if settings.show_clock_widget {
-        w += CLOCK_W_DIPS + 6.0;
+    for wd in widgets::active_widgets(settings) {
+        w += wd.width_dips + 6.0;
     }
     if settings.show_desktop_button {
         w += SHOW_DESKTOP_W_DIPS + 6.0;
@@ -108,6 +104,14 @@ fn widgets_section_width(settings: &DockSettings) -> f32 {
     } else {
         0.0
     }
+}
+
+struct WidgetVisual {
+    id: &'static str,
+    width_dips: f32,
+    bg: VisualNode,
+    node: VisualNode,
+    last_key: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,13 +232,10 @@ struct DockState {
     bin_empty_surf: IDCompositionSurface,
     bin_full_surf: IDCompositionSurface,
     bin_is_full: bool,
-    stats_node: VisualNode,
-    clock_node: VisualNode,
+    widget_visuals: Vec<WidgetVisual>,
+    widget_runtime: WidgetRuntime,
     sd_bg: VisualNode,
     show_desktop_node: VisualNode,
-    stats_sampler: SystemStatsSampler,
-    last_stats_text: String,
-    last_clock_text: String,
     dot_running: IDCompositionSurface,
     dot_active: IDCompositionSurface,
     icon_surfaces: HashMap<String, Option<IDCompositionSurface>>,
@@ -253,12 +254,14 @@ struct DockState {
     hovered_shell: Option<ShellButton>,
     hovered_tray: bool,
     hovered_bin: bool,
+    hovered_widget: Option<&'static str>,
     hovered_show_desktop: bool,
     hovered_resize: Option<ResizeEdge>,
     pressed_idx: Option<usize>,
     pressed_shell: Option<ShellButton>,
     pressed_tray: bool,
     pressed_bin: bool,
+    pressed_widget: Option<&'static str>,
     drag: Option<DragState>,
     resize_drag: Option<ResizeDragState>,
     tracking_mouse: bool,
@@ -682,8 +685,6 @@ impl DockState {
             &bin_empty_surf
         }));
 
-        let stats_node = dcomp.create_node()?;
-        let clock_node = dcomp.create_node()?;
         let sd_bg = dcomp.create_node()?;
         sd_bg.hide();
         let show_desktop_node = dcomp.create_node()?;
@@ -746,13 +747,10 @@ impl DockState {
             bin_empty_surf,
             bin_full_surf,
             bin_is_full,
-            stats_node,
-            clock_node,
+            widget_visuals: Vec::new(),
+            widget_runtime: WidgetRuntime::default(),
             sd_bg,
             show_desktop_node,
-            stats_sampler: SystemStatsSampler::default(),
-            last_stats_text: String::new(),
-            last_clock_text: String::new(),
             dot_running,
             dot_active,
             icon_surfaces: HashMap::new(),
@@ -771,12 +769,14 @@ impl DockState {
             hovered_shell: None,
             hovered_tray: false,
             hovered_bin: false,
+            hovered_widget: None,
             hovered_show_desktop: false,
             hovered_resize: None,
             pressed_idx: None,
             pressed_shell: None,
             pressed_tray: false,
             pressed_bin: false,
+            pressed_widget: None,
             drag: None,
             resize_drag: None,
             tracking_mouse: false,
@@ -887,8 +887,10 @@ impl DockState {
         self.dcomp.add_child(&self.dcomp.root, &self.tray_node);
         self.dcomp.add_child(&self.dcomp.root, &self.bin_bg);
         self.dcomp.add_child(&self.dcomp.root, &self.bin_node);
-        self.dcomp.add_child(&self.dcomp.root, &self.stats_node);
-        self.dcomp.add_child(&self.dcomp.root, &self.clock_node);
+        for wv in &self.widget_visuals {
+            self.dcomp.add_child(&self.dcomp.root, &wv.bg);
+            self.dcomp.add_child(&self.dcomp.root, &wv.node);
+        }
         self.dcomp.add_child(&self.dcomp.root, &self.sd_bg);
         self.dcomp
             .add_child(&self.dcomp.root, &self.show_desktop_node);
@@ -897,44 +899,53 @@ impl DockState {
         self.dcomp.add_child(&self.dcomp.root, &self.tooltip_node);
     }
 
-    fn refresh_widgets(&mut self) -> bool {
-        let mut changed = false;
-        let widget_h = 36.0;
-        if self.settings.show_clock_widget {
-            let (time, date) = widgets::local_clock_strings();
-            let key = format!("{time}|{date}");
-            if key != self.last_clock_text
-                && let Ok(surf) = self.dcomp.create_widget_text_surface(
-                    &time,
-                    Some(&date),
-                    CLOCK_W_DIPS,
-                    widget_h,
-                    self.dpi,
-                    self.is_dark,
-                )
-            {
-                self.clock_node.set_content(Some(&surf));
-                self.last_clock_text = key;
-                changed = true;
+    fn sync_widget_visuals(&mut self) {
+        let active = widgets::active_widgets(&self.settings);
+        let same = self.widget_visuals.len() == active.len()
+            && self
+                .widget_visuals
+                .iter()
+                .zip(active.iter())
+                .all(|(v, d)| v.id == d.id);
+        if same {
+            return;
+        }
+        self.widget_visuals.clear();
+        for wd in active {
+            if let (Ok(bg), Ok(node)) = (self.dcomp.create_node(), self.dcomp.create_node()) {
+                bg.hide();
+                self.widget_visuals.push(WidgetVisual {
+                    id: wd.id,
+                    width_dips: wd.width_dips,
+                    bg,
+                    node,
+                    last_key: String::new(),
+                });
             }
         }
-        if self.settings.show_system_stats_widget {
-            let (cpu, ram) = self.stats_sampler.sample();
-            let primary = format!("CPU {cpu}%");
-            let secondary = format!("RAM {ram}%");
-            let key = format!("{primary}|{secondary}");
-            if key != self.last_stats_text
+        self.rebuild_visual_tree();
+    }
+
+    fn refresh_widgets(&mut self) -> bool {
+        self.sync_widget_visuals();
+        self.widget_runtime.tick(&self.settings);
+        let mut changed = false;
+        let widget_h = 36.0;
+        for wv in &mut self.widget_visuals {
+            let (top, bottom) = self.widget_runtime.chip_lines(wv.id, &self.settings);
+            let key = format!("{top}|{bottom}");
+            if key != wv.last_key
                 && let Ok(surf) = self.dcomp.create_widget_text_surface(
-                    &primary,
-                    Some(&secondary),
-                    STATS_W_DIPS,
+                    &top,
+                    Some(&bottom),
+                    wv.width_dips,
                     widget_h,
                     self.dpi,
                     self.is_dark,
                 )
             {
-                self.stats_node.set_content(Some(&surf));
-                self.last_stats_text = key;
+                wv.node.set_content(Some(&surf));
+                wv.last_key = key;
                 changed = true;
             }
         }
@@ -1012,8 +1023,9 @@ impl DockState {
         self.settings = next;
         self.is_dark = resolve_is_dark(self.settings.theme);
         self.pins = load_effective_pins(&self.settings);
-        self.last_clock_text.clear();
-        self.last_stats_text.clear();
+        for wv in &mut self.widget_visuals {
+            wv.last_key.clear();
+        }
         self.tooltip_cache = None;
         if self.monitor.is_primary {
             let auto_hide = self.settings.auto_hide != AutoHideMode::Disabled;
@@ -1199,30 +1211,20 @@ impl DockState {
     ) -> (
         Option<DipRect>,
         Option<DipRect>,
-        Option<DipRect>,
-        Option<DipRect>,
+        Vec<(&'static str, DipRect)>,
     ) {
         let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
         let mut right_cursor = pill_left + pill_w - 12.0;
         if self.settings.show_desktop_button {
             right_cursor -= SHOW_DESKTOP_W_DIPS + 6.0;
         }
-        let clock = if self.settings.show_clock_widget {
-            let l = right_cursor - CLOCK_W_DIPS;
+        let mut widget_rects = Vec::with_capacity(self.widget_visuals.len());
+        for wv in self.widget_visuals.iter().rev() {
+            let l = right_cursor - wv.width_dips;
             let r = right_cursor;
-            right_cursor -= CLOCK_W_DIPS + 6.0;
-            Some((l, pill_top + 6.0, r, pill_top + pill_h - 6.0))
-        } else {
-            None
-        };
-        let stats = if self.settings.show_system_stats_widget {
-            let l = right_cursor - STATS_W_DIPS;
-            let r = right_cursor;
-            right_cursor -= STATS_W_DIPS + 6.0;
-            Some((l, pill_top + 6.0, r, pill_top + pill_h - 6.0))
-        } else {
-            None
-        };
+            right_cursor -= wv.width_dips + 6.0;
+            widget_rects.push((wv.id, (l, pill_top + 6.0, r, pill_top + pill_h - 6.0)));
+        }
         let bin = if self.settings.show_recycle_bin {
             let bw = self.settings.icon_dips();
             let l = right_cursor - bw;
@@ -1240,7 +1242,19 @@ impl DockState {
         } else {
             None
         };
-        (tray, bin, stats, clock)
+        (tray, bin, widget_rects)
+    }
+
+    fn flyout_anchor_px(&self, rect: DipRect) -> (i32, i32) {
+        let (_, pill_top, _, _) = self.live_pill_geometry();
+        let mut win_rc: RECT = unsafe { std::mem::zeroed() };
+        unsafe {
+            GetWindowRect(self.hwnd as HWND, &mut win_rc);
+        }
+        let cx_dips = (rect.0 + rect.2) * 0.5;
+        let anchor_x = win_rc.left + (cx_dips * self.dpi).round() as i32;
+        let anchor_y = win_rc.top + ((pill_top - 8.0) * self.dpi).round() as i32;
+        (anchor_x, anchor_y)
     }
 
     fn hit_rect(rc: Option<(f32, f32, f32, f32)>, mx: f32, my: f32) -> bool {
@@ -1664,30 +1678,28 @@ impl DockState {
                 self.show_desktop_node.hide();
             }
 
-            if self.settings.show_clock_widget {
-                let cx = right_cursor - CLOCK_W_DIPS;
-                self.clock_node.set_transform(
-                    1.0,
-                    1.0,
-                    (cx * dpi).round(),
-                    (widget_top * dpi).round(),
-                );
-                right_cursor -= CLOCK_W_DIPS + 6.0;
-            } else {
-                self.clock_node.hide();
-            }
-
-            if self.settings.show_system_stats_widget {
-                let sx = right_cursor - STATS_W_DIPS;
-                self.stats_node.set_transform(
-                    1.0,
-                    1.0,
-                    (sx * dpi).round(),
-                    (widget_top * dpi).round(),
-                );
-                right_cursor -= STATS_W_DIPS + 6.0;
-            } else {
-                self.stats_node.hide();
+            for wv in self.widget_visuals.iter().rev() {
+                let wx = right_cursor - wv.width_dips;
+                let is_pressed = self.pressed_widget == Some(wv.id);
+                let is_hovered = self.hovered_widget == Some(wv.id);
+                if is_pressed || is_hovered {
+                    wv.bg.set_content(Some(if is_pressed {
+                        &self.shell_bg_press
+                    } else {
+                        &self.shell_bg_hover
+                    }));
+                    wv.bg.set_transform(
+                        wv.width_dips / base,
+                        36.0 / base,
+                        (wx * dpi).round(),
+                        (widget_top * dpi).round(),
+                    );
+                } else {
+                    wv.bg.hide();
+                }
+                wv.node
+                    .set_transform(1.0, 1.0, (wx * dpi).round(), (widget_top * dpi).round());
+                right_cursor -= wv.width_dips + 6.0;
             }
 
             if self.settings.show_recycle_bin {
@@ -1769,8 +1781,10 @@ impl DockState {
             self.tray_node.hide();
             self.bin_bg.hide();
             self.bin_node.hide();
-            self.stats_node.hide();
-            self.clock_node.hide();
+            for wv in &self.widget_visuals {
+                wv.bg.hide();
+                wv.node.hide();
+            }
             self.sd_bg.hide();
             self.show_desktop_node.hide();
         }
@@ -1814,13 +1828,23 @@ impl DockState {
                 .map_or(pill_left + pill_w - 12.0, |(l, _, r, _)| (l + r) * 0.5);
             Some(("Show Desktop".to_owned(), cx, pill_top - 8.0))
         } else if self.hovered_bin {
-            let (_, bin_rc, _, _) = self.right_widget_rects_dips();
+            let (_, bin_rc, _) = self.right_widget_rects_dips();
             let cx = bin_rc.map_or(pill_left + pill_w - 60.0, |(l, _, r, _)| (l + r) * 0.5);
             Some(("Recycle Bin".to_owned(), cx, pill_top - 8.0))
         } else if self.hovered_tray {
-            let (tray_rc, _, _, _) = self.right_widget_rects_dips();
+            let (tray_rc, _, _) = self.right_widget_rects_dips();
             let cx = tray_rc.map_or(pill_left + pill_w - 110.0, |(l, _, r, _)| (l + r) * 0.5);
-            Some(("Background apps".to_owned(), cx, pill_top - 8.0))
+            Some(("Background Apps".to_owned(), cx, pill_top - 8.0))
+        } else if let Some(wid) = self.hovered_widget {
+            let (_, _, wrects) = self.right_widget_rects_dips();
+            let cx = wrects
+                .iter()
+                .find(|(id, _)| *id == wid)
+                .map_or(pill_left + pill_w - 60.0, |(_, (l, _, r, _))| (l + r) * 0.5);
+            let label = widgets::widget_descriptor(wid)
+                .map_or(wid, |d| d.name)
+                .to_owned();
+            Some((label, cx, pill_top - 8.0))
         } else if let Some(shell) = self.hovered_shell {
             Some((
                 shell.label().to_owned(),
@@ -2072,13 +2096,21 @@ impl DockState {
             return;
         }
 
-        let (tray_rc, bin_rc, _, _) = self.right_widget_rects_dips();
+        let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
         let over_tray = Self::hit_rect(tray_rc, mx, my);
         let over_bin = Self::hit_rect(bin_rc, mx, my);
-        if over_tray != self.hovered_tray || over_bin != self.hovered_bin {
+        let over_widget = wrects
+            .iter()
+            .find(|(_, rc)| Self::hit_rect(Some(*rc), mx, my))
+            .map(|(id, _)| *id);
+        if over_tray != self.hovered_tray
+            || over_bin != self.hovered_bin
+            || over_widget != self.hovered_widget
+        {
             self.hovered_tray = over_tray;
             self.hovered_bin = over_bin;
-            if over_tray || over_bin {
+            self.hovered_widget = over_widget;
+            if over_tray || over_bin || over_widget.is_some() {
                 self.hovered_shell = None;
                 self.hover_mouse_x = None;
                 self.hovered_idx = None;
@@ -2087,7 +2119,7 @@ impl DockState {
             self.ensure_animation();
             self.update_visuals();
         }
-        if over_tray || over_bin {
+        if over_tray || over_bin || over_widget.is_some() {
             return;
         }
 
@@ -2149,11 +2181,13 @@ impl DockState {
         self.hovered_shell = None;
         self.hovered_tray = false;
         self.hovered_bin = false;
+        self.hovered_widget = None;
         self.hovered_show_desktop = false;
         self.hovered_resize = None;
         self.pressed_shell = None;
         self.pressed_tray = false;
         self.pressed_bin = false;
+        self.pressed_widget = None;
         self.pressed_idx = None;
         self.schedule_preview_hide();
         self.evaluate_auto_hide();
@@ -2182,7 +2216,7 @@ impl DockState {
         if self.hit_show_desktop(mx, my) {
             return;
         }
-        let (tray_rc, bin_rc, stats_rc, clock_rc) = self.right_widget_rects_dips();
+        let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
         if Self::hit_rect(tray_rc, mx, my) {
             self.pressed_tray = true;
             self.update_visuals();
@@ -2193,7 +2227,12 @@ impl DockState {
             self.update_visuals();
             return;
         }
-        if Self::hit_rect(stats_rc, mx, my) || Self::hit_rect(clock_rc, mx, my) {
+        if let Some((wid, _)) = wrects
+            .iter()
+            .find(|(_, rc)| Self::hit_rect(Some(*rc), mx, my))
+        {
+            self.pressed_widget = Some(*wid);
+            self.update_visuals();
             return;
         }
 
@@ -2231,12 +2270,15 @@ impl DockState {
             opentaskbar_shell::taskbar::show_desktop();
             return;
         }
-        let (tray_rc, bin_rc, stats_rc, clock_rc) = self.right_widget_rects_dips();
+        let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
         if self.pressed_tray {
             self.pressed_tray = false;
             self.update_visuals();
-            if Self::hit_rect(tray_rc, mx, my) {
-                opentaskbar_shell::taskbar::open_tray_overflow();
+            if let Some(rc) = tray_rc
+                && Self::hit_rect(Some(rc), mx, my)
+            {
+                let (ax, ay) = self.flyout_anchor_px(rc);
+                tray::open_background_apps_flyout(self.hwnd, self.is_dark, ax, ay);
             }
             return;
         }
@@ -2248,12 +2290,32 @@ impl DockState {
             }
             return;
         }
-        if Self::hit_rect(stats_rc, mx, my) {
-            pins::launch("taskmgr.exe".to_owned());
-            return;
-        }
-        if Self::hit_rect(clock_rc, mx, my) {
-            opentaskbar_shell::taskbar::open_notifications();
+        if let Some(wid) = self.pressed_widget.take() {
+            self.update_visuals();
+            if let Some((_, rc)) = wrects
+                .iter()
+                .find(|(id, rc)| *id == wid && Self::hit_rect(Some(*rc), mx, my))
+            {
+                let (ax, ay) = self.flyout_anchor_px(*rc);
+                let changed = self.widget_runtime.open_widget_flyout(
+                    wid,
+                    self.hwnd,
+                    self.is_dark,
+                    ax,
+                    ay,
+                    &mut self.settings,
+                );
+                if changed {
+                    let _ = opentaskbar_core::settings::save_to(
+                        &opentaskbar_core::settings::settings_path(),
+                        &self.settings,
+                    );
+                    self.reload_settings_live();
+                } else {
+                    self.refresh_widgets();
+                    self.update_visuals();
+                }
+            }
             return;
         }
         if let Some(shell) = self.pressed_shell.take() {
@@ -2316,6 +2378,12 @@ impl DockState {
     }
 
     fn handle_mouse_wheel(&mut self, delta: i16) {
+        if self.hovered_widget == Some("audio") {
+            widgets::adjust_audio_volume(if delta > 0 { 4 } else { -4 });
+            self.refresh_widgets();
+            self.update_visuals();
+            return;
+        }
         if let Some(idx) = self.hovered_idx
             && let Some(slot) = self.slots.get(idx)
             && !slot.windows.is_empty()
@@ -2424,7 +2492,7 @@ impl DockState {
     fn handle_rbutton_up(&mut self, mx: f32, my: f32) {
         self.hide_preview_now();
 
-        let (_, bin_rc, _, _) = self.right_widget_rects_dips();
+        let (_, bin_rc, _) = self.right_widget_rects_dips();
         if Self::hit_rect(bin_rc, mx, my) {
             match win32::show_recycle_bin_context_menu(self.hwnd, self.is_dark) {
                 RecycleBinAction::Open => pins::launch("shell:RecycleBinFolder".to_owned()),
@@ -2553,6 +2621,7 @@ unsafe extern "system" fn wnd_proc(
                 || state.hovered_idx.is_some()
                 || state.hovered_tray
                 || state.hovered_bin
+                || state.hovered_widget.is_some()
                 || state.hovered_show_desktop
             {
                 IDC_HAND

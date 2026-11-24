@@ -327,22 +327,22 @@ pub fn reposition_dock_window(hwnd: usize, x: i32, y: i32, w: i32, h: i32) {
     }
 }
 
-use crate::menu::{self, MenuEntry};
+use crate::menu::{self, MenuEntry, MenuIcon};
 
 pub fn show_dock_context_menu(hwnd: usize, is_dark: bool) -> ContextAction {
     let entries = vec![
-        MenuEntry::item(MENU_SETTINGS, "Settings..."),
-        MenuEntry::item(MENU_TASKMGR, "Task Manager"),
+        MenuEntry::item(MENU_SETTINGS, MenuIcon::Settings, "Settings..."),
+        MenuEntry::item(MENU_TASKMGR, MenuIcon::Activity, "Task Manager"),
         MenuEntry::Separator,
-        MenuEntry::item(MENU_EXPLORER, "File Explorer"),
-        MenuEntry::item(MENU_TERMINAL, "Terminal"),
-        MenuEntry::item(MENU_TERMINAL_ADMIN, "Terminal (Admin)"),
-        MenuEntry::item(MENU_RUN, "Run..."),
+        MenuEntry::item(MENU_EXPLORER, MenuIcon::Folder, "File Explorer"),
+        MenuEntry::item(MENU_TERMINAL, MenuIcon::Terminal, "Terminal"),
+        MenuEntry::item(MENU_TERMINAL_ADMIN, MenuIcon::Shield, "Terminal (Admin)"),
+        MenuEntry::item(MENU_RUN, MenuIcon::Play, "Run..."),
         MenuEntry::Separator,
-        MenuEntry::item(MENU_SHOW_DESKTOP, "Show Desktop"),
-        MenuEntry::item(MENU_RESTORE, "Restore Windows Taskbar"),
+        MenuEntry::item(MENU_SHOW_DESKTOP, MenuIcon::Monitor, "Show Desktop"),
+        MenuEntry::item(MENU_RESTORE, MenuIcon::Refresh, "Restore Windows Taskbar"),
         MenuEntry::Separator,
-        MenuEntry::destructive(MENU_EXIT, "Exit OpenTaskbar"),
+        MenuEntry::destructive(MENU_EXIT, MenuIcon::Power, "Exit OpenTaskbar"),
     ];
     match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
         MENU_SETTINGS => ContextAction::Settings,
@@ -366,12 +366,23 @@ pub fn show_app_context_menu(
     running: bool,
 ) -> AppContextAction {
     let mut entries = vec![
-        MenuEntry::item(APP_MENU_OPEN, app_name),
-        MenuEntry::with_shortcut(APP_MENU_NEW_WINDOW, "New Window", "Shift+Click"),
-        MenuEntry::with_shortcut(APP_MENU_ADMIN, "Run as Admin", "Ctrl+Shift"),
+        MenuEntry::item(APP_MENU_OPEN, MenuIcon::Play, app_name),
+        MenuEntry::with_shortcut(
+            APP_MENU_NEW_WINDOW,
+            MenuIcon::Plus,
+            "New Window",
+            "Shift+Click",
+        ),
+        MenuEntry::with_shortcut(
+            APP_MENU_ADMIN,
+            MenuIcon::Shield,
+            "Run as Admin",
+            "Ctrl+Shift",
+        ),
         MenuEntry::Separator,
         MenuEntry::item(
             APP_MENU_TOGGLE_PIN,
+            MenuIcon::Pin,
             if pinned {
                 "Unpin from Dock"
             } else {
@@ -381,9 +392,14 @@ pub fn show_app_context_menu(
     ];
     if running {
         entries.push(MenuEntry::Separator);
-        entries.push(MenuEntry::item(APP_MENU_CLOSE, "Close Window"));
+        entries.push(MenuEntry::item(
+            APP_MENU_CLOSE,
+            MenuIcon::Close,
+            "Close Window",
+        ));
         entries.push(MenuEntry::destructive(
             APP_MENU_TERMINATE,
+            MenuIcon::Power,
             "Terminate Process",
         ));
     }
@@ -400,11 +416,11 @@ pub fn show_app_context_menu(
 
 pub fn show_taskview_context_menu(hwnd: usize, is_dark: bool) -> TaskViewAction {
     let entries = vec![
-        MenuEntry::item(TV_MENU_PREV, "Previous Desktop"),
-        MenuEntry::item(TV_MENU_NEXT, "Next Desktop"),
-        MenuEntry::item(TV_MENU_NEW, "New Desktop"),
+        MenuEntry::item(TV_MENU_PREV, MenuIcon::ChevronLeft, "Previous Desktop"),
+        MenuEntry::item(TV_MENU_NEXT, MenuIcon::ChevronRight, "Next Desktop"),
+        MenuEntry::item(TV_MENU_NEW, MenuIcon::Plus, "New Desktop"),
         MenuEntry::Separator,
-        MenuEntry::item(TV_MENU_VIEW, "Task View"),
+        MenuEntry::item(TV_MENU_VIEW, MenuIcon::Layers, "Task View"),
     ];
     match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
         TV_MENU_PREV => TaskViewAction::PreviousDesktop,
@@ -417,9 +433,9 @@ pub fn show_taskview_context_menu(hwnd: usize, is_dark: bool) -> TaskViewAction 
 
 pub fn show_recycle_bin_context_menu(hwnd: usize, is_dark: bool) -> RecycleBinAction {
     let entries = vec![
-        MenuEntry::item(BIN_MENU_OPEN, "Open Recycle Bin"),
+        MenuEntry::item(BIN_MENU_OPEN, MenuIcon::Folder, "Open Recycle Bin"),
         MenuEntry::Separator,
-        MenuEntry::destructive(BIN_MENU_EMPTY, "Empty Recycle Bin"),
+        MenuEntry::destructive(BIN_MENU_EMPTY, MenuIcon::Trash, "Empty Recycle Bin"),
     ];
     match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
         BIN_MENU_OPEN => RecycleBinAction::Open,

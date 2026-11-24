@@ -12,6 +12,8 @@ mod dcomp;
 #[cfg(windows)]
 mod dock;
 #[cfg(windows)]
+mod flyout;
+#[cfg(windows)]
 mod icon_cache;
 #[cfg(windows)]
 mod menu;
@@ -21,6 +23,10 @@ mod pins;
 mod preview;
 #[cfg(windows)]
 mod settings_ui;
+#[cfg(windows)]
+mod tray;
+#[cfg(windows)]
+mod ui_components;
 #[cfg(windows)]
 mod widgets;
 #[cfg(windows)]

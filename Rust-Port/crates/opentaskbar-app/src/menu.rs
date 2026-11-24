@@ -1,8 +1,8 @@
-//! Custom modern macOS-inspired Win32 popup context menu.
+//! Custom modern iOS/shadcn-inspired Win32 popup context menu with crisp vector icons.
 //!
 //! Replaces Win32's legacy `TrackPopupMenu` with a crisp Win11-rounded dark/light surface,
-//! rounded hover highlights, right-aligned shortcut hints, thin separators, and destructive
-//! red hover tints. Opens in < 2ms with zero GPU overhead.
+//! left vector icons, rounded hover highlights, right-aligned shortcut hints, thin separators,
+//! and destructive red hover tints. Opens in < 2ms with zero GPU overhead.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -12,8 +12,9 @@ use windows_sys::Win32::Graphics::Dwm::{
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DT_LEFT, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect, LineTo, MoveToEx,
-    PAINTSTRUCT, PS_SOLID, RoundRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    DT_VCENTER, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, HDC, InvalidateRect, LineTo,
+    MoveToEx, PAINTSTRUCT, PS_SOLID, Rectangle, RoundRect, SelectObject, SetBkMode, SetTextColor,
+    TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -32,16 +33,38 @@ use crate::win32;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
-const MENU_W_DIPS: f32 = 232.0;
-const ROW_H_DIPS: f32 = 30.0;
+const MENU_W_DIPS: f32 = 246.0;
+const ROW_H_DIPS: f32 = 32.0;
 const SEP_H_DIPS: f32 = 9.0;
 const PAD_X_DIPS: f32 = 6.0;
 const PAD_Y_DIPS: f32 = 6.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuIcon {
+    None,
+    Settings,
+    Activity,
+    Folder,
+    Terminal,
+    Shield,
+    Play,
+    Monitor,
+    Refresh,
+    Power,
+    Plus,
+    Pin,
+    Close,
+    Trash,
+    ChevronLeft,
+    ChevronRight,
+    Layers,
+}
 
 #[derive(Clone)]
 pub enum MenuEntry {
     Item {
         id: u32,
+        icon: MenuIcon,
         label: String,
         shortcut: Option<&'static str>,
         destructive: bool,
@@ -50,27 +73,35 @@ pub enum MenuEntry {
 }
 
 impl MenuEntry {
-    pub fn item(id: u32, label: impl Into<String>) -> Self {
+    pub fn item(id: u32, icon: MenuIcon, label: impl Into<String>) -> Self {
         Self::Item {
             id,
+            icon,
             label: label.into(),
             shortcut: None,
             destructive: false,
         }
     }
 
-    pub fn with_shortcut(id: u32, label: impl Into<String>, shortcut: &'static str) -> Self {
+    pub fn with_shortcut(
+        id: u32,
+        icon: MenuIcon,
+        label: impl Into<String>,
+        shortcut: &'static str,
+    ) -> Self {
         Self::Item {
             id,
+            icon,
             label: label.into(),
             shortcut: Some(shortcut),
             destructive: false,
         }
     }
 
-    pub fn destructive(id: u32, label: impl Into<String>) -> Self {
+    pub fn destructive(id: u32, icon: MenuIcon, label: impl Into<String>) -> Self {
         Self::Item {
             id,
+            icon,
             label: label.into(),
             shortcut: None,
             destructive: true,
@@ -100,6 +131,149 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
 
 fn pt_in_rect(r: &RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
+}
+
+unsafe fn draw_menu_icon(hdc: HDC, icon: MenuIcon, cx: i32, cy: i32, dpi: f32, color: u32) {
+    if icon == MenuIcon::None {
+        return;
+    }
+    let s = |v: f32| (v * dpi).round() as i32;
+    let stroke_w = (1.4 * dpi).round().max(1.0) as i32;
+    unsafe {
+        let pen = CreatePen(PS_SOLID, stroke_w, color);
+        let null_brush = windows_sys::Win32::Graphics::Gdi::GetStockObject(
+            windows_sys::Win32::Graphics::Gdi::NULL_BRUSH,
+        );
+        let old_pen = SelectObject(hdc, pen as _);
+        let old_brush = SelectObject(hdc, null_brush);
+
+        match icon {
+            MenuIcon::None => {}
+            MenuIcon::Settings => {
+                Ellipse(hdc, cx - s(5.0), cy - s(5.0), cx + s(5.0), cy + s(5.0));
+                Ellipse(hdc, cx - s(2.0), cy - s(2.0), cx + s(2.0), cy + s(2.0));
+            }
+            MenuIcon::Activity => {
+                MoveToEx(hdc, cx - s(6.0), cy, std::ptr::null_mut());
+                LineTo(hdc, cx - s(3.0), cy);
+                LineTo(hdc, cx - s(1.0), cy - s(4.5));
+                LineTo(hdc, cx + s(1.5), cy + s(4.0));
+                LineTo(hdc, cx + s(3.5), cy);
+                LineTo(hdc, cx + s(6.0), cy);
+            }
+            MenuIcon::Folder => {
+                RoundRect(
+                    hdc,
+                    cx - s(6.0),
+                    cy - s(4.0),
+                    cx + s(6.0),
+                    cy + s(5.0),
+                    s(2.0),
+                    s(2.0),
+                );
+                MoveToEx(hdc, cx - s(5.5), cy - s(4.0), std::ptr::null_mut());
+                LineTo(hdc, cx - s(4.0), cy - s(5.5));
+                LineTo(hdc, cx - s(0.5), cy - s(5.5));
+                LineTo(hdc, cx + s(1.0), cy - s(4.0));
+            }
+            MenuIcon::Terminal => {
+                MoveToEx(hdc, cx - s(5.5), cy - s(3.5), std::ptr::null_mut());
+                LineTo(hdc, cx - s(1.5), cy);
+                LineTo(hdc, cx - s(5.5), cy + s(3.5));
+                MoveToEx(hdc, cx + s(0.5), cy + s(3.5), std::ptr::null_mut());
+                LineTo(hdc, cx + s(5.5), cy + s(3.5));
+            }
+            MenuIcon::Shield => {
+                MoveToEx(hdc, cx, cy - s(6.0), std::ptr::null_mut());
+                LineTo(hdc, cx + s(5.0), cy - s(3.5));
+                LineTo(hdc, cx + s(4.5), cy + s(1.5));
+                LineTo(hdc, cx, cy + s(6.0));
+                LineTo(hdc, cx - s(4.5), cy + s(1.5));
+                LineTo(hdc, cx - s(5.0), cy - s(3.5));
+                LineTo(hdc, cx, cy - s(6.0));
+            }
+            MenuIcon::Play => {
+                MoveToEx(hdc, cx - s(3.5), cy - s(5.0), std::ptr::null_mut());
+                LineTo(hdc, cx + s(5.0), cy);
+                LineTo(hdc, cx - s(3.5), cy + s(5.0));
+                LineTo(hdc, cx - s(3.5), cy - s(5.0));
+            }
+            MenuIcon::Monitor => {
+                RoundRect(
+                    hdc,
+                    cx - s(6.0),
+                    cy - s(5.0),
+                    cx + s(6.0),
+                    cy + s(2.5),
+                    s(2.0),
+                    s(2.0),
+                );
+                MoveToEx(hdc, cx - s(2.5), cy + s(5.0), std::ptr::null_mut());
+                LineTo(hdc, cx + s(2.5), cy + s(5.0));
+                MoveToEx(hdc, cx, cy + s(2.5), std::ptr::null_mut());
+                LineTo(hdc, cx, cy + s(5.0));
+            }
+            MenuIcon::Refresh => {
+                Ellipse(hdc, cx - s(5.0), cy - s(5.0), cx + s(5.0), cy + s(5.0));
+                MoveToEx(hdc, cx + s(2.0), cy - s(5.5), std::ptr::null_mut());
+                LineTo(hdc, cx + s(5.5), cy - s(3.0));
+            }
+            MenuIcon::Power => {
+                Ellipse(hdc, cx - s(5.0), cy - s(4.0), cx + s(5.0), cy + s(5.5));
+                MoveToEx(hdc, cx, cy - s(6.0), std::ptr::null_mut());
+                LineTo(hdc, cx, cy);
+            }
+            MenuIcon::Plus => {
+                MoveToEx(hdc, cx - s(5.0), cy, std::ptr::null_mut());
+                LineTo(hdc, cx + s(5.0), cy);
+                MoveToEx(hdc, cx, cy - s(5.0), std::ptr::null_mut());
+                LineTo(hdc, cx, cy + s(5.0));
+            }
+            MenuIcon::Pin => {
+                MoveToEx(hdc, cx - s(3.5), cy - s(5.0), std::ptr::null_mut());
+                LineTo(hdc, cx + s(3.5), cy - s(5.0));
+                MoveToEx(hdc, cx - s(2.5), cy - s(5.0), std::ptr::null_mut());
+                LineTo(hdc, cx - s(4.0), cy + s(1.0));
+                LineTo(hdc, cx + s(4.0), cy + s(1.0));
+                LineTo(hdc, cx + s(2.5), cy - s(5.0));
+                MoveToEx(hdc, cx, cy + s(1.0), std::ptr::null_mut());
+                LineTo(hdc, cx, cy + s(6.0));
+            }
+            MenuIcon::Close => {
+                MoveToEx(hdc, cx - s(4.5), cy - s(4.5), std::ptr::null_mut());
+                LineTo(hdc, cx + s(4.5), cy + s(4.5));
+                MoveToEx(hdc, cx + s(4.5), cy - s(4.5), std::ptr::null_mut());
+                LineTo(hdc, cx - s(4.5), cy + s(4.5));
+            }
+            MenuIcon::Trash => {
+                MoveToEx(hdc, cx - s(5.5), cy - s(4.0), std::ptr::null_mut());
+                LineTo(hdc, cx + s(5.5), cy - s(4.0));
+                MoveToEx(hdc, cx - s(2.0), cy - s(6.0), std::ptr::null_mut());
+                LineTo(hdc, cx + s(2.0), cy - s(6.0));
+                Rectangle(hdc, cx - s(4.0), cy - s(4.0), cx + s(4.0), cy + s(5.5));
+            }
+            MenuIcon::ChevronLeft => {
+                MoveToEx(hdc, cx + s(2.5), cy - s(4.5), std::ptr::null_mut());
+                LineTo(hdc, cx - s(2.5), cy);
+                LineTo(hdc, cx + s(2.5), cy + s(4.5));
+            }
+            MenuIcon::ChevronRight => {
+                MoveToEx(hdc, cx - s(2.5), cy - s(4.5), std::ptr::null_mut());
+                LineTo(hdc, cx + s(2.5), cy);
+                LineTo(hdc, cx - s(2.5), cy + s(4.5));
+            }
+            MenuIcon::Layers => {
+                Rectangle(hdc, cx - s(5.5), cy - s(5.0), cx + s(2.0), cy + s(1.5));
+                MoveToEx(hdc, cx - s(2.0), cy + s(4.5), std::ptr::null_mut());
+                LineTo(hdc, cx + s(5.5), cy + s(4.5));
+                LineTo(hdc, cx + s(5.5), cy - s(1.5));
+            }
+        }
+
+        SelectObject(hdc, old_pen);
+        SelectObject(hdc, old_brush);
+        DeleteObject(pen as _);
+    }
 }
 
 /// Displays a modern rounded popup menu at the current cursor position and returns the chosen item ID.
@@ -187,7 +361,7 @@ pub fn show_popup_menu(owner_hwnd: usize, is_dark: bool, entries: Vec<MenuEntry>
             size_of::<u32>() as u32,
         );
         let border = if is_dark {
-            rgb(0x32, 0x38, 0x47)
+            rgb(0x2e, 0x34, 0x44)
         } else {
             rgb(0xd4, 0xd9, 0xe3)
         };
@@ -250,30 +424,35 @@ impl MenuState {
         let pad_y = (PAD_Y_DIPS * dpi).round() as i32;
         let row_h = (ROW_H_DIPS * dpi).round() as i32;
         let sep_h = (SEP_H_DIPS * dpi).round() as i32;
-        let radius = (6.0 * dpi).round() as i32;
-        let text_inset = (10.0 * dpi).round() as i32;
+        let radius = (7.0 * dpi).round() as i32;
+        let icon_cx_off = (16.0 * dpi).round() as i32;
+        let text_left_off = (32.0 * dpi).round() as i32;
+        let text_right_off = (10.0 * dpi).round() as i32;
 
-        let (bg, hover_bg, danger_bg, text_fg, hint_fg, danger_fg, sep_col) = if self.is_dark {
-            (
-                rgb(0x18, 0x1c, 0x26),
-                rgb(0x28, 0x2f, 0x3f),
-                rgb(0x7f, 0x1d, 0x1d),
-                rgb(0xf1, 0xf5, 0xf9),
-                rgb(0x94, 0xa3, 0xb8),
-                rgb(0xfc, 0xa5, 0xa5),
-                rgb(0x2a, 0x30, 0x3f),
-            )
-        } else {
-            (
-                rgb(0xf8, 0xfa, 0xfc),
-                rgb(0xe8, 0xed, 0xf5),
-                rgb(0xfe, 0xe2, 0xe2),
-                rgb(0x0f, 0x17, 0x2a),
-                rgb(0x64, 0x74, 0x8b),
-                rgb(0xb9, 0x1c, 0x1c),
-                rgb(0xe2, 0xe8, 0xf0),
-            )
-        };
+        let (bg, hover_bg, danger_bg, text_fg, icon_fg, hint_fg, danger_fg, sep_col) =
+            if self.is_dark {
+                (
+                    rgb(0x18, 0x1c, 0x26),
+                    rgb(0x27, 0x2e, 0x3f),
+                    rgb(0x7f, 0x1d, 0x1d),
+                    rgb(0xf1, 0xf5, 0xf9),
+                    rgb(0x94, 0xa3, 0xb8),
+                    rgb(0x64, 0x74, 0x8b),
+                    rgb(0xfc, 0xa5, 0xa5),
+                    rgb(0x2a, 0x30, 0x3f),
+                )
+            } else {
+                (
+                    rgb(0xf8, 0xfa, 0xfc),
+                    rgb(0xe8, 0xed, 0xf5),
+                    rgb(0xfe, 0xe2, 0xe2),
+                    rgb(0x0f, 0x17, 0x2a),
+                    rgb(0x47, 0x55, 0x69),
+                    rgb(0x64, 0x74, 0x8b),
+                    rgb(0xb9, 0x1c, 0x1c),
+                    rgb(0xe2, 0xe8, 0xf0),
+                )
+            };
 
         unsafe {
             let bg_brush = CreateSolidBrush(bg);
@@ -319,6 +498,7 @@ impl MenuState {
             for (idx, entry) in self.entries.iter().enumerate() {
                 match entry {
                     MenuEntry::Item {
+                        icon,
                         label,
                         shortcut,
                         destructive,
@@ -344,12 +524,28 @@ impl MenuState {
                             DeleteObject(hp as _);
                         }
 
+                        let ic_col = if *destructive {
+                            danger_fg
+                        } else if is_hovered {
+                            text_fg
+                        } else {
+                            icon_fg
+                        };
+                        draw_menu_icon(
+                            hdc,
+                            *icon,
+                            rc.left + icon_cx_off,
+                            (rc.top + rc.bottom) / 2,
+                            dpi,
+                            ic_col,
+                        );
+
                         let old_font = SelectObject(hdc, main_font as _);
                         SetTextColor(hdc, if *destructive { danger_fg } else { text_fg });
                         let mut text_rc = RECT {
-                            left: rc.left + text_inset,
+                            left: rc.left + text_left_off,
                             top: rc.top,
-                            right: rc.right - text_inset,
+                            right: rc.right - text_right_off,
                             bottom: rc.bottom,
                         };
                         let mut label_w: Vec<u16> = label.encode_utf16().collect();
@@ -381,8 +577,8 @@ impl MenuState {
                         let sep_y = y_cursor + sep_h / 2;
                         let sp = CreatePen(PS_SOLID, 1, sep_col);
                         let op = SelectObject(hdc, sp as _);
-                        MoveToEx(hdc, pad_x + text_inset, sep_y, std::ptr::null_mut());
-                        LineTo(hdc, ps.rcPaint.right - pad_x - text_inset, sep_y);
+                        MoveToEx(hdc, pad_x + text_right_off, sep_y, std::ptr::null_mut());
+                        LineTo(hdc, ps.rcPaint.right - pad_x - text_right_off, sep_y);
                         SelectObject(hdc, op);
                         DeleteObject(sp as _);
                         y_cursor += sep_h;

@@ -56,6 +56,24 @@ pub enum SurfaceBackground {
     None,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct DockAppGroup {
+    pub id: String,
+    pub name: String,
+    pub executable_paths: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct DockProfile {
+    pub name: String,
+    pub position: DockPosition,
+    pub size: DockSize,
+    pub auto_hide: AutoHideMode,
+    pub enabled_widgets: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct DockSettings {
@@ -73,6 +91,7 @@ pub struct DockSettings {
     pub dock_scale: f64,
     pub animations_enabled: bool,
     pub magnification_enabled: bool,
+    pub focus_mode: bool,
     pub show_recycle_bin: bool,
     pub show_tray_button: bool,
     pub show_on_all_monitors: bool,
@@ -83,6 +102,15 @@ pub struct DockSettings {
     pub current_desktop_only: bool,
     pub show_clock_widget: bool,
     pub show_system_stats_widget: bool,
+    /// Explicitly user-enabled widget IDs (e.g. `"clock"`, `"stats"`, `"audio"`, `"media"`,
+    /// `"netspeed"`, `"battery"`, `"storage"`, `"keyboard"`, `"dayprogress"`, `"stopwatch"`,
+    /// `"countdown"`, `"focus"`, `"weather"`, `"quicksettings"`). Empty by default.
+    pub enabled_widgets: Vec<String>,
+    pub weather_city: String,
+    pub stack_folders: Vec<String>,
+    pub app_groups: Vec<DockAppGroup>,
+    pub profiles: Vec<DockProfile>,
+    pub active_profile: Option<String>,
     pub pin_order: Option<Vec<String>>,
     pub user_pinned_apps: Vec<String>,
     pub user_unpinned_apps: Vec<String>,
@@ -108,6 +136,7 @@ impl Default for DockSettings {
             dock_scale: 1.0,
             animations_enabled: true,
             magnification_enabled: true,
+            focus_mode: false,
             show_recycle_bin: true,
             show_tray_button: true,
             show_on_all_monitors: true,
@@ -118,10 +147,53 @@ impl Default for DockSettings {
             current_desktop_only: false,
             show_clock_widget: false,
             show_system_stats_widget: false,
+            enabled_widgets: Vec::new(),
+            weather_city: "Istanbul".to_owned(),
+            stack_folders: Vec::new(),
+            app_groups: Vec::new(),
+            profiles: Vec::new(),
+            active_profile: None,
             pin_order: None,
             user_pinned_apps: Vec::new(),
             user_unpinned_apps: Vec::new(),
             extra: Map::new(),
+        }
+    }
+}
+
+impl DockSettings {
+    pub fn is_widget_enabled(&self, id: &str) -> bool {
+        if self.focus_mode && id != "focus" && id != "clock" {
+            return false;
+        }
+        if id == "clock" && self.show_clock_widget {
+            return true;
+        }
+        if id == "stats" && self.show_system_stats_widget {
+            return true;
+        }
+        self.enabled_widgets
+            .iter()
+            .any(|w| w.eq_ignore_ascii_case(id))
+    }
+
+    pub fn set_widget_enabled(&mut self, id: &str, enabled: bool) {
+        if id == "clock" {
+            self.show_clock_widget = enabled;
+        }
+        if id == "stats" {
+            self.show_system_stats_widget = enabled;
+        }
+        if enabled {
+            if !self
+                .enabled_widgets
+                .iter()
+                .any(|w| w.eq_ignore_ascii_case(id))
+            {
+                self.enabled_widgets.push(id.to_owned());
+            }
+        } else {
+            self.enabled_widgets.retain(|w| !w.eq_ignore_ascii_case(id));
         }
     }
 }
@@ -258,5 +330,32 @@ mod tests {
         });
         assert!(has_backup);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn widgets_are_opt_in_by_default_and_respect_focus_mode() {
+        let mut s = DockSettings::default();
+        assert!(s.enabled_widgets.is_empty());
+        assert!(!s.is_widget_enabled("clock"));
+        assert!(!s.is_widget_enabled("stats"));
+        assert!(!s.is_widget_enabled("audio"));
+
+        s.set_widget_enabled("clock", true);
+        s.set_widget_enabled("audio", true);
+        s.set_widget_enabled("focus", true);
+        assert!(s.is_widget_enabled("clock"));
+        assert!(s.is_widget_enabled("audio"));
+        assert!(s.is_widget_enabled("focus"));
+
+        // Focus mode keeps only clock and focus visible.
+        s.focus_mode = true;
+        assert!(s.is_widget_enabled("clock"));
+        assert!(s.is_widget_enabled("focus"));
+        assert!(!s.is_widget_enabled("audio"));
+
+        s.focus_mode = false;
+        s.set_widget_enabled("clock", false);
+        assert!(!s.is_widget_enabled("clock"));
+        assert!(!s.show_clock_widget);
     }
 }
