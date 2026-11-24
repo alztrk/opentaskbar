@@ -36,10 +36,6 @@ fn main() {
             icon_cache::run_worker();
             return;
         }
-        if opentaskbar_shell::watchdog::is_invocation(&args) {
-            opentaskbar_shell::watchdog::run(&args);
-            return;
-        }
         if args.iter().any(|a| a == "--restore") {
             opentaskbar_shell::taskbar::restore_from_journal();
             return;

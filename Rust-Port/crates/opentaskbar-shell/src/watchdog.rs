@@ -1,19 +1,21 @@
-//! Out-of-process watchdog mode (`OpenTaskBar.exe --watchdog=<pid>:<token>`).
+//! Launches the native 26 KB C `OpenTaskbarWatchdog.exe` (`tools/watchdog/watchdog.c`)
+//! as a separate process (`OpenTaskbarWatchdog.exe --watchdog=<pid>:<token>`).
+//!
+//! Because it has its own process name, force-killing `OpenTaskBar.exe` never kills
+//! the watchdog, so Windows' native taskbar is always restored reliably.
 
+use std::fs;
 use std::hash::{BuildHasher, RandomState};
 use std::os::windows::process::CommandExt;
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0};
-use windows_sys::Win32::System::Threading::{
-    CreateEventW, INFINITE, OpenProcess, PROCESS_SYNCHRONIZE, SetEvent, WaitForMultipleObjects,
-};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent};
 
-use crate::taskbar;
-
-const ARG_PREFIX: &str = "--watchdog=";
-const EVENT_PREFIX: &str = r"Local\OpenTaskBar-Rust.CleanExit.";
+const WATCHDOG_BYTES: &[u8] = include_bytes!("../../../../tools/watchdog/OpenTaskbarWatchdog.exe");
+const EVENT_PREFIX: &str = r"Local\OpenTaskbar.CleanExit.";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
@@ -38,21 +40,25 @@ fn create_clean_event(pid: u32, token: &str) -> Option<OwnedHandle> {
         .encode_utf16()
         .chain(Some(0))
         .collect();
-    // SAFETY: null-terminated event name.
-    let handle = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) };
+    // SAFETY: manual-reset, initially unsignalled named event matching `watchdog.c`.
+    let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, name.as_ptr()) };
     (!handle.is_null()).then_some(OwnedHandle(handle))
 }
 
-pub fn is_invocation(args: &[String]) -> bool {
-    args.iter().any(|arg| arg.starts_with(ARG_PREFIX))
-}
-
-pub fn parse_args(args: &[String]) -> Option<(u32, String)> {
-    let raw = args.iter().find_map(|a| a.strip_prefix(ARG_PREFIX))?;
-    let (pid, token) = raw.split_once(':')?;
-    let pid: u32 = pid.parse().ok().filter(|&p| p > 0)?;
-    (!token.is_empty() && token.bytes().all(|b| b.is_ascii_alphanumeric()))
-        .then(|| (pid, token.to_owned()))
+fn ensure_watchdog_exe() -> Option<PathBuf> {
+    let dir = opentaskbar_core::settings::app_data_dir();
+    let _ = fs::create_dir_all(&dir);
+    let path = dir.join("OpenTaskbarWatchdog.exe");
+    let up_to_date = fs::metadata(&path)
+        .ok()
+        .is_some_and(|m| m.len() == WATCHDOG_BYTES.len() as u64);
+    if !up_to_date {
+        let tmp = path.with_extension("exe.tmp");
+        if fs::write(&tmp, WATCHDOG_BYTES).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
+    }
+    path.exists().then_some(path)
 }
 
 pub fn arm() {
@@ -62,15 +68,16 @@ pub fn arm() {
     if slot.is_some() {
         return;
     }
+    let Some(exe) = ensure_watchdog_exe() else {
+        opentaskbar_core::log::warn("Failed to materialize native OpenTaskbarWatchdog.exe.");
+        return;
+    };
     let pid = std::process::id();
     let token = format!("{:016x}", RandomState::new().hash_one(pid));
     let Some(event) = create_clean_event(pid, &token) else {
         return;
     };
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let arg = format!("{ARG_PREFIX}{pid}:{token}");
+    let arg = format!("--watchdog={pid}:{token}");
     let spawned = Command::new(&exe)
         .arg(&arg)
         .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
@@ -81,8 +88,9 @@ pub fn arm() {
                 .creation_flags(CREATE_NO_WINDOW)
                 .spawn()
         });
-    if spawned.is_ok() {
-        *slot = Some(event);
+    match spawned {
+        Ok(_) => *slot = Some(event),
+        Err(err) => opentaskbar_core::log::warn(format!("Failed to start C watchdog: {err}")),
     }
 }
 
@@ -94,27 +102,5 @@ pub fn notify_clean_exit() {
         unsafe {
             SetEvent(event.0);
         }
-    }
-}
-
-pub fn run(args: &[String]) {
-    let Some((pid, token)) = parse_args(args) else {
-        return;
-    };
-    let Some(clean_event) = create_clean_event(pid, &token) else {
-        return;
-    };
-    // SAFETY: synchronize-only handle on parent dock PID.
-    let parent = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
-    if parent.is_null() {
-        taskbar::restore_from_journal();
-        return;
-    }
-    let parent = OwnedHandle(parent);
-    let handles = [clean_event.0, parent.0];
-    // SAFETY: waiting on two valid handles owned by this stack frame.
-    let wait = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };
-    if wait != WAIT_OBJECT_0 {
-        taskbar::restore_from_journal();
     }
 }

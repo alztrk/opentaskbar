@@ -12,8 +12,10 @@ use windows_sys::Win32::UI::Shell::{
     ABM_SETSTATE, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, FindWindowW, GetSystemMetrics, IsWindowVisible, SM_CXSCREEN, SM_CYSCREEN,
-    SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow, WM_APP,
+    FindWindowExW, FindWindowW, GetSystemMetrics, HWND_BROADCAST, IsWindowVisible,
+    RegisterWindowMessageW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SendNotifyMessageW, SetWindowPos, ShowWindow, WM_APP,
 };
 
 use crate::{journal, watchdog};
@@ -190,17 +192,50 @@ pub fn begin_replacement(dock_hwnd: usize, auto_hide: bool, desired_total_px: i3
 
 pub fn restore_from_journal() {
     unregister_appbar();
-    let prev = journal::read_state().unwrap_or(0);
-    set_taskbar_state(prev);
+    let prev = journal::read_state().unwrap_or(2); // ABS_ALWAYSONTOP default
     let tray = find_primary_tray();
-    if !tray.is_null() {
-        // SAFETY: restoring Explorer's primary taskbar window.
+    if tray.is_null() {
+        return;
+    }
+    // Mirror `watchdog.c` RestoreNativeTaskbars: 3 retries of ABM_SETSTATE + SW_SHOW + SetWindowPos.
+    for attempt in 0..3 {
+        set_taskbar_state(prev);
+        // SAFETY: restoring Explorer's primary taskbar window with SWP_SHOWWINDOW | SWP_FRAMECHANGED.
         unsafe {
-            ShowWindow(tray, SW_SHOWNOACTIVATE);
+            ShowWindow(tray, SW_SHOW);
+            SetWindowPos(
+                tray,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE
+                    | SWP_NOSIZE
+                    | SWP_NOZORDER
+                    | SWP_NOACTIVATE
+                    | SWP_SHOWWINDOW
+                    | SWP_FRAMECHANGED,
+            );
+        }
+        set_secondary_trays_visible(true);
+        if attempt < 2 {
+            std::thread::sleep(std::time::Duration::from_millis(60));
         }
     }
-    set_secondary_trays_visible(true);
-    journal::clear();
+    // Only clear journal if the native taskbar is confirmed visible.
+    let visible = unsafe { IsWindowVisible(tray) != 0 };
+    if visible {
+        journal::clear();
+        let msg_name = wide("TaskbarCreated");
+        // SAFETY: notifying apps to re-register tray icons with Explorer.
+        unsafe {
+            let msg = RegisterWindowMessageW(msg_name.as_ptr());
+            if msg != 0 {
+                SendNotifyMessageW(HWND_BROADCAST, msg, 0, 0);
+            }
+        }
+    }
 }
 
 pub fn end_replacement() {

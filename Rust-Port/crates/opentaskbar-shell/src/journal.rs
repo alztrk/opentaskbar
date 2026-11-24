@@ -1,10 +1,16 @@
 //! Recovery journal recording Explorer's taskbar state before hiding it.
+//! Uses `%LOCALAPPDATA%\OpenTaskbar\taskbar-state.txt` so the native C
+//! `OpenTaskbarWatchdog.exe` reads the exact same file on crash/kill recovery.
 
 use std::fs;
 use std::path::PathBuf;
 
 fn journal_path() -> PathBuf {
-    opentaskbar_core::settings::app_data_dir().join("taskbar-state.txt")
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("OpenTaskbar")
+        .join("taskbar-state.txt")
 }
 
 pub fn has_pending() -> bool {
