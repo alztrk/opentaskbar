@@ -257,6 +257,159 @@ fn dib_rows(bitmap: HBITMAP, width: i32, height: i32) -> Option<Vec<u8>> {
     }
 }
 
+/// Command-line flag for the short-lived out-of-process icon extraction worker.
+pub const WORKER_ARG: &str = "--extract-icons";
+
+const CACHE_MAGIC: &[u8; 8] = b"OTICON01";
+const CACHE_HEADER_LEN: usize = 8 + 4 + 4 + 8;
+const MAX_ICON_DIM: u32 = 512;
+
+fn cache_dir() -> std::path::PathBuf {
+    ot_core::store::app_data_dir().join("icon-cache")
+}
+
+fn cache_key_hash(parsing_name: &str, size: u32) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in parsing_name.as_bytes() {
+        hash ^= u64::from(byte.to_ascii_lowercase());
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash ^= u64::from(size);
+    hash.wrapping_mul(0x0100_0000_01b3)
+}
+
+/// Returns a file-change fingerprint for cache validation, or `None` when the icon is dynamic and must not be
+/// cached on disk (such as the Recycle Bin, which changes between empty and full).
+fn cache_fingerprint(parsing_name: &str) -> Option<u64> {
+    if parsing_name.eq_ignore_ascii_case(RECYCLE_BIN) {
+        return None;
+    }
+    if parsing_name.starts_with("shell:") || parsing_name.starts_with("::{") {
+        return Some(0);
+    }
+    let meta = std::fs::metadata(parsing_name).ok()?;
+    let modified = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs());
+    Some(meta.len().rotate_left(17) ^ modified)
+}
+
+fn cache_path_in(dir: &std::path::Path, parsing_name: &str, size: u32) -> std::path::PathBuf {
+    dir.join(format!(
+        "{:016x}.oticon",
+        cache_key_hash(parsing_name, size)
+    ))
+}
+
+/// Reads a cached premultiplied BGRA icon from disk if its fingerprint still matches.
+pub fn read_cached(parsing_name: &str, size: u32) -> Option<Icon> {
+    read_cached_in(&cache_dir(), parsing_name, size)
+}
+
+fn read_cached_in(dir: &std::path::Path, parsing_name: &str, size: u32) -> Option<Icon> {
+    let expected_fp = cache_fingerprint(parsing_name)?;
+    let bytes = std::fs::read(cache_path_in(dir, parsing_name, size)).ok()?;
+    if bytes.len() < CACHE_HEADER_LEN || &bytes[..8] != CACHE_MAGIC {
+        return None;
+    }
+    let width = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+    let height = u32::from_le_bytes(bytes[12..16].try_into().ok()?);
+    let fp = u64::from_le_bytes(bytes[16..24].try_into().ok()?);
+    if fp != expected_fp
+        || width == 0
+        || height == 0
+        || width > MAX_ICON_DIM
+        || height > MAX_ICON_DIM
+    {
+        return None;
+    }
+    let payload_len = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)?;
+    if bytes.len() != CACHE_HEADER_LEN + payload_len {
+        return None;
+    }
+    Some(Icon {
+        width,
+        height,
+        pixels: bytes[CACHE_HEADER_LEN..].to_vec(),
+    })
+}
+
+/// Persists a premultiplied BGRA icon into the disk cache (atomic write).
+pub fn write_cached(parsing_name: &str, size: u32, icon: &Icon) {
+    write_cached_in(&cache_dir(), parsing_name, size, icon);
+}
+
+fn write_cached_in(dir: &std::path::Path, parsing_name: &str, size: u32, icon: &Icon) {
+    let Some(fp) = cache_fingerprint(parsing_name) else {
+        return;
+    };
+    if icon.width == 0
+        || icon.height == 0
+        || icon.width > MAX_ICON_DIM
+        || icon.height > MAX_ICON_DIM
+        || icon.pixels.len() != (icon.width as usize) * (icon.height as usize) * 4
+    {
+        return;
+    }
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let path = cache_path_in(dir, parsing_name, size);
+    let tmp = path.with_extension("tmp");
+    let mut out = Vec::with_capacity(CACHE_HEADER_LEN + icon.pixels.len());
+    out.extend_from_slice(CACHE_MAGIC);
+    out.extend_from_slice(&icon.width.to_le_bytes());
+    out.extend_from_slice(&icon.height.to_le_bytes());
+    out.extend_from_slice(&fp.to_le_bytes());
+    out.extend_from_slice(&icon.pixels);
+    if std::fs::write(&tmp, &out).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
+    }
+}
+
+/// Runs the short-lived out-of-process icon extraction worker (`OpenTaskBar.exe --extract-icons`).
+/// Reads `<size>\t<parsing_name>\n` lines from stdin, extracts via Shell COM, and writes binary frames to stdout.
+pub fn run_worker() {
+    use std::io::{BufRead, BufReader, Write};
+
+    // SAFETY: COM STA for Shell icon extraction, isolated to this short-lived worker process.
+    let _ = unsafe {
+        windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+        )
+    };
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut reader = BufReader::new(stdin.lock());
+    let mut writer = stdout.lock();
+    let mut line = String::new();
+    while reader.read_line(&mut line).unwrap_or(0) > 0 {
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        let icon = trimmed
+            .split_once('\t')
+            .and_then(|(size, name)| Some((size.parse::<u32>().ok()?, name)))
+            .and_then(|(size, name)| load(name, size));
+        let write_result = match icon {
+            Some(icon) => writer
+                .write_all(&[1u8])
+                .and_then(|()| writer.write_all(&icon.width.to_le_bytes()))
+                .and_then(|()| writer.write_all(&icon.height.to_le_bytes()))
+                .and_then(|()| writer.write_all(&(icon.pixels.len() as u32).to_le_bytes()))
+                .and_then(|()| writer.write_all(&icon.pixels)),
+            None => writer.write_all(&[0u8]),
+        };
+        if write_result.is_err() || writer.flush().is_err() {
+            break;
+        }
+        line.clear();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,5 +426,29 @@ mod tests {
             vec![100, 0, 0, 128],
             "already valid data is untouched"
         );
+    }
+
+    #[test]
+    fn disk_cache_round_trips_and_skips_recycle_bin() {
+        let dir = std::env::temp_dir().join(format!("ot-icon-cache-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let sample = Icon {
+            width: 2,
+            height: 2,
+            pixels: vec![1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 255, 10, 11, 12, 255],
+        };
+        let aumid = r"shell:AppsFolder\Example.App!App";
+        write_cached_in(&dir, aumid, 32, &sample);
+        let loaded = read_cached_in(&dir, aumid, 32).expect("cached icon should load");
+        assert_eq!(loaded.width, 2);
+        assert_eq!(loaded.height, 2);
+        assert_eq!(loaded.pixels, sample.pixels);
+
+        write_cached_in(&dir, RECYCLE_BIN, 32, &sample);
+        assert!(
+            read_cached_in(&dir, RECYCLE_BIN, 32).is_none(),
+            "Recycle Bin icon must stay dynamic"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

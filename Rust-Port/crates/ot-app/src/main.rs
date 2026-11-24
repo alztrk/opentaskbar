@@ -28,13 +28,20 @@ use single_instance::SingleInstance;
 
 fn main() {
     startup::begin();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // Short-lived out-of-process icon extractor: starts before logging, settings or single-instance lock so
+    // it runs in a few milliseconds and keeps Windows Shell COM/WIC DLLs out of the long-running dock process.
+    #[cfg(windows)]
+    if args.iter().any(|arg| arg == ot_dock::icons::WORKER_ARG) {
+        ot_dock::icons::run_worker();
+        return;
+    }
     // Settings' "Hardware acceleration" (`RenderModePreference`): the renderer reads it as `OT_RENDER_HARDWARE`.
     #[cfg(windows)]
     if std::env::var_os("OT_RENDER_HARDWARE").is_none() && ot_ui::settings::hardware_rendering() {
-        // SAFETY: the first statement of main, before any other thread exists.
+        // SAFETY: before any other thread exists.
         unsafe { std::env::set_var("OT_RENDER_HARDWARE", "1") };
     }
-    let args: Vec<String> = std::env::args().skip(1).collect();
     #[cfg(windows)]
     attach_parent_console(&args);
     let dev = args.iter().any(|arg| arg == "--dev");

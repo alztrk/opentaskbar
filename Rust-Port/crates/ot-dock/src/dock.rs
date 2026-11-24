@@ -82,6 +82,16 @@ fn memory_mark(stage: &str) {
     log::info(format!("Memory {stage}: {:.1} MB private", private_mb()));
 }
 
+/// Asks Windows to trim unused startup pages from the dock's working set.
+fn trim_working_set() {
+    use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    // SAFETY: pseudo handle for the current process.
+    unsafe {
+        let _ = K32EmptyWorkingSet(GetCurrentProcess());
+    }
+}
+
 const WM_TRACKER: u32 = wm::WM_APP + 10;
 const WM_ICONS: u32 = wm::WM_APP + 11;
 const WM_INVOKE: u32 = wm::WM_APP + 12;
@@ -542,6 +552,8 @@ pub fn start(settings: DockSettings) -> std::result::Result<(), &'static str> {
         return Err(key);
     }
     ot_core::startup::mark("dock visible");
+    trim_working_set();
+    memory_mark("after working-set trim");
     if SETTINGS_ON_START.with(|flag| flag.replace(false)) {
         // SAFETY: posting to our own window: Settings opens once the loop runs.
         unsafe { wm::PostMessageW(hwnd as HWND, WM_OPEN_SETTINGS, 0, 0) };
