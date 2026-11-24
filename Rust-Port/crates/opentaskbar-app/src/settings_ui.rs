@@ -5,10 +5,12 @@
 //! with inline widget settings, and instant auto-save + live DirectComposition dock reload.
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Application, Bounds, Context, ScrollHandle, SharedString, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, rgba, size,
+    Animation, AnimationExt, AnyElement, App, Application, Bounds, Context, ScrollHandle,
+    SharedString, Window, WindowBounds, WindowOptions, div, ease_out_quint, prelude::*, px, rgba,
+    size,
 };
 use opentaskbar_core::settings::{
     self, AppTheme, AutoHideMode, DockAppGroup, DockPosition, DockProfile, DockSettings, DockSize,
@@ -181,6 +183,7 @@ fn user_folder(name: &str) -> Option<String> {
 
 struct SettingsView {
     page: SettingsPage,
+    page_epoch: usize,
     settings: DockSettings,
     scroll_handle: ScrollHandle,
     saved_flash: bool,
@@ -190,6 +193,7 @@ impl SettingsView {
     fn new(settings: DockSettings) -> Self {
         Self {
             page: SettingsPage::General,
+            page_epoch: 0,
             settings,
             scroll_handle: ScrollHandle::new(),
             saved_flash: false,
@@ -1375,9 +1379,12 @@ impl Render for SettingsView {
                     count_badge,
                     self.page == p,
                     cx.listener(move |this, _, _, cx| {
-                        this.page = p;
-                        this.scroll_handle.set_offset(gpui::point(px(0.0), px(0.0)));
-                        cx.notify();
+                        if this.page != p {
+                            this.page = p;
+                            this.page_epoch = this.page_epoch.wrapping_add(1);
+                            this.scroll_handle.set_offset(gpui::point(px(0.0), px(0.0)));
+                            cx.notify();
+                        }
                     }),
                 )
                 .into_any_element()
@@ -1480,6 +1487,18 @@ impl Render for SettingsView {
                     ),
             );
 
+        let animated_content = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(14.0))
+            .children(content_blocks)
+            .with_animation(
+                ("settings-page-anim", self.page_epoch),
+                Animation::new(Duration::from_millis(165)).with_easing(ease_out_quint()),
+                |el, delta| el.opacity(delta).pt(px((1.0 - delta) * 10.0)),
+            );
+
         let mut scroll_wrap = div().flex_1().min_h_0().w_full().relative().child(
             div()
                 .id("settings-scroll")
@@ -1492,10 +1511,7 @@ impl Render for SettingsView {
                 }))
                 .px(px(22.0))
                 .py(px(16.0))
-                .flex()
-                .flex_col()
-                .gap(px(14.0))
-                .children(content_blocks),
+                .child(animated_content),
         );
 
         if let Some(sb) = scrollbar_el {

@@ -28,11 +28,12 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetMessageW,
-    GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LoadCursorW, MSG, RegisterClassExW,
-    SW_SHOW, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, KillTimer, LWA_ALPHA, LoadCursorW, MSG,
+    RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, TranslateMessage, WM_ACTIVATE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSEXW,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::win32;
@@ -40,6 +41,10 @@ use crate::win32;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
 const MAX_FLYOUT_H_DIPS: f32 = 380.0;
+const TIMER_ANIM: usize = 1;
+const OPEN_ANIM_MS: f32 = 135.0;
+const CLOSE_ANIM_MS: f32 = 95.0;
+const SLIDE_OFFSET_DIPS: f32 = 10.0;
 
 static LAST_CLOSED: OnceLock<Mutex<Option<(String, Instant)>>> = OnceLock::new();
 
@@ -130,6 +135,12 @@ struct FlyoutState {
     dpi: f32,
     is_dark: bool,
     spec: FlyoutSpec,
+    x_px: i32,
+    target_y_px: i32,
+    slide_px: i32,
+    anim_start: Instant,
+    closing: bool,
+    animating: bool,
     content_top_px: i32,
     viewport_h_px: i32,
     content_h_px: i32,
@@ -269,14 +280,15 @@ pub fn show_flyout_interactive(
     let top_y =
         (anchor_bottom_y_px - height_px).clamp(margin, (scr_h - height_px - margin).max(margin));
 
+    let slide_px = s(SLIDE_OFFSET_DIPS);
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
             class_name.as_ptr(),
             wide("").as_ptr(),
             WS_POPUP,
             x,
-            top_y,
+            top_y + slide_px,
             width_px,
             height_px,
             std::ptr::null_mut(),
@@ -290,6 +302,7 @@ pub fn show_flyout_interactive(
     }
 
     unsafe {
+        let _ = SetLayeredWindowAttributes(hwnd, 0, 0, LWA_ALPHA);
         let corner = DWMWCP_ROUND;
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -315,6 +328,12 @@ pub fn show_flyout_interactive(
         dpi,
         is_dark,
         spec,
+        x_px: x,
+        target_y_px: top_y,
+        slide_px,
+        anim_start: Instant::now(),
+        closing: false,
+        animating: true,
         content_top_px,
         viewport_h_px,
         content_h_px,
@@ -332,13 +351,14 @@ pub fn show_flyout_interactive(
             hwnd,
             HWND_TOPMOST,
             x,
-            top_y,
+            top_y + slide_px,
             width_px,
             height_px,
             SWP_SHOWWINDOW,
         );
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
+        SetTimer(hwnd, TIMER_ANIM, 8, None);
     }
 
     let mut msg: MSG = unsafe { std::mem::zeroed() };
@@ -355,6 +375,7 @@ pub fn show_flyout_interactive(
 
     let selected = state.selected;
     unsafe {
+        KillTimer(hwnd, TIMER_ANIM);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         DestroyWindow(hwnd);
     }
@@ -417,6 +438,75 @@ fn draw_bgra_icon(hdc: HDC, icon: &FlyoutIcon, bg_rgb: u32, dst_x: i32, dst_y: i
 }
 
 impl FlyoutState {
+    fn begin_close(&mut self) {
+        if self.closing {
+            return;
+        }
+        self.closing = true;
+        self.animating = true;
+        self.anim_start = Instant::now();
+        unsafe {
+            SetTimer(self.hwnd, TIMER_ANIM, 8, None);
+        }
+    }
+
+    fn step_animation(&mut self) {
+        if !self.animating {
+            return;
+        }
+        let elapsed = self.anim_start.elapsed().as_secs_f32() * 1000.0;
+        if !self.closing {
+            let t = (elapsed / OPEN_ANIM_MS).clamp(0.0, 1.0);
+            // Smooth cubic ease-out: fast start, gentle settle
+            let eased = 1.0 - (1.0 - t).powi(3);
+            let alpha = (eased * 255.0).round() as u8;
+            let cur_y = self.target_y_px + ((1.0 - eased) * self.slide_px as f32).round() as i32;
+            unsafe {
+                let _ = SetLayeredWindowAttributes(self.hwnd, 0, alpha, LWA_ALPHA);
+                SetWindowPos(
+                    self.hwnd,
+                    std::ptr::null_mut(),
+                    self.x_px,
+                    cur_y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            if t >= 1.0 {
+                self.animating = false;
+                unsafe {
+                    KillTimer(self.hwnd, TIMER_ANIM);
+                }
+            }
+        } else {
+            let t = (elapsed / CLOSE_ANIM_MS).clamp(0.0, 1.0);
+            // Smooth quadratic ease-in fade + slight drop
+            let eased = t * t;
+            let alpha = ((1.0 - eased) * 255.0).round() as u8;
+            let cur_y = self.target_y_px + (eased * (self.slide_px as f32 * 0.75)).round() as i32;
+            unsafe {
+                let _ = SetLayeredWindowAttributes(self.hwnd, 0, alpha, LWA_ALPHA);
+                SetWindowPos(
+                    self.hwnd,
+                    std::ptr::null_mut(),
+                    self.x_px,
+                    cur_y,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            if t >= 1.0 {
+                self.animating = false;
+                unsafe {
+                    KillTimer(self.hwnd, TIMER_ANIM);
+                }
+                self.done.store(true, Ordering::Release);
+            }
+        }
+    }
+
     fn max_scroll(&self) -> i32 {
         (self.content_h_px - self.viewport_h_px).max(0)
     }
@@ -980,34 +1070,42 @@ unsafe extern "system" fn flyout_wnd_proc(
             }
             0
         }
+        WM_TIMER if wparam == TIMER_ANIM => {
+            state.step_animation();
+            0
+        }
         WM_LBUTTONUP => {
-            let x = (lparam as u32 & 0xffff) as i16 as i32;
-            let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
-            if let Some(id) = state.hit_at(x, y) {
-                state.selected = Some(FlyoutAction::Primary(id));
+            if !state.closing {
+                let x = (lparam as u32 & 0xffff) as i16 as i32;
+                let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
+                if let Some(id) = state.hit_at(x, y) {
+                    state.selected = Some(FlyoutAction::Primary(id));
+                }
+                state.begin_close();
             }
-            state.done.store(true, Ordering::Release);
             0
         }
         WM_RBUTTONUP => {
-            let x = (lparam as u32 & 0xffff) as i16 as i32;
-            let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
-            if let Some(id) = state.hit_at(x, y) {
-                state.selected = Some(FlyoutAction::Secondary(id));
-                state.done.store(true, Ordering::Release);
+            if !state.closing {
+                let x = (lparam as u32 & 0xffff) as i16 as i32;
+                let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
+                if let Some(id) = state.hit_at(x, y) {
+                    state.selected = Some(FlyoutAction::Secondary(id));
+                    state.begin_close();
+                }
             }
             0
         }
         WM_KEYDOWN if wparam == VK_ESCAPE as usize => {
-            state.done.store(true, Ordering::Release);
+            state.begin_close();
             0
         }
         WM_KILLFOCUS => {
-            state.done.store(true, Ordering::Release);
+            state.begin_close();
             0
         }
         WM_ACTIVATE if (wparam & 0xffff) == 0 => {
-            state.done.store(true, Ordering::Release);
+            state.begin_close();
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
