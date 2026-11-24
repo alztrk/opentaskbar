@@ -1020,11 +1020,11 @@ public partial class MainWindow : Window
 
     private bool UpdateRunningApps(IReadOnlyList<RunningAppCandidate> candidates)
     {
-        var desiredPaths = candidates.Select(candidate => candidate.ExecutablePath)
+        var desiredIdentities = candidates.Select(candidate => candidate.Identity)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        foreach (var executablePath in desiredPaths)
+        foreach (var identity in desiredIdentities)
         {
-            CancelRunningAppExit(executablePath);
+            CancelRunningAppExit(identity);
         }
 
         // Two Store apps can share one host executable (ApplicationFrameHost.exe); AUMID is the
@@ -1126,15 +1126,15 @@ public partial class MainWindow : Window
         return layoutChanged;
     }
 
-    private void CancelRunningAppExit(string executablePath)
+    private void CancelRunningAppExit(string identity)
     {
-        if (!_exitingRunningPaths.Remove(executablePath))
+        if (!_exitingRunningPaths.Remove(identity))
         {
             return;
         }
 
         var app = _runningApps.FirstOrDefault(candidate =>
-            string.Equals(candidate.ExecutablePath, executablePath, StringComparison.OrdinalIgnoreCase));
+            string.Equals(candidate.AppUserModelId ?? candidate.ExecutablePath, identity, StringComparison.OrdinalIgnoreCase));
         var button = app is null ? null : FindVisualChild<Button>(RunningApps.ItemContainerGenerator.ContainerFromItem(app));
         if (button is null) return;
 
@@ -1152,14 +1152,16 @@ public partial class MainWindow : Window
 
     private void AnimateRunningAppRemoval(DockApp app)
     {
-        if (!_exitingRunningPaths.Add(app.ExecutablePath))
+        var identity = app.AppUserModelId ?? app.ExecutablePath;
+        if (!_exitingRunningPaths.Add(identity))
         {
             return;
         }
 
         AnimateDockAppRemoval(RunningApps, _runningApps, app, () =>
         {
-            _exitingRunningPaths.Remove(app.ExecutablePath);
+            _exitingRunningPaths.Remove(identity);
+            RebuildDockOrder();
             ResizeDockToContent();
             _replacementSession?.RefreshPosition();
         });
@@ -1171,7 +1173,9 @@ public partial class MainWindow : Window
         DockApp app,
         Action afterRemoval)
     {
-        var button = FindVisualChild<Button>(owner.ItemContainerGenerator.ContainerFromItem(app));
+        var button = owner.Visibility == Visibility.Visible
+            ? FindVisualChild<Button>(owner.ItemContainerGenerator.ContainerFromItem(app))
+            : null;
         if (!_preferences.Current.EffectiveAnimationsEnabled || !SystemParameters.ClientAreaAnimation || button?.RenderTransform is not ScaleTransform { IsFrozen: false, IsSealed: false } scale)
         {
             RemoveDockApp(apps, app);
@@ -1179,6 +1183,7 @@ public partial class MainWindow : Window
             return;
         }
 
+        var exitKey = app.AppUserModelId ?? app.ExecutablePath;
         button.IsHitTestVisible = false;
         var fade = new DoubleAnimation(0, TimeSpan.FromMilliseconds(75))
         {
@@ -1186,7 +1191,7 @@ public partial class MainWindow : Window
         };
         fade.Completed += (_, _) =>
         {
-            if (ReferenceEquals(owner, RunningApps) && !_exitingRunningPaths.Contains(app.ExecutablePath))
+            if (ReferenceEquals(owner, RunningApps) && !_exitingRunningPaths.Contains(exitKey))
             {
                 return;
             }
@@ -1847,7 +1852,7 @@ public partial class MainWindow : Window
         SetMenuItemVisibility(contextMenu, "NewGroup", !hasAppTarget);
         SetMenuItemVisibility(contextMenu, "CloseDockApp", isRunning);
         SetMenuItemVisibility(contextMenu, "TerminateDockApp", isRunning);
-        SetMenuItemVisibility(contextMenu, "PinDockApp", hasAppTarget && !isPinnedTarget);
+        SetMenuItemVisibility(contextMenu, "PinDockApp", hasAppTarget && !isPinnedTarget && !IsSelfExecutable(pinnedApp?.ExecutablePath));
         SetMenuItemVisibility(contextMenu, "UnpinDockApp", hasRemovablePin);
         SetSeparatorVisibility(contextMenu, "RunningCommandsDivider", isRunning);
         SetMenuItemVisibility(contextMenu, "HideInProfile", isPinnedTarget && ActiveProfile is not null);
@@ -2092,6 +2097,7 @@ public partial class MainWindow : Window
             Multiselect = false
         };
         if (dialog.ShowDialog() != true) return;
+        if (IsSelfExecutable(dialog.FileName)) return;
 
         DockApp? existingMatch = null;
         var (pinnedApp, error) = WindowsTaskbarPinImporter.PinFromFile(dialog.FileName, candidate =>
@@ -2112,6 +2118,12 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (IsSelfExecutable(pinnedApp.ExecutablePath))
+        {
+            if (pinnedApp.ShortcutPath is not null) _ = WindowsTaskbarPinImporter.RemovePin(pinnedApp.ShortcutPath);
+            return;
+        }
+
         LoadPinnedIconAsync(pinnedApp);
         _pinnedApps.Add(pinnedApp);
         SavePinOrder();
@@ -2122,12 +2134,9 @@ public partial class MainWindow : Window
             UpdateWindowIndicators(states);
             RefreshRunningApps();
         }
-        else
-        {
-            RebuildDockOrder();
-            ResizeDockToContent();
-            _replacementSession?.RefreshPosition();
-        }
+        RebuildDockOrder();
+        ResizeDockToContent();
+        _replacementSession?.RefreshPosition();
     }
 
     private DockApp? FindMatchingPinnedApp(DockApp candidate) =>
@@ -2147,8 +2156,68 @@ public partial class MainWindow : Window
         PinRunningApp(app);
     }
 
+    internal static bool IsSelfExecutable(string? executablePath, string? currentProcessPath = null) =>
+        DockApp.IsSelfExecutable(executablePath, currentProcessPath);
+
+    internal static IReadOnlyList<string>? UpdateDockItemOrderOnPin(
+        IReadOnlyList<string>? dockItemOrder,
+        string oldDockKey,
+        string newDockKey)
+    {
+        if (dockItemOrder is null || string.Equals(oldDockKey, newDockKey, StringComparison.OrdinalIgnoreCase))
+            return dockItemOrder;
+
+        var oldToken = "app:" + oldDockKey;
+        var newToken = "app:" + newDockKey;
+        var updated = new List<string>(dockItemOrder.Count);
+        var changed = false;
+        var seenNew = false;
+        foreach (var token in dockItemOrder)
+        {
+            if (string.Equals(token, oldToken, StringComparison.OrdinalIgnoreCase))
+            {
+                changed = true;
+                if (!seenNew)
+                {
+                    updated.Add(newToken);
+                    seenNew = true;
+                }
+                continue;
+            }
+            if (string.Equals(token, newToken, StringComparison.OrdinalIgnoreCase))
+            {
+                if (seenNew)
+                {
+                    changed = true;
+                    continue;
+                }
+                seenNew = true;
+            }
+            updated.Add(token);
+        }
+        return changed ? updated : dockItemOrder;
+    }
+
+    internal static IReadOnlyList<string>? UpdateDockItemOrderOnUnpin(
+        IReadOnlyList<string>? dockItemOrder,
+        DockApp app)
+    {
+        if (dockItemOrder is null) return null;
+
+        var keyToken = "app:" + app.DockKey;
+        var pathToken = string.IsNullOrWhiteSpace(app.LaunchArguments) && !DockApp.IsSharedHostExecutable(app.ExecutablePath)
+            ? "app:" + app.ExecutablePath
+            : null;
+        var updated = dockItemOrder
+            .Where(token => !string.Equals(token, keyToken, StringComparison.OrdinalIgnoreCase)
+                && (pathToken is null || !string.Equals(token, pathToken, StringComparison.OrdinalIgnoreCase)))
+            .ToArray();
+        return updated.Length == dockItemOrder.Count ? dockItemOrder : updated;
+    }
+
     internal void PinRunningApp(DockApp app, int insertIndex = -1)
     {
+        if (IsSelfExecutable(app.ExecutablePath)) return;
         if (RevealHiddenPin(app)) return;
         var pinExecutablePath = app.ExecutablePath;
         if (DockApp.IsSharedHostExecutable(pinExecutablePath) && !string.IsNullOrWhiteSpace(app.AppUserModelId))
@@ -2157,7 +2226,12 @@ public partial class MainWindow : Window
                 ?? $"{WindowsTaskbarPinImporter.AppsFolderPrefix}{app.AppUserModelId}";
         }
 
-        var pinKey = DockApp.BuildDockKey(pinExecutablePath, app.LaunchArguments, app.AppUserModelId);
+        var pinAumid = !string.IsNullOrWhiteSpace(app.AppUserModelId)
+            ? app.AppUserModelId
+            : WindowsTaskbarPinImporter.GetAppsFolderAumid(pinExecutablePath)
+                ?? ApplicationIconProvider.TryResolvePackagedAppUserModelId(pinExecutablePath);
+
+        var pinKey = DockApp.BuildDockKey(pinExecutablePath, app.LaunchArguments, pinAumid);
         if (_pinnedApps.Any(existing => string.Equals(existing.DockKey, pinKey, StringComparison.OrdinalIgnoreCase)))
             return;
 
@@ -2166,7 +2240,7 @@ public partial class MainWindow : Window
             pinExecutablePath,
             app.LaunchArguments,
             app.IconLocation,
-            app.AppUserModelId);
+            pinAumid);
         if (error is not null || shortcutPath is null)
         {
             ReportError(error ?? "ErrorAppPinFailed");
@@ -2179,7 +2253,7 @@ public partial class MainWindow : Window
             LaunchArguments = app.LaunchArguments,
             ShortcutPath = shortcutPath,
             IconLocation = app.IconLocation,
-            AppUserModelId = app.AppUserModelId,
+            AppUserModelId = pinAumid,
             HasNotification = app.HasNotification,
             IsForeground = app.IsForeground,
             WindowCount = app.WindowCount
@@ -2196,23 +2270,27 @@ public partial class MainWindow : Window
             _pinnedApps.Add(pinnedApp);
         }
 
-        SavePinOrder();
+        var updatedDockOrder = UpdateDockItemOrderOnPin(_preferences.Current.DockItemOrder, app.DockKey, pinnedApp.DockKey);
+        SavePinOrder(updatedDockOrder);
         if (_windowTracker is not null) RefreshRunningApps();
-        else RebuildDockOrder();
+        RebuildDockOrder();
         ResizeDockToContent();
         _replacementSession?.RefreshPosition();
     }
 
-    private void SavePinOrder()
+    private void SavePinOrder(IReadOnlyList<string>? dockItemOrder = null)
     {
         if (_mirrorOf is not null)
         {
             _mirrorOf.SynchronizePins(_pinnedApps);
-            _mirrorOf.SavePinOrder();
+            _mirrorOf.SavePinOrder(dockItemOrder);
             return;
         }
         var order = _pinnedApps.Select(app => app.DockKey).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        var error = _preferences.Save(_preferences.Current with { PinOrder = order });
+        var updated = dockItemOrder is not null
+            ? _preferences.Current with { PinOrder = order, DockItemOrder = dockItemOrder }
+            : _preferences.Current with { PinOrder = order };
+        var error = _preferences.Save(updated);
         if (error is not null) ReportError(error);
     }
 
@@ -2238,14 +2316,24 @@ public partial class MainWindow : Window
 
         AnimateDockAppRemoval(PinnedApps, _pinnedApps, app, () =>
         {
-            SavePinOrder();
-            if (_windowTracker is not null)
+            _instantDockResize = true;
+            try
             {
-                RefreshRunningApps();
-            }
+                var updatedDockOrder = UpdateDockItemOrderOnUnpin(_preferences.Current.DockItemOrder, app);
+                SavePinOrder(updatedDockOrder);
+                if (_windowTracker is not null)
+                {
+                    RefreshRunningApps();
+                }
 
-            ResizeDockToContent();
-            _replacementSession?.RefreshPosition();
+                RebuildDockOrder();
+                ResizeDockToContent();
+                _replacementSession?.RefreshPosition();
+            }
+            finally
+            {
+                _instantDockResize = false;
+            }
         });
     }
 
@@ -3090,6 +3178,7 @@ public partial class MainWindow : Window
         ApplyShowDesktopButtonLayout();
         _rebuildingDockOrder = true;
         ResetMagnification(immediate: true);
+        CancelLiveDrag();
         try
         {
             var tokens = BuildEffectiveDockOrder();
@@ -3875,12 +3964,12 @@ public partial class MainWindow : Window
 
         // Auto mode keeps the bar content-sized; Pixels/Percent/Fill pin it to the configured thickness.
         DockSurface.Height = DockSurfaceHeight;
-        var hasWidgets = _widgetCoordinator.ActiveWidgets.Values.Any(widget => widget.Visibility == Visibility.Visible);
-        WidgetIsland.Visibility = hasWidgets ? Visibility.Visible : Visibility.Collapsed;
+        var hasIslandWidgets = WidgetStrip.Children.OfType<UIElement>().Any(child => child.Visibility == Visibility.Visible);
+        WidgetIsland.Visibility = hasIslandWidgets ? Visibility.Visible : Visibility.Collapsed;
         var leadWidth = DockScrollViewer.MeasureContentWidth(DockLeadControls);
         var appsContentWidth = IsFullWidth ? 0 : DockScrollViewer.MeasureContentWidth(DockContents);
         var trailWidth = DockScrollViewer.MeasureContentWidth(DockTrailControls);
-        var widgetsWidth = hasWidgets ? DockScrollViewer.MeasureContentWidth(WidgetIsland) : 0;
+        var widgetsWidth = hasIslandWidgets ? DockScrollViewer.MeasureContentWidth(WidgetIsland) : 0;
         var showDesktopWidth = ShowDesktopButton.Visibility == Visibility.Visible
             ? ShowDesktopButton.Width + 1
             : 0;

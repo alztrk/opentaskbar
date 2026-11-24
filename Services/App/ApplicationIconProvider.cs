@@ -2,9 +2,12 @@ using System.Collections.Concurrent;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Windows.Interop;
 using System.Windows.Media.Imaging;
 using System.Xml.Linq;
+using OpenTaskbar.Models;
 
 namespace OpenTaskbar.Services;
 
@@ -172,8 +175,9 @@ public static class ApplicationIconProvider
     }
 
     /// <summary>
-    /// For executables inside <c>WindowsApps\&lt;PackageFullName&gt;\...</c>, reads <c>AppxManifest.xml</c> to
-    /// build the AppUserModelID (<c>&lt;PackageFamilyName&gt;!&lt;ApplicationId&gt;</c>) used by <c>shell:AppsFolder</c>.
+    /// For executables inside packaged install roots (<c>WindowsApps</c>, <c>SystemApps</c>, or
+    /// <c>ImmersiveControlPanel</c>), reads <c>AppxManifest.xml</c> to build the AppUserModelID
+    /// (<c>&lt;PackageFamilyName&gt;!&lt;ApplicationId&gt;</c>) used by <c>shell:AppsFolder</c>.
     /// </summary>
     internal static string? TryResolvePackagedAppUserModelId(string? executablePath)
     {
@@ -188,7 +192,7 @@ public static class ApplicationIconProvider
             return null;
         }
 
-        if (!fullExePath.Contains($"{Path.DirectorySeparatorChar}WindowsApps{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+        if (!DockApp.IsPackagedInstallPath(fullExePath))
         {
             return null;
         }
@@ -203,7 +207,12 @@ public static class ApplicationIconProvider
         while (!string.IsNullOrEmpty(dir))
         {
             var folderName = Path.GetFileName(dir);
-            if (string.Equals(folderName, "WindowsApps", StringComparison.OrdinalIgnoreCase)) break;
+            if (string.Equals(folderName, "WindowsApps", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(folderName, "SystemApps", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(folderName, "Windows", StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
             if (File.Exists(Path.Combine(dir, "AppxManifest.xml")))
             {
                 packageRoot = dir;
@@ -214,18 +223,13 @@ public static class ApplicationIconProvider
 
         if (packageRoot is null) return null;
 
-        // Package folder name format: <Name>_<Version>_<Architecture>_<ResourceId>_<PublisherId>
         var packageFolder = Path.GetFileName(packageRoot);
-        var parts = packageFolder.Split('_');
-        if (parts.Length < 5 || string.IsNullOrWhiteSpace(parts[0]) || string.IsNullOrWhiteSpace(parts[^1]))
-        {
-            return null;
-        }
-        var packageFamilyName = $"{parts[0]}_{parts[^1]}";
-
         try
         {
             var manifest = XDocument.Load(Path.Combine(packageRoot, "AppxManifest.xml"));
+            var packageFamilyName = TryExtractPackageFamilyName(packageFolder, manifest);
+            if (string.IsNullOrWhiteSpace(packageFamilyName)) return null;
+
             var applications = manifest.Descendants()
                 .Where(e => string.Equals(e.Name.LocalName, "Application", StringComparison.Ordinal))
                 .Select(e => (
@@ -249,6 +253,75 @@ public static class ApplicationIconProvider
             AppLog.Warning($"Failed to parse AppxManifest for '{packageFolder}': {ex.Message}");
             return null;
         }
+    }
+
+    private static string? TryExtractPackageFamilyName(string packageFolder, XDocument manifest)
+    {
+        if (!string.IsNullOrWhiteSpace(packageFolder))
+        {
+            var parts = packageFolder.Split('_');
+            // WindowsApps folder format: <Name>_<Version>_<Architecture>_<ResourceId>_<PublisherId>
+            if (parts.Length >= 5 && !string.IsNullOrWhiteSpace(parts[0]) && IsPublisherId(parts[^1]))
+            {
+                return $"{parts[0]}_{parts[^1]}";
+            }
+
+            // SystemApps folder format: <Name>_<PublisherId>
+            if (parts.Length >= 2 && IsPublisherId(parts[^1]))
+            {
+                var lastUnderscore = packageFolder.LastIndexOf('_');
+                if (lastUnderscore > 0)
+                {
+                    return $"{packageFolder[..lastUnderscore]}_{parts[^1]}";
+                }
+            }
+        }
+
+        // Inbox system packages (e.g. C:\Windows\ImmersiveControlPanel) do not encode the publisher ID
+        // in their directory name; derive <Identity/@Name>_<PublisherId> from AppxManifest.xml.
+        var identity = manifest.Descendants()
+            .FirstOrDefault(e => string.Equals(e.Name.LocalName, "Identity", StringComparison.Ordinal));
+        var name = identity?.Attribute("Name")?.Value?.Trim();
+        var publisher = identity?.Attribute("Publisher")?.Value?.Trim();
+        if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(publisher))
+        {
+            return null;
+        }
+
+        return $"{name}_{ComputePublisherId(publisher)}";
+    }
+
+    private static bool IsPublisherId(string? value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length != 13) return false;
+        foreach (var ch in value)
+        {
+            if (!char.IsAsciiLetterOrDigit(ch)) return false;
+        }
+        return true;
+    }
+
+    internal static string ComputePublisherId(string publisher)
+    {
+        const string alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
+        var hash = SHA256.HashData(Encoding.Unicode.GetBytes(publisher));
+        ulong value = 0;
+        for (var i = 0; i < 8; i++)
+        {
+            value = (value << 8) | hash[i];
+        }
+
+        Span<char> chars = stackalloc char[13];
+        for (var i = 0; i < 13; i++)
+        {
+            var shift = 64 - (i + 1) * 5;
+            var index = shift >= 0
+                ? (int)((value >> shift) & 0x1F)
+                : (int)((value << -shift) & 0x1F);
+            chars[i] = alphabet[index];
+        }
+
+        return new string(chars);
     }
 
     public static BitmapSource? GetForFile(string path, int targetSize = 0)

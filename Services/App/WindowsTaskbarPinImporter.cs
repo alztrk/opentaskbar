@@ -390,7 +390,9 @@ public static class WindowsTaskbarPinImporter
                 ? rawAumid
                 : ApplicationIconProvider.TryResolvePackagedAppUserModelId(executablePath);
 
-            if (DockApp.IsSharedHostExecutable(executablePath) && !string.IsNullOrWhiteSpace(packagedAumid))
+            if ((DockApp.IsSharedHostExecutable(executablePath)
+                    || DockApp.IsSystemPackagedInstallPath(executablePath))
+                && !string.IsNullOrWhiteSpace(packagedAumid))
             {
                 var resolvedHosted = TryResolvePackagedApp(packagedAumid, windowsAppsRoot);
                 var hostedTarget = resolvedHosted?.ExecutablePath ?? $"{AppsFolderPrefix}{packagedAumid}";
@@ -611,7 +613,13 @@ public static class WindowsTaskbarPinImporter
 
                 string? readableExe = null;
                 var relExe = appElem.Attribute("Executable")?.Value?.Trim();
-                if (!string.IsNullOrWhiteSpace(relExe) && !relExe.Contains('$'))
+                var entryPoint = appElem.Attribute("EntryPoint")?.Value?.Trim();
+                // Pure UWP/AppContainer apps (e.g. Windows Settings with EntryPoint="AppObject.EntryPoint")
+                // cannot be launched directly via their raw .exe and embed no Win32 icon resource; they must
+                // route through shell:AppsFolder\<AUMID> for both icon loading and activation.
+                if (!IsAppContainerEntryPoint(entryPoint)
+                    && !string.IsNullOrWhiteSpace(relExe)
+                    && !relExe.Contains('$'))
                 {
                     try
                     {
@@ -969,9 +977,13 @@ public static class WindowsTaskbarPinImporter
         var isAppsFolderTarget = executablePath.StartsWith(AppsFolderPrefix, StringComparison.OrdinalIgnoreCase);
         var effectiveAumid = !string.IsNullOrWhiteSpace(appUserModelId)
             ? appUserModelId.Trim()
-            : (isAppsFolderTarget ? executablePath[AppsFolderPrefix.Length..].Trim() : null);
+            : (isAppsFolderTarget
+                ? executablePath[AppsFolderPrefix.Length..].Trim()
+                : ApplicationIconProvider.TryResolvePackagedAppUserModelId(executablePath));
 
-        if ((isAppsFolderTarget || DockApp.IsSharedHostExecutable(executablePath))
+        if ((isAppsFolderTarget
+                || DockApp.IsSharedHostExecutable(executablePath)
+                || DockApp.IsSystemPackagedInstallPath(executablePath))
             && !string.IsNullOrWhiteSpace(effectiveAumid))
         {
             return CreatePackagedShellLink(shortcutPath, effectiveAumid, iconLocation)
@@ -1091,19 +1103,27 @@ public static class WindowsTaskbarPinImporter
                 ? description
                 : Path.GetFileNameWithoutExtension(fullPath);
             var aumid = ApplicationIconProvider.TryResolvePackagedAppUserModelId(fullPath);
-            var candidate = new DockApp(name, fullPath) { AppUserModelId = aumid };
+            var targetPath = fullPath;
+            if (!string.IsNullOrWhiteSpace(aumid)
+                && (DockApp.IsSystemPackagedInstallPath(fullPath)
+                    || (TryResolvePackagedApp(aumid) is { ExecutablePath: var resolvedTarget }
+                        && resolvedTarget.StartsWith(AppsFolderPrefix, StringComparison.OrdinalIgnoreCase))))
+            {
+                targetPath = $"{AppsFolderPrefix}{aumid}";
+            }
+            var candidate = new DockApp(name, targetPath) { AppUserModelId = aumid };
             if (isAlreadyPinned?.Invoke(candidate) == true)
             {
                 return (candidate, null);
             }
 
-            var (shortcutPath, error) = AddPin(name, fullPath, launchArguments: null, iconLocation: null, appUserModelId: aumid);
+            var (shortcutPath, error) = AddPin(name, targetPath, launchArguments: null, iconLocation: null, appUserModelId: aumid);
             if (error is not null || shortcutPath is null)
             {
                 return (null, error ?? "ErrorAppPinFailed");
             }
 
-            return (new DockApp(name, fullPath)
+            return (new DockApp(name, targetPath)
             {
                 ShortcutPath = shortcutPath,
                 AppUserModelId = aumid
@@ -1490,8 +1510,12 @@ public static class WindowsTaskbarPinImporter
         string.Equals(Path.GetFileName(path), "explorer.exe", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsPackagedInstallPath(string path) =>
-        path.Contains($"{Path.DirectorySeparatorChar}WindowsApps{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
-        || path.Contains($"{Path.DirectorySeparatorChar}SystemApps{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase);
+        DockApp.IsPackagedInstallPath(path);
+
+    internal static bool IsAppContainerEntryPoint(string? entryPoint) =>
+        !string.IsNullOrWhiteSpace(entryPoint)
+        && !string.Equals(entryPoint, "Windows.FullTrustApplication", StringComparison.OrdinalIgnoreCase)
+        && !string.Equals(entryPoint, "Windows.PartialTrustApplication", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsReadableFile(string path)
     {

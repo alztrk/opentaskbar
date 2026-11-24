@@ -1378,6 +1378,77 @@ internal static class DockLayoutChecks
                 Check(Math.Abs((withTopGap - requiredShelf) - 16) < 0.01,
                     $"Top gap (16 DIP) must increase the reserved shelf height by 16 DIP so maximized windows stop above the dock (#92, got {withTopGap - requiredShelf}).");
             }
+
+            // Issue #167: OpenTaskbar's own executable must not be pinnable as an external app.
+            {
+                const string selfPath = @"C:\Program Files\OpenTaskbar\OpenTaskbar.exe";
+                Check(MainWindow.IsSelfExecutable(selfPath, selfPath),
+                    "Exact match against OpenTaskbar.exe must be detected as self.");
+                Check(MainWindow.IsSelfExecutable(@"c:\program files\opentaskbar\OPENTASKBAR.EXE", selfPath),
+                    "Case-insensitive match against OpenTaskbar.exe must be detected as self.");
+                Check(!MainWindow.IsSelfExecutable(@"C:\Windows\ImmersiveControlPanel\SystemSettings.exe", selfPath),
+                    "External apps such as Windows Settings must not be treated as self.");
+                Check(!MainWindow.IsSelfExecutable(@"appsfolder:windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel", selfPath),
+                    "AppsFolder URIs must not throw or match self.");
+                Check(!MainWindow.IsSelfExecutable(null, selfPath) && !MainWindow.IsSelfExecutable("", selfPath),
+                    "Null or empty executable paths must not match self.");
+            }
+
+            // Issue #167: Pinning a shared-host running app (e.g. Windows Settings) must replace its running token
+            // in DockItemOrder in-place without disturbing adjacent widgets, and unpinning must prune its token
+            // without touching sibling shared-host apps or PWAs.
+            {
+                const string runningSettingsKey = @"C:\Windows\System32\ApplicationFrameHost.exe|windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel";
+                const string pinnedSettingsKey = @"C:\Windows\ImmersiveControlPanel\SystemSettings.exe";
+                var initialOrder = new[]
+                {
+                    "start",
+                    @"app:C:\Apps\Code.exe",
+                    "app:" + runningSettingsKey,
+                    "widget:Clock",
+                    "widget:Audio",
+                    "tray"
+                };
+
+                var afterPin = MainWindow.UpdateDockItemOrderOnPin(initialOrder, runningSettingsKey, pinnedSettingsKey);
+                Check(afterPin is not null && afterPin.SequenceEqual([
+                        "start",
+                        @"app:C:\Apps\Code.exe",
+                        "app:" + pinnedSettingsKey,
+                        "widget:Clock",
+                        "widget:Audio",
+                        "tray"
+                    ]),
+                    "Pinning a shared-host app must replace its DockItemOrder token in place while preserving all widgets.");
+
+                var pinnedSettingsApp = new DockApp("Settings", pinnedSettingsKey)
+                {
+                    AppUserModelId = "windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"
+                };
+                var afterUnpin = MainWindow.UpdateDockItemOrderOnUnpin(afterPin, pinnedSettingsApp);
+                Check(afterUnpin is not null && afterUnpin.SequenceEqual([
+                        "start",
+                        @"app:C:\Apps\Code.exe",
+                        "widget:Clock",
+                        "widget:Audio",
+                        "tray"
+                    ]),
+                    "Unpinning must remove the app's token from DockItemOrder so no empty gap or ghost slot remains.");
+
+                var pwaOrder = new[]
+                {
+                    @"app:C:\Program Files\Edge\msedge_proxy.exe|--app-id=alpha",
+                    @"app:C:\Program Files\Edge\msedge_proxy.exe|--app-id=beta",
+                    "widget:Clock"
+                };
+                var pwaAlpha = new DockApp("Alpha", @"C:\Program Files\Edge\msedge_proxy.exe") { LaunchArguments = "--app-id=alpha" };
+                var afterPwaUnpin = MainWindow.UpdateDockItemOrderOnUnpin(pwaOrder, pwaAlpha);
+                Check(afterPwaUnpin is not null && afterPwaUnpin.SequenceEqual([
+                        @"app:C:\Program Files\Edge\msedge_proxy.exe|--app-id=beta",
+                        "widget:Clock"
+                    ]),
+                    "Unpinning one PWA must not remove a sibling PWA sharing the same proxy executable.");
+            }
         }
 
         return checks;

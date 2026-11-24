@@ -92,6 +92,49 @@ public sealed class DockApp(string name, string executablePath) : INotifyPropert
             || string.Equals(fileName, "WWAHost.exe", StringComparison.OrdinalIgnoreCase);
     }
 
+    internal static bool IsSystemPackagedInstallPath(string? executablePath)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath)) return false;
+        return ContainsPathSegment(executablePath, "SystemApps")
+            || ContainsPathSegment(executablePath, "ImmersiveControlPanel");
+    }
+
+    internal static bool IsPackagedInstallPath(string? executablePath)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath)) return false;
+        return ContainsPathSegment(executablePath, "WindowsApps")
+            || IsSystemPackagedInstallPath(executablePath);
+    }
+
+    internal static bool IsSelfExecutable(string? executablePath, string? currentProcessPath = null)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath)) return false;
+        var trimmed = executablePath.Trim();
+        var processPath = !string.IsNullOrWhiteSpace(currentProcessPath)
+            ? currentProcessPath.Trim()
+            : Environment.ProcessPath;
+        if (!string.IsNullOrWhiteSpace(processPath))
+        {
+            try
+            {
+                if (string.Equals(Path.GetFullPath(trimmed), Path.GetFullPath(processPath), StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                // Fall through to filename comparison.
+            }
+        }
+
+        return string.Equals(Path.GetFileName(trimmed), "OpenTaskbar.exe", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ContainsPathSegment(string path, string segment) =>
+        path.Contains($"\\{segment}\\", StringComparison.OrdinalIgnoreCase)
+        || path.Contains($"/{segment}/", StringComparison.OrdinalIgnoreCase);
+
     // Notifies because packaged apps can receive their icon after the dock entry is created.
     [JsonIgnore]
     public BitmapSource? Icon { get => _icon; set => SetField(ref _icon, value); }
