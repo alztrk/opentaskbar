@@ -27,6 +27,7 @@ public sealed class TaskbarReplacementSession : IDisposable
     private const uint WmDpiChanged = 0x02E0;
     private const uint CallbackMessage = 0x8000 + 0x52;
     private const uint MonitorDefaultToNearest = 2;
+    private const uint MonitorDefaultToPrimary = 1;
     private const uint GaRootOwner = 3;
     private const uint SwpNoSize = 0x0001;
     private const uint SwpNoMove = 0x0002;
@@ -229,7 +230,13 @@ public sealed class TaskbarReplacementSession : IDisposable
     private uint ReplacementState => (_previousTaskbarState & AbsAlwaysOnTop)
         | (_autoHideEnabled || IsVertical || !_nativeTaskbarAtBottom || ReleaseNativeStrip ? AbsAutoHide : 0);
 
-    private bool ReleaseNativeStrip => !IsVertical && _nativeTaskbarAtBottom && ShelfHeight < _nativeBottomTaskbarHeight;
+    // Also released when the dock lives on a monitor other than the primary one: Explorer's primary taskbar would
+    // otherwise keep reserving an empty strip on a display that has no dock at all.
+    private bool ReleaseNativeStrip => !IsVertical && _nativeTaskbarAtBottom
+        && (ShelfHeight < _nativeBottomTaskbarHeight || !DockOnPrimaryMonitor);
+
+    private bool DockOnPrimaryMonitor =>
+        _targetMonitor == 0 || _targetMonitor == MonitorFromPoint(new NativePoint(0, 0), MonitorDefaultToPrimary);
 
     private Models.DockEdge _edge = Models.DockEdge.Bottom;
     private bool IsVertical => _edge != Models.DockEdge.Bottom;
@@ -311,6 +318,7 @@ public sealed class TaskbarReplacementSession : IDisposable
     public void SetTargetMonitor(nint monitorHandle)
     {
         if (_targetMonitor == monitorHandle) return;
+        var wasReleasingNative = ReleaseNativeStrip;
         _targetMonitor = monitorHandle;
         _reservation = null;
         _sideReservation = null;
@@ -325,6 +333,15 @@ public sealed class TaskbarReplacementSession : IDisposable
             if (AppBarClient.Register(_handle, CallbackMessage, "TargetMonitor") != 0)
             {
                 MarkRegistered(CurrentTaskbarLease());
+            }
+        }
+
+        if (_ownsNativeTaskbar && wasReleasingNative != ReleaseNativeStrip)
+        {
+            SetTaskbarState(ReplacementState, _handle);
+            if (HideNativeTaskbarDetailed() != HideObservation.AlreadyHidden)
+            {
+                RetryHideNativeTaskbar("TargetMonitor");
             }
         }
 
@@ -2352,6 +2369,16 @@ public sealed class TaskbarReplacementSession : IDisposable
 
     [DllImport("user32.dll")]
     private static extern nint MonitorFromWindow(nint windowHandle, uint flags);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private readonly struct NativePoint(int x, int y)
+    {
+        public readonly int X = x;
+        public readonly int Y = y;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern nint MonitorFromPoint(NativePoint point, uint flags);
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
