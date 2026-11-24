@@ -27,14 +27,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA, GetMessageW,
     GetWindowLongPtrW, HTCLIENT, HTTRANSPARENT, IDC_ARROW, IDC_HAND, KillTimer, LoadCursorW, MSG,
     PostMessageW, PostQuitMessage, RegisterClassExW, SetCursor, SetTimer, SetWindowLongPtrW,
-    TranslateMessage, WM_APP, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    TranslateMessage, WM_APP, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
+    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_VISIBLE,
 };
 
 use crate::dcomp::{DcompEngine, PillNodes, ShellGlyph, VisualNode};
 use crate::icon_cache::{self, RawIcon};
 use crate::pins::{self, PinnedApp};
+use crate::preview::{PreviewItem, PreviewPopup};
 use crate::win32::{self, ContextAction};
 
 const VERTICAL_EDGE_GAP: f32 = 5.0;
@@ -46,9 +48,12 @@ const BOUNCE_DURATION_SECS: f32 = 0.42;
 const DRAG_THRESHOLD_PX: f32 = 6.0;
 
 const TIMER_POLL: usize = 1;
+const TIMER_PREVIEW_SHOW: usize = 2;
+const TIMER_PREVIEW_HIDE: usize = 3;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_APP_VSYNC: u32 = WM_APP + 1;
 const WM_APP_ICONS: u32 = WM_APP + 2;
+const WM_APP_PREVIEW_LEAVE: u32 = WM_APP + 3;
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
@@ -100,11 +105,17 @@ struct DockSlot {
     label: String,
     launch_path: String,
     icon_source: String,
-    hwnds: Vec<usize>,
+    windows: Vec<PreviewItem>,
     is_foreground: bool,
     scale: f32,
     slide_x: f32,
     bounce_started: Option<Instant>,
+}
+
+impl DockSlot {
+    fn hwnds(&self) -> Vec<usize> {
+        self.windows.iter().map(|w| w.hwnd).collect()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -156,6 +167,8 @@ struct DockState {
     drag_ghost_source: Option<String>,
     tooltip_node: VisualNode,
     tooltip_cache: Option<TooltipCache>,
+    preview: Option<Box<PreviewPopup>>,
+    preview_pending_idx: Option<usize>,
     hover_mouse_x: Option<f32>,
     hovered_idx: Option<usize>,
     hovered_shell: Option<ShellButton>,
@@ -194,7 +207,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
             .push(win);
     }
 
-    let mut pin_matches: HashMap<String, (Vec<usize>, bool)> = HashMap::new();
+    let mut pin_matches: HashMap<String, (Vec<PreviewItem>, bool)> = HashMap::new();
     let mut claimed_exes: HashMap<String, bool> = HashMap::new();
     for pin in pins {
         let matched_key = pin
@@ -214,18 +227,23 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                     })
                     .cloned()
             });
-        let (hwnds, is_fg) = match matched_key {
+        let (windows, is_fg) = match matched_key {
             Some(ref key) => {
                 claimed_exes.insert(key.clone(), true);
                 let list = &by_exe[key];
                 (
-                    list.iter().map(|w| w.hwnd).collect(),
+                    list.iter()
+                        .map(|w| PreviewItem {
+                            hwnd: w.hwnd,
+                            title: w.title.clone(),
+                        })
+                        .collect(),
                     list.iter().any(|w| w.is_foreground),
                 )
             }
             None => (Vec::new(), false),
         };
-        pin_matches.insert(pin.launch_path.to_lowercase(), (hwnds, is_fg));
+        pin_matches.insert(pin.launch_path.to_lowercase(), (windows, is_fg));
     }
 
     let mut next: Vec<DockSlot> = Vec::with_capacity(pins.len() + by_exe.len());
@@ -238,7 +256,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                 .find(|p| p.launch_path.eq_ignore_ascii_case(&old.key))
             {
                 let key = pin.launch_path.to_lowercase();
-                let (hwnds, is_foreground) = pin_matches.get(&key).cloned().unwrap_or_default();
+                let (windows, is_foreground) = pin_matches.get(&key).cloned().unwrap_or_default();
                 emitted_keys.insert(key.clone(), true);
                 next.push(DockSlot {
                     key,
@@ -246,7 +264,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                     label: pin.name.clone(),
                     launch_path: pin.launch_path.clone(),
                     icon_source: pin.icon_source.clone(),
-                    hwnds,
+                    windows,
                     is_foreground,
                     scale: old.scale,
                     slide_x: old.slide_x,
@@ -263,7 +281,13 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                 label: old.label.clone(),
                 launch_path: old.launch_path.clone(),
                 icon_source: old.icon_source.clone(),
-                hwnds: list.iter().map(|w| w.hwnd).collect(),
+                windows: list
+                    .iter()
+                    .map(|w| PreviewItem {
+                        hwnd: w.hwnd,
+                        title: w.title.clone(),
+                    })
+                    .collect(),
                 is_foreground: list.iter().any(|w| w.is_foreground),
                 scale: old.scale,
                 slide_x: old.slide_x,
@@ -277,7 +301,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
         if emitted_keys.contains_key(&key) {
             continue;
         }
-        let (hwnds, is_foreground) = pin_matches.get(&key).cloned().unwrap_or_default();
+        let (windows, is_foreground) = pin_matches.get(&key).cloned().unwrap_or_default();
         emitted_keys.insert(key.clone(), true);
         next.push(DockSlot {
             key,
@@ -285,7 +309,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
             label: pin.name.clone(),
             launch_path: pin.launch_path.clone(),
             icon_source: pin.icon_source.clone(),
-            hwnds,
+            windows,
             is_foreground,
             scale: 1.0,
             slide_x: 0.0,
@@ -310,7 +334,13 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
             label,
             launch_path: win.exe_path.clone(),
             icon_source,
-            hwnds: list.iter().map(|w| w.hwnd).collect(),
+            windows: list
+                .iter()
+                .map(|w| PreviewItem {
+                    hwnd: w.hwnd,
+                    title: w.title.clone(),
+                })
+                .collect(),
             is_foreground: list.iter().any(|w| w.is_foreground),
             scale: 1.0,
             slide_x: 0.0,
@@ -483,6 +513,10 @@ impl DockState {
         let tooltip_node = dcomp.create_node()?;
         tooltip_node.hide();
 
+        let preview = PreviewPopup::new(move || unsafe {
+            let _ = PostMessageW(hwnd as HWND, WM_APP_PREVIEW_LEAVE, 0, 0);
+        });
+
         let anim_signal = Arc::new((Mutex::new(false), Condvar::new()));
         let tick_pending = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -511,6 +545,8 @@ impl DockState {
             drag_ghost_source: None,
             tooltip_node,
             tooltip_cache: None,
+            preview,
+            preview_pending_idx: None,
             hover_mouse_x: None,
             hovered_idx: None,
             hovered_shell: None,
@@ -677,7 +713,7 @@ impl DockState {
             || next.iter().zip(self.slots.iter()).any(|(a, b)| {
                 a.key != b.key
                     || a.is_foreground != b.is_foreground
-                    || a.hwnds.is_empty() != b.hwnds.is_empty()
+                    || a.windows.len() != b.windows.len()
             });
         self.slots = next;
         if len_changed {
@@ -1027,7 +1063,7 @@ impl DockState {
             let slide_x = self.slots[idx].slide_x;
             let source = self.slots[idx].icon_source.clone();
             let label = self.slots[idx].label.clone();
-            let running = !self.slots[idx].hwnds.is_empty();
+            let running = !self.slots[idx].windows.is_empty();
             let active = self.slots[idx].is_foreground;
 
             let has_real_icon = self
@@ -1120,7 +1156,12 @@ impl DockState {
             self.drag_ghost.hide();
         }
 
-        // 5. Auto-height tooltip rendered last (always above magnified icons).
+        // 5. Auto-height tooltip rendered last (suppressed when live thumbnail preview is shown for this slot).
+        let preview_showing_for = self
+            .preview
+            .as_deref()
+            .filter(|p| p.is_visible())
+            .and_then(|p| p.owner_key());
         let tooltip_info: Option<(String, f32, f32)> = if active_drag.is_some() {
             None
         } else if let Some(shell) = self.hovered_shell {
@@ -1131,6 +1172,7 @@ impl DockState {
             ))
         } else if let Some(idx) = self.hovered_idx
             && let Some(slot) = self.slots.get(idx)
+            && preview_showing_for != Some(slot.key.as_str())
         {
             let bounce = bounce_offset_dips(slot.bounce_started).unwrap_or(0.0);
             let lift = ((slot.scale - 1.0) * 14.0 + bounce).max(0.0);
@@ -1172,6 +1214,93 @@ impl DockState {
         self.dcomp.commit();
     }
 
+    fn cancel_preview_timers(&self) {
+        unsafe {
+            let _ = KillTimer(self.hwnd as HWND, TIMER_PREVIEW_SHOW);
+            let _ = KillTimer(self.hwnd as HWND, TIMER_PREVIEW_HIDE);
+        }
+    }
+
+    fn hide_preview_now(&mut self) {
+        self.cancel_preview_timers();
+        self.preview_pending_idx = None;
+        if let Some(ref mut preview) = self.preview {
+            preview.hide();
+        }
+    }
+
+    fn schedule_preview_hide(&mut self) {
+        self.preview_pending_idx = None;
+        unsafe {
+            let _ = KillTimer(self.hwnd as HWND, TIMER_PREVIEW_SHOW);
+            SetTimer(self.hwnd as HWND, TIMER_PREVIEW_HIDE, 220, None);
+        }
+    }
+
+    fn sync_preview_hover(&mut self) {
+        if self.drag.is_some() {
+            self.hide_preview_now();
+            return;
+        }
+        let running_idx = self
+            .hovered_idx
+            .filter(|&i| self.slots.get(i).is_some_and(|s| !s.windows.is_empty()));
+        if let Some(idx) = running_idx {
+            unsafe {
+                let _ = KillTimer(self.hwnd as HWND, TIMER_PREVIEW_HIDE);
+            }
+            let already_showing_this = self.preview.as_deref().is_some_and(|p| {
+                p.is_visible() && p.owner_key() == Some(self.slots[idx].key.as_str())
+            });
+            if already_showing_this {
+                return;
+            }
+            let preview_open = self.preview.as_deref().is_some_and(|p| p.is_visible());
+            self.preview_pending_idx = Some(idx);
+            if preview_open {
+                // Seamless instant switch when sliding between running icons while preview is open.
+                self.show_preview_for_slot(idx);
+            } else {
+                unsafe {
+                    SetTimer(self.hwnd as HWND, TIMER_PREVIEW_SHOW, 180, None);
+                }
+            }
+        } else if self.preview.as_deref().is_some_and(|p| p.is_visible()) {
+            self.schedule_preview_hide();
+        } else {
+            self.preview_pending_idx = None;
+            unsafe {
+                let _ = KillTimer(self.hwnd as HWND, TIMER_PREVIEW_SHOW);
+            }
+        }
+    }
+
+    fn show_preview_for_slot(&mut self, idx: usize) {
+        let Some(slot) = self.slots.get(idx) else {
+            return;
+        };
+        if slot.windows.is_empty() {
+            return;
+        }
+        let key = slot.key.clone();
+        let items = slot.windows.clone();
+        let (win_x, win_y, _, _) = self
+            .last_window_rect
+            .unwrap_or_else(|| compute_window_rect(&self.settings, self.slots.len(), self.dpi));
+        let (_, pill_top, _, _) = self.live_pill_geometry();
+        let base = self.settings.icon_dips();
+        let max_icon_top =
+            pill_top + 7.5 + base - (FISHEYE_PEAK * 14.0) - base * (1.0 + FISHEYE_PEAK);
+        let top_edge = max_icon_top.min(pill_top);
+        let anchor_x = win_x + (self.live_slot_center_x(idx) * self.dpi).round() as i32;
+        let anchor_bottom_y = win_y + ((top_edge - 10.0) * self.dpi).round() as i32;
+
+        if let Some(ref mut preview) = self.preview {
+            preview.show(&key, &items, anchor_x, anchor_bottom_y);
+        }
+        self.update_visuals();
+    }
+
     fn handle_mouse_move(&mut self, mx: f32, my: f32) {
         if !self.tracking_mouse {
             let mut tme = TRACKMOUSEEVENT {
@@ -1187,6 +1316,7 @@ impl DockState {
         }
 
         if self.drag.is_some() {
+            self.hide_preview_now();
             self.update_drag(mx);
             self.ensure_animation();
             return;
@@ -1197,6 +1327,7 @@ impl DockState {
             self.hovered_shell = Some(shell);
             self.hover_mouse_x = None;
             self.hovered_idx = None;
+            self.sync_preview_hover();
             if changed {
                 self.ensure_animation();
                 self.update_visuals();
@@ -1220,6 +1351,9 @@ impl DockState {
             let prev_idx = self.hovered_idx;
             self.hover_mouse_x = Some(mx);
             self.update_hovered_index_from_mouse();
+            if self.hovered_idx != prev_idx {
+                self.sync_preview_hover();
+            }
             if self.settings.magnification_enabled && self.settings.animations_enabled {
                 self.ensure_animation();
             } else if self.hovered_idx != prev_idx {
@@ -1229,6 +1363,7 @@ impl DockState {
             self.hovered_shell = None;
             self.hover_mouse_x = None;
             self.hovered_idx = None;
+            self.sync_preview_hover();
             self.ensure_animation();
             self.update_visuals();
         }
@@ -1244,11 +1379,13 @@ impl DockState {
         self.hovered_shell = None;
         self.pressed_shell = None;
         self.pressed_idx = None;
+        self.schedule_preview_hide();
         self.ensure_animation();
         self.update_visuals();
     }
 
     fn handle_lbutton_down(&mut self, mx: f32, my: f32) {
+        self.hide_preview_now();
         unsafe {
             SetCapture(self.hwnd as HWND);
         }
@@ -1299,7 +1436,7 @@ impl DockState {
             && let Some(slot) = self.slots.get_mut(idx)
         {
             slot.bounce_started = Some(Instant::now());
-            let hwnds = slot.hwnds.clone();
+            let hwnds = slot.hwnds();
             let launch_path = slot.launch_path.clone();
             self.ensure_animation();
             self.update_visuals();
@@ -1313,7 +1450,30 @@ impl DockState {
         }
     }
 
-    fn handle_rbutton_up(&self) {
+    fn handle_mbutton_up(&mut self) {
+        self.hide_preview_now();
+        if let Some(idx) = self.hovered_idx
+            && let Some(slot) = self.slots.get_mut(idx)
+        {
+            slot.bounce_started = Some(Instant::now());
+            let launch_path = slot.launch_path.clone();
+            self.ensure_animation();
+            pins::launch(launch_path);
+        }
+    }
+
+    fn handle_mouse_wheel(&mut self, delta: i16) {
+        if let Some(idx) = self.hovered_idx
+            && let Some(slot) = self.slots.get(idx)
+            && !slot.windows.is_empty()
+        {
+            let hwnds = slot.hwnds();
+            tracker::cycle_windows(&hwnds, delta < 0);
+        }
+    }
+
+    fn handle_rbutton_up(&mut self) {
+        self.hide_preview_now();
         match win32::show_dock_context_menu(self.hwnd) {
             ContextAction::TaskManager => pins::launch("taskmgr.exe".to_owned()),
             ContextAction::RestoreTaskbar => opentaskbar_shell::taskbar::restore_from_journal(),
@@ -1399,6 +1559,15 @@ unsafe extern "system" fn wnd_proc(
             state.handle_lbutton_up(mx, my);
             0
         }
+        WM_MBUTTONUP => {
+            state.handle_mbutton_up();
+            0
+        }
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam >> 16) & 0xffff) as i16;
+            state.handle_mouse_wheel(delta);
+            0
+        }
         WM_RBUTTONUP => {
             state.handle_rbutton_up();
             0
@@ -1416,6 +1585,37 @@ unsafe extern "system" fn wnd_proc(
             state.drain_loaded_icons();
             0
         }
+        WM_APP_PREVIEW_LEAVE => {
+            if state.hovered_idx.is_none() {
+                state.schedule_preview_hide();
+            }
+            0
+        }
+        WM_TIMER if wparam == TIMER_PREVIEW_SHOW => {
+            unsafe {
+                let _ = KillTimer(hwnd, TIMER_PREVIEW_SHOW);
+            }
+            if let Some(idx) = state.preview_pending_idx.take()
+                && state.hovered_idx == Some(idx)
+            {
+                state.show_preview_for_slot(idx);
+            }
+            0
+        }
+        WM_TIMER if wparam == TIMER_PREVIEW_HIDE => {
+            unsafe {
+                let _ = KillTimer(hwnd, TIMER_PREVIEW_HIDE);
+            }
+            let inside_preview = state
+                .preview
+                .as_deref()
+                .is_some_and(|p| p.is_pointer_inside());
+            if !inside_preview && state.hovered_idx.is_none() {
+                state.hide_preview_now();
+                state.update_visuals();
+            }
+            0
+        }
         WM_TIMER if wparam == TIMER_POLL => {
             let _ = opentaskbar_shell::taskbar::ensure_hidden();
             if state.sync_slots() {
@@ -1426,6 +1626,8 @@ unsafe extern "system" fn wnd_proc(
         WM_DESTROY => {
             unsafe {
                 KillTimer(hwnd, TIMER_POLL);
+                KillTimer(hwnd, TIMER_PREVIEW_SHOW);
+                KillTimer(hwnd, TIMER_PREVIEW_HIDE);
                 PostQuitMessage(0);
             }
             0

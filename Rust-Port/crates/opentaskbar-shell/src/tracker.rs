@@ -3,13 +3,14 @@
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
+    TerminateProcess,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
-    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    SW_MINIMIZE, SW_RESTORE, SetForegroundWindow, ShowWindow, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
+    IsWindowVisible, PostMessageW, SW_MINIMIZE, SW_RESTORE, SetForegroundWindow, ShowWindow,
+    WM_CLOSE, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 use windows_sys::core::BOOL;
 
@@ -143,6 +144,77 @@ pub fn enumerate_windows() -> Vec<RunningWindow> {
     ctx.out
 }
 
+/// Activates and restores a specific window.
+pub fn activate_window(hwnd_val: usize) {
+    if hwnd_val == 0 {
+        return;
+    }
+    let hwnd = hwnd_val as HWND;
+    // SAFETY: standard Win32 activation calls on a live window handle.
+    unsafe {
+        if IsWindow(hwnd) == 0 {
+            return;
+        }
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd);
+    }
+}
+
+/// Requests a graceful close (`WM_CLOSE`) for a specific window.
+pub fn close_window(hwnd_val: usize) {
+    if hwnd_val == 0 {
+        return;
+    }
+    let hwnd = hwnd_val as HWND;
+    // SAFETY: asynchronous `WM_CLOSE` message to a live window.
+    unsafe {
+        if IsWindow(hwnd) != 0 {
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+    }
+}
+
+/// Forcefully terminates the process owning `hwnd_val`.
+pub fn terminate_window_process(hwnd_val: usize) {
+    if hwnd_val == 0 {
+        return;
+    }
+    // SAFETY: queries PID and terminates only the target window's process.
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd_val as HWND, &mut pid);
+        if pid == 0 || pid == std::process::id() {
+            return;
+        }
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !handle.is_null() {
+            let _ = TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
+    }
+}
+
+/// Cycles forward or backward through an app's open windows (e.g. mouse wheel on dock icon).
+pub fn cycle_windows(hwnds: &[usize], forward: bool) {
+    if hwnds.is_empty() {
+        return;
+    }
+    let fg = unsafe { GetForegroundWindow() as usize };
+    let next = match hwnds.iter().position(|&h| h == fg) {
+        Some(pos) => {
+            if forward {
+                hwnds[(pos + 1) % hwnds.len()]
+            } else {
+                hwnds[(pos + hwnds.len() - 1) % hwnds.len()]
+            }
+        }
+        None => hwnds[0],
+    };
+    activate_window(next);
+}
+
 /// Cycles or toggles activation for a group of windows belonging to one app.
 pub fn activate_or_toggle(hwnds: &[usize]) {
     if hwnds.is_empty() {
@@ -156,21 +228,10 @@ pub fn activate_or_toggle(hwnds: &[usize]) {
             if fg == hwnds[0] && IsIconic(hwnd) == 0 {
                 ShowWindow(hwnd, SW_MINIMIZE);
             } else {
-                if IsIconic(hwnd) != 0 {
-                    ShowWindow(hwnd, SW_RESTORE);
-                }
-                SetForegroundWindow(hwnd);
+                activate_window(hwnds[0]);
             }
             return;
         }
-        let next = match hwnds.iter().position(|&h| h == fg) {
-            Some(pos) => hwnds[(pos + 1) % hwnds.len()],
-            None => hwnds[0],
-        };
-        let hwnd = next as HWND;
-        if IsIconic(hwnd) != 0 {
-            ShowWindow(hwnd, SW_RESTORE);
-        }
-        SetForegroundWindow(hwnd);
+        cycle_windows(hwnds, true);
     }
 }

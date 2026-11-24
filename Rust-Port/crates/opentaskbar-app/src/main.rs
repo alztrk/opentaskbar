@@ -16,6 +16,8 @@ mod icon_cache;
 #[cfg(windows)]
 mod pins;
 #[cfg(windows)]
+mod preview;
+#[cfg(windows)]
 mod win32;
 
 #[cfg(windows)]
