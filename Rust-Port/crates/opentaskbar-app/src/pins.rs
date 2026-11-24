@@ -72,9 +72,12 @@ fn resolve_shortcut(lnk_path: &str) -> (Option<String>, Option<String>) {
 
         let aumid = link.cast::<IPropertyStore>().ok().and_then(|store| {
             let val = store.GetValue(&PKEY_APPUSERMODEL_ID).ok()?;
-            let text = val.to_string();
-            let trimmed = text.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+            let pwstr =
+                windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc(&val)
+                    .ok()?;
+            let text = pwstr.to_string().ok();
+            windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.0.cast()));
+            text.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
         });
 
         (target_exe, aumid)

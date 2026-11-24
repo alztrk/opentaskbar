@@ -29,7 +29,7 @@ use windows::core::HSTRING;
 pub const WORKER_ARG: &str = "--extract-icons";
 
 const ICON_PX: u32 = 64;
-const CACHE_MAGIC: &[u8; 8] = b"OTICON02";
+const CACHE_MAGIC: &[u8; 8] = b"OTICON03";
 const CACHE_HEADER_LEN: usize = 24;
 const MAX_DIM: u32 = 256;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -154,18 +154,21 @@ fn from_shell_hbitmap(bitmap: HBITMAP) -> Option<RawIcon> {
                     pixels[row * width * 4..(row + 1) * width * 4]
                         .copy_from_slice(&src[src_row * stride..src_row * stride + width * 4]);
                 }
-                // Un-premultiply if the bitmap was premultiplied so GPUI does not double-darken edges.
-                let is_premultiplied = pixels
-                    .chunks_exact(4)
-                    .all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]);
-                if is_premultiplied {
-                    for p in pixels.chunks_exact_mut(4) {
-                        let a = u16::from(p[3]);
-                        if a > 0 && a < 255 {
-                            p[0] = ((u16::from(p[0]) * 255 + a / 2) / a).min(255) as u8;
-                            p[1] = ((u16::from(p[1]) * 255 + a / 2) / a).min(255) as u8;
-                            p[2] = ((u16::from(p[2]) * 255 + a / 2) / a).min(255) as u8;
-                        }
+                // Normalize premultiplied Shell bitmaps to clean straight BGRA and zero RGB on
+                // fully transparent pixels so bilinear filtering never creates dark edge fringes.
+                for p in pixels.chunks_exact_mut(4) {
+                    let a = u16::from(p[3]);
+                    if a == 0 {
+                        p[0] = 0;
+                        p[1] = 0;
+                        p[2] = 0;
+                    } else if a < 255 {
+                        let b = u16::from(p[0]).min(a);
+                        let g = u16::from(p[1]).min(a);
+                        let r = u16::from(p[2]).min(a);
+                        p[0] = ((b * 255 + a / 2) / a).min(255) as u8;
+                        p[1] = ((g * 255 + a / 2) / a).min(255) as u8;
+                        p[2] = ((r * 255 + a / 2) / a).min(255) as u8;
                     }
                 }
                 Some(RawIcon {

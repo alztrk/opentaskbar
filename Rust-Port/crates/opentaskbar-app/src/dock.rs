@@ -63,7 +63,12 @@ fn exe_display_name(exe_path: &str, fallback_title: &str) -> String {
 }
 
 impl DockView {
-    fn new(hwnd: usize, settings: DockSettings, cx: &mut Context<Self>) -> Self {
+    fn new(
+        hwnd: usize,
+        settings: DockSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let pins = pins::load_pins();
         let mut view = Self {
             hwnd,
@@ -76,8 +81,8 @@ impl DockView {
             last_window_rect: None,
         };
         view.sync_slots(cx);
-        view.sync_window_bounds();
-        view.start_window_poll(cx);
+        view.sync_window_bounds(window);
+        view.start_window_poll(window, cx);
         view
     }
 
@@ -188,13 +193,11 @@ impl DockView {
         }
     }
 
-    /// Computes tight physical window bounds so no oversized transparent box covers the desktop.
-    fn sync_window_bounds(&mut self) {
-        let dpi = win32::dpi_scale(self.hwnd);
+    /// Keeps Explorer's taskbar hidden and updates window position without fighting GPUI's swapchain.
+    fn sync_window_bounds(&mut self, window: &mut Window) {
         let base = self.settings.icon_dips();
         let gap = 8.0 + self.settings.dock_icon_padding.max(0) as f32;
         let count = self.slots.len().max(1) as f32;
-        // Budget horizontal expansion for hover magnification so the pill never clips.
         let mag_budget = if self.settings.magnification_enabled {
             base * 1.15
         } else {
@@ -204,6 +207,7 @@ impl DockView {
         let bottom_gap = self.settings.dock_bottom_gap_pixels.max(0) as f32;
         let height_dips = (base + 26.0 + TOOLTIP_HEADROOM + MAG_HEADROOM + bottom_gap).ceil();
 
+        let dpi = win32::dpi_scale(self.hwnd);
         let (scr_w, scr_h) = win32::primary_screen_px();
         let w_px = ((width_dips * dpi).ceil() as i32).min(scr_w);
         let h_px = ((height_dips * dpi).ceil() as i32).min(scr_h);
@@ -218,18 +222,30 @@ impl DockView {
         let rect = (x_px, y_px, w_px, h_px);
         if self.last_window_rect != Some(rect) {
             self.last_window_rect = Some(rect);
+            window.resize(size(px(width_dips), px(height_dips)));
             win32::reposition_dock_window(self.hwnd, x_px, y_px, w_px, h_px);
         }
     }
 
-    fn start_window_poll(&self, cx: &mut Context<Self>) {
+    fn start_window_poll(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let window_handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(Duration::from_millis(800)).await;
-                let updated = this.update(cx, |view, cx| {
-                    view.sync_slots(cx);
-                    view.sync_window_bounds();
-                    cx.notify();
+                if opentaskbar_shell::taskbar::ensure_hidden() {
+                    // Keep our dock topmost if Explorer tried to reclaim Z-order.
+                    let _ = this.update(cx, |view, _| {
+                        if let Some((x, y, w, h)) = view.last_window_rect {
+                            win32::reposition_dock_window(view.hwnd, x, y, w, h);
+                        }
+                    });
+                }
+                let updated = cx.update_window(window_handle, |_, window, cx| {
+                    let _ = this.update(cx, |view, cx| {
+                        view.sync_slots(cx);
+                        view.sync_window_bounds(window);
+                        cx.notify();
+                    });
                 });
                 if updated.is_err() {
                     break;
@@ -425,7 +441,7 @@ impl Render for DockView {
                             })
                             .child(
                                 div()
-                                    .w(px(if active { 10.0 } else { 4.0 }))
+                                    .w(px(if active { 14.0 } else { 5.0 }))
                                     .h(px(3.5))
                                     .rounded(px(2.0))
                                     .bg(if !running {
@@ -433,7 +449,7 @@ impl Render for DockView {
                                     } else if active {
                                         rgba(0xffffffff)
                                     } else {
-                                        rgba(0xcbd5e1aa)
+                                        rgba(0xcbd5e1cc)
                                     }),
                             )
                     })),
@@ -474,13 +490,14 @@ pub fn run(settings: DockSettings) {
         let opened = cx.open_window(options, |window, cx| {
             let hwnd = win32::configure_dock_window(window).unwrap_or(0);
             let dpi = win32::dpi_scale(hwnd);
+            // Leave breathing room above the dock pill so maximized windows never touch its top edge.
             let reserve_dips = settings_clone.icon_dips()
-                + 22.0
+                + 34.0
                 + settings_clone.dock_bottom_gap_pixels.max(0) as f32;
             let reserve_px = (reserve_dips * dpi).ceil() as i32;
             opentaskbar_shell::taskbar::begin_replacement(hwnd, auto_hide, reserve_px);
             win32::trim_working_set();
-            cx.new(|cx| DockView::new(hwnd, settings_clone, cx))
+            cx.new(|cx| DockView::new(hwnd, settings_clone, window, cx))
         });
 
         if let Err(err) = opened {

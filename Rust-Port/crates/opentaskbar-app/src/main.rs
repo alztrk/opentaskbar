@@ -49,6 +49,12 @@ fn main() {
 
     opentaskbar_core::log::init(opentaskbar_core::settings::app_data_dir().join("opentaskbar.log"));
 
+    std::panic::set_hook(Box::new(|info| {
+        opentaskbar_core::log::error(format!("PANIC: {info}"));
+        #[cfg(windows)]
+        opentaskbar_shell::taskbar::restore_from_journal();
+    }));
+
     #[cfg(windows)]
     {
         let Some(_lock) = opentaskbar_core::single_instance::SingleInstance::acquire(
