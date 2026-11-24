@@ -1,0 +1,7 @@
+/target
+*.pdb
+*.profraw
+.vs/
+.vscode/
+.idea/
+/target-test
