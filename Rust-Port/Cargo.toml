@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/ot-core", "crates/ot-shell", "crates/ot-render", "crates/ot-dock", "crates/ot-ui", "crates/ot-app"]
+members = ["crates/ot-core", "crates/ot-shell", "crates/ot-render", "crates/ot-dock", "crates/ot-ui", "crates/ot-gpui", "crates/ot-app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -52,6 +52,7 @@ windows = { version = "0.62", features = [
 windows-numerics = "0.3.1"
 windows-core = "0.62"
 wry = "0.57"
+gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
 raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
