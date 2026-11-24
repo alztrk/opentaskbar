@@ -1,14 +1,16 @@
 //! GPUI floating dock window:
-//! - Left native Windows shell buttons (Start, Search, Task View) + vertical divider
-//! - Automatic work-area calculation: 5px top + 5px bottom margin around the dock pill
-//! - Exact initial placement (zero startup jump), fixed-height pill with pop-out hover icons
-//! - Grouped apps, C#-matched Store/Win32 icon extraction, tooltips, and native context menu
+//! - Left native Windows shell buttons (Start, Search, Task View) with crisp embedded SVGs
+//! - Stable slot ordering: unpinned running apps never jump positions when clicked/focused
+//! - Continuous mouse-X cosine fisheye magnification anchored to resting centers (zero jitter,
+//!   zero icon overlap, smooth neighbor parting inside a fixed-size transparent window)
+//! - Tactile press squish + damped launch/activation bounce animation
+//! - Automatic work-area calculation (5px top + 5px bottom), tooltips, and native context menu
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     App, Application, AssetSource, Bounds, Context, MouseButton, RenderImage, SharedString, Timer,
@@ -24,7 +26,10 @@ use crate::win32::{self, ContextAction};
 
 const VERTICAL_EDGE_GAP: f32 = 5.0;
 const TOOLTIP_HEADROOM: f32 = 34.0;
-const MAG_HEADROOM: f32 = 28.0;
+const MAG_HEADROOM: f32 = 30.0;
+const FISHEYE_PEAK: f32 = 0.42;
+const FISHEYE_RADIUS_SLOTS: f32 = 2.4;
+const BOUNCE_DURATION_SECS: f32 = 0.42;
 
 const SVG_START: &[u8] =
     br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
@@ -90,12 +95,14 @@ impl ShellButton {
 #[derive(Clone)]
 struct DockSlot {
     key: String,
+    pinned: bool,
     label: SharedString,
     launch_path: String,
     icon_source: String,
     hwnds: Vec<usize>,
     is_foreground: bool,
     scale: f32,
+    bounce_started: Option<Instant>,
 }
 
 struct DockView {
@@ -104,8 +111,12 @@ struct DockView {
     pins: Vec<PinnedApp>,
     slots: Vec<DockSlot>,
     icons: HashMap<String, Option<Arc<RenderImage>>>,
+    /// Continuous mouse X coordinate inside the window (in logical DIPs) while hovering the app strip.
+    hover_mouse_x: Option<f32>,
     hovered_idx: Option<usize>,
     hovered_shell: Option<ShellButton>,
+    pressed_idx: Option<usize>,
+    pressed_shell: Option<ShellButton>,
     animating: bool,
     last_window_rect: Option<(i32, i32, i32, i32)>,
 }
@@ -125,6 +136,8 @@ fn exe_display_name(exe_path: &str, fallback_title: &str) -> String {
         .unwrap_or_else(|| fallback_title.to_owned())
 }
 
+/// Builds dock slots while preserving the exact order of previously seen unpinned apps
+/// so clicking/focusing an app never causes icons to jump or reorder.
 fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot]) -> Vec<DockSlot> {
     let mut by_exe: HashMap<String, Vec<&RunningWindow>> = HashMap::new();
     for win in running {
@@ -137,6 +150,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
     let mut next: Vec<DockSlot> = Vec::with_capacity(pins.len() + by_exe.len());
     let mut claimed_exes: HashMap<String, bool> = HashMap::new();
 
+    // 1. Pinned apps in their stable pin order.
     for pin in pins {
         let matched_key = pin
             .target_exe
@@ -170,15 +184,39 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
 
         next.push(DockSlot {
             key: pin.launch_path.to_lowercase(),
+            pinned: true,
             label: pin.name.clone().into(),
             launch_path: pin.launch_path.clone(),
             icon_source: pin.icon_source.clone(),
             hwnds,
             is_foreground,
             scale: 1.0,
+            bounce_started: None,
         });
     }
 
+    // 2. Keep already-open unpinned apps in their exact previous order (immune to Z-order changes).
+    for old in prev.iter().filter(|s| !s.pinned) {
+        if claimed_exes.contains_key(&old.key) {
+            continue;
+        }
+        if let Some(list) = by_exe.get(&old.key) {
+            claimed_exes.insert(old.key.clone(), true);
+            next.push(DockSlot {
+                key: old.key.clone(),
+                pinned: false,
+                label: old.label.clone(),
+                launch_path: old.launch_path.clone(),
+                icon_source: old.icon_source.clone(),
+                hwnds: list.iter().map(|w| w.hwnd).collect(),
+                is_foreground: list.iter().any(|w| w.is_foreground),
+                scale: old.scale,
+                bounce_started: old.bounce_started,
+            });
+        }
+    }
+
+    // 3. Append newly launched unpinned apps at the end.
     for win in running {
         let key = win.exe_path.to_lowercase();
         if claimed_exes.contains_key(&key) {
@@ -191,37 +229,76 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
             .map(|id| format!(r"shell:AppsFolder\{id}"))
             .unwrap_or_else(|| win.exe_path.clone());
         next.push(DockSlot {
-            key: key.clone(),
+            key,
+            pinned: false,
             label: label.into(),
             launch_path: win.exe_path.clone(),
             icon_source,
             hwnds: list.iter().map(|w| w.hwnd).collect(),
             is_foreground: list.iter().any(|w| w.is_foreground),
             scale: 1.0,
+            bounce_started: None,
         });
     }
 
+    // Preserve animation state for pinned slots across refreshes.
     for slot in &mut next {
-        if let Some(old) = prev.iter().find(|p| p.key == slot.key) {
+        if slot.pinned
+            && let Some(old) = prev.iter().find(|p| p.key == slot.key)
+        {
             slot.scale = old.scale;
+            slot.bounce_started = old.bounce_started;
         }
     }
     next
 }
 
 fn pill_height_dips(settings: &DockSettings) -> f32 {
-    // Generous vertical padding so resting icons + indicator dots sit comfortably inside the pill.
     settings.icon_dips() + 22.0
 }
 
+fn slot_gap(settings: &DockSettings) -> f32 {
+    9.0 + settings.dock_icon_padding.max(0) as f32
+}
+
+/// Computes the fixed resting pill width (used as anchor for continuous fisheye math).
+fn resting_pill_width(settings: &DockSettings, slot_count: usize) -> f32 {
+    let base = settings.icon_dips();
+    let gap = slot_gap(settings);
+    let icons_w = (slot_count as f32) * base + gap * (slot_count.saturating_sub(1) as f32);
+    (shell_section_width(base) + icons_w + 30.0).max(160.0)
+}
+
+/// Pre-allocates horizontal headroom for smooth fisheye neighbor parting so the Win32
+/// window never resizes during hover.
 fn compute_window_dips(settings: &DockSettings, slot_count: usize) -> (f32, f32) {
     let base = settings.icon_dips();
-    let gap = 8.0 + settings.dock_icon_padding.max(0) as f32;
-    let count = slot_count.max(1) as f32;
-    let width_dips = (shell_section_width(base) + count * base + (count - 1.0) * gap + 48.0).ceil();
+    let resting_w = resting_pill_width(settings, slot_count);
+    let mag_extra = if settings.magnification_enabled {
+        base * 1.4
+    } else {
+        0.0
+    };
+    let width_dips = (resting_w + mag_extra + 24.0).ceil();
     let pill_h = pill_height_dips(settings);
     let height_dips = (pill_h + TOOLTIP_HEADROOM + MAG_HEADROOM + VERTICAL_EDGE_GAP).ceil();
     (width_dips, height_dips)
+}
+
+/// Damped double-hop activation bounce offset in DIPs (matches C# AnimateActivationFeedback).
+fn bounce_offset_dips(started: Option<Instant>) -> Option<f32> {
+    let t = started?.elapsed().as_secs_f32() / BOUNCE_DURATION_SECS;
+    if t >= 1.0 {
+        return None;
+    }
+    let y = if t < 0.62 {
+        let u = t / 0.62;
+        (u * std::f32::consts::PI).sin() * 11.0
+    } else {
+        let u = (t - 0.62) / 0.38;
+        (u * std::f32::consts::PI).sin() * 4.5
+    };
+    Some(y)
 }
 
 fn render_shell_svg(kind: ShellButton, base: f32) -> impl IntoElement {
@@ -248,8 +325,11 @@ impl DockView {
             pins,
             slots: initial_slots,
             icons: HashMap::new(),
+            hover_mouse_x: None,
             hovered_idx: None,
             hovered_shell: None,
+            pressed_idx: None,
+            pressed_shell: None,
             animating: false,
             last_window_rect: None,
         };
@@ -304,8 +384,6 @@ impl DockView {
         let rect = (x_px, y_px, w_px, h_px);
         if self.last_window_rect != Some(rect) {
             self.last_window_rect = Some(rect);
-            // Uses SWP_ASYNCWINDOWPOS so Win32 never pumps a synchronous WM_SIZE while
-            // GPUI's AppCell RefCell is borrowed (which caused RefCell already borrowed panics).
             win32::reposition_dock_window(self.hwnd, x_px, y_px, w_px, h_px);
         }
     }
@@ -331,19 +409,52 @@ impl DockView {
         .detach();
     }
 
+    /// Resting X center of app slot `idx` in window logical DIPs (immune to current magnification).
+    fn resting_slot_center_x(&self, idx: usize) -> f32 {
+        let base = self.settings.icon_dips();
+        let gap = slot_gap(&self.settings);
+        let (win_w, _) = compute_window_dips(&self.settings, self.slots.len());
+        let pill_w = resting_pill_width(&self.settings, self.slots.len());
+        let pill_left = (win_w - pill_w) * 0.5;
+        let apps_left = pill_left + 15.0 + shell_section_width(base);
+        apps_left + (idx as f32) * (base + gap) + base * 0.5
+    }
+
+    /// Smooth cosine bell magnification based on continuous mouse X vs resting slot centers.
     fn target_scale_for(&self, idx: usize) -> f32 {
         if !self.settings.magnification_enabled || !self.settings.animations_enabled {
             return 1.0;
         }
-        match self.hovered_idx {
-            Some(hovered) => match idx.abs_diff(hovered) {
-                0 => 1.38,
-                1 => 1.18,
-                2 => 1.07,
-                _ => 1.0,
-            },
-            None => 1.0,
+        let Some(mx) = self.hover_mouse_x else {
+            return 1.0;
+        };
+        let base = self.settings.icon_dips();
+        let gap = slot_gap(&self.settings);
+        let radius = (base + gap) * FISHEYE_RADIUS_SLOTS;
+        let dist = (mx - self.resting_slot_center_x(idx)).abs();
+        if dist >= radius {
+            return 1.0;
         }
+        let c = (dist / radius * std::f32::consts::FRAC_PI_2).cos();
+        1.0 + FISHEYE_PEAK * c * c
+    }
+
+    fn update_hovered_index_from_mouse(&mut self) {
+        let Some(mx) = self.hover_mouse_x else {
+            self.hovered_idx = None;
+            return;
+        };
+        let base = self.settings.icon_dips();
+        let gap = slot_gap(&self.settings);
+        let max_dist = (base + gap) * 0.55;
+        self.hovered_idx = self
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, _)| (i, (mx - self.resting_slot_center_x(i)).abs()))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .filter(|(_, d)| *d <= max_dist)
+            .map(|(i, _)| i);
     }
 
     fn ensure_animation(&mut self, cx: &mut Context<Self>) {
@@ -361,11 +472,18 @@ impl DockView {
                             let target = view.target_scale_for(idx);
                             let cur = view.slots[idx].scale;
                             let diff = target - cur;
-                            if diff.abs() > 0.004 {
-                                view.slots[idx].scale = cur + diff * 0.28;
+                            if diff.abs() > 0.003 {
+                                view.slots[idx].scale = cur + diff * 0.30;
                                 moving = true;
                             } else if (cur - target).abs() > 0.0 {
                                 view.slots[idx].scale = target;
+                            }
+                            if let Some(started) = view.slots[idx].bounce_started {
+                                if bounce_offset_dips(Some(started)).is_some() {
+                                    moving = true;
+                                } else {
+                                    view.slots[idx].bounce_started = None;
+                                }
                             }
                         }
                         if moving {
@@ -385,8 +503,6 @@ impl DockView {
         .detach();
     }
 
-    /// Runs the modal Win32 popup menu on a background thread so GPUI's `AppCell` borrow is
-    /// released before `TrackPopupMenu` pumps messages (prevents `RefCell already borrowed` panic).
     fn handle_right_click(&self, cx: &mut Context<Self>) {
         let hwnd = self.hwnd;
         cx.spawn(async move |_this, cx| {
@@ -407,11 +523,13 @@ impl DockView {
     fn render_shell_button(&self, kind: ShellButton, cx: &mut Context<Self>) -> impl IntoElement {
         let base = self.settings.icon_dips();
         let hovered = self.hovered_shell == Some(kind);
+        let pressed = self.pressed_shell == Some(kind);
         let id = match kind {
             ShellButton::Start => "shell-start",
             ShellButton::Search => "shell-search",
             ShellButton::TaskView => "shell-taskview",
         };
+        let visual_base = if pressed { base * 0.88 } else { base };
         div()
             .id(id)
             .w(px(base))
@@ -422,39 +540,56 @@ impl DockView {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .bg(if hovered {
-                rgba(0xffffff1e)
+            .bg(if pressed {
+                rgba(0xffffff2e)
+            } else if hovered {
+                rgba(0xffffff1c)
             } else {
                 rgba(0x00000000)
             })
             .on_hover(cx.listener(move |this, active, _window, cx| {
                 if *active {
                     this.hovered_shell = Some(kind);
+                    this.hover_mouse_x = None;
                     this.hovered_idx = None;
                     this.ensure_animation(cx);
                 } else if this.hovered_shell == Some(kind) {
                     this.hovered_shell = None;
+                    this.pressed_shell = None;
                 }
                 cx.notify();
             }))
-            .on_click(move |_, _window, _cx| match kind {
-                ShellButton::Start => opentaskbar_shell::taskbar::open_start_menu(),
-                ShellButton::Search => opentaskbar_shell::taskbar::open_search(),
-                ShellButton::TaskView => opentaskbar_shell::taskbar::open_task_view(),
-            })
-            .child(render_shell_svg(kind, base))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _window, cx| {
+                    this.pressed_shell = Some(kind);
+                    cx.notify();
+                }),
+            )
+            .on_click(cx.listener(move |this, _, _window, cx| {
+                this.pressed_shell = None;
+                cx.notify();
+                match kind {
+                    ShellButton::Start => opentaskbar_shell::taskbar::open_start_menu(),
+                    ShellButton::Search => opentaskbar_shell::taskbar::open_search(),
+                    ShellButton::TaskView => opentaskbar_shell::taskbar::open_task_view(),
+                }
+            }))
+            .child(render_shell_svg(kind, visual_base))
     }
 }
 
 impl Render for DockView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let base = self.settings.icon_dips();
-        let gap = 8.0 + self.settings.dock_icon_padding.max(0) as f32;
+        let gap = slot_gap(&self.settings);
         let radius = self.settings.corner_radius_dips();
         let pill_h = pill_height_dips(&self.settings);
-        // Fixed resting width: dock pill never expands horizontally or jitters during fisheye hover.
-        let icons_w =
-            (self.slots.len() as f32) * base + gap * (self.slots.len().saturating_sub(1) as f32);
+
+        // Each slot expands proportionally to its magnified icon so icons never overlap,
+        // while resting centers drive the fisheye curve so there is zero feedback jitter.
+        let icons_w: f32 = self.slots.iter().map(|s| base * s.scale).sum::<f32>()
+            + gap * (self.slots.len().saturating_sub(1) as f32);
         let pill_w = (shell_section_width(base) + icons_w + 30.0).max(160.0);
 
         let alpha = (self.settings.dock_opacity.clamp(0.1, 1.0) * 218.0) as u32;
@@ -484,6 +619,16 @@ impl Render for DockView {
                 MouseButton::Right,
                 cx.listener(|this, _, _window, cx| {
                     this.handle_right_click(cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _window, cx| {
+                    if this.pressed_idx.is_some() || this.pressed_shell.is_some() {
+                        this.pressed_idx = None;
+                        this.pressed_shell = None;
+                        cx.notify();
+                    }
                 }),
             )
             // Fixed-height background pill anchored 5px from bottom edge.
@@ -532,112 +677,143 @@ impl Render for DockView {
                             .child(self.render_shell_button(ShellButton::Search, cx))
                             .child(self.render_shell_button(ShellButton::TaskView, cx)),
                     )
-                    // Subtle divider between Windows shell buttons and apps.
                     .child(
                         div()
                             .mx(px(8.0))
-                            .mb(px(9.0))
+                            .mb(px(10.0))
                             .w(px(1.0))
                             .h(px(22.0))
                             .bg(rgba(0xffffff26)),
                     )
-                    .child(div().flex().items_end().gap(px(gap)).children(
-                        self.slots.iter().enumerate().map(|(idx, slot)| {
-                            let scale = slot.scale;
-                            let dim = base * scale;
-                            let lift = (scale - 1.0) * 12.0;
-                            let icon = self.icons.get(&slot.icon_source).and_then(|o| o.clone());
-                            let hwnds = slot.hwnds.clone();
-                            let launch_path = slot.launch_path.clone();
-                            let running = !hwnds.is_empty();
-                            let active = slot.is_foreground;
-                            let fallback_char: SharedString = slot
-                                .label
-                                .chars()
-                                .next()
-                                .unwrap_or('?')
-                                .to_uppercase()
-                                .to_string()
-                                .into();
-
-                            div()
-                                .id(SharedString::from(format!("dock-slot-{idx}")))
-                                // Fixed cell width prevents hover hitboxes from shifting and jittering.
-                                .w(px(base))
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .gap(px(4.0))
-                                .cursor_pointer()
-                                .on_hover(cx.listener(move |this, is_hovered, _window, cx| {
-                                    if *is_hovered {
-                                        this.hovered_idx = Some(idx);
-                                        this.hovered_shell = None;
-                                    } else if this.hovered_idx == Some(idx) {
-                                        this.hovered_idx = None;
-                                    }
+                    .child(
+                        div()
+                            .id("dock-apps-strip")
+                            .flex()
+                            .items_end()
+                            .gap(px(gap))
+                            .on_mouse_move(cx.listener(
+                                |this, event: &gpui::MouseMoveEvent, _, cx| {
+                                    let mx: f32 = event.position.x.into();
+                                    this.hover_mouse_x = Some(mx);
+                                    this.hovered_shell = None;
+                                    this.update_hovered_index_from_mouse();
                                     this.ensure_animation(cx);
                                     cx.notify();
-                                }))
-                                .on_click(move |_, _window, _cx| {
-                                    if !hwnds.is_empty() {
-                                        tracker::activate_or_toggle(&hwnds);
-                                    } else {
-                                        pins::launch(launch_path.clone());
-                                    }
-                                })
-                                .child(
-                                    div()
-                                        .w(px(base))
-                                        .h(px(base))
-                                        .flex()
-                                        .items_end()
-                                        .justify_center()
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .mb(px(lift))
-                                                .w(px(dim))
-                                                .h(px(dim))
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .child(match icon {
-                                                    Some(image) => img(image)
-                                                        .w(px(dim))
-                                                        .h(px(dim))
-                                                        .into_any_element(),
-                                                    None => div()
-                                                        .size_full()
-                                                        .rounded(px(10.0))
-                                                        .bg(rgba(0x334155cc))
-                                                        .border_1()
-                                                        .border_color(hsla(0.0, 0.0, 1.0, 0.18))
-                                                        .flex()
-                                                        .items_center()
-                                                        .justify_center()
-                                                        .text_sm()
-                                                        .text_color(rgba(0xf8fafcff))
-                                                        .child(fallback_char)
-                                                        .into_any_element(),
-                                                }),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(if active { 14.0 } else { 5.0 }))
-                                        .h(px(3.5))
-                                        .rounded(px(2.0))
-                                        .bg(if !running {
-                                            rgba(0x00000000)
-                                        } else if active {
-                                            rgba(0xffffffff)
-                                        } else {
-                                            rgba(0xcbd5e1cc)
+                                },
+                            ))
+                            .on_hover(cx.listener(|this, active: &bool, _, cx| {
+                                if !*active {
+                                    this.hover_mouse_x = None;
+                                    this.hovered_idx = None;
+                                    this.pressed_idx = None;
+                                    this.ensure_animation(cx);
+                                    cx.notify();
+                                }
+                            }))
+                            .children(self.slots.iter().enumerate().map(|(idx, slot)| {
+                                let pressed = self.pressed_idx == Some(idx);
+                                let press_factor = if pressed { 0.88 } else { 1.0 };
+                                let slot_w = base * slot.scale;
+                                let dim = slot_w * press_factor;
+                                let bounce = bounce_offset_dips(slot.bounce_started).unwrap_or(0.0);
+                                let lift = ((slot.scale - 1.0) * 14.0 + bounce
+                                    - if pressed { 2.0 } else { 0.0 })
+                                .max(0.0);
+                                let icon =
+                                    self.icons.get(&slot.icon_source).and_then(|o| o.clone());
+                                let hwnds = slot.hwnds.clone();
+                                let launch_path = slot.launch_path.clone();
+                                let running = !hwnds.is_empty();
+                                let active = slot.is_foreground;
+                                let fallback_char: SharedString = slot
+                                    .label
+                                    .chars()
+                                    .next()
+                                    .unwrap_or('?')
+                                    .to_uppercase()
+                                    .to_string()
+                                    .into();
+
+                                div()
+                                    .id(SharedString::from(format!("dock-slot-{idx}")))
+                                    .w(px(slot_w))
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .gap(px(4.0))
+                                    .cursor_pointer()
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.pressed_idx = Some(idx);
+                                            cx.notify();
                                         }),
-                                )
-                        }),
-                    )),
+                                    )
+                                    .on_click(cx.listener(move |this, _, _window, cx| {
+                                        this.pressed_idx = None;
+                                        if let Some(slot) = this.slots.get_mut(idx) {
+                                            slot.bounce_started = Some(Instant::now());
+                                        }
+                                        this.ensure_animation(cx);
+                                        cx.notify();
+                                        if !hwnds.is_empty() {
+                                            tracker::activate_or_toggle(&hwnds);
+                                        } else {
+                                            pins::launch(launch_path.clone());
+                                        }
+                                    }))
+                                    .child(
+                                        div()
+                                            .w(px(slot_w))
+                                            .h(px(base))
+                                            .flex()
+                                            .items_end()
+                                            .justify_center()
+                                            .child(
+                                                div()
+                                                    .flex_none()
+                                                    .mb(px(lift))
+                                                    .w(px(dim))
+                                                    .h(px(dim))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .child(match icon {
+                                                        Some(image) => img(image)
+                                                            .w(px(dim))
+                                                            .h(px(dim))
+                                                            .into_any_element(),
+                                                        None => div()
+                                                            .size_full()
+                                                            .rounded(px(10.0))
+                                                            .bg(rgba(0x334155cc))
+                                                            .border_1()
+                                                            .border_color(hsla(0.0, 0.0, 1.0, 0.18))
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .text_sm()
+                                                            .text_color(rgba(0xf8fafcff))
+                                                            .child(fallback_char)
+                                                            .into_any_element(),
+                                                    }),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(if active { 14.0 } else { 5.0 }))
+                                            .h(px(3.5))
+                                            .rounded(px(2.0))
+                                            .bg(if !running {
+                                                rgba(0x00000000)
+                                            } else if active {
+                                                rgba(0xffffffff)
+                                            } else {
+                                                rgba(0xcbd5e1cc)
+                                            }),
+                                    )
+                            })),
+                    ),
             )
     }
 }
@@ -686,7 +862,6 @@ pub fn run(settings: DockSettings) {
             let opened = cx.open_window(options, |window, cx| {
                 let hwnd = win32::configure_dock_window(window).unwrap_or(0);
                 let dpi = win32::dpi_scale(hwnd);
-                // Total reserved strip = pill height + 5px bottom gap + 5px top gap.
                 let desired_total_dips =
                     pill_height_dips(&settings_clone) + VERTICAL_EDGE_GAP * 2.0;
                 let desired_total_px = (desired_total_dips * dpi).ceil() as i32;
