@@ -186,7 +186,6 @@ struct SettingsView {
     page_epoch: usize,
     settings: DockSettings,
     scroll_handle: ScrollHandle,
-    saved_flash: bool,
 }
 
 impl SettingsView {
@@ -196,7 +195,6 @@ impl SettingsView {
             page_epoch: 0,
             settings,
             scroll_handle: ScrollHandle::new(),
-            saved_flash: false,
         }
     }
 
@@ -212,7 +210,6 @@ impl SettingsView {
     fn auto_save(&mut self, cx: &mut Context<Self>) {
         if settings::save_to(&settings::settings_path(), &self.settings).is_ok() {
             notify_docks_reload();
-            self.saved_flash = true;
         }
         cx.notify();
     }
@@ -1258,7 +1255,6 @@ impl SettingsView {
                                 cx.listener(|this, _, _, cx| {
                                     let dst = settings::app_data_dir().join("settings.backup.json");
                                     let _ = settings::save_to(&dst, &this.settings);
-                                    this.saved_flash = true;
                                     cx.notify();
                                 }),
                             ))
@@ -1460,31 +1456,6 @@ impl Render for SettingsView {
                             .child(ui::badge(&t, "v0.1", true)),
                     )
                     .children(nav_items),
-            )
-            .child(
-                div()
-                    .px(px(10.0))
-                    .py(px(6.0))
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(
-                        div()
-                            .w(px(6.0))
-                            .h(px(6.0))
-                            .rounded(px(3.0))
-                            .bg(rgba(t.switch_on)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.0))
-                            .text_color(rgba(t.text_muted))
-                            .child(if self.saved_flash {
-                                "Auto-saved"
-                            } else {
-                                "Auto-save on"
-                            }),
-                    ),
             );
 
         let animated_content = div()

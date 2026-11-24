@@ -130,7 +130,7 @@ struct HitTarget {
     rect: RECT,
 }
 
-struct FlyoutState {
+struct FlyoutState<'a> {
     hwnd: HWND,
     dpi: f32,
     is_dark: bool,
@@ -141,6 +141,8 @@ struct FlyoutState {
     anim_start: Instant,
     closing: bool,
     animating: bool,
+    suppress_blur: bool,
+    on_secondary: Option<&'a mut dyn FnMut(u32) -> bool>,
     content_top_px: i32,
     viewport_h_px: i32,
     content_h_px: i32,
@@ -179,13 +181,14 @@ pub fn show_flyout(
         anchor_center_x_px,
         anchor_bottom_y_px,
         spec,
+        None,
     ) {
         Some(FlyoutAction::Primary(id)) => Some(id),
         _ => None,
     }
 }
 
-/// Shows the shared `DockFlyout` with toggle-close suppression, scrolling, icons, and right-click support.
+/// Shows the shared `DockFlyout` with toggle-close suppression, scrolling, icons, and in-place right-click handling.
 pub fn show_flyout_interactive(
     tag: &str,
     owner_hwnd: usize,
@@ -193,6 +196,7 @@ pub fn show_flyout_interactive(
     anchor_center_x_px: i32,
     anchor_bottom_y_px: i32,
     spec: FlyoutSpec,
+    on_secondary: Option<&mut dyn FnMut(u32) -> bool>,
 ) -> Option<FlyoutAction> {
     if should_suppress_reopen(tag) {
         return None;
@@ -334,6 +338,8 @@ pub fn show_flyout_interactive(
         anim_start: Instant::now(),
         closing: false,
         animating: true,
+        suppress_blur: false,
+        on_secondary,
         content_top_px,
         viewport_h_px,
         content_h_px,
@@ -344,7 +350,7 @@ pub fn show_flyout_interactive(
         selected: None,
         done: AtomicBool::new(false),
     });
-    let ptr = (&mut *state) as *mut FlyoutState as isize;
+    let ptr = (&mut *state) as *mut FlyoutState<'_> as isize;
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr);
         SetWindowPos(
@@ -437,7 +443,7 @@ fn draw_bgra_icon(hdc: HDC, icon: &FlyoutIcon, bg_rgb: u32, dst_x: i32, dst_y: i
     }
 }
 
-impl FlyoutState {
+impl FlyoutState<'_> {
     fn begin_close(&mut self) {
         if self.closing {
             return;
@@ -1001,7 +1007,7 @@ unsafe extern "system" fn flyout_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FlyoutState };
+    let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut FlyoutState<'_> };
     if ptr.is_null() {
         return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
     }
@@ -1090,8 +1096,21 @@ unsafe extern "system" fn flyout_wnd_proc(
                 let x = (lparam as u32 & 0xffff) as i16 as i32;
                 let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
                 if let Some(id) = state.hit_at(x, y) {
-                    state.selected = Some(FlyoutAction::Secondary(id));
-                    state.begin_close();
+                    if let Some(cb) = state.on_secondary.as_deref_mut() {
+                        state.suppress_blur = true;
+                        let should_close = cb(id);
+                        state.suppress_blur = false;
+                        if should_close {
+                            state.begin_close();
+                        } else {
+                            unsafe {
+                                SetForegroundWindow(hwnd);
+                            }
+                        }
+                    } else {
+                        state.selected = Some(FlyoutAction::Secondary(id));
+                        state.begin_close();
+                    }
                 }
             }
             0
@@ -1101,11 +1120,15 @@ unsafe extern "system" fn flyout_wnd_proc(
             0
         }
         WM_KILLFOCUS => {
-            state.begin_close();
+            if !state.suppress_blur {
+                state.begin_close();
+            }
             0
         }
         WM_ACTIVATE if (wparam & 0xffff) == 0 => {
-            state.begin_close();
+            if !state.suppress_blur {
+                state.begin_close();
+            }
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },

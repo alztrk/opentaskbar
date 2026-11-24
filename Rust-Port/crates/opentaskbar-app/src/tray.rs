@@ -247,6 +247,36 @@ pub fn open_background_apps_flyout(
         blocks,
     };
 
+    let mut handle_right_click = |id: u32| -> bool {
+        if id < 100 {
+            return false;
+        }
+        let Some(app) = apps.get((id - 100) as usize) else {
+            return false;
+        };
+        let entries = vec![
+            MenuEntry::item(1, MenuIcon::Play, format!("Open {}", app.name)),
+            MenuEntry::item(2, MenuIcon::Close, "Close Window"),
+            MenuEntry::Separator,
+            MenuEntry::destructive(3, MenuIcon::Power, "End Process"),
+        ];
+        match menu::show_popup_menu(owner_hwnd, is_dark, entries).unwrap_or(0) {
+            1 => {
+                activate_or_relaunch(app);
+                true
+            }
+            2 => {
+                close_background_app(app);
+                false
+            }
+            3 => {
+                terminate_pid(app.pid);
+                false
+            }
+            _ => false,
+        }
+    };
+
     match flyout::show_flyout_interactive(
         "tray",
         owner_hwnd,
@@ -254,28 +284,13 @@ pub fn open_background_apps_flyout(
         anchor_center_x_px,
         anchor_bottom_y_px,
         spec,
+        Some(&mut handle_right_click),
     ) {
         Some(FlyoutAction::Primary(1)) => pins::launch("taskmgr.exe".to_owned()),
         Some(FlyoutAction::Primary(2)) => opentaskbar_shell::taskbar::open_tray_overflow(),
         Some(FlyoutAction::Primary(id)) if id >= 100 => {
             if let Some(app) = apps.get((id - 100) as usize) {
                 activate_or_relaunch(app);
-            }
-        }
-        Some(FlyoutAction::Secondary(id)) if id >= 100 => {
-            if let Some(app) = apps.get((id - 100) as usize) {
-                let entries = vec![
-                    MenuEntry::item(1, MenuIcon::Play, format!("Open {}", app.name)),
-                    MenuEntry::item(2, MenuIcon::Close, "Close Window"),
-                    MenuEntry::Separator,
-                    MenuEntry::destructive(3, MenuIcon::Power, "End Process"),
-                ];
-                match menu::show_popup_menu(owner_hwnd, is_dark, entries).unwrap_or(0) {
-                    1 => activate_or_relaunch(app),
-                    2 => close_background_app(app),
-                    3 => terminate_pid(app.pid),
-                    _ => {}
-                }
             }
         }
         _ => {}
