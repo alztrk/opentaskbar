@@ -5,7 +5,7 @@
 //! - Native context menus (Dock, Per-App, Task View), file drop extraction, and key modifiers
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
     DwmSetWindowAttribute,
@@ -20,11 +20,9 @@ use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFEC
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_SHIFT};
 use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GWL_EXSTYLE, GetCursorPos, GetSystemMetrics,
-    GetWindowLongPtrW, HWND_TOPMOST, MF_SEPARATOR, MF_STRING, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TrackPopupMenu,
-    WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    GWL_EXSTYLE, GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
+    SetWindowPos, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
 use windows_sys::core::BOOL;
 
@@ -329,200 +327,104 @@ pub fn reposition_dock_window(hwnd: usize, x: i32, y: i32, w: i32, h: i32) {
     }
 }
 
-pub fn show_dock_context_menu(hwnd: usize) -> ContextAction {
-    if hwnd == 0 {
-        return ContextAction::None;
-    }
-    unsafe {
-        let menu = CreatePopupMenu();
-        if menu.is_null() {
-            return ContextAction::None;
-        }
-        let add = |id: u32, label: &str| {
-            let w = wide(label);
-            AppendMenuW(menu, MF_STRING, id as usize, w.as_ptr());
-        };
-        add(MENU_SETTINGS, "Settings...");
-        add(MENU_TASKMGR, "Task Manager");
-        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        add(MENU_EXPLORER, "File Explorer");
-        add(MENU_TERMINAL, "Terminal");
-        add(MENU_TERMINAL_ADMIN, "Terminal (Admin)");
-        add(MENU_RUN, "Run...");
-        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        add(MENU_SHOW_DESKTOP, "Show Desktop");
-        add(MENU_RESTORE, "Restore Windows Taskbar");
-        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        add(MENU_EXIT, "Exit OpenTaskbar");
+use crate::menu::{self, MenuEntry};
 
-        let mut pt: POINT = std::mem::zeroed();
-        GetCursorPos(&mut pt);
-        SetForegroundWindow(hwnd as HWND);
-        let cmd = TrackPopupMenu(
-            menu,
-            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD,
-            pt.x,
-            pt.y,
-            0,
-            hwnd as HWND,
-            std::ptr::null(),
-        ) as u32;
-        DestroyMenu(menu);
-
-        match cmd {
-            MENU_SETTINGS => ContextAction::Settings,
-            MENU_TASKMGR => ContextAction::TaskManager,
-            MENU_EXPLORER => ContextAction::FileExplorer,
-            MENU_TERMINAL => ContextAction::Terminal,
-            MENU_TERMINAL_ADMIN => ContextAction::TerminalAdmin,
-            MENU_RUN => ContextAction::RunDialog,
-            MENU_SHOW_DESKTOP => ContextAction::ShowDesktop,
-            MENU_RESTORE => ContextAction::RestoreTaskbar,
-            MENU_EXIT => ContextAction::Exit,
-            _ => ContextAction::None,
-        }
+pub fn show_dock_context_menu(hwnd: usize, is_dark: bool) -> ContextAction {
+    let entries = vec![
+        MenuEntry::item(MENU_SETTINGS, "Settings..."),
+        MenuEntry::item(MENU_TASKMGR, "Task Manager"),
+        MenuEntry::Separator,
+        MenuEntry::item(MENU_EXPLORER, "File Explorer"),
+        MenuEntry::item(MENU_TERMINAL, "Terminal"),
+        MenuEntry::item(MENU_TERMINAL_ADMIN, "Terminal (Admin)"),
+        MenuEntry::item(MENU_RUN, "Run..."),
+        MenuEntry::Separator,
+        MenuEntry::item(MENU_SHOW_DESKTOP, "Show Desktop"),
+        MenuEntry::item(MENU_RESTORE, "Restore Windows Taskbar"),
+        MenuEntry::Separator,
+        MenuEntry::destructive(MENU_EXIT, "Exit OpenTaskbar"),
+    ];
+    match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
+        MENU_SETTINGS => ContextAction::Settings,
+        MENU_TASKMGR => ContextAction::TaskManager,
+        MENU_EXPLORER => ContextAction::FileExplorer,
+        MENU_TERMINAL => ContextAction::Terminal,
+        MENU_TERMINAL_ADMIN => ContextAction::TerminalAdmin,
+        MENU_RUN => ContextAction::RunDialog,
+        MENU_SHOW_DESKTOP => ContextAction::ShowDesktop,
+        MENU_RESTORE => ContextAction::RestoreTaskbar,
+        MENU_EXIT => ContextAction::Exit,
+        _ => ContextAction::None,
     }
 }
 
 pub fn show_app_context_menu(
     hwnd: usize,
+    is_dark: bool,
     app_name: &str,
     pinned: bool,
     running: bool,
 ) -> AppContextAction {
-    if hwnd == 0 {
-        return AppContextAction::None;
-    }
-    unsafe {
-        let menu = CreatePopupMenu();
-        if menu.is_null() {
-            return AppContextAction::None;
-        }
-        let add = |id: u32, label: &str| {
-            let w = wide(label);
-            AppendMenuW(menu, MF_STRING, id as usize, w.as_ptr());
-        };
-        add(APP_MENU_OPEN, app_name);
-        add(APP_MENU_NEW_WINDOW, "New Window\tShift+Click");
-        add(APP_MENU_ADMIN, "Run as Administrator\tCtrl+Shift+Click");
-        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        add(
+    let mut entries = vec![
+        MenuEntry::item(APP_MENU_OPEN, app_name),
+        MenuEntry::with_shortcut(APP_MENU_NEW_WINDOW, "New Window", "Shift+Click"),
+        MenuEntry::with_shortcut(APP_MENU_ADMIN, "Run as Admin", "Ctrl+Shift"),
+        MenuEntry::Separator,
+        MenuEntry::item(
             APP_MENU_TOGGLE_PIN,
             if pinned {
                 "Unpin from Dock"
             } else {
                 "Pin to Dock"
             },
-        );
-        if running {
-            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-            add(APP_MENU_CLOSE, "Close Window");
-            add(APP_MENU_TERMINATE, "Terminate Process");
-        }
-
-        let mut pt: POINT = std::mem::zeroed();
-        GetCursorPos(&mut pt);
-        SetForegroundWindow(hwnd as HWND);
-        let cmd = TrackPopupMenu(
-            menu,
-            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD,
-            pt.x,
-            pt.y,
-            0,
-            hwnd as HWND,
-            std::ptr::null(),
-        ) as u32;
-        DestroyMenu(menu);
-
-        match cmd {
-            APP_MENU_OPEN => AppContextAction::Open,
-            APP_MENU_NEW_WINDOW => AppContextAction::NewWindow,
-            APP_MENU_ADMIN => AppContextAction::RunAsAdmin,
-            APP_MENU_TOGGLE_PIN => AppContextAction::TogglePin,
-            APP_MENU_CLOSE => AppContextAction::Close,
-            APP_MENU_TERMINATE => AppContextAction::Terminate,
-            _ => AppContextAction::None,
-        }
+        ),
+    ];
+    if running {
+        entries.push(MenuEntry::Separator);
+        entries.push(MenuEntry::item(APP_MENU_CLOSE, "Close Window"));
+        entries.push(MenuEntry::destructive(
+            APP_MENU_TERMINATE,
+            "Terminate Process",
+        ));
+    }
+    match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
+        APP_MENU_OPEN => AppContextAction::Open,
+        APP_MENU_NEW_WINDOW => AppContextAction::NewWindow,
+        APP_MENU_ADMIN => AppContextAction::RunAsAdmin,
+        APP_MENU_TOGGLE_PIN => AppContextAction::TogglePin,
+        APP_MENU_CLOSE => AppContextAction::Close,
+        APP_MENU_TERMINATE => AppContextAction::Terminate,
+        _ => AppContextAction::None,
     }
 }
 
-pub fn show_taskview_context_menu(hwnd: usize) -> TaskViewAction {
-    if hwnd == 0 {
-        return TaskViewAction::None;
-    }
-    unsafe {
-        let menu = CreatePopupMenu();
-        if menu.is_null() {
-            return TaskViewAction::None;
-        }
-        let add = |id: u32, label: &str| {
-            let w = wide(label);
-            AppendMenuW(menu, MF_STRING, id as usize, w.as_ptr());
-        };
-        add(TV_MENU_PREV, "Previous Desktop");
-        add(TV_MENU_NEXT, "Next Desktop");
-        add(TV_MENU_NEW, "New Desktop");
-        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        add(TV_MENU_VIEW, "Task View");
-
-        let mut pt: POINT = std::mem::zeroed();
-        GetCursorPos(&mut pt);
-        SetForegroundWindow(hwnd as HWND);
-        let cmd = TrackPopupMenu(
-            menu,
-            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD,
-            pt.x,
-            pt.y,
-            0,
-            hwnd as HWND,
-            std::ptr::null(),
-        ) as u32;
-        DestroyMenu(menu);
-
-        match cmd {
-            TV_MENU_PREV => TaskViewAction::PreviousDesktop,
-            TV_MENU_NEXT => TaskViewAction::NextDesktop,
-            TV_MENU_NEW => TaskViewAction::NewDesktop,
-            TV_MENU_VIEW => TaskViewAction::TaskView,
-            _ => TaskViewAction::None,
-        }
+pub fn show_taskview_context_menu(hwnd: usize, is_dark: bool) -> TaskViewAction {
+    let entries = vec![
+        MenuEntry::item(TV_MENU_PREV, "Previous Desktop"),
+        MenuEntry::item(TV_MENU_NEXT, "Next Desktop"),
+        MenuEntry::item(TV_MENU_NEW, "New Desktop"),
+        MenuEntry::Separator,
+        MenuEntry::item(TV_MENU_VIEW, "Task View"),
+    ];
+    match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
+        TV_MENU_PREV => TaskViewAction::PreviousDesktop,
+        TV_MENU_NEXT => TaskViewAction::NextDesktop,
+        TV_MENU_NEW => TaskViewAction::NewDesktop,
+        TV_MENU_VIEW => TaskViewAction::TaskView,
+        _ => TaskViewAction::None,
     }
 }
 
-pub fn show_recycle_bin_context_menu(hwnd: usize) -> RecycleBinAction {
-    if hwnd == 0 {
-        return RecycleBinAction::None;
-    }
-    unsafe {
-        let menu = CreatePopupMenu();
-        if menu.is_null() {
-            return RecycleBinAction::None;
-        }
-        let open_w = wide("Open Recycle Bin");
-        let empty_w = wide("Empty Recycle Bin");
-        AppendMenuW(menu, MF_STRING, BIN_MENU_OPEN as usize, open_w.as_ptr());
-        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        AppendMenuW(menu, MF_STRING, BIN_MENU_EMPTY as usize, empty_w.as_ptr());
-
-        let mut pt: POINT = std::mem::zeroed();
-        GetCursorPos(&mut pt);
-        SetForegroundWindow(hwnd as HWND);
-        let cmd = TrackPopupMenu(
-            menu,
-            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD,
-            pt.x,
-            pt.y,
-            0,
-            hwnd as HWND,
-            std::ptr::null(),
-        ) as u32;
-        DestroyMenu(menu);
-
-        match cmd {
-            BIN_MENU_OPEN => RecycleBinAction::Open,
-            BIN_MENU_EMPTY => RecycleBinAction::Empty,
-            _ => RecycleBinAction::None,
-        }
+pub fn show_recycle_bin_context_menu(hwnd: usize, is_dark: bool) -> RecycleBinAction {
+    let entries = vec![
+        MenuEntry::item(BIN_MENU_OPEN, "Open Recycle Bin"),
+        MenuEntry::Separator,
+        MenuEntry::destructive(BIN_MENU_EMPTY, "Empty Recycle Bin"),
+    ];
+    match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
+        BIN_MENU_OPEN => RecycleBinAction::Open,
+        BIN_MENU_EMPTY => RecycleBinAction::Empty,
+        _ => RecycleBinAction::None,
     }
 }
 

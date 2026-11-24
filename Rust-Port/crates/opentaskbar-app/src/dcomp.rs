@@ -47,6 +47,7 @@ pub enum ShellGlyph {
     Start,
     Search,
     TaskView,
+    TrayChevron,
     RecycleBinEmpty,
     RecycleBinFull,
 }
@@ -660,6 +661,35 @@ impl DcompEngine {
                         },
                         &brush,
                         2.0 * s,
+                        Some(&stroke),
+                    );
+                }
+                ShellGlyph::TrayChevron => {
+                    let brush = dc.CreateSolidColorBrush(&fg, None)?;
+                    dc.DrawLine(
+                        Vector2 {
+                            X: 6.5 * s,
+                            Y: 14.5 * s,
+                        },
+                        Vector2 {
+                            X: 12.0 * s,
+                            Y: 9.0 * s,
+                        },
+                        &brush,
+                        2.1 * s,
+                        Some(&stroke),
+                    );
+                    dc.DrawLine(
+                        Vector2 {
+                            X: 12.0 * s,
+                            Y: 9.0 * s,
+                        },
+                        Vector2 {
+                            X: 17.5 * s,
+                            Y: 14.5 * s,
+                        },
+                        &brush,
+                        2.1 * s,
                         Some(&stroke),
                     );
                 }

@@ -14,6 +14,8 @@ mod dock;
 #[cfg(windows)]
 mod icon_cache;
 #[cfg(windows)]
+mod menu;
+#[cfg(windows)]
 mod pins;
 #[cfg(windows)]
 mod preview;

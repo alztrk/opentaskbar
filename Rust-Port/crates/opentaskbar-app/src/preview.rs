@@ -172,6 +172,17 @@ impl PreviewPopup {
         self.owner_key.as_deref()
     }
 
+    pub fn window_rect(&self) -> Option<RECT> {
+        if !self.visible {
+            return None;
+        }
+        let mut rc: RECT = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(self.hwnd, &mut rc)
+        };
+        (ok != 0).then_some(rc)
+    }
+
     fn clear_thumbnails(&mut self) {
         for card in self.cards.drain(..) {
             if card.thumb != 0 {

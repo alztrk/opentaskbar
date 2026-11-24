@@ -356,3 +356,28 @@ pub fn new_desktop() {
 pub fn open_notifications() {
     send_chord(&[VK_LWIN, b'N' as u16]);
 }
+
+/// Opens Windows' hidden background-apps tray overflow popup.
+pub fn open_tray_overflow() {
+    let win11_cls = wide("TopLevelWindowForOverflowXamlIsland");
+    let win10_cls = wide("NotifyIconOverflowWindow");
+    unsafe {
+        let mut overflow = FindWindowW(win11_cls.as_ptr(), std::ptr::null());
+        if overflow.is_null() {
+            overflow = FindWindowW(win10_cls.as_ptr(), std::ptr::null());
+        }
+        if !overflow.is_null() && IsWindowVisible(overflow) != 0 {
+            ShowWindow(overflow, SW_HIDE);
+            return;
+        }
+    }
+    // Trigger Explorer's native notification-area chevron via Win+B then Space.
+    send_chord(&[VK_LWIN, b'B' as u16]);
+    std::thread::Builder::new()
+        .name("opentaskbar-tray".into())
+        .spawn(|| {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            send_chord(&[0x20]); // VK_SPACE
+        })
+        .ok();
+}
