@@ -435,6 +435,7 @@ impl DcompEngine {
             startCap: D2D1_CAP_STYLE_ROUND,
             endCap: D2D1_CAP_STYLE_ROUND,
             lineJoin: D2D1_LINE_JOIN_ROUND,
+            miterLimit: 10.0,
             ..Default::default()
         };
         let stroke: ID2D1StrokeStyle = unsafe {
@@ -504,18 +505,46 @@ impl DcompEngine {
                         radiusY: 2.2 * s,
                     };
                     dc.DrawRoundedRectangle(&front, &brush, 2.0 * s, Some(&stroke));
-                    let back = D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F {
-                            left: 8.5 * s,
-                            top: 8.5 * s,
-                            right: 21.5 * s,
-                            bottom: 18.5 * s,
+                    // Draw the tucked back window's visible bottom + right edges cleanly.
+                    dc.DrawLine(
+                        Vector2 {
+                            X: 8.5 * s,
+                            Y: 18.5 * s,
                         },
-                        radiusX: 2.2 * s,
-                        radiusY: 2.2 * s,
-                    };
-                    // Clip out front box interior so the back window looks tucked behind it.
-                    dc.DrawRoundedRectangle(&back, &brush, 1.8 * s, Some(&stroke));
+                        Vector2 {
+                            X: 19.3 * s,
+                            Y: 18.5 * s,
+                        },
+                        &brush,
+                        2.0 * s,
+                        Some(&stroke),
+                    );
+                    dc.DrawLine(
+                        Vector2 {
+                            X: 21.5 * s,
+                            Y: 8.5 * s,
+                        },
+                        Vector2 {
+                            X: 21.5 * s,
+                            Y: 16.3 * s,
+                        },
+                        &brush,
+                        2.0 * s,
+                        Some(&stroke),
+                    );
+                    dc.DrawLine(
+                        Vector2 {
+                            X: 19.3 * s,
+                            Y: 18.5 * s,
+                        },
+                        Vector2 {
+                            X: 21.5 * s,
+                            Y: 16.3 * s,
+                        },
+                        &brush,
+                        2.0 * s,
+                        Some(&stroke),
+                    );
                 }
             }
             Ok(())
@@ -656,8 +685,17 @@ impl DcompEngine {
             dc.FillRoundedRectangle(&rr, &bg);
             dc.DrawRoundedRectangle(&rr, &bd, bw, None);
 
-            // Scale DirectWrite layout into physical pixels.
-            dc.SetDpi(96.0 * dpi, 96.0 * dpi);
+            // Scale DirectWrite DIPs into physical pixels while preserving the DComp atlas offset.
+            let mut prev = Matrix3x2::identity();
+            dc.GetTransform(&mut prev);
+            dc.SetTransform(&Matrix3x2 {
+                M11: dpi,
+                M12: 0.0,
+                M21: 0.0,
+                M22: dpi,
+                M31: prev.M31,
+                M32: prev.M32,
+            });
             dc.DrawText(
                 &wide,
                 &self.tooltip_format,

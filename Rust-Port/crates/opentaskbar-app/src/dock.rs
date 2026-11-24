@@ -433,7 +433,7 @@ impl DockState {
             dcomp.create_node()?,
             dcomp.create_node()?,
         ];
-        let glyph_px = ((base * 0.62).max(20.0) * dpi).ceil() as u32;
+        let glyph_px = ((base * 0.68).max(22.0) * dpi).ceil() as u32;
         let shell_icons = [
             {
                 let n = dcomp.create_node()?;
@@ -457,22 +457,22 @@ impl DockState {
 
         let divider = dcomp.create_node()?;
         let div_surf = dcomp.create_rounded_rect_surface(
-            (1.0 * dpi).ceil() as u32,
-            (22.0 * dpi).ceil() as u32,
-            0.5 * dpi,
-            (0xff, 0xff, 0xff, 0.15),
+            (1.5 * dpi).ceil() as u32,
+            (26.0 * dpi).ceil() as u32,
+            0.75 * dpi,
+            (0xff, 0xff, 0xff, 0.26),
         )?;
         divider.set_content(Some(&div_surf));
 
         let dot_h_px = (3.5 * dpi).ceil() as u32;
         let dot_running = dcomp.create_rounded_rect_surface(
-            (5.0 * dpi).ceil() as u32,
+            (6.0 * dpi).ceil() as u32,
             dot_h_px,
             2.0 * dpi,
-            (0xcb, 0xd5, 0xe1, 0.80),
+            (0xe2, 0xe8, 0xf0, 0.90),
         )?;
         let dot_active = dcomp.create_rounded_rect_surface(
-            (14.0 * dpi).ceil() as u32,
+            (16.0 * dpi).ceil() as u32,
             dot_h_px,
             2.0 * dpi,
             (0xff, 0xff, 0xff, 1.0),
@@ -747,8 +747,7 @@ impl DockState {
             return true;
         }
         let base = self.settings.icon_dips();
-        let (_, win_h) = compute_window_dips(&self.settings, self.slots.len());
-        let icon_base_bottom = win_h - VERTICAL_EDGE_GAP - 6.0 - 3.5 - 4.0;
+        let icon_base_bottom = pill_top + 7.5 + base;
         for (idx, slot) in self.slots.iter().enumerate() {
             let dim = base * slot.scale;
             let cx = self.live_slot_center_x(idx) + slot.slide_x;
@@ -946,7 +945,7 @@ impl DockState {
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
         let (win_w, win_h) = compute_window_dips(&self.settings, self.slots.len());
-        let (pill_left, pill_top, pill_w, _pill_h) = self.live_pill_geometry();
+        let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
 
         // 1. 3-piece pill transform (zero texture redraws during width animation).
         let cap_w_px = self.pill.cap_w_px;
@@ -964,9 +963,15 @@ impl DockState {
             .right
             .set_transform(1.0, 1.0, pill_left_px + pill_w_px - cap_w_px, pill_top_px);
 
-        // 2. Shell buttons (Start, Search, Task View) + divider.
-        let shell_top = win_h - VERTICAL_EDGE_GAP - 6.0 - 6.5 - base;
-        let glyph_dips = (base * 0.62).max(20.0);
+        // Shared vertical rhythm inside the pill:
+        // top padding 7.5 -> icon (base) -> 4.5 gap -> 3.5 dot -> 6.5 bottom padding (= base + 22).
+        let icon_base_top = pill_top + 7.5;
+        let icon_base_bottom = icon_base_top + base;
+        let dot_top = icon_base_bottom + 4.5;
+
+        // 2. Shell buttons (Start, Search, Task View) aligned on the exact same vertical axis as app icons.
+        let shell_top = icon_base_top;
+        let glyph_dips = (base * 0.68).max(22.0);
         for kind in ShellButton::ALL {
             let i = kind.index();
             let x = pill_left + 15.0 + (i as f32) * (base + 4.0);
@@ -1000,14 +1005,12 @@ impl DockState {
         }
 
         let div_x = pill_left + 15.0 + base * 3.0 + 4.0 * 2.0 + 8.0;
-        let div_y = win_h - VERTICAL_EDGE_GAP - 6.0 - 10.0 - 22.0;
+        let div_y = pill_top + (pill_h - 26.0) * 0.5;
         self.divider
             .set_transform(1.0, 1.0, (div_x * dpi).round(), (div_y * dpi).round());
 
         // 3. Unified app slots (icons + running/active indicator dots).
         let active_drag = self.drag.filter(|d| d.active);
-        let icon_base_bottom = win_h - VERTICAL_EDGE_GAP - 6.0 - 3.5 - 4.0;
-        let dot_top = win_h - VERTICAL_EDGE_GAP - 6.0 - 3.5;
 
         let mut cursor_x = pill_left + 15.0 + shell_section_width(base);
         let slot_count = self.slots.len().min(self.slot_visuals.len());
@@ -1078,7 +1081,7 @@ impl DockState {
                 if desired_dot == 0 {
                     self.slot_visuals[idx].dot.hide();
                 } else {
-                    let dot_w = if desired_dot == 2 { 14.0 } else { 5.0 };
+                    let dot_w = if desired_dot == 2 { 16.0 } else { 6.0 };
                     let dx = cursor_x + slide_x + (slot_w - dot_w) * 0.5;
                     self.slot_visuals[idx].dot.set_transform(
                         1.0,
