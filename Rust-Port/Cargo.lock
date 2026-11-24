@@ -2997,9 +2997,12 @@ name = "opentaskbar-app"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "image",
  "opentaskbar-core",
  "opentaskbar-shell",
  "raw-window-handle",
+ "smallvec",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

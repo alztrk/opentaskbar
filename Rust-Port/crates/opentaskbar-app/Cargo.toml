@@ -15,9 +15,12 @@ workspace = true
 
 [dependencies]
 gpui.workspace = true
+image.workspace = true
 opentaskbar-core = { path = "../opentaskbar-core" }
 opentaskbar-shell = { path = "../opentaskbar-shell" }
 raw-window-handle.workspace = true
+smallvec.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+windows.workspace = true
 windows-sys.workspace = true

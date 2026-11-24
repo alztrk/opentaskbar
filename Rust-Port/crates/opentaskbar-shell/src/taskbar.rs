@@ -1,14 +1,22 @@
-//! Explorer taskbar hiding, restoration, and non-blocking AppBar setup.
+//! Explorer taskbar hiding, restoration, and AppBar work-area reservation.
 
-use windows_sys::Win32::Foundation::HWND;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::UI::Shell::{
-    ABM_GETSTATE, ABM_SETSTATE, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage,
+    ABE_BOTTOM, ABM_GETSTATE, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABM_SETSTATE,
+    ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, FindWindowW, SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow,
+    FindWindowExW, FindWindowW, GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE,
+    SW_SHOWNOACTIVATE, ShowWindow, WM_APP,
 };
 
 use crate::{journal, watchdog};
+
+const APPBAR_CALLBACK_MSG: u32 = WM_APP + 0x52;
+
+static REGISTERED_APPBAR: AtomicUsize = AtomicUsize::new(0);
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
@@ -64,9 +72,54 @@ pub fn set_taskbar_state(state: u32) {
     }
 }
 
-/// Immediately hides Explorer's taskbar windows and runs `ABM_SETSTATE` on a
-/// background thread so GPUI paints its first frame without stalling.
-pub fn begin_replacement(auto_hide: bool) {
+/// Reserves a bottom work-area strip of `height_px` physical pixels for `dock_hwnd`.
+fn register_bottom_appbar(dock_hwnd: usize, height_px: i32) {
+    if dock_hwnd == 0 || height_px <= 0 {
+        return;
+    }
+    // SAFETY: standard Win32 AppBar registration for our own dock HWND.
+    unsafe {
+        let mut abd: APPBARDATA = std::mem::zeroed();
+        abd.cbSize = size_of::<APPBARDATA>() as u32;
+        abd.hWnd = dock_hwnd as HWND;
+        abd.uCallbackMessage = APPBAR_CALLBACK_MSG;
+        if SHAppBarMessage(ABM_NEW, &mut abd) == 0 {
+            return;
+        }
+        REGISTERED_APPBAR.store(dock_hwnd, Ordering::SeqCst);
+
+        let scr_w = GetSystemMetrics(SM_CXSCREEN);
+        let scr_h = GetSystemMetrics(SM_CYSCREEN);
+        abd.uEdge = ABE_BOTTOM;
+        abd.rc = RECT {
+            left: 0,
+            top: (scr_h - height_px).max(0),
+            right: scr_w,
+            bottom: scr_h,
+        };
+        SHAppBarMessage(ABM_QUERYPOS, &mut abd);
+        abd.rc.top = (abd.rc.bottom - height_px).max(0);
+        SHAppBarMessage(ABM_SETPOS, &mut abd);
+    }
+}
+
+fn unregister_appbar() {
+    let hwnd = REGISTERED_APPBAR.swap(0, Ordering::SeqCst);
+    if hwnd == 0 {
+        return;
+    }
+    // SAFETY: removing our previously registered AppBar.
+    unsafe {
+        let mut abd: APPBARDATA = std::mem::zeroed();
+        abd.cbSize = size_of::<APPBARDATA>() as u32;
+        abd.hWnd = hwnd as HWND;
+        SHAppBarMessage(ABM_REMOVE, &mut abd);
+    }
+}
+
+/// Immediately hides Explorer's taskbar windows and runs `ABM_SETSTATE` + AppBar
+/// registration on a background thread so GPUI paints its first frame without stalling.
+pub fn begin_replacement(dock_hwnd: usize, auto_hide: bool, reserve_height_px: i32) {
     let prev = journal::read_state().unwrap_or_else(get_taskbar_state);
     if !journal::has_pending() {
         let _ = journal::write_state(prev);
@@ -82,16 +135,24 @@ pub fn begin_replacement(auto_hide: bool) {
     }
     set_secondary_trays_visible(false);
 
-    let target_state = if auto_hide { prev | ABS_AUTOHIDE } else { prev };
-    if target_state != prev {
-        std::thread::Builder::new()
-            .name("opentaskbar-abm".into())
-            .spawn(move || set_taskbar_state(target_state))
-            .ok();
-    }
+    // Switch Explorer's hidden taskbar to auto-hide so its old work-area strip is released,
+    // then reserve our exact dock height via AppBar when not auto-hiding.
+    let target_state = prev | ABS_AUTOHIDE;
+    std::thread::Builder::new()
+        .name("opentaskbar-abm".into())
+        .spawn(move || {
+            if target_state != prev {
+                set_taskbar_state(target_state);
+            }
+            if !auto_hide {
+                register_bottom_appbar(dock_hwnd, reserve_height_px);
+            }
+        })
+        .ok();
 }
 
 pub fn restore_from_journal() {
+    unregister_appbar();
     let prev = journal::read_state().unwrap_or(0);
     set_taskbar_state(prev);
     let tray = find_primary_tray();

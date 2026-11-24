@@ -1,15 +1,17 @@
 //! GPUI floating dock window:
-//! - Borderless transparent `WindowKind::PopUp` styled with Win32
-//!   `WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`.
-//! - Fisheye hover magnification, running indicators, click-to-launch/toggle,
-//!   and asynchronous icon batch resolution via `icon_cache`.
+//! - Borderless transparent `WindowKind::PopUp` with Win11 DWM border stripped
+//! - Dynamically sized to fit its content cleanly (no oversized transparent hitbox)
+//! - AppBar work-area reservation so maximized windows align cleanly above the dock
+//! - Grouped running apps by executable path, sharp 64x64 transparent `RenderImage` icons
+//! - Smooth 60fps hover magnification, hover tooltip, and native Win32 right-click menu
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, Application, Bounds, Context, Image, SharedString, Timer, Window,
+    App, Application, Bounds, Context, MouseButton, RenderImage, SharedString, Timer, Window,
     WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions, div,
     hsla, img, point, prelude::*, px, rgba, size,
 };
@@ -18,76 +20,154 @@ use opentaskbar_shell::tracker::{self, RunningWindow};
 
 use crate::icon_cache;
 use crate::pins::{self, PinnedApp};
-use crate::win32;
+use crate::win32::{self, ContextAction};
+
+const TOOLTIP_HEADROOM: f32 = 34.0;
+const MAG_HEADROOM: f32 = 22.0;
 
 #[derive(Clone)]
 struct DockSlot {
+    key: String,
     label: SharedString,
     launch_path: String,
-    icon_path: String,
-    hwnd: Option<usize>,
+    icon_source: String,
+    hwnds: Vec<usize>,
     is_foreground: bool,
+    scale: f32,
 }
 
 struct DockView {
+    hwnd: usize,
     settings: DockSettings,
     pins: Vec<PinnedApp>,
     slots: Vec<DockSlot>,
-    icons: HashMap<String, Option<Arc<Image>>>,
+    icons: HashMap<String, Option<Arc<RenderImage>>>,
     hovered_idx: Option<usize>,
+    animating: bool,
+    last_window_rect: Option<(i32, i32, i32, i32)>,
+}
+
+fn exe_display_name(exe_path: &str, fallback_title: &str) -> String {
+    Path::new(exe_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            let mut chars = s.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => fallback_title.to_owned(),
+            }
+        })
+        .unwrap_or_else(|| fallback_title.to_owned())
 }
 
 impl DockView {
-    fn new(settings: DockSettings, cx: &mut Context<Self>) -> Self {
+    fn new(hwnd: usize, settings: DockSettings, cx: &mut Context<Self>) -> Self {
         let pins = pins::load_pins();
         let mut view = Self {
+            hwnd,
             settings,
             pins,
             slots: Vec::new(),
             icons: HashMap::new(),
             hovered_idx: None,
+            animating: false,
+            last_window_rect: None,
         };
         view.sync_slots(cx);
+        view.sync_window_bounds();
         view.start_window_poll(cx);
         view
     }
 
     fn sync_slots(&mut self, cx: &mut Context<Self>) {
         let running: Vec<RunningWindow> = tracker::enumerate_windows();
-        let mut next: Vec<DockSlot> = Vec::with_capacity(self.pins.len() + running.len());
+
+        // Group running windows by canonical lowercase executable path.
+        let mut by_exe: HashMap<String, Vec<&RunningWindow>> = HashMap::new();
+        for win in &running {
+            by_exe
+                .entry(win.exe_path.to_lowercase())
+                .or_default()
+                .push(win);
+        }
+
+        let mut next: Vec<DockSlot> = Vec::with_capacity(self.pins.len() + by_exe.len());
+        let mut claimed_exes: HashMap<String, bool> = HashMap::new();
 
         for pin in &self.pins {
-            let stem = pin.name.to_lowercase();
-            let matched = running.iter().find(|w| {
-                w.exe_path.to_lowercase().contains(&stem) || w.title.to_lowercase().contains(&stem)
-            });
+            let matched_key = pin
+                .target_exe
+                .as_ref()
+                .map(|p| p.to_lowercase())
+                .filter(|k| by_exe.contains_key(k))
+                .or_else(|| {
+                    let stem = pin.name.to_lowercase();
+                    by_exe
+                        .keys()
+                        .find(|k| {
+                            Path::new(k)
+                                .file_stem()
+                                .and_then(|s| s.to_str())
+                                .is_some_and(|s| s.eq_ignore_ascii_case(&stem))
+                        })
+                        .cloned()
+                });
+
+            let (hwnds, is_foreground) = match matched_key {
+                Some(ref key) => {
+                    claimed_exes.insert(key.clone(), true);
+                    let list = &by_exe[key];
+                    (
+                        list.iter().map(|w| w.hwnd).collect(),
+                        list.iter().any(|w| w.is_foreground),
+                    )
+                }
+                None => (Vec::new(), false),
+            };
+
             next.push(DockSlot {
+                key: pin.launch_path.to_lowercase(),
                 label: pin.name.clone().into(),
-                launch_path: pin.path.clone(),
-                icon_path: matched
-                    .map(|w| w.exe_path.clone())
-                    .unwrap_or_else(|| pin.path.clone()),
-                hwnd: matched.map(|w| w.hwnd),
-                is_foreground: matched.is_some_and(|w| w.is_foreground),
+                launch_path: pin.launch_path.clone(),
+                icon_source: pin.icon_source.clone(),
+                hwnds,
+                is_foreground,
+                scale: 1.0,
             });
         }
 
+        // Preserve stable discovery order for unpinned running apps.
         for win in &running {
-            if next.iter().any(|s| s.hwnd == Some(win.hwnd)) {
+            let key = win.exe_path.to_lowercase();
+            if claimed_exes.contains_key(&key) {
                 continue;
             }
+            claimed_exes.insert(key.clone(), true);
+            let list = &by_exe[&key];
+            let label = exe_display_name(&win.exe_path, &win.title);
             next.push(DockSlot {
-                label: win.title.clone().into(),
+                key: key.clone(),
+                label: label.into(),
                 launch_path: win.exe_path.clone(),
-                icon_path: win.exe_path.clone(),
-                hwnd: Some(win.hwnd),
-                is_foreground: win.is_foreground,
+                icon_source: win.exe_path.clone(),
+                hwnds: list.iter().map(|w| w.hwnd).collect(),
+                is_foreground: list.iter().any(|w| w.is_foreground),
+                scale: 1.0,
             });
+        }
+
+        // Preserve current smooth scale across refreshes.
+        for slot in &mut next {
+            if let Some(prev) = self.slots.iter().find(|p| p.key == slot.key) {
+                slot.scale = prev.scale;
+            }
         }
 
         let missing: Vec<String> = next
             .iter()
-            .map(|s| s.icon_path.clone())
+            .map(|s| s.icon_source.clone())
             .filter(|p| !self.icons.contains_key(p))
             .collect();
 
@@ -108,12 +188,47 @@ impl DockView {
         }
     }
 
+    /// Computes tight physical window bounds so no oversized transparent box covers the desktop.
+    fn sync_window_bounds(&mut self) {
+        let dpi = win32::dpi_scale(self.hwnd);
+        let base = self.settings.icon_dips();
+        let gap = 8.0 + self.settings.dock_icon_padding.max(0) as f32;
+        let count = self.slots.len().max(1) as f32;
+        // Budget horizontal expansion for hover magnification so the pill never clips.
+        let mag_budget = if self.settings.magnification_enabled {
+            base * 1.15
+        } else {
+            0.0
+        };
+        let width_dips = (count * base + (count - 1.0) * gap + 36.0 + mag_budget).ceil();
+        let bottom_gap = self.settings.dock_bottom_gap_pixels.max(0) as f32;
+        let height_dips = (base + 26.0 + TOOLTIP_HEADROOM + MAG_HEADROOM + bottom_gap).ceil();
+
+        let (scr_w, scr_h) = win32::primary_screen_px();
+        let w_px = ((width_dips * dpi).ceil() as i32).min(scr_w);
+        let h_px = ((height_dips * dpi).ceil() as i32).min(scr_h);
+        let margin_px = (12.0 * dpi).round() as i32;
+        let x_px = match self.settings.position {
+            DockPosition::Left => margin_px,
+            DockPosition::Center => (scr_w - w_px) / 2,
+            DockPosition::Right => scr_w - w_px - margin_px,
+        };
+        let y_px = scr_h - h_px;
+
+        let rect = (x_px, y_px, w_px, h_px);
+        if self.last_window_rect != Some(rect) {
+            self.last_window_rect = Some(rect);
+            win32::reposition_dock_window(self.hwnd, x_px, y_px, w_px, h_px);
+        }
+    }
+
     fn start_window_poll(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
-                Timer::after(Duration::from_millis(1000)).await;
+                Timer::after(Duration::from_millis(800)).await;
                 let updated = this.update(cx, |view, cx| {
                     view.sync_slots(cx);
+                    view.sync_window_bounds();
                     cx.notify();
                 });
                 if updated.is_err() {
@@ -124,21 +239,66 @@ impl DockView {
         .detach();
     }
 
-    fn scale_for(&self, idx: usize) -> f32 {
+    fn target_scale_for(&self, idx: usize) -> f32 {
         if !self.settings.magnification_enabled || !self.settings.animations_enabled {
             return 1.0;
         }
         match self.hovered_idx {
-            Some(hovered) => {
-                let dist = idx.abs_diff(hovered);
-                match dist {
-                    0 => 1.42,
-                    1 => 1.20,
-                    2 => 1.08,
-                    _ => 1.0,
+            Some(hovered) => match idx.abs_diff(hovered) {
+                0 => 1.38,
+                1 => 1.18,
+                2 => 1.07,
+                _ => 1.0,
+            },
+            None => 1.0,
+        }
+    }
+
+    fn ensure_animation(&mut self, cx: &mut Context<Self>) {
+        if self.animating {
+            return;
+        }
+        self.animating = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                Timer::after(Duration::from_millis(16)).await;
+                let keep_going = this
+                    .update(cx, |view, cx| {
+                        let mut moving = false;
+                        for idx in 0..view.slots.len() {
+                            let target = view.target_scale_for(idx);
+                            let cur = view.slots[idx].scale;
+                            let diff = target - cur;
+                            if diff.abs() > 0.004 {
+                                view.slots[idx].scale = cur + diff * 0.28;
+                                moving = true;
+                            } else if (cur - target).abs() > 0.0 {
+                                view.slots[idx].scale = target;
+                            }
+                        }
+                        if moving {
+                            cx.notify();
+                        } else {
+                            view.animating = false;
+                            cx.notify();
+                        }
+                        moving
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    break;
                 }
             }
-            None => 1.0,
+        })
+        .detach();
+    }
+
+    fn handle_right_click(&self, cx: &mut Context<Self>) {
+        match win32::show_dock_context_menu(self.hwnd) {
+            ContextAction::TaskManager => pins::launch("taskmgr.exe".to_owned()),
+            ContextAction::RestoreTaskbar => opentaskbar_shell::taskbar::restore_from_journal(),
+            ContextAction::Exit => cx.quit(),
+            ContextAction::None => {}
         }
     }
 }
@@ -147,40 +307,66 @@ impl Render for DockView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let base = self.settings.icon_dips();
         let radius = self.settings.corner_radius_dips();
-        let alpha = (self.settings.dock_opacity.clamp(0.1, 1.0) * 230.0) as u32;
+        let alpha = (self.settings.dock_opacity.clamp(0.1, 1.0) * 218.0) as u32;
         let pill_bg = if self.settings.dock_background == SurfaceBackground::None {
             rgba(0x00000000)
         } else {
-            rgba(0x16181e00 | alpha)
+            rgba(0x14171f00 | alpha)
         };
+        let hovered_label = self
+            .hovered_idx
+            .and_then(|i| self.slots.get(i))
+            .map(|s| s.label.clone());
 
         div()
             .size_full()
             .flex()
-            .items_end()
-            .justify_center()
+            .flex_col()
+            .items_center()
+            .justify_end()
             .pb(px(self.settings.dock_bottom_gap_pixels.max(0) as f32))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, _, _window, cx| {
+                    this.handle_right_click(cx);
+                }),
+            )
+            .when_some(hovered_label, |el, label| {
+                el.child(
+                    div()
+                        .mb(px(6.0))
+                        .px(px(10.0))
+                        .py(px(4.0))
+                        .rounded(px(8.0))
+                        .bg(rgba(0x181b24eb))
+                        .border_1()
+                        .border_color(rgba(0xffffff24))
+                        .text_xs()
+                        .text_color(rgba(0xf1f5f9ff))
+                        .child(label),
+                )
+            })
             .child(
                 div()
                     .flex()
                     .items_end()
                     .gap(px(8.0 + self.settings.dock_icon_padding.max(0) as f32))
                     .px(px(14.0))
-                    .py(px(8.0))
+                    .py(px(7.0))
                     .rounded(px(radius))
                     .bg(pill_bg)
                     .when(
                         self.settings.dock_background != SurfaceBackground::None,
-                        |el| el.border_1().border_color(rgba(0xffffff26)),
+                        |el| el.border_1().border_color(rgba(0xffffff28)).shadow_md(),
                     )
                     .children(self.slots.iter().enumerate().map(|(idx, slot)| {
-                        let scale = self.scale_for(idx);
+                        let scale = slot.scale;
                         let dim = base * scale;
                         let lift = (scale - 1.0) * 14.0;
-                        let icon = self.icons.get(&slot.icon_path).and_then(|o| o.clone());
-                        let hwnd = slot.hwnd;
+                        let icon = self.icons.get(&slot.icon_source).and_then(|o| o.clone());
+                        let hwnds = slot.hwnds.clone();
                         let launch_path = slot.launch_path.clone();
-                        let running = hwnd.is_some();
+                        let running = !hwnds.is_empty();
                         let active = slot.is_foreground;
                         let fallback_char: SharedString = slot
                             .label
@@ -205,11 +391,12 @@ impl Render for DockView {
                                 } else if this.hovered_idx == Some(idx) {
                                     this.hovered_idx = None;
                                 }
+                                this.ensure_animation(cx);
                                 cx.notify();
                             }))
                             .on_click(move |_, _window, _cx| {
-                                if let Some(hwnd) = hwnd {
-                                    tracker::toggle_window(hwnd);
+                                if !hwnds.is_empty() {
+                                    tracker::activate_or_toggle(&hwnds);
                                 } else {
                                     pins::launch(launch_path.clone());
                                 }
@@ -238,8 +425,8 @@ impl Render for DockView {
                             })
                             .child(
                                 div()
-                                    .w(px(4.0))
-                                    .h(px(4.0))
+                                    .w(px(if active { 10.0 } else { 4.0 }))
+                                    .h(px(3.5))
                                     .rounded(px(2.0))
                                     .bg(if !running {
                                         rgba(0x00000000)
@@ -249,22 +436,7 @@ impl Render for DockView {
                                         rgba(0xcbd5e1aa)
                                     }),
                             )
-                    }))
-                    .child(
-                        div()
-                            .id("dock-quit")
-                            .ml(px(6.0))
-                            .mb(px(8.0))
-                            .px(px(8.0))
-                            .py(px(4.0))
-                            .rounded(px(8.0))
-                            .bg(rgba(0xffffff18))
-                            .text_xs()
-                            .text_color(rgba(0xe2e8f0ff))
-                            .cursor_pointer()
-                            .on_click(|_, _window, cx| cx.quit())
-                            .child("Exit"),
-                    ),
+                    })),
             )
     }
 }
@@ -272,20 +444,16 @@ impl Render for DockView {
 pub fn run(settings: DockSettings) {
     let auto_hide = settings.auto_hide != AutoHideMode::Disabled;
     Application::new().run(move |cx: &mut App| {
-        let dock_w = px(960.0);
-        let dock_h = px(108.0);
+        let initial_w = px(420.0);
+        let initial_h = px(120.0);
         let bounds = match cx.primary_display() {
             Some(display) => {
                 let area = display.bounds();
-                let x = match settings.position {
-                    DockPosition::Left => area.origin.x + px(12.0),
-                    DockPosition::Center => area.origin.x + (area.size.width - dock_w) * 0.5,
-                    DockPosition::Right => area.origin.x + area.size.width - dock_w - px(12.0),
-                };
-                let y = area.origin.y + area.size.height - dock_h;
-                Bounds::new(point(x, y), size(dock_w, dock_h))
+                let x = area.origin.x + (area.size.width - initial_w) * 0.5;
+                let y = area.origin.y + area.size.height - initial_h;
+                Bounds::new(point(x, y), size(initial_w, initial_h))
             }
-            None => Bounds::centered(None, size(dock_w, dock_h), cx),
+            None => Bounds::centered(None, size(initial_w, initial_h), cx),
         };
 
         let options = WindowOptions {
@@ -304,10 +472,15 @@ pub fn run(settings: DockSettings) {
 
         let settings_clone = settings.clone();
         let opened = cx.open_window(options, |window, cx| {
-            let _ = win32::configure_dock_window(window);
-            opentaskbar_shell::taskbar::begin_replacement(auto_hide);
+            let hwnd = win32::configure_dock_window(window).unwrap_or(0);
+            let dpi = win32::dpi_scale(hwnd);
+            let reserve_dips = settings_clone.icon_dips()
+                + 22.0
+                + settings_clone.dock_bottom_gap_pixels.max(0) as f32;
+            let reserve_px = (reserve_dips * dpi).ceil() as i32;
+            opentaskbar_shell::taskbar::begin_replacement(hwnd, auto_hide, reserve_px);
             win32::trim_working_set();
-            cx.new(|cx| DockView::new(settings_clone, cx))
+            cx.new(|cx| DockView::new(hwnd, settings_clone, cx))
         });
 
         if let Err(err) = opened {

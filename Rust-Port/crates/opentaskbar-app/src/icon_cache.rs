@@ -1,7 +1,9 @@
 //! Persistent raw-BGRA icon disk cache + short-lived out-of-process icon worker.
 //!
-//! Extracted icons are cached as `.oticon` files under `%LOCALAPPDATA%\OpenTaskBar-Rust\icon-cache`
-//! and wrapped as `Arc<gpui::Image>` (32-bit BGRA BMP with alpha) for direct GPU rendering via `gpui::img`.
+//! Uses `IShellItemImageFactory::GetImage(64x64, SIIGBF_ICONONLY)` inside the
+//! short-lived `--extract-icons` worker so icons are high-DPI sharp, have full
+//! 32-bit alpha (zero black boxes), never show `.lnk` shortcut arrows, and
+//! support Store/UWP AUMIDs (`shell:AppsFolder\<AUMID>`).
 
 use std::collections::HashMap;
 use std::fs;
@@ -12,17 +14,22 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use gpui::{Image, ImageFormat};
-use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
-    DeleteObject, GetDIBits, GetObjectW, HBITMAP,
+use gpui::RenderImage;
+use image::{Frame, RgbaImage};
+use smallvec::smallvec;
+use windows::Win32::Foundation::SIZE;
+use windows::Win32::Graphics::Gdi::{BITMAP, DeleteObject, GetObjectW, HBITMAP, HGDIOBJ};
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+use windows::Win32::UI::Shell::{
+    IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
+    SIIGBF_SCALEUP,
 };
-use windows_sys::Win32::UI::Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGetFileInfoW};
-use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
+use windows::core::HSTRING;
 
 pub const WORKER_ARG: &str = "--extract-icons";
 
-const CACHE_MAGIC: &[u8; 8] = b"OTICON01";
+const ICON_PX: u32 = 64;
+const CACHE_MAGIC: &[u8; 8] = b"OTICON02";
 const CACHE_HEADER_LEN: usize = 24;
 const MAX_DIM: u32 = 256;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -31,7 +38,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 struct RawIcon {
     width: u32,
     height: u32,
-    /// Straight top-down BGRA32 pixels.
+    /// Top-down straight BGRA32 pixels (GPUI DirectX `RenderImage` native format).
     pixels: Vec<u8>,
 }
 
@@ -49,6 +56,9 @@ fn hash_key(path: &str) -> u64 {
 }
 
 fn fingerprint(path: &str) -> Option<u64> {
+    if path.starts_with("shell:") || path.starts_with("::{") {
+        return Some(0);
+    }
     let meta = fs::metadata(path).ok()?;
     let modified = meta
         .modified()
@@ -108,119 +118,92 @@ fn write_cached(path: &str, icon: &RawIcon) {
     }
 }
 
-/// Encodes a top-down 32-bit BGRA icon as a minimal 54-byte BMP for GPUI `Image`.
-fn to_gpui_image(icon: &RawIcon) -> Arc<Image> {
-    let file_size = (54 + icon.pixels.len()) as u32;
-    let mut bmp = Vec::with_capacity(file_size as usize);
-    bmp.extend_from_slice(b"BM");
-    bmp.extend_from_slice(&file_size.to_le_bytes());
-    bmp.extend_from_slice(&0u32.to_le_bytes());
-    bmp.extend_from_slice(&54u32.to_le_bytes());
-    // BITMAPINFOHEADER (40 bytes)
-    bmp.extend_from_slice(&40u32.to_le_bytes());
-    bmp.extend_from_slice(&(icon.width as i32).to_le_bytes());
-    bmp.extend_from_slice(&(-(icon.height as i32)).to_le_bytes()); // top-down
-    bmp.extend_from_slice(&1u16.to_le_bytes()); // planes
-    bmp.extend_from_slice(&32u16.to_le_bytes()); // bpp
-    bmp.extend_from_slice(&0u32.to_le_bytes()); // BI_RGB
-    bmp.extend_from_slice(&(icon.pixels.len() as u32).to_le_bytes());
-    bmp.extend_from_slice(&0i32.to_le_bytes());
-    bmp.extend_from_slice(&0i32.to_le_bytes());
-    bmp.extend_from_slice(&0u32.to_le_bytes());
-    bmp.extend_from_slice(&0u32.to_le_bytes());
-    bmp.extend_from_slice(&icon.pixels);
-    Arc::new(Image::from_bytes(ImageFormat::Bmp, bmp))
+/// Wraps BGRA32 pixels directly as a `gpui::RenderImage` with full 32-bit alpha.
+fn to_render_image(icon: RawIcon) -> Option<Arc<RenderImage>> {
+    // GPUI's Windows DirectX renderer expects BGRA bytes inside `RgbaImage`.
+    let buffer = RgbaImage::from_raw(icon.width, icon.height, icon.pixels)?;
+    Some(Arc::new(RenderImage::new(smallvec![Frame::new(buffer)])))
 }
 
-fn hbitmap_to_bgra(bitmap: HBITMAP) -> Option<RawIcon> {
-    // SAFETY: reading DIB bits from a valid GDI HBITMAP.
+/// Converts a Shell DIB section (premultiplied or straight BGRA) to top-down straight BGRA
+/// suitable for GPUI's shader pipeline, and deletes the HBITMAP.
+fn from_shell_hbitmap(bitmap: HBITMAP) -> Option<RawIcon> {
+    // SAFETY: reading DIB section pixels owned by `bitmap`, deleted before returning.
     unsafe {
-        let mut bmp: BITMAP = std::mem::zeroed();
-        if GetObjectW(
-            bitmap,
+        let mut info = BITMAP::default();
+        let read = GetObjectW(
+            HGDIOBJ(bitmap.0),
             size_of::<BITMAP>() as i32,
-            (&mut bmp as *mut BITMAP).cast(),
-        ) == 0
-        {
-            return None;
-        }
-        let width = bmp.bmWidth.max(0) as u32;
-        let height = bmp.bmHeight.unsigned_abs();
-        if width == 0 || height == 0 || width > MAX_DIM || height > MAX_DIM {
-            return None;
-        }
-        let mut pixels = vec![0u8; (width as usize) * (height as usize) * 4];
-        let mut info = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: width as i32,
-                biHeight: -(height as i32),
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB,
-                ..std::mem::zeroed()
-            },
-            bmiColors: [std::mem::zeroed()],
-        };
-        let dc = CreateCompatibleDC(std::ptr::null_mut());
-        let rows = GetDIBits(
-            dc,
-            bitmap,
-            0,
-            height,
-            pixels.as_mut_ptr().cast(),
-            &mut info,
-            DIB_RGB_COLORS,
+            Some((&mut info as *mut BITMAP).cast()),
         );
-        DeleteDC(dc);
-        (rows != 0).then_some(RawIcon {
-            width,
-            height,
-            pixels,
-        })
-    }
-}
-
-fn extract_hicon(path: &str) -> Option<RawIcon> {
-    let wide: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
-    // SAFETY: `SHGetFileInfoW` returns an owned HICON destroyed below.
-    unsafe {
-        let mut info: SHFILEINFOW = std::mem::zeroed();
-        let res = SHGetFileInfoW(
-            wide.as_ptr(),
-            0,
-            &mut info,
-            size_of::<SHFILEINFOW>() as u32,
-            SHGFI_ICON | SHGFI_LARGEICON,
-        );
-        if res == 0 || info.hIcon.is_null() {
-            return None;
-        }
-        let hicon: HICON = info.hIcon;
-        let mut icon_info: ICONINFO = std::mem::zeroed();
-        let icon = if GetIconInfo(hicon, &mut icon_info) != 0 {
-            let result = if !icon_info.hbmColor.is_null() {
-                hbitmap_to_bgra(icon_info.hbmColor)
-            } else {
+        let result = if read != 0 && !info.bmBits.is_null() && info.bmBitsPixel == 32 {
+            let width = info.bmWidth.max(0) as usize;
+            let height = info.bmHeight.unsigned_abs() as usize;
+            let stride = info.bmWidthBytes as usize;
+            if width == 0 || height == 0 || width > MAX_DIM as usize || height > MAX_DIM as usize {
                 None
-            };
-            if !icon_info.hbmColor.is_null() {
-                DeleteObject(icon_info.hbmColor);
+            } else {
+                let src = std::slice::from_raw_parts(info.bmBits as *const u8, stride * height);
+                let mut pixels = vec![0u8; width * height * 4];
+                for row in 0..height {
+                    let src_row = if info.bmHeight > 0 {
+                        height - 1 - row
+                    } else {
+                        row
+                    };
+                    pixels[row * width * 4..(row + 1) * width * 4]
+                        .copy_from_slice(&src[src_row * stride..src_row * stride + width * 4]);
+                }
+                // Un-premultiply if the bitmap was premultiplied so GPUI does not double-darken edges.
+                let is_premultiplied = pixels
+                    .chunks_exact(4)
+                    .all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3]);
+                if is_premultiplied {
+                    for p in pixels.chunks_exact_mut(4) {
+                        let a = u16::from(p[3]);
+                        if a > 0 && a < 255 {
+                            p[0] = ((u16::from(p[0]) * 255 + a / 2) / a).min(255) as u8;
+                            p[1] = ((u16::from(p[1]) * 255 + a / 2) / a).min(255) as u8;
+                            p[2] = ((u16::from(p[2]) * 255 + a / 2) / a).min(255) as u8;
+                        }
+                    }
+                }
+                Some(RawIcon {
+                    width: width as u32,
+                    height: height as u32,
+                    pixels,
+                })
             }
-            if !icon_info.hbmMask.is_null() {
-                DeleteObject(icon_info.hbmMask);
-            }
-            result
         } else {
             None
         };
-        DestroyIcon(hicon);
-        icon
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        result
+    }
+}
+
+fn extract_shell_icon(parsing_name: &str) -> Option<RawIcon> {
+    // SAFETY: COM STA initialized in `run_worker`; HBITMAP freed in `from_shell_hbitmap`.
+    unsafe {
+        let factory: IShellItemImageFactory =
+            SHCreateItemFromParsingName(&HSTRING::from(parsing_name), None).ok()?;
+        let bitmap = factory
+            .GetImage(
+                SIZE {
+                    cx: ICON_PX as i32,
+                    cy: ICON_PX as i32,
+                },
+                SIIGBF_BIGGERSIZEOK | SIIGBF_ICONONLY | SIIGBF_SCALEUP,
+            )
+            .ok()?;
+        from_shell_hbitmap(bitmap)
     }
 }
 
 /// Worker entry point (`OpenTaskBar.exe --extract-icons`).
 pub fn run_worker() {
+    // SAFETY: COM STA for IShellItemImageFactory, isolated to this short-lived worker process.
+    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut reader = BufReader::new(stdin.lock());
@@ -231,7 +214,7 @@ pub fn run_worker() {
         let icon = if path.is_empty() {
             None
         } else {
-            extract_hicon(path)
+            extract_shell_icon(path)
         };
         let ok = match icon {
             Some(ic) => writer
@@ -316,7 +299,7 @@ impl Drop for Worker {
 
 /// Resolves a batch of icon paths using disk cache first and a single short-lived
 /// worker process for misses; drops the worker immediately when done.
-pub fn resolve_batch(paths: &[String]) -> HashMap<String, Option<Arc<Image>>> {
+pub fn resolve_batch(paths: &[String]) -> HashMap<String, Option<Arc<RenderImage>>> {
     let mut result = HashMap::with_capacity(paths.len());
     let mut worker: Option<Worker> = None;
 
@@ -333,7 +316,7 @@ pub fn resolve_batch(paths: &[String]) -> HashMap<String, Option<Arc<Image>>> {
             }
             extracted
         };
-        result.insert(path.clone(), raw.map(|ic| to_gpui_image(&ic)));
+        result.insert(path.clone(), raw.and_then(to_render_image));
     }
     result
 }

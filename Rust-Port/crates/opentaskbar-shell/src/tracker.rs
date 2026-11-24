@@ -1,13 +1,15 @@
-//! Minimal Win32 running-window enumeration and activation helpers.
+//! Win32 running-window enumeration with DWM cloaked filtering and activation helpers.
 
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible,
-    SW_MINIMIZE, SW_RESTORE, SetForegroundWindow, ShowWindow, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    SW_MINIMIZE, SW_RESTORE, SetForegroundWindow, ShowWindow, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW,
 };
 use windows_sys::core::BOOL;
 
@@ -18,6 +20,20 @@ pub struct RunningWindow {
     pub title: String,
     pub exe_path: String,
     pub is_foreground: bool,
+}
+
+fn is_cloaked(hwnd: HWND) -> bool {
+    let mut cloaked: u32 = 0;
+    // SAFETY: querying DWMWA_CLOAKED into a local u32.
+    let hr = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED as u32,
+            (&mut cloaked as *mut u32).cast(),
+            size_of::<u32>() as u32,
+        )
+    };
+    hr == 0 && cloaked != 0
 }
 
 fn process_image_path(pid: u32) -> Option<String> {
@@ -52,6 +68,17 @@ fn window_title(hwnd: HWND) -> String {
     }
 }
 
+fn is_shell_noise(exe_path: &str) -> bool {
+    let lower = exe_path.to_lowercase();
+    lower.ends_with(r"\textinputhost.exe")
+        || lower.ends_with(r"\shellexperiencehost.exe")
+        || lower.ends_with(r"\searchhost.exe")
+        || lower.ends_with(r"\startmenuexperiencehost.exe")
+        || lower.ends_with(r"\lockapp.exe")
+        || lower.ends_with(r"\systemsettings.exe")
+        || lower.ends_with(r"\applicationframehost.exe")
+}
+
 struct EnumCtx {
     self_pid: u32,
     foreground: HWND,
@@ -62,10 +89,13 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     // SAFETY: `lparam` points to `EnumCtx` alive for the duration of `EnumWindows`.
     unsafe {
         let ctx = &mut *(lparam as *mut EnumCtx);
-        if IsWindowVisible(hwnd) == 0 {
+        if IsWindowVisible(hwnd) == 0 || is_cloaked(hwnd) {
             return 1;
         }
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        if (ex & WS_EX_NOACTIVATE) != 0 {
+            return 1;
+        }
         if (ex & WS_EX_TOOLWINDOW) != 0 && (ex & WS_EX_APPWINDOW) == 0 {
             return 1;
         }
@@ -85,6 +115,9 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         let Some(exe_path) = process_image_path(pid) else {
             return 1;
         };
+        if is_shell_noise(&exe_path) {
+            return 1;
+        }
         ctx.out.push(RunningWindow {
             hwnd: hwnd as usize,
             pid,
@@ -110,17 +143,34 @@ pub fn enumerate_windows() -> Vec<RunningWindow> {
     ctx.out
 }
 
-pub fn toggle_window(hwnd: usize) {
-    let hwnd = hwnd as HWND;
-    // SAFETY: standard Win32 activation calls on a tracked window.
+/// Cycles or toggles activation for a group of windows belonging to one app.
+pub fn activate_or_toggle(hwnds: &[usize]) {
+    if hwnds.is_empty() {
+        return;
+    }
+    // SAFETY: standard Win32 activation calls on tracked windows.
     unsafe {
-        if GetForegroundWindow() == hwnd && IsIconic(hwnd) == 0 {
-            ShowWindow(hwnd, SW_MINIMIZE);
-        } else {
-            if IsIconic(hwnd) != 0 {
-                ShowWindow(hwnd, SW_RESTORE);
+        let fg = GetForegroundWindow() as usize;
+        if hwnds.len() == 1 {
+            let hwnd = hwnds[0] as HWND;
+            if fg == hwnds[0] && IsIconic(hwnd) == 0 {
+                ShowWindow(hwnd, SW_MINIMIZE);
+            } else {
+                if IsIconic(hwnd) != 0 {
+                    ShowWindow(hwnd, SW_RESTORE);
+                }
+                SetForegroundWindow(hwnd);
             }
-            SetForegroundWindow(hwnd);
+            return;
         }
+        let next = match hwnds.iter().position(|&h| h == fg) {
+            Some(pos) => hwnds[(pos + 1) % hwnds.len()],
+            None => hwnds[0],
+        };
+        let hwnd = next as HWND;
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd);
     }
 }
