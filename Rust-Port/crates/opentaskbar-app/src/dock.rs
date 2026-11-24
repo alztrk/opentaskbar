@@ -131,7 +131,7 @@ struct DockView {
     pressed_shell: Option<ShellButton>,
     drag: Option<DragState>,
     suppress_next_click: bool,
-    animating: bool,
+    last_frame: Option<Instant>,
     last_window_rect: Option<(i32, i32, i32, i32)>,
 }
 
@@ -371,7 +371,7 @@ impl DockView {
             pressed_shell: None,
             drag: None,
             suppress_next_click: false,
-            animating: false,
+            last_frame: None,
             last_window_rect: None,
         };
         view.request_missing_icons(cx);
@@ -614,59 +614,59 @@ impl DockView {
             .map(|(i, _)| i);
     }
 
-    fn ensure_animation(&mut self, cx: &mut Context<Self>) {
-        if self.animating {
-            return;
-        }
-        self.animating = true;
-        cx.spawn(async move |this, cx| {
-            loop {
-                Timer::after(Duration::from_millis(16)).await;
-                let keep_going = this
-                    .update(cx, |view, cx| {
-                        let mut moving = false;
-                        for idx in 0..view.slots.len() {
-                            let target = view.target_scale_for(idx);
-                            let cur = view.slots[idx].scale;
-                            let diff = target - cur;
-                            if diff.abs() > 0.008 {
-                                view.slots[idx].scale = cur + diff * 0.34;
-                                moving = true;
-                            } else if (cur - target).abs() > 0.0 {
-                                view.slots[idx].scale = target;
-                                moving = true;
-                            }
-                            let sx = view.slots[idx].slide_x;
-                            if sx.abs() > 0.5 {
-                                view.slots[idx].slide_x = sx * 0.70;
-                                moving = true;
-                            } else if sx != 0.0 {
-                                view.slots[idx].slide_x = 0.0;
-                                moving = true;
-                            }
-                            if let Some(started) = view.slots[idx].bounce_started {
-                                if bounce_offset_dips(Some(started)).is_some() {
-                                    moving = true;
-                                } else {
-                                    view.slots[idx].bounce_started = None;
-                                    moving = true;
-                                }
-                            }
-                        }
-                        if moving {
-                            cx.notify();
-                        } else {
-                            view.animating = false;
-                        }
-                        moving
-                    })
-                    .unwrap_or(false);
-                if !keep_going {
-                    break;
+    /// Advances all spring/bounce animations using framerate-independent delta-time
+    /// and returns `true` if another VSync frame is needed.
+    fn step_animations(&mut self) -> bool {
+        let now = Instant::now();
+        let dt = self
+            .last_frame
+            .map_or(1.0 / 60.0, |prev| now.duration_since(prev).as_secs_f32())
+            .clamp(0.001, 0.05);
+        self.last_frame = Some(now);
+
+        let scale_k = 1.0 - (-22.0 * dt).exp();
+        let slide_k = 1.0 - (-24.0 * dt).exp();
+        let mut moving = false;
+
+        for idx in 0..self.slots.len() {
+            let target = self.target_scale_for(idx);
+            let cur = self.slots[idx].scale;
+            let diff = target - cur;
+            if diff.abs() > 0.004 {
+                self.slots[idx].scale = cur + diff * scale_k;
+                moving = true;
+            } else if (cur - target).abs() > 0.0 {
+                self.slots[idx].scale = target;
+            }
+
+            let sx = self.slots[idx].slide_x;
+            if sx.abs() > 0.35 {
+                self.slots[idx].slide_x = sx * (1.0 - slide_k);
+                moving = true;
+            } else if sx != 0.0 {
+                self.slots[idx].slide_x = 0.0;
+            }
+
+            if let Some(started) = self.slots[idx].bounce_started {
+                if bounce_offset_dips(Some(started)).is_some() {
+                    moving = true;
+                } else {
+                    self.slots[idx].bounce_started = None;
                 }
             }
-        })
-        .detach();
+        }
+
+        if !moving {
+            self.last_frame = None;
+        }
+        moving
+    }
+
+    fn ensure_animation(&mut self, cx: &mut Context<Self>) {
+        if self.last_frame.is_none() {
+            self.last_frame = Some(Instant::now());
+            cx.notify();
+        }
     }
 
     fn handle_right_click(&self, cx: &mut Context<Self>) {
@@ -746,7 +746,11 @@ impl DockView {
 }
 
 impl Render for DockView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.step_animations() {
+            // Native DWM VSync frame pacing (locked to 60/120/144Hz display refresh rate).
+            window.request_animation_frame();
+        }
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
         let radius = self.settings.corner_radius_dips();
@@ -1061,7 +1065,6 @@ impl Render for DockView {
                             .w(px(ghost_dim))
                             .h(px(ghost_dim))
                             .opacity(0.88)
-                            .shadow_lg()
                             .flex()
                             .items_center()
                             .justify_center()
@@ -1105,7 +1108,6 @@ impl Render for DockView {
                                 .bg(rgba(0x181b24f2))
                                 .border_1()
                                 .border_color(rgba(0xffffff2c))
-                                .shadow_md()
                                 .text_xs()
                                 .text_color(rgba(0xf8fafcff))
                                 .whitespace_nowrap()
