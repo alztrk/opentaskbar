@@ -103,6 +103,8 @@ struct DockSlot {
     hwnds: Vec<usize>,
     is_foreground: bool,
     scale: f32,
+    /// Smooth horizontal spring offset (DIPs) when neighbors slide aside during drag reorder.
+    slide_x: f32,
     bounce_started: Option<Instant>,
 }
 
@@ -110,6 +112,8 @@ struct DockSlot {
 struct DragState {
     idx: usize,
     start_x: f32,
+    current_x: f32,
+    grab_offset_x: f32,
     active: bool,
 }
 
@@ -146,8 +150,8 @@ fn exe_display_name(exe_path: &str, fallback_title: &str) -> String {
         .unwrap_or_else(|| fallback_title.to_owned())
 }
 
-/// Builds dock slots while preserving the exact order of previously seen unpinned apps
-/// so clicking/focusing an app never causes icons to jump or reorder.
+/// Builds a single unified slot list where pinned and unpinned apps live together and
+/// preserve their exact user-ordered positions across refreshes.
 fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot]) -> Vec<DockSlot> {
     let mut by_exe: HashMap<String, Vec<&RunningWindow>> = HashMap::new();
     for win in running {
@@ -157,29 +161,10 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
             .push(win);
     }
 
-    let mut next: Vec<DockSlot> = Vec::with_capacity(pins.len() + by_exe.len());
+    // Resolve running windows matched to each pin.
+    let mut pin_matches: HashMap<String, (Vec<usize>, bool, Option<String>)> = HashMap::new();
     let mut claimed_exes: HashMap<String, bool> = HashMap::new();
-
-    // 1. Pinned apps in their stable pin order (preserving custom drag order from `prev` if present).
-    let mut ordered_pins: Vec<&PinnedApp> = Vec::with_capacity(pins.len());
-    for old in prev.iter().filter(|s| s.pinned) {
-        if let Some(pin) = pins
-            .iter()
-            .find(|p| p.launch_path.eq_ignore_ascii_case(&old.key))
-        {
-            ordered_pins.push(pin);
-        }
-    }
     for pin in pins {
-        if !ordered_pins
-            .iter()
-            .any(|p| p.launch_path.eq_ignore_ascii_case(&pin.launch_path))
-        {
-            ordered_pins.push(pin);
-        }
-    }
-
-    for pin in ordered_pins {
         let matched_key = pin
             .target_exe
             .as_ref()
@@ -197,8 +182,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                     })
                     .cloned()
             });
-
-        let (hwnds, is_foreground) = match matched_key {
+        let (hwnds, is_fg) = match matched_key {
             Some(ref key) => {
                 claimed_exes.insert(key.clone(), true);
                 let list = &by_exe[key];
@@ -209,27 +193,39 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
             }
             None => (Vec::new(), false),
         };
-
-        next.push(DockSlot {
-            key: pin.launch_path.to_lowercase(),
-            pinned: true,
-            label: pin.name.clone().into(),
-            launch_path: pin.launch_path.clone(),
-            icon_source: pin.icon_source.clone(),
-            hwnds,
-            is_foreground,
-            scale: 1.0,
-            bounce_started: None,
-        });
+        pin_matches.insert(pin.launch_path.to_lowercase(), (hwnds, is_fg, matched_key));
     }
 
-    // 2. Keep already-open unpinned apps in their exact previous order (immune to Z-order changes).
-    for old in prev.iter().filter(|s| !s.pinned) {
-        if claimed_exes.contains_key(&old.key) {
-            continue;
-        }
-        if let Some(list) = by_exe.get(&old.key) {
-            claimed_exes.insert(old.key.clone(), true);
+    let mut next: Vec<DockSlot> = Vec::with_capacity(pins.len() + by_exe.len());
+    let mut emitted_keys: HashMap<String, bool> = HashMap::new();
+
+    // 1. Walk existing unified order (`prev`) so dragged pinned & unpinned apps stay exactly where placed.
+    for old in prev {
+        if old.pinned {
+            if let Some(pin) = pins
+                .iter()
+                .find(|p| p.launch_path.eq_ignore_ascii_case(&old.key))
+            {
+                let key = pin.launch_path.to_lowercase();
+                let (hwnds, is_foreground, _) = pin_matches.get(&key).cloned().unwrap_or_default();
+                emitted_keys.insert(key.clone(), true);
+                next.push(DockSlot {
+                    key,
+                    pinned: true,
+                    label: pin.name.clone().into(),
+                    launch_path: pin.launch_path.clone(),
+                    icon_source: pin.icon_source.clone(),
+                    hwnds,
+                    is_foreground,
+                    scale: old.scale,
+                    slide_x: old.slide_x,
+                    bounce_started: old.bounce_started,
+                });
+            }
+        } else if !claimed_exes.contains_key(&old.key)
+            && let Some(list) = by_exe.get(&old.key)
+        {
+            emitted_keys.insert(old.key.clone(), true);
             next.push(DockSlot {
                 key: old.key.clone(),
                 pinned: false,
@@ -239,18 +235,41 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                 hwnds: list.iter().map(|w| w.hwnd).collect(),
                 is_foreground: list.iter().any(|w| w.is_foreground),
                 scale: old.scale,
+                slide_x: old.slide_x,
                 bounce_started: old.bounce_started,
             });
         }
     }
 
+    // 2. Append any pins not yet in `prev` (initial startup or newly pinned).
+    for pin in pins {
+        let key = pin.launch_path.to_lowercase();
+        if emitted_keys.contains_key(&key) {
+            continue;
+        }
+        let (hwnds, is_foreground, _) = pin_matches.get(&key).cloned().unwrap_or_default();
+        emitted_keys.insert(key.clone(), true);
+        next.push(DockSlot {
+            key,
+            pinned: true,
+            label: pin.name.clone().into(),
+            launch_path: pin.launch_path.clone(),
+            icon_source: pin.icon_source.clone(),
+            hwnds,
+            is_foreground,
+            scale: 1.0,
+            slide_x: 0.0,
+            bounce_started: None,
+        });
+    }
+
     // 3. Append newly launched unpinned apps at the end.
     for win in running {
         let key = win.exe_path.to_lowercase();
-        if claimed_exes.contains_key(&key) {
+        if claimed_exes.contains_key(&key) || emitted_keys.contains_key(&key) {
             continue;
         }
-        claimed_exes.insert(key.clone(), true);
+        emitted_keys.insert(key.clone(), true);
         let list = &by_exe[&key];
         let label = exe_display_name(&win.exe_path, &win.title);
         let icon_source = pins::resolve_windowsapps_aumid(&win.exe_path)
@@ -265,19 +284,11 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
             hwnds: list.iter().map(|w| w.hwnd).collect(),
             is_foreground: list.iter().any(|w| w.is_foreground),
             scale: 1.0,
+            slide_x: 0.0,
             bounce_started: None,
         });
     }
 
-    // Preserve animation state for pinned slots across refreshes.
-    for slot in &mut next {
-        if slot.pinned
-            && let Some(old) = prev.iter().find(|p| p.key == slot.key)
-        {
-            slot.scale = old.scale;
-            slot.bounce_started = old.bounce_started;
-        }
-    }
     next
 }
 
@@ -484,11 +495,13 @@ impl DockView {
         pill_left + 15.0 + index * (base + 4.0) + base * 0.5
     }
 
-    /// Handles pointer motion during an active slot drag, swapping slots smoothly as the pointer crosses centers.
+    /// Handles pointer motion during an active slot drag: the dragged icon floats smoothly
+    /// under the cursor while neighboring slots glide aside with spring animation.
     fn update_drag(&mut self, mx: f32) {
         let Some(mut drag) = self.drag else {
             return;
         };
+        drag.current_x = mx;
         if !drag.active && (mx - drag.start_x).abs() >= DRAG_THRESHOLD_PX {
             drag.active = true;
             self.hover_mouse_x = None;
@@ -496,17 +509,31 @@ impl DockView {
             self.hovered_shell = None;
         }
         if drag.active && !self.slots.is_empty() {
+            let center_x = mx - drag.grab_offset_x;
             let target = self
                 .slots
                 .iter()
                 .enumerate()
-                .map(|(i, _)| (i, (mx - self.resting_slot_center_x(i)).abs()))
+                .map(|(i, _)| (i, (center_x - self.resting_slot_center_x(i)).abs()))
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(i, _)| i)
                 .unwrap_or(drag.idx);
             if target != drag.idx && target < self.slots.len() && drag.idx < self.slots.len() {
-                let item = self.slots.remove(drag.idx);
+                let step = self.settings.icon_dips() + slot_gap(&self.settings);
+                let old_idx = drag.idx;
+                let item = self.slots.remove(old_idx);
                 self.slots.insert(target, item);
+                // Give every shifted neighbor a spring displacement from its old screen position
+                // so it visibly glides smoothly into its new slot.
+                if target > old_idx {
+                    for slot in &mut self.slots[old_idx..target] {
+                        slot.slide_x += step;
+                    }
+                } else {
+                    for slot in &mut self.slots[(target + 1)..=old_idx] {
+                        slot.slide_x -= step;
+                    }
+                }
                 drag.idx = target;
                 self.pressed_idx = Some(target);
             }
@@ -595,6 +622,13 @@ impl DockView {
                                 moving = true;
                             } else if (cur - target).abs() > 0.0 {
                                 view.slots[idx].scale = target;
+                            }
+                            let sx = view.slots[idx].slide_x;
+                            if sx.abs() > 0.35 {
+                                view.slots[idx].slide_x = sx * 0.72;
+                                moving = true;
+                            } else if sx != 0.0 {
+                                view.slots[idx].slide_x = 0.0;
                             }
                             if let Some(started) = view.slots[idx].bounce_started {
                                 if bounce_offset_dips(Some(started)).is_some() {
@@ -716,24 +750,35 @@ impl Render for DockView {
         } else {
             rgba(0x14171f00 | alpha)
         };
-        let is_dragging = self.drag.is_some_and(|d| d.active);
-        let hovered_tooltip: Option<(SharedString, f32)> = if is_dragging {
+        let active_drag = self.drag.filter(|d| d.active);
+        let is_dragging = active_drag.is_some();
+        // Automatically position tooltip 8px above the exact visual top edge of the hovered item:
+        // - Shell buttons (no fisheye) -> 8px above the dock pill
+        // - App icons (with fisheye) -> 8px above the magnified icon's live top edge
+        let hovered_tooltip: Option<(SharedString, f32, f32)> = if is_dragging {
             None
         } else if let Some(shell) = self.hovered_shell {
             Some((
                 SharedString::from(shell.label()),
                 self.live_shell_center_x(shell),
+                VERTICAL_EDGE_GAP + pill_h + 8.0,
             ))
         } else if let Some(idx) = self.hovered_idx
             && let Some(slot) = self.slots.get(idx)
         {
-            Some((slot.label.clone(), self.live_slot_center_x(idx)))
+            let bounce = bounce_offset_dips(slot.bounce_started).unwrap_or(0.0);
+            let lift = ((slot.scale - 1.0) * 14.0 + bounce).max(0.0);
+            let icon_top = VERTICAL_EDGE_GAP + 6.0 + 3.5 + 4.0 + lift + base * slot.scale;
+            let top_edge = icon_top.max(VERTICAL_EDGE_GAP + pill_h);
+            Some((
+                slot.label.clone(),
+                self.live_slot_center_x(idx),
+                top_edge + 8.0,
+            ))
         } else {
             None
         };
         let (win_w, _) = compute_window_dips(&self.settings, self.slots.len());
-        // Place tooltip well above peak magnified icons so fisheye never covers it.
-        let tooltip_bottom = VERTICAL_EDGE_GAP + pill_h + MAG_HEADROOM - 2.0;
 
         div()
             .size_full()
@@ -837,24 +882,16 @@ impl Render for DockView {
                                 }
                             }))
                             .children(self.slots.iter().enumerate().map(|(idx, slot)| {
-                                let dragging_this =
-                                    self.drag.is_some_and(|d| d.active && d.idx == idx);
+                                let dragging_this = active_drag.is_some_and(|d| d.idx == idx);
                                 let pressed = self.pressed_idx == Some(idx) && !dragging_this;
-                                let press_factor = if dragging_this {
-                                    1.08
-                                } else if pressed {
-                                    0.88
-                                } else {
-                                    1.0
-                                };
+                                let press_factor = if pressed { 0.88 } else { 1.0 };
                                 let slot_w = base * slot.scale;
                                 let dim = slot_w * press_factor;
                                 let bounce = bounce_offset_dips(slot.bounce_started).unwrap_or(0.0);
-                                let lift = ((slot.scale - 1.0) * 14.0
-                                    + bounce
-                                    + if dragging_this { 6.0 } else { 0.0 }
+                                let lift = ((slot.scale - 1.0) * 14.0 + bounce
                                     - if pressed { 2.0 } else { 0.0 })
                                 .max(0.0);
+                                let slide_x = slot.slide_x;
                                 let icon =
                                     self.icons.get(&slot.icon_source).and_then(|o| o.clone());
                                 let hwnds = slot.hwnds.clone();
@@ -872,8 +909,11 @@ impl Render for DockView {
 
                                 div()
                                     .id(SharedString::from(format!("dock-slot-{idx}")))
+                                    .relative()
+                                    .left(px(slide_x))
                                     .w(px(slot_w))
-                                    .when(dragging_this, |el| el.opacity(0.75))
+                                    // Hide underlying slot while its floating ghost tracks the cursor.
+                                    .when(dragging_this, |el| el.opacity(0.0))
                                     .flex()
                                     .flex_col()
                                     .items_center()
@@ -883,10 +923,14 @@ impl Render for DockView {
                                         MouseButton::Left,
                                         cx.listener(
                                             move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                                let mx: f32 = event.position.x.into();
+                                                let center = this.live_slot_center_x(idx);
                                                 this.pressed_idx = Some(idx);
                                                 this.drag = Some(DragState {
                                                     idx,
-                                                    start_x: event.position.x.into(),
+                                                    start_x: mx,
+                                                    current_x: mx,
+                                                    grab_offset_x: mx - center,
                                                     active: false,
                                                 });
                                                 cx.notify();
@@ -965,8 +1009,57 @@ impl Render for DockView {
                             })),
                     ),
             )
-            // Tooltip rendered LAST (always on top of magnified icons) and centered directly over hovered item.
-            .when_some(hovered_tooltip, |el, (label, center_x)| {
+            // Floating ghost of the dragged icon tracking the cursor smoothly in real time.
+            .when_some(
+                active_drag.and_then(|d| self.slots.get(d.idx).map(|s| (d, s))),
+                |el, (drag, slot)| {
+                    let ghost_dim = base * 1.14;
+                    let left_x = (drag.current_x - drag.grab_offset_x - ghost_dim * 0.5)
+                        .clamp(4.0, (win_w - ghost_dim - 4.0).max(4.0));
+                    let bottom_y = VERTICAL_EDGE_GAP + 20.0;
+                    let icon = self.icons.get(&slot.icon_source).and_then(|o| o.clone());
+                    let fallback_char: SharedString = slot
+                        .label
+                        .chars()
+                        .next()
+                        .unwrap_or('?')
+                        .to_uppercase()
+                        .to_string()
+                        .into();
+                    el.child(
+                        div()
+                            .absolute()
+                            .left(px(left_x))
+                            .bottom(px(bottom_y))
+                            .w(px(ghost_dim))
+                            .h(px(ghost_dim))
+                            .opacity(0.88)
+                            .shadow_lg()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(match icon {
+                                Some(image) => img(image)
+                                    .w(px(ghost_dim))
+                                    .h(px(ghost_dim))
+                                    .into_any_element(),
+                                None => div()
+                                    .size_full()
+                                    .rounded(px(10.0))
+                                    .bg(rgba(0x334155cc))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .text_sm()
+                                    .text_color(rgba(0xf8fafcff))
+                                    .child(fallback_char)
+                                    .into_any_element(),
+                            }),
+                    )
+                },
+            )
+            // Tooltip rendered LAST (always on top of magnified icons) at the exact auto-computed height.
+            .when_some(hovered_tooltip, |el, (label, center_x, tooltip_bottom)| {
                 let est_w = (label.len() as f32 * 6.8 + 22.0).clamp(54.0, 220.0);
                 let left_x = (center_x - est_w * 0.5).clamp(6.0, (win_w - est_w - 6.0).max(6.0));
                 el.child(
