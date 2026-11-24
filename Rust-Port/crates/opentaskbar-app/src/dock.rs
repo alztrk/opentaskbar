@@ -25,11 +25,12 @@ use crate::pins::{self, PinnedApp};
 use crate::win32::{self, ContextAction};
 
 const VERTICAL_EDGE_GAP: f32 = 5.0;
-const TOOLTIP_HEADROOM: f32 = 34.0;
-const MAG_HEADROOM: f32 = 30.0;
+const TOOLTIP_HEADROOM: f32 = 42.0;
+const MAG_HEADROOM: f32 = 34.0;
 const FISHEYE_PEAK: f32 = 0.42;
 const FISHEYE_RADIUS_SLOTS: f32 = 2.4;
 const BOUNCE_DURATION_SECS: f32 = 0.42;
+const DRAG_THRESHOLD_PX: f32 = 6.0;
 
 const SVG_START: &[u8] =
     br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
@@ -105,6 +106,13 @@ struct DockSlot {
     bounce_started: Option<Instant>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct DragState {
+    idx: usize,
+    start_x: f32,
+    active: bool,
+}
+
 struct DockView {
     hwnd: usize,
     settings: DockSettings,
@@ -117,6 +125,8 @@ struct DockView {
     hovered_shell: Option<ShellButton>,
     pressed_idx: Option<usize>,
     pressed_shell: Option<ShellButton>,
+    drag: Option<DragState>,
+    suppress_next_click: bool,
     animating: bool,
     last_window_rect: Option<(i32, i32, i32, i32)>,
 }
@@ -150,8 +160,26 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
     let mut next: Vec<DockSlot> = Vec::with_capacity(pins.len() + by_exe.len());
     let mut claimed_exes: HashMap<String, bool> = HashMap::new();
 
-    // 1. Pinned apps in their stable pin order.
+    // 1. Pinned apps in their stable pin order (preserving custom drag order from `prev` if present).
+    let mut ordered_pins: Vec<&PinnedApp> = Vec::with_capacity(pins.len());
+    for old in prev.iter().filter(|s| s.pinned) {
+        if let Some(pin) = pins
+            .iter()
+            .find(|p| p.launch_path.eq_ignore_ascii_case(&old.key))
+        {
+            ordered_pins.push(pin);
+        }
+    }
     for pin in pins {
+        if !ordered_pins
+            .iter()
+            .any(|p| p.launch_path.eq_ignore_ascii_case(&pin.launch_path))
+        {
+            ordered_pins.push(pin);
+        }
+    }
+
+    for pin in ordered_pins {
         let matched_key = pin
             .target_exe
             .as_ref()
@@ -330,6 +358,8 @@ impl DockView {
             hovered_shell: None,
             pressed_idx: None,
             pressed_shell: None,
+            drag: None,
+            suppress_next_click: false,
             animating: false,
             last_window_rect: None,
         };
@@ -420,8 +450,96 @@ impl DockView {
         apps_left + (idx as f32) * (base + gap) + base * 0.5
     }
 
+    /// Live horizontal center X of app slot `idx` in window logical DIPs (accounts for current magnification).
+    fn live_slot_center_x(&self, idx: usize) -> f32 {
+        let base = self.settings.icon_dips();
+        let gap = slot_gap(&self.settings);
+        let (win_w, _) = compute_window_dips(&self.settings, self.slots.len());
+        let icons_w: f32 = self.slots.iter().map(|s| base * s.scale).sum::<f32>()
+            + gap * (self.slots.len().saturating_sub(1) as f32);
+        let pill_w = (shell_section_width(base) + icons_w + 30.0).max(160.0);
+        let pill_left = (win_w - pill_w) * 0.5;
+        let mut cursor = pill_left + 15.0 + shell_section_width(base);
+        for i in 0..idx.min(self.slots.len()) {
+            cursor += base * self.slots[i].scale + gap;
+        }
+        let w = self.slots.get(idx).map_or(base, |s| base * s.scale);
+        cursor + w * 0.5
+    }
+
+    /// Live horizontal center X of a left-side Windows shell button in window logical DIPs.
+    fn live_shell_center_x(&self, kind: ShellButton) -> f32 {
+        let base = self.settings.icon_dips();
+        let gap = slot_gap(&self.settings);
+        let (win_w, _) = compute_window_dips(&self.settings, self.slots.len());
+        let icons_w: f32 = self.slots.iter().map(|s| base * s.scale).sum::<f32>()
+            + gap * (self.slots.len().saturating_sub(1) as f32);
+        let pill_w = (shell_section_width(base) + icons_w + 30.0).max(160.0);
+        let pill_left = (win_w - pill_w) * 0.5;
+        let index = match kind {
+            ShellButton::Start => 0.0,
+            ShellButton::Search => 1.0,
+            ShellButton::TaskView => 2.0,
+        };
+        pill_left + 15.0 + index * (base + 4.0) + base * 0.5
+    }
+
+    /// Handles pointer motion during an active slot drag, swapping slots smoothly as the pointer crosses centers.
+    fn update_drag(&mut self, mx: f32) {
+        let Some(mut drag) = self.drag else {
+            return;
+        };
+        if !drag.active && (mx - drag.start_x).abs() >= DRAG_THRESHOLD_PX {
+            drag.active = true;
+            self.hover_mouse_x = None;
+            self.hovered_idx = None;
+            self.hovered_shell = None;
+        }
+        if drag.active && !self.slots.is_empty() {
+            let target = self
+                .slots
+                .iter()
+                .enumerate()
+                .map(|(i, _)| (i, (mx - self.resting_slot_center_x(i)).abs()))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+                .unwrap_or(drag.idx);
+            if target != drag.idx && target < self.slots.len() && drag.idx < self.slots.len() {
+                let item = self.slots.remove(drag.idx);
+                self.slots.insert(target, item);
+                drag.idx = target;
+                self.pressed_idx = Some(target);
+            }
+        }
+        self.drag = Some(drag);
+    }
+
+    /// Finishes an active drag and persists the new pinned order to `settings.json`.
+    fn finish_drag(&mut self) {
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        if drag.active {
+            self.suppress_next_click = true;
+            let order: Vec<String> = self
+                .slots
+                .iter()
+                .filter(|s| s.pinned)
+                .map(|s| s.launch_path.clone())
+                .collect();
+            self.settings.pin_order = Some(order);
+            let _ = opentaskbar_core::settings::save_to(
+                &opentaskbar_core::settings::settings_path(),
+                &self.settings,
+            );
+        }
+    }
+
     /// Smooth cosine bell magnification based on continuous mouse X vs resting slot centers.
     fn target_scale_for(&self, idx: usize) -> f32 {
+        if self.drag.is_some_and(|d| d.active) {
+            return 1.0;
+        }
         if !self.settings.magnification_enabled || !self.settings.animations_enabled {
             return 1.0;
         }
@@ -598,14 +716,24 @@ impl Render for DockView {
         } else {
             rgba(0x14171f00 | alpha)
         };
-        let hovered_label: Option<SharedString> = self
-            .hovered_shell
-            .map(|b| SharedString::from(b.label()))
-            .or_else(|| {
-                self.hovered_idx
-                    .and_then(|i| self.slots.get(i))
-                    .map(|s| s.label.clone())
-            });
+        let is_dragging = self.drag.is_some_and(|d| d.active);
+        let hovered_tooltip: Option<(SharedString, f32)> = if is_dragging {
+            None
+        } else if let Some(shell) = self.hovered_shell {
+            Some((
+                SharedString::from(shell.label()),
+                self.live_shell_center_x(shell),
+            ))
+        } else if let Some(idx) = self.hovered_idx
+            && let Some(slot) = self.slots.get(idx)
+        {
+            Some((slot.label.clone(), self.live_slot_center_x(idx)))
+        } else {
+            None
+        };
+        let (win_w, _) = compute_window_dips(&self.settings, self.slots.len());
+        // Place tooltip well above peak magnified icons so fisheye never covers it.
+        let tooltip_bottom = VERTICAL_EDGE_GAP + pill_h + MAG_HEADROOM - 2.0;
 
         div()
             .size_full()
@@ -621,9 +749,18 @@ impl Render for DockView {
                     this.handle_right_click(cx);
                 }),
             )
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                if this.drag.is_some() {
+                    let mx: f32 = event.position.x.into();
+                    this.update_drag(mx);
+                    this.ensure_animation(cx);
+                    cx.notify();
+                }
+            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _, _window, cx| {
+                    this.finish_drag();
                     if this.pressed_idx.is_some() || this.pressed_shell.is_some() {
                         this.pressed_idx = None;
                         this.pressed_shell = None;
@@ -645,21 +782,6 @@ impl Render for DockView {
                         |el| el.border_1().border_color(rgba(0xffffff28)).shadow_md(),
                     ),
             )
-            .when_some(hovered_label, |el, label| {
-                el.child(
-                    div()
-                        .mb(px(6.0))
-                        .px(px(10.0))
-                        .py(px(4.0))
-                        .rounded(px(8.0))
-                        .bg(rgba(0x181b24eb))
-                        .border_1()
-                        .border_color(rgba(0xffffff24))
-                        .text_xs()
-                        .text_color(rgba(0xf1f5f9ff))
-                        .child(label),
-                )
-            })
             // Shell buttons + divider + app icons float over the fixed-height pill.
             .child(
                 div()
@@ -694,15 +816,19 @@ impl Render for DockView {
                             .on_mouse_move(cx.listener(
                                 |this, event: &gpui::MouseMoveEvent, _, cx| {
                                     let mx: f32 = event.position.x.into();
-                                    this.hover_mouse_x = Some(mx);
-                                    this.hovered_shell = None;
-                                    this.update_hovered_index_from_mouse();
+                                    if this.drag.is_some() {
+                                        this.update_drag(mx);
+                                    } else {
+                                        this.hover_mouse_x = Some(mx);
+                                        this.hovered_shell = None;
+                                        this.update_hovered_index_from_mouse();
+                                    }
                                     this.ensure_animation(cx);
                                     cx.notify();
                                 },
                             ))
                             .on_hover(cx.listener(|this, active: &bool, _, cx| {
-                                if !*active {
+                                if !*active && this.drag.is_none() {
                                     this.hover_mouse_x = None;
                                     this.hovered_idx = None;
                                     this.pressed_idx = None;
@@ -711,12 +837,22 @@ impl Render for DockView {
                                 }
                             }))
                             .children(self.slots.iter().enumerate().map(|(idx, slot)| {
-                                let pressed = self.pressed_idx == Some(idx);
-                                let press_factor = if pressed { 0.88 } else { 1.0 };
+                                let dragging_this =
+                                    self.drag.is_some_and(|d| d.active && d.idx == idx);
+                                let pressed = self.pressed_idx == Some(idx) && !dragging_this;
+                                let press_factor = if dragging_this {
+                                    1.08
+                                } else if pressed {
+                                    0.88
+                                } else {
+                                    1.0
+                                };
                                 let slot_w = base * slot.scale;
                                 let dim = slot_w * press_factor;
                                 let bounce = bounce_offset_dips(slot.bounce_started).unwrap_or(0.0);
-                                let lift = ((slot.scale - 1.0) * 14.0 + bounce
+                                let lift = ((slot.scale - 1.0) * 14.0
+                                    + bounce
+                                    + if dragging_this { 6.0 } else { 0.0 }
                                     - if pressed { 2.0 } else { 0.0 })
                                 .max(0.0);
                                 let icon =
@@ -737,6 +873,7 @@ impl Render for DockView {
                                 div()
                                     .id(SharedString::from(format!("dock-slot-{idx}")))
                                     .w(px(slot_w))
+                                    .when(dragging_this, |el| el.opacity(0.75))
                                     .flex()
                                     .flex_col()
                                     .items_center()
@@ -744,13 +881,26 @@ impl Render for DockView {
                                     .cursor_pointer()
                                     .on_mouse_down(
                                         MouseButton::Left,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.pressed_idx = Some(idx);
-                                            cx.notify();
-                                        }),
+                                        cx.listener(
+                                            move |this, event: &gpui::MouseDownEvent, _, cx| {
+                                                this.pressed_idx = Some(idx);
+                                                this.drag = Some(DragState {
+                                                    idx,
+                                                    start_x: event.position.x.into(),
+                                                    active: false,
+                                                });
+                                                cx.notify();
+                                            },
+                                        ),
                                     )
                                     .on_click(cx.listener(move |this, _, _window, cx| {
+                                        this.finish_drag();
                                         this.pressed_idx = None;
+                                        if this.suppress_next_click {
+                                            this.suppress_next_click = false;
+                                            cx.notify();
+                                            return;
+                                        }
                                         if let Some(slot) = this.slots.get_mut(idx) {
                                             slot.bounce_started = Some(Instant::now());
                                         }
@@ -815,12 +965,48 @@ impl Render for DockView {
                             })),
                     ),
             )
+            // Tooltip rendered LAST (always on top of magnified icons) and centered directly over hovered item.
+            .when_some(hovered_tooltip, |el, (label, center_x)| {
+                let est_w = (label.len() as f32 * 6.8 + 22.0).clamp(54.0, 220.0);
+                let left_x = (center_x - est_w * 0.5).clamp(6.0, (win_w - est_w - 6.0).max(6.0));
+                el.child(
+                    div()
+                        .absolute()
+                        .left(px(left_x))
+                        .bottom(px(tooltip_bottom))
+                        .w(px(est_w))
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .px(px(10.0))
+                                .py(px(4.0))
+                                .rounded(px(8.0))
+                                .bg(rgba(0x181b24f2))
+                                .border_1()
+                                .border_color(rgba(0xffffff2c))
+                                .shadow_md()
+                                .text_xs()
+                                .text_color(rgba(0xf8fafcff))
+                                .whitespace_nowrap()
+                                .child(label),
+                        ),
+                )
+            })
     }
 }
 
 pub fn run(settings: DockSettings) {
     let auto_hide = settings.auto_hide != AutoHideMode::Disabled;
-    let initial_pins = pins::load_pins();
+    let mut initial_pins = pins::load_pins();
+    if let Some(ref order) = settings.pin_order {
+        initial_pins.sort_by_key(|p| {
+            order
+                .iter()
+                .position(|saved| saved.eq_ignore_ascii_case(&p.launch_path))
+                .unwrap_or(usize::MAX)
+        });
+    }
     let initial_running = tracker::enumerate_windows();
     let initial_slots = build_slots(&initial_pins, &initial_running, &[]);
     let (init_w, init_h) = compute_window_dips(&settings, initial_slots.len());
