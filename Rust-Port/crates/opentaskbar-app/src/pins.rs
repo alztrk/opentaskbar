@@ -1,14 +1,16 @@
-//! Reads Windows taskbar pinned shortcuts (`.lnk`), resolves their target executable
-//! or Store AUMID (so icons have no shortcut arrows and match running windows accurately),
-//! and launches applications via `ShellExecuteW` on a helper thread.
+//! Reads Windows taskbar pinned shortcuts (`.lnk`), mirroring OpenTaskbar C#'s
+//! `WindowsTaskbarPinImporter`: resolves `PKEY_AppUserModel_ID`,
+//! `PKEY_Link_TargetParsingPath` (`::{4234d49b-0245-4df3-b780-3893943456e1}\<AUMID>`),
+//! `IShellLinkW::GetIconLocation`, and `IShellLinkW::GetPath`.
 
 use std::fs;
 use std::path::PathBuf;
 
 use windows::Win32::Foundation::PROPERTYKEY;
+use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, IPersistFile,
-    STGM_READ,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
+    CoTaskMemFree, IPersistFile, STGM_READ,
 };
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::Win32::UI::Shell::{IShellLinkW, SLGP_RAWPATH, ShellLink};
@@ -22,6 +24,14 @@ const PKEY_APPUSERMODEL_ID: PROPERTYKEY = PROPERTYKEY {
     pid: 5,
 };
 
+/// `System.Link.TargetParsingPath` (`{B9B4B3FC-2B51-4A42-B5D8-324146AFCF25}, 2`).
+const PKEY_LINK_TARGET_PARSING_PATH: PROPERTYKEY = PROPERTYKEY {
+    fmtid: GUID::from_u128(0xB9B4_B3FC_2B51_4A42_B5D8_3241_46AF_CF25),
+    pid: 2,
+};
+
+const APPS_FOLDER_CLSID_PREFIX: &str = "::{4234d49b-0245-4df3-b780-3893943456e1}\\";
+
 #[derive(Clone, Debug)]
 pub struct PinnedApp {
     pub name: String,
@@ -29,7 +39,7 @@ pub struct PinnedApp {
     pub launch_path: String,
     /// Resolved executable path when available (used to match running windows).
     pub target_exe: Option<String>,
-    /// Parsing name for `IShellItemImageFactory` (`shell:AppsFolder\<AUMID>`, resolved `.exe`, or `.lnk`).
+    /// Resolved icon source (`shell:AppsFolder\<AUMID>`, custom icon path, resolved `.exe`, or `.lnk`).
     pub icon_source: String,
 }
 
@@ -40,18 +50,47 @@ fn pins_dir() -> PathBuf {
         .join(r"Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar")
 }
 
-fn resolve_shortcut(lnk_path: &str) -> (Option<String>, Option<String>) {
-    // SAFETY: COM STA calls to inspect a `.lnk` file's target path and AUMID.
+unsafe fn read_prop_string(store: &IPropertyStore, key: &PROPERTYKEY) -> Option<String> {
+    // SAFETY: caller ensures COM STA is initialized and `store` is valid.
+    unsafe {
+        let val = store.GetValue(key).ok()?;
+        let pwstr = PropVariantToStringAlloc(&val).ok()?;
+        let text = pwstr.to_string().ok();
+        CoTaskMemFree(Some(pwstr.0.cast()));
+        text.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+    }
+}
+
+struct ShortcutMeta {
+    target_exe: Option<String>,
+    aumid: Option<String>,
+    icon_location: Option<String>,
+}
+
+fn resolve_shortcut(lnk_path: &str) -> ShortcutMeta {
+    // SAFETY: COM STA calls to inspect `.lnk` metadata.
     unsafe {
         let Ok(link) = CoCreateInstance::<_, IShellLinkW>(&ShellLink, None, CLSCTX_INPROC_SERVER)
         else {
-            return (None, None);
+            return ShortcutMeta {
+                target_exe: None,
+                aumid: None,
+                icon_location: None,
+            };
         };
         let Ok(persist) = link.cast::<IPersistFile>() else {
-            return (None, None);
+            return ShortcutMeta {
+                target_exe: None,
+                aumid: None,
+                icon_location: None,
+            };
         };
         if persist.Load(&HSTRING::from(lnk_path), STGM_READ).is_err() {
-            return (None, None);
+            return ShortcutMeta {
+                target_exe: None,
+                aumid: None,
+                icon_location: None,
+            };
         }
 
         let mut target_buf = [0u16; 1024];
@@ -70,17 +109,54 @@ fn resolve_shortcut(lnk_path: &str) -> (Option<String>, Option<String>) {
             None
         };
 
+        let mut icon_buf = [0u16; 1024];
+        let mut icon_idx = 0i32;
+        let icon_location = if link.GetIconLocation(&mut icon_buf, &mut icon_idx).is_ok() {
+            let len = icon_buf
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(icon_buf.len());
+            let raw = String::from_utf16_lossy(&icon_buf[..len]);
+            let expanded = expand_env_vars(raw.trim());
+            (!expanded.is_empty() && PathBuf::from(&expanded).exists()).then(|| {
+                if icon_idx != 0 {
+                    format!("{expanded},{icon_idx}")
+                } else {
+                    expanded
+                }
+            })
+        } else {
+            None
+        };
+
         let aumid = link.cast::<IPropertyStore>().ok().and_then(|store| {
-            let val = store.GetValue(&PKEY_APPUSERMODEL_ID).ok()?;
-            let pwstr =
-                windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc(&val)
-                    .ok()?;
-            let text = pwstr.to_string().ok();
-            windows::Win32::System::Com::CoTaskMemFree(Some(pwstr.0.cast()));
-            text.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
+            let direct = read_prop_string(&store, &PKEY_APPUSERMODEL_ID);
+            if direct.as_ref().is_some_and(|s| s.contains('!')) {
+                return direct;
+            }
+            if let Some(target_parsing) = read_prop_string(&store, &PKEY_LINK_TARGET_PARSING_PATH) {
+                let lower = target_parsing.to_lowercase();
+                if lower.starts_with(APPS_FOLDER_CLSID_PREFIX) {
+                    let rest = &target_parsing[APPS_FOLDER_CLSID_PREFIX.len()..];
+                    if !rest.is_empty() {
+                        return Some(rest.to_owned());
+                    }
+                }
+                if lower.starts_with("shell:appsfolder\\") {
+                    let rest = &target_parsing["shell:appsfolder\\".len()..];
+                    if !rest.is_empty() {
+                        return Some(rest.to_owned());
+                    }
+                }
+            }
+            direct
         });
 
-        (target_exe, aumid)
+        ShortcutMeta {
+            target_exe,
+            aumid,
+            icon_location,
+        }
     }
 }
 
@@ -96,15 +172,12 @@ fn expand_env_vars(input: &str) -> String {
         "USERPROFILE",
     ] {
         let token = format!("%{var}%");
-        if out.to_lowercase().contains(&token.to_lowercase())
-            && let Ok(val) = std::env::var(var)
-        {
-            // Case-insensitive replace
-            let lower = out.to_lowercase();
-            let tok_lower = token.to_lowercase();
-            if let Some(pos) = lower.find(&tok_lower) {
-                out.replace_range(pos..pos + token.len(), &val);
-            }
+        let tok_lower = token.to_lowercase();
+        while let Some(pos) = out.to_lowercase().find(&tok_lower) {
+            let Ok(val) = std::env::var(var) else {
+                break;
+            };
+            out.replace_range(pos..pos + token.len(), &val);
         }
     }
     out
@@ -131,14 +204,20 @@ pub fn load_pins() -> Vec<PinnedApp> {
             }
             let name = path.file_stem()?.to_string_lossy().into_owned();
             let launch_path = path.to_string_lossy().into_owned();
-            let (target_exe, aumid) = resolve_shortcut(&launch_path);
+            let meta = resolve_shortcut(&launch_path);
 
-            // Prefer Store AUMID or resolved executable so Windows never overlays a shortcut arrow.
-            let icon_source = if let Some(ref id) = aumid
-                && id.contains('!')
+            // Mirror C# ApplicationIconProvider.GetForPinnedApp priority:
+            // 1. Custom shortcut IconLocation (e.g. PWA .ico or custom resource index)
+            // 2. Packaged Store app via shell:AppsFolder\<AUMID>
+            // 3. Resolved target executable
+            // 4. Fallback to .lnk itself
+            let icon_source = if let Some(ref icon_loc) = meta.icon_location {
+                icon_loc.clone()
+            } else if let Some(ref id) = meta.aumid
+                && (id.contains('!') || meta.target_exe.is_none())
             {
                 format!(r"shell:AppsFolder\{id}")
-            } else if let Some(ref exe) = target_exe {
+            } else if let Some(ref exe) = meta.target_exe {
                 exe.clone()
             } else {
                 launch_path.clone()
@@ -147,7 +226,7 @@ pub fn load_pins() -> Vec<PinnedApp> {
             Some(PinnedApp {
                 name,
                 launch_path,
-                target_exe,
+                target_exe: meta.target_exe,
                 icon_source,
             })
         })
