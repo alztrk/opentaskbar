@@ -18,6 +18,10 @@ mod pins;
 #[cfg(windows)]
 mod preview;
 #[cfg(windows)]
+mod settings_ui;
+#[cfg(windows)]
+mod widgets;
+#[cfg(windows)]
 mod win32;
 
 #[cfg(windows)]
@@ -45,6 +49,10 @@ fn main() {
             return;
         }
         enable_dpi_awareness();
+        if args.iter().any(|a| a == settings_ui::SETTINGS_ARG) {
+            settings_ui::run_settings_window();
+            return;
+        }
     }
 
     opentaskbar_core::log::init(opentaskbar_core::settings::app_data_dir().join("opentaskbar.log"));

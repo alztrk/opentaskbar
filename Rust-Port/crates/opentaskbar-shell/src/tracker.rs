@@ -76,8 +76,6 @@ fn is_shell_noise(exe_path: &str) -> bool {
         || lower.ends_with(r"\searchhost.exe")
         || lower.ends_with(r"\startmenuexperiencehost.exe")
         || lower.ends_with(r"\lockapp.exe")
-        || lower.ends_with(r"\systemsettings.exe")
-        || lower.ends_with(r"\applicationframehost.exe")
 }
 
 struct EnumCtx {
@@ -216,22 +214,33 @@ pub fn cycle_windows(hwnds: &[usize], forward: bool) {
 }
 
 /// Cycles or toggles activation for a group of windows belonging to one app.
-pub fn activate_or_toggle(hwnds: &[usize]) {
-    if hwnds.is_empty() {
-        return;
+/// Returns `true` if a live window was activated/toggled, or `false` if all HWNDs were stale
+/// (so the caller can launch a fresh instance instead of doing nothing, fixing issue #173).
+pub fn activate_or_toggle(hwnds: &[usize]) -> bool {
+    let live: Vec<usize> = hwnds
+        .iter()
+        .copied()
+        .filter(|&h| {
+            let hwnd = h as HWND;
+            unsafe { h != 0 && IsWindow(hwnd) != 0 && IsWindowVisible(hwnd) != 0 }
+        })
+        .collect();
+    if live.is_empty() {
+        return false;
     }
-    // SAFETY: standard Win32 activation calls on tracked windows.
+    // SAFETY: standard Win32 activation calls on verified live windows.
     unsafe {
         let fg = GetForegroundWindow() as usize;
-        if hwnds.len() == 1 {
-            let hwnd = hwnds[0] as HWND;
-            if fg == hwnds[0] && IsIconic(hwnd) == 0 {
+        if live.len() == 1 {
+            let hwnd = live[0] as HWND;
+            if fg == live[0] && IsIconic(hwnd) == 0 {
                 ShowWindow(hwnd, SW_MINIMIZE);
             } else {
-                activate_window(hwnds[0]);
+                activate_window(live[0]);
             }
-            return;
+            return true;
         }
-        cycle_windows(hwnds, true);
+        cycle_windows(&live, true);
+        true
     }
 }

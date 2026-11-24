@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_LWIN, VK_TAB,
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_CONTROL, VK_LEFT,
+    VK_LWIN, VK_RIGHT, VK_TAB,
 };
 use windows_sys::Win32::UI::Shell::{
     ABE_BOTTOM, ABM_GETSTATE, ABM_GETTASKBARPOS, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS,
@@ -288,4 +289,24 @@ pub fn open_search() {
 
 pub fn open_task_view() {
     send_chord(&[VK_LWIN, VK_TAB]);
+}
+
+pub fn show_desktop() {
+    send_chord(&[VK_LWIN, b'D' as u16]);
+}
+
+pub fn open_run_dialog() {
+    send_chord(&[VK_LWIN, b'R' as u16]);
+}
+
+pub fn previous_desktop() {
+    send_chord(&[VK_CONTROL, VK_LWIN, VK_LEFT]);
+}
+
+pub fn next_desktop() {
+    send_chord(&[VK_CONTROL, VK_LWIN, VK_RIGHT]);
+}
+
+pub fn new_desktop() {
+    send_chord(&[VK_CONTROL, VK_LWIN, b'D' as u16]);
 }

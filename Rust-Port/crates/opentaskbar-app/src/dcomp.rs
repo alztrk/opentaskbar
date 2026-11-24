@@ -228,6 +228,113 @@ impl DcompEngine {
         }
     }
 
+    pub fn set_root_offset_y(&self, offset_y_px: f32) {
+        unsafe {
+            let _ = self.root.SetOffsetY2(offset_y_px);
+        }
+    }
+
+    /// Renders a compact, crisp two-line or single-line macOS-style widget text surface
+    /// (e.g. Clock `01:55` / `25 Kas` or CPU/RAM stats) onto a static `IDCompositionSurface`.
+    pub fn create_widget_text_surface(
+        &self,
+        primary: &str,
+        secondary: Option<&str>,
+        width_dips: f32,
+        height_dips: f32,
+        dpi: f32,
+        is_dark: bool,
+    ) -> Result<IDCompositionSurface> {
+        let w_px = (width_dips * dpi).ceil().max(1.0) as u32;
+        let h_px = (height_dips * dpi).ceil().max(1.0) as u32;
+        let primary_w: Vec<u16> = primary.encode_utf16().collect();
+        let secondary_w: Option<Vec<u16>> = secondary.map(|s| s.encode_utf16().collect());
+        let (fg_primary, fg_secondary) = if is_dark {
+            (
+                color_rgba(0xf1, 0xf5, 0xf9, 0.96),
+                color_rgba(0x94, 0xa3, 0xb8, 0.90),
+            )
+        } else {
+            (
+                color_rgba(0x0f, 0x17, 0x2a, 0.96),
+                color_rgba(0x47, 0x55, 0x69, 0.90),
+            )
+        };
+        let sec_fmt = unsafe {
+            let fmt = self.dwrite_factory.CreateTextFormat(
+                &HSTRING::from("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_MEDIUM,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                10.5,
+                &HSTRING::from("en-US"),
+            )?;
+            fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            fmt
+        };
+
+        self.draw_surface(w_px, h_px, |dc, _w, _h| unsafe {
+            let p_brush = dc.CreateSolidColorBrush(&fg_primary, None)?;
+            let s_brush = dc.CreateSolidColorBrush(&fg_secondary, None)?;
+            let mut prev = Matrix3x2::identity();
+            dc.GetTransform(&mut prev);
+            dc.SetTransform(&Matrix3x2 {
+                M11: dpi,
+                M12: 0.0,
+                M21: 0.0,
+                M22: dpi,
+                M31: prev.M31,
+                M32: prev.M32,
+            });
+            if let Some(ref sw) = secondary_w {
+                let mid = height_dips * 0.52;
+                dc.DrawText(
+                    &primary_w,
+                    &self.tooltip_format,
+                    &D2D_RECT_F {
+                        left: 0.0,
+                        top: 2.0,
+                        right: width_dips,
+                        bottom: mid + 2.0,
+                    },
+                    &p_brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                );
+                dc.DrawText(
+                    sw,
+                    &sec_fmt,
+                    &D2D_RECT_F {
+                        left: 0.0,
+                        top: mid - 1.0,
+                        right: width_dips,
+                        bottom: height_dips - 2.0,
+                    },
+                    &s_brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                );
+            } else {
+                dc.DrawText(
+                    &primary_w,
+                    &self.tooltip_format,
+                    &D2D_RECT_F {
+                        left: 0.0,
+                        top: 0.0,
+                        right: width_dips,
+                        bottom: height_dips,
+                    },
+                    &p_brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
+            Ok(())
+        })
+    }
+
     fn draw_surface(
         &self,
         width: u32,
@@ -430,6 +537,7 @@ impl DcompEngine {
         &self,
         kind: ShellGlyph,
         size_px: u32,
+        is_dark: bool,
     ) -> Result<IDCompositionSurface> {
         let stroke_props = D2D1_STROKE_STYLE_PROPERTIES1 {
             startCap: D2D1_CAP_STYLE_ROUND,
@@ -443,13 +551,22 @@ impl DcompEngine {
                 .CreateStrokeStyle(&stroke_props, None)?
                 .into()
         };
+        let fg = if is_dark {
+            color_rgba(0xe2, 0xe8, 0xf0, 1.0)
+        } else {
+            color_rgba(0x1e, 0x29, 0x3b, 1.0)
+        };
+        let start_blue = if is_dark {
+            color_rgba(0x38, 0xbd, 0xf8, 1.0)
+        } else {
+            color_rgba(0x02, 0x84, 0xc7, 1.0)
+        };
 
         self.draw_surface(size_px, size_px, |dc, w, _h| unsafe {
             let s = w / 24.0;
             match kind {
                 ShellGlyph::Start => {
-                    let brush =
-                        dc.CreateSolidColorBrush(&color_rgba(0x38, 0xbd, 0xf8, 1.0), None)?;
+                    let brush = dc.CreateSolidColorBrush(&start_blue, None)?;
                     let rects = [(2.5, 2.5), (12.8, 2.5), (2.5, 12.8), (12.8, 12.8)];
                     for (x, y) in rects {
                         let rr = D2D1_ROUNDED_RECT {
@@ -466,8 +583,7 @@ impl DcompEngine {
                     }
                 }
                 ShellGlyph::Search => {
-                    let brush =
-                        dc.CreateSolidColorBrush(&color_rgba(0xe2, 0xe8, 0xf0, 1.0), None)?;
+                    let brush = dc.CreateSolidColorBrush(&fg, None)?;
                     let ellipse = D2D1_ELLIPSE {
                         point: Vector2 {
                             X: 11.0 * s,
@@ -492,8 +608,7 @@ impl DcompEngine {
                     );
                 }
                 ShellGlyph::TaskView => {
-                    let brush =
-                        dc.CreateSolidColorBrush(&color_rgba(0xe2, 0xe8, 0xf0, 1.0), None)?;
+                    let brush = dc.CreateSolidColorBrush(&fg, None)?;
                     let front = D2D1_ROUNDED_RECT {
                         rect: D2D_RECT_F {
                             left: 2.5 * s,
@@ -649,6 +764,7 @@ impl DcompEngine {
         &self,
         text: &str,
         dpi: f32,
+        is_dark: bool,
     ) -> Result<(IDCompositionSurface, f32, f32)> {
         let wide: Vec<u16> = text.encode_utf16().collect();
         let layout = unsafe {
@@ -666,10 +782,24 @@ impl DcompEngine {
         let w_px = (w_dips * dpi).ceil() as u32;
         let h_px = (h_dips * dpi).ceil() as u32;
 
+        let (bg_c, bd_c, fg_c) = if is_dark {
+            (
+                color_rgba(0x18, 0x1b, 0x24, 0.95),
+                color_rgba(0xff, 0xff, 0xff, 0.17),
+                color_rgba(0xf8, 0xfa, 0xfc, 1.0),
+            )
+        } else {
+            (
+                color_rgba(0xf8, 0xfa, 0xfc, 0.96),
+                color_rgba(0x0f, 0x17, 0x2a, 0.14),
+                color_rgba(0x0f, 0x17, 0x2a, 1.0),
+            )
+        };
+
         let surface = self.draw_surface(w_px, h_px, |dc, w, h| unsafe {
-            let bg = dc.CreateSolidColorBrush(&color_rgba(0x18, 0x1b, 0x24, 0.95), None)?;
-            let bd = dc.CreateSolidColorBrush(&color_rgba(0xff, 0xff, 0xff, 0.17), None)?;
-            let fg = dc.CreateSolidColorBrush(&color_rgba(0xf8, 0xfa, 0xfc, 1.0), None)?;
+            let bg = dc.CreateSolidColorBrush(&bg_c, None)?;
+            let bd = dc.CreateSolidColorBrush(&bd_c, None)?;
+            let fg = dc.CreateSolidColorBrush(&fg_c, None)?;
             let bw = dpi.max(1.0);
             let half_bw = bw * 0.5;
             let rr = D2D1_ROUNDED_RECT {

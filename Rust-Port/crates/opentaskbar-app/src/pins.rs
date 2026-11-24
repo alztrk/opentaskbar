@@ -279,19 +279,80 @@ pub fn load_pins() -> Vec<PinnedApp> {
     items
 }
 
+/// Builds a `PinnedApp` from an arbitrary `.exe` or `.lnk` file path (for user pin / file drop).
+pub fn pin_from_path(raw_path: &str) -> Option<PinnedApp> {
+    let path = PathBuf::from(raw_path);
+    if !path.exists() {
+        return None;
+    }
+    let name = path.file_stem()?.to_string_lossy().into_owned();
+    let is_lnk = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("lnk"));
+    if is_lnk {
+        let meta = resolve_shortcut(raw_path);
+        let resolved_aumid = meta.aumid.clone().or_else(|| {
+            meta.target_exe
+                .as_deref()
+                .and_then(resolve_windowsapps_aumid)
+        });
+        let icon_source = if let Some(ref icon_loc) = meta.icon_location {
+            icon_loc.clone()
+        } else if let Some(ref id) = resolved_aumid
+            && (id.contains('!') || meta.target_exe.is_none())
+        {
+            format!(r"shell:AppsFolder\{id}")
+        } else if let Some(ref exe) = meta.target_exe {
+            exe.clone()
+        } else {
+            raw_path.to_owned()
+        };
+        return Some(PinnedApp {
+            name,
+            launch_path: raw_path.to_owned(),
+            target_exe: meta.target_exe,
+            icon_source,
+        });
+    }
+    let icon_source = resolve_windowsapps_aumid(raw_path)
+        .map(|id| format!(r"shell:AppsFolder\{id}"))
+        .unwrap_or_else(|| raw_path.to_owned());
+    Some(PinnedApp {
+        name,
+        launch_path: raw_path.to_owned(),
+        target_exe: Some(raw_path.to_owned()),
+        icon_source,
+    })
+}
+
 pub fn launch(target: String) {
+    launch_impl(target, "open", None);
+}
+
+pub fn launch_elevated(target: String) {
+    launch_impl(target, "runas", None);
+}
+
+pub fn launch_with_args(target: String, args: String) {
+    launch_impl(target, "open", Some(args));
+}
+
+fn launch_impl(target: String, verb_str: &'static str, args: Option<String>) {
     std::thread::Builder::new()
         .name("opentaskbar-launch".into())
         .spawn(move || {
-            let verb: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
+            let verb: Vec<u16> = verb_str.encode_utf16().chain(Some(0)).collect();
             let file: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
+            let params: Option<Vec<u16>> = args.map(|a| a.encode_utf16().chain(Some(0)).collect());
+            let params_ptr = params.as_ref().map_or(std::ptr::null(), |v| v.as_ptr());
             // SAFETY: null-terminated strings alive for the duration of ShellExecuteW.
             unsafe {
                 ShellExecuteW(
                     std::ptr::null_mut(),
                     verb.as_ptr(),
                     file.as_ptr(),
-                    std::ptr::null(),
+                    params_ptr,
                     std::ptr::null(),
                     SW_SHOWNORMAL,
                 );

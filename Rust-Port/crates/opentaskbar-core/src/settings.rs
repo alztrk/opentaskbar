@@ -74,7 +74,15 @@ pub struct DockSettings {
     pub animations_enabled: bool,
     pub magnification_enabled: bool,
     pub show_recycle_bin: bool,
+    pub show_on_all_monitors: bool,
+    pub show_desktop_button: bool,
+    pub full_width: bool,
+    pub reveal_dock_on_win_key: bool,
+    pub show_clock_widget: bool,
+    pub show_system_stats_widget: bool,
     pub pin_order: Option<Vec<String>>,
+    pub user_pinned_apps: Vec<String>,
+    pub user_unpinned_apps: Vec<String>,
     /// Unknown keys from other OpenTaskbar builds preserved on round-trip save.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -98,7 +106,15 @@ impl Default for DockSettings {
             animations_enabled: true,
             magnification_enabled: true,
             show_recycle_bin: true,
+            show_on_all_monitors: true,
+            show_desktop_button: true,
+            full_width: false,
+            reveal_dock_on_win_key: true,
+            show_clock_widget: true,
+            show_system_stats_widget: true,
             pin_order: None,
+            user_pinned_apps: Vec::new(),
+            user_unpinned_apps: Vec::new(),
             extra: Map::new(),
         }
     }

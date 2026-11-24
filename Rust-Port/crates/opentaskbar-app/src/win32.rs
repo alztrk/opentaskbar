@@ -1,45 +1,231 @@
-//! Win32 bridge for GPUI dock windows:
-//! - Extracts `HWND` via `HasWindowHandle`
-//! - Applies `WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`
-//! - Disables Win11 DWM border (`DWMWA_BORDER_COLOR = DWMWA_COLOR_NONE`),
-//!   non-client rendering, and native rounding so transparent popups never show a gray frame
-//! - Dynamically resizes/positions the dock window and shows the native context menu
+//! Win32 bridge for OpenTaskBar dock windows:
+//! - Window styles & Win11 DWM chrome stripping (borderless transparent popups)
+//! - Multi-monitor enumeration with signed physical coordinates & per-monitor DPI (Issue #95)
+//! - System dark/light theme detection via Windows Personalize registry key (Issue #88)
+//! - Native context menus (Dock, Per-App, Task View), file drop extraction, and key modifiers
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows_sys::Win32::Foundation::{HWND, POINT};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
     DwmSetWindowAttribute,
 };
+use windows_sys::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+};
 use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
+use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
-use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_SHIFT};
+use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GWL_EXSTYLE, GetCursorPos, GetSystemMetrics,
     GetWindowLongPtrW, HWND_TOPMOST, MF_SEPARATOR, MF_STRING, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetForegroundWindow,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetForegroundWindow,
     SetWindowLongPtrW, SetWindowPos, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RETURNCMD, TrackPopupMenu,
     WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
+use windows_sys::core::BOOL;
 
 const DWMWCP_DONOTROUND: u32 = 1;
 const DWMNCRP_DISABLED: u32 = 1;
 const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
+const MONITORINFOF_PRIMARY: u32 = 1;
 
+const MENU_SETTINGS: u32 = 1000;
 const MENU_TASKMGR: u32 = 1001;
-const MENU_RESTORE: u32 = 1002;
-const MENU_EXIT: u32 = 1003;
+const MENU_EXPLORER: u32 = 1002;
+const MENU_TERMINAL: u32 = 1003;
+const MENU_TERMINAL_ADMIN: u32 = 1004;
+const MENU_RUN: u32 = 1005;
+const MENU_SHOW_DESKTOP: u32 = 1006;
+const MENU_RESTORE: u32 = 1007;
+const MENU_EXIT: u32 = 1008;
+
+const APP_MENU_OPEN: u32 = 2001;
+const APP_MENU_NEW_WINDOW: u32 = 2002;
+const APP_MENU_ADMIN: u32 = 2003;
+const APP_MENU_TOGGLE_PIN: u32 = 2004;
+const APP_MENU_CLOSE: u32 = 2005;
+const APP_MENU_TERMINATE: u32 = 2006;
+
+const TV_MENU_PREV: u32 = 3001;
+const TV_MENU_NEXT: u32 = 3002;
+const TV_MENU_NEW: u32 = 3003;
+const TV_MENU_VIEW: u32 = 3004;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextAction {
     None,
+    Settings,
     TaskManager,
+    FileExplorer,
+    Terminal,
+    TerminalAdmin,
+    RunDialog,
+    ShowDesktop,
     RestoreTaskbar,
     Exit,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppContextAction {
+    None,
+    Open,
+    NewWindow,
+    RunAsAdmin,
+    TogglePin,
+    Close,
+    Terminate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskViewAction {
+    None,
+    PreviousDesktop,
+    NextDesktop,
+    NewDesktop,
+    TaskView,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MonitorInfo {
+    pub handle: usize,
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    pub dpi_scale: f32,
+    pub is_primary: bool,
+}
+
+impl MonitorInfo {
+    pub fn width(self) -> i32 {
+        (self.right - self.left).max(1)
+    }
+
+    pub fn height(self) -> i32 {
+        (self.bottom - self.top).max(1)
+    }
+}
+
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
+}
+
+/// Enumerates all active monitors with signed physical coordinates and per-monitor DPI.
+/// Primary monitor is always placed first; supports negative coordinates (left-of-primary monitors).
+pub fn enumerate_monitors() -> Vec<MonitorInfo> {
+    unsafe extern "system" fn enum_cb(
+        hmon: HMONITOR,
+        _hdc: HDC,
+        _rc: *mut RECT,
+        lparam: LPARAM,
+    ) -> BOOL {
+        // SAFETY: `lparam` points to `Vec<MonitorInfo>` alive for the duration of `EnumDisplayMonitors`.
+        unsafe {
+            let list = &mut *(lparam as *mut Vec<MonitorInfo>);
+            let mut info: MONITORINFO = std::mem::zeroed();
+            info.cbSize = size_of::<MONITORINFO>() as u32;
+            if GetMonitorInfoW(hmon, &mut info) != 0 {
+                let mut dpi_x = 96u32;
+                let mut dpi_y = 96u32;
+                let _ = GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
+                let dpi_scale = if dpi_x == 0 { 1.0 } else { dpi_x as f32 / 96.0 };
+                list.push(MonitorInfo {
+                    handle: hmon as usize,
+                    left: info.rcMonitor.left,
+                    top: info.rcMonitor.top,
+                    right: info.rcMonitor.right,
+                    bottom: info.rcMonitor.bottom,
+                    dpi_scale,
+                    is_primary: (info.dwFlags & MONITORINFOF_PRIMARY) != 0,
+                });
+            }
+            1
+        }
+    }
+
+    let mut monitors: Vec<MonitorInfo> = Vec::with_capacity(4);
+    // SAFETY: synchronous Win32 monitor enumeration.
+    unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(enum_cb),
+            (&mut monitors as *mut Vec<MonitorInfo>) as LPARAM,
+        );
+    }
+    if monitors.is_empty() {
+        let (w, h) = primary_screen_px();
+        monitors.push(MonitorInfo {
+            handle: 0,
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+            dpi_scale: 1.0,
+            is_primary: true,
+        });
+    } else {
+        monitors.sort_by_key(|m| !m.is_primary);
+    }
+    monitors
+}
+
+/// Reads Windows' `AppsUseLightTheme` registry value (returns `true` for Dark mode, fixing Issue #88).
+pub fn read_system_is_dark() -> bool {
+    let subkey = wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    let value = wide("AppsUseLightTheme");
+    let mut data: u32 = 0;
+    let mut size: u32 = size_of::<u32>() as u32;
+    // SAFETY: reading a single DWORD from HKCU.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut data as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    if status == 0 { data == 0 } else { true }
+}
+
+pub fn is_shift_down() -> bool {
+    unsafe { (GetKeyState(i32::from(VK_SHIFT)) as u16 & 0x8000) != 0 }
+}
+
+pub fn is_ctrl_down() -> bool {
+    unsafe { (GetKeyState(i32::from(VK_CONTROL)) as u16 & 0x8000) != 0 }
+}
+
+/// Extracts all file paths from a `WM_DROPFILES` `HDROP` handle and releases it.
+pub fn extract_dropped_files(hdrop_val: usize) -> Vec<String> {
+    let hdrop = hdrop_val as HDROP;
+    if hdrop.is_null() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    // SAFETY: querying dropped file count and paths before calling `DragFinish`.
+    unsafe {
+        let count = DragQueryFileW(hdrop, u32::MAX, std::ptr::null_mut(), 0);
+        for i in 0..count {
+            let len = DragQueryFileW(hdrop, i, std::ptr::null_mut(), 0);
+            if len > 0 {
+                let mut buf = vec![0u16; (len + 1) as usize];
+                let copied = DragQueryFileW(hdrop, i, buf.as_mut_ptr(), buf.len() as u32);
+                if copied > 0 {
+                    out.push(String::from_utf16_lossy(&buf[..copied as usize]));
+                }
+            }
+        }
+        DragFinish(hdrop);
+    }
+    out
 }
 
 #[allow(dead_code)]
@@ -81,7 +267,6 @@ pub fn configure_native_dock_hwnd(hwnd_val: usize) {
             size_of::<u32>() as u32,
         );
 
-        // Removes the 1px gray Win11 border drawn around borderless popup windows.
         let border_none = DWMWA_COLOR_NONE;
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -116,14 +301,11 @@ pub fn primary_screen_px() -> (i32, i32) {
     unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
 }
 
-/// Repositions and resizes the dock window asynchronously without stealing focus,
-/// overriding Z-order, or triggering synchronous WM_SIZE re-entrancy inside GPUI's borrow.
 pub fn reposition_dock_window(hwnd: usize, x: i32, y: i32, w: i32, h: i32) {
     if hwnd == 0 || w <= 0 || h <= 0 {
         return;
     }
-    const SWP_ASYNCWINDOWPOS: u32 = 0x4000;
-    // SAFETY: moving/resizing our own dock window without changing Z-order.
+    // SAFETY: moving/resizing our own dock window without changing Z-order or stealing focus.
     unsafe {
         SetWindowPos(
             hwnd as HWND,
@@ -132,35 +314,39 @@ pub fn reposition_dock_window(hwnd: usize, x: i32, y: i32, w: i32, h: i32) {
             y,
             w,
             h,
-            windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
-                | SWP_NOACTIVATE
-                | SWP_ASYNCWINDOWPOS,
+            SWP_NOZORDER | SWP_NOACTIVATE,
         );
     }
 }
 
-/// Displays a native Win32 context menu at the cursor position.
 pub fn show_dock_context_menu(hwnd: usize) -> ContextAction {
     if hwnd == 0 {
         return ContextAction::None;
     }
-    // SAFETY: standard Win32 popup menu owned by our dock window.
     unsafe {
         let menu = CreatePopupMenu();
         if menu.is_null() {
             return ContextAction::None;
         }
-        let tm = wide("Task Manager");
-        let rs = wide("Restore Windows Taskbar");
-        let ex = wide("Exit OpenTaskbar");
-        AppendMenuW(menu, MF_STRING, MENU_TASKMGR as usize, tm.as_ptr());
+        let add = |id: u32, label: &str| {
+            let w = wide(label);
+            AppendMenuW(menu, MF_STRING, id as usize, w.as_ptr());
+        };
+        add(MENU_SETTINGS, "Settings...");
+        add(MENU_TASKMGR, "Task Manager");
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        AppendMenuW(menu, MF_STRING, MENU_RESTORE as usize, rs.as_ptr());
-        AppendMenuW(menu, MF_STRING, MENU_EXIT as usize, ex.as_ptr());
+        add(MENU_EXPLORER, "File Explorer");
+        add(MENU_TERMINAL, "Terminal");
+        add(MENU_TERMINAL_ADMIN, "Terminal (Admin)");
+        add(MENU_RUN, "Run...");
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        add(MENU_SHOW_DESKTOP, "Show Desktop");
+        add(MENU_RESTORE, "Restore Windows Taskbar");
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        add(MENU_EXIT, "Exit OpenTaskbar");
 
         let mut pt: POINT = std::mem::zeroed();
         GetCursorPos(&mut pt);
-        // SetForegroundWindow ensures clicking outside dismisses the popup menu cleanly.
         SetForegroundWindow(hwnd as HWND);
         let cmd = TrackPopupMenu(
             menu,
@@ -174,10 +360,121 @@ pub fn show_dock_context_menu(hwnd: usize) -> ContextAction {
         DestroyMenu(menu);
 
         match cmd {
+            MENU_SETTINGS => ContextAction::Settings,
             MENU_TASKMGR => ContextAction::TaskManager,
+            MENU_EXPLORER => ContextAction::FileExplorer,
+            MENU_TERMINAL => ContextAction::Terminal,
+            MENU_TERMINAL_ADMIN => ContextAction::TerminalAdmin,
+            MENU_RUN => ContextAction::RunDialog,
+            MENU_SHOW_DESKTOP => ContextAction::ShowDesktop,
             MENU_RESTORE => ContextAction::RestoreTaskbar,
             MENU_EXIT => ContextAction::Exit,
             _ => ContextAction::None,
+        }
+    }
+}
+
+pub fn show_app_context_menu(
+    hwnd: usize,
+    app_name: &str,
+    pinned: bool,
+    running: bool,
+) -> AppContextAction {
+    if hwnd == 0 {
+        return AppContextAction::None;
+    }
+    unsafe {
+        let menu = CreatePopupMenu();
+        if menu.is_null() {
+            return AppContextAction::None;
+        }
+        let add = |id: u32, label: &str| {
+            let w = wide(label);
+            AppendMenuW(menu, MF_STRING, id as usize, w.as_ptr());
+        };
+        add(APP_MENU_OPEN, app_name);
+        add(APP_MENU_NEW_WINDOW, "New Window\tShift+Click");
+        add(APP_MENU_ADMIN, "Run as Administrator\tCtrl+Shift+Click");
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        add(
+            APP_MENU_TOGGLE_PIN,
+            if pinned {
+                "Unpin from Dock"
+            } else {
+                "Pin to Dock"
+            },
+        );
+        if running {
+            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+            add(APP_MENU_CLOSE, "Close Window");
+            add(APP_MENU_TERMINATE, "Terminate Process");
+        }
+
+        let mut pt: POINT = std::mem::zeroed();
+        GetCursorPos(&mut pt);
+        SetForegroundWindow(hwnd as HWND);
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD,
+            pt.x,
+            pt.y,
+            0,
+            hwnd as HWND,
+            std::ptr::null(),
+        ) as u32;
+        DestroyMenu(menu);
+
+        match cmd {
+            APP_MENU_OPEN => AppContextAction::Open,
+            APP_MENU_NEW_WINDOW => AppContextAction::NewWindow,
+            APP_MENU_ADMIN => AppContextAction::RunAsAdmin,
+            APP_MENU_TOGGLE_PIN => AppContextAction::TogglePin,
+            APP_MENU_CLOSE => AppContextAction::Close,
+            APP_MENU_TERMINATE => AppContextAction::Terminate,
+            _ => AppContextAction::None,
+        }
+    }
+}
+
+pub fn show_taskview_context_menu(hwnd: usize) -> TaskViewAction {
+    if hwnd == 0 {
+        return TaskViewAction::None;
+    }
+    unsafe {
+        let menu = CreatePopupMenu();
+        if menu.is_null() {
+            return TaskViewAction::None;
+        }
+        let add = |id: u32, label: &str| {
+            let w = wide(label);
+            AppendMenuW(menu, MF_STRING, id as usize, w.as_ptr());
+        };
+        add(TV_MENU_PREV, "Previous Desktop");
+        add(TV_MENU_NEXT, "Next Desktop");
+        add(TV_MENU_NEW, "New Desktop");
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        add(TV_MENU_VIEW, "Task View");
+
+        let mut pt: POINT = std::mem::zeroed();
+        GetCursorPos(&mut pt);
+        SetForegroundWindow(hwnd as HWND);
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD,
+            pt.x,
+            pt.y,
+            0,
+            hwnd as HWND,
+            std::ptr::null(),
+        ) as u32;
+        DestroyMenu(menu);
+
+        match cmd {
+            TV_MENU_PREV => TaskViewAction::PreviousDesktop,
+            TV_MENU_NEXT => TaskViewAction::NextDesktop,
+            TV_MENU_NEW => TaskViewAction::NewDesktop,
+            TV_MENU_VIEW => TaskViewAction::TaskView,
+            _ => TaskViewAction::None,
         }
     }
 }
