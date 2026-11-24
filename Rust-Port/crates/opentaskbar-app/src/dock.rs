@@ -402,10 +402,19 @@ impl DockView {
         .detach();
     }
 
-    fn sync_slots(&mut self, cx: &mut Context<Self>) {
+    /// Syncs slots from running windows and returns `true` only if visible state changed.
+    fn sync_slots(&mut self, cx: &mut Context<Self>) -> bool {
         let running = tracker::enumerate_windows();
-        self.slots = build_slots(&self.pins, &running, &self.slots);
+        let next = build_slots(&self.pins, &running, &self.slots);
+        let changed = next.len() != self.slots.len()
+            || next.iter().zip(self.slots.iter()).any(|(a, b)| {
+                a.key != b.key
+                    || a.is_foreground != b.is_foreground
+                    || a.hwnds.is_empty() != b.hwnds.is_empty()
+            });
+        self.slots = next;
         self.request_missing_icons(cx);
+        changed
     }
 
     fn sync_window_bounds(&mut self) {
@@ -436,11 +445,14 @@ impl DockView {
                 let _ = opentaskbar_shell::taskbar::ensure_hidden();
                 let updated = this.update(cx, |view, cx| {
                     let prev_len = view.slots.len();
-                    view.sync_slots(cx);
+                    let changed = view.sync_slots(cx);
                     if view.slots.len() != prev_len {
                         view.sync_window_bounds();
                     }
-                    cx.notify();
+                    // Never redraw the GPU swapchain on idle polls when nothing changed.
+                    if changed {
+                        cx.notify();
+                    }
                 });
                 if updated.is_err() {
                     break;
@@ -617,24 +629,27 @@ impl DockView {
                             let target = view.target_scale_for(idx);
                             let cur = view.slots[idx].scale;
                             let diff = target - cur;
-                            if diff.abs() > 0.003 {
-                                view.slots[idx].scale = cur + diff * 0.30;
+                            if diff.abs() > 0.008 {
+                                view.slots[idx].scale = cur + diff * 0.34;
                                 moving = true;
                             } else if (cur - target).abs() > 0.0 {
                                 view.slots[idx].scale = target;
+                                moving = true;
                             }
                             let sx = view.slots[idx].slide_x;
-                            if sx.abs() > 0.35 {
-                                view.slots[idx].slide_x = sx * 0.72;
+                            if sx.abs() > 0.5 {
+                                view.slots[idx].slide_x = sx * 0.70;
                                 moving = true;
                             } else if sx != 0.0 {
                                 view.slots[idx].slide_x = 0.0;
+                                moving = true;
                             }
                             if let Some(started) = view.slots[idx].bounce_started {
                                 if bounce_offset_dips(Some(started)).is_some() {
                                     moving = true;
                                 } else {
                                     view.slots[idx].bounce_started = None;
+                                    moving = true;
                                 }
                             }
                         }
@@ -642,7 +657,6 @@ impl DockView {
                             cx.notify();
                         } else {
                             view.animating = false;
-                            cx.notify();
                         }
                         moving
                     })
@@ -813,7 +827,7 @@ impl Render for DockView {
                     }
                 }),
             )
-            // Fixed-height background pill anchored 5px from bottom edge.
+            // Fixed-height background pill anchored 5px from bottom edge (no per-frame shadow blur shader).
             .child(
                 div()
                     .absolute()
@@ -824,7 +838,7 @@ impl Render for DockView {
                     .bg(pill_bg)
                     .when(
                         self.settings.dock_background != SurfaceBackground::None,
-                        |el| el.border_1().border_color(rgba(0xffffff28)).shadow_md(),
+                        |el| el.border_1().border_color(rgba(0xffffff28)),
                     ),
             )
             // Shell buttons + divider + app icons float over the fixed-height pill.
@@ -863,13 +877,26 @@ impl Render for DockView {
                                     let mx: f32 = event.position.x.into();
                                     if this.drag.is_some() {
                                         this.update_drag(mx);
+                                        this.ensure_animation(cx);
+                                        cx.notify();
                                     } else {
+                                        // Ignore sub-pixel jitter and let the 60fps animation loop pace GPU frames
+                                        // instead of redrawing on every 500-1000Hz raw mouse event.
+                                        if this
+                                            .hover_mouse_x
+                                            .is_some_and(|prev| (prev - mx).abs() < 1.0)
+                                        {
+                                            return;
+                                        }
+                                        let prev_idx = this.hovered_idx;
                                         this.hover_mouse_x = Some(mx);
                                         this.hovered_shell = None;
                                         this.update_hovered_index_from_mouse();
+                                        this.ensure_animation(cx);
+                                        if this.hovered_idx != prev_idx {
+                                            cx.notify();
+                                        }
                                     }
-                                    this.ensure_animation(cx);
-                                    cx.notify();
                                 },
                             ))
                             .on_hover(cx.listener(|this, active: &bool, _, cx| {
