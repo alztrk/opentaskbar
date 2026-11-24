@@ -1,84 +1,65 @@
-//! GPUI floating dock window:
-//! - Left native Windows shell buttons (Start, Search, Task View) with crisp embedded SVGs
-//! - Stable slot ordering: unpinned running apps never jump positions when clicked/focused
-//! - Continuous mouse-X cosine fisheye magnification anchored to resting centers (zero jitter,
-//!   zero icon overlap, smooth neighbor parting inside a fixed-size transparent window)
-//! - Tactile press squish + damped launch/activation bounce animation
-//! - Automatic work-area calculation (5px top + 5px bottom), tooltips, and native context menu
+//! Native Win32 + DirectComposition floating dock window:
+//! - Hybrid architecture: dock runs on pure DirectComposition visual transforms (0-1% GPU at
+//!   full 60-180 FPS display refresh rate), leaving GPUI free for on-demand settings & flyouts
+//! - Left native Windows shell buttons (Start, Search, Task View) with crisp Direct2D vector glyphs
+//! - Unified pinned + unpinned slot list with smooth drag-and-drop reorder & neighbor gliding
+//! - Continuous mouse-X cosine fisheye anchored to resting centers, press squish, damped bounce
+//! - Click-through transparent sky above the dock pill and auto-height DirectWrite tooltips
 
-use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Instant;
 
-use gpui::{
-    App, Application, AssetSource, Bounds, Context, MouseButton, RenderImage, SharedString, Timer,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions,
-    div, hsla, img, point, prelude::*, px, rgba, size, svg,
-};
 use opentaskbar_core::settings::{AutoHideMode, DockPosition, DockSettings, SurfaceBackground};
 use opentaskbar_shell::tracker::{self, RunningWindow};
+use windows::Win32::Graphics::DirectComposition::IDCompositionSurface;
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows_sys::Win32::Graphics::Dwm::DwmFlush;
+use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GWLP_USERDATA, GetMessageW,
+    GetWindowLongPtrW, HTCLIENT, HTTRANSPARENT, IDC_ARROW, IDC_HAND, KillTimer, LoadCursorW, MSG,
+    PostMessageW, PostQuitMessage, RegisterClassExW, SetCursor, SetTimer, SetWindowLongPtrW,
+    TranslateMessage, WM_APP, WM_DESTROY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+};
 
-use crate::icon_cache;
+use crate::dcomp::{DcompEngine, PillNodes, ShellGlyph, VisualNode};
+use crate::icon_cache::{self, RawIcon};
 use crate::pins::{self, PinnedApp};
 use crate::win32::{self, ContextAction};
 
 const VERTICAL_EDGE_GAP: f32 = 5.0;
-const TOOLTIP_HEADROOM: f32 = 34.0;
-const MAG_HEADROOM: f32 = 24.0;
+const TOOLTIP_HEADROOM: f32 = 36.0;
+const MAG_HEADROOM: f32 = 26.0;
 const FISHEYE_PEAK: f32 = 0.42;
 const FISHEYE_RADIUS_SLOTS: f32 = 2.4;
 const BOUNCE_DURATION_SECS: f32 = 0.42;
 const DRAG_THRESHOLD_PX: f32 = 6.0;
-/// VSync-aligned minimum frame interval (13ms):
-/// - 60Hz  (16.67ms) -> every 1st VSync = 60.0 FPS
-/// - 120Hz (8.33ms)  -> every 2nd VSync = 60.0 FPS
-/// - 144Hz (6.94ms)  -> every 2nd VSync = 72.0 FPS
-/// - 180Hz (5.55ms)  -> every 3rd VSync = 60.0 FPS
-///
-/// Skipped VSyncs do zero layout, zero paint, zero D3D11 draw, and zero Present().
-const TARGET_FRAME_INTERVAL: Duration = Duration::from_micros(13_000);
 
-const SVG_START: &[u8] =
-    br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
-  <rect x="2.5" y="2.5" width="8.7" height="8.7" rx="1.6"/>
-  <rect x="12.8" y="2.5" width="8.7" height="8.7" rx="1.6"/>
-  <rect x="2.5" y="12.8" width="8.7" height="8.7" rx="1.6"/>
-  <rect x="12.8" y="12.8" width="8.7" height="8.7" rx="1.6"/>
-</svg>"##;
+const TIMER_POLL: usize = 1;
+const WM_MOUSELEAVE: u32 = 0x02A3;
+const WM_APP_VSYNC: u32 = WM_APP + 1;
+const WM_APP_ICONS: u32 = WM_APP + 2;
 
-const SVG_SEARCH: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
-  <circle cx="11" cy="11" r="7.5"/>
-  <path d="M20.5 20.5l-4.2-4.2"/>
-</svg>"##;
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
+}
 
-const SVG_TASKVIEW: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-  <rect x="2.5" y="4" width="13.5" height="10.5" rx="2.2"/>
-  <path d="M8.5 18.5h10.8a2.2 2.2 0 0 0 2.2-2.2V8.5"/>
-</svg>"##;
+fn loword_i16(v: isize) -> f32 {
+    (v as u32 & 0xffff) as i16 as f32
+}
 
-struct EmbeddedAssets;
-
-impl AssetSource for EmbeddedAssets {
-    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
-        let bytes = match path {
-            "icons/start.svg" => Some(Cow::Borrowed(SVG_START)),
-            "icons/search.svg" => Some(Cow::Borrowed(SVG_SEARCH)),
-            "icons/taskview.svg" => Some(Cow::Borrowed(SVG_TASKVIEW)),
-            _ => None,
-        };
-        Ok(bytes)
-    }
-
-    fn list(&self, _path: &str) -> gpui::Result<Vec<SharedString>> {
-        Ok(vec![
-            "icons/start.svg".into(),
-            "icons/search.svg".into(),
-            "icons/taskview.svg".into(),
-        ])
-    }
+fn hiword_i16(v: isize) -> f32 {
+    ((v as u32 >> 16) & 0xffff) as i16 as f32
 }
 
 fn shell_section_width(base: f32) -> f32 {
@@ -93,11 +74,21 @@ enum ShellButton {
 }
 
 impl ShellButton {
+    const ALL: [Self; 3] = [Self::Start, Self::Search, Self::TaskView];
+
     fn label(self) -> &'static str {
         match self {
             Self::Start => "Start",
             Self::Search => "Search",
             Self::TaskView => "Task View",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Self::Start => 0,
+            Self::Search => 1,
+            Self::TaskView => 2,
         }
     }
 }
@@ -106,13 +97,12 @@ impl ShellButton {
 struct DockSlot {
     key: String,
     pinned: bool,
-    label: SharedString,
+    label: String,
     launch_path: String,
     icon_source: String,
     hwnds: Vec<usize>,
     is_foreground: bool,
     scale: f32,
-    /// Smooth horizontal spring offset (DIPs) when neighbors slide aside during drag reorder.
     slide_x: f32,
     bounce_started: Option<Instant>,
 }
@@ -126,41 +116,58 @@ struct DragState {
     active: bool,
 }
 
-struct DockView {
+struct SlotVisuals {
+    icon: VisualNode,
+    dot: VisualNode,
+    bound_source: String,
+    bound_has_icon: bool,
+    bound_dot_state: u8, // 0 = hidden, 1 = running, 2 = active
+}
+
+struct TooltipCache {
+    text: String,
+    width_dips: f32,
+    height_dips: f32,
+}
+
+type IconBatchQueue = Arc<Mutex<Vec<HashMap<String, Option<RawIcon>>>>>;
+
+struct DockState {
     hwnd: usize,
+    dpi: f32,
     settings: DockSettings,
     pins: Vec<PinnedApp>,
     slots: Vec<DockSlot>,
-    icons: HashMap<String, Option<Arc<RenderImage>>>,
-    /// Continuous mouse X coordinate inside the window (in logical DIPs) while hovering the app strip.
+    dcomp: DcompEngine,
+    pill: PillNodes,
+    shell_bgs: [VisualNode; 3],
+    shell_icons: [VisualNode; 3],
+    shell_bg_hover: IDCompositionSurface,
+    shell_bg_press: IDCompositionSurface,
+    divider: VisualNode,
+    dot_running: IDCompositionSurface,
+    dot_active: IDCompositionSurface,
+    icon_surfaces: HashMap<String, Option<IDCompositionSurface>>,
+    fallback_surfaces: HashMap<String, IDCompositionSurface>,
+    in_flight_icons: HashSet<String>,
+    pending_icons: IconBatchQueue,
+    slot_visuals: Vec<SlotVisuals>,
+    drag_ghost: VisualNode,
+    drag_ghost_source: Option<String>,
+    tooltip_node: VisualNode,
+    tooltip_cache: Option<TooltipCache>,
     hover_mouse_x: Option<f32>,
     hovered_idx: Option<usize>,
     hovered_shell: Option<ShellButton>,
     pressed_idx: Option<usize>,
     pressed_shell: Option<ShellButton>,
     drag: Option<DragState>,
-    suppress_next_click: bool,
+    tracking_mouse: bool,
     last_frame: Option<Instant>,
-    pacing_active: Arc<AtomicBool>,
     last_window_rect: Option<(i32, i32, i32, i32)>,
-}
-
-/// Schedules a single VSync-aligned redraw once `due_at` is reached, skipping intermediate
-/// high-refresh-rate VSyncs without marking the window dirty or touching the GPU.
-fn schedule_paced_frame(
-    window: &Window,
-    entity: gpui::EntityId,
-    due_at: Instant,
-    pacing_active: Arc<AtomicBool>,
-) {
-    window.on_next_frame(move |window, cx| {
-        if Instant::now() >= due_at {
-            pacing_active.store(false, Ordering::Relaxed);
-            cx.notify(entity);
-        } else {
-            schedule_paced_frame(window, entity, due_at, pacing_active);
-        }
-    });
+    anim_signal: Arc<(Mutex<bool>, Condvar)>,
+    tick_pending: Arc<AtomicBool>,
+    shutdown: Arc<AtomicBool>,
 }
 
 fn exe_display_name(exe_path: &str, fallback_title: &str) -> String {
@@ -178,8 +185,6 @@ fn exe_display_name(exe_path: &str, fallback_title: &str) -> String {
         .unwrap_or_else(|| fallback_title.to_owned())
 }
 
-/// Builds a single unified slot list where pinned and unpinned apps live together and
-/// preserve their exact user-ordered positions across refreshes.
 fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot]) -> Vec<DockSlot> {
     let mut by_exe: HashMap<String, Vec<&RunningWindow>> = HashMap::new();
     for win in running {
@@ -189,8 +194,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
             .push(win);
     }
 
-    // Resolve running windows matched to each pin.
-    let mut pin_matches: HashMap<String, (Vec<usize>, bool, Option<String>)> = HashMap::new();
+    let mut pin_matches: HashMap<String, (Vec<usize>, bool)> = HashMap::new();
     let mut claimed_exes: HashMap<String, bool> = HashMap::new();
     for pin in pins {
         let matched_key = pin
@@ -221,13 +225,12 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
             }
             None => (Vec::new(), false),
         };
-        pin_matches.insert(pin.launch_path.to_lowercase(), (hwnds, is_fg, matched_key));
+        pin_matches.insert(pin.launch_path.to_lowercase(), (hwnds, is_fg));
     }
 
     let mut next: Vec<DockSlot> = Vec::with_capacity(pins.len() + by_exe.len());
     let mut emitted_keys: HashMap<String, bool> = HashMap::new();
 
-    // 1. Walk existing unified order (`prev`) so dragged pinned & unpinned apps stay exactly where placed.
     for old in prev {
         if old.pinned {
             if let Some(pin) = pins
@@ -235,12 +238,12 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                 .find(|p| p.launch_path.eq_ignore_ascii_case(&old.key))
             {
                 let key = pin.launch_path.to_lowercase();
-                let (hwnds, is_foreground, _) = pin_matches.get(&key).cloned().unwrap_or_default();
+                let (hwnds, is_foreground) = pin_matches.get(&key).cloned().unwrap_or_default();
                 emitted_keys.insert(key.clone(), true);
                 next.push(DockSlot {
                     key,
                     pinned: true,
-                    label: pin.name.clone().into(),
+                    label: pin.name.clone(),
                     launch_path: pin.launch_path.clone(),
                     icon_source: pin.icon_source.clone(),
                     hwnds,
@@ -269,18 +272,17 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
         }
     }
 
-    // 2. Append any pins not yet in `prev` (initial startup or newly pinned).
     for pin in pins {
         let key = pin.launch_path.to_lowercase();
         if emitted_keys.contains_key(&key) {
             continue;
         }
-        let (hwnds, is_foreground, _) = pin_matches.get(&key).cloned().unwrap_or_default();
+        let (hwnds, is_foreground) = pin_matches.get(&key).cloned().unwrap_or_default();
         emitted_keys.insert(key.clone(), true);
         next.push(DockSlot {
             key,
             pinned: true,
-            label: pin.name.clone().into(),
+            label: pin.name.clone(),
             launch_path: pin.launch_path.clone(),
             icon_source: pin.icon_source.clone(),
             hwnds,
@@ -291,7 +293,6 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
         });
     }
 
-    // 3. Append newly launched unpinned apps at the end.
     for win in running {
         let key = win.exe_path.to_lowercase();
         if claimed_exes.contains_key(&key) || emitted_keys.contains_key(&key) {
@@ -306,7 +307,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
         next.push(DockSlot {
             key,
             pinned: false,
-            label: label.into(),
+            label,
             launch_path: win.exe_path.clone(),
             icon_source,
             hwnds: list.iter().map(|w| w.hwnd).collect(),
@@ -328,7 +329,6 @@ fn slot_gap(settings: &DockSettings) -> f32 {
     9.0 + settings.dock_icon_padding.max(0) as f32
 }
 
-/// Computes the fixed resting pill width (used as anchor for continuous fisheye math).
 fn resting_pill_width(settings: &DockSettings, slot_count: usize) -> f32 {
     let base = settings.icon_dips();
     let gap = slot_gap(settings);
@@ -336,8 +336,6 @@ fn resting_pill_width(settings: &DockSettings, slot_count: usize) -> f32 {
     (shell_section_width(base) + icons_w + 30.0).max(160.0)
 }
 
-/// Pre-allocates horizontal headroom for smooth fisheye neighbor parting so the Win32
-/// window never resizes during hover.
 fn compute_window_dips(settings: &DockSettings, slot_count: usize) -> (f32, f32) {
     let base = settings.icon_dips();
     let resting_w = resting_pill_width(settings, slot_count);
@@ -352,7 +350,25 @@ fn compute_window_dips(settings: &DockSettings, slot_count: usize) -> (f32, f32)
     (width_dips, height_dips)
 }
 
-/// Damped double-hop activation bounce offset in DIPs (matches C# AnimateActivationFeedback).
+fn compute_window_rect(
+    settings: &DockSettings,
+    slot_count: usize,
+    dpi: f32,
+) -> (i32, i32, i32, i32) {
+    let (width_dips, height_dips) = compute_window_dips(settings, slot_count);
+    let (scr_w, scr_h) = win32::primary_screen_px();
+    let w_px = ((width_dips * dpi).ceil() as i32).min(scr_w);
+    let h_px = ((height_dips * dpi).ceil() as i32).min(scr_h);
+    let margin_px = (12.0 * dpi).round() as i32;
+    let x_px = match settings.position {
+        DockPosition::Left => margin_px,
+        DockPosition::Center => (scr_w - w_px) / 2,
+        DockPosition::Right => scr_w - w_px - margin_px,
+    };
+    let y_px = scr_h - h_px;
+    (x_px, y_px, w_px, h_px)
+}
+
 fn bounce_offset_dips(started: Option<Instant>) -> Option<f32> {
     let t = started?.elapsed().as_secs_f32() / BOUNCE_DURATION_SECS;
     if t >= 1.0 {
@@ -368,130 +384,331 @@ fn bounce_offset_dips(started: Option<Instant>) -> Option<f32> {
     Some(y)
 }
 
-fn render_shell_svg(kind: ShellButton, base: f32) -> impl IntoElement {
-    let icon_sz = (base * 0.62).round().max(20.0);
-    let (path, color) = match kind {
-        ShellButton::Start => ("icons/start.svg", rgba(0x38bdf8ff)),
-        ShellButton::Search => ("icons/search.svg", rgba(0xe2e8f0ff)),
-        ShellButton::TaskView => ("icons/taskview.svg", rgba(0xe2e8f0ff)),
-    };
-    svg().path(path).size(px(icon_sz)).text_color(color)
-}
-
-impl DockView {
+impl DockState {
     fn new(
         hwnd: usize,
+        dpi: f32,
         settings: DockSettings,
         pins: Vec<PinnedApp>,
         initial_slots: Vec<DockSlot>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let view = Self {
+        initial_rect: (i32, i32, i32, i32),
+    ) -> windows::core::Result<Self> {
+        let dcomp = DcompEngine::new(hwnd)?;
+        let base = settings.icon_dips();
+        let pill_h = pill_height_dips(&settings);
+        let radius = settings.corner_radius_dips();
+        let bg_alpha = if settings.dock_background == SurfaceBackground::None {
+            0.0_f32
+        } else {
+            (settings.dock_opacity.clamp(0.1, 1.0) * 0.855) as f32
+        };
+        let bd_alpha = if settings.dock_background == SurfaceBackground::None {
+            0.0
+        } else {
+            0.16
+        };
+        let pill = dcomp.create_pill_nodes(
+            radius * dpi,
+            pill_h * dpi,
+            (0x14, 0x17, 0x1f, bg_alpha),
+            (0xff, 0xff, 0xff, bd_alpha),
+            dpi,
+        )?;
+
+        let shell_px = (base * dpi).ceil() as u32;
+        let shell_bg_hover = dcomp.create_rounded_rect_surface(
+            shell_px,
+            shell_px,
+            9.0 * dpi,
+            (0xff, 0xff, 0xff, 0.11),
+        )?;
+        let shell_bg_press = dcomp.create_rounded_rect_surface(
+            shell_px,
+            shell_px,
+            9.0 * dpi,
+            (0xff, 0xff, 0xff, 0.18),
+        )?;
+        let shell_bgs = [
+            dcomp.create_node()?,
+            dcomp.create_node()?,
+            dcomp.create_node()?,
+        ];
+        let glyph_px = ((base * 0.62).max(20.0) * dpi).ceil() as u32;
+        let shell_icons = [
+            {
+                let n = dcomp.create_node()?;
+                let s = dcomp.create_shell_glyph_surface(ShellGlyph::Start, glyph_px)?;
+                n.set_content(Some(&s));
+                n
+            },
+            {
+                let n = dcomp.create_node()?;
+                let s = dcomp.create_shell_glyph_surface(ShellGlyph::Search, glyph_px)?;
+                n.set_content(Some(&s));
+                n
+            },
+            {
+                let n = dcomp.create_node()?;
+                let s = dcomp.create_shell_glyph_surface(ShellGlyph::TaskView, glyph_px)?;
+                n.set_content(Some(&s));
+                n
+            },
+        ];
+
+        let divider = dcomp.create_node()?;
+        let div_surf = dcomp.create_rounded_rect_surface(
+            (1.0 * dpi).ceil() as u32,
+            (22.0 * dpi).ceil() as u32,
+            0.5 * dpi,
+            (0xff, 0xff, 0xff, 0.15),
+        )?;
+        divider.set_content(Some(&div_surf));
+
+        let dot_h_px = (3.5 * dpi).ceil() as u32;
+        let dot_running = dcomp.create_rounded_rect_surface(
+            (5.0 * dpi).ceil() as u32,
+            dot_h_px,
+            2.0 * dpi,
+            (0xcb, 0xd5, 0xe1, 0.80),
+        )?;
+        let dot_active = dcomp.create_rounded_rect_surface(
+            (14.0 * dpi).ceil() as u32,
+            dot_h_px,
+            2.0 * dpi,
+            (0xff, 0xff, 0xff, 1.0),
+        )?;
+
+        let drag_ghost = dcomp.create_node()?;
+        drag_ghost.hide();
+        let tooltip_node = dcomp.create_node()?;
+        tooltip_node.hide();
+
+        let anim_signal = Arc::new((Mutex::new(false), Condvar::new()));
+        let tick_pending = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let mut state = Self {
             hwnd,
+            dpi,
             settings,
             pins,
             slots: initial_slots,
-            icons: HashMap::new(),
+            dcomp,
+            pill,
+            shell_bgs,
+            shell_icons,
+            shell_bg_hover,
+            shell_bg_press,
+            divider,
+            dot_running,
+            dot_active,
+            icon_surfaces: HashMap::new(),
+            fallback_surfaces: HashMap::new(),
+            in_flight_icons: HashSet::new(),
+            pending_icons: Arc::new(Mutex::new(Vec::new())),
+            slot_visuals: Vec::new(),
+            drag_ghost,
+            drag_ghost_source: None,
+            tooltip_node,
+            tooltip_cache: None,
             hover_mouse_x: None,
             hovered_idx: None,
             hovered_shell: None,
             pressed_idx: None,
             pressed_shell: None,
             drag: None,
-            suppress_next_click: false,
+            tracking_mouse: false,
             last_frame: None,
-            pacing_active: Arc::new(AtomicBool::new(false)),
-            last_window_rect: None,
+            last_window_rect: Some(initial_rect),
+            anim_signal,
+            tick_pending,
+            shutdown,
         };
-        view.request_missing_icons(cx);
-        view.start_window_poll(cx);
-        view
+        state.rebuild_visual_tree();
+        state.request_missing_icons();
+        state.update_visuals();
+        state.spawn_vsync_thread();
+        Ok(state)
     }
 
-    fn request_missing_icons(&self, cx: &mut Context<Self>) {
-        let missing: Vec<String> = self
-            .slots
-            .iter()
-            .map(|s| s.icon_source.clone())
-            .filter(|p| !self.icons.contains_key(p))
-            .collect();
+    fn spawn_vsync_thread(&self) {
+        let hwnd_val = self.hwnd;
+        let signal = self.anim_signal.clone();
+        let tick_pending = self.tick_pending.clone();
+        let shutdown = self.shutdown.clone();
+        std::thread::Builder::new()
+            .name("dock-vsync".to_owned())
+            .spawn(move || {
+                let (lock, cvar) = &*signal;
+                loop {
+                    {
+                        let mut active = lock.lock().unwrap_or_else(|e| e.into_inner());
+                        while !*active && !shutdown.load(Ordering::Relaxed) {
+                            active = cvar.wait(active).unwrap_or_else(|e| e.into_inner());
+                        }
+                    }
+                    if shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    // Block on DWM VSync (0% CPU/GPU wait, native 60-180Hz pacing).
+                    unsafe {
+                        let _ = DwmFlush();
+                    }
+                    if shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if !tick_pending.swap(true, Ordering::AcqRel) {
+                        unsafe {
+                            let _ = PostMessageW(hwnd_val as HWND, WM_APP_VSYNC, 0, 0);
+                        }
+                    }
+                }
+            })
+            .ok();
+    }
+
+    fn set_animating(&self, active: bool) {
+        let (lock, cvar) = &*self.anim_signal;
+        let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        if *guard != active {
+            *guard = active;
+            if active {
+                cvar.notify_one();
+            }
+        }
+    }
+
+    fn ensure_animation(&mut self) {
+        if self.last_frame.is_none() {
+            self.last_frame = Some(Instant::now());
+        }
+        self.set_animating(true);
+    }
+
+    fn rebuild_visual_tree(&mut self) {
+        self.dcomp.remove_all_children(&self.dcomp.root);
+        self.dcomp.add_child(&self.dcomp.root, &self.pill.left);
+        self.dcomp.add_child(&self.dcomp.root, &self.pill.center);
+        self.dcomp.add_child(&self.dcomp.root, &self.pill.right);
+        for i in 0..3 {
+            self.dcomp.add_child(&self.dcomp.root, &self.shell_bgs[i]);
+            self.dcomp.add_child(&self.dcomp.root, &self.shell_icons[i]);
+        }
+        self.dcomp.add_child(&self.dcomp.root, &self.divider);
+
+        while self.slot_visuals.len() < self.slots.len() {
+            if let (Ok(icon), Ok(dot)) = (self.dcomp.create_node(), self.dcomp.create_node()) {
+                icon.hide();
+                dot.hide();
+                self.slot_visuals.push(SlotVisuals {
+                    icon,
+                    dot,
+                    bound_source: String::new(),
+                    bound_has_icon: false,
+                    bound_dot_state: 0,
+                });
+            } else {
+                break;
+            }
+        }
+        self.slot_visuals.truncate(self.slots.len());
+
+        for sv in &self.slot_visuals {
+            self.dcomp.add_child(&self.dcomp.root, &sv.icon);
+            self.dcomp.add_child(&self.dcomp.root, &sv.dot);
+        }
+        self.dcomp.add_child(&self.dcomp.root, &self.drag_ghost);
+        self.dcomp.add_child(&self.dcomp.root, &self.tooltip_node);
+    }
+
+    fn request_missing_icons(&mut self) {
+        let mut missing = Vec::new();
+        for slot in &self.slots {
+            if !self.icon_surfaces.contains_key(&slot.icon_source)
+                && self.in_flight_icons.insert(slot.icon_source.clone())
+            {
+                missing.push(slot.icon_source.clone());
+            }
+        }
         if missing.is_empty() {
             return;
         }
-        cx.spawn(async move |this, cx| {
-            let resolved = cx
-                .background_executor()
-                .spawn(async move { icon_cache::resolve_batch(&missing) })
-                .await;
-            let _ = this.update(cx, |view, cx| {
-                view.icons.extend(resolved);
-                cx.notify();
-            });
-        })
-        .detach();
+        let pending = self.pending_icons.clone();
+        let hwnd_val = self.hwnd;
+        std::thread::Builder::new()
+            .name("dock-icons".to_owned())
+            .spawn(move || {
+                let batch = icon_cache::resolve_batch_raw(&missing);
+                if let Ok(mut queue) = pending.lock() {
+                    queue.push(batch);
+                }
+                unsafe {
+                    let _ = PostMessageW(hwnd_val as HWND, WM_APP_ICONS, 0, 0);
+                }
+            })
+            .ok();
     }
 
-    /// Syncs slots from running windows and returns `true` only if visible state changed.
-    fn sync_slots(&mut self, cx: &mut Context<Self>) -> bool {
+    fn drain_loaded_icons(&mut self) {
+        let batches: Vec<HashMap<String, Option<RawIcon>>> = {
+            let Ok(mut queue) = self.pending_icons.lock() else {
+                return;
+            };
+            std::mem::take(&mut *queue)
+        };
+        if batches.is_empty() {
+            return;
+        }
+        for batch in batches {
+            for (spec, raw_opt) in batch {
+                self.in_flight_icons.remove(&spec);
+                let surf = raw_opt.and_then(|raw| self.dcomp.create_app_icon_surface(&raw).ok());
+                self.icon_surfaces.insert(spec, surf);
+            }
+        }
+        self.update_visuals();
+    }
+
+    fn sync_slots(&mut self) -> bool {
         let running = tracker::enumerate_windows();
         let next = build_slots(&self.pins, &running, &self.slots);
-        let changed = next.len() != self.slots.len()
+        let len_changed = next.len() != self.slots.len();
+        let changed = len_changed
             || next.iter().zip(self.slots.iter()).any(|(a, b)| {
                 a.key != b.key
                     || a.is_foreground != b.is_foreground
                     || a.hwnds.is_empty() != b.hwnds.is_empty()
             });
         self.slots = next;
-        self.request_missing_icons(cx);
+        if len_changed {
+            self.rebuild_visual_tree();
+            self.sync_window_bounds();
+        }
+        self.request_missing_icons();
         changed
     }
 
     fn sync_window_bounds(&mut self) {
-        let (width_dips, height_dips) = compute_window_dips(&self.settings, self.slots.len());
-        let dpi = win32::dpi_scale(self.hwnd);
-        let (scr_w, scr_h) = win32::primary_screen_px();
-        let w_px = ((width_dips * dpi).ceil() as i32).min(scr_w);
-        let h_px = ((height_dips * dpi).ceil() as i32).min(scr_h);
-        let margin_px = (12.0 * dpi).round() as i32;
-        let x_px = match self.settings.position {
-            DockPosition::Left => margin_px,
-            DockPosition::Center => (scr_w - w_px) / 2,
-            DockPosition::Right => scr_w - w_px - margin_px,
-        };
-        let y_px = scr_h - h_px;
-
-        let rect = (x_px, y_px, w_px, h_px);
+        let rect = compute_window_rect(&self.settings, self.slots.len(), self.dpi);
         if self.last_window_rect != Some(rect) {
             self.last_window_rect = Some(rect);
-            win32::reposition_dock_window(self.hwnd, x_px, y_px, w_px, h_px);
+            win32::reposition_dock_window(self.hwnd, rect.0, rect.1, rect.2, rect.3);
         }
     }
 
-    fn start_window_poll(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            loop {
-                Timer::after(Duration::from_millis(800)).await;
-                let _ = opentaskbar_shell::taskbar::ensure_hidden();
-                let updated = this.update(cx, |view, cx| {
-                    let prev_len = view.slots.len();
-                    let changed = view.sync_slots(cx);
-                    if view.slots.len() != prev_len {
-                        view.sync_window_bounds();
-                    }
-                    // Never redraw the GPU swapchain on idle polls when nothing changed.
-                    if changed {
-                        cx.notify();
-                    }
-                });
-                if updated.is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
+    fn live_pill_geometry(&self) -> (f32, f32, f32, f32) {
+        let base = self.settings.icon_dips();
+        let gap = slot_gap(&self.settings);
+        let (win_w, win_h) = compute_window_dips(&self.settings, self.slots.len());
+        let icons_w: f32 = self.slots.iter().map(|s| base * s.scale).sum::<f32>()
+            + gap * (self.slots.len().saturating_sub(1) as f32);
+        let pill_w = (shell_section_width(base) + icons_w + 30.0).max(160.0);
+        let pill_h = pill_height_dips(&self.settings);
+        let pill_left = (win_w - pill_w) * 0.5;
+        let pill_top = win_h - VERTICAL_EDGE_GAP - pill_h;
+        (pill_left, pill_top, pill_w, pill_h)
     }
 
-    /// Resting X center of app slot `idx` in window logical DIPs (immune to current magnification).
     fn resting_slot_center_x(&self, idx: usize) -> f32 {
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
@@ -502,15 +719,10 @@ impl DockView {
         apps_left + (idx as f32) * (base + gap) + base * 0.5
     }
 
-    /// Live horizontal center X of app slot `idx` in window logical DIPs (accounts for current magnification).
     fn live_slot_center_x(&self, idx: usize) -> f32 {
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
-        let (win_w, _) = compute_window_dips(&self.settings, self.slots.len());
-        let icons_w: f32 = self.slots.iter().map(|s| base * s.scale).sum::<f32>()
-            + gap * (self.slots.len().saturating_sub(1) as f32);
-        let pill_w = (shell_section_width(base) + icons_w + 30.0).max(160.0);
-        let pill_left = (win_w - pill_w) * 0.5;
+        let (pill_left, _, _, _) = self.live_pill_geometry();
         let mut cursor = pill_left + 15.0 + shell_section_width(base);
         for i in 0..idx.min(self.slots.len()) {
             cursor += base * self.slots[i].scale + gap;
@@ -519,25 +731,136 @@ impl DockView {
         cursor + w * 0.5
     }
 
-    /// Live horizontal center X of a left-side Windows shell button in window logical DIPs.
     fn live_shell_center_x(&self, kind: ShellButton) -> f32 {
         let base = self.settings.icon_dips();
-        let gap = slot_gap(&self.settings);
-        let (win_w, _) = compute_window_dips(&self.settings, self.slots.len());
-        let icons_w: f32 = self.slots.iter().map(|s| base * s.scale).sum::<f32>()
-            + gap * (self.slots.len().saturating_sub(1) as f32);
-        let pill_w = (shell_section_width(base) + icons_w + 30.0).max(160.0);
-        let pill_left = (win_w - pill_w) * 0.5;
-        let index = match kind {
-            ShellButton::Start => 0.0,
-            ShellButton::Search => 1.0,
-            ShellButton::TaskView => 2.0,
-        };
-        pill_left + 15.0 + index * (base + 4.0) + base * 0.5
+        let (pill_left, _, _, _) = self.live_pill_geometry();
+        pill_left + 15.0 + (kind.index() as f32) * (base + 4.0) + base * 0.5
     }
 
-    /// Handles pointer motion during an active slot drag: the dragged icon floats smoothly
-    /// under the cursor while neighboring slots glide aside with spring animation.
+    fn hit_test_dips(&self, mx: f32, my: f32) -> bool {
+        if self.drag.is_some() {
+            return true;
+        }
+        let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
+        if mx >= pill_left && mx <= pill_left + pill_w && my >= pill_top && my <= pill_top + pill_h
+        {
+            return true;
+        }
+        let base = self.settings.icon_dips();
+        let (_, win_h) = compute_window_dips(&self.settings, self.slots.len());
+        let icon_base_bottom = win_h - VERTICAL_EDGE_GAP - 6.0 - 3.5 - 4.0;
+        for (idx, slot) in self.slots.iter().enumerate() {
+            let dim = base * slot.scale;
+            let cx = self.live_slot_center_x(idx) + slot.slide_x;
+            let bounce = bounce_offset_dips(slot.bounce_started).unwrap_or(0.0);
+            let lift = ((slot.scale - 1.0) * 14.0 + bounce).max(0.0);
+            let top = icon_base_bottom - lift - dim;
+            if mx >= cx - dim * 0.5 && mx <= cx + dim * 0.5 && my >= top && my <= icon_base_bottom {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn hit_shell_button(&self, mx: f32, my: f32) -> Option<ShellButton> {
+        let base = self.settings.icon_dips();
+        let (pill_left, pill_top, _, pill_h) = self.live_pill_geometry();
+        if my < pill_top || my > pill_top + pill_h {
+            return None;
+        }
+        for kind in ShellButton::ALL {
+            let x = pill_left + 15.0 + (kind.index() as f32) * (base + 4.0);
+            if mx >= x && mx <= x + base {
+                return Some(kind);
+            }
+        }
+        None
+    }
+
+    fn update_hovered_index_from_mouse(&mut self) {
+        let Some(mx) = self.hover_mouse_x else {
+            self.hovered_idx = None;
+            return;
+        };
+        let base = self.settings.icon_dips();
+        let gap = slot_gap(&self.settings);
+        let max_dist = (base + gap) * 0.55;
+        self.hovered_idx = self
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, _)| (i, (mx - self.resting_slot_center_x(i)).abs()))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .filter(|(_, d)| *d <= max_dist)
+            .map(|(i, _)| i);
+    }
+
+    fn target_scale_for(&self, idx: usize) -> f32 {
+        if self.drag.is_some_and(|d| d.active) {
+            return 1.0;
+        }
+        if !self.settings.magnification_enabled || !self.settings.animations_enabled {
+            return 1.0;
+        }
+        let Some(mx) = self.hover_mouse_x else {
+            return 1.0;
+        };
+        let base = self.settings.icon_dips();
+        let gap = slot_gap(&self.settings);
+        let radius = (base + gap) * FISHEYE_RADIUS_SLOTS;
+        let dist = (mx - self.resting_slot_center_x(idx)).abs();
+        if dist >= radius {
+            return 1.0;
+        }
+        let c = (dist / radius * std::f32::consts::FRAC_PI_2).cos();
+        1.0 + FISHEYE_PEAK * c * c
+    }
+
+    fn step_animations(&mut self, now: Instant) -> bool {
+        let dt = self
+            .last_frame
+            .map_or(1.0 / 60.0, |prev| now.duration_since(prev).as_secs_f32())
+            .clamp(0.001, 0.05);
+        self.last_frame = Some(now);
+
+        let scale_k = 1.0 - (-22.0 * dt).exp();
+        let slide_k = 1.0 - (-24.0 * dt).exp();
+        let mut moving = self.drag.is_some_and(|d| d.active);
+
+        for idx in 0..self.slots.len() {
+            let target = self.target_scale_for(idx);
+            let cur = self.slots[idx].scale;
+            let diff = target - cur;
+            if diff.abs() > 0.004 {
+                self.slots[idx].scale = cur + diff * scale_k;
+                moving = true;
+            } else if (cur - target).abs() > 0.0 {
+                self.slots[idx].scale = target;
+            }
+
+            let sx = self.slots[idx].slide_x;
+            if sx.abs() > 0.35 {
+                self.slots[idx].slide_x = sx * (1.0 - slide_k);
+                moving = true;
+            } else if sx != 0.0 {
+                self.slots[idx].slide_x = 0.0;
+            }
+
+            if let Some(started) = self.slots[idx].bounce_started {
+                if bounce_offset_dips(Some(started)).is_some() {
+                    moving = true;
+                } else {
+                    self.slots[idx].bounce_started = None;
+                }
+            }
+        }
+
+        if !moving {
+            self.last_frame = None;
+        }
+        moving
+    }
+
     fn update_drag(&mut self, mx: f32) {
         let Some(mut drag) = self.drag else {
             return;
@@ -564,8 +887,6 @@ impl DockView {
                 let old_idx = drag.idx;
                 let item = self.slots.remove(old_idx);
                 self.slots.insert(target, item);
-                // Give every shifted neighbor a spring displacement from its old screen position
-                // so it visibly glides smoothly into its new slot.
                 if target > old_idx {
                     for slot in &mut self.slots[old_idx..target] {
                         slot.slide_x += step;
@@ -582,13 +903,11 @@ impl DockView {
         self.drag = Some(drag);
     }
 
-    /// Finishes an active drag and persists the new pinned order to `settings.json`.
-    fn finish_drag(&mut self) {
+    fn finish_drag(&mut self) -> bool {
         let Some(drag) = self.drag.take() else {
-            return;
+            return false;
         };
         if drag.active {
-            self.suppress_next_click = true;
             let order: Vec<String> = self
                 .slots
                 .iter()
@@ -600,557 +919,524 @@ impl DockView {
                 &opentaskbar_core::settings::settings_path(),
                 &self.settings,
             );
+            return true;
         }
+        false
     }
 
-    /// Smooth cosine bell magnification based on continuous mouse X vs resting slot centers.
-    fn target_scale_for(&self, idx: usize) -> f32 {
-        if self.drag.is_some_and(|d| d.active) {
-            return 1.0;
+    fn fallback_surface_for(&mut self, label: &str) -> Option<IDCompositionSurface> {
+        let ch = label
+            .chars()
+            .next()
+            .unwrap_or('?')
+            .to_uppercase()
+            .to_string();
+        if let Some(existing) = self.fallback_surfaces.get(&ch) {
+            return Some(existing.clone());
         }
-        if !self.settings.magnification_enabled || !self.settings.animations_enabled {
-            return 1.0;
-        }
-        let Some(mx) = self.hover_mouse_x else {
-            return 1.0;
-        };
+        let created = self.dcomp.create_fallback_tile_surface(&ch, 64).ok()?;
+        self.fallback_surfaces.insert(ch, created.clone());
+        Some(created)
+    }
+
+    /// Updates only 2D affine transforms on the DirectComposition visual tree and commits.
+    /// Performs zero D3D11 draw calls during fisheye/bounce/drag animations.
+    fn update_visuals(&mut self) {
+        let dpi = self.dpi;
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
-        let radius = (base + gap) * FISHEYE_RADIUS_SLOTS;
-        let dist = (mx - self.resting_slot_center_x(idx)).abs();
-        if dist >= radius {
-            return 1.0;
-        }
-        let c = (dist / radius * std::f32::consts::FRAC_PI_2).cos();
-        1.0 + FISHEYE_PEAK * c * c
-    }
+        let (win_w, win_h) = compute_window_dips(&self.settings, self.slots.len());
+        let (pill_left, pill_top, pill_w, _pill_h) = self.live_pill_geometry();
 
-    fn update_hovered_index_from_mouse(&mut self) {
-        let Some(mx) = self.hover_mouse_x else {
-            self.hovered_idx = None;
-            return;
-        };
-        let base = self.settings.icon_dips();
-        let gap = slot_gap(&self.settings);
-        let max_dist = (base + gap) * 0.55;
-        self.hovered_idx = self
-            .slots
-            .iter()
-            .enumerate()
-            .map(|(i, _)| (i, (mx - self.resting_slot_center_x(i)).abs()))
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .filter(|(_, d)| *d <= max_dist)
-            .map(|(i, _)| i);
-    }
+        // 1. 3-piece pill transform (zero texture redraws during width animation).
+        let cap_w_px = self.pill.cap_w_px;
+        let pill_left_px = (pill_left * dpi).round();
+        let pill_top_px = (pill_top * dpi).round();
+        let pill_w_px = (pill_w * dpi).round().max(cap_w_px * 2.0 + 1.0);
+        let center_w_px = (pill_w_px - cap_w_px * 2.0).max(1.0);
+        self.pill
+            .left
+            .set_transform(1.0, 1.0, pill_left_px, pill_top_px);
+        self.pill
+            .center
+            .set_transform(center_w_px, 1.0, pill_left_px + cap_w_px, pill_top_px);
+        self.pill
+            .right
+            .set_transform(1.0, 1.0, pill_left_px + pill_w_px - cap_w_px, pill_top_px);
 
-    /// Advances all spring/bounce animations using framerate-independent delta-time
-    /// and returns `true` if another paced VSync frame is needed.
-    fn step_animations(&mut self, now: Instant) -> bool {
-        let dt = self
-            .last_frame
-            .map_or(1.0 / 60.0, |prev| now.duration_since(prev).as_secs_f32())
-            .clamp(0.001, 0.05);
-        self.last_frame = Some(now);
-
-        let scale_k = 1.0 - (-22.0 * dt).exp();
-        let slide_k = 1.0 - (-24.0 * dt).exp();
-        let mut moving = self.drag.is_some_and(|d| d.active);
-
-        for idx in 0..self.slots.len() {
-            let target = self.target_scale_for(idx);
-            let cur = self.slots[idx].scale;
-            let diff = target - cur;
-            if diff.abs() > 0.006 {
-                self.slots[idx].scale = cur + diff * scale_k;
-                moving = true;
-            } else if (cur - target).abs() > 0.0 {
-                self.slots[idx].scale = target;
+        // 2. Shell buttons (Start, Search, Task View) + divider.
+        let shell_top = win_h - VERTICAL_EDGE_GAP - 6.0 - 6.5 - base;
+        let glyph_dips = (base * 0.62).max(20.0);
+        for kind in ShellButton::ALL {
+            let i = kind.index();
+            let x = pill_left + 15.0 + (i as f32) * (base + 4.0);
+            let hovered = self.hovered_shell == Some(kind);
+            let pressed = self.pressed_shell == Some(kind);
+            if pressed {
+                self.shell_bgs[i].set_content(Some(&self.shell_bg_press));
+                self.shell_bgs[i].set_transform(
+                    1.0,
+                    1.0,
+                    (x * dpi).round(),
+                    (shell_top * dpi).round(),
+                );
+            } else if hovered {
+                self.shell_bgs[i].set_content(Some(&self.shell_bg_hover));
+                self.shell_bgs[i].set_transform(
+                    1.0,
+                    1.0,
+                    (x * dpi).round(),
+                    (shell_top * dpi).round(),
+                );
+            } else {
+                self.shell_bgs[i].hide();
             }
 
-            let sx = self.slots[idx].slide_x;
-            if sx.abs() > 0.5 {
-                self.slots[idx].slide_x = sx * (1.0 - slide_k);
-                moving = true;
-            } else if sx != 0.0 {
-                self.slots[idx].slide_x = 0.0;
-            }
-
-            if let Some(started) = self.slots[idx].bounce_started {
-                if bounce_offset_dips(Some(started)).is_some() {
-                    moving = true;
-                } else {
-                    self.slots[idx].bounce_started = None;
-                }
-            }
+            let scale = if pressed { 0.88 } else { 1.0 };
+            let drawn = glyph_dips * scale;
+            let gx = x + (base - drawn) * 0.5;
+            let gy = shell_top + (base - drawn) * 0.5;
+            self.shell_icons[i].set_transform(scale, scale, gx * dpi, gy * dpi);
         }
 
-        if !moving {
-            self.last_frame = None;
-        }
-        moving
-    }
+        let div_x = pill_left + 15.0 + base * 3.0 + 4.0 * 2.0 + 8.0;
+        let div_y = win_h - VERTICAL_EDGE_GAP - 6.0 - 10.0 - 22.0;
+        self.divider
+            .set_transform(1.0, 1.0, (div_x * dpi).round(), (div_y * dpi).round());
 
-    fn ensure_animation(&mut self, cx: &mut Context<Self>) {
-        if self.last_frame.is_none() {
-            self.last_frame = Some(Instant::now());
-            cx.notify();
-        }
-    }
-
-    fn handle_right_click(&self, cx: &mut Context<Self>) {
-        let hwnd = self.hwnd;
-        cx.spawn(async move |_this, cx| {
-            let action = cx
-                .background_executor()
-                .spawn(async move { win32::show_dock_context_menu(hwnd) })
-                .await;
-            let _ = cx.update(|cx| match action {
-                ContextAction::TaskManager => pins::launch("taskmgr.exe".to_owned()),
-                ContextAction::RestoreTaskbar => opentaskbar_shell::taskbar::restore_from_journal(),
-                ContextAction::Exit => cx.quit(),
-                ContextAction::None => {}
-            });
-        })
-        .detach();
-    }
-
-    fn render_shell_button(&self, kind: ShellButton, cx: &mut Context<Self>) -> impl IntoElement {
-        let base = self.settings.icon_dips();
-        let hovered = self.hovered_shell == Some(kind);
-        let pressed = self.pressed_shell == Some(kind);
-        let id = match kind {
-            ShellButton::Start => "shell-start",
-            ShellButton::Search => "shell-search",
-            ShellButton::TaskView => "shell-taskview",
-        };
-        let visual_base = if pressed { base * 0.88 } else { base };
-        div()
-            .id(id)
-            .w(px(base))
-            .h(px(base))
-            .mb(px(6.5))
-            .rounded(px(9.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .when(pressed, |el| el.bg(rgba(0xffffff2e)))
-            .when(!pressed && hovered, |el| el.bg(rgba(0xffffff1c)))
-            .on_hover(cx.listener(move |this, active, _window, cx| {
-                if *active {
-                    this.hovered_shell = Some(kind);
-                    this.hover_mouse_x = None;
-                    this.hovered_idx = None;
-                    this.ensure_animation(cx);
-                } else if this.hovered_shell == Some(kind) {
-                    this.hovered_shell = None;
-                    this.pressed_shell = None;
-                }
-                cx.notify();
-            }))
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| {
-                    this.pressed_shell = Some(kind);
-                    cx.notify();
-                }),
-            )
-            .on_click(cx.listener(move |this, _, _window, cx| {
-                this.pressed_shell = None;
-                cx.notify();
-                match kind {
-                    ShellButton::Start => opentaskbar_shell::taskbar::open_start_menu(),
-                    ShellButton::Search => opentaskbar_shell::taskbar::open_search(),
-                    ShellButton::TaskView => opentaskbar_shell::taskbar::open_task_view(),
-                }
-            }))
-            .child(render_shell_svg(kind, visual_base))
-    }
-}
-
-impl Render for DockView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let now = Instant::now();
-        if self.step_animations(now) && !self.pacing_active.swap(true, Ordering::Relaxed) {
-            // VSync-aligned 60+ FPS pacing: skips intermediate high-Hz VSyncs (e.g. 180Hz -> 60Hz)
-            // without touching the GPU, cutting D3D11 + DirectComposition load ~3x.
-            schedule_paced_frame(
-                window,
-                cx.entity_id(),
-                now + TARGET_FRAME_INTERVAL,
-                self.pacing_active.clone(),
-            );
-        }
-        let base = self.settings.icon_dips();
-        let gap = slot_gap(&self.settings);
-        let radius = self.settings.corner_radius_dips();
-        let pill_h = pill_height_dips(&self.settings);
-
-        // Each slot expands proportionally to its magnified icon so icons never overlap,
-        // while resting centers drive the fisheye curve so there is zero feedback jitter.
-        let icons_w: f32 = self.slots.iter().map(|s| base * s.scale).sum::<f32>()
-            + gap * (self.slots.len().saturating_sub(1) as f32);
-        let pill_w = (shell_section_width(base) + icons_w + 30.0).max(160.0);
-
-        let alpha = (self.settings.dock_opacity.clamp(0.1, 1.0) * 218.0) as u32;
-        let pill_bg = if self.settings.dock_background == SurfaceBackground::None {
-            rgba(0x00000000)
-        } else {
-            rgba(0x14171f00 | alpha)
-        };
+        // 3. Unified app slots (icons + running/active indicator dots).
         let active_drag = self.drag.filter(|d| d.active);
-        let is_dragging = active_drag.is_some();
-        // Automatically position tooltip 8px above the exact visual top edge of the hovered item:
-        // - Shell buttons (no fisheye) -> 8px above the dock pill
-        // - App icons (with fisheye) -> 8px above the magnified icon's live top edge
-        let hovered_tooltip: Option<(SharedString, f32, f32)> = if is_dragging {
+        let icon_base_bottom = win_h - VERTICAL_EDGE_GAP - 6.0 - 3.5 - 4.0;
+        let dot_top = win_h - VERTICAL_EDGE_GAP - 6.0 - 3.5;
+
+        let mut cursor_x = pill_left + 15.0 + shell_section_width(base);
+        let slot_count = self.slots.len().min(self.slot_visuals.len());
+        for idx in 0..slot_count {
+            let slot_w = base * self.slots[idx].scale;
+            let dragging_this = active_drag.is_some_and(|d| d.idx == idx);
+            let pressed = self.pressed_idx == Some(idx) && !dragging_this;
+            let press_factor = if pressed { 0.88 } else { 1.0 };
+            let dim = slot_w * press_factor;
+            let bounce = bounce_offset_dips(self.slots[idx].bounce_started).unwrap_or(0.0);
+            let lift = ((self.slots[idx].scale - 1.0) * 14.0 + bounce
+                - if pressed { 2.0 } else { 0.0 })
+            .max(0.0);
+            let slide_x = self.slots[idx].slide_x;
+            let source = self.slots[idx].icon_source.clone();
+            let label = self.slots[idx].label.clone();
+            let running = !self.slots[idx].hwnds.is_empty();
+            let active = self.slots[idx].is_foreground;
+
+            let has_real_icon = self
+                .icon_surfaces
+                .get(&source)
+                .and_then(|o| o.as_ref())
+                .is_some();
+            if self.slot_visuals[idx].bound_source != source
+                || self.slot_visuals[idx].bound_has_icon != has_real_icon
+            {
+                let surf = self
+                    .icon_surfaces
+                    .get(&source)
+                    .and_then(|o| o.clone())
+                    .or_else(|| self.fallback_surface_for(&label));
+                self.slot_visuals[idx].icon.set_content(surf.as_ref());
+                self.slot_visuals[idx].bound_source = source;
+                self.slot_visuals[idx].bound_has_icon = has_real_icon;
+            }
+
+            if dragging_this {
+                self.slot_visuals[idx].icon.hide();
+                self.slot_visuals[idx].dot.hide();
+            } else {
+                let ix = cursor_x + slide_x + (slot_w - dim) * 0.5;
+                let iy = icon_base_bottom - lift - dim;
+                let s = (dim * dpi) / 64.0;
+                self.slot_visuals[idx]
+                    .icon
+                    .set_transform(s, s, ix * dpi, iy * dpi);
+
+                let desired_dot = if !running {
+                    0
+                } else if active {
+                    2
+                } else {
+                    1
+                };
+                if self.slot_visuals[idx].bound_dot_state != desired_dot {
+                    match desired_dot {
+                        2 => self.slot_visuals[idx]
+                            .dot
+                            .set_content(Some(&self.dot_active)),
+                        1 => self.slot_visuals[idx]
+                            .dot
+                            .set_content(Some(&self.dot_running)),
+                        _ => self.slot_visuals[idx].dot.set_content(None),
+                    }
+                    self.slot_visuals[idx].bound_dot_state = desired_dot;
+                }
+                if desired_dot == 0 {
+                    self.slot_visuals[idx].dot.hide();
+                } else {
+                    let dot_w = if desired_dot == 2 { 14.0 } else { 5.0 };
+                    let dx = cursor_x + slide_x + (slot_w - dot_w) * 0.5;
+                    self.slot_visuals[idx].dot.set_transform(
+                        1.0,
+                        1.0,
+                        (dx * dpi).round(),
+                        (dot_top * dpi).round(),
+                    );
+                }
+            }
+
+            cursor_x += slot_w + gap;
+        }
+
+        // 4. Floating cursor-tracking drag ghost.
+        if let Some(drag) = active_drag
+            && let Some(slot) = self.slots.get(drag.idx)
+        {
+            let source = slot.icon_source.clone();
+            let label = slot.label.clone();
+            if self.drag_ghost_source.as_deref() != Some(source.as_str()) {
+                let surf = self
+                    .icon_surfaces
+                    .get(&source)
+                    .and_then(|o| o.clone())
+                    .or_else(|| self.fallback_surface_for(&label));
+                self.drag_ghost.set_content(surf.as_ref());
+                self.drag_ghost_source = Some(source);
+            }
+            let ghost_dim = base * 1.14;
+            let gx = (drag.current_x - drag.grab_offset_x - ghost_dim * 0.5)
+                .clamp(4.0, (win_w - ghost_dim - 4.0).max(4.0));
+            let gy = win_h - VERTICAL_EDGE_GAP - 20.0 - ghost_dim;
+            let s = (ghost_dim * dpi) / 64.0;
+            self.drag_ghost.set_transform(s, s, gx * dpi, gy * dpi);
+        } else {
+            self.drag_ghost.hide();
+        }
+
+        // 5. Auto-height tooltip rendered last (always above magnified icons).
+        let tooltip_info: Option<(String, f32, f32)> = if active_drag.is_some() {
             None
         } else if let Some(shell) = self.hovered_shell {
             Some((
-                SharedString::from(shell.label()),
+                shell.label().to_owned(),
                 self.live_shell_center_x(shell),
-                VERTICAL_EDGE_GAP + pill_h + 8.0,
+                pill_top - 8.0,
             ))
         } else if let Some(idx) = self.hovered_idx
             && let Some(slot) = self.slots.get(idx)
         {
             let bounce = bounce_offset_dips(slot.bounce_started).unwrap_or(0.0);
             let lift = ((slot.scale - 1.0) * 14.0 + bounce).max(0.0);
-            let icon_top = VERTICAL_EDGE_GAP + 6.0 + 3.5 + 4.0 + lift + base * slot.scale;
-            let top_edge = icon_top.max(VERTICAL_EDGE_GAP + pill_h);
+            let icon_top = icon_base_bottom - lift - base * slot.scale;
+            let top_edge = icon_top.min(pill_top);
             Some((
                 slot.label.clone(),
                 self.live_slot_center_x(idx),
-                top_edge + 8.0,
+                top_edge - 8.0,
             ))
         } else {
             None
         };
-        let (win_w, _) = compute_window_dips(&self.settings, self.slots.len());
 
-        div()
-            .size_full()
-            .relative()
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_end()
-            .pb(px(VERTICAL_EDGE_GAP))
-            .on_mouse_down(
-                MouseButton::Right,
-                cx.listener(|this, _, _window, cx| {
-                    this.handle_right_click(cx);
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
-                if this.drag.is_some() {
-                    let mx: f32 = event.position.x.into();
-                    this.update_drag(mx);
-                    this.ensure_animation(cx);
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _window, cx| {
-                    this.finish_drag();
-                    if this.pressed_idx.is_some() || this.pressed_shell.is_some() {
-                        this.pressed_idx = None;
-                        this.pressed_shell = None;
-                        cx.notify();
-                    }
-                }),
-            )
-            // Fixed-height background pill anchored 5px from bottom edge (no per-frame shadow blur shader).
-            .child(
-                div()
-                    .absolute()
-                    .bottom(px(VERTICAL_EDGE_GAP))
-                    .w(px(pill_w))
-                    .h(px(pill_h))
-                    .rounded(px(radius))
-                    .bg(pill_bg)
-                    .when(
-                        self.settings.dock_background != SurfaceBackground::None,
-                        |el| el.border_1().border_color(rgba(0xffffff28)),
-                    ),
-            )
-            // Shell buttons + divider + app icons float over the fixed-height pill.
-            .child(
-                div()
-                    .relative()
-                    .flex()
-                    .items_end()
-                    .px(px(15.0))
-                    .pb(px(6.0))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.0))
-                            .child(self.render_shell_button(ShellButton::Start, cx))
-                            .child(self.render_shell_button(ShellButton::Search, cx))
-                            .child(self.render_shell_button(ShellButton::TaskView, cx)),
-                    )
-                    .child(
-                        div()
-                            .mx(px(8.0))
-                            .mb(px(10.0))
-                            .w(px(1.0))
-                            .h(px(22.0))
-                            .bg(rgba(0xffffff26)),
-                    )
-                    .child(
-                        div()
-                            .id("dock-apps-strip")
-                            .flex()
-                            .items_end()
-                            .gap(px(gap))
-                            .on_mouse_move(cx.listener(
-                                |this, event: &gpui::MouseMoveEvent, _, cx| {
-                                    let mx: f32 = event.position.x.into();
-                                    if this.drag.is_some() {
-                                        this.update_drag(mx);
-                                        this.ensure_animation(cx);
-                                    } else {
-                                        // Ignore sub-pixel jitter and let the VSync 60fps pacer drive GPU frames
-                                        // instead of redrawing on every 500-1000Hz raw mouse event.
-                                        if this
-                                            .hover_mouse_x
-                                            .is_some_and(|prev| (prev - mx).abs() < 1.0)
-                                        {
-                                            return;
-                                        }
-                                        let prev_idx = this.hovered_idx;
-                                        this.hover_mouse_x = Some(mx);
-                                        this.hovered_shell = None;
-                                        this.update_hovered_index_from_mouse();
-                                        if this.settings.magnification_enabled
-                                            && this.settings.animations_enabled
-                                        {
-                                            this.ensure_animation(cx);
-                                        } else if this.hovered_idx != prev_idx {
-                                            cx.notify();
-                                        }
-                                    }
-                                },
-                            ))
-                            .on_hover(cx.listener(|this, active: &bool, _, cx| {
-                                if !*active && this.drag.is_none() {
-                                    this.hover_mouse_x = None;
-                                    this.hovered_idx = None;
-                                    this.pressed_idx = None;
-                                    this.ensure_animation(cx);
-                                    cx.notify();
-                                }
-                            }))
-                            .children(self.slots.iter().enumerate().map(|(idx, slot)| {
-                                let dragging_this = active_drag.is_some_and(|d| d.idx == idx);
-                                let pressed = self.pressed_idx == Some(idx) && !dragging_this;
-                                let press_factor = if pressed { 0.88 } else { 1.0 };
-                                let slot_w = base * slot.scale;
-                                let dim = slot_w * press_factor;
-                                let bounce = bounce_offset_dips(slot.bounce_started).unwrap_or(0.0);
-                                let lift = ((slot.scale - 1.0) * 14.0 + bounce
-                                    - if pressed { 2.0 } else { 0.0 })
-                                .max(0.0);
-                                let slide_x = slot.slide_x;
-                                let icon =
-                                    self.icons.get(&slot.icon_source).and_then(|o| o.clone());
-                                let hwnds = slot.hwnds.clone();
-                                let launch_path = slot.launch_path.clone();
-                                let running = !hwnds.is_empty();
-                                let active = slot.is_foreground;
-                                let fallback_char: SharedString = slot
-                                    .label
-                                    .chars()
-                                    .next()
-                                    .unwrap_or('?')
-                                    .to_uppercase()
-                                    .to_string()
-                                    .into();
-
-                                div()
-                                    .id(SharedString::from(format!("dock-slot-{idx}")))
-                                    .relative()
-                                    .left(px(slide_x))
-                                    .w(px(slot_w))
-                                    // Hide underlying slot while its floating ghost tracks the cursor.
-                                    .when(dragging_this, |el| el.opacity(0.0))
-                                    .flex()
-                                    .flex_col()
-                                    .items_center()
-                                    .gap(px(4.0))
-                                    .cursor_pointer()
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(
-                                            move |this, event: &gpui::MouseDownEvent, _, cx| {
-                                                let mx: f32 = event.position.x.into();
-                                                let center = this.live_slot_center_x(idx);
-                                                this.pressed_idx = Some(idx);
-                                                this.drag = Some(DragState {
-                                                    idx,
-                                                    start_x: mx,
-                                                    current_x: mx,
-                                                    grab_offset_x: mx - center,
-                                                    active: false,
-                                                });
-                                                cx.notify();
-                                            },
-                                        ),
-                                    )
-                                    .on_click(cx.listener(move |this, _, _window, cx| {
-                                        this.finish_drag();
-                                        this.pressed_idx = None;
-                                        if this.suppress_next_click {
-                                            this.suppress_next_click = false;
-                                            cx.notify();
-                                            return;
-                                        }
-                                        if let Some(slot) = this.slots.get_mut(idx) {
-                                            slot.bounce_started = Some(Instant::now());
-                                        }
-                                        this.ensure_animation(cx);
-                                        cx.notify();
-                                        if !hwnds.is_empty() {
-                                            tracker::activate_or_toggle(&hwnds);
-                                        } else {
-                                            pins::launch(launch_path.clone());
-                                        }
-                                    }))
-                                    .child(
-                                        div()
-                                            .w(px(slot_w))
-                                            .h(px(base))
-                                            .flex()
-                                            .items_end()
-                                            .justify_center()
-                                            .child(
-                                                div()
-                                                    .flex_none()
-                                                    .mb(px(lift))
-                                                    .w(px(dim))
-                                                    .h(px(dim))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .child(match icon {
-                                                        Some(image) => img(image)
-                                                            .w(px(dim))
-                                                            .h(px(dim))
-                                                            .into_any_element(),
-                                                        None => div()
-                                                            .size_full()
-                                                            .rounded(px(10.0))
-                                                            .bg(rgba(0x334155cc))
-                                                            .border_1()
-                                                            .border_color(hsla(0.0, 0.0, 1.0, 0.18))
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .text_sm()
-                                                            .text_color(rgba(0xf8fafcff))
-                                                            .child(fallback_char)
-                                                            .into_any_element(),
-                                                    }),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(if active { 14.0 } else { 5.0 }))
-                                            .h(px(3.5))
-                                            .when(running, |el| {
-                                                el.rounded(px(2.0)).bg(if active {
-                                                    rgba(0xffffffff)
-                                                } else {
-                                                    rgba(0xcbd5e1cc)
-                                                })
-                                            }),
-                                    )
-                            })),
-                    ),
-            )
-            // Floating ghost of the dragged icon tracking the cursor smoothly in real time.
-            .when_some(
-                active_drag.and_then(|d| self.slots.get(d.idx).map(|s| (d, s))),
-                |el, (drag, slot)| {
-                    let ghost_dim = base * 1.14;
-                    let left_x = (drag.current_x - drag.grab_offset_x - ghost_dim * 0.5)
-                        .clamp(4.0, (win_w - ghost_dim - 4.0).max(4.0));
-                    let bottom_y = VERTICAL_EDGE_GAP + 20.0;
-                    let icon = self.icons.get(&slot.icon_source).and_then(|o| o.clone());
-                    let fallback_char: SharedString = slot
-                        .label
-                        .chars()
-                        .next()
-                        .unwrap_or('?')
-                        .to_uppercase()
-                        .to_string()
-                        .into();
-                    el.child(
-                        div()
-                            .absolute()
-                            .left(px(left_x))
-                            .bottom(px(bottom_y))
-                            .w(px(ghost_dim))
-                            .h(px(ghost_dim))
-                            .opacity(0.88)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(match icon {
-                                Some(image) => img(image)
-                                    .w(px(ghost_dim))
-                                    .h(px(ghost_dim))
-                                    .into_any_element(),
-                                None => div()
-                                    .size_full()
-                                    .rounded(px(10.0))
-                                    .bg(rgba(0x334155cc))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .text_sm()
-                                    .text_color(rgba(0xf8fafcff))
-                                    .child(fallback_char)
-                                    .into_any_element(),
-                            }),
-                    )
-                },
-            )
-            // Tooltip rendered LAST (always on top of magnified icons) at integer-snapped coordinates.
-            .when_some(hovered_tooltip, |el, (label, center_x, tooltip_bottom)| {
-                let est_w = (label.len() as f32 * 6.8 + 22.0).clamp(54.0, 220.0).round();
-                let left_x = (center_x - est_w * 0.5)
-                    .clamp(6.0, (win_w - est_w - 6.0).max(6.0))
+        if let Some((text, center_x, bottom_y)) = tooltip_info {
+            let needs_redraw = self.tooltip_cache.as_ref().is_none_or(|c| c.text != text);
+            if needs_redraw
+                && let Ok((surf, w_dips, h_dips)) = self.dcomp.create_tooltip_surface(&text, dpi)
+            {
+                self.tooltip_node.set_content(Some(&surf));
+                self.tooltip_cache = Some(TooltipCache {
+                    text,
+                    width_dips: w_dips,
+                    height_dips: h_dips,
+                });
+            }
+            if let Some(ref tc) = self.tooltip_cache {
+                let tx = (center_x - tc.width_dips * 0.5)
+                    .clamp(6.0, (win_w - tc.width_dips - 6.0).max(6.0))
                     .round();
-                el.child(
-                    div()
-                        .absolute()
-                        .left(px(left_x))
-                        .bottom(px(tooltip_bottom.round()))
-                        .w(px(est_w))
-                        .flex()
-                        .justify_center()
-                        .child(
-                            div()
-                                .px(px(10.0))
-                                .py(px(4.0))
-                                .rounded(px(8.0))
-                                .bg(rgba(0x181b24f2))
-                                .border_1()
-                                .border_color(rgba(0xffffff2c))
-                                .text_xs()
-                                .text_color(rgba(0xf8fafcff))
-                                .whitespace_nowrap()
-                                .child(label),
-                        ),
-                )
-            })
+                let ty = (bottom_y - tc.height_dips).max(2.0).round();
+                self.tooltip_node
+                    .set_transform(1.0, 1.0, (tx * dpi).round(), (ty * dpi).round());
+            }
+        } else {
+            self.tooltip_node.hide();
+        }
+
+        self.dcomp.commit();
+    }
+
+    fn handle_mouse_move(&mut self, mx: f32, my: f32) {
+        if !self.tracking_mouse {
+            let mut tme = TRACKMOUSEEVENT {
+                cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+                dwFlags: TME_LEAVE,
+                hwndTrack: self.hwnd as HWND,
+                dwHoverTime: 0,
+            };
+            unsafe {
+                TrackMouseEvent(&mut tme);
+            }
+            self.tracking_mouse = true;
+        }
+
+        if self.drag.is_some() {
+            self.update_drag(mx);
+            self.ensure_animation();
+            return;
+        }
+
+        if let Some(shell) = self.hit_shell_button(mx, my) {
+            let changed = self.hovered_shell != Some(shell) || self.hover_mouse_x.is_some();
+            self.hovered_shell = Some(shell);
+            self.hover_mouse_x = None;
+            self.hovered_idx = None;
+            if changed {
+                self.ensure_animation();
+                self.update_visuals();
+            }
+            return;
+        }
+
+        let (pill_left, _, _, _) = self.live_pill_geometry();
+        let apps_left = pill_left + 15.0 + shell_section_width(self.settings.icon_dips()) - 6.0;
+        if mx >= apps_left && !self.slots.is_empty() {
+            if self.hovered_shell.is_some() {
+                self.hovered_shell = None;
+                self.pressed_shell = None;
+            }
+            if self
+                .hover_mouse_x
+                .is_some_and(|prev| (prev - mx).abs() < 0.75)
+            {
+                return;
+            }
+            let prev_idx = self.hovered_idx;
+            self.hover_mouse_x = Some(mx);
+            self.update_hovered_index_from_mouse();
+            if self.settings.magnification_enabled && self.settings.animations_enabled {
+                self.ensure_animation();
+            } else if self.hovered_idx != prev_idx {
+                self.update_visuals();
+            }
+        } else if self.hovered_shell.is_some() || self.hover_mouse_x.is_some() {
+            self.hovered_shell = None;
+            self.hover_mouse_x = None;
+            self.hovered_idx = None;
+            self.ensure_animation();
+            self.update_visuals();
+        }
+    }
+
+    fn handle_mouse_leave(&mut self) {
+        self.tracking_mouse = false;
+        if self.drag.is_some() {
+            return;
+        }
+        self.hover_mouse_x = None;
+        self.hovered_idx = None;
+        self.hovered_shell = None;
+        self.pressed_shell = None;
+        self.pressed_idx = None;
+        self.ensure_animation();
+        self.update_visuals();
+    }
+
+    fn handle_lbutton_down(&mut self, mx: f32, my: f32) {
+        unsafe {
+            SetCapture(self.hwnd as HWND);
+        }
+        if let Some(shell) = self.hit_shell_button(mx, my) {
+            self.pressed_shell = Some(shell);
+            self.update_visuals();
+            return;
+        }
+        if let Some(idx) = self.hovered_idx {
+            let center = self.live_slot_center_x(idx);
+            self.pressed_idx = Some(idx);
+            self.drag = Some(DragState {
+                idx,
+                start_x: mx,
+                current_x: mx,
+                grab_offset_x: mx - center,
+                active: false,
+            });
+            self.update_visuals();
+        }
+    }
+
+    fn handle_lbutton_up(&mut self, mx: f32, my: f32) {
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        if let Some(shell) = self.pressed_shell.take() {
+            self.update_visuals();
+            if self.hit_shell_button(mx, my) == Some(shell) {
+                match shell {
+                    ShellButton::Start => opentaskbar_shell::taskbar::open_start_menu(),
+                    ShellButton::Search => opentaskbar_shell::taskbar::open_search(),
+                    ShellButton::TaskView => opentaskbar_shell::taskbar::open_task_view(),
+                }
+            }
+            return;
+        }
+
+        let was_drag = self.finish_drag();
+        let clicked_idx = self.pressed_idx.take();
+        if was_drag {
+            self.ensure_animation();
+            self.update_visuals();
+            return;
+        }
+
+        if let Some(idx) = clicked_idx
+            && let Some(slot) = self.slots.get_mut(idx)
+        {
+            slot.bounce_started = Some(Instant::now());
+            let hwnds = slot.hwnds.clone();
+            let launch_path = slot.launch_path.clone();
+            self.ensure_animation();
+            self.update_visuals();
+            if !hwnds.is_empty() {
+                tracker::activate_or_toggle(&hwnds);
+            } else {
+                pins::launch(launch_path);
+            }
+        } else {
+            self.update_visuals();
+        }
+    }
+
+    fn handle_rbutton_up(&self) {
+        match win32::show_dock_context_menu(self.hwnd) {
+            ContextAction::TaskManager => pins::launch("taskmgr.exe".to_owned()),
+            ContextAction::RestoreTaskbar => opentaskbar_shell::taskbar::restore_from_journal(),
+            ContextAction::Exit => unsafe {
+                PostQuitMessage(0);
+            },
+            ContextAction::None => {}
+        }
+    }
+}
+
+impl Drop for DockState {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        let (lock, cvar) = &*self.anim_signal;
+        if let Ok(mut guard) = lock.lock() {
+            *guard = true;
+            cvar.notify_all();
+        }
+    }
+}
+
+unsafe extern "system" fn wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DockState };
+    if ptr.is_null() {
+        return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+    }
+    // SAFETY: `ptr` points to our heap-allocated `DockState` alive until `WM_DESTROY`.
+    let state = unsafe { &mut *ptr };
+
+    match msg {
+        WM_NCHITTEST => {
+            let mut pt = POINT {
+                x: loword_i16(lparam) as i32,
+                y: hiword_i16(lparam) as i32,
+            };
+            unsafe {
+                ScreenToClient(hwnd, &mut pt);
+            }
+            let mx = pt.x as f32 / state.dpi;
+            let my = pt.y as f32 / state.dpi;
+            if state.hit_test_dips(mx, my) {
+                HTCLIENT as LRESULT
+            } else {
+                HTTRANSPARENT as LRESULT
+            }
+        }
+        WM_SETCURSOR => {
+            let cursor_id = if state.hovered_shell.is_some() || state.hovered_idx.is_some() {
+                IDC_HAND
+            } else {
+                IDC_ARROW
+            };
+            unsafe {
+                SetCursor(LoadCursorW(std::ptr::null_mut(), cursor_id));
+            }
+            1
+        }
+        WM_MOUSEMOVE => {
+            let mx = loword_i16(lparam) / state.dpi;
+            let my = hiword_i16(lparam) / state.dpi;
+            state.handle_mouse_move(mx, my);
+            0
+        }
+        WM_MOUSELEAVE => {
+            state.handle_mouse_leave();
+            0
+        }
+        WM_LBUTTONDOWN => {
+            let mx = loword_i16(lparam) / state.dpi;
+            let my = hiword_i16(lparam) / state.dpi;
+            state.handle_lbutton_down(mx, my);
+            0
+        }
+        WM_LBUTTONUP => {
+            let mx = loword_i16(lparam) / state.dpi;
+            let my = hiword_i16(lparam) / state.dpi;
+            state.handle_lbutton_up(mx, my);
+            0
+        }
+        WM_RBUTTONUP => {
+            state.handle_rbutton_up();
+            0
+        }
+        WM_APP_VSYNC => {
+            state.tick_pending.store(false, Ordering::Release);
+            let moving = state.step_animations(Instant::now());
+            state.update_visuals();
+            if !moving {
+                state.set_animating(false);
+            }
+            0
+        }
+        WM_APP_ICONS => {
+            state.drain_loaded_icons();
+            0
+        }
+        WM_TIMER if wparam == TIMER_POLL => {
+            let _ = opentaskbar_shell::taskbar::ensure_hidden();
+            if state.sync_slots() {
+                state.update_visuals();
+            }
+            0
+        }
+        WM_DESTROY => {
+            unsafe {
+                KillTimer(hwnd, TIMER_POLL);
+                PostQuitMessage(0);
+            }
+            0
+        }
+        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
 pub fn run(settings: DockSettings) {
+    // SAFETY: initialize single-threaded apartment COM for DirectComposition/Direct2D/DirectWrite.
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    }
+
     let auto_hide = settings.auto_hide != AutoHideMode::Disabled;
     let mut initial_pins = pins::load_pins();
     if let Some(ref order) = settings.pin_order {
@@ -1163,56 +1449,90 @@ pub fn run(settings: DockSettings) {
     }
     let initial_running = tracker::enumerate_windows();
     let initial_slots = build_slots(&initial_pins, &initial_running, &[]);
-    let (init_w, init_h) = compute_window_dips(&settings, initial_slots.len());
 
-    Application::new()
-        .with_assets(EmbeddedAssets)
-        .run(move |cx: &mut App| {
-            let dock_w = px(init_w);
-            let dock_h = px(init_h);
-            let bounds = match cx.primary_display() {
-                Some(display) => {
-                    let area = display.bounds();
-                    let x = match settings.position {
-                        DockPosition::Left => area.origin.x + px(12.0),
-                        DockPosition::Center => area.origin.x + (area.size.width - dock_w) * 0.5,
-                        DockPosition::Right => area.origin.x + area.size.width - dock_w - px(12.0),
-                    };
-                    let y = area.origin.y + area.size.height - dock_h;
-                    Bounds::new(point(x, y), size(dock_w, dock_h))
-                }
-                None => Bounds::centered(None, size(dock_w, dock_h), cx),
-            };
+    let class_name = wide("OpenTaskBarDock");
+    let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
+    let wc = WNDCLASSEXW {
+        cbSize: size_of::<WNDCLASSEXW>() as u32,
+        lpfnWndProc: Some(wnd_proc),
+        hInstance: hinstance,
+        hCursor: unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) },
+        lpszClassName: class_name.as_ptr(),
+        ..unsafe { std::mem::zeroed() }
+    };
+    unsafe {
+        RegisterClassExW(&wc);
+    }
 
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: None,
-                focus: false,
-                show: true,
-                kind: WindowKind::PopUp,
-                is_movable: false,
-                is_resizable: false,
-                is_minimizable: false,
-                window_background: WindowBackgroundAppearance::Transparent,
-                window_decorations: Some(WindowDecorations::Client),
-                ..Default::default()
-            };
+    let initial_rect = compute_window_rect(&settings, initial_slots.len(), 1.0);
+    let ex_style = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP;
+    let hwnd = unsafe {
+        CreateWindowExW(
+            ex_style,
+            class_name.as_ptr(),
+            wide("OpenTaskBar").as_ptr(),
+            WS_POPUP | WS_VISIBLE,
+            initial_rect.0,
+            initial_rect.1,
+            initial_rect.2,
+            initial_rect.3,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            hinstance,
+            std::ptr::null(),
+        )
+    };
+    if hwnd.is_null() {
+        opentaskbar_core::log::error("Failed to create native DirectComposition dock window.");
+        unsafe { CoUninitialize() };
+        return;
+    }
 
-            let settings_clone = settings.clone();
-            let opened = cx.open_window(options, |window, cx| {
-                let hwnd = win32::configure_dock_window(window).unwrap_or(0);
-                let dpi = win32::dpi_scale(hwnd);
-                let desired_total_dips =
-                    pill_height_dips(&settings_clone) + VERTICAL_EDGE_GAP * 2.0;
-                let desired_total_px = (desired_total_dips * dpi).ceil() as i32;
-                opentaskbar_shell::taskbar::begin_replacement(hwnd, auto_hide, desired_total_px);
-                win32::trim_working_set();
-                cx.new(|cx| DockView::new(hwnd, settings_clone, initial_pins, initial_slots, cx))
-            });
+    let hwnd_val = hwnd as usize;
+    win32::configure_native_dock_hwnd(hwnd_val);
+    let dpi = win32::dpi_scale(hwnd_val);
+    let rect = compute_window_rect(&settings, initial_slots.len(), dpi);
+    if rect != initial_rect {
+        win32::reposition_dock_window(hwnd_val, rect.0, rect.1, rect.2, rect.3);
+    }
 
-            if let Err(err) = opened {
-                opentaskbar_core::log::error(format!("Failed to open GPUI dock window: {err}"));
-                cx.quit();
-            }
-        });
+    let desired_total_dips = pill_height_dips(&settings) + VERTICAL_EDGE_GAP * 2.0;
+    let desired_total_px = (desired_total_dips * dpi).ceil() as i32;
+    opentaskbar_shell::taskbar::begin_replacement(hwnd_val, auto_hide, desired_total_px);
+
+    let state = match DockState::new(hwnd_val, dpi, settings, initial_pins, initial_slots, rect) {
+        Ok(s) => Box::into_raw(Box::new(s)),
+        Err(err) => {
+            opentaskbar_core::log::error(format!(
+                "Failed to initialize DirectComposition engine: {err}"
+            ));
+            unsafe { CoUninitialize() };
+            return;
+        }
+    };
+
+    unsafe {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
+        SetTimer(hwnd, TIMER_POLL, 800, None);
+    }
+    win32::trim_working_set();
+
+    let mut msg: MSG = unsafe { std::mem::zeroed() };
+    loop {
+        let ret = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
+        if ret <= 0 {
+            break;
+        }
+        unsafe {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+
+    // SAFETY: reclaim and drop `DockState` cleanly before uninitializing COM.
+    unsafe {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        drop(Box::from_raw(state));
+        CoUninitialize();
+    }
 }

@@ -8,6 +8,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod dcomp;
+#[cfg(windows)]
 mod dock;
 #[cfg(windows)]
 mod icon_cache;

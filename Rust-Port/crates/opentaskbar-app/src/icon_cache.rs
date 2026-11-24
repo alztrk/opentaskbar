@@ -43,11 +43,11 @@ const MAX_DIM: u32 = 256;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Debug)]
-struct RawIcon {
-    width: u32,
-    height: u32,
-    /// Top-down straight BGRA32 pixels (GPUI DirectX `RenderImage` native format).
-    pixels: Vec<u8>,
+pub struct RawIcon {
+    pub width: u32,
+    pub height: u32,
+    /// Top-down straight BGRA32 pixels.
+    pub pixels: Vec<u8>,
 }
 
 fn cache_dir() -> PathBuf {
@@ -462,7 +462,7 @@ impl Drop for Worker {
     }
 }
 
-pub fn resolve_batch(specs: &[String]) -> HashMap<String, Option<Arc<RenderImage>>> {
+pub fn resolve_batch_raw(specs: &[String]) -> HashMap<String, Option<RawIcon>> {
     let mut result = HashMap::with_capacity(specs.len());
     let mut worker: Option<Worker> = None;
 
@@ -479,9 +479,17 @@ pub fn resolve_batch(specs: &[String]) -> HashMap<String, Option<Arc<RenderImage
             }
             extracted
         };
-        result.insert(spec.clone(), raw.and_then(to_render_image));
+        result.insert(spec.clone(), raw);
     }
     result
+}
+
+#[allow(dead_code)]
+pub fn resolve_batch(specs: &[String]) -> HashMap<String, Option<Arc<RenderImage>>> {
+    resolve_batch_raw(specs)
+        .into_iter()
+        .map(|(k, v)| (k, v.and_then(to_render_image)))
+        .collect()
 }
 
 fn fetch_from_worker(worker: &mut Option<Worker>, spec: &str) -> Option<RawIcon> {

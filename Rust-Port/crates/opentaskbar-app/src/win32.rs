@@ -42,12 +42,22 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
+#[allow(dead_code)]
 pub fn configure_dock_window(window: &gpui::Window) -> Option<usize> {
     let handle = HasWindowHandle::window_handle(window).ok()?;
     let hwnd = match handle.as_raw() {
         RawWindowHandle::Win32(win32) => win32.hwnd.get() as HWND,
         _ => return None,
     };
+    configure_native_dock_hwnd(hwnd as usize);
+    Some(hwnd as usize)
+}
+
+pub fn configure_native_dock_hwnd(hwnd_val: usize) {
+    if hwnd_val == 0 {
+        return;
+    }
+    let hwnd = hwnd_val as HWND;
     // SAFETY: `hwnd` is a live top-level window owned by the current thread.
     unsafe {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize;
@@ -90,7 +100,6 @@ pub fn configure_dock_window(window: &gpui::Window) -> Option<usize> {
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
         );
     }
-    Some(hwnd as usize)
 }
 
 pub fn dpi_scale(hwnd: usize) -> f32 {

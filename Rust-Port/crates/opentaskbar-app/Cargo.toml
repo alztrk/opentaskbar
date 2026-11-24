@@ -23,4 +23,5 @@ smallvec.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true
+windows-numerics.workspace = true
 windows-sys.workspace = true
