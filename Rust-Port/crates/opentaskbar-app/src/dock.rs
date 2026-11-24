@@ -4,15 +4,16 @@
 //! - Exact initial placement (zero startup jump), fixed-height pill with pop-out hover icons
 //! - Grouped apps, C#-matched Store/Win32 icon extraction, tooltips, and native context menu
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    App, Application, Bounds, Context, MouseButton, RenderImage, SharedString, Timer, Window,
-    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions, div,
-    hsla, img, point, prelude::*, px, rgba, size,
+    App, Application, AssetSource, Bounds, Context, MouseButton, RenderImage, SharedString, Timer,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowKind, WindowOptions,
+    div, hsla, img, point, prelude::*, px, rgba, size, svg,
 };
 use opentaskbar_core::settings::{AutoHideMode, DockPosition, DockSettings, SurfaceBackground};
 use opentaskbar_shell::tracker::{self, RunningWindow};
@@ -24,6 +25,46 @@ use crate::win32::{self, ContextAction};
 const VERTICAL_EDGE_GAP: f32 = 5.0;
 const TOOLTIP_HEADROOM: f32 = 34.0;
 const MAG_HEADROOM: f32 = 28.0;
+
+const SVG_START: &[u8] =
+    br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+  <rect x="2.5" y="2.5" width="8.7" height="8.7" rx="1.6"/>
+  <rect x="12.8" y="2.5" width="8.7" height="8.7" rx="1.6"/>
+  <rect x="2.5" y="12.8" width="8.7" height="8.7" rx="1.6"/>
+  <rect x="12.8" y="12.8" width="8.7" height="8.7" rx="1.6"/>
+</svg>"##;
+
+const SVG_SEARCH: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="11" cy="11" r="7.5"/>
+  <path d="M20.5 20.5l-4.2-4.2"/>
+</svg>"##;
+
+const SVG_TASKVIEW: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="2.5" y="4" width="13.5" height="10.5" rx="2.2"/>
+  <path d="M8.5 18.5h10.8a2.2 2.2 0 0 0 2.2-2.2V8.5"/>
+</svg>"##;
+
+struct EmbeddedAssets;
+
+impl AssetSource for EmbeddedAssets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        let bytes = match path {
+            "icons/start.svg" => Some(Cow::Borrowed(SVG_START)),
+            "icons/search.svg" => Some(Cow::Borrowed(SVG_SEARCH)),
+            "icons/taskview.svg" => Some(Cow::Borrowed(SVG_TASKVIEW)),
+            _ => None,
+        };
+        Ok(bytes)
+    }
+
+    fn list(&self, _path: &str) -> gpui::Result<Vec<SharedString>> {
+        Ok(vec![
+            "icons/start.svg".into(),
+            "icons/search.svg".into(),
+            "icons/taskview.svg".into(),
+        ])
+    }
+}
 
 fn shell_section_width(base: f32) -> f32 {
     base * 3.0 + 4.0 * 2.0 + 17.0
@@ -169,107 +210,28 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
 }
 
 fn pill_height_dips(settings: &DockSettings) -> f32 {
-    settings.icon_dips() + 14.0
+    // Generous vertical padding so resting icons + indicator dots sit comfortably inside the pill.
+    settings.icon_dips() + 22.0
 }
 
 fn compute_window_dips(settings: &DockSettings, slot_count: usize) -> (f32, f32) {
     let base = settings.icon_dips();
     let gap = 8.0 + settings.dock_icon_padding.max(0) as f32;
     let count = slot_count.max(1) as f32;
-    let mag_budget = if settings.magnification_enabled {
-        base * 1.15
-    } else {
-        0.0
-    };
-    let width_dips =
-        (shell_section_width(base) + count * base + (count - 1.0) * gap + 44.0 + mag_budget).ceil();
+    let width_dips = (shell_section_width(base) + count * base + (count - 1.0) * gap + 48.0).ceil();
     let pill_h = pill_height_dips(settings);
     let height_dips = (pill_h + TOOLTIP_HEADROOM + MAG_HEADROOM + VERTICAL_EDGE_GAP).ceil();
     (width_dips, height_dips)
 }
 
-/// Windows 11 4-pane Start logo scaled to match app icon size.
-fn render_windows_logo(base: f32) -> impl IntoElement {
-    let pane_px = (base * 0.28).round().max(9.0);
-    let pane = move || {
-        div()
-            .w(px(pane_px))
-            .h(px(pane_px))
-            .rounded(px(2.0))
-            .bg(rgba(0x38bdf8ff))
+fn render_shell_svg(kind: ShellButton, base: f32) -> impl IntoElement {
+    let icon_sz = (base * 0.62).round().max(20.0);
+    let (path, color) = match kind {
+        ShellButton::Start => ("icons/start.svg", rgba(0x38bdf8ff)),
+        ShellButton::Search => ("icons/search.svg", rgba(0xe2e8f0ff)),
+        ShellButton::TaskView => ("icons/taskview.svg", rgba(0xe2e8f0ff)),
     };
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(2.5))
-        .child(div().flex().gap(px(2.5)).child(pane()).child(pane()))
-        .child(div().flex().gap(px(2.5)).child(pane()).child(pane()))
-}
-
-/// Crisp magnifying glass icon for Windows Search, scaled to match app icon size.
-fn render_search_icon(base: f32) -> impl IntoElement {
-    let sz = (base * 0.64).round().max(20.0);
-    let ring = (sz * 0.68).round();
-    div()
-        .relative()
-        .w(px(sz))
-        .h(px(sz))
-        .child(
-            div()
-                .absolute()
-                .top(px(1.0))
-                .left(px(1.0))
-                .w(px(ring))
-                .h(px(ring))
-                .rounded(px(ring * 0.5))
-                .border_2()
-                .border_color(rgba(0xe2e8f0ff)),
-        )
-        .child(
-            div()
-                .absolute()
-                .bottom(px(2.0))
-                .right(px(1.5))
-                .w(px(7.0))
-                .h(px(2.5))
-                .rounded(px(1.5))
-                .bg(rgba(0xe2e8f0ff)),
-        )
-}
-
-/// Crisp overlapping virtual desktop cards icon for Task View, scaled to match app icon size.
-fn render_task_view_icon(base: f32) -> impl IntoElement {
-    let w = (base * 0.68).round().max(22.0);
-    let h = (base * 0.56).round().max(18.0);
-    let card_w = (w * 0.68).round();
-    let card_h = (h * 0.65).round();
-    div()
-        .relative()
-        .w(px(w))
-        .h(px(h))
-        .child(
-            div()
-                .absolute()
-                .top(px(0.0))
-                .right(px(0.0))
-                .w(px(card_w))
-                .h(px(card_h))
-                .rounded(px(3.0))
-                .border_2()
-                .border_color(rgba(0x94a3b8dd)),
-        )
-        .child(
-            div()
-                .absolute()
-                .bottom(px(0.0))
-                .left(px(0.0))
-                .w(px(card_w))
-                .h(px(card_h))
-                .rounded(px(3.0))
-                .bg(rgba(0x1e293bee))
-                .border_2()
-                .border_color(rgba(0xe2e8f0ff)),
-        )
+    svg().path(path).size(px(icon_sz)).text_color(color)
 }
 
 impl DockView {
@@ -480,11 +442,7 @@ impl DockView {
                 ShellButton::Search => opentaskbar_shell::taskbar::open_search(),
                 ShellButton::TaskView => opentaskbar_shell::taskbar::open_task_view(),
             })
-            .child(match kind {
-                ShellButton::Start => render_windows_logo(base).into_any_element(),
-                ShellButton::Search => render_search_icon(base).into_any_element(),
-                ShellButton::TaskView => render_task_view_icon(base).into_any_element(),
-            })
+            .child(render_shell_svg(kind, base))
     }
 }
 
@@ -494,9 +452,10 @@ impl Render for DockView {
         let gap = 8.0 + self.settings.dock_icon_padding.max(0) as f32;
         let radius = self.settings.corner_radius_dips();
         let pill_h = pill_height_dips(&self.settings);
-        let icons_w: f32 = self.slots.iter().map(|s| base * s.scale).sum::<f32>()
-            + gap * (self.slots.len().saturating_sub(1) as f32);
-        let pill_w = (shell_section_width(base) + icons_w + 28.0).max(160.0);
+        // Fixed resting width: dock pill never expands horizontally or jitters during fisheye hover.
+        let icons_w =
+            (self.slots.len() as f32) * base + gap * (self.slots.len().saturating_sub(1) as f32);
+        let pill_w = (shell_section_width(base) + icons_w + 30.0).max(160.0);
 
         let alpha = (self.settings.dock_opacity.clamp(0.1, 1.0) * 218.0) as u32;
         let pill_bg = if self.settings.dock_background == SurfaceBackground::None {
@@ -562,8 +521,8 @@ impl Render for DockView {
                     .relative()
                     .flex()
                     .items_end()
-                    .px(px(14.0))
-                    .pb(px(4.0))
+                    .px(px(15.0))
+                    .pb(px(6.0))
                     .child(
                         div()
                             .flex()
@@ -603,10 +562,12 @@ impl Render for DockView {
 
                             div()
                                 .id(SharedString::from(format!("dock-slot-{idx}")))
+                                // Fixed cell width prevents hover hitboxes from shifting and jittering.
+                                .w(px(base))
                                 .flex()
                                 .flex_col()
                                 .items_center()
-                                .gap(px(3.0))
+                                .gap(px(4.0))
                                 .cursor_pointer()
                                 .on_hover(cx.listener(move |this, is_hovered, _window, cx| {
                                     if *is_hovered {
@@ -627,30 +588,40 @@ impl Render for DockView {
                                 })
                                 .child(
                                     div()
-                                        .mb(px(lift))
-                                        .w(px(dim))
-                                        .h(px(dim))
+                                        .w(px(base))
+                                        .h(px(base))
                                         .flex()
-                                        .items_center()
+                                        .items_end()
                                         .justify_center()
-                                        .child(match icon {
-                                            Some(image) => {
-                                                img(image).w(px(dim)).h(px(dim)).into_any_element()
-                                            }
-                                            None => div()
-                                                .size_full()
-                                                .rounded(px(10.0))
-                                                .bg(rgba(0x334155cc))
-                                                .border_1()
-                                                .border_color(hsla(0.0, 0.0, 1.0, 0.18))
+                                        .child(
+                                            div()
+                                                .flex_none()
+                                                .mb(px(lift))
+                                                .w(px(dim))
+                                                .h(px(dim))
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
-                                                .text_sm()
-                                                .text_color(rgba(0xf8fafcff))
-                                                .child(fallback_char)
-                                                .into_any_element(),
-                                        }),
+                                                .child(match icon {
+                                                    Some(image) => img(image)
+                                                        .w(px(dim))
+                                                        .h(px(dim))
+                                                        .into_any_element(),
+                                                    None => div()
+                                                        .size_full()
+                                                        .rounded(px(10.0))
+                                                        .bg(rgba(0x334155cc))
+                                                        .border_1()
+                                                        .border_color(hsla(0.0, 0.0, 1.0, 0.18))
+                                                        .flex()
+                                                        .items_center()
+                                                        .justify_center()
+                                                        .text_sm()
+                                                        .text_color(rgba(0xf8fafcff))
+                                                        .child(fallback_char)
+                                                        .into_any_element(),
+                                                }),
+                                        ),
                                 )
                                 .child(
                                     div()
@@ -678,52 +649,55 @@ pub fn run(settings: DockSettings) {
     let initial_slots = build_slots(&initial_pins, &initial_running, &[]);
     let (init_w, init_h) = compute_window_dips(&settings, initial_slots.len());
 
-    Application::new().run(move |cx: &mut App| {
-        let dock_w = px(init_w);
-        let dock_h = px(init_h);
-        let bounds = match cx.primary_display() {
-            Some(display) => {
-                let area = display.bounds();
-                let x = match settings.position {
-                    DockPosition::Left => area.origin.x + px(12.0),
-                    DockPosition::Center => area.origin.x + (area.size.width - dock_w) * 0.5,
-                    DockPosition::Right => area.origin.x + area.size.width - dock_w - px(12.0),
-                };
-                let y = area.origin.y + area.size.height - dock_h;
-                Bounds::new(point(x, y), size(dock_w, dock_h))
+    Application::new()
+        .with_assets(EmbeddedAssets)
+        .run(move |cx: &mut App| {
+            let dock_w = px(init_w);
+            let dock_h = px(init_h);
+            let bounds = match cx.primary_display() {
+                Some(display) => {
+                    let area = display.bounds();
+                    let x = match settings.position {
+                        DockPosition::Left => area.origin.x + px(12.0),
+                        DockPosition::Center => area.origin.x + (area.size.width - dock_w) * 0.5,
+                        DockPosition::Right => area.origin.x + area.size.width - dock_w - px(12.0),
+                    };
+                    let y = area.origin.y + area.size.height - dock_h;
+                    Bounds::new(point(x, y), size(dock_w, dock_h))
+                }
+                None => Bounds::centered(None, size(dock_w, dock_h), cx),
+            };
+
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: None,
+                focus: false,
+                show: true,
+                kind: WindowKind::PopUp,
+                is_movable: false,
+                is_resizable: false,
+                is_minimizable: false,
+                window_background: WindowBackgroundAppearance::Transparent,
+                window_decorations: Some(WindowDecorations::Client),
+                ..Default::default()
+            };
+
+            let settings_clone = settings.clone();
+            let opened = cx.open_window(options, |window, cx| {
+                let hwnd = win32::configure_dock_window(window).unwrap_or(0);
+                let dpi = win32::dpi_scale(hwnd);
+                // Total reserved strip = pill height + 5px bottom gap + 5px top gap.
+                let desired_total_dips =
+                    pill_height_dips(&settings_clone) + VERTICAL_EDGE_GAP * 2.0;
+                let desired_total_px = (desired_total_dips * dpi).ceil() as i32;
+                opentaskbar_shell::taskbar::begin_replacement(hwnd, auto_hide, desired_total_px);
+                win32::trim_working_set();
+                cx.new(|cx| DockView::new(hwnd, settings_clone, initial_pins, initial_slots, cx))
+            });
+
+            if let Err(err) = opened {
+                opentaskbar_core::log::error(format!("Failed to open GPUI dock window: {err}"));
+                cx.quit();
             }
-            None => Bounds::centered(None, size(dock_w, dock_h), cx),
-        };
-
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: None,
-            focus: false,
-            show: true,
-            kind: WindowKind::PopUp,
-            is_movable: false,
-            is_resizable: false,
-            is_minimizable: false,
-            window_background: WindowBackgroundAppearance::Transparent,
-            window_decorations: Some(WindowDecorations::Client),
-            ..Default::default()
-        };
-
-        let settings_clone = settings.clone();
-        let opened = cx.open_window(options, |window, cx| {
-            let hwnd = win32::configure_dock_window(window).unwrap_or(0);
-            let dpi = win32::dpi_scale(hwnd);
-            // Total reserved strip = pill height + 5px bottom gap + 5px top gap.
-            let desired_total_dips = pill_height_dips(&settings_clone) + VERTICAL_EDGE_GAP * 2.0;
-            let desired_total_px = (desired_total_dips * dpi).ceil() as i32;
-            opentaskbar_shell::taskbar::begin_replacement(hwnd, auto_hide, desired_total_px);
-            win32::trim_working_set();
-            cx.new(|cx| DockView::new(hwnd, settings_clone, initial_pins, initial_slots, cx))
         });
-
-        if let Err(err) = opened {
-            opentaskbar_core::log::error(format!("Failed to open GPUI dock window: {err}"));
-            cx.quit();
-        }
-    });
 }
