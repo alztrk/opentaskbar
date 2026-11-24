@@ -47,6 +47,8 @@ pub enum ShellGlyph {
     Start,
     Search,
     TaskView,
+    RecycleBinEmpty,
+    RecycleBinFull,
 }
 
 #[derive(Clone)]
@@ -658,6 +660,85 @@ impl DcompEngine {
                         },
                         &brush,
                         2.0 * s,
+                        Some(&stroke),
+                    );
+                }
+                ShellGlyph::RecycleBinEmpty | ShellGlyph::RecycleBinFull => {
+                    let full = kind == ShellGlyph::RecycleBinFull;
+                    let brush = dc.CreateSolidColorBrush(&fg, None)?;
+                    // Lid bar + handle
+                    dc.DrawLine(
+                        Vector2 {
+                            X: 4.5 * s,
+                            Y: 6.5 * s,
+                        },
+                        Vector2 {
+                            X: 19.5 * s,
+                            Y: 6.5 * s,
+                        },
+                        &brush,
+                        1.9 * s,
+                        Some(&stroke),
+                    );
+                    dc.DrawLine(
+                        Vector2 {
+                            X: 9.0 * s,
+                            Y: 4.0 * s,
+                        },
+                        Vector2 {
+                            X: 15.0 * s,
+                            Y: 4.0 * s,
+                        },
+                        &brush,
+                        1.9 * s,
+                        Some(&stroke),
+                    );
+                    // Bin body
+                    let body = D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F {
+                            left: 6.2 * s,
+                            top: 6.8 * s,
+                            right: 17.8 * s,
+                            bottom: 20.5 * s,
+                        },
+                        radiusX: 2.0 * s,
+                        radiusY: 2.0 * s,
+                    };
+                    if full {
+                        let fill_c = if is_dark {
+                            color_rgba(0x38, 0xbd, 0xf8, 0.35)
+                        } else {
+                            color_rgba(0x02, 0x84, 0xc7, 0.25)
+                        };
+                        let fill_brush = dc.CreateSolidColorBrush(&fill_c, None)?;
+                        dc.FillRoundedRectangle(&body, &fill_brush);
+                    }
+                    dc.DrawRoundedRectangle(&body, &brush, 1.8 * s, Some(&stroke));
+                    // Vertical ribs
+                    dc.DrawLine(
+                        Vector2 {
+                            X: 10.2 * s,
+                            Y: 10.5 * s,
+                        },
+                        Vector2 {
+                            X: 10.2 * s,
+                            Y: 17.2 * s,
+                        },
+                        &brush,
+                        1.6 * s,
+                        Some(&stroke),
+                    );
+                    dc.DrawLine(
+                        Vector2 {
+                            X: 13.8 * s,
+                            Y: 10.5 * s,
+                        },
+                        Vector2 {
+                            X: 13.8 * s,
+                            Y: 17.2 * s,
+                        },
+                        &brush,
+                        1.6 * s,
                         Some(&stroke),
                     );
                 }

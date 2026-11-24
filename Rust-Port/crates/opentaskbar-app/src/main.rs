@@ -78,7 +78,7 @@ fn main() {
 
         let settings =
             opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
-        opentaskbar_core::log::info("Starting OpenTaskBar GPUI dock.");
+        opentaskbar_core::log::info("Starting OpenTaskBar hybrid dock.");
         dock::run(settings);
         opentaskbar_shell::taskbar::end_replacement();
     }

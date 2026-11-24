@@ -78,6 +78,7 @@ pub struct DockSettings {
     pub show_desktop_button: bool,
     pub full_width: bool,
     pub reveal_dock_on_win_key: bool,
+    pub current_desktop_only: bool,
     pub show_clock_widget: bool,
     pub show_system_stats_widget: bool,
     pub pin_order: Option<Vec<String>>,
@@ -110,6 +111,7 @@ impl Default for DockSettings {
             show_desktop_button: true,
             full_width: false,
             reveal_dock_on_win_key: true,
+            current_desktop_only: false,
             show_clock_widget: true,
             show_system_stats_widget: true,
             pin_order: None,
@@ -189,4 +191,68 @@ pub fn save_to(path: &Path, settings: &DockSettings) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, json)?;
     fs::rename(&tmp, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_trip_preserves_unknown_fields() {
+        let dir = std::env::temp_dir().join(format!("ot-test-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let raw = r#"{
+            "Position": "Left",
+            "Size": "Large",
+            "Theme": "Dark",
+            "AutoHide": "Smart",
+            "DockOpacity": 0.75,
+            "CustomCSharpField": "keep-me"
+        }"#;
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, raw).unwrap();
+
+        let loaded = load_from(&path);
+        assert_eq!(loaded.position, DockPosition::Left);
+        assert_eq!(loaded.size, DockSize::Large);
+        assert_eq!(loaded.theme, AppTheme::Dark);
+        assert_eq!(loaded.auto_hide, AutoHideMode::Smart);
+        assert_eq!(
+            loaded
+                .extra
+                .get("CustomCSharpField")
+                .and_then(|v| v.as_str()),
+            Some("keep-me")
+        );
+
+        save_to(&path, &loaded).unwrap();
+        let reloaded = load_from(&path);
+        assert_eq!(
+            reloaded
+                .extra
+                .get("CustomCSharpField")
+                .and_then(|v| v.as_str()),
+            Some("keep-me")
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_json_returns_defaults_and_creates_backup() {
+        let dir = std::env::temp_dir().join(format!("ot-corrupt-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(&path, "{not valid json").unwrap();
+
+        let loaded = load_from(&path);
+        assert_eq!(loaded.position, DockPosition::Center);
+        assert!(!path.exists());
+        let has_backup = fs::read_dir(&dir).unwrap().flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("settings.json.invalid-")
+        });
+        assert!(has_backup);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

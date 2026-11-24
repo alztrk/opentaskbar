@@ -44,7 +44,9 @@ use crate::pins::{self, PinnedApp};
 use crate::preview::{PreviewItem, PreviewPopup};
 use crate::settings_ui;
 use crate::widgets::{self, SystemStatsSampler};
-use crate::win32::{self, AppContextAction, ContextAction, MonitorInfo, TaskViewAction};
+use crate::win32::{
+    self, AppContextAction, ContextAction, MonitorInfo, RecycleBinAction, TaskViewAction,
+};
 
 const VERTICAL_EDGE_GAP: f32 = 5.0;
 const TOOLTIP_HEADROOM: f32 = 36.0;
@@ -84,6 +86,9 @@ fn shell_section_width(base: f32) -> f32 {
 
 fn widgets_section_width(settings: &DockSettings) -> f32 {
     let mut w = 0.0;
+    if settings.show_recycle_bin {
+        w += settings.icon_dips() + 6.0;
+    }
     if settings.show_system_stats_widget {
         w += STATS_W_DIPS + 6.0;
     }
@@ -179,6 +184,7 @@ struct TooltipCache {
 }
 
 type IconBatchQueue = Arc<Mutex<Vec<HashMap<String, Option<RawIcon>>>>>;
+type DipRect = (f32, f32, f32, f32);
 
 struct DockState {
     hwnd: usize,
@@ -197,6 +203,10 @@ struct DockState {
     shell_bg_press: IDCompositionSurface,
     divider: VisualNode,
     widget_divider: VisualNode,
+    bin_node: VisualNode,
+    bin_empty_surf: IDCompositionSurface,
+    bin_full_surf: IDCompositionSurface,
+    bin_is_full: bool,
     stats_node: VisualNode,
     clock_node: VisualNode,
     show_desktop_node: VisualNode,
@@ -219,6 +229,7 @@ struct DockState {
     hover_mouse_x: Option<f32>,
     hovered_idx: Option<usize>,
     hovered_shell: Option<ShellButton>,
+    hovered_bin: bool,
     hovered_show_desktop: bool,
     pressed_idx: Option<usize>,
     pressed_shell: Option<ShellButton>,
@@ -616,6 +627,18 @@ impl DockState {
         let widget_divider = dcomp.create_node()?;
         widget_divider.set_content(Some(&div_surf));
 
+        let bin_node = dcomp.create_node()?;
+        let bin_empty_surf =
+            dcomp.create_shell_glyph_surface(ShellGlyph::RecycleBinEmpty, glyph_px, is_dark)?;
+        let bin_full_surf =
+            dcomp.create_shell_glyph_surface(ShellGlyph::RecycleBinFull, glyph_px, is_dark)?;
+        let bin_is_full = widgets::is_recycle_bin_non_empty();
+        bin_node.set_content(Some(if bin_is_full {
+            &bin_full_surf
+        } else {
+            &bin_empty_surf
+        }));
+
         let stats_node = dcomp.create_node()?;
         let clock_node = dcomp.create_node()?;
         let show_desktop_node = dcomp.create_node()?;
@@ -671,6 +694,10 @@ impl DockState {
             shell_bg_press,
             divider,
             widget_divider,
+            bin_node,
+            bin_empty_surf,
+            bin_full_surf,
+            bin_is_full,
             stats_node,
             clock_node,
             show_desktop_node,
@@ -693,6 +720,7 @@ impl DockState {
             hover_mouse_x: None,
             hovered_idx: None,
             hovered_shell: None,
+            hovered_bin: false,
             hovered_show_desktop: false,
             pressed_idx: None,
             pressed_shell: None,
@@ -801,6 +829,7 @@ impl DockState {
         }
 
         self.dcomp.add_child(&self.dcomp.root, &self.widget_divider);
+        self.dcomp.add_child(&self.dcomp.root, &self.bin_node);
         self.dcomp.add_child(&self.dcomp.root, &self.stats_node);
         self.dcomp.add_child(&self.dcomp.root, &self.clock_node);
         self.dcomp
@@ -848,6 +877,18 @@ impl DockState {
             {
                 self.stats_node.set_content(Some(&surf));
                 self.last_stats_text = key;
+                changed = true;
+            }
+        }
+        if self.settings.show_recycle_bin {
+            let full = widgets::is_recycle_bin_non_empty();
+            if full != self.bin_is_full {
+                self.bin_is_full = full;
+                self.bin_node.set_content(Some(if full {
+                    &self.bin_full_surf
+                } else {
+                    &self.bin_empty_surf
+                }));
                 changed = true;
             }
         }
@@ -915,6 +956,17 @@ impl DockState {
         self.pins = load_effective_pins(&self.settings);
         self.last_clock_text.clear();
         self.last_stats_text.clear();
+        self.tooltip_cache = None;
+        if self.monitor.is_primary {
+            let auto_hide = self.settings.auto_hide != AutoHideMode::Disabled;
+            let desired_total_dips = pill_height_dips(&self.settings) + VERTICAL_EDGE_GAP * 2.0;
+            let desired_total_px = (desired_total_dips * self.dpi).ceil() as i32;
+            opentaskbar_shell::taskbar::update_appbar_height(
+                self.hwnd,
+                auto_hide,
+                desired_total_px,
+            );
+        }
         self.sync_slots();
         self.sync_window_bounds();
         self.refresh_widgets();
@@ -1058,6 +1110,43 @@ impl DockState {
         let right = pill_left + pill_w - 8.0;
         let left = right - SHOW_DESKTOP_W_DIPS;
         Some((left, pill_top + 6.0, right, pill_top + pill_h - 6.0))
+    }
+
+    fn right_widget_rects_dips(&self) -> (Option<DipRect>, Option<DipRect>, Option<DipRect>) {
+        let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
+        let mut right_cursor = pill_left + pill_w - 12.0;
+        if self.settings.show_desktop_button {
+            right_cursor -= SHOW_DESKTOP_W_DIPS + 6.0;
+        }
+        let clock = if self.settings.show_clock_widget {
+            let l = right_cursor - CLOCK_W_DIPS;
+            let r = right_cursor;
+            right_cursor -= CLOCK_W_DIPS + 6.0;
+            Some((l, pill_top + 6.0, r, pill_top + pill_h - 6.0))
+        } else {
+            None
+        };
+        let stats = if self.settings.show_system_stats_widget {
+            let l = right_cursor - STATS_W_DIPS;
+            let r = right_cursor;
+            right_cursor -= STATS_W_DIPS + 6.0;
+            Some((l, pill_top + 6.0, r, pill_top + pill_h - 6.0))
+        } else {
+            None
+        };
+        let bin = if self.settings.show_recycle_bin {
+            let bw = self.settings.icon_dips();
+            let l = right_cursor - bw;
+            let r = right_cursor;
+            Some((l, pill_top + 6.0, r, pill_top + pill_h - 6.0))
+        } else {
+            None
+        };
+        (bin, stats, clock)
+    }
+
+    fn hit_rect(rc: Option<(f32, f32, f32, f32)>, mx: f32, my: f32) -> bool {
+        rc.is_some_and(|(l, t, r, b)| mx >= l && mx <= r && my >= t && my <= b)
     }
 
     fn hit_test_dips(&self, mx: f32, my: f32) -> bool {
@@ -1489,6 +1578,16 @@ impl DockState {
                 self.stats_node.hide();
             }
 
+            if self.settings.show_recycle_bin {
+                let bx = right_cursor - base + (base - glyph_dips) * 0.5;
+                let by = icon_base_top + (base - glyph_dips) * 0.5;
+                self.bin_node
+                    .set_transform(1.0, 1.0, (bx * dpi).round(), (by * dpi).round());
+                right_cursor -= base + 6.0;
+            } else {
+                self.bin_node.hide();
+            }
+
             let wdiv_x = right_cursor - 5.0;
             self.widget_divider.set_transform(
                 1.0,
@@ -1498,6 +1597,7 @@ impl DockState {
             );
         } else {
             self.widget_divider.hide();
+            self.bin_node.hide();
             self.stats_node.hide();
             self.clock_node.hide();
             self.show_desktop_node.hide();
@@ -1541,6 +1641,10 @@ impl DockState {
                 .show_desktop_rect_dips()
                 .map_or(pill_left + pill_w - 12.0, |(l, _, r, _)| (l + r) * 0.5);
             Some(("Show Desktop".to_owned(), cx, pill_top - 8.0))
+        } else if self.hovered_bin {
+            let (bin_rc, _, _) = self.right_widget_rects_dips();
+            let cx = bin_rc.map_or(pill_left + pill_w - 140.0, |(l, _, r, _)| (l + r) * 0.5);
+            Some(("Recycle Bin".to_owned(), cx, pill_top - 8.0))
         } else if let Some(shell) = self.hovered_shell {
             Some((
                 shell.label().to_owned(),
@@ -1716,6 +1820,23 @@ impl DockState {
             return;
         }
 
+        let (bin_rc, _, _) = self.right_widget_rects_dips();
+        let over_bin = Self::hit_rect(bin_rc, mx, my);
+        if over_bin != self.hovered_bin {
+            self.hovered_bin = over_bin;
+            if over_bin {
+                self.hovered_shell = None;
+                self.hover_mouse_x = None;
+                self.hovered_idx = None;
+                self.sync_preview_hover();
+            }
+            self.ensure_animation();
+            self.update_visuals();
+        }
+        if over_bin {
+            return;
+        }
+
         if let Some(shell) = self.hit_shell_button(mx, my) {
             let changed = self.hovered_shell != Some(shell) || self.hover_mouse_x.is_some();
             self.hovered_shell = Some(shell);
@@ -1772,6 +1893,7 @@ impl DockState {
         self.hover_mouse_x = None;
         self.hovered_idx = None;
         self.hovered_shell = None;
+        self.hovered_bin = false;
         self.hovered_show_desktop = false;
         self.pressed_shell = None;
         self.pressed_idx = None;
@@ -1789,6 +1911,14 @@ impl DockState {
         if self.hit_show_desktop(mx, my) {
             return;
         }
+        let (bin_rc, stats_rc, clock_rc) = self.right_widget_rects_dips();
+        if Self::hit_rect(bin_rc, mx, my)
+            || Self::hit_rect(stats_rc, mx, my)
+            || Self::hit_rect(clock_rc, mx, my)
+        {
+            return;
+        }
+
         if let Some(shell) = self.hit_shell_button(mx, my) {
             self.pressed_shell = Some(shell);
             self.update_visuals();
@@ -1814,6 +1944,19 @@ impl DockState {
         }
         if self.hit_show_desktop(mx, my) {
             opentaskbar_shell::taskbar::show_desktop();
+            return;
+        }
+        let (bin_rc, stats_rc, clock_rc) = self.right_widget_rects_dips();
+        if Self::hit_rect(bin_rc, mx, my) {
+            pins::launch("shell:RecycleBinFolder".to_owned());
+            return;
+        }
+        if Self::hit_rect(stats_rc, mx, my) {
+            pins::launch("taskmgr.exe".to_owned());
+            return;
+        }
+        if Self::hit_rect(clock_rc, mx, my) {
+            opentaskbar_shell::taskbar::open_notifications();
             return;
         }
         if let Some(shell) = self.pressed_shell.take() {
@@ -1984,6 +2127,20 @@ impl DockState {
     fn handle_rbutton_up(&mut self, mx: f32, my: f32) {
         self.hide_preview_now();
 
+        let (bin_rc, _, _) = self.right_widget_rects_dips();
+        if Self::hit_rect(bin_rc, mx, my) {
+            match win32::show_recycle_bin_context_menu(self.hwnd) {
+                RecycleBinAction::Open => pins::launch("shell:RecycleBinFolder".to_owned()),
+                RecycleBinAction::Empty => {
+                    widgets::empty_recycle_bin();
+                    self.refresh_widgets();
+                    self.update_visuals();
+                }
+                RecycleBinAction::None => {}
+            }
+            return;
+        }
+
         if self.hit_shell_button(mx, my) == Some(ShellButton::TaskView) {
             match win32::show_taskview_context_menu(self.hwnd) {
                 TaskViewAction::PreviousDesktop => opentaskbar_shell::taskbar::previous_desktop(),
@@ -2089,6 +2246,7 @@ unsafe extern "system" fn wnd_proc(
         WM_SETCURSOR => {
             let cursor_id = if state.hovered_shell.is_some()
                 || state.hovered_idx.is_some()
+                || state.hovered_bin
                 || state.hovered_show_desktop
             {
                 IDC_HAND
@@ -2345,5 +2503,82 @@ pub fn run(settings: DockSettings) {
     }
     unsafe {
         CoUninitialize();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn negative_x_secondary_monitor_positions_correctly() {
+        let settings = DockSettings::default();
+        let left_monitor = MonitorInfo {
+            handle: 2,
+            left: -2560,
+            top: 0,
+            right: 0,
+            bottom: 1440,
+            dpi_scale: 1.0,
+            is_primary: false,
+        };
+        let (x, y, w, h) = compute_window_rect(&settings, 8, left_monitor);
+        assert!(
+            x < 0,
+            "dock on left monitor must keep negative X (Issue #95)"
+        );
+        assert!(x >= left_monitor.left && x + w <= left_monitor.right);
+        assert_eq!(y + h, left_monitor.bottom);
+    }
+
+    #[test]
+    fn mixed_dpi_monitor_scales_window_bounds() {
+        let settings = DockSettings::default();
+        let hidpi = MonitorInfo {
+            handle: 1,
+            left: 0,
+            top: 0,
+            right: 3840,
+            bottom: 2160,
+            dpi_scale: 1.5,
+            is_primary: true,
+        };
+        let (x, y, w, h) = compute_window_rect(&settings, 6, hidpi);
+        assert!(w > 0 && w <= 3840);
+        assert!(h > 0 && y + h == 2160);
+        assert_eq!(x, (3840 - w) / 2);
+    }
+
+    #[test]
+    fn build_slots_preserves_unified_user_order() {
+        let pins = vec![
+            PinnedApp {
+                name: "Alpha".into(),
+                launch_path: r"C:\Alpha.lnk".into(),
+                target_exe: Some(r"C:\Alpha.exe".into()),
+                icon_source: r"C:\Alpha.exe".into(),
+            },
+            PinnedApp {
+                name: "Beta".into(),
+                launch_path: r"C:\Beta.lnk".into(),
+                target_exe: Some(r"C:\Beta.exe".into()),
+                icon_source: r"C:\Beta.exe".into(),
+            },
+        ];
+        let running = vec![RunningWindow {
+            hwnd: 100,
+            pid: 42,
+            title: "Gamma Window".into(),
+            exe_path: r"C:\Gamma.exe".into(),
+            is_foreground: true,
+        }];
+        let initial = build_slots(&pins, &running, &[]);
+        assert_eq!(initial.len(), 3);
+        // Simulate user dragging unpinned Gamma between Alpha and Beta.
+        let reordered = vec![initial[0].clone(), initial[2].clone(), initial[1].clone()];
+        let after_poll = build_slots(&pins, &running, &reordered);
+        assert_eq!(after_poll[0].label, "Alpha");
+        assert_eq!(after_poll[1].label, "Gamma");
+        assert_eq!(after_poll[2].label, "Beta");
     }
 }

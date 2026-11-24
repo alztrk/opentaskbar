@@ -307,6 +307,52 @@ pub fn next_desktop() {
     send_chord(&[VK_CONTROL, VK_LWIN, VK_RIGHT]);
 }
 
+/// Updates the registered AppBar height in-place without restoring/flashing Explorer's taskbar
+/// (fixes Issue #86 when changing dock size/scale in Settings).
+pub fn update_appbar_height(dock_hwnd: usize, auto_hide: bool, desired_total_px: i32) {
+    if auto_hide {
+        unregister_appbar();
+        return;
+    }
+    let prev = journal::read_state().unwrap_or(2);
+    let prev_was_autohide = (prev & ABS_AUTOHIDE) != 0;
+    let native_h = if prev_was_autohide {
+        0
+    } else {
+        native_bottom_taskbar_height_px()
+    };
+    let extra_px = (desired_total_px - native_h).max(0);
+    if extra_px == 0 {
+        unregister_appbar();
+        return;
+    }
+    if REGISTERED_APPBAR.load(Ordering::SeqCst) != dock_hwnd {
+        register_bottom_appbar(dock_hwnd, desired_total_px, prev);
+        return;
+    }
+    unsafe {
+        let mut abd: APPBARDATA = std::mem::zeroed();
+        abd.cbSize = size_of::<APPBARDATA>() as u32;
+        abd.hWnd = dock_hwnd as HWND;
+        let scr_w = GetSystemMetrics(SM_CXSCREEN);
+        let scr_h = GetSystemMetrics(SM_CYSCREEN);
+        abd.uEdge = ABE_BOTTOM;
+        abd.rc = RECT {
+            left: 0,
+            top: (scr_h - extra_px).max(0),
+            right: scr_w,
+            bottom: scr_h,
+        };
+        SHAppBarMessage(ABM_QUERYPOS, &mut abd);
+        abd.rc.top = (abd.rc.bottom - extra_px).max(0);
+        SHAppBarMessage(ABM_SETPOS, &mut abd);
+    }
+}
+
 pub fn new_desktop() {
     send_chord(&[VK_CONTROL, VK_LWIN, b'D' as u16]);
+}
+
+pub fn open_notifications() {
+    send_chord(&[VK_LWIN, b'N' as u16]);
 }

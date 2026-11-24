@@ -96,7 +96,6 @@ pub fn local_clock_strings() -> (String, String) {
     (time, date)
 }
 
-#[allow(dead_code)]
 pub fn is_recycle_bin_non_empty() -> bool {
     let mut info: SHQUERYRBINFO = unsafe { std::mem::zeroed() };
     info.cbSize = size_of::<SHQUERYRBINFO>() as u32;
@@ -105,7 +104,6 @@ pub fn is_recycle_bin_non_empty() -> bool {
     hr == 0 && info.i64NumItems > 0
 }
 
-#[allow(dead_code)]
 pub fn empty_recycle_bin() {
     std::thread::Builder::new()
         .name("opentaskbar-empty-bin".into())

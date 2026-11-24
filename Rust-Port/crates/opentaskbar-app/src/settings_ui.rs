@@ -410,6 +410,17 @@ impl Render for SettingsView {
                     &pal,
                     |this, _| this.settings.animations_enabled = !this.settings.animations_enabled,
                     cx,
+                ))
+                .child(self.toggle_row(
+                    "tog-winkey",
+                    "Reveal Dock on Windows Key",
+                    "Show auto-hidden dock when pressing the Windows key",
+                    self.settings.reveal_dock_on_win_key,
+                    &pal,
+                    |this, _| {
+                        this.settings.reveal_dock_on_win_key = !this.settings.reveal_dock_on_win_key
+                    },
+                    cx,
                 )),
             SettingsTab::Widgets => div()
                 .flex()

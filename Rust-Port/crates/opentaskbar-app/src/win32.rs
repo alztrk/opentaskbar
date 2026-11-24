@@ -55,6 +55,16 @@ const TV_MENU_NEXT: u32 = 3002;
 const TV_MENU_NEW: u32 = 3003;
 const TV_MENU_VIEW: u32 = 3004;
 
+const BIN_MENU_OPEN: u32 = 4001;
+const BIN_MENU_EMPTY: u32 = 4002;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecycleBinAction {
+    None,
+    Open,
+    Empty,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextAction {
     None,
@@ -475,6 +485,43 @@ pub fn show_taskview_context_menu(hwnd: usize) -> TaskViewAction {
             TV_MENU_NEW => TaskViewAction::NewDesktop,
             TV_MENU_VIEW => TaskViewAction::TaskView,
             _ => TaskViewAction::None,
+        }
+    }
+}
+
+pub fn show_recycle_bin_context_menu(hwnd: usize) -> RecycleBinAction {
+    if hwnd == 0 {
+        return RecycleBinAction::None;
+    }
+    unsafe {
+        let menu = CreatePopupMenu();
+        if menu.is_null() {
+            return RecycleBinAction::None;
+        }
+        let open_w = wide("Open Recycle Bin");
+        let empty_w = wide("Empty Recycle Bin");
+        AppendMenuW(menu, MF_STRING, BIN_MENU_OPEN as usize, open_w.as_ptr());
+        AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+        AppendMenuW(menu, MF_STRING, BIN_MENU_EMPTY as usize, empty_w.as_ptr());
+
+        let mut pt: POINT = std::mem::zeroed();
+        GetCursorPos(&mut pt);
+        SetForegroundWindow(hwnd as HWND);
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD,
+            pt.x,
+            pt.y,
+            0,
+            hwnd as HWND,
+            std::ptr::null(),
+        ) as u32;
+        DestroyMenu(menu);
+
+        match cmd {
+            BIN_MENU_OPEN => RecycleBinAction::Open,
+            BIN_MENU_EMPTY => RecycleBinAction::Empty,
+            _ => RecycleBinAction::None,
         }
     }
 }
