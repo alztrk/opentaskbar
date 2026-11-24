@@ -142,8 +142,10 @@ pub fn ensure_hidden() -> bool {
     hid
 }
 
-/// Immediately hides Explorer's taskbar, arms the watchdog, registers our AppBar on the
-/// UI thread, and switches Explorer's hidden taskbar state to auto-hide.
+/// Immediately hides Explorer's taskbar, arms the watchdog, and registers our AppBar on the
+/// UI thread. Matches C# `TaskbarReplacementSession`: only switches Explorer to `ABS_AUTOHIDE`
+/// when the dock itself is in auto-hide mode, so normal mode never leaves Windows' taskbar
+/// stuck in auto-hide.
 pub fn begin_replacement(dock_hwnd: usize, auto_hide: bool, reserve_height_px: i32) {
     let prev = journal::read_state().unwrap_or_else(get_taskbar_state);
     if !journal::has_pending() {
@@ -152,13 +154,13 @@ pub fn begin_replacement(dock_hwnd: usize, auto_hide: bool, reserve_height_px: i
     watchdog::arm();
     ensure_hidden();
 
-    let target_state = prev | ABS_AUTOHIDE;
-    if target_state != prev {
-        set_taskbar_state(target_state);
-        // Explorer can re-show Shell_TrayWnd when transitioning to ABS_AUTOHIDE; hide again.
-        ensure_hidden();
-    }
-    if !auto_hide {
+    if auto_hide {
+        let target_state = prev | ABS_AUTOHIDE;
+        if target_state != prev {
+            set_taskbar_state(target_state);
+            ensure_hidden();
+        }
+    } else {
         register_bottom_appbar(dock_hwnd, reserve_height_px);
         ensure_hidden();
     }
