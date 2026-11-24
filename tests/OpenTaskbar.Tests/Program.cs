@@ -3,6 +3,12 @@ using System.IO;
 using OpenTaskbar.Models;
 using OpenTaskbar.Services;
 
+if (args.Contains("--dynamic-island-placement", StringComparer.OrdinalIgnoreCase))
+{
+    DynamicIslandPlacementCheck.Run();
+    return;
+}
+
 if (args.Contains("--dynamic-island-only", StringComparer.OrdinalIgnoreCase))
 {
     Console.WriteLine($"{DynamicIslandChecks.Run()} Dynamic Island behavior checks passed.");

@@ -558,8 +558,6 @@ public partial class DynamicIslandWindow : Window, IDisposable
     {
         if (!IsInitialized) return;
         var windowWidth = width + ShoulderWidth * 2;
-        var left = _display.Bounds.Left + (_display.Bounds.Width - windowWidth) / 2;
-        Top = _display.Bounds.Top;
         IslandSurface.CornerRadius = height > CompactHeight
             ? new CornerRadius(0, 0, 22, 22)
             : new CornerRadius(0, 0, 17, 17);
@@ -569,21 +567,31 @@ public partial class DynamicIslandWindow : Window, IDisposable
         if (animate && IsVisible)
         {
             AnimateWindowValue(WidthProperty, ActualWidth, windowWidth);
-            AnimateWindowValue(LeftProperty, Left, left);
             AnimateWindowValue(HeightProperty, ActualHeight, height);
             AnimateSurfaceWidth(width);
         }
         else
         {
             BeginAnimation(WidthProperty, null);
-            BeginAnimation(LeftProperty, null);
             BeginAnimation(HeightProperty, null);
             IslandSurface.BeginAnimation(FrameworkElement.WidthProperty, null);
             IslandSurface.Width = width;
             Width = windowWidth;
             Height = height;
-            Left = left;
         }
+        PositionNativeWindow();
+    }
+
+    private void PositionNativeWindow()
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == 0) return;
+        // WPF converts Left/Top using the window's current monitor DPI, not the destination DPI.
+        var scale = _display.Dpi / 96d;
+        var left = (int)Math.Round((_display.Bounds.Left + (_display.Bounds.Width - Width) / 2) * scale);
+        var top = (int)Math.Round(_display.Bounds.Top * scale);
+        const uint noSizeNoZOrderNoActivate = 0x0001 | 0x0004 | 0x0010;
+        SetWindowPos(handle, 0, left, top, 0, 0, noSizeNoZOrderNoActivate);
     }
 
     private void IslandContent_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateIslandContentClip();
@@ -1005,11 +1013,11 @@ public partial class DynamicIslandWindow : Window, IDisposable
     private bool IsPointerAtRevealStrip()
     {
         if (!GetCursorPos(out var cursor)) return false;
-        var scale = 96d / _display.Dpi;
-        var cursorX = cursor.X * scale;
-        var cursorY = cursor.Y * scale;
-        return cursorX >= Left && cursorX <= Left + Width
-            && cursorY >= Top && cursorY <= Top + RevealStripHeight;
+        var scale = _display.Dpi / 96d;
+        var left = (_display.Bounds.Left + (_display.Bounds.Width - Width) / 2) * scale;
+        var top = _display.Bounds.Top * scale;
+        return cursor.X >= left && cursor.X <= left + Width * scale
+            && cursor.Y >= top && cursor.Y <= top + RevealStripHeight * scale;
     }
 
     private void Window_Closed(object? sender, EventArgs e) => ReleaseResources();
@@ -1037,6 +1045,8 @@ public partial class DynamicIslandWindow : Window, IDisposable
         var style = GetWindowLongPtr(handle, -20).ToInt64();
         SetWindowLongPtr(handle, -20, new nint((style | WsExToolWindow | WsExNoActivate) & ~WsExAppWindow));
         HwndSource.FromHwnd(handle)?.AddHook(WindowProc);
+        SizeChanged += (_, _) => PositionNativeWindow();
+        PositionNativeWindow();
     }
 
     private static nint WindowProc(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
@@ -1065,6 +1075,10 @@ public partial class DynamicIslandWindow : Window, IDisposable
 
     [DllImport("user32.dll")]
     private static extern bool GetCursorPos(out NativePoint point);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(nint hwnd, nint after, int x, int y, int width, int height, uint flags);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
     private static extern nint GetWindowLongPtr64(nint window, int index);
