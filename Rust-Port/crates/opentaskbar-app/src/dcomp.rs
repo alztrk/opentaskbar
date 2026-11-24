@@ -11,12 +11,10 @@ use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_ROUND, D2D1_CREATION_PROPERTIES, D2D1_DEBUG_LEVEL_NONE,
-    D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
+    D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_ROUND, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LINE_JOIN_ROUND,
-    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1, D2D1_THREADING_MODE_SINGLE_THREADED,
-    D2D1CreateDevice, D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
-    ID2D1StrokeStyle,
+    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1, D2D1CreateFactory, ID2D1Device,
+    ID2D1DeviceContext, ID2D1Factory1, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
@@ -144,13 +142,9 @@ impl DcompEngine {
         let d2d_factory: ID2D1Factory1 =
             unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
 
-        let creation_props = D2D1_CREATION_PROPERTIES {
-            threadingMode: D2D1_THREADING_MODE_SINGLE_THREADED,
-            debugLevel: D2D1_DEBUG_LEVEL_NONE,
-            options: D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-        };
-        let d2d_device: ID2D1Device =
-            unsafe { D2D1CreateDevice(&dxgi_device, Some(&creation_props))? };
+        // Must create `d2d_device` from `d2d_factory` so stroke styles and device contexts share
+        // the exact same factory (otherwise Direct2D fails with D2DERR_WRONG_FACTORY on EndDraw).
+        let d2d_device: ID2D1Device = unsafe { d2d_factory.CreateDevice(&dxgi_device)? };
 
         let dwrite_factory: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
@@ -263,10 +257,14 @@ impl DcompEngine {
             }));
         }
         let draw_res = draw_fn(&dc, w as f32, h as f32);
-        unsafe {
-            let _ = surface.EndDraw();
+        let end_res = unsafe { surface.EndDraw() };
+        if let Err(ref err) = end_res {
+            opentaskbar_core::log::error(format!(
+                "DirectComposition EndDraw failed ({w}x{h}): {err}"
+            ));
         }
         draw_res?;
+        end_res?;
         Ok(surface)
     }
 
@@ -411,6 +409,8 @@ impl DcompEngine {
         let col = color_rgba(rgba.0, rgba.1, rgba.2, rgba.3);
         self.draw_surface(width, height, |dc, w, h| unsafe {
             let brush = dc.CreateSolidColorBrush(&col, None)?;
+            let rx = radius.min(w * 0.5);
+            let ry = radius.min(h * 0.5);
             let rr = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
                     left: 0.0,
@@ -418,8 +418,8 @@ impl DcompEngine {
                     right: w,
                     bottom: h,
                 },
-                radiusX: radius,
-                radiusY: radius,
+                radiusX: rx,
+                radiusY: ry,
             };
             dc.FillRoundedRectangle(&rr, &brush);
             Ok(())
