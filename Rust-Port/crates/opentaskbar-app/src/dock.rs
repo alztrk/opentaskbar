@@ -1017,6 +1017,135 @@ impl DockState {
         false
     }
 
+    fn rebuild_theme_surfaces(&mut self) {
+        let dpi = self.dpi;
+        let is_dark = self.is_dark;
+        let base = self.settings.icon_dips();
+        let pill_h = pill_height_dips(&self.settings);
+        let radius = self.settings.corner_radius_dips();
+
+        let (pill_rgb, bd_rgb, hover_rgb, press_rgb, div_rgb, dot_run_rgb, dot_act_rgb) = if is_dark
+        {
+            (
+                (0x14, 0x17, 0x1f),
+                (0xff, 0xff, 0xff, 0.16),
+                (0xff, 0xff, 0xff, 0.11),
+                (0xff, 0xff, 0xff, 0.18),
+                (0xff, 0xff, 0xff, 0.24),
+                (0xe2, 0xe8, 0xf0, 0.90),
+                (0xff, 0xff, 0xff, 1.0),
+            )
+        } else {
+            (
+                (0xf3, 0xf5, 0xf9),
+                (0x0f, 0x17, 0x2a, 0.14),
+                (0x0f, 0x17, 0x2a, 0.08),
+                (0x0f, 0x17, 0x2a, 0.15),
+                (0x0f, 0x17, 0x2a, 0.20),
+                (0x47, 0x55, 0x69, 0.85),
+                (0x0f, 0x17, 0x2a, 0.95),
+            )
+        };
+
+        let bg_alpha = match self.settings.dock_background {
+            SurfaceBackground::None => 0.0_f32,
+            SurfaceBackground::Solid => 0.98_f32,
+            SurfaceBackground::Glass => (self.settings.dock_opacity.clamp(0.1, 1.0) * 0.88) as f32,
+        };
+        let bd_alpha = if self.settings.dock_background == SurfaceBackground::None {
+            0.0
+        } else {
+            bd_rgb.3
+        };
+        if let Ok(pill) = self.dcomp.create_pill_nodes(
+            radius * dpi,
+            pill_h * dpi,
+            (pill_rgb.0, pill_rgb.1, pill_rgb.2, bg_alpha),
+            (bd_rgb.0, bd_rgb.1, bd_rgb.2, bd_alpha),
+            dpi,
+        ) {
+            self.pill = pill;
+        }
+        let shell_px = (base * dpi).ceil() as u32;
+        if let Ok(s) =
+            self.dcomp
+                .create_rounded_rect_surface(shell_px, shell_px, 9.0 * dpi, hover_rgb)
+        {
+            self.shell_bg_hover = s;
+        }
+        if let Ok(s) =
+            self.dcomp
+                .create_rounded_rect_surface(shell_px, shell_px, 9.0 * dpi, press_rgb)
+        {
+            self.shell_bg_press = s;
+        }
+        let glyph_px = ((base * 0.68).max(22.0) * dpi).ceil() as u32;
+        for (idx, glyph) in [ShellGlyph::Start, ShellGlyph::Search, ShellGlyph::TaskView]
+            .into_iter()
+            .enumerate()
+        {
+            if let Ok(s) = self
+                .dcomp
+                .create_shell_glyph_surface(glyph, glyph_px, is_dark)
+            {
+                self.shell_icons[idx].set_content(Some(&s));
+            }
+        }
+        if let Ok(s) = self.dcomp.create_rounded_rect_surface(
+            (1.5 * dpi).ceil() as u32,
+            (26.0 * dpi).ceil() as u32,
+            0.75 * dpi,
+            div_rgb,
+        ) {
+            self.divider.set_content(Some(&s));
+            self.widget_divider.set_content(Some(&s));
+        }
+        if let Ok(s) =
+            self.dcomp
+                .create_shell_glyph_surface(ShellGlyph::TrayChevron, glyph_px, is_dark)
+        {
+            self.tray_node.set_content(Some(&s));
+        }
+        if let Ok(s) =
+            self.dcomp
+                .create_shell_glyph_surface(ShellGlyph::RecycleBinEmpty, glyph_px, is_dark)
+        {
+            self.bin_empty_surf = s;
+        }
+        if let Ok(s) =
+            self.dcomp
+                .create_shell_glyph_surface(ShellGlyph::RecycleBinFull, glyph_px, is_dark)
+        {
+            self.bin_full_surf = s;
+        }
+        self.bin_node.set_content(Some(if self.bin_is_full {
+            &self.bin_full_surf
+        } else {
+            &self.bin_empty_surf
+        }));
+        let dot_h_px = (3.5 * dpi).ceil() as u32;
+        if let Ok(s) = self.dcomp.create_rounded_rect_surface(
+            (6.0 * dpi).ceil() as u32,
+            dot_h_px,
+            2.0 * dpi,
+            dot_run_rgb,
+        ) {
+            self.dot_running = s;
+        }
+        if let Ok(s) = self.dcomp.create_rounded_rect_surface(
+            (16.0 * dpi).ceil() as u32,
+            dot_h_px,
+            2.0 * dpi,
+            dot_act_rgb,
+        ) {
+            self.dot_active = s;
+        }
+        for sv in &mut self.slot_visuals {
+            sv.bound_dot_state = 255;
+        }
+        self.rebuild_visual_tree();
+    }
+
     fn reload_settings_live(&mut self) {
         let next =
             opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
@@ -1027,6 +1156,7 @@ impl DockState {
             wv.last_key.clear();
         }
         self.tooltip_cache = None;
+        self.rebuild_theme_surfaces();
         if self.monitor.is_primary {
             let auto_hide = self.settings.auto_hide != AutoHideMode::Disabled;
             let desired_total_dips = pill_height_dips(&self.settings) + VERTICAL_EDGE_GAP * 2.0;

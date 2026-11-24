@@ -1,16 +1,14 @@
 //! On-demand GPUI Settings window (`OpenTaskBar.exe --settings`).
 //!
-//! Built with OpenTaskBar's iOS + shadcn/ui reusable component library (`ui_components.rs`).
-//! Runs in a short-lived subprocess so GPUI's DX11 context and RAM are 100% freed the moment
-//! Settings is closed. Every change atomically saves `settings.json` and broadcasts
-//! `OpenTaskBarReloadSettings` so all live DirectComposition docks update immediately.
+//! Fixed-size (`880 x 600`) iOS + shadcn/ui window with native Segoe Fluent Icons,
+//! zero horizontal overflow, visible custom scrollbar, interactive Widget Preview Cards
+//! with inline widget settings, and instant auto-save + live DirectComposition dock reload.
 
-use std::fs;
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, App, Application, Bounds, Context, SharedString, Window, WindowBounds,
-    WindowOptions, div, prelude::*, px, rgba, size,
+    AnyElement, App, Application, Bounds, Context, ScrollHandle, SharedString, Window,
+    WindowBounds, WindowOptions, div, prelude::*, px, rgba, size,
 };
 use opentaskbar_core::settings::{
     self, AppTheme, AutoHideMode, DockAppGroup, DockPosition, DockProfile, DockSettings, DockSize,
@@ -22,8 +20,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::pins;
 use crate::ui_components::{
-    self as ui, ButtonVariant, UiTheme, badge, button, ios_switch, section_card, segmented_item,
-    segmented_track, setting_row, sidebar_nav_item, stepper,
+    self as ui, ButtonVariant, UiTheme, badge, button, icon_glyph, ios_switch, section_card,
+    segmented_item, segmented_track, setting_row, sidebar_nav_item, stepper,
 };
 use crate::widgets;
 use crate::win32;
@@ -31,7 +29,9 @@ use crate::win32;
 pub const SETTINGS_ARG: &str = "--settings";
 pub const RELOAD_MSG_NAME: &str = "OpenTaskBarReloadSettings";
 
-/// Spawns `OpenTaskBar.exe --settings` as an on-demand subprocess.
+const WIN_W: f32 = 880.0;
+const WIN_H: f32 = 600.0;
+
 pub fn spawn_settings_window() {
     if let Ok(exe) = std::env::current_exe() {
         let _ = std::process::Command::new(exe).arg(SETTINGS_ARG).spawn();
@@ -64,24 +64,102 @@ impl SettingsPage {
         match self {
             Self::General => "General",
             Self::Appearance => "Appearance",
-            Self::Layout => "Layout & Displays",
+            Self::Layout => "Layout",
             Self::Widgets => "Widgets",
             Self::Stacks => "Stacks & Groups",
-            Self::Profiles => "Profiles & Backup",
+            Self::Profiles => "Profiles",
             Self::About => "About",
         }
     }
 
-    fn subtitle(self) -> &'static str {
+    fn glyph(self) -> &'static str {
         match self {
-            Self::General => "Theme, auto-hide, focus mode, and window behavior.",
-            Self::Appearance => "Surface material, icon scale, geometry, and motion.",
-            Self::Layout => "Alignment, multi-monitor visibility, and dock utilities.",
-            Self::Widgets => "Choose which live widgets appear on your dock.",
-            Self::Stacks => "Quick-access folder stacks and custom app groups.",
-            Self::Profiles => "Switch saved dock presets or export/restore settings.",
-            Self::About => "OpenTaskBar hybrid runtime details and recovery tools.",
+            Self::General => "\u{E713}",    // Settings gear
+            Self::Appearance => "\u{E790}", // Color palette
+            Self::Layout => "\u{E7F4}",     // Display / monitor
+            Self::Widgets => "\u{F0E2}",    // Grid / apps
+            Self::Stacks => "\u{E8B7}",     // Folder
+            Self::Profiles => "\u{E748}",   // Profile / switch
+            Self::About => "\u{E946}",      // Info
         }
+    }
+}
+
+fn widget_glyph(id: &str) -> &'static str {
+    match id {
+        "clock" => "\u{E823}",
+        "stats" => "\u{E9D9}",
+        "audio" => "\u{E767}",
+        "media" => "\u{E8D6}",
+        "netspeed" => "\u{E701}",
+        "battery" => "\u{E83F}",
+        "storage" => "\u{EDA2}",
+        "keyboard" => "\u{E765}",
+        "dayprogress" => "\u{E706}",
+        "stopwatch" => "\u{E916}",
+        "countdown" => "\u{E917}",
+        "focus" => "\u{E708}",
+        "weather" => "\u{E753}",
+        "quicksettings" => "\u{E9E9}",
+        _ => "\u{F0E2}",
+    }
+}
+
+fn widget_preview_lines(id: &str, settings: &DockSettings) -> (String, String) {
+    match id {
+        "clock" => widgets::local_clock_strings(),
+        "stats" => {
+            let (ram, _, _) = widgets::sample_ram_info();
+            ("CPU 12%".to_owned(), format!("RAM {ram}%"))
+        }
+        "audio" => {
+            let (vol, muted) = widgets::get_audio_state();
+            if muted {
+                ("VOL --".to_owned(), "Muted".to_owned())
+            } else {
+                (format!("VOL {vol}%"), "Audio".to_owned())
+            }
+        }
+        "media" => ("MEDIA".to_owned(), "Prev · Play · Next".to_owned()),
+        "netspeed" => ("D 2.4M".to_owned(), "U 320K".to_owned()),
+        "battery" => {
+            let b = widgets::sample_battery();
+            if b.has_battery {
+                (format!("BAT {}%", b.percent), "Power".to_owned())
+            } else {
+                ("AC".to_owned(), "Desktop".to_owned())
+            }
+        }
+        "storage" => {
+            let d = widgets::sample_drives();
+            if let Some(first) = d.first() {
+                (
+                    format!("{}: {:.0}G", first.letter, first.free_gb),
+                    "Free".to_owned(),
+                )
+            } else {
+                ("C: 120G".to_owned(), "Free".to_owned())
+            }
+        }
+        "keyboard" => (widgets::active_keyboard_code(), "Layout".to_owned()),
+        "dayprogress" => {
+            let (day, _, _, left) = widgets::day_progress_metrics();
+            (format!("DAY {:.0}%", day * 100.0), format!("{left}h left"))
+        }
+        "stopwatch" => ("00:00".to_owned(), "Stopwatch".to_owned()),
+        "countdown" => ("15:00".to_owned(), "Timer".to_owned()),
+        "focus" => (
+            "25:00".to_owned(),
+            if settings.focus_mode {
+                "Focus On"
+            } else {
+                "Pomodoro"
+            }
+            .to_owned(),
+        ),
+        "weather" => ("21°C".to_owned(), settings.weather_city.clone()),
+        "quicksettings" => ("QUICK".to_owned(), "Controls".to_owned()),
+        _ => (id.to_uppercase(), "Widget".to_owned()),
     }
 }
 
@@ -104,7 +182,8 @@ fn user_folder(name: &str) -> Option<String> {
 struct SettingsView {
     page: SettingsPage,
     settings: DockSettings,
-    status: Option<SharedString>,
+    scroll_handle: ScrollHandle,
+    saved_flash: bool,
 }
 
 impl SettingsView {
@@ -112,7 +191,8 @@ impl SettingsView {
         Self {
             page: SettingsPage::General,
             settings,
-            status: None,
+            scroll_handle: ScrollHandle::new(),
+            saved_flash: false,
         }
     }
 
@@ -125,15 +205,10 @@ impl SettingsView {
         UiTheme::new(is_dark)
     }
 
-    fn persist(&mut self, note: impl Into<SharedString>, cx: &mut Context<Self>) {
-        match settings::save_to(&settings::settings_path(), &self.settings) {
-            Ok(()) => {
-                notify_docks_reload();
-                self.status = Some(note.into());
-            }
-            Err(err) => {
-                self.status = Some(format!("Save failed: {err}").into());
-            }
+    fn auto_save(&mut self, cx: &mut Context<Self>) {
+        if settings::save_to(&settings::settings_path(), &self.settings).is_ok() {
+            notify_docks_reload();
+            self.saved_flash = true;
         }
         cx.notify();
     }
@@ -149,7 +224,7 @@ impl SettingsView {
                     self.settings.theme == AppTheme::System,
                     cx.listener(|this, _, _, cx| {
                         this.settings.theme = AppTheme::System;
-                        this.persist("Theme set to System", cx);
+                        this.auto_save(cx);
                     }),
                 ),
                 segmented_item(
@@ -159,7 +234,7 @@ impl SettingsView {
                     self.settings.theme == AppTheme::Dark,
                     cx.listener(|this, _, _, cx| {
                         this.settings.theme = AppTheme::Dark;
-                        this.persist("Theme set to Dark", cx);
+                        this.auto_save(cx);
                     }),
                 ),
                 segmented_item(
@@ -169,7 +244,7 @@ impl SettingsView {
                     self.settings.theme == AppTheme::Light,
                     cx.listener(|this, _, _, cx| {
                         this.settings.theme = AppTheme::Light;
-                        this.persist("Theme set to Light", cx);
+                        this.auto_save(cx);
                     }),
                 ),
             ],
@@ -185,7 +260,7 @@ impl SettingsView {
                     self.settings.auto_hide == AutoHideMode::Disabled,
                     cx.listener(|this, _, _, cx| {
                         this.settings.auto_hide = AutoHideMode::Disabled;
-                        this.persist("Auto-Hide disabled", cx);
+                        this.auto_save(cx);
                     }),
                 ),
                 segmented_item(
@@ -195,7 +270,7 @@ impl SettingsView {
                     self.settings.auto_hide == AutoHideMode::Smart,
                     cx.listener(|this, _, _, cx| {
                         this.settings.auto_hide = AutoHideMode::Smart;
-                        this.persist("Smart Auto-Hide enabled", cx);
+                        this.auto_save(cx);
                     }),
                 ),
                 segmented_item(
@@ -205,7 +280,7 @@ impl SettingsView {
                     self.settings.auto_hide == AutoHideMode::Always,
                     cx.listener(|this, _, _, cx| {
                         this.settings.auto_hide = AutoHideMode::Always;
-                        this.persist("Auto-Hide set to Always", cx);
+                        this.auto_save(cx);
                     }),
                 ),
             ],
@@ -214,50 +289,36 @@ impl SettingsView {
         vec![
             section_card(
                 t,
-                "Appearance & Visibility",
-                Some("Smart Auto-Hide tucks the dock away only when a window overlaps it."),
+                "System",
                 vec![
-                    setting_row(
-                        t,
-                        "Theme",
-                        Some("Follow Windows dark/light mode or lock a theme."),
-                        theme_seg,
-                    )
-                    .into_any_element(),
-                    setting_row(
-                        t,
-                        "Auto-Hide",
-                        Some("Slide dock off the screen edge when not needed."),
-                        autohide_seg,
-                    )
-                    .into_any_element(),
+                    setting_row(t, Some("\u{E790}"), "Theme", theme_seg).into_any_element(),
+                    setting_row(t, Some("\u{E740}"), "Auto-Hide", autohide_seg).into_any_element(),
                 ],
             )
             .into_any_element(),
             section_card(
                 t,
-                "Behavior & Focus",
-                None::<&str>,
+                "Behavior",
                 vec![
                     setting_row(
                         t,
+                        Some("\u{E708}"),
                         "Focus Mode",
-                        Some("Hide non-essential widgets while concentrating."),
                         ios_switch(
                             "sw-focus",
                             t,
                             self.settings.focus_mode,
                             cx.listener(|this, _, _, cx| {
                                 this.settings.focus_mode = !this.settings.focus_mode;
-                                this.persist("Focus Mode updated", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
                     .into_any_element(),
                     setting_row(
                         t,
-                        "Reveal Dock on Win Key",
-                        Some("Show hidden dock automatically when pressing Start."),
+                        Some("\u{E765}"),
+                        "Reveal on Win Key",
                         ios_switch(
                             "sw-winkey",
                             t,
@@ -265,15 +326,15 @@ impl SettingsView {
                             cx.listener(|this, _, _, cx| {
                                 this.settings.reveal_dock_on_win_key =
                                     !this.settings.reveal_dock_on_win_key;
-                                this.persist("Saved", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
                     .into_any_element(),
                     setting_row(
                         t,
-                        "Current Virtual Desktop Only",
-                        Some("Show running apps only from the active Windows desktop."),
+                        Some("\u{E7F4}"),
+                        "Current Desktop Only",
                         ios_switch(
                             "sw-vdesk",
                             t,
@@ -281,7 +342,7 @@ impl SettingsView {
                             cx.listener(|this, _, _, cx| {
                                 this.settings.current_desktop_only =
                                     !this.settings.current_desktop_only;
-                                this.persist("Saved", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
@@ -303,7 +364,7 @@ impl SettingsView {
                     self.settings.dock_background == SurfaceBackground::Glass,
                     cx.listener(|this, _, _, cx| {
                         this.settings.dock_background = SurfaceBackground::Glass;
-                        this.persist("Glass surface enabled", cx);
+                        this.auto_save(cx);
                     }),
                 ),
                 segmented_item(
@@ -313,7 +374,7 @@ impl SettingsView {
                     self.settings.dock_background == SurfaceBackground::Solid,
                     cx.listener(|this, _, _, cx| {
                         this.settings.dock_background = SurfaceBackground::Solid;
-                        this.persist("Solid surface enabled", cx);
+                        this.auto_save(cx);
                     }),
                 ),
                 segmented_item(
@@ -323,7 +384,7 @@ impl SettingsView {
                     self.settings.dock_background == SurfaceBackground::None,
                     cx.listener(|this, _, _, cx| {
                         this.settings.dock_background = SurfaceBackground::None;
-                        this.persist("Transparent surface enabled", cx);
+                        this.auto_save(cx);
                     }),
                 ),
             ],
@@ -339,7 +400,7 @@ impl SettingsView {
                     self.settings.size == DockSize::Compact,
                     cx.listener(|this, _, _, cx| {
                         this.settings.size = DockSize::Compact;
-                        this.persist("Size set to Compact", cx);
+                        this.auto_save(cx);
                     }),
                 ),
                 segmented_item(
@@ -349,7 +410,7 @@ impl SettingsView {
                     self.settings.size == DockSize::Medium,
                     cx.listener(|this, _, _, cx| {
                         this.settings.size = DockSize::Medium;
-                        this.persist("Size set to Medium", cx);
+                        this.auto_save(cx);
                     }),
                 ),
                 segmented_item(
@@ -359,7 +420,7 @@ impl SettingsView {
                     self.settings.size == DockSize::Large,
                     cx.listener(|this, _, _, cx| {
                         this.settings.size = DockSize::Large;
-                        this.persist("Size set to Large", cx);
+                        this.auto_save(cx);
                     }),
                 ),
             ],
@@ -375,27 +436,14 @@ impl SettingsView {
         vec![
             section_card(
                 t,
-                "Surface & Size",
-                None::<&str>,
+                "Surface",
                 vec![
+                    setting_row(t, Some("\u{E790}"), "Background", bg_seg).into_any_element(),
+                    setting_row(t, Some("\u{E740}"), "Dock Size", size_seg).into_any_element(),
                     setting_row(
                         t,
-                        "Background Style",
-                        Some("Dock pill backdrop material."),
-                        bg_seg,
-                    )
-                    .into_any_element(),
-                    setting_row(
-                        t,
-                        "Icon Size Preset",
-                        Some("Base icon footprint in DIPs."),
-                        size_seg,
-                    )
-                    .into_any_element(),
-                    setting_row(
-                        t,
+                        Some("\u{E706}"),
                         "Opacity",
-                        Some("Dock surface translucency."),
                         stepper(
                             "op-minus",
                             "op-plus",
@@ -404,20 +452,20 @@ impl SettingsView {
                             cx.listener(|this, _, _, cx| {
                                 this.settings.dock_opacity =
                                     (this.settings.dock_opacity - 0.05).clamp(0.2, 1.0);
-                                this.persist("Opacity updated", cx);
+                                this.auto_save(cx);
                             }),
                             cx.listener(|this, _, _, cx| {
                                 this.settings.dock_opacity =
                                     (this.settings.dock_opacity + 0.05).clamp(0.2, 1.0);
-                                this.persist("Opacity updated", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
                     .into_any_element(),
                     setting_row(
                         t,
-                        "Dock Scale",
-                        Some("Fine-grained icon multiplier (75% - 150%)."),
+                        Some("\u{E8A3}"),
+                        "Scale",
                         stepper(
                             "sc-minus",
                             "sc-plus",
@@ -428,22 +476,22 @@ impl SettingsView {
                                     ((this.settings.dock_scale * 20.0).round() - 1.0)
                                         .clamp(15.0, 30.0)
                                         / 20.0;
-                                this.persist("Scale updated", cx);
+                                this.auto_save(cx);
                             }),
                             cx.listener(|this, _, _, cx| {
                                 this.settings.dock_scale =
                                     ((this.settings.dock_scale * 20.0).round() + 1.0)
                                         .clamp(15.0, 30.0)
                                         / 20.0;
-                                this.persist("Scale updated", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
                     .into_any_element(),
                     setting_row(
                         t,
+                        Some("\u{F158}"),
                         "Corner Radius",
-                        Some("Pill corner rounding."),
                         stepper(
                             "rad-minus",
                             "rad-plus",
@@ -452,20 +500,20 @@ impl SettingsView {
                             cx.listener(|this, _, _, cx| {
                                 let cur = this.settings.dock_corner_radius.unwrap_or(16);
                                 this.settings.dock_corner_radius = Some((cur - 2).max(0));
-                                this.persist("Corner radius updated", cx);
+                                this.auto_save(cx);
                             }),
                             cx.listener(|this, _, _, cx| {
                                 let cur = this.settings.dock_corner_radius.unwrap_or(16);
                                 this.settings.dock_corner_radius = Some((cur + 2).min(32));
-                                this.persist("Corner radius updated", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
                     .into_any_element(),
                     setting_row(
                         t,
+                        Some("\u{E74A}"),
                         "Bottom Margin",
-                        Some("Floating gap from screen edge."),
                         stepper(
                             "gap-minus",
                             "gap-plus",
@@ -474,12 +522,12 @@ impl SettingsView {
                             cx.listener(|this, _, _, cx| {
                                 this.settings.dock_bottom_gap_pixels =
                                     (this.settings.dock_bottom_gap_pixels - 2).max(0);
-                                this.persist("Margin updated", cx);
+                                this.auto_save(cx);
                             }),
                             cx.listener(|this, _, _, cx| {
                                 this.settings.dock_bottom_gap_pixels =
                                     (this.settings.dock_bottom_gap_pixels + 2).min(32);
-                                this.persist("Margin updated", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
@@ -490,12 +538,11 @@ impl SettingsView {
             section_card(
                 t,
                 "Motion",
-                None::<&str>,
                 vec![
                     setting_row(
                         t,
+                        Some("\u{E945}"),
                         "Smooth Animations",
-                        Some("VSync spring motion for hover, bounce, and auto-hide."),
                         ios_switch(
                             "sw-anim",
                             t,
@@ -503,15 +550,15 @@ impl SettingsView {
                             cx.listener(|this, _, _, cx| {
                                 this.settings.animations_enabled =
                                     !this.settings.animations_enabled;
-                                this.persist("Animations updated", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
                     .into_any_element(),
                     setting_row(
                         t,
-                        "Fisheye Magnification",
-                        Some("macOS-style icon wave on pointer hover."),
+                        Some("\u{E71E}"),
+                        "Magnification",
                         ios_switch(
                             "sw-mag",
                             t,
@@ -519,7 +566,7 @@ impl SettingsView {
                             cx.listener(|this, _, _, cx| {
                                 this.settings.magnification_enabled =
                                     !this.settings.magnification_enabled;
-                                this.persist("Magnification updated", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
@@ -541,7 +588,7 @@ impl SettingsView {
                     self.settings.position == DockPosition::Left,
                     cx.listener(|this, _, _, cx| {
                         this.settings.position = DockPosition::Left;
-                        this.persist("Aligned Left", cx);
+                        this.auto_save(cx);
                     }),
                 ),
                 segmented_item(
@@ -551,7 +598,7 @@ impl SettingsView {
                     self.settings.position == DockPosition::Center,
                     cx.listener(|this, _, _, cx| {
                         this.settings.position = DockPosition::Center;
-                        this.persist("Aligned Center", cx);
+                        this.auto_save(cx);
                     }),
                 ),
                 segmented_item(
@@ -561,65 +608,58 @@ impl SettingsView {
                     self.settings.position == DockPosition::Right,
                     cx.listener(|this, _, _, cx| {
                         this.settings.position = DockPosition::Right;
-                        this.persist("Aligned Right", cx);
+                        this.auto_save(cx);
                     }),
                 ),
             ],
         );
 
-        let custom_width_text = self
-            .settings
-            .dock_custom_width_dips
-            .map_or_else(|| "Auto-fit".to_owned(), |w| format!("{w:.0} DIPs"));
+        let width_label = self.settings.dock_custom_width_dips.map_or_else(
+            || "Width (Auto)".to_owned(),
+            |w| format!("Width ({w:.0}px)"),
+        );
 
         vec![
             section_card(
                 t,
                 "Position & Displays",
-                Some("You can also drag the left or right edge of the dock pill to resize it."),
                 vec![
+                    setting_row(t, Some("\u{E8E3}"), "Alignment", align_seg).into_any_element(),
                     setting_row(
                         t,
-                        "Alignment",
-                        Some("Horizontal dock placement."),
-                        align_seg,
-                    )
-                    .into_any_element(),
-                    setting_row(
-                        t,
-                        "Full-Width Taskbar",
-                        Some("Stretch dock across the entire monitor width."),
+                        Some("\u{E740}"),
+                        "Full Width",
                         ios_switch(
                             "sw-fullw",
                             t,
                             self.settings.full_width,
                             cx.listener(|this, _, _, cx| {
                                 this.settings.full_width = !this.settings.full_width;
-                                this.persist("Width mode updated", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
                     .into_any_element(),
                     setting_row(
                         t,
-                        "Custom Width",
-                        Some(format!("Current: {custom_width_text}")),
+                        Some("\u{E72C}"),
+                        width_label,
                         button(
                             "btn-reset-width",
                             t,
-                            "Reset to Auto",
+                            "Reset",
                             ButtonVariant::Secondary,
                             cx.listener(|this, _, _, cx| {
                                 this.settings.dock_custom_width_dips = None;
-                                this.persist("Dock width reset to Auto", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
                     .into_any_element(),
                     setting_row(
                         t,
-                        "Show on All Monitors",
-                        Some("Display a DPI-aware dock on every connected screen."),
+                        Some("\u{E7F4}"),
+                        "All Monitors",
                         ios_switch(
                             "sw-allmon",
                             t,
@@ -627,7 +667,7 @@ impl SettingsView {
                             cx.listener(|this, _, _, cx| {
                                 this.settings.show_on_all_monitors =
                                     !this.settings.show_on_all_monitors;
-                                this.persist("Multi-monitor setting saved", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
@@ -638,42 +678,41 @@ impl SettingsView {
             section_card(
                 t,
                 "Dock Utilities",
-                None::<&str>,
                 vec![
                     setting_row(
                         t,
-                        "Background Apps Button",
-                        Some("Opens OpenTaskBar's custom background apps flyout."),
+                        Some("\u{E70E}"),
+                        "Background Apps",
                         ios_switch(
                             "sw-tray",
                             t,
                             self.settings.show_tray_button,
                             cx.listener(|this, _, _, cx| {
                                 this.settings.show_tray_button = !this.settings.show_tray_button;
-                                this.persist("Background Apps button updated", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
                     .into_any_element(),
                     setting_row(
                         t,
+                        Some("\u{E74D}"),
                         "Recycle Bin",
-                        Some("Quick access and right-click Empty Recycle Bin."),
                         ios_switch(
                             "sw-bin",
                             t,
                             self.settings.show_recycle_bin,
                             cx.listener(|this, _, _, cx| {
                                 this.settings.show_recycle_bin = !this.settings.show_recycle_bin;
-                                this.persist("Recycle Bin updated", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
                     .into_any_element(),
                     setting_row(
                         t,
+                        Some("\u{E7F8}"),
                         "Show Desktop Strip",
-                        Some("Thin edge button at the far right of the dock."),
                         ios_switch(
                             "sw-sd",
                             t,
@@ -681,7 +720,7 @@ impl SettingsView {
                             cx.listener(|this, _, _, cx| {
                                 this.settings.show_desktop_button =
                                     !this.settings.show_desktop_button;
-                                this.persist("Show Desktop button updated", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
@@ -692,112 +731,294 @@ impl SettingsView {
         ]
     }
 
+    fn render_widget_card(
+        &self,
+        w: &'static widgets::WidgetDescriptor,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let wid = w.id;
+        let enabled = self.settings.is_widget_enabled(wid);
+        let (top_line, bot_line) = widget_preview_lines(wid, &self.settings);
+
+        let border_col = if enabled { t.accent } else { t.border };
+        let card_hover = t.surface_hover;
+
+        // Inline widget-specific settings right inside the preview card
+        let inline_controls: Option<AnyElement> =
+            match wid {
+                "weather" => Some(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .flex_wrap()
+                        .children(["Istanbul", "Ankara", "London", "Berlin"].into_iter().map(
+                            |city| {
+                                let active = self.settings.weather_city.eq_ignore_ascii_case(city);
+                                let bg = if active { t.accent } else { t.surface_muted };
+                                let fg = if active {
+                                    t.accent_fg
+                                } else {
+                                    t.text_secondary
+                                };
+                                div()
+                                    .id(SharedString::from(format!("wc-{city}")))
+                                    .px(px(7.0))
+                                    .py(px(2.5))
+                                    .rounded(px(6.0))
+                                    .bg(rgba(bg))
+                                    .text_size(px(10.5))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(rgba(fg))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.settings.weather_city = city.to_owned();
+                                        this.auto_save(cx);
+                                    }))
+                                    .child(city)
+                            },
+                        ))
+                        .into_any_element(),
+                ),
+                "focus" => {
+                    let on = self.settings.focus_mode;
+                    let bg = if on { t.accent_soft } else { t.surface_muted };
+                    let fg = if on { t.accent } else { t.text_secondary };
+                    Some(
+                        div()
+                            .id("wc-focus-toggle")
+                            .px(px(8.0))
+                            .py(px(3.0))
+                            .rounded(px(6.0))
+                            .bg(rgba(bg))
+                            .text_size(px(10.5))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(rgba(fg))
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.settings.focus_mode = !this.settings.focus_mode;
+                                this.auto_save(cx);
+                            }))
+                            .child(if on {
+                                "Focus Mode: On"
+                            } else {
+                                "Focus Mode: Off"
+                            })
+                            .into_any_element(),
+                    )
+                }
+                "audio" => Some(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .id("wc-vol-dn")
+                                .px(px(8.0))
+                                .py(px(2.5))
+                                .rounded(px(6.0))
+                                .bg(rgba(t.surface_muted))
+                                .text_size(px(10.5))
+                                .text_color(rgba(t.text_primary))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    widgets::adjust_audio_volume(-10);
+                                    cx.notify();
+                                }))
+                                .child("-10%"),
+                        )
+                        .child(
+                            div()
+                                .id("wc-vol-mute")
+                                .px(px(8.0))
+                                .py(px(2.5))
+                                .rounded(px(6.0))
+                                .bg(rgba(t.surface_muted))
+                                .text_size(px(10.5))
+                                .text_color(rgba(t.text_primary))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    widgets::toggle_audio_mute();
+                                    cx.notify();
+                                }))
+                                .child("Mute"),
+                        )
+                        .child(
+                            div()
+                                .id("wc-vol-up")
+                                .px(px(8.0))
+                                .py(px(2.5))
+                                .rounded(px(6.0))
+                                .bg(rgba(t.surface_muted))
+                                .text_size(px(10.5))
+                                .text_color(rgba(t.text_primary))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.stop_propagation();
+                                    widgets::adjust_audio_volume(10);
+                                    cx.notify();
+                                }))
+                                .child("+10%"),
+                        )
+                        .into_any_element(),
+                ),
+                _ => None,
+            };
+
+        let mut card = div()
+            .id(SharedString::from(format!("wcard-{wid}")))
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .p(px(12.0))
+            .rounded(px(12.0))
+            .bg(rgba(t.surface))
+            .border_1()
+            .border_color(rgba(border_col))
+            .cursor_pointer()
+            .hover(move |s| s.bg(rgba(card_hover)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let cur = this.settings.is_widget_enabled(wid);
+                this.settings.set_widget_enabled(wid, !cur);
+                this.auto_save(cx);
+            }))
+            // Live Dock Chip Preview
+            .child(
+                div()
+                    .w_full()
+                    .h(px(54.0))
+                    .rounded(px(9.0))
+                    .bg(rgba(t.dock_preview_bg))
+                    .border_1()
+                    .border_color(rgba(0xffffff18))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .px(px(12.0))
+                            .py(px(5.0))
+                            .rounded(px(7.0))
+                            .bg(rgba(0xffffff10))
+                            .flex()
+                            .flex_col()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgba(0xf8fafcff))
+                                    .child(top_line),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgba(0x94a3b8ff))
+                                    .child(bot_line),
+                            ),
+                    ),
+            )
+            // Card footer: Icon + Name + Active indicator
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.0))
+                            .min_w_0()
+                            .child(icon_glyph(
+                                widget_glyph(wid),
+                                13.5,
+                                if enabled { t.accent } else { t.text_secondary },
+                            ))
+                            .child(
+                                div()
+                                    .text_size(px(12.5))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgba(t.text_primary))
+                                    .child(w.name),
+                            ),
+                    )
+                    .child(if enabled {
+                        badge(t, "On", true)
+                    } else {
+                        badge(t, "Add", false)
+                    }),
+            );
+
+        if let Some(inline) = inline_controls {
+            card = card.child(
+                div()
+                    .w_full()
+                    .pt(px(4.0))
+                    .border_t_1()
+                    .border_color(rgba(t.separator))
+                    .child(inline),
+            );
+        }
+
+        card.into_any_element()
+    }
+
     fn render_widgets(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut sections: Vec<AnyElement> = Vec::new();
+        let mut out: Vec<AnyElement> = Vec::new();
         let active_count = widgets::ALL_WIDGETS
             .iter()
             .filter(|w| self.settings.is_widget_enabled(w.id))
             .count();
 
-        sections.push(
-            section_card(
-                t,
-                "Active Widgets",
-                Some("Widgets are opt-in: enable only the ones you want on your dock. Clicking any widget opens its shared flyout."),
-                vec![
-                    setting_row(
-                        t,
-                        format!("{active_count} of {} widgets enabled", widgets::ALL_WIDGETS.len()),
-                        Some("Scroll wheel over Audio Volume adjusts master volume directly."),
-                        button(
-                            "btn-clear-widgets",
-                            t,
-                            "Disable All",
-                            ButtonVariant::Secondary,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.show_clock_widget = false;
-                                this.settings.show_system_stats_widget = false;
-                                this.settings.enabled_widgets.clear();
-                                this.persist("All widgets disabled", cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                ],
-            )
-            .into_any_element(),
+        out.push(
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(badge(
+                    t,
+                    format!("{active_count} / {} active", widgets::ALL_WIDGETS.len()),
+                    active_count > 0,
+                ))
+                .child(button(
+                    "btn-clear-widgets",
+                    t,
+                    "Clear All",
+                    ButtonVariant::Secondary,
+                    cx.listener(|this, _, _, cx| {
+                        this.settings.show_clock_widget = false;
+                        this.settings.show_system_stats_widget = false;
+                        this.settings.enabled_widgets.clear();
+                        this.auto_save(cx);
+                    }),
+                ))
+                .into_any_element(),
         );
 
-        let categories = ["Time", "System", "Media", "Input", "Productivity", "Info"];
-        for cat in categories {
-            let rows: Vec<AnyElement> = widgets::ALL_WIDGETS
-                .iter()
-                .filter(|w| w.category == cat)
-                .map(|w| {
-                    let wid = w.id;
-                    let enabled = self.settings.is_widget_enabled(wid);
-                    setting_row(
-                        t,
-                        w.name,
-                        Some(w.description),
-                        ios_switch(
-                            SharedString::from(format!("w-{wid}")),
-                            t,
-                            enabled,
-                            cx.listener(move |this, _, _, cx| {
-                                let cur = this.settings.is_widget_enabled(wid);
-                                this.settings.set_widget_enabled(wid, !cur);
-                                this.persist(format!("{} updated", w.name), cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element()
-                })
-                .collect();
-            if !rows.is_empty() {
-                sections.push(section_card(t, cat, None::<&str>, rows).into_any_element());
+        // Strict 2-column rows so cards never overflow horizontally
+        for pair in widgets::ALL_WIDGETS.chunks(2) {
+            let mut row = div().w_full().flex().gap(px(10.0));
+            for w in pair {
+                row = row.child(self.render_widget_card(w, t, cx));
             }
+            if pair.len() == 1 {
+                row = row.child(div().flex_1());
+            }
+            out.push(row.into_any_element());
         }
-
-        // Weather city selector
-        let city_seg = segmented_track(
-            t,
-            ["Istanbul", "Ankara", "London", "Berlin", "New York"]
-                .into_iter()
-                .map(|city| {
-                    let active = self.settings.weather_city.eq_ignore_ascii_case(city);
-                    segmented_item(
-                        SharedString::from(format!("city-{city}")),
-                        t,
-                        city,
-                        active,
-                        cx.listener(move |this, _, _, cx| {
-                            this.settings.weather_city = city.to_owned();
-                            this.persist(format!("Weather city set to {city}"), cx);
-                        }),
-                    )
-                })
-                .collect(),
-        );
-        sections.push(
-            section_card(
-                t,
-                "Weather Location",
-                None::<&str>,
-                vec![
-                    setting_row(
-                        t,
-                        "City",
-                        Some(format!("Current: {}", self.settings.weather_city)),
-                        city_seg,
-                    )
-                    .into_any_element(),
-                ],
-            )
-            .into_any_element(),
-        );
-
-        sections
+        out
     }
 
     fn render_stacks(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -807,15 +1028,15 @@ impl SettingsView {
             .iter()
             .enumerate()
             .map(|(i, path)| {
-                let p = path.clone();
+                let name = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(path)
+                    .to_owned();
                 setting_row(
                     t,
-                    std::path::Path::new(&p)
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or(&p)
-                        .to_owned(),
-                    Some(p),
+                    Some("\u{E8B7}"),
+                    name,
                     button(
                         SharedString::from(format!("rm-stack-{i}")),
                         t,
@@ -824,7 +1045,7 @@ impl SettingsView {
                         cx.listener(move |this, _, _, cx| {
                             if i < this.settings.stack_folders.len() {
                                 this.settings.stack_folders.remove(i);
-                                this.persist("Folder stack removed", cx);
+                                this.auto_save(cx);
                             }
                         }),
                     ),
@@ -832,18 +1053,6 @@ impl SettingsView {
                 .into_any_element()
             })
             .collect();
-
-        if stack_rows.is_empty() {
-            stack_rows.push(
-                setting_row(
-                    t,
-                    "No folder stacks yet",
-                    Some("Add a common folder below for quick flyout access."),
-                    badge(t, "Empty", false),
-                )
-                .into_any_element(),
-            );
-        }
 
         let quick_add = div().flex().items_center().gap(px(6.0)).children(
             ["Downloads", "Desktop", "Documents"]
@@ -863,21 +1072,14 @@ impl SettingsView {
                                     .any(|x| x.eq_ignore_ascii_case(&p))
                             {
                                 this.settings.stack_folders.push(p);
-                                this.persist(format!("{folder} stack added"), cx);
+                                this.auto_save(cx);
                             }
                         }),
                     )
                 }),
         );
-        stack_rows.push(
-            setting_row(
-                t,
-                "Quick Add Folder",
-                Some("Add standard Windows folders."),
-                quick_add,
-            )
-            .into_any_element(),
-        );
+        stack_rows
+            .push(setting_row(t, Some("\u{E710}"), "Add Folder", quick_add).into_any_element());
 
         let mut group_rows: Vec<AnyElement> = self
             .settings
@@ -887,8 +1089,8 @@ impl SettingsView {
             .map(|(i, g)| {
                 setting_row(
                     t,
-                    g.name.clone(),
-                    Some(format!("{} app(s) linked", g.executable_paths.len())),
+                    Some("\u{F0E2}"),
+                    format!("{} ({})", g.name, g.executable_paths.len()),
                     button(
                         SharedString::from(format!("rm-grp-{i}")),
                         t,
@@ -897,7 +1099,7 @@ impl SettingsView {
                         cx.listener(move |this, _, _, cx| {
                             if i < this.settings.app_groups.len() {
                                 this.settings.app_groups.remove(i);
-                                this.persist("App group removed", cx);
+                                this.auto_save(cx);
                             }
                         }),
                     ),
@@ -906,22 +1108,11 @@ impl SettingsView {
             })
             .collect();
 
-        if group_rows.is_empty() {
-            group_rows.push(
-                setting_row(
-                    t,
-                    "No app groups yet",
-                    Some("Create a group to organize related apps."),
-                    badge(t, "Empty", false),
-                )
-                .into_any_element(),
-            );
-        }
         group_rows.push(
             setting_row(
                 t,
-                "Create Starter Group",
-                Some("Adds a customizable Productivity app group."),
+                Some("\u{E710}"),
+                "Starter Group",
                 button(
                     "add-grp-prod",
                     t,
@@ -942,7 +1133,7 @@ impl SettingsView {
                                     "wt.exe".to_owned(),
                                 ],
                             });
-                            this.persist("Productivity group created", cx);
+                            this.auto_save(cx);
                         }
                     }),
                 ),
@@ -951,8 +1142,8 @@ impl SettingsView {
         );
 
         vec![
-            section_card(t, "Folder Stacks", None::<&str>, stack_rows).into_any_element(),
-            section_card(t, "App Groups", None::<&str>, group_rows).into_any_element(),
+            section_card(t, "Folder Stacks", stack_rows).into_any_element(),
+            section_card(t, "App Groups", group_rows).into_any_element(),
         ]
     }
 
@@ -968,7 +1159,6 @@ impl SettingsView {
                     .active_profile
                     .as_deref()
                     .is_some_and(|a| a.eq_ignore_ascii_case(&p.name));
-                let name = p.name.clone();
                 let controls = div()
                     .flex()
                     .items_center()
@@ -993,7 +1183,7 @@ impl SettingsView {
                                 this.settings.show_system_stats_widget =
                                     prof.enabled_widgets.iter().any(|w| w == "stats");
                                 this.settings.active_profile = Some(prof.name.clone());
-                                this.persist(format!("Switched to profile '{}'", prof.name), cx);
+                                this.auto_save(cx);
                             }
                         }),
                     ))
@@ -1005,22 +1195,11 @@ impl SettingsView {
                         cx.listener(move |this, _, _, cx| {
                             if i < this.settings.profiles.len() {
                                 this.settings.profiles.remove(i);
-                                this.persist("Profile deleted", cx);
+                                this.auto_save(cx);
                             }
                         }),
                     ));
-                setting_row(
-                    t,
-                    name,
-                    Some(format!(
-                        "{:?} · {:?} · {} widget(s)",
-                        p.size,
-                        p.auto_hide,
-                        p.enabled_widgets.len()
-                    )),
-                    controls,
-                )
-                .into_any_element()
+                setting_row(t, Some("\u{E748}"), p.name.clone(), controls).into_any_element()
             })
             .collect();
 
@@ -1029,7 +1208,7 @@ impl SettingsView {
                 button(
                     SharedString::from(format!("save-prof-{preset}")),
                     t,
-                    format!("Save as {preset}"),
+                    preset,
                     ButtonVariant::Secondary,
                     cx.listener(move |this, _, _, cx| {
                         let snap = DockProfile {
@@ -1044,85 +1223,68 @@ impl SettingsView {
                             .retain(|p| !p.name.eq_ignore_ascii_case(preset));
                         this.settings.profiles.push(snap);
                         this.settings.active_profile = Some(preset.to_owned());
-                        this.persist(format!("Saved current layout as '{preset}'"), cx);
+                        this.auto_save(cx);
                     }),
                 )
             }),
         );
         prof_rows.push(
-            setting_row(
-                t,
-                "Save Current Setup",
-                Some("Snapshot position, size, auto-hide, and enabled widgets."),
-                save_presets,
-            )
-            .into_any_element(),
+            setting_row(t, Some("\u{E74E}"), "Save Current As", save_presets).into_any_element(),
         );
 
-        let backup_path = settings::app_data_dir().join("settings.backup.json");
         vec![
-            section_card(t, "Profiles", None::<&str>, prof_rows).into_any_element(),
+            section_card(t, "Profiles", prof_rows).into_any_element(),
             section_card(
                 t,
-                "Backup & Recovery",
-                Some(format!("Backup file: {}", backup_path.display())),
+                "Backup",
                 vec![
                     setting_row(
                         t,
-                        "Export Backup",
-                        Some("Write a snapshot of settings.json to your app data folder."),
-                        button(
-                            "btn-export",
-                            t,
-                            "Export JSON",
-                            ButtonVariant::Secondary,
-                            cx.listener(|this, _, _, cx| {
-                                let dst = settings::app_data_dir().join("settings.backup.json");
-                                match settings::save_to(&dst, &this.settings) {
-                                    Ok(()) => this.status = Some("Backup exported".into()),
-                                    Err(e) => {
-                                        this.status = Some(format!("Export failed: {e}").into())
-                                    }
-                                }
-                                cx.notify();
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    setting_row(
-                        t,
-                        "Restore Backup",
-                        Some("Load settings from settings.backup.json."),
-                        button(
-                            "btn-import",
-                            t,
-                            "Restore JSON",
-                            ButtonVariant::Secondary,
-                            cx.listener(|this, _, _, cx| {
-                                let src = settings::app_data_dir().join("settings.backup.json");
-                                if src.exists() {
-                                    this.settings = settings::load_from(&src);
-                                    this.persist("Backup restored", cx);
-                                } else {
-                                    this.status = Some("No backup file found".into());
+                        Some("\u{EDE1}"),
+                        "Settings Backup",
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(button(
+                                "btn-export",
+                                t,
+                                "Export",
+                                ButtonVariant::Secondary,
+                                cx.listener(|this, _, _, cx| {
+                                    let dst = settings::app_data_dir().join("settings.backup.json");
+                                    let _ = settings::save_to(&dst, &this.settings);
+                                    this.saved_flash = true;
                                     cx.notify();
-                                }
-                            }),
-                        ),
+                                }),
+                            ))
+                            .child(button(
+                                "btn-import",
+                                t,
+                                "Restore",
+                                ButtonVariant::Secondary,
+                                cx.listener(|this, _, _, cx| {
+                                    let src = settings::app_data_dir().join("settings.backup.json");
+                                    if src.exists() {
+                                        this.settings = settings::load_from(&src);
+                                        this.auto_save(cx);
+                                    }
+                                }),
+                            )),
                     )
                     .into_any_element(),
                     setting_row(
                         t,
-                        "Reset All Settings",
-                        Some("Restore factory defaults (widgets remain off)."),
+                        Some("\u{E777}"),
+                        "Factory Defaults",
                         button(
                             "btn-reset-all",
                             t,
-                            "Reset Defaults",
+                            "Reset",
                             ButtonVariant::Destructive,
                             cx.listener(|this, _, _, cx| {
                                 this.settings = DockSettings::default();
-                                this.persist("Settings reset to defaults", cx);
+                                this.auto_save(cx);
                             }),
                         ),
                     )
@@ -1133,62 +1295,43 @@ impl SettingsView {
         ]
     }
 
-    fn render_about(&self, t: &UiTheme, _cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let data_dir = settings::app_data_dir();
-        let data_dir_str = data_dir.to_string_lossy().into_owned();
-        let settings_exists = fs::metadata(settings::settings_path()).is_ok();
-
+    fn render_about(&self, t: &UiTheme) -> Vec<AnyElement> {
+        let data_dir = settings::app_data_dir().to_string_lossy().into_owned();
         vec![
             section_card(
                 t,
-                "OpenTaskBar (Rust Hybrid)",
-                Some("Native Win32 + DirectComposition dock strip with on-demand GPUI Settings."),
+                "OpenTaskBar",
                 vec![
                     setting_row(
                         t,
+                        Some("\u{E946}"),
                         "Version",
-                        Some("Rust Port 0.1.0"),
-                        badge(t, "Hybrid", true),
+                        badge(t, "0.1.0 Hybrid", true),
                     )
                     .into_any_element(),
                     setting_row(
                         t,
-                        "Configuration",
-                        Some(settings::settings_path().to_string_lossy().into_owned()),
-                        badge(t, if settings_exists { "Synced" } else { "Default" }, false),
-                    )
-                    .into_any_element(),
-                ],
-            )
-            .into_any_element(),
-            section_card(
-                t,
-                "Tools & Recovery",
-                None::<&str>,
-                vec![
-                    setting_row(
-                        t,
-                        "Open Data Folder",
-                        Some("Inspect settings.json, backups, and runtime logs."),
+                        Some("\u{E8B7}"),
+                        "Data Folder",
                         button(
                             "btn-open-data",
                             t,
-                            "Open Folder",
+                            "Open",
                             ButtonVariant::Secondary,
                             move |_, _, _| {
-                                pins::launch(data_dir_str.clone());
+                                pins::launch(data_dir.clone());
                             },
                         ),
                     )
                     .into_any_element(),
                     setting_row(
                         t,
-                        "Restore Windows Taskbar",
-                        Some("Immediately unhide Explorer's native taskbar."),
+                        Some("\u{E777}"),
+                        "Windows Taskbar",
                         button(
                             "btn-restore-tb",
                             t,
-                            "Restore Taskbar",
+                            "Restore",
                             ButtonVariant::Destructive,
                             |_, _, _| {
                                 opentaskbar_shell::taskbar::restore_from_journal();
@@ -1227,11 +1370,13 @@ impl Render for SettingsView {
                 sidebar_nav_item(
                     SharedString::from(format!("nav-{}", p.title())),
                     &t,
+                    p.glyph(),
                     p.title(),
                     count_badge,
                     self.page == p,
                     cx.listener(move |this, _, _, cx| {
                         this.page = p;
+                        this.scroll_handle.set_offset(gpui::point(px(0.0), px(0.0)));
                         cx.notify();
                     }),
                 )
@@ -1246,24 +1391,50 @@ impl Render for SettingsView {
             SettingsPage::Widgets => self.render_widgets(&t, cx),
             SettingsPage::Stacks => self.render_stacks(&t, cx),
             SettingsPage::Profiles => self.render_profiles(&t, cx),
-            SettingsPage::About => self.render_about(&t, cx),
+            SettingsPage::About => self.render_about(&t),
         };
 
-        let mut sidebar = div()
-            .w(px(224.0))
+        // Visible scrollbar thumb calculated from ScrollHandle
+        let max_off: f32 = self.scroll_handle.max_offset().height.into();
+        let cur_off: f32 = (-self.scroll_handle.offset().y).into();
+        let viewport_h: f32 = self.scroll_handle.bounds().size.height.into();
+        let scrollbar_el = if max_off > 2.0 && viewport_h > 40.0 {
+            let total_h = viewport_h + max_off;
+            let track_h = (viewport_h - 16.0).max(40.0);
+            let thumb_h = ((viewport_h / total_h) * track_h).clamp(28.0, track_h);
+            let ratio = (cur_off / max_off).clamp(0.0, 1.0);
+            let thumb_top = 8.0 + ratio * (track_h - thumb_h);
+            Some(
+                div()
+                    .absolute()
+                    .top(px(thumb_top))
+                    .right(px(5.0))
+                    .w(px(5.0))
+                    .h(px(thumb_h))
+                    .rounded(px(3.0))
+                    .bg(rgba(t.scrollbar_thumb)),
+            )
+        } else {
+            None
+        };
+
+        let sidebar = div()
+            .w(px(208.0))
+            .flex_shrink_0()
             .h_full()
             .flex()
             .flex_col()
             .justify_between()
-            .p(px(14.0))
+            .p(px(12.0))
             .bg(rgba(t.sidebar_bg))
             .border_r_1()
             .border_color(rgba(t.border))
             .child(
                 div()
+                    .w_full()
                     .flex()
                     .flex_col()
-                    .gap(px(4.0))
+                    .gap(px(3.0))
                     .child(
                         div()
                             .px(px(10.0))
@@ -1274,7 +1445,7 @@ impl Render for SettingsView {
                             .justify_between()
                             .child(
                                 div()
-                                    .text_size(px(15.0))
+                                    .text_size(px(14.5))
                                     .font_weight(gpui::FontWeight::BOLD)
                                     .text_color(rgba(t.text_primary))
                                     .child("OpenTaskBar"),
@@ -1282,68 +1453,88 @@ impl Render for SettingsView {
                             .child(ui::badge(&t, "v0.1", true)),
                     )
                     .children(nav_items),
-            );
-
-        if let Some(status) = &self.status {
-            sidebar = sidebar.child(
+            )
+            .child(
                 div()
                     .px(px(10.0))
-                    .py(px(7.0))
-                    .rounded(px(8.0))
-                    .bg(rgba(t.surface_muted))
-                    .text_size(px(11.5))
-                    .text_color(rgba(t.text_secondary))
-                    .child(status.clone()),
+                    .py(px(6.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .w(px(6.0))
+                            .h(px(6.0))
+                            .rounded(px(3.0))
+                            .bg(rgba(t.switch_on)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgba(t.text_muted))
+                            .child(if self.saved_flash {
+                                "Auto-saved"
+                            } else {
+                                "Auto-save on"
+                            }),
+                    ),
             );
+
+        let mut scroll_wrap = div().flex_1().min_h_0().w_full().relative().child(
+            div()
+                .id("settings-scroll")
+                .w_full()
+                .h_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll_handle)
+                .on_scroll_wheel(cx.listener(|_, _, _, cx| {
+                    cx.notify();
+                }))
+                .px(px(22.0))
+                .py(px(16.0))
+                .flex()
+                .flex_col()
+                .gap(px(14.0))
+                .children(content_blocks),
+        );
+
+        if let Some(sb) = scrollbar_el {
+            scroll_wrap = scroll_wrap.child(sb);
         }
 
         let main = div()
             .flex_1()
+            .min_w_0()
             .h_full()
             .flex()
             .flex_col()
             .bg(rgba(t.canvas_bg))
             .child(
                 div()
-                    .px(px(28.0))
-                    .pt(px(22.0))
-                    .pb(px(14.0))
+                    .w_full()
+                    .px(px(22.0))
+                    .py(px(16.0))
                     .border_b_1()
                     .border_color(rgba(t.border))
                     .flex()
-                    .flex_col()
-                    .gap(px(3.0))
+                    .items_center()
+                    .gap(px(10.0))
+                    .child(icon_glyph(self.page.glyph(), 17.0, t.accent))
                     .child(
                         div()
-                            .text_size(px(20.0))
+                            .text_size(px(18.0))
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(rgba(t.text_primary))
                             .child(self.page.title()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(rgba(t.text_secondary))
-                            .child(self.page.subtitle()),
                     ),
             )
-            .child(
-                div()
-                    .id("settings-scroll")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .px(px(28.0))
-                    .py(px(18.0))
-                    .flex()
-                    .flex_col()
-                    .gap(px(18.0))
-                    .children(content_blocks),
-            );
+            .child(scroll_wrap);
 
         div()
             .w_full()
             .h_full()
             .flex()
+            .overflow_hidden()
             .bg(rgba(t.canvas_bg))
             .text_color(rgba(t.text_primary))
             .child(sidebar)
@@ -1354,10 +1545,13 @@ impl Render for SettingsView {
 pub fn run_settings_window() {
     let loaded = settings::load_from(&settings::settings_path());
     Application::new().run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(860.0), px(620.0)), cx);
+        let fixed = size(px(WIN_W), px(WIN_H));
+        let bounds = Bounds::centered(None, fixed, cx);
         let _ = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                is_resizable: false,
+                window_min_size: Some(fixed),
                 ..Default::default()
             },
             |_, cx| cx.new(|_| SettingsView::new(loaded.clone())),

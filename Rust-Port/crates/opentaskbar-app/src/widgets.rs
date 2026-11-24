@@ -53,6 +53,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Metadata for the Settings Widget Catalog and dock strip.
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 pub struct WidgetDescriptor {
     pub id: &'static str,
     pub name: &'static str,
@@ -1121,6 +1122,7 @@ impl WidgetRuntime {
                         } else {
                             None
                         },
+                        icon: None,
                         destructive: false,
                     })
                     .collect();
@@ -1328,6 +1330,7 @@ impl WidgetRuntime {
                             },
                             subtitle: Some("Hide non-essential widgets on the dock".to_owned()),
                             badge: Some(if settings.focus_mode { "On" } else { "Off" }.to_owned()),
+                            icon: None,
                             destructive: false,
                         },
                     ],
@@ -1411,6 +1414,7 @@ impl WidgetRuntime {
                             title: "Focus Mode".to_owned(),
                             subtitle: Some("Hide distracting dock widgets".to_owned()),
                             badge: Some(if settings.focus_mode { "On" } else { "Off" }.to_owned()),
+                            icon: None,
                             destructive: false,
                         },
                         FlyoutBlock::ActionRow {
@@ -1418,6 +1422,7 @@ impl WidgetRuntime {
                             title: "Auto-Hide Dock".to_owned(),
                             subtitle: None,
                             badge: Some(format!("{:?}", settings.auto_hide)),
+                            icon: None,
                             destructive: false,
                         },
                         FlyoutBlock::ActionRow {
@@ -1425,6 +1430,7 @@ impl WidgetRuntime {
                             title: "Theme".to_owned(),
                             subtitle: None,
                             badge: Some(format!("{:?}", settings.theme)),
+                            icon: None,
                             destructive: false,
                         },
                         FlyoutBlock::ActionRow {
@@ -1432,6 +1438,7 @@ impl WidgetRuntime {
                             title: if muted { "Unmute Audio" } else { "Mute Audio" }.to_owned(),
                             subtitle: None,
                             badge: Some(if muted { "Muted" } else { "Active" }.to_owned()),
+                            icon: None,
                             destructive: false,
                         },
                         FlyoutBlock::Separator,
@@ -1489,6 +1496,7 @@ impl WidgetRuntime {
                         title: name,
                         subtitle: Some(folder.clone()),
                         badge: Some("Open".to_owned()),
+                        icon: None,
                         destructive: false,
                     });
                     if let Ok(entries) = std::fs::read_dir(folder) {
@@ -1506,6 +1514,7 @@ impl WidgetRuntime {
                                 title: format!("  {fname}"),
                                 subtitle: None,
                                 badge: None,
+                                icon: None,
                                 destructive: false,
                             });
                         }
@@ -1540,6 +1549,7 @@ impl WidgetRuntime {
                         title: group.name.clone(),
                         subtitle: Some(format!("{} app(s)", group.executable_paths.len())),
                         badge: Some("Launch".to_owned()),
+                        icon: None,
                         destructive: false,
                     });
                 }

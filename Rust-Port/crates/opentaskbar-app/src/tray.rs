@@ -1,22 +1,26 @@
 //! Native Background Apps (System Tray) enumeration and shared `DockFlyout` integration.
 //!
-//! Replaces Windows' legacy `Win+B` overflow popup with OpenTaskBar's own shared `DockFlyout`
-//! component, allowing users to inspect, focus/open, or inspect background processes cleanly.
+//! Compact icon-bearing rows, scrollable overflow, toggle-close on the tray button,
+//! and right-click context menu to Open, Close Window, or End Process.
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
 use windows_sys::Win32::System::Threading::{
-    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
+    TerminateProcess,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindow, IsWindowVisible, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+    IsWindow, IsWindowVisible, PostMessageW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+    WM_CLOSE,
 };
 use windows_sys::core::BOOL;
 
-use crate::flyout::{self, FlyoutBlock, FlyoutSpec};
+use crate::flyout::{self, FlyoutAction, FlyoutBlock, FlyoutIcon, FlyoutSpec};
+use crate::icon_cache;
+use crate::menu::{self, MenuEntry, MenuIcon};
 use crate::pins;
 
 #[derive(Clone, Debug)]
@@ -59,7 +63,7 @@ fn window_title(hwnd: HWND) -> String {
 
 fn is_system_noise(exe_path: &str) -> bool {
     let lower = exe_path.to_lowercase();
-    if lower.starts_with(r"c:\windows\system32\")
+    lower.starts_with(r"c:\windows\system32\")
         || lower.starts_with(r"c:\windows\syswow64\")
         || lower.starts_with(r"c:\windows\systemapps\")
         || lower.starts_with(r"c:\windows\immersivecontrolpanel\")
@@ -76,10 +80,6 @@ fn is_system_noise(exe_path: &str) -> bool {
         || lower.ends_with(r"\widgetservice.exe")
         || lower.ends_with(r"\msedgewebview2.exe")
         || lower.ends_with(r"\crashpad_handler.exe")
-    {
-        return true;
-    }
-    false
 }
 
 fn friendly_name(exe_path: &str) -> String {
@@ -130,7 +130,7 @@ unsafe extern "system" fn enum_tray_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     }
 }
 
-/// Enumerates user-space GUI apps currently running in the background (hidden/tray state).
+/// Enumerates all user-space GUI apps currently running in the background.
 pub fn enumerate_background_apps() -> Vec<BackgroundApp> {
     let mut ctx = EnumTrayCtx {
         self_pid: std::process::id(),
@@ -150,7 +150,6 @@ pub fn enumerate_background_apps() -> Vec<BackgroundApp> {
         .map(|(_, app)| app)
         .collect();
     apps.sort_by_key(|a| a.name.to_lowercase());
-    apps.truncate(10);
     apps
 }
 
@@ -172,7 +171,30 @@ fn activate_or_relaunch(app: &BackgroundApp) {
     }
 }
 
-/// Opens our shared `DockFlyout` for Background Apps (System Tray).
+fn close_background_app(app: &BackgroundApp) {
+    if app.hwnd != 0 {
+        unsafe {
+            if IsWindow(app.hwnd as HWND) != 0 {
+                PostMessageW(app.hwnd as HWND, WM_CLOSE, 0, 0);
+            }
+        }
+    }
+}
+
+fn terminate_pid(pid: u32) {
+    if pid == 0 || pid == std::process::id() {
+        return;
+    }
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !handle.is_null() {
+            let _ = TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
+    }
+}
+
+/// Opens our shared `DockFlyout` for Background Apps with icons, scroll overflow, and right-click menu.
 pub fn open_background_apps_flyout(
     owner_hwnd: usize,
     is_dark: bool,
@@ -180,18 +202,34 @@ pub fn open_background_apps_flyout(
     anchor_bottom_y_px: i32,
 ) {
     let apps = enumerate_background_apps();
+    let paths: Vec<String> = apps.iter().map(|a| a.exe_path.clone()).collect();
+    let icon_map: HashMap<String, FlyoutIcon> = icon_cache::resolve_batch_raw(&paths)
+        .into_iter()
+        .filter_map(|(path, raw)| {
+            raw.map(|r| {
+                (
+                    path,
+                    FlyoutIcon {
+                        width: r.width,
+                        height: r.height,
+                        bgra: r.pixels,
+                    },
+                )
+            })
+        })
+        .collect();
+
     let mut blocks = Vec::new();
     if apps.is_empty() {
-        blocks.push(FlyoutBlock::Note(
-            "No background tray apps detected.".to_owned(),
-        ));
+        blocks.push(FlyoutBlock::Note("No background apps running.".to_owned()));
     } else {
         for (i, app) in apps.iter().enumerate() {
             blocks.push(FlyoutBlock::ActionRow {
                 id: 100 + i as u32,
                 title: app.name.clone(),
-                subtitle: Some(format!("PID {}", app.pid)),
-                badge: Some("Open".to_owned()),
+                subtitle: None,
+                badge: None,
+                icon: icon_map.get(&app.exe_path).cloned(),
                 destructive: false,
             });
         }
@@ -203,28 +241,43 @@ pub fn open_background_apps_flyout(
     ]));
 
     let spec = FlyoutSpec {
-        title: "Background Apps".to_owned(),
-        subtitle: Some(format!("{} running in background", apps.len())),
-        width_dips: 300.0,
+        title: format!("Background Apps ({})", apps.len()),
+        subtitle: None,
+        width_dips: 268.0,
         blocks,
     };
 
-    if let Some(action) = flyout::show_flyout(
+    match flyout::show_flyout_interactive(
+        "tray",
         owner_hwnd,
         is_dark,
         anchor_center_x_px,
         anchor_bottom_y_px,
         spec,
     ) {
-        match action {
-            1 => pins::launch("taskmgr.exe".to_owned()),
-            2 => opentaskbar_shell::taskbar::open_tray_overflow(),
-            id if id >= 100 => {
-                if let Some(app) = apps.get((id - 100) as usize) {
-                    activate_or_relaunch(app);
+        Some(FlyoutAction::Primary(1)) => pins::launch("taskmgr.exe".to_owned()),
+        Some(FlyoutAction::Primary(2)) => opentaskbar_shell::taskbar::open_tray_overflow(),
+        Some(FlyoutAction::Primary(id)) if id >= 100 => {
+            if let Some(app) = apps.get((id - 100) as usize) {
+                activate_or_relaunch(app);
+            }
+        }
+        Some(FlyoutAction::Secondary(id)) if id >= 100 => {
+            if let Some(app) = apps.get((id - 100) as usize) {
+                let entries = vec![
+                    MenuEntry::item(1, MenuIcon::Play, format!("Open {}", app.name)),
+                    MenuEntry::item(2, MenuIcon::Close, "Close Window"),
+                    MenuEntry::Separator,
+                    MenuEntry::destructive(3, MenuIcon::Power, "End Process"),
+                ];
+                match menu::show_popup_menu(owner_hwnd, is_dark, entries).unwrap_or(0) {
+                    1 => activate_or_relaunch(app),
+                    2 => close_background_app(app),
+                    3 => terminate_pid(app.pid),
+                    _ => {}
                 }
             }
-            _ => {}
         }
+        _ => {}
     }
 }
