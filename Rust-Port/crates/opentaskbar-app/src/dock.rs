@@ -10,6 +10,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use gpui::{
@@ -25,12 +26,20 @@ use crate::pins::{self, PinnedApp};
 use crate::win32::{self, ContextAction};
 
 const VERTICAL_EDGE_GAP: f32 = 5.0;
-const TOOLTIP_HEADROOM: f32 = 42.0;
-const MAG_HEADROOM: f32 = 34.0;
+const TOOLTIP_HEADROOM: f32 = 34.0;
+const MAG_HEADROOM: f32 = 24.0;
 const FISHEYE_PEAK: f32 = 0.42;
 const FISHEYE_RADIUS_SLOTS: f32 = 2.4;
 const BOUNCE_DURATION_SECS: f32 = 0.42;
 const DRAG_THRESHOLD_PX: f32 = 6.0;
+/// VSync-aligned minimum frame interval (13ms):
+/// - 60Hz  (16.67ms) -> every 1st VSync = 60.0 FPS
+/// - 120Hz (8.33ms)  -> every 2nd VSync = 60.0 FPS
+/// - 144Hz (6.94ms)  -> every 2nd VSync = 72.0 FPS
+/// - 180Hz (5.55ms)  -> every 3rd VSync = 60.0 FPS
+///
+/// Skipped VSyncs do zero layout, zero paint, zero D3D11 draw, and zero Present().
+const TARGET_FRAME_INTERVAL: Duration = Duration::from_micros(13_000);
 
 const SVG_START: &[u8] =
     br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
@@ -132,7 +141,26 @@ struct DockView {
     drag: Option<DragState>,
     suppress_next_click: bool,
     last_frame: Option<Instant>,
+    pacing_active: Arc<AtomicBool>,
     last_window_rect: Option<(i32, i32, i32, i32)>,
+}
+
+/// Schedules a single VSync-aligned redraw once `due_at` is reached, skipping intermediate
+/// high-refresh-rate VSyncs without marking the window dirty or touching the GPU.
+fn schedule_paced_frame(
+    window: &Window,
+    entity: gpui::EntityId,
+    due_at: Instant,
+    pacing_active: Arc<AtomicBool>,
+) {
+    window.on_next_frame(move |window, cx| {
+        if Instant::now() >= due_at {
+            pacing_active.store(false, Ordering::Relaxed);
+            cx.notify(entity);
+        } else {
+            schedule_paced_frame(window, entity, due_at, pacing_active);
+        }
+    });
 }
 
 fn exe_display_name(exe_path: &str, fallback_title: &str) -> String {
@@ -372,6 +400,7 @@ impl DockView {
             drag: None,
             suppress_next_click: false,
             last_frame: None,
+            pacing_active: Arc::new(AtomicBool::new(false)),
             last_window_rect: None,
         };
         view.request_missing_icons(cx);
@@ -615,9 +644,8 @@ impl DockView {
     }
 
     /// Advances all spring/bounce animations using framerate-independent delta-time
-    /// and returns `true` if another VSync frame is needed.
-    fn step_animations(&mut self) -> bool {
-        let now = Instant::now();
+    /// and returns `true` if another paced VSync frame is needed.
+    fn step_animations(&mut self, now: Instant) -> bool {
         let dt = self
             .last_frame
             .map_or(1.0 / 60.0, |prev| now.duration_since(prev).as_secs_f32())
@@ -626,13 +654,13 @@ impl DockView {
 
         let scale_k = 1.0 - (-22.0 * dt).exp();
         let slide_k = 1.0 - (-24.0 * dt).exp();
-        let mut moving = false;
+        let mut moving = self.drag.is_some_and(|d| d.active);
 
         for idx in 0..self.slots.len() {
             let target = self.target_scale_for(idx);
             let cur = self.slots[idx].scale;
             let diff = target - cur;
-            if diff.abs() > 0.004 {
+            if diff.abs() > 0.006 {
                 self.slots[idx].scale = cur + diff * scale_k;
                 moving = true;
             } else if (cur - target).abs() > 0.0 {
@@ -640,7 +668,7 @@ impl DockView {
             }
 
             let sx = self.slots[idx].slide_x;
-            if sx.abs() > 0.35 {
+            if sx.abs() > 0.5 {
                 self.slots[idx].slide_x = sx * (1.0 - slide_k);
                 moving = true;
             } else if sx != 0.0 {
@@ -706,13 +734,8 @@ impl DockView {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .bg(if pressed {
-                rgba(0xffffff2e)
-            } else if hovered {
-                rgba(0xffffff1c)
-            } else {
-                rgba(0x00000000)
-            })
+            .when(pressed, |el| el.bg(rgba(0xffffff2e)))
+            .when(!pressed && hovered, |el| el.bg(rgba(0xffffff1c)))
             .on_hover(cx.listener(move |this, active, _window, cx| {
                 if *active {
                     this.hovered_shell = Some(kind);
@@ -747,9 +770,16 @@ impl DockView {
 
 impl Render for DockView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.step_animations() {
-            // Native DWM VSync frame pacing (locked to 60/120/144Hz display refresh rate).
-            window.request_animation_frame();
+        let now = Instant::now();
+        if self.step_animations(now) && !self.pacing_active.swap(true, Ordering::Relaxed) {
+            // VSync-aligned 60+ FPS pacing: skips intermediate high-Hz VSyncs (e.g. 180Hz -> 60Hz)
+            // without touching the GPU, cutting D3D11 + DirectComposition load ~3x.
+            schedule_paced_frame(
+                window,
+                cx.entity_id(),
+                now + TARGET_FRAME_INTERVAL,
+                self.pacing_active.clone(),
+            );
         }
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
@@ -817,7 +847,6 @@ impl Render for DockView {
                     let mx: f32 = event.position.x.into();
                     this.update_drag(mx);
                     this.ensure_animation(cx);
-                    cx.notify();
                 }
             }))
             .on_mouse_up(
@@ -882,9 +911,8 @@ impl Render for DockView {
                                     if this.drag.is_some() {
                                         this.update_drag(mx);
                                         this.ensure_animation(cx);
-                                        cx.notify();
                                     } else {
-                                        // Ignore sub-pixel jitter and let the 60fps animation loop pace GPU frames
+                                        // Ignore sub-pixel jitter and let the VSync 60fps pacer drive GPU frames
                                         // instead of redrawing on every 500-1000Hz raw mouse event.
                                         if this
                                             .hover_mouse_x
@@ -896,8 +924,11 @@ impl Render for DockView {
                                         this.hover_mouse_x = Some(mx);
                                         this.hovered_shell = None;
                                         this.update_hovered_index_from_mouse();
-                                        this.ensure_animation(cx);
-                                        if this.hovered_idx != prev_idx {
+                                        if this.settings.magnification_enabled
+                                            && this.settings.animations_enabled
+                                        {
+                                            this.ensure_animation(cx);
+                                        } else if this.hovered_idx != prev_idx {
                                             cx.notify();
                                         }
                                     }
@@ -1028,13 +1059,12 @@ impl Render for DockView {
                                         div()
                                             .w(px(if active { 14.0 } else { 5.0 }))
                                             .h(px(3.5))
-                                            .rounded(px(2.0))
-                                            .bg(if !running {
-                                                rgba(0x00000000)
-                                            } else if active {
-                                                rgba(0xffffffff)
-                                            } else {
-                                                rgba(0xcbd5e1cc)
+                                            .when(running, |el| {
+                                                el.rounded(px(2.0)).bg(if active {
+                                                    rgba(0xffffffff)
+                                                } else {
+                                                    rgba(0xcbd5e1cc)
+                                                })
                                             }),
                                     )
                             })),
@@ -1088,15 +1118,17 @@ impl Render for DockView {
                     )
                 },
             )
-            // Tooltip rendered LAST (always on top of magnified icons) at the exact auto-computed height.
+            // Tooltip rendered LAST (always on top of magnified icons) at integer-snapped coordinates.
             .when_some(hovered_tooltip, |el, (label, center_x, tooltip_bottom)| {
-                let est_w = (label.len() as f32 * 6.8 + 22.0).clamp(54.0, 220.0);
-                let left_x = (center_x - est_w * 0.5).clamp(6.0, (win_w - est_w - 6.0).max(6.0));
+                let est_w = (label.len() as f32 * 6.8 + 22.0).clamp(54.0, 220.0).round();
+                let left_x = (center_x - est_w * 0.5)
+                    .clamp(6.0, (win_w - est_w - 6.0).max(6.0))
+                    .round();
                 el.child(
                     div()
                         .absolute()
                         .left(px(left_x))
-                        .bottom(px(tooltip_bottom))
+                        .bottom(px(tooltip_bottom.round()))
                         .w(px(est_w))
                         .flex()
                         .justify_center()
