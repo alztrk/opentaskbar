@@ -1,11 +1,15 @@
-//! Explorer taskbar hiding, restoration, re-hide guard, and UI-thread AppBar reservation.
+//! Explorer taskbar hiding, restoration, exact delta AppBar reservation, and
+//! native Windows shell shortcut triggers (Start, Search, Task View).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use windows_sys::Win32::Foundation::{HWND, RECT};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_LWIN, VK_TAB,
+};
 use windows_sys::Win32::UI::Shell::{
-    ABE_BOTTOM, ABM_GETSTATE, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABM_SETSTATE,
-    ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage,
+    ABE_BOTTOM, ABM_GETSTATE, ABM_GETTASKBARPOS, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS,
+    ABM_SETSTATE, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     FindWindowExW, FindWindowW, GetSystemMetrics, IsWindowVisible, SM_CXSCREEN, SM_CYSCREEN,
@@ -76,14 +80,38 @@ pub fn set_taskbar_state(state: u32) {
     }
 }
 
-/// Reserves a bottom work-area strip on the dock's own UI thread.
-pub fn register_bottom_appbar(dock_hwnd: usize, height_px: i32) {
-    if dock_hwnd == 0 || height_px <= 0 {
+/// Returns Explorer's currently reserved bottom taskbar strip height in physical pixels.
+fn native_bottom_taskbar_height_px() -> i32 {
+    let mut data: APPBARDATA = unsafe { std::mem::zeroed() };
+    data.cbSize = size_of::<APPBARDATA>() as u32;
+    // SAFETY: properly sized APPBARDATA for ABM_GETTASKBARPOS.
+    let ok = unsafe { SHAppBarMessage(ABM_GETTASKBARPOS, &mut data) };
+    if ok == 0 || data.uEdge != ABE_BOTTOM {
+        return 0;
+    }
+    (data.rc.bottom - data.rc.top).max(0)
+}
+
+/// Reserves ONLY the extra height needed beyond Explorer's existing hidden bottom strip,
+/// so the total work-area strip never doubles.
+pub fn register_bottom_appbar(dock_hwnd: usize, desired_total_px: i32, prev_state: u32) {
+    if dock_hwnd == 0 || desired_total_px <= 0 {
         return;
     }
     if REGISTERED_APPBAR.load(Ordering::SeqCst) == dock_hwnd {
         return;
     }
+    let prev_was_autohide = (prev_state & ABS_AUTOHIDE) != 0;
+    let native_h = if prev_was_autohide {
+        0
+    } else {
+        native_bottom_taskbar_height_px()
+    };
+    let extra_px = (desired_total_px - native_h).max(0);
+    if extra_px == 0 {
+        return;
+    }
+
     // SAFETY: standard Win32 AppBar registration on the window's owning UI thread.
     unsafe {
         let mut abd: APPBARDATA = std::mem::zeroed();
@@ -100,12 +128,12 @@ pub fn register_bottom_appbar(dock_hwnd: usize, height_px: i32) {
         abd.uEdge = ABE_BOTTOM;
         abd.rc = RECT {
             left: 0,
-            top: (scr_h - height_px).max(0),
+            top: (scr_h - extra_px).max(0),
             right: scr_w,
             bottom: scr_h,
         };
         SHAppBarMessage(ABM_QUERYPOS, &mut abd);
-        abd.rc.top = (abd.rc.bottom - height_px).max(0);
+        abd.rc.top = (abd.rc.bottom - extra_px).max(0);
         SHAppBarMessage(ABM_SETPOS, &mut abd);
     }
 }
@@ -124,8 +152,6 @@ fn unregister_appbar() {
     }
 }
 
-/// Re-hides Explorer's taskbar if Explorer made it visible again (e.g. after `ABM_SETSTATE`
-/// or an Explorer shell event). Returns true if any taskbar window was re-hidden.
 pub fn ensure_hidden() -> bool {
     let mut hid = false;
     let tray = find_primary_tray();
@@ -142,11 +168,7 @@ pub fn ensure_hidden() -> bool {
     hid
 }
 
-/// Immediately hides Explorer's taskbar, arms the watchdog, and registers our AppBar on the
-/// UI thread. Matches C# `TaskbarReplacementSession`: only switches Explorer to `ABS_AUTOHIDE`
-/// when the dock itself is in auto-hide mode, so normal mode never leaves Windows' taskbar
-/// stuck in auto-hide.
-pub fn begin_replacement(dock_hwnd: usize, auto_hide: bool, reserve_height_px: i32) {
+pub fn begin_replacement(dock_hwnd: usize, auto_hide: bool, desired_total_px: i32) {
     let prev = journal::read_state().unwrap_or_else(get_taskbar_state);
     if !journal::has_pending() {
         let _ = journal::write_state(prev);
@@ -161,7 +183,7 @@ pub fn begin_replacement(dock_hwnd: usize, auto_hide: bool, reserve_height_px: i
             ensure_hidden();
         }
     } else {
-        register_bottom_appbar(dock_hwnd, reserve_height_px);
+        register_bottom_appbar(dock_hwnd, desired_total_px, prev);
         ensure_hidden();
     }
 }
@@ -184,4 +206,51 @@ pub fn restore_from_journal() {
 pub fn end_replacement() {
     restore_from_journal();
     watchdog::notify_clean_exit();
+}
+
+// ---- Native Windows shell triggers ----
+
+fn key_input(vk: u16, up: bool) -> INPUT {
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
+}
+
+fn send_chord(keys: &[u16]) {
+    let mut inputs = Vec::with_capacity(keys.len() * 2);
+    for &vk in keys {
+        inputs.push(key_input(vk, false));
+    }
+    for &vk in keys.iter().rev() {
+        inputs.push(key_input(vk, true));
+    }
+    // SAFETY: properly sized INPUT array for SendInput.
+    unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            size_of::<INPUT>() as i32,
+        );
+    }
+}
+
+pub fn open_start_menu() {
+    send_chord(&[VK_LWIN]);
+}
+
+pub fn open_search() {
+    send_chord(&[VK_LWIN, b'S' as u16]);
+}
+
+pub fn open_task_view() {
+    send_chord(&[VK_LWIN, VK_TAB]);
 }

@@ -37,7 +37,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 pub const WORKER_ARG: &str = "--extract-icons";
 
 const ICON_PX: u32 = 64;
-const CACHE_MAGIC: &[u8; 8] = b"OTICON04";
+const CACHE_MAGIC: &[u8; 8] = b"OTICON05";
 const CACHE_HEADER_LEN: usize = 24;
 const MAX_DIM: u32 = 256;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;

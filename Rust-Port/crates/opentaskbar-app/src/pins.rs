@@ -104,7 +104,9 @@ fn resolve_shortcut(lnk_path: &str) -> ShortcutMeta {
                 .unwrap_or(target_buf.len());
             let raw = String::from_utf16_lossy(&target_buf[..len]);
             let expanded = expand_env_vars(&raw);
-            (!expanded.is_empty() && PathBuf::from(&expanded).exists()).then_some(expanded)
+            let is_windowsapps = expanded.to_lowercase().contains(r"\windowsapps\");
+            (!expanded.is_empty() && (is_windowsapps || PathBuf::from(&expanded).exists()))
+                .then_some(expanded)
         } else {
             None
         };
@@ -183,6 +185,42 @@ fn expand_env_vars(input: &str) -> String {
     out
 }
 
+/// Resolves a `WindowsApps\<PackageFullName>\...` executable path to `shell:AppsFolder\<PackageFamilyName>!<AppId>`.
+/// Mirrors C# `ApplicationIconProvider.TryResolvePackagedAppUserModelId`.
+pub fn resolve_windowsapps_aumid(exe_path: &str) -> Option<String> {
+    let lower = exe_path.to_lowercase();
+    let marker = r"\windowsapps\";
+    let pos = lower.find(marker)?;
+    let after = &exe_path[pos + marker.len()..];
+    let pkg_folder = after.split('\\').next()?;
+    let mut parts = pkg_folder.split('_');
+    let name = parts.next()?;
+    let publisher_id = pkg_folder.rsplit('_').next()?;
+    if name.is_empty() || publisher_id.is_empty() || name == publisher_id {
+        return None;
+    }
+    let family = format!("{name}_{publisher_id}");
+
+    // Try reading `<Application Id="...">` from AppxManifest.xml; fall back to "App".
+    let manifest_path = format!("{}{}", &exe_path[..pos + marker.len()], pkg_folder);
+    let app_id = fs::read_to_string(PathBuf::from(manifest_path).join("AppxManifest.xml"))
+        .ok()
+        .and_then(|xml| extract_manifest_app_id(&xml))
+        .unwrap_or_else(|| "App".to_owned());
+
+    Some(format!("{family}!{app_id}"))
+}
+
+fn extract_manifest_app_id(xml: &str) -> Option<String> {
+    let app_pos = xml.find("<Application")?;
+    let slice = &xml[app_pos..];
+    let id_pos = slice.find("Id=\"")?;
+    let rest = &slice[id_pos + 4..];
+    let end = rest.find('"')?;
+    let id = rest[..end].trim();
+    (!id.is_empty()).then(|| id.to_owned())
+}
+
 pub fn load_pins() -> Vec<PinnedApp> {
     let dir = pins_dir();
     let Ok(entries) = fs::read_dir(&dir) else {
@@ -206,6 +244,12 @@ pub fn load_pins() -> Vec<PinnedApp> {
             let launch_path = path.to_string_lossy().into_owned();
             let meta = resolve_shortcut(&launch_path);
 
+            let resolved_aumid = meta.aumid.clone().or_else(|| {
+                meta.target_exe
+                    .as_deref()
+                    .and_then(resolve_windowsapps_aumid)
+            });
+
             // Mirror C# ApplicationIconProvider.GetForPinnedApp priority:
             // 1. Custom shortcut IconLocation (e.g. PWA .ico or custom resource index)
             // 2. Packaged Store app via shell:AppsFolder\<AUMID>
@@ -213,7 +257,7 @@ pub fn load_pins() -> Vec<PinnedApp> {
             // 4. Fallback to .lnk itself
             let icon_source = if let Some(ref icon_loc) = meta.icon_location {
                 icon_loc.clone()
-            } else if let Some(ref id) = meta.aumid
+            } else if let Some(ref id) = resolved_aumid
                 && (id.contains('!') || meta.target_exe.is_none())
             {
                 format!(r"shell:AppsFolder\{id}")
