@@ -107,12 +107,13 @@ pub fn primary_screen_px() -> (i32, i32) {
     unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
 }
 
-/// Repositions and resizes the dock window in physical pixels without stealing focus
-/// or overriding Z-order (so overlays like Snipping Tool stay above the dock).
+/// Repositions and resizes the dock window asynchronously without stealing focus,
+/// overriding Z-order, or triggering synchronous WM_SIZE re-entrancy inside GPUI's borrow.
 pub fn reposition_dock_window(hwnd: usize, x: i32, y: i32, w: i32, h: i32) {
     if hwnd == 0 || w <= 0 || h <= 0 {
         return;
     }
+    const SWP_ASYNCWINDOWPOS: u32 = 0x4000;
     // SAFETY: moving/resizing our own dock window without changing Z-order.
     unsafe {
         SetWindowPos(
@@ -122,7 +123,9 @@ pub fn reposition_dock_window(hwnd: usize, x: i32, y: i32, w: i32, h: i32) {
             y,
             w,
             h,
-            windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOZORDER | SWP_NOACTIVATE,
+            windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
+                | SWP_NOACTIVATE
+                | SWP_ASYNCWINDOWPOS,
         );
     }
 }

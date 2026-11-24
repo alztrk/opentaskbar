@@ -24,8 +24,10 @@ use crate::win32::{self, ContextAction};
 const VERTICAL_EDGE_GAP: f32 = 5.0;
 const TOOLTIP_HEADROOM: f32 = 34.0;
 const MAG_HEADROOM: f32 = 28.0;
-const SHELL_BUTTON_SIZE: f32 = 32.0;
-const SHELL_SECTION_WIDTH: f32 = SHELL_BUTTON_SIZE * 3.0 + 4.0 * 2.0 + 17.0;
+
+fn shell_section_width(base: f32) -> f32 {
+    base * 3.0 + 4.0 * 2.0 + 17.0
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShellButton {
@@ -180,73 +182,80 @@ fn compute_window_dips(settings: &DockSettings, slot_count: usize) -> (f32, f32)
         0.0
     };
     let width_dips =
-        (SHELL_SECTION_WIDTH + count * base + (count - 1.0) * gap + 44.0 + mag_budget).ceil();
+        (shell_section_width(base) + count * base + (count - 1.0) * gap + 44.0 + mag_budget).ceil();
     let pill_h = pill_height_dips(settings);
     let height_dips = (pill_h + TOOLTIP_HEADROOM + MAG_HEADROOM + VERTICAL_EDGE_GAP).ceil();
     (width_dips, height_dips)
 }
 
-/// Windows 11 4-pane Start logo drawn with crisp geometric GPUI boxes.
-fn render_windows_logo() -> impl IntoElement {
-    let pane = || {
+/// Windows 11 4-pane Start logo scaled to match app icon size.
+fn render_windows_logo(base: f32) -> impl IntoElement {
+    let pane_px = (base * 0.28).round().max(9.0);
+    let pane = move || {
         div()
-            .w(px(7.0))
-            .h(px(7.0))
-            .rounded(px(1.5))
+            .w(px(pane_px))
+            .h(px(pane_px))
+            .rounded(px(2.0))
             .bg(rgba(0x38bdf8ff))
     };
     div()
         .flex()
         .flex_col()
-        .gap(px(2.0))
-        .child(div().flex().gap(px(2.0)).child(pane()).child(pane()))
-        .child(div().flex().gap(px(2.0)).child(pane()).child(pane()))
+        .gap(px(2.5))
+        .child(div().flex().gap(px(2.5)).child(pane()).child(pane()))
+        .child(div().flex().gap(px(2.5)).child(pane()).child(pane()))
 }
 
-/// Crisp magnifying glass icon for Windows Search.
-fn render_search_icon() -> impl IntoElement {
+/// Crisp magnifying glass icon for Windows Search, scaled to match app icon size.
+fn render_search_icon(base: f32) -> impl IntoElement {
+    let sz = (base * 0.64).round().max(20.0);
+    let ring = (sz * 0.68).round();
     div()
         .relative()
-        .w(px(16.0))
-        .h(px(16.0))
+        .w(px(sz))
+        .h(px(sz))
         .child(
             div()
                 .absolute()
                 .top(px(1.0))
                 .left(px(1.0))
-                .w(px(11.0))
-                .h(px(11.0))
-                .rounded(px(6.0))
+                .w(px(ring))
+                .h(px(ring))
+                .rounded(px(ring * 0.5))
                 .border_2()
                 .border_color(rgba(0xe2e8f0ff)),
         )
         .child(
             div()
                 .absolute()
-                .bottom(px(1.5))
+                .bottom(px(2.0))
                 .right(px(1.5))
-                .w(px(5.0))
-                .h(px(2.0))
-                .rounded(px(1.0))
+                .w(px(7.0))
+                .h(px(2.5))
+                .rounded(px(1.5))
                 .bg(rgba(0xe2e8f0ff)),
         )
 }
 
-/// Crisp overlapping virtual desktop cards icon for Task View.
-fn render_task_view_icon() -> impl IntoElement {
+/// Crisp overlapping virtual desktop cards icon for Task View, scaled to match app icon size.
+fn render_task_view_icon(base: f32) -> impl IntoElement {
+    let w = (base * 0.68).round().max(22.0);
+    let h = (base * 0.56).round().max(18.0);
+    let card_w = (w * 0.68).round();
+    let card_h = (h * 0.65).round();
     div()
         .relative()
-        .w(px(16.0))
-        .h(px(14.0))
+        .w(px(w))
+        .h(px(h))
         .child(
             div()
                 .absolute()
                 .top(px(0.0))
                 .right(px(0.0))
-                .w(px(11.0))
-                .h(px(9.0))
-                .rounded(px(2.0))
-                .border_1()
+                .w(px(card_w))
+                .h(px(card_h))
+                .rounded(px(3.0))
+                .border_2()
                 .border_color(rgba(0x94a3b8dd)),
         )
         .child(
@@ -254,11 +263,11 @@ fn render_task_view_icon() -> impl IntoElement {
                 .absolute()
                 .bottom(px(0.0))
                 .left(px(0.0))
-                .w(px(11.0))
-                .h(px(9.0))
-                .rounded(px(2.0))
+                .w(px(card_w))
+                .h(px(card_h))
+                .rounded(px(3.0))
                 .bg(rgba(0x1e293bee))
-                .border_1()
+                .border_2()
                 .border_color(rgba(0xe2e8f0ff)),
         )
 }
@@ -269,7 +278,6 @@ impl DockView {
         settings: DockSettings,
         pins: Vec<PinnedApp>,
         initial_slots: Vec<DockSlot>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let view = Self {
@@ -284,7 +292,7 @@ impl DockView {
             last_window_rect: None,
         };
         view.request_missing_icons(cx);
-        view.start_window_poll(window, cx);
+        view.start_window_poll(cx);
         view
     }
 
@@ -317,7 +325,7 @@ impl DockView {
         self.request_missing_icons(cx);
     }
 
-    fn sync_window_bounds(&mut self, window: &mut Window) {
+    fn sync_window_bounds(&mut self) {
         let (width_dips, height_dips) = compute_window_dips(&self.settings, self.slots.len());
         let dpi = win32::dpi_scale(self.hwnd);
         let (scr_w, scr_h) = win32::primary_screen_px();
@@ -334,26 +342,24 @@ impl DockView {
         let rect = (x_px, y_px, w_px, h_px);
         if self.last_window_rect != Some(rect) {
             self.last_window_rect = Some(rect);
-            window.resize(size(px(width_dips), px(height_dips)));
+            // Uses SWP_ASYNCWINDOWPOS so Win32 never pumps a synchronous WM_SIZE while
+            // GPUI's AppCell RefCell is borrowed (which caused RefCell already borrowed panics).
             win32::reposition_dock_window(self.hwnd, x_px, y_px, w_px, h_px);
         }
     }
 
-    fn start_window_poll(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let window_handle = window.window_handle();
+    fn start_window_poll(&self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             loop {
                 Timer::after(Duration::from_millis(800)).await;
                 let _ = opentaskbar_shell::taskbar::ensure_hidden();
-                let updated = cx.update_window(window_handle, |_, window, cx| {
-                    let _ = this.update(cx, |view, cx| {
-                        let prev_len = view.slots.len();
-                        view.sync_slots(cx);
-                        if view.slots.len() != prev_len {
-                            view.sync_window_bounds(window);
-                        }
-                        cx.notify();
-                    });
+                let updated = this.update(cx, |view, cx| {
+                    let prev_len = view.slots.len();
+                    view.sync_slots(cx);
+                    if view.slots.len() != prev_len {
+                        view.sync_window_bounds();
+                    }
+                    cx.notify();
                 });
                 if updated.is_err() {
                     break;
@@ -417,16 +423,27 @@ impl DockView {
         .detach();
     }
 
+    /// Runs the modal Win32 popup menu on a background thread so GPUI's `AppCell` borrow is
+    /// released before `TrackPopupMenu` pumps messages (prevents `RefCell already borrowed` panic).
     fn handle_right_click(&self, cx: &mut Context<Self>) {
-        match win32::show_dock_context_menu(self.hwnd) {
-            ContextAction::TaskManager => pins::launch("taskmgr.exe".to_owned()),
-            ContextAction::RestoreTaskbar => opentaskbar_shell::taskbar::restore_from_journal(),
-            ContextAction::Exit => cx.quit(),
-            ContextAction::None => {}
-        }
+        let hwnd = self.hwnd;
+        cx.spawn(async move |_this, cx| {
+            let action = cx
+                .background_executor()
+                .spawn(async move { win32::show_dock_context_menu(hwnd) })
+                .await;
+            let _ = cx.update(|cx| match action {
+                ContextAction::TaskManager => pins::launch("taskmgr.exe".to_owned()),
+                ContextAction::RestoreTaskbar => opentaskbar_shell::taskbar::restore_from_journal(),
+                ContextAction::Exit => cx.quit(),
+                ContextAction::None => {}
+            });
+        })
+        .detach();
     }
 
     fn render_shell_button(&self, kind: ShellButton, cx: &mut Context<Self>) -> impl IntoElement {
+        let base = self.settings.icon_dips();
         let hovered = self.hovered_shell == Some(kind);
         let id = match kind {
             ShellButton::Start => "shell-start",
@@ -435,9 +452,9 @@ impl DockView {
         };
         div()
             .id(id)
-            .w(px(SHELL_BUTTON_SIZE))
-            .h(px(SHELL_BUTTON_SIZE))
-            .mb(px(4.0))
+            .w(px(base))
+            .h(px(base))
+            .mb(px(6.5))
             .rounded(px(9.0))
             .flex()
             .items_center()
@@ -464,9 +481,9 @@ impl DockView {
                 ShellButton::TaskView => opentaskbar_shell::taskbar::open_task_view(),
             })
             .child(match kind {
-                ShellButton::Start => render_windows_logo().into_any_element(),
-                ShellButton::Search => render_search_icon().into_any_element(),
-                ShellButton::TaskView => render_task_view_icon().into_any_element(),
+                ShellButton::Start => render_windows_logo(base).into_any_element(),
+                ShellButton::Search => render_search_icon(base).into_any_element(),
+                ShellButton::TaskView => render_task_view_icon(base).into_any_element(),
             })
     }
 }
@@ -479,7 +496,7 @@ impl Render for DockView {
         let pill_h = pill_height_dips(&self.settings);
         let icons_w: f32 = self.slots.iter().map(|s| base * s.scale).sum::<f32>()
             + gap * (self.slots.len().saturating_sub(1) as f32);
-        let pill_w = (SHELL_SECTION_WIDTH + icons_w + 28.0).max(160.0);
+        let pill_w = (shell_section_width(base) + icons_w + 28.0).max(160.0);
 
         let alpha = (self.settings.dock_opacity.clamp(0.1, 1.0) * 218.0) as u32;
         let pill_bg = if self.settings.dock_background == SurfaceBackground::None {
@@ -701,16 +718,7 @@ pub fn run(settings: DockSettings) {
             let desired_total_px = (desired_total_dips * dpi).ceil() as i32;
             opentaskbar_shell::taskbar::begin_replacement(hwnd, auto_hide, desired_total_px);
             win32::trim_working_set();
-            cx.new(|cx| {
-                DockView::new(
-                    hwnd,
-                    settings_clone,
-                    initial_pins,
-                    initial_slots,
-                    window,
-                    cx,
-                )
-            })
+            cx.new(|cx| DockView::new(hwnd, settings_clone, initial_pins, initial_slots, cx))
         });
 
         if let Err(err) = opened {
