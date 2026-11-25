@@ -86,10 +86,14 @@ public sealed class SecondaryDockWindow : Window
         _widgetsArea.Children.Add(_quickSettingsButton);
         _widgetsArea.Children.Add(_clockButton);
 
-        var row = new DockPanel { LastChildFill = false };
-        DockPanel.SetDock(_widgetsArea, Dock.Right);
-        row.Children.Add(_widgetsArea);
+        // One cell: the widgets stay at the right edge while the app strip follows the primary dock's alignment,
+        // so a centered dock gives centered icons on every display instead of a left-aligned strip.
+        _widgetsArea.HorizontalAlignment = HorizontalAlignment.Right;
+        _apps.HorizontalAlignment = HorizontalAlignment.Center;
+        _widgetsArea.SizeChanged += (_, _) => UpdateAppsMargin();
+        var row = new Grid();
         row.Children.Add(_apps);
+        row.Children.Add(_widgetsArea);
         var surface = new Border
         {
             Child = row,
@@ -281,11 +285,41 @@ public sealed class SecondaryDockWindow : Window
         RegisterAppBar();
     }
 
-    public void Configure(SecondaryAppScope scope, bool showWidgets)
+    public void Configure(SecondaryAppScope scope, bool showWidgets, HorizontalAlignment appsAlignment = HorizontalAlignment.Center)
     {
         _scope = scope;
         _quickSettingsButton.Visibility = showWidgets ? Visibility.Visible : Visibility.Collapsed;
+        _apps.HorizontalAlignment = appsAlignment;
+        UpdateAppsMargin();
     }
+
+    /// <summary>
+    /// Maps the primary dock's placement to the secondary app strip: a floating dock uses its screen position,
+    /// a full-width dock uses its content alignment.
+    /// </summary>
+    internal static HorizontalAlignment AppsAlignment(DockLayout layout, DockPosition position, DockContentAlignment contentAlignment)
+    {
+        var side = layout == DockLayout.FullWidth
+            ? contentAlignment switch
+            {
+                DockContentAlignment.Left => DockPosition.Left,
+                DockContentAlignment.Right => DockPosition.Right,
+                _ => DockPosition.Center
+            }
+            : position;
+        return side switch
+        {
+            DockPosition.Left => HorizontalAlignment.Left,
+            DockPosition.Right => HorizontalAlignment.Right,
+            _ => HorizontalAlignment.Center
+        };
+    }
+
+    // Right-aligned apps end where the widgets begin rather than underneath them.
+    private void UpdateAppsMargin() =>
+        _apps.Margin = _apps.HorizontalAlignment == HorizontalAlignment.Right
+            ? new Thickness(0, 0, _widgetsArea.ActualWidth + 8, 0)
+            : new Thickness(0);
 
     /// <summary>Current shelf in DIPs, derived from the active size + scale profile.</summary>
     public double ShelfHeight => _shelfHeight;

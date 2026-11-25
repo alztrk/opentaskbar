@@ -181,6 +181,17 @@ internal static class SecondaryDockAndInteropChecks
             && events.SequenceEqual(["show:4", "reposition", "notify:False"]),
             "Exiting fullscreen must invalidate cached HWND_BOTTOM position, show without activation, reposition to HWND_TOPMOST, and notify.");
 
+        // Secondary docks must follow the primary dock's alignment instead of always left-aligning their apps.
+        Check(SecondaryDockWindow.AppsAlignment(DockLayout.Floating, DockPosition.Center, DockContentAlignment.Left)
+                == System.Windows.HorizontalAlignment.Center,
+            "A centered floating dock must center the secondary dock apps.");
+        Check(SecondaryDockWindow.AppsAlignment(DockLayout.Floating, DockPosition.Left, DockContentAlignment.Center)
+                == System.Windows.HorizontalAlignment.Left,
+            "A left floating dock must left-align the secondary dock apps.");
+        Check(SecondaryDockWindow.AppsAlignment(DockLayout.FullWidth, DockPosition.Center, DockContentAlignment.Right)
+                == System.Windows.HorizontalAlignment.Right,
+            "A full-width dock must use its content alignment for the secondary dock apps.");
+
         // A full-screen video on a secondary display must keep that display's dock hidden after focus moves to
         // another monitor; previously only the foreground window was checked, so the dock covered the video.
         const nint videoMonitor = 0x100;
