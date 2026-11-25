@@ -81,6 +81,17 @@ internal static class WidgetViewChecks
                 Check(visible.Length == 1 && Equals(visible[0], "Turkey"),
                     "SearchableComboBox must filter its items while the user types.");
                 picker.IsDropDownOpen = false;
+
+                // City lists hold thousands of names; a non-virtualized list rebuilt on every keystroke hung Settings (#176).
+                var cities = Enumerable.Range(0, 5000).Select(i => $"City {i:D4}").ToList();
+                picker.ItemsSource = cities;
+                picker.IsDropDownOpen = true;
+                ((System.Windows.Controls.Primitives.Popup)picker.Template.FindName("PART_Popup", picker)).Child.UpdateLayout();
+                var realized = Enumerable.Range(0, picker.Items.Count)
+                    .Count(index => picker.ItemContainerGenerator.ContainerFromIndex(index) is not null);
+                Check(picker.Items.Count == cities.Count && realized is > 0 and < 100,
+                    $"SearchableComboBox must virtualize its dropdown items (items={picker.Items.Count}, realized={realized}).");
+                picker.IsDropDownOpen = false;
                 host.Close();
             }
 
