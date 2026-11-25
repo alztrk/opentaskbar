@@ -30,14 +30,16 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::Shell::DragAcceptFiles;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-    GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect, HTCLIENT, HTTRANSPARENT,
-    HWND_BROADCAST, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IsIconic, IsWindowVisible, KillTimer,
-    LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW,
-    SetCursor, SetTimer, SetWindowLongPtrW, TranslateMessage, WM_APP, WM_DESTROY, WM_DROPFILES,
+    CS_DBLCLKS, CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    GWLP_USERDATA, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect, HHOOK, HTCLIENT,
+    HTTRANSPARENT, HWND_BROADCAST, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IsIconic, IsWindowVisible,
+    KillTimer, LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage, RegisterClassExW,
+    RegisterWindowMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowsHookExW,
+    TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_APP, WM_DESTROY, WM_DROPFILES,
     WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_NCHITTEST, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    WindowFromPoint,
 };
 
 pub mod dcomp;
@@ -3552,7 +3554,12 @@ impl DockState {
                 "quicksettings" => Some("Toggle Focus Mode"),
                 _ => None,
             };
-            match win32::show_widget_context_menu(self.hwnd, self.is_dark, secondary_label) {
+            match win32::show_widget_context_menu(
+                self.hwnd,
+                self.is_dark,
+                secondary_label,
+                self.settings.focus_mode,
+            ) {
                 WidgetContextAction::Remove => {
                     self.settings.set_widget_enabled(wid, false);
                     if let Err(error) = opentaskbar_core::settings::save_to(
@@ -3587,6 +3594,7 @@ impl DockState {
                         }
                     }
                 }
+                WidgetContextAction::Dock(act) => self.execute_context_action(act),
                 WidgetContextAction::None => {}
             }
             return;
@@ -3713,6 +3721,31 @@ thread_local! {
     /// Prevents re-entrant `&mut DockState` aliasing when modal flyouts/menus or
     /// synchronous Win32 callbacks (`SetWindowPos`) dispatch messages to the dock window.
     static DOCK_WNDPROC_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Active dock window handles on this UI thread for `WH_MOUSE_LL` wheel routing.
+    static DOCK_HWNDS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Routes `WM_MOUSEWHEEL` / `WM_MOUSEHWHEEL` to unfocused `WS_EX_NOACTIVATE` dock windows
+/// when the pointer is directly over a dock pill, preventing wheel events from leaking to
+/// background windows behind the dock.
+unsafe extern "system" fn mouse_wheel_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let msg = wparam as u32;
+    if code >= 0 && (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL) && lparam != 0 {
+        let busy = DOCK_WNDPROC_ACTIVE.with(std::cell::Cell::get);
+        if !busy {
+            let info = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
+            let target = unsafe { WindowFromPoint(info.pt) };
+            let target_val = target as usize;
+            if target_val != 0 && DOCK_HWNDS.with(|list| list.borrow().contains(&target_val)) {
+                let delta = ((info.mouseData >> 16) & 0xffff) as u16;
+                unsafe {
+                    let _ = PostMessageW(target, msg, (delta as usize) << 16, 0);
+                }
+                return 1;
+            }
+        }
+    }
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
 }
 
 struct DockWndProcGuard;
@@ -4089,6 +4122,14 @@ pub fn run(settings: DockSettings) {
 
     win32::trim_working_set();
 
+    DOCK_HWNDS.with(|list| {
+        let mut guard = list.borrow_mut();
+        guard.clear();
+        guard.extend(created.iter().map(|(hwnd, _)| *hwnd as usize));
+    });
+    let wheel_hook: HHOOK =
+        unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_wheel_hook), hinstance, 0) };
+
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     loop {
         let ret = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
@@ -4100,6 +4141,13 @@ pub fn run(settings: DockSettings) {
             DispatchMessageW(&msg);
         }
     }
+
+    if !wheel_hook.is_null() {
+        unsafe {
+            let _ = UnhookWindowsHookEx(wheel_hook);
+        }
+    }
+    DOCK_HWNDS.with(|list| list.borrow_mut().clear());
 
     for (hwnd, ptr) in created {
         unsafe {

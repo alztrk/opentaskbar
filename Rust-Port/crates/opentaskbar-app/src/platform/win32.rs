@@ -94,12 +94,14 @@ pub enum WidgetContextAction {
     None,
     Secondary,
     Remove,
+    Dock(ContextAction),
 }
 
 pub fn show_widget_context_menu(
     hwnd: usize,
     is_dark: bool,
     secondary_label: Option<&str>,
+    focus_mode: bool,
 ) -> WidgetContextAction {
     const MENU_WIDGET_SECONDARY: u32 = 5001;
     const MENU_WIDGET_REMOVE: u32 = 5002;
@@ -111,17 +113,22 @@ pub fn show_widget_context_menu(
             MenuIcon::Refresh,
             label,
         ));
-        entries.push(MenuEntry::Separator);
     }
     entries.push(MenuEntry::destructive(
         MENU_WIDGET_REMOVE,
         MenuIcon::Trash,
         "Remove Widget",
     ));
+    entries.push(MenuEntry::Separator);
+    entries.extend(dock_menu_entries(focus_mode));
+
     match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
         MENU_WIDGET_SECONDARY => WidgetContextAction::Secondary,
         MENU_WIDGET_REMOVE => WidgetContextAction::Remove,
-        _ => WidgetContextAction::None,
+        id => match map_context_action(id) {
+            ContextAction::None => WidgetContextAction::None,
+            act => WidgetContextAction::Dock(act),
+        },
     }
 }
 
