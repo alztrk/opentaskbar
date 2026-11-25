@@ -3001,6 +3001,7 @@ dependencies = [
  "opentaskbar-core",
  "opentaskbar-shell",
  "raw-window-handle",
+ "roxmltree",
  "smallvec",
  "windows",
  "windows-numerics",

@@ -4,7 +4,7 @@
 //! `IShellLinkW::GetIconLocation`, and `IShellLinkW::GetPath`.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
@@ -15,8 +15,9 @@ use windows::Win32::System::Com::{
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::Win32::UI::Shell::{IShellLinkW, SLGP_RAWPATH, ShellLink};
 use windows::core::{GUID, HSTRING, Interface};
-use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+mod launch;
+pub use launch::{launch, launch_app, launch_elevated, launch_with_args};
 
 /// `System.AppUserModel.ID` (`{9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3}, 5`).
 const PKEY_APPUSERMODEL_ID: PROPERTYKEY = PROPERTYKEY {
@@ -31,6 +32,34 @@ const PKEY_LINK_TARGET_PARSING_PATH: PROPERTYKEY = PROPERTYKEY {
 };
 
 const APPS_FOLDER_CLSID_PREFIX: &str = "::{4234d49b-0245-4df3-b780-3893943456e1}\\";
+const APPS_FOLDER_PREFIX: &str = "shell:AppsFolder\\";
+
+fn is_packaged_aumid(id: &str) -> bool {
+    let Some((family, app)) = id.split_once('!') else {
+        return false;
+    };
+    let Some((name, publisher)) = family.rsplit_once('_') else {
+        return false;
+    };
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b".-".contains(&c))
+        && publisher.len() == 13
+        && publisher.bytes().all(|c| c.is_ascii_alphanumeric())
+        && !app.is_empty()
+        && app
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b".-_".contains(&c))
+}
+
+fn apps_folder_aumid<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    if !value.get(..prefix.len())?.eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    let id = value[prefix.len()..].trim();
+    is_packaged_aumid(id).then_some(id)
+}
 
 #[derive(Clone, Debug)]
 pub struct PinnedApp {
@@ -61,10 +90,12 @@ unsafe fn read_prop_string(store: &IPropertyStore, key: &PROPERTYKEY) -> Option<
     }
 }
 
+#[derive(Default)]
 struct ShortcutMeta {
     target_exe: Option<String>,
     aumid: Option<String>,
     icon_location: Option<String>,
+    has_arguments: bool,
 }
 
 fn resolve_shortcut(lnk_path: &str) -> ShortcutMeta {
@@ -72,25 +103,13 @@ fn resolve_shortcut(lnk_path: &str) -> ShortcutMeta {
     unsafe {
         let Ok(link) = CoCreateInstance::<_, IShellLinkW>(&ShellLink, None, CLSCTX_INPROC_SERVER)
         else {
-            return ShortcutMeta {
-                target_exe: None,
-                aumid: None,
-                icon_location: None,
-            };
+            return ShortcutMeta::default();
         };
         let Ok(persist) = link.cast::<IPersistFile>() else {
-            return ShortcutMeta {
-                target_exe: None,
-                aumid: None,
-                icon_location: None,
-            };
+            return ShortcutMeta::default();
         };
         if persist.Load(&HSTRING::from(lnk_path), STGM_READ).is_err() {
-            return ShortcutMeta {
-                target_exe: None,
-                aumid: None,
-                icon_location: None,
-            };
+            return ShortcutMeta::default();
         }
 
         let mut target_buf = [0u16; 1024];
@@ -131,35 +150,47 @@ fn resolve_shortcut(lnk_path: &str) -> ShortcutMeta {
             None
         };
 
-        let aumid = link.cast::<IPropertyStore>().ok().and_then(|store| {
-            let direct = read_prop_string(&store, &PKEY_APPUSERMODEL_ID);
-            if direct.as_ref().is_some_and(|s| s.contains('!')) {
-                return direct;
-            }
-            if let Some(target_parsing) = read_prop_string(&store, &PKEY_LINK_TARGET_PARSING_PATH) {
-                let lower = target_parsing.to_lowercase();
-                if lower.starts_with(APPS_FOLDER_CLSID_PREFIX) {
-                    let rest = &target_parsing[APPS_FOLDER_CLSID_PREFIX.len()..];
-                    if !rest.is_empty() {
-                        return Some(rest.to_owned());
-                    }
+        let mut arguments_buf = [0u16; 2048];
+        let arguments = if link.GetArguments(&mut arguments_buf).is_ok() {
+            String::from_utf16_lossy(arguments_buf.split(|&c| c == 0).next().unwrap_or_default())
+        } else {
+            String::new()
+        };
+        let aumid = link
+            .cast::<IPropertyStore>()
+            .ok()
+            .and_then(|store| {
+                let direct = read_prop_string(&store, &PKEY_APPUSERMODEL_ID);
+                if direct.as_deref().is_some_and(is_packaged_aumid) {
+                    return direct;
                 }
-                if lower.starts_with("shell:appsfolder\\") {
-                    let rest = &target_parsing["shell:appsfolder\\".len()..];
-                    if !rest.is_empty() {
-                        return Some(rest.to_owned());
-                    }
+                let parsing_path = read_prop_string(&store, &PKEY_LINK_TARGET_PARSING_PATH)?;
+                apps_folder_aumid(&parsing_path, APPS_FOLDER_CLSID_PREFIX)
+                    .or_else(|| apps_folder_aumid(&parsing_path, APPS_FOLDER_PREFIX))
+                    .map(str::to_owned)
+            })
+            .or_else(|| {
+                let exe = Path::new(target_exe.as_deref()?).file_name()?.to_str()?;
+                if !exe.eq_ignore_ascii_case("explorer.exe") {
+                    return None;
                 }
-            }
-            direct
-        });
+                explorer_arguments_aumid(&arguments).map(str::to_owned)
+            });
 
         ShortcutMeta {
             target_exe,
             aumid,
             icon_location,
+            has_arguments: !arguments.trim().is_empty(),
         }
     }
+}
+
+fn explorer_arguments_aumid(arguments: &str) -> Option<&str> {
+    let arguments_lower = arguments.to_ascii_lowercase();
+    let start = arguments_lower.find("shell:appsfolder\\")?;
+    let target = arguments[start..].split([' ', '"', '\t']).next()?;
+    apps_folder_aumid(target, APPS_FOLDER_PREFIX)
 }
 
 fn expand_env_vars(input: &str) -> String {
@@ -175,7 +206,7 @@ fn expand_env_vars(input: &str) -> String {
     ] {
         let token = format!("%{var}%");
         let tok_lower = token.to_lowercase();
-        while let Some(pos) = out.to_lowercase().find(&tok_lower) {
+        while let Some(pos) = out.to_ascii_lowercase().find(&tok_lower) {
             let Ok(val) = std::env::var(var) else {
                 break;
             };
@@ -185,40 +216,53 @@ fn expand_env_vars(input: &str) -> String {
     out
 }
 
-/// Resolves a `WindowsApps\<PackageFullName>\...` executable path to `shell:AppsFolder\<PackageFamilyName>!<AppId>`.
+/// Resolves a `WindowsApps\<PackageFullName>\...` executable path to a packaged app ID.
 /// Mirrors C# `ApplicationIconProvider.TryResolvePackagedAppUserModelId`.
 pub fn resolve_windowsapps_aumid(exe_path: &str) -> Option<String> {
-    let lower = exe_path.to_lowercase();
-    let marker = r"\windowsapps\";
-    let pos = lower.find(marker)?;
-    let after = &exe_path[pos + marker.len()..];
-    let pkg_folder = after.split('\\').next()?;
-    let mut parts = pkg_folder.split('_');
-    let name = parts.next()?;
-    let publisher_id = pkg_folder.rsplit('_').next()?;
-    if name.is_empty() || publisher_id.is_empty() || name == publisher_id {
+    let exe = Path::new(exe_path);
+    let package_root = exe.ancestors().skip(1).find(|dir| {
+        dir.parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("WindowsApps"))
+    })?;
+    let [name, _, _, _, publisher] = package_root
+        .file_name()?
+        .to_str()?
+        .split('_')
+        .collect::<Vec<_>>()[..]
+    else {
         return None;
-    }
-    let family = format!("{name}_{publisher_id}");
-
-    // Try reading `<Application Id="...">` from AppxManifest.xml; fall back to "App".
-    let manifest_path = format!("{}{}", &exe_path[..pos + marker.len()], pkg_folder);
-    let app_id = fs::read_to_string(PathBuf::from(manifest_path).join("AppxManifest.xml"))
-        .ok()
-        .and_then(|xml| extract_manifest_app_id(&xml))
-        .unwrap_or_else(|| "App".to_owned());
-
-    Some(format!("{family}!{app_id}"))
+    };
+    let xml = fs::read_to_string(package_root.join("AppxManifest.xml")).ok()?;
+    let relative_exe = exe.strip_prefix(package_root).ok()?.to_str()?;
+    let app = manifest_app_id(&xml, relative_exe)?;
+    let id = format!("{name}_{publisher}!{app}");
+    is_packaged_aumid(&id).then_some(id)
 }
 
-fn extract_manifest_app_id(xml: &str) -> Option<String> {
-    let app_pos = xml.find("<Application")?;
-    let slice = &xml[app_pos..];
-    let id_pos = slice.find("Id=\"")?;
-    let rest = &slice[id_pos + 4..];
-    let end = rest.find('"')?;
-    let id = rest[..end].trim();
-    (!id.is_empty()).then(|| id.to_owned())
+fn manifest_app_id(xml: &str, relative_exe: &str) -> Option<String> {
+    let manifest = roxmltree::Document::parse(xml).ok()?;
+    let apps = manifest
+        .root_element()
+        .children()
+        .find(|node| node.tag_name().name() == "Applications")?;
+    let entries = apps
+        .children()
+        .filter(|node| node.tag_name().name() == "Application")
+        .filter_map(|node| Some((node.attribute("Id")?, node.attribute("Executable"))));
+    let relative_exe = relative_exe.replace('/', "\\");
+    let matching_id = entries.clone().find_map(|(id, exe)| {
+        exe.filter(|exe| exe.replace('/', "\\").eq_ignore_ascii_case(&relative_exe))
+            .map(|_| id)
+    });
+    matching_id
+        .or_else(|| {
+            let mut entries = entries;
+            let (only_id, _) = entries.next()?;
+            entries.next().is_none().then_some(only_id)
+        })
+        .map(str::to_owned)
 }
 
 pub fn load_pins() -> Vec<PinnedApp> {
@@ -326,37 +370,36 @@ pub fn pin_from_path(raw_path: &str) -> Option<PinnedApp> {
     })
 }
 
-pub fn launch(target: String) {
-    launch_impl(target, "open", None);
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub fn launch_elevated(target: String) {
-    launch_impl(target, "runas", None);
-}
+    #[test]
+    fn explorer_store_shortcut_preserves_non_default_application_id() {
+        let args = r#"/separate,"SHELL:AppsFolder\Example.Product_0123456789abc!Client""#;
+        assert_eq!(
+            explorer_arguments_aumid(args),
+            Some("Example.Product_0123456789abc!Client")
+        );
+        assert_eq!(
+            explorer_arguments_aumid(r"shell:AppsFolder\Chrome.Profile"),
+            None
+        );
+    }
 
-pub fn launch_with_args(target: String, args: String) {
-    launch_impl(target, "open", Some(args));
-}
-
-fn launch_impl(target: String, verb_str: &'static str, args: Option<String>) {
-    std::thread::Builder::new()
-        .name("opentaskbar-launch".into())
-        .spawn(move || {
-            let verb: Vec<u16> = verb_str.encode_utf16().chain(Some(0)).collect();
-            let file: Vec<u16> = target.encode_utf16().chain(Some(0)).collect();
-            let params: Option<Vec<u16>> = args.map(|a| a.encode_utf16().chain(Some(0)).collect());
-            let params_ptr = params.as_ref().map_or(std::ptr::null(), |v| v.as_ptr());
-            // SAFETY: null-terminated strings alive for the duration of ShellExecuteW.
-            unsafe {
-                ShellExecuteW(
-                    std::ptr::null_mut(),
-                    verb.as_ptr(),
-                    file.as_ptr(),
-                    params_ptr,
-                    std::ptr::null(),
-                    SW_SHOWNORMAL,
-                );
-            }
-        })
-        .ok();
+    #[test]
+    fn package_manifest_selects_the_application_for_the_executable() {
+        let xml = r#"<Package xmlns="urn:test">
+            <Applications>
+                <Application Id="Main" Executable="Main.exe"/>
+                <Application Executable="tools/Second.exe" Id="Second"/>
+            </Applications>
+        </Package>"#;
+        assert_eq!(
+            manifest_app_id(xml, r"tools\SECOND.EXE").as_deref(),
+            Some("Second")
+        );
+        assert_eq!(manifest_app_id(xml, "Unknown.exe"), None);
+        assert_eq!(manifest_app_id("<invalid>", "Unknown.exe"), None);
+    }
 }

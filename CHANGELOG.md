@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed Rust dock launches for Microsoft Store apps and desktop apps tracked through helper processes, such as Steam. Steam game shortcuts can also be dropped onto the dock and opened as Windows Internet shortcuts.
+
 - Redesigned the Rust port's Settings and Background Apps panels with coordinated light and dark themes, responsive Settings navigation, and inline dock pin and window close controls.
 
 - Read playback progress from the matching LibreWolf tab when Windows omits the timeline and the browser exposes a verifiable player position and duration. Show an unavailable-duration status when neither source has a usable timeline.

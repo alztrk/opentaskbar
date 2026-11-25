@@ -2408,16 +2408,8 @@ impl DockState {
             self.ensure_animation();
             self.update_visuals();
 
-            if ctrl && shift {
-                pins::launch_elevated(launch_path);
-            } else if shift {
-                pins::launch(launch_path);
-            } else if !hwnds.is_empty() {
-                if !tracker::activate_or_toggle(&hwnds) {
-                    pins::launch(launch_path);
-                }
-            } else {
-                pins::launch(launch_path);
+            if shift || !tracker::activate_or_toggle(&hwnds) {
+                pins::launch_app(launch_path, hwnds.first().copied(), ctrl && shift);
             }
         } else {
             self.update_visuals();
@@ -2431,8 +2423,9 @@ impl DockState {
         {
             slot.bounce_started = Some(Instant::now());
             let launch_path = slot.launch_path.clone();
+            let window = slot.windows.first().map(|window| window.hwnd);
             self.ensure_animation();
-            pins::launch(launch_path);
+            pins::launch_app(launch_path, window, false);
         }
     }
 
@@ -2520,11 +2513,11 @@ impl DockState {
             return;
         }
 
-        // Otherwise pin dropped `.exe` / `.lnk` files to the dock.
+        // Otherwise pin dropped executables and shortcuts to the dock.
         let mut added = false;
         for path in files {
             let lower = path.to_lowercase();
-            if (lower.ends_with(".exe") || lower.ends_with(".lnk"))
+            if (lower.ends_with(".exe") || lower.ends_with(".lnk") || lower.ends_with(".url"))
                 && !self
                     .settings
                     .user_pinned_apps
@@ -2578,6 +2571,7 @@ impl DockState {
             && let Some(slot) = self.slots.get(idx).cloned()
         {
             let running = !slot.windows.is_empty();
+            let window = slot.windows.first().map(|window| window.hwnd);
             match win32::show_app_context_menu(
                 self.hwnd,
                 self.is_dark,
@@ -2588,11 +2582,11 @@ impl DockState {
                 AppContextAction::Open => {
                     let hwnds = slot.hwnds();
                     if !tracker::activate_or_toggle(&hwnds) {
-                        pins::launch(slot.launch_path);
+                        pins::launch_app(slot.launch_path, window, false);
                     }
                 }
-                AppContextAction::NewWindow => pins::launch(slot.launch_path),
-                AppContextAction::RunAsAdmin => pins::launch_elevated(slot.launch_path),
+                AppContextAction::NewWindow => pins::launch_app(slot.launch_path, window, false),
+                AppContextAction::RunAsAdmin => pins::launch_app(slot.launch_path, window, true),
                 AppContextAction::TogglePin => self.toggle_pin_for_slot(idx),
                 AppContextAction::Close => {
                     for w in &slot.windows {
