@@ -1,8 +1,8 @@
 //! On-demand GPUI Settings window (`OpenTaskBar.exe --settings`).
 //!
-//! Fixed-size (`880 x 600`) iOS + shadcn/ui window with native Segoe Fluent Icons,
-//! zero horizontal overflow, visible custom scrollbar, interactive Widget Preview Cards
-//! with inline widget settings, and instant auto-save + live DirectComposition dock reload.
+//! Fixed-size (`880 x 600`) iOS + shadcn/ui window matching C# OpenTaskbar's tabs and
+//! all 23 catalog widgets across 5 categories, with interactive Widget Preview Cards,
+//! inline widget controls, smooth page transitions, visible scrollbar, and instant auto-save.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -20,13 +20,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, RegisterWindowMessageW, SendNotifyMessageW,
 };
 
-use crate::pins;
-use crate::ui_components::{
+use crate::platform::{pins, win32};
+use crate::ui::components::{
     self as ui, ButtonVariant, UiTheme, badge, button, icon_glyph, ios_switch, section_card,
     segmented_item, segmented_track, setting_row, sidebar_nav_item, stepper,
 };
-use crate::widgets;
-use crate::win32;
+use crate::widgets::{self, telemetry};
 
 pub const SETTINGS_ARG: &str = "--settings";
 pub const RELOAD_MSG_NAME: &str = "OpenTaskBarReloadSettings";
@@ -42,87 +41,93 @@ pub fn spawn_settings_window() {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsPage {
-    General,
-    Appearance,
-    Layout,
+    Dock,
     Widgets,
+    Themes,
     Stacks,
-    Profiles,
+    Preferences,
     About,
 }
 
 impl SettingsPage {
-    const ALL: [Self; 7] = [
-        Self::General,
-        Self::Appearance,
-        Self::Layout,
+    const ALL: [Self; 6] = [
+        Self::Dock,
         Self::Widgets,
+        Self::Themes,
         Self::Stacks,
-        Self::Profiles,
+        Self::Preferences,
         Self::About,
     ];
 
     fn title(self) -> &'static str {
         match self {
-            Self::General => "General",
-            Self::Appearance => "Appearance",
-            Self::Layout => "Layout",
+            Self::Dock => "Dock",
             Self::Widgets => "Widgets",
+            Self::Themes => "Themes",
             Self::Stacks => "Stacks & Groups",
-            Self::Profiles => "Profiles",
+            Self::Preferences => "Preferences",
             Self::About => "About",
         }
     }
 
     fn glyph(self) -> &'static str {
         match self {
-            Self::General => "\u{E713}",    // Settings gear
-            Self::Appearance => "\u{E790}", // Color palette
-            Self::Layout => "\u{E7F4}",     // Display / monitor
-            Self::Widgets => "\u{F0E2}",    // Grid / apps
-            Self::Stacks => "\u{E8B7}",     // Folder
-            Self::Profiles => "\u{E748}",   // Profile / switch
-            Self::About => "\u{E946}",      // Info
+            Self::Dock => "\u{E7F4}",
+            Self::Widgets => "\u{F0E2}",
+            Self::Themes => "\u{E790}",
+            Self::Stacks => "\u{E8B7}",
+            Self::Preferences => "\u{E713}",
+            Self::About => "\u{E946}",
         }
     }
 }
 
 fn widget_glyph(id: &str) -> &'static str {
+    if id.starts_with("aiusage_") {
+        return "\u{E99A}";
+    }
     match id {
         "clock" => "\u{E823}",
-        "stats" => "\u{E9D9}",
-        "audio" => "\u{E767}",
-        "media" => "\u{E8D6}",
-        "netspeed" => "\u{E701}",
-        "battery" => "\u{E83F}",
-        "storage" => "\u{EDA2}",
-        "keyboard" => "\u{E765}",
+        "weather" => "\u{E753}",
         "dayprogress" => "\u{E706}",
         "stopwatch" => "\u{E916}",
         "countdown" => "\u{E917}",
-        "focus" => "\u{E708}",
-        "weather" => "\u{E753}",
+        "stats" => "\u{E9D9}",
+        "netspeed" => "\u{E701}",
+        "battery" => "\u{E83F}",
+        "bluetoothbattery" => "\u{E702}",
+        "storage" => "\u{EDA2}",
+        "media" => "\u{E8D6}",
+        "audio" => "\u{E767}",
         "quicksettings" => "\u{E9E9}",
+        "keyboard" => "\u{E765}",
+        "focus" => "\u{E708}",
         _ => "\u{F0E2}",
     }
 }
 
 fn widget_preview_lines(id: &str, settings: &DockSettings) -> (String, String) {
+    if let Some(ai) = telemetry::ai_provider_meta(id) {
+        let status = if telemetry::ai_provider_detected(ai.id) {
+            "Ready"
+        } else {
+            "Sign in"
+        };
+        return (ai.short.to_owned(), status.to_owned());
+    }
     match id {
         "clock" => widgets::local_clock_strings(),
-        "stats" => {
-            let (ram, _, _) = widgets::sample_ram_info();
-            ("CPU 12%".to_owned(), format!("RAM {ram}%"))
+        "weather" => ("21°C".to_owned(), settings.weather_city.clone()),
+        "dayprogress" => {
+            let (day, _, _, left) = widgets::day_progress_metrics();
+            (format!("DAY {:.0}%", day * 100.0), format!("{left}h left"))
         }
-        "audio" => {
-            let (vol, muted) = widgets::get_audio_state();
-            if muted {
-                ("VOL --".to_owned(), "Muted".to_owned())
-            } else {
-                (format!("VOL {vol}%"), "Audio".to_owned())
-            }
-        }
-        "media" => ("MEDIA".to_owned(), "Prev · Play · Next".to_owned()),
+        "stopwatch" => ("00:00".to_owned(), "Stopwatch".to_owned()),
+        "countdown" => ("15:00".to_owned(), "Timer".to_owned()),
+        "stats" => (
+            "CPU 12%".to_owned(),
+            format!("RAM {}%", widgets::sample_ram_info().0),
+        ),
         "netspeed" => ("D 2.4M".to_owned(), "U 320K".to_owned()),
         "battery" => {
             let b = widgets::sample_battery();
@@ -132,24 +137,27 @@ fn widget_preview_lines(id: &str, settings: &DockSettings) -> (String, String) {
                 ("AC".to_owned(), "Desktop".to_owned())
             }
         }
-        "storage" => {
-            let d = widgets::sample_drives();
-            if let Some(first) = d.first() {
+        "bluetoothbattery" => ("BT 85%".to_owned(), "Wireless".to_owned()),
+        "storage" => widgets::sample_drives().first().map_or_else(
+            || ("C: 120G".to_owned(), "Free".to_owned()),
+            |d| {
                 (
-                    format!("{}: {:.0}G", first.letter, first.free_gb),
+                    format!("{}: {:.0}G", d.letter, d.free_gb),
                     "Free".to_owned(),
                 )
+            },
+        ),
+        "media" => ("MEDIA".to_owned(), "Prev · Play · Next".to_owned()),
+        "audio" => {
+            let (vol, muted) = widgets::get_audio_state();
+            if muted {
+                ("VOL --".to_owned(), "Muted".to_owned())
             } else {
-                ("C: 120G".to_owned(), "Free".to_owned())
+                (format!("VOL {vol}%"), "Audio".to_owned())
             }
         }
+        "quicksettings" => ("QUICK".to_owned(), "Controls".to_owned()),
         "keyboard" => (widgets::active_keyboard_code(), "Layout".to_owned()),
-        "dayprogress" => {
-            let (day, _, _, left) = widgets::day_progress_metrics();
-            (format!("DAY {:.0}%", day * 100.0), format!("{left}h left"))
-        }
-        "stopwatch" => ("00:00".to_owned(), "Stopwatch".to_owned()),
-        "countdown" => ("15:00".to_owned(), "Timer".to_owned()),
         "focus" => (
             "25:00".to_owned(),
             if settings.focus_mode {
@@ -159,8 +167,6 @@ fn widget_preview_lines(id: &str, settings: &DockSettings) -> (String, String) {
             }
             .to_owned(),
         ),
-        "weather" => ("21°C".to_owned(), settings.weather_city.clone()),
-        "quicksettings" => ("QUICK".to_owned(), "Controls".to_owned()),
         _ => (id.to_uppercase(), "Widget".to_owned()),
     }
 }
@@ -176,8 +182,9 @@ fn notify_docks_reload() {
 }
 
 fn user_folder(name: &str) -> Option<String> {
-    let home = std::env::var_os("USERPROFILE").map(PathBuf::from)?;
-    let path = home.join(name);
+    let path = std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)?
+        .join(name);
     path.exists().then(|| path.to_string_lossy().into_owned())
 }
 
@@ -185,15 +192,17 @@ struct SettingsView {
     page: SettingsPage,
     page_epoch: usize,
     settings: DockSettings,
+    startup_enabled: bool,
     scroll_handle: ScrollHandle,
 }
 
 impl SettingsView {
     fn new(settings: DockSettings) -> Self {
         Self {
-            page: SettingsPage::General,
+            page: SettingsPage::Dock,
             page_epoch: 0,
             settings,
+            startup_enabled: win32::is_startup_enabled(),
             scroll_handle: ScrollHandle::new(),
         }
     }
@@ -214,93 +223,214 @@ impl SettingsView {
         cx.notify();
     }
 
-    fn render_general(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let theme_seg = segmented_track(
+    fn render_dock(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let align_seg = segmented_track(
             t,
-            vec![
+            [
+                ("Left", DockPosition::Left),
+                ("Center", DockPosition::Center),
+                ("Right", DockPosition::Right),
+            ]
+            .into_iter()
+            .map(|(label, pos)| {
                 segmented_item(
-                    "theme-sys",
+                    SharedString::from(format!("pos-{label}")),
                     t,
-                    "System",
-                    self.settings.theme == AppTheme::System,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.theme = AppTheme::System;
+                    label,
+                    self.settings.position == pos,
+                    cx.listener(move |this, _, _, cx| {
+                        this.settings.position = pos;
                         this.auto_save(cx);
                     }),
-                ),
+                )
+            })
+            .collect(),
+        );
+
+        let size_seg = segmented_track(
+            t,
+            [
+                ("Compact", DockSize::Compact),
+                ("Medium", DockSize::Medium),
+                ("Large", DockSize::Large),
+            ]
+            .into_iter()
+            .map(|(label, sz)| {
                 segmented_item(
-                    "theme-dark",
+                    SharedString::from(format!("sz-{label}")),
                     t,
-                    "Dark",
-                    self.settings.theme == AppTheme::Dark,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.theme = AppTheme::Dark;
+                    label,
+                    self.settings.size == sz,
+                    cx.listener(move |this, _, _, cx| {
+                        this.settings.size = sz;
                         this.auto_save(cx);
                     }),
-                ),
-                segmented_item(
-                    "theme-light",
-                    t,
-                    "Light",
-                    self.settings.theme == AppTheme::Light,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.theme = AppTheme::Light;
-                        this.auto_save(cx);
-                    }),
-                ),
-            ],
+                )
+            })
+            .collect(),
         );
 
         let autohide_seg = segmented_track(
             t,
-            vec![
+            [
+                ("Off", AutoHideMode::Disabled),
+                ("Smart", AutoHideMode::Smart),
+                ("Always", AutoHideMode::Always),
+            ]
+            .into_iter()
+            .map(|(label, mode)| {
                 segmented_item(
-                    "ah-off",
+                    SharedString::from(format!("ah-{label}")),
                     t,
-                    "Off",
-                    self.settings.auto_hide == AutoHideMode::Disabled,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.auto_hide = AutoHideMode::Disabled;
+                    label,
+                    self.settings.auto_hide == mode,
+                    cx.listener(move |this, _, _, cx| {
+                        this.settings.auto_hide = mode;
                         this.auto_save(cx);
                     }),
-                ),
-                segmented_item(
-                    "ah-smart",
-                    t,
-                    "Smart",
-                    self.settings.auto_hide == AutoHideMode::Smart,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.auto_hide = AutoHideMode::Smart;
-                        this.auto_save(cx);
-                    }),
-                ),
-                segmented_item(
-                    "ah-always",
-                    t,
-                    "Always",
-                    self.settings.auto_hide == AutoHideMode::Always,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.auto_hide = AutoHideMode::Always;
-                        this.auto_save(cx);
-                    }),
-                ),
-            ],
+                )
+            })
+            .collect(),
+        );
+
+        let scale_pct = (self.settings.dock_scale * 100.0).round() as i32;
+        let width_label = self.settings.dock_custom_width_dips.map_or_else(
+            || "Width (Auto)".to_owned(),
+            |w| format!("Width ({w:.0}px)"),
         );
 
         vec![
             section_card(
                 t,
-                "System",
+                "Layout & Dimensions",
                 vec![
-                    setting_row(t, Some("\u{E790}"), "Theme", theme_seg).into_any_element(),
-                    setting_row(t, Some("\u{E740}"), "Auto-Hide", autohide_seg).into_any_element(),
+                    setting_row(t, Some("\u{E8E3}"), "Alignment", align_seg).into_any_element(),
+                    setting_row(t, Some("\u{E740}"), "Dock Size", size_seg).into_any_element(),
+                    setting_row(
+                        t,
+                        Some("\u{E8A3}"),
+                        "Scale",
+                        stepper(
+                            "sc-minus",
+                            "sc-plus",
+                            t,
+                            format!("{scale_pct}%"),
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.dock_scale =
+                                    ((this.settings.dock_scale * 20.0).round() - 1.0)
+                                        .clamp(15.0, 30.0)
+                                        / 20.0;
+                                this.auto_save(cx);
+                            }),
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.dock_scale =
+                                    ((this.settings.dock_scale * 20.0).round() + 1.0)
+                                        .clamp(15.0, 30.0)
+                                        / 20.0;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    setting_row(
+                        t,
+                        Some("\u{E74A}"),
+                        "Bottom Margin",
+                        stepper(
+                            "gap-minus",
+                            "gap-plus",
+                            t,
+                            format!("{} px", self.settings.dock_bottom_gap_pixels),
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.dock_bottom_gap_pixels =
+                                    (this.settings.dock_bottom_gap_pixels - 2).max(0);
+                                this.auto_save(cx);
+                            }),
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.dock_bottom_gap_pixels =
+                                    (this.settings.dock_bottom_gap_pixels + 2).min(32);
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    setting_row(
+                        t,
+                        Some("\u{E9A9}"),
+                        "Icon Padding",
+                        stepper(
+                            "pad-minus",
+                            "pad-plus",
+                            t,
+                            format!("{} px", self.settings.dock_icon_padding),
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.dock_icon_padding =
+                                    (this.settings.dock_icon_padding - 1).max(0);
+                                this.auto_save(cx);
+                            }),
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.dock_icon_padding =
+                                    (this.settings.dock_icon_padding + 1).min(12);
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    setting_row(
+                        t,
+                        Some("\u{E740}"),
+                        "Full Width",
+                        ios_switch(
+                            "sw-fullw",
+                            t,
+                            self.settings.full_width,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.full_width = !this.settings.full_width;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    setting_row(
+                        t,
+                        Some("\u{E72C}"),
+                        width_label,
+                        button(
+                            "btn-reset-width",
+                            t,
+                            "Reset",
+                            ButtonVariant::Secondary,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.dock_custom_width_dips = None;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
                 ],
             )
             .into_any_element(),
             section_card(
                 t,
-                "Behavior",
+                "Behavior & Displays",
                 vec![
+                    setting_row(t, Some("\u{E740}"), "Auto-Hide", autohide_seg).into_any_element(),
+                    setting_row(
+                        t,
+                        Some("\u{E7F4}"),
+                        "All Monitors",
+                        ios_switch(
+                            "sw-allmon",
+                            t,
+                            self.settings.show_on_all_monitors,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.show_on_all_monitors =
+                                    !this.settings.show_on_all_monitors;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
                     setting_row(
                         t,
                         Some("\u{E708}"),
@@ -343,331 +473,6 @@ impl SettingsView {
                             cx.listener(|this, _, _, cx| {
                                 this.settings.current_desktop_only =
                                     !this.settings.current_desktop_only;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                ],
-            )
-            .into_any_element(),
-        ]
-    }
-
-    fn render_appearance(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let bg_seg = segmented_track(
-            t,
-            vec![
-                segmented_item(
-                    "bg-glass",
-                    t,
-                    "Glass",
-                    self.settings.dock_background == SurfaceBackground::Glass,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.dock_background = SurfaceBackground::Glass;
-                        this.auto_save(cx);
-                    }),
-                ),
-                segmented_item(
-                    "bg-solid",
-                    t,
-                    "Solid",
-                    self.settings.dock_background == SurfaceBackground::Solid,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.dock_background = SurfaceBackground::Solid;
-                        this.auto_save(cx);
-                    }),
-                ),
-                segmented_item(
-                    "bg-none",
-                    t,
-                    "None",
-                    self.settings.dock_background == SurfaceBackground::None,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.dock_background = SurfaceBackground::None;
-                        this.auto_save(cx);
-                    }),
-                ),
-            ],
-        );
-
-        let size_seg = segmented_track(
-            t,
-            vec![
-                segmented_item(
-                    "sz-compact",
-                    t,
-                    "Compact",
-                    self.settings.size == DockSize::Compact,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.size = DockSize::Compact;
-                        this.auto_save(cx);
-                    }),
-                ),
-                segmented_item(
-                    "sz-med",
-                    t,
-                    "Medium",
-                    self.settings.size == DockSize::Medium,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.size = DockSize::Medium;
-                        this.auto_save(cx);
-                    }),
-                ),
-                segmented_item(
-                    "sz-large",
-                    t,
-                    "Large",
-                    self.settings.size == DockSize::Large,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.size = DockSize::Large;
-                        this.auto_save(cx);
-                    }),
-                ),
-            ],
-        );
-
-        let opacity_pct = (self.settings.dock_opacity * 100.0).round() as i32;
-        let scale_pct = (self.settings.dock_scale * 100.0).round() as i32;
-        let radius_label = self
-            .settings
-            .dock_corner_radius
-            .map_or_else(|| "Auto".to_owned(), |r| format!("{r} px"));
-
-        vec![
-            section_card(
-                t,
-                "Surface",
-                vec![
-                    setting_row(t, Some("\u{E790}"), "Background", bg_seg).into_any_element(),
-                    setting_row(t, Some("\u{E740}"), "Dock Size", size_seg).into_any_element(),
-                    setting_row(
-                        t,
-                        Some("\u{E706}"),
-                        "Opacity",
-                        stepper(
-                            "op-minus",
-                            "op-plus",
-                            t,
-                            format!("{opacity_pct}%"),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_opacity =
-                                    (this.settings.dock_opacity - 0.05).clamp(0.2, 1.0);
-                                this.auto_save(cx);
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_opacity =
-                                    (this.settings.dock_opacity + 0.05).clamp(0.2, 1.0);
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    setting_row(
-                        t,
-                        Some("\u{E8A3}"),
-                        "Scale",
-                        stepper(
-                            "sc-minus",
-                            "sc-plus",
-                            t,
-                            format!("{scale_pct}%"),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_scale =
-                                    ((this.settings.dock_scale * 20.0).round() - 1.0)
-                                        .clamp(15.0, 30.0)
-                                        / 20.0;
-                                this.auto_save(cx);
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_scale =
-                                    ((this.settings.dock_scale * 20.0).round() + 1.0)
-                                        .clamp(15.0, 30.0)
-                                        / 20.0;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    setting_row(
-                        t,
-                        Some("\u{F158}"),
-                        "Corner Radius",
-                        stepper(
-                            "rad-minus",
-                            "rad-plus",
-                            t,
-                            radius_label,
-                            cx.listener(|this, _, _, cx| {
-                                let cur = this.settings.dock_corner_radius.unwrap_or(16);
-                                this.settings.dock_corner_radius = Some((cur - 2).max(0));
-                                this.auto_save(cx);
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                let cur = this.settings.dock_corner_radius.unwrap_or(16);
-                                this.settings.dock_corner_radius = Some((cur + 2).min(32));
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    setting_row(
-                        t,
-                        Some("\u{E74A}"),
-                        "Bottom Margin",
-                        stepper(
-                            "gap-minus",
-                            "gap-plus",
-                            t,
-                            format!("{} px", self.settings.dock_bottom_gap_pixels),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_bottom_gap_pixels =
-                                    (this.settings.dock_bottom_gap_pixels - 2).max(0);
-                                this.auto_save(cx);
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_bottom_gap_pixels =
-                                    (this.settings.dock_bottom_gap_pixels + 2).min(32);
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                ],
-            )
-            .into_any_element(),
-            section_card(
-                t,
-                "Motion",
-                vec![
-                    setting_row(
-                        t,
-                        Some("\u{E945}"),
-                        "Smooth Animations",
-                        ios_switch(
-                            "sw-anim",
-                            t,
-                            self.settings.animations_enabled,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.animations_enabled =
-                                    !this.settings.animations_enabled;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    setting_row(
-                        t,
-                        Some("\u{E71E}"),
-                        "Magnification",
-                        ios_switch(
-                            "sw-mag",
-                            t,
-                            self.settings.magnification_enabled,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.magnification_enabled =
-                                    !this.settings.magnification_enabled;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                ],
-            )
-            .into_any_element(),
-        ]
-    }
-
-    fn render_layout(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let align_seg = segmented_track(
-            t,
-            vec![
-                segmented_item(
-                    "pos-left",
-                    t,
-                    "Left",
-                    self.settings.position == DockPosition::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.position = DockPosition::Left;
-                        this.auto_save(cx);
-                    }),
-                ),
-                segmented_item(
-                    "pos-center",
-                    t,
-                    "Center",
-                    self.settings.position == DockPosition::Center,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.position = DockPosition::Center;
-                        this.auto_save(cx);
-                    }),
-                ),
-                segmented_item(
-                    "pos-right",
-                    t,
-                    "Right",
-                    self.settings.position == DockPosition::Right,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.position = DockPosition::Right;
-                        this.auto_save(cx);
-                    }),
-                ),
-            ],
-        );
-
-        let width_label = self.settings.dock_custom_width_dips.map_or_else(
-            || "Width (Auto)".to_owned(),
-            |w| format!("Width ({w:.0}px)"),
-        );
-
-        vec![
-            section_card(
-                t,
-                "Position & Displays",
-                vec![
-                    setting_row(t, Some("\u{E8E3}"), "Alignment", align_seg).into_any_element(),
-                    setting_row(
-                        t,
-                        Some("\u{E740}"),
-                        "Full Width",
-                        ios_switch(
-                            "sw-fullw",
-                            t,
-                            self.settings.full_width,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.full_width = !this.settings.full_width;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    setting_row(
-                        t,
-                        Some("\u{E72C}"),
-                        width_label,
-                        button(
-                            "btn-reset-width",
-                            t,
-                            "Reset",
-                            ButtonVariant::Secondary,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_custom_width_dips = None;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    setting_row(
-                        t,
-                        Some("\u{E7F4}"),
-                        "All Monitors",
-                        ios_switch(
-                            "sw-allmon",
-                            t,
-                            self.settings.show_on_all_monitors,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.show_on_all_monitors =
-                                    !this.settings.show_on_all_monitors;
                                 this.auto_save(cx);
                             }),
                         ),
@@ -732,6 +537,155 @@ impl SettingsView {
         ]
     }
 
+    fn render_themes(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let theme_seg = segmented_track(
+            t,
+            [
+                ("System", AppTheme::System),
+                ("Dark", AppTheme::Dark),
+                ("Light", AppTheme::Light),
+            ]
+            .into_iter()
+            .map(|(label, th)| {
+                segmented_item(
+                    SharedString::from(format!("theme-{label}")),
+                    t,
+                    label,
+                    self.settings.theme == th,
+                    cx.listener(move |this, _, _, cx| {
+                        this.settings.theme = th;
+                        this.auto_save(cx);
+                    }),
+                )
+            })
+            .collect(),
+        );
+
+        let bg_seg = segmented_track(
+            t,
+            [
+                ("Glass", SurfaceBackground::Glass),
+                ("Solid", SurfaceBackground::Solid),
+                ("None", SurfaceBackground::None),
+            ]
+            .into_iter()
+            .map(|(label, bg)| {
+                segmented_item(
+                    SharedString::from(format!("bg-{label}")),
+                    t,
+                    label,
+                    self.settings.dock_background == bg,
+                    cx.listener(move |this, _, _, cx| {
+                        this.settings.dock_background = bg;
+                        this.auto_save(cx);
+                    }),
+                )
+            })
+            .collect(),
+        );
+
+        let opacity_pct = (self.settings.dock_opacity * 100.0).round() as i32;
+        let radius_label = self
+            .settings
+            .dock_corner_radius
+            .map_or_else(|| "Auto".to_owned(), |r| format!("{r} px"));
+
+        vec![
+            section_card(
+                t,
+                "Theme & Surfaces",
+                vec![
+                    setting_row(t, Some("\u{E790}"), "Theme", theme_seg).into_any_element(),
+                    setting_row(t, Some("\u{E790}"), "Background", bg_seg).into_any_element(),
+                    setting_row(
+                        t,
+                        Some("\u{E706}"),
+                        "Opacity",
+                        stepper(
+                            "op-minus",
+                            "op-plus",
+                            t,
+                            format!("{opacity_pct}%"),
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.dock_opacity =
+                                    (this.settings.dock_opacity - 0.05).clamp(0.2, 1.0);
+                                this.auto_save(cx);
+                            }),
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.dock_opacity =
+                                    (this.settings.dock_opacity + 0.05).clamp(0.2, 1.0);
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    setting_row(
+                        t,
+                        Some("\u{F158}"),
+                        "Corner Radius",
+                        stepper(
+                            "rad-minus",
+                            "rad-plus",
+                            t,
+                            radius_label,
+                            cx.listener(|this, _, _, cx| {
+                                let cur = this.settings.dock_corner_radius.unwrap_or(16);
+                                this.settings.dock_corner_radius = Some((cur - 2).max(0));
+                                this.auto_save(cx);
+                            }),
+                            cx.listener(|this, _, _, cx| {
+                                let cur = this.settings.dock_corner_radius.unwrap_or(16);
+                                this.settings.dock_corner_radius = Some((cur + 2).min(32));
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                ],
+            )
+            .into_any_element(),
+            section_card(
+                t,
+                "Motion",
+                vec![
+                    setting_row(
+                        t,
+                        Some("\u{E945}"),
+                        "Smooth Animations",
+                        ios_switch(
+                            "sw-anim",
+                            t,
+                            self.settings.animations_enabled,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.animations_enabled =
+                                    !this.settings.animations_enabled;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    setting_row(
+                        t,
+                        Some("\u{E71E}"),
+                        "Magnification",
+                        ios_switch(
+                            "sw-mag",
+                            t,
+                            self.settings.magnification_enabled,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.magnification_enabled =
+                                    !this.settings.magnification_enabled;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                ],
+            )
+            .into_any_element(),
+        ]
+    }
+
     fn render_widget_card(
         &self,
         w: &'static widgets::WidgetDescriptor,
@@ -741,11 +695,9 @@ impl SettingsView {
         let wid = w.id;
         let enabled = self.settings.is_widget_enabled(wid);
         let (top_line, bot_line) = widget_preview_lines(wid, &self.settings);
-
         let border_col = if enabled { t.accent } else { t.border };
         let card_hover = t.surface_hover;
 
-        // Inline widget-specific settings right inside the preview card
         let inline_controls: Option<AnyElement> =
             match wid {
                 "weather" => Some(
@@ -878,8 +830,8 @@ impl SettingsView {
             .min_w_0()
             .flex()
             .flex_col()
-            .gap(px(10.0))
-            .p(px(12.0))
+            .gap(px(9.0))
+            .p(px(11.0))
             .rounded(px(12.0))
             .bg(rgba(t.surface))
             .border_1()
@@ -891,12 +843,11 @@ impl SettingsView {
                 this.settings.set_widget_enabled(wid, !cur);
                 this.auto_save(cx);
             }))
-            // Live Dock Chip Preview
             .child(
                 div()
                     .w_full()
-                    .h(px(54.0))
-                    .rounded(px(9.0))
+                    .h(px(50.0))
+                    .rounded(px(8.0))
                     .bg(rgba(t.dock_preview_bg))
                     .border_1()
                     .border_color(rgba(0xffffff18))
@@ -906,7 +857,7 @@ impl SettingsView {
                     .child(
                         div()
                             .px(px(12.0))
-                            .py(px(5.0))
+                            .py(px(4.5))
                             .rounded(px(7.0))
                             .bg(rgba(0xffffff10))
                             .flex()
@@ -914,7 +865,7 @@ impl SettingsView {
                             .items_center()
                             .child(
                                 div()
-                                    .text_size(px(12.0))
+                                    .text_size(px(11.5))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(rgba(0xf8fafcff))
                                     .child(top_line),
@@ -927,7 +878,6 @@ impl SettingsView {
                             ),
                     ),
             )
-            // Card footer: Icon + Name + Active indicator
             .child(
                 div()
                     .w_full()
@@ -943,12 +893,12 @@ impl SettingsView {
                             .min_w_0()
                             .child(icon_glyph(
                                 widget_glyph(wid),
-                                13.5,
+                                13.0,
                                 if enabled { t.accent } else { t.text_secondary },
                             ))
                             .child(
                                 div()
-                                    .text_size(px(12.5))
+                                    .text_size(px(12.0))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .text_color(rgba(t.text_primary))
                                     .child(w.name),
@@ -1008,16 +958,35 @@ impl SettingsView {
                 .into_any_element(),
         );
 
-        // Strict 2-column rows so cards never overflow horizontally
-        for pair in widgets::ALL_WIDGETS.chunks(2) {
-            let mut row = div().w_full().flex().gap(px(10.0));
-            for w in pair {
-                row = row.child(self.render_widget_card(w, t, cx));
+        for &cat in widgets::WIDGET_CATEGORIES {
+            let items: Vec<&'static widgets::WidgetDescriptor> = widgets::ALL_WIDGETS
+                .iter()
+                .filter(|w| w.category == cat)
+                .collect();
+            if items.is_empty() {
+                continue;
             }
-            if pair.len() == 1 {
-                row = row.child(div().flex_1());
+            out.push(
+                div()
+                    .w_full()
+                    .pt(px(4.0))
+                    .px(px(2.0))
+                    .text_size(px(11.5))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgba(t.text_secondary))
+                    .child(cat)
+                    .into_any_element(),
+            );
+            for pair in items.chunks(2) {
+                let mut row = div().w_full().flex().gap(px(10.0));
+                for &w in pair {
+                    row = row.child(self.render_widget_card(w, t, cx));
+                }
+                if pair.len() == 1 {
+                    row = row.child(div().flex_1());
+                }
+                out.push(row.into_any_element());
             }
-            out.push(row.into_any_element());
         }
         out
     }
@@ -1148,7 +1117,7 @@ impl SettingsView {
         ]
     }
 
-    fn render_profiles(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_preferences(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut prof_rows: Vec<AnyElement> = self
             .settings
             .profiles
@@ -1234,6 +1203,30 @@ impl SettingsView {
         );
 
         vec![
+            section_card(
+                t,
+                "System",
+                vec![
+                    setting_row(
+                        t,
+                        Some("\u{E7E8}"),
+                        "Start with Windows",
+                        ios_switch(
+                            "sw-startup",
+                            t,
+                            self.startup_enabled,
+                            cx.listener(|this, _, _, cx| {
+                                let next = !this.startup_enabled;
+                                win32::set_startup_enabled(next);
+                                this.startup_enabled = win32::is_startup_enabled();
+                                cx.notify();
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                ],
+            )
+            .into_any_element(),
             section_card(t, "Profiles", prof_rows).into_any_element(),
             section_card(
                 t,
@@ -1297,10 +1290,14 @@ impl SettingsView {
 
     fn render_about(&self, t: &UiTheme) -> Vec<AnyElement> {
         let data_dir = settings::app_data_dir().to_string_lossy().into_owned();
+        let log_file = settings::app_data_dir()
+            .join("opentaskbar.log")
+            .to_string_lossy()
+            .into_owned();
         vec![
             section_card(
                 t,
-                "OpenTaskBar",
+                "Application",
                 vec![
                     setting_row(
                         t,
@@ -1309,6 +1306,13 @@ impl SettingsView {
                         badge(t, "0.1.0 Hybrid", true),
                     )
                     .into_any_element(),
+                ],
+            )
+            .into_any_element(),
+            section_card(
+                t,
+                "Diagnostics & Recovery",
+                vec![
                     setting_row(
                         t,
                         Some("\u{E8B7}"),
@@ -1318,9 +1322,20 @@ impl SettingsView {
                             t,
                             "Open",
                             ButtonVariant::Secondary,
-                            move |_, _, _| {
-                                pins::launch(data_dir.clone());
-                            },
+                            move |_, _, _| pins::launch(data_dir.clone()),
+                        ),
+                    )
+                    .into_any_element(),
+                    setting_row(
+                        t,
+                        Some("\u{E9F5}"),
+                        "Runtime Log",
+                        button(
+                            "btn-open-log",
+                            t,
+                            "Open",
+                            ButtonVariant::Secondary,
+                            move |_, _, _| pins::launch(log_file.clone()),
                         ),
                     )
                     .into_any_element(),
@@ -1333,9 +1348,7 @@ impl SettingsView {
                             t,
                             "Restore",
                             ButtonVariant::Destructive,
-                            |_, _, _| {
-                                opentaskbar_shell::taskbar::restore_from_journal();
-                            },
+                            |_, _, _| opentaskbar_shell::taskbar::restore_from_journal(),
                         ),
                     )
                     .into_any_element(),
@@ -1357,16 +1370,8 @@ impl Render for SettingsView {
         let nav_items: Vec<AnyElement> = SettingsPage::ALL
             .into_iter()
             .map(|p| {
-                let count_badge = match p {
-                    SettingsPage::Widgets => Some(format!(
-                        "{active_widgets_count}/{}",
-                        widgets::ALL_WIDGETS.len()
-                    )),
-                    SettingsPage::Profiles if !self.settings.profiles.is_empty() => {
-                        Some(self.settings.profiles.len().to_string())
-                    }
-                    _ => None,
-                };
+                let count_badge = (p == SettingsPage::Widgets)
+                    .then(|| format!("{active_widgets_count}/{}", widgets::ALL_WIDGETS.len()));
                 sidebar_nav_item(
                     SharedString::from(format!("nav-{}", p.title())),
                     &t,
@@ -1388,16 +1393,14 @@ impl Render for SettingsView {
             .collect();
 
         let content_blocks = match self.page {
-            SettingsPage::General => self.render_general(&t, cx),
-            SettingsPage::Appearance => self.render_appearance(&t, cx),
-            SettingsPage::Layout => self.render_layout(&t, cx),
+            SettingsPage::Dock => self.render_dock(&t, cx),
             SettingsPage::Widgets => self.render_widgets(&t, cx),
+            SettingsPage::Themes => self.render_themes(&t, cx),
             SettingsPage::Stacks => self.render_stacks(&t, cx),
-            SettingsPage::Profiles => self.render_profiles(&t, cx),
+            SettingsPage::Preferences => self.render_preferences(&t, cx),
             SettingsPage::About => self.render_about(&t),
         };
 
-        // Visible scrollbar thumb calculated from ScrollHandle
         let max_off: f32 = self.scroll_handle.max_offset().height.into();
         let cur_off: f32 = (-self.scroll_handle.offset().y).into();
         let viewport_h: f32 = self.scroll_handle.bounds().size.height.into();
@@ -1427,7 +1430,6 @@ impl Render for SettingsView {
             .h_full()
             .flex()
             .flex_col()
-            .justify_between()
             .p(px(12.0))
             .bg(rgba(t.sidebar_bg))
             .border_r_1()
@@ -1462,7 +1464,7 @@ impl Render for SettingsView {
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(14.0))
+            .gap(px(12.0))
             .children(content_blocks)
             .with_animation(
                 ("settings-page-anim", self.page_epoch),
@@ -1500,7 +1502,7 @@ impl Render for SettingsView {
                 div()
                     .w_full()
                     .px(px(22.0))
-                    .py(px(16.0))
+                    .py(px(15.0))
                     .border_b_1()
                     .border_color(rgba(t.border))
                     .flex()
@@ -1509,7 +1511,7 @@ impl Render for SettingsView {
                     .child(icon_glyph(self.page.glyph(), 17.0, t.accent))
                     .child(
                         div()
-                            .text_size(px(18.0))
+                            .text_size(px(17.5))
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(rgba(t.text_primary))
                             .child(self.page.title()),

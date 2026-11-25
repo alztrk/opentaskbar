@@ -18,10 +18,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use windows_sys::core::BOOL;
 
-use crate::flyout::{self, FlyoutAction, FlyoutBlock, FlyoutIcon, FlyoutSpec};
-use crate::icon_cache;
-use crate::menu::{self, MenuEntry, MenuIcon};
-use crate::pins;
+use crate::platform::{icon_cache, pins};
+use crate::ui::flyout::{self, FlyoutAction, FlyoutBlock, FlyoutIcon, FlyoutSpec};
+use crate::ui::menu::{self, MenuEntry, MenuIcon};
 
 #[derive(Clone, Debug)]
 pub struct BackgroundApp {

@@ -40,7 +40,7 @@ use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::core::{HSTRING, Interface, Result};
 use windows_numerics::{Matrix3x2, Vector2};
 
-use crate::icon_cache::RawIcon;
+use crate::platform::icon_cache::RawIcon;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellGlyph {

@@ -1,43 +1,26 @@
-//! OpenTaskBar (Rust + GPUI) entry point.
+//! OpenTaskBar (Rust Hybrid: DirectComposition Dock + GPUI Settings) entry point.
 //!
 //! Modes:
 //! - `--extract-icons`: short-lived icon extractor worker (zero log/mutex/UI).
-//! - `--watchdog=<pid>:<token>`: out-of-process taskbar recovery watchdog.
+//! - `--settings`: on-demand GPUI Settings window (frees 100% RAM/VRAM on close).
 //! - `--restore`: restores Explorer's taskbar from the recovery journal and exits.
-//! - default: acquires single-instance lock, loads settings, and launches the GPUI dock.
+//! - default: acquires single-instance lock, loads settings, and runs the native dock.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]
-mod dcomp;
-#[cfg(windows)]
 mod dock;
 #[cfg(windows)]
-mod flyout;
+mod platform;
 #[cfg(windows)]
-mod icon_cache;
-#[cfg(windows)]
-mod menu;
-#[cfg(windows)]
-mod pins;
-#[cfg(windows)]
-mod preview;
-#[cfg(windows)]
-mod settings_ui;
-#[cfg(windows)]
-mod tray;
-#[cfg(windows)]
-mod ui_components;
+mod ui;
 #[cfg(windows)]
 mod widgets;
-#[cfg(windows)]
-mod win32;
 
 #[cfg(windows)]
 fn enable_dpi_awareness() {
     use windows_sys::Win32::UI::HiDpi::{
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
     };
-    // SAFETY: called once at startup before any window is created.
     unsafe {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
@@ -48,8 +31,8 @@ fn main() {
 
     #[cfg(windows)]
     {
-        if args.iter().any(|a| a == icon_cache::WORKER_ARG) {
-            icon_cache::run_worker();
+        if args.iter().any(|a| a == platform::icon_cache::WORKER_ARG) {
+            platform::icon_cache::run_worker();
             return;
         }
         if args.iter().any(|a| a == "--restore") {
@@ -57,8 +40,8 @@ fn main() {
             return;
         }
         enable_dpi_awareness();
-        if args.iter().any(|a| a == settings_ui::SETTINGS_ARG) {
-            settings_ui::run_settings_window();
+        if args.iter().any(|a| a == ui::settings::SETTINGS_ARG) {
+            ui::settings::run_settings_window();
             return;
         }
     }

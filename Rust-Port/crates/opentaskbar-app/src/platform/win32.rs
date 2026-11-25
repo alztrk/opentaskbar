@@ -327,7 +327,7 @@ pub fn reposition_dock_window(hwnd: usize, x: i32, y: i32, w: i32, h: i32) {
     }
 }
 
-use crate::menu::{self, MenuEntry, MenuIcon};
+use crate::ui::menu::{self, MenuEntry, MenuIcon};
 
 pub fn show_dock_context_menu(hwnd: usize, is_dark: bool) -> ContextAction {
     let entries = vec![
@@ -448,5 +448,75 @@ pub fn trim_working_set() {
     // SAFETY: pseudo handle for current process.
     unsafe {
         let _ = K32EmptyWorkingSet(GetCurrentProcess());
+    }
+}
+
+/// Checks whether OpenTaskBar is registered under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+pub fn is_startup_enabled() -> bool {
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+    };
+    let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0"
+        .encode_utf16()
+        .collect();
+    let name: Vec<u16> = "OpenTaskbar\0".encode_utf16().collect();
+    unsafe {
+        let mut hkey: HKEY = std::ptr::null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) != 0 {
+            return false;
+        }
+        let mut size = 0u32;
+        let ok = RegQueryValueExW(
+            hkey,
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        ) == 0
+            && size > 2;
+        RegCloseKey(hkey);
+        ok
+    }
+}
+
+/// Enables or disables automatic launch at Windows sign-in (`HKCU\...\Run`).
+pub fn set_startup_enabled(enabled: bool) {
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW,
+        RegOpenKeyExW, RegSetValueExW,
+    };
+    let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0"
+        .encode_utf16()
+        .collect();
+    let name: Vec<u16> = "OpenTaskbar\0".encode_utf16().collect();
+    unsafe {
+        let mut hkey: HKEY = std::ptr::null_mut();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            subkey.as_ptr(),
+            0,
+            KEY_SET_VALUE,
+            &mut hkey,
+        ) != 0
+        {
+            return;
+        }
+        if enabled {
+            if let Ok(exe) = std::env::current_exe() {
+                let cmd: Vec<u16> = format!("\"{}\"\0", exe.display()).encode_utf16().collect();
+                let _ = RegSetValueExW(
+                    hkey,
+                    name.as_ptr(),
+                    0,
+                    REG_SZ,
+                    cmd.as_ptr().cast(),
+                    (cmd.len() * 2) as u32,
+                );
+            }
+        } else {
+            let _ = RegDeleteValueW(hkey, name.as_ptr());
+        }
+        RegCloseKey(hkey);
     }
 }

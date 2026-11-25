@@ -36,7 +36,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
-use crate::win32;
+use crate::platform::win32;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
@@ -164,6 +164,20 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
 
 fn pt_in_rect(r: &RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
+}
+
+fn fill_round_rect(hdc: HDC, l: i32, t: i32, r: i32, b: i32, rad: i32, color: u32) {
+    unsafe {
+        let brush = CreateSolidBrush(color);
+        let pen = CreatePen(PS_SOLID, 1, color);
+        let ob = SelectObject(hdc, brush as _);
+        let op = SelectObject(hdc, pen as _);
+        RoundRect(hdc, l, t, r, b, rad, rad);
+        SelectObject(hdc, ob);
+        SelectObject(hdc, op);
+        DeleteObject(brush as _);
+        DeleteObject(pen as _);
+    }
 }
 
 /// Convenience wrapper for consumers that only handle primary clicks.
@@ -749,44 +763,28 @@ impl FlyoutState<'_> {
 
                         let bar_top = y + s(22.0);
                         let bar_h = s(7.0);
-                        let tb = CreateSolidBrush(card_bg);
-                        let tp = CreatePen(PS_SOLID, 1, card_bg);
-                        let ob = SelectObject(hdc, tb as _);
-                        let op = SelectObject(hdc, tp as _);
-                        RoundRect(
+                        fill_round_rect(
                             hdc,
                             pad,
                             bar_top,
                             w - right_pad,
                             bar_top + bar_h,
                             s(4.0),
-                            s(4.0),
+                            card_bg,
                         );
-                        SelectObject(hdc, ob);
-                        SelectObject(hdc, op);
-                        DeleteObject(tb as _);
-                        DeleteObject(tp as _);
 
                         let fill_w =
                             (((w - pad - right_pad) as f32) * ratio.clamp(0.0, 1.0)).round() as i32;
                         if fill_w > s(4.0) {
-                            let fb = CreateSolidBrush(accent);
-                            let fp = CreatePen(PS_SOLID, 1, accent);
-                            let ob = SelectObject(hdc, fb as _);
-                            let op = SelectObject(hdc, fp as _);
-                            RoundRect(
+                            fill_round_rect(
                                 hdc,
                                 pad,
                                 bar_top,
                                 pad + fill_w,
                                 bar_top + bar_h,
                                 s(4.0),
-                                s(4.0),
+                                accent,
                             );
-                            SelectObject(hdc, ob);
-                            SelectObject(hdc, op);
-                            DeleteObject(fb as _);
-                            DeleteObject(fp as _);
                         }
                         y += h;
                     }
@@ -805,15 +803,7 @@ impl FlyoutState<'_> {
                         } else {
                             card_bg
                         };
-                        let fb = CreateSolidBrush(fill);
-                        let fp = CreatePen(PS_SOLID, 1, fill);
-                        let ob = SelectObject(hdc, fb as _);
-                        let op = SelectObject(hdc, fp as _);
-                        RoundRect(hdc, pad, y, w - right_pad, y + h, radius, radius);
-                        SelectObject(hdc, ob);
-                        SelectObject(hdc, op);
-                        DeleteObject(fb as _);
-                        DeleteObject(fp as _);
+                        fill_round_rect(hdc, pad, y, w - right_pad, y + h, radius, fill);
 
                         let mut text_left = pad + s(10.0);
                         if let Some(ic) = icon {
@@ -893,15 +883,7 @@ impl FlyoutState<'_> {
                             } else {
                                 card_bg
                             };
-                            let fb = CreateSolidBrush(fill);
-                            let fp = CreatePen(PS_SOLID, 1, fill);
-                            let ob = SelectObject(hdc, fb as _);
-                            let op = SelectObject(hdc, fp as _);
-                            RoundRect(hdc, left, y, left + bw, y + h, radius, radius);
-                            SelectObject(hdc, ob);
-                            SelectObject(hdc, op);
-                            DeleteObject(fb as _);
-                            DeleteObject(fp as _);
+                            fill_round_rect(hdc, left, y, left + bw, y + h, radius, fill);
 
                             SelectObject(hdc, body_font as _);
                             SetTextColor(
@@ -973,23 +955,15 @@ impl FlyoutState<'_> {
                 let thumb_top = self.content_top_px + ((track_h - thumb_h) as f32 * ratio) as i32;
                 let sb_w = s(4.0).max(3);
                 let sb_left = w - s(8.0);
-                let sb_brush = CreateSolidBrush(scroll_col);
-                let sb_pen = CreatePen(PS_SOLID, 1, scroll_col);
-                let ob = SelectObject(hdc, sb_brush as _);
-                let op = SelectObject(hdc, sb_pen as _);
-                RoundRect(
+                fill_round_rect(
                     hdc,
                     sb_left,
                     thumb_top,
                     sb_left + sb_w,
                     thumb_top + thumb_h,
                     sb_w,
-                    sb_w,
+                    scroll_col,
                 );
-                SelectObject(hdc, ob);
-                SelectObject(hdc, op);
-                DeleteObject(sb_brush as _);
-                DeleteObject(sb_pen as _);
             }
 
             SelectObject(hdc, old_f);

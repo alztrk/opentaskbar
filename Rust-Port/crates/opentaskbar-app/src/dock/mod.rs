@@ -38,16 +38,19 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
-use crate::dcomp::{DcompEngine, PillNodes, ShellGlyph, VisualNode};
-use crate::icon_cache::{self, RawIcon};
-use crate::pins::{self, PinnedApp};
-use crate::preview::{PreviewItem, PreviewPopup};
-use crate::settings_ui;
-use crate::tray;
-use crate::widgets::{self, WidgetRuntime};
-use crate::win32::{
+pub mod dcomp;
+pub mod preview;
+pub mod tray;
+
+use self::dcomp::{DcompEngine, PillNodes, ShellGlyph, VisualNode};
+use self::preview::{PreviewItem, PreviewPopup};
+use crate::platform::icon_cache::{self, RawIcon};
+use crate::platform::pins::{self, PinnedApp};
+use crate::platform::win32::{
     self, AppContextAction, ContextAction, MonitorInfo, RecycleBinAction, TaskViewAction,
 };
+use crate::ui::settings as settings_ui;
+use crate::widgets::{self, WidgetRuntime};
 
 const VERTICAL_EDGE_GAP: f32 = 5.0;
 const TOOLTIP_HEADROOM: f32 = 36.0;
