@@ -90,6 +90,10 @@ fn cache_path(spec: &str) -> PathBuf {
     cache_dir().join(format!("{:016x}.oticon", hash_key(spec)))
 }
 
+pub fn read_cached_raw(spec: &str) -> Option<RawIcon> {
+    read_cached(spec)
+}
+
 fn read_cached(spec: &str) -> Option<RawIcon> {
     let expected_fp = fingerprint(spec)?;
     let bytes = fs::read(cache_path(spec)).ok()?;

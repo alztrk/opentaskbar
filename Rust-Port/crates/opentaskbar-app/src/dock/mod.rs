@@ -1180,10 +1180,17 @@ impl DockState {
     fn request_missing_icons(&mut self) {
         let mut missing = Vec::new();
         for slot in &self.slots {
-            if !self.icon_surfaces.contains_key(&slot.icon_source)
-                && self.in_flight_icons.insert(slot.icon_source.clone())
-            {
-                missing.push(slot.icon_source.clone());
+            if !self.icon_surfaces.contains_key(&slot.icon_source) {
+                if let Some(raw) = icon_cache::read_cached_raw(&slot.icon_source)
+                    && let Ok(surf) = self.dcomp.create_app_icon_surface(&raw)
+                {
+                    self.icon_surfaces
+                        .insert(slot.icon_source.clone(), Some(surf));
+                    continue;
+                }
+                if self.in_flight_icons.insert(slot.icon_source.clone()) {
+                    missing.push(slot.icon_source.clone());
+                }
             }
         }
         if missing.is_empty() {
@@ -2915,6 +2922,7 @@ unsafe extern "system" fn wnd_proc(
 }
 
 pub fn run(settings: DockSettings) {
+    let startup_t0 = Instant::now();
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
@@ -2923,6 +2931,7 @@ pub fn run(settings: DockSettings) {
     let initial_pins = load_effective_pins(&settings);
     let initial_running = tracker::enumerate_windows();
     let initial_slots = build_slots(&initial_pins, &initial_running, &[]);
+    let t_pins_ms = startup_t0.elapsed().as_millis();
 
     let class_name = wide("OpenTaskBarDock");
     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
@@ -2978,12 +2987,8 @@ pub fn run(settings: DockSettings) {
             DragAcceptFiles(hwnd, 1);
         }
 
-        if monitor.is_primary {
-            let desired_total_dips = pill_height_dips(&settings) + VERTICAL_EDGE_GAP * 2.0;
-            let desired_total_px = (desired_total_dips * monitor.dpi_scale).ceil() as i32;
-            opentaskbar_shell::taskbar::begin_replacement(hwnd_val, auto_hide, desired_total_px);
-        }
-
+        // Paint and commit the first DirectComposition frame immediately BEFORE synchronous
+        // Explorer AppBar RPCs so the dock appears on screen without waiting on shell IPC.
         match DockState::new(
             hwnd_val,
             monitor,
@@ -3001,6 +3006,15 @@ pub fn run(settings: DockSettings) {
                     SetTimer(hwnd, TIMER_WIDGETS, 2000, None);
                 }
                 created.push((hwnd, ptr));
+                if monitor.is_primary {
+                    let desired_total_dips = pill_height_dips(&settings) + VERTICAL_EDGE_GAP * 2.0;
+                    let desired_total_px = (desired_total_dips * monitor.dpi_scale).ceil() as i32;
+                    opentaskbar_shell::taskbar::begin_replacement(
+                        hwnd_val,
+                        auto_hide,
+                        desired_total_px,
+                    );
+                }
             }
             Err(err) => {
                 opentaskbar_core::log::error(format!(
@@ -3013,6 +3027,13 @@ pub fn run(settings: DockSettings) {
             }
         }
     }
+
+    opentaskbar_core::log::info(format!(
+        "Dock ready in {} ms (pins+windows: {} ms, monitors: {}).",
+        startup_t0.elapsed().as_millis(),
+        t_pins_ms,
+        created.len()
+    ));
 
     if created.is_empty() {
         opentaskbar_core::log::error("No dock windows could be created.");

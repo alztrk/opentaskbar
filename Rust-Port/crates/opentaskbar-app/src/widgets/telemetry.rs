@@ -7,6 +7,7 @@
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -121,10 +122,26 @@ pub fn system_uptime_string() -> String {
     }
 }
 
+static RECYCLE_BIN_FULL: AtomicBool = AtomicBool::new(false);
+static RECYCLE_BIN_QUERYING: AtomicBool = AtomicBool::new(false);
+
+/// Non-blocking Recycle Bin check: returns cached state immediately and refreshes on a background
+/// thread so slow/sleeping drives never stall dock startup or UI frames.
 pub fn is_recycle_bin_non_empty() -> bool {
-    let mut info: SHQUERYRBINFO = unsafe { std::mem::zeroed() };
-    info.cbSize = size_of::<SHQUERYRBINFO>() as u32;
-    unsafe { SHQueryRecycleBinW(std::ptr::null(), &mut info) == 0 && info.i64NumItems > 0 }
+    if !RECYCLE_BIN_QUERYING.swap(true, Ordering::AcqRel) {
+        let _ = std::thread::Builder::new()
+            .name("opentaskbar-bin-query".into())
+            .spawn(|| {
+                let mut info: SHQUERYRBINFO = unsafe { std::mem::zeroed() };
+                info.cbSize = size_of::<SHQUERYRBINFO>() as u32;
+                let full = unsafe {
+                    SHQueryRecycleBinW(std::ptr::null(), &mut info) == 0 && info.i64NumItems > 0
+                };
+                RECYCLE_BIN_FULL.store(full, Ordering::Release);
+                RECYCLE_BIN_QUERYING.store(false, Ordering::Release);
+            });
+    }
+    RECYCLE_BIN_FULL.load(Ordering::Acquire)
 }
 
 pub fn empty_recycle_bin() {
