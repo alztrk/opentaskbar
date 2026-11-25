@@ -407,7 +407,15 @@ impl DcompEngine {
             let cy = height_dips * 0.5;
             match spec {
                 WidgetChipSpec::IconOnly(icon) => {
-                    draw_chip_icon(dc, *icon, width_dips * 0.5, cy, 18.0, dpi, pal.text_primary)?;
+                    draw_chip_icon(
+                        &self.dwrite_factory,
+                        dc,
+                        *icon,
+                        width_dips * 0.5,
+                        cy,
+                        16.0,
+                        pal.text_primary,
+                    )?;
                 }
                 WidgetChipSpec::IconValue {
                     icon,
@@ -433,7 +441,7 @@ impl DcompEngine {
                     } else {
                         pal.text_primary
                     };
-                    draw_chip_icon(dc, *icon, 14.0, cy, 17.0, dpi, icon_rgb)?;
+                    draw_chip_icon(&self.dwrite_factory, dc, *icon, 14.0, cy, 15.0, icon_rgb)?;
                     let wtxt: Vec<u16> = value.encode_utf16().collect();
                     dc.DrawText(
                         &wtxt,
@@ -1171,7 +1179,9 @@ impl DcompEngine {
             } else {
                 pal.text_primary
             };
-            draw_svg_bitmap_d2d(
+            let glyph_size = (w * 0.78).max(12.0);
+            draw_fluent_glyph_d2d(
+                &self.dwrite_factory,
                 dc,
                 app_icon,
                 D2D_RECT_F {
@@ -1180,7 +1190,7 @@ impl DcompEngine {
                     right: w,
                     bottom: h,
                 },
-                size_px,
+                glyph_size,
                 color,
                 0.96,
             )?;
@@ -1369,56 +1379,49 @@ impl DcompEngine {
 #[allow(dead_code)]
 fn _unused_rect_check(_: RECT, _: D2D_SIZE_F) {}
 
-unsafe fn draw_svg_bitmap_d2d(
+unsafe fn draw_fluent_glyph_d2d(
+    dwrite: &IDWriteFactory,
     dc: &ID2D1DeviceContext,
     icon: AppIcon,
     dest: D2D_RECT_F,
-    raster_px: u32,
+    font_size: f32,
     color: Rgb,
     alpha: f32,
 ) -> Result<()> {
-    let px_size = raster_px.clamp(8, 256);
-    let Some(premul) = icons::render_svg_premul_bgra(icon, px_size, color, alpha) else {
-        return Ok(());
-    };
-    let props = D2D1_BITMAP_PROPERTIES1 {
-        pixelFormat: D2D1_PIXEL_FORMAT {
-            format: DXGI_FORMAT_B8G8R8A8_UNORM,
-            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-        },
-        dpiX: 96.0,
-        dpiY: 96.0,
-        ..Default::default()
-    };
+    let glyph: Vec<u16> = icons::fluent_glyph(icon).encode_utf16().collect();
+    let col = color_rgba(color.0, color.1, color.2, alpha);
     unsafe {
-        let bitmap = dc.CreateBitmap(
-            D2D_SIZE_U {
-                width: px_size,
-                height: px_size,
-            },
-            Some(premul.as_ptr().cast()),
-            px_size * 4,
-            &props,
+        let fmt = dwrite.CreateTextFormat(
+            &HSTRING::from("Segoe Fluent Icons"),
+            None,
+            windows::Win32::Graphics::DirectWrite::DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            font_size,
+            &HSTRING::from("en-US"),
         )?;
-        dc.DrawBitmap(
-            &bitmap,
-            Some(&dest),
-            1.0,
-            D2D1_INTERPOLATION_MODE_LINEAR,
-            None,
-            None,
+        fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+        fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        let brush = dc.CreateSolidColorBrush(&col, None)?;
+        dc.DrawText(
+            &glyph,
+            &fmt,
+            &dest,
+            &brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
         );
     }
     Ok(())
 }
 
 unsafe fn draw_chip_icon(
+    dwrite: &IDWriteFactory,
     dc: &ID2D1DeviceContext,
     icon: ChipIcon,
     cx: f32,
     cy: f32,
     size_dips: f32,
-    dpi: f32,
     color: Rgb,
 ) -> Result<()> {
     let app_icon = match icon {
@@ -1434,10 +1437,10 @@ unsafe fn draw_chip_icon(
         ChipIcon::Folder => AppIcon::Folder,
         ChipIcon::Grid => AppIcon::LayoutGrid,
     };
-    let half = size_dips * 0.5;
-    let raster_px = (size_dips * dpi).round().max(12.0) as u32;
+    let half = size_dips * 0.6;
     unsafe {
-        draw_svg_bitmap_d2d(
+        draw_fluent_glyph_d2d(
+            dwrite,
             dc,
             app_icon,
             D2D_RECT_F {
@@ -1446,7 +1449,7 @@ unsafe fn draw_chip_icon(
                 right: cx + half,
                 bottom: cy + half,
             },
-            raster_px,
+            size_dips,
             color,
             0.96,
         )

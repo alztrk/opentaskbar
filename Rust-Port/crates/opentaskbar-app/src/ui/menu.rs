@@ -136,7 +136,6 @@ pub(super) unsafe fn draw_menu_icon(
     cy: i32,
     dpi: f32,
     color: u32,
-    bg_color: u32,
 ) {
     use crate::design::icons::{self, AppIcon};
     let app_icon = match icon {
@@ -158,9 +157,9 @@ pub(super) unsafe fn draw_menu_icon(
         MenuIcon::ChevronRight => AppIcon::ChevronRight,
         MenuIcon::Layers => AppIcon::Layers,
     };
-    let size_px = (18.0 * dpi).round() as i32;
+    let size_px = (15.0 * dpi).round() as i32;
     unsafe {
-        icons::draw_svg_icon_gdi(hdc, app_icon, cx, cy, size_px, color, bg_color);
+        icons::draw_fluent_icon_gdi(hdc, app_icon, cx, cy, size_px, color);
     }
 }
 
@@ -419,7 +418,6 @@ impl MenuState {
                             (rc.top + rc.bottom) / 2,
                             dpi,
                             ic_col,
-                            row_bg,
                         );
 
                         let old_font = SelectObject(hdc, main_font as _);

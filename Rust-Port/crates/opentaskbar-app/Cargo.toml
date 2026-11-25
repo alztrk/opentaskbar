@@ -19,7 +19,6 @@ image.workspace = true
 opentaskbar-core = { path = "../opentaskbar-core" }
 opentaskbar-shell = { path = "../opentaskbar-shell" }
 raw-window-handle.workspace = true
-resvg.workspace = true
 smallvec.workspace = true
 
 [target.'cfg(windows)'.dependencies]
