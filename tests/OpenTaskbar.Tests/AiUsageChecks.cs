@@ -960,15 +960,17 @@ internal static class AiUsageChecks
             var weeklyTrack = (Border)barsObj.GetType().GetProperty("WeeklyTrack")!.GetValue(barsObj)!;
             var weeklyReset = (TextBlock)barsObj.GetType().GetProperty("WeeklyReset")!.GetValue(barsObj)!;
             var fullResetText = weeklyReset.Text;
+            // "35" can legitimately appear in the reset *time* depending on the wall clock, so assert on
+            // the compact-percentage marker instead of bare digits (#173 CI triage).
             if (weeklyLabel.Visibility != System.Windows.Visibility.Visible || weeklyTrack.Width != 38
-                || fullResetText.Contains("35", StringComparison.Ordinal) || string.IsNullOrEmpty(fullResetText))
+                || fullResetText.Contains('%') || !fullResetText.Contains(':'))
                 throw new InvalidOperationException("Cursor full card must show the 7d label, 38px track, and reset time.");
 
             cursorBarWidget.SetCompactState(true);
             cursorBarWidget.Tick(DateTime.Now.AddMinutes(3));
             if (weeklyLabel.Visibility != System.Windows.Visibility.Collapsed || weeklyTrack.Width != 26
                 || weeklyFill.Width > 26 || weeklyFill.Width <= 0
-                || !weeklyReset.Text.Contains("35", StringComparison.Ordinal))
+                || weeklyReset.Text != UiText.Format("Percent", "35"))
                 throw new InvalidOperationException($"Cursor compact card must collapse the label, shrink the track to 26px and show the percentage, got '{weeklyReset.Text}'.");
 
             cursorBarWidget.SetCompactState(false);

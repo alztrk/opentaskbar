@@ -23,6 +23,14 @@ internal static class DockLayoutChecks
             checks++;
         }
 
+        // #176: dock-item drops save synchronously; the resulting preference applies must be deferred and
+        // coalesced so every dock does not rebuild the strip inside the nested drag loop.
+        Check(!OpenTaskbar.MainWindow.ShouldDeferPreferenceApply(false, false)
+              && OpenTaskbar.MainWindow.ShouldDeferPreferenceApply(true, false)
+              && !OpenTaskbar.MainWindow.ShouldDeferPreferenceApply(true, true)
+              && !OpenTaskbar.MainWindow.ShouldDeferPreferenceApply(false, true),
+            "Preference applies must defer only while a drop is active, and only once per drop.");
+
         // Edge-to-edge fill mode must be a valid width mode so users can span the dock across the whole screen.
         Check(Enum.IsDefined(DockWidthMode.Fill), "DockWidthMode.Fill must be a defined width mode.");
 

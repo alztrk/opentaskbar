@@ -99,6 +99,10 @@ public partial class MainWindow : Window
     private Point _legacyDragStartPoint;
     private ContentControl? _draggedLegacyWidget;
     private bool _rebuildingDockOrder;
+    // All docks share the UI thread. A drop persists synchronously, which used to trigger a full
+    // preference re-apply on every dock before the drop call stack unwound (#176).
+    private static bool _suspendDockPreferenceApply;
+    private bool _preferenceApplyPending;
     private bool _instantDockResize;
     private double _dockTopGap;
     private (DockSize Size, double Scale, int Padding)? _sizePreviewOverride;
@@ -991,20 +995,38 @@ public partial class MainWindow : Window
     {
         // Apps hidden by the active profile still show up among running apps while they have windows.
         var visiblePinned = _pinnedApps.Where(app => !IsHiddenByProfile(app)).ToList();
-        var pinnedPaths = visiblePinned
-            .Where(app => !DockApp.IsSharedHostExecutable(app.ExecutablePath)
-                && (string.IsNullOrWhiteSpace(app.LaunchArguments) || string.IsNullOrWhiteSpace(app.AppUserModelId)))
-            .Select(app => app.ExecutablePath)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var pinnedAumids = visiblePinned
-            .Select(app => app.AppUserModelId
-                ?? WindowsTaskbarPinImporter.GetAppsFolderAumid(app.ExecutablePath)
-                ?? ApplicationIconProvider.TryResolvePackagedAppUserModelId(app.ExecutablePath))
-            .Where(aumid => !string.IsNullOrWhiteSpace(aumid))
-            .Select(aumid => aumid!)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        return RunningAppProjection.Project(VisibleSnapshot, pinnedPaths, _foregroundWindow,
-            _preferences.Current.EffectiveNotificationBadgesEnabled, File.Exists, pinnedAumids);
+        var pinsByPath = visiblePinned
+            .GroupBy(app => app.ExecutablePath, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key,
+                g => g.Select(app => app.DockKey).Distinct(StringComparer.OrdinalIgnoreCase).Count(),
+                StringComparer.OrdinalIgnoreCase);
+
+        bool IsPinnedWindow(TrackedWindow window) => visiblePinned.Any(pin =>
+            pinsByPath.TryGetValue(pin.ExecutablePath, out var sharingPath)
+            && MatchesPinnedWindow(pin, window, sharingPath));
+
+        return RunningAppProjection.Project(VisibleSnapshot,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase), _foregroundWindow,
+            _preferences.Current.EffectiveNotificationBadgesEnabled, File.Exists,
+            excludedWindow: IsPinnedWindow);
+    }
+
+    /// <summary>
+    /// Identity check used to keep a running window from producing a second button under its pin (#173).
+    /// AUMIDs win when both sides have one; a plain path is accepted only when it cannot stand for two apps.
+    /// </summary>
+    internal static bool MatchesPinnedWindow(DockApp pin, TrackedWindow window, int pinsSharingPath)
+    {
+        var aumid = pin.AppUserModelId
+            ?? WindowsTaskbarPinImporter.GetAppsFolderAumid(pin.ExecutablePath)
+            ?? ApplicationIconProvider.TryResolvePackagedAppUserModelId(pin.ExecutablePath);
+        if (!string.IsNullOrWhiteSpace(aumid) && !string.IsNullOrWhiteSpace(window.AppUserModelId))
+            return string.Equals(aumid, window.AppUserModelId, StringComparison.OrdinalIgnoreCase);
+        if (pinsSharingPath > 1
+            || pin.ExecutablePath.StartsWith(WindowsTaskbarPinImporter.AppsFolderPrefix, StringComparison.OrdinalIgnoreCase)
+            || DockApp.IsSharedHostExecutable(pin.ExecutablePath))
+            return false;
+        return string.Equals(pin.ExecutablePath, window.ExecutablePath, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Updates running apps and their layout together, including callers outside the window-event path.</summary>
@@ -1425,17 +1447,28 @@ public partial class MainWindow : Window
             var activated = toggleIfForeground
                 ? NativeWindowTracker.ToggleActivation(existingWindow.Handle, matchPath, foregroundAtPress)
                 : NativeWindowTracker.Activate(existingWindow.Handle);
-            if (!activated)
-            {
-                ReportError("ErrorWindowActivate");
+            if (!HandleActivationResult(activated,
+                    () => LaunchApp(app, elevated: false),
+                    AppLog.Warning))
                 return;
-            }
 
             _lastSelectedWindows[matchPath] = existingWindow.Handle;
             return;
         }
 
         LaunchApp(app, elevated: false);
+    }
+
+    /// <summary>
+    /// A stale or non-activatable window must not turn a dock click into a no-op (#173): log and launch instead.
+    /// Returns false when the caller should stop because a fallback launch was issued.
+    /// </summary>
+    internal static bool HandleActivationResult(bool activated, Action launchFallback, Action<string>? log = null)
+    {
+        if (activated) return true;
+        log?.Invoke("Cannot activate the matching window; launching a new instance instead.");
+        launchFallback();
+        return false;
     }
 
     /// <summary>Starts a new instance even when the app already has windows (Shift/middle click, Ctrl+Shift for admin).</summary>
@@ -2306,8 +2339,16 @@ public partial class MainWindow : Window
 
     private void OnWidgetOrderChanged(IReadOnlyList<string> newOrder)
     {
-        var error = _preferences.Save(_preferences.Current with { WidgetOrder = newOrder });
-        if (error is not null) ReportError(error);
+        _suspendDockPreferenceApply = true;
+        try
+        {
+            var error = _preferences.Save(_preferences.Current with { WidgetOrder = newOrder });
+            if (error is not null) ReportError(error);
+        }
+        finally
+        {
+            _suspendDockPreferenceApply = false;
+        }
     }
 
     private void UnpinDockApp_Click(object sender, RoutedEventArgs e)
@@ -2636,6 +2677,26 @@ public partial class MainWindow : Window
     private void Preferences_Changed(object? sender, EventArgs e)
     {
         if (_closed) return;
+        if (!_suspendDockPreferenceApply)
+        {
+            ApplyPreferencesChanged();
+            return;
+        }
+        // A dock-item drop saves synchronously while the nested drag loop is still on the stack. Coalesce the
+        // per-dock rebuilds to one dispatcher pass after the drop completes instead of nesting them (#176).
+        if (!ShouldDeferPreferenceApply(_suspendDockPreferenceApply, _preferenceApplyPending)) return;
+        _preferenceApplyPending = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(() =>
+        {
+            _preferenceApplyPending = false;
+            if (!_closed) ApplyPreferencesChanged();
+        }));
+    }
+
+    internal static bool ShouldDeferPreferenceApply(bool suspended, bool pending) => suspended && !pending;
+
+    private void ApplyPreferencesChanged()
+    {
         if (!_preferences.Current.PreviewsEnabled) _windowPicker?.Close();
         if (_mirrorOf is not null)
         {
@@ -3184,15 +3245,23 @@ public partial class MainWindow : Window
         var oldOrder = BuildEffectiveDockOrder();
         var tokens = DockItemOrdering.MoveVisibleItem(oldOrder, visibleOrder, token, index);
         if (tokens.SequenceEqual(oldOrder, StringComparer.OrdinalIgnoreCase)) return;
-        var error = _preferences.Save(settings with { DockItemOrder = tokens });
-        if (error is not null)
+        _suspendDockPreferenceApply = true;
+        try
         {
-            ReportError(error);
-            return;
+            var error = _preferences.Save(settings with { DockItemOrder = tokens });
+            if (error is not null)
+            {
+                ReportError(error);
+                return;
+            }
+            RebuildDockOrder();
+            ResizeDockToContent();
+            _replacementSession?.RefreshPosition();
         }
-        RebuildDockOrder();
-        ResizeDockToContent();
-        _replacementSession?.RefreshPosition();
+        finally
+        {
+            _suspendDockPreferenceApply = false;
+        }
     }
 
     private int _memoryTrimCounter;

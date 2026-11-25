@@ -343,6 +343,16 @@ internal static class RunningAppChecks
                       && string.Equals(projectedWithAumidExclude[0].AppUserModelId, settingsAumid, StringComparison.OrdinalIgnoreCase),
                     "RunningAppProjection must exclude already-pinned packaged apps by AUMID while keeping other hosted UWP apps.");
 
+                // #173: a stale/unactivatable window must launch instead of silently doing nothing on a dock click.
+                var launches = 0;
+                var warnings = 0;
+                Check(OpenTaskbar.MainWindow.HandleActivationResult(true, () => launches++, _ => warnings++)
+                      && launches == 0 && warnings == 0,
+                    "A successful activation must keep the current window and launch nothing.");
+                Check(!OpenTaskbar.MainWindow.HandleActivationResult(false, () => launches++, _ => warnings++)
+                      && launches == 1 && warnings == 1,
+                    "A failed activation must launch exactly one new instance and log one warning.");
+
                 // Issue #167: Inbox system UWP packages (C:\Windows\ImmersiveControlPanel\SystemSettings.exe and
                 // C:\Windows\SystemApps\*) must resolve their packaged AUMID and route through shell:AppsFolder\<AUMID>
                 // instead of falling back to the generic .exe icon.

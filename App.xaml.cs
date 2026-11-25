@@ -233,7 +233,6 @@ public partial class App : Application
 
         _fjordFilesActivation?.Cancel();
         _fjordFilesActivation?.Dispose();
-        TaskbarRecoveryWatchdog.NotifyCleanExit();
         SystemEvents.SessionSwitch -= SystemEvents_SessionSwitch;
         Preferences.Changed -= Preferences_Changed;
         if (_paletteListener is not null)
@@ -254,15 +253,20 @@ public partial class App : Application
 
         // The window-level restore can fail while Explorer is restarting. A leftover journal is the reliable
         // signal that the taskbar may still be hidden, so try the journal-based path before shutting down.
-        if (TaskbarReplacementSession.HasPendingRecovery)
+        var recoveryError = TaskbarReplacementSession.HasPendingRecovery
+            ? RestoreCoordinator.Restore("exit-journal-heal")
+            : null;
+        if (recoveryError is not null)
         {
-            var recoveryError = RestoreCoordinator.Restore("exit-journal-heal");
-            if (recoveryError is not null)
-            {
-                AppLog.Error($"Exit taskbar self-heal failed: {recoveryError}");
-                e.ApplicationExitCode = 1;
-            }
+            AppLog.Error($"Exit taskbar self-heal failed: {recoveryError}");
+            e.ApplicationExitCode = 1;
         }
+
+        // Only disarm the watchdog after both restore paths are verified (#173).
+        if (RestoreCoordinator.CanSignalCleanExit(error, TaskbarReplacementSession.HasPendingRecovery))
+            TaskbarRecoveryWatchdog.NotifyCleanExit();
+        else
+            AppLog.Warning("Taskbar recovery journal pending; watchdog remains armed after exit.");
 
         _devReload?.Dispose();
         _devReload = null;

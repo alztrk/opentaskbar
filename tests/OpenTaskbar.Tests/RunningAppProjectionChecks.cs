@@ -94,6 +94,24 @@ internal static class RunningAppProjectionChecks
         Check(string.Equals(spotifyLaunch.Target, $"shell:AppsFolder\\{spotifyAumid}", StringComparison.OrdinalIgnoreCase),
             "Packaged Store apps like Spotify must resolve to shell:AppsFolder\\{AUMID}.");
 
+        // #173: a pinned app with arguments/AUMID must not produce a second running icon when the running
+        // window has no AUMID; two pins sharing one executable must stay distinct.
+        var pinnedSpotify = new DockApp("Spotify", spotifyExe)
+        {
+            LaunchArguments = "--pinned",
+            AppUserModelId = spotifyAumid
+        };
+        var spotifyWindow = new TrackedWindow(14, "Spotify", spotifyExe);
+        Check(OpenTaskbar.MainWindow.MatchesPinnedWindow(pinnedSpotify, spotifyWindow, 1),
+            "A pin with arguments must match a same-path running window that has no AUMID.");
+        Check(!OpenTaskbar.MainWindow.MatchesPinnedWindow(pinnedSpotify, spotifyWindow, 2),
+            "Two pins on one executable must not both claim the same running window.");
+        var deduped = RunningAppProjection.Project([spotifyWindow],
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase), 0, false, static _ => true,
+            excludedWindow: window => OpenTaskbar.MainWindow.MatchesPinnedWindow(pinnedSpotify, window, 1));
+        Check(deduped.Count == 0,
+            "A running window already represented by a pin must not create a second running-app button.");
+
         RunAsyncTrackerChecks(Check);
 
         return checks;
