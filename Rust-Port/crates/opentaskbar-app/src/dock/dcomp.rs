@@ -366,6 +366,9 @@ impl DcompEngine {
                     DWRITE_TEXT_ALIGNMENT_CENTER
                 })?;
                 fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+                fmt.SetWordWrapping(
+                    windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_NO_WRAP,
+                )?;
                 Ok(fmt)
             }
         };
@@ -472,7 +475,14 @@ impl DcompEngine {
                         radiusX: 5.0,
                         radiusY: 5.0,
                     };
-                    dc.DrawRoundedRectangle(&rr, &tr_brush, 1.25, None);
+                    let key_bg = if is_dark {
+                        color_rgba(0xff, 0xff, 0xff, 0.06)
+                    } else {
+                        color_rgba(0x18, 0x18, 0x1b, 0.05)
+                    };
+                    let kb = dc.CreateSolidColorBrush(&key_bg, None)?;
+                    dc.FillRoundedRectangle(&rr, &kb);
+                    dc.DrawRoundedRectangle(&rr, &tr_brush, 1.0, None);
                     let wtxt: Vec<u16> = code.encode_utf16().collect();
                     dc.DrawText(
                         &wtxt,
@@ -513,13 +523,13 @@ impl DcompEngine {
                         radiusY: rad,
                     };
                     dc.DrawEllipse(&ell, &tr_brush, 2.0, None);
-                    // Draw segmented arc approximation (16 crisp steps) around the ring
-                    let steps = ((ratio.clamp(0.0, 1.0) * 20.0).round() as usize).max(1);
+                    // Smooth 36-segment arc around the ring
+                    let steps = ((ratio.clamp(0.0, 1.0) * 36.0).round() as usize).max(1);
                     if *ratio > 0.01 {
                         let mut prev_pt = Vector2 { X: rx, Y: cy - rad };
                         for i in 1..=steps {
                             let ang = -std::f32::consts::FRAC_PI_2
-                                + (i as f32 / 20.0) * std::f32::consts::TAU;
+                                + (i as f32 / 36.0) * std::f32::consts::TAU;
                             let pt = Vector2 {
                                 X: rx + ang.cos() * rad,
                                 Y: cy + ang.sin() * rad,

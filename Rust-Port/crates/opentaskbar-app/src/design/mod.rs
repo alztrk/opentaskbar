@@ -98,6 +98,17 @@ pub fn meter_color(p: &Palette, ratio: f32) -> Rgb {
     }
 }
 
+/// Semantic threshold color for remaining-level bars like Battery (`<=15%` red, `<=30%` amber, `>30%` green).
+pub fn level_color(p: &Palette, ratio: f32) -> Rgb {
+    if ratio <= 0.15 {
+        p.danger
+    } else if ratio <= 0.30 {
+        p.warning
+    } else {
+        p.success
+    }
+}
+
 /// Computes dock widget chip height automatically from the live dock pill height.
 pub fn widget_height_dips(pill_h_dips: f32) -> f32 {
     (pill_h_dips - 12.0).clamp(30.0, 56.0)

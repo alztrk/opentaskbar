@@ -22,7 +22,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use crate::design::{self, Rgb};
 use crate::dock::dcomp::{ChipIcon, WidgetChipSpec};
 use crate::platform::pins;
-use crate::ui::flyout::{self, FlyoutBlock, FlyoutSpec};
+use crate::ui::flyout::{self, BarTone, FlyoutBlock, FlyoutSpec};
 
 pub use telemetry::{
     active_keyboard_code, adjust_audio_volume, day_progress_metrics, empty_recycle_bin,
@@ -63,38 +63,38 @@ const fn wd(
 /// All 23 C# catalog widgets in exact C# category and declaration order, with archetype-matched widths.
 pub const ALL_WIDGETS: &[WidgetDescriptor] = &[
     // Time & Weather
-    wd("clock", "Clock & Date", "Time & Weather", 72.0),
-    wd("weather", "Weather", "Time & Weather", 64.0),
-    wd("dayprogress", "Day Progress", "Time & Weather", 64.0),
-    wd("stopwatch", "Stopwatch", "Time & Weather", 68.0),
-    wd("countdown", "Countdown", "Time & Weather", 68.0),
+    wd("clock", "Clock & Date", "Time & Weather", 78.0),
+    wd("weather", "Weather", "Time & Weather", 68.0),
+    wd("dayprogress", "Day Progress", "Time & Weather", 66.0),
+    wd("stopwatch", "Stopwatch", "Time & Weather", 72.0),
+    wd("countdown", "Countdown", "Time & Weather", 72.0),
     // System & Hardware
-    wd("stats", "System Stats", "System & Hardware", 72.0),
-    wd("netspeed", "Net Speed", "System & Hardware", 74.0),
-    wd("battery", "Battery", "System & Hardware", 62.0),
+    wd("stats", "System Stats", "System & Hardware", 80.0),
+    wd("netspeed", "Net Speed", "System & Hardware", 78.0),
+    wd("battery", "Battery", "System & Hardware", 64.0),
     wd(
         "bluetoothbattery",
         "Bluetooth Battery",
         "System & Hardware",
-        64.0,
+        66.0,
     ),
-    wd("storage", "Storage", "System & Hardware", 68.0),
+    wd("storage", "Storage", "System & Hardware", 72.0),
     // AI Quotas
-    wd("aiusage_claude", "Claude", "AI Quotas", 66.0),
-    wd("aiusage_codex", "Codex", "AI Quotas", 64.0),
-    wd("aiusage_antigravity", "Antigravity", "AI Quotas", 72.0),
-    wd("aiusage_opencode", "OpenCode", "AI Quotas", 72.0),
-    wd("aiusage_copilot", "Copilot", "AI Quotas", 68.0),
-    wd("aiusage_deepseek", "DeepSeek", "AI Quotas", 72.0),
-    wd("aiusage_openrouter", "OpenRouter", "AI Quotas", 74.0),
-    wd("aiusage_cursor", "Cursor", "AI Quotas", 66.0),
+    wd("aiusage_claude", "Claude", "AI Quotas", 70.0),
+    wd("aiusage_codex", "Codex", "AI Quotas", 68.0),
+    wd("aiusage_antigravity", "Antigravity", "AI Quotas", 84.0),
+    wd("aiusage_opencode", "OpenCode", "AI Quotas", 80.0),
+    wd("aiusage_copilot", "Copilot", "AI Quotas", 74.0),
+    wd("aiusage_deepseek", "DeepSeek", "AI Quotas", 80.0),
+    wd("aiusage_openrouter", "OpenRouter", "AI Quotas", 86.0),
+    wd("aiusage_cursor", "Cursor", "AI Quotas", 70.0),
     // Media & Controls
     wd("media", "Media", "Media & Controls", 40.0),
-    wd("audio", "Audio", "Media & Controls", 64.0),
+    wd("audio", "Audio", "Media & Controls", 66.0),
     wd("quicksettings", "Quick Settings", "Media & Controls", 40.0),
-    wd("keyboard", "Keyboard Layout", "Media & Controls", 42.0),
+    wd("keyboard", "Keyboard Layout", "Media & Controls", 44.0),
     // Productivity
-    wd("focus", "Focus", "Productivity", 68.0),
+    wd("focus", "Focus", "Productivity", 72.0),
 ];
 
 pub fn ai_provider_color(id: &str) -> Rgb {
@@ -321,8 +321,8 @@ impl WidgetRuntime {
             "netspeed" => WidgetChipSpec::DualMetric {
                 top: format!("↓ {}", telemetry::format_speed(self.net.rx_bps)),
                 bot: format!("↑ {}", telemetry::format_speed(self.net.tx_bps)),
-                top_color: Some(pal.success),
-                bot_color: Some(pal.accent),
+                top_color: None,
+                bot_color: None,
                 bars: None,
             },
             "battery" => {
@@ -541,16 +541,23 @@ impl WidgetRuntime {
         if let Some(ai) = telemetry::ai_provider_meta(id) {
             let detected = telemetry::ai_provider_detected(ai.id);
             let spec = FlyoutSpec {
-                title: format!("{} Quota", ai.name),
+                title: ai.name.to_owned(),
                 subtitle: None,
-                width_dips: 270.0,
+                width_dips: 276.0,
                 blocks: vec![
-                    FlyoutBlock::StatRow {
-                        label: "Local Session".to_owned(),
-                        value: if detected { "Detected" } else { "Not found" }.to_owned(),
+                    FlyoutBlock::Hero {
+                        value: if detected { "Connected" } else { "Sign In" }.to_owned(),
+                        caption: Some(
+                            if detected {
+                                "Local session credentials detected"
+                            } else {
+                                "No local session found on this device"
+                            }
+                            .to_owned(),
+                        ),
                     },
                     FlyoutBlock::Separator,
-                    FlyoutBlock::ButtonBar(vec![(1, "Open Usage Dashboard".to_owned(), true)]),
+                    FlyoutBlock::ButtonBar(vec![(1, "Open Dashboard".to_owned(), true)]),
                 ],
             };
             if flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) == Some(1) {
@@ -595,11 +602,13 @@ impl WidgetRuntime {
                             label: "CPU".to_owned(),
                             value_text: format!("{}%", self.cpu_pct),
                             ratio: self.cpu_pct as f32 / 100.0,
+                            tone: BarTone::Usage,
                         },
                         FlyoutBlock::ProgressBar {
                             label: "Memory".to_owned(),
                             value_text: format!("{used_gb:.1} / {total_gb:.1} GB ({ram_pct}%)"),
                             ratio: ram_pct as f32 / 100.0,
+                            tone: BarTone::Usage,
                         },
                         FlyoutBlock::Separator,
                         FlyoutBlock::ButtonBar(vec![(1, "Task Manager".to_owned(), true)]),
@@ -616,10 +625,18 @@ impl WidgetRuntime {
                     subtitle: None,
                     width_dips: 274.0,
                     blocks: vec![
-                        FlyoutBlock::ProgressBar {
-                            label: "Master Volume".to_owned(),
-                            value_text: if self.audio_muted {
+                        FlyoutBlock::Hero {
+                            value: if self.audio_muted {
                                 "Muted".to_owned()
+                            } else {
+                                format!("{}%", self.audio_vol)
+                            },
+                            caption: Some("Master Volume".to_owned()),
+                        },
+                        FlyoutBlock::ProgressBar {
+                            label: "Level".to_owned(),
+                            value_text: if self.audio_muted {
+                                "0%".to_owned()
                             } else {
                                 format!("{}%", self.audio_vol)
                             },
@@ -628,6 +645,7 @@ impl WidgetRuntime {
                             } else {
                                 self.audio_vol as f32 / 100.0
                             },
+                            tone: BarTone::Accent,
                         },
                         FlyoutBlock::ButtonBar(vec![
                             (1, "-10%".to_owned(), false),
@@ -654,30 +672,35 @@ impl WidgetRuntime {
             "media" => {
                 let spec = FlyoutSpec {
                     title: "Media".to_owned(),
-                    subtitle: None,
-                    width_dips: 266.0,
-                    blocks: vec![FlyoutBlock::ButtonBar(vec![
-                        (1, "Prev".to_owned(), false),
-                        (2, "Play / Pause".to_owned(), true),
-                        (3, "Next".to_owned(), false),
-                    ])],
+                    subtitle: Some("System playback controls".to_owned()),
+                    width_dips: 274.0,
+                    blocks: vec![
+                        FlyoutBlock::ButtonBar(vec![
+                            (1, "Previous".to_owned(), false),
+                            (2, "Play / Pause".to_owned(), true),
+                            (3, "Next".to_owned(), false),
+                        ]),
+                        FlyoutBlock::Separator,
+                        FlyoutBlock::ButtonBar(vec![(4, "Sound Settings".to_owned(), false)]),
+                    ],
                 };
                 match flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) {
                     Some(1) => telemetry::send_media_vk(VK_MEDIA_PREV_TRACK),
                     Some(2) => telemetry::send_media_vk(VK_MEDIA_PLAY_PAUSE),
                     Some(3) => telemetry::send_media_vk(VK_MEDIA_NEXT_TRACK),
+                    Some(4) => pins::launch("ms-settings:sound".to_owned()),
                     _ => {}
                 }
             }
             "netspeed" => {
                 let spec = FlyoutSpec {
-                    title: "Net Speed".to_owned(),
+                    title: "Network".to_owned(),
                     subtitle: None,
-                    width_dips: 268.0,
+                    width_dips: 272.0,
                     blocks: vec![
-                        FlyoutBlock::StatRow {
-                            label: "Download".to_owned(),
+                        FlyoutBlock::Hero {
                             value: format!("{}/s", telemetry::format_speed(self.net.rx_bps)),
+                            caption: Some("Current download speed".to_owned()),
                         },
                         FlyoutBlock::StatRow {
                             label: "Upload".to_owned(),
@@ -715,6 +738,7 @@ impl WidgetRuntime {
                             label: "Charge".to_owned(),
                             value_text: format!("{}%", b.percent),
                             ratio: b.percent as f32 / 100.0,
+                            tone: BarTone::Level,
                         },
                         FlyoutBlock::StatRow {
                             label: "Remaining".to_owned(),
@@ -740,6 +764,7 @@ impl WidgetRuntime {
                         label: d.name.clone(),
                         value_text: format!("{}%", d.percent),
                         ratio: d.percent as f32 / 100.0,
+                        tone: BarTone::Level,
                     })
                     .collect();
                 if blocks.is_empty() {
@@ -775,6 +800,7 @@ impl WidgetRuntime {
                             label: format!("{}:", d.letter),
                             value_text: format!("{:.0} GB free / {:.0} GB", d.free_gb, d.total_gb),
                             ratio: (used / d.total_gb.max(1.0)) as f32,
+                            tone: BarTone::Usage,
                         }
                     })
                     .collect();
@@ -829,23 +855,30 @@ impl WidgetRuntime {
                 let (day, week, year, left) = day_progress_metrics();
                 let spec = FlyoutSpec {
                     title: "Day Progress".to_owned(),
-                    subtitle: Some(format!("{left}h remaining")),
-                    width_dips: 268.0,
+                    subtitle: None,
+                    width_dips: 272.0,
                     blocks: vec![
+                        FlyoutBlock::Hero {
+                            value: format!("{:.0}%", day * 100.0),
+                            caption: Some(format!("{left}h remaining today")),
+                        },
                         FlyoutBlock::ProgressBar {
                             label: "Day".to_owned(),
                             value_text: format!("{:.0}%", day * 100.0),
                             ratio: day,
+                            tone: BarTone::Accent,
                         },
                         FlyoutBlock::ProgressBar {
                             label: "Week".to_owned(),
                             value_text: format!("{:.0}%", week * 100.0),
                             ratio: week,
+                            tone: BarTone::Accent,
                         },
                         FlyoutBlock::ProgressBar {
                             label: "Year".to_owned(),
                             value_text: format!("{:.0}%", year * 100.0),
                             ratio: year,
+                            tone: BarTone::Accent,
                         },
                     ],
                 };
@@ -927,6 +960,7 @@ impl WidgetRuntime {
                             label: "Progress".to_owned(),
                             value_text: format!("{:.0}%", ratio * 100.0),
                             ratio,
+                            tone: BarTone::Accent,
                         },
                         FlyoutBlock::ButtonBar(vec![
                             (
@@ -998,6 +1032,7 @@ impl WidgetRuntime {
                             label: "Session".to_owned(),
                             value_text: format!("{:.0}%", ratio * 100.0),
                             ratio,
+                            tone: BarTone::Accent,
                         },
                         FlyoutBlock::ButtonBar(vec![
                             (
@@ -1077,6 +1112,16 @@ impl WidgetRuntime {
             }
             "quicksettings" => {
                 let (vol, muted) = get_audio_state();
+                let hide_label = match settings.auto_hide {
+                    AutoHideMode::Disabled => "Off",
+                    AutoHideMode::Smart => "Smart",
+                    AutoHideMode::Always => "Always",
+                };
+                let theme_label = match settings.theme {
+                    AppTheme::System => "System",
+                    AppTheme::Dark => "Dark",
+                    AppTheme::Light => "Light",
+                };
                 let spec = FlyoutSpec {
                     title: "Quick Settings".to_owned(),
                     subtitle: None,
@@ -1092,14 +1137,14 @@ impl WidgetRuntime {
                             (
                                 2,
                                 "Auto-Hide".to_owned(),
-                                format!("{:?}", settings.auto_hide),
+                                hide_label.to_owned(),
                                 settings.auto_hide != AutoHideMode::Disabled,
                             ),
                             (
                                 3,
                                 "Theme".to_owned(),
-                                format!("{:?}", settings.theme),
-                                false,
+                                theme_label.to_owned(),
+                                settings.theme != AppTheme::System,
                             ),
                             (
                                 4,
@@ -1112,6 +1157,16 @@ impl WidgetRuntime {
                                 !muted,
                             ),
                         ]),
+                        FlyoutBlock::ProgressBar {
+                            label: "Master Volume".to_owned(),
+                            value_text: if muted {
+                                "Muted".to_owned()
+                            } else {
+                                format!("{vol}%")
+                            },
+                            ratio: if muted { 0.0 } else { vol as f32 / 100.0 },
+                            tone: BarTone::Accent,
+                        },
                         FlyoutBlock::Separator,
                         FlyoutBlock::ButtonBar(vec![
                             (5, "Settings".to_owned(), true),

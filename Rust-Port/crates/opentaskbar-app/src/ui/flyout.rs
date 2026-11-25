@@ -95,6 +95,17 @@ pub enum FlyoutAction {
     Secondary(u32),
 }
 
+/// Semantic color mode for `FlyoutBlock::ProgressBar`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarTone {
+    /// Always calm accent (Audio Volume, Day Progress, Countdown, Focus).
+    Accent,
+    /// High-is-critical utilization (CPU, Memory, Storage): `<70%` accent, `70-89%` amber, `>=90%` red.
+    Usage,
+    /// Low-is-critical remaining level (Battery, Bluetooth Battery): `<=15%` red, `<=30%` amber, `>30%` green.
+    Level,
+}
+
 /// Declarative content block rendered inside the shared `DockFlyout`.
 #[derive(Clone, Debug)]
 pub enum FlyoutBlock {
@@ -113,6 +124,7 @@ pub enum FlyoutBlock {
         label: String,
         value_text: String,
         ratio: f32,
+        tone: BarTone,
     },
     ActionRow {
         id: u32,
@@ -1038,6 +1050,7 @@ impl FlyoutState<'_> {
                         label,
                         value_text,
                         ratio,
+                        tone,
                     } => {
                         let h = s(38.0);
                         SelectObject(hdc, small_font as _);
@@ -1081,7 +1094,12 @@ impl FlyoutState<'_> {
                         let fill_w =
                             (((w - pad - right_pad) as f32) * ratio.clamp(0.0, 1.0)).round() as i32;
                         if fill_w > s(3.0) {
-                            let meter_col = gdi_rgb(design::meter_color(&pal, *ratio));
+                            let meter_rgb = match tone {
+                                BarTone::Accent => pal.accent,
+                                BarTone::Usage => design::meter_color(&pal, *ratio),
+                                BarTone::Level => design::level_color(&pal, *ratio),
+                            };
+                            let meter_col = gdi_rgb(meter_rgb);
                             fill_round_rect(
                                 hdc,
                                 pad,
