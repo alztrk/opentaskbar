@@ -1540,6 +1540,35 @@ internal static class DockLayoutChecks
                     "A floating dock whose needed span reaches the monitor width must clamp cleanly to the monitor.");
             }
 
+            // Leaving the dock must release the magnified frame: a settled spring lands exactly on 1.0 instead of
+            // keeping a sub-0.0001 residue, and the frame shrinks with the decaying slots instead of snapping.
+            {
+                Check(MainWindow.ShouldWriteSpringScale(1.00009, 1.0, settled: true),
+                    "A settled spring must write its exact target even when the last step is below 0.0001.");
+                Check(!MainWindow.ShouldWriteSpringScale(1.00009, 1.00005, settled: false),
+                    "Mid-spring sub-0.0001 steps must still be skipped.");
+                Check(!MainWindow.ShouldWriteSpringScale(1.0, 1.0, settled: true),
+                    "A spring already at its target must not be rewritten.");
+
+                Span<double> residueExtras = stackalloc double[11];
+                ReadOnlySpan<double> residueScales = [1.00009, 1.00009, 1.00009, 1.00009, 1.00009, 1.00009, 1.00009, 1.00009, 1.00009, 1.00009, 1.00009];
+                ReadOnlySpan<double> residueBases = [48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48];
+                var residue = DockFisheyeLayout.ComputeSlotExtras(residueScales, residueBases, 200, residueExtras);
+                Check(residue > 0.01,
+                    "Residual 1.00009x scales across a dozen icons exceed the 0.01 clear threshold, which is why the exact settle write matters.");
+
+                Check(Math.Abs(MainWindow.ScaleDecayingSurfaceDelta(50, 40, 40) - 50) < 0.001,
+                    "The first decay frame must keep the full reserved delta.");
+                Check(Math.Abs(MainWindow.ScaleDecayingSurfaceDelta(50, 40, 20) - 25) < 0.001,
+                    "The frame delta must shrink in proportion to the remaining slot expansion.");
+                Check(MainWindow.ScaleDecayingSurfaceDelta(50, 40, 0) == 0,
+                    "The frame delta must reach zero when the slots are back at rest.");
+                Check(MainWindow.ScaleDecayingSurfaceDelta(30, 40, 35) >= 30,
+                    "The frame must never be narrower than the expansion the slots still need.");
+                Check(MainWindow.ScaleDecayingSurfaceDelta(50, 0, 0) == 50,
+                    "Without a decay baseline the reserved delta must be kept.");
+            }
+
             // Issue #128 Finding #5: Magnification layout writes must skip sub-0.25 DIP churn mid-spring,
             // while still clearing overrides on zero-extra decay and snapping cleanly on the final settled frame.
             {
