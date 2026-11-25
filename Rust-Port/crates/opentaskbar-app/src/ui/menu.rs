@@ -29,12 +29,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOPMOST, WS_POPUP,
 };
 
+use crate::design::{self, gdi_rgb};
 use crate::platform::win32;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
 const MENU_W_DIPS: f32 = 248.0;
-const ROW_H_DIPS: f32 = 28.0;
+const ROW_H_DIPS: f32 = 30.0;
 const SEP_H_DIPS: f32 = 8.0;
 const PAD_X_DIPS: f32 = 6.0;
 const PAD_Y_DIPS: f32 = 6.0;
@@ -123,10 +124,6 @@ struct MenuState {
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
-}
-
-fn rgb(r: u8, g: u8, b: u8) -> u32 {
-    u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16)
 }
 
 fn pt_in_rect(r: &RECT, x: i32, y: i32) -> bool {
@@ -367,11 +364,8 @@ pub fn show_popup_menu(owner_hwnd: usize, is_dark: bool, entries: Vec<MenuEntry>
             (&corner as *const u32).cast(),
             size_of::<u32>() as u32,
         );
-        let border = if is_dark {
-            rgb(0x2e, 0x34, 0x44)
-        } else {
-            rgb(0xd4, 0xd9, 0xe3)
-        };
+        let pal = design::palette(is_dark);
+        let border = gdi_rgb(pal.border_rgb);
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_BORDER_COLOR as u32,
@@ -436,30 +430,17 @@ impl MenuState {
         let text_left_off = (32.0 * dpi).round() as i32;
         let text_right_off = (10.0 * dpi).round() as i32;
 
-        let (bg, hover_bg, danger_bg, text_fg, icon_fg, hint_fg, danger_fg, sep_col) =
-            if self.is_dark {
-                (
-                    rgb(0x18, 0x1c, 0x26),
-                    rgb(0x27, 0x2e, 0x3f),
-                    rgb(0x7f, 0x1d, 0x1d),
-                    rgb(0xf1, 0xf5, 0xf9),
-                    rgb(0x94, 0xa3, 0xb8),
-                    rgb(0x64, 0x74, 0x8b),
-                    rgb(0xfc, 0xa5, 0xa5),
-                    rgb(0x2a, 0x30, 0x3f),
-                )
-            } else {
-                (
-                    rgb(0xf8, 0xfa, 0xfc),
-                    rgb(0xe8, 0xed, 0xf5),
-                    rgb(0xfe, 0xe2, 0xe2),
-                    rgb(0x0f, 0x17, 0x2a),
-                    rgb(0x47, 0x55, 0x69),
-                    rgb(0x64, 0x74, 0x8b),
-                    rgb(0xb9, 0x1c, 0x1c),
-                    rgb(0xe2, 0xe8, 0xf0),
-                )
-            };
+        let pal = design::palette(self.is_dark);
+        let (bg, hover_bg, danger_bg, text_fg, icon_fg, hint_fg, danger_fg, sep_col) = (
+            gdi_rgb(pal.surface),
+            gdi_rgb(pal.hover),
+            gdi_rgb(pal.danger_hover_bg),
+            gdi_rgb(pal.text_primary),
+            gdi_rgb(pal.text_secondary),
+            gdi_rgb(pal.text_secondary),
+            gdi_rgb(pal.danger_fg),
+            gdi_rgb(pal.sep_rgb),
+        );
 
         unsafe {
             let bg_brush = CreateSolidBrush(bg);

@@ -40,7 +40,63 @@ use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::core::{HSTRING, Interface, Result};
 use windows_numerics::{Matrix3x2, Vector2};
 
+use crate::design::{self, Rgb};
 use crate::platform::icon_cache::RawIcon;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChipIcon {
+    Sliders,
+    Music,
+    Speaker,
+    SpeakerMuted,
+    SunCloud,
+    Battery,
+    Bluetooth,
+    Drive,
+    Timer,
+    Folder,
+    Grid,
+}
+
+/// Six unified dock chip archetypes replacing the legacy 2-line plain-text box.
+#[derive(Clone, Debug)]
+pub enum WidgetChipSpec {
+    IconOnly(ChipIcon),
+    IconValue {
+        icon: ChipIcon,
+        value: String,
+        active_tint: bool,
+    },
+    Keycap(String),
+    ProgressRing {
+        ratio: f32,
+        value: String,
+        color: Rgb,
+        active_tint: bool,
+    },
+    DualMetric {
+        top: String,
+        bot: String,
+        top_color: Option<Rgb>,
+        bot_color: Option<Rgb>,
+        bars: Option<(f32, f32)>,
+    },
+    Provider {
+        label: String,
+        color: Rgb,
+        detected: bool,
+    },
+    DateTime {
+        time: String,
+        date: String,
+    },
+}
+
+impl WidgetChipSpec {
+    pub fn cache_key(&self) -> String {
+        format!("{self:?}")
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellGlyph {
@@ -252,8 +308,377 @@ impl DcompEngine {
         }
     }
 
-    /// Renders a compact, crisp two-line or single-line macOS-style widget text surface
-    /// (e.g. Clock `01:55` / `25 Kas` or CPU/RAM stats) onto a static `IDCompositionSurface`.
+    /// Renders one of the 6 unified dock chip archetypes at automatic `height_dips` derived
+    /// from the live dock pill height, using unified Zinc tokens and integer DirectWrite sizes.
+    pub fn create_widget_chip_surface(
+        &self,
+        spec: &WidgetChipSpec,
+        width_dips: f32,
+        height_dips: f32,
+        dpi: f32,
+        is_dark: bool,
+    ) -> Result<IDCompositionSurface> {
+        let pal = design::palette(is_dark);
+        let w_px = (width_dips * dpi).ceil().max(1.0) as u32;
+        let h_px = (height_dips * dpi).ceil().max(1.0) as u32;
+        let fg_p = color_rgba(
+            pal.text_primary.0,
+            pal.text_primary.1,
+            pal.text_primary.2,
+            0.98,
+        );
+        let fg_s = color_rgba(
+            pal.text_secondary.0,
+            pal.text_secondary.1,
+            pal.text_secondary.2,
+            0.92,
+        );
+        let accent_c = color_rgba(pal.accent.0, pal.accent.1, pal.accent.2, 1.0);
+        let track_c = if is_dark {
+            color_rgba(0xff, 0xff, 0xff, 0.16)
+        } else {
+            color_rgba(0x18, 0x18, 0x1b, 0.16)
+        };
+        let tint_c = color_rgba(pal.accent.0, pal.accent.1, pal.accent.2, 0.18);
+
+        let mk_fmt = |size: f32, bold: bool, align_left: bool| -> Result<IDWriteTextFormat> {
+            unsafe {
+                let fmt = self.dwrite_factory.CreateTextFormat(
+                    &HSTRING::from("Segoe UI"),
+                    None,
+                    if bold {
+                        DWRITE_FONT_WEIGHT_SEMI_BOLD
+                    } else {
+                        DWRITE_FONT_WEIGHT_MEDIUM
+                    },
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    size,
+                    &HSTRING::from("en-US"),
+                )?;
+                fmt.SetTextAlignment(if align_left {
+                    windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_LEADING
+                } else {
+                    DWRITE_TEXT_ALIGNMENT_CENTER
+                })?;
+                fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+                Ok(fmt)
+            }
+        };
+
+        let fmt_13 = mk_fmt(13.0, true, false)?;
+        let fmt_12_l = mk_fmt(12.0, true, true)?;
+        let fmt_11_c = mk_fmt(11.0, false, false)?;
+        let fmt_11_b = mk_fmt(11.0, true, false)?;
+        let fmt_11_l = mk_fmt(11.0, true, true)?;
+
+        let stroke_props = D2D1_STROKE_STYLE_PROPERTIES1 {
+            startCap: D2D1_CAP_STYLE_ROUND,
+            endCap: D2D1_CAP_STYLE_ROUND,
+            lineJoin: D2D1_LINE_JOIN_ROUND,
+            miterLimit: 10.0,
+            ..Default::default()
+        };
+        let stroke: ID2D1StrokeStyle = unsafe {
+            self.d2d_factory
+                .CreateStrokeStyle(&stroke_props, None)?
+                .into()
+        };
+
+        self.draw_surface(w_px, h_px, |dc, _w, _h| unsafe {
+            let p_brush = dc.CreateSolidColorBrush(&fg_p, None)?;
+            let s_brush = dc.CreateSolidColorBrush(&fg_s, None)?;
+            let a_brush = dc.CreateSolidColorBrush(&accent_c, None)?;
+            let tr_brush = dc.CreateSolidColorBrush(&track_c, None)?;
+            let mut prev = Matrix3x2::identity();
+            dc.GetTransform(&mut prev);
+            dc.SetTransform(&Matrix3x2 {
+                M11: dpi,
+                M12: 0.0,
+                M21: 0.0,
+                M22: dpi,
+                M31: prev.M31,
+                M32: prev.M32,
+            });
+
+            let cy = height_dips * 0.5;
+            match spec {
+                WidgetChipSpec::IconOnly(icon) => {
+                    draw_chip_icon(dc, *icon, width_dips * 0.5, cy, 16.0, &p_brush, &stroke)?;
+                }
+                WidgetChipSpec::IconValue {
+                    icon,
+                    value,
+                    active_tint,
+                } => {
+                    if *active_tint {
+                        let tb = dc.CreateSolidColorBrush(&tint_c, None)?;
+                        let rr = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: 1.0,
+                                top: 2.0,
+                                right: width_dips - 1.0,
+                                bottom: height_dips - 2.0,
+                            },
+                            radiusX: 8.0,
+                            radiusY: 8.0,
+                        };
+                        dc.FillRoundedRectangle(&rr, &tb);
+                    }
+                    let icon_brush = if *active_tint { &a_brush } else { &p_brush };
+                    draw_chip_icon(dc, *icon, 14.0, cy, 14.0, icon_brush, &stroke)?;
+                    let wtxt: Vec<u16> = value.encode_utf16().collect();
+                    dc.DrawText(
+                        &wtxt,
+                        &fmt_12_l,
+                        &D2D_RECT_F {
+                            left: 25.0,
+                            top: 0.0,
+                            right: width_dips - 4.0,
+                            bottom: height_dips,
+                        },
+                        &p_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+                WidgetChipSpec::Keycap(code) => {
+                    let kw = 28.0_f32.min(width_dips - 8.0);
+                    let kh = 22.0_f32.min(height_dips - 6.0);
+                    let kl = (width_dips - kw) * 0.5;
+                    let kt = (height_dips - kh) * 0.5;
+                    let rr = D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F {
+                            left: kl,
+                            top: kt,
+                            right: kl + kw,
+                            bottom: kt + kh,
+                        },
+                        radiusX: 5.0,
+                        radiusY: 5.0,
+                    };
+                    dc.DrawRoundedRectangle(&rr, &tr_brush, 1.25, None);
+                    let wtxt: Vec<u16> = code.encode_utf16().collect();
+                    dc.DrawText(
+                        &wtxt,
+                        &fmt_11_b,
+                        &rr.rect,
+                        &p_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+                WidgetChipSpec::ProgressRing {
+                    ratio,
+                    value,
+                    color,
+                    active_tint,
+                } => {
+                    if *active_tint {
+                        let tb = dc.CreateSolidColorBrush(&tint_c, None)?;
+                        let rr = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: 1.0,
+                                top: 2.0,
+                                right: width_dips - 1.0,
+                                bottom: height_dips - 2.0,
+                            },
+                            radiusX: 8.0,
+                            radiusY: 8.0,
+                        };
+                        dc.FillRoundedRectangle(&rr, &tb);
+                    }
+                    let rc = color_rgba(color.0, color.1, color.2, 1.0);
+                    let r_brush = dc.CreateSolidColorBrush(&rc, None)?;
+                    let rx = 14.0;
+                    let rad = 6.5;
+                    let ell = D2D1_ELLIPSE {
+                        point: Vector2 { X: rx, Y: cy },
+                        radiusX: rad,
+                        radiusY: rad,
+                    };
+                    dc.DrawEllipse(&ell, &tr_brush, 2.0, None);
+                    // Draw segmented arc approximation (16 crisp steps) around the ring
+                    let steps = ((ratio.clamp(0.0, 1.0) * 20.0).round() as usize).max(1);
+                    if *ratio > 0.01 {
+                        let mut prev_pt = Vector2 { X: rx, Y: cy - rad };
+                        for i in 1..=steps {
+                            let ang = -std::f32::consts::FRAC_PI_2
+                                + (i as f32 / 20.0) * std::f32::consts::TAU;
+                            let pt = Vector2 {
+                                X: rx + ang.cos() * rad,
+                                Y: cy + ang.sin() * rad,
+                            };
+                            dc.DrawLine(prev_pt, pt, &r_brush, 2.0, Some(&stroke));
+                            prev_pt = pt;
+                        }
+                    }
+                    let wtxt: Vec<u16> = value.encode_utf16().collect();
+                    dc.DrawText(
+                        &wtxt,
+                        &fmt_12_l,
+                        &D2D_RECT_F {
+                            left: 25.0,
+                            top: 0.0,
+                            right: width_dips - 4.0,
+                            bottom: height_dips,
+                        },
+                        &p_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+                WidgetChipSpec::DualMetric {
+                    top,
+                    bot,
+                    top_color,
+                    bot_color,
+                    bars,
+                } => {
+                    let text_left = if let Some((b1, b2)) = bars {
+                        let bh = (height_dips - 12.0).clamp(14.0, 24.0);
+                        let bt = (height_dips - bh) * 0.5;
+                        for (i, ratio) in [b1, b2].into_iter().enumerate() {
+                            let bx = 7.0 + (i as f32) * 5.5;
+                            let track = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F {
+                                    left: bx,
+                                    top: bt,
+                                    right: bx + 3.0,
+                                    bottom: bt + bh,
+                                },
+                                radiusX: 1.5,
+                                radiusY: 1.5,
+                            };
+                            dc.FillRoundedRectangle(&track, &tr_brush);
+                            let fh = (bh * ratio.clamp(0.05, 1.0)).max(2.0);
+                            let mc = design::meter_color(&pal, *ratio);
+                            let fb =
+                                dc.CreateSolidColorBrush(&color_rgba(mc.0, mc.1, mc.2, 1.0), None)?;
+                            let fill = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F {
+                                    left: bx,
+                                    top: bt + bh - fh,
+                                    right: bx + 3.0,
+                                    bottom: bt + bh,
+                                },
+                                radiusX: 1.5,
+                                radiusY: 1.5,
+                            };
+                            dc.FillRoundedRectangle(&fill, &fb);
+                        }
+                        20.0
+                    } else {
+                        6.0
+                    };
+                    let tb = if let Some(c) = top_color {
+                        dc.CreateSolidColorBrush(&color_rgba(c.0, c.1, c.2, 1.0), None)?
+                    } else {
+                        p_brush.clone()
+                    };
+                    let bb = if let Some(c) = bot_color {
+                        dc.CreateSolidColorBrush(&color_rgba(c.0, c.1, c.2, 1.0), None)?
+                    } else {
+                        s_brush.clone()
+                    };
+                    let tw: Vec<u16> = top.encode_utf16().collect();
+                    let bw: Vec<u16> = bot.encode_utf16().collect();
+                    let mid = height_dips * 0.5;
+                    dc.DrawText(
+                        &tw,
+                        &fmt_11_l,
+                        &D2D_RECT_F {
+                            left: text_left,
+                            top: 2.0,
+                            right: width_dips - 4.0,
+                            bottom: mid + 1.0,
+                        },
+                        &tb,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                    dc.DrawText(
+                        &bw,
+                        &fmt_11_l,
+                        &D2D_RECT_F {
+                            left: text_left,
+                            top: mid - 1.0,
+                            right: width_dips - 4.0,
+                            bottom: height_dips - 2.0,
+                        },
+                        &bb,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+                WidgetChipSpec::Provider {
+                    label,
+                    color,
+                    detected,
+                } => {
+                    let alpha = if *detected { 1.0 } else { 0.35 };
+                    let dot_c = color_rgba(color.0, color.1, color.2, alpha);
+                    let db = dc.CreateSolidColorBrush(&dot_c, None)?;
+                    dc.FillEllipse(
+                        &D2D1_ELLIPSE {
+                            point: Vector2 { X: 11.0, Y: cy },
+                            radiusX: 4.0,
+                            radiusY: 4.0,
+                        },
+                        &db,
+                    );
+                    let lw: Vec<u16> = label.encode_utf16().collect();
+                    dc.DrawText(
+                        &lw,
+                        &fmt_11_l,
+                        &D2D_RECT_F {
+                            left: 20.0,
+                            top: 0.0,
+                            right: width_dips - 4.0,
+                            bottom: height_dips,
+                        },
+                        if *detected { &p_brush } else { &s_brush },
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+                WidgetChipSpec::DateTime { time, date } => {
+                    let tw: Vec<u16> = time.encode_utf16().collect();
+                    let dw: Vec<u16> = date.encode_utf16().collect();
+                    let mid = height_dips * 0.54;
+                    dc.DrawText(
+                        &tw,
+                        &fmt_13,
+                        &D2D_RECT_F {
+                            left: 2.0,
+                            top: 1.0,
+                            right: width_dips - 2.0,
+                            bottom: mid + 1.0,
+                        },
+                        &p_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                    dc.DrawText(
+                        &dw,
+                        &fmt_11_c,
+                        &D2D_RECT_F {
+                            left: 2.0,
+                            top: mid - 1.0,
+                            right: width_dips - 2.0,
+                            bottom: height_dips - 1.0,
+                        },
+                        &s_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+            }
+            Ok(())
+        })
+    }
+
+    #[allow(dead_code)]
     pub fn create_widget_text_surface(
         &self,
         primary: &str,
@@ -974,3 +1399,202 @@ impl DcompEngine {
 
 #[allow(dead_code)]
 fn _unused_rect_check(_: RECT, _: D2D_SIZE_F) {}
+
+unsafe fn draw_chip_icon(
+    dc: &ID2D1DeviceContext,
+    icon: ChipIcon,
+    cx: f32,
+    cy: f32,
+    size: f32,
+    brush: &windows::Win32::Graphics::Direct2D::ID2D1SolidColorBrush,
+    stroke: &ID2D1StrokeStyle,
+) -> Result<()> {
+    let r = size * 0.5;
+    let sw = 1.6_f32;
+    let l = |x1: f32, y1: f32, x2: f32, y2: f32| unsafe {
+        dc.DrawLine(
+            Vector2 {
+                X: cx + x1 * r,
+                Y: cy + y1 * r,
+            },
+            Vector2 {
+                X: cx + x2 * r,
+                Y: cy + y2 * r,
+            },
+            brush,
+            sw,
+            Some(stroke),
+        );
+    };
+    unsafe {
+        match icon {
+            ChipIcon::Sliders => {
+                l(-0.8, -0.45, 0.8, -0.45);
+                l(-0.8, 0.45, 0.8, 0.45);
+                dc.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point: Vector2 {
+                            X: cx - 0.25 * r,
+                            Y: cy - 0.45 * r,
+                        },
+                        radiusX: 2.2,
+                        radiusY: 2.2,
+                    },
+                    brush,
+                );
+                dc.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point: Vector2 {
+                            X: cx + 0.3 * r,
+                            Y: cy + 0.45 * r,
+                        },
+                        radiusX: 2.2,
+                        radiusY: 2.2,
+                    },
+                    brush,
+                );
+            }
+            ChipIcon::Music => {
+                l(-0.2, 0.5, -0.2, -0.6);
+                l(-0.2, -0.6, 0.65, -0.8);
+                l(0.65, -0.8, 0.65, 0.35);
+                dc.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point: Vector2 {
+                            X: cx - 0.45 * r,
+                            Y: cy + 0.55 * r,
+                        },
+                        radiusX: 2.2,
+                        radiusY: 1.8,
+                    },
+                    brush,
+                );
+                dc.FillEllipse(
+                    &D2D1_ELLIPSE {
+                        point: Vector2 {
+                            X: cx + 0.4 * r,
+                            Y: cy + 0.4 * r,
+                        },
+                        radiusX: 2.2,
+                        radiusY: 1.8,
+                    },
+                    brush,
+                );
+            }
+            ChipIcon::Speaker | ChipIcon::SpeakerMuted => {
+                l(-0.75, -0.25, -0.35, -0.25);
+                l(-0.75, 0.25, -0.35, 0.25);
+                l(-0.75, -0.25, -0.75, 0.25);
+                l(-0.35, -0.25, 0.1, -0.65);
+                l(-0.35, 0.25, 0.1, 0.65);
+                l(0.1, -0.65, 0.1, 0.65);
+                if icon == ChipIcon::Speaker {
+                    l(0.45, -0.3, 0.6, 0.0);
+                    l(0.6, 0.0, 0.45, 0.3);
+                } else {
+                    l(0.4, -0.35, 0.85, 0.35);
+                    l(0.85, -0.35, 0.4, 0.35);
+                }
+            }
+            ChipIcon::SunCloud => {
+                dc.DrawEllipse(
+                    &D2D1_ELLIPSE {
+                        point: Vector2 { X: cx, Y: cy },
+                        radiusX: 0.42 * r,
+                        radiusY: 0.42 * r,
+                    },
+                    brush,
+                    sw,
+                    None,
+                );
+                l(0.0, -0.9, 0.0, -0.72);
+                l(0.0, 0.72, 0.0, 0.9);
+                l(-0.9, 0.0, -0.72, 0.0);
+                l(0.72, 0.0, 0.9, 0.0);
+            }
+            ChipIcon::Battery => {
+                let rr = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: cx - 0.85 * r,
+                        top: cy - 0.48 * r,
+                        right: cx + 0.62 * r,
+                        bottom: cy + 0.48 * r,
+                    },
+                    radiusX: 2.0,
+                    radiusY: 2.0,
+                };
+                dc.DrawRoundedRectangle(&rr, brush, sw, None);
+                l(0.82, -0.22, 0.82, 0.22);
+            }
+            ChipIcon::Bluetooth => {
+                l(0.0, -0.8, 0.0, 0.8);
+                l(0.0, -0.8, 0.55, -0.35);
+                l(0.55, -0.35, -0.45, 0.35);
+                l(-0.45, -0.35, 0.55, 0.35);
+                l(0.55, 0.35, 0.0, 0.8);
+            }
+            ChipIcon::Drive => {
+                let rr = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: cx - 0.8 * r,
+                        top: cy - 0.45 * r,
+                        right: cx + 0.8 * r,
+                        bottom: cy + 0.45 * r,
+                    },
+                    radiusX: 2.2,
+                    radiusY: 2.2,
+                };
+                dc.DrawRoundedRectangle(&rr, brush, sw, None);
+                l(-0.4, 0.05, 0.05, 0.05);
+            }
+            ChipIcon::Timer => {
+                dc.DrawEllipse(
+                    &D2D1_ELLIPSE {
+                        point: Vector2 {
+                            X: cx,
+                            Y: cy + 0.08 * r,
+                        },
+                        radiusX: 0.65 * r,
+                        radiusY: 0.65 * r,
+                    },
+                    brush,
+                    sw,
+                    None,
+                );
+                l(0.0, 0.08, 0.0, -0.28);
+                l(0.0, 0.08, 0.32, 0.08);
+                l(-0.25, -0.82, 0.25, -0.82);
+            }
+            ChipIcon::Folder => {
+                let rr = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: cx - 0.8 * r,
+                        top: cy - 0.45 * r,
+                        right: cx + 0.8 * r,
+                        bottom: cy + 0.6 * r,
+                    },
+                    radiusX: 2.0,
+                    radiusY: 2.0,
+                };
+                dc.DrawRoundedRectangle(&rr, brush, sw, None);
+                l(-0.8, -0.45, -0.2, -0.72);
+            }
+            ChipIcon::Grid => {
+                for (ox, oy) in [(-0.45, -0.45), (0.45, -0.45), (-0.45, 0.45), (0.45, 0.45)] {
+                    dc.FillEllipse(
+                        &D2D1_ELLIPSE {
+                            point: Vector2 {
+                                X: cx + ox * r,
+                                Y: cy + oy * r,
+                            },
+                            radiusX: 1.8,
+                            radiusY: 1.8,
+                        },
+                        brush,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}

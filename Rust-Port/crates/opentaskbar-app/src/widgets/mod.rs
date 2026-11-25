@@ -19,6 +19,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK,
 };
 
+use crate::design::{self, Rgb};
+use crate::dock::dcomp::{ChipIcon, WidgetChipSpec};
 use crate::platform::pins;
 use crate::ui::flyout::{self, FlyoutBlock, FlyoutSpec};
 
@@ -58,42 +60,56 @@ const fn wd(
     }
 }
 
-/// All 23 C# catalog widgets in exact C# category and declaration order.
+/// All 23 C# catalog widgets in exact C# category and declaration order, with archetype-matched widths.
 pub const ALL_WIDGETS: &[WidgetDescriptor] = &[
     // Time & Weather
-    wd("clock", "Clock & Date", "Time & Weather", 66.0),
-    wd("weather", "Weather", "Time & Weather", 68.0),
-    wd("dayprogress", "Day Progress", "Time & Weather", 66.0),
-    wd("stopwatch", "Stopwatch", "Time & Weather", 62.0),
-    wd("countdown", "Countdown", "Time & Weather", 62.0),
+    wd("clock", "Clock & Date", "Time & Weather", 72.0),
+    wd("weather", "Weather", "Time & Weather", 64.0),
+    wd("dayprogress", "Day Progress", "Time & Weather", 64.0),
+    wd("stopwatch", "Stopwatch", "Time & Weather", 68.0),
+    wd("countdown", "Countdown", "Time & Weather", 68.0),
     // System & Hardware
-    wd("stats", "System Stats", "System & Hardware", 68.0),
-    wd("netspeed", "Net Speed", "System & Hardware", 72.0),
-    wd("battery", "Battery", "System & Hardware", 64.0),
+    wd("stats", "System Stats", "System & Hardware", 72.0),
+    wd("netspeed", "Net Speed", "System & Hardware", 74.0),
+    wd("battery", "Battery", "System & Hardware", 62.0),
     wd(
         "bluetoothbattery",
         "Bluetooth Battery",
         "System & Hardware",
-        68.0,
+        64.0,
     ),
     wd("storage", "Storage", "System & Hardware", 68.0),
     // AI Quotas
-    wd("aiusage_claude", "Claude", "AI Quotas", 62.0),
-    wd("aiusage_codex", "Codex", "AI Quotas", 62.0),
-    wd("aiusage_antigravity", "Antigravity", "AI Quotas", 66.0),
-    wd("aiusage_opencode", "OpenCode", "AI Quotas", 64.0),
-    wd("aiusage_copilot", "Copilot", "AI Quotas", 62.0),
-    wd("aiusage_deepseek", "DeepSeek", "AI Quotas", 64.0),
-    wd("aiusage_openrouter", "OpenRouter", "AI Quotas", 66.0),
-    wd("aiusage_cursor", "Cursor", "AI Quotas", 62.0),
+    wd("aiusage_claude", "Claude", "AI Quotas", 66.0),
+    wd("aiusage_codex", "Codex", "AI Quotas", 64.0),
+    wd("aiusage_antigravity", "Antigravity", "AI Quotas", 72.0),
+    wd("aiusage_opencode", "OpenCode", "AI Quotas", 72.0),
+    wd("aiusage_copilot", "Copilot", "AI Quotas", 68.0),
+    wd("aiusage_deepseek", "DeepSeek", "AI Quotas", 72.0),
+    wd("aiusage_openrouter", "OpenRouter", "AI Quotas", 74.0),
+    wd("aiusage_cursor", "Cursor", "AI Quotas", 66.0),
     // Media & Controls
-    wd("media", "Media", "Media & Controls", 60.0),
+    wd("media", "Media", "Media & Controls", 40.0),
     wd("audio", "Audio", "Media & Controls", 64.0),
-    wd("quicksettings", "Quick Settings", "Media & Controls", 58.0),
-    wd("keyboard", "Keyboard Layout", "Media & Controls", 50.0),
+    wd("quicksettings", "Quick Settings", "Media & Controls", 40.0),
+    wd("keyboard", "Keyboard Layout", "Media & Controls", 42.0),
     // Productivity
-    wd("focus", "Focus", "Productivity", 66.0),
+    wd("focus", "Focus", "Productivity", 68.0),
 ];
+
+pub fn ai_provider_color(id: &str) -> Rgb {
+    match id {
+        "aiusage_claude" => (0xd9, 0x77, 0x57),
+        "aiusage_codex" => (0x8d, 0x99, 0xff),
+        "aiusage_antigravity" => (0x38, 0xbd, 0xf8),
+        "aiusage_opencode" => (0x22, 0xc5, 0x5e),
+        "aiusage_copilot" => (0x9f, 0x9f, 0xf2),
+        "aiusage_deepseek" => (0x4d, 0x6b, 0xfe),
+        "aiusage_openrouter" => (0xb7, 0x9b, 0xf8),
+        "aiusage_cursor" => (0xe4, 0xe4, 0xe7),
+        _ => (0xa1, 0xa1, 0xaa),
+    }
+}
 
 const STACKS_WIDGET: WidgetDescriptor = wd("stacks", "Folder Stacks", "System & Hardware", 58.0);
 const GROUPS_WIDGET: WidgetDescriptor = wd("groups", "App Groups", "System & Hardware", 58.0);
@@ -214,6 +230,169 @@ impl WidgetRuntime {
         }
     }
 
+    /// Builds the archetype-matched `WidgetChipSpec` rendered onto the dock pill.
+    pub fn chip_spec(&self, id: &str, settings: &DockSettings, is_dark: bool) -> WidgetChipSpec {
+        let pal = design::palette(is_dark);
+        if let Some(ai) = telemetry::ai_provider_meta(id) {
+            return WidgetChipSpec::Provider {
+                label: ai.name.to_owned(),
+                color: ai_provider_color(ai.id),
+                detected: telemetry::ai_provider_detected(ai.id),
+            };
+        }
+        match id {
+            "clock" => {
+                let (time, date) = local_clock_strings();
+                WidgetChipSpec::DateTime { time, date }
+            }
+            "weather" => {
+                let temp = self
+                    .weather
+                    .lock()
+                    .ok()
+                    .map(|g| g.temp_c.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "--°".to_owned());
+                WidgetChipSpec::IconValue {
+                    icon: ChipIcon::SunCloud,
+                    value: temp,
+                    active_tint: false,
+                }
+            }
+            "dayprogress" => {
+                let (day, _, _, _) = day_progress_metrics();
+                WidgetChipSpec::ProgressRing {
+                    ratio: day,
+                    value: format!("{:.0}%", day * 100.0),
+                    color: pal.accent,
+                    active_tint: false,
+                }
+            }
+            "stopwatch" => WidgetChipSpec::IconValue {
+                icon: ChipIcon::Timer,
+                value: format!(
+                    "{:02}:{:02}",
+                    self.stopwatch_secs / 60,
+                    self.stopwatch_secs % 60
+                ),
+                active_tint: self.stopwatch_running,
+            },
+            "countdown" => {
+                let ratio = if self.countdown_total_secs > 0 {
+                    self.countdown_remaining_secs as f32 / self.countdown_total_secs as f32
+                } else {
+                    0.0
+                };
+                WidgetChipSpec::ProgressRing {
+                    ratio,
+                    value: format!(
+                        "{:02}:{:02}",
+                        self.countdown_remaining_secs / 60,
+                        self.countdown_remaining_secs % 60
+                    ),
+                    color: pal.accent,
+                    active_tint: self.countdown_running,
+                }
+            }
+            "focus" => {
+                let ratio = self.focus_remaining_secs as f32 / (25.0 * 60.0);
+                WidgetChipSpec::ProgressRing {
+                    ratio,
+                    value: format!(
+                        "{:02}:{:02}",
+                        self.focus_remaining_secs / 60,
+                        self.focus_remaining_secs % 60
+                    ),
+                    color: if settings.focus_mode {
+                        pal.warning
+                    } else {
+                        pal.accent
+                    },
+                    active_tint: self.focus_running || settings.focus_mode,
+                }
+            }
+            "stats" => WidgetChipSpec::DualMetric {
+                top: format!("CPU {:>2}%", self.cpu_pct),
+                bot: format!("RAM {:>2}%", self.ram_pct),
+                top_color: None,
+                bot_color: None,
+                bars: Some((self.cpu_pct as f32 / 100.0, self.ram_pct as f32 / 100.0)),
+            },
+            "netspeed" => WidgetChipSpec::DualMetric {
+                top: format!("↓ {}", telemetry::format_speed(self.net.rx_bps)),
+                bot: format!("↑ {}", telemetry::format_speed(self.net.tx_bps)),
+                top_color: Some(pal.success),
+                bot_color: Some(pal.accent),
+                bars: None,
+            },
+            "battery" => {
+                let b = sample_battery();
+                let val = if !b.has_battery {
+                    "AC".to_owned()
+                } else {
+                    format!("{}%", b.percent)
+                };
+                WidgetChipSpec::IconValue {
+                    icon: ChipIcon::Battery,
+                    value: val,
+                    active_tint: b.charging,
+                }
+            }
+            "bluetoothbattery" => {
+                let val = self
+                    .bt_battery
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.devices.first().map(|d| format!("{}%", d.percent)))
+                    .unwrap_or_else(|| "--".to_owned());
+                WidgetChipSpec::IconValue {
+                    icon: ChipIcon::Bluetooth,
+                    value: val,
+                    active_tint: false,
+                }
+            }
+            "storage" => {
+                let val = sample_drives()
+                    .first()
+                    .map(|d| format!("{:.0}G", d.free_gb))
+                    .unwrap_or_else(|| "--".to_owned());
+                WidgetChipSpec::IconValue {
+                    icon: ChipIcon::Drive,
+                    value: val,
+                    active_tint: false,
+                }
+            }
+            "media" => WidgetChipSpec::IconOnly(ChipIcon::Music),
+            "audio" => WidgetChipSpec::IconValue {
+                icon: if self.audio_muted {
+                    ChipIcon::SpeakerMuted
+                } else {
+                    ChipIcon::Speaker
+                },
+                value: if self.audio_muted {
+                    "Mute".to_owned()
+                } else {
+                    format!("{}%", self.audio_vol)
+                },
+                active_tint: false,
+            },
+            "quicksettings" => WidgetChipSpec::IconOnly(ChipIcon::Sliders),
+            "keyboard" => WidgetChipSpec::Keycap(active_keyboard_code()),
+            "stacks" => WidgetChipSpec::IconValue {
+                icon: ChipIcon::Folder,
+                value: settings.stack_folders.len().to_string(),
+                active_tint: false,
+            },
+            "groups" => WidgetChipSpec::IconValue {
+                icon: ChipIcon::Grid,
+                value: settings.app_groups.len().to_string(),
+                active_tint: false,
+            },
+            _ => WidgetChipSpec::Keycap(id.chars().take(3).collect::<String>().to_uppercase()),
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn chip_lines(&self, id: &str, settings: &DockSettings) -> (String, String) {
         if let Some(ai) = telemetry::ai_provider_meta(id) {
             let status = if telemetry::ai_provider_detected(ai.id) {
@@ -384,13 +563,13 @@ impl WidgetRuntime {
             "clock" => {
                 let (time, date) = local_clock_strings();
                 let spec = FlyoutSpec {
-                    title: time,
-                    subtitle: Some(date),
-                    width_dips: 268.0,
+                    title: "Clock".to_owned(),
+                    subtitle: None,
+                    width_dips: 276.0,
                     blocks: vec![
-                        FlyoutBlock::StatRow {
-                            label: "Uptime".to_owned(),
-                            value: telemetry::system_uptime_string(),
+                        FlyoutBlock::Hero {
+                            value: time,
+                            caption: Some(date),
                         },
                         FlyoutBlock::Separator,
                         FlyoutBlock::ButtonBar(vec![
@@ -683,9 +862,16 @@ impl WidgetRuntime {
                     subtitle: None,
                     width_dips: 256.0,
                     blocks: vec![
-                        FlyoutBlock::StatRow {
-                            label: "Elapsed".to_owned(),
+                        FlyoutBlock::Hero {
                             value: format!("{h:02}:{m:02}:{s:02}"),
+                            caption: Some(
+                                if self.stopwatch_running {
+                                    "Running"
+                                } else {
+                                    "Paused"
+                                }
+                                .to_owned(),
+                            ),
                         },
                         FlyoutBlock::ButtonBar(vec![
                             (
@@ -722,13 +908,24 @@ impl WidgetRuntime {
                     subtitle: None,
                     width_dips: 266.0,
                     blocks: vec![
-                        FlyoutBlock::ProgressBar {
-                            label: "Remaining".to_owned(),
-                            value_text: format!(
+                        FlyoutBlock::Hero {
+                            value: format!(
                                 "{:02}:{:02}",
                                 self.countdown_remaining_secs / 60,
                                 self.countdown_remaining_secs % 60
                             ),
+                            caption: Some(
+                                if self.countdown_running {
+                                    "Counting down"
+                                } else {
+                                    "Ready"
+                                }
+                                .to_owned(),
+                            ),
+                        },
+                        FlyoutBlock::ProgressBar {
+                            label: "Progress".to_owned(),
+                            value_text: format!("{:.0}%", ratio * 100.0),
                             ratio,
                         },
                         FlyoutBlock::ButtonBar(vec![
@@ -782,13 +979,24 @@ impl WidgetRuntime {
                     subtitle: None,
                     width_dips: 274.0,
                     blocks: vec![
-                        FlyoutBlock::ProgressBar {
-                            label: "Pomodoro".to_owned(),
-                            value_text: format!(
+                        FlyoutBlock::Hero {
+                            value: format!(
                                 "{:02}:{:02}",
                                 self.focus_remaining_secs / 60,
                                 self.focus_remaining_secs % 60
                             ),
+                            caption: Some(
+                                if self.focus_running {
+                                    "Pomodoro active"
+                                } else {
+                                    "25-minute session"
+                                }
+                                .to_owned(),
+                            ),
+                        },
+                        FlyoutBlock::ProgressBar {
+                            label: "Session".to_owned(),
+                            value_text: format!("{:.0}%", ratio * 100.0),
                             ratio,
                         },
                         FlyoutBlock::ButtonBar(vec![
@@ -829,17 +1037,17 @@ impl WidgetRuntime {
                 };
                 let spec = FlyoutSpec {
                     title: city,
-                    subtitle: (!snap.condition.is_empty()).then_some(snap.condition),
+                    subtitle: None,
                     width_dips: 268.0,
                     blocks: vec![
-                        FlyoutBlock::StatRow {
-                            label: "Temperature".to_owned(),
+                        FlyoutBlock::Hero {
                             value: if snap.temp_c.is_empty() {
                                 "--"
                             } else {
                                 &snap.temp_c
                             }
                             .to_owned(),
+                            caption: (!snap.condition.is_empty()).then_some(snap.condition),
                         },
                         FlyoutBlock::StatRow {
                             label: "Feels Like".to_owned(),
@@ -868,24 +1076,42 @@ impl WidgetRuntime {
                 }
             }
             "quicksettings" => {
-                let (_, muted) = get_audio_state();
+                let (vol, muted) = get_audio_state();
                 let spec = FlyoutSpec {
                     title: "Quick Settings".to_owned(),
                     subtitle: None,
-                    width_dips: 274.0,
+                    width_dips: 292.0,
                     blocks: vec![
-                        action_row(
-                            1,
-                            "Focus Mode",
-                            Some(if settings.focus_mode { "On" } else { "Off" }.to_owned()),
-                        ),
-                        action_row(2, "Auto-Hide", Some(format!("{:?}", settings.auto_hide))),
-                        action_row(3, "Theme", Some(format!("{:?}", settings.theme))),
-                        action_row(
-                            4,
-                            "Audio",
-                            Some(if muted { "Muted" } else { "Active" }.to_owned()),
-                        ),
+                        FlyoutBlock::ToggleGrid(vec![
+                            (
+                                1,
+                                "Focus Mode".to_owned(),
+                                if settings.focus_mode { "On" } else { "Off" }.to_owned(),
+                                settings.focus_mode,
+                            ),
+                            (
+                                2,
+                                "Auto-Hide".to_owned(),
+                                format!("{:?}", settings.auto_hide),
+                                settings.auto_hide != AutoHideMode::Disabled,
+                            ),
+                            (
+                                3,
+                                "Theme".to_owned(),
+                                format!("{:?}", settings.theme),
+                                false,
+                            ),
+                            (
+                                4,
+                                "Sound".to_owned(),
+                                if muted {
+                                    "Muted".to_owned()
+                                } else {
+                                    format!("{vol}%")
+                                },
+                                !muted,
+                            ),
+                        ]),
                         FlyoutBlock::Separator,
                         FlyoutBlock::ButtonBar(vec![
                             (5, "Settings".to_owned(), true),

@@ -46,6 +46,7 @@ pub mod tray;
 use self::dcomp::{DcompEngine, PillNodes, ShellGlyph, VisualNode};
 use self::preview::{PreviewItem, PreviewPopup};
 use self::show_desktop::ShowDesktopCorner;
+use crate::design;
 use crate::platform::icon_cache::{self, RawIcon};
 use crate::platform::pins::{self, PinnedApp};
 use crate::platform::win32::{
@@ -715,26 +716,27 @@ impl DockState {
         let pill_h = pill_height_dips(&settings);
         let radius = settings.corner_radius_dips();
 
+        let pal = design::palette(is_dark);
         let (pill_rgb, bd_rgb, hover_rgb, press_rgb, div_rgb, dot_run_rgb, dot_act_rgb) = if is_dark
         {
             (
-                (0x14, 0x17, 0x1f),
-                (0xff, 0xff, 0xff, 0.16),
+                pal.dock_pill,
                 (0xff, 0xff, 0xff, 0.11),
-                (0xff, 0xff, 0xff, 0.18),
-                (0xff, 0xff, 0xff, 0.24),
-                (0xe2, 0xe8, 0xf0, 0.90),
+                (0xff, 0xff, 0xff, 0.10),
+                (0xff, 0xff, 0xff, 0.16),
+                (0xff, 0xff, 0xff, 0.14),
+                (0xd4, 0xd4, 0xd8, 0.85),
                 (0xff, 0xff, 0xff, 1.0),
             )
         } else {
             (
-                (0xf3, 0xf5, 0xf9),
-                (0x0f, 0x17, 0x2a, 0.14),
-                (0x0f, 0x17, 0x2a, 0.08),
-                (0x0f, 0x17, 0x2a, 0.15),
-                (0x0f, 0x17, 0x2a, 0.20),
-                (0x47, 0x55, 0x69, 0.85),
-                (0x0f, 0x17, 0x2a, 0.95),
+                pal.dock_pill,
+                (0x18, 0x18, 0x1b, 0.11),
+                (0x18, 0x18, 0x1b, 0.07),
+                (0x18, 0x18, 0x1b, 0.13),
+                (0x18, 0x18, 0x1b, 0.14),
+                (0x52, 0x52, 0x5b, 0.85),
+                (0x18, 0x18, 0x1b, 0.95),
             )
         };
 
@@ -1080,14 +1082,15 @@ impl DockState {
         self.sync_widget_visuals();
         self.widget_runtime.tick(&self.settings);
         let mut changed = false;
-        let widget_h = 36.0;
+        let widget_h = design::widget_height_dips(pill_height_dips(&self.settings));
         for wv in &mut self.widget_visuals {
-            let (top, bottom) = self.widget_runtime.chip_lines(wv.id, &self.settings);
-            let key = format!("{top}|{bottom}");
+            let spec = self
+                .widget_runtime
+                .chip_spec(wv.id, &self.settings, self.is_dark);
+            let key = format!("{}|{widget_h:.1}|{}", spec.cache_key(), self.is_dark);
             if key != wv.last_key
-                && let Ok(surf) = self.dcomp.create_widget_text_surface(
-                    &top,
-                    Some(&bottom),
+                && let Ok(surf) = self.dcomp.create_widget_chip_surface(
+                    &spec,
                     wv.width_dips,
                     widget_h,
                     self.dpi,
@@ -1174,26 +1177,27 @@ impl DockState {
         let pill_h = pill_height_dips(&self.settings);
         let radius = self.settings.corner_radius_dips();
 
+        let pal = design::palette(is_dark);
         let (pill_rgb, bd_rgb, hover_rgb, press_rgb, div_rgb, dot_run_rgb, dot_act_rgb) = if is_dark
         {
             (
-                (0x14, 0x17, 0x1f),
-                (0xff, 0xff, 0xff, 0.16),
+                pal.dock_pill,
                 (0xff, 0xff, 0xff, 0.11),
-                (0xff, 0xff, 0xff, 0.18),
-                (0xff, 0xff, 0xff, 0.24),
-                (0xe2, 0xe8, 0xf0, 0.90),
+                (0xff, 0xff, 0xff, 0.10),
+                (0xff, 0xff, 0xff, 0.16),
+                (0xff, 0xff, 0xff, 0.14),
+                (0xd4, 0xd4, 0xd8, 0.85),
                 (0xff, 0xff, 0xff, 1.0),
             )
         } else {
             (
-                (0xf3, 0xf5, 0xf9),
-                (0x0f, 0x17, 0x2a, 0.14),
-                (0x0f, 0x17, 0x2a, 0.08),
-                (0x0f, 0x17, 0x2a, 0.15),
-                (0x0f, 0x17, 0x2a, 0.20),
-                (0x47, 0x55, 0x69, 0.85),
-                (0x0f, 0x17, 0x2a, 0.95),
+                pal.dock_pill,
+                (0x18, 0x18, 0x1b, 0.11),
+                (0x18, 0x18, 0x1b, 0.07),
+                (0x18, 0x18, 0x1b, 0.13),
+                (0x18, 0x18, 0x1b, 0.14),
+                (0x52, 0x52, 0x5b, 0.85),
+                (0x18, 0x18, 0x1b, 0.95),
             )
         };
 
@@ -2085,7 +2089,8 @@ impl DockState {
         let widgets_w = widgets_section_width(&self.settings, self.slots.len(), self.mon_w_dips());
         if widgets_w > 0.0 {
             let mut right_cursor = pill_left + pill_w - 12.0;
-            let widget_top = pill_top + (pill_h - 36.0) * 0.5;
+            let widget_h = design::widget_height_dips(pill_h);
+            let widget_top = pill_top + (pill_h - widget_h) * 0.5;
 
             for wv in self.widget_visuals.iter().rev() {
                 let wx = right_cursor - wv.width_dips;
@@ -2099,7 +2104,7 @@ impl DockState {
                     }));
                     wv.bg.set_transform(
                         wv.width_dips / base,
-                        36.0 / base,
+                        widget_h / base,
                         (wx * dpi).round(),
                         (widget_top * dpi).round(),
                     );

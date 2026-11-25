@@ -395,7 +395,7 @@ fn map_context_action(id: u32) -> ContextAction {
 
 fn dock_menu_entries(focus_mode: bool) -> Vec<MenuEntry> {
     vec![
-        MenuEntry::item(MENU_SEARCH, MenuIcon::Play, "Search / Launcher"),
+        MenuEntry::item(MENU_SEARCH, MenuIcon::Play, "Search Apps"),
         MenuEntry::item(
             MENU_FOCUS_MODE,
             MenuIcon::Layers,
@@ -406,9 +406,19 @@ fn dock_menu_entries(focus_mode: bool) -> Vec<MenuEntry> {
             },
         ),
         MenuEntry::item(MENU_SETTINGS, MenuIcon::Settings, "Settings..."),
-        MenuEntry::item(MENU_TASKMGR, MenuIcon::Activity, "Task Manager"),
+        MenuEntry::with_shortcut(
+            MENU_TASKMGR,
+            MenuIcon::Activity,
+            "Task Manager",
+            "Ctrl+Shift+Esc",
+        ),
         MenuEntry::Separator,
-        MenuEntry::item(MENU_SHOW_DESKTOP, MenuIcon::Monitor, "Show Desktop"),
+        MenuEntry::with_shortcut(
+            MENU_SHOW_DESKTOP,
+            MenuIcon::Monitor,
+            "Show Desktop",
+            "Win+D",
+        ),
         MenuEntry::item(MENU_RESTORE, MenuIcon::Refresh, "Restore Windows Taskbar"),
         MenuEntry::Separator,
         MenuEntry::destructive(MENU_EXIT, MenuIcon::Power, "Exit OpenTaskbar"),
@@ -418,9 +428,14 @@ fn dock_menu_entries(focus_mode: bool) -> Vec<MenuEntry> {
 /// Power-user / system menu opened only on right-clicking the Windows Start logo.
 pub fn show_start_context_menu(hwnd: usize, is_dark: bool) -> ContextAction {
     let entries = vec![
-        MenuEntry::item(MENU_TASKMGR, MenuIcon::Activity, "Task Manager"),
-        MenuEntry::item(MENU_EXPLORER, MenuIcon::Folder, "File Explorer"),
-        MenuEntry::item(MENU_RUN, MenuIcon::Play, "Run..."),
+        MenuEntry::with_shortcut(
+            MENU_TASKMGR,
+            MenuIcon::Activity,
+            "Task Manager",
+            "Ctrl+Shift+Esc",
+        ),
+        MenuEntry::with_shortcut(MENU_EXPLORER, MenuIcon::Folder, "File Explorer", "Win+E"),
+        MenuEntry::with_shortcut(MENU_RUN, MenuIcon::Play, "Run...", "Win+R"),
         MenuEntry::item(MENU_TERMINAL, MenuIcon::Terminal, "Terminal"),
         MenuEntry::item(MENU_TERMINAL_ADMIN, MenuIcon::Shield, "Terminal (Admin)"),
         MenuEntry::Separator,
@@ -430,12 +445,17 @@ pub fn show_start_context_menu(hwnd: usize, is_dark: bool) -> ContextAction {
         MenuEntry::item(MENU_EVENT_VWR, MenuIcon::Activity, "Event Viewer"),
         MenuEntry::item(MENU_NET_CONN, MenuIcon::Refresh, "Network Connections"),
         MenuEntry::Separator,
-        MenuEntry::item(MENU_LOCK_PC, MenuIcon::Shield, "Lock"),
+        MenuEntry::with_shortcut(
+            MENU_SHOW_DESKTOP,
+            MenuIcon::Monitor,
+            "Show Desktop",
+            "Win+D",
+        ),
+        MenuEntry::Separator,
+        MenuEntry::with_shortcut(MENU_LOCK_PC, MenuIcon::Shield, "Lock", "Win+L"),
         MenuEntry::item(MENU_SIGN_OUT, MenuIcon::ChevronRight, "Sign Out"),
         MenuEntry::item(MENU_RESTART_PC, MenuIcon::Refresh, "Restart"),
         MenuEntry::destructive(MENU_SHUTDOWN_PC, MenuIcon::Power, "Shut Down"),
-        MenuEntry::Separator,
-        MenuEntry::item(MENU_SHOW_DESKTOP, MenuIcon::Monitor, "Show Desktop"),
     ];
     map_context_action(menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0))
 }

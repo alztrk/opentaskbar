@@ -8,6 +8,8 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 #[cfg(windows)]
+mod design;
+#[cfg(windows)]
 mod dock;
 #[cfg(windows)]
 mod platform;

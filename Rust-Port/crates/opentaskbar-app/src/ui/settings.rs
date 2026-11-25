@@ -32,7 +32,7 @@ const WIN_H: f32 = 680.0;
 const MIN_WIDTH: f32 = 540.0;
 const MIN_HEIGHT: f32 = 428.0;
 const SIDEBAR_BREAKPOINT: f32 = 680.0;
-const SIDEBAR_WIDTH: f32 = 220.0;
+const SIDEBAR_WIDTH: f32 = 196.0;
 const WIDGET_COLUMNS_BREAKPOINT: f32 = 520.0;
 
 actions!(settings_navigation, [TabNext, TabPrevious]);
@@ -889,21 +889,21 @@ impl SettingsView {
                             .px(px(12.0))
                             .py(px(4.5))
                             .rounded(px(7.0))
-                            .bg(rgba(0xffffff10))
+                            .bg(rgba(t.surface_muted))
                             .flex()
                             .flex_col()
                             .items_center()
                             .child(
                                 div()
-                                    .text_size(px(11.5))
+                                    .text_size(px(12.0))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgba(0xf8fafcff))
+                                    .text_color(rgba(t.dock_preview_fg))
                                     .child(top_line),
                             )
                             .child(
                                 div()
-                                    .text_size(px(10.0))
-                                    .text_color(rgba(0x94a3b8ff))
+                                    .text_size(px(11.0))
+                                    .text_color(rgba(t.dock_preview_sub))
                                     .child(bot_line),
                             ),
                     ),
@@ -1335,13 +1335,8 @@ impl SettingsView {
                 t,
                 "Application",
                 vec![
-                    setting_row(
-                        t,
-                        Some("\u{E946}"),
-                        "Version",
-                        badge(t, "0.1.0 Hybrid", true),
-                    )
-                    .into_any_element(),
+                    setting_row(t, Some("\u{E946}"), "Version", badge(t, "v0.1.0", true))
+                        .into_any_element(),
                 ],
             )
             .into_any_element(),
@@ -1548,31 +1543,23 @@ impl Render for SettingsView {
                     .w_full()
                     .flex_shrink_0()
                     .px(inset)
-                    .py(px(if narrow { 12.0 } else { 22.0 }))
+                    .py(px(if narrow { 12.0 } else { 18.0 }))
                     .border_b_1()
                     .border_color(rgba(t.border))
                     .flex()
-                    .items_center()
-                    .gap(px(14.0))
+                    .flex_col()
+                    .gap(px(3.0))
                     .child(
                         div()
-                            .size(px(42.0))
-                            .flex_shrink_0()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(12.0))
-                            .bg(rgba(t.accent_soft))
-                            .child(icon_glyph(self.page.glyph(), 20.0, t.accent)),
+                            .text_size(px(22.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(self.page.title()),
                     )
                     .child(
                         div()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .gap(px(3.0))
-                            .child(div().text_size(px(25.0)).font_weight(gpui::FontWeight::SEMIBOLD).child(self.page.title()))
-                            .child(div().text_size(px(13.0)).text_color(rgba(t.text_secondary)).child(self.page.description())),
+                            .text_size(px(12.0))
+                            .text_color(rgba(t.text_secondary))
+                            .child(self.page.description()),
                     ),
             )
             .when(self.save_failed, |panel| panel.child(

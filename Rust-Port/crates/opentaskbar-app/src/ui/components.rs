@@ -9,11 +9,13 @@
 
 use gpui::{AnyElement, Div, SharedString, div, prelude::*, px, rgba};
 
-const PANEL_RADIUS: f32 = 16.0;
-const CONTROL_RADIUS: f32 = 9.0;
+use crate::design::{self, gpui_rgba};
+
+const PANEL_RADIUS: f32 = 14.0;
+const CONTROL_RADIUS: f32 = 8.0;
 const ROW_INSET: f32 = 16.0;
 
-/// Semantic iOS + shadcn/ui color palette for GPUI surfaces.
+/// Unified neutral Zinc/Carbon palette for GPUI surfaces (shared with Dock & Flyout).
 #[derive(Clone, Copy)]
 pub struct UiTheme {
     pub canvas_bg: u32,
@@ -22,6 +24,8 @@ pub struct UiTheme {
     pub surface_muted: u32,
     pub surface_hover: u32,
     pub dock_preview_bg: u32,
+    pub dock_preview_fg: u32,
+    pub dock_preview_sub: u32,
     pub border: u32,
     pub separator: u32,
     pub text_primary: u32,
@@ -39,50 +43,29 @@ pub struct UiTheme {
 
 impl UiTheme {
     pub fn new(is_dark: bool) -> Self {
-        if is_dark {
-            Self {
-                canvas_bg: 0x18191dff,
-                sidebar_bg: 0x202126ff,
-                surface: 0x24262cff,
-                surface_muted: 0x1a1b20ff,
-                surface_hover: 0x2e3038ff,
-                dock_preview_bg: 0x11141dff,
-                border: 0xffffff16,
-                separator: 0xffffff10,
-                text_primary: 0xf5f6f8ff,
-                text_secondary: 0xaeb2beff,
-                accent: 0x7fb7ffff,
-                accent_soft: 0x7fb7ff22,
-                accent_fg: 0x18191dff,
-                switch_off: 0x39393dff,
-                switch_on: 0x30d158ff,
-                switch_thumb: 0xffffffff,
-                destructive: 0xffa2a8ff,
-                destructive_soft: 0xffa2a824,
-                scrollbar_thumb: 0xffffff38,
-            }
-        } else {
-            Self {
-                canvas_bg: 0xf1f2f6ff,
-                sidebar_bg: 0xfafafcff,
-                surface: 0xffffffff,
-                surface_muted: 0xefeff4ff,
-                surface_hover: 0xe5e5eaff,
-                dock_preview_bg: 0x1c202bff,
-                border: 0x00000014,
-                separator: 0x0000000e,
-                text_primary: 0x191b22ff,
-                text_secondary: 0x515766ff,
-                accent: 0x0f59a7ff,
-                accent_soft: 0x0f59a71a,
-                accent_fg: 0xffffffff,
-                switch_off: 0xd1d1d6ff,
-                switch_on: 0x34c759ff,
-                switch_thumb: 0xffffffff,
-                destructive: 0xa42137ff,
-                destructive_soft: 0xa4213718,
-                scrollbar_thumb: 0x00000038,
-            }
+        let p = design::palette(is_dark);
+        Self {
+            canvas_bg: gpui_rgba(p.canvas, 0xff),
+            sidebar_bg: gpui_rgba(p.sidebar, 0xff),
+            surface: gpui_rgba(p.surface, 0xff),
+            surface_muted: gpui_rgba(p.elevated, 0xff),
+            surface_hover: gpui_rgba(p.hover, 0xff),
+            dock_preview_bg: gpui_rgba(p.dock_pill, 0xf2),
+            dock_preview_fg: gpui_rgba(p.text_primary, 0xff),
+            dock_preview_sub: gpui_rgba(p.text_secondary, 0xff),
+            border: if is_dark { 0xffffff16 } else { 0x00000014 },
+            separator: if is_dark { 0xffffff10 } else { 0x0000000e },
+            text_primary: gpui_rgba(p.text_primary, 0xff),
+            text_secondary: gpui_rgba(p.text_secondary, 0xff),
+            accent: gpui_rgba(p.accent, 0xff),
+            accent_soft: gpui_rgba(p.accent, 0x22),
+            accent_fg: 0xffffffff,
+            switch_off: gpui_rgba(p.switch_off, 0xff),
+            switch_on: gpui_rgba(p.accent, 0xff),
+            switch_thumb: 0xffffffff,
+            destructive: gpui_rgba(p.danger, 0xff),
+            destructive_soft: gpui_rgba(p.danger, 0x22),
+            scrollbar_thumb: if is_dark { 0xffffff38 } else { 0x00000038 },
         }
     }
 }
@@ -180,7 +163,7 @@ pub fn setting_row(
         .child(div().flex_shrink_0().child(control))
 }
 
-/// Tactile iOS-style switch pill (`42x24`).
+/// Crisp desktop toggle switch pill (`36x20`).
 pub fn ios_switch(
     id: impl Into<gpui::ElementId>,
     theme: &UiTheme,
@@ -192,13 +175,13 @@ pub fn ios_switch(
     } else {
         theme.switch_off
     };
-    let thumb_left = if checked { px(20.0) } else { px(2.0) };
+    let thumb_left = if checked { px(18.0) } else { px(2.0) };
 
     div()
         .id(id)
-        .w(px(42.0))
-        .h(px(24.0))
-        .rounded(px(12.0))
+        .w(px(36.0))
+        .h(px(20.0))
+        .rounded(px(10.0))
         .border_1()
         .border_color(rgba(track_bg))
         .bg(rgba(track_bg))
@@ -213,9 +196,9 @@ pub fn ios_switch(
         .on_click(on_click)
         .child(
             div()
-                .w(px(20.0))
-                .h(px(20.0))
-                .rounded(px(10.0))
+                .w(px(16.0))
+                .h(px(16.0))
+                .rounded(px(8.0))
                 .bg(rgba(theme.switch_thumb))
                 .ml(thumb_left - px(1.0)),
         )
@@ -443,14 +426,14 @@ pub fn sidebar_nav_item(
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> gpui::Stateful<Div> {
     let bg = if active {
-        theme.accent_soft
+        theme.surface_muted
     } else {
         0x00000000
     };
     let fg = if active {
-        theme.accent
-    } else {
         theme.text_primary
+    } else {
+        theme.text_secondary
     };
     let icon_col = if active {
         theme.accent
@@ -458,7 +441,7 @@ pub fn sidebar_nav_item(
         theme.text_secondary
     };
     let hover = if active {
-        theme.accent_soft
+        theme.surface_muted
     } else {
         theme.surface_hover
     };

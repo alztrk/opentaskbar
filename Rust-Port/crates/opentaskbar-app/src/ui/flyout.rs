@@ -39,6 +39,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::menu::{MenuIcon, draw_menu_icon};
+use crate::design::{self, gdi_rgb};
 use crate::platform::win32;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -97,6 +98,13 @@ pub enum FlyoutAction {
 /// Declarative content block rendered inside the shared `DockFlyout`.
 #[derive(Clone, Debug)]
 pub enum FlyoutBlock {
+    /// Large 28px hero metric (Clock time, Weather temp, Pomodoro/Stopwatch timer).
+    Hero {
+        value: String,
+        caption: Option<String>,
+    },
+    /// 2-column Control Center toggle tile grid (`(id, title, state_label, active)`).
+    ToggleGrid(Vec<(u32, String, String, bool)>),
     StatRow {
         label: String,
         value: String,
@@ -279,6 +287,33 @@ pub fn show_flyout_interactive(
     let content_right_pad = pad + s(6.0); // room for thin scrollbar if needed
     for block in &spec.blocks {
         match block {
+            FlyoutBlock::Hero { caption, .. } => {
+                y += if caption.is_some() { s(54.0) } else { s(38.0) };
+            }
+            FlyoutBlock::ToggleGrid(tiles) => {
+                let rows = tiles.len().div_ceil(2) as i32;
+                let tile_h = s(48.0);
+                let gap = s(6.0);
+                let avail = width_px - pad - content_right_pad - gap;
+                let tw = (avail / 2).max(s(80.0));
+                for (i, (id, _, _, _)) in tiles.iter().enumerate() {
+                    let col = (i % 2) as i32;
+                    let row = (i / 2) as i32;
+                    let left = pad + col * (tw + gap);
+                    let top = y + row * (tile_h + gap);
+                    targets.push(HitTarget {
+                        id: *id,
+                        menu_id: *id,
+                        rect: RECT {
+                            left,
+                            top,
+                            right: left + tw,
+                            bottom: top + tile_h,
+                        },
+                    });
+                }
+                y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
+            }
             FlyoutBlock::StatRow { .. } => y += s(26.0),
             FlyoutBlock::ProgressBar { .. } => y += s(38.0),
             FlyoutBlock::ActionRow { id, subtitle, .. } => {
@@ -410,11 +445,7 @@ pub fn show_flyout_interactive(
             (&corner as *const u32).cast(),
             size_of::<u32>() as u32,
         );
-        let border = if is_dark {
-            rgb(0x2e, 0x35, 0x46)
-        } else {
-            rgb(0xd4, 0xd9, 0xe3)
-        };
+        let border = gdi_rgb(design::palette(is_dark).border_rgb);
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_BORDER_COLOR as u32,
@@ -697,6 +728,7 @@ impl FlyoutState<'_> {
         let w = client.right;
         let focused_id = self.keyboard_index.map(|index| self.targets[index].id);
 
+        let pal = design::palette(self.is_dark);
         let (
             bg,
             card_bg,
@@ -708,59 +740,18 @@ impl FlyoutState<'_> {
             danger_fg,
             sep_col,
             scroll_col,
-        ) = if self.keyboard_navigation && self.is_dark {
-            (
-                rgb(24, 25, 29),
-                rgb(32, 33, 38),
-                rgb(46, 48, 56),
-                rgb(127, 183, 255),
-                rgb(245, 246, 248),
-                rgb(174, 178, 190),
-                rgb(78, 41, 47),
-                rgb(255, 162, 168),
-                rgb(52, 55, 63),
-                rgb(101, 106, 120),
-            )
-        } else if self.keyboard_navigation {
-            (
-                rgb(250, 250, 252),
-                rgb(241, 242, 246),
-                rgb(229, 232, 239),
-                rgb(15, 89, 167),
-                rgb(25, 27, 34),
-                rgb(81, 87, 102),
-                rgb(252, 223, 228),
-                rgb(164, 33, 55),
-                rgb(221, 224, 232),
-                rgb(137, 144, 161),
-            )
-        } else if self.is_dark {
-            (
-                rgb(0x14, 0x17, 0x20),
-                rgb(0x1d, 0x22, 0x30),
-                rgb(0x28, 0x30, 0x42),
-                rgb(0x0a, 0x84, 0xff),
-                rgb(0xf1, 0xf5, 0xf9),
-                rgb(0x94, 0xa3, 0xb8),
-                rgb(0x7f, 0x1d, 0x1d),
-                rgb(0xfc, 0xa5, 0xa5),
-                rgb(0x27, 0x2d, 0x3d),
-                rgb(0x47, 0x55, 0x69),
-            )
-        } else {
-            (
-                rgb(0xf8, 0xfa, 0xfc),
-                rgb(0xee, 0xf2, 0xf7),
-                rgb(0xe2, 0xe8, 0xf0),
-                rgb(0x00, 0x7a, 0xff),
-                rgb(0x0f, 0x17, 0x2a),
-                rgb(0x47, 0x55, 0x69),
-                rgb(0xfe, 0xe2, 0xe2),
-                rgb(0xb9, 0x1c, 0x1c),
-                rgb(0xe2, 0xe8, 0xf0),
-                rgb(0x94, 0xa3, 0xb8),
-            )
-        };
+        ) = (
+            gdi_rgb(pal.surface),
+            gdi_rgb(pal.elevated),
+            gdi_rgb(pal.hover),
+            gdi_rgb(pal.accent),
+            gdi_rgb(pal.text_primary),
+            gdi_rgb(pal.text_secondary),
+            gdi_rgb(pal.danger_hover_bg),
+            gdi_rgb(pal.danger_fg),
+            gdi_rgb(pal.sep_rgb),
+            gdi_rgb(pal.text_secondary),
+        );
 
         unsafe {
             let bg_brush = CreateSolidBrush(bg);
@@ -890,6 +881,130 @@ impl FlyoutState<'_> {
             let mut y = self.content_top_px - self.scroll_y;
             for block in &self.spec.blocks {
                 match block {
+                    FlyoutBlock::Hero { value, caption } => {
+                        let hero_font = CreateFontW(
+                            -s(28.0),
+                            0,
+                            0,
+                            0,
+                            600,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            5,
+                            0,
+                            fname.as_ptr(),
+                        );
+                        SelectObject(hdc, hero_font as _);
+                        SetTextColor(hdc, text_fg);
+                        let mut hrc = RECT {
+                            left: pad,
+                            top: y,
+                            right: w - right_pad,
+                            bottom: y + s(34.0),
+                        };
+                        let mut vw: Vec<u16> = value.encode_utf16().collect();
+                        DrawTextW(
+                            hdc,
+                            vw.as_mut_ptr(),
+                            vw.len() as i32,
+                            &mut hrc,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                        );
+                        DeleteObject(hero_font as _);
+                        y += s(36.0);
+                        if let Some(cap) = caption {
+                            SelectObject(hdc, small_font as _);
+                            SetTextColor(hdc, muted_fg);
+                            let mut crc = RECT {
+                                left: pad,
+                                top: y,
+                                right: w - right_pad,
+                                bottom: y + s(16.0),
+                            };
+                            let mut cw: Vec<u16> = cap.encode_utf16().collect();
+                            DrawTextW(
+                                hdc,
+                                cw.as_mut_ptr(),
+                                cw.len() as i32,
+                                &mut crc,
+                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            );
+                            y += s(18.0);
+                        }
+                    }
+                    FlyoutBlock::ToggleGrid(tiles) => {
+                        let rows = tiles.len().div_ceil(2) as i32;
+                        let tile_h = s(48.0);
+                        let gap = s(6.0);
+                        let avail = w - pad - right_pad - gap;
+                        let tw = (avail / 2).max(s(80.0));
+                        for (i, (id, title, state_lbl, active)) in tiles.iter().enumerate() {
+                            let col = (i % 2) as i32;
+                            let row = (i / 2) as i32;
+                            let left = pad + col * (tw + gap);
+                            let top = y + row * (tile_h + gap);
+                            let hovered = self.hovered_id == Some(*id);
+                            let fill = if *active {
+                                accent
+                            } else if hovered {
+                                hover_bg
+                            } else {
+                                card_bg
+                            };
+                            fill_round_rect(hdc, left, top, left + tw, top + tile_h, radius, fill);
+                            SelectObject(hdc, body_font as _);
+                            SetTextColor(
+                                hdc,
+                                if *active {
+                                    rgb(0xff, 0xff, 0xff)
+                                } else {
+                                    text_fg
+                                },
+                            );
+                            let mut trc = RECT {
+                                left: left + s(10.0),
+                                top: top + s(6.0),
+                                right: left + tw - s(8.0),
+                                bottom: top + s(24.0),
+                            };
+                            let mut tw_u16: Vec<u16> = title.encode_utf16().collect();
+                            DrawTextW(
+                                hdc,
+                                tw_u16.as_mut_ptr(),
+                                tw_u16.len() as i32,
+                                &mut trc,
+                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            );
+                            SelectObject(hdc, small_font as _);
+                            SetTextColor(
+                                hdc,
+                                if *active {
+                                    rgb(0xe2, 0xe8, 0xf0)
+                                } else {
+                                    muted_fg
+                                },
+                            );
+                            let mut src = RECT {
+                                left: left + s(10.0),
+                                top: top + s(25.0),
+                                right: left + tw - s(8.0),
+                                bottom: top + tile_h - s(6.0),
+                            };
+                            let mut sw_u16: Vec<u16> = state_lbl.encode_utf16().collect();
+                            DrawTextW(
+                                hdc,
+                                sw_u16.as_mut_ptr(),
+                                sw_u16.len() as i32,
+                                &mut src,
+                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            );
+                        }
+                        y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
+                    }
                     FlyoutBlock::StatRow { label, value } => {
                         let h = s(26.0);
                         SelectObject(hdc, body_font as _);
@@ -951,29 +1066,30 @@ impl FlyoutState<'_> {
                             DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
                         );
 
-                        let bar_top = y + s(22.0);
-                        let bar_h = s(7.0);
+                        let bar_top = y + s(23.0);
+                        let bar_h = s(5.0);
                         fill_round_rect(
                             hdc,
                             pad,
                             bar_top,
                             w - right_pad,
                             bar_top + bar_h,
-                            s(4.0),
+                            s(3.0),
                             card_bg,
                         );
 
                         let fill_w =
                             (((w - pad - right_pad) as f32) * ratio.clamp(0.0, 1.0)).round() as i32;
-                        if fill_w > s(4.0) {
+                        if fill_w > s(3.0) {
+                            let meter_col = gdi_rgb(design::meter_color(&pal, *ratio));
                             fill_round_rect(
                                 hdc,
                                 pad,
                                 bar_top,
                                 pad + fill_w,
                                 bar_top + bar_h,
-                                s(4.0),
-                                accent,
+                                s(3.0),
+                                meter_col,
                             );
                         }
                         y += h;
