@@ -71,6 +71,101 @@ const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY {
     pid: 14,
 };
 
+/// Live Windows SMTC (System Media Transport Controls) session snapshot.
+#[derive(Clone, Debug, Default)]
+pub struct MediaSessionSnapshot {
+    pub title: String,
+    pub artist: String,
+    pub playing: bool,
+    pub position_secs: u64,
+    pub duration_secs: u64,
+    pub fetched_at: Option<Instant>,
+    pub in_flight: bool,
+}
+
+/// Queries the active Windows SMTC media session on a background thread (non-blocking).
+pub fn refresh_media_session(cache: &Arc<Mutex<MediaSessionSnapshot>>, force: bool) {
+    let should_fetch = if let Ok(mut guard) = cache.lock() {
+        if guard.in_flight
+            || (!force && guard.fetched_at.is_some_and(|t| t.elapsed().as_secs() < 3))
+        {
+            false
+        } else {
+            guard.in_flight = true;
+            true
+        }
+    } else {
+        false
+    };
+    if !should_fetch {
+        return;
+    }
+
+    let cache_clone = cache.clone();
+    std::thread::Builder::new()
+        .name("media-smtc".to_owned())
+        .spawn(move || {
+            let next = query_smtc_session();
+            if let Ok(mut guard) = cache_clone.lock() {
+                if let Some((title, artist, playing, pos, dur)) = next {
+                    guard.title = title;
+                    guard.artist = artist;
+                    guard.playing = playing;
+                    guard.position_secs = pos;
+                    guard.duration_secs = dur;
+                } else {
+                    guard.title.clear();
+                    guard.artist.clear();
+                    guard.playing = false;
+                    guard.position_secs = 0;
+                    guard.duration_secs = 0;
+                }
+                guard.fetched_at = Some(Instant::now());
+                guard.in_flight = false;
+            }
+        })
+        .ok();
+}
+
+fn query_smtc_session() -> Option<(String, String, bool, u64, u64)> {
+    use windows::Media::Control::{
+        GlobalSystemMediaTransportControlsSessionManager,
+        GlobalSystemMediaTransportControlsSessionPlaybackStatus,
+    };
+    let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+        .ok()?
+        .get()
+        .ok()?;
+    let session = manager.GetCurrentSession().ok()?;
+    let props = session.TryGetMediaPropertiesAsync().ok()?.get().ok()?;
+    let title = props.Title().map(|s| s.to_string()).unwrap_or_default();
+    let artist = props.Artist().map(|s| s.to_string()).unwrap_or_default();
+    if title.is_empty() && artist.is_empty() {
+        return None;
+    }
+    let playing = session
+        .GetPlaybackInfo()
+        .ok()
+        .and_then(|info| info.PlaybackStatus().ok())
+        .is_some_and(|st| st == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing);
+    let (pos_secs, dur_secs) = session
+        .GetTimelineProperties()
+        .ok()
+        .map(|tl| {
+            let pos = tl
+                .Position()
+                .map(|t| (t.Duration.max(0) / 10_000_000) as u64)
+                .unwrap_or(0);
+            let end = tl
+                .EndTime()
+                .map(|t| (t.Duration.max(0) / 10_000_000) as u64)
+                .unwrap_or(0);
+            (pos.min(end), end)
+        })
+        .unwrap_or((0, 0));
+    Some((title, artist, playing, pos_secs, dur_secs))
+}
+
 fn ft_to_u64(ft: FILETIME) -> u64 {
     (u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime)
 }

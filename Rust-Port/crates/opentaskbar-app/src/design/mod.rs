@@ -11,7 +11,7 @@ pub mod icons;
 /// RGB color tuple `(r, g, b)`.
 pub type Rgb = (u8, u8, u8);
 
-/// Unified semantic color palette for both Dark and Light themes (C# parity).
+/// Unified semantic color palette for both Dark and Light themes (neutral Zinc/Carbon + Aurora).
 #[derive(Clone, Copy, Debug)]
 pub struct Palette {
     pub canvas: Rgb,
@@ -20,6 +20,7 @@ pub struct Palette {
     pub elevated: Rgb,
     pub hover: Rgb,
     pub border_rgb: Rgb,
+    pub specular_top: Rgb,
     pub sep_rgb: Rgb,
     pub dock_pill: Rgb,
     pub text_primary: Rgb,
@@ -43,56 +44,58 @@ pub struct Palette {
     pub switch_off: Rgb,
 }
 
-/// Exact C# `Design/Palettes/Dark.xaml` Slate Neutral + Aurora palette.
+/// Unified neutral Carbon/Zinc + Aurora dark palette across Dock, Flyouts, Menus, and Settings.
 pub const DARK: Palette = Palette {
-    canvas: (0x1b, 0x20, 0x29),          // SettingsBackground #1B2029
-    sidebar: (0x17, 0x1c, 0x26),         // SettingsSidebarOverlay #171C26
-    surface: (0x25, 0x2b, 0x37),         // SurfacePopup / MenuMaterial #252B37
-    elevated: (0x2e, 0x35, 0x43),        // SurfaceSelected (#14FFFFFF over #252B37)
-    hover: (0x38, 0x40, 0x50),           // SurfaceHover (#18FFFFFF over #252B37)
-    border_rgb: (0x3a, 0x43, 0x52),      // StrokeSubtle #3A4352
-    sep_rgb: (0x32, 0x3a, 0x48),         // MenuDivider #323A48
-    dock_pill: (0x22, 0x28, 0x33),       // DockMaterial midpoint (#2B313E -> #1B2029)
-    text_primary: (0xf3, 0xf4, 0xf6),    // TextPrimary #F3F4F6
-    text_secondary: (0xaa, 0xb2, 0xc0),  // TextSecondary #AAB2C0
-    accent: (0x38, 0xbd, 0xf8),          // AccentBrush #38BDF8
-    widget_accent: (0x2d, 0xd4, 0xbf),   // WidgetAccent #2DD4BF
+    canvas: (0x11, 0x11, 0x14),          // Neutral Zinc canvas #111114
+    sidebar: (0x0d, 0x0d, 0x10),         // Unified sidebar #0D0D10
+    surface: (0x18, 0x18, 0x1c),         // Popup / Card surface #18181C
+    elevated: (0x22, 0x22, 0x27),        // Elevated control / tile #222227
+    hover: (0x2c, 0x2c, 0x33),           // Hover surface #2C2C33
+    border_rgb: (0x2e, 0x2e, 0x36),      // Subtle neutral hairline #2E2E36
+    specular_top: (0x46, 0x46, 0x52),    // Top specular edge highlight
+    sep_rgb: (0x26, 0x26, 0x2e),         // Hairline divider #26262E
+    dock_pill: (0x16, 0x16, 0x1a),       // Dock glass pill base #16161A
+    text_primary: (0xf4, 0xf4, 0xf5),    // Zinc-100 #F4F4F5
+    text_secondary: (0xa1, 0xa1, 0xaa),  // Zinc-400 #A1A1AA
+    accent: (0x38, 0xbd, 0xf8),          // Aurora Sky #38BDF8
+    widget_accent: (0x2d, 0xd4, 0xbf),   // Aurora Teal #2DD4BF
     widget_blue: (0xa2, 0xc0, 0xff),     // WidgetBlue #A2C0FF
-    selected_fill: (0x2f, 0x40, 0x60),   // WidgetSelectedFill (#335B92FF over #252B37)
-    selected_stroke: (0x5d, 0x76, 0xa2), // WidgetSelectedStroke (#7891B8FF over #252B37)
-    selected_fg: (0xa2, 0xc0, 0xff),     // WidgetSelectedForeground #A2C0FF
+    selected_fill: (0x23, 0x33, 0x4d),   // Selected pill fill
+    selected_stroke: (0x52, 0x6f, 0x9e), // Selected pill border
+    selected_fg: (0xa2, 0xc0, 0xff),     // Selected pill foreground
     success: (0x58, 0xd8, 0xb2),         // WidgetGreen #58D8B2
     warning: (0xfb, 0xbf, 0x24),         // WidgetWarning #FBBF24
-    danger: (0xef, 0x44, 0x44),          // WidgetFocusAccent #EF4444
-    danger_hover_bg: (0x3e, 0x2c, 0x39), // WidgetDangerHover (#22DF4B53 over #252B37)
-    danger_fg: (0xf3, 0x6c, 0x74),       // WidgetDangerForeground #F36C74
-    switch_off: (0x3a, 0x43, 0x52),
+    danger: (0xef, 0x44, 0x44),          // Danger #EF4444
+    danger_hover_bg: (0x3a, 0x1f, 0x24), // Soft translucent red hover
+    danger_fg: (0xf8, 0x71, 0x71),       // Danger text #F87171
+    switch_off: (0x34, 0x34, 0x3d),
 };
 
-/// Exact C# `Design/Palettes/Light.xaml` Slate Neutral + Aurora palette.
+/// Unified neutral Zinc + Aurora light palette across Dock, Flyouts, Menus, and Settings.
 pub const LIGHT: Palette = Palette {
-    canvas: (0xf3, 0xf3, 0xf3),          // SettingsBackground #F3F3F3
-    sidebar: (0xee, 0xee, 0xee),         // SettingsSidebarOverlay #EEEEEE
-    surface: (0xff, 0xff, 0xff),         // SurfacePopup #FFFFFF
-    elevated: (0xf2, 0xf2, 0xf4),        // SurfaceSelected (#0D000000 over #FFFFFF)
-    hover: (0xe8, 0xec, 0xf2),           // SurfaceHover (#12162038 over #FFFFFF)
-    border_rgb: (0xe5, 0xe5, 0xe5),      // StrokeSubtle #E5E5E5
-    sep_rgb: (0xe8, 0xe8, 0xe8),         // MenuDivider #E8E8E8
-    dock_pill: (0xf7, 0xf7, 0xf8),       // DockMaterial midpoint
-    text_primary: (0x1b, 0x1b, 0x1b),    // TextPrimary #1B1B1B
-    text_secondary: (0x61, 0x66, 0x6e),  // TextSecondary #61666E
-    accent: (0x03, 0x69, 0xa1),          // AccentBrush #0369A1
-    widget_accent: (0x0d, 0x94, 0x88),   // WidgetAccent #0D9488
+    canvas: (0xf4, 0xf4, 0xf5),          // Zinc-100 #F4F4F5
+    sidebar: (0xec, 0xec, 0xef),         // Neutral sidebar #ECECEF
+    surface: (0xff, 0xff, 0xff),         // Pure white surface #FFFFFF
+    elevated: (0xf2, 0xf2, 0xf4),        // Subtle elevated control #F2F2F4
+    hover: (0xe8, 0xe8, 0xed),           // Neutral hover #E8E8ED
+    border_rgb: (0xe2, 0xe2, 0xe7),      // Crisp hairline #E2E2E7
+    specular_top: (0xff, 0xff, 0xff),    // Top specular edge highlight
+    sep_rgb: (0xe8, 0xe8, 0xec),         // Divider #E8E8EC
+    dock_pill: (0xf8, 0xf8, 0xfa),       // Dock glass pill base #F8F8FA
+    text_primary: (0x18, 0x18, 0x1b),    // Zinc-900 #18181B
+    text_secondary: (0x61, 0x66, 0x6e),  // Neutral secondary #61666E
+    accent: (0x03, 0x69, 0xa1),          // Accent #0369A1
+    widget_accent: (0x0d, 0x94, 0x88),   // Aurora Teal #0D9488
     widget_blue: (0x1d, 0x66, 0xd7),     // WidgetBlue #1D66D7
-    selected_fill: (0xde, 0xea, 0xfc),   // WidgetSelectedFill (#262474E9 over #FFFFFF)
-    selected_stroke: (0x92, 0xb7, 0xf4), // WidgetSelectedStroke
-    selected_fg: (0x1d, 0x66, 0xd7),     // WidgetSelectedForeground #1D66D7
-    success: (0x0d, 0x9e, 0x78),         // WidgetGreen #0D9E78
-    warning: (0xd9, 0x77, 0x06),         // WidgetWarning #D97706
-    danger: (0xdc, 0x26, 0x26),          // WidgetFocusAccent #DC2626
-    danger_hover_bg: (0xfb, 0xe6, 0xe8), // WidgetDangerHover
-    danger_fg: (0xdc, 0x26, 0x26),       // WidgetDangerForeground #DC2626
-    switch_off: (0xd1, 0xd1, 0xd6),
+    selected_fill: (0xde, 0xea, 0xfc),   // Selected fill
+    selected_stroke: (0x92, 0xb7, 0xf4), // Selected stroke
+    selected_fg: (0x1d, 0x66, 0xd7),     // Selected fg
+    success: (0x0d, 0x9e, 0x78),         // Green #0D9E78
+    warning: (0xd9, 0x77, 0x06),         // Warning #D97706
+    danger: (0xdc, 0x26, 0x26),          // Danger #DC2626
+    danger_hover_bg: (0xfb, 0xe6, 0xe8), // Soft danger hover
+    danger_fg: (0xdc, 0x26, 0x26),       // Danger fg #DC2626
+    switch_off: (0xd4, 0xd4, 0xd8),
 };
 
 pub const fn palette(is_dark: bool) -> Palette {

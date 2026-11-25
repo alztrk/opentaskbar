@@ -21,6 +21,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 smallvec = "1"
 windows = { version = "0.61", features = [
+    "Foundation",
+    "Media_Control",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",

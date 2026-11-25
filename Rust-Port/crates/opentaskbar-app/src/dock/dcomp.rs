@@ -55,6 +55,7 @@ use crate::platform::icon_cache::RawIcon;
 pub enum ChipIcon {
     Folder,
     Grid,
+    Sparkle,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -633,27 +634,40 @@ impl DcompEngine {
             }
         };
 
+        // Integer typography scale (`9, 10, 11, 12, 13, 15, 16, 18` DIP) for sharp pixel hinting.
         let fmt_18_b_l = mk_fmt(18.0, true, 1)?;
         let fmt_16_b_l = mk_fmt(16.0, true, 1)?;
         let fmt_15_b_l = mk_fmt(15.0, true, 1)?;
         let fmt_13_b_c = mk_fmt(13.0, true, 0)?;
         let fmt_13_b_l = mk_fmt(13.0, true, 1)?;
-        let fmt_125_b_l = mk_fmt(12.5, true, 1)?;
+        let fmt_125_b_l = mk_fmt(12.0, true, 1)?;
         let fmt_12_b_l = mk_fmt(12.0, true, 1)?;
         let fmt_12_c = mk_fmt(12.0, false, 0)?;
-        let fmt_115_b_l = mk_fmt(11.5, true, 1)?;
-        let fmt_115_b_c = mk_fmt(11.5, true, 0)?;
-        let fmt_115_l = mk_fmt(11.5, false, 1)?;
+        let fmt_115_b_l = mk_fmt(11.0, true, 1)?;
+        let fmt_115_b_c = mk_fmt(11.0, true, 0)?;
+        let fmt_115_l = mk_fmt(11.0, false, 1)?;
         let fmt_11_b_l = mk_fmt(11.0, true, 1)?;
-        let fmt_105_b_r = mk_fmt(10.5, true, 2)?;
-        let fmt_105_l = mk_fmt(10.5, false, 1)?;
+        let fmt_105_b_r = mk_fmt(10.0, true, 2)?;
+        let fmt_105_l = mk_fmt(10.0, false, 1)?;
         let fmt_10_l = mk_fmt(10.0, false, 1)?;
-        let fmt_95_b_l = mk_fmt(9.5, true, 1)?;
-        let fmt_95_l = mk_fmt(9.5, false, 1)?;
+        let fmt_95_b_l = mk_fmt(10.0, true, 1)?;
+        let fmt_95_l = mk_fmt(10.0, false, 1)?;
         let fmt_9_l = mk_fmt(9.0, false, 1)?;
         let fmt_9_b_l = mk_fmt(9.0, true, 1)?;
-        let fmt_85_l = mk_fmt(8.5, false, 1)?;
-        let fmt_85_b_l = mk_fmt(8.5, true, 1)?;
+        let fmt_85_l = mk_fmt(9.0, false, 1)?;
+        let fmt_85_b_l = mk_fmt(9.0, true, 1)?;
+
+        // OpenType `tnum` (tabular lining figures) so clocks, timers, and metrics never jitter horizontally.
+        let tnum_typo = unsafe {
+            let typo = self.dwrite_factory.CreateTypography()?;
+            let _ = typo
+                .AddFontFeature(windows::Win32::Graphics::DirectWrite::DWRITE_FONT_FEATURE {
+                nameTag:
+                    windows::Win32::Graphics::DirectWrite::DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+                parameter: 1,
+            });
+            typo
+        };
 
         let stroke_props = D2D1_STROKE_STYLE_PROPERTIES1 {
             startCap: D2D1_CAP_STYLE_ROUND,
@@ -714,15 +728,33 @@ impl DcompEngine {
                  fmt: &IDWriteTextFormat,
                  rect: D2D_RECT_F,
                  brush: &windows::Win32::Graphics::Direct2D::ID2D1SolidColorBrush| {
+                    if text.is_empty() {
+                        return;
+                    }
                     let wtxt: Vec<u16> = text.encode_utf16().collect();
-                    dc.DrawText(
-                        &wtxt,
-                        fmt,
-                        &rect,
-                        brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                    );
+                    let max_w = (rect.right - rect.left).max(1.0);
+                    let max_h = (rect.bottom - rect.top).max(1.0);
+                    if let Ok(layout) = self
+                        .dwrite_factory
+                        .CreateTextLayout(&wtxt, fmt, max_w, max_h)
+                    {
+                        let _ = layout.SetTypography(
+                            &tnum_typo,
+                            windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_RANGE {
+                                startPosition: 0,
+                                length: wtxt.len() as u32,
+                            },
+                        );
+                        dc.DrawTextLayout(
+                            Vector2 {
+                                X: rect.left,
+                                Y: rect.top,
+                            },
+                            &layout,
+                            brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        );
+                    }
                 };
             let draw_vdiv = |x: f32, h: f32| {
                 let top = cy - h * 0.5;
@@ -3057,6 +3089,7 @@ unsafe fn draw_chip_icon(
     let app_icon = match icon {
         ChipIcon::Folder => AppIcon::Folder,
         ChipIcon::Grid => AppIcon::LayoutGrid,
+        ChipIcon::Sparkle => AppIcon::Layers,
     };
     let half = size_dips * 0.6;
     unsafe {

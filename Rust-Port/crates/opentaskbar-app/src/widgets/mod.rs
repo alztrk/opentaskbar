@@ -79,7 +79,8 @@ pub const ALL_WIDGETS: &[WidgetDescriptor] = &[
         78.0,
     ),
     wd("storage", "Storage", "System & Hardware", 136.0),
-    // AI Quotas (exact C# `AiUsageWidget.CardWidth` widths)
+    // AI Quotas (unified summary + exact C# `AiUsageWidget.CardWidth` widths)
+    wd("aiusage_all", "AI Quotas (All)", "AI Quotas", 156.0),
     wd("aiusage_claude", "Claude", "AI Quotas", 184.0),
     wd("aiusage_codex", "Codex", "AI Quotas", 184.0),
     wd("aiusage_antigravity", "Antigravity", "AI Quotas", 262.0),
@@ -166,6 +167,7 @@ pub struct WidgetRuntime {
     weather: Arc<Mutex<telemetry::WeatherCache>>,
     bt_battery: Arc<Mutex<telemetry::BluetoothBatteryCache>>,
     ai_usage: Arc<Mutex<telemetry::AiUsageCache>>,
+    media_session: Arc<Mutex<telemetry::MediaSessionSnapshot>>,
     night_light_on: bool,
     last_tick: Instant,
 }
@@ -192,6 +194,7 @@ impl Default for WidgetRuntime {
             weather: Arc::new(Mutex::new(telemetry::WeatherCache::default())),
             bt_battery: Arc::new(Mutex::new(telemetry::BluetoothBatteryCache::default())),
             ai_usage: Arc::new(Mutex::new(telemetry::AiUsageCache::default())),
+            media_session: Arc::new(Mutex::new(telemetry::MediaSessionSnapshot::default())),
             night_light_on: telemetry::read_night_light().unwrap_or(false),
             last_tick: Instant::now(),
         }
@@ -248,8 +251,14 @@ impl WidgetRuntime {
         if settings.is_widget_enabled("stats") {
             (self.cpu_pct, self.ram_pct) = self.stats.sample();
         }
-        if settings.is_widget_enabled("audio") || settings.is_widget_enabled("media") {
+        if settings.is_widget_enabled("audio")
+            || settings.is_widget_enabled("media")
+            || settings.is_widget_enabled("quicksettings")
+        {
             (self.audio_vol, self.audio_muted) = get_audio_state();
+        }
+        if settings.is_widget_enabled("media") {
+            telemetry::refresh_media_session(&self.media_session, false);
         }
         if settings.is_widget_enabled("netspeed") {
             self.net.sample();
@@ -263,8 +272,9 @@ impl WidgetRuntime {
         if settings.is_widget_enabled("quicksettings") {
             self.night_light_on = telemetry::read_night_light().unwrap_or(self.night_light_on);
         }
+        let all_ai = settings.is_widget_enabled("aiusage_all");
         for ai in telemetry::AI_PROVIDERS {
-            if settings.is_widget_enabled(ai.id) {
+            if all_ai || settings.is_widget_enabled(ai.id) {
                 telemetry::refresh_ai_provider(&self.ai_usage, ai.id, false);
             }
         }
@@ -560,11 +570,24 @@ impl WidgetRuntime {
                     .collect();
                 WidgetChipSpec::Storage { drives }
             }
-            "media" => WidgetChipSpec::Media {
-                title: "Not playing".to_owned(),
-                artist: String::new(),
-                muted: self.audio_muted,
-            },
+            "media" => {
+                let snap = self
+                    .media_session
+                    .lock()
+                    .ok()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
+                let title = if snap.title.is_empty() {
+                    "Not playing".to_owned()
+                } else {
+                    snap.title
+                };
+                WidgetChipSpec::Media {
+                    title,
+                    artist: snap.artist,
+                    muted: self.audio_muted,
+                }
+            }
             "audio" => WidgetChipSpec::Audio {
                 volume: self.audio_vol,
                 muted: self.audio_muted,
@@ -580,6 +603,46 @@ impl WidgetRuntime {
             "keyboard" => WidgetChipSpec::Keyboard {
                 code: active_keyboard_code(),
             },
+            "aiusage_all" => {
+                let mut active_count = 0usize;
+                let mut peak_label: Option<(f32, String)> = None;
+                let mut first_bal: Option<String> = None;
+                if let Ok(guard) = self.ai_usage.lock() {
+                    for ai in telemetry::AI_PROVIDERS {
+                        if let Some(snap) = guard.providers.get(ai.id) {
+                            if snap.has_cred
+                                || snap.balance_text.is_some()
+                                || !snap.windows.is_empty()
+                            {
+                                active_count += 1;
+                            }
+                            if let Some(w) = snap.windows.first() {
+                                let replace =
+                                    peak_label.as_ref().is_none_or(|(prev, _)| w.used > *prev);
+                                if replace {
+                                    peak_label = Some((
+                                        w.used,
+                                        format!("{} {:.0}%", ai.name, w.used * 100.0),
+                                    ));
+                                }
+                            } else if first_bal.is_none()
+                                && let Some(bal) = &snap.balance_text
+                            {
+                                first_bal = Some(format!("{} {bal}", ai.name));
+                            }
+                        }
+                    }
+                }
+                let bottom = peak_label.map(|(_, s)| s).or(first_bal).unwrap_or_else(|| {
+                    format!("{active_count}/{} ready", telemetry::AI_PROVIDERS.len())
+                });
+                WidgetChipSpec::Simple {
+                    icon: ChipIcon::Sparkle,
+                    icon_color: pal.widget_accent,
+                    top: format!("AI · {active_count}"),
+                    bottom,
+                }
+            }
             "stacks" => WidgetChipSpec::Simple {
                 icon: ChipIcon::Folder,
                 icon_color: pal.warning,
@@ -811,8 +874,8 @@ impl WidgetRuntime {
                 DirectClickOutcome::Handled
             }
             // Exact C# flyout triggers:
-            "clock" | "audio" | "stats" | "weather" | "netspeed" | "bluetoothbattery"
-            | "storage" | "keyboard" | "dayprogress" | "stacks" | "groups" => {
+            "aiusage_all" | "clock" | "audio" | "stats" | "weather" | "netspeed"
+            | "bluetoothbattery" | "storage" | "keyboard" | "dayprogress" | "stacks" | "groups" => {
                 DirectClickOutcome::OpenFlyout
             }
             _ => DirectClickOutcome::Handled,
@@ -1099,6 +1162,59 @@ impl WidgetRuntime {
         settings: &mut DockSettings,
     ) -> bool {
         let pal = design::palette(is_dark);
+
+        if id == "aiusage_all" {
+            let mut blocks = Vec::new();
+            let guard_map = self
+                .ai_usage
+                .lock()
+                .ok()
+                .map(|g| g.providers.clone())
+                .unwrap_or_default();
+            for ai in telemetry::AI_PROVIDERS {
+                let snap = guard_map.get(ai.id).cloned().unwrap_or_default();
+                if let Some(w) = snap.windows.first() {
+                    blocks.push(FlyoutBlock::ProgressBar {
+                        label: format!("{} ({})", ai.name, w.label),
+                        value_text: format!("{:.0}% · {}", w.used * 100.0, w.reset_text),
+                        ratio: w.used,
+                        tone: BarTone::Usage,
+                    });
+                } else if let Some(bal) = snap.balance_text {
+                    blocks.push(FlyoutBlock::StatRow {
+                        label: ai.name.to_owned(),
+                        value: bal,
+                    });
+                } else {
+                    blocks.push(FlyoutBlock::StatRow {
+                        label: ai.name.to_owned(),
+                        value: if snap.has_cred {
+                            "Configured".to_owned()
+                        } else {
+                            "Sign in".to_owned()
+                        },
+                    });
+                }
+            }
+            blocks.push(FlyoutBlock::Separator);
+            blocks.push(FlyoutBlock::ButtonBar(vec![(
+                1,
+                "Refresh All".to_owned(),
+                true,
+            )]));
+            let spec = FlyoutSpec {
+                title: "AI Quotas".to_owned(),
+                subtitle: Some("Live usage across configured providers".to_owned()),
+                width_dips: 316.0,
+                blocks,
+            };
+            if flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) == Some(1) {
+                for ai in telemetry::AI_PROVIDERS {
+                    telemetry::refresh_ai_provider(&self.ai_usage, ai.id, true);
+                }
+            }
+            return false;
+        }
 
         // Exact C# `AiUsageWidget.BuildFlyout`
         if let Some(ai) = telemetry::ai_provider_meta(id) {
@@ -1709,115 +1825,239 @@ impl WidgetRuntime {
                 );
             }
             "media" => {
-                let spec = FlyoutSpec {
-                    title: "Media".to_owned(),
-                    subtitle: Some("System playback controls".to_owned()),
-                    width_dips: 274.0,
-                    blocks: vec![
-                        FlyoutBlock::ButtonBar(vec![
-                            (1, "Previous".to_owned(), false),
-                            (2, "Play / Pause".to_owned(), true),
-                            (3, "Next".to_owned(), false),
-                        ]),
-                        FlyoutBlock::Separator,
-                        FlyoutBlock::ButtonBar(vec![(4, "Sound Settings".to_owned(), false)]),
-                    ],
+                telemetry::refresh_media_session(&self.media_session, true);
+                let build_media_spec = |media: &Arc<Mutex<telemetry::MediaSessionSnapshot>>| {
+                    let snap = media.lock().ok().map(|g| g.clone()).unwrap_or_default();
+                    let has_track = !snap.title.is_empty();
+                    let mut blocks = vec![FlyoutBlock::Hero {
+                        value: if has_track {
+                            snap.title.clone()
+                        } else {
+                            "Nothing Playing".to_owned()
+                        },
+                        caption: if !snap.artist.is_empty() {
+                            Some(snap.artist.clone())
+                        } else if has_track {
+                            Some(if snap.playing { "Playing" } else { "Paused" }.to_owned())
+                        } else {
+                            Some("Start playback in any media app".to_owned())
+                        },
+                        centered: false,
+                        large: false,
+                        right_meta: if has_track {
+                            Some(if snap.playing { "Playing" } else { "Paused" }.to_owned())
+                        } else {
+                            None
+                        },
+                    }];
+                    if snap.duration_secs > 0 {
+                        let ratio =
+                            (snap.position_secs as f32 / snap.duration_secs as f32).clamp(0.0, 1.0);
+                        blocks.push(FlyoutBlock::ProgressBar {
+                            label: format_mm_ss(snap.position_secs),
+                            value_text: format_mm_ss(snap.duration_secs),
+                            ratio,
+                            tone: BarTone::Accent,
+                        });
+                    }
+                    blocks.push(FlyoutBlock::ButtonBar(vec![
+                        (1, "Previous".to_owned(), false),
+                        (
+                            2,
+                            if snap.playing { "Pause" } else { "Play" }.to_owned(),
+                            true,
+                        ),
+                        (3, "Next".to_owned(), false),
+                    ]));
+                    blocks.push(FlyoutBlock::Separator);
+                    blocks.push(FlyoutBlock::ButtonBar(vec![(
+                        4,
+                        "Sound Settings".to_owned(),
+                        false,
+                    )]));
+                    FlyoutSpec {
+                        title: "Media".to_owned(),
+                        subtitle: None,
+                        width_dips: 300.0,
+                        blocks,
+                    }
                 };
-                match flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) {
-                    Some(1) => telemetry::send_media_vk(VK_MEDIA_PREV_TRACK),
-                    Some(2) => telemetry::send_media_vk(VK_MEDIA_PLAY_PAUSE),
-                    Some(3) => telemetry::send_media_vk(VK_MEDIA_NEXT_TRACK),
-                    Some(4) => pins::launch("ms-settings:sound".to_owned()),
-                    _ => {}
-                }
+                let init = build_media_spec(&self.media_session);
+                flyout::show_flyout_live(
+                    "media",
+                    owner_hwnd,
+                    is_dark,
+                    anchor_x,
+                    anchor_y,
+                    init,
+                    |ev| match ev {
+                        LiveEvent::Click(1) => {
+                            telemetry::send_media_vk(VK_MEDIA_PREV_TRACK);
+                            telemetry::refresh_media_session(&self.media_session, true);
+                            LiveOutcome::Update(build_media_spec(&self.media_session))
+                        }
+                        LiveEvent::Click(2) => {
+                            telemetry::send_media_vk(VK_MEDIA_PLAY_PAUSE);
+                            telemetry::refresh_media_session(&self.media_session, true);
+                            LiveOutcome::Update(build_media_spec(&self.media_session))
+                        }
+                        LiveEvent::Click(3) => {
+                            telemetry::send_media_vk(VK_MEDIA_NEXT_TRACK);
+                            telemetry::refresh_media_session(&self.media_session, true);
+                            LiveOutcome::Update(build_media_spec(&self.media_session))
+                        }
+                        LiveEvent::Click(4) => {
+                            pins::launch("ms-settings:sound".to_owned());
+                            LiveOutcome::Close
+                        }
+                        _ => LiveOutcome::Close,
+                    },
+                );
             }
             "quicksettings" => {
-                let (vol, muted) = get_audio_state();
-                let hide_label = match settings.auto_hide {
-                    AutoHideMode::Disabled => "Off",
-                    AutoHideMode::Smart => "Smart",
-                    AutoHideMode::Always => "Always",
-                };
-                let theme_label = match settings.theme {
-                    AppTheme::System => "System",
-                    AppTheme::Dark => "Dark",
-                    AppTheme::Light => "Light",
-                };
-                let spec = FlyoutSpec {
-                    title: "Quick Settings".to_owned(),
-                    subtitle: None,
-                    width_dips: 296.0,
-                    blocks: vec![
-                        FlyoutBlock::ToggleGrid(vec![
-                            (
-                                1,
-                                "Focus Mode".to_owned(),
-                                if settings.focus_mode { "On" } else { "Off" }.to_owned(),
-                                settings.focus_mode,
-                            ),
-                            (
-                                2,
-                                "Auto-Hide".to_owned(),
-                                hide_label.to_owned(),
-                                settings.auto_hide != AutoHideMode::Disabled,
-                            ),
-                            (
-                                3,
-                                "Theme".to_owned(),
-                                theme_label.to_owned(),
-                                settings.theme != AppTheme::System,
-                            ),
-                            (
-                                4,
-                                "Sound".to_owned(),
-                                if muted {
+                let mut settings_changed = false;
+                let build_qs_spec = |settings: &DockSettings, night_light: bool| {
+                    let (vol, muted) = get_audio_state();
+                    let out_name = telemetry::default_audio_device_name(false)
+                        .unwrap_or_else(|| "Speakers".to_owned());
+                    let hide_label = match settings.auto_hide {
+                        AutoHideMode::Disabled => "Off",
+                        AutoHideMode::Smart => "Smart",
+                        AutoHideMode::Always => "Always",
+                    };
+                    let theme_label = match settings.theme {
+                        AppTheme::System => "System",
+                        AppTheme::Dark => "Dark",
+                        AppTheme::Light => "Light",
+                    };
+                    FlyoutSpec {
+                        title: "Quick Settings".to_owned(),
+                        subtitle: None,
+                        width_dips: 312.0,
+                        blocks: vec![
+                            FlyoutBlock::ToggleGrid(vec![
+                                (
+                                    1,
+                                    "Focus Mode".to_owned(),
+                                    if settings.focus_mode { "On" } else { "Off" }.to_owned(),
+                                    settings.focus_mode,
+                                ),
+                                (
+                                    2,
+                                    "Auto-Hide".to_owned(),
+                                    hide_label.to_owned(),
+                                    settings.auto_hide != AutoHideMode::Disabled,
+                                ),
+                                (
+                                    3,
+                                    "Theme".to_owned(),
+                                    theme_label.to_owned(),
+                                    settings.theme != AppTheme::System,
+                                ),
+                                (
+                                    7,
+                                    "Night Light".to_owned(),
+                                    if night_light { "On" } else { "Off" }.to_owned(),
+                                    night_light,
+                                ),
+                            ]),
+                            FlyoutBlock::Separator,
+                            FlyoutBlock::AudioSliderSection {
+                                label: "Volume".to_owned(),
+                                device_name: out_name,
+                                value_text: if muted {
                                     "Muted".to_owned()
                                 } else {
                                     format!("{vol}%")
                                 },
-                                !muted,
-                            ),
-                        ]),
-                        FlyoutBlock::Separator,
-                        FlyoutBlock::ButtonBar(vec![
-                            (5, "Wi-Fi".to_owned(), false),
-                            (6, "Bluetooth".to_owned(), false),
-                            (7, "Night Light".to_owned(), false),
-                        ]),
-                        FlyoutBlock::ButtonBar(vec![
-                            (8, "Settings".to_owned(), true),
-                            (9, "Show Desktop".to_owned(), false),
-                        ]),
-                    ],
+                                ratio: vol as f32 / 100.0,
+                                muted,
+                                mute_id: 4,
+                                slider_id: 10,
+                            },
+                            FlyoutBlock::Separator,
+                            FlyoutBlock::ButtonBar(vec![
+                                (5, "Wi-Fi".to_owned(), false),
+                                (6, "Bluetooth".to_owned(), false),
+                            ]),
+                            FlyoutBlock::ButtonBar(vec![
+                                (8, "Settings".to_owned(), true),
+                                (9, "Show Desktop".to_owned(), false),
+                            ]),
+                        ],
+                    }
                 };
-                match flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) {
-                    Some(1) => {
-                        settings.focus_mode = !settings.focus_mode;
-                        return true;
-                    }
-                    Some(2) => {
-                        settings.auto_hide = match settings.auto_hide {
-                            AutoHideMode::Disabled => AutoHideMode::Smart,
-                            AutoHideMode::Smart => AutoHideMode::Always,
-                            AutoHideMode::Always => AutoHideMode::Disabled,
-                        };
-                        return true;
-                    }
-                    Some(3) => {
-                        settings.theme = match settings.theme {
-                            AppTheme::System => AppTheme::Dark,
-                            AppTheme::Dark => AppTheme::Light,
-                            AppTheme::Light => AppTheme::System,
-                        };
-                        return true;
-                    }
-                    Some(4) => toggle_audio_mute(),
-                    Some(5) => pins::launch("ms-settings:network-wifi".to_owned()),
-                    Some(6) => pins::launch("ms-settings:bluetooth".to_owned()),
-                    Some(7) => pins::launch("ms-settings:nightlight".to_owned()),
-                    Some(8) => crate::ui::settings::spawn_settings_window(),
-                    Some(9) => opentaskbar_shell::taskbar::show_desktop(),
-                    _ => {}
+                let init = build_qs_spec(settings, self.night_light_on);
+                flyout::show_flyout_live(
+                    "quicksettings",
+                    owner_hwnd,
+                    is_dark,
+                    anchor_x,
+                    anchor_y,
+                    init,
+                    |ev| match ev {
+                        LiveEvent::Click(1) => {
+                            settings.focus_mode = !settings.focus_mode;
+                            settings_changed = true;
+                            LiveOutcome::Update(build_qs_spec(settings, self.night_light_on))
+                        }
+                        LiveEvent::Click(2) => {
+                            settings.auto_hide = match settings.auto_hide {
+                                AutoHideMode::Disabled => AutoHideMode::Smart,
+                                AutoHideMode::Smart => AutoHideMode::Always,
+                                AutoHideMode::Always => AutoHideMode::Disabled,
+                            };
+                            settings_changed = true;
+                            LiveOutcome::Update(build_qs_spec(settings, self.night_light_on))
+                        }
+                        LiveEvent::Click(3) => {
+                            settings.theme = match settings.theme {
+                                AppTheme::System => AppTheme::Dark,
+                                AppTheme::Dark => AppTheme::Light,
+                                AppTheme::Light => AppTheme::System,
+                            };
+                            settings_changed = true;
+                            LiveOutcome::Update(build_qs_spec(settings, self.night_light_on))
+                        }
+                        LiveEvent::Click(4) => {
+                            toggle_audio_mute();
+                            (self.audio_vol, self.audio_muted) = get_audio_state();
+                            LiveOutcome::Update(build_qs_spec(settings, self.night_light_on))
+                        }
+                        LiveEvent::Slider { id: 10, ratio } => {
+                            set_audio_volume((ratio * 100.0).round() as u32);
+                            (self.audio_vol, self.audio_muted) = get_audio_state();
+                            LiveOutcome::Update(build_qs_spec(settings, self.night_light_on))
+                        }
+                        LiveEvent::Click(5) => {
+                            pins::launch("ms-settings:network-wifi".to_owned());
+                            LiveOutcome::Close
+                        }
+                        LiveEvent::Click(6) => {
+                            pins::launch("ms-settings:bluetooth".to_owned());
+                            LiveOutcome::Close
+                        }
+                        LiveEvent::Click(7) => {
+                            if telemetry::toggle_night_light() {
+                                self.night_light_on = !self.night_light_on;
+                            } else {
+                                pins::launch("ms-settings:nightlight".to_owned());
+                            }
+                            LiveOutcome::Update(build_qs_spec(settings, self.night_light_on))
+                        }
+                        LiveEvent::Click(8) => {
+                            crate::ui::settings::spawn_settings_window();
+                            LiveOutcome::Close
+                        }
+                        LiveEvent::Click(9) => {
+                            opentaskbar_shell::taskbar::show_desktop();
+                            LiveOutcome::Close
+                        }
+                        _ => LiveOutcome::Close,
+                    },
+                );
+                if settings_changed {
+                    return true;
                 }
             }
             "stacks" => {
@@ -1898,7 +2138,7 @@ mod tests {
 
     #[test]
     fn all_23_csharp_widgets_registered_with_valid_categories() {
-        assert_eq!(ALL_WIDGETS.len(), 23);
+        assert_eq!(ALL_WIDGETS.len(), 24);
         let mut seen = std::collections::HashSet::new();
         for w in ALL_WIDGETS {
             assert!(seen.insert(w.id), "duplicate widget id {}", w.id);

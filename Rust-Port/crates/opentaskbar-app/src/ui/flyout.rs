@@ -15,7 +15,8 @@ use std::time::Instant;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
-    DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute,
+    DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CreateFontW, CreatePen, CreateSolidBrush,
@@ -784,6 +785,13 @@ fn show_flyout_impl<'a>(
 
     unsafe {
         let _ = SetLayeredWindowAttributes(hwnd, 0, if animate { 0 } else { 255 }, LWA_ALPHA);
+        let dark_val: u32 = u32::from(is_dark);
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+            (&dark_val as *const u32).cast(),
+            size_of::<u32>() as u32,
+        );
         let corner = DWMWCP_ROUND;
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -1131,6 +1139,14 @@ impl FlyoutState<'_> {
             FillRect(hdc, &ps.rcPaint, bg_brush);
             DeleteObject(bg_brush as _);
 
+            // Top specular hairline for crisp Apple/Raycast surface elevation.
+            let spec_pen = CreatePen(PS_SOLID, 1, gdi_rgb(pal.specular_top));
+            let prev_pen = SelectObject(hdc, spec_pen as _);
+            MoveToEx(hdc, s(8.0), 0, std::ptr::null_mut());
+            LineTo(hdc, (w - s(8.0)).max(s(8.0)), 0);
+            SelectObject(hdc, prev_pen);
+            DeleteObject(spec_pen as _);
+
             let fname = wide("Segoe UI Variable Text");
             let mk_font = |pt: f32, weight: i32| {
                 CreateFontW(
@@ -1150,9 +1166,9 @@ impl FlyoutState<'_> {
                     fname.as_ptr(),
                 )
             };
-            let title_font = mk_font(if self.keyboard_navigation { 16.0 } else { 13.5 }, 600);
-            let body_font = mk_font(12.5, 500);
-            let bold_font = mk_font(12.5, 600);
+            let title_font = mk_font(if self.keyboard_navigation { 16.0 } else { 14.0 }, 600);
+            let body_font = mk_font(12.0, 500);
+            let bold_font = mk_font(12.0, 600);
             let small_font = mk_font(11.0, 400);
             let tiny_font = mk_font(10.0, 500);
             SetBkMode(hdc, TRANSPARENT as i32);
@@ -2123,22 +2139,23 @@ impl FlyoutState<'_> {
                         close_id,
                     } => {
                         let [app, pin, close] = app_row_targets(pad, pad + content_w, y, dpi);
-                        fill_round_rect(
-                            hdc,
-                            app.left,
-                            y,
-                            close.right,
-                            app.bottom,
-                            s(10.0),
-                            card_bg,
-                        );
-
-                        let app_fill = if self.hovered_id == Some(*id) || focused_id == Some(*id) {
-                            hover_bg
-                        } else {
-                            card_bg
-                        };
-                        fill_round_rect(hdc, app.left, y, app.right, app.bottom, s(10.0), app_fill);
+                        let row_hovered = self.hovered_id == Some(*id)
+                            || focused_id == Some(*id)
+                            || self.hovered_id == Some(*pin_id)
+                            || (*close_id).is_some_and(|cid| self.hovered_id == Some(cid));
+                        // Transparent resting rows that softly illuminate on hover (clean Raycast/macOS list).
+                        let app_fill = if row_hovered { hover_bg } else { bg };
+                        if row_hovered {
+                            fill_round_rect(
+                                hdc,
+                                app.left,
+                                y,
+                                close.right,
+                                app.bottom,
+                                s(8.0),
+                                hover_bg,
+                            );
+                        }
                         let icon_size = s(22.0);
                         let icon_x = app.left + s(10.0);
                         let icon_y = y + (app.bottom - y - icon_size) / 2;

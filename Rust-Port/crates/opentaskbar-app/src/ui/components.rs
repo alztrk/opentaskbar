@@ -216,7 +216,7 @@ pub fn badge(theme: &UiTheme, text: impl Into<SharedString>, accent: bool) -> Di
         .py(px(2.0))
         .rounded(px(999.0))
         .bg(rgba(bg))
-        .text_size(px(10.5))
+        .text_size(px(11.0))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(rgba(fg))
         .flex_shrink_0()
@@ -319,7 +319,7 @@ pub fn segmented_item(
         .border_1()
         .border_color(rgba(if active { theme.border } else { 0 }))
         .bg(rgba(bg))
-        .text_size(px(11.5))
+        .text_size(px(12.0))
         .font_weight(if active {
             gpui::FontWeight::SEMIBOLD
         } else {
@@ -338,6 +338,91 @@ pub fn segmented_item(
         .into_any_element()
 }
 
+/// Interactive live slider with clickable stops, accent fill track, circular thumb, and value label.
+pub fn live_slider<F>(
+    id_prefix: &'static str,
+    theme: &UiTheme,
+    ratio: f32,
+    steps: usize,
+    value_text: impl Into<SharedString>,
+    make_handler: F,
+) -> Div
+where
+    F: Fn(usize) -> Box<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App)>,
+{
+    let clamped = ratio.clamp(0.0, 1.0);
+    let track_w = 132.0_f32;
+    let fill_w = (track_w * clamped).round().clamp(0.0, track_w);
+    let thumb_x = (fill_w - 7.0).clamp(0.0, track_w - 14.0);
+    let count = steps.max(2);
+
+    let mut stops = div().absolute().inset_0().flex().items_center();
+    for i in 0..count {
+        let cb = make_handler(i);
+        stops = stops.child(
+            div()
+                .id(SharedString::from(format!("{id_prefix}-{i}")))
+                .flex_1()
+                .h_full()
+                .cursor_pointer()
+                .on_click(move |ev, win, cx| cb(ev, win, cx)),
+        );
+    }
+
+    div()
+        .flex()
+        .items_center()
+        .gap(px(10.0))
+        .flex_shrink_0()
+        .child(
+            div()
+                .relative()
+                .w(px(track_w))
+                .h(px(22.0))
+                .flex()
+                .items_center()
+                .child(
+                    div()
+                        .w_full()
+                        .h(px(5.0))
+                        .rounded(px(3.0))
+                        .bg(rgba(theme.switch_off))
+                        .overflow_hidden()
+                        .child(
+                            div()
+                                .w(px(fill_w))
+                                .h_full()
+                                .rounded(px(3.0))
+                                .bg(rgba(theme.accent)),
+                        ),
+                )
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(thumb_x))
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .rounded(px(7.0))
+                        .bg(rgba(theme.switch_thumb))
+                        .border_1()
+                        .border_color(rgba(theme.accent)),
+                )
+                .child(stops),
+        )
+        .child(
+            div()
+                .min_w(px(46.0))
+                .flex()
+                .items_center()
+                .justify_end()
+                .text_size(px(12.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgba(theme.text_primary))
+                .child(value_text.into()),
+        )
+}
+
+#[allow(dead_code)]
 pub fn stepper(
     id_minus: impl Into<gpui::ElementId>,
     id_plus: impl Into<gpui::ElementId>,
@@ -475,7 +560,7 @@ pub fn sidebar_nav_item(
                 .child(icon_glyph(glyph, 14.0, icon_col))
                 .child(
                     div()
-                        .text_size(px(12.5))
+                        .text_size(px(13.0))
                         .font_weight(if active {
                             gpui::FontWeight::SEMIBOLD
                         } else {

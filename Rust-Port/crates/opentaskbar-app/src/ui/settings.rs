@@ -20,8 +20,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::dock::dcomp::WidgetChipSpec;
 use crate::platform::{pins, win32};
 use crate::ui::components::{
-    ButtonVariant, UiTheme, badge, button, icon_glyph, ios_switch, section_card, segmented_item,
-    segmented_track, setting_row, sidebar_nav_item, stepper,
+    ButtonVariant, UiTheme, badge, button, icon_glyph, ios_switch, live_slider, section_card,
+    segmented_item, segmented_track, setting_row, sidebar_nav_item,
 };
 use crate::widgets;
 
@@ -138,6 +138,7 @@ struct SettingsView {
     focus: FocusHandle,
     settings: DockSettings,
     widget_runtime: widgets::WidgetRuntime,
+    widget_filter: &'static str,
     startup_enabled: bool,
     scroll_handle: ScrollHandle,
     save_failed: bool,
@@ -154,6 +155,7 @@ impl SettingsView {
             focus,
             settings,
             widget_runtime,
+            widget_filter: "All",
             startup_enabled: win32::is_startup_enabled(),
             scroll_handle: ScrollHandle::new(),
             save_failed: false,
@@ -402,25 +404,19 @@ impl SettingsView {
                         t,
                         Some("\u{E8A3}"),
                         "Scale",
-                        stepper(
-                            "sc-minus",
-                            "sc-plus",
+                        live_slider(
+                            "sc",
                             t,
+                            ((self.settings.dock_scale as f32) - 0.75) / 0.75,
+                            16,
                             format!("{scale_pct}%"),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_scale =
-                                    ((this.settings.dock_scale * 20.0).round() - 1.0)
-                                        .clamp(15.0, 30.0)
-                                        / 20.0;
-                                this.auto_save(cx);
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_scale =
-                                    ((this.settings.dock_scale * 20.0).round() + 1.0)
-                                        .clamp(15.0, 30.0)
-                                        / 20.0;
-                                this.auto_save(cx);
-                            }),
+                            |i| {
+                                Box::new(cx.listener(move |this, _, _, cx| {
+                                    this.settings.dock_scale =
+                                        (0.75 + (i as f64) * 0.05).clamp(0.75, 1.50);
+                                    this.auto_save(cx);
+                                }))
+                            },
                         ),
                     )
                     .into_any_element(),
@@ -428,21 +424,19 @@ impl SettingsView {
                         t,
                         Some("\u{E74A}"),
                         "Bottom Margin",
-                        stepper(
-                            "gap-minus",
-                            "gap-plus",
+                        live_slider(
+                            "gap",
                             t,
+                            self.settings.dock_bottom_gap_pixels as f32 / 32.0,
+                            17,
                             format!("{} px", self.settings.dock_bottom_gap_pixels),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_bottom_gap_pixels =
-                                    (this.settings.dock_bottom_gap_pixels - 2).max(0);
-                                this.auto_save(cx);
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_bottom_gap_pixels =
-                                    (this.settings.dock_bottom_gap_pixels + 2).min(32);
-                                this.auto_save(cx);
-                            }),
+                            |i| {
+                                Box::new(cx.listener(move |this, _, _, cx| {
+                                    this.settings.dock_bottom_gap_pixels =
+                                        ((i as i32) * 2).clamp(0, 32);
+                                    this.auto_save(cx);
+                                }))
+                            },
                         ),
                     )
                     .into_any_element(),
@@ -450,21 +444,18 @@ impl SettingsView {
                         t,
                         Some("\u{E9A9}"),
                         "Icon Padding",
-                        stepper(
-                            "pad-minus",
-                            "pad-plus",
+                        live_slider(
+                            "pad",
                             t,
+                            self.settings.dock_icon_padding as f32 / 12.0,
+                            13,
                             format!("{} px", self.settings.dock_icon_padding),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_icon_padding =
-                                    (this.settings.dock_icon_padding - 1).max(0);
-                                this.auto_save(cx);
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_icon_padding =
-                                    (this.settings.dock_icon_padding + 1).min(12);
-                                this.auto_save(cx);
-                            }),
+                            |i| {
+                                Box::new(cx.listener(move |this, _, _, cx| {
+                                    this.settings.dock_icon_padding = (i as i32).clamp(0, 12);
+                                    this.auto_save(cx);
+                                }))
+                            },
                         ),
                     )
                     .into_any_element(),
@@ -693,21 +684,19 @@ impl SettingsView {
                         t,
                         Some("\u{E706}"),
                         "Opacity",
-                        stepper(
-                            "op-minus",
-                            "op-plus",
+                        live_slider(
+                            "op",
                             t,
+                            ((self.settings.dock_opacity as f32) - 0.2) / 0.8,
+                            17,
                             format!("{opacity_pct}%"),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_opacity =
-                                    (this.settings.dock_opacity - 0.05).clamp(0.2, 1.0);
-                                this.auto_save(cx);
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_opacity =
-                                    (this.settings.dock_opacity + 0.05).clamp(0.2, 1.0);
-                                this.auto_save(cx);
-                            }),
+                            |i| {
+                                Box::new(cx.listener(move |this, _, _, cx| {
+                                    this.settings.dock_opacity =
+                                        (0.20 + (i as f64) * 0.05).clamp(0.20, 1.0);
+                                    this.auto_save(cx);
+                                }))
+                            },
                         ),
                     )
                     .into_any_element(),
@@ -715,21 +704,19 @@ impl SettingsView {
                         t,
                         Some("\u{F158}"),
                         "Corner Radius",
-                        stepper(
-                            "rad-minus",
-                            "rad-plus",
+                        live_slider(
+                            "rad",
                             t,
+                            self.settings.dock_corner_radius.unwrap_or(16) as f32 / 32.0,
+                            17,
                             radius_label,
-                            cx.listener(|this, _, _, cx| {
-                                let cur = this.settings.dock_corner_radius.unwrap_or(16);
-                                this.settings.dock_corner_radius = Some((cur - 2).max(0));
-                                this.auto_save(cx);
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                let cur = this.settings.dock_corner_radius.unwrap_or(16);
-                                this.settings.dock_corner_radius = Some((cur + 2).min(32));
-                                this.auto_save(cx);
-                            }),
+                            |i| {
+                                Box::new(cx.listener(move |this, _, _, cx| {
+                                    this.settings.dock_corner_radius =
+                                        Some(((i as i32) * 2).clamp(0, 32));
+                                    this.auto_save(cx);
+                                }))
+                            },
                         ),
                     )
                     .into_any_element(),
@@ -791,139 +778,15 @@ impl SettingsView {
         let card_hover = t.surface_hover;
         let focus_color = t.text_primary;
 
-        let inline_controls: Option<AnyElement> =
-            match wid {
-                "weather" => Some(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .flex_wrap()
-                        .children(["Istanbul", "Ankara", "London", "Berlin"].into_iter().map(
-                            |city| {
-                                let active = self.settings.weather_city.eq_ignore_ascii_case(city);
-                                let bg = if active { t.accent } else { t.surface_muted };
-                                let fg = if active {
-                                    t.accent_fg
-                                } else {
-                                    t.text_secondary
-                                };
-                                div()
-                                    .id(SharedString::from(format!("wc-{city}")))
-                                    .px(px(7.0))
-                                    .py(px(2.5))
-                                    .rounded(px(6.0))
-                                    .bg(rgba(bg))
-                                    .text_size(px(10.5))
-                                    .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(rgba(fg))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.settings.weather_city = city.to_owned();
-                                        this.auto_save(cx);
-                                    }))
-                                    .child(city)
-                            },
-                        ))
-                        .into_any_element(),
-                ),
-                "focus" => {
-                    let on = self.settings.focus_mode;
-                    let bg = if on { t.accent_soft } else { t.surface_muted };
-                    let fg = if on { t.accent } else { t.text_secondary };
-                    Some(
-                        div()
-                            .id("wc-focus-toggle")
-                            .px(px(8.0))
-                            .py(px(3.0))
-                            .rounded(px(6.0))
-                            .bg(rgba(bg))
-                            .text_size(px(10.5))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(rgba(fg))
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.settings.focus_mode = !this.settings.focus_mode;
-                                this.auto_save(cx);
-                            }))
-                            .child(if on {
-                                "Focus Mode: On"
-                            } else {
-                                "Focus Mode: Off"
-                            })
-                            .into_any_element(),
-                    )
-                }
-                "audio" => Some(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .child(
-                            div()
-                                .id("wc-vol-dn")
-                                .px(px(8.0))
-                                .py(px(2.5))
-                                .rounded(px(6.0))
-                                .bg(rgba(t.surface_muted))
-                                .text_size(px(10.5))
-                                .text_color(rgba(t.text_primary))
-                                .cursor_pointer()
-                                .on_click(cx.listener(|_, _, _, cx| {
-                                    cx.stop_propagation();
-                                    widgets::adjust_audio_volume(-10);
-                                    cx.notify();
-                                }))
-                                .child("-10%"),
-                        )
-                        .child(
-                            div()
-                                .id("wc-vol-mute")
-                                .px(px(8.0))
-                                .py(px(2.5))
-                                .rounded(px(6.0))
-                                .bg(rgba(t.surface_muted))
-                                .text_size(px(10.5))
-                                .text_color(rgba(t.text_primary))
-                                .cursor_pointer()
-                                .on_click(cx.listener(|_, _, _, cx| {
-                                    cx.stop_propagation();
-                                    widgets::toggle_audio_mute();
-                                    cx.notify();
-                                }))
-                                .child("Mute"),
-                        )
-                        .child(
-                            div()
-                                .id("wc-vol-up")
-                                .px(px(8.0))
-                                .py(px(2.5))
-                                .rounded(px(6.0))
-                                .bg(rgba(t.surface_muted))
-                                .text_size(px(10.5))
-                                .text_color(rgba(t.text_primary))
-                                .cursor_pointer()
-                                .on_click(cx.listener(|_, _, _, cx| {
-                                    cx.stop_propagation();
-                                    widgets::adjust_audio_volume(10);
-                                    cx.notify();
-                                }))
-                                .child("+10%"),
-                        )
-                        .into_any_element(),
-                ),
-                _ => None,
-            };
-
-        let mut card = div()
+        let card = div()
             .id(SharedString::from(format!("wcard-{wid}")))
             .flex_1()
             .min_w_0()
+            .h(px(116.0))
             .flex()
             .flex_col()
-            .gap(px(9.0))
+            .justify_between()
+            .gap(px(8.0))
             .p(px(11.0))
             .rounded(px(12.0))
             .bg(rgba(t.surface))
@@ -941,18 +804,18 @@ impl SettingsView {
             .child(
                 div()
                     .w_full()
-                    .h(px(50.0))
+                    .h(px(52.0))
                     .rounded(px(8.0))
                     .bg(rgba(t.dock_preview_bg))
                     .border_1()
-                    .border_color(rgba(0xffffff18))
+                    .border_color(rgba(t.border))
                     .flex()
                     .items_center()
                     .justify_center()
                     .child(
                         div()
                             .px(px(12.0))
-                            .py(px(4.5))
+                            .py(px(4.0))
                             .rounded(px(7.0))
                             .bg(rgba(t.surface_muted))
                             .flex()
@@ -999,23 +862,18 @@ impl SettingsView {
                                     .child(w.name),
                             ),
                     )
-                    .child(if enabled {
-                        badge(t, "On", true)
-                    } else {
-                        badge(t, "Add", false)
-                    }),
+                    .child(ios_switch(
+                        SharedString::from(format!("wsw-{wid}")),
+                        t,
+                        enabled,
+                        cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            let cur = this.settings.is_widget_enabled(wid);
+                            this.settings.set_widget_enabled(wid, !cur);
+                            this.auto_save(cx);
+                        }),
+                    )),
             );
-
-        if let Some(inline) = inline_controls {
-            card = card.child(
-                div()
-                    .w_full()
-                    .pt(px(4.0))
-                    .border_t_1()
-                    .border_color(rgba(t.separator))
-                    .child(inline),
-            );
-        }
 
         card.into_any_element()
     }
@@ -1032,36 +890,95 @@ impl SettingsView {
             .filter(|w| self.settings.is_widget_enabled(w.id))
             .count();
 
+        let filter_pills = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .flex_wrap()
+            .gap(px(6.0))
+            .children(
+                std::iter::once("All")
+                    .chain(std::iter::once("Active"))
+                    .chain(widgets::WIDGET_CATEGORIES.iter().copied())
+                    .map(|cat| {
+                        let active = self.widget_filter == cat;
+                        let bg = if active { t.accent } else { t.surface_muted };
+                        let fg = if active {
+                            t.accent_fg
+                        } else {
+                            t.text_secondary
+                        };
+                        let hov = if active { t.accent } else { t.surface_hover };
+                        div()
+                            .id(SharedString::from(format!("wflt-{cat}")))
+                            .px(px(10.0))
+                            .py(px(5.0))
+                            .rounded(px(999.0))
+                            .bg(rgba(bg))
+                            .text_size(px(12.0))
+                            .font_weight(if active {
+                                gpui::FontWeight::SEMIBOLD
+                            } else {
+                                gpui::FontWeight::MEDIUM
+                            })
+                            .text_color(rgba(fg))
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(rgba(hov)))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.widget_filter = cat;
+                                cx.notify();
+                            }))
+                            .child(cat)
+                    }),
+            );
+
         out.push(
             div()
                 .w_full()
                 .flex()
-                .items_center()
-                .justify_between()
-                .child(badge(
-                    t,
-                    format!("{active_count} / {} active", widgets::ALL_WIDGETS.len()),
-                    active_count > 0,
-                ))
-                .child(button(
-                    "btn-clear-widgets",
-                    t,
-                    "Clear All",
-                    ButtonVariant::Secondary,
-                    cx.listener(|this, _, _, cx| {
-                        this.settings.show_clock_widget = false;
-                        this.settings.show_system_stats_widget = false;
-                        this.settings.enabled_widgets.clear();
-                        this.auto_save(cx);
-                    }),
-                ))
+                .flex_col()
+                .gap(px(10.0))
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(badge(
+                            t,
+                            format!("{active_count} / {} active", widgets::ALL_WIDGETS.len()),
+                            active_count > 0,
+                        ))
+                        .child(button(
+                            "btn-clear-widgets",
+                            t,
+                            "Clear All",
+                            ButtonVariant::Secondary,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.show_clock_widget = false;
+                                this.settings.show_system_stats_widget = false;
+                                this.settings.enabled_widgets.clear();
+                                this.auto_save(cx);
+                            }),
+                        )),
+                )
+                .child(filter_pills)
                 .into_any_element(),
         );
 
         for &cat in widgets::WIDGET_CATEGORIES {
+            if self.widget_filter != "All"
+                && self.widget_filter != "Active"
+                && self.widget_filter != cat
+            {
+                continue;
+            }
             let items: Vec<&'static widgets::WidgetDescriptor> = widgets::ALL_WIDGETS
                 .iter()
-                .filter(|w| w.category == cat)
+                .filter(|w| {
+                    w.category == cat
+                        && (self.widget_filter != "Active" || self.settings.is_widget_enabled(w.id))
+                })
                 .collect();
             if items.is_empty() {
                 continue;
@@ -1071,7 +988,7 @@ impl SettingsView {
                     .w_full()
                     .pt(px(4.0))
                     .px(px(2.0))
-                    .text_size(px(11.5))
+                    .text_size(px(12.0))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgba(t.text_secondary))
                     .child(cat)
@@ -1638,7 +1555,7 @@ impl Render for SettingsView {
         let close_hover = t.destructive;
         let titlebar = div()
             .w_full()
-            .h(px(40.0))
+            .h(px(36.0))
             .flex_shrink_0()
             .flex()
             .items_center()
@@ -1653,21 +1570,12 @@ impl Render for SettingsView {
                     .px(px(14.0))
                     .flex()
                     .items_center()
-                    .gap(px(9.0))
+                    .gap(px(8.0))
                     .window_control_area(WindowControlArea::Drag)
+                    .child(icon_glyph("\u{E713}", 13.0, t.text_secondary))
                     .child(
                         div()
-                            .size(px(22.0))
-                            .rounded(px(6.0))
-                            .bg(rgba(t.accent_soft))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon_glyph("\u{E713}", 12.0, t.accent)),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(13.0))
+                            .text_size(px(12.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgba(t.text_primary))
                             .child("OpenTaskbar Settings"),
