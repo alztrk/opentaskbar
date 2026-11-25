@@ -51,10 +51,6 @@ use crate::platform::icon_cache::RawIcon;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChipIcon {
-    SunCloud,
-    Bluetooth,
-    Drive,
-    Timer,
     Folder,
     Grid,
 }
@@ -66,67 +62,96 @@ pub enum WidgetInteraction {
     Pressed(Option<u8>),
 }
 
-/// Self-contained, directly glanceable & interactive dock widget archetypes.
+/// Exact C# 1-to-1 dock widget specs ported from `Widgets/*.xaml` and `Widgets/*.cs`.
 #[derive(Clone, Debug)]
 pub enum WidgetChipSpec {
-    DateTime {
+    /// C# `ClockWidget.xaml`: `[ClockIcon 15px] [15px Bold Time] [11.5px Date / 10.5px Weekday]`
+    Clock {
         time: String,
         date: String,
+        weekday: String,
     },
-    IconTwoLine {
+    /// C# `WeatherWidget.cs`: `[Icon 19px] [18px Bold Temp] [Place / Condition] | [Today / High/Low]`
+    Weather {
+        icon_color: Rgb,
+        is_rain: bool,
+        temp: String,
+        place: String,
+        condition: String,
+        today_range: Option<String>,
+    },
+    /// C# `DayProgressWidget.cs`: `[22px RingMeter (WidgetBlue)] [13px SemiBold %] [11.5px "day"]`
+    DayProgress {
+        ratio: f32,
+        percent: String,
+        unit: String,
+    },
+    /// C# `TimedWidgetTile.xaml` & `FocusWidget.xaml`: `[Icon 16px] [13px Tabular Time] [26x26 Play/Pause]`
+    Timed {
+        is_focus: bool,
+        running: bool,
+        text: String,
+    },
+    /// C# `SystemStatsWidget.xaml`: `[CPU / 14%] | [RAM / 48%]` with threshold foreground colors
+    SystemStats {
+        cpu_text: String,
+        cpu_color: Rgb,
+        ram_text: String,
+        ram_color: Rgb,
+    },
+    /// C# `NetSpeedWidget.cs`: `[Wifi 15px] [↓ green speed / ↑ blue speed]`
+    NetSpeed { down: String, up: String },
+    /// C# `BatteryWidget.cs`: full-card horizontal liquid fill gradient + shadowed white `%` + bolt
+    BatteryLiquid {
+        present: bool,
+        percent: u32,
+        charging: bool,
+    },
+    /// C# `BluetoothBatteryWidget.cs`: horizontal connected device tiles (`icon + % + bolt`) or `—`
+    Bluetooth {
+        /// `(percent, low_warning)`
+        devices: Vec<(u32, bool)>,
+    },
+    /// C# `StorageWidget.cs`: `"C: 213 / 476 GB | D: 1.2 / 1.8 TB"` (clean typographic, no bars)
+    Storage { drives: Vec<(String, String)> },
+    /// C# `MediaWidget.xaml`: `[29x29 tinted Art] [Title / Artist] [Prev | PlayPause | Next] [Volume]`
+    Media {
+        title: String,
+        artist: String,
+        muted: bool,
+    },
+    /// C# `AudioWidget.xaml`: `[Speaker 16px] [12.5px SemiBold 67%]` (scroll adjusts, click opens mixer)
+    Audio { volume: u32, muted: bool },
+    /// C# `QuickSettingsWidget.xaml`: 3 compact `27x27` toggle pills (`Wi-Fi`, `Bluetooth`, `Night Light/Focus`)
+    QuickSettings { pills: [(String, bool); 3] },
+    /// C# `KeyboardLayoutWidget.cs`: `[Keyboard 13px] [12px SemiBold TR/EN]`
+    Keyboard { code: String },
+    /// C# `AiUsageWidget.cs` dual-bar layout (Claude, Codex, Cursor) with real `Brand.xaml` logo
+    AiDual {
+        provider_id: &'static str,
+        brand_color: Option<Rgb>,
+        detected: bool,
+    },
+    /// C# `AiUsageWidget.cs` multi-column Antigravity layout (`Gemini | Claude`)
+    AiAntigravity { detected: bool },
+    /// C# `AiUsageWidget.cs` triple-column OpenCode layout (`1h | 7d | 30d`)
+    AiOpenCode { detected: bool },
+    /// C# `AiUsageWidget.cs` Copilot inline layout (`Logo + Copilot | Status + mini bar`)
+    AiCopilot { detected: bool },
+    /// C# `AiUsageWidget.cs` DeepSeek / OpenRouter tinted balance card (`29x29 tinted logo well + Name / Status`)
+    AiBalance {
+        provider_id: &'static str,
+        name: &'static str,
+        brand_color: Rgb,
+        value_text: String,
+    },
+    /// Clean borderless icon + two-line helper (Stacks, Groups)
+    Simple {
         icon: ChipIcon,
         icon_color: Rgb,
         top: String,
         bottom: String,
-        bottom_color: Option<Rgb>,
-        active_tint: Option<Rgb>,
-        bar: Option<(f32, Rgb)>,
     },
-    RingTwoLine {
-        ratio: f32,
-        ring_color: Rgb,
-        top: String,
-        bottom: String,
-        bottom_color: Option<Rgb>,
-        active_tint: Option<Rgb>,
-    },
-    DualBars {
-        top_label: String,
-        top_val: String,
-        top_ratio: f32,
-        top_color: Rgb,
-        bot_label: String,
-        bot_val: String,
-        bot_ratio: f32,
-        bot_color: Rgb,
-    },
-    NetTraffic {
-        down: String,
-        up: String,
-    },
-    BatteryGraphic {
-        percent: u32,
-        has_battery: bool,
-        charging: bool,
-        top: String,
-        bottom: String,
-        level_color: Rgb,
-    },
-    AudioSlider {
-        volume: u32,
-        muted: bool,
-    },
-    InlineControls {
-        /// `(fluent_glyph, highlighted, highlight_color)`
-        buttons: Vec<(String, bool, Rgb)>,
-    },
-    ProviderBadge {
-        name: String,
-        monogram: String,
-        color: Rgb,
-        detected: bool,
-    },
-    Keycap(String),
 }
 
 impl WidgetChipSpec {
@@ -520,8 +545,8 @@ impl DcompEngine {
         }
     }
 
-    /// Renders one of the rich, self-contained dock widget modules at automatic `height_dips`
-    /// derived from the live dock pill height, using unified Zinc tokens and Windows 11 Fluent icons.
+    /// Renders one of the 1-to-1 C# dock widget modules at automatic `height_dips`
+    /// derived from the live dock pill height, using Slate/Aurora tokens and Windows 11 Fluent icons.
     pub fn create_widget_chip_surface(
         &self,
         spec: &WidgetChipSpec,
@@ -591,14 +616,20 @@ impl DcompEngine {
             }
         };
 
-        let fmt_14_c = mk_fmt(14.0, true, 0)?;
-        let fmt_12_l = mk_fmt(12.0, true, 1)?;
-        let fmt_11_b_c = mk_fmt(11.0, true, 0)?;
+        let fmt_18_b_l = mk_fmt(18.0, true, 1)?;
+        let fmt_15_b_l = mk_fmt(15.0, true, 1)?;
+        let fmt_13_b_c = mk_fmt(13.0, true, 0)?;
+        let fmt_13_b_l = mk_fmt(13.0, true, 1)?;
+        let fmt_125_b_l = mk_fmt(12.5, true, 1)?;
+        let fmt_12_b_l = mk_fmt(12.0, true, 1)?;
+        let fmt_115_b_l = mk_fmt(11.5, true, 1)?;
+        let fmt_115_l = mk_fmt(11.5, false, 1)?;
         let fmt_11_b_l = mk_fmt(11.0, true, 1)?;
-        let fmt_11_b_r = mk_fmt(11.0, true, 2)?;
-        let fmt_10_c = mk_fmt(10.5, false, 0)?;
+        let fmt_105_l = mk_fmt(10.5, false, 1)?;
         let fmt_10_l = mk_fmt(10.0, false, 1)?;
-        let fmt_95_l = mk_fmt(9.5, true, 1)?;
+        let fmt_95_b_l = mk_fmt(9.5, true, 1)?;
+        let fmt_9_l = mk_fmt(9.0, false, 1)?;
+        let fmt_9_b_l = mk_fmt(9.0, true, 1)?;
 
         let stroke_props = D2D1_STROKE_STYLE_PROPERTIES1 {
             startCap: D2D1_CAP_STYLE_ROUND,
@@ -613,10 +644,31 @@ impl DcompEngine {
                 .into()
         };
 
+        let div_c = color_rgba(pal.border_rgb.0, pal.border_rgb.1, pal.border_rgb.2, 0.85);
+        let sel_fill_c = if is_dark {
+            color_rgba(0x5b, 0x92, 0xff, 0.20)
+        } else {
+            color_rgba(0x24, 0x74, 0xe9, 0.15)
+        };
+        let sel_stroke_c = if is_dark {
+            color_rgba(0x91, 0xb8, 0xff, 0.47)
+        } else {
+            color_rgba(0x2c, 0x74, 0xe9, 0.44)
+        };
+        let surf_sel_c = if is_dark {
+            color_rgba(0xff, 0xff, 0xff, 0.08)
+        } else {
+            color_rgba(0x00, 0x00, 0x00, 0.05)
+        };
+
         self.draw_surface(w_px, h_px, |dc, _w, _h| unsafe {
             let p_brush = dc.CreateSolidColorBrush(&fg_p, None)?;
             let s_brush = dc.CreateSolidColorBrush(&fg_s, None)?;
             let tr_brush = dc.CreateSolidColorBrush(&track_c, None)?;
+            let div_brush = dc.CreateSolidColorBrush(&div_c, None)?;
+            let sel_fill_b = dc.CreateSolidColorBrush(&sel_fill_c, None)?;
+            let sel_stroke_b = dc.CreateSolidColorBrush(&sel_stroke_c, None)?;
+            let surf_sel_b = dc.CreateSolidColorBrush(&surf_sel_c, None)?;
             let mut prev = Matrix3x2::identity();
             dc.GetTransform(&mut prev);
             dc.SetTransform(&Matrix3x2 {
@@ -633,191 +685,205 @@ impl DcompEngine {
                 WidgetInteraction::Hovered(s) | WidgetInteraction::Pressed(s) => s,
             };
             let cy = height_dips * 0.5;
+            let draw_text =
+                |text: &str,
+                 fmt: &IDWriteTextFormat,
+                 rect: D2D_RECT_F,
+                 brush: &windows::Win32::Graphics::Direct2D::ID2D1SolidColorBrush| {
+                    let wtxt: Vec<u16> = text.encode_utf16().collect();
+                    dc.DrawText(
+                        &wtxt,
+                        fmt,
+                        &rect,
+                        brush,
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                };
+            let draw_vdiv = |x: f32, h: f32| {
+                let top = cy - h * 0.5;
+                dc.FillRectangle(
+                    &D2D_RECT_F {
+                        left: x,
+                        top,
+                        right: x + 1.0,
+                        bottom: top + h,
+                    },
+                    &div_brush,
+                );
+            };
+
             match spec {
-                WidgetChipSpec::DateTime { time, date } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
-                    let tw: Vec<u16> = time.encode_utf16().collect();
-                    let dw: Vec<u16> = date.encode_utf16().collect();
-                    let mid = height_dips * 0.53;
-                    dc.DrawText(
-                        &tw,
-                        &fmt_14_c,
-                        &D2D_RECT_F {
-                            left: 4.0,
-                            top: 2.0,
-                            right: width_dips - 4.0,
-                            bottom: mid + 1.0,
-                        },
-                        &p_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                    dc.DrawText(
-                        &dw,
-                        &fmt_10_c,
-                        &D2D_RECT_F {
-                            left: 4.0,
-                            top: mid - 1.0,
-                            right: width_dips - 4.0,
-                            bottom: height_dips - 2.0,
-                        },
-                        &s_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                }
-                WidgetChipSpec::IconTwoLine {
-                    icon,
-                    icon_color,
-                    top,
-                    bottom,
-                    bottom_color,
-                    active_tint,
-                    bar,
+                WidgetChipSpec::Clock {
+                    time,
+                    date,
+                    weekday,
                 } => {
-                    draw_chip_card(
-                        dc,
-                        width_dips,
-                        height_dips,
-                        is_dark,
-                        *active_tint,
-                        interaction,
-                    )?;
-                    // Subtle rounded icon well on the left
-                    let well = 24.0_f32.min(height_dips - 8.0);
-                    let wx = 7.0;
-                    let wy = (height_dips - well) * 0.5;
-                    let well_c = color_rgba(icon_color.0, icon_color.1, icon_color.2, 0.16);
-                    let well_b = dc.CreateSolidColorBrush(&well_c, None)?;
-                    dc.FillRoundedRectangle(
-                        &D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F {
-                                left: wx,
-                                top: wy,
-                                right: wx + well,
-                                bottom: wy + well,
-                            },
-                            radiusX: 7.0,
-                            radiusY: 7.0,
-                        },
-                        &well_b,
-                    );
-                    draw_chip_icon(
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    // ClockWidget.xaml: [IconClock 15px, margin 0,0,8,0] [Time 15px Bold] + 9px + [Date 11.5px / DayOfWeek 10.5px]
+                    draw_fluent_str_d2d(
                         &self.dwrite_factory,
                         dc,
-                        *icon,
-                        wx + well * 0.5,
-                        cy,
-                        14.0,
-                        *icon_color,
+                        "\u{E823}",
+                        D2D_RECT_F {
+                            left: 9.0,
+                            top: cy - 8.5,
+                            right: 25.0,
+                            bottom: cy + 8.5,
+                        },
+                        15.0,
+                        pal.text_secondary,
+                        0.92,
                     )?;
-
-                    let tx = wx + well + 7.0;
-                    let tr = width_dips - 7.0;
-                    let mid = height_dips * 0.52;
-                    let tw: Vec<u16> = top.encode_utf16().collect();
-                    dc.DrawText(
-                        &tw,
-                        &fmt_11_b_l,
-                        &D2D_RECT_F {
-                            left: tx,
-                            top: 3.0,
-                            right: tr,
+                    draw_text(
+                        time,
+                        &fmt_15_b_l,
+                        D2D_RECT_F {
+                            left: 32.0,
+                            top: 0.0,
+                            right: 82.0,
+                            bottom: height_dips,
+                        },
+                        &p_brush,
+                    );
+                    let dx = 82.0;
+                    let mid = height_dips * 0.51;
+                    draw_text(
+                        date,
+                        &fmt_115_b_l,
+                        D2D_RECT_F {
+                            left: dx,
+                            top: (mid - 14.0).max(2.0),
+                            right: width_dips - 8.0,
                             bottom: mid + 1.0,
                         },
                         &p_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
                     );
-
-                    if let Some((ratio, bar_rgb)) = bar {
-                        let bar_h = 4.0;
-                        let bar_top = mid + (height_dips - mid - bar_h) * 0.42;
-                        let bar_r = (tr - tx).max(16.0);
-                        dc.FillRoundedRectangle(
-                            &D2D1_ROUNDED_RECT {
-                                rect: D2D_RECT_F {
-                                    left: tx,
-                                    top: bar_top,
-                                    right: tx + bar_r,
-                                    bottom: bar_top + bar_h,
-                                },
-                                radiusX: 2.0,
-                                radiusY: 2.0,
-                            },
-                            &tr_brush,
-                        );
-                        let fw = (bar_r * ratio.clamp(0.04, 1.0)).max(3.0);
-                        let fb = dc.CreateSolidColorBrush(
-                            &color_rgba(bar_rgb.0, bar_rgb.1, bar_rgb.2, 1.0),
-                            None,
-                        )?;
-                        dc.FillRoundedRectangle(
-                            &D2D1_ROUNDED_RECT {
-                                rect: D2D_RECT_F {
-                                    left: tx,
-                                    top: bar_top,
-                                    right: tx + fw,
-                                    bottom: bar_top + bar_h,
-                                },
-                                radiusX: 2.0,
-                                radiusY: 2.0,
-                            },
-                            &fb,
-                        );
+                    draw_text(
+                        weekday,
+                        &fmt_105_l,
+                        D2D_RECT_F {
+                            left: dx,
+                            top: mid - 0.5,
+                            right: width_dips - 8.0,
+                            bottom: (mid + 13.5).min(height_dips - 2.0),
+                        },
+                        &s_brush,
+                    );
+                }
+                WidgetChipSpec::Weather {
+                    icon_color,
+                    is_rain,
+                    temp,
+                    place,
+                    condition,
+                    today_range,
+                } => {
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    // WeatherWidget.cs: [Icon 19px] [18px Bold Temp] [Place / Condition] | [Today / range]
+                    let glyph = if *is_rain { "\u{E9C4}" } else { "\u{E753}" };
+                    draw_fluent_str_d2d(
+                        &self.dwrite_factory,
+                        dc,
+                        glyph,
+                        D2D_RECT_F {
+                            left: 9.0,
+                            top: cy - 10.0,
+                            right: 29.0,
+                            bottom: cy + 10.0,
+                        },
+                        18.0,
+                        *icon_color,
+                        0.98,
+                    )?;
+                    draw_text(
+                        temp,
+                        &fmt_18_b_l,
+                        D2D_RECT_F {
+                            left: 35.0,
+                            top: 0.0,
+                            right: 78.0,
+                            bottom: height_dips,
+                        },
+                        &p_brush,
+                    );
+                    let px = 80.0;
+                    let pr = if today_range.is_some() {
+                        width_dips - 74.0
                     } else {
-                        let bw: Vec<u16> = bottom.encode_utf16().collect();
-                        let bb = if let Some(c) = bottom_color {
-                            dc.CreateSolidColorBrush(&color_rgba(c.0, c.1, c.2, 0.95), None)?
-                        } else {
-                            s_brush.clone()
-                        };
-                        dc.DrawText(
-                            &bw,
-                            &fmt_10_l,
-                            &D2D_RECT_F {
-                                left: tx,
-                                top: mid - 1.0,
-                                right: tr,
-                                bottom: height_dips - 2.0,
+                        width_dips - 9.0
+                    };
+                    let mid = height_dips * 0.51;
+                    draw_text(
+                        place,
+                        &fmt_11_b_l,
+                        D2D_RECT_F {
+                            left: px,
+                            top: (mid - 14.0).max(2.0),
+                            right: pr,
+                            bottom: mid + 1.0,
+                        },
+                        &p_brush,
+                    );
+                    draw_text(
+                        condition,
+                        &fmt_10_l,
+                        D2D_RECT_F {
+                            left: px,
+                            top: mid - 0.5,
+                            right: pr,
+                            bottom: (mid + 13.0).min(height_dips - 2.0),
+                        },
+                        &s_brush,
+                    );
+                    if let Some(range) = today_range {
+                        let sep_x = width_dips - 68.0;
+                        draw_vdiv(sep_x, 20.0);
+                        draw_text(
+                            "Today",
+                            &fmt_9_l,
+                            D2D_RECT_F {
+                                left: sep_x + 8.0,
+                                top: (mid - 13.0).max(2.0),
+                                right: width_dips - 8.0,
+                                bottom: mid,
                             },
-                            &bb,
-                            D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                            windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                            &s_brush,
+                        );
+                        draw_text(
+                            range,
+                            &fmt_115_b_l,
+                            D2D_RECT_F {
+                                left: sep_x + 8.0,
+                                top: mid - 1.0,
+                                right: width_dips - 8.0,
+                                bottom: (mid + 13.5).min(height_dips - 2.0),
+                            },
+                            &p_brush,
                         );
                     }
                 }
-                WidgetChipSpec::RingTwoLine {
+                WidgetChipSpec::DayProgress {
                     ratio,
-                    ring_color,
-                    top,
-                    bottom,
-                    bottom_color,
-                    active_tint,
+                    percent,
+                    unit,
                 } => {
-                    draw_chip_card(
-                        dc,
-                        width_dips,
-                        height_dips,
-                        is_dark,
-                        *active_tint,
-                        interaction,
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    // DayProgressWidget.cs: [RingMeter 22x22 Stroke=2.8 WidgetBlue] + 7px + [13px SemiBold %] + 5px + [11.5px "day"]
+                    let rx = 21.0;
+                    let rad = 9.5_f32.min(height_dips * 0.30);
+                    let r_brush = dc.CreateSolidColorBrush(
+                        &color_rgba(pal.widget_blue.0, pal.widget_blue.1, pal.widget_blue.2, 1.0),
+                        None,
                     )?;
-                    let rx = 18.0;
-                    let rad = 9.0_f32.min(height_dips * 0.30);
-                    let rc = color_rgba(ring_color.0, ring_color.1, ring_color.2, 1.0);
-                    let r_brush = dc.CreateSolidColorBrush(&rc, None)?;
-                    let inner_fill = color_rgba(ring_color.0, ring_color.1, ring_color.2, 0.10);
-                    let if_brush = dc.CreateSolidColorBrush(&inner_fill, None)?;
                     let ell = D2D1_ELLIPSE {
                         point: Vector2 { X: rx, Y: cy },
                         radiusX: rad,
                         radiusY: rad,
                     };
-                    dc.FillEllipse(&ell, &if_brush);
-                    dc.DrawEllipse(&ell, &tr_brush, 2.2, None);
-                    let steps = ((ratio.clamp(0.0, 1.0) * 36.0).round() as usize).max(1);
+                    dc.DrawEllipse(&ell, &tr_brush, 2.8, None);
                     if *ratio > 0.01 {
+                        let steps = ((ratio.clamp(0.0, 1.0) * 36.0).round() as usize).max(1);
                         let mut prev_pt = Vector2 { X: rx, Y: cy - rad };
                         for i in 1..=steps {
                             let ang = -std::f32::consts::FRAC_PI_2
@@ -826,344 +892,613 @@ impl DcompEngine {
                                 X: rx + ang.cos() * rad,
                                 Y: cy + ang.sin() * rad,
                             };
-                            dc.DrawLine(prev_pt, pt, &r_brush, 2.2, Some(&stroke));
+                            dc.DrawLine(prev_pt, pt, &r_brush, 2.8, Some(&stroke));
                             prev_pt = pt;
                         }
                     }
-
-                    let tx = rx + rad + 8.0;
-                    let tr = width_dips - 7.0;
-                    let mid = height_dips * 0.52;
-                    let tw: Vec<u16> = top.encode_utf16().collect();
-                    dc.DrawText(
-                        &tw,
-                        &fmt_12_l,
-                        &D2D_RECT_F {
-                            left: tx,
-                            top: 2.0,
-                            right: tr,
+                    draw_text(
+                        percent,
+                        &fmt_13_b_l,
+                        D2D_RECT_F {
+                            left: 39.0,
+                            top: 0.0,
+                            right: 68.0,
+                            bottom: height_dips,
+                        },
+                        &p_brush,
+                    );
+                    draw_text(
+                        unit,
+                        &fmt_115_l,
+                        D2D_RECT_F {
+                            left: 69.0,
+                            top: 0.5,
+                            right: width_dips - 8.0,
+                            bottom: height_dips,
+                        },
+                        &s_brush,
+                    );
+                }
+                WidgetChipSpec::Timed {
+                    is_focus,
+                    running,
+                    text,
+                } => {
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    // FocusWidget.xaml / TimedWidgetTile.xaml: [Icon 16px] [13px Tabular Time] [26x26 Play/Pause]
+                    let icon_glyph = if *is_focus { "\u{E7C8}" } else { "\u{E916}" };
+                    let icon_col = if *running {
+                        pal.selected_fg
+                    } else {
+                        pal.text_secondary
+                    };
+                    draw_fluent_str_d2d(
+                        &self.dwrite_factory,
+                        dc,
+                        icon_glyph,
+                        D2D_RECT_F {
+                            left: 9.0,
+                            top: cy - 8.5,
+                            right: 26.0,
+                            bottom: cy + 8.5,
+                        },
+                        15.0,
+                        icon_col,
+                        0.95,
+                    )?;
+                    let btn_sz = 26.0;
+                    let btn_l = width_dips - btn_sz - 8.0;
+                    let btn_t = cy - btn_sz * 0.5;
+                    draw_text(
+                        text,
+                        &fmt_13_b_l,
+                        D2D_RECT_F {
+                            left: 32.0,
+                            top: 0.0,
+                            right: btn_l - 4.0,
+                            bottom: height_dips,
+                        },
+                        &p_brush,
+                    );
+                    let btn_rect = D2D_RECT_F {
+                        left: btn_l,
+                        top: btn_t,
+                        right: btn_l + btn_sz,
+                        bottom: btn_t + btn_sz,
+                    };
+                    let btn_rr = D2D1_ROUNDED_RECT {
+                        rect: btn_rect,
+                        radiusX: 7.0,
+                        radiusY: 7.0,
+                    };
+                    let sub_hov = active_sub == Some(1);
+                    if *running {
+                        dc.FillRoundedRectangle(&btn_rr, &sel_fill_b);
+                        dc.DrawRoundedRectangle(&btn_rr, &sel_stroke_b, 1.0, None);
+                    } else if sub_hov {
+                        let hb = dc.CreateSolidColorBrush(
+                            &if is_dark {
+                                color_rgba(0xff, 0xff, 0xff, 0.14)
+                            } else {
+                                color_rgba(0x00, 0x00, 0x00, 0.10)
+                            },
+                            None,
+                        )?;
+                        dc.FillRoundedRectangle(&btn_rr, &hb);
+                    }
+                    let play_glyph = if *running { "\u{E769}" } else { "\u{E768}" };
+                    let play_col = if *running {
+                        pal.selected_fg
+                    } else {
+                        pal.text_primary
+                    };
+                    draw_fluent_str_d2d(
+                        &self.dwrite_factory,
+                        dc,
+                        play_glyph,
+                        btn_rect,
+                        11.5,
+                        play_col,
+                        0.96,
+                    )?;
+                }
+                WidgetChipSpec::SystemStats {
+                    cpu_text,
+                    cpu_color,
+                    ram_text,
+                    ram_color,
+                } => {
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    // SystemStatsWidget.xaml: [CPU 10px / 14% 12px] | [RAM 10px / 48% 12px]
+                    let mid_x = width_dips * 0.5;
+                    let mid_y = height_dips * 0.46;
+                    let cpu_b = dc.CreateSolidColorBrush(
+                        &color_rgba(cpu_color.0, cpu_color.1, cpu_color.2, 0.98),
+                        None,
+                    )?;
+                    let ram_b = dc.CreateSolidColorBrush(
+                        &color_rgba(ram_color.0, ram_color.1, ram_color.2, 0.98),
+                        None,
+                    )?;
+                    draw_text(
+                        "CPU",
+                        &fmt_10_l,
+                        D2D_RECT_F {
+                            left: 9.0,
+                            top: (mid_y - 13.0).max(2.0),
+                            right: mid_x - 4.0,
+                            bottom: mid_y,
+                        },
+                        &s_brush,
+                    );
+                    draw_text(
+                        cpu_text,
+                        &fmt_12_b_l,
+                        D2D_RECT_F {
+                            left: 9.0,
+                            top: mid_y - 1.0,
+                            right: mid_x - 4.0,
+                            bottom: (mid_y + 15.0).min(height_dips - 2.0),
+                        },
+                        &cpu_b,
+                    );
+                    draw_vdiv(mid_x - 0.5, 20.0);
+                    draw_text(
+                        "RAM",
+                        &fmt_10_l,
+                        D2D_RECT_F {
+                            left: mid_x + 6.0,
+                            top: (mid_y - 13.0).max(2.0),
+                            right: width_dips - 6.0,
+                            bottom: mid_y,
+                        },
+                        &s_brush,
+                    );
+                    draw_text(
+                        ram_text,
+                        &fmt_12_b_l,
+                        D2D_RECT_F {
+                            left: mid_x + 6.0,
+                            top: mid_y - 1.0,
+                            right: width_dips - 6.0,
+                            bottom: (mid_y + 15.0).min(height_dips - 2.0),
+                        },
+                        &ram_b,
+                    );
+                }
+                WidgetChipSpec::NetSpeed { down, up } => {
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    // NetSpeedWidget.cs: [Wifi 15px Secondary] + [↓ WidgetGreen + 11.5px] / [↑ WidgetBlue + 11.5px]
+                    draw_fluent_str_d2d(
+                        &self.dwrite_factory,
+                        dc,
+                        "\u{E701}",
+                        D2D_RECT_F {
+                            left: 9.0,
+                            top: cy - 8.5,
+                            right: 25.0,
+                            bottom: cy + 8.5,
+                        },
+                        14.5,
+                        pal.text_secondary,
+                        0.90,
+                    )?;
+                    let mid = height_dips * 0.5;
+                    draw_fluent_str_d2d(
+                        &self.dwrite_factory,
+                        dc,
+                        "\u{E74B}",
+                        D2D_RECT_F {
+                            left: 31.0,
+                            top: (mid - 14.0).max(2.0),
+                            right: 43.0,
+                            bottom: mid,
+                        },
+                        10.0,
+                        pal.success,
+                        0.98,
+                    )?;
+                    draw_text(
+                        down,
+                        &fmt_115_b_l,
+                        D2D_RECT_F {
+                            left: 45.0,
+                            top: (mid - 15.0).max(2.0),
+                            right: width_dips - 6.0,
                             bottom: mid + 1.0,
                         },
                         &p_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
                     );
-                    let bw: Vec<u16> = bottom.encode_utf16().collect();
-                    let bb = if let Some(c) = bottom_color {
-                        dc.CreateSolidColorBrush(&color_rgba(c.0, c.1, c.2, 0.95), None)?
-                    } else {
-                        s_brush.clone()
-                    };
-                    dc.DrawText(
-                        &bw,
-                        &fmt_10_l,
-                        &D2D_RECT_F {
-                            left: tx,
-                            top: mid - 1.0,
-                            right: tr,
-                            bottom: height_dips - 2.0,
+                    draw_fluent_str_d2d(
+                        &self.dwrite_factory,
+                        dc,
+                        "\u{E74A}",
+                        D2D_RECT_F {
+                            left: 31.0,
+                            top: mid,
+                            right: 43.0,
+                            bottom: (mid + 14.0).min(height_dips - 2.0),
                         },
-                        &bb,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                        10.0,
+                        pal.widget_blue,
+                        0.98,
+                    )?;
+                    draw_text(
+                        up,
+                        &fmt_115_b_l,
+                        D2D_RECT_F {
+                            left: 45.0,
+                            top: mid - 1.0,
+                            right: width_dips - 6.0,
+                            bottom: (mid + 15.0).min(height_dips - 2.0),
+                        },
+                        &p_brush,
                     );
                 }
-                WidgetChipSpec::DualBars {
-                    top_label,
-                    top_val,
-                    top_ratio,
-                    top_color,
-                    bot_label,
-                    bot_val,
-                    bot_ratio,
-                    bot_color,
+                WidgetChipSpec::BatteryLiquid {
+                    present,
+                    percent,
+                    charging,
                 } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
-                    let rows = [
-                        (
-                            top_label,
-                            top_val,
-                            *top_ratio,
-                            *top_color,
-                            3.0,
-                            height_dips * 0.5,
-                        ),
-                        (
-                            bot_label,
-                            bot_val,
-                            *bot_ratio,
-                            *bot_color,
-                            height_dips * 0.5,
-                            height_dips - 3.0,
-                        ),
-                    ];
-                    let lbl_l = 8.0;
-                    let bar_l = 35.0;
-                    let val_r = width_dips - 8.0;
-                    let bar_r = (val_r - 32.0).max(bar_l + 18.0);
-                    for (lbl, val, ratio, col, y1, y2) in rows {
-                        let lw: Vec<u16> = lbl.encode_utf16().collect();
-                        dc.DrawText(
-                            &lw,
-                            &fmt_95_l,
-                            &D2D_RECT_F {
-                                left: lbl_l,
-                                top: y1,
-                                right: bar_l - 2.0,
-                                bottom: y2,
+                    // Exact C# BatteryWidget.cs horizontal liquid-fill card!
+                    if !*present {
+                        draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                        draw_text(
+                            "—",
+                            &fmt_13_b_c,
+                            D2D_RECT_F {
+                                left: 4.0,
+                                top: 0.0,
+                                right: width_dips - 4.0,
+                                bottom: height_dips,
                             },
                             &s_brush,
-                            D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                            windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
                         );
-                        let bh = 4.0;
-                        let by = (y1 + y2 - bh) * 0.5;
-                        let bw = bar_r - bar_l;
-                        dc.FillRoundedRectangle(
-                            &D2D1_ROUNDED_RECT {
-                                rect: D2D_RECT_F {
-                                    left: bar_l,
-                                    top: by,
-                                    right: bar_r,
-                                    bottom: by + bh,
-                                },
-                                radiusX: 2.0,
-                                radiusY: 2.0,
+                    } else {
+                        let card_rr = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: 0.0,
+                                top: 0.0,
+                                right: width_dips,
+                                bottom: height_dips,
                             },
-                            &tr_brush,
-                        );
-                        let fw = (bw * ratio.clamp(0.05, 1.0)).max(3.0);
-                        let fb =
-                            dc.CreateSolidColorBrush(&color_rgba(col.0, col.1, col.2, 1.0), None)?;
-                        dc.FillRoundedRectangle(
-                            &D2D1_ROUNDED_RECT {
-                                rect: D2D_RECT_F {
-                                    left: bar_l,
-                                    top: by,
-                                    right: bar_l + fw,
-                                    bottom: by + bh,
-                                },
-                                radiusX: 2.0,
-                                radiusY: 2.0,
+                            radiusX: 12.0,
+                            radiusY: 12.0,
+                        };
+                        let base_track = dc.CreateSolidColorBrush(
+                            &if is_dark {
+                                color_rgba(0xff, 0xff, 0xff, 0.08)
+                            } else {
+                                color_rgba(0x00, 0x00, 0x00, 0.06)
                             },
-                            &fb,
-                        );
-                        let vw: Vec<u16> = val.encode_utf16().collect();
-                        dc.DrawText(
-                            &vw,
-                            &fmt_11_b_r,
+                            None,
+                        )?;
+                        dc.FillRoundedRectangle(&card_rr, &base_track);
+
+                        // Exact C# BatteryWidget.PaletteForLevel gradient stops
+                        let (top_c, bot_c) = if *percent <= 20 {
+                            ((0xb2, 0x60, 0x67), (0x98, 0x50, 0x5a))
+                        } else if *percent <= 50 {
+                            ((0xb9, 0x95, 0x63), (0x96, 0x76, 0x48))
+                        } else {
+                            ((0x58, 0xa8, 0x9c), (0x3e, 0x82, 0x7e))
+                        };
+                        let stops = [
+                            D2D1_GRADIENT_STOP {
+                                position: 0.0,
+                                color: color_rgba(top_c.0, top_c.1, top_c.2, 0.96),
+                            },
+                            D2D1_GRADIENT_STOP {
+                                position: 1.0,
+                                color: color_rgba(bot_c.0, bot_c.1, bot_c.2, 0.96),
+                            },
+                        ];
+                        let stop_col = dc.CreateGradientStopCollection(
+                            &stops,
+                            D2D1_COLOR_SPACE_SRGB,
+                            D2D1_COLOR_SPACE_SRGB,
+                            D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                            D2D1_EXTEND_MODE_CLAMP,
+                            D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+                        )?;
+                        let liq_b = dc.CreateLinearGradientBrush(
+                            &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                                startPoint: Vector2 { X: 0.0, Y: 0.0 },
+                                endPoint: Vector2 {
+                                    X: 0.0,
+                                    Y: height_dips,
+                                },
+                            },
+                            None,
+                            &stop_col,
+                        )?;
+                        let edge_x = width_dips * ((*percent).clamp(4, 100) as f32 / 100.0);
+                        dc.PushAxisAlignedClip(
                             &D2D_RECT_F {
-                                left: bar_r + 2.0,
-                                top: y1,
-                                right: val_r,
-                                bottom: y2,
+                                left: 0.0,
+                                top: 0.0,
+                                right: edge_x,
+                                bottom: height_dips,
                             },
-                            &p_brush,
-                            D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                            windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                            windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                        );
+                        dc.FillRoundedRectangle(&card_rr, &liq_b);
+                        dc.PopAxisAlignedClip();
+
+                        // Hover/press overlay above liquid fill (just like C# _hoverOverlay/_pressOverlay)
+                        draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+
+                        let label = if *charging {
+                            format!("⚡ {percent}%")
+                        } else {
+                            format!("{percent}%")
+                        };
+                        let sh_b = dc.CreateSolidColorBrush(&color_rgba(0, 0, 0, 0.35), None)?;
+                        let wh_b =
+                            dc.CreateSolidColorBrush(&color_rgba(0xff, 0xff, 0xff, 0.98), None)?;
+                        draw_text(
+                            &label,
+                            &fmt_13_b_c,
+                            D2D_RECT_F {
+                                left: 4.0,
+                                top: 1.0,
+                                right: width_dips - 4.0,
+                                bottom: height_dips + 1.0,
+                            },
+                            &sh_b,
+                        );
+                        draw_text(
+                            &label,
+                            &fmt_13_b_c,
+                            D2D_RECT_F {
+                                left: 4.0,
+                                top: 0.0,
+                                right: width_dips - 4.0,
+                                bottom: height_dips,
+                            },
+                            &wh_b,
                         );
                     }
                 }
-                WidgetChipSpec::NetTraffic { down, up } => {
+                WidgetChipSpec::Bluetooth { devices } => {
                     draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
-                    let mid = height_dips * 0.5;
-                    let down_dot = dc.CreateSolidColorBrush(
-                        &color_rgba(pal.success.0, pal.success.1, pal.success.2, 1.0),
-                        None,
-                    )?;
-                    let up_dot = dc.CreateSolidColorBrush(
-                        &color_rgba(pal.accent.0, pal.accent.1, pal.accent.2, 1.0),
-                        None,
-                    )?;
-                    let y_top = (3.0 + mid) * 0.5;
-                    let y_bot = (mid + height_dips - 3.0) * 0.5;
-                    dc.FillEllipse(
-                        &D2D1_ELLIPSE {
-                            point: Vector2 { X: 11.0, Y: y_top },
-                            radiusX: 2.6,
-                            radiusY: 2.6,
+                    if devices.is_empty() {
+                        draw_fluent_str_d2d(
+                            &self.dwrite_factory,
+                            dc,
+                            "\u{E702}",
+                            D2D_RECT_F {
+                                left: 10.0,
+                                top: cy - 8.0,
+                                right: 26.0,
+                                bottom: cy + 8.0,
+                            },
+                            14.5,
+                            pal.text_secondary,
+                            0.90,
+                        )?;
+                        draw_text(
+                            "—",
+                            &fmt_12_b_l,
+                            D2D_RECT_F {
+                                left: 30.0,
+                                top: 0.0,
+                                right: width_dips - 8.0,
+                                bottom: height_dips,
+                            },
+                            &s_brush,
+                        );
+                    } else {
+                        let count = devices.len().min(2);
+                        let tile_w = (width_dips - 12.0) / count as f32;
+                        for (i, (pct, low)) in devices.iter().take(2).enumerate() {
+                            let tx = 6.0 + i as f32 * tile_w;
+                            if i > 0 {
+                                draw_vdiv(tx - 2.0, 20.0);
+                            }
+                            draw_fluent_str_d2d(
+                                &self.dwrite_factory,
+                                dc,
+                                "\u{E702}",
+                                D2D_RECT_F {
+                                    left: tx + 3.0,
+                                    top: cy - 8.0,
+                                    right: tx + 19.0,
+                                    bottom: cy + 8.0,
+                                },
+                                14.5,
+                                pal.text_secondary,
+                                0.92,
+                            )?;
+                            let val_col = if *low { pal.warning } else { pal.text_primary };
+                            let vb = dc.CreateSolidColorBrush(
+                                &color_rgba(val_col.0, val_col.1, val_col.2, 0.98),
+                                None,
+                            )?;
+                            draw_text(
+                                &format!("{pct}%"),
+                                &fmt_12_b_l,
+                                D2D_RECT_F {
+                                    left: tx + 22.0,
+                                    top: 0.0,
+                                    right: tx + tile_w - 2.0,
+                                    bottom: height_dips,
+                                },
+                                &vb,
+                            );
+                        }
+                    }
+                }
+                WidgetChipSpec::Storage { drives } => {
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    // StorageWidget.cs: "C: 213 / 476 GB | D: 1.2 / 1.8 TB"
+                    if drives.is_empty() {
+                        draw_text(
+                            "—",
+                            &fmt_115_l,
+                            D2D_RECT_F {
+                                left: 10.0,
+                                top: 0.0,
+                                right: width_dips - 10.0,
+                                bottom: height_dips,
+                            },
+                            &s_brush,
+                        );
+                    } else {
+                        let count = drives.len().min(2);
+                        let seg_w = (width_dips - 20.0) / count as f32;
+                        for (i, (letter, pair)) in drives.iter().take(2).enumerate() {
+                            let sx = 10.0 + i as f32 * seg_w;
+                            if i > 0 {
+                                draw_vdiv(sx - 5.0, 13.0);
+                            }
+                            draw_text(
+                                letter,
+                                &fmt_11_b_l,
+                                D2D_RECT_F {
+                                    left: sx,
+                                    top: 0.0,
+                                    right: sx + 18.0,
+                                    bottom: height_dips,
+                                },
+                                &s_brush,
+                            );
+                            draw_text(
+                                pair,
+                                &fmt_115_b_l,
+                                D2D_RECT_F {
+                                    left: sx + 18.0,
+                                    top: 0.0,
+                                    right: sx + seg_w - 4.0,
+                                    bottom: height_dips,
+                                },
+                                &p_brush,
+                            );
+                        }
+                    }
+                }
+                WidgetChipSpec::Media {
+                    title,
+                    artist,
+                    muted,
+                } => {
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    // MediaWidget.xaml: [29x29 ArtTint #526D84] [InfoPanel] [Prev 25x27 | Play 27x27 | Next 25x27] [Mute 27x27]
+                    let art_sz = 29.0_f32.min(height_dips - 6.0);
+                    let art_y = cy - art_sz * 0.5;
+                    let art_b =
+                        dc.CreateSolidColorBrush(&color_rgba(0x52, 0x6d, 0x84, 0.95), None)?;
+                    let art_rr = D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F {
+                            left: 8.0,
+                            top: art_y,
+                            right: 8.0 + art_sz,
+                            bottom: art_y + art_sz,
                         },
-                        &down_dot,
-                    );
-                    dc.FillEllipse(
-                        &D2D1_ELLIPSE {
-                            point: Vector2 { X: 11.0, Y: y_bot },
-                            radiusX: 2.6,
-                            radiusY: 2.6,
-                        },
-                        &up_dot,
-                    );
-                    let dw: Vec<u16> = format!("↓ {down}").encode_utf16().collect();
-                    let uw: Vec<u16> = format!("↑ {up}").encode_utf16().collect();
-                    dc.DrawText(
-                        &dw,
-                        &fmt_11_b_l,
-                        &D2D_RECT_F {
-                            left: 19.0,
-                            top: 3.0,
-                            right: width_dips - 6.0,
+                        radiusX: 7.0,
+                        radiusY: 7.0,
+                    };
+                    dc.FillRoundedRectangle(&art_rr, &art_b);
+                    draw_fluent_str_d2d(
+                        &self.dwrite_factory,
+                        dc,
+                        "\u{E8D6}",
+                        art_rr.rect,
+                        14.0,
+                        (0xef, 0xef, 0xef),
+                        0.96,
+                    )?;
+
+                    let info_l = 8.0 + art_sz + 8.0;
+                    let controls_l = width_dips - 116.0;
+                    let mid = height_dips * 0.51;
+                    draw_text(
+                        title,
+                        &fmt_12_b_l,
+                        D2D_RECT_F {
+                            left: info_l,
+                            top: (mid - 14.0).max(2.0),
+                            right: controls_l - 4.0,
                             bottom: mid + 1.0,
                         },
                         &p_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
                     );
-                    dc.DrawText(
-                        &uw,
-                        &fmt_10_l,
-                        &D2D_RECT_F {
-                            left: 19.0,
-                            top: mid - 1.0,
-                            right: width_dips - 6.0,
-                            bottom: height_dips - 3.0,
+                    draw_text(
+                        artist,
+                        &fmt_105_l,
+                        D2D_RECT_F {
+                            left: info_l,
+                            top: mid - 0.5,
+                            right: controls_l - 4.0,
+                            bottom: (mid + 13.5).min(height_dips - 2.0),
                         },
                         &s_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
                     );
-                }
-                WidgetChipSpec::BatteryGraphic {
-                    percent,
-                    has_battery,
-                    charging,
-                    top,
-                    bottom,
-                    level_color,
-                } => {
-                    let active = charging.then_some(pal.success);
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, active, interaction)?;
-                    // Crisp horizontal battery glyph (24x13 body + 2.5x5 nub)
-                    let bx = 8.0;
-                    let bw = 24.0;
-                    let bh = 13.0;
+
+                    // 4 sub-buttons: 0=Prev, 1=Play/Pause, 2=Next, 3=Mute
+                    let btns: [(f32, f32, &str, bool); 4] = [
+                        (controls_l, 25.0, "\u{E892}", false),
+                        (controls_l + 27.0, 27.0, "\u{E768}", true),
+                        (controls_l + 56.0, 25.0, "\u{E893}", false),
+                        (
+                            controls_l + 84.0,
+                            27.0,
+                            if *muted { "\u{E74F}" } else { "\u{E767}" },
+                            true,
+                        ),
+                    ];
+                    let bh = 27.0_f32.min(height_dips - 6.0);
                     let by = cy - bh * 0.5;
-                    let body_rr = D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F {
-                            left: bx,
+                    for (i, (bx, bw, glyph, has_base_bg)) in btns.iter().enumerate() {
+                        let rect = D2D_RECT_F {
+                            left: *bx,
                             top: by,
                             right: bx + bw,
                             bottom: by + bh,
-                        },
-                        radiusX: 3.2,
-                        radiusY: 3.2,
-                    };
-                    dc.DrawRoundedRectangle(&body_rr, &s_brush, 1.35, None);
-                    // Positive terminal nub
-                    dc.FillRoundedRectangle(
-                        &D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F {
-                                left: bx + bw + 1.2,
-                                top: cy - 2.6,
-                                right: bx + bw + 3.4,
-                                bottom: cy + 2.6,
-                            },
-                            radiusX: 1.0,
-                            radiusY: 1.0,
-                        },
-                        &s_brush,
-                    );
-                    // Live interior fill bar
-                    let ratio = if *has_battery {
-                        (*percent as f32 / 100.0).clamp(0.08, 1.0)
-                    } else {
-                        1.0
-                    };
-                    let fill_col = if *has_battery {
-                        *level_color
-                    } else {
-                        pal.accent
-                    };
-                    let fb = dc.CreateSolidColorBrush(
-                        &color_rgba(fill_col.0, fill_col.1, fill_col.2, 0.95),
-                        None,
-                    )?;
-                    let inner_max = bw - 4.4;
-                    let inner_w = (inner_max * ratio).max(3.0);
-                    dc.FillRoundedRectangle(
-                        &D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F {
-                                left: bx + 2.2,
-                                top: by + 2.2,
-                                right: bx + 2.2 + inner_w,
-                                bottom: by + bh - 2.2,
-                            },
-                            radiusX: 1.6,
-                            radiusY: 1.6,
-                        },
-                        &fb,
-                    );
-
-                    let tx = bx + bw + 9.0;
-                    let tr = width_dips - 6.0;
-                    let mid = height_dips * 0.52;
-                    let tw: Vec<u16> = top.encode_utf16().collect();
-                    let botw: Vec<u16> = bottom.encode_utf16().collect();
-                    dc.DrawText(
-                        &tw,
-                        &fmt_12_l,
-                        &D2D_RECT_F {
-                            left: tx,
-                            top: 2.0,
-                            right: tr,
-                            bottom: mid + 1.0,
-                        },
-                        &p_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                    dc.DrawText(
-                        &botw,
-                        &fmt_10_l,
-                        &D2D_RECT_F {
-                            left: tx,
-                            top: mid - 1.0,
-                            right: tr,
-                            bottom: height_dips - 2.0,
-                        },
-                        &s_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                    );
+                        };
+                        let rr = D2D1_ROUNDED_RECT {
+                            rect,
+                            radiusX: 8.0,
+                            radiusY: 8.0,
+                        };
+                        let hov = active_sub == Some(i as u8);
+                        if hov {
+                            let hb = dc.CreateSolidColorBrush(
+                                &if is_dark {
+                                    color_rgba(0xff, 0xff, 0xff, 0.16)
+                                } else {
+                                    color_rgba(0x00, 0x00, 0x00, 0.11)
+                                },
+                                None,
+                            )?;
+                            dc.FillRoundedRectangle(&rr, &hb);
+                        } else if *has_base_bg {
+                            dc.FillRoundedRectangle(&rr, &surf_sel_b);
+                        }
+                        draw_fluent_str_d2d(
+                            &self.dwrite_factory,
+                            dc,
+                            glyph,
+                            rect,
+                            if i == 1 || i == 3 { 12.5 } else { 11.0 },
+                            pal.text_primary,
+                            0.95,
+                        )?;
+                    }
                 }
-                WidgetChipSpec::AudioSlider { volume, muted } => {
-                    let active = muted.then_some(pal.danger);
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, active, interaction)?;
-                    // Left clickable mute icon well
-                    let well = 24.0_f32.min(height_dips - 8.0);
-                    let wx = 7.0;
-                    let wy = (height_dips - well) * 0.5;
-                    let well_rgb = if *muted { pal.danger } else { pal.accent };
-                    let well_alpha = if active_sub == Some(0) { 0.30 } else { 0.16 };
-                    let well_b = dc.CreateSolidColorBrush(
-                        &color_rgba(well_rgb.0, well_rgb.1, well_rgb.2, well_alpha),
-                        None,
-                    )?;
-                    dc.FillRoundedRectangle(
-                        &D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F {
-                                left: wx,
-                                top: wy,
-                                right: wx + well,
-                                bottom: wy + well,
-                            },
-                            radiusX: 7.0,
-                            radiusY: 7.0,
-                        },
-                        &well_b,
-                    );
-                    let glyph = if *muted {
+                WidgetChipSpec::Audio { volume, muted } => {
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    // AudioWidget.xaml: [Speaker 16px, margin 0,0,7,0] [12.5px SemiBold "67%" / "0%"]
+                    let silent = *muted || *volume == 0;
+                    let glyph = if silent {
                         "\u{E74F}"
-                    } else if *volume == 0 {
-                        "\u{E992}"
-                    } else if *volume < 34 {
+                    } else if *volume < 50 {
                         "\u{E993}"
-                    } else if *volume < 67 {
-                        "\u{E994}"
                     } else {
                         "\u{E995}"
                     };
-                    let ic_col = if *muted {
-                        pal.danger_fg
+                    let col = if silent {
+                        pal.text_secondary
                     } else {
                         pal.text_primary
                     };
@@ -1172,330 +1507,494 @@ impl DcompEngine {
                         dc,
                         glyph,
                         D2D_RECT_F {
-                            left: wx,
-                            top: wy,
-                            right: wx + well,
-                            bottom: wy + well,
+                            left: 10.0,
+                            top: cy - 8.5,
+                            right: 26.0,
+                            bottom: cy + 8.5,
                         },
-                        14.0,
-                        ic_col,
-                        0.98,
+                        15.5,
+                        col,
+                        0.96,
                     )?;
-
-                    // Right side: Volume label + interactive slider track & thumb
-                    let sx = wx + well + 8.0;
-                    let sr = width_dips - 9.0;
-                    let mid = height_dips * 0.50;
-                    let lbl = if *muted {
-                        "Muted".to_owned()
+                    let txt = if *muted {
+                        "0%".to_owned()
                     } else {
                         format!("{volume}%")
                     };
-                    let lw: Vec<u16> = lbl.encode_utf16().collect();
-                    dc.DrawText(
-                        &lw,
-                        &fmt_11_b_l,
-                        &D2D_RECT_F {
-                            left: sx,
-                            top: 2.0,
-                            right: sr,
-                            bottom: mid + 1.0,
+                    let b = if silent { &s_brush } else { &p_brush };
+                    draw_text(
+                        &txt,
+                        &fmt_125_b_l,
+                        D2D_RECT_F {
+                            left: 33.0,
+                            top: 0.0,
+                            right: width_dips - 8.0,
+                            bottom: height_dips,
                         },
-                        &p_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                    let track_y = mid + (height_dips - mid) * 0.45;
-                    let track_h = 4.0;
-                    let track_w = (sr - sx).max(20.0);
-                    dc.FillRoundedRectangle(
-                        &D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F {
-                                left: sx,
-                                top: track_y - track_h * 0.5,
-                                right: sx + track_w,
-                                bottom: track_y + track_h * 0.5,
-                            },
-                            radiusX: 2.0,
-                            radiusY: 2.0,
-                        },
-                        &tr_brush,
-                    );
-                    let ratio = if *muted {
-                        0.0
-                    } else {
-                        (*volume as f32 / 100.0).clamp(0.0, 1.0)
-                    };
-                    let fill_w = track_w * ratio;
-                    if fill_w > 1.0 {
-                        let ac = dc.CreateSolidColorBrush(
-                            &color_rgba(pal.accent.0, pal.accent.1, pal.accent.2, 1.0),
-                            None,
-                        )?;
-                        dc.FillRoundedRectangle(
-                            &D2D1_ROUNDED_RECT {
-                                rect: D2D_RECT_F {
-                                    left: sx,
-                                    top: track_y - track_h * 0.5,
-                                    right: sx + fill_w,
-                                    bottom: track_y + track_h * 0.5,
-                                },
-                                radiusX: 2.0,
-                                radiusY: 2.0,
-                            },
-                            &ac,
-                        );
-                    }
-                    // Crisp circular slider thumb (enlarges smoothly when slider region is hovered)
-                    let thumb_x = (sx + fill_w).clamp(sx + 3.5, sr - 3.5);
-                    let thumb_r = if active_sub == Some(1) { 4.6 } else { 3.6 };
-                    dc.FillEllipse(
-                        &D2D1_ELLIPSE {
-                            point: Vector2 {
-                                X: thumb_x,
-                                Y: track_y,
-                            },
-                            radiusX: thumb_r,
-                            radiusY: thumb_r,
-                        },
-                        &p_brush,
+                        b,
                     );
                 }
-                WidgetChipSpec::InlineControls { buttons } => {
+                WidgetChipSpec::QuickSettings { pills } => {
                     draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
-                    let count = buttons.len().max(1) as f32;
-                    let pad = 5.0;
+                    // QuickSettingsWidget.xaml: 3 x 27x27 rounded pills with 4px gap + 8px padding
+                    let sz = 27.0_f32.min(height_dips - 6.0);
                     let gap = 4.0;
-                    let bw = ((width_dips - pad * 2.0 - gap * (count - 1.0)) / count).max(20.0);
-                    let bh = (height_dips - 8.0).clamp(22.0, 32.0);
-                    let by = (height_dips - bh) * 0.5;
-                    for (i, (glyph, highlighted, hi_rgb)) in buttons.iter().enumerate() {
-                        let bx = pad + (i as f32) * (bw + gap);
+                    let start_x = (width_dips - (sz * 3.0 + gap * 2.0)) * 0.5;
+                    let py = cy - sz * 0.5;
+                    for (i, (glyph, active)) in pills.iter().enumerate() {
+                        let px = start_x + i as f32 * (sz + gap);
                         let rect = D2D_RECT_F {
-                            left: bx,
-                            top: by,
-                            right: bx + bw,
-                            bottom: by + bh,
+                            left: px,
+                            top: py,
+                            right: px + sz,
+                            bottom: py + sz,
                         };
-                        let sub_hovered = active_sub == Some(i as u8);
-                        if *highlighted || sub_hovered {
-                            let bg_col = if *highlighted {
-                                color_rgba(
-                                    hi_rgb.0,
-                                    hi_rgb.1,
-                                    hi_rgb.2,
-                                    if sub_hovered { 0.34 } else { 0.22 },
-                                )
-                            } else if is_dark {
-                                color_rgba(0xff, 0xff, 0xff, 0.12)
-                            } else {
-                                color_rgba(0x18, 0x18, 0x1b, 0.09)
-                            };
-                            let bg = dc.CreateSolidColorBrush(&bg_col, None)?;
-                            let rr = D2D1_ROUNDED_RECT {
-                                rect,
-                                radiusX: 7.0,
-                                radiusY: 7.0,
-                            };
-                            dc.FillRoundedRectangle(&rr, &bg);
-                            if *highlighted {
-                                let bd = dc.CreateSolidColorBrush(
-                                    &color_rgba(hi_rgb.0, hi_rgb.1, hi_rgb.2, 0.50),
-                                    None,
-                                )?;
-                                dc.DrawRoundedRectangle(&rr, &bd, 1.0, None);
-                            }
+                        let rr = D2D1_ROUNDED_RECT {
+                            rect,
+                            radiusX: 7.0,
+                            radiusY: 7.0,
+                        };
+                        let hov = active_sub == Some(i as u8);
+                        if *active {
+                            dc.FillRoundedRectangle(&rr, &sel_fill_b);
+                            dc.DrawRoundedRectangle(&rr, &sel_stroke_b, 1.0, None);
+                        } else if hov {
+                            let hb = dc.CreateSolidColorBrush(
+                                &if is_dark {
+                                    color_rgba(0xff, 0xff, 0xff, 0.14)
+                                } else {
+                                    color_rgba(0x00, 0x00, 0x00, 0.09)
+                                },
+                                None,
+                            )?;
+                            dc.FillRoundedRectangle(&rr, &hb);
                         }
-                        let ic_col = if *highlighted {
-                            *hi_rgb
+                        let col = if *active {
+                            pal.selected_fg
                         } else {
-                            pal.text_primary
+                            pal.text_secondary
                         };
                         draw_fluent_str_d2d(
                             &self.dwrite_factory,
                             dc,
                             glyph,
                             rect,
-                            13.5,
-                            ic_col,
+                            14.5,
+                            col,
                             0.96,
                         )?;
                     }
                 }
-                WidgetChipSpec::ProviderBadge {
-                    name,
-                    monogram,
-                    color,
+                WidgetChipSpec::Keyboard { code } => {
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    // KeyboardLayoutWidget.cs: [IconKeyboard 13px Secondary, margin 0,0,5,0] [12px SemiBold Primary]
+                    draw_fluent_str_d2d(
+                        &self.dwrite_factory,
+                        dc,
+                        "\u{E765}",
+                        D2D_RECT_F {
+                            left: 9.0,
+                            top: cy - 7.5,
+                            right: 23.0,
+                            bottom: cy + 7.5,
+                        },
+                        13.0,
+                        pal.text_secondary,
+                        0.92,
+                    )?;
+                    draw_text(
+                        code,
+                        &fmt_12_b_l,
+                        D2D_RECT_F {
+                            left: 27.0,
+                            top: 0.0,
+                            right: width_dips - 7.0,
+                            bottom: height_dips,
+                        },
+                        &p_brush,
+                    );
+                }
+                WidgetChipSpec::AiDual {
+                    provider_id,
+                    brand_color,
                     detected,
                 } => {
-                    let active = detected.then_some(*color);
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, active, interaction)?;
-                    let bsz = 23.0_f32.min(height_dips - 8.0);
-                    let bx = 7.0;
-                    let by = (height_dips - bsz) * 0.5;
-                    let badge_rr = D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F {
-                            left: bx,
-                            top: by,
-                            right: bx + bsz,
-                            bottom: by + bsz,
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    // AiUsageWidget.cs DualQuotaBars (Claude, Codex, Cursor):
+                    // [Brand Logo 16x16] + stacked rows: "5h" [38x4 track] "—" and "7d" [38x4 track] "—"
+                    let logo_col = brand_color.unwrap_or(pal.text_primary);
+                    design::brand_paths::draw_brand_logo(
+                        &self.d2d_factory,
+                        dc,
+                        provider_id,
+                        D2D_RECT_F {
+                            left: 10.0,
+                            top: cy - 8.0,
+                            right: 26.0,
+                            bottom: cy + 8.0,
                         },
-                        radiusX: 7.0,
-                        radiusY: 7.0,
-                    };
-                    let alpha_bg = if *detected { 0.22 } else { 0.10 };
-                    let alpha_bd = if *detected { 0.55 } else { 0.24 };
-                    let bg_b = dc.CreateSolidColorBrush(
-                        &color_rgba(color.0, color.1, color.2, alpha_bg),
-                        None,
+                        logo_col,
+                        if *detected { 0.98 } else { 0.65 },
                     )?;
-                    let bd_b = dc.CreateSolidColorBrush(
-                        &color_rgba(color.0, color.1, color.2, alpha_bd),
-                        None,
-                    )?;
-                    let fg_b = dc.CreateSolidColorBrush(
+                    let rx = 34.0;
+                    let mid = height_dips * 0.5;
+                    let rows = [("5h", mid - 12.5, mid - 0.5), ("7d", mid + 0.5, mid + 12.5)];
+                    let fill_b = dc.CreateSolidColorBrush(
                         &color_rgba(
-                            color.0,
-                            color.1,
-                            color.2,
-                            if *detected { 1.0 } else { 0.65 },
+                            pal.widget_accent.0,
+                            pal.widget_accent.1,
+                            pal.widget_accent.2,
+                            0.95,
                         ),
                         None,
                     )?;
-                    dc.FillRoundedRectangle(&badge_rr, &bg_b);
-                    dc.DrawRoundedRectangle(&badge_rr, &bd_b, 1.0, None);
-                    let mw: Vec<u16> = monogram.encode_utf16().collect();
-                    dc.DrawText(
-                        &mw,
-                        &fmt_11_b_c,
-                        &badge_rr.rect,
-                        &fg_b,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
-                    );
-                    if *detected {
-                        let ring_b = dc.CreateSolidColorBrush(
-                            &color_rgba(pal.dock_pill.0, pal.dock_pill.1, pal.dock_pill.2, 0.95),
-                            None,
-                        )?;
-                        let ok_b = dc.CreateSolidColorBrush(
-                            &color_rgba(pal.success.0, pal.success.1, pal.success.2, 1.0),
-                            None,
-                        )?;
-                        let pt = Vector2 {
-                            X: bx + bsz - 1.5,
-                            Y: by + bsz - 1.5,
-                        };
-                        dc.FillEllipse(
-                            &D2D1_ELLIPSE {
-                                point: pt,
-                                radiusX: 4.1,
-                                radiusY: 4.1,
+                    for (lbl, y1, y2) in rows {
+                        draw_text(
+                            lbl,
+                            &fmt_95_b_l,
+                            D2D_RECT_F {
+                                left: rx,
+                                top: y1,
+                                right: rx + 20.0,
+                                bottom: y2,
                             },
-                            &ring_b,
+                            &s_brush,
                         );
-                        dc.FillEllipse(
-                            &D2D1_ELLIPSE {
-                                point: pt,
-                                radiusX: 2.8,
-                                radiusY: 2.8,
+                        let by = (y1 + y2) * 0.5 - 2.0;
+                        let bl = rx + 22.0;
+                        let bw = 38.0;
+                        dc.FillRoundedRectangle(
+                            &D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F {
+                                    left: bl,
+                                    top: by,
+                                    right: bl + bw,
+                                    bottom: by + 4.0,
+                                },
+                                radiusX: 2.0,
+                                radiusY: 2.0,
                             },
-                            &ok_b,
+                            &tr_brush,
+                        );
+                        if *detected {
+                            dc.FillRoundedRectangle(
+                                &D2D1_ROUNDED_RECT {
+                                    rect: D2D_RECT_F {
+                                        left: bl,
+                                        top: by,
+                                        right: bl + 4.0,
+                                        bottom: by + 4.0,
+                                    },
+                                    radiusX: 2.0,
+                                    radiusY: 2.0,
+                                },
+                                &fill_b,
+                            );
+                        }
+                        draw_text(
+                            if *detected { "Ready" } else { "—" },
+                            &fmt_9_l,
+                            D2D_RECT_F {
+                                left: bl + bw + 5.0,
+                                top: y1,
+                                right: width_dips - 6.0,
+                                bottom: y2,
+                            },
+                            if *detected { &p_brush } else { &s_brush },
                         );
                     }
-
-                    let tx = bx + bsz + 7.0;
-                    let tr = width_dips - 6.0;
-                    let mid = height_dips * 0.52;
-                    let nw: Vec<u16> = name.encode_utf16().collect();
-                    dc.DrawText(
-                        &nw,
-                        &fmt_11_b_l,
-                        &D2D_RECT_F {
-                            left: tx,
-                            top: 2.0,
-                            right: tr,
+                }
+                WidgetChipSpec::AiAntigravity { detected } => {
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    // AiUsageWidget.cs Antigravity: [Logo 16x16] + Gemini | Claude columns
+                    design::brand_paths::draw_brand_logo(
+                        &self.d2d_factory,
+                        dc,
+                        "aiusage_antigravity",
+                        D2D_RECT_F {
+                            left: 10.0,
+                            top: cy - 8.0,
+                            right: 26.0,
+                            bottom: cy + 8.0,
+                        },
+                        pal.text_primary,
+                        if *detected { 0.98 } else { 0.65 },
+                    )?;
+                    let cols = [("Gemini", 34.0), ("Claude", 98.0)];
+                    let mid = height_dips * 0.5;
+                    for (i, (name, cx_l)) in cols.iter().enumerate() {
+                        if i > 0 {
+                            draw_vdiv(cx_l - 6.0, 22.0);
+                        }
+                        draw_text(
+                            name,
+                            &fmt_9_b_l,
+                            D2D_RECT_F {
+                                left: *cx_l,
+                                top: (mid - 13.0).max(2.0),
+                                right: cx_l + 52.0,
+                                bottom: mid - 1.0,
+                            },
+                            &p_brush,
+                        );
+                        let by = mid + 3.5;
+                        dc.FillRoundedRectangle(
+                            &D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F {
+                                    left: *cx_l,
+                                    top: by,
+                                    right: cx_l + 32.0,
+                                    bottom: by + 3.5,
+                                },
+                                radiusX: 1.75,
+                                radiusY: 1.75,
+                            },
+                            &tr_brush,
+                        );
+                        draw_text(
+                            "—",
+                            &fmt_9_l,
+                            D2D_RECT_F {
+                                left: cx_l + 35.0,
+                                top: mid - 1.0,
+                                right: cx_l + 54.0,
+                                bottom: mid + 11.0,
+                            },
+                            &s_brush,
+                        );
+                    }
+                }
+                WidgetChipSpec::AiOpenCode { detected } => {
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    // AiUsageWidget.cs OpenCode: [Logo 16x16] [OpenCode 12px] + [1h / 7d] mini columns
+                    design::brand_paths::draw_brand_logo(
+                        &self.d2d_factory,
+                        dc,
+                        "aiusage_opencode",
+                        D2D_RECT_F {
+                            left: 10.0,
+                            top: cy - 8.0,
+                            right: 26.0,
+                            bottom: cy + 8.0,
+                        },
+                        pal.text_primary,
+                        if *detected { 0.98 } else { 0.65 },
+                    )?;
+                    draw_text(
+                        "OpenCode",
+                        &fmt_12_b_l,
+                        D2D_RECT_F {
+                            left: 32.0,
+                            top: 0.0,
+                            right: 92.0,
+                            bottom: height_dips,
+                        },
+                        &p_brush,
+                    );
+                    let cols = [("1h", 96.0), ("7d", 142.0)];
+                    let mid = height_dips * 0.5;
+                    for (lbl, cx_l) in cols {
+                        draw_text(
+                            lbl,
+                            &fmt_95_b_l,
+                            D2D_RECT_F {
+                                left: cx_l,
+                                top: (mid - 13.0).max(2.0),
+                                right: cx_l + 38.0,
+                                bottom: mid - 1.0,
+                            },
+                            &s_brush,
+                        );
+                        dc.FillRoundedRectangle(
+                            &D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F {
+                                    left: cx_l,
+                                    top: mid + 2.0,
+                                    right: cx_l + 38.0,
+                                    bottom: mid + 5.0,
+                                },
+                                radiusX: 1.5,
+                                radiusY: 1.5,
+                            },
+                            &tr_brush,
+                        );
+                    }
+                }
+                WidgetChipSpec::AiCopilot { detected } => {
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    // AiUsageWidget.cs Copilot: [Logo 16x16] [Copilot 12px] | [Status / Monthly] [31x4 track]
+                    design::brand_paths::draw_brand_logo(
+                        &self.d2d_factory,
+                        dc,
+                        "aiusage_copilot",
+                        D2D_RECT_F {
+                            left: 10.0,
+                            top: cy - 8.0,
+                            right: 26.0,
+                            bottom: cy + 8.0,
+                        },
+                        pal.text_primary,
+                        if *detected { 0.98 } else { 0.65 },
+                    )?;
+                    draw_text(
+                        "Copilot",
+                        &fmt_12_b_l,
+                        D2D_RECT_F {
+                            left: 32.0,
+                            top: 0.0,
+                            right: 78.0,
+                            bottom: height_dips,
+                        },
+                        &p_brush,
+                    );
+                    draw_vdiv(81.0, 20.0);
+                    let mid = height_dips * 0.51;
+                    draw_text(
+                        if *detected { "Ready" } else { "—" },
+                        &fmt_115_b_l,
+                        D2D_RECT_F {
+                            left: 88.0,
+                            top: (mid - 13.5).max(2.0),
+                            right: width_dips - 40.0,
                             bottom: mid + 1.0,
                         },
                         &p_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
                     );
-                    let status_s = if *detected { "Ready" } else { "Sign in" };
-                    let sw: Vec<u16> = status_s.encode_utf16().collect();
-                    let status_b = if *detected {
-                        dc.CreateSolidColorBrush(
-                            &color_rgba(pal.success.0, pal.success.1, pal.success.2, 0.95),
-                            None,
-                        )?
-                    } else {
-                        s_brush.clone()
-                    };
-                    dc.DrawText(
-                        &sw,
-                        &fmt_10_l,
-                        &D2D_RECT_F {
-                            left: tx,
-                            top: mid - 1.0,
-                            right: tr,
-                            bottom: height_dips - 2.0,
+                    draw_text(
+                        if *detected { "Monthly" } else { "Sign in" },
+                        &fmt_9_l,
+                        D2D_RECT_F {
+                            left: 88.0,
+                            top: mid - 0.5,
+                            right: width_dips - 40.0,
+                            bottom: (mid + 12.0).min(height_dips - 2.0),
                         },
-                        &status_b,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                        &s_brush,
                     );
-                }
-                WidgetChipSpec::Keycap(code) => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
-                    let kw = 34.0_f32.min(width_dips - 10.0);
-                    let kh = 24.0_f32.min(height_dips - 8.0);
-                    let kl = (width_dips - kw) * 0.5;
-                    let kt = (height_dips - kh) * 0.5;
-                    let rr = D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F {
-                            left: kl,
-                            top: kt,
-                            right: kl + kw,
-                            bottom: kt + kh,
-                        },
-                        radiusX: 6.0,
-                        radiusY: 6.0,
-                    };
-                    let key_bg = if is_dark {
-                        color_rgba(0xff, 0xff, 0xff, 0.08)
-                    } else {
-                        color_rgba(0x18, 0x18, 0x1b, 0.06)
-                    };
-                    let kb = dc.CreateSolidColorBrush(&key_bg, None)?;
-                    dc.FillRoundedRectangle(&rr, &kb);
-                    dc.DrawRoundedRectangle(&rr, &tr_brush, 1.0, None);
-                    // Subtle bottom keycap bevel line
-                    dc.DrawLine(
-                        Vector2 {
-                            X: kl + 4.0,
-                            Y: kt + kh - 1.5,
-                        },
-                        Vector2 {
-                            X: kl + kw - 4.0,
-                            Y: kt + kh - 1.5,
+                    dc.FillRoundedRectangle(
+                        &D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: width_dips - 37.0,
+                                top: cy - 2.0,
+                                right: width_dips - 8.0,
+                                bottom: cy + 2.0,
+                            },
+                            radiusX: 2.0,
+                            radiusY: 2.0,
                         },
                         &tr_brush,
-                        1.5,
-                        Some(&stroke),
                     );
-                    let wtxt: Vec<u16> = code.encode_utf16().collect();
-                    dc.DrawText(
-                        &wtxt,
-                        &fmt_11_b_c,
-                        &D2D_RECT_F {
-                            left: kl,
-                            top: kt - 1.0,
-                            right: kl + kw,
-                            bottom: kt + kh - 1.0,
+                }
+                WidgetChipSpec::AiBalance {
+                    provider_id,
+                    name,
+                    brand_color,
+                    value_text,
+                } => {
+                    // Exact C# AiUsageWidget.cs DeepSeek / OpenRouter tinted balance card!
+                    let card_rr = D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F {
+                            left: 0.0,
+                            top: 0.0,
+                            right: width_dips,
+                            bottom: height_dips,
+                        },
+                        radiusX: 12.0,
+                        radiusY: 12.0,
+                    };
+                    let tint_b = dc.CreateSolidColorBrush(
+                        &color_rgba(brand_color.0, brand_color.1, brand_color.2, 26.0 / 255.0),
+                        None,
+                    )?;
+                    dc.FillRoundedRectangle(&card_rr, &tint_b);
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+
+                    let well = 29.0_f32.min(height_dips - 6.0);
+                    let wy = cy - well * 0.5;
+                    let well_rr = D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F {
+                            left: 8.0,
+                            top: wy,
+                            right: 8.0 + well,
+                            bottom: wy + well,
+                        },
+                        radiusX: well * 0.5,
+                        radiusY: well * 0.5,
+                    };
+                    let well_b = dc.CreateSolidColorBrush(
+                        &color_rgba(brand_color.0, brand_color.1, brand_color.2, 52.0 / 255.0),
+                        None,
+                    )?;
+                    dc.FillRoundedRectangle(&well_rr, &well_b);
+                    design::brand_paths::draw_brand_logo(
+                        &self.d2d_factory,
+                        dc,
+                        provider_id,
+                        D2D_RECT_F {
+                            left: 8.0 + (well - 15.0) * 0.5,
+                            top: wy + (well - 15.0) * 0.5,
+                            right: 8.0 + (well + 15.0) * 0.5,
+                            bottom: wy + (well + 15.0) * 0.5,
+                        },
+                        *brand_color,
+                        0.98,
+                    )?;
+
+                    let tx = 8.0 + well + 9.0;
+                    let mid = height_dips * 0.45;
+                    draw_text(
+                        name,
+                        &fmt_95_b_l,
+                        D2D_RECT_F {
+                            left: tx,
+                            top: (mid - 12.0).max(2.0),
+                            right: width_dips - 8.0,
+                            bottom: mid,
+                        },
+                        &s_brush,
+                    );
+                    draw_text(
+                        value_text,
+                        &fmt_15_b_l,
+                        D2D_RECT_F {
+                            left: tx,
+                            top: mid - 1.0,
+                            right: width_dips - 8.0,
+                            bottom: (mid + 17.0).min(height_dips - 2.0),
                         },
                         &p_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
+                WidgetChipSpec::Simple {
+                    icon,
+                    icon_color,
+                    top,
+                    bottom,
+                } => {
+                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_icon(&self.dwrite_factory, dc, *icon, 18.0, cy, 15.0, *icon_color)?;
+                    let mid = height_dips * 0.51;
+                    draw_text(
+                        top,
+                        &fmt_115_b_l,
+                        D2D_RECT_F {
+                            left: 32.0,
+                            top: (mid - 13.5).max(2.0),
+                            right: width_dips - 8.0,
+                            bottom: mid + 1.0,
+                        },
+                        &p_brush,
+                    );
+                    draw_text(
+                        bottom,
+                        &fmt_10_l,
+                        D2D_RECT_F {
+                            left: 32.0,
+                            top: mid - 0.5,
+                            right: width_dips - 8.0,
+                            bottom: (mid + 13.0).min(height_dips - 2.0),
+                        },
+                        &s_brush,
                     );
                 }
             }
@@ -2192,74 +2691,47 @@ impl DcompEngine {
 #[allow(dead_code)]
 fn _unused_rect_check(_: RECT, _: D2D_SIZE_F) {}
 
+/// Exact C# `WidgetCardBorder` / `WidgetCardButton`: completely transparent at rest (`#00000000`),
+/// smooth translucent hover (`#22FFFFFF` dark / `#18000000` light) and press (`#38FFFFFF` / `#2A000000`),
+/// with `WidgetRadius = 12.0` and zero borders.
 unsafe fn draw_chip_card(
     dc: &ID2D1DeviceContext,
     width_dips: f32,
     height_dips: f32,
     is_dark: bool,
-    active_tint: Option<Rgb>,
+    _active_tint: Option<Rgb>,
     interaction: WidgetInteraction,
 ) -> Result<()> {
-    let (lift, bd_boost) = match interaction {
-        WidgetInteraction::Idle => (0.0_f32, 0.0_f32),
-        WidgetInteraction::Hovered(_) => (0.045, 0.08),
-        WidgetInteraction::Pressed(_) => (0.085, 0.14),
-    };
-    let (fill_c, border_c, spec_c) = if let Some(t) = active_tint {
-        (
-            color_rgba(
-                t.0,
-                t.1,
-                t.2,
-                (if is_dark { 0.14 } else { 0.11 } + lift).min(0.42),
-            ),
-            color_rgba(
-                t.0,
-                t.1,
-                t.2,
-                (if is_dark { 0.36 } else { 0.30 } + bd_boost).min(0.68),
-            ),
-            color_rgba(0xff, 0xff, 0xff, if is_dark { 0.14 } else { 0.48 }),
-        )
-    } else if is_dark {
-        (
-            color_rgba(0xff, 0xff, 0xff, 0.055 + lift),
-            color_rgba(0xff, 0xff, 0xff, 0.09 + bd_boost),
-            color_rgba(0xff, 0xff, 0xff, 0.09 + lift * 0.6),
-        )
-    } else {
-        (
-            color_rgba(0x18, 0x18, 0x1b, 0.042 + lift * 0.7),
-            color_rgba(0x18, 0x18, 0x1b, 0.085 + bd_boost * 0.7),
-            color_rgba(0xff, 0xff, 0xff, 0.68),
-        )
+    let fill_c = match interaction {
+        WidgetInteraction::Idle => return Ok(()),
+        WidgetInteraction::Hovered(_) => {
+            if is_dark {
+                color_rgba(0xff, 0xff, 0xff, 0x22 as f32 / 255.0)
+            } else {
+                color_rgba(0x00, 0x00, 0x00, 0x18 as f32 / 255.0)
+            }
+        }
+        WidgetInteraction::Pressed(_) => {
+            if is_dark {
+                color_rgba(0xff, 0xff, 0xff, 0x38 as f32 / 255.0)
+            } else {
+                color_rgba(0x00, 0x00, 0x00, 0x2a as f32 / 255.0)
+            }
+        }
     };
     let rr = D2D1_ROUNDED_RECT {
         rect: D2D_RECT_F {
-            left: 0.5,
-            top: 0.5,
-            right: width_dips - 0.5,
-            bottom: height_dips - 0.5,
+            left: 0.0,
+            top: 0.0,
+            right: width_dips,
+            bottom: height_dips,
         },
-        radiusX: 9.0,
-        radiusY: 9.0,
+        radiusX: 12.0,
+        radiusY: 12.0,
     };
     unsafe {
         let fb = dc.CreateSolidColorBrush(&fill_c, None)?;
-        let bb = dc.CreateSolidColorBrush(&border_c, None)?;
-        let sb = dc.CreateSolidColorBrush(&spec_c, None)?;
         dc.FillRoundedRectangle(&rr, &fb);
-        dc.DrawLine(
-            Vector2 { X: 9.0, Y: 1.5 },
-            Vector2 {
-                X: (width_dips - 9.0).max(9.0),
-                Y: 1.5,
-            },
-            &sb,
-            1.0,
-            None,
-        );
-        dc.DrawRoundedRectangle(&rr, &bb, 1.0, None);
     }
     Ok(())
 }
@@ -2332,10 +2804,6 @@ unsafe fn draw_chip_icon(
     color: Rgb,
 ) -> Result<()> {
     let app_icon = match icon {
-        ChipIcon::SunCloud => AppIcon::SunCloud,
-        ChipIcon::Bluetooth => AppIcon::Bluetooth,
-        ChipIcon::Drive => AppIcon::HardDrive,
-        ChipIcon::Timer => AppIcon::Timer,
         ChipIcon::Folder => AppIcon::Folder,
         ChipIcon::Grid => AppIcon::LayoutGrid,
     };

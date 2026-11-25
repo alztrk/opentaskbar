@@ -2922,8 +2922,22 @@ impl DockState {
             let rel_x = mx - rc.0;
             let w = (rc.2 - rc.0).max(1.0);
             match id {
-                "media" | "quicksettings" => Some(((rel_x / (w / 3.0)).floor() as u8).min(2)),
-                "audio" => Some(if rel_x < 35.0 { 0 } else { 1 }),
+                "media" => {
+                    let controls_l = w - 116.0;
+                    if rel_x < controls_l {
+                        None
+                    } else if rel_x < controls_l + 26.0 {
+                        Some(0)
+                    } else if rel_x < controls_l + 55.0 {
+                        Some(1)
+                    } else if rel_x < controls_l + 82.0 {
+                        Some(2)
+                    } else {
+                        Some(3)
+                    }
+                }
+                "quicksettings" => Some(((rel_x / (w / 3.0)).floor() as u8).min(2)),
+                "focus" | "stopwatch" | "countdown" => Some(if rel_x >= w - 36.0 { 1 } else { 0 }),
                 _ => None,
             }
         });
@@ -3289,6 +3303,12 @@ impl DockState {
     fn handle_mouse_wheel(&mut self, delta: i16, horizontal: bool) {
         if !horizontal && self.hovered_widget == Some("audio") {
             widgets::adjust_audio_volume(if delta > 0 { 4 } else { -4 });
+            self.refresh_widgets();
+            self.update_visuals();
+            return;
+        }
+        if !horizontal && self.hovered_widget == Some("keyboard") {
+            widgets::telemetry::cycle_keyboard_layout();
             self.refresh_widgets();
             self.update_visuals();
             return;

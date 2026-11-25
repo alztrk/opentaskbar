@@ -1,9 +1,12 @@
 //! Native Win32 telemetry providers for all 23 dock widgets.
 //!
-//! Includes CPU/RAM, Core Audio volume, media transport keys, network throughput (`GetIfTable2`),
-//! system battery, Bluetooth PnP device battery, fixed storage drives, keyboard layout switcher,
-//! day progress, cached weather (`wttr.in`), Recycle Bin status, and AI CLI credential status.
+//! Includes CPU/RAM + 45-sample sparkline history + top processes by memory, Core Audio output &
+//! input (microphone) volume/mute/device names, media transport keys, network throughput + session
+//! totals (`GetIfTable2`), system battery, Bluetooth PnP device battery, fixed storage drives,
+//! keyboard layout switcher with localized display names, day progress, cached weather (`wttr.in`),
+//! Recycle Bin status, and AI CLI credential presence.
 
+use std::collections::VecDeque;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
@@ -11,19 +14,30 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
-use windows::Win32::Media::Audio::{IMMDeviceEnumerator, MMDeviceEnumerator, eMultimedia, eRender};
-use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
-use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
-use windows_sys::Win32::Globalization::{GetLocaleInfoW, LOCALE_SISO639LANGNAME};
+use windows::Win32::Media::Audio::{
+    EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eMultimedia, eRender,
+};
+use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, STGM_READ};
+use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, SYSTEMTIME};
+use windows_sys::Win32::Globalization::{
+    GetLocaleInfoW, LOCALE_SISO639LANGNAME, LOCALE_SLOCALIZEDDISPLAYNAME,
+};
 use windows_sys::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
 use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetLogicalDrives};
 use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
-use windows_sys::Win32::System::SystemInformation::{
-    GetLocalTime, GetTickCount64, GlobalMemoryStatusEx, MEMORYSTATUSEX,
+use windows_sys::Win32::System::ProcessStatus::{
+    EnumProcesses, GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
 };
-use windows_sys::Win32::System::Threading::GetSystemTimes;
+use windows_sys::Win32::System::SystemInformation::{
+    GetLocalTime, GetSystemTime, GetTickCount64, GlobalMemoryStatusEx, MEMORYSTATUSEX,
+};
+use windows_sys::Win32::System::Threading::{
+    GetSystemTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
+    QueryFullProcessImageNameW,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     ActivateKeyboardLayout, GetKeyboardLayout, GetKeyboardLayoutList, INPUT, INPUT_0,
     INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
@@ -35,9 +49,43 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const SPARKLINE_CAPACITY: usize = 45;
+
+// PKEY_Device_FriendlyName = {a45c254e-df1c-4efd-8020-67d146a850e0}, pid 14
+const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY {
+    fmtid: windows::core::GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
+    pid: 14,
+};
 
 fn ft_to_u64(ft: FILETIME) -> u64 {
     (u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime)
+}
+
+/// Fixed-capacity ring buffer storing `[0.0, 1.0]` telemetry samples (matching C# `MetricRingBuffer`).
+#[derive(Clone, Debug)]
+pub struct MetricHistory {
+    samples: VecDeque<f32>,
+}
+
+impl Default for MetricHistory {
+    fn default() -> Self {
+        Self {
+            samples: VecDeque::with_capacity(SPARKLINE_CAPACITY),
+        }
+    }
+}
+
+impl MetricHistory {
+    pub fn push(&mut self, value: f32) {
+        if self.samples.len() >= SPARKLINE_CAPACITY {
+            self.samples.pop_front();
+        }
+        self.samples.push_back(value.clamp(0.0, 1.0));
+    }
+
+    pub fn as_vec(&self) -> Vec<f32> {
+        self.samples.iter().copied().collect()
+    }
 }
 
 #[derive(Default)]
@@ -45,11 +93,17 @@ pub struct SystemStatsSampler {
     prev_idle: u64,
     prev_kernel: u64,
     prev_user: u64,
+    pub cpu_history: MetricHistory,
+    pub ram_history: MetricHistory,
 }
 
 impl SystemStatsSampler {
     pub fn sample(&mut self) -> (u32, u32) {
-        (self.sample_cpu(), sample_ram_info().0)
+        let cpu = self.sample_cpu();
+        let ram = sample_ram_info().0;
+        self.cpu_history.push(cpu as f32 / 100.0);
+        self.ram_history.push(ram as f32 / 100.0);
+        (cpu, ram)
     }
 
     fn sample_cpu(&mut self) -> u32 {
@@ -101,23 +155,196 @@ pub fn sample_ram_info() -> (u32, f32, f32) {
     }
 }
 
-pub fn local_clock_strings() -> (String, String) {
-    let mut st: SYSTEMTIME = unsafe { std::mem::zeroed() };
-    unsafe {
-        GetLocalTime(&mut st);
+/// Top real processes ordered by Working Set memory (matches C# `SystemStats.SampleTopProcesses`).
+pub fn sample_top_processes(limit: usize) -> Vec<(String, u64)> {
+    let mut pids = vec![0u32; 1024];
+    let mut needed = 0u32;
+    if unsafe {
+        EnumProcesses(
+            pids.as_mut_ptr(),
+            (pids.len() * size_of::<u32>()) as u32,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Vec::new();
     }
-    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let dow = DAYS.get(usize::from(st.wDayOfWeek)).copied().unwrap_or("");
-    let mon = MONTHS
-        .get(usize::from(st.wMonth.saturating_sub(1)))
+    let count = (needed as usize / size_of::<u32>()).min(pids.len());
+    let mut entries: Vec<(String, u64)> = Vec::with_capacity(64);
+    let mut path_buf = [0u16; 260];
+    for &pid in &pids[..count] {
+        if pid <= 4 {
+            continue;
+        }
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, 0, pid);
+            if h.is_null() {
+                continue;
+            }
+            let mut pmc: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+            pmc.cb = size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+            let got_mem = GetProcessMemoryInfo(h, &mut pmc, pmc.cb) != 0;
+            let mut len = path_buf.len() as u32;
+            let got_name =
+                QueryFullProcessImageNameW(h, 0, path_buf.as_mut_ptr(), &mut len) != 0 && len > 0;
+            let _ = CloseHandle(h);
+            if got_mem && got_name {
+                let full = String::from_utf16_lossy(&path_buf[..len as usize]);
+                let name = full
+                    .rsplit(['\\', '/'])
+                    .next()
+                    .unwrap_or(&full)
+                    .trim_end_matches(".exe")
+                    .trim_end_matches(".EXE")
+                    .to_owned();
+                if !name.is_empty() {
+                    entries.push((name, pmc.WorkingSetSize as u64));
+                }
+            }
+        }
+    }
+    // Aggregate multiple helper processes with the same executable name (e.g. Chrome/Edge/Code).
+    let mut merged: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+    for (name, bytes) in entries {
+        *merged.entry(name).or_insert(0) += bytes;
+    }
+    let mut list: Vec<(String, u64)> = merged.into_iter().collect();
+    list.sort_by_key(|b| std::cmp::Reverse(b.1));
+    list.truncate(limit);
+    list
+}
+
+// --- Clock & Calendar Helpers ---
+
+#[derive(Clone, Debug)]
+pub struct LocalClockInfo {
+    pub time_hm: String,
+    pub short_date: String,
+    pub weekday_short: String,
+    pub full_date: String,
+    pub tz_label: String,
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+}
+
+const SHORT_DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const FULL_DAYS: [&str; 7] = [
+    "Sunday",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+];
+const SHORT_MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+const FULL_MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+pub fn month_name(month: u32) -> &'static str {
+    FULL_MONTHS
+        .get(month.saturating_sub(1) as usize)
+        .copied()
+        .unwrap_or("January")
+}
+
+/// Returns `(year, month, day)` -> days in that Gregorian month.
+pub fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 30,
+    }
+}
+
+/// Sakamoto's algorithm: returns `0 = Sunday .. 6 = Saturday` for any Gregorian date.
+pub fn weekday_of(year: i32, month: u32, day: u32) -> u32 {
+    const T: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let y = if month < 3 { year - 1 } else { year };
+    let m = (month as usize).clamp(1, 12) - 1;
+    ((y + y / 4 - y / 100 + y / 400 + T[m] + day as i32).rem_euclid(7)) as u32
+}
+
+pub fn local_clock_info() -> LocalClockInfo {
+    let mut lt: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    let mut ut: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    unsafe {
+        GetLocalTime(&mut lt);
+        GetSystemTime(&mut ut);
+    }
+    let dow_s = SHORT_DAYS
+        .get(usize::from(lt.wDayOfWeek))
         .copied()
         .unwrap_or("");
+    let dow_f = FULL_DAYS
+        .get(usize::from(lt.wDayOfWeek))
+        .copied()
+        .unwrap_or("");
+    let mon_s = SHORT_MONTHS
+        .get(usize::from(lt.wMonth.saturating_sub(1)))
+        .copied()
+        .unwrap_or("");
+    let mon_f = FULL_MONTHS
+        .get(usize::from(lt.wMonth.saturating_sub(1)))
+        .copied()
+        .unwrap_or("");
+
+    // Derive UTC offset directly from `GetLocalTime` vs `GetSystemTime`.
+    let l_mins = i32::from(lt.wHour) * 60 + i32::from(lt.wMinute);
+    let u_mins = i32::from(ut.wHour) * 60 + i32::from(ut.wMinute);
+    let mut diff = l_mins - u_mins;
+    if diff > 720 {
+        diff -= 1440;
+    } else if diff < -720 {
+        diff += 1440;
+    }
+    let sign = if diff < 0 { "-" } else { "+" };
+    let abs_m = diff.abs();
+    let tz_label = if abs_m % 60 == 0 {
+        format!("UTC{sign}{}", abs_m / 60)
+    } else {
+        format!("UTC{sign}{}:{:02}", abs_m / 60, abs_m % 60)
+    };
+
+    LocalClockInfo {
+        time_hm: format!("{:02}:{:02}", lt.wHour, lt.wMinute),
+        short_date: format!("{} {mon_s}", lt.wDay),
+        weekday_short: dow_s.to_owned(),
+        full_date: format!("{dow_f}, {} {mon_f}", lt.wDay),
+        tz_label,
+        year: i32::from(lt.wYear),
+        month: u32::from(lt.wMonth),
+        day: u32::from(lt.wDay),
+    }
+}
+
+pub fn local_clock_strings() -> (String, String) {
+    let info = local_clock_info();
     (
-        format!("{:02}:{:02}", st.wHour, st.wMinute),
-        format!("{dow}, {} {mon}", st.wDay),
+        info.time_hm,
+        format!("{}, {}", info.weekday_short, info.short_date),
     )
 }
 
@@ -165,19 +392,32 @@ pub fn empty_recycle_bin() {
         });
 }
 
-// --- Core Audio ---
+// --- Core Audio (Output & Microphone Input) ---
 
-fn endpoint_volume() -> Option<IAudioEndpointVolume> {
+fn endpoint_volume_for(flow: EDataFlow) -> Option<IAudioEndpointVolume> {
     unsafe {
         let en: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-        let dev = en.GetDefaultAudioEndpoint(eRender, eMultimedia).ok()?;
+        let dev = en.GetDefaultAudioEndpoint(flow, eMultimedia).ok()?;
         dev.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok()
     }
 }
 
+pub fn default_audio_device_name(capture: bool) -> Option<String> {
+    let flow = if capture { eCapture } else { eRender };
+    unsafe {
+        let en: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let dev = en.GetDefaultAudioEndpoint(flow, eMultimedia).ok()?;
+        let store = dev.OpenPropertyStore(STGM_READ).ok()?;
+        let prop = store.GetValue(&PKEY_DEVICE_FRIENDLY_NAME).ok()?;
+        let name = prop.to_string();
+        (!name.trim().is_empty()).then_some(name.trim().to_owned())
+    }
+}
+
 pub fn get_audio_state() -> (u32, bool) {
-    let Some(ep) = endpoint_volume() else {
+    let Some(ep) = endpoint_volume_for(eRender) else {
         return (0, false);
     };
     unsafe {
@@ -190,8 +430,20 @@ pub fn get_audio_state() -> (u32, bool) {
     }
 }
 
+pub fn get_mic_state() -> Option<(u32, bool)> {
+    let ep = endpoint_volume_for(eCapture)?;
+    unsafe {
+        let vol = ep
+            .GetMasterVolumeLevelScalar()
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        let muted = ep.GetMute().map(|b| b.as_bool()).unwrap_or(false);
+        Some(((vol * 100.0).round() as u32, muted))
+    }
+}
+
 pub fn adjust_audio_volume(delta_pct: i32) {
-    let Some(ep) = endpoint_volume() else {
+    let Some(ep) = endpoint_volume_for(eRender) else {
         return;
     };
     unsafe {
@@ -205,7 +457,7 @@ pub fn adjust_audio_volume(delta_pct: i32) {
 }
 
 pub fn set_audio_volume(pct: u32) {
-    let Some(ep) = endpoint_volume() else {
+    let Some(ep) = endpoint_volume_for(eRender) else {
         return;
     };
     let scalar = (pct.min(100) as f32) / 100.0;
@@ -218,7 +470,30 @@ pub fn set_audio_volume(pct: u32) {
 }
 
 pub fn toggle_audio_mute() {
-    let Some(ep) = endpoint_volume() else {
+    let Some(ep) = endpoint_volume_for(eRender) else {
+        return;
+    };
+    unsafe {
+        let muted = ep.GetMute().map(|b| b.as_bool()).unwrap_or(false);
+        let _ = ep.SetMute(!muted, std::ptr::null());
+    }
+}
+
+pub fn set_mic_volume(pct: u32) {
+    let Some(ep) = endpoint_volume_for(eCapture) else {
+        return;
+    };
+    let scalar = (pct.min(100) as f32) / 100.0;
+    unsafe {
+        let _ = ep.SetMasterVolumeLevelScalar(scalar, std::ptr::null());
+        if pct > 0 {
+            let _ = ep.SetMute(false, std::ptr::null());
+        }
+    }
+}
+
+pub fn toggle_mic_mute() {
+    let Some(ep) = endpoint_volume_for(eCapture) else {
         return;
     };
     unsafe {
@@ -259,39 +534,64 @@ pub struct NetSpeedSampler {
     prev_at: Option<Instant>,
     pub rx_bps: u64,
     pub tx_bps: u64,
+    pub session_rx: u64,
+    pub session_tx: u64,
+    pub adapter_name: String,
 }
 
 impl NetSpeedSampler {
     pub fn sample(&mut self) -> (u64, u64) {
-        let (rx, tx) = read_total_net_bytes();
+        let (rx, tx, adapter) = read_total_net_bytes();
+        if !adapter.is_empty() {
+            self.adapter_name = adapter;
+        }
         let now = Instant::now();
         if let Some(prev) = self.prev_at {
             let dt = now.duration_since(prev).as_secs_f64().max(0.2);
-            self.rx_bps = (rx.saturating_sub(self.prev_rx) as f64 / dt) as u64;
-            self.tx_bps = (tx.saturating_sub(self.prev_tx) as f64 / dt) as u64;
+            let drx = rx.saturating_sub(self.prev_rx);
+            let dtx = tx.saturating_sub(self.prev_tx);
+            self.rx_bps = (drx as f64 / dt) as u64;
+            self.tx_bps = (dtx as f64 / dt) as u64;
+            self.session_rx = self.session_rx.saturating_add(drx);
+            self.session_tx = self.session_tx.saturating_add(dtx);
         }
         (self.prev_rx, self.prev_tx, self.prev_at) = (rx, tx, Some(now));
         (self.rx_bps, self.tx_bps)
     }
 }
 
-fn read_total_net_bytes() -> (u64, u64) {
+fn read_total_net_bytes() -> (u64, u64, String) {
     let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
     unsafe {
         if GetIfTable2(&mut table) != 0 || table.is_null() {
-            return (0, 0);
+            return (0, 0, String::new());
         }
         let rows =
             std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
         let (mut rx, mut tx) = (0u64, 0u64);
+        let mut best_traffic = 0u64;
+        let mut best_name = String::new();
         for r in rows {
             if r.OperStatus == IfOperStatusUp && r.Type != 24 {
                 rx = rx.saturating_add(r.InOctets);
                 tx = tx.saturating_add(r.OutOctets);
+                let total = r.InOctets.saturating_add(r.OutOctets);
+                if total >= best_traffic {
+                    best_traffic = total;
+                    let end = r
+                        .Alias
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(r.Alias.len());
+                    let alias = String::from_utf16_lossy(&r.Alias[..end]).trim().to_owned();
+                    if !alias.is_empty() {
+                        best_name = alias;
+                    }
+                }
             }
         }
         FreeMibTable(table.cast());
-        (rx, tx)
+        (rx, tx, best_name)
     }
 }
 
@@ -302,6 +602,22 @@ pub fn format_speed(bps: u64) -> String {
         format!("{} KB/s", bps / 1024)
     } else {
         format!("{bps} B/s")
+    }
+}
+
+pub fn format_bytes(bytes: u64) -> String {
+    const GB: f64 = 1_073_741_824.0;
+    const MB: f64 = 1_048_576.0;
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.2} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.0} KB", b / KB)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -411,6 +727,21 @@ pub struct DriveSpace {
     pub total_gb: f64,
 }
 
+impl DriveSpace {
+    /// Formats `"213 / 476 GB"` or `"1.2 / 1.8 TB"` matching C# `StorageWidget.FormatCapacityPair`.
+    pub fn format_capacity_pair(&self) -> String {
+        if self.total_gb >= 972.0 {
+            format!(
+                "{:.1} / {:.1} TB",
+                self.free_gb / 1024.0,
+                self.total_gb / 1024.0
+            )
+        } else {
+            format!("{:.0} / {:.0} GB", self.free_gb, self.total_gb)
+        }
+    }
+}
+
 pub fn sample_drives() -> Vec<DriveSpace> {
     let mask = unsafe { GetLogicalDrives() };
     (0..26u32)
@@ -450,6 +781,24 @@ fn hkl_iso_code(hkl: isize) -> String {
     }
 }
 
+fn hkl_display_name(hkl: isize) -> String {
+    let lcid = (hkl as u32) & 0xffff;
+    let mut buf = [0u16; 96];
+    let len = unsafe {
+        GetLocaleInfoW(
+            lcid,
+            LOCALE_SLOCALIZEDDISPLAYNAME,
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        )
+    };
+    if len > 1 {
+        String::from_utf16_lossy(&buf[..(len - 1) as usize])
+    } else {
+        hkl_iso_code(hkl)
+    }
+}
+
 pub fn active_keyboard_code() -> String {
     unsafe {
         let fg = GetForegroundWindow();
@@ -462,7 +811,8 @@ pub fn active_keyboard_code() -> String {
     }
 }
 
-pub fn installed_keyboard_layouts() -> Vec<(isize, String)> {
+/// Returns `(hkl, short_code, localized_display_name)` matching C# `KeyboardLayoutWidget`.
+pub fn installed_keyboard_layouts() -> Vec<(isize, String, String)> {
     let mut list = [std::ptr::null_mut(); 16];
     let count = unsafe { GetKeyboardLayoutList(list.len() as i32, list.as_mut_ptr()) };
     if count <= 0 {
@@ -470,7 +820,10 @@ pub fn installed_keyboard_layouts() -> Vec<(isize, String)> {
     }
     list[..count as usize]
         .iter()
-        .map(|&h| (h as isize, hkl_iso_code(h as isize)))
+        .map(|&h| {
+            let hkl = h as isize;
+            (hkl, hkl_iso_code(hkl), hkl_display_name(hkl))
+        })
         .collect()
 }
 
@@ -488,7 +841,7 @@ pub fn cycle_keyboard_layout() {
     let active = active_keyboard_code();
     let idx = layouts
         .iter()
-        .position(|(_, code)| code == &active)
+        .position(|(_, code, _)| code == &active)
         .unwrap_or(0);
     let next = (idx + 1) % layouts.len();
     activate_keyboard_layout(layouts[next].0);
@@ -527,6 +880,7 @@ pub struct WeatherCache {
     pub condition: String,
     pub feels_like: String,
     pub humidity: String,
+    pub wind: String,
     pub last_fetch: Option<Instant>,
     pub loading: bool,
 }
@@ -559,7 +913,7 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
         .name("opentaskbar-weather".into())
         .spawn(move || {
             let url = format!(
-                "https://wttr.in/{}?format=%t|%C|%f|%h",
+                "https://wttr.in/{}?format=%t|%C|%f|%h|%w",
                 city_owned.replace(' ', "%20")
             );
             let output = Command::new("curl.exe")
@@ -579,6 +933,13 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
                         g.condition = parts[1].trim().to_owned();
                         g.feels_like = parts[2].trim().trim_start_matches('+').to_owned();
                         g.humidity = parts[3].trim().to_owned();
+                        if parts.len() >= 5 {
+                            g.wind = parts[4]
+                                .trim()
+                                .trim_start_matches(|c: char| !c.is_ascii_alphanumeric())
+                                .trim()
+                                .to_owned();
+                        }
                     }
                 }
             }
@@ -592,56 +953,65 @@ pub struct AiProviderMeta {
     pub name: &'static str,
     pub short: &'static str,
     pub dashboard_url: &'static str,
+    pub signin_hint: &'static str,
 }
 
 pub const AI_PROVIDERS: &[AiProviderMeta] = &[
     AiProviderMeta {
         id: "aiusage_claude",
-        name: "Claude",
-        short: "CLAUDE",
+        name: "Claude Code",
+        short: "Claude",
         dashboard_url: "https://claude.ai/settings/usage",
+        signin_hint: "claude auth login",
     },
     AiProviderMeta {
         id: "aiusage_codex",
         name: "Codex",
-        short: "CODEX",
+        short: "Codex",
         dashboard_url: "https://chatgpt.com/codex/settings/usage",
+        signin_hint: "codex login",
     },
     AiProviderMeta {
         id: "aiusage_antigravity",
         name: "Antigravity",
-        short: "AGY",
-        dashboard_url: "https://aistudio.google.com/",
+        short: "Antigravity",
+        dashboard_url: "https://antigravity.google/docs",
+        signin_hint: "agy",
     },
     AiProviderMeta {
         id: "aiusage_opencode",
-        name: "OpenCode",
-        short: "OPENC",
-        dashboard_url: "https://opencode.ai/",
+        name: "OpenCode Go",
+        short: "OpenCode",
+        dashboard_url: "https://opencode.ai/go",
+        signin_hint: "opencode auth login",
     },
     AiProviderMeta {
         id: "aiusage_copilot",
-        name: "Copilot",
-        short: "COPILOT",
+        name: "GitHub Copilot",
+        short: "Copilot",
         dashboard_url: "https://github.com/settings/copilot",
+        signin_hint: "gh auth login",
     },
     AiProviderMeta {
         id: "aiusage_deepseek",
         name: "DeepSeek",
-        short: "DEEP",
+        short: "DeepSeek",
         dashboard_url: "https://platform.deepseek.com/usage",
+        signin_hint: "DEEPSEEK_API_KEY",
     },
     AiProviderMeta {
         id: "aiusage_openrouter",
         name: "OpenRouter",
-        short: "OR",
-        dashboard_url: "https://openrouter.ai/activity",
+        short: "OpenRouter",
+        dashboard_url: "https://openrouter.ai/settings/credits",
+        signin_hint: "OPENROUTER_API_KEY",
     },
     AiProviderMeta {
         id: "aiusage_cursor",
         name: "Cursor",
-        short: "CURSOR",
-        dashboard_url: "https://www.cursor.com/settings",
+        short: "Cursor",
+        dashboard_url: "https://cursor.com/dashboard?tab=usage",
+        signin_hint: "Sign in to Cursor",
     },
 ];
 

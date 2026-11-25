@@ -1,11 +1,13 @@
-//! Shared reusable iOS/shadcn-style popup flyout component (`DockFlyout`).
+//! Shared C#-parity `DockFlyout` window rendered with Slate Neutral + Aurora design tokens.
 //!
-//! Used across Background Apps (System Tray), Folder Stacks, App Groups, and all 14 Dock Widgets.
+//! Used across Background Apps (System Tray), Folder Stacks, App Groups, and all 23 Dock Widgets.
 //! Supports:
-//! - Toggle-on-same-button suppression (re-clicking the same trigger closes cleanly)
-//! - Mouse-wheel vertical scrolling + visible thin scrollbar thumb on overflow
-//! - Crisp anti-aliased BGRA application icons in `ActionRow`
-//! - Left-click (`FlyoutAction::Primary`) and right-click (`FlyoutAction::Secondary`)
+//! - Exact C# `DockFlyout.cs` visuals (`#252B37` dark / `#FFFFFF` light, `14px` padding, 190ms ease-out)
+//! - In-place live interactive updates (`show_flyout_live`) for Calendar month/year navigation,
+//!   Audio Output/Input continuous slider drag & mute, and Focus/Stopwatch/Countdown timers
+//! - Full C# widget blocks: `CalendarGrid`, `Slider`, `Sparkline`, `MetricTiles`, `BadgeRow`,
+//!   `StatusHeader`, `Hero`, `ToggleGrid`, `ProgressBar`, `StatRow`, `ActionRow`, `AppRow`, `ButtonBar`
+//! - Mouse-wheel vertical scrolling + thin scrollbar thumb + toggle-close suppression.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -18,15 +20,15 @@ use windows_sys::Win32::Graphics::Dwm::{
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CreateFontW, CreatePen, CreateSolidBrush,
     DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect, GetMonitorInfoW, HDC,
+    DT_VCENTER, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, GetMonitorInfoW, HDC,
     IntersectClipRect, InvalidateRect, LineTo, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromPoint, MoveToEx, PAINTSTRUCT, PS_SOLID, RestoreDC, RoundRect, SaveDC, SelectObject,
     SetBkMode, SetTextColor, StretchDIBits, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_ESCAPE, VK_RETURN, VK_SHIFT,
-    VK_SPACE, VK_TAB,
+    GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    VK_ESCAPE, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect,
@@ -34,21 +36,23 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, MSG, RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_ACTIVATE, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR,
-    WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::menu::{MenuIcon, draw_menu_icon};
-use crate::design::{self, gdi_rgb};
+use crate::design::{self, Rgb, gdi_rgb};
 use crate::platform::win32;
+use crate::widgets::telemetry;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
-const MAX_FLYOUT_H_DIPS: f32 = 380.0;
+const MAX_FLYOUT_H_DIPS: f32 = 460.0;
 const TIMER_ANIM: usize = 1;
-const OPEN_ANIM_MS: f32 = 135.0;
+const OPEN_ANIM_MS: f32 = 175.0;
 const CLOSE_ANIM_MS: f32 = 95.0;
-const SLIDE_OFFSET_DIPS: f32 = 10.0;
+const SLIDE_OFFSET_DIPS: f32 = 7.0;
 
 static LAST_CLOSED: OnceLock<Mutex<Option<(String, Instant)>>> = OnceLock::new();
 
@@ -80,7 +84,7 @@ fn record_closed(tag: &str) {
     }
 }
 
-/// Straight BGRA32 icon payload for `FlyoutBlock::ActionRow`.
+/// Straight BGRA32 icon payload for `FlyoutBlock::ActionRow` / `AppRow`.
 #[derive(Clone, Debug)]
 pub struct FlyoutIcon {
     pub width: u32,
@@ -95,24 +99,89 @@ pub enum FlyoutAction {
     Secondary(u32),
 }
 
+/// Interactive event dispatched to live flyouts (`show_flyout_live`).
+#[derive(Clone, Copy, Debug)]
+pub enum LiveEvent {
+    Click(u32),
+    Slider { id: u32, ratio: f32 },
+}
+
+/// Result of handling a `LiveEvent`: either replace the flyout spec in place or close cleanly.
+pub enum LiveOutcome {
+    Update(FlyoutSpec),
+    Close,
+}
+
 /// Semantic color mode for `FlyoutBlock::ProgressBar`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BarTone {
-    /// Always calm accent (Audio Volume, Day Progress, Countdown, Focus).
+    /// Always calm accent (`WidgetBlue` / `WidgetAccent`).
     Accent,
-    /// High-is-critical utilization (CPU, Memory, Storage): `<70%` accent, `70-89%` amber, `>=90%` red.
+    /// High-is-critical utilization (`<75%` accent, `75-89%` amber, `>=90%` red).
     Usage,
-    /// Low-is-critical remaining level (Battery, Bluetooth Battery): `<=15%` red, `<=30%` amber, `>30%` green.
+    /// Low-is-critical remaining level (`<=15%` red, `<=30%` amber, `>30%` green).
     Level,
 }
 
-/// Declarative content block rendered inside the shared `DockFlyout`.
+/// Declarative content block rendered inside the shared C#-parity `DockFlyout`.
 #[derive(Clone, Debug)]
 pub enum FlyoutBlock {
-    /// Large 28px hero metric (Clock time, Weather temp, Pomodoro/Stopwatch timer).
+    /// Prominent hero metric (Clock 28px, Focus 44px, Weather 24px) with optional right metadata.
     Hero {
         value: String,
         caption: Option<String>,
+        centered: bool,
+        large: bool,
+        right_meta: Option<String>,
+    },
+    /// C# `ClockWidget.BuildCalendar`: interactive month/year nav + 7-col calendar grid.
+    CalendarGrid {
+        year: i32,
+        month: u32,
+        today: (i32, u32, u32),
+        selected: Option<(i32, u32, u32)>,
+        prev_year_id: u32,
+        prev_month_id: u32,
+        title_id: u32,
+        next_month_id: u32,
+        next_year_id: u32,
+        /// Clickable day cell IDs are `day_id_base + cell_index` (`0..42`).
+        day_id_base: u32,
+    },
+    /// C# `AudioWidget` Output/Input mixer section: label + `%`, device pill + mute btn, draggable slider.
+    AudioSliderSection {
+        label: String,
+        device_name: String,
+        value_text: String,
+        ratio: f32,
+        muted: bool,
+        mute_id: u32,
+        slider_id: u32,
+    },
+    /// C# `SystemStatsWidget` telemetry row with 45-sample vector sparkline.
+    Sparkline {
+        label: String,
+        value_text: String,
+        detail_text: Option<String>,
+        samples: Vec<f32>,
+        color: Rgb,
+    },
+    /// C# `WeatherWidget` / `NetSpeedWidget` 2-column metric tiles (`SurfaceSelected`, `r=8`).
+    MetricTiles(Vec<(String, String)>),
+    /// C# `KeyboardLayoutWidget` selectable row: short-code badge pill + full display name.
+    BadgeRow {
+        id: u32,
+        code: String,
+        title: String,
+        active: bool,
+    },
+    /// C# `AiUsageWidget.SectionHeader`: title + status dot + right dashboard button.
+    StatusHeader {
+        title: String,
+        status_label: String,
+        status_color: Rgb,
+        action_id: Option<u32>,
+        action_label: Option<String>,
     },
     /// 2-column Control Center toggle tile grid (`(id, title, state_label, active)`).
     ToggleGrid(Vec<(u32, String, String, bool)>),
@@ -142,6 +211,7 @@ pub enum FlyoutBlock {
         pinned: bool,
         close_id: Option<u32>,
     },
+    /// Horizontal button row: `(id, label, primary_selected_style)`.
     ButtonBar(Vec<(u32, String, bool)>),
     Separator,
     Note(String),
@@ -155,11 +225,12 @@ pub struct FlyoutSpec {
     pub blocks: Vec<FlyoutBlock>,
 }
 
+#[derive(Clone, Copy)]
 struct HitTarget {
     id: u32,
-    /// Content-space coordinates (before subtracting `scroll_y`).
     rect: RECT,
     menu_id: u32,
+    is_slider: bool,
 }
 
 struct FlyoutState<'a> {
@@ -175,12 +246,14 @@ struct FlyoutState<'a> {
     animating: bool,
     suppress_blur: bool,
     on_secondary: Option<&'a mut dyn FnMut(u32) -> bool>,
+    on_live: Option<&'a mut dyn FnMut(LiveEvent) -> LiveOutcome>,
     content_top_px: i32,
     viewport_h_px: i32,
     content_h_px: i32,
     scroll_y: i32,
     targets: Vec<HitTarget>,
     hovered_id: Option<u32>,
+    dragging_slider: Option<(u32, RECT)>,
     keyboard_index: Option<usize>,
     keyboard_navigation: bool,
     tracking: bool,
@@ -218,18 +291,322 @@ fn app_row_targets(left: i32, right: i32, top: i32, dpi: f32) -> [RECT; 3] {
     })
 }
 
-fn fill_round_rect(hdc: HDC, l: i32, t: i32, r: i32, b: i32, rad: i32, color: u32) {
+fn fill_round_rect_bordered(hdc: HDC, rc: RECT, rad: i32, fill_color: u32, border_color: u32) {
     unsafe {
-        let brush = CreateSolidBrush(color);
-        let pen = CreatePen(PS_SOLID, 1, color);
+        let brush = CreateSolidBrush(fill_color);
+        let pen = CreatePen(PS_SOLID, 1, border_color);
         let ob = SelectObject(hdc, brush as _);
         let op = SelectObject(hdc, pen as _);
-        RoundRect(hdc, l, t, r, b, rad, rad);
+        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, rad, rad);
         SelectObject(hdc, ob);
         SelectObject(hdc, op);
         DeleteObject(brush as _);
         DeleteObject(pen as _);
     }
+}
+
+fn fill_round_rect(hdc: HDC, l: i32, t: i32, r: i32, b: i32, rad: i32, color: u32) {
+    fill_round_rect_bordered(
+        hdc,
+        RECT {
+            left: l,
+            top: t,
+            right: r,
+            bottom: b,
+        },
+        rad,
+        color,
+        color,
+    );
+}
+
+/// Computes the layout height and content-space hit targets for `spec`.
+fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<HitTarget>) {
+    let s = |v: f32| (v * dpi).round() as i32;
+    let pad = s(14.0);
+    let content_right_pad = pad + s(4.0);
+    let has_header = !spec.title.is_empty();
+    let header_h = if !has_header {
+        0
+    } else if spec.subtitle.is_some() {
+        s(44.0)
+    } else {
+        s(26.0)
+    };
+    let content_top_px = if has_header {
+        pad + header_h + s(6.0)
+    } else {
+        pad
+    };
+
+    let mut y = content_top_px;
+    let mut targets = Vec::new();
+    let content_w = (width_px - pad - content_right_pad).max(s(120.0));
+
+    for block in &spec.blocks {
+        match block {
+            FlyoutBlock::Hero { caption, large, .. } => {
+                let val_h = if *large { s(48.0) } else { s(34.0) };
+                y += val_h + if caption.is_some() { s(20.0) } else { s(6.0) };
+            }
+            FlyoutBlock::CalendarGrid {
+                prev_year_id,
+                prev_month_id,
+                title_id,
+                next_month_id,
+                next_year_id,
+                day_id_base,
+                ..
+            } => {
+                // Navigation bar (`<<` `<` `Month YYYY` `>` `>>`)
+                let nav_h = s(28.0);
+                let btn_w = s(26.0);
+                let gap = s(2.0);
+                let left = pad;
+                let right = pad + content_w;
+                targets.push(HitTarget {
+                    id: *prev_year_id,
+                    menu_id: *prev_year_id,
+                    is_slider: false,
+                    rect: RECT {
+                        left,
+                        top: y,
+                        right: left + btn_w,
+                        bottom: y + nav_h,
+                    },
+                });
+                targets.push(HitTarget {
+                    id: *prev_month_id,
+                    menu_id: *prev_month_id,
+                    is_slider: false,
+                    rect: RECT {
+                        left: left + btn_w + gap,
+                        top: y,
+                        right: left + btn_w * 2 + gap,
+                        bottom: y + nav_h,
+                    },
+                });
+                targets.push(HitTarget {
+                    id: *title_id,
+                    menu_id: *title_id,
+                    is_slider: false,
+                    rect: RECT {
+                        left: left + btn_w * 2 + gap * 2,
+                        top: y,
+                        right: right - btn_w * 2 - gap * 2,
+                        bottom: y + nav_h,
+                    },
+                });
+                targets.push(HitTarget {
+                    id: *next_month_id,
+                    menu_id: *next_month_id,
+                    is_slider: false,
+                    rect: RECT {
+                        left: right - btn_w * 2 - gap,
+                        top: y,
+                        right: right - btn_w - gap,
+                        bottom: y + nav_h,
+                    },
+                });
+                targets.push(HitTarget {
+                    id: *next_year_id,
+                    menu_id: *next_year_id,
+                    is_slider: false,
+                    rect: RECT {
+                        left: right - btn_w,
+                        top: y,
+                        right,
+                        bottom: y + nav_h,
+                    },
+                });
+                y += nav_h + s(8.0);
+                // Weekday labels row
+                y += s(20.0);
+                // 6 rows x 7 cols of 31px day cells
+                let cell_w = content_w / 7;
+                let cell_h = s(31.0);
+                for cell in 0..42i32 {
+                    let row = cell / 7;
+                    let col = cell % 7;
+                    let cx = pad + col * cell_w;
+                    let cy = y + row * cell_h;
+                    let id = day_id_base + cell as u32;
+                    targets.push(HitTarget {
+                        id,
+                        menu_id: id,
+                        is_slider: false,
+                        rect: RECT {
+                            left: cx + s(1.5),
+                            top: cy + s(1.5),
+                            right: cx + cell_w - s(1.5),
+                            bottom: cy + cell_h - s(1.5),
+                        },
+                    });
+                }
+                y += 6 * cell_h + s(4.0);
+            }
+            FlyoutBlock::AudioSliderSection {
+                mute_id, slider_id, ..
+            } => {
+                // Heading row (20px) + Device/Mute row (32px + 8px) + Slider row (20px + 4px)
+                let dev_top = y + s(24.0);
+                let mute_w = s(32.0);
+                targets.push(HitTarget {
+                    id: *mute_id,
+                    menu_id: *mute_id,
+                    is_slider: false,
+                    rect: RECT {
+                        left: pad + content_w - mute_w,
+                        top: dev_top,
+                        right: pad + content_w,
+                        bottom: dev_top + mute_w,
+                    },
+                });
+                let slider_top = dev_top + mute_w + s(8.0);
+                targets.push(HitTarget {
+                    id: *slider_id,
+                    menu_id: *slider_id,
+                    is_slider: true,
+                    rect: RECT {
+                        left: pad,
+                        top: slider_top,
+                        right: pad + content_w,
+                        bottom: slider_top + s(20.0),
+                    },
+                });
+                y = slider_top + s(24.0);
+            }
+            FlyoutBlock::Sparkline { .. } => {
+                y += s(48.0);
+            }
+            FlyoutBlock::MetricTiles(tiles) => {
+                let rows = tiles.len().div_ceil(2) as i32;
+                let tile_h = s(44.0);
+                let gap = s(6.0);
+                y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
+            }
+            FlyoutBlock::BadgeRow { id, .. } => {
+                let h = s(34.0);
+                targets.push(HitTarget {
+                    id: *id,
+                    menu_id: *id,
+                    is_slider: false,
+                    rect: RECT {
+                        left: pad,
+                        top: y,
+                        right: pad + content_w,
+                        bottom: y + h,
+                    },
+                });
+                y += h + s(4.0);
+            }
+            FlyoutBlock::StatusHeader { action_id, .. } => {
+                let h = s(28.0);
+                if let Some(id) = *action_id {
+                    let bw = s(64.0);
+                    targets.push(HitTarget {
+                        id,
+                        menu_id: id,
+                        is_slider: false,
+                        rect: RECT {
+                            left: pad + content_w - bw,
+                            top: y,
+                            right: pad + content_w,
+                            bottom: y + h,
+                        },
+                    });
+                }
+                y += h + s(6.0);
+            }
+            FlyoutBlock::ToggleGrid(tiles) => {
+                let rows = tiles.len().div_ceil(2) as i32;
+                let tile_h = s(48.0);
+                let gap = s(6.0);
+                let tw = ((content_w - gap) / 2).max(s(80.0));
+                for (i, (id, _, _, _)) in tiles.iter().enumerate() {
+                    let col = (i % 2) as i32;
+                    let row = (i / 2) as i32;
+                    let left = pad + col * (tw + gap);
+                    let top = y + row * (tile_h + gap);
+                    targets.push(HitTarget {
+                        id: *id,
+                        menu_id: *id,
+                        is_slider: false,
+                        rect: RECT {
+                            left,
+                            top,
+                            right: left + tw,
+                            bottom: top + tile_h,
+                        },
+                    });
+                }
+                y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
+            }
+            FlyoutBlock::StatRow { .. } => y += s(24.0),
+            FlyoutBlock::ProgressBar { .. } => y += s(34.0),
+            FlyoutBlock::ActionRow { id, subtitle, .. } => {
+                let h = if subtitle.is_some() { s(40.0) } else { s(32.0) };
+                targets.push(HitTarget {
+                    id: *id,
+                    menu_id: *id,
+                    is_slider: false,
+                    rect: RECT {
+                        left: pad,
+                        top: y,
+                        right: pad + content_w,
+                        bottom: y + h,
+                    },
+                });
+                y += h + s(4.0);
+            }
+            FlyoutBlock::AppRow {
+                id: menu_id,
+                pin_id,
+                close_id,
+                ..
+            } => {
+                let rects = app_row_targets(pad, pad + content_w, y, dpi);
+                for (id, rect) in [Some(*menu_id), Some(*pin_id), *close_id]
+                    .into_iter()
+                    .zip(rects)
+                {
+                    if let Some(id) = id {
+                        targets.push(HitTarget {
+                            id,
+                            rect,
+                            menu_id: *menu_id,
+                            is_slider: false,
+                        });
+                    }
+                }
+                y += s(42.0) + s(2.0);
+            }
+            FlyoutBlock::ButtonBar(buttons) => {
+                let h = s(31.0);
+                let count = buttons.len().max(1) as i32;
+                let gap = s(6.0);
+                let bw = ((content_w - gap * (count - 1)) / count).max(s(40.0));
+                for (i, (id, _, _)) in buttons.iter().enumerate() {
+                    let left = pad + (i as i32) * (bw + gap);
+                    targets.push(HitTarget {
+                        id: *id,
+                        menu_id: *id,
+                        is_slider: false,
+                        rect: RECT {
+                            left,
+                            top: y,
+                            right: left + bw,
+                            bottom: y + h,
+                        },
+                    });
+                }
+                y += h + s(6.0);
+            }
+            FlyoutBlock::Separator => y += s(12.0),
+            FlyoutBlock::Note(_) => y += s(22.0),
+        }
+    }
+    (content_top_px, (y - content_top_px).max(s(24.0)), targets)
 }
 
 /// Convenience wrapper for consumers that only handle primary clicks.
@@ -254,6 +631,28 @@ pub fn show_flyout(
     }
 }
 
+/// Shows an interactive flyout that updates in place on clicks and slider drags (C# WPF parity).
+pub fn show_flyout_live(
+    tag: &str,
+    owner_hwnd: usize,
+    is_dark: bool,
+    anchor_center_x_px: i32,
+    anchor_bottom_y_px: i32,
+    spec: FlyoutSpec,
+    mut on_live: impl FnMut(LiveEvent) -> LiveOutcome,
+) {
+    let _ = show_flyout_impl(
+        tag,
+        owner_hwnd,
+        is_dark,
+        anchor_center_x_px,
+        anchor_bottom_y_px,
+        spec,
+        None,
+        Some(&mut on_live),
+    );
+}
+
 /// Shows the shared `DockFlyout` with toggle-close suppression, scrolling, icons, and in-place right-click handling.
 pub fn show_flyout_interactive(
     tag: &str,
@@ -263,6 +662,29 @@ pub fn show_flyout_interactive(
     anchor_bottom_y_px: i32,
     spec: FlyoutSpec,
     on_secondary: Option<&mut dyn FnMut(u32) -> bool>,
+) -> Option<FlyoutAction> {
+    show_flyout_impl(
+        tag,
+        owner_hwnd,
+        is_dark,
+        anchor_center_x_px,
+        anchor_bottom_y_px,
+        spec,
+        on_secondary,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn show_flyout_impl<'a>(
+    tag: &str,
+    owner_hwnd: usize,
+    is_dark: bool,
+    anchor_center_x_px: i32,
+    anchor_bottom_y_px: i32,
+    spec: FlyoutSpec,
+    on_secondary: Option<&'a mut dyn FnMut(u32) -> bool>,
+    on_live: Option<&'a mut dyn FnMut(LiveEvent) -> LiveOutcome>,
 ) -> Option<FlyoutAction> {
     if should_suppress_reopen(tag) {
         return None;
@@ -285,110 +707,8 @@ pub fn show_flyout_interactive(
     let dpi = win32::dpi_scale(owner_hwnd);
     let s = |v: f32| (v * dpi).round() as i32;
     let width_px = s(spec.width_dips.clamp(240.0, 380.0));
-    let pad = s(12.0);
-    let header_h = if spec.subtitle.is_some() {
-        s(44.0)
-    } else {
-        s(28.0)
-    };
-    let content_top_px = pad + header_h + s(6.0);
-
-    // Compute total content height and content-space hit targets.
-    let mut y = content_top_px;
-    let mut targets = Vec::new();
-    let content_right_pad = pad + s(6.0); // room for thin scrollbar if needed
-    for block in &spec.blocks {
-        match block {
-            FlyoutBlock::Hero { caption, .. } => {
-                y += if caption.is_some() { s(54.0) } else { s(38.0) };
-            }
-            FlyoutBlock::ToggleGrid(tiles) => {
-                let rows = tiles.len().div_ceil(2) as i32;
-                let tile_h = s(48.0);
-                let gap = s(6.0);
-                let avail = width_px - pad - content_right_pad - gap;
-                let tw = (avail / 2).max(s(80.0));
-                for (i, (id, _, _, _)) in tiles.iter().enumerate() {
-                    let col = (i % 2) as i32;
-                    let row = (i / 2) as i32;
-                    let left = pad + col * (tw + gap);
-                    let top = y + row * (tile_h + gap);
-                    targets.push(HitTarget {
-                        id: *id,
-                        menu_id: *id,
-                        rect: RECT {
-                            left,
-                            top,
-                            right: left + tw,
-                            bottom: top + tile_h,
-                        },
-                    });
-                }
-                y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
-            }
-            FlyoutBlock::StatRow { .. } => y += s(26.0),
-            FlyoutBlock::ProgressBar { .. } => y += s(38.0),
-            FlyoutBlock::ActionRow { id, subtitle, .. } => {
-                let h = if subtitle.is_some() { s(40.0) } else { s(32.0) };
-                targets.push(HitTarget {
-                    id: *id,
-                    menu_id: *id,
-                    rect: RECT {
-                        left: pad,
-                        top: y,
-                        right: width_px - content_right_pad,
-                        bottom: y + h,
-                    },
-                });
-                y += h + s(4.0);
-            }
-            FlyoutBlock::AppRow {
-                id: menu_id,
-                pin_id,
-                close_id,
-                ..
-            } => {
-                let rects = app_row_targets(pad, width_px - content_right_pad, y, dpi);
-                for (id, rect) in [Some(*menu_id), Some(*pin_id), *close_id]
-                    .into_iter()
-                    .zip(rects)
-                {
-                    if let Some(id) = id {
-                        targets.push(HitTarget {
-                            id,
-                            rect,
-                            menu_id: *menu_id,
-                        });
-                    }
-                }
-                y += s(42.0) + s(2.0);
-            }
-            FlyoutBlock::ButtonBar(buttons) => {
-                let h = s(30.0);
-                let count = buttons.len().max(1) as i32;
-                let gap = s(6.0);
-                let avail = width_px - pad - content_right_pad - gap * (count - 1);
-                let bw = (avail / count).max(s(40.0));
-                for (i, (id, _, _)) in buttons.iter().enumerate() {
-                    let left = pad + (i as i32) * (bw + gap);
-                    targets.push(HitTarget {
-                        id: *id,
-                        menu_id: *id,
-                        rect: RECT {
-                            left,
-                            top: y,
-                            right: left + bw,
-                            bottom: y + h,
-                        },
-                    });
-                }
-                y += h + s(6.0);
-            }
-            FlyoutBlock::Separator => y += s(10.0),
-            FlyoutBlock::Note(_) => y += s(26.0),
-        }
-    }
-    let content_h_px = y - content_top_px;
+    let pad = s(14.0);
+    let (content_top_px, content_h_px, targets) = layout_flyout(&spec, width_px, dpi);
     let max_h_px = s(MAX_FLYOUT_H_DIPS);
     let height_px = (content_top_px + content_h_px + pad).min(max_h_px);
     let viewport_h_px = (height_px - content_top_px - pad).max(s(40.0));
@@ -399,17 +719,16 @@ pub fn show_flyout_interactive(
         cbSize: size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
-    let screen = if is_tray
-        && unsafe {
-            let anchor = POINT {
-                x: anchor_center_x_px,
-                y: anchor_bottom_y_px,
-            };
-            GetMonitorInfoW(
-                MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST),
-                &mut monitor,
-            ) != 0
-        } {
+    let screen = if unsafe {
+        let anchor = POINT {
+            x: anchor_center_x_px,
+            y: anchor_bottom_y_px,
+        };
+        GetMonitorInfoW(
+            MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST),
+            &mut monitor,
+        ) != 0
+    } {
         monitor.rcMonitor
     } else {
         RECT {
@@ -426,7 +745,7 @@ pub fn show_flyout_interactive(
     let top_y =
         (anchor_bottom_y_px - height_px).clamp(top, (screen.bottom - height_px - margin).max(top));
 
-    let animate = !is_tray || win32::client_area_animations_enabled();
+    let animate = win32::client_area_animations_enabled();
     let slide_px = if animate { s(SLIDE_OFFSET_DIPS) } else { 0 };
     let hwnd = unsafe {
         CreateWindowExW(
@@ -479,12 +798,14 @@ pub fn show_flyout_interactive(
         animating: animate,
         suppress_blur: false,
         on_secondary,
+        on_live,
         content_top_px,
         viewport_h_px,
         content_h_px,
         scroll_y: 0,
         targets,
         hovered_id: None,
+        dragging_slider: None,
         keyboard_index: None,
         keyboard_navigation: is_tray,
         tracking: false,
@@ -546,7 +867,6 @@ fn draw_bgra_icon(hdc: HDC, icon: &FlyoutIcon, bg_rgb: u32, dst_x: i32, dst_y: i
     let bg_g = ((bg_rgb >> 8) & 0xff) as f32;
     let bg_b = ((bg_rgb >> 16) & 0xff) as f32;
 
-    // Premultiplied-alpha area-box filter for razor-sharp downsampling (replaces jagged GDI StretchDIBits).
     let mut flat = vec![0u8; dw * dh * 4];
     let scale_x = sw as f32 / dw as f32;
     let scale_y = sh as f32 / dh as f32;
@@ -610,12 +930,40 @@ fn draw_bgra_icon(hdc: HDC, icon: &FlyoutIcon, bg_rgb: u32, dst_x: i32, dst_y: i
             flat.as_ptr().cast(),
             &bmi,
             DIB_RGB_COLORS,
-            0x00CC_0020, // SRCCOPY
+            0x00CC_0020,
         );
     }
 }
 
 impl FlyoutState<'_> {
+    fn apply_live_spec(&mut self, next: FlyoutSpec) {
+        let mut client = RECT::default();
+        unsafe { GetClientRect(self.hwnd, &mut client) };
+        let width_px = client.right.max(1);
+        let (ct, ch, targets) = layout_flyout(&next, width_px, self.dpi);
+        self.spec = next;
+        self.content_top_px = ct;
+        self.content_h_px = ch;
+        self.targets = targets;
+        self.scroll_y = self.scroll_y.clamp(0, self.max_scroll());
+        unsafe {
+            InvalidateRect(self.hwnd, std::ptr::null(), 0);
+        }
+    }
+
+    fn dispatch_live(&mut self, event: LiveEvent) -> bool {
+        let outcome = if let Some(cb) = self.on_live.as_deref_mut() {
+            cb(event)
+        } else {
+            return false;
+        };
+        match outcome {
+            LiveOutcome::Update(spec) => self.apply_live_spec(spec),
+            LiveOutcome::Close => self.begin_close(),
+        }
+        true
+    }
+
     fn begin_close(&mut self) {
         if self.closing {
             return;
@@ -639,7 +987,6 @@ impl FlyoutState<'_> {
         let elapsed = self.anim_start.elapsed().as_secs_f32() * 1000.0;
         if !self.closing {
             let t = (elapsed / OPEN_ANIM_MS).clamp(0.0, 1.0);
-            // Smooth cubic ease-out: fast start, gentle settle
             let eased = 1.0 - (1.0 - t).powi(3);
             let alpha = (eased * 255.0).round() as u8;
             let cur_y = self.target_y_px + ((1.0 - eased) * self.slide_px as f32).round() as i32;
@@ -663,7 +1010,6 @@ impl FlyoutState<'_> {
             }
         } else {
             let t = (elapsed / CLOSE_ANIM_MS).clamp(0.0, 1.0);
-            // Smooth quadratic ease-in fade + slight drop
             let eased = t * t;
             let alpha = ((1.0 - eased) * 255.0).round() as u8;
             let cur_y = self.target_y_px + (eased * (self.slide_px as f32 * 0.75)).round() as i32;
@@ -693,12 +1039,15 @@ impl FlyoutState<'_> {
         (self.content_h_px - self.viewport_h_px).max(0)
     }
 
-    fn hit_at(&self, x: i32, y: i32) -> Option<&HitTarget> {
+    fn hit_at(&self, x: i32, y: i32) -> Option<HitTarget> {
         if y < self.content_top_px || y >= self.content_top_px + self.viewport_h_px {
             return None;
         }
         let cy = y + self.scroll_y;
-        self.targets.iter().find(|t| pt_in_rect(&t.rect, x, cy))
+        self.targets
+            .iter()
+            .find(|t| pt_in_rect(&t.rect, x, cy))
+            .copied()
     }
 
     fn focus_next_target(&mut self, backwards: bool) {
@@ -732,38 +1081,35 @@ impl FlyoutState<'_> {
         }
         let dpi = self.dpi;
         let s = |v: f32| (v * dpi).round() as i32;
-        let pad = s(12.0);
-        let right_pad = pad + s(6.0);
+        let pad = s(14.0);
+        let right_pad = pad + s(4.0);
         let radius = s(8.0);
         let mut client = RECT::default();
         unsafe { GetClientRect(self.hwnd, &mut client) };
         let w = client.right;
+        let content_w = (w - pad - right_pad).max(s(120.0));
         let focused_id = self.keyboard_index.map(|index| self.targets[index].id);
 
         let pal = design::palette(self.is_dark);
-        let (
-            bg,
-            card_bg,
-            hover_bg,
-            accent,
-            text_fg,
-            muted_fg,
-            danger_bg,
-            danger_fg,
-            sep_col,
-            scroll_col,
-        ) = (
-            gdi_rgb(pal.surface),
-            gdi_rgb(pal.elevated),
-            gdi_rgb(pal.hover),
-            gdi_rgb(pal.accent),
-            gdi_rgb(pal.text_primary),
-            gdi_rgb(pal.text_secondary),
-            gdi_rgb(pal.danger_hover_bg),
-            gdi_rgb(pal.danger_fg),
-            gdi_rgb(pal.sep_rgb),
-            gdi_rgb(pal.text_secondary),
-        );
+        let bg = gdi_rgb(pal.surface);
+        let card_bg = gdi_rgb(pal.elevated);
+        let hover_bg = gdi_rgb(pal.hover);
+        let border_col = gdi_rgb(pal.border_rgb);
+        let accent = gdi_rgb(pal.widget_accent);
+        let sel_fill = gdi_rgb(pal.selected_fill);
+        let sel_stroke = gdi_rgb(pal.selected_stroke);
+        let sel_fg = gdi_rgb(pal.selected_fg);
+        let text_fg = gdi_rgb(pal.text_primary);
+        let muted_fg = gdi_rgb(pal.text_secondary);
+        let danger_bg = gdi_rgb(pal.danger_hover_bg);
+        let danger_fg = gdi_rgb(pal.danger_fg);
+        let sep_col = gdi_rgb(pal.sep_rgb);
+        let scroll_col = gdi_rgb(pal.text_secondary);
+        let track_col = if self.is_dark {
+            rgb(0x3b, 0x44, 0x55)
+        } else {
+            rgb(0xdc, 0xe1, 0xe8)
+        };
 
         unsafe {
             let bg_brush = CreateSolidBrush(bg);
@@ -771,116 +1117,91 @@ impl FlyoutState<'_> {
             DeleteObject(bg_brush as _);
 
             let fname = wide("Segoe UI Variable Text");
-            let title_font = CreateFontW(
-                -s(if self.keyboard_navigation { 18.0 } else { 14.5 }),
-                0,
-                0,
-                0,
-                600,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                4, // ANTIALIASED_QUALITY
-                0,
-                fname.as_ptr(),
-            );
-            let body_font = CreateFontW(
-                -s(13.0),
-                0,
-                0,
-                0,
-                500,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                4, // ANTIALIASED_QUALITY
-                0,
-                fname.as_ptr(),
-            );
-            let small_font = CreateFontW(
-                -s(11.0),
-                0,
-                0,
-                0,
-                400,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                4, // ANTIALIASED_QUALITY
-                0,
-                fname.as_ptr(),
-            );
+            let mk_font = |pt: f32, weight: i32| {
+                CreateFontW(
+                    -s(pt),
+                    0,
+                    0,
+                    0,
+                    weight,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    4, // ANTIALIASED_QUALITY (grayscale AA, zero RGB fringing)
+                    0,
+                    fname.as_ptr(),
+                )
+            };
+            let title_font = mk_font(if self.keyboard_navigation { 16.0 } else { 13.5 }, 600);
+            let body_font = mk_font(12.5, 500);
+            let bold_font = mk_font(12.5, 600);
+            let small_font = mk_font(11.0, 400);
+            let tiny_font = mk_font(10.0, 500);
             SetBkMode(hdc, TRANSPARENT as i32);
 
-            // Fixed header
             let old_f = SelectObject(hdc, title_font as _);
-            SetTextColor(hdc, text_fg);
-            let mut hrc = RECT {
-                left: pad,
-                top: pad,
-                right: w - pad,
-                bottom: pad + s(22.0),
-            };
-            let mut tw: Vec<u16> = self.spec.title.encode_utf16().collect();
-            DrawTextW(
-                hdc,
-                tw.as_mut_ptr(),
-                tw.len() as i32,
-                &mut hrc,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-            );
-
-            let action_label = self.spec.blocks.iter().find_map(|block| match block {
-                FlyoutBlock::AppRow {
-                    pin_id,
-                    close_id,
-                    pinned,
-                    ..
-                } => {
-                    let active = self.hovered_id.or(focused_id);
-                    if active == Some(*pin_id) {
-                        Some(if *pinned {
-                            "Unpin background app"
-                        } else {
-                            "Pin next to Background Apps"
-                        })
-                    } else if active.is_some() && active == *close_id {
-                        Some("Close app window")
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            });
-            if let Some(sub) = action_label.or(self.spec.subtitle.as_deref()) {
-                SelectObject(hdc, small_font as _);
-                SetTextColor(hdc, muted_fg);
-                let mut src = RECT {
+            if !self.spec.title.is_empty() {
+                SetTextColor(hdc, text_fg);
+                let mut hrc = RECT {
                     left: pad,
-                    top: pad + s(24.0),
+                    top: pad,
                     right: w - pad,
-                    bottom: pad + s(42.0),
+                    bottom: pad + s(22.0),
                 };
-                let mut sw: Vec<u16> = sub.encode_utf16().collect();
+                let mut tw: Vec<u16> = self.spec.title.encode_utf16().collect();
                 DrawTextW(
                     hdc,
-                    sw.as_mut_ptr(),
-                    sw.len() as i32,
-                    &mut src,
+                    tw.as_mut_ptr(),
+                    tw.len() as i32,
+                    &mut hrc,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                 );
+
+                let action_label = self.spec.blocks.iter().find_map(|block| match block {
+                    FlyoutBlock::AppRow {
+                        pin_id,
+                        close_id,
+                        pinned,
+                        ..
+                    } => {
+                        let active = self.hovered_id.or(focused_id);
+                        if active == Some(*pin_id) {
+                            Some(if *pinned {
+                                "Unpin background app"
+                            } else {
+                                "Pin next to Background Apps"
+                            })
+                        } else if active.is_some() && active == *close_id {
+                            Some("Close app window")
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                });
+                if let Some(sub) = action_label.or(self.spec.subtitle.as_deref()) {
+                    SelectObject(hdc, small_font as _);
+                    SetTextColor(hdc, muted_fg);
+                    let mut src = RECT {
+                        left: pad,
+                        top: pad + s(24.0),
+                        right: w - pad,
+                        bottom: pad + s(42.0),
+                    };
+                    let mut sw: Vec<u16> = sub.encode_utf16().collect();
+                    DrawTextW(
+                        hdc,
+                        sw.as_mut_ptr(),
+                        sw.len() as i32,
+                        &mut src,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                    );
+                }
             }
 
-            // Clipped scrollable content region
             let saved = SaveDC(hdc);
             IntersectClipRect(
                 hdc,
@@ -893,41 +1214,54 @@ impl FlyoutState<'_> {
             let mut y = self.content_top_px - self.scroll_y;
             for block in &self.spec.blocks {
                 match block {
-                    FlyoutBlock::Hero { value, caption } => {
-                        let hero_font = CreateFontW(
-                            -s(28.0),
-                            0,
-                            0,
-                            0,
-                            600,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            4, // ANTIALIASED_QUALITY
-                            0,
-                            fname.as_ptr(),
-                        );
+                    FlyoutBlock::Hero {
+                        value,
+                        caption,
+                        centered,
+                        large,
+                        right_meta,
+                    } => {
+                        let pt = if *large { 40.0 } else { 27.0 };
+                        let val_h = if *large { s(46.0) } else { s(32.0) };
+                        let hero_font = mk_font(pt, 700);
                         SelectObject(hdc, hero_font as _);
                         SetTextColor(hdc, text_fg);
                         let mut hrc = RECT {
                             left: pad,
                             top: y,
                             right: w - right_pad,
-                            bottom: y + s(34.0),
+                            bottom: y + val_h,
                         };
+                        let align = if *centered { DT_CENTER } else { DT_LEFT };
                         let mut vw: Vec<u16> = value.encode_utf16().collect();
                         DrawTextW(
                             hdc,
                             vw.as_mut_ptr(),
                             vw.len() as i32,
                             &mut hrc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                            align | DT_VCENTER | DT_SINGLELINE,
                         );
                         DeleteObject(hero_font as _);
-                        y += s(36.0);
+
+                        if let Some(meta) = right_meta {
+                            SelectObject(hdc, small_font as _);
+                            SetTextColor(hdc, muted_fg);
+                            let mut mrc = RECT {
+                                left: pad + content_w / 2,
+                                top: y + s(4.0),
+                                right: w - right_pad,
+                                bottom: y + s(22.0),
+                            };
+                            let mut mw: Vec<u16> = meta.encode_utf16().collect();
+                            DrawTextW(
+                                hdc,
+                                mw.as_mut_ptr(),
+                                mw.len() as i32,
+                                &mut mrc,
+                                DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            );
+                        }
+                        y += val_h + s(2.0);
                         if let Some(cap) = caption {
                             SelectObject(hdc, small_font as _);
                             SetTextColor(hdc, muted_fg);
@@ -943,40 +1277,714 @@ impl FlyoutState<'_> {
                                 cw.as_mut_ptr(),
                                 cw.len() as i32,
                                 &mut crc,
+                                align | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            );
+                            y += s(20.0);
+                        } else {
+                            y += s(4.0);
+                        }
+                    }
+                    FlyoutBlock::CalendarGrid {
+                        year,
+                        month,
+                        today,
+                        selected,
+                        prev_year_id,
+                        prev_month_id,
+                        title_id,
+                        next_month_id,
+                        next_year_id,
+                        day_id_base,
+                    } => {
+                        let nav_h = s(28.0);
+                        let btn_w = s(26.0);
+                        let gap = s(2.0);
+                        let right = pad + content_w;
+                        let nav_btns = [
+                            (*prev_year_id, "«", pad, pad + btn_w),
+                            (
+                                *prev_month_id,
+                                "‹",
+                                pad + btn_w + gap,
+                                pad + btn_w * 2 + gap,
+                            ),
+                            (
+                                *next_month_id,
+                                "›",
+                                right - btn_w * 2 - gap,
+                                right - btn_w - gap,
+                            ),
+                            (*next_year_id, "»", right - btn_w, right),
+                        ];
+                        SelectObject(hdc, bold_font as _);
+                        for (id, glyph, l, r) in nav_btns {
+                            if self.hovered_id == Some(id) {
+                                fill_round_rect(hdc, l, y, r, y + nav_h, s(7.0), hover_bg);
+                            }
+                            SetTextColor(hdc, text_fg);
+                            let mut rc = RECT {
+                                left: l,
+                                top: y,
+                                right: r,
+                                bottom: y + nav_h,
+                            };
+                            let mut gw: Vec<u16> = glyph.encode_utf16().collect();
+                            DrawTextW(
+                                hdc,
+                                gw.as_mut_ptr(),
+                                gw.len() as i32,
+                                &mut rc,
+                                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                            );
+                        }
+                        let tl = pad + btn_w * 2 + gap * 2;
+                        let tr = right - btn_w * 2 - gap * 2;
+                        if self.hovered_id == Some(*title_id) {
+                            fill_round_rect(hdc, tl, y, tr, y + nav_h, s(7.0), hover_bg);
+                        }
+                        SetTextColor(hdc, text_fg);
+                        let mut title_rc = RECT {
+                            left: tl,
+                            top: y,
+                            right: tr,
+                            bottom: y + nav_h,
+                        };
+                        let title_str = format!("{} {}", telemetry::month_name(*month), year);
+                        let mut tw: Vec<u16> = title_str.encode_utf16().collect();
+                        DrawTextW(
+                            hdc,
+                            tw.as_mut_ptr(),
+                            tw.len() as i32,
+                            &mut title_rc,
+                            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                        );
+                        y += nav_h + s(8.0);
+
+                        // Weekday headers (Monday first, matching European/Turkish calendar convention)
+                        let cell_w = content_w / 7;
+                        SelectObject(hdc, tiny_font as _);
+                        SetTextColor(hdc, muted_fg);
+                        const DOWS: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+                        for (i, dow) in DOWS.iter().enumerate() {
+                            let mut rc = RECT {
+                                left: pad + (i as i32) * cell_w,
+                                top: y,
+                                right: pad + ((i as i32) + 1) * cell_w,
+                                bottom: y + s(18.0),
+                            };
+                            let mut dw: Vec<u16> = dow.encode_utf16().collect();
+                            DrawTextW(
+                                hdc,
+                                dw.as_mut_ptr(),
+                                dw.len() as i32,
+                                &mut rc,
+                                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                            );
+                        }
+                        y += s(20.0);
+
+                        let first_wd = telemetry::weekday_of(*year, *month, 1);
+                        let mon_offset = ((first_wd + 6) % 7) as i32; // 0=Mon..6=Sun
+                        let prev_m = if *month == 1 { 12 } else { *month - 1 };
+                        let prev_y = if *month == 1 { *year - 1 } else { *year };
+                        let prev_days = telemetry::days_in_month(prev_y, prev_m) as i32;
+                        let cur_days = telemetry::days_in_month(*year, *month) as i32;
+                        let next_m = if *month == 12 { 1 } else { *month + 1 };
+                        let next_y = if *month == 12 { *year + 1 } else { *year };
+                        let cell_h = s(31.0);
+                        let cell_r = s(7.0);
+                        let dim_fg = if self.is_dark {
+                            rgb(0x63, 0x6c, 0x7c)
+                        } else {
+                            rgb(0xb0, 0xb5, 0xbe)
+                        };
+
+                        for cell in 0..42i32 {
+                            let row = cell / 7;
+                            let col = cell % 7;
+                            let d_idx = cell - mon_offset + 1;
+                            let (cy, cm, cd, in_month) = if d_idx < 1 {
+                                (prev_y, prev_m, (prev_days + d_idx) as u32, false)
+                            } else if d_idx > cur_days {
+                                (next_y, next_m, (d_idx - cur_days) as u32, false)
+                            } else {
+                                (*year, *month, d_idx as u32, true)
+                            };
+                            let is_today = (cy, cm, cd) == *today;
+                            let is_sel = selected.is_some_and(|s| s == (cy, cm, cd)) && !is_today;
+                            let id = day_id_base + cell as u32;
+                            let is_hov = self.hovered_id == Some(id);
+
+                            let l = pad + col * cell_w + s(1.5);
+                            let t = y + row * cell_h + s(1.5);
+                            let r = pad + (col + 1) * cell_w - s(1.5);
+                            let b = y + (row + 1) * cell_h - s(1.5);
+
+                            let cell_rc = RECT {
+                                left: l,
+                                top: t,
+                                right: r,
+                                bottom: b,
+                            };
+                            if is_today {
+                                fill_round_rect_bordered(
+                                    hdc, cell_rc, cell_r, sel_fill, sel_stroke,
+                                );
+                            } else if is_sel {
+                                fill_round_rect_bordered(
+                                    hdc, cell_rc, cell_r, hover_bg, border_col,
+                                );
+                            } else if is_hov {
+                                fill_round_rect(hdc, l, t, r, b, cell_r, hover_bg);
+                            }
+
+                            SelectObject(
+                                hdc,
+                                if is_today || is_sel {
+                                    bold_font as _
+                                } else {
+                                    body_font as _
+                                },
+                            );
+                            SetTextColor(
+                                hdc,
+                                if is_today {
+                                    sel_fg
+                                } else if in_month {
+                                    text_fg
+                                } else {
+                                    dim_fg
+                                },
+                            );
+                            let mut rc = RECT {
+                                left: l,
+                                top: t,
+                                right: r,
+                                bottom: b,
+                            };
+                            let ds = cd.to_string();
+                            let mut dw: Vec<u16> = ds.encode_utf16().collect();
+                            DrawTextW(
+                                hdc,
+                                dw.as_mut_ptr(),
+                                dw.len() as i32,
+                                &mut rc,
+                                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                            );
+                        }
+                        y += 6 * cell_h + s(4.0);
+                    }
+                    FlyoutBlock::AudioSliderSection {
+                        label,
+                        device_name,
+                        value_text,
+                        ratio,
+                        muted,
+                        mute_id,
+                        slider_id,
+                    } => {
+                        // 1. Heading row (`Output` left, `67%` right)
+                        SelectObject(hdc, bold_font as _);
+                        SetTextColor(hdc, text_fg);
+                        let mut hrc = RECT {
+                            left: pad,
+                            top: y,
+                            right: pad + content_w,
+                            bottom: y + s(20.0),
+                        };
+                        let mut lw: Vec<u16> = label.encode_utf16().collect();
+                        DrawTextW(
+                            hdc,
+                            lw.as_mut_ptr(),
+                            lw.len() as i32,
+                            &mut hrc,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                        );
+                        SelectObject(hdc, small_font as _);
+                        SetTextColor(hdc, muted_fg);
+                        let mut vw: Vec<u16> = value_text.encode_utf16().collect();
+                        DrawTextW(
+                            hdc,
+                            vw.as_mut_ptr(),
+                            vw.len() as i32,
+                            &mut hrc,
+                            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+                        );
+
+                        // 2. Device box + 32x32 Mute button
+                        let dev_top = y + s(24.0);
+                        let dev_h = s(32.0);
+                        let mute_w = s(32.0);
+                        let dev_r = pad + content_w - mute_w - s(8.0);
+                        fill_round_rect_bordered(
+                            hdc,
+                            RECT {
+                                left: pad,
+                                top: dev_top,
+                                right: dev_r,
+                                bottom: dev_top + dev_h,
+                            },
+                            radius,
+                            card_bg,
+                            border_col,
+                        );
+                        SelectObject(hdc, small_font as _);
+                        SetTextColor(hdc, text_fg);
+                        let mut drc = RECT {
+                            left: pad + s(10.0),
+                            top: dev_top,
+                            right: dev_r - s(8.0),
+                            bottom: dev_top + dev_h,
+                        };
+                        let mut dw: Vec<u16> = device_name.encode_utf16().collect();
+                        DrawTextW(
+                            hdc,
+                            dw.as_mut_ptr(),
+                            dw.len() as i32,
+                            &mut drc,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                        );
+
+                        let mute_l = pad + content_w - mute_w;
+                        let mute_hov = self.hovered_id == Some(*mute_id);
+                        let (m_bg, m_bd, m_fg) = if *muted {
+                            (danger_bg, gdi_rgb(pal.danger), danger_fg)
+                        } else if mute_hov {
+                            (hover_bg, border_col, text_fg)
+                        } else {
+                            (card_bg, border_col, muted_fg)
+                        };
+                        fill_round_rect_bordered(
+                            hdc,
+                            RECT {
+                                left: mute_l,
+                                top: dev_top,
+                                right: mute_l + mute_w,
+                                bottom: dev_top + dev_h,
+                            },
+                            radius,
+                            m_bg,
+                            m_bd,
+                        );
+                        let glyph_font = CreateFontW(
+                            -s(14.0),
+                            0,
+                            0,
+                            0,
+                            400,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            4,
+                            0,
+                            wide("Segoe Fluent Icons").as_ptr(),
+                        );
+                        SelectObject(hdc, glyph_font as _);
+                        SetTextColor(hdc, m_fg);
+                        let mut mrc = RECT {
+                            left: mute_l,
+                            top: dev_top,
+                            right: mute_l + mute_w,
+                            bottom: dev_top + dev_h,
+                        };
+                        let mut mg: Vec<u16> = if *muted { "\u{E74F}" } else { "\u{E767}" }
+                            .encode_utf16()
+                            .collect();
+                        DrawTextW(
+                            hdc,
+                            mg.as_mut_ptr(),
+                            mg.len() as i32,
+                            &mut mrc,
+                            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                        );
+                        DeleteObject(glyph_font as _);
+
+                        // 3. C# `WidgetSlider`: 5px track + Aurora teal fill + 10px circular thumb
+                        let slider_top = dev_top + dev_h + s(8.0);
+                        let mid_y = slider_top + s(10.0);
+                        let tr_h = s(5.0).max(4);
+                        fill_round_rect(
+                            hdc,
+                            pad,
+                            mid_y - tr_h / 2,
+                            pad + content_w,
+                            mid_y + tr_h / 2,
+                            tr_h,
+                            track_col,
+                        );
+                        let r_clamped = if *muted { 0.0 } else { ratio.clamp(0.0, 1.0) };
+                        let fill_w = (content_w as f32 * r_clamped).round() as i32;
+                        if fill_w > s(2.0) {
+                            fill_round_rect(
+                                hdc,
+                                pad,
+                                mid_y - tr_h / 2,
+                                pad + fill_w,
+                                mid_y + tr_h / 2,
+                                tr_h,
+                                accent,
+                            );
+                        }
+                        let thumb_r = if self.hovered_id == Some(*slider_id)
+                            || self
+                                .dragging_slider
+                                .is_some_and(|(sid, _)| sid == *slider_id)
+                        {
+                            s(6.0)
+                        } else {
+                            s(5.0)
+                        };
+                        let tx = (pad + fill_w).clamp(pad + thumb_r, pad + content_w - thumb_r);
+                        let tb = CreateSolidBrush(text_fg);
+                        let tp = CreatePen(PS_SOLID, 1, text_fg);
+                        let ob = SelectObject(hdc, tb as _);
+                        let op = SelectObject(hdc, tp as _);
+                        Ellipse(
+                            hdc,
+                            tx - thumb_r,
+                            mid_y - thumb_r,
+                            tx + thumb_r,
+                            mid_y + thumb_r,
+                        );
+                        SelectObject(hdc, ob);
+                        SelectObject(hdc, op);
+                        DeleteObject(tb as _);
+                        DeleteObject(tp as _);
+
+                        y = slider_top + s(24.0);
+                    }
+                    FlyoutBlock::Sparkline {
+                        label,
+                        value_text,
+                        detail_text,
+                        samples,
+                        color,
+                    } => {
+                        SelectObject(hdc, body_font as _);
+                        SetTextColor(hdc, text_fg);
+                        let mut lrc = RECT {
+                            left: pad,
+                            top: y,
+                            right: pad + content_w,
+                            bottom: y + s(18.0),
+                        };
+                        let mut lw: Vec<u16> = label.encode_utf16().collect();
+                        DrawTextW(
+                            hdc,
+                            lw.as_mut_ptr(),
+                            lw.len() as i32,
+                            &mut lrc,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                        );
+                        let val_full = match detail_text {
+                            Some(d) => format!("{d}  {value_text}"),
+                            None => value_text.clone(),
+                        };
+                        SelectObject(hdc, bold_font as _);
+                        SetTextColor(hdc, gdi_rgb(*color));
+                        let mut vw: Vec<u16> = val_full.encode_utf16().collect();
+                        DrawTextW(
+                            hdc,
+                            vw.as_mut_ptr(),
+                            vw.len() as i32,
+                            &mut lrc,
+                            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+                        );
+
+                        // Vector sparkline matching C# `TelemetrySparkline.cs` (height 22px)
+                        let plot_top = y + s(21.0);
+                        let plot_h = s(22.0);
+                        let plot_bot = plot_top + plot_h;
+                        let base_pen = CreatePen(PS_SOLID, 1, sep_col);
+                        let op = SelectObject(hdc, base_pen as _);
+                        MoveToEx(hdc, pad, plot_bot, std::ptr::null_mut());
+                        LineTo(hdc, pad + content_w, plot_bot);
+                        SelectObject(hdc, op);
+                        DeleteObject(base_pen as _);
+
+                        if !samples.is_empty() {
+                            let line_pen = CreatePen(
+                                PS_SOLID,
+                                (1.5 * dpi).round().max(1.0) as i32,
+                                gdi_rgb(*color),
+                            );
+                            let op = SelectObject(hdc, line_pen as _);
+                            let n = samples.len();
+                            let py = |v: f32| {
+                                plot_bot
+                                    - (v.clamp(0.0, 1.0) * (plot_h - s(3.0)) as f32).round() as i32
+                            };
+                            if n == 1 {
+                                let y0 = py(samples[0]);
+                                MoveToEx(hdc, pad, y0, std::ptr::null_mut());
+                                LineTo(hdc, pad + content_w, y0);
+                            } else {
+                                let step = content_w as f32 / (n - 1) as f32;
+                                MoveToEx(hdc, pad, py(samples[0]), std::ptr::null_mut());
+                                for (i, &val) in samples.iter().enumerate().skip(1) {
+                                    let px = pad + (i as f32 * step).round() as i32;
+                                    LineTo(hdc, px, py(val));
+                                }
+                            }
+                            SelectObject(hdc, op);
+                            DeleteObject(line_pen as _);
+                        }
+                        y += s(48.0);
+                    }
+                    FlyoutBlock::MetricTiles(tiles) => {
+                        let rows = tiles.len().div_ceil(2) as i32;
+                        let tile_h = s(44.0);
+                        let gap = s(6.0);
+                        let tw = ((content_w - gap) / 2).max(s(80.0));
+                        for (i, (lbl, val)) in tiles.iter().enumerate() {
+                            let col = (i % 2) as i32;
+                            let row = (i / 2) as i32;
+                            let l = pad + col * (tw + gap);
+                            let t = y + row * (tile_h + gap);
+                            fill_round_rect(hdc, l, t, l + tw, t + tile_h, radius, card_bg);
+                            SelectObject(hdc, tiny_font as _);
+                            SetTextColor(hdc, muted_fg);
+                            let mut lrc = RECT {
+                                left: l + s(8.0),
+                                top: t + s(5.0),
+                                right: l + tw - s(8.0),
+                                bottom: t + s(20.0),
+                            };
+                            let mut lw: Vec<u16> = lbl.encode_utf16().collect();
+                            DrawTextW(
+                                hdc,
+                                lw.as_mut_ptr(),
+                                lw.len() as i32,
+                                &mut lrc,
                                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                             );
-                            y += s(18.0);
+                            SelectObject(hdc, bold_font as _);
+                            SetTextColor(hdc, text_fg);
+                            let mut vrc = RECT {
+                                left: l + s(8.0),
+                                top: t + s(21.0),
+                                right: l + tw - s(8.0),
+                                bottom: t + tile_h - s(5.0),
+                            };
+                            let mut vw: Vec<u16> = val.encode_utf16().collect();
+                            DrawTextW(
+                                hdc,
+                                vw.as_mut_ptr(),
+                                vw.len() as i32,
+                                &mut vrc,
+                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            );
                         }
+                        y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
+                    }
+                    FlyoutBlock::BadgeRow {
+                        id,
+                        code,
+                        title,
+                        active,
+                    } => {
+                        let h = s(34.0);
+                        let hovered = self.hovered_id == Some(*id);
+                        let row_bg = if hovered {
+                            hover_bg
+                        } else if *active {
+                            card_bg
+                        } else {
+                            bg
+                        };
+                        if hovered || *active {
+                            fill_round_rect(hdc, pad, y, pad + content_w, y + h, radius, row_bg);
+                        }
+                        let bw = s(34.0);
+                        let bh = s(22.0);
+                        let bx = pad + s(8.0);
+                        let by = y + (h - bh) / 2;
+                        fill_round_rect(
+                            hdc,
+                            bx,
+                            by,
+                            bx + bw,
+                            by + bh,
+                            s(5.0),
+                            if *active { sel_fill } else { card_bg },
+                        );
+                        SelectObject(hdc, bold_font as _);
+                        SetTextColor(hdc, if *active { sel_fg } else { text_fg });
+                        let mut brc = RECT {
+                            left: bx,
+                            top: by,
+                            right: bx + bw,
+                            bottom: by + bh,
+                        };
+                        let mut cw: Vec<u16> = code.encode_utf16().collect();
+                        DrawTextW(
+                            hdc,
+                            cw.as_mut_ptr(),
+                            cw.len() as i32,
+                            &mut brc,
+                            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                        );
+
+                        SelectObject(
+                            hdc,
+                            if *active {
+                                bold_font as _
+                            } else {
+                                body_font as _
+                            },
+                        );
+                        SetTextColor(hdc, text_fg);
+                        let mut trc = RECT {
+                            left: bx + bw + s(10.0),
+                            top: y,
+                            right: pad + content_w - s(8.0),
+                            bottom: y + h,
+                        };
+                        let mut tw: Vec<u16> = title.encode_utf16().collect();
+                        DrawTextW(
+                            hdc,
+                            tw.as_mut_ptr(),
+                            tw.len() as i32,
+                            &mut trc,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                        );
+                        y += h + s(4.0);
+                    }
+                    FlyoutBlock::StatusHeader {
+                        title,
+                        status_label,
+                        status_color,
+                        action_id,
+                        action_label,
+                    } => {
+                        let h = s(28.0);
+                        SelectObject(hdc, bold_font as _);
+                        SetTextColor(hdc, text_fg);
+                        let mut trc = RECT {
+                            left: pad,
+                            top: y,
+                            right: pad + content_w - s(90.0),
+                            bottom: y + h,
+                        };
+                        let mut tw: Vec<u16> = title.encode_utf16().collect();
+                        DrawTextW(
+                            hdc,
+                            tw.as_mut_ptr(),
+                            tw.len() as i32,
+                            &mut trc,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                        );
+
+                        let right_edge = if let (Some(id), Some(lbl)) = (*action_id, action_label) {
+                            let bw = s(64.0);
+                            let bl = pad + content_w - bw;
+                            let hovered = self.hovered_id == Some(id);
+                            fill_round_rect_bordered(
+                                hdc,
+                                RECT {
+                                    left: bl,
+                                    top: y + s(2.0),
+                                    right: pad + content_w,
+                                    bottom: y + h - s(2.0),
+                                },
+                                s(6.0),
+                                if hovered { hover_bg } else { card_bg },
+                                border_col,
+                            );
+                            SelectObject(hdc, tiny_font as _);
+                            SetTextColor(hdc, text_fg);
+                            let mut brc = RECT {
+                                left: bl,
+                                top: y,
+                                right: pad + content_w,
+                                bottom: y + h,
+                            };
+                            let mut lw: Vec<u16> = lbl.encode_utf16().collect();
+                            DrawTextW(
+                                hdc,
+                                lw.as_mut_ptr(),
+                                lw.len() as i32,
+                                &mut brc,
+                                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                            );
+                            bl - s(8.0)
+                        } else {
+                            pad + content_w
+                        };
+
+                        SelectObject(hdc, small_font as _);
+                        SetTextColor(hdc, muted_fg);
+                        let mut src = RECT {
+                            left: pad + content_w / 3,
+                            top: y,
+                            right: right_edge,
+                            bottom: y + h,
+                        };
+                        let mut sw: Vec<u16> = status_label.encode_utf16().collect();
+                        DrawTextW(
+                            hdc,
+                            sw.as_mut_ptr(),
+                            sw.len() as i32,
+                            &mut src,
+                            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+                        );
+                        // Status dot left of status label
+                        let dot_r = s(3.0).max(2);
+                        let dot_x = right_edge - s(status_label.len() as f32 * 6.5 + 8.0);
+                        let dot_y = y + h / 2;
+                        let db = CreateSolidBrush(gdi_rgb(*status_color));
+                        let dp = CreatePen(PS_SOLID, 1, gdi_rgb(*status_color));
+                        let ob = SelectObject(hdc, db as _);
+                        let op = SelectObject(hdc, dp as _);
+                        Ellipse(
+                            hdc,
+                            dot_x - dot_r,
+                            dot_y - dot_r,
+                            dot_x + dot_r,
+                            dot_y + dot_r,
+                        );
+                        SelectObject(hdc, ob);
+                        SelectObject(hdc, op);
+                        DeleteObject(db as _);
+                        DeleteObject(dp as _);
+
+                        y += h + s(6.0);
                     }
                     FlyoutBlock::ToggleGrid(tiles) => {
                         let rows = tiles.len().div_ceil(2) as i32;
                         let tile_h = s(48.0);
                         let gap = s(6.0);
-                        let avail = w - pad - right_pad - gap;
-                        let tw = (avail / 2).max(s(80.0));
+                        let tw = ((content_w - gap) / 2).max(s(80.0));
                         for (i, (id, title, state_lbl, active)) in tiles.iter().enumerate() {
                             let col = (i % 2) as i32;
                             let row = (i / 2) as i32;
                             let left = pad + col * (tw + gap);
                             let top = y + row * (tile_h + gap);
                             let hovered = self.hovered_id == Some(*id);
-                            let fill = if *active {
-                                accent
+                            let (fill, bd) = if *active {
+                                (sel_fill, sel_stroke)
                             } else if hovered {
-                                hover_bg
+                                (hover_bg, border_col)
                             } else {
-                                card_bg
+                                (card_bg, border_col)
                             };
-                            fill_round_rect(hdc, left, top, left + tw, top + tile_h, radius, fill);
-                            SelectObject(hdc, body_font as _);
-                            SetTextColor(
+                            fill_round_rect_bordered(
                                 hdc,
-                                if *active {
-                                    rgb(0xff, 0xff, 0xff)
-                                } else {
-                                    text_fg
+                                RECT {
+                                    left,
+                                    top,
+                                    right: left + tw,
+                                    bottom: top + tile_h,
                                 },
+                                radius,
+                                fill,
+                                bd,
                             );
+                            SelectObject(hdc, bold_font as _);
+                            SetTextColor(hdc, if *active { sel_fg } else { text_fg });
                             let mut trc = RECT {
                                 left: left + s(10.0),
                                 top: top + s(6.0),
@@ -992,14 +2000,7 @@ impl FlyoutState<'_> {
                                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                             );
                             SelectObject(hdc, small_font as _);
-                            SetTextColor(
-                                hdc,
-                                if *active {
-                                    rgb(0xe2, 0xe8, 0xf0)
-                                } else {
-                                    muted_fg
-                                },
-                            );
+                            SetTextColor(hdc, muted_fg);
                             let mut src = RECT {
                                 left: left + s(10.0),
                                 top: top + s(25.0),
@@ -1018,13 +2019,13 @@ impl FlyoutState<'_> {
                         y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
                     }
                     FlyoutBlock::StatRow { label, value } => {
-                        let h = s(26.0);
-                        SelectObject(hdc, body_font as _);
+                        let h = s(24.0);
+                        SelectObject(hdc, small_font as _);
                         SetTextColor(hdc, muted_fg);
                         let mut rc = RECT {
                             left: pad,
                             top: y,
-                            right: w - right_pad,
+                            right: pad + content_w,
                             bottom: y + h,
                         };
                         let mut lw: Vec<u16> = label.encode_utf16().collect();
@@ -1033,8 +2034,9 @@ impl FlyoutState<'_> {
                             lw.as_mut_ptr(),
                             lw.len() as i32,
                             &mut rc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                         );
+                        SelectObject(hdc, bold_font as _);
                         SetTextColor(hdc, text_fg);
                         let mut vw: Vec<u16> = value.encode_utf16().collect();
                         DrawTextW(
@@ -1052,14 +2054,14 @@ impl FlyoutState<'_> {
                         ratio,
                         tone,
                     } => {
-                        let h = s(38.0);
+                        let h = s(34.0);
                         SelectObject(hdc, small_font as _);
                         SetTextColor(hdc, muted_fg);
                         let mut rc = RECT {
                             left: pad,
                             top: y,
-                            right: w - right_pad,
-                            bottom: y + s(18.0),
+                            right: pad + content_w,
+                            bottom: y + s(16.0),
                         };
                         let mut lw: Vec<u16> = label.encode_utf16().collect();
                         DrawTextW(
@@ -1067,7 +2069,7 @@ impl FlyoutState<'_> {
                             lw.as_mut_ptr(),
                             lw.len() as i32,
                             &mut rc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                         );
                         SetTextColor(hdc, text_fg);
                         let mut vw: Vec<u16> = value_text.encode_utf16().collect();
@@ -1079,27 +2081,25 @@ impl FlyoutState<'_> {
                             DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
                         );
 
-                        let bar_top = y + s(23.0);
-                        let bar_h = s(5.0);
+                        let bar_top = y + s(21.0);
+                        let bar_h = s(6.0);
                         fill_round_rect(
                             hdc,
                             pad,
                             bar_top,
-                            w - right_pad,
+                            pad + content_w,
                             bar_top + bar_h,
                             s(3.0),
-                            card_bg,
+                            track_col,
                         );
 
-                        let fill_w =
-                            (((w - pad - right_pad) as f32) * ratio.clamp(0.0, 1.0)).round() as i32;
+                        let fill_w = (content_w as f32 * ratio.clamp(0.0, 1.0)).round() as i32;
                         if fill_w > s(3.0) {
                             let meter_rgb = match tone {
-                                BarTone::Accent => pal.accent,
+                                BarTone::Accent => pal.widget_blue,
                                 BarTone::Usage => design::meter_color(&pal, *ratio),
                                 BarTone::Level => design::level_color(&pal, *ratio),
                             };
-                            let meter_col = gdi_rgb(meter_rgb);
                             fill_round_rect(
                                 hdc,
                                 pad,
@@ -1107,7 +2107,7 @@ impl FlyoutState<'_> {
                                 pad + fill_w,
                                 bar_top + bar_h,
                                 s(3.0),
-                                meter_col,
+                                gdi_rgb(meter_rgb),
                             );
                         }
                         y += h;
@@ -1127,7 +2127,7 @@ impl FlyoutState<'_> {
                         } else {
                             card_bg
                         };
-                        fill_round_rect(hdc, pad, y, w - right_pad, y + h, radius, fill);
+                        fill_round_rect(hdc, pad, y, pad + content_w, y + h, radius, fill);
 
                         let mut text_left = pad + s(10.0);
                         if let Some(ic) = icon {
@@ -1141,7 +2141,7 @@ impl FlyoutState<'_> {
                         let mut trc = RECT {
                             left: text_left,
                             top: y + if subtitle.is_some() { s(3.0) } else { 0 },
-                            right: w - right_pad - s(10.0),
+                            right: pad + content_w - s(10.0),
                             bottom: y + if subtitle.is_some() { s(21.0) } else { h },
                         };
                         let mut tw: Vec<u16> = title.encode_utf16().collect();
@@ -1159,7 +2159,7 @@ impl FlyoutState<'_> {
                             let mut src = RECT {
                                 left: text_left,
                                 top: y + s(20.0),
-                                right: w - right_pad - s(10.0),
+                                right: pad + content_w - s(10.0),
                                 bottom: y + h - s(3.0),
                             };
                             let mut sw: Vec<u16> = sub.encode_utf16().collect();
@@ -1177,7 +2177,7 @@ impl FlyoutState<'_> {
                             let mut brc = RECT {
                                 left: text_left,
                                 top: y,
-                                right: w - right_pad - s(10.0),
+                                right: pad + content_w - s(10.0),
                                 bottom: y + h,
                             };
                             let mut bw: Vec<u16> = b.encode_utf16().collect();
@@ -1199,14 +2199,14 @@ impl FlyoutState<'_> {
                         pinned,
                         close_id,
                     } => {
-                        let [app, pin, close] = app_row_targets(pad, w - right_pad, y, dpi);
+                        let [app, pin, close] = app_row_targets(pad, pad + content_w, y, dpi);
                         fill_round_rect(
                             hdc,
                             app.left,
                             y,
                             close.right,
                             app.bottom,
-                            s(13.0),
+                            s(10.0),
                             card_bg,
                         );
 
@@ -1215,7 +2215,7 @@ impl FlyoutState<'_> {
                         } else {
                             card_bg
                         };
-                        fill_round_rect(hdc, app.left, y, app.right, app.bottom, s(13.0), app_fill);
+                        fill_round_rect(hdc, app.left, y, app.right, app.bottom, s(10.0), app_fill);
                         let icon_size = s(22.0);
                         let icon_x = app.left + s(10.0);
                         let icon_y = y + (app.bottom - y - icon_size) / 2;
@@ -1248,7 +2248,7 @@ impl FlyoutState<'_> {
                         );
 
                         for (id, rect, icon, selected, fill, ink) in [
-                            (Some(*pin_id), pin, MenuIcon::Pin, *pinned, hover_bg, accent),
+                            (Some(*pin_id), pin, MenuIcon::Pin, *pinned, sel_fill, sel_fg),
                             (
                                 *close_id,
                                 close,
@@ -1268,7 +2268,7 @@ impl FlyoutState<'_> {
                                     y + inset,
                                     rect.right - inset,
                                     rect.bottom - inset,
-                                    s(11.0),
+                                    s(8.0),
                                     fill,
                                 );
                             }
@@ -1284,32 +2284,36 @@ impl FlyoutState<'_> {
                         y = app.bottom + s(2.0);
                     }
                     FlyoutBlock::ButtonBar(buttons) => {
-                        let h = s(30.0);
+                        let h = s(31.0);
                         let count = buttons.len().max(1) as i32;
                         let gap = s(6.0);
-                        let avail = w - pad - right_pad - gap * (count - 1);
-                        let bw = (avail / count).max(s(40.0));
+                        let bw = ((content_w - gap * (count - 1)) / count).max(s(40.0));
                         for (i, (id, label, primary)) in buttons.iter().enumerate() {
                             let left = pad + (i as i32) * (bw + gap);
                             let hovered = self.hovered_id == Some(*id) || focused_id == Some(*id);
-                            let fill = if *primary {
-                                accent
+                            // Exact C# `WidgetFlyoutPrimaryButton` / `WidgetFlyoutActionButton`
+                            let (fill, bd, fg) = if *primary {
+                                (sel_fill, sel_stroke, text_fg)
                             } else if hovered {
-                                hover_bg
+                                (hover_bg, border_col, text_fg)
                             } else {
-                                card_bg
+                                (card_bg, border_col, text_fg)
                             };
-                            fill_round_rect(hdc, left, y, left + bw, y + h, radius, fill);
-
-                            SelectObject(hdc, body_font as _);
-                            SetTextColor(
+                            fill_round_rect_bordered(
                                 hdc,
-                                if *primary {
-                                    rgb(0xff, 0xff, 0xff)
-                                } else {
-                                    text_fg
+                                RECT {
+                                    left,
+                                    top: y,
+                                    right: left + bw,
+                                    bottom: y + h,
                                 },
+                                radius,
+                                fill,
+                                bd,
                             );
+
+                            SelectObject(hdc, bold_font as _);
+                            SetTextColor(hdc, fg);
                             let mut brc = RECT {
                                 left,
                                 top: y,
@@ -1330,21 +2334,21 @@ impl FlyoutState<'_> {
                     FlyoutBlock::Separator => {
                         let pen = CreatePen(PS_SOLID, 1, sep_col);
                         let op = SelectObject(hdc, pen as _);
-                        let sy = y + s(5.0);
+                        let sy = y + s(6.0);
                         MoveToEx(hdc, pad, sy, std::ptr::null_mut());
-                        LineTo(hdc, w - right_pad, sy);
+                        LineTo(hdc, pad + content_w, sy);
                         SelectObject(hdc, op);
                         DeleteObject(pen as _);
-                        y += s(10.0);
+                        y += s(12.0);
                     }
                     FlyoutBlock::Note(text) => {
-                        let h = s(26.0);
+                        let h = s(22.0);
                         SelectObject(hdc, small_font as _);
                         SetTextColor(hdc, muted_fg);
                         let mut rc = RECT {
                             left: pad,
                             top: y,
-                            right: w - right_pad,
+                            right: pad + content_w,
                             bottom: y + h,
                         };
                         let mut nw: Vec<u16> = text.encode_utf16().collect();
@@ -1359,8 +2363,10 @@ impl FlyoutState<'_> {
                     }
                 }
             }
-            if let Some(index) = self.keyboard_index {
-                let mut rect = self.targets[index].rect;
+            if let Some(index) = self.keyboard_index
+                && let Some(t) = self.targets.get(index)
+            {
+                let mut rect = t.rect;
                 rect.left += s(2.0);
                 rect.right -= s(2.0);
                 rect.top += s(2.0) - self.scroll_y;
@@ -1395,7 +2401,9 @@ impl FlyoutState<'_> {
             SelectObject(hdc, old_f);
             DeleteObject(title_font as _);
             DeleteObject(body_font as _);
+            DeleteObject(bold_font as _);
             DeleteObject(small_font as _);
+            DeleteObject(tiny_font as _);
             EndPaint(self.hwnd, &ps);
         }
     }
@@ -1418,7 +2426,7 @@ unsafe extern "system" fn flyout_wnd_proc(
             0
         }
         WM_SETCURSOR => {
-            let cid = if state.hovered_id.is_some() {
+            let cid = if state.hovered_id.is_some() || state.dragging_slider.is_some() {
                 IDC_HAND
             } else {
                 IDC_ARROW
@@ -1443,6 +2451,12 @@ unsafe extern "system" fn flyout_wnd_proc(
             }
             let x = (lparam as u32 & 0xffff) as i16 as i32;
             let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
+            if let Some((sid, rect)) = state.dragging_slider {
+                let w = (rect.right - rect.left).max(1) as f32;
+                let ratio = ((x - rect.left) as f32 / w).clamp(0.0, 1.0);
+                state.dispatch_live(LiveEvent::Slider { id: sid, ratio });
+                return 0;
+            }
             let hit = state.hit_at(x, y).map(|target| target.id);
             if hit != state.hovered_id {
                 state.hovered_id = hit;
@@ -1454,7 +2468,7 @@ unsafe extern "system" fn flyout_wnd_proc(
         }
         WM_MOUSELEAVE => {
             state.tracking = false;
-            if state.hovered_id.take().is_some() {
+            if state.dragging_slider.is_none() && state.hovered_id.take().is_some() {
                 unsafe {
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                 }
@@ -1483,14 +2497,46 @@ unsafe extern "system" fn flyout_wnd_proc(
             state.step_animation();
             0
         }
+        WM_LBUTTONDOWN => {
+            if !state.closing {
+                let x = (lparam as u32 & 0xffff) as i16 as i32;
+                let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
+                if let Some(target) = state.hit_at(x, y)
+                    && target.is_slider
+                    && state.on_live.is_some()
+                {
+                    unsafe {
+                        SetCapture(hwnd);
+                    }
+                    state.dragging_slider = Some((target.id, target.rect));
+                    let w = (target.rect.right - target.rect.left).max(1) as f32;
+                    let ratio = ((x - target.rect.left) as f32 / w).clamp(0.0, 1.0);
+                    state.dispatch_live(LiveEvent::Slider {
+                        id: target.id,
+                        ratio,
+                    });
+                }
+            }
+            0
+        }
         WM_LBUTTONUP => {
+            if state.dragging_slider.take().is_some() {
+                unsafe {
+                    let _ = ReleaseCapture();
+                }
+                return 0;
+            }
             if !state.closing {
                 let x = (lparam as u32 & 0xffff) as i16 as i32;
                 let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
                 if let Some(target) = state.hit_at(x, y) {
-                    state.selected = Some(FlyoutAction::Primary(target.id));
-                    state.begin_close();
-                } else if !state.keyboard_navigation {
+                    if !target.is_slider && state.on_live.is_some() {
+                        state.dispatch_live(LiveEvent::Click(target.id));
+                    } else if !target.is_slider {
+                        state.selected = Some(FlyoutAction::Primary(target.id));
+                        state.begin_close();
+                    }
+                } else if !state.keyboard_navigation && state.on_live.is_none() {
                     state.begin_close();
                 }
             }
