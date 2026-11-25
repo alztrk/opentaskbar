@@ -1244,7 +1244,7 @@ impl FlyoutState<'_> {
                             let Some(id) = id else { continue };
                             let active = self.hovered_id == Some(id) || focused_id == Some(id);
                             let inset = s(3.0);
-                            let btn_bg = if active || selected { fill } else { bg };
+                            let btn_bg = if active || selected { fill } else { card_bg };
                             if active || selected {
                                 fill_round_rect(
                                     hdc,

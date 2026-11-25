@@ -157,9 +157,9 @@ pub fn render_svg_premul_bgra(
 
     let hex = format!("#{:02x}{:02x}{:02x}", color.0, color.1, color.2);
     let inner = lucide_inner(icon).replace("currentColor", &hex);
-    let stroke_w = if size <= 16 { "2.0" } else { "1.85" };
+    let stroke_w = if size <= 22 { "2.15" } else { "2.0" };
     let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{hex}" stroke-width="{stroke_w}" stroke-linecap="round" stroke-linejoin="round" opacity="{a:.3}">{inner}</svg>"#,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" stroke="{hex}" stroke-width="{stroke_w}" stroke-linecap="round" stroke-linejoin="round" shape-rendering="geometricPrecision" opacity="{a:.3}">{inner}</svg>"#,
         a = f32::from(alpha_u8) / 255.0
     );
 
@@ -170,10 +170,27 @@ pub fn render_svg_premul_bgra(
     let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
 
-    // `tiny-skia` produces premultiplied RGBA; convert to premultiplied BGRA for Direct2D/GDI.
+    // `tiny-skia` outputs linear premultiplied RGBA; convert to premultiplied BGRA with a subtle
+    // perceptual alpha lift (`powf(0.76)`) so thin strokes stay razor-sharp on dark surfaces.
     let mut bgra = pixmap.take();
     for px in bgra.chunks_exact_mut(4) {
-        px.swap(0, 2);
+        let a = px[3];
+        if a == 0 {
+            px[0] = 0;
+            px[1] = 0;
+            px[2] = 0;
+            continue;
+        }
+        let a_f = f32::from(a) / 255.0;
+        let new_a_f = a_f.powf(0.76).clamp(0.0, 1.0);
+        let gain = new_a_f / a_f;
+        let r = (f32::from(px[0]) * gain).round().min(255.0) as u8;
+        let g = (f32::from(px[1]) * gain).round().min(255.0) as u8;
+        let b = (f32::from(px[2]) * gain).round().min(255.0) as u8;
+        px[0] = b;
+        px[1] = g;
+        px[2] = r;
+        px[3] = (new_a_f * 255.0).round().min(255.0) as u8;
     }
     let arc = Arc::new(bgra);
     if let Ok(mut guard) = cache.lock() {

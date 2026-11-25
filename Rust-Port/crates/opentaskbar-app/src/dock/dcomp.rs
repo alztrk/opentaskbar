@@ -407,7 +407,7 @@ impl DcompEngine {
             let cy = height_dips * 0.5;
             match spec {
                 WidgetChipSpec::IconOnly(icon) => {
-                    draw_chip_icon(dc, *icon, width_dips * 0.5, cy, 16.0, dpi, pal.text_primary)?;
+                    draw_chip_icon(dc, *icon, width_dips * 0.5, cy, 18.0, dpi, pal.text_primary)?;
                 }
                 WidgetChipSpec::IconValue {
                     icon,
@@ -433,7 +433,7 @@ impl DcompEngine {
                     } else {
                         pal.text_primary
                     };
-                    draw_chip_icon(dc, *icon, 14.0, cy, 15.0, dpi, icon_rgb)?;
+                    draw_chip_icon(dc, *icon, 14.0, cy, 17.0, dpi, icon_rgb)?;
                     let wtxt: Vec<u16> = value.encode_utf16().collect();
                     dc.DrawText(
                         &wtxt,

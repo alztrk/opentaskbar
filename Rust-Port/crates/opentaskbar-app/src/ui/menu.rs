@@ -33,14 +33,15 @@ use crate::platform::win32;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
-const MENU_W_DIPS: f32 = 248.0;
-const ROW_H_DIPS: f32 = 30.0;
+const MENU_W_DIPS: f32 = 256.0;
+const ROW_H_DIPS: f32 = 32.0;
 const SEP_H_DIPS: f32 = 8.0;
 const PAD_X_DIPS: f32 = 6.0;
 const PAD_Y_DIPS: f32 = 6.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuIcon {
+    Search,
     Settings,
     Activity,
     Folder,
@@ -139,6 +140,7 @@ pub(super) unsafe fn draw_menu_icon(
 ) {
     use crate::design::icons::{self, AppIcon};
     let app_icon = match icon {
+        MenuIcon::Search => AppIcon::Search,
         MenuIcon::Settings => AppIcon::Settings,
         MenuIcon::Activity => AppIcon::Activity,
         MenuIcon::Folder => AppIcon::Folder,
@@ -156,7 +158,7 @@ pub(super) unsafe fn draw_menu_icon(
         MenuIcon::ChevronRight => AppIcon::ChevronRight,
         MenuIcon::Layers => AppIcon::Layers,
     };
-    let size_px = (15.0 * dpi).round() as i32;
+    let size_px = (18.0 * dpi).round() as i32;
     unsafe {
         icons::draw_svg_icon_gdi(hdc, app_icon, cx, cy, size_px, color, bg_color);
     }
@@ -308,17 +310,22 @@ impl MenuState {
         let row_h = (ROW_H_DIPS * dpi).round() as i32;
         let sep_h = (SEP_H_DIPS * dpi).round() as i32;
         let radius = (7.0 * dpi).round() as i32;
-        let icon_cx_off = (16.0 * dpi).round() as i32;
-        let text_left_off = (32.0 * dpi).round() as i32;
+        let icon_cx_off = (18.0 * dpi).round() as i32;
+        let text_left_off = (37.0 * dpi).round() as i32;
         let text_right_off = (10.0 * dpi).round() as i32;
 
         let pal = design::palette(self.is_dark);
+        let idle_icon_rgb = if self.is_dark {
+            (0xc8, 0xc8, 0xd0)
+        } else {
+            (0x48, 0x48, 0x52)
+        };
         let (bg, hover_bg, danger_bg, text_fg, icon_fg, hint_fg, danger_fg, sep_col) = (
             gdi_rgb(pal.surface),
             gdi_rgb(pal.hover),
             gdi_rgb(pal.danger_hover_bg),
             gdi_rgb(pal.text_primary),
-            gdi_rgb(pal.text_secondary),
+            gdi_rgb(idle_icon_rgb),
             gdi_rgb(pal.text_secondary),
             gdi_rgb(pal.danger_fg),
             gdi_rgb(pal.sep_rgb),

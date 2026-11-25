@@ -395,7 +395,7 @@ fn map_context_action(id: u32) -> ContextAction {
 
 fn dock_menu_entries(focus_mode: bool) -> Vec<MenuEntry> {
     vec![
-        MenuEntry::item(MENU_SEARCH, MenuIcon::Play, "Search Apps"),
+        MenuEntry::item(MENU_SEARCH, MenuIcon::Search, "Search Apps"),
         MenuEntry::item(
             MENU_FOCUS_MODE,
             MenuIcon::Layers,
