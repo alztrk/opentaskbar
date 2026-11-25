@@ -110,6 +110,7 @@ pub enum WidgetChipSpec {
         present: bool,
         percent: u32,
         charging: bool,
+        wave_phase: f32,
     },
     /// C# `BluetoothBatteryWidget.cs`: horizontal connected device tiles (`icon + %`) or centered `—`
     Bluetooth {
@@ -1226,8 +1227,10 @@ impl DcompEngine {
                     present,
                     percent,
                     charging,
+                    wave_phase,
                 } => {
-                    // Exact C# BatteryWidget.cs horizontal liquid-fill card!
+                    // Exact C# BatteryWidget.cs horizontal liquid-fill card with scrolling sinusoidal
+                    // meniscus wave + -22deg skewed left-to-right charging sheen!
                     if !*present {
                         draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
                         draw_text(
@@ -1249,20 +1252,20 @@ impl DcompEngine {
                                 right: width_dips,
                                 bottom: height_dips,
                             },
-                            radiusX: 12.0,
-                            radiusY: 12.0,
+                            radiusX: 10.0,
+                            radiusY: 10.0,
                         };
                         let base_track = dc.CreateSolidColorBrush(
                             &if is_dark {
-                                color_rgba(0xff, 0xff, 0xff, 0.08)
+                                color_rgba(0xff, 0xff, 0xff, 0.09)
                             } else {
-                                color_rgba(0x00, 0x00, 0x00, 0.06)
+                                color_rgba(0x00, 0x00, 0x00, 0.07)
                             },
                             None,
                         )?;
                         dc.FillRoundedRectangle(&card_rr, &base_track);
 
-                        // Exact C# BatteryWidget.PaletteForLevel gradient stops
+                        // Exact C# BatteryWidget.PaletteForLevel vertical gradient stops
                         let (top_c, bot_c) = if *percent <= 20 {
                             ((0xb2, 0x60, 0x67), (0x98, 0x50, 0x5a))
                         } else if *percent <= 50 {
@@ -1299,20 +1302,177 @@ impl DcompEngine {
                             None,
                             &stop_col,
                         )?;
-                        let edge_x = width_dips * ((*percent).clamp(4, 100) as f32 / 100.0);
-                        dc.PushAxisAlignedClip(
-                            &D2D_RECT_F {
-                                left: 0.0,
-                                top: 0.0,
-                                right: edge_x,
-                                bottom: height_dips,
-                            },
-                            windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                        );
-                        dc.FillRoundedRectangle(&card_rr, &liq_b);
-                        dc.PopAxisAlignedClip();
 
-                        // Hover/press overlay above liquid fill (just like C# _hoverOverlay/_pressOverlay)
+                        let edge_x = width_dips * ((*percent).clamp(2, 100) as f32 / 100.0);
+                        let card_mask: windows::Win32::Graphics::Direct2D::ID2D1Geometry =
+                            self.d2d_factory.CreateRoundedRectangleGeometry(&card_rr)?.into();
+                        let layer_params = windows::Win32::Graphics::Direct2D::D2D1_LAYER_PARAMETERS1 {
+                            contentBounds: card_rr.rect,
+                            geometricMask: std::mem::ManuallyDrop::new(Some(card_mask)),
+                            maskAntialiasMode:
+                                windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                            maskTransform: Matrix3x2::identity(),
+                            opacity: 1.0,
+                            opacityBrush: std::mem::ManuallyDrop::new(None),
+                            layerOptions:
+                                windows::Win32::Graphics::Direct2D::D2D1_LAYER_OPTIONS1_NONE,
+                        };
+                        dc.PushLayer(&layer_params, None);
+
+                        // Build liquid geometry (2-period sinusoidal meniscus when charging & < 100%).
+                        let liquid_geom: windows::Win32::Graphics::Direct2D::ID2D1Geometry =
+                            if *charging && *percent < 100 {
+                                let amp = 3.2_f32.min(edge_x * 0.35);
+                                let half = height_dips * 0.5;
+                                let y0 = -(wave_phase.clamp(0.0, 1.0)) * height_dips;
+                                let path = self.d2d_factory.CreatePathGeometry()?;
+                                let sink = path.Open()?;
+                                sink.BeginFigure(
+                                    Vector2 { X: 0.0, Y: y0 },
+                                    windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_BEGIN_FILLED,
+                                );
+                                sink.AddLine(Vector2 { X: edge_x, Y: y0 });
+                                // Period 1: y0 -> y0 + height_dips
+                                sink.AddBezier(&windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
+                                    point1: Vector2 {
+                                        X: edge_x + amp,
+                                        Y: y0 + half * 0.36,
+                                    },
+                                    point2: Vector2 {
+                                        X: edge_x + amp,
+                                        Y: y0 + half * 0.64,
+                                    },
+                                    point3: Vector2 {
+                                        X: edge_x,
+                                        Y: y0 + half,
+                                    },
+                                });
+                                sink.AddBezier(&windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
+                                    point1: Vector2 {
+                                        X: edge_x - amp,
+                                        Y: y0 + half + half * 0.36,
+                                    },
+                                    point2: Vector2 {
+                                        X: edge_x - amp,
+                                        Y: y0 + half + half * 0.64,
+                                    },
+                                    point3: Vector2 {
+                                        X: edge_x,
+                                        Y: y0 + height_dips,
+                                    },
+                                });
+                                // Period 2: y0 + height_dips -> y0 + 2 * height_dips (seamless loop)
+                                sink.AddBezier(&windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
+                                    point1: Vector2 {
+                                        X: edge_x + amp,
+                                        Y: y0 + height_dips + half * 0.36,
+                                    },
+                                    point2: Vector2 {
+                                        X: edge_x + amp,
+                                        Y: y0 + height_dips + half * 0.64,
+                                    },
+                                    point3: Vector2 {
+                                        X: edge_x,
+                                        Y: y0 + height_dips + half,
+                                    },
+                                });
+                                sink.AddBezier(&windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
+                                    point1: Vector2 {
+                                        X: edge_x - amp,
+                                        Y: y0 + height_dips + half + half * 0.36,
+                                    },
+                                    point2: Vector2 {
+                                        X: edge_x - amp,
+                                        Y: y0 + height_dips + half + half * 0.64,
+                                    },
+                                    point3: Vector2 {
+                                        X: edge_x,
+                                        Y: y0 + height_dips * 2.0,
+                                    },
+                                });
+                                sink.AddLine(Vector2 {
+                                    X: 0.0,
+                                    Y: y0 + height_dips * 2.0,
+                                });
+                                sink.EndFigure(
+                                    windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_END_CLOSED,
+                                );
+                                sink.Close()?;
+                                path.into()
+                            } else {
+                                self.d2d_factory
+                                    .CreateRectangleGeometry(&D2D_RECT_F {
+                                        left: 0.0,
+                                        top: 0.0,
+                                        right: edge_x,
+                                        bottom: height_dips,
+                                    })?
+                                    .into()
+                            };
+
+                        dc.FillGeometry(&liquid_geom, &liq_b, None);
+
+                        // Exact C# -22deg skewed left-to-right charging sheen clipped strictly to liquid fill.
+                        if *charging {
+                            let sheen_w = 54.0_f32;
+                            let t = (wave_phase / 0.875).clamp(0.0, 1.0);
+                            let eased = if t < 0.5 {
+                                4.0 * t * t * t
+                            } else {
+                                1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+                            };
+                            let start_x = -sheen_w - 28.0;
+                            let end_x = edge_x + 28.0;
+                            let sx = start_x + (end_x - start_x) * eased;
+                            let sheen_stops = [
+                                D2D1_GRADIENT_STOP {
+                                    position: 0.0,
+                                    color: color_rgba(0xff, 0xff, 0xff, 0.0),
+                                },
+                                D2D1_GRADIENT_STOP {
+                                    position: 0.30,
+                                    color: color_rgba(0xff, 0xff, 0xff, 0.09),
+                                },
+                                D2D1_GRADIENT_STOP {
+                                    position: 0.50,
+                                    color: color_rgba(0xff, 0xff, 0xff, 0.21),
+                                },
+                                D2D1_GRADIENT_STOP {
+                                    position: 0.70,
+                                    color: color_rgba(0xff, 0xff, 0xff, 0.09),
+                                },
+                                D2D1_GRADIENT_STOP {
+                                    position: 1.0,
+                                    color: color_rgba(0xff, 0xff, 0xff, 0.0),
+                                },
+                            ];
+                            let sheen_sc = dc.CreateGradientStopCollection(
+                                &sheen_stops,
+                                D2D1_COLOR_SPACE_SRGB,
+                                D2D1_COLOR_SPACE_SRGB,
+                                D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                                D2D1_EXTEND_MODE_CLAMP,
+                                D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+                            )?;
+                            let sheen_b = dc.CreateLinearGradientBrush(
+                                &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                                    startPoint: Vector2 { X: sx, Y: 0.0 },
+                                    endPoint: Vector2 {
+                                        X: sx + sheen_w,
+                                        Y: height_dips * 0.40,
+                                    },
+                                },
+                                None,
+                                &sheen_sc,
+                            )?;
+                            dc.FillGeometry(&liquid_geom, &sheen_b, None);
+                        }
+
+                        dc.PopLayer();
+                        // Drop ManuallyDrop geometricMask cleanly after PopLayer.
+                        let _ = std::mem::ManuallyDrop::into_inner(layer_params.geometricMask);
+
+                        // Hover/press overlay above liquid fill (exact C# _hoverOverlay/_pressOverlay)
                         draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
 
                         let label = format!("{percent}%");

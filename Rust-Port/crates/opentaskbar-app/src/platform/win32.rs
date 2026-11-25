@@ -4,6 +4,7 @@
 //! - System dark/light theme detection via Windows Personalize registry key (Issue #88)
 //! - Native context menus (Dock, Per-App, Task View), file drop extraction, and key modifiers
 
+use opentaskbar_core::settings::DockSettings;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
@@ -68,7 +69,20 @@ const MENU_LOCK_PC: u32 = 1014;
 const MENU_SIGN_OUT: u32 = 1015;
 const MENU_RESTART_PC: u32 = 1016;
 const MENU_SHUTDOWN_PC: u32 = 1017;
-const MENU_PROFILES: u32 = 1018;
+
+const MENU_PROFILE_APPLY_BASE: u32 = 6000;
+const MENU_PROFILE_APPLY_MAX: u32 = 6199;
+const MENU_PROFILE_SAVE_WORK: u32 = 6201;
+const MENU_PROFILE_SAVE_GAMING: u32 = 6202;
+const MENU_PROFILE_SAVE_MINIMAL: u32 = 6203;
+const MENU_STACK_ADD_DOWNLOADS: u32 = 6301;
+const MENU_STACK_ADD_DESKTOP: u32 = 6302;
+const MENU_STACK_ADD_DOCUMENTS: u32 = 6303;
+const MENU_STACK_REMOVE_BASE: u32 = 6400;
+const MENU_STACK_REMOVE_MAX: u32 = 6499;
+const MENU_GROUP_ADD_PRODUCTIVITY: u32 = 6501;
+const MENU_GROUP_REMOVE_BASE: u32 = 6600;
+const MENU_GROUP_REMOVE_MAX: u32 = 6699;
 
 const APP_MENU_OPEN: u32 = 2001;
 const APP_MENU_NEW_WINDOW: u32 = 2002;
@@ -104,7 +118,7 @@ pub fn show_widget_context_menu(
     hwnd: usize,
     is_dark: bool,
     secondary_label: Option<&str>,
-    focus_mode: bool,
+    settings: &DockSettings,
 ) -> WidgetContextAction {
     const MENU_WIDGET_SECONDARY: u32 = 5001;
     const MENU_WIDGET_REMOVE: u32 = 5002;
@@ -123,7 +137,7 @@ pub fn show_widget_context_menu(
         "Remove Widget",
     ));
     entries.push(MenuEntry::Separator);
-    entries.extend(dock_menu_entries(focus_mode));
+    entries.extend(dock_menu_entries(settings));
 
     match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
         MENU_WIDGET_SECONDARY => WidgetContextAction::Secondary,
@@ -139,7 +153,12 @@ pub fn show_widget_context_menu(
 pub enum ContextAction {
     None,
     Search,
-    Profiles,
+    ApplyProfile(usize),
+    SaveProfile(&'static str),
+    AddStack(&'static str),
+    RemoveStack(usize),
+    AddStarterGroup,
+    RemoveGroup(usize),
     ToggleFocusMode,
     Settings,
     TaskManager,
@@ -433,7 +452,22 @@ use crate::ui::menu::{self, MenuEntry, MenuIcon};
 fn map_context_action(id: u32) -> ContextAction {
     match id {
         MENU_SEARCH => ContextAction::Search,
-        MENU_PROFILES => ContextAction::Profiles,
+        MENU_PROFILE_APPLY_BASE..=MENU_PROFILE_APPLY_MAX => {
+            ContextAction::ApplyProfile((id - MENU_PROFILE_APPLY_BASE) as usize)
+        }
+        MENU_PROFILE_SAVE_WORK => ContextAction::SaveProfile("Work"),
+        MENU_PROFILE_SAVE_GAMING => ContextAction::SaveProfile("Gaming"),
+        MENU_PROFILE_SAVE_MINIMAL => ContextAction::SaveProfile("Minimal"),
+        MENU_STACK_ADD_DOWNLOADS => ContextAction::AddStack("Downloads"),
+        MENU_STACK_ADD_DESKTOP => ContextAction::AddStack("Desktop"),
+        MENU_STACK_ADD_DOCUMENTS => ContextAction::AddStack("Documents"),
+        MENU_STACK_REMOVE_BASE..=MENU_STACK_REMOVE_MAX => {
+            ContextAction::RemoveStack((id - MENU_STACK_REMOVE_BASE) as usize)
+        }
+        MENU_GROUP_ADD_PRODUCTIVITY => ContextAction::AddStarterGroup,
+        MENU_GROUP_REMOVE_BASE..=MENU_GROUP_REMOVE_MAX => {
+            ContextAction::RemoveGroup((id - MENU_GROUP_REMOVE_BASE) as usize)
+        }
         MENU_FOCUS_MODE => ContextAction::ToggleFocusMode,
         MENU_SETTINGS => ContextAction::Settings,
         MENU_TASKMGR => ContextAction::TaskManager,
@@ -457,14 +491,119 @@ fn map_context_action(id: u32) -> ContextAction {
     }
 }
 
-fn dock_menu_entries(focus_mode: bool) -> Vec<MenuEntry> {
+fn dock_menu_entries(settings: &DockSettings) -> Vec<MenuEntry> {
+    let mut profile_items: Vec<MenuEntry> = settings
+        .profiles
+        .iter()
+        .enumerate()
+        .take(20)
+        .map(|(i, p)| {
+            let active = settings
+                .active_profile
+                .as_deref()
+                .is_some_and(|a| a.eq_ignore_ascii_case(&p.name));
+            if active {
+                MenuEntry::with_shortcut(
+                    MENU_PROFILE_APPLY_BASE + i as u32,
+                    MenuIcon::Layers,
+                    p.name.clone(),
+                    "Active",
+                )
+            } else {
+                MenuEntry::item(
+                    MENU_PROFILE_APPLY_BASE + i as u32,
+                    MenuIcon::Layers,
+                    p.name.clone(),
+                )
+            }
+        })
+        .collect();
+    if !profile_items.is_empty() {
+        profile_items.push(MenuEntry::Separator);
+    }
+    profile_items.push(MenuEntry::item(
+        MENU_PROFILE_SAVE_WORK,
+        MenuIcon::Plus,
+        "Save as Work",
+    ));
+    profile_items.push(MenuEntry::item(
+        MENU_PROFILE_SAVE_GAMING,
+        MenuIcon::Plus,
+        "Save as Gaming",
+    ));
+    profile_items.push(MenuEntry::item(
+        MENU_PROFILE_SAVE_MINIMAL,
+        MenuIcon::Plus,
+        "Save as Minimal",
+    ));
+
+    let mut stack_items: Vec<MenuEntry> = settings
+        .stack_folders
+        .iter()
+        .enumerate()
+        .take(20)
+        .map(|(i, path)| {
+            let name = std::path::Path::new(path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or(path);
+            MenuEntry::destructive(
+                MENU_STACK_REMOVE_BASE + i as u32,
+                MenuIcon::Trash,
+                format!("Remove {name}"),
+            )
+        })
+        .collect();
+    if !stack_items.is_empty() {
+        stack_items.push(MenuEntry::Separator);
+    }
+    stack_items.push(MenuEntry::item(
+        MENU_STACK_ADD_DOWNLOADS,
+        MenuIcon::Folder,
+        "Add Downloads",
+    ));
+    stack_items.push(MenuEntry::item(
+        MENU_STACK_ADD_DESKTOP,
+        MenuIcon::Folder,
+        "Add Desktop",
+    ));
+    stack_items.push(MenuEntry::item(
+        MENU_STACK_ADD_DOCUMENTS,
+        MenuIcon::Folder,
+        "Add Documents",
+    ));
+
+    let mut group_items: Vec<MenuEntry> = settings
+        .app_groups
+        .iter()
+        .enumerate()
+        .take(20)
+        .map(|(i, g)| {
+            MenuEntry::destructive(
+                MENU_GROUP_REMOVE_BASE + i as u32,
+                MenuIcon::Trash,
+                format!("Remove {}", g.name),
+            )
+        })
+        .collect();
+    if !group_items.is_empty() {
+        group_items.push(MenuEntry::Separator);
+    }
+    group_items.push(MenuEntry::item(
+        MENU_GROUP_ADD_PRODUCTIVITY,
+        MenuIcon::Plus,
+        "Add Productivity Group",
+    ));
+
     vec![
         MenuEntry::item(MENU_SEARCH, MenuIcon::Search, "Search Apps"),
-        MenuEntry::item(MENU_PROFILES, MenuIcon::Layers, "Profiles"),
+        MenuEntry::submenu(MenuIcon::Layers, "Profiles", profile_items),
+        MenuEntry::submenu(MenuIcon::Folder, "Folder Stacks", stack_items),
+        MenuEntry::submenu(MenuIcon::Layers, "App Groups", group_items),
         MenuEntry::item(
             MENU_FOCUS_MODE,
             MenuIcon::Layers,
-            if focus_mode {
+            if settings.focus_mode {
                 "Focus Mode (On)"
             } else {
                 "Focus Mode"
@@ -525,9 +664,13 @@ pub fn show_start_context_menu(hwnd: usize, is_dark: bool) -> ContextAction {
     map_context_action(menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0))
 }
 
-pub fn show_dock_context_menu(hwnd: usize, is_dark: bool, focus_mode: bool) -> ContextAction {
+pub fn show_dock_context_menu(
+    hwnd: usize,
+    is_dark: bool,
+    settings: &DockSettings,
+) -> ContextAction {
     map_context_action(
-        menu::show_popup_menu(hwnd, is_dark, dock_menu_entries(focus_mode)).unwrap_or(0),
+        menu::show_popup_menu(hwnd, is_dark, dock_menu_entries(settings)).unwrap_or(0),
     )
 }
 
@@ -537,7 +680,7 @@ pub fn show_app_context_menu(
     app_name: &str,
     pinned: bool,
     running: bool,
-    focus_mode: bool,
+    settings: &DockSettings,
 ) -> AppContextAction {
     let mut entries = vec![
         MenuEntry::item(APP_MENU_OPEN, MenuIcon::Play, app_name),
@@ -578,7 +721,7 @@ pub fn show_app_context_menu(
         ));
     }
     entries.push(MenuEntry::Separator);
-    entries.extend(dock_menu_entries(focus_mode));
+    entries.extend(dock_menu_entries(settings));
 
     let chosen = menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0);
     match chosen {

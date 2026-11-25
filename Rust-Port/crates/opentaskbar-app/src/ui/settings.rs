@@ -2,16 +2,13 @@
 //!
 //! Grouped settings with a responsive navigation pane and immediate dock updates.
 
-use std::path::PathBuf;
-
 use gpui::{
     AnyElement, App, Application, Bounds, Context, FocusHandle, KeyBinding, MouseButton,
     ScrollHandle, SharedString, TitlebarOptions, Window, WindowBounds, WindowControlArea,
     WindowOptions, actions, div, prelude::*, px, rgba, size,
 };
 use opentaskbar_core::settings::{
-    self, AppTheme, AutoHideMode, DockAppGroup, DockPosition, DockSettings, DockSize,
-    SurfaceBackground,
+    self, AppTheme, AutoHideMode, DockPosition, DockSettings, DockSize, SurfaceBackground,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, RegisterWindowMessageW, SendNotifyMessageW,
@@ -49,13 +46,12 @@ enum SettingsPage {
     Dock,
     Widgets,
     Themes,
-    Stacks,
     Preferences,
     About,
 }
 
 impl SettingsPage {
-    const TOP: [Self; 4] = [Self::Dock, Self::Widgets, Self::Themes, Self::Stacks];
+    const TOP: [Self; 3] = [Self::Dock, Self::Widgets, Self::Themes];
     const BOTTOM: [Self; 2] = [Self::Preferences, Self::About];
 
     fn title(self) -> &'static str {
@@ -63,7 +59,6 @@ impl SettingsPage {
             Self::Dock => "Dock",
             Self::Widgets => "Widgets",
             Self::Themes => "Themes",
-            Self::Stacks => "Stacks & Groups",
             Self::Preferences => "Preferences",
             Self::About => "About",
         }
@@ -74,7 +69,6 @@ impl SettingsPage {
             Self::Dock => "\u{E7F4}",
             Self::Widgets => "\u{F0E2}",
             Self::Themes => "\u{E790}",
-            Self::Stacks => "\u{E8B7}",
             Self::Preferences => "\u{E713}",
             Self::About => "\u{E946}",
         }
@@ -85,7 +79,6 @@ impl SettingsPage {
             Self::Dock => "Adjust the dock layout and how it behaves on your displays.",
             Self::Widgets => "Choose which widgets appear on the dock and configure them.",
             Self::Themes => "Customize the dock colors, materials, and effects.",
-            Self::Stacks => "Organize dock shortcuts into folders and app groups.",
             Self::Preferences => "Manage startup and settings backups.",
             Self::About => "View the version and open local application files.",
         }
@@ -124,13 +117,6 @@ fn notify_docks_reload() {
             SendNotifyMessageW(HWND_BROADCAST, msg, 0, 0);
         }
     }
-}
-
-fn user_folder(name: &str) -> Option<String> {
-    let path = std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)?
-        .join(name);
-    path.exists().then(|| path.to_string_lossy().into_owned())
 }
 
 struct SettingsView {
@@ -216,6 +202,7 @@ impl SettingsView {
                 present: true,
                 percent: 84,
                 charging: true,
+                wave_phase: 0.35,
             },
             "bluetoothbattery" => WidgetChipSpec::Bluetooth {
                 devices: vec![(90, false, false)],
@@ -675,6 +662,7 @@ impl SettingsView {
                 present,
                 percent,
                 charging,
+                ..
             } => {
                 if !present {
                     chip(
@@ -687,22 +675,28 @@ impl SettingsView {
                                 div()
                                     .text_size(px(11.0))
                                     .text_color(rgba(t.dock_preview_sub))
-                                    .child("N/A"),
+                                    .child("—"),
                             ),
                     )
                 } else {
-                    let ratio = (percent as f32 / 100.0).clamp(0.0, 1.0);
-                    let fill_col = crate::design::level_color(&pal, ratio);
-                    let card_w = 88.0_f32;
+                    let ratio = (percent as f32 / 100.0).clamp(0.02, 1.0);
+                    let fill_col = if percent <= 20 {
+                        (0xb2, 0x60, 0x67)
+                    } else if percent <= 50 {
+                        (0xb9, 0x95, 0x63)
+                    } else {
+                        (0x58, 0xa8, 0x9c)
+                    };
+                    let card_w = 94.0_f32;
                     let fill_w = (card_w * ratio).round();
                     div()
                         .relative()
                         .w(px(card_w))
                         .h(px(40.0))
-                        .rounded(px(9.0))
+                        .rounded(px(10.0))
                         .bg(rgba(chip_bg))
                         .border_1()
-                        .border_color(c_rgba(fill_col, 0x88))
+                        .border_color(rgba(chip_bd))
                         .overflow_hidden()
                         .flex()
                         .items_center()
@@ -714,24 +708,22 @@ impl SettingsView {
                                 .top_0()
                                 .bottom_0()
                                 .w(px(fill_w))
-                                .bg(c_rgba(fill_col, 0x44)),
+                                .bg(c_rgba(fill_col, 0xf2)),
                         )
                         .child(
                             div()
                                 .relative()
                                 .flex()
                                 .items_center()
-                                .gap(px(5.0))
-                                .child(icon_glyph(
-                                    if charging { "\u{EBAB}" } else { "\u{E858}" },
-                                    13.0,
-                                    crate::design::gpui_rgba(fill_col, 0xff),
-                                ))
+                                .gap(px(4.0))
+                                .when(charging, |row| {
+                                    row.child(icon_glyph("\u{E945}", 11.0, 0xffffffff))
+                                })
                                 .child(
                                     div()
-                                        .text_size(px(12.0))
+                                        .text_size(px(13.0))
                                         .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(rgba(t.dock_preview_fg))
+                                        .text_color(rgba(0xffffffff))
                                         .child(format!("{percent}%")),
                                 ),
                         )
@@ -1609,11 +1601,17 @@ impl SettingsView {
             .tab_index(0)
             .focus(move |style| style.border_color(rgba(focus_color)))
             .hover(move |s| s.bg(rgba(card_hover)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let cur = this.settings.is_widget_enabled(wid);
-                this.settings.set_widget_enabled(wid, !cur);
-                this.auto_save(cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| {
+                    let cur = this.settings.is_widget_enabled(wid);
+                    if !cur && this.settings.focus_mode && wid != "clock" && wid != "focus" {
+                        this.settings.focus_mode = false;
+                    }
+                    this.settings.set_widget_enabled(wid, !cur);
+                    this.auto_save(cx);
+                }),
+            )
             .child(
                 div()
                     .w_full()
@@ -1655,17 +1653,9 @@ impl SettingsView {
                                     .child(w.name),
                             ),
                     )
-                    .child(ios_switch(
-                        SharedString::from(format!("wsw-{wid}")),
-                        t,
-                        enabled,
-                        cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            let cur = this.settings.is_widget_enabled(wid);
-                            this.settings.set_widget_enabled(wid, !cur);
-                            this.auto_save(cx);
-                        }),
-                    )),
+                    .when(enabled, |row| {
+                        row.child(icon_glyph("\u{E73E}", 12.0, t.accent))
+                    }),
             );
 
         card.into_any_element()
@@ -1799,132 +1789,6 @@ impl SettingsView {
             }
         }
         out
-    }
-
-    fn render_stacks(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut stack_rows: Vec<AnyElement> = self
-            .settings
-            .stack_folders
-            .iter()
-            .enumerate()
-            .map(|(i, path)| {
-                let name = std::path::Path::new(path)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or(path)
-                    .to_owned();
-                setting_row(
-                    t,
-                    Some("\u{E8B7}"),
-                    name,
-                    button(
-                        SharedString::from(format!("rm-stack-{i}")),
-                        t,
-                        "Remove",
-                        ButtonVariant::Destructive,
-                        cx.listener(move |this, _, _, cx| {
-                            if i < this.settings.stack_folders.len() {
-                                this.settings.stack_folders.remove(i);
-                                this.auto_save(cx);
-                            }
-                        }),
-                    ),
-                )
-                .into_any_element()
-            })
-            .collect();
-
-        let quick_add = div().flex().items_center().gap(px(6.0)).children(
-            ["Downloads", "Desktop", "Documents"]
-                .into_iter()
-                .map(|folder| {
-                    button(
-                        SharedString::from(format!("add-st-{folder}")),
-                        t,
-                        format!("+ {folder}"),
-                        ButtonVariant::Secondary,
-                        cx.listener(move |this, _, _, cx| {
-                            if let Some(p) = user_folder(folder)
-                                && !this
-                                    .settings
-                                    .stack_folders
-                                    .iter()
-                                    .any(|x| x.eq_ignore_ascii_case(&p))
-                            {
-                                this.settings.stack_folders.push(p);
-                                this.auto_save(cx);
-                            }
-                        }),
-                    )
-                }),
-        );
-        stack_rows
-            .push(setting_row(t, Some("\u{E710}"), "Add Folder", quick_add).into_any_element());
-
-        let mut group_rows: Vec<AnyElement> = self
-            .settings
-            .app_groups
-            .iter()
-            .enumerate()
-            .map(|(i, g)| {
-                setting_row(
-                    t,
-                    Some("\u{F0E2}"),
-                    format!("{} ({})", g.name, g.executable_paths.len()),
-                    button(
-                        SharedString::from(format!("rm-grp-{i}")),
-                        t,
-                        "Remove",
-                        ButtonVariant::Destructive,
-                        cx.listener(move |this, _, _, cx| {
-                            if i < this.settings.app_groups.len() {
-                                this.settings.app_groups.remove(i);
-                                this.auto_save(cx);
-                            }
-                        }),
-                    ),
-                )
-                .into_any_element()
-            })
-            .collect();
-
-        group_rows.push(
-            setting_row(
-                t,
-                Some("\u{E710}"),
-                "Starter Group",
-                button(
-                    "add-grp-prod",
-                    t,
-                    "+ Productivity",
-                    ButtonVariant::Secondary,
-                    cx.listener(|this, _, _, cx| {
-                        if !this
-                            .settings
-                            .app_groups
-                            .iter()
-                            .any(|g| g.name.eq_ignore_ascii_case("Productivity"))
-                        {
-                            this.settings.app_groups.push(DockAppGroup {
-                                id: "productivity".to_owned(),
-                                name: "Productivity".to_owned(),
-                                executable_paths: vec![
-                                    "explorer.exe".to_owned(),
-                                    "wt.exe".to_owned(),
-                                ],
-                            });
-                            this.auto_save(cx);
-                        }
-                    }),
-                ),
-            )
-            .into_any_element(),
-        );
-
-        vec![
-            section_card(t, "Folder Stacks", stack_rows).into_any_element(),
-            section_card(t, "App Groups", group_rows).into_any_element(),
-        ]
     }
 
     fn render_preferences(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -2126,7 +1990,6 @@ impl Render for SettingsView {
                 self.render_widgets(&t, columns, cx)
             }
             SettingsPage::Themes => self.render_themes(&t, cx),
-            SettingsPage::Stacks => self.render_stacks(&t, cx),
             SettingsPage::Preferences => self.render_preferences(&t, cx),
             SettingsPage::About => self.render_about(&t),
         };

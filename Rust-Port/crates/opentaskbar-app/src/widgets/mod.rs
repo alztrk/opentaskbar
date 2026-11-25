@@ -169,6 +169,8 @@ pub struct WidgetRuntime {
     ai_usage: Arc<Mutex<telemetry::AiUsageCache>>,
     media_session: Arc<Mutex<telemetry::MediaSessionSnapshot>>,
     night_light_on: bool,
+    battery_anim_start: Instant,
+    battery_charging: bool,
     last_tick: Instant,
 }
 
@@ -196,6 +198,8 @@ impl Default for WidgetRuntime {
             ai_usage: Arc::new(Mutex::new(telemetry::AiUsageCache::default())),
             media_session: Arc::new(Mutex::new(telemetry::MediaSessionSnapshot::default())),
             night_light_on: telemetry::read_night_light().unwrap_or(false),
+            battery_anim_start: Instant::now(),
+            battery_charging: false,
             last_tick: Instant::now(),
         }
     }
@@ -272,12 +276,25 @@ impl WidgetRuntime {
         if settings.is_widget_enabled("quicksettings") {
             self.night_light_on = telemetry::read_night_light().unwrap_or(self.night_light_on);
         }
+        if settings.is_widget_enabled("battery") {
+            let b = sample_battery();
+            self.battery_charging = b.has_battery && b.charging;
+        } else {
+            self.battery_charging = false;
+        }
         let all_ai = settings.is_widget_enabled("aiusage_all");
         for ai in telemetry::AI_PROVIDERS {
             if all_ai || settings.is_widget_enabled(ai.id) {
                 telemetry::refresh_ai_provider(&self.ai_usage, ai.id, false);
             }
         }
+    }
+
+    /// Returns `true` when any dock widget needs a 15 FPS animation tick (e.g. C# Battery charging wave).
+    pub fn needs_animation_tick(&self, settings: &DockSettings) -> bool {
+        settings.animations_enabled
+            && settings.is_widget_enabled("battery")
+            && self.battery_charging
     }
 
     /// Returns the live dynamic width for a dock widget (matching C# `StorageWidget` multi-drive
@@ -541,10 +558,16 @@ impl WidgetRuntime {
             },
             "battery" => {
                 let b = sample_battery();
+                let wave_phase = if b.has_battery && b.charging && settings.animations_enabled {
+                    (((self.battery_anim_start.elapsed().as_millis() % 1600) / 67) as f32) / 24.0
+                } else {
+                    0.0
+                };
                 WidgetChipSpec::BatteryLiquid {
                     present: b.has_battery,
                     percent: b.percent,
                     charging: b.charging,
+                    wave_phase,
                 }
             }
             "bluetoothbattery" => {

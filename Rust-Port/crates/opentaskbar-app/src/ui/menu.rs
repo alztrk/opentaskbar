@@ -1,4 +1,4 @@
-//! Native Windows 11 Acrylic + Direct2D/DirectWrite popup context menu.
+//! Native Windows 11 Acrylic + Direct2D/DirectWrite popup context menu with cascading hover submenus.
 //!
 //! Uses `DWMWA_SYSTEMBACKDROP_TYPE = DWMSBT_TRANSIENTWINDOW` (Windows 11 Acrylic glass)
 //! with hardware-accelerated Direct2D rounded hover pills, DirectWrite grayscale anti-aliasing,
@@ -39,10 +39,10 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetCursorPos,
     GetMessageW, GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LoadCursorW, MSG,
-    RegisterClassExW, SW_SHOW, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetWindowLongPtrW,
-    SetWindowPos, ShowWindow, TranslateMessage, WM_ACTIVATE, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_ACTIVATE, WM_ERASEBKGND,
+    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::design::icons::{self, AppIcon};
@@ -52,6 +52,7 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
 const DWMSBT_TRANSIENTWINDOW: u32 = 3; // Windows 11 Acrylic backdrop
 const MENU_W_DIPS: f32 = 256.0;
+const SUBMENU_W_DIPS: f32 = 232.0;
 const ROW_H_DIPS: f32 = 32.0;
 const SEP_H_DIPS: f32 = 9.0;
 const PAD_X_DIPS: f32 = 5.0;
@@ -109,6 +110,11 @@ pub enum MenuEntry {
         shortcut: Option<String>,
         destructive: bool,
     },
+    Submenu {
+        icon: MenuIcon,
+        label: String,
+        items: Vec<MenuEntry>,
+    },
     Separator,
 }
 
@@ -147,6 +153,14 @@ impl MenuEntry {
             destructive: true,
         }
     }
+
+    pub fn submenu(icon: MenuIcon, label: impl Into<String>, items: Vec<MenuEntry>) -> Self {
+        Self::Submenu {
+            icon,
+            label: label.into(),
+            items,
+        }
+    }
 }
 
 struct MenuD2d {
@@ -154,20 +168,35 @@ struct MenuD2d {
     text_fmt: IDWriteTextFormat,
     hint_fmt: IDWriteTextFormat,
     icon_fmt: IDWriteTextFormat,
+    chevron_fmt: IDWriteTextFormat,
 }
 
-struct MenuState {
+struct MenuPane {
     hwnd: HWND,
     dpi: f32,
     is_dark: bool,
     acrylic: bool,
+    width_dips: f32,
+    screen_rect: RECT,
     entries: Vec<MenuEntry>,
     row_rects: Vec<Option<RECT>>,
     hovered: Option<usize>,
+    open_submenu_idx: Option<usize>,
     tracking: bool,
+    d2d: Option<MenuD2d>,
+    is_submenu: bool,
+    session: *mut MenuSession,
+}
+
+struct MenuSession {
+    hinstance: windows_sys::Win32::Foundation::HINSTANCE,
+    class_name: Vec<u16>,
+    dpi: f32,
+    is_dark: bool,
+    root: *mut MenuPane,
+    submenu: Option<Box<MenuPane>>,
     selected_id: Option<u32>,
     done: AtomicBool,
-    d2d: Option<MenuD2d>,
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -239,7 +268,7 @@ fn create_menu_d2d(hwnd: HWND, width_px: u32, height_px: u32, dpi: f32) -> Optio
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                11.5,
+                11.0,
                 &locale,
             )
             .ok()?;
@@ -260,11 +289,26 @@ fn create_menu_d2d(hwnd: HWND, width_px: u32, height_px: u32, dpi: f32) -> Optio
         let _ = icon_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
         let _ = icon_fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
+        let chevron_fmt = dwrite
+            .CreateTextFormat(
+                &icon_font,
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                10.0,
+                &locale,
+            )
+            .ok()?;
+        let _ = chevron_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
+        let _ = chevron_fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
         Some(MenuD2d {
             rt,
             text_fmt,
             hint_fmt,
             icon_fmt,
+            chevron_fmt,
         })
     }
 }
@@ -284,37 +328,22 @@ pub(super) unsafe fn draw_menu_icon(
     }
 }
 
-/// Displays a native Windows 11 Acrylic popup menu at the cursor and returns the chosen item ID.
-pub fn show_popup_menu(owner_hwnd: usize, is_dark: bool, entries: Vec<MenuEntry>) -> Option<u32> {
-    if entries.is_empty() {
-        return None;
-    }
-    let class_name = wide("OpenTaskBarContextMenu");
-    let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
-    let wc = WNDCLASSEXW {
-        cbSize: size_of::<WNDCLASSEXW>() as u32,
-        lpfnWndProc: Some(menu_wnd_proc),
-        hInstance: hinstance,
-        hCursor: unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) },
-        lpszClassName: class_name.as_ptr(),
-        ..unsafe { std::mem::zeroed() }
-    };
-    unsafe {
-        RegisterClassExW(&wc);
-    }
-
-    let dpi = win32::dpi_scale(owner_hwnd);
+fn measure_entries(
+    entries: &[MenuEntry],
+    width_dips: f32,
+    dpi: f32,
+) -> (i32, i32, Vec<Option<RECT>>) {
     let pad_x = (PAD_X_DIPS * dpi).round() as i32;
     let pad_y = (PAD_Y_DIPS * dpi).round() as i32;
     let row_h = (ROW_H_DIPS * dpi).round() as i32;
     let sep_h = (SEP_H_DIPS * dpi).round() as i32;
-    let menu_w = (MENU_W_DIPS * dpi).round() as i32;
+    let menu_w = (width_dips * dpi).round() as i32;
 
     let mut y_cursor = pad_y;
     let mut row_rects = Vec::with_capacity(entries.len());
-    for entry in &entries {
+    for entry in entries {
         match entry {
-            MenuEntry::Item { .. } => {
+            MenuEntry::Item { .. } | MenuEntry::Submenu { .. } => {
                 row_rects.push(Some(RECT {
                     left: pad_x,
                     top: y_cursor,
@@ -330,20 +359,27 @@ pub fn show_popup_menu(owner_hwnd: usize, is_dark: bool, entries: Vec<MenuEntry>
         }
     }
     let menu_h = y_cursor + pad_y;
+    (menu_w, menu_h, row_rects)
+}
 
-    let mut pt = POINT { x: 0, y: 0 };
-    unsafe {
-        GetCursorPos(&mut pt);
-    }
-    let (scr_w, scr_h) = win32::primary_screen_px();
-    let margin = (8.0 * dpi).round() as i32;
-    let x = pt.x.clamp(margin, (scr_w - menu_w - margin).max(margin));
-    let y = (pt.y - menu_h).clamp(margin, (scr_h - menu_h - margin).max(margin));
-
+fn create_pane_window(
+    session: *mut MenuSession,
+    entries: Vec<MenuEntry>,
+    width_dips: f32,
+    x: i32,
+    y: i32,
+    is_submenu: bool,
+) -> Option<Box<MenuPane>> {
+    let (hinstance, class_ptr, dpi, is_dark) = unsafe {
+        let s = &*session;
+        (s.hinstance, s.class_name.as_ptr(), s.dpi, s.is_dark)
+    };
+    let (menu_w, menu_h, row_rects) = measure_entries(&entries, width_dips, dpi);
+    let ex_style = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | if is_submenu { WS_EX_NOACTIVATE } else { 0 };
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            class_name.as_ptr(),
+            ex_style,
+            class_ptr,
             wide("").as_ptr(),
             WS_POPUP,
             x,
@@ -392,30 +428,94 @@ pub fn show_popup_menu(owner_hwnd: usize, is_dark: bool, entries: Vec<MenuEntry>
     };
 
     let d2d = create_menu_d2d(hwnd, menu_w as u32, menu_h as u32, dpi);
-
-    let mut state = Box::new(MenuState {
+    let mut pane = Box::new(MenuPane {
         hwnd,
         dpi,
         is_dark,
         acrylic,
+        width_dips,
+        screen_rect: RECT {
+            left: x,
+            top: y,
+            right: x + menu_w,
+            bottom: y + menu_h,
+        },
         entries,
         row_rects,
         hovered: None,
+        open_submenu_idx: None,
         tracking: false,
-        selected_id: None,
-        done: AtomicBool::new(false),
         d2d,
+        is_submenu,
+        session,
     });
-    let ptr = (&mut *state) as *mut MenuState as isize;
+    let ptr = (&mut *pane) as *mut MenuPane as isize;
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr);
-        SetWindowPos(hwnd, HWND_TOPMOST, x, y, menu_w, menu_h, SWP_SHOWWINDOW);
-        ShowWindow(hwnd, SW_SHOW);
-        SetForegroundWindow(hwnd);
+        let flags = SWP_SHOWWINDOW | if is_submenu { SWP_NOACTIVATE } else { 0 };
+        SetWindowPos(hwnd, HWND_TOPMOST, x, y, menu_w, menu_h, flags);
+        if !is_submenu {
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+        }
+    }
+    Some(pane)
+}
+
+fn destroy_pane(pane: &mut MenuPane) {
+    pane.d2d = None;
+    unsafe {
+        SetWindowLongPtrW(pane.hwnd, GWLP_USERDATA, 0);
+        DestroyWindow(pane.hwnd);
+    }
+}
+
+/// Displays a native Windows 11 Acrylic popup menu (with hover submenus) at the cursor.
+pub fn show_popup_menu(owner_hwnd: usize, is_dark: bool, entries: Vec<MenuEntry>) -> Option<u32> {
+    if entries.is_empty() {
+        return None;
+    }
+    let class_name = wide("OpenTaskBarContextMenu");
+    let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
+    let wc = WNDCLASSEXW {
+        cbSize: size_of::<WNDCLASSEXW>() as u32,
+        lpfnWndProc: Some(menu_wnd_proc),
+        hInstance: hinstance,
+        hCursor: unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) },
+        lpszClassName: class_name.as_ptr(),
+        ..unsafe { std::mem::zeroed() }
+    };
+    unsafe {
+        RegisterClassExW(&wc);
     }
 
+    let dpi = win32::dpi_scale(owner_hwnd);
+    let (menu_w, menu_h, _) = measure_entries(&entries, MENU_W_DIPS, dpi);
+    let mut pt = POINT { x: 0, y: 0 };
+    unsafe {
+        GetCursorPos(&mut pt);
+    }
+    let (scr_w, scr_h) = win32::primary_screen_px();
+    let margin = (8.0 * dpi).round() as i32;
+    let x = pt.x.clamp(margin, (scr_w - menu_w - margin).max(margin));
+    let y = (pt.y - menu_h).clamp(margin, (scr_h - menu_h - margin).max(margin));
+
+    let mut session = Box::new(MenuSession {
+        hinstance,
+        class_name,
+        dpi,
+        is_dark,
+        root: std::ptr::null_mut(),
+        submenu: None,
+        selected_id: None,
+        done: AtomicBool::new(false),
+    });
+    let session_ptr = (&mut *session) as *mut MenuSession;
+    let mut root = create_pane_window(session_ptr, entries, MENU_W_DIPS, x, y, false)?;
+    session.root = (&mut *root) as *mut MenuPane;
+
     let mut msg: MSG = unsafe { std::mem::zeroed() };
-    while !state.done.load(Ordering::Acquire) {
+    while !session.done.load(Ordering::Acquire) {
         let ret = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
         if ret <= 0 {
             break;
@@ -426,16 +526,70 @@ pub fn show_popup_menu(owner_hwnd: usize, is_dark: bool, entries: Vec<MenuEntry>
         }
     }
 
-    let selected = state.selected_id;
-    state.d2d = None;
-    unsafe {
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-        DestroyWindow(hwnd);
+    let selected = session.selected_id;
+    if let Some(mut sub) = session.submenu.take() {
+        destroy_pane(&mut sub);
     }
+    destroy_pane(&mut root);
     selected
 }
 
-impl MenuState {
+impl MenuSession {
+    fn close_submenu(&mut self) {
+        if let Some(mut sub) = self.submenu.take() {
+            destroy_pane(&mut sub);
+        }
+        if !self.root.is_null() {
+            let root = unsafe { &mut *self.root };
+            if root.open_submenu_idx.take().is_some() {
+                unsafe {
+                    InvalidateRect(root.hwnd, std::ptr::null(), 0);
+                }
+            }
+        }
+    }
+
+    fn open_submenu(&mut self, parent_idx: usize, items: Vec<MenuEntry>, row_rect: RECT) {
+        if self.root.is_null() || items.is_empty() {
+            return;
+        }
+        let root = unsafe { &mut *self.root };
+        if root.open_submenu_idx == Some(parent_idx) && self.submenu.is_some() {
+            return;
+        }
+        if let Some(mut old) = self.submenu.take() {
+            destroy_pane(&mut old);
+        }
+        let (sub_w, sub_h, _) = measure_entries(&items, SUBMENU_W_DIPS, self.dpi);
+        let (scr_w, scr_h) = win32::primary_screen_px();
+        let margin = (8.0 * self.dpi).round() as i32;
+        let pad_y = (PAD_Y_DIPS * self.dpi).round() as i32;
+
+        // Open to the right of the parent menu; flip to the left if near the right screen edge.
+        let right_x = root.screen_rect.right - (2.0 * self.dpi).round() as i32;
+        let left_x = root.screen_rect.left - sub_w + (2.0 * self.dpi).round() as i32;
+        let sub_x = if right_x + sub_w <= scr_w - margin {
+            right_x
+        } else {
+            left_x.max(margin)
+        };
+        let ideal_y = root.screen_rect.top + row_rect.top - pad_y;
+        let sub_y = ideal_y.clamp(margin, (scr_h - sub_h - margin).max(margin));
+
+        let session_ptr = self as *mut MenuSession;
+        if let Some(sub_pane) =
+            create_pane_window(session_ptr, items, SUBMENU_W_DIPS, sub_x, sub_y, true)
+        {
+            self.submenu = Some(sub_pane);
+            root.open_submenu_idx = Some(parent_idx);
+            unsafe {
+                InvalidateRect(root.hwnd, std::ptr::null(), 0);
+            }
+        }
+    }
+}
+
+impl MenuPane {
     fn paint(&self) {
         let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
         let hdc = unsafe { BeginPaint(self.hwnd, &mut ps) };
@@ -464,7 +618,6 @@ impl MenuState {
         ) = if self.is_dark {
             (
                 if self.acrylic {
-                    // Subtle dark tint over Windows 11 Acrylic backdrop
                     rgba_f(0x18, 0x18, 0x1b, 0.35)
                 } else {
                     rgba_f(0x1a, 0x1a, 0x1e, 0.98)
@@ -518,7 +671,7 @@ impl MenuState {
                     } => {
                         let hovered = self.hovered == Some(idx);
                         let left = PAD_X_DIPS;
-                        let right = MENU_W_DIPS - PAD_X_DIPS;
+                        let right = self.width_dips - PAD_X_DIPS;
                         if hovered {
                             let rr = D2D1_ROUNDED_RECT {
                                 rect: D2D_RECT_F {
@@ -540,7 +693,6 @@ impl MenuState {
                             );
                         }
 
-                        // Calm neutral text/icon at rest; crisp danger red on hover.
                         let active_danger = *destructive && hovered;
                         let glyph_w: Vec<u16> = icons::fluent_glyph(to_app_icon(*icon))
                             .encode_utf16()
@@ -594,6 +746,74 @@ impl MenuState {
                         }
                         y += ROW_H_DIPS;
                     }
+                    MenuEntry::Submenu { icon, label, .. } => {
+                        let active =
+                            self.hovered == Some(idx) || self.open_submenu_idx == Some(idx);
+                        let left = PAD_X_DIPS;
+                        let right = self.width_dips - PAD_X_DIPS;
+                        if active {
+                            let rr = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F {
+                                    left,
+                                    top: y,
+                                    right,
+                                    bottom: y + ROW_H_DIPS,
+                                },
+                                radiusX: 6.0,
+                                radiusY: 6.0,
+                            };
+                            rt.FillRoundedRectangle(&rr, &hover_br);
+                        }
+
+                        let glyph_w: Vec<u16> = icons::fluent_glyph(to_app_icon(*icon))
+                            .encode_utf16()
+                            .collect();
+                        rt.DrawText(
+                            &glyph_w,
+                            &d2d.icon_fmt,
+                            &D2D_RECT_F {
+                                left: left + 6.0,
+                                top: y,
+                                right: left + 30.0,
+                                bottom: y + ROW_H_DIPS,
+                            },
+                            if active { &text_br } else { &icon_br },
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                            DWRITE_MEASURING_MODE_NATURAL,
+                        );
+
+                        let label_w: Vec<u16> = label.encode_utf16().collect();
+                        let text_rect = D2D_RECT_F {
+                            left: left + 36.0,
+                            top: y,
+                            right: right - 24.0,
+                            bottom: y + ROW_H_DIPS,
+                        };
+                        rt.DrawText(
+                            &label_w,
+                            &d2d.text_fmt,
+                            &text_rect,
+                            &text_br,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                            DWRITE_MEASURING_MODE_NATURAL,
+                        );
+
+                        let chev_w: Vec<u16> = "\u{E76C}".encode_utf16().collect();
+                        rt.DrawText(
+                            &chev_w,
+                            &d2d.chevron_fmt,
+                            &D2D_RECT_F {
+                                left: right - 24.0,
+                                top: y,
+                                right: right - 8.0,
+                                bottom: y + ROW_H_DIPS,
+                            },
+                            &hint_br,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                            DWRITE_MEASURING_MODE_NATURAL,
+                        );
+                        y += ROW_H_DIPS;
+                    }
                     MenuEntry::Separator => {
                         let sy = (y + SEP_H_DIPS * 0.5).floor() + 0.5;
                         rt.DrawLine(
@@ -602,7 +822,7 @@ impl MenuState {
                                 Y: sy,
                             },
                             Vector2 {
-                                X: MENU_W_DIPS - PAD_X_DIPS - 8.0,
+                                X: self.width_dips - PAD_X_DIPS - 8.0,
                                 Y: sy,
                             },
                             &sep_br,
@@ -628,19 +848,20 @@ unsafe extern "system" fn menu_wnd_proc(
     if msg == WM_ERASEBKGND {
         return 1;
     }
-    let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut MenuState };
+    let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut MenuPane };
     if ptr.is_null() {
         return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
     }
-    let state = unsafe { &mut *ptr };
+    let pane = unsafe { &mut *ptr };
+    let session = unsafe { &mut *pane.session };
 
     match msg {
         WM_PAINT => {
-            state.paint();
+            pane.paint();
             0
         }
         WM_SETCURSOR => {
-            let cur = if state.hovered.is_some() {
+            let cur = if pane.hovered.is_some() {
                 IDC_HAND
             } else {
                 IDC_ARROW
@@ -651,7 +872,7 @@ unsafe extern "system" fn menu_wnd_proc(
             1
         }
         WM_MOUSEMOVE => {
-            if !state.tracking {
+            if !pane.tracking {
                 let mut tme = TRACKMOUSEEVENT {
                     cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
                     dwFlags: TME_LEAVE,
@@ -661,16 +882,27 @@ unsafe extern "system" fn menu_wnd_proc(
                 unsafe {
                     TrackMouseEvent(&mut tme);
                 }
-                state.tracking = true;
+                pane.tracking = true;
             }
             let x = (lparam as u32 & 0xffff) as i16 as i32;
             let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
-            let next = state
+            let next = pane
                 .row_rects
                 .iter()
                 .position(|r| r.as_ref().is_some_and(|rc| pt_in_rect(rc, x, y)));
-            if next != state.hovered {
-                state.hovered = next;
+            if next != pane.hovered {
+                pane.hovered = next;
+                if !pane.is_submenu
+                    && let Some(idx) = next
+                {
+                    if let MenuEntry::Submenu { items, .. } = &pane.entries[idx]
+                        && let Some(rc) = pane.row_rects[idx]
+                    {
+                        session.open_submenu(idx, items.clone(), rc);
+                    } else {
+                        session.close_submenu();
+                    }
+                }
                 unsafe {
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                 }
@@ -678,8 +910,8 @@ unsafe extern "system" fn menu_wnd_proc(
             0
         }
         WM_MOUSELEAVE => {
-            state.tracking = false;
-            if state.hovered.take().is_some() {
+            pane.tracking = false;
+            if pane.hovered.take().is_some() {
                 unsafe {
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                 }
@@ -689,27 +921,52 @@ unsafe extern "system" fn menu_wnd_proc(
         WM_LBUTTONUP => {
             let x = (lparam as u32 & 0xffff) as i16 as i32;
             let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
-            if let Some(idx) = state
+            if let Some(idx) = pane
                 .row_rects
                 .iter()
                 .position(|r| r.as_ref().is_some_and(|rc| pt_in_rect(rc, x, y)))
-                && let MenuEntry::Item { id, .. } = state.entries[idx]
             {
-                state.selected_id = Some(id);
+                match &pane.entries[idx] {
+                    MenuEntry::Item { id, .. } => {
+                        session.selected_id = Some(*id);
+                        session.done.store(true, Ordering::Release);
+                    }
+                    MenuEntry::Submenu { items, .. } if !pane.is_submenu => {
+                        if let Some(rc) = pane.row_rects[idx] {
+                            session.open_submenu(idx, items.clone(), rc);
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                session.done.store(true, Ordering::Release);
             }
-            state.done.store(true, Ordering::Release);
             0
         }
         WM_KEYDOWN if wparam as u16 == VK_ESCAPE => {
-            state.done.store(true, Ordering::Release);
+            session.done.store(true, Ordering::Release);
             0
         }
-        WM_ACTIVATE if (wparam & 0xffff) == 0 => {
-            state.done.store(true, Ordering::Release);
+        WM_ACTIVATE if !pane.is_submenu && (wparam & 0xffff) == 0 => {
+            let other = lparam as HWND;
+            let is_own_sub = session
+                .submenu
+                .as_ref()
+                .is_some_and(|sub| sub.hwnd == other);
+            if !is_own_sub {
+                session.done.store(true, Ordering::Release);
+            }
             0
         }
-        WM_KILLFOCUS => {
-            state.done.store(true, Ordering::Release);
+        WM_KILLFOCUS if !pane.is_submenu => {
+            let other = wparam as HWND;
+            let is_own_sub = session
+                .submenu
+                .as_ref()
+                .is_some_and(|sub| sub.hwnd == other);
+            if !is_own_sub {
+                session.done.store(true, Ordering::Release);
+            }
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },

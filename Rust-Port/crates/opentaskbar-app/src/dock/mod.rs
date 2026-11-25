@@ -75,6 +75,7 @@ const TIMER_PREVIEW_HIDE: usize = 3;
 const TIMER_WIDGETS: usize = 4;
 const TIMER_PREVIEW_WATCH: usize = 5;
 const TIMER_WINDOW_CLOSE: usize = 6;
+const TIMER_WIDGET_ANIM: usize = 7;
 const RESIZE_EDGE_DIPS: f32 = 8.0;
 const SCROLL_EDGE_W_DIPS: f32 = 28.0;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -3602,7 +3603,7 @@ impl DockState {
                 self.hwnd,
                 self.is_dark,
                 secondary_label,
-                self.settings.focus_mode,
+                &self.settings,
             ) {
                 WidgetContextAction::Remove => {
                     self.settings.set_widget_enabled(wid, false);
@@ -3672,7 +3673,7 @@ impl DockState {
                 &slot.label,
                 slot.pinned,
                 running,
-                self.settings.focus_mode,
+                &self.settings,
             ) {
                 AppContextAction::Open => {
                     let hwnds = slot.hwnds();
@@ -3699,102 +3700,94 @@ impl DockState {
             return;
         }
 
-        let act = win32::show_dock_context_menu(self.hwnd, self.is_dark, self.settings.focus_mode);
+        let act = win32::show_dock_context_menu(self.hwnd, self.is_dark, &self.settings);
         self.execute_context_action(act);
-    }
-
-    fn open_profiles_flyout(&mut self) {
-        use crate::ui::flyout::{self, FlyoutBlock, FlyoutSpec};
-        use opentaskbar_core::settings::DockProfile;
-
-        let mut pt = POINT { x: 0, y: 0 };
-        unsafe {
-            let _ = GetCursorPos(&mut pt);
-        }
-        let mut blocks: Vec<FlyoutBlock> = self
-            .settings
-            .profiles
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let is_active = self
-                    .settings
-                    .active_profile
-                    .as_deref()
-                    .is_some_and(|a| a.eq_ignore_ascii_case(&p.name));
-                FlyoutBlock::ActionRow {
-                    id: 100 + i as u32,
-                    title: p.name.clone(),
-                    subtitle: Some(format!("{} widgets", p.enabled_widgets.len())),
-                    badge: is_active.then(|| "Active".to_owned()),
-                    icon: None,
-                    destructive: false,
-                }
-            })
-            .collect();
-        if blocks.is_empty() {
-            blocks.push(FlyoutBlock::Note(
-                "No saved profiles yet. Save your current dock layout below.".to_owned(),
-            ));
-        }
-        blocks.push(FlyoutBlock::Separator);
-        blocks.push(FlyoutBlock::ButtonBar(vec![
-            (1, "Save Work".to_owned(), false),
-            (2, "Save Gaming".to_owned(), false),
-            (3, "Save Minimal".to_owned(), false),
-        ]));
-
-        let spec = FlyoutSpec {
-            title: "Profiles".to_owned(),
-            subtitle: Some("Switch or save dock layouts".to_owned()),
-            width_dips: 300.0,
-            blocks,
-        };
-        let Some(chosen) = flyout::show_flyout(self.hwnd, self.is_dark, pt.x, pt.y - 8, spec)
-        else {
-            return;
-        };
-
-        if chosen >= 100
-            && let Some(prof) = self.settings.profiles.get((chosen - 100) as usize).cloned()
-        {
-            self.settings.position = prof.position;
-            self.settings.size = prof.size;
-            self.settings.auto_hide = prof.auto_hide;
-            self.settings.enabled_widgets = prof.enabled_widgets.clone();
-            self.settings.show_clock_widget = prof.enabled_widgets.iter().any(|w| w == "clock");
-            self.settings.show_system_stats_widget =
-                prof.enabled_widgets.iter().any(|w| w == "stats");
-            self.settings.active_profile = Some(prof.name);
-            let _ = settings::save_to(&settings::settings_path(), &self.settings);
-            self.reload_settings_live();
-        } else if let Some(preset) = match chosen {
-            1 => Some("Work"),
-            2 => Some("Gaming"),
-            3 => Some("Minimal"),
-            _ => None,
-        } {
-            let snap = DockProfile {
-                name: preset.to_owned(),
-                position: self.settings.position,
-                size: self.settings.size,
-                auto_hide: self.settings.auto_hide,
-                enabled_widgets: self.settings.enabled_widgets.clone(),
-            };
-            self.settings
-                .profiles
-                .retain(|p| !p.name.eq_ignore_ascii_case(preset));
-            self.settings.profiles.push(snap);
-            self.settings.active_profile = Some(preset.to_owned());
-            let _ = settings::save_to(&settings::settings_path(), &self.settings);
-            self.reload_settings_live();
-        }
     }
 
     fn execute_context_action(&mut self, action: ContextAction) {
         match action {
             ContextAction::Search => opentaskbar_shell::taskbar::open_search(),
-            ContextAction::Profiles => self.open_profiles_flyout(),
+            ContextAction::ApplyProfile(idx) => {
+                if let Some(prof) = self.settings.profiles.get(idx).cloned() {
+                    self.settings.position = prof.position;
+                    self.settings.size = prof.size;
+                    self.settings.auto_hide = prof.auto_hide;
+                    self.settings.enabled_widgets = prof.enabled_widgets.clone();
+                    self.settings.show_clock_widget =
+                        prof.enabled_widgets.iter().any(|w| w == "clock");
+                    self.settings.show_system_stats_widget =
+                        prof.enabled_widgets.iter().any(|w| w == "stats");
+                    self.settings.active_profile = Some(prof.name);
+                    let _ = settings::save_to(&settings::settings_path(), &self.settings);
+                    self.reload_settings_live();
+                }
+            }
+            ContextAction::SaveProfile(preset) => {
+                let snap = opentaskbar_core::settings::DockProfile {
+                    name: preset.to_owned(),
+                    position: self.settings.position,
+                    size: self.settings.size,
+                    auto_hide: self.settings.auto_hide,
+                    enabled_widgets: self.settings.enabled_widgets.clone(),
+                };
+                self.settings
+                    .profiles
+                    .retain(|p| !p.name.eq_ignore_ascii_case(preset));
+                self.settings.profiles.push(snap);
+                self.settings.active_profile = Some(preset.to_owned());
+                let _ = settings::save_to(&settings::settings_path(), &self.settings);
+                self.reload_settings_live();
+            }
+            ContextAction::AddStack(folder) => {
+                if let Some(base) = std::env::var_os("USERPROFILE") {
+                    let path = std::path::PathBuf::from(base).join(folder);
+                    if path.is_dir() {
+                        let p = path.to_string_lossy().into_owned();
+                        if !self
+                            .settings
+                            .stack_folders
+                            .iter()
+                            .any(|x| x.eq_ignore_ascii_case(&p))
+                        {
+                            self.settings.stack_folders.push(p);
+                            let _ = settings::save_to(&settings::settings_path(), &self.settings);
+                            self.reload_settings_live();
+                        }
+                    }
+                }
+            }
+            ContextAction::RemoveStack(idx) => {
+                if idx < self.settings.stack_folders.len() {
+                    self.settings.stack_folders.remove(idx);
+                    let _ = settings::save_to(&settings::settings_path(), &self.settings);
+                    self.reload_settings_live();
+                }
+            }
+            ContextAction::AddStarterGroup => {
+                if !self
+                    .settings
+                    .app_groups
+                    .iter()
+                    .any(|g| g.name.eq_ignore_ascii_case("Productivity"))
+                {
+                    self.settings
+                        .app_groups
+                        .push(opentaskbar_core::settings::DockAppGroup {
+                            id: "productivity".to_owned(),
+                            name: "Productivity".to_owned(),
+                            executable_paths: vec!["explorer.exe".to_owned(), "wt.exe".to_owned()],
+                        });
+                    let _ = settings::save_to(&settings::settings_path(), &self.settings);
+                    self.reload_settings_live();
+                }
+            }
+            ContextAction::RemoveGroup(idx) => {
+                if idx < self.settings.app_groups.len() {
+                    self.settings.app_groups.remove(idx);
+                    let _ = settings::save_to(&settings::settings_path(), &self.settings);
+                    self.reload_settings_live();
+                }
+            }
             ContextAction::ToggleFocusMode => {
                 self.settings.focus_mode = !self.settings.focus_mode;
                 let _ = opentaskbar_core::settings::save_to(
@@ -4094,6 +4087,27 @@ unsafe extern "system" fn wnd_proc(
             if state.refresh_widgets() {
                 state.update_visuals();
             }
+            if state.widget_runtime.needs_animation_tick(&state.settings) {
+                unsafe {
+                    SetTimer(hwnd, TIMER_WIDGET_ANIM, 66, None);
+                }
+            } else {
+                unsafe {
+                    let _ = KillTimer(hwnd, TIMER_WIDGET_ANIM);
+                }
+            }
+            0
+        }
+        WM_TIMER if wparam == TIMER_WIDGET_ANIM => {
+            if state.widget_runtime.needs_animation_tick(&state.settings) {
+                if state.refresh_widgets() {
+                    state.update_visuals();
+                }
+            } else {
+                unsafe {
+                    let _ = KillTimer(hwnd, TIMER_WIDGET_ANIM);
+                }
+            }
             0
         }
         WM_TIMER if wparam == TIMER_POLL => {
@@ -4128,6 +4142,7 @@ unsafe extern "system" fn wnd_proc(
                 KillTimer(hwnd, TIMER_PREVIEW_HIDE);
                 KillTimer(hwnd, TIMER_PREVIEW_WATCH);
                 KillTimer(hwnd, TIMER_WIDGETS);
+                KillTimer(hwnd, TIMER_WIDGET_ANIM);
             }
             0
         }
