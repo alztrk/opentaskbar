@@ -377,7 +377,7 @@ public partial class MainWindow : Window
             source.Handle,
             DockSurfaceTranslate,
             DockSurface,
-            () => _widgetPanel.IsOpen || (_openContextMenu?.IsOpen == true) || _thumbnailPreview.IsVisible
+            () => _widgetPanel.IsOpen || (_openContextMenu?.IsOpen == true) || _thumbnailPreview.IsVisible || _windowPicker?.IsVisible == true
                 || DockScrollViewer.IsPanning || LeftResizeThumb.IsDragging || RightResizeThumb.IsDragging
                 || _draggedApp is not null
                 || (_settingsWindow is { IsVisible: true, IsActive: true, WindowState: not WindowState.Minimized })
@@ -870,6 +870,7 @@ public partial class MainWindow : Window
         UpdateWindowIndicators(states);
         RefreshRunningApps(RunningCandidates());
         UpdateSecondaryDocks();
+        RefreshWindowPicker();
         // Store app windows often publish their identity shortly after they appear, without another window event.
         if (_runningAppIcons.HasPendingLookups && !_iconRetryTimer.IsEnabled)
         {
@@ -1285,7 +1286,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        OpenDockApp(app, toggleIfForeground: true, foregroundAtPress);
+        if (!TryShowWindowPicker(app, (Button)sender))
+            OpenDockApp(app, toggleIfForeground: true, foregroundAtPress);
     }
 
     private void DockApp_MouseUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -1553,7 +1555,8 @@ public partial class MainWindow : Window
         _previewHoverTimer.Stop();
         var hoveredButton = _pendingPreviewButton;
         _pendingPreviewButton = null;
-        if (hoveredButton is null || !hoveredButton.IsMouseOver || _widgetPanel.IsOpen || !_preferences.Current.PreviewsEnabled)
+        if (hoveredButton is null || !hoveredButton.IsMouseOver || _widgetPanel.IsOpen
+            || _windowPicker is not null || !_preferences.Current.PreviewsEnabled)
         {
             return;
         }
@@ -2633,6 +2636,7 @@ public partial class MainWindow : Window
     private void Preferences_Changed(object? sender, EventArgs e)
     {
         if (_closed) return;
+        if (!_preferences.Current.PreviewsEnabled) _windowPicker?.Close();
         if (_mirrorOf is not null)
         {
             Title = UiText.Get("SecondaryDockTitle");
@@ -3761,6 +3765,7 @@ public partial class MainWindow : Window
     /// </summary>
     internal void ResetTransientUiStateForSessionSwitch(bool unlocking)
     {
+        _windowPicker?.Close();
         if (unlocking) _widgetCoordinator.SuppressHover(TimeSpan.FromMilliseconds(1200));
         else _widgetCoordinator.CollapseHover();
 
@@ -3800,6 +3805,7 @@ public partial class MainWindow : Window
     private void OnFullScreenChanged(bool suppressed)
     {
         if (!suppressed) return;
+        _windowPicker?.Close();
         _widgetCoordinator.CollapseHover();
         _widgetPanel.Close(restoreFocus: false);
         _previewHoverTimer.Stop();
@@ -4085,6 +4091,7 @@ public partial class MainWindow : Window
     private void Window_Closed(object? sender, EventArgs e)
     {
         _closed = true;
+        _windowPicker?.Close();
         if (_mirrorOf?._startMenuDock == this) _mirrorOf._startMenuDock = null;
         CancelShowDesktopDragHover();
         _widgetPanel.IsOpenChanged -= WidgetPanel_IsOpenChanged;

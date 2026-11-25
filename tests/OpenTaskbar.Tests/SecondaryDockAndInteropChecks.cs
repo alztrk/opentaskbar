@@ -46,6 +46,20 @@ internal static class SecondaryDockAndInteropChecks
             && !secondary[1].IsForeground,
             "Unpinned running apps must remain included after pinned apps in Z-order.");
 
+        var pickerApp = new DockApp("Editor", PinnedPath) { AppUserModelId = "Editor!App" };
+        TrackedWindow[] pickerWindows =
+        [
+            new(7, "Other monitor", PinnedPath, AppUserModelId: "Editor!App"),
+            new(8, "Same monitor", UnpinnedPath, AppUserModelId: "editor!app"),
+            new(8, "Duplicate", UnpinnedPath, AppUserModelId: "editor!app"),
+            new(9, "Shared host", PinnedPath, AppUserModelId: "Different!App"),
+            new(10, "Unidentified classic window", PinnedPath),
+            new(0, "Invalid window", PinnedPath)
+        ];
+        var ordered = AppWindowPicker.OrderWindows(pickerWindows, pickerApp, 2, handle => handle == 8 ? 2 : 1);
+        Check(ordered.Select(window => window.Handle).SequenceEqual(new nint[] { 8, 7, 10 }),
+            "The picker must prefer the invoking monitor, deduplicate live windows and separate packaged apps sharing one host.");
+
         // PR #163: Shared widget provider requests across mirrored docks.
         var reads = new OpenTaskbar.Widgets.SharedWidgetRequest<string, int>(TimeSpan.FromMinutes(1));
         var pendingRead = new TaskCompletionSource<int>();

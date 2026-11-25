@@ -23,12 +23,14 @@ public sealed class SecondaryDockWindow : Window
     private const uint AbmSetPos = 0x00000003;
     private const uint AbeBottom = 3;
 
-    private sealed class AppSlot(string path, BitmapSource? icon, nint targetHandle, string title, bool isForeground, System.Windows.Shapes.Ellipse dot)
+    private sealed class AppSlot(string path, BitmapSource? icon, nint targetHandle, string title, string? appUserModelId,
+        bool isForeground, System.Windows.Shapes.Ellipse dot)
     {
         public string Path { get; } = path;
         public BitmapSource? Icon { get; } = icon;
         public nint TargetHandle { get; set; } = targetHandle;
         public string Title { get; set; } = title;
+        public string? AppUserModelId { get; set; } = appUserModelId;
         public bool IsForeground { get; set; } = isForeground;
         public System.Windows.Shapes.Ellipse Dot { get; } = dot;
     }
@@ -399,6 +401,7 @@ public sealed class SecondaryDockWindow : Window
                 var active = entry.Windows.FirstOrDefault(window => window.Handle == foreground) ?? first;
                 var isForeground = active.Handle == foreground;
                 slot.TargetHandle = active.Handle;
+                slot.AppUserModelId = first.AppUserModelId;
                 if (!string.Equals(slot.Title, first.Title, StringComparison.Ordinal))
                 {
                     slot.Title = first.Title;
@@ -438,8 +441,15 @@ public sealed class SecondaryDockWindow : Window
             var cell = new StackPanel();
             cell.Children.Add(image);
             cell.Children.Add(dot);
-            var slot = new AppSlot(path, icon, active.Handle, first.Title, isForeground, dot);
-            var button = DockFlyout.FlatButton(cell, (_, _) => NativeWindowTracker.ToggleActivation(slot.TargetHandle, slot.Path), first.Title);
+            var slot = new AppSlot(path, icon, active.Handle, first.Title, first.AppUserModelId, isForeground, dot);
+            var button = DockFlyout.FlatButton(cell, (sender, _) =>
+            {
+                var app = new DockApp(slot.Title, slot.Path) { AppUserModelId = slot.AppUserModelId, Icon = slot.Icon };
+                if (sender is FrameworkElement anchor
+                    && Application.Current?.MainWindow is MainWindow primary
+                    && primary.TryShowWindowPicker(app, anchor)) return;
+                NativeWindowTracker.ToggleActivation(slot.TargetHandle, slot.Path);
+            }, first.Title);
             button.Padding = new Thickness(6, 2, 6, 0);
             System.Windows.Automation.AutomationProperties.SetName(button, first.Title);
             _slots.Add(slot);

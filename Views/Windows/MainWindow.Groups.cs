@@ -302,10 +302,11 @@ public partial class MainWindow
             row.ContextMenu = menu;
 
             var capturedPathForLaunch = path;
-            var button = DockFlyout.FlatButton(row, (_, _) =>
+            var button = DockFlyout.FlatButton(row, (sender, _) =>
             {
                 var targetApp = app ?? new DockApp(name, capturedPathForLaunch);
-                ActivateDockApp(targetApp);
+                if (sender is not FrameworkElement anchor || !TryShowWindowPicker(targetApp, anchor))
+                    ActivateDockApp(targetApp);
                 _groupFlyout?.Close(restoreFocus: false);
             }, name);
             button.HorizontalContentAlignment = HorizontalAlignment.Left;

@@ -731,6 +731,30 @@ public sealed class WindowThumbnailPreview : IDisposable
             SwpNoActivate | SwpNoOwnerZOrder);
     }
 
+    internal static nint RegisterLiveThumbnail(nint destination, nint source, Rect bounds)
+    {
+        if (bounds.IsEmpty || bounds.Width < 3 || bounds.Height < 3
+            || DwmRegisterThumbnail(destination, source, out var thumbnail) != 0 || thumbnail == 0)
+            return 0;
+        if (DwmQueryThumbnailSourceSize(thumbnail, out var size) == 0 && size.Width > 0 && size.Height > 0)
+        {
+            var target = FitThumbnail(size, new NativeRect((int)Math.Ceiling(bounds.Left), (int)Math.Ceiling(bounds.Top),
+                (int)Math.Floor(bounds.Right), (int)Math.Floor(bounds.Bottom)));
+            var properties = new DwmThumbnailProperties
+            {
+                Flags = DwmThumbnailRectDestination | DwmThumbnailOpacity | DwmThumbnailVisible,
+                Destination = target,
+                Opacity = byte.MaxValue,
+                Visible = true
+            };
+            if (DwmUpdateThumbnailProperties(thumbnail, ref properties) == 0) return thumbnail;
+        }
+        _ = DwmUnregisterThumbnail(thumbnail);
+        return 0;
+    }
+
+    internal static void UnregisterLiveThumbnail(nint thumbnail) => DwmUnregisterThumbnail(thumbnail);
+
     private static NativeRect FitThumbnail(NativeSize source, NativeRect client)
     {
         const int inset = 2;
