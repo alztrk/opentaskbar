@@ -98,7 +98,17 @@ fn shell_section_width(base: f32) -> f32 {
     base * 3.0 + 4.0 * 2.0 + 17.0
 }
 
-fn base_widgets_width(settings: &DockSettings) -> f32 {
+fn widgets_strip_width(settings: &DockSettings, has_apps: bool) -> f32 {
+    let active = widgets::active_widgets(settings);
+    if active.is_empty() {
+        return 0.0;
+    }
+    let gap_before = if has_apps { 8.0 } else { 0.0 };
+    let cards_w: f32 = active.iter().map(|wd| wd.width_dips + 6.0).sum();
+    gap_before + cards_w
+}
+
+fn base_trail_width(settings: &DockSettings) -> f32 {
     let mut w = 0.0;
     if settings.show_tray_button {
         w += settings.icon_dips() + 6.0;
@@ -106,11 +116,8 @@ fn base_widgets_width(settings: &DockSettings) -> f32 {
     if settings.show_recycle_bin {
         w += settings.icon_dips() + 6.0;
     }
-    for wd in widgets::active_widgets(settings) {
-        w += wd.width_dips + 6.0;
-    }
     if w > 0.0 {
-        w + 13.0 // left divider + breathing room
+        w + 13.0 // left TrayGroupDivider + breathing room
     } else {
         0.0
     }
@@ -135,7 +142,8 @@ fn visible_tray_pin_count(settings: &DockSettings, slot_count: usize, mon_w_dips
     let available = mon_w_dips
         - 16.0
         - shell_section_width(base)
-        - base_widgets_width(settings)
+        - widgets_strip_width(settings, slot_count > 0)
+        - base_trail_width(settings)
         - apps
         - magnification
         - 30.0;
@@ -144,7 +152,8 @@ fn visible_tray_pin_count(settings: &DockSettings, slot_count: usize, mon_w_dips
 }
 
 fn widgets_section_width(settings: &DockSettings, slot_count: usize, mon_w_dips: f32) -> f32 {
-    base_widgets_width(settings)
+    widgets_strip_width(settings, slot_count > 0)
+        + base_trail_width(settings)
         + visible_tray_pin_count(settings, slot_count, mon_w_dips) as f32
             * tray_pin_cell(settings.icon_dips())
 }
@@ -1168,6 +1177,10 @@ impl DockState {
             self.scroll_container.add_child(&sv.icon);
             self.scroll_container.add_child(&sv.dot);
         }
+        for wv in &self.widget_visuals {
+            self.scroll_container.add_child(&wv.bg);
+            self.scroll_container.add_child(&wv.node);
+        }
 
         self.scroll_container.add_child(&self.widget_divider);
         let count = visible_tray_pin_count(&self.settings, self.slots.len(), self.mon_w_dips());
@@ -1196,10 +1209,6 @@ impl DockState {
         self.scroll_container.add_child(&self.tray_node);
         self.scroll_container.add_child(&self.bin_bg);
         self.scroll_container.add_child(&self.bin_node);
-        for wv in &self.widget_visuals {
-            self.scroll_container.add_child(&wv.bg);
-            self.scroll_container.add_child(&wv.node);
-        }
 
         self.dcomp
             .add_child(&self.dcomp.root, &self.scroll_prev_node);
@@ -1698,22 +1707,35 @@ impl DockState {
         self.monitor.width() as f32 / self.dpi
     }
 
-    fn live_widgets_section_width(&self) -> f32 {
-        let mut w = 0.0;
-        if self.settings.show_tray_button {
-            w += self.settings.icon_dips() + 6.0;
+    fn live_widgets_strip_width(&self, has_apps: bool) -> f32 {
+        if self.widget_visuals.is_empty() {
+            return 0.0;
         }
-        if self.settings.show_recycle_bin {
-            w += self.settings.icon_dips() + 6.0;
-        }
-        for wv in &self.widget_visuals {
-            w += wv.width_dips + 6.0;
-        }
-        if w > 0.0 {
-            w + 13.0 + self.tray_pin_visuals.len() as f32 * tray_pin_cell(self.settings.icon_dips())
+        let gap_before = if has_apps { 8.0 } else { 0.0 };
+        let cards_w: f32 = self
+            .widget_visuals
+            .iter()
+            .map(|wv| wv.width_dips + 6.0)
+            .sum();
+        gap_before + cards_w
+    }
+
+    fn live_trail_section_width(&self) -> f32 {
+        let base_w = base_trail_width(&self.settings);
+        if base_w > 0.0 {
+            let pins_w = if self.settings.show_tray_button {
+                self.tray_pin_visuals.len() as f32 * tray_pin_cell(self.settings.icon_dips())
+            } else {
+                0.0
+            };
+            base_w + pins_w
         } else {
             0.0
         }
+    }
+
+    fn live_widgets_section_width(&self) -> f32 {
+        self.live_widgets_strip_width(!self.slots.is_empty()) + self.live_trail_section_width()
     }
 
     fn live_pill_geometry(&self) -> (f32, f32, f32, f32) {
@@ -1774,12 +1796,13 @@ impl DockState {
         let vp_left = pill_left + 1.0;
         let vp_right = (pill_left + pill_w - 1.0).max(vp_left + 1.0);
         let apps_w = self.live_apps_width_dips();
-        let right_w = self.live_widgets_section_width();
+        let widgets_w = self.live_widgets_strip_width(apps_w > 0.0);
+        let trail_w = self.live_trail_section_width();
         compute_scroll_metrics(
             vp_left,
             vp_right,
-            apps_w,
-            right_w,
+            apps_w + widgets_w,
+            trail_w,
             shell_section_width(base),
             self.scroll_offset,
         )
@@ -1877,14 +1900,18 @@ impl DockState {
     ) {
         let (_, pill_top, _, pill_h) = self.live_pill_geometry();
         let sm = self.live_scroll_metrics();
-        let mut right_cursor = sm.right_anchor_x;
+        // Widgets live in the same main strip right after the apps (matching C# `RebuildDockOrder`),
+        // while Background Apps (`tray`) and Recycle Bin (`bin`) stay pinned to the trailing edge.
+        let apps_w = self.live_apps_width_dips();
+        let mut wx = sm.apps_start_x + if apps_w > 0.0 { apps_w + 8.0 } else { 0.0 };
         let mut widget_rects = Vec::with_capacity(self.widget_visuals.len());
-        for wv in self.widget_visuals.iter().rev() {
-            let l = right_cursor - wv.width_dips;
-            let r = right_cursor;
-            right_cursor -= wv.width_dips + 6.0;
+        for wv in &self.widget_visuals {
+            let l = wx;
+            let r = wx + wv.width_dips;
             widget_rects.push((wv.id, (l, pill_top + 6.0, r, pill_top + pill_h - 6.0)));
+            wx = r + 6.0;
         }
+        let mut right_cursor = sm.right_anchor_x;
         let bin = if self.settings.show_recycle_bin {
             let bw = self.settings.icon_dips();
             let l = right_cursor - bw;
@@ -2463,22 +2490,24 @@ impl DockState {
             cursor_x += (slot_w + gap) * self.slots[idx].layout_fraction(now);
         }
 
-        // 4. Right-side widget strip (Background Apps, Recycle Bin, user-enabled Widgets).
-        let widgets_w = self.live_widgets_section_width();
-        if widgets_w > 0.0 {
-            let mut right_cursor = sm.right_anchor_x;
-            let widget_h = design::widget_height_dips(pill_h);
-            let widget_top = pill_top + (pill_h - widget_h) * 0.5;
+        // 4. Widgets inline right after apps (same main strip as C# `RebuildDockOrder`).
+        let widget_h = design::widget_height_dips(pill_h);
+        let widget_top = pill_top + (pill_h - widget_h) * 0.5;
+        let apps_w = self.live_apps_width_dips();
+        let mut wx = sm.apps_start_x + if apps_w > 0.0 { apps_w + 8.0 } else { 0.0 };
+        for wv in &self.widget_visuals {
+            // Widget hover/press states are rendered natively on the card surface itself
+            // so corner radii never distort when stretched across wide widget cards.
+            wv.bg.hide();
+            wv.node
+                .set_transform(1.0, 1.0, (wx * dpi).round(), (widget_top * dpi).round());
+            wx += wv.width_dips + 6.0;
+        }
 
-            for wv in self.widget_visuals.iter().rev() {
-                let wx = right_cursor - wv.width_dips;
-                // Widget hover/press states are rendered natively on the card surface itself
-                // so corner radii never distort when stretched across wide widget cards.
-                wv.bg.hide();
-                wv.node
-                    .set_transform(1.0, 1.0, (wx * dpi).round(), (widget_top * dpi).round());
-                right_cursor -= wv.width_dips + 6.0;
-            }
+        // 4a. Trailing shell group pinned to the right edge (`[Divider] [PinnedTray...] [Tray] [Bin]`).
+        let trail_w = self.live_trail_section_width();
+        if trail_w > 0.0 {
+            let mut right_cursor = sm.right_anchor_x;
 
             if self.settings.show_recycle_bin {
                 let bx_box = right_cursor - base;
@@ -2555,10 +2584,6 @@ impl DockState {
             self.tray_node.hide();
             self.bin_bg.hide();
             self.bin_node.hide();
-            for wv in &self.widget_visuals {
-                wv.bg.hide();
-                wv.node.hide();
-            }
         }
 
         // 4b. Scroll edge scrim + chevron overlays (only visible when dock content overflows).
@@ -4308,5 +4333,40 @@ mod tests {
         assert!(end.can_scroll_left);
         assert!(!end.can_scroll_right);
         assert!((end.right_anchor_x - 736.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn widgets_sit_inline_after_apps_and_before_trail_group() {
+        let mut settings = DockSettings::default();
+        settings.set_widget_enabled("clock", true);
+        settings.set_widget_enabled("audio", true);
+        settings.show_tray_button = true;
+        settings.show_recycle_bin = true;
+
+        let base = settings.icon_dips();
+        let shell_w = shell_section_width(base);
+        let apps_w = 3.0 * base + 2.0 * slot_gap(&settings);
+        let widgets_w = widgets_strip_width(&settings, true);
+        let trail_w = base_trail_width(&settings);
+
+        assert!(widgets_w > 0.0);
+        assert!(trail_w > 0.0);
+
+        let sm = compute_scroll_metrics(
+            100.0,
+            100.0 + shell_w + apps_w + widgets_w + trail_w + 28.0,
+            apps_w + widgets_w,
+            trail_w,
+            shell_w,
+            0.0,
+        );
+        let first_widget_x = sm.apps_start_x + apps_w + 8.0;
+        let last_widget_right = sm.apps_start_x + apps_w + widgets_w - 6.0;
+        let trail_left = sm.right_anchor_x - trail_w;
+        assert!(first_widget_x > sm.apps_start_x + apps_w);
+        assert!(
+            last_widget_right < trail_left,
+            "widgets end ({last_widget_right}) must stay left of trail group ({trail_left})"
+        );
     }
 }
