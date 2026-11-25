@@ -17,7 +17,9 @@ use opentaskbar_core::settings::{
     self, AppTheme, AutoHideMode, DockPosition, DockSettings, SurfaceBackground,
 };
 use opentaskbar_shell::tracker::{self, RunningWindow};
-use windows::Win32::Graphics::DirectComposition::IDCompositionSurface;
+use windows::Win32::Graphics::DirectComposition::{
+    IDCompositionRectangleClip, IDCompositionSurface,
+};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::DwmFlush;
@@ -71,7 +73,10 @@ const TIMER_WIDGETS: usize = 4;
 const TIMER_PREVIEW_WATCH: usize = 5;
 const TIMER_WINDOW_CLOSE: usize = 6;
 const RESIZE_EDGE_DIPS: f32 = 8.0;
+const SCROLL_EDGE_W_DIPS: f32 = 28.0;
 const WM_MOUSELEAVE: u32 = 0x02A3;
+const WM_MBUTTONDOWN: u32 = 0x0207;
+const WM_MOUSEHWHEEL: u32 = 0x020E;
 const WM_APP_VSYNC: u32 = WM_APP + 1;
 const WM_APP_ICONS: u32 = WM_APP + 2;
 const WM_APP_PREVIEW_LEAVE: u32 = WM_APP + 3;
@@ -160,6 +165,56 @@ struct WidgetVisual {
 enum ResizeEdge {
     Left,
     Right,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ScrollMetrics {
+    vp_left: f32,
+    vp_right: f32,
+    max_scroll: f32,
+    offset: f32,
+    apps_start_x: f32,
+    right_anchor_x: f32,
+    can_scroll_left: bool,
+    can_scroll_right: bool,
+}
+
+/// Computes horizontal scroll viewport & non-overlapping apps/widgets layout.
+/// Note: `right_w` (`widgets_section_width`) already includes the 13 DIP divider and spacing
+/// between apps and widgets, so `content_w` fits cleanly inside the natural pill width (`+11.0`)
+/// without triggering false scroll indicators when the dock does not overflow.
+fn compute_scroll_metrics(
+    vp_left: f32,
+    vp_right: f32,
+    apps_w: f32,
+    right_w: f32,
+    scroll_offset: f32,
+) -> ScrollMetrics {
+    let vp_w = (vp_right - vp_left).max(1.0);
+    let content_w = 4.0 + apps_w + right_w + 4.0;
+    let max_scroll = (content_w - vp_w).max(0.0);
+    let offset = scroll_offset.clamp(0.0, max_scroll);
+    let apps_start_x = vp_left + 4.0 - offset;
+    let right_anchor_x = if max_scroll > 0.5 {
+        vp_left + content_w - 4.0 - offset
+    } else {
+        vp_right - 4.0
+    };
+    ScrollMetrics {
+        vp_left,
+        vp_right,
+        max_scroll,
+        offset,
+        apps_start_x,
+        right_anchor_x,
+        can_scroll_left: max_scroll > 0.5 && offset > 1.0,
+        can_scroll_right: max_scroll > 0.5 && offset < max_scroll - 1.0,
+    }
+}
+
+fn scroll_min_pill_width(settings: &DockSettings) -> f32 {
+    let base = settings.icon_dips();
+    (shell_section_width(base) + base * 2.5 + 36.0).max(200.0)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -287,6 +342,14 @@ struct DockState {
     shell_bg_hover: IDCompositionSurface,
     shell_bg_press: IDCompositionSurface,
     divider: VisualNode,
+    scroll_container: VisualNode,
+    scroll_clip: IDCompositionRectangleClip,
+    scroll_prev_node: VisualNode,
+    scroll_next_node: VisualNode,
+    scroll_prev_surf: IDCompositionSurface,
+    scroll_prev_hover_surf: IDCompositionSurface,
+    scroll_next_surf: IDCompositionSurface,
+    scroll_next_hover_surf: IDCompositionSurface,
     widget_divider: VisualNode,
     tray_bg: VisualNode,
     tray_node: VisualNode,
@@ -321,6 +384,7 @@ struct DockState {
     hovered_bin: bool,
     hovered_widget: Option<&'static str>,
     hovered_widget_sub: Option<u8>,
+    hovered_scroll: Option<bool>,
     hovered_resize: Option<ResizeEdge>,
     pressed_idx: Option<usize>,
     pressed_shell: Option<ShellButton>,
@@ -328,8 +392,12 @@ struct DockState {
     pressed_tray_pin: Option<String>,
     pressed_bin: bool,
     pressed_widget: Option<&'static str>,
+    pressed_scroll: Option<bool>,
     drag: Option<DragState>,
     resize_drag: Option<ResizeDragState>,
+    scroll_offset: f32,
+    scroll_target: f32,
+    scroll_pan: Option<(f32, f32, bool)>,
     tracking_mouse: bool,
     /// Auto-hide smooth animation (`0.0` = fully shown, `1.0` = slid off bottom edge).
     hide_progress: f32,
@@ -631,10 +699,11 @@ fn resting_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips: f3
     if settings.full_width {
         return max_w;
     }
-    let min_w = content_min_pill_width(settings, slot_count, mon_w_dips);
+    let natural_w = content_min_pill_width(settings, slot_count, mon_w_dips);
+    let floor_w = scroll_min_pill_width(settings).min(natural_w);
     let target = settings
         .dock_custom_width_dips
-        .map_or(min_w, |custom| custom.max(min_w));
+        .map_or(natural_w, |custom| custom.max(floor_w));
     target.min(max_w)
 }
 
@@ -801,6 +870,57 @@ impl DockState {
         )?;
         let divider = dcomp.create_node()?;
         divider.set_content(Some(&div_surf));
+        let scroll_container = dcomp.create_node()?;
+        let scroll_clip = dcomp.create_rect_clip()?;
+        scroll_container.set_clip(&scroll_clip);
+        let se_w_px = (SCROLL_EDGE_W_DIPS * dpi).ceil() as u32;
+        let se_h_px = (pill_h * dpi).ceil() as u32;
+        let scroll_prev_surf = dcomp.create_scroll_edge_surface(
+            true,
+            se_w_px,
+            se_h_px,
+            radius * dpi,
+            pill_rgb,
+            is_dark,
+            false,
+            dpi,
+        )?;
+        let scroll_prev_hover_surf = dcomp.create_scroll_edge_surface(
+            true,
+            se_w_px,
+            se_h_px,
+            radius * dpi,
+            pill_rgb,
+            is_dark,
+            true,
+            dpi,
+        )?;
+        let scroll_next_surf = dcomp.create_scroll_edge_surface(
+            false,
+            se_w_px,
+            se_h_px,
+            radius * dpi,
+            pill_rgb,
+            is_dark,
+            false,
+            dpi,
+        )?;
+        let scroll_next_hover_surf = dcomp.create_scroll_edge_surface(
+            false,
+            se_w_px,
+            se_h_px,
+            radius * dpi,
+            pill_rgb,
+            is_dark,
+            true,
+            dpi,
+        )?;
+        let scroll_prev_node = dcomp.create_node()?;
+        scroll_prev_node.set_content(Some(&scroll_prev_surf));
+        scroll_prev_node.hide();
+        let scroll_next_node = dcomp.create_node()?;
+        scroll_next_node.set_content(Some(&scroll_next_surf));
+        scroll_next_node.hide();
         let widget_divider = dcomp.create_node()?;
         widget_divider.set_content(Some(&div_surf));
 
@@ -881,6 +1001,14 @@ impl DockState {
             shell_bg_hover,
             shell_bg_press,
             divider,
+            scroll_container,
+            scroll_clip,
+            scroll_prev_node,
+            scroll_next_node,
+            scroll_prev_surf,
+            scroll_prev_hover_surf,
+            scroll_next_surf,
+            scroll_next_hover_surf,
             widget_divider,
             tray_bg,
             tray_node,
@@ -915,6 +1043,7 @@ impl DockState {
             hovered_bin: false,
             hovered_widget: None,
             hovered_widget_sub: None,
+            hovered_scroll: None,
             hovered_resize: None,
             pressed_idx: None,
             pressed_shell: None,
@@ -922,8 +1051,12 @@ impl DockState {
             pressed_tray_pin: None,
             pressed_bin: false,
             pressed_widget: None,
+            pressed_scroll: None,
             drag: None,
             resize_drag: None,
+            scroll_offset: 0.0,
+            scroll_target: 0.0,
+            scroll_pan: None,
             tracking_mouse: false,
             hide_progress: 0.0,
             target_hidden: false,
@@ -1004,6 +1137,9 @@ impl DockState {
             self.dcomp.add_child(&self.dcomp.root, &self.shell_icons[i]);
         }
         self.dcomp.add_child(&self.dcomp.root, &self.divider);
+        self.scroll_container.remove_all_children();
+        self.dcomp
+            .add_child(&self.dcomp.root, &self.scroll_container);
 
         while self.slot_visuals.len() < self.slots.len() {
             if let (Ok(icon), Ok(dot)) = (self.dcomp.create_node(), self.dcomp.create_node()) {
@@ -1024,11 +1160,11 @@ impl DockState {
         self.slot_visuals.truncate(self.slots.len());
 
         for sv in &self.slot_visuals {
-            self.dcomp.add_child(&self.dcomp.root, &sv.icon);
-            self.dcomp.add_child(&self.dcomp.root, &sv.dot);
+            self.scroll_container.add_child(&sv.icon);
+            self.scroll_container.add_child(&sv.dot);
         }
 
-        self.dcomp.add_child(&self.dcomp.root, &self.widget_divider);
+        self.scroll_container.add_child(&self.widget_divider);
         let count = visible_tray_pin_count(&self.settings, self.slots.len(), self.mon_w_dips());
         self.tray_pin_visuals.truncate(count);
         if self.hovered_tray_pin.is_some_and(|index| index >= count) {
@@ -1048,18 +1184,22 @@ impl DockState {
             });
         }
         for pin in &self.tray_pin_visuals {
-            self.dcomp.add_child(&self.dcomp.root, &pin.bg);
-            self.dcomp.add_child(&self.dcomp.root, &pin.icon);
+            self.scroll_container.add_child(&pin.bg);
+            self.scroll_container.add_child(&pin.icon);
         }
-        self.dcomp.add_child(&self.dcomp.root, &self.tray_bg);
-        self.dcomp.add_child(&self.dcomp.root, &self.tray_node);
-        self.dcomp.add_child(&self.dcomp.root, &self.bin_bg);
-        self.dcomp.add_child(&self.dcomp.root, &self.bin_node);
+        self.scroll_container.add_child(&self.tray_bg);
+        self.scroll_container.add_child(&self.tray_node);
+        self.scroll_container.add_child(&self.bin_bg);
+        self.scroll_container.add_child(&self.bin_node);
         for wv in &self.widget_visuals {
-            self.dcomp.add_child(&self.dcomp.root, &wv.bg);
-            self.dcomp.add_child(&self.dcomp.root, &wv.node);
+            self.scroll_container.add_child(&wv.bg);
+            self.scroll_container.add_child(&wv.node);
         }
 
+        self.dcomp
+            .add_child(&self.dcomp.root, &self.scroll_prev_node);
+        self.dcomp
+            .add_child(&self.dcomp.root, &self.scroll_next_node);
         self.dcomp.add_child(&self.dcomp.root, &self.drag_ghost);
         self.dcomp.add_child(&self.dcomp.root, &self.tooltip_node);
     }
@@ -1278,6 +1418,56 @@ impl DockState {
         ) {
             self.divider.set_content(Some(&s));
             self.widget_divider.set_content(Some(&s));
+        }
+        let se_w_px = (SCROLL_EDGE_W_DIPS * dpi).ceil() as u32;
+        let se_h_px = (pill_h * dpi).ceil() as u32;
+        if let Ok(s) = self.dcomp.create_scroll_edge_surface(
+            true,
+            se_w_px,
+            se_h_px,
+            radius * dpi,
+            pill_rgb,
+            is_dark,
+            false,
+            dpi,
+        ) {
+            self.scroll_prev_surf = s;
+        }
+        if let Ok(s) = self.dcomp.create_scroll_edge_surface(
+            true,
+            se_w_px,
+            se_h_px,
+            radius * dpi,
+            pill_rgb,
+            is_dark,
+            true,
+            dpi,
+        ) {
+            self.scroll_prev_hover_surf = s;
+        }
+        if let Ok(s) = self.dcomp.create_scroll_edge_surface(
+            false,
+            se_w_px,
+            se_h_px,
+            radius * dpi,
+            pill_rgb,
+            is_dark,
+            false,
+            dpi,
+        ) {
+            self.scroll_next_surf = s;
+        }
+        if let Ok(s) = self.dcomp.create_scroll_edge_surface(
+            false,
+            se_w_px,
+            se_h_px,
+            radius * dpi,
+            pill_rgb,
+            is_dark,
+            true,
+            dpi,
+        ) {
+            self.scroll_next_hover_surf = s;
         }
         if let Ok(s) =
             self.dcomp
@@ -1513,16 +1703,77 @@ impl DockState {
                 + widgets_section_width(&self.settings, self.slots.len(), mon_w)
                 + 30.0)
                 .max(160.0);
+            let max_w = (mon_w - 16.0).max(200.0);
+            let floor_w = scroll_min_pill_width(&self.settings).min(live_content);
             let target = self
                 .settings
                 .dock_custom_width_dips
-                .map_or(live_content, |custom| custom.max(live_content));
-            target.min(win_w)
+                .map_or(live_content, |custom| custom.max(floor_w));
+            target.min(win_w).min(max_w)
         };
         let pill_h = pill_height_dips(&self.settings);
         let pill_left = (win_w - pill_w) * 0.5;
         let pill_top = win_h - VERTICAL_EDGE_GAP - pill_h;
         (pill_left, pill_top, pill_w, pill_h)
+    }
+
+    fn live_apps_width_dips(&self) -> f32 {
+        if self.slots.is_empty() {
+            return 0.0;
+        }
+        let base = self.settings.icon_dips();
+        let gap = slot_gap(&self.settings);
+        let now = Instant::now();
+        let mut w = 0.0;
+        let mut largest_fraction = 0.0_f32;
+        for slot in &self.slots {
+            let fraction = slot.layout_fraction(now);
+            w += (base * slot.scale + gap) * fraction;
+            largest_fraction = largest_fraction.max(fraction);
+        }
+        (w - gap * largest_fraction).max(0.0)
+    }
+
+    fn live_scroll_metrics(&self) -> ScrollMetrics {
+        let base = self.settings.icon_dips();
+        let (pill_left, _, pill_w, _) = self.live_pill_geometry();
+        let vp_left = pill_left + 15.0 + shell_section_width(base) - 4.0;
+        let vp_right = (pill_left + pill_w - 8.0).max(vp_left + 1.0);
+        let apps_w = self.live_apps_width_dips();
+        let right_w = widgets_section_width(&self.settings, self.slots.len(), self.mon_w_dips());
+        compute_scroll_metrics(vp_left, vp_right, apps_w, right_w, self.scroll_offset)
+    }
+
+    /// Returns `Some(false)` for left `<` scroll button, `Some(true)` for right `>` scroll button.
+    fn hit_scroll_button(&self, mx: f32, my: f32) -> Option<bool> {
+        let (_, pill_top, _, pill_h) = self.live_pill_geometry();
+        if my < pill_top || my > pill_top + pill_h {
+            return None;
+        }
+        let sm = self.live_scroll_metrics();
+        if sm.can_scroll_left && mx >= sm.vp_left && mx <= sm.vp_left + SCROLL_EDGE_W_DIPS {
+            return Some(false);
+        }
+        if sm.can_scroll_right && mx >= sm.vp_right - SCROLL_EDGE_W_DIPS && mx <= sm.vp_right {
+            return Some(true);
+        }
+        None
+    }
+
+    fn scroll_by_step(&mut self, forward: bool) {
+        let sm = self.live_scroll_metrics();
+        if sm.max_scroll <= 0.5 {
+            return;
+        }
+        let step = (self.settings.icon_dips() + slot_gap(&self.settings)) * 3.0;
+        let base = if (self.scroll_offset - self.scroll_target).abs() > 1.0 {
+            self.scroll_target
+        } else {
+            self.scroll_offset
+        };
+        let next = if forward { base + step } else { base - step };
+        self.scroll_target = next.clamp(0.0, sm.max_scroll);
+        self.ensure_animation();
     }
 
     fn hit_resize_edge(&self, mx: f32, my: f32) -> Option<ResizeEdge> {
@@ -1545,11 +1796,7 @@ impl DockState {
     fn resting_slot_center_x(&self, idx: usize) -> f32 {
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
-        let mon_w = self.mon_w_dips();
-        let (win_w, _) = compute_window_dips(&self.settings, self.slots.len(), mon_w);
-        let pill_w = resting_pill_width(&self.settings, self.slots.len(), mon_w);
-        let pill_left = (win_w - pill_w) * 0.5;
-        let apps_left = pill_left + 15.0 + shell_section_width(base);
+        let sm = self.live_scroll_metrics();
         let now = Instant::now();
         let before: f32 = self
             .slots
@@ -1557,14 +1804,14 @@ impl DockState {
             .take(idx)
             .map(|slot| (base + gap) * slot.layout_fraction(now))
             .sum();
-        apps_left + before + base * 0.5
+        sm.apps_start_x + before + base * 0.5
     }
 
     fn live_slot_center_x(&self, idx: usize) -> f32 {
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
-        let (pill_left, _, _, _) = self.live_pill_geometry();
-        let mut cursor = pill_left + 15.0 + shell_section_width(base);
+        let sm = self.live_scroll_metrics();
+        let mut cursor = sm.apps_start_x;
         let now = Instant::now();
         for i in 0..idx.min(self.slots.len()) {
             let slot = &self.slots[i];
@@ -1587,8 +1834,9 @@ impl DockState {
         Option<DipRect>,
         Vec<(&'static str, DipRect)>,
     ) {
-        let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
-        let mut right_cursor = pill_left + pill_w - 12.0;
+        let (_, pill_top, _, pill_h) = self.live_pill_geometry();
+        let sm = self.live_scroll_metrics();
+        let mut right_cursor = sm.right_anchor_x;
         let mut widget_rects = Vec::with_capacity(self.widget_visuals.len());
         for wv in self.widget_visuals.iter().rev() {
             let l = right_cursor - wv.width_dips;
@@ -1618,11 +1866,12 @@ impl DockState {
 
     fn flyout_anchor_px(&self, rect: DipRect) -> (i32, i32) {
         let (_, pill_top, _, _) = self.live_pill_geometry();
+        let sm = self.live_scroll_metrics();
         let mut win_rc: RECT = unsafe { std::mem::zeroed() };
         unsafe {
             GetWindowRect(self.hwnd as HWND, &mut win_rc);
         }
-        let cx_dips = (rect.0 + rect.2) * 0.5;
+        let cx_dips = ((rect.0 + rect.2) * 0.5).clamp(sm.vp_left, sm.vp_right);
         let anchor_x = win_rc.left + (cx_dips * self.dpi).round() as i32;
         let anchor_y = win_rc.top + ((pill_top - 8.0) * self.dpi).round() as i32;
         (anchor_x, anchor_y)
@@ -1632,7 +1881,20 @@ impl DockState {
         rc.is_some_and(|(l, t, r, b)| mx >= l && mx <= r && my >= t && my <= b)
     }
 
+    fn hit_rect_in_vp(
+        sm: &ScrollMetrics,
+        rc: Option<(f32, f32, f32, f32)>,
+        mx: f32,
+        my: f32,
+    ) -> bool {
+        mx >= sm.vp_left && mx <= sm.vp_right && Self::hit_rect(rc, mx, my)
+    }
+
     fn hit_tray_pin(&self, tray: Option<DipRect>, mx: f32, my: f32) -> Option<usize> {
+        let sm = self.live_scroll_metrics();
+        if mx < sm.vp_left || mx > sm.vp_right {
+            return None;
+        }
         let tray = tray?;
         let cell = tray_pin_cell(self.settings.icon_dips());
         let count = self.tray_pin_visuals.len();
@@ -1653,6 +1915,10 @@ impl DockState {
         if mx >= pill_left && mx <= pill_left + pill_w && my >= pill_top && my <= pill_top + pill_h
         {
             return true;
+        }
+        let sm = self.live_scroll_metrics();
+        if mx < sm.vp_left || mx > sm.vp_right {
+            return false;
         }
         let base = self.settings.icon_dips();
         let icon_base_bottom = pill_top + 7.5 + base;
@@ -1692,6 +1958,11 @@ impl DockState {
             self.hovered_idx = None;
             return;
         };
+        let sm = self.live_scroll_metrics();
+        if mx < sm.vp_left || mx > sm.vp_right {
+            self.hovered_idx = None;
+            return;
+        }
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
         let max_dist = (base + gap) * 0.55;
@@ -1700,10 +1971,14 @@ impl DockState {
             .iter()
             .enumerate()
             .filter(|(_, slot)| !slot.is_exiting())
-            .map(|(i, _)| (i, (mx - self.resting_slot_center_x(i)).abs()))
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .filter(|(_, d)| *d <= max_dist)
-            .map(|(i, _)| i);
+            .map(|(i, _)| {
+                let cx = self.resting_slot_center_x(i);
+                (i, cx, (mx - cx).abs())
+            })
+            .filter(|(_, cx, _)| *cx >= sm.vp_left - base * 0.4 && *cx <= sm.vp_right + base * 0.4)
+            .min_by(|a, b| a.2.total_cmp(&b.2))
+            .filter(|(_, _, d)| *d <= max_dist)
+            .map(|(i, _, _)| i);
     }
 
     fn target_scale_for(&self, idx: usize) -> f32 {
@@ -1749,7 +2024,23 @@ impl DockState {
         let scale_k = 1.0 - (-22.0 * dt).exp();
         let slide_k = 1.0 - (-24.0 * dt).exp();
         let hide_k = 1.0 - (-16.0 * dt).exp();
+        // Continuous inertial scrolling matching C# DockScrollViewer (`tau = 0.045s`).
+        let scroll_k = 1.0 - (-dt / 0.045).exp();
         let mut moving = self.drag.is_some_and(|d| d.active);
+
+        let max_scroll = self.live_scroll_metrics().max_scroll;
+        self.scroll_target = self.scroll_target.clamp(0.0, max_scroll);
+        if self.scroll_pan.is_none() {
+            let sdiff = self.scroll_target - self.scroll_offset;
+            if sdiff.abs() > 0.3 {
+                self.scroll_offset = (self.scroll_offset + sdiff * scroll_k).clamp(0.0, max_scroll);
+                moving = true;
+            } else if (self.scroll_offset - self.scroll_target).abs() > 0.0 {
+                self.scroll_offset = self.scroll_target;
+            }
+        } else {
+            self.scroll_offset = self.scroll_offset.clamp(0.0, max_scroll);
+        }
 
         let hide_target = if self.target_hidden { 1.0 } else { 0.0 };
         let hide_diff = hide_target - self.hide_progress;
@@ -2006,9 +2297,22 @@ impl DockState {
         self.divider
             .set_transform(1.0, 1.0, (div_x * dpi).round(), (div_y * dpi).round());
 
-        // 3. Unified app slots.
+        // Hardware-clip scrollable content horizontally to the dock viewport while keeping
+        // full vertical headroom (`0.0 .. win_h`) so magnified app icons are never clipped above.
+        let sm = self.live_scroll_metrics();
+        self.scroll_offset = sm.offset;
+        self.scroll_target = self.scroll_target.clamp(0.0, sm.max_scroll);
+        DcompEngine::update_clip_rect(
+            &self.scroll_clip,
+            (sm.vp_left * dpi).floor(),
+            0.0,
+            (sm.vp_right * dpi).ceil(),
+            (win_h * dpi).ceil(),
+        );
+
+        // 3. Unified app slots (inside clipped scroll container).
         let active_drag = self.drag.filter(|d| d.active);
-        let mut cursor_x = pill_left + 15.0 + shell_section_width(base);
+        let mut cursor_x = sm.apps_start_x;
         let slot_count = self.slots.len().min(self.slot_visuals.len());
         let now = Instant::now();
         for idx in 0..slot_count {
@@ -2120,7 +2424,7 @@ impl DockState {
         // 4. Right-side widget strip (Background Apps, Recycle Bin, user-enabled Widgets).
         let widgets_w = widgets_section_width(&self.settings, self.slots.len(), self.mon_w_dips());
         if widgets_w > 0.0 {
-            let mut right_cursor = pill_left + pill_w - 12.0;
+            let mut right_cursor = sm.right_anchor_x;
             let widget_h = design::widget_height_dips(pill_h);
             let widget_top = pill_top + (pill_h - widget_h) * 0.5;
 
@@ -2215,6 +2519,40 @@ impl DockState {
             }
         }
 
+        // 4b. Scroll edge scrim + chevron overlays (only visible when dock content overflows).
+        if sm.can_scroll_left {
+            self.scroll_prev_node
+                .set_content(Some(if self.hovered_scroll == Some(false) {
+                    &self.scroll_prev_hover_surf
+                } else {
+                    &self.scroll_prev_surf
+                }));
+            self.scroll_prev_node.set_transform(
+                1.0,
+                1.0,
+                (sm.vp_left * dpi).floor(),
+                (pill_top * dpi).round(),
+            );
+        } else {
+            self.scroll_prev_node.hide();
+        }
+        if sm.can_scroll_right {
+            self.scroll_next_node
+                .set_content(Some(if self.hovered_scroll == Some(true) {
+                    &self.scroll_next_hover_surf
+                } else {
+                    &self.scroll_next_surf
+                }));
+            self.scroll_next_node.set_transform(
+                1.0,
+                1.0,
+                ((sm.vp_right - SCROLL_EDGE_W_DIPS) * dpi).round(),
+                (pill_top * dpi).round(),
+            );
+        } else {
+            self.scroll_next_node.hide();
+        }
+
         // 5. Floating cursor-tracking drag ghost.
         if let Some(drag) = active_drag
             && let Some(slot) = self.slots.get(drag.idx)
@@ -2248,6 +2586,22 @@ impl DockState {
             .and_then(|p| p.owner_key());
         let tooltip_info: Option<(String, f32, f32)> = if active_drag.is_some() {
             None
+        } else if let Some(is_next) = self.hovered_scroll {
+            let cx = if is_next {
+                sm.vp_right - SCROLL_EDGE_W_DIPS * 0.5
+            } else {
+                sm.vp_left + SCROLL_EDGE_W_DIPS * 0.5
+            };
+            Some((
+                if is_next {
+                    "Scroll Right"
+                } else {
+                    "Scroll Left"
+                }
+                .to_owned(),
+                cx,
+                pill_top - 8.0,
+            ))
         } else if self.hovered_bin {
             let (_, bin_rc, _) = self.right_widget_rects_dips();
             let cx = bin_rc.map_or(pill_left + pill_w - 60.0, |(l, _, r, _)| (l + r) * 0.5);
@@ -2466,6 +2820,18 @@ impl DockState {
             self.evaluate_auto_hide();
         }
 
+        if let Some((start_mx, start_off, ref mut moved)) = self.scroll_pan {
+            let delta = start_mx - mx;
+            if delta.abs() > 3.0 {
+                *moved = true;
+            }
+            let max_s = self.live_scroll_metrics().max_scroll;
+            self.scroll_offset = (start_off + delta).clamp(0.0, max_s);
+            self.scroll_target = self.scroll_offset;
+            self.update_visuals();
+            return;
+        }
+
         if let Some(rdrag) = self.resize_drag {
             self.hide_preview_now();
             let mut pt = POINT { x: 0, y: 0 };
@@ -2477,7 +2843,9 @@ impl DockState {
                 ResizeEdge::Right => delta_dips * 2.0,
                 ResizeEdge::Left => -delta_dips * 2.0,
             };
-            let min_w = content_min_pill_width(&self.settings, self.slots.len(), self.mon_w_dips());
+            let natural_w =
+                content_min_pill_width(&self.settings, self.slots.len(), self.mon_w_dips());
+            let min_w = scroll_min_pill_width(&self.settings).min(natural_w);
             let max_w = (self.mon_w_dips() - 16.0).max(min_w);
             let next_w = (rdrag.start_width_dips + signed)
                 .clamp(min_w, max_w)
@@ -2515,13 +2883,39 @@ impl DockState {
             return;
         }
 
+        let over_scroll = self.hit_scroll_button(mx, my);
+        if over_scroll != self.hovered_scroll {
+            let had_widget = self.hovered_widget.is_some();
+            self.hovered_scroll = over_scroll;
+            if over_scroll.is_some() {
+                self.hovered_shell = None;
+                self.hovered_tray = false;
+                self.hovered_tray_pin = None;
+                self.hovered_bin = false;
+                self.hovered_widget = None;
+                self.hovered_widget_sub = None;
+                self.hover_mouse_x = None;
+                self.hovered_idx = None;
+                self.sync_preview_hover();
+                if had_widget {
+                    self.refresh_widgets();
+                }
+            }
+            self.ensure_animation();
+            self.update_visuals();
+        }
+        if over_scroll.is_some() {
+            return;
+        }
+
+        let sm = self.live_scroll_metrics();
         let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
-        let over_tray = Self::hit_rect(tray_rc, mx, my);
+        let over_tray = Self::hit_rect_in_vp(&sm, tray_rc, mx, my);
         let over_tray_pin = self.hit_tray_pin(tray_rc, mx, my);
-        let over_bin = Self::hit_rect(bin_rc, mx, my);
+        let over_bin = Self::hit_rect_in_vp(&sm, bin_rc, mx, my);
         let over_widget_hit = wrects
             .iter()
-            .find(|(_, rc)| Self::hit_rect(Some(*rc), mx, my))
+            .find(|(_, rc)| Self::hit_rect_in_vp(&sm, Some(*rc), mx, my))
             .copied();
         let over_widget = over_widget_hit.map(|(id, _)| id);
         let over_widget_sub = over_widget_hit.and_then(|(id, rc)| {
@@ -2575,11 +2969,10 @@ impl DockState {
             return;
         }
 
-        let (pill_left, _, pill_w, _) = self.live_pill_geometry();
-        let apps_left = pill_left + 15.0 + shell_section_width(self.settings.icon_dips()) - 6.0;
-        let apps_right = pill_left + pill_w
-            - widgets_section_width(&self.settings, self.slots.len(), self.mon_w_dips())
-            - 10.0;
+        let apps_left = sm.vp_left;
+        let apps_right = sm
+            .vp_right
+            .min(sm.apps_start_x + self.live_apps_width_dips() + 8.0);
         if mx >= apps_left && mx <= apps_right && !self.slots.is_empty() {
             if self.hovered_shell.is_some() {
                 self.hovered_shell = None;
@@ -2614,7 +3007,7 @@ impl DockState {
 
     fn handle_mouse_leave(&mut self) {
         self.tracking_mouse = false;
-        if self.drag.is_some() || self.resize_drag.is_some() {
+        if self.drag.is_some() || self.resize_drag.is_some() || self.scroll_pan.is_some() {
             return;
         }
         self.hover_mouse_x = None;
@@ -2626,12 +3019,15 @@ impl DockState {
         self.hovered_bin = false;
         self.hovered_widget = None;
         self.hovered_widget_sub = None;
+        self.hovered_scroll = None;
         self.hovered_resize = None;
         self.pressed_shell = None;
         self.pressed_tray = false;
         self.pressed_tray_pin = None;
         self.pressed_bin = false;
         self.pressed_widget = None;
+        self.pressed_scroll = None;
+        self.scroll_pan = None;
         self.pressed_idx = None;
         if had_widget {
             self.refresh_widgets();
@@ -2660,6 +3056,12 @@ impl DockState {
             });
             return;
         }
+        if let Some(is_next) = self.hit_scroll_button(mx, my) {
+            self.pressed_scroll = Some(is_next);
+            self.update_visuals();
+            return;
+        }
+        let sm = self.live_scroll_metrics();
         let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
         if let Some(index) = self.hit_tray_pin(tray_rc, mx, my) {
             self.pressed_tray_pin = self
@@ -2670,19 +3072,19 @@ impl DockState {
             self.update_visuals();
             return;
         }
-        if Self::hit_rect(tray_rc, mx, my) {
+        if Self::hit_rect_in_vp(&sm, tray_rc, mx, my) {
             self.pressed_tray = true;
             self.update_visuals();
             return;
         }
-        if Self::hit_rect(bin_rc, mx, my) {
+        if Self::hit_rect_in_vp(&sm, bin_rc, mx, my) {
             self.pressed_bin = true;
             self.update_visuals();
             return;
         }
         if let Some((wid, _)) = wrects
             .iter()
-            .find(|(_, rc)| Self::hit_rect(Some(*rc), mx, my))
+            .find(|(_, rc)| Self::hit_rect_in_vp(&sm, Some(*rc), mx, my))
         {
             self.pressed_widget = Some(*wid);
             self.refresh_widgets();
@@ -2720,6 +3122,14 @@ impl DockState {
             );
             return;
         }
+        if let Some(is_next) = self.pressed_scroll.take() {
+            if self.hit_scroll_button(mx, my) == Some(is_next) {
+                self.scroll_by_step(is_next);
+            }
+            self.update_visuals();
+            return;
+        }
+        let sm = self.live_scroll_metrics();
         let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
         if let Some(path) = self.pressed_tray_pin.take() {
             self.update_visuals();
@@ -2734,7 +3144,7 @@ impl DockState {
             self.pressed_tray = false;
             self.update_visuals();
             if let Some(rc) = tray_rc
-                && Self::hit_rect(Some(rc), mx, my)
+                && Self::hit_rect_in_vp(&sm, Some(rc), mx, my)
             {
                 let (ax, ay) = self.flyout_anchor_px(rc);
                 if let Some((path, pinned)) = tray::open_background_apps_flyout(
@@ -2752,7 +3162,7 @@ impl DockState {
         if self.pressed_bin {
             self.pressed_bin = false;
             self.update_visuals();
-            if Self::hit_rect(bin_rc, mx, my) {
+            if Self::hit_rect_in_vp(&sm, bin_rc, mx, my) {
                 pins::launch("shell:RecycleBinFolder".to_owned());
             }
             return;
@@ -2761,7 +3171,7 @@ impl DockState {
             self.update_visuals();
             if let Some((_, rc)) = wrects
                 .iter()
-                .find(|(id, rc)| *id == wid && Self::hit_rect(Some(*rc), mx, my))
+                .find(|(id, rc)| *id == wid && Self::hit_rect_in_vp(&sm, Some(*rc), mx, my))
             {
                 let rel_x = mx - rc.0;
                 let width = (rc.2 - rc.0).max(1.0);
@@ -2844,8 +3254,27 @@ impl DockState {
         }
     }
 
+    fn handle_mbutton_down(&mut self, mx: f32) {
+        self.hide_preview_now();
+        let max_s = self.live_scroll_metrics().max_scroll;
+        if max_s > 0.5 {
+            unsafe {
+                SetCapture(self.hwnd as HWND);
+            }
+            self.scroll_pan = Some((mx, self.scroll_offset, false));
+        }
+    }
+
     fn handle_mbutton_up(&mut self) {
         self.hide_preview_now();
+        if let Some((_, _, moved)) = self.scroll_pan.take() {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            if moved {
+                return;
+            }
+        }
         if let Some(idx) = self.hovered_idx
             && let Some(slot) = self.slots.get_mut(idx)
         {
@@ -2857,14 +3286,32 @@ impl DockState {
         }
     }
 
-    fn handle_mouse_wheel(&mut self, delta: i16) {
-        if self.hovered_widget == Some("audio") {
+    fn handle_mouse_wheel(&mut self, delta: i16, horizontal: bool) {
+        if !horizontal && self.hovered_widget == Some("audio") {
             widgets::adjust_audio_volume(if delta > 0 { 4 } else { -4 });
             self.refresh_widgets();
             self.update_visuals();
             return;
         }
-        if let Some(idx) = self.hovered_idx
+        let sm = self.live_scroll_metrics();
+        if sm.max_scroll > 0.5 && delta != 0 {
+            let step = (self.settings.icon_dips() + slot_gap(&self.settings)) * 2.2;
+            let dist = (f32::from(delta) / 120.0) * step;
+            let signed = if horizontal { dist } else { -dist };
+            let base = if (self.scroll_offset - self.scroll_target).abs() > 1.0
+                && signed.signum() == (self.scroll_target - self.scroll_offset).signum()
+            {
+                self.scroll_target
+            } else {
+                self.scroll_offset
+            };
+            self.scroll_target = (base + signed).clamp(0.0, sm.max_scroll);
+            self.ensure_animation();
+            self.update_visuals();
+            return;
+        }
+        if !horizontal
+            && let Some(idx) = self.hovered_idx
             && let Some(slot) = self.slots.get(idx)
             && !slot.windows.is_empty()
         {
@@ -2987,6 +3434,7 @@ impl DockState {
     fn handle_rbutton_up(&mut self, mx: f32, my: f32) {
         self.hide_preview_now();
 
+        let sm = self.live_scroll_metrics();
         let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
         if let Some(index) = self.hit_tray_pin(tray_rc, mx, my) {
             let path = self.settings.user_pinned_background_apps[index].clone();
@@ -2995,7 +3443,7 @@ impl DockState {
             }
             return;
         }
-        if Self::hit_rect(bin_rc, mx, my) {
+        if Self::hit_rect_in_vp(&sm, bin_rc, mx, my) {
             match win32::show_recycle_bin_context_menu(self.hwnd, self.is_dark) {
                 RecycleBinAction::Open => pins::launch("shell:RecycleBinFolder".to_owned()),
                 RecycleBinAction::Empty => {
@@ -3009,7 +3457,7 @@ impl DockState {
         }
         if let Some((wid, _)) = wrects
             .iter()
-            .find(|(_, rc)| Self::hit_rect(Some(*rc), mx, my))
+            .find(|(_, rc)| Self::hit_rect_in_vp(&sm, Some(*rc), mx, my))
             && let Some(outcome) = self
                 .widget_runtime
                 .handle_secondary_click(wid, &mut self.settings)
@@ -3192,6 +3640,7 @@ unsafe extern "system" fn wnd_proc(
                 || state.hovered_tray_pin.is_some()
                 || state.hovered_bin
                 || state.hovered_widget.is_some()
+                || state.hovered_scroll.is_some()
             {
                 IDC_HAND
             } else {
@@ -3238,13 +3687,23 @@ unsafe extern "system" fn wnd_proc(
             state.handle_lbutton_up(mx, my);
             0
         }
+        WM_MBUTTONDOWN => {
+            let mx = loword_i16(lparam) / state.dpi;
+            state.handle_mbutton_down(mx);
+            0
+        }
         WM_MBUTTONUP => {
             state.handle_mbutton_up();
             0
         }
         WM_MOUSEWHEEL => {
             let delta = ((wparam >> 16) & 0xffff) as i16;
-            state.handle_mouse_wheel(delta);
+            state.handle_mouse_wheel(delta, false);
+            0
+        }
+        WM_MOUSEHWHEEL => {
+            let delta = ((wparam >> 16) & 0xffff) as i16;
+            state.handle_mouse_wheel(delta, true);
             0
         }
         WM_RBUTTONUP => {
@@ -3674,5 +4133,39 @@ mod tests {
         assert_eq!(pinned[0].close_started, Some(now));
         assert!(!pinned[0].is_exiting());
         assert_eq!(pinned[0].layout_fraction(now + CLOSE_DURATION / 2), 1.0);
+    }
+
+    #[test]
+    fn scroll_metrics_prevent_apps_and_widgets_overlap_and_clamp_edge_indicators() {
+        // Natural-width dock (`vp_w = apps_w + right_w + 11.0`): never triggers false scrollbars.
+        let natural =
+            compute_scroll_metrics(150.0, 150.0 + 260.0 + 320.0 + 11.0, 260.0, 320.0, 0.0);
+        assert_eq!(natural.max_scroll, 0.0);
+        assert!(!natural.can_scroll_left);
+        assert!(!natural.can_scroll_right);
+        assert_eq!(natural.apps_start_x, 154.0);
+        assert_eq!(natural.right_anchor_x, 150.0 + 260.0 + 320.0 + 11.0 - 4.0);
+
+        // Overflowing dock (e.g. many apps + many widgets): zero overlap and accurate chevrons.
+        let start = compute_scroll_metrics(150.0, 750.0, 420.0, 620.0, 0.0);
+        assert!(start.max_scroll > 400.0);
+        assert!(!start.can_scroll_left);
+        assert!(start.can_scroll_right);
+        let apps_end = start.apps_start_x + 420.0;
+        let widgets_left = start.right_anchor_x - 620.0;
+        assert!(
+            widgets_left >= apps_end - 0.01,
+            "widgets ({widgets_left}) must never overlap apps ({apps_end})"
+        );
+
+        let mid = compute_scroll_metrics(150.0, 750.0, 420.0, 620.0, start.max_scroll * 0.5);
+        assert!(mid.can_scroll_left);
+        assert!(mid.can_scroll_right);
+
+        let end = compute_scroll_metrics(150.0, 750.0, 420.0, 620.0, start.max_scroll + 200.0);
+        assert!((end.offset - start.max_scroll).abs() < 0.01);
+        assert!(end.can_scroll_left);
+        assert!(!end.can_scroll_right);
+        assert!((end.right_anchor_x - 746.0).abs() < 0.01);
     }
 }

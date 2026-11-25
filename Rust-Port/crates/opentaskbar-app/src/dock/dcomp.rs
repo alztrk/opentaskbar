@@ -27,7 +27,8 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice2, IDCompositionDevice, IDCompositionMatrixTransform,
-    IDCompositionSurface, IDCompositionTarget, IDCompositionVisual, IDCompositionVisual3,
+    IDCompositionRectangleClip, IDCompositionSurface, IDCompositionTarget, IDCompositionVisual,
+    IDCompositionVisual3,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -189,6 +190,24 @@ impl VisualNode {
             }
         }
     }
+
+    pub fn set_clip(&self, clip: &IDCompositionRectangleClip) {
+        unsafe {
+            let _ = self.visual.SetClip(clip);
+        }
+    }
+
+    pub fn remove_all_children(&self) {
+        unsafe {
+            let _ = self.visual.RemoveAllVisuals();
+        }
+    }
+
+    pub fn add_child(&self, child: &VisualNode) {
+        unsafe {
+            let _ = self.visual.AddVisual(&child.visual, false, None);
+        }
+    }
 }
 
 pub struct PillNodes {
@@ -318,6 +337,163 @@ impl DcompEngine {
                 opacity,
             })
         }
+    }
+
+    pub fn create_rect_clip(&self) -> Result<IDCompositionRectangleClip> {
+        unsafe { self.dcomp_device.CreateRectangleClip() }
+    }
+
+    pub fn update_clip_rect(
+        clip: &IDCompositionRectangleClip,
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+    ) {
+        unsafe {
+            let _ = clip.SetLeft2(left);
+            let _ = clip.SetTop2(top);
+            let _ = clip.SetRight2(right.max(left));
+            let _ = clip.SetBottom2(bottom.max(top));
+        }
+    }
+
+    /// Creates a directional edge-fade scrim + crisp Fluent chevron button for overflowing dock scroll.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_scroll_edge_surface(
+        &self,
+        is_left: bool,
+        width_px: u32,
+        height_px: u32,
+        radius_px: f32,
+        pill_rgb: Rgb,
+        is_dark: bool,
+        hovered: bool,
+        dpi: f32,
+    ) -> Result<IDCompositionSurface> {
+        let pal = design::palette(is_dark);
+        self.draw_surface(width_px, height_px, |dc, w, h| unsafe {
+            let stops = [
+                D2D1_GRADIENT_STOP {
+                    position: 0.0,
+                    color: color_rgba(pill_rgb.0, pill_rgb.1, pill_rgb.2, 0.94),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 0.55,
+                    color: color_rgba(pill_rgb.0, pill_rgb.1, pill_rgb.2, 0.72),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 1.0,
+                    color: color_rgba(pill_rgb.0, pill_rgb.1, pill_rgb.2, 0.0),
+                },
+            ];
+            let coll = dc.CreateGradientStopCollection(
+                &stops,
+                D2D1_COLOR_SPACE_SRGB,
+                D2D1_COLOR_SPACE_SRGB,
+                D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                D2D1_EXTEND_MODE_CLAMP,
+                D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+            )?;
+            let (start_x, end_x) = if is_left { (0.0, w) } else { (w, 0.0) };
+            let grad = dc.CreateLinearGradientBrush(
+                &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                    startPoint: Vector2 { X: start_x, Y: 0.0 },
+                    endPoint: Vector2 { X: end_x, Y: 0.0 },
+                },
+                None,
+                &coll,
+            )?;
+
+            let pad_v = (1.5 * dpi).max(1.0);
+            let r = radius_px.clamp(2.0, (h - pad_v * 2.0) * 0.5);
+            if is_left {
+                dc.FillRectangle(
+                    &D2D_RECT_F {
+                        left: 0.0,
+                        top: pad_v,
+                        right: w,
+                        bottom: h - pad_v,
+                    },
+                    &grad,
+                );
+            } else {
+                // Clip a wider rounded rect to keep the right outer edge curved with the dock pill.
+                dc.PushAxisAlignedClip(
+                    &D2D_RECT_F {
+                        left: 0.0,
+                        top: pad_v,
+                        right: w,
+                        bottom: h - pad_v,
+                    },
+                    windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                );
+                dc.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F {
+                            left: -(r * 2.0),
+                            top: pad_v,
+                            right: w,
+                            bottom: h - pad_v,
+                        },
+                        radiusX: r,
+                        radiusY: r,
+                    },
+                    &grad,
+                );
+                dc.PopAxisAlignedClip();
+            }
+
+            // Crisp hover highlight pill behind the chevron
+            let pill_sz = (22.0 * dpi).min(h - 8.0 * dpi).max(14.0);
+            let cx = if is_left { w * 0.40 } else { w * 0.60 };
+            let cy = h * 0.5;
+            if hovered {
+                let hb = dc.CreateSolidColorBrush(
+                    &if is_dark {
+                        color_rgba(0xff, 0xff, 0xff, 0.14)
+                    } else {
+                        color_rgba(0x18, 0x18, 0x1b, 0.10)
+                    },
+                    None,
+                )?;
+                dc.FillRoundedRectangle(
+                    &D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F {
+                            left: cx - pill_sz * 0.5,
+                            top: cy - pill_sz * 0.5,
+                            right: cx + pill_sz * 0.5,
+                            bottom: cy + pill_sz * 0.5,
+                        },
+                        radiusX: 7.0 * dpi,
+                        radiusY: 7.0 * dpi,
+                    },
+                    &hb,
+                );
+            }
+
+            let glyph = if is_left { "\u{E76B}" } else { "\u{E76C}" };
+            let ink = if hovered {
+                pal.accent
+            } else {
+                pal.text_primary
+            };
+            draw_fluent_str_d2d(
+                &self.dwrite_factory,
+                dc,
+                glyph,
+                D2D_RECT_F {
+                    left: cx - pill_sz * 0.5,
+                    top: cy - pill_sz * 0.5,
+                    right: cx + pill_sz * 0.5,
+                    bottom: cy + pill_sz * 0.5,
+                },
+                13.0 * dpi,
+                ink,
+                if hovered { 1.0 } else { 0.88 },
+            )?;
+            Ok(())
+        })
     }
 
     pub fn add_child(&self, parent: &IDCompositionVisual, child: &VisualNode) {
