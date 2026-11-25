@@ -181,6 +181,24 @@ internal static class SecondaryDockAndInteropChecks
             && events.SequenceEqual(["show:4", "reposition", "notify:False"]),
             "Exiting fullscreen must invalidate cached HWND_BOTTOM position, show without activation, reposition to HWND_TOPMOST, and notify.");
 
+        // A full-screen video on a secondary display must keep that display's dock hidden after focus moves to
+        // another monitor; previously only the foreground window was checked, so the dock covered the video.
+        const nint videoMonitor = 0x100;
+        const nint otherMonitor = 0x200;
+        const nint videoWindow = 0x300;
+        const nint focusedWindowElsewhere = 0x400;
+        bool ForegroundFullScreen(nint window, nint monitor) => window == videoWindow && monitor == videoMonitor;
+        bool AnyFullScreen(nint monitor) => monitor == videoMonitor;
+        bool NoFullScreen(nint _) => false;
+        Check(SecondaryDockWindow.ShouldHideForFullScreen(videoMonitor, focusedWindowElsewhere, ForegroundFullScreen, AnyFullScreen),
+            "A secondary dock must stay hidden behind a full-screen window on its display when another display has focus.");
+        Check(SecondaryDockWindow.ShouldHideForFullScreen(videoMonitor, videoWindow, ForegroundFullScreen, NoFullScreen),
+            "A full-screen foreground window on the dock's display must hide the secondary dock even if the monitor scan skips it.");
+        Check(!SecondaryDockWindow.ShouldHideForFullScreen(otherMonitor, videoWindow, ForegroundFullScreen, AnyFullScreen),
+            "A full-screen window on another display must not hide this secondary dock.");
+        Check(!SecondaryDockWindow.ShouldHideForFullScreen(0, videoWindow, ForegroundFullScreen, AnyFullScreen),
+            "A secondary dock without a monitor handle must never report full-screen suppression.");
+
         // Bug #11: Own-process focus (menus / flyouts / keyboard nav) must preserve the external foreground handle,
         // while a genuine empty foreground (0) or new external window must still update it.
         const nint externalApp = 0x1234;
