@@ -1,12 +1,13 @@
-//! Native Windows bottom-right corner "Show Desktop" edge strip (Fitts's Law).
+//! Native Windows 11 bottom-right corner "Show Desktop" edge strip.
 //!
-//! Sits at the far bottom-right corner of the monitor (exact Windows taskbar location),
-//! stays unobtrusive when idle, highlights cleanly on hover, and triggers `Show Desktop`
-//! on click without stealing focus.
+//! Uses `UpdateLayeredWindow` for per-pixel alpha:
+//! - Idle: 100% invisible (`alpha = 1` hit-testable corner target, zero visible rectangle)
+//! - Hover: draws only a crisp Windows 11-style `2px x 22px` vertical hairline near the edge
 
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect, PAINTSTRUCT,
+    AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
+    CreateCompatibleDC, CreateDIBSection, DIB_RGB_COLORS, DeleteDC, DeleteObject, SelectObject,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -14,24 +15,124 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST,
-    IDC_HAND, LWA_ALPHA, LoadCursorW, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SetCursor, SetLayeredWindowAttributes, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED,
+    IDC_HAND, LoadCursorW, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOSIZE, SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow, ULW_ALPHA,
+    UpdateLayeredWindow, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED,
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::platform::win32::MonitorInfo;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
-const STRIP_W_DIPS: f32 = 8.0;
+const STRIP_W_DIPS: f32 = 10.0;
 const STRIP_H_DIPS: f32 = 44.0;
-const IDLE_ALPHA: u8 = 28;
-const HOVER_ALPHA: u8 = 185;
 
 struct CornerState {
+    hwnd: HWND,
+    w_px: i32,
+    h_px: i32,
+    dpi: f32,
     is_dark: bool,
     hovered: bool,
     tracking: bool,
+}
+
+impl CornerState {
+    fn render(&self) {
+        let w = self.w_px.max(1) as usize;
+        let h = self.h_px.max(1) as usize;
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w as i32,
+                biHeight: -(h as i32),
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..unsafe { std::mem::zeroed() }
+            },
+            ..unsafe { std::mem::zeroed() }
+        };
+
+        unsafe {
+            let dc = CreateCompatibleDC(std::ptr::null_mut());
+            if dc.is_null() {
+                return;
+            }
+            let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+            let bmp =
+                CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+            if bmp.is_null() || bits.is_null() {
+                DeleteDC(dc);
+                return;
+            }
+            let old = SelectObject(dc, bmp as _);
+            let pixels = std::slice::from_raw_parts_mut(bits.cast::<u8>(), w * h * 4);
+
+            // Fill with alpha=1 (completely invisible to the eye, still 100% hit-testable).
+            for px in pixels.chunks_exact_mut(4) {
+                px[0] = 0;
+                px[1] = 0;
+                px[2] = 0;
+                px[3] = 1;
+            }
+
+            // On hover, draw only a subtle Windows 11-style 2px vertical hairline.
+            if self.hovered {
+                let line_w = (1.5 * self.dpi).round().max(1.0) as usize;
+                let line_h = (22.0 * self.dpi).round() as usize;
+                let x0 = (w.saturating_sub(line_w + (3.0 * self.dpi).round() as usize)).min(w);
+                let x1 = (x0 + line_w).min(w);
+                let y0 = h.saturating_sub(line_h) / 2;
+                let y1 = (y0 + line_h).min(h);
+                let (r, g, b, a): (u8, u8, u8, u8) = if self.is_dark {
+                    (226, 232, 240, 200)
+                } else {
+                    (30, 41, 59, 185)
+                };
+                // Premultiplied BGRA
+                let pb = ((u16::from(b) * u16::from(a) + 127) / 255) as u8;
+                let pg = ((u16::from(g) * u16::from(a) + 127) / 255) as u8;
+                let pr = ((u16::from(r) * u16::from(a) + 127) / 255) as u8;
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        let off = (y * w + x) * 4;
+                        pixels[off] = pb;
+                        pixels[off + 1] = pg;
+                        pixels[off + 2] = pr;
+                        pixels[off + 3] = a;
+                    }
+                }
+            }
+
+            let sz = SIZE {
+                cx: w as i32,
+                cy: h as i32,
+            };
+            let src_pt = POINT { x: 0, y: 0 };
+            let blend = BLENDFUNCTION {
+                BlendOp: AC_SRC_OVER as u8,
+                BlendFlags: 0,
+                SourceConstantAlpha: 255,
+                AlphaFormat: AC_SRC_ALPHA as u8,
+            };
+            let _ = UpdateLayeredWindow(
+                self.hwnd,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                &sz,
+                dc,
+                &src_pt,
+                0,
+                &blend,
+                ULW_ALPHA,
+            );
+
+            SelectObject(dc, old);
+            DeleteObject(bmp as _);
+            DeleteDC(dc);
+        }
+    }
 }
 
 pub struct ShowDesktopCorner {
@@ -41,10 +142,6 @@ pub struct ShowDesktopCorner {
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
-}
-
-fn rgb(r: u8, g: u8, b: u8) -> u32 {
-    u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16)
 }
 
 impl ShowDesktopCorner {
@@ -89,13 +186,17 @@ impl ShowDesktopCorner {
         }
 
         let state = Box::into_raw(Box::new(CornerState {
+            hwnd,
+            w_px: w,
+            h_px: h,
+            dpi: monitor.dpi_scale,
             is_dark,
             hovered: false,
             tracking: false,
         }));
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
-            let _ = SetLayeredWindowAttributes(hwnd, 0, IDLE_ALPHA, LWA_ALPHA);
+            (*state).render();
             SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
@@ -114,6 +215,7 @@ impl ShowDesktopCorner {
         unsafe {
             if !self.state.is_null() {
                 (*self.state).is_dark = is_dark;
+                (*self.state).render();
             }
             ShowWindow(self.hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
             if visible {
@@ -126,7 +228,6 @@ impl ShowDesktopCorner {
                     0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                 );
-                InvalidateRect(self.hwnd, std::ptr::null(), 0);
             }
         }
     }
@@ -156,30 +257,6 @@ unsafe extern "system" fn corner_wnd_proc(
     }
     let state = unsafe { &mut *ptr };
     match msg {
-        WM_PAINT => {
-            let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
-            let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
-            if !hdc.is_null() {
-                let col = if state.is_dark {
-                    if state.hovered {
-                        rgb(0xe2, 0xe8, 0xf0)
-                    } else {
-                        rgb(0x94, 0xa3, 0xb8)
-                    }
-                } else if state.hovered {
-                    rgb(0x0f, 0x17, 0x2a)
-                } else {
-                    rgb(0x47, 0x55, 0x69)
-                };
-                unsafe {
-                    let brush = CreateSolidBrush(col);
-                    FillRect(hdc, &ps.rcPaint, brush);
-                    DeleteObject(brush as _);
-                    EndPaint(hwnd, &ps);
-                }
-            }
-            0
-        }
         WM_SETCURSOR => {
             unsafe {
                 SetCursor(LoadCursorW(std::ptr::null_mut(), IDC_HAND));
@@ -201,10 +278,7 @@ unsafe extern "system" fn corner_wnd_proc(
             }
             if !state.hovered {
                 state.hovered = true;
-                unsafe {
-                    let _ = SetLayeredWindowAttributes(hwnd, 0, HOVER_ALPHA, LWA_ALPHA);
-                    InvalidateRect(hwnd, std::ptr::null(), 0);
-                }
+                state.render();
             }
             0
         }
@@ -212,10 +286,7 @@ unsafe extern "system" fn corner_wnd_proc(
             state.tracking = false;
             if state.hovered {
                 state.hovered = false;
-                unsafe {
-                    let _ = SetLayeredWindowAttributes(hwnd, 0, IDLE_ALPHA, LWA_ALPHA);
-                    InvalidateRect(hwnd, std::ptr::null(), 0);
-                }
+                state.render();
             }
             0
         }
