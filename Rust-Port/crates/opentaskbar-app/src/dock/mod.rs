@@ -53,6 +53,7 @@ use crate::platform::icon_cache::{self, RawIcon};
 use crate::platform::pins::{self, PinnedApp};
 use crate::platform::win32::{
     self, AppContextAction, ContextAction, MonitorInfo, RecycleBinAction, TaskViewAction,
+    WidgetContextAction,
 };
 use crate::ui::settings as settings_ui;
 use crate::widgets::{self, WidgetRuntime};
@@ -180,10 +181,9 @@ struct ScrollMetrics {
     can_scroll_right: bool,
 }
 
-/// Computes horizontal scroll viewport & non-overlapping apps/widgets layout.
-/// Note: `right_w` (`widgets_section_width`) already includes the 13 DIP divider and spacing
-/// between apps and widgets, so `content_w` fits cleanly inside the natural pill width (`+11.0`)
-/// without triggering false scroll indicators when the dock does not overflow.
+/// Computes full-pill horizontal scroll viewport & non-overlapping shell/apps/widgets layout.
+/// `vp_left..vp_right` sits flush inside the dock pill (`pill_left + 1 .. pill_left + pill_w - 1`),
+/// with `14 DIP` inner horizontal padding on both ends (`1 + 14 = 15 DIP` matching `content_min_pill_width`).
 fn compute_scroll_metrics(
     vp_left: f32,
     vp_right: f32,
@@ -193,15 +193,15 @@ fn compute_scroll_metrics(
     scroll_offset: f32,
 ) -> ScrollMetrics {
     let vp_w = (vp_right - vp_left).max(1.0);
-    let content_w = 4.0 + shell_w + apps_w + right_w + 4.0;
+    let content_w = 14.0 + shell_w + apps_w + right_w + 14.0;
     let max_scroll = (content_w - vp_w).max(0.0);
     let offset = scroll_offset.clamp(0.0, max_scroll);
-    let shell_start_x = vp_left + 4.0 - offset;
+    let shell_start_x = vp_left + 14.0 - offset;
     let apps_start_x = shell_start_x + shell_w;
     let right_anchor_x = if max_scroll > 0.5 {
-        vp_left + content_w - 4.0 - offset
+        vp_left + content_w - 14.0 - offset
     } else {
-        vp_right - 4.0
+        vp_right - 14.0
     };
     ScrollMetrics {
         vp_left,
@@ -218,7 +218,7 @@ fn compute_scroll_metrics(
 
 fn scroll_min_pill_width(settings: &DockSettings) -> f32 {
     let base = settings.icon_dips();
-    (shell_section_width(base) + base * 2.5 + 36.0).max(200.0)
+    (base * 2.5 + 36.0).max(160.0)
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -694,7 +694,7 @@ fn content_min_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips
     (shell_section_width(base)
         + icons_w
         + widgets_section_width(settings, slot_count, mon_w_dips)
-        + 31.0)
+        + 30.0)
         .max(160.0)
 }
 
@@ -1224,9 +1224,10 @@ impl DockState {
         for wd in active {
             if let (Ok(bg), Ok(node)) = (self.dcomp.create_node(), self.dcomp.create_node()) {
                 bg.hide();
+                let width_dips = self.widget_runtime.widget_width_dips(wd.id);
                 self.widget_visuals.push(WidgetVisual {
                     id: wd.id,
-                    width_dips: wd.width_dips,
+                    width_dips,
                     bg,
                     node,
                     last_key: String::new(),
@@ -1240,8 +1241,15 @@ impl DockState {
         self.sync_widget_visuals();
         self.widget_runtime.tick(&self.settings);
         let mut changed = false;
+        let mut width_changed = false;
         let widget_h = design::widget_height_dips(pill_height_dips(&self.settings));
         for wv in &mut self.widget_visuals {
+            let live_w = self.widget_runtime.widget_width_dips(wv.id);
+            if (live_w - wv.width_dips).abs() > 0.5 {
+                wv.width_dips = live_w;
+                wv.last_key.clear();
+                width_changed = true;
+            }
             let interaction = if self.pressed_widget == Some(wv.id) {
                 WidgetInteraction::Pressed(self.hovered_widget_sub)
             } else if self.hovered_widget == Some(wv.id) {
@@ -1253,8 +1261,9 @@ impl DockState {
                 .widget_runtime
                 .chip_spec(wv.id, &self.settings, self.is_dark);
             let key = format!(
-                "{}|{widget_h:.1}|{}|{interaction:?}",
+                "{}|{:.1}|{widget_h:.1}|{}|{interaction:?}",
                 spec.cache_key(),
+                wv.width_dips,
                 self.is_dark
             );
             if key != wv.last_key
@@ -1271,6 +1280,9 @@ impl DockState {
                 wv.last_key = key;
                 changed = true;
             }
+        }
+        if width_changed {
+            self.sync_window_bounds();
         }
         if self.settings.show_recycle_bin {
             let full = widgets::is_recycle_bin_non_empty();
@@ -1686,6 +1698,24 @@ impl DockState {
         self.monitor.width() as f32 / self.dpi
     }
 
+    fn live_widgets_section_width(&self) -> f32 {
+        let mut w = 0.0;
+        if self.settings.show_tray_button {
+            w += self.settings.icon_dips() + 6.0;
+        }
+        if self.settings.show_recycle_bin {
+            w += self.settings.icon_dips() + 6.0;
+        }
+        for wv in &self.widget_visuals {
+            w += wv.width_dips + 6.0;
+        }
+        if w > 0.0 {
+            w + 13.0 + self.tray_pin_visuals.len() as f32 * tray_pin_cell(self.settings.icon_dips())
+        } else {
+            0.0
+        }
+    }
+
     fn live_pill_geometry(&self) -> (f32, f32, f32, f32) {
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
@@ -1703,11 +1733,9 @@ impl DockState {
                 largest_fraction = largest_fraction.max(fraction);
             }
             icons_w -= gap * largest_fraction;
-            let live_content = (shell_section_width(base)
-                + icons_w
-                + widgets_section_width(&self.settings, self.slots.len(), mon_w)
-                + 31.0)
-                .max(160.0);
+            let live_content =
+                (shell_section_width(base) + icons_w + self.live_widgets_section_width() + 30.0)
+                    .max(160.0);
             let max_w = (mon_w - 16.0).max(200.0);
             let floor_w = scroll_min_pill_width(&self.settings).min(live_content);
             let target = self
@@ -1742,10 +1770,11 @@ impl DockState {
     fn live_scroll_metrics(&self) -> ScrollMetrics {
         let base = self.settings.icon_dips();
         let (pill_left, _, pill_w, _) = self.live_pill_geometry();
-        let vp_left = pill_left + 15.0;
-        let vp_right = (pill_left + pill_w - 8.0).max(vp_left + 1.0);
+        // Flush with the outer rounded edges of the dock pill (matching C# `MainWindow.xaml`).
+        let vp_left = pill_left + 1.0;
+        let vp_right = (pill_left + pill_w - 1.0).max(vp_left + 1.0);
         let apps_w = self.live_apps_width_dips();
-        let right_w = widgets_section_width(&self.settings, self.slots.len(), self.mon_w_dips());
+        let right_w = self.live_widgets_section_width();
         compute_scroll_metrics(
             vp_left,
             vp_right,
@@ -2435,7 +2464,7 @@ impl DockState {
         }
 
         // 4. Right-side widget strip (Background Apps, Recycle Bin, user-enabled Widgets).
-        let widgets_w = widgets_section_width(&self.settings, self.slots.len(), self.mon_w_dips());
+        let widgets_w = self.live_widgets_section_width();
         if widgets_w > 0.0 {
             let mut right_cursor = sm.right_anchor_x;
             let widget_h = design::widget_height_dips(pill_h);
@@ -3492,34 +3521,48 @@ impl DockState {
             .iter()
             .find(|(_, rc)| Self::hit_rect_in_vp(&sm, Some(*rc), mx, my))
         {
-            if win32::show_widget_context_menu(self.hwnd) {
-                self.settings.set_widget_enabled(wid, false);
-                if let Err(error) = opentaskbar_core::settings::save_to(
-                    &opentaskbar_core::settings::settings_path(),
-                    &self.settings,
-                ) {
-                    opentaskbar_core::log::error(format!("Could not remove widget {wid}: {error}"));
-                } else {
-                    self.reload_settings_live();
-                }
-            } else if let Some(outcome) = self
-                .widget_runtime
-                .handle_secondary_click(wid, &mut self.settings)
-            {
-                match outcome {
-                    widgets::DirectClickOutcome::SettingsChanged => {
-                        let _ = opentaskbar_core::settings::save_to(
-                            &opentaskbar_core::settings::settings_path(),
-                            &self.settings,
-                        );
+            let secondary_label = match *wid {
+                "stopwatch" | "countdown" | "focus" => Some("Reset"),
+                "audio" => Some("Sound Settings"),
+                "quicksettings" => Some("Toggle Focus Mode"),
+                _ => None,
+            };
+            match win32::show_widget_context_menu(self.hwnd, self.is_dark, secondary_label) {
+                WidgetContextAction::Remove => {
+                    self.settings.set_widget_enabled(wid, false);
+                    if let Err(error) = opentaskbar_core::settings::save_to(
+                        &opentaskbar_core::settings::settings_path(),
+                        &self.settings,
+                    ) {
+                        opentaskbar_core::log::error(format!(
+                            "Could not remove widget {wid}: {error}"
+                        ));
+                    } else {
                         self.reload_settings_live();
                     }
-                    widgets::DirectClickOutcome::Handled
-                    | widgets::DirectClickOutcome::OpenFlyout => {
-                        self.refresh_widgets();
-                        self.update_visuals();
+                }
+                WidgetContextAction::Secondary => {
+                    if let Some(outcome) = self
+                        .widget_runtime
+                        .handle_secondary_click(wid, &mut self.settings)
+                    {
+                        match outcome {
+                            widgets::DirectClickOutcome::SettingsChanged => {
+                                let _ = opentaskbar_core::settings::save_to(
+                                    &opentaskbar_core::settings::settings_path(),
+                                    &self.settings,
+                                );
+                                self.reload_settings_live();
+                            }
+                            widgets::DirectClickOutcome::Handled
+                            | widgets::DirectClickOutcome::OpenFlyout => {
+                                self.refresh_widgets();
+                                self.update_visuals();
+                            }
+                        }
                     }
                 }
+                WidgetContextAction::None => {}
             }
             return;
         }
@@ -4183,11 +4226,11 @@ mod tests {
 
     #[test]
     fn scroll_metrics_prevent_apps_and_widgets_overlap_and_clamp_edge_indicators() {
-        // Natural-width dock (`vp_w = apps_w + right_w + 11.0`): never triggers false scrollbars.
+        // Natural-width dock (`vp_w = shell_w + apps_w + right_w + 28.0`): never triggers false scrollbars.
         let shell_w = 200.0;
         let natural = compute_scroll_metrics(
             150.0,
-            150.0 + shell_w + 260.0 + 320.0 + 12.0,
+            150.0 + shell_w + 260.0 + 320.0 + 28.0,
             260.0,
             320.0,
             shell_w,
@@ -4196,11 +4239,11 @@ mod tests {
         assert_eq!(natural.max_scroll, 0.0);
         assert!(!natural.can_scroll_left);
         assert!(!natural.can_scroll_right);
-        assert_eq!(natural.shell_start_x, 154.0);
+        assert_eq!(natural.shell_start_x, 164.0);
         assert_eq!(natural.apps_start_x, natural.shell_start_x + shell_w);
         assert_eq!(
             natural.right_anchor_x,
-            150.0 + shell_w + 260.0 + 320.0 + 12.0 - 4.0
+            150.0 + shell_w + 260.0 + 320.0 + 28.0 - 14.0
         );
 
         // Overflowing dock (e.g. many apps + many widgets): zero overlap and accurate chevrons.
@@ -4234,6 +4277,6 @@ mod tests {
         assert!(end.shell_start_x < end.vp_left);
         assert!(end.can_scroll_left);
         assert!(!end.can_scroll_right);
-        assert!((end.right_anchor_x - 746.0).abs() < 0.01);
+        assert!((end.right_anchor_x - 736.0).abs() < 0.01);
     }
 }

@@ -270,6 +270,30 @@ impl WidgetRuntime {
         }
     }
 
+    /// Returns the live dynamic width for a dock widget (matching C# `StorageWidget` multi-drive
+    /// and `BluetoothBatteryWidget` multi-device width expansion).
+    pub fn widget_width_dips(&self, id: &str) -> f32 {
+        match id {
+            "storage" => {
+                let n = sample_drives().len().clamp(1, 3);
+                (n as f32 * 116.0).max(124.0)
+            }
+            "bluetoothbattery" => {
+                let n = self
+                    .bt_battery
+                    .lock()
+                    .ok()
+                    .map_or(0, |g| g.devices.len().min(3));
+                if n == 0 {
+                    78.0
+                } else {
+                    (n as f32 * 64.0 + 12.0).max(78.0)
+                }
+            }
+            _ => widget_descriptor(id).map_or(96.0, |d| d.width_dips),
+        }
+    }
+
     /// Builds the exact C# 1-to-1 `WidgetChipSpec` rendered onto the dock pill.
     pub fn chip_spec(&self, id: &str, settings: &DockSettings, is_dark: bool) -> WidgetChipSpec {
         let pal = design::palette(is_dark);

@@ -5,7 +5,7 @@
 //! - Native context menus (Dock, Per-App, Task View), file drop extraction, and key modifiers
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
     DwmSetWindowAttribute,
@@ -20,11 +20,10 @@ use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFEC
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_SHIFT};
 use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GWL_EXSTYLE, GetCursorPos, GetSystemMetrics,
-    GetWindowLongPtrW, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN, SPI_GETCLIENTAREAANIMATION,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
-    SetWindowPos, SystemParametersInfoW, TrackPopupMenu, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    GWL_EXSTYLE, GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
+    SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW, WS_EX_APPWINDOW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
 use windows_sys::core::BOOL;
 
@@ -90,38 +89,40 @@ pub enum RecycleBinAction {
     Empty,
 }
 
-pub fn show_widget_context_menu(hwnd: usize) -> bool {
-    const MENU_REMOVE_WIDGET: u32 = 5001;
-    const MF_STRING: u32 = 0;
-    const TPM_RETURNCMD: u32 = 0x0100;
-    const TPM_RIGHTBUTTON: u32 = 0x0002;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WidgetContextAction {
+    None,
+    Secondary,
+    Remove,
+}
 
-    let label: Vec<u16> = "Remove widget\0".encode_utf16().collect();
-    let menu = unsafe { CreatePopupMenu() };
-    if menu.is_null() {
-        return false;
+pub fn show_widget_context_menu(
+    hwnd: usize,
+    is_dark: bool,
+    secondary_label: Option<&str>,
+) -> WidgetContextAction {
+    const MENU_WIDGET_SECONDARY: u32 = 5001;
+    const MENU_WIDGET_REMOVE: u32 = 5002;
+
+    let mut entries = Vec::new();
+    if let Some(label) = secondary_label {
+        entries.push(MenuEntry::item(
+            MENU_WIDGET_SECONDARY,
+            MenuIcon::Refresh,
+            label,
+        ));
+        entries.push(MenuEntry::Separator);
     }
-    let appended =
-        unsafe { AppendMenuW(menu, MF_STRING, MENU_REMOVE_WIDGET as usize, label.as_ptr()) };
-    let mut cursor = POINT { x: 0, y: 0 };
-    let got_cursor = unsafe { GetCursorPos(&mut cursor) } != 0;
-    let command = if appended != 0 && got_cursor {
-        unsafe {
-            TrackPopupMenu(
-                menu,
-                TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                cursor.x,
-                cursor.y,
-                0,
-                hwnd as HWND,
-                std::ptr::null(),
-            )
-        }
-    } else {
-        0
-    };
-    unsafe { DestroyMenu(menu) };
-    command == MENU_REMOVE_WIDGET as i32
+    entries.push(MenuEntry::destructive(
+        MENU_WIDGET_REMOVE,
+        MenuIcon::Trash,
+        "Remove Widget",
+    ));
+    match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
+        MENU_WIDGET_SECONDARY => WidgetContextAction::Secondary,
+        MENU_WIDGET_REMOVE => WidgetContextAction::Remove,
+        _ => WidgetContextAction::None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
