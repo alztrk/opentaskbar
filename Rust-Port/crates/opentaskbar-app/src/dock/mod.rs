@@ -2556,6 +2556,12 @@ impl DockState {
             return;
         }
 
+        if self.hit_shell_button(mx, my) == Some(ShellButton::Start) {
+            let act = win32::show_start_context_menu(self.hwnd, self.is_dark);
+            self.execute_context_action(act);
+            return;
+        }
+
         if self.hit_shell_button(mx, my) == Some(ShellButton::TaskView) {
             match win32::show_taskview_context_menu(self.hwnd, self.is_dark) {
                 TaskViewAction::PreviousDesktop => opentaskbar_shell::taskbar::previous_desktop(),
@@ -2578,6 +2584,7 @@ impl DockState {
                 &slot.label,
                 slot.pinned,
                 running,
+                self.settings.focus_mode,
             ) {
                 AppContextAction::Open => {
                     let hwnds = slot.hwnds();
@@ -2598,12 +2605,18 @@ impl DockState {
                         tracker::terminate_window_process(first.hwnd);
                     }
                 }
+                AppContextAction::Dock(act) => self.execute_context_action(act),
                 AppContextAction::None => {}
             }
             return;
         }
 
-        match win32::show_dock_context_menu(self.hwnd, self.is_dark, self.settings.focus_mode) {
+        let act = win32::show_dock_context_menu(self.hwnd, self.is_dark, self.settings.focus_mode);
+        self.execute_context_action(act);
+    }
+
+    fn execute_context_action(&mut self, action: ContextAction) {
+        match action {
             ContextAction::Search => opentaskbar_shell::taskbar::open_search(),
             ContextAction::ToggleFocusMode => {
                 self.settings.focus_mode = !self.settings.focus_mode;

@@ -108,6 +108,7 @@ pub enum AppContextAction {
     TogglePin,
     Close,
     Terminate,
+    Dock(ContextAction),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -351,43 +352,8 @@ pub fn reposition_dock_window(hwnd: usize, x: i32, y: i32, w: i32, h: i32) {
 
 use crate::ui::menu::{self, MenuEntry, MenuIcon};
 
-pub fn show_dock_context_menu(hwnd: usize, is_dark: bool, focus_mode: bool) -> ContextAction {
-    let entries = vec![
-        MenuEntry::item(MENU_SEARCH, MenuIcon::Play, "Search / Launcher"),
-        MenuEntry::item(
-            MENU_FOCUS_MODE,
-            MenuIcon::Layers,
-            if focus_mode {
-                "Focus Mode (On)"
-            } else {
-                "Focus Mode"
-            },
-        ),
-        MenuEntry::Separator,
-        MenuEntry::item(MENU_TASKMGR, MenuIcon::Activity, "Task Manager"),
-        MenuEntry::item(MENU_EXPLORER, MenuIcon::Folder, "File Explorer"),
-        MenuEntry::item(MENU_RUN, MenuIcon::Play, "Run..."),
-        MenuEntry::item(MENU_TERMINAL, MenuIcon::Terminal, "Terminal"),
-        MenuEntry::item(MENU_TERMINAL_ADMIN, MenuIcon::Shield, "Terminal (Admin)"),
-        MenuEntry::Separator,
-        MenuEntry::item(MENU_DEV_MGMT, MenuIcon::Settings, "Device Manager"),
-        MenuEntry::item(MENU_DISK_MGMT, MenuIcon::Layers, "Disk Management"),
-        MenuEntry::item(MENU_COMP_MGMT, MenuIcon::Monitor, "Computer Management"),
-        MenuEntry::item(MENU_EVENT_VWR, MenuIcon::Activity, "Event Viewer"),
-        MenuEntry::item(MENU_NET_CONN, MenuIcon::Refresh, "Network Connections"),
-        MenuEntry::Separator,
-        MenuEntry::item(MENU_LOCK_PC, MenuIcon::Shield, "Lock"),
-        MenuEntry::item(MENU_SIGN_OUT, MenuIcon::ChevronRight, "Sign Out"),
-        MenuEntry::item(MENU_RESTART_PC, MenuIcon::Refresh, "Restart"),
-        MenuEntry::destructive(MENU_SHUTDOWN_PC, MenuIcon::Power, "Shut Down"),
-        MenuEntry::Separator,
-        MenuEntry::item(MENU_SETTINGS, MenuIcon::Settings, "Settings..."),
-        MenuEntry::item(MENU_SHOW_DESKTOP, MenuIcon::Monitor, "Show Desktop"),
-        MenuEntry::item(MENU_RESTORE, MenuIcon::Refresh, "Restore Windows Taskbar"),
-        MenuEntry::Separator,
-        MenuEntry::destructive(MENU_EXIT, MenuIcon::Power, "Exit OpenTaskbar"),
-    ];
-    match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
+fn map_context_action(id: u32) -> ContextAction {
+    match id {
         MENU_SEARCH => ContextAction::Search,
         MENU_FOCUS_MODE => ContextAction::ToggleFocusMode,
         MENU_SETTINGS => ContextAction::Settings,
@@ -412,12 +378,66 @@ pub fn show_dock_context_menu(hwnd: usize, is_dark: bool, focus_mode: bool) -> C
     }
 }
 
+fn dock_menu_entries(focus_mode: bool) -> Vec<MenuEntry> {
+    vec![
+        MenuEntry::item(MENU_SEARCH, MenuIcon::Play, "Search / Launcher"),
+        MenuEntry::item(
+            MENU_FOCUS_MODE,
+            MenuIcon::Layers,
+            if focus_mode {
+                "Focus Mode (On)"
+            } else {
+                "Focus Mode"
+            },
+        ),
+        MenuEntry::item(MENU_SETTINGS, MenuIcon::Settings, "Settings..."),
+        MenuEntry::item(MENU_TASKMGR, MenuIcon::Activity, "Task Manager"),
+        MenuEntry::Separator,
+        MenuEntry::item(MENU_SHOW_DESKTOP, MenuIcon::Monitor, "Show Desktop"),
+        MenuEntry::item(MENU_RESTORE, MenuIcon::Refresh, "Restore Windows Taskbar"),
+        MenuEntry::Separator,
+        MenuEntry::destructive(MENU_EXIT, MenuIcon::Power, "Exit OpenTaskbar"),
+    ]
+}
+
+/// Power-user / system menu opened only on right-clicking the Windows Start logo.
+pub fn show_start_context_menu(hwnd: usize, is_dark: bool) -> ContextAction {
+    let entries = vec![
+        MenuEntry::item(MENU_TASKMGR, MenuIcon::Activity, "Task Manager"),
+        MenuEntry::item(MENU_EXPLORER, MenuIcon::Folder, "File Explorer"),
+        MenuEntry::item(MENU_RUN, MenuIcon::Play, "Run..."),
+        MenuEntry::item(MENU_TERMINAL, MenuIcon::Terminal, "Terminal"),
+        MenuEntry::item(MENU_TERMINAL_ADMIN, MenuIcon::Shield, "Terminal (Admin)"),
+        MenuEntry::Separator,
+        MenuEntry::item(MENU_DEV_MGMT, MenuIcon::Settings, "Device Manager"),
+        MenuEntry::item(MENU_DISK_MGMT, MenuIcon::Layers, "Disk Management"),
+        MenuEntry::item(MENU_COMP_MGMT, MenuIcon::Monitor, "Computer Management"),
+        MenuEntry::item(MENU_EVENT_VWR, MenuIcon::Activity, "Event Viewer"),
+        MenuEntry::item(MENU_NET_CONN, MenuIcon::Refresh, "Network Connections"),
+        MenuEntry::Separator,
+        MenuEntry::item(MENU_LOCK_PC, MenuIcon::Shield, "Lock"),
+        MenuEntry::item(MENU_SIGN_OUT, MenuIcon::ChevronRight, "Sign Out"),
+        MenuEntry::item(MENU_RESTART_PC, MenuIcon::Refresh, "Restart"),
+        MenuEntry::destructive(MENU_SHUTDOWN_PC, MenuIcon::Power, "Shut Down"),
+        MenuEntry::Separator,
+        MenuEntry::item(MENU_SHOW_DESKTOP, MenuIcon::Monitor, "Show Desktop"),
+    ];
+    map_context_action(menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0))
+}
+
+pub fn show_dock_context_menu(hwnd: usize, is_dark: bool, focus_mode: bool) -> ContextAction {
+    map_context_action(
+        menu::show_popup_menu(hwnd, is_dark, dock_menu_entries(focus_mode)).unwrap_or(0),
+    )
+}
+
 pub fn show_app_context_menu(
     hwnd: usize,
     is_dark: bool,
     app_name: &str,
     pinned: bool,
     running: bool,
+    focus_mode: bool,
 ) -> AppContextAction {
     let mut entries = vec![
         MenuEntry::item(APP_MENU_OPEN, MenuIcon::Play, app_name),
@@ -457,14 +477,21 @@ pub fn show_app_context_menu(
             "Terminate Process",
         ));
     }
-    match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
+    entries.push(MenuEntry::Separator);
+    entries.extend(dock_menu_entries(focus_mode));
+
+    let chosen = menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0);
+    match chosen {
         APP_MENU_OPEN => AppContextAction::Open,
         APP_MENU_NEW_WINDOW => AppContextAction::NewWindow,
         APP_MENU_ADMIN => AppContextAction::RunAsAdmin,
         APP_MENU_TOGGLE_PIN => AppContextAction::TogglePin,
         APP_MENU_CLOSE => AppContextAction::Close,
         APP_MENU_TERMINATE => AppContextAction::Terminate,
-        _ => AppContextAction::None,
+        id => match map_context_action(id) {
+            ContextAction::None => AppContextAction::None,
+            act => AppContextAction::Dock(act),
+        },
     }
 }
 
