@@ -17,12 +17,13 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, RegisterWindowMessageW, SendNotifyMessageW,
 };
 
+use crate::dock::dcomp::WidgetChipSpec;
 use crate::platform::{pins, win32};
 use crate::ui::components::{
     ButtonVariant, UiTheme, badge, button, icon_glyph, ios_switch, section_card, segmented_item,
     segmented_track, setting_row, sidebar_nav_item, stepper,
 };
-use crate::widgets::{self, telemetry};
+use crate::widgets;
 
 pub const SETTINGS_ARG: &str = "--settings";
 pub const RELOAD_MSG_NAME: &str = "OpenTaskBarReloadSettings";
@@ -115,71 +116,6 @@ fn widget_glyph(id: &str) -> &'static str {
     }
 }
 
-fn widget_preview_lines(id: &str, settings: &DockSettings) -> (String, String) {
-    if let Some(ai) = telemetry::ai_provider_meta(id) {
-        let status = if telemetry::ai_provider_detected(ai.id) {
-            "Ready"
-        } else {
-            "Sign in"
-        };
-        return (ai.short.to_owned(), status.to_owned());
-    }
-    match id {
-        "clock" => widgets::local_clock_strings(),
-        "weather" => ("21°C".to_owned(), settings.weather_city.clone()),
-        "dayprogress" => {
-            let (day, _, _, left) = widgets::day_progress_metrics();
-            (format!("DAY {:.0}%", day * 100.0), format!("{left}h left"))
-        }
-        "stopwatch" => ("00:00".to_owned(), "Stopwatch".to_owned()),
-        "countdown" => ("15:00".to_owned(), "Timer".to_owned()),
-        "stats" => (
-            "CPU 12%".to_owned(),
-            format!("RAM {}%", widgets::sample_ram_info().0),
-        ),
-        "netspeed" => ("D 2.4M".to_owned(), "U 320K".to_owned()),
-        "battery" => {
-            let b = widgets::sample_battery();
-            if b.has_battery {
-                (format!("BAT {}%", b.percent), "Power".to_owned())
-            } else {
-                ("AC".to_owned(), "Desktop".to_owned())
-            }
-        }
-        "bluetoothbattery" => ("BT 85%".to_owned(), "Wireless".to_owned()),
-        "storage" => widgets::sample_drives().first().map_or_else(
-            || ("C: 120G".to_owned(), "Free".to_owned()),
-            |d| {
-                (
-                    format!("{}: {:.0}G", d.letter, d.free_gb),
-                    "Free".to_owned(),
-                )
-            },
-        ),
-        "media" => ("MEDIA".to_owned(), "Prev · Play · Next".to_owned()),
-        "audio" => {
-            let (vol, muted) = widgets::get_audio_state();
-            if muted {
-                ("VOL --".to_owned(), "Muted".to_owned())
-            } else {
-                (format!("VOL {vol}%"), "Audio".to_owned())
-            }
-        }
-        "quicksettings" => ("QUICK".to_owned(), "Controls".to_owned()),
-        "keyboard" => (widgets::active_keyboard_code(), "Layout".to_owned()),
-        "focus" => (
-            "25:00".to_owned(),
-            if settings.focus_mode {
-                "Focus On"
-            } else {
-                "Pomodoro"
-            }
-            .to_owned(),
-        ),
-        _ => (id.to_uppercase(), "Widget".to_owned()),
-    }
-}
-
 fn notify_docks_reload() {
     let wide: Vec<u16> = RELOAD_MSG_NAME.encode_utf16().chain(Some(0)).collect();
     unsafe {
@@ -201,6 +137,7 @@ struct SettingsView {
     page: SettingsPage,
     focus: FocusHandle,
     settings: DockSettings,
+    widget_runtime: widgets::WidgetRuntime,
     startup_enabled: bool,
     scroll_handle: ScrollHandle,
     save_failed: bool,
@@ -210,10 +147,13 @@ impl SettingsView {
     fn new(settings: DockSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window);
+        let mut widget_runtime = widgets::WidgetRuntime::default();
+        widget_runtime.tick(&settings);
         Self {
             page: SettingsPage::Dock,
             focus,
             settings,
+            widget_runtime,
             startup_enabled: win32::is_startup_enabled(),
             scroll_handle: ScrollHandle::new(),
             save_failed: false,
@@ -231,7 +171,132 @@ impl SettingsView {
 
     fn auto_save(&mut self, cx: &mut Context<Self>) {
         self.sync_dock_pins();
+        self.widget_runtime.tick(&self.settings);
         self.save_settings(cx);
+    }
+
+    fn widget_preview_lines(&self, id: &str) -> (String, String) {
+        let is_dark = match self.settings.theme {
+            AppTheme::Dark => true,
+            AppTheme::Light => false,
+            AppTheme::System => win32::read_system_is_dark(),
+        };
+        let spec = self.widget_runtime.chip_spec(id, &self.settings, is_dark);
+        match spec {
+            WidgetChipSpec::Clock {
+                time,
+                date,
+                weekday,
+            } => (time, format!("{date} · {weekday}")),
+            WidgetChipSpec::Weather {
+                available,
+                temp,
+                place,
+                condition,
+                ..
+            } => {
+                if available {
+                    (temp, format!("{place} · {condition}"))
+                } else {
+                    (condition, place)
+                }
+            }
+            WidgetChipSpec::DayProgress { percent, unit, .. } => (percent, unit),
+            WidgetChipSpec::Timed { text, running, .. } => (
+                text,
+                if running {
+                    "Running".to_owned()
+                } else {
+                    "Paused".to_owned()
+                },
+            ),
+            WidgetChipSpec::SystemStats {
+                cpu_text, ram_text, ..
+            } => (format!("CPU {cpu_text}"), format!("RAM {ram_text}")),
+            WidgetChipSpec::NetSpeed { down, up } => (format!("↓ {down}"), format!("↑ {up}")),
+            WidgetChipSpec::BatteryLiquid {
+                present,
+                percent,
+                charging,
+            } => {
+                if present {
+                    (
+                        format!("{percent}%"),
+                        if charging {
+                            "Charging".to_owned()
+                        } else {
+                            "Battery".to_owned()
+                        },
+                    )
+                } else {
+                    ("Unavailable".to_owned(), "No battery".to_owned())
+                }
+            }
+            WidgetChipSpec::Bluetooth { devices } => devices.first().map_or_else(
+                || ("—".to_owned(), "No connected devices".to_owned()),
+                |(percent, _, _)| {
+                    (
+                        format!("{percent}%"),
+                        format!("{} connected", devices.len()),
+                    )
+                },
+            ),
+            WidgetChipSpec::Storage { drives } => drives.first().map_or_else(
+                || ("Unavailable".to_owned(), "No drives".to_owned()),
+                |(name, capacity)| (name.clone(), capacity.clone()),
+            ),
+            WidgetChipSpec::Media { title, artist, .. } => (
+                title,
+                if artist.is_empty() {
+                    "Not playing".to_owned()
+                } else {
+                    artist
+                },
+            ),
+            WidgetChipSpec::Audio { volume, muted } => (
+                if muted {
+                    "Muted".to_owned()
+                } else {
+                    format!("{volume}%")
+                },
+                "Audio".to_owned(),
+            ),
+            WidgetChipSpec::QuickSettings { pills } => (
+                pills
+                    .iter()
+                    .map(|(_, on)| if *on { "On" } else { "Off" })
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+                "Wi-Fi · Bluetooth · Night light".to_owned(),
+            ),
+            WidgetChipSpec::Keyboard { code } => (code, "Keyboard layout".to_owned()),
+            WidgetChipSpec::AiDual { rows, .. } => rows.first().map_or_else(
+                || ("—".to_owned(), "Sign in".to_owned()),
+                |(label, used, _, reset)| (format!("{label} {:.0}%", used * 100.0), reset.clone()),
+            ),
+            WidgetChipSpec::AiAntigravity { columns } => columns
+                .first()
+                .and_then(|(_, rows)| rows.first())
+                .map_or_else(
+                    || ("—".to_owned(), "Sign in".to_owned()),
+                    |(label, used, _, reset)| {
+                        (format!("{label} {:.0}%", used * 100.0), reset.clone())
+                    },
+                ),
+            WidgetChipSpec::AiOpenCode { columns } => columns.first().map_or_else(
+                || ("—".to_owned(), "Sign in".to_owned()),
+                |(label, value, _, _, reset)| (format!("{label} {value}"), reset.clone()),
+            ),
+            WidgetChipSpec::AiCopilot {
+                value_text,
+                meta_text,
+                ..
+            } => (value_text, meta_text),
+            WidgetChipSpec::AiBalance {
+                name, value_text, ..
+            } => (value_text, name.to_owned()),
+            WidgetChipSpec::Simple { top, bottom, .. } => (top, bottom),
+        }
     }
 
     fn sync_dock_pins(&mut self) {
@@ -721,7 +786,7 @@ impl SettingsView {
     ) -> AnyElement {
         let wid = w.id;
         let enabled = self.settings.is_widget_enabled(wid);
-        let (top_line, bot_line) = widget_preview_lines(wid, &self.settings);
+        let (top_line, bot_line) = self.widget_preview_lines(wid);
         let border_col = if enabled { t.accent } else { t.border };
         let card_hover = t.surface_hover;
         let focus_color = t.text_primary;

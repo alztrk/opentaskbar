@@ -3491,21 +3491,34 @@ impl DockState {
         if let Some((wid, _)) = wrects
             .iter()
             .find(|(_, rc)| Self::hit_rect_in_vp(&sm, Some(*rc), mx, my))
-            && let Some(outcome) = self
-                .widget_runtime
-                .handle_secondary_click(wid, &mut self.settings)
         {
-            match outcome {
-                widgets::DirectClickOutcome::SettingsChanged => {
-                    let _ = opentaskbar_core::settings::save_to(
-                        &opentaskbar_core::settings::settings_path(),
-                        &self.settings,
-                    );
+            if win32::show_widget_context_menu(self.hwnd) {
+                self.settings.set_widget_enabled(wid, false);
+                if let Err(error) = opentaskbar_core::settings::save_to(
+                    &opentaskbar_core::settings::settings_path(),
+                    &self.settings,
+                ) {
+                    opentaskbar_core::log::error(format!("Could not remove widget {wid}: {error}"));
+                } else {
                     self.reload_settings_live();
                 }
-                widgets::DirectClickOutcome::Handled | widgets::DirectClickOutcome::OpenFlyout => {
-                    self.refresh_widgets();
-                    self.update_visuals();
+            } else if let Some(outcome) = self
+                .widget_runtime
+                .handle_secondary_click(wid, &mut self.settings)
+            {
+                match outcome {
+                    widgets::DirectClickOutcome::SettingsChanged => {
+                        let _ = opentaskbar_core::settings::save_to(
+                            &opentaskbar_core::settings::settings_path(),
+                            &self.settings,
+                        );
+                        self.reload_settings_live();
+                    }
+                    widgets::DirectClickOutcome::Handled
+                    | widgets::DirectClickOutcome::OpenFlyout => {
+                        self.refresh_widgets();
+                        self.update_visuals();
+                    }
                 }
             }
             return;

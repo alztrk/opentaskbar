@@ -26,8 +26,8 @@ use crate::ui::flyout::{self, BarTone, FlyoutBlock, FlyoutSpec, LiveEvent, LiveO
 
 pub use telemetry::{
     active_keyboard_code, adjust_audio_volume, day_progress_metrics, empty_recycle_bin,
-    get_audio_state, is_recycle_bin_non_empty, local_clock_strings, sample_battery, sample_drives,
-    sample_ram_info, set_audio_volume, toggle_audio_mute,
+    get_audio_state, is_recycle_bin_non_empty, sample_battery, sample_drives, sample_ram_info,
+    set_audio_volume, toggle_audio_mute,
 };
 
 pub const WIDGET_CATEGORIES: &[&str] = &[

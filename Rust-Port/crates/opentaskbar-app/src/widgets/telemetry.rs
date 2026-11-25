@@ -354,14 +354,6 @@ pub fn local_clock_info() -> LocalClockInfo {
     }
 }
 
-pub fn local_clock_strings() -> (String, String) {
-    let info = local_clock_info();
-    (
-        info.time_hm,
-        format!("{}, {}", info.weekday_short, info.short_date),
-    )
-}
-
 pub fn system_uptime_string() -> String {
     let secs = unsafe { GetTickCount64() } / 1000;
     let (d, h, m) = (secs / 86_400, (secs % 86_400) / 3600, (secs % 3600) / 60);
