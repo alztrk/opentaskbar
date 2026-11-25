@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed the Rust Background Apps list opening hidden utility windows or launching helper executables. Opening from either the row or its menu now restores an app window when possible and uses the dock's launch resolver otherwise.
+
 - Fixed Rust dock launches for Microsoft Store apps and desktop apps tracked through helper processes, such as Steam. Steam game shortcuts can also be dropped onto the dock and opened as Windows Internet shortcuts.
 
 - Redesigned the Rust port's Settings and Background Apps panels with coordinated light and dark themes, responsive Settings navigation, and inline dock pin and window close controls.

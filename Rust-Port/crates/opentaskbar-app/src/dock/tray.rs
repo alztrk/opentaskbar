@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use opentaskbar_shell::tracker;
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
 use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
@@ -13,8 +14,8 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindow, IsWindowVisible, MB_ICONWARNING, MB_OK, MessageBoxW, PostMessageW, SW_RESTORE,
-    SW_SHOW, SetForegroundWindow, ShowWindow, WM_CLOSE,
+    IsWindowVisible, MB_ICONWARNING, MB_OK, MessageBoxW, PostMessageW, SW_RESTORE, SW_SHOW,
+    SetForegroundWindow, ShowWindow, WM_CLOSE,
 };
 use windows_sys::core::BOOL;
 
@@ -156,21 +157,36 @@ pub fn enumerate_background_apps() -> Vec<BackgroundApp> {
 }
 
 fn activate_or_relaunch(app: &BackgroundApp) {
-    let hwnd = app.hwnd as HWND;
-    let mut brought = false;
-    unsafe {
-        if app.hwnd != 0 && IsWindow(hwnd) != 0 {
-            if IsIconic(hwnd) != 0 {
-                ShowWindow(hwnd, SW_RESTORE);
-            } else {
-                ShowWindow(hwnd, SW_SHOW);
+    let same_process =
+        process_image_path(app.pid).is_some_and(|path| path.eq_ignore_ascii_case(&app.exe_path));
+    let mut identity_window = None;
+    if same_process {
+        if let Some(window) = tracker::find_app_window(app.pid) {
+            let hwnd = window as HWND;
+            identity_window = Some(window);
+            // SAFETY: The window was selected from the application's current top-level windows.
+            let brought = unsafe {
+                let show = if IsIconic(hwnd) != 0 {
+                    SW_RESTORE
+                } else {
+                    SW_SHOW
+                };
+                ShowWindow(hwnd, show);
+                SetForegroundWindow(hwnd) != 0 && IsWindowVisible(hwnd) != 0 && IsIconic(hwnd) == 0
+            };
+            if brought {
+                return;
             }
-            brought = SetForegroundWindow(hwnd) != 0;
+        } else {
+            let mut owner_pid = 0;
+            // SAFETY: Windows validates the stored handle before returning its owning process.
+            unsafe { GetWindowThreadProcessId(app.hwnd as HWND, &mut owner_pid) };
+            if owner_pid == app.pid {
+                identity_window = Some(app.hwnd);
+            }
         }
     }
-    if !brought {
-        pins::launch(app.exe_path.clone());
-    }
+    pins::launch_app(app.exe_path.clone(), identity_window, false);
 }
 
 fn close_background_app(owner_hwnd: usize, app: &BackgroundApp) {
@@ -282,6 +298,7 @@ pub(super) fn open_background_apps_flyout(
         blocks,
     };
 
+    let mut open_from_menu = None;
     let mut handle_right_click = |id: u32| -> bool {
         if id < 100 {
             return false;
@@ -297,7 +314,7 @@ pub(super) fn open_background_apps_flyout(
         ];
         match menu::show_popup_menu(owner_hwnd, is_dark, entries).unwrap_or(0) {
             1 => {
-                activate_or_relaunch(app);
+                open_from_menu = Some(app);
                 true
             }
             2 => {
@@ -312,7 +329,7 @@ pub(super) fn open_background_apps_flyout(
         }
     };
 
-    match flyout::show_flyout_interactive(
+    let action = flyout::show_flyout_interactive(
         "tray",
         owner_hwnd,
         is_dark,
@@ -320,7 +337,12 @@ pub(super) fn open_background_apps_flyout(
         anchor_bottom_y_px,
         spec,
         Some(&mut handle_right_click),
-    ) {
+    );
+    if let Some(app) = open_from_menu {
+        activate_or_relaunch(app);
+        return None;
+    }
+    match action {
         Some(FlyoutAction::Primary(1)) => pins::launch("taskmgr.exe".to_owned()),
         Some(FlyoutAction::Primary(2)) => opentaskbar_shell::taskbar::open_tray_overflow(),
         Some(FlyoutAction::Primary(id)) if id >= 100 => {

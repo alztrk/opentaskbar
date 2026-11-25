@@ -7,7 +7,7 @@ use windows_sys::Win32::System::Threading::{
     TerminateProcess,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
+    EnumWindows, GW_OWNER, GWL_EXSTYLE, GetForegroundWindow, GetWindow, GetWindowLongPtrW,
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
     IsWindowVisible, PostMessageW, SW_MINIMIZE, SW_RESTORE, SetForegroundWindow, ShowWindow,
     WM_CLOSE, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
@@ -35,6 +35,18 @@ fn is_cloaked(hwnd: HWND) -> bool {
         )
     };
     hr == 0 && cloaked != 0
+}
+
+fn has_app_window_style(hwnd: HWND) -> bool {
+    // SAFETY: The HWND is supplied by EnumWindows on the caller's thread.
+    let (style, owner) = unsafe {
+        (
+            GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32,
+            GetWindow(hwnd, GW_OWNER),
+        )
+    };
+    style & WS_EX_NOACTIVATE == 0
+        && ((style & WS_EX_TOOLWINDOW == 0 && owner.is_null()) || style & WS_EX_APPWINDOW != 0)
 }
 
 fn process_image_path(pid: u32) -> Option<String> {
@@ -91,15 +103,7 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         if IsWindowVisible(hwnd) == 0 || is_cloaked(hwnd) {
             return 1;
         }
-        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-        if (ex & WS_EX_NOACTIVATE) != 0 {
-            return 1;
-        }
-        if (ex & WS_EX_TOOLWINDOW) != 0 && (ex & WS_EX_APPWINDOW) == 0 {
-            return 1;
-        }
-        let owner = GetWindow(hwnd, 4); // GW_OWNER
-        if !owner.is_null() && (ex & WS_EX_APPWINDOW) == 0 {
+        if !has_app_window_style(hwnd) {
             return 1;
         }
         let title = window_title(hwnd);
@@ -140,6 +144,41 @@ pub fn enumerate_windows() -> Vec<RunningWindow> {
         EnumWindows(Some(enum_proc), (&mut ctx as *mut EnumCtx) as LPARAM);
     }
     ctx.out
+}
+
+/// Finds a visible or hidden application window for an already verified process.
+pub fn find_app_window(pid: u32) -> Option<usize> {
+    struct Search {
+        pid: u32,
+        hwnd: Option<usize>,
+    }
+
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: EnumWindows invokes this callback synchronously while Search is alive.
+        unsafe {
+            let search = &mut *(lparam as *mut Search);
+            let mut owner_pid = 0;
+            GetWindowThreadProcessId(hwnd, &mut owner_pid);
+            if owner_pid != search.pid
+                || GetWindowTextLengthW(hwnd) == 0
+                || !has_app_window_style(hwnd)
+                || is_cloaked(hwnd)
+            {
+                return 1;
+            }
+            if IsWindowVisible(hwnd) != 0 {
+                search.hwnd = Some(hwnd as usize);
+                return 0;
+            }
+            search.hwnd.get_or_insert(hwnd as usize);
+            1
+        }
+    }
+
+    let mut search = Search { pid, hwnd: None };
+    // SAFETY: The local Search outlives every synchronous callback.
+    unsafe { EnumWindows(Some(visit), (&mut search as *mut Search) as LPARAM) };
+    search.hwnd
 }
 
 /// Activates and restores a specific window.
@@ -242,5 +281,60 @@ pub fn activate_or_toggle(hwnds: &[usize]) -> bool {
         }
         cycle_windows(&live, true);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, WS_OVERLAPPEDWINDOW,
+    };
+    use windows_sys::core::PCWSTR;
+    use windows_sys::w;
+
+    struct HiddenWindow(HWND);
+
+    impl HiddenWindow {
+        fn new(style: u32, title: PCWSTR) -> Self {
+            // SAFETY: STATIC is a system window class. No window is shown or activated.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    style,
+                    w!("STATIC"),
+                    title,
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                    200,
+                    100,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null(),
+                )
+            };
+            assert!(!hwnd.is_null());
+            Self(hwnd)
+        }
+    }
+
+    impl Drop for HiddenWindow {
+        fn drop(&mut self) {
+            // SAFETY: The same test thread owns the fixture window.
+            unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    #[test]
+    fn background_app_lookup_skips_utility_windows_and_finds_a_hidden_app_window() {
+        let pid = std::process::id();
+        let _utility = HiddenWindow::new(WS_EX_TOOLWINDOW, w!("Utility"));
+        let _untitled = HiddenWindow::new(0, w!(""));
+        let _no_activate = HiddenWindow::new(WS_EX_NOACTIVATE, w!("Notification"));
+        assert_eq!(find_app_window(pid), None);
+
+        let app = HiddenWindow::new(0, w!("Application window"));
+        assert_eq!(find_app_window(pid), Some(app.0 as usize));
     }
 }
