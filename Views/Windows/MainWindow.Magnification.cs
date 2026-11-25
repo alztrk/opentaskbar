@@ -510,7 +510,7 @@ public partial class MainWindow
     private bool IsNativeShellButton(Button button)
     {
         if (ReferenceEquals(button, StartButton) || ReferenceEquals(button, SearchButton)
-            || ReferenceEquals(button, TaskViewButton) || ReferenceEquals(button, TrayButton)
+            || ReferenceEquals(button, FjordFilesButton) || ReferenceEquals(button, TaskViewButton) || ReferenceEquals(button, TrayButton)
             || ReferenceEquals(button, ShowDesktopButton) || ReferenceEquals(button, RecycleBinButton))
         {
             return true;

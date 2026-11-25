@@ -223,6 +223,7 @@ public partial class MainWindow
             : 0;
         var shellCount = (StartButtonShown ? 1 : 0)
             + (_preferences.Current.ShowSearchButton ? 1 : 0)
+            + (_preferences.Current.IsFjordFilesButtonVisible ? 1 : 0)
             + (_preferences.Current.ShowTaskViewButton ? 1 : 0)
             + (_preferences.Current.ShowTrayButton ? 1 : 0)
             + (PinnedTrayStrip.VisibleCount > 0 ? (int)Math.Ceiling(PinnedTrayStrip.VisibleCount * 0.7) : 0);

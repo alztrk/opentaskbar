@@ -21,6 +21,8 @@ public sealed class DockSettingsStore
     private readonly string _path;
     private readonly AppLanguage _defaultLanguage;
 
+    internal string SettingsPath => _path;
+
     public DockSettingsStore(string? path = null, CultureInfo? defaultCulture = null)
     {
         _defaultLanguage = LanguageCatalog.FromCulture(defaultCulture ?? CultureInfo.CurrentUICulture);

@@ -53,6 +53,7 @@
             <MenuItem Header="{local:Loc CheckForUpdates}" Icon="{StaticResource IconRefresh}" Tag="UpdateMenu" Click="CheckUpdates_Click" />
             <MenuItem Header="{local:Loc TaskManager}" Icon="{StaticResource IconTaskManager}" Click="OpenTaskManager_Click" />
             <Separator />
+            <MenuItem Header="{local:FjordLoc Title}" Icon="{StaticResource IconFolder}" Tag="FjordFilesMenu" Click="OpenFjordFiles_Click" />
             <MenuItem Header="{local:Loc OpenFileExplorer}" Icon="{StaticResource IconFolder}" Click="OpenFileExplorer_Click" />
             <MenuItem Header="{local:Loc OpenRunDialog}" Icon="{StaticResource IconSearch}" Click="OpenRunDialog_Click" />
             <MenuItem Header="{local:Loc OpenTerminal}" Icon="{StaticResource IconTerminal}" Click="OpenTerminal_Click" />
@@ -288,6 +289,21 @@
                                     <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconSearch}"
                                                     Width="{DynamicResource DockUtilityGlyphSize}"
                                                     Height="{DynamicResource DockUtilityGlyphSize}"
+                                                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                    Foreground="{DynamicResource TextPrimary}" />
+                                </Grid>
+                            </Button>
+                            <Button x:Name="FjordFilesButton" Style="{StaticResource ShellDockButton}" Click="OpenFjordFiles_Click"
+                                    AutomationProperties.Name="{local:FjordLoc Title}" ToolTip="{local:FjordLoc Title}">
+                                <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}" RenderTransformOrigin="0.5,0.5">
+                                    <Grid.RenderTransform>
+                                        <TransformGroup>
+                                            <ScaleTransform ScaleX="1" ScaleY="1" />
+                                            <TranslateTransform Y="0" />
+                                        </TransformGroup>
+                                    </Grid.RenderTransform>
+                                    <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconFolder}"
+                                                    Width="{DynamicResource DockUtilityGlyphSize}" Height="{DynamicResource DockUtilityGlyphSize}"
                                                     HorizontalAlignment="Center" VerticalAlignment="Center"
                                                     Foreground="{DynamicResource TextPrimary}" />
                                 </Grid>

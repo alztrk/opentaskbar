@@ -375,6 +375,23 @@
                                     </StackPanel>
                                 </DockPanel></Border>
                                 <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <CheckBox x:Name="FjordFilesEnabledToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              AutomationProperties.Name="{local:FjordLoc EnableFjordFiles}" AutomationProperties.HelpText="{local:FjordLoc EnableFjordFilesDescription}" />
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:FjordLoc EnableFjordFiles}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:FjordLoc EnableFjordFilesDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <CheckBox x:Name="FjordFilesButtonToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              IsEnabled="{Binding IsChecked, ElementName=FjordFilesEnabledToggle}"
+                                              AutomationProperties.Name="{local:FjordLoc ShowDockButton}" AutomationProperties.HelpText="{local:FjordLoc DockDescription}" />
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:FjordLoc ShowDockButton}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:FjordLoc DockDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
                                     <CheckBox x:Name="TaskViewButtonToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
                                               AutomationProperties.Name="{local:Loc WidgetDesktops}" AutomationProperties.HelpText="{local:Loc TaskViewDescription}" />
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">

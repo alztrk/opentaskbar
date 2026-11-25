@@ -572,6 +572,8 @@ public partial class SettingsWindow : Window
             FocusSessions = (int)Math.Round(FocusSessionsSlider.Value),
             ShowRecycleBin = RecycleBinToggle.IsChecked == true,
             ShowSearchButton = SearchButtonToggle.IsChecked == true,
+            FjordFilesEnabled = FjordFilesEnabledToggle.IsChecked == true,
+            ShowFjordFilesButton = FjordFilesButtonToggle.IsChecked == true,
             ShowTaskViewButton = TaskViewButtonToggle.IsChecked == true,
             ShowTrayButton = TrayButtonToggle.IsChecked == true,
             ShowDesktopButton = ShowDesktopButtonToggle.IsChecked == true,
@@ -1620,6 +1622,8 @@ public partial class SettingsWindow : Window
     {
         RecycleBinToggle.IsChecked = settings.ShowRecycleBin;
         SearchButtonToggle.IsChecked = settings.ShowSearchButton;
+        FjordFilesEnabledToggle.IsChecked = settings.FjordFilesEnabled;
+        FjordFilesButtonToggle.IsChecked = settings.ShowFjordFilesButton;
         TaskViewButtonToggle.IsChecked = settings.ShowTaskViewButton;
         TrayButtonToggle.IsChecked = settings.ShowTrayButton;
         ShowDesktopButtonToggle.IsChecked = settings.ShowDesktopButton;
@@ -2852,6 +2856,8 @@ public partial class SettingsWindow : Window
             RecycleBinToggle.IsChecked = defaults.ShowRecycleBin;
             CurrentDesktopToggle.IsChecked = defaults.CurrentDesktopOnly;
             SearchButtonToggle.IsChecked = defaults.ShowSearchButton;
+            FjordFilesEnabledToggle.IsChecked = defaults.FjordFilesEnabled;
+            FjordFilesButtonToggle.IsChecked = defaults.ShowFjordFilesButton;
             TaskViewButtonToggle.IsChecked = defaults.ShowTaskViewButton;
             TrayButtonToggle.IsChecked = defaults.ShowTrayButton;
             ShowDesktopButtonToggle.IsChecked = defaults.ShowDesktopButton;

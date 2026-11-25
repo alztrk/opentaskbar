@@ -70,6 +70,7 @@ AppLaunchChecks();
 TrayListChecks();
 checks += PinnedTrayChecks.RunHeadless();
 ShellTokenChecks();
+checks += FjordFilesFeatureChecks.RunSettings();
 LiveDragMathChecks();
 DragDropAndShowDesktopChecks();
 DockGroupsProfilesAndPinsChecks();
@@ -94,6 +95,7 @@ if (!headless)
 {
     checks += StaCheckRunner.Run(TraySourceChecks.RunUi);
     checks += StaCheckRunner.Run(DockGestureChecks.RunUi);
+    checks += StaCheckRunner.Run(FjordFilesFeatureChecks.RunUi);
 }
 Console.WriteLine($"{checks} behavior checks passed.");
 
@@ -137,26 +139,49 @@ void TrayListChecks()
 // Permanent shell buttons must be addressable by a free-form dock-order token, including Show Desktop.
 void ShellTokenChecks()
 {
-    var expected = new[] { "start", "search", "taskview", "tray", "peek", "bin" };
+    var expected = new[] { "start", "search", "fjord-files", "taskview", "tray", "peek", "bin" };
     Check(OpenTaskbar.MainWindow.ShellDockTokens.SequenceEqual(expected, StringComparer.OrdinalIgnoreCase),
         "Every permanent shell button must have a stable dock-order token.");
     var settings = new DockSettings(ShowTaskViewButton: false, ShowTrayButton: false, ShowDesktopButton: false);
     Check(!expected.Skip(2).Any(token => OpenTaskbar.MainWindow.ShellDockTokens.Contains(token, StringComparer.OrdinalIgnoreCase)
-        && (token == "taskview" ? settings.ShowTaskViewButton
+        && (token == "fjord-files" ? settings.ShowFjordFilesButton
+            : token == "taskview" ? settings.ShowTaskViewButton
             : token == "tray" ? settings.ShowTrayButton
             : token == "peek" && settings.ShowDesktopButton)),
         "Shell button visibility must be independently controllable through DockSettings.");
 
     var pinned = DockItemOrdering.ApplyPinnedGroups(
         ["app:a", "tray", "app:b", "taskview", "start", "search"],
-        new DockSettings(ShowTaskViewButton: true));
-    Check(pinned.SequenceEqual(["start", "search", "taskview", "app:a", "app:b", "tray", "bin"], StringComparer.OrdinalIgnoreCase),
+        new DockSettings(ShowTaskViewButton: true, ShowFjordFilesButton: true));
+    Check(pinned.SequenceEqual(["start", "search", "fjord-files", "taskview", "app:a", "app:b", "tray", "bin"], StringComparer.OrdinalIgnoreCase),
         "Native shell buttons must lead; background apps must trail with the Recycle Bin rightmost regardless of the saved order.");
     var hiddenPinned = DockItemOrdering.ApplyPinnedGroups(
-        ["app:a", "tray", "start", "search", "taskview", "bin"],
+        ["app:a", "tray", "start", "search", "fjord-files", "taskview", "bin"],
         new DockSettings(ShowSearchButton: false, ShowTaskViewButton: false, ShowTrayButton: false, ShowRecycleBin: false));
     Check(hiddenPinned.SequenceEqual(["start", "app:a"], StringComparer.OrdinalIgnoreCase),
         "Hidden pinned buttons must be omitted rather than leave gaps between the groups.");
+    Check(OpenTaskbar.FjordFilesWindow.IsComputerLocation("shell:MyComputerFolder")
+        && OpenTaskbar.FjordFilesWindow.IsComputerLocation("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}")
+        && !OpenTaskbar.FjordFilesWindow.IsComputerLocation(@"C:\This PC"),
+        "Fjord must resolve the virtual Computer folder without confusing similarly named filesystem paths.");
+    Check(FjordFilesText.Get("Computer", System.Globalization.CultureInfo.GetCultureInfo("tr-TR")) == "Bu Bilgisayar"
+        && FjordFilesText.Get("Computer", System.Globalization.CultureInfo.GetCultureInfo("de-DE")) == "This PC",
+        "Fjord must use its Turkish strings when available and English otherwise.");
+
+    var originalLanguage = UiText.Current.Language;
+    try
+    {
+        UiText.Current.SetLanguage(LanguageCatalog.FromCulture(CultureInfo.GetCultureInfo("tr-TR")));
+        Check(OpenTaskbar.FjordBarText.Get("Disconnect") == "Bağlantıyı kes",
+            "The Fjord top bar must load the Turkish Wi-Fi resources.");
+        UiText.Current.SetLanguage(LanguageCatalog.FromCulture(CultureInfo.GetCultureInfo("de-DE")));
+        Check(OpenTaskbar.FjordBarText.Get("Disconnect") == "Disconnect",
+            "The Fjord top bar must fall back to English when localized Wi-Fi resources are unavailable.");
+    }
+    finally
+    {
+        UiText.Current.SetLanguage(originalLanguage);
+    }
 }
 
 // Live reordering (#130): pure insertion-index and neighbour-slide math.

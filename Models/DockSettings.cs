@@ -207,7 +207,7 @@ public sealed record DockSettings(
     bool ThemeApplicationIcons = true,
     WidgetDensityMode GlobalWidgetDensity = WidgetDensityMode.Auto,
     IReadOnlyDictionary<string, WidgetDensityMode>? WidgetDensityOverrides = null,
-    // Free-form dock order: "start", "search", "taskview", "tray", "peek", "app:<path>", "stack:<path>", "widget:<id>", "bin".
+    // Free-form dock order: "start", "search", "fjord-files", "taskview", "tray", "peek", "app:<path>", "stack:<path>", "widget:<id>", "bin".
     // Null keeps the legacy grouped layout until the user drags an item.
     IReadOnlyList<string>? DockItemOrder = null,
     // Custom taskbar corner radius override (null = auto from size profile).
@@ -220,6 +220,7 @@ public sealed record DockSettings(
     IReadOnlyList<DockAppGroup>? AppGroups = null,
     // Shows the Search button beside Start. Search used to be a widget; the setting keeps the same opt-out.
     bool ShowSearchButton = true,
+    bool ShowFjordFilesButton = false,
     // Permanent shell buttons that used to be (or would have been) widgets.
     bool ShowTaskViewButton = true,
     bool ShowTrayButton = true,
@@ -271,7 +272,8 @@ public sealed record DockSettings(
     bool DynamicIslandEnabled = false,
     string? DynamicIslandBackgroundColor = null,
     double DynamicIslandOpacity = 1.0,
-    bool DynamicIslandAutoHide = false)
+    bool DynamicIslandAutoHide = false,
+    bool FjordFilesEnabled = true)
 {
     public const string DynamicIslandAllDisplays = "*";
     /// <summary>Effective animation state, suppressed while focus mode is active.</summary>
@@ -281,6 +283,9 @@ public sealed record DockSettings(
     /// <summary>Effective notification badge state, suppressed while focus mode is active.</summary>
     [JsonIgnore]
     public bool EffectiveNotificationBadgesEnabled => NotificationBadgesEnabled && !FocusModeEnabled;
+
+    [JsonIgnore]
+    public bool IsFjordFilesButtonVisible => FjordFilesEnabled && ShowFjordFilesButton;
 
     /// <summary>
     /// Parsed view of <see cref="PinnedTrayIcons"/>. Legacy <c>guid:</c>/<c>path:</c> strings and structured JSON

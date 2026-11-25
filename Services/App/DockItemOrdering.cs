@@ -6,7 +6,7 @@ namespace OpenTaskbar.Services;
 internal static class DockItemOrdering
 {
     /// <summary>Windows-native shell buttons that are always pinned to the left edge of the dock.</summary>
-    internal static readonly string[] PinnedLeadTokens = ["start", "search", "taskview"];
+    internal static readonly string[] PinnedLeadTokens = ["start", "search", "fjord-files", "taskview"];
 
     /// <summary>
     /// The background-apps button and the Recycle Bin are always pinned to the right edge of the dock,
@@ -67,6 +67,7 @@ internal static class DockItemOrdering
         var lead = new List<string>();
         if (settings.StartPlacement != StartButtonPlacement.Hidden) lead.Add("start");
         if (settings.ShowSearchButton) lead.Add("search");
+        if (settings.IsFjordFilesButtonVisible) lead.Add("fjord-files");
         if (settings.ShowTaskViewButton) lead.Add("taskview");
 
         var result = new List<string>(lead);

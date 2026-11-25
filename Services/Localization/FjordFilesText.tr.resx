@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <resheader name="resmimetype"><value>text/microsoft-resx</value></resheader>
+  <resheader name="version"><value>2.0</value></resheader>
+  <resheader name="reader"><value>System.Resources.ResXResourceReader, System.Windows.Forms</value></resheader>
+  <resheader name="writer"><value>System.Resources.ResXResourceWriter, System.Windows.Forms</value></resheader>
+  <data name="Title" xml:space="preserve"><value>Fjord Dosyalar</value></data>
+  <data name="EnableFjordFiles" xml:space="preserve"><value>Fjord Dosyalar’ı etkinleştir</value></data>
+  <data name="EnableFjordFilesDescription" xml:space="preserve"><value>Fjord Dosyalar’ın dock, üst bar ve kısayollardan açılmasına izin ver.</value></data>
+  <data name="ShowDockButton" xml:space="preserve"><value>Fjord Dosyalar simgesini göster</value></data>
+  <data name="DockDescription" xml:space="preserve"><value>Sürücülere, klasörlere ve dosya önizlemelerine dock’tan eriş.</value></data>
+  <data name="Computer" xml:space="preserve"><value>Bu Bilgisayar</value></data>
+  <data name="Home" xml:space="preserve"><value>Ev</value></data>
+  <data name="Desktop" xml:space="preserve"><value>Masaüstü</value></data>
+  <data name="Downloads" xml:space="preserve"><value>İndirilenler</value></data>
+  <data name="Documents" xml:space="preserve"><value>Belgeler</value></data>
+  <data name="Pictures" xml:space="preserve"><value>Resimler</value></data>
+  <data name="Music" xml:space="preserve"><value>Müzik</value></data>
+  <data name="Videos" xml:space="preserve"><value>Videolar</value></data>
+  <data name="Minimize" xml:space="preserve"><value>Simge durumuna küçült</value></data>
+  <data name="Resize" xml:space="preserve"><value>Pencere boyutu</value></data>
+  <data name="Close" xml:space="preserve"><value>Kapat</value></data>
+  <data name="Back" xml:space="preserve"><value>Geri</value></data>
+  <data name="Forward" xml:space="preserve"><value>İleri</value></data>
+  <data name="Parent" xml:space="preserve"><value>Üst klasör</value></data>
+  <data name="BackHint" xml:space="preserve"><value>Geri (Alt+Sol)</value></data>
+  <data name="ForwardHint" xml:space="preserve"><value>İleri (Alt+Sağ)</value></data>
+  <data name="ParentHint" xml:space="preserve"><value>Üst klasör (Alt+Yukarı)</value></data>
+  <data name="Location" xml:space="preserve"><value>Konum</value></data>
+  <data name="LocationHint" xml:space="preserve"><value>Konuma git (Ctrl+L)</value></data>
+  <data name="SearchHint" xml:space="preserve"><value>Bu konumda ara (Ctrl+F)</value></data>
+  <data name="Preview" xml:space="preserve"><value>Önizleme</value></data>
+  <data name="PreviewPane" xml:space="preserve"><value>Önizleme bölmesi</value></data>
+  <data name="PreviewHint" xml:space="preserve"><value>Önizleme bölmesi (F4)</value></data>
+  <data name="Favorites" xml:space="preserve"><value>Hızlı erişim</value></data>
+  <data name="Volumes" xml:space="preserve"><value>Konumlar</value></data>
+  <data name="Name" xml:space="preserve"><value>Ad</value></data>
+  <data name="Modified" xml:space="preserve"><value>Değiştirilme</value></data>
+  <data name="Size" xml:space="preserve"><value>Boyut</value></data>
+  <data name="Items" xml:space="preserve"><value>Dosyalar ve klasörler</value></data>
+  <data name="Open" xml:space="preserve"><value>Aç</value></data>
+  <data name="QuickLook" xml:space="preserve"><value>Hızlı Bakış</value></data>
+  <data name="CopyPath" xml:space="preserve"><value>Yolu kopyala</value></data>
+  <data name="Reveal" xml:space="preserve"><value>Windows Gezgini’nde göster</value></data>
+  <data name="Loading" xml:space="preserve"><value>Konum açılıyor…</value></data>
+  <data name="AccessDenied" xml:space="preserve"><value>Bu klasöre erişim izni yok.</value></data>
+  <data name="Missing" xml:space="preserve"><value>Klasör bulunamadı.</value></data>
+  <data name="OpenFolderFailed" xml:space="preserve"><value>Klasör açılamadı.</value></data>
+  <data name="OpenItemFailed" xml:space="preserve"><value>Windows bu öğeyi açamadı.</value></data>
+  <data name="Empty" xml:space="preserve"><value>Bu konum boş.</value></data>
+  <data name="NoMatches" xml:space="preserve"><value>Eşleşen öğe yok.</value></data>
+  <data name="Count" xml:space="preserve"><value>{0:N0} öğe</value></data>
+  <data name="FilteredCount" xml:space="preserve"><value>{0:N0} / {1:N0} öğe</value></data>
+  <data name="PreparingPreview" xml:space="preserve"><value>Önizleme hazırlanıyor…</value></data>
+  <data name="CopyFailed" xml:space="preserve"><value>Yol panoya kopyalanamadı.</value></data>
+  <data name="Copied" xml:space="preserve"><value>Yol panoya kopyalandı.</value></data>
+  <data name="SelectPreview" xml:space="preserve"><value>Önizlemek için bir öğe seç.</value></data>
+  <data name="Folder" xml:space="preserve"><value>Klasör</value></data>
+  <data name="PdfPages" xml:space="preserve"><value>İlk sayfa · {0} sayfa</value></data>
+  <data name="TextLimit" xml:space="preserve"><value>İlk 64 KB gösteriliyor.</value></data>
+  <data name="EmptyFile" xml:space="preserve"><value>Dosya boş.</value></data>
+  <data name="UnsupportedPreview" xml:space="preserve"><value>Bu dosya türü için önizleme yok.</value></data>
+  <data name="PreviewFailed" xml:space="preserve"><value>Dosya önizlenemedi.</value></data>
+  <data name="FilePreview" xml:space="preserve"><value>Dosya önizlemesi</value></data>
+</root>
