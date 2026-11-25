@@ -1139,6 +1139,9 @@ impl DockState {
         if self.last_frame.is_none() {
             self.last_frame = Some(Instant::now());
         }
+        // Clear any dropped `WM_APP_VSYNC` flag (e.g. skipped while a modal flyout/menu held
+        // `DockWndProcGuard`) so the VSync thread can never stall permanently.
+        self.tick_pending.store(false, Ordering::Release);
         self.set_animating(true);
     }
 
@@ -3088,6 +3091,47 @@ impl DockState {
         }
     }
 
+    fn is_cursor_over_dock_hit_area(&self) -> bool {
+        let mut pt = POINT { x: 0, y: 0 };
+        unsafe {
+            if GetCursorPos(&mut pt) == 0 {
+                return false;
+            }
+            ScreenToClient(self.hwnd as HWND, &mut pt);
+        }
+        let mx = pt.x as f32 / self.dpi;
+        let my = pt.y as f32 / self.dpi;
+        self.hit_test_dips(mx, my)
+    }
+
+    fn has_active_hover(&self) -> bool {
+        self.hover_mouse_x.is_some()
+            || self.hovered_idx.is_some()
+            || self.hovered_shell.is_some()
+            || self.hovered_tray
+            || self.hovered_tray_pin.is_some()
+            || self.hovered_bin
+            || self.hovered_widget.is_some()
+            || self.hovered_scroll.is_some()
+            || self.hovered_resize.is_some()
+    }
+
+    /// Reconciles pointer hover and animation state after drags, modal flyouts, or context menus,
+    /// where `WM_MOUSELEAVE` or `WM_APP_VSYNC` may have been suppressed.
+    fn reconcile_pointer_after_interaction(&mut self) {
+        self.tick_pending.store(false, Ordering::Release);
+        if self.drag.is_some() || self.resize_drag.is_some() || self.scroll_pan.is_some() {
+            return;
+        }
+        if self.has_active_hover() && !self.is_cursor_over_dock_hit_area() {
+            self.handle_mouse_leave();
+        } else if self.slots.iter().any(|s| (s.scale - 1.0).abs() > 0.004)
+            && self.hover_mouse_x.is_none()
+        {
+            self.ensure_animation();
+        }
+    }
+
     fn handle_mouse_leave(&mut self) {
         self.tracking_mouse = false;
         if self.drag.is_some() || self.resize_drag.is_some() || self.scroll_pan.is_some() {
@@ -3862,6 +3906,7 @@ unsafe extern "system" fn wnd_proc(
             let mx = loword_i16(lparam) / state.dpi;
             let my = hiword_i16(lparam) / state.dpi;
             state.handle_lbutton_up(mx, my);
+            state.reconcile_pointer_after_interaction();
             0
         }
         WM_MBUTTONDOWN => {
@@ -3887,6 +3932,7 @@ unsafe extern "system" fn wnd_proc(
             let mx = loword_i16(lparam) / state.dpi;
             let my = hiword_i16(lparam) / state.dpi;
             state.handle_rbutton_up(mx, my);
+            state.reconcile_pointer_after_interaction();
             0
         }
         WM_DROPFILES => {
@@ -3965,6 +4011,7 @@ unsafe extern "system" fn wnd_proc(
             if state.monitor.is_primary {
                 let _ = opentaskbar_shell::taskbar::ensure_hidden();
             }
+            state.reconcile_pointer_after_interaction();
             let slots_changed = state.sync_slots(true);
             state.evaluate_auto_hide();
             if slots_changed {
