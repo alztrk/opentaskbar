@@ -2609,13 +2609,42 @@ impl DockState {
             return;
         }
 
-        match win32::show_dock_context_menu(self.hwnd, self.is_dark) {
+        match win32::show_dock_context_menu(self.hwnd, self.is_dark, self.settings.focus_mode) {
+            ContextAction::Search => opentaskbar_shell::taskbar::open_search(),
+            ContextAction::ToggleFocusMode => {
+                self.settings.focus_mode = !self.settings.focus_mode;
+                let _ = opentaskbar_core::settings::save_to(
+                    &opentaskbar_core::settings::settings_path(),
+                    &self.settings,
+                );
+                self.reload_settings_live();
+            }
             ContextAction::Settings => spawn_settings_window(),
             ContextAction::TaskManager => pins::launch("taskmgr.exe".to_owned()),
             ContextAction::FileExplorer => pins::launch("explorer.exe".to_owned()),
             ContextAction::Terminal => pins::launch("wt.exe".to_owned()),
             ContextAction::TerminalAdmin => pins::launch_elevated("wt.exe".to_owned()),
             ContextAction::RunDialog => opentaskbar_shell::taskbar::open_run_dialog(),
+            ContextAction::DeviceManager => pins::launch("devmgmt.msc".to_owned()),
+            ContextAction::DiskManagement => pins::launch("diskmgmt.msc".to_owned()),
+            ContextAction::ComputerManagement => pins::launch("compmgmt.msc".to_owned()),
+            ContextAction::EventViewer => pins::launch("eventvwr.msc".to_owned()),
+            ContextAction::NetworkConnections => pins::launch("ncpa.cpl".to_owned()),
+            ContextAction::LockWorkstation => {
+                pins::launch_with_args(
+                    "rundll32.exe".to_owned(),
+                    "user32.dll,LockWorkStation".to_owned(),
+                );
+            }
+            ContextAction::SignOut => {
+                pins::launch_with_args("shutdown.exe".to_owned(), "/l".to_owned());
+            }
+            ContextAction::RestartComputer => {
+                pins::launch_with_args("shutdown.exe".to_owned(), "/r /t 0".to_owned());
+            }
+            ContextAction::ShutDownComputer => {
+                pins::launch_with_args("shutdown.exe".to_owned(), "/s /t 0".to_owned());
+            }
             ContextAction::ShowDesktop => opentaskbar_shell::taskbar::show_desktop(),
             ContextAction::RestoreTaskbar => opentaskbar_shell::taskbar::restore_from_journal(),
             ContextAction::Exit => unsafe {

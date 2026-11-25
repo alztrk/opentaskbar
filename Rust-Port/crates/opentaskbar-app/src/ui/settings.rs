@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use gpui::{
     AnyElement, App, Application, Bounds, Context, FocusHandle, KeyBinding, ScrollHandle,
-    SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, prelude::*,
-    px, rgba, size,
+    SharedString, TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowOptions, actions,
+    div, prelude::*, px, rgba, size,
 };
 use opentaskbar_core::settings::{
     self, AppTheme, AutoHideMode, DockAppGroup, DockPosition, DockProfile, DockSettings, DockSize,
@@ -54,14 +54,8 @@ enum SettingsPage {
 }
 
 impl SettingsPage {
-    const ALL: [Self; 6] = [
-        Self::Dock,
-        Self::Widgets,
-        Self::Themes,
-        Self::Stacks,
-        Self::Preferences,
-        Self::About,
-    ];
+    const TOP: [Self; 4] = [Self::Dock, Self::Widgets, Self::Themes, Self::Stacks];
+    const BOTTOM: [Self; 2] = [Self::Preferences, Self::About];
 
     fn title(self) -> &'static str {
         match self {
@@ -1412,29 +1406,34 @@ impl Render for SettingsView {
             .filter(|w| self.settings.is_widget_enabled(w.id))
             .count();
 
-        let nav_items: Vec<AnyElement> = SettingsPage::ALL
+        let make_nav = |p: SettingsPage, cx: &mut Context<Self>| -> AnyElement {
+            let count_badge = (p == SettingsPage::Widgets)
+                .then(|| format!("{active_widgets_count}/{}", widgets::ALL_WIDGETS.len()));
+            sidebar_nav_item(
+                SharedString::from(format!("nav-{}", p.title())),
+                &t,
+                p.glyph(),
+                p.title(),
+                count_badge,
+                self.page == p,
+                cx.listener(move |this, _, _, cx| {
+                    if this.page != p {
+                        this.page = p;
+                        this.scroll_handle.set_offset(gpui::point(px(0.0), px(0.0)));
+                        cx.notify();
+                    }
+                }),
+            )
+            .when(narrow, |item| item.w(px(156.0)))
+            .into_any_element()
+        };
+        let top_nav: Vec<AnyElement> = SettingsPage::TOP
             .into_iter()
-            .map(|p| {
-                let count_badge = (p == SettingsPage::Widgets)
-                    .then(|| format!("{active_widgets_count}/{}", widgets::ALL_WIDGETS.len()));
-                sidebar_nav_item(
-                    SharedString::from(format!("nav-{}", p.title())),
-                    &t,
-                    p.glyph(),
-                    p.title(),
-                    count_badge,
-                    self.page == p,
-                    cx.listener(move |this, _, _, cx| {
-                        if this.page != p {
-                            this.page = p;
-                            this.scroll_handle.set_offset(gpui::point(px(0.0), px(0.0)));
-                            cx.notify();
-                        }
-                    }),
-                )
-                .when(narrow, |item| item.w(px(156.0)))
-                .into_any_element()
-            })
+            .map(|p| make_nav(p, cx))
+            .collect();
+        let bottom_nav: Vec<AnyElement> = SettingsPage::BOTTOM
+            .into_iter()
+            .map(|p| make_nav(p, cx))
             .collect();
 
         let content_blocks = match self.page {
@@ -1480,8 +1479,9 @@ impl Render for SettingsView {
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .gap(px(16.0))
-            .p(px(16.0))
+            .justify_between()
+            .gap(px(12.0))
+            .p(px(14.0))
             .bg(rgba(t.sidebar_bg))
             .border_color(rgba(t.border))
             .when(narrow, |panel| panel.w_full().border_b_1())
@@ -1490,34 +1490,24 @@ impl Render for SettingsView {
             })
             .child(
                 div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.0))
-                    .px(px(4.0))
-                    .child(
-                        div()
-                            .size(px(32.0))
-                            .rounded(px(10.0))
-                            .bg(rgba(t.accent_soft))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(icon_glyph("\u{E713}", 16.0, t.accent)),
-                    )
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child("OpenTaskbar"),
-                    ),
-            )
-            .child(
-                div()
                     .w_full()
                     .flex()
                     .gap(px(4.0))
                     .when(narrow, |nav| nav.flex_wrap())
                     .when(!narrow, |nav| nav.flex_col())
-                    .children(nav_items),
+                    .children(top_nav),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .pt(px(10.0))
+                    .border_t_1()
+                    .border_color(rgba(t.separator))
+                    .flex()
+                    .gap(px(4.0))
+                    .when(narrow, |nav| nav.flex_wrap())
+                    .when(!narrow, |nav| nav.flex_col())
+                    .children(bottom_nav),
             );
 
         let page_content = div()
@@ -1591,6 +1581,91 @@ impl Render for SettingsView {
             ))
             .child(scroll_wrap);
 
+        let hover_cap = t.surface_hover;
+        let close_hover = t.destructive;
+        let titlebar = div()
+            .w_full()
+            .h(px(40.0))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_between()
+            .bg(rgba(t.sidebar_bg))
+            .border_b_1()
+            .border_color(rgba(t.border))
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .px(px(14.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(9.0))
+                    .window_control_area(WindowControlArea::Drag)
+                    .child(
+                        div()
+                            .size(px(22.0))
+                            .rounded(px(6.0))
+                            .bg(rgba(t.accent_soft))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon_glyph("\u{E713}", 12.0, t.accent)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(13.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(t.text_primary))
+                            .child("OpenTaskbar Settings"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .h_full()
+                    .child(
+                        div()
+                            .id("cap-min")
+                            .w(px(44.0))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(rgba(hover_cap)))
+                            .on_click(|_, window, _| window.minimize_window())
+                            .child(icon_glyph("\u{E921}", 10.0, t.text_primary)),
+                    )
+                    .child(
+                        div()
+                            .id("cap-max")
+                            .w(px(44.0))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(rgba(hover_cap)))
+                            .on_click(|_, window, _| window.zoom_window())
+                            .child(icon_glyph("\u{E922}", 10.0, t.text_primary)),
+                    )
+                    .child(
+                        div()
+                            .id("cap-close")
+                            .w(px(46.0))
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .hover(move |s| s.bg(rgba(close_hover)))
+                            .on_click(|_, window, _| window.remove_window())
+                            .child(icon_glyph("\u{E8BB}", 10.0, t.text_primary)),
+                    ),
+            );
+
         div()
             .id("settings")
             .track_focus(&self.focus)
@@ -1600,13 +1675,24 @@ impl Render for SettingsView {
             .w_full()
             .h_full()
             .flex()
-            .when(narrow, |root| root.flex_col())
+            .flex_col()
+            .overflow_hidden()
             .bg(rgba(t.canvas_bg))
             .font_family("Segoe UI")
             .text_size(px(14.0))
             .text_color(rgba(t.text_primary))
-            .child(sidebar)
-            .child(main)
+            .child(titlebar)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .flex()
+                    .when(narrow, |root| root.flex_col())
+                    .overflow_hidden()
+                    .child(sidebar)
+                    .child(main),
+            )
     }
 }
 
@@ -1624,7 +1710,8 @@ pub fn run_settings_window() {
                 window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
                 titlebar: Some(TitlebarOptions {
                     title: Some("OpenTaskbar Settings".into()),
-                    ..Default::default()
+                    appears_transparent: true,
+                    traffic_light_position: None,
                 }),
                 ..Default::default()
             },

@@ -503,31 +503,60 @@ pub fn show_flyout_interactive(
 }
 
 fn draw_bgra_icon(hdc: HDC, icon: &FlyoutIcon, bg_rgb: u32, dst_x: i32, dst_y: i32, dst_sz: i32) {
-    let w = icon.width as usize;
-    let h = icon.height as usize;
-    if w == 0 || h == 0 || icon.bgra.len() < w * h * 4 {
+    let sw = icon.width as usize;
+    let sh = icon.height as usize;
+    let dw = dst_sz.max(1) as usize;
+    let dh = dw;
+    if sw == 0 || sh == 0 || icon.bgra.len() < sw * sh * 4 {
         return;
     }
-    let bg_r = bg_rgb & 0xff;
-    let bg_g = (bg_rgb >> 8) & 0xff;
-    let bg_b = (bg_rgb >> 16) & 0xff;
+    let bg_r = (bg_rgb & 0xff) as f32;
+    let bg_g = ((bg_rgb >> 8) & 0xff) as f32;
+    let bg_b = ((bg_rgb >> 16) & 0xff) as f32;
 
-    // Composite straight BGRA onto the row background color for crisp anti-aliased edges.
-    let mut flat = vec![0u8; w * h * 4];
-    for (src, dst) in icon.bgra.chunks_exact(4).zip(flat.chunks_exact_mut(4)) {
-        let a = u32::from(src[3]);
-        let inv = 255 - a;
-        dst[0] = ((u32::from(src[0]) * a + bg_b * inv + 127) / 255) as u8;
-        dst[1] = ((u32::from(src[1]) * a + bg_g * inv + 127) / 255) as u8;
-        dst[2] = ((u32::from(src[2]) * a + bg_r * inv + 127) / 255) as u8;
-        dst[3] = 255;
+    // Premultiplied-alpha area-box filter for razor-sharp downsampling (replaces jagged GDI StretchDIBits).
+    let mut flat = vec![0u8; dw * dh * 4];
+    let scale_x = sw as f32 / dw as f32;
+    let scale_y = sh as f32 / dh as f32;
+
+    for dy in 0..dh {
+        let sy0 = (dy as f32 * scale_y).floor() as usize;
+        let sy1 = (((dy + 1) as f32 * scale_y).ceil() as usize).clamp(sy0 + 1, sh);
+        for dx in 0..dw {
+            let sx0 = (dx as f32 * scale_x).floor() as usize;
+            let sx1 = (((dx + 1) as f32 * scale_x).ceil() as usize).clamp(sx0 + 1, sw);
+            let (mut pb, mut pg, mut pr, mut pa) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            let mut count = 0.0f32;
+            for sy in sy0..sy1 {
+                for sx in sx0..sx1 {
+                    let off = (sy * sw + sx) * 4;
+                    let a = f32::from(icon.bgra[off + 3]) / 255.0;
+                    pb += f32::from(icon.bgra[off]) * a;
+                    pg += f32::from(icon.bgra[off + 1]) * a;
+                    pr += f32::from(icon.bgra[off + 2]) * a;
+                    pa += a;
+                    count += 1.0;
+                }
+            }
+            let inv_n = 1.0 / count.max(1.0);
+            let a = (pa * inv_n).clamp(0.0, 1.0);
+            let inv_a = 1.0 - a;
+            let out_b = (pb * inv_n + bg_b * inv_a).round().clamp(0.0, 255.0) as u8;
+            let out_g = (pg * inv_n + bg_g * inv_a).round().clamp(0.0, 255.0) as u8;
+            let out_r = (pr * inv_n + bg_r * inv_a).round().clamp(0.0, 255.0) as u8;
+            let dst = (dy * dw + dx) * 4;
+            flat[dst] = out_b;
+            flat[dst + 1] = out_g;
+            flat[dst + 2] = out_r;
+            flat[dst + 3] = 255;
+        }
     }
 
     let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: icon.width as i32,
-            biHeight: -(icon.height as i32), // top-down DIB
+            biWidth: dw as i32,
+            biHeight: -(dh as i32),
             biPlanes: 1,
             biBitCount: 32,
             biCompression: BI_RGB,
@@ -540,12 +569,12 @@ fn draw_bgra_icon(hdc: HDC, icon: &FlyoutIcon, bg_rgb: u32, dst_x: i32, dst_y: i
             hdc,
             dst_x,
             dst_y,
-            dst_sz,
-            dst_sz,
+            dw as i32,
+            dh as i32,
             0,
             0,
-            icon.width as i32,
-            icon.height as i32,
+            dw as i32,
+            dh as i32,
             flat.as_ptr().cast(),
             &bmi,
             DIB_RGB_COLORS,

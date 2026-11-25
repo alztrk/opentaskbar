@@ -33,9 +33,9 @@ use crate::platform::win32;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
-const MENU_W_DIPS: f32 = 246.0;
-const ROW_H_DIPS: f32 = 32.0;
-const SEP_H_DIPS: f32 = 9.0;
+const MENU_W_DIPS: f32 = 248.0;
+const ROW_H_DIPS: f32 = 28.0;
+const SEP_H_DIPS: f32 = 8.0;
 const PAD_X_DIPS: f32 = 6.0;
 const PAD_Y_DIPS: f32 = 6.0;
 

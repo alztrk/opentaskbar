@@ -31,6 +31,8 @@ const DWMNCRP_DISABLED: u32 = 1;
 const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
 const MONITORINFOF_PRIMARY: u32 = 1;
 
+const MENU_SEARCH: u32 = 999;
+const MENU_FOCUS_MODE: u32 = 998;
 const MENU_SETTINGS: u32 = 1000;
 const MENU_TASKMGR: u32 = 1001;
 const MENU_EXPLORER: u32 = 1002;
@@ -40,6 +42,15 @@ const MENU_RUN: u32 = 1005;
 const MENU_SHOW_DESKTOP: u32 = 1006;
 const MENU_RESTORE: u32 = 1007;
 const MENU_EXIT: u32 = 1008;
+const MENU_DEV_MGMT: u32 = 1009;
+const MENU_DISK_MGMT: u32 = 1010;
+const MENU_COMP_MGMT: u32 = 1011;
+const MENU_EVENT_VWR: u32 = 1012;
+const MENU_NET_CONN: u32 = 1013;
+const MENU_LOCK_PC: u32 = 1014;
+const MENU_SIGN_OUT: u32 = 1015;
+const MENU_RESTART_PC: u32 = 1016;
+const MENU_SHUTDOWN_PC: u32 = 1017;
 
 const APP_MENU_OPEN: u32 = 2001;
 const APP_MENU_NEW_WINDOW: u32 = 2002;
@@ -66,12 +77,23 @@ pub enum RecycleBinAction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ContextAction {
     None,
+    Search,
+    ToggleFocusMode,
     Settings,
     TaskManager,
     FileExplorer,
     Terminal,
     TerminalAdmin,
     RunDialog,
+    DeviceManager,
+    DiskManagement,
+    ComputerManagement,
+    EventViewer,
+    NetworkConnections,
+    LockWorkstation,
+    SignOut,
+    RestartComputer,
+    ShutDownComputer,
     ShowDesktop,
     RestoreTaskbar,
     Exit,
@@ -329,28 +351,60 @@ pub fn reposition_dock_window(hwnd: usize, x: i32, y: i32, w: i32, h: i32) {
 
 use crate::ui::menu::{self, MenuEntry, MenuIcon};
 
-pub fn show_dock_context_menu(hwnd: usize, is_dark: bool) -> ContextAction {
+pub fn show_dock_context_menu(hwnd: usize, is_dark: bool, focus_mode: bool) -> ContextAction {
     let entries = vec![
-        MenuEntry::item(MENU_SETTINGS, MenuIcon::Settings, "Settings..."),
-        MenuEntry::item(MENU_TASKMGR, MenuIcon::Activity, "Task Manager"),
+        MenuEntry::item(MENU_SEARCH, MenuIcon::Play, "Search / Launcher"),
+        MenuEntry::item(
+            MENU_FOCUS_MODE,
+            MenuIcon::Layers,
+            if focus_mode {
+                "Focus Mode (On)"
+            } else {
+                "Focus Mode"
+            },
+        ),
         MenuEntry::Separator,
+        MenuEntry::item(MENU_TASKMGR, MenuIcon::Activity, "Task Manager"),
         MenuEntry::item(MENU_EXPLORER, MenuIcon::Folder, "File Explorer"),
+        MenuEntry::item(MENU_RUN, MenuIcon::Play, "Run..."),
         MenuEntry::item(MENU_TERMINAL, MenuIcon::Terminal, "Terminal"),
         MenuEntry::item(MENU_TERMINAL_ADMIN, MenuIcon::Shield, "Terminal (Admin)"),
-        MenuEntry::item(MENU_RUN, MenuIcon::Play, "Run..."),
         MenuEntry::Separator,
+        MenuEntry::item(MENU_DEV_MGMT, MenuIcon::Settings, "Device Manager"),
+        MenuEntry::item(MENU_DISK_MGMT, MenuIcon::Layers, "Disk Management"),
+        MenuEntry::item(MENU_COMP_MGMT, MenuIcon::Monitor, "Computer Management"),
+        MenuEntry::item(MENU_EVENT_VWR, MenuIcon::Activity, "Event Viewer"),
+        MenuEntry::item(MENU_NET_CONN, MenuIcon::Refresh, "Network Connections"),
+        MenuEntry::Separator,
+        MenuEntry::item(MENU_LOCK_PC, MenuIcon::Shield, "Lock"),
+        MenuEntry::item(MENU_SIGN_OUT, MenuIcon::ChevronRight, "Sign Out"),
+        MenuEntry::item(MENU_RESTART_PC, MenuIcon::Refresh, "Restart"),
+        MenuEntry::destructive(MENU_SHUTDOWN_PC, MenuIcon::Power, "Shut Down"),
+        MenuEntry::Separator,
+        MenuEntry::item(MENU_SETTINGS, MenuIcon::Settings, "Settings..."),
         MenuEntry::item(MENU_SHOW_DESKTOP, MenuIcon::Monitor, "Show Desktop"),
         MenuEntry::item(MENU_RESTORE, MenuIcon::Refresh, "Restore Windows Taskbar"),
         MenuEntry::Separator,
         MenuEntry::destructive(MENU_EXIT, MenuIcon::Power, "Exit OpenTaskbar"),
     ];
     match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
+        MENU_SEARCH => ContextAction::Search,
+        MENU_FOCUS_MODE => ContextAction::ToggleFocusMode,
         MENU_SETTINGS => ContextAction::Settings,
         MENU_TASKMGR => ContextAction::TaskManager,
         MENU_EXPLORER => ContextAction::FileExplorer,
         MENU_TERMINAL => ContextAction::Terminal,
         MENU_TERMINAL_ADMIN => ContextAction::TerminalAdmin,
         MENU_RUN => ContextAction::RunDialog,
+        MENU_DEV_MGMT => ContextAction::DeviceManager,
+        MENU_DISK_MGMT => ContextAction::DiskManagement,
+        MENU_COMP_MGMT => ContextAction::ComputerManagement,
+        MENU_EVENT_VWR => ContextAction::EventViewer,
+        MENU_NET_CONN => ContextAction::NetworkConnections,
+        MENU_LOCK_PC => ContextAction::LockWorkstation,
+        MENU_SIGN_OUT => ContextAction::SignOut,
+        MENU_RESTART_PC => ContextAction::RestartComputer,
+        MENU_SHUTDOWN_PC => ContextAction::ShutDownComputer,
         MENU_SHOW_DESKTOP => ContextAction::ShowDesktop,
         MENU_RESTORE => ContextAction::RestoreTaskbar,
         MENU_EXIT => ContextAction::Exit,
