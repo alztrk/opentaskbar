@@ -3703,9 +3703,98 @@ impl DockState {
         self.execute_context_action(act);
     }
 
+    fn open_profiles_flyout(&mut self) {
+        use crate::ui::flyout::{self, FlyoutBlock, FlyoutSpec};
+        use opentaskbar_core::settings::DockProfile;
+
+        let mut pt = POINT { x: 0, y: 0 };
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
+        let mut blocks: Vec<FlyoutBlock> = self
+            .settings
+            .profiles
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let is_active = self
+                    .settings
+                    .active_profile
+                    .as_deref()
+                    .is_some_and(|a| a.eq_ignore_ascii_case(&p.name));
+                FlyoutBlock::ActionRow {
+                    id: 100 + i as u32,
+                    title: p.name.clone(),
+                    subtitle: Some(format!("{} widgets", p.enabled_widgets.len())),
+                    badge: is_active.then(|| "Active".to_owned()),
+                    icon: None,
+                    destructive: false,
+                }
+            })
+            .collect();
+        if blocks.is_empty() {
+            blocks.push(FlyoutBlock::Note(
+                "No saved profiles yet. Save your current dock layout below.".to_owned(),
+            ));
+        }
+        blocks.push(FlyoutBlock::Separator);
+        blocks.push(FlyoutBlock::ButtonBar(vec![
+            (1, "Save Work".to_owned(), false),
+            (2, "Save Gaming".to_owned(), false),
+            (3, "Save Minimal".to_owned(), false),
+        ]));
+
+        let spec = FlyoutSpec {
+            title: "Profiles".to_owned(),
+            subtitle: Some("Switch or save dock layouts".to_owned()),
+            width_dips: 300.0,
+            blocks,
+        };
+        let Some(chosen) = flyout::show_flyout(self.hwnd, self.is_dark, pt.x, pt.y - 8, spec)
+        else {
+            return;
+        };
+
+        if chosen >= 100
+            && let Some(prof) = self.settings.profiles.get((chosen - 100) as usize).cloned()
+        {
+            self.settings.position = prof.position;
+            self.settings.size = prof.size;
+            self.settings.auto_hide = prof.auto_hide;
+            self.settings.enabled_widgets = prof.enabled_widgets.clone();
+            self.settings.show_clock_widget = prof.enabled_widgets.iter().any(|w| w == "clock");
+            self.settings.show_system_stats_widget =
+                prof.enabled_widgets.iter().any(|w| w == "stats");
+            self.settings.active_profile = Some(prof.name);
+            let _ = settings::save_to(&settings::settings_path(), &self.settings);
+            self.reload_settings_live();
+        } else if let Some(preset) = match chosen {
+            1 => Some("Work"),
+            2 => Some("Gaming"),
+            3 => Some("Minimal"),
+            _ => None,
+        } {
+            let snap = DockProfile {
+                name: preset.to_owned(),
+                position: self.settings.position,
+                size: self.settings.size,
+                auto_hide: self.settings.auto_hide,
+                enabled_widgets: self.settings.enabled_widgets.clone(),
+            };
+            self.settings
+                .profiles
+                .retain(|p| !p.name.eq_ignore_ascii_case(preset));
+            self.settings.profiles.push(snap);
+            self.settings.active_profile = Some(preset.to_owned());
+            let _ = settings::save_to(&settings::settings_path(), &self.settings);
+            self.reload_settings_live();
+        }
+    }
+
     fn execute_context_action(&mut self, action: ContextAction) {
         match action {
             ContextAction::Search => opentaskbar_shell::taskbar::open_search(),
+            ContextAction::Profiles => self.open_profiles_flyout(),
             ContextAction::ToggleFocusMode => {
                 self.settings.focus_mode = !self.settings.focus_mode;
                 let _ = opentaskbar_core::settings::save_to(

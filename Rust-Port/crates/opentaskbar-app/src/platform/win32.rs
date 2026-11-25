@@ -5,7 +5,7 @@
 //! - Native context menus (Dock, Per-App, Task View), file drop extraction, and key modifiers
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
     DwmSetWindowAttribute,
@@ -17,13 +17,15 @@ use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
 use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, VK_SHIFT};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, ReleaseCapture, VK_CONTROL, VK_SHIFT,
+};
 use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
-    SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW, WS_EX_APPWINDOW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    GWL_EXSTYLE, GetSystemMetrics, GetWindowLongPtrW, HTCAPTION, HWND_TOPMOST, SM_CXSCREEN,
+    SM_CYSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW,
+    WM_NCLBUTTONDOWN, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
 use windows_sys::core::BOOL;
 
@@ -66,6 +68,7 @@ const MENU_LOCK_PC: u32 = 1014;
 const MENU_SIGN_OUT: u32 = 1015;
 const MENU_RESTART_PC: u32 = 1016;
 const MENU_SHUTDOWN_PC: u32 = 1017;
+const MENU_PROFILES: u32 = 1018;
 
 const APP_MENU_OPEN: u32 = 2001;
 const APP_MENU_NEW_WINDOW: u32 = 2002;
@@ -136,6 +139,7 @@ pub fn show_widget_context_menu(
 pub enum ContextAction {
     None,
     Search,
+    Profiles,
     ToggleFocusMode,
     Settings,
     TaskManager,
@@ -317,6 +321,22 @@ pub fn extract_dropped_files(hdrop_val: usize) -> Vec<String> {
     out
 }
 
+/// Starts a native Win32 caption drag on a borderless GPUI window.
+pub fn start_native_window_drag(window: &gpui::Window) {
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return;
+    };
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return;
+    };
+    let hwnd = win32.hwnd.get() as HWND;
+    // SAFETY: releases capture and delegates drag loop directly to Windows' native non-client move.
+    unsafe {
+        let _ = ReleaseCapture();
+        SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION as WPARAM, 0);
+    }
+}
+
 #[allow(dead_code)]
 pub fn configure_dock_window(window: &gpui::Window) -> Option<usize> {
     let handle = HasWindowHandle::window_handle(window).ok()?;
@@ -413,6 +433,7 @@ use crate::ui::menu::{self, MenuEntry, MenuIcon};
 fn map_context_action(id: u32) -> ContextAction {
     match id {
         MENU_SEARCH => ContextAction::Search,
+        MENU_PROFILES => ContextAction::Profiles,
         MENU_FOCUS_MODE => ContextAction::ToggleFocusMode,
         MENU_SETTINGS => ContextAction::Settings,
         MENU_TASKMGR => ContextAction::TaskManager,
@@ -439,6 +460,7 @@ fn map_context_action(id: u32) -> ContextAction {
 fn dock_menu_entries(focus_mode: bool) -> Vec<MenuEntry> {
     vec![
         MenuEntry::item(MENU_SEARCH, MenuIcon::Search, "Search Apps"),
+        MenuEntry::item(MENU_PROFILES, MenuIcon::Layers, "Profiles"),
         MenuEntry::item(
             MENU_FOCUS_MODE,
             MenuIcon::Layers,

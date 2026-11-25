@@ -10,7 +10,7 @@ use gpui::{
     WindowOptions, actions, div, prelude::*, px, rgba, size,
 };
 use opentaskbar_core::settings::{
-    self, AppTheme, AutoHideMode, DockAppGroup, DockPosition, DockProfile, DockSettings, DockSize,
+    self, AppTheme, AutoHideMode, DockAppGroup, DockPosition, DockSettings, DockSize,
     SurfaceBackground,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -86,7 +86,7 @@ impl SettingsPage {
             Self::Widgets => "Choose which widgets appear on the dock and configure them.",
             Self::Themes => "Customize the dock colors, materials, and effects.",
             Self::Stacks => "Organize dock shortcuts into folders and app groups.",
-            Self::Preferences => "Manage startup, profiles, and settings backups.",
+            Self::Preferences => "Manage startup and settings backups.",
             Self::About => "View the version and open local application files.",
         }
     }
@@ -188,7 +188,150 @@ impl SettingsView {
         let chip_bg = if is_dark { 0xffffff10 } else { 0x00000008 };
         let chip_bd = if is_dark { 0xffffff1c } else { 0x00000016 };
         let track_bg = if is_dark { 0xffffff1f } else { 0x00000018 };
-        let spec = self.widget_runtime.chip_spec(id, &self.settings, is_dark);
+        let spec = match id {
+            "weather" => WidgetChipSpec::Weather {
+                available: true,
+                icon_color: pal.warning,
+                is_rain: false,
+                temp: "21°".to_owned(),
+                place: if self.settings.weather_city.is_empty() {
+                    "Istanbul".to_owned()
+                } else {
+                    self.settings.weather_city.clone()
+                },
+                condition: "Clear".to_owned(),
+                today_range: Some("24° / 16°".to_owned()),
+            },
+            "stats" => WidgetChipSpec::SystemStats {
+                cpu_text: "24%".to_owned(),
+                cpu_color: pal.widget_blue,
+                ram_text: "58%".to_owned(),
+                ram_color: pal.widget_accent,
+            },
+            "netspeed" => WidgetChipSpec::NetSpeed {
+                down: "18.4 MB/s".to_owned(),
+                up: "3.2 MB/s".to_owned(),
+            },
+            "battery" => WidgetChipSpec::BatteryLiquid {
+                present: true,
+                percent: 84,
+                charging: true,
+            },
+            "bluetoothbattery" => WidgetChipSpec::Bluetooth {
+                devices: vec![(90, false, false)],
+            },
+            "media" => WidgetChipSpec::Media {
+                title: "Midnight City".to_owned(),
+                artist: "M83".to_owned(),
+                muted: false,
+            },
+            "audio" => WidgetChipSpec::Audio {
+                volume: 68,
+                muted: false,
+            },
+            "stopwatch" => WidgetChipSpec::Timed {
+                is_focus: false,
+                running: true,
+                text: "04:18".to_owned(),
+            },
+            "countdown" => WidgetChipSpec::Timed {
+                is_focus: false,
+                running: false,
+                text: "12:30".to_owned(),
+            },
+            "focus" => WidgetChipSpec::Timed {
+                is_focus: true,
+                running: true,
+                text: "21:45".to_owned(),
+            },
+            "aiusage_all" => WidgetChipSpec::Simple {
+                icon: crate::dock::dcomp::ChipIcon::Sparkle,
+                icon_color: pal.widget_accent,
+                top: "AI · 6".to_owned(),
+                bottom: "Claude 42%".to_owned(),
+            },
+            "aiusage_claude" => WidgetChipSpec::AiDual {
+                provider_id: "aiusage_claude",
+                brand_color: Some((0xd9, 0x77, 0x57)),
+                rows: vec![
+                    ("5h".to_owned(), 0.42, pal.widget_accent, "2h".to_owned()),
+                    ("7d".to_owned(), 0.68, pal.widget_accent, "4d".to_owned()),
+                ],
+            },
+            "aiusage_codex" => WidgetChipSpec::AiDual {
+                provider_id: "aiusage_codex",
+                brand_color: Some((0x8d, 0x99, 0xff)),
+                rows: vec![
+                    ("5h".to_owned(), 0.28, pal.widget_accent, "3h".to_owned()),
+                    ("7d".to_owned(), 0.54, pal.widget_accent, "5d".to_owned()),
+                ],
+            },
+            "aiusage_cursor" => WidgetChipSpec::AiDual {
+                provider_id: "aiusage_cursor",
+                brand_color: None,
+                rows: vec![("30d".to_owned(), 0.61, pal.widget_accent, "12d".to_owned())],
+            },
+            "aiusage_antigravity" => WidgetChipSpec::AiAntigravity {
+                columns: vec![
+                    (
+                        "Gemini".to_owned(),
+                        vec![("5h".to_owned(), 0.35, pal.widget_accent, "3h".to_owned())],
+                    ),
+                    (
+                        "Claude".to_owned(),
+                        vec![("7d".to_owned(), 0.62, pal.widget_accent, "4d".to_owned())],
+                    ),
+                    (
+                        "Argon".to_owned(),
+                        vec![("7d".to_owned(), 0.22, pal.widget_accent, "6d".to_owned())],
+                    ),
+                ],
+            },
+            "aiusage_opencode" => WidgetChipSpec::AiOpenCode {
+                columns: vec![
+                    (
+                        "1h".to_owned(),
+                        "18%".to_owned(),
+                        0.18,
+                        pal.success,
+                        "42m".to_owned(),
+                    ),
+                    (
+                        "7d".to_owned(),
+                        "49%".to_owned(),
+                        0.49,
+                        pal.success,
+                        "3d".to_owned(),
+                    ),
+                    (
+                        "30d".to_owned(),
+                        "64%".to_owned(),
+                        0.64,
+                        pal.success,
+                        "11d".to_owned(),
+                    ),
+                ],
+            },
+            "aiusage_copilot" => WidgetChipSpec::AiCopilot {
+                value_text: "36%".to_owned(),
+                meta_text: "14d left".to_owned(),
+                used: 0.36,
+                bar_color: (0x9f, 0x9f, 0xf2),
+            },
+            "aiusage_deepseek" => WidgetChipSpec::AiBalance {
+                provider_id: "aiusage_deepseek",
+                brand_color: (0x4d, 0x6b, 0xfe),
+                name: "DeepSeek",
+                value_text: "$14.80".to_owned(),
+            },
+            "aiusage_openrouter" => WidgetChipSpec::AiBalance {
+                provider_id: "aiusage_openrouter",
+                brand_color: (0xb7, 0x9b, 0xf8),
+                name: "OpenRouter",
+                value_text: "$22.40".to_owned(),
+            },
+            _ => self.widget_runtime.chip_spec(id, &self.settings, is_dark),
+        };
 
         let chip = |inner: gpui::Div| -> AnyElement {
             div()
@@ -1785,90 +1928,6 @@ impl SettingsView {
     }
 
     fn render_preferences(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut prof_rows: Vec<AnyElement> = self
-            .settings
-            .profiles
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let is_active = self
-                    .settings
-                    .active_profile
-                    .as_deref()
-                    .is_some_and(|a| a.eq_ignore_ascii_case(&p.name));
-                let controls = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(button(
-                        SharedString::from(format!("apply-prof-{i}")),
-                        t,
-                        if is_active { "Active" } else { "Apply" },
-                        if is_active {
-                            ButtonVariant::Primary
-                        } else {
-                            ButtonVariant::Secondary
-                        },
-                        cx.listener(move |this, _, _, cx| {
-                            if let Some(prof) = this.settings.profiles.get(i).cloned() {
-                                this.settings.position = prof.position;
-                                this.settings.size = prof.size;
-                                this.settings.auto_hide = prof.auto_hide;
-                                this.settings.enabled_widgets = prof.enabled_widgets.clone();
-                                this.settings.show_clock_widget =
-                                    prof.enabled_widgets.iter().any(|w| w == "clock");
-                                this.settings.show_system_stats_widget =
-                                    prof.enabled_widgets.iter().any(|w| w == "stats");
-                                this.settings.active_profile = Some(prof.name.clone());
-                                this.auto_save(cx);
-                            }
-                        }),
-                    ))
-                    .child(button(
-                        SharedString::from(format!("del-prof-{i}")),
-                        t,
-                        "Delete",
-                        ButtonVariant::Destructive,
-                        cx.listener(move |this, _, _, cx| {
-                            if i < this.settings.profiles.len() {
-                                this.settings.profiles.remove(i);
-                                this.auto_save(cx);
-                            }
-                        }),
-                    ));
-                setting_row(t, Some("\u{E748}"), p.name.clone(), controls).into_any_element()
-            })
-            .collect();
-
-        let save_presets = div().flex().items_center().gap(px(6.0)).children(
-            ["Work", "Gaming", "Minimal"].into_iter().map(|preset| {
-                button(
-                    SharedString::from(format!("save-prof-{preset}")),
-                    t,
-                    preset,
-                    ButtonVariant::Secondary,
-                    cx.listener(move |this, _, _, cx| {
-                        let snap = DockProfile {
-                            name: preset.to_owned(),
-                            position: this.settings.position,
-                            size: this.settings.size,
-                            auto_hide: this.settings.auto_hide,
-                            enabled_widgets: this.settings.enabled_widgets.clone(),
-                        };
-                        this.settings
-                            .profiles
-                            .retain(|p| !p.name.eq_ignore_ascii_case(preset));
-                        this.settings.profiles.push(snap);
-                        this.settings.active_profile = Some(preset.to_owned());
-                        this.auto_save(cx);
-                    }),
-                )
-            }),
-        );
-        prof_rows.push(
-            setting_row(t, Some("\u{E74E}"), "Save Current As", save_presets).into_any_element(),
-        );
-
         vec![
             section_card(
                 t,
@@ -1894,7 +1953,6 @@ impl SettingsView {
                 ],
             )
             .into_any_element(),
-            section_card(t, "Profiles", prof_rows).into_any_element(),
             section_card(
                 t,
                 "Backup",
@@ -2029,20 +2087,13 @@ impl Render for SettingsView {
         let narrow = width < px(SIDEBAR_BREAKPOINT);
         let inset = px(if narrow { 20.0 } else { 32.0 });
         let content_width = width - inset * 2.0 - px(if narrow { 0.0 } else { SIDEBAR_WIDTH });
-        let active_widgets_count = widgets::ALL_WIDGETS
-            .iter()
-            .filter(|w| self.settings.is_widget_enabled(w.id))
-            .count();
-
         let make_nav = |p: SettingsPage, cx: &mut Context<Self>| -> AnyElement {
-            let count_badge = (p == SettingsPage::Widgets)
-                .then(|| format!("{active_widgets_count}/{}", widgets::ALL_WIDGETS.len()));
             sidebar_nav_item(
                 SharedString::from(format!("nav-{}", p.title())),
                 &t,
                 p.glyph(),
                 p.title(),
-                count_badge,
+                None,
                 self.page == p,
                 cx.listener(move |this, _, _, cx| {
                     if this.page != p {
@@ -2172,6 +2223,7 @@ impl Render for SettingsView {
             .flex_col()
             .child(
                 div()
+                    .id("settings-page-header-drag")
                     .w_full()
                     .flex_shrink_0()
                     .px(inset)
@@ -2181,6 +2233,9 @@ impl Render for SettingsView {
                     .flex()
                     .flex_col()
                     .gap(px(3.0))
+                    .on_mouse_down(MouseButton::Left, |_, window, _| {
+                        win32::start_native_window_drag(window);
+                    })
                     .child(
                         div()
                             .text_size(px(22.0))
@@ -2224,7 +2279,7 @@ impl Render for SettingsView {
                     .gap(px(8.0))
                     .window_control_area(WindowControlArea::Drag)
                     .on_mouse_down(MouseButton::Left, |_, window, _| {
-                        window.start_window_move();
+                        win32::start_native_window_drag(window);
                     })
                     .child(icon_glyph("\u{E713}", 13.0, t.text_secondary))
                     .child(

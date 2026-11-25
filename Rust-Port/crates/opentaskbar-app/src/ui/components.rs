@@ -225,7 +225,6 @@ pub fn badge(theme: &UiTheme, text: impl Into<SharedString>, accent: bool) -> Di
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ButtonVariant {
-    Primary,
     Secondary,
     Destructive,
 }
@@ -238,7 +237,6 @@ pub fn button(
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     let (bg, hover_bg, fg, border) = match variant {
-        ButtonVariant::Primary => (theme.accent, theme.accent, theme.accent_fg, theme.accent),
         ButtonVariant::Secondary => (
             theme.surface_muted,
             theme.surface_hover,
