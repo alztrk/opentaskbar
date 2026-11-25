@@ -469,7 +469,12 @@ fn attach_parent_console(args: &[String]) {
 /// Saves settings the dock changed (pin order) to the app's own settings file.
 #[cfg(windows)]
 fn save_settings(settings: &ot_core::settings::DockSettings) {
-    if let Err(error) = SettingsStore::for_current_user().save(settings) {
+    // The dock only runs after setup (finished or skipped), so what it saves never asks for setup again.
+    let mut settings = settings.clone();
+    settings.onboarding_version = settings
+        .onboarding_version
+        .max(ot_ui::wizard::ONBOARDING_VERSION);
+    if let Err(error) = SettingsStore::for_current_user().save(&settings) {
         log::report_error(error.key(), &settings.language, None);
     }
 }

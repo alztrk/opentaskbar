@@ -34,5 +34,6 @@ pub mod widgets;
 pub use dock::{
     apply_and_save, apply_settings, current_settings, default_corner_radius, export_pins,
     import_pins, is_running, open_settings_on_start, reload_theme, restart_into_setup, run,
-    set_persist, set_settings_opener, setup_restart_requested, start, stop, widget_preview_png,
+    set_onboarding_version, set_persist, set_settings_opener, setup_restart_requested, start, stop,
+    widget_preview_png,
 };

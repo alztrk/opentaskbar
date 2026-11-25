@@ -1215,6 +1215,8 @@ fn import_settings(full: bool) {
     if settings.pin_order.is_none() {
         settings.pin_order = previous.pin_order.clone();
     }
+    // A backup (or OpenTaskbar's file) has no setup version: importing it must not bring the wizard back.
+    settings.onboarding_version = settings.onboarding_version.max(previous.onboarding_version);
     let added = ot_dock::import_pins(&pins);
     log::info(format!(
         "Settings imported from {}; {added} pins added.",

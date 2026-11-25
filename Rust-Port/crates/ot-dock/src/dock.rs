@@ -650,6 +650,11 @@ fn persist(settings: &DockSettings) {
     });
 }
 
+/// Records the completed setup version in the running dock's settings (nothing is redrawn).
+pub fn set_onboarding_version(version: u32) {
+    with_dock(|dock| dock.settings.onboarding_version = version);
+}
+
 /// `ThemePackReload_Click`: rereads the active theme pack from disk and redraws the dock with it.
 pub fn reload_theme() {
     with_dock(|dock| {

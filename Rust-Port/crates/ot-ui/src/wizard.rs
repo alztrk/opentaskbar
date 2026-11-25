@@ -683,6 +683,11 @@ fn finish(skipped: bool) {
     } else {
         "Wizard finished."
     });
+    // The dock the install step started keeps its own copy of the settings and saves it on later changes: it must
+    // carry the completed setup too, or the next start would run the wizard again.
+    if installed && ot_dock::is_running() {
+        ot_dock::set_onboarding_version(settings.onboarding_version);
+    }
     let outcome = if installed && ot_dock::is_running() {
         WizardOutcome::DockRunning(settings)
     } else {
