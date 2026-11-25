@@ -477,6 +477,10 @@ public sealed class TaskbarReplacementSession : IDisposable
         {
             if (AppBarClient.Register(_handle, CallbackMessage, "SecondaryDock") == 0)
                 throw new InvalidOperationException("ErrorAppBarRegister");
+            // MarkRegistered ignores sessions that are not running yet. Enter a running phase first, otherwise
+            // the AppBarRegistered flag is never set: ReserveShelf then skips the mirrored dock's shelf and
+            // ReapplyReservation sends ABM_NEW for a window that is still registered, which fails.
+            SetPhase(SessionState.Registered);
             MarkRegistered();
             SetPhase(SessionState.Active);
             try { StartPositioning(); }
