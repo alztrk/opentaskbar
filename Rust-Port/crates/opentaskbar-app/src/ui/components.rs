@@ -7,7 +7,7 @@
 //! - Grouped inset `section_card`, concise `setting_row`, `ios_switch`, `segmented_track`,
 //!   `stepper`, `button`, `badge`, `sidebar_nav_item`, and `scrollbar_overlay`.
 
-use gpui::{AnyElement, Div, SharedString, div, prelude::*, px, rgba};
+use gpui::{AnyElement, Div, MouseButton, SharedString, div, prelude::*, px, rgba};
 
 use crate::design::{self, gpui_rgba};
 
@@ -338,7 +338,7 @@ pub fn segmented_item(
         .into_any_element()
 }
 
-/// Interactive live slider with clickable stops, accent fill track, circular thumb, and value label.
+/// Interactive live slider supporting both click and continuous left-button pointer drag.
 pub fn live_slider<F>(
     id_prefix: &'static str,
     theme: &UiTheme,
@@ -348,7 +348,7 @@ pub fn live_slider<F>(
     make_handler: F,
 ) -> Div
 where
-    F: Fn(usize) -> Box<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App)>,
+    F: Fn(usize) -> std::rc::Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>,
 {
     let clamped = ratio.clamp(0.0, 1.0);
     let track_w = 132.0_f32;
@@ -358,14 +358,20 @@ where
 
     let mut stops = div().absolute().inset_0().flex().items_center();
     for i in 0..count {
-        let cb = make_handler(i);
+        let cb_down = make_handler(i);
+        let cb_move = cb_down.clone();
         stops = stops.child(
             div()
                 .id(SharedString::from(format!("{id_prefix}-{i}")))
                 .flex_1()
                 .h_full()
                 .cursor_pointer()
-                .on_click(move |ev, win, cx| cb(ev, win, cx)),
+                .on_mouse_down(MouseButton::Left, move |_, win, cx| cb_down(win, cx))
+                .on_mouse_move(move |ev, win, cx| {
+                    if ev.pressed_button == Some(MouseButton::Left) {
+                        cb_move(win, cx);
+                    }
+                }),
         );
     }
 

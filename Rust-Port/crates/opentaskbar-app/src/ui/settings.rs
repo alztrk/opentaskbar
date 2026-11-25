@@ -5,9 +5,9 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, App, Application, Bounds, Context, FocusHandle, KeyBinding, ScrollHandle,
-    SharedString, TitlebarOptions, Window, WindowBounds, WindowControlArea, WindowOptions, actions,
-    div, prelude::*, px, rgba, size,
+    AnyElement, App, Application, Bounds, Context, FocusHandle, KeyBinding, MouseButton,
+    ScrollHandle, SharedString, TitlebarOptions, Window, WindowBounds, WindowControlArea,
+    WindowOptions, actions, div, prelude::*, px, rgba, size,
 };
 use opentaskbar_core::settings::{
     self, AppTheme, AutoHideMode, DockAppGroup, DockPosition, DockProfile, DockSettings, DockSize,
@@ -177,127 +177,771 @@ impl SettingsView {
         self.save_settings(cx);
     }
 
-    fn widget_preview_lines(&self, id: &str) -> (String, String) {
+    fn render_widget_preview(&self, id: &str, t: &UiTheme) -> AnyElement {
         let is_dark = match self.settings.theme {
             AppTheme::Dark => true,
             AppTheme::Light => false,
             AppTheme::System => win32::read_system_is_dark(),
         };
+        let pal = crate::design::palette(is_dark);
+        let c_rgba = |c: (u8, u8, u8), a: u8| rgba(crate::design::gpui_rgba(c, a));
+        let chip_bg = if is_dark { 0xffffff10 } else { 0x00000008 };
+        let chip_bd = if is_dark { 0xffffff1c } else { 0x00000016 };
+        let track_bg = if is_dark { 0xffffff1f } else { 0x00000018 };
         let spec = self.widget_runtime.chip_spec(id, &self.settings, is_dark);
+
+        let chip = |inner: gpui::Div| -> AnyElement {
+            div()
+                .h(px(40.0))
+                .max_w_full()
+                .px(px(10.0))
+                .rounded(px(9.0))
+                .bg(rgba(chip_bg))
+                .border_1()
+                .border_color(rgba(chip_bd))
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .overflow_hidden()
+                .child(inner)
+                .into_any_element()
+        };
+
+        let mini_bar = |ratio: f32, col: (u8, u8, u8), bar_w: f32| {
+            let fill_w = (bar_w * ratio.clamp(0.0, 1.0))
+                .round()
+                .max(if ratio > 0.01 { 3.0 } else { 0.0 });
+            div()
+                .w(px(bar_w))
+                .h(px(4.0))
+                .rounded(px(2.0))
+                .bg(rgba(track_bg))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .w(px(fill_w))
+                        .h_full()
+                        .rounded(px(2.0))
+                        .bg(c_rgba(col, 0xff)),
+                )
+        };
+
+        let vdiv = || {
+            div()
+                .w(px(1.0))
+                .h(px(18.0))
+                .bg(rgba(t.separator))
+                .flex_shrink_0()
+        };
+
         match spec {
             WidgetChipSpec::Clock {
                 time,
                 date,
                 weekday,
-            } => (time, format!("{date} · {weekday}")),
+            } => chip(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .child(icon_glyph("\u{E823}", 13.0, t.dock_preview_sub))
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_color(rgba(t.dock_preview_fg))
+                            .child(time),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgba(t.dock_preview_fg))
+                                    .child(date),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(9.0))
+                                    .text_color(rgba(t.dock_preview_sub))
+                                    .child(weekday),
+                            ),
+                    ),
+            ),
             WidgetChipSpec::Weather {
                 available,
+                icon_color,
+                is_rain,
                 temp,
                 place,
                 condition,
-                ..
+                today_range,
             } => {
-                if available {
-                    (temp, format!("{place} · {condition}"))
+                if !available {
+                    chip(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgba(t.dock_preview_sub))
+                            .child(condition),
+                    )
                 } else {
-                    (condition, place)
+                    let mut row = div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(icon_glyph(
+                            if is_rain { "\u{E9C4}" } else { "\u{E753}" },
+                            15.0,
+                            crate::design::gpui_rgba(icon_color, 0xff),
+                        ))
+                        .child(
+                            div()
+                                .text_size(px(15.0))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(rgba(t.dock_preview_fg))
+                                .child(temp),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgba(t.dock_preview_fg))
+                                        .child(place),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(9.0))
+                                        .text_color(rgba(t.dock_preview_sub))
+                                        .child(condition),
+                                ),
+                        );
+                    if let Some(range) = today_range {
+                        row = row.child(vdiv()).child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(9.0))
+                                        .text_color(rgba(t.dock_preview_sub))
+                                        .child("Today"),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgba(t.dock_preview_fg))
+                                        .child(range),
+                                ),
+                        );
+                    }
+                    chip(row)
                 }
             }
-            WidgetChipSpec::DayProgress { percent, unit, .. } => (percent, unit),
-            WidgetChipSpec::Timed { text, running, .. } => (
+            WidgetChipSpec::DayProgress {
+                ratio,
+                percent,
+                unit,
+            } => chip(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .child(
+                        div()
+                            .size(px(18.0))
+                            .rounded(px(9.0))
+                            .border_2()
+                            .border_color(c_rgba(pal.widget_blue, 0xff))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .size(px((8.0 * ratio.clamp(0.25, 1.0)).round()))
+                                    .rounded(px(4.0))
+                                    .bg(c_rgba(pal.widget_blue, 0xaa)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(t.dock_preview_fg))
+                            .child(percent),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(rgba(t.dock_preview_sub))
+                            .child(unit),
+                    ),
+            ),
+            WidgetChipSpec::Timed {
+                is_focus,
+                running,
                 text,
-                if running {
-                    "Running".to_owned()
-                } else {
-                    "Paused".to_owned()
-                },
+            } => chip(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .child(icon_glyph(
+                        if is_focus { "\u{E7C8}" } else { "\u{E916}" },
+                        13.0,
+                        if running {
+                            crate::design::gpui_rgba(pal.selected_fg, 0xff)
+                        } else {
+                            t.dock_preview_sub
+                        },
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(t.dock_preview_fg))
+                            .child(text),
+                    )
+                    .child(
+                        div()
+                            .size(px(22.0))
+                            .rounded(px(6.0))
+                            .bg(rgba(if running {
+                                crate::design::gpui_rgba(pal.selected_fill, 0xff)
+                            } else {
+                                track_bg
+                            }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon_glyph(
+                                if running { "\u{E769}" } else { "\u{E768}" },
+                                10.0,
+                                if running {
+                                    crate::design::gpui_rgba(pal.selected_fg, 0xff)
+                                } else {
+                                    t.dock_preview_fg
+                                },
+                            )),
+                    ),
             ),
             WidgetChipSpec::SystemStats {
-                cpu_text, ram_text, ..
-            } => (format!("CPU {cpu_text}"), format!("RAM {ram_text}")),
-            WidgetChipSpec::NetSpeed { down, up } => (format!("↓ {down}"), format!("↑ {up}")),
+                cpu_text,
+                cpu_color,
+                ram_text,
+                ram_color,
+            } => chip(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(9.0))
+                                    .text_color(rgba(t.dock_preview_sub))
+                                    .child("CPU"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(c_rgba(cpu_color, 0xff))
+                                    .child(cpu_text),
+                            ),
+                    )
+                    .child(vdiv())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(9.0))
+                                    .text_color(rgba(t.dock_preview_sub))
+                                    .child("RAM"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .text_color(c_rgba(ram_color, 0xff))
+                                    .child(ram_text),
+                            ),
+                    ),
+            ),
+            WidgetChipSpec::NetSpeed { down, up } => chip(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .child(icon_glyph("\u{E701}", 13.0, t.dock_preview_sub))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(3.0))
+                                    .child(icon_glyph(
+                                        "\u{E74B}",
+                                        9.0,
+                                        crate::design::gpui_rgba(pal.success, 0xff),
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(rgba(t.dock_preview_fg))
+                                            .child(down),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(3.0))
+                                    .child(icon_glyph(
+                                        "\u{E74A}",
+                                        9.0,
+                                        crate::design::gpui_rgba(pal.widget_blue, 0xff),
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(rgba(t.dock_preview_fg))
+                                            .child(up),
+                                    ),
+                            ),
+                    ),
+            ),
             WidgetChipSpec::BatteryLiquid {
                 present,
                 percent,
                 charging,
             } => {
-                if present {
-                    (
-                        format!("{percent}%"),
-                        if charging {
-                            "Charging".to_owned()
-                        } else {
-                            "Battery".to_owned()
-                        },
+                if !present {
+                    chip(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(icon_glyph("\u{E850}", 14.0, t.dock_preview_sub))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgba(t.dock_preview_sub))
+                                    .child("N/A"),
+                            ),
                     )
                 } else {
-                    ("Unavailable".to_owned(), "No battery".to_owned())
+                    let ratio = (percent as f32 / 100.0).clamp(0.0, 1.0);
+                    let fill_col = crate::design::level_color(&pal, ratio);
+                    let card_w = 88.0_f32;
+                    let fill_w = (card_w * ratio).round();
+                    div()
+                        .relative()
+                        .w(px(card_w))
+                        .h(px(40.0))
+                        .rounded(px(9.0))
+                        .bg(rgba(chip_bg))
+                        .border_1()
+                        .border_color(c_rgba(fill_col, 0x88))
+                        .overflow_hidden()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .top_0()
+                                .bottom_0()
+                                .w(px(fill_w))
+                                .bg(c_rgba(fill_col, 0x44)),
+                        )
+                        .child(
+                            div()
+                                .relative()
+                                .flex()
+                                .items_center()
+                                .gap(px(5.0))
+                                .child(icon_glyph(
+                                    if charging { "\u{EBAB}" } else { "\u{E858}" },
+                                    13.0,
+                                    crate::design::gpui_rgba(fill_col, 0xff),
+                                ))
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(rgba(t.dock_preview_fg))
+                                        .child(format!("{percent}%")),
+                                ),
+                        )
+                        .into_any_element()
                 }
             }
-            WidgetChipSpec::Bluetooth { devices } => devices.first().map_or_else(
-                || ("—".to_owned(), "No connected devices".to_owned()),
-                |(percent, _, _)| {
-                    (
-                        format!("{percent}%"),
-                        format!("{} connected", devices.len()),
-                    )
-                },
+            WidgetChipSpec::Bluetooth { devices } => chip(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(icon_glyph("\u{E702}", 13.0, t.dock_preview_sub))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(t.dock_preview_fg))
+                            .child(
+                                devices
+                                    .first()
+                                    .map_or_else(|| "—".to_owned(), |(p, _, _)| format!("{p}%")),
+                            ),
+                    ),
             ),
-            WidgetChipSpec::Storage { drives } => drives.first().map_or_else(
-                || ("Unavailable".to_owned(), "No drives".to_owned()),
-                |(name, capacity)| (name.clone(), capacity.clone()),
-            ),
-            WidgetChipSpec::Media { title, artist, .. } => (
+            WidgetChipSpec::Storage { drives } => {
+                let (drv, cap) = drives
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| ("C:".to_owned(), "—".to_owned()));
+                chip(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(icon_glyph("\u{EDA2}", 13.0, t.dock_preview_sub))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgba(t.dock_preview_fg))
+                                        .child(drv),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(9.0))
+                                        .text_color(rgba(t.dock_preview_sub))
+                                        .child(cap),
+                                ),
+                        ),
+                )
+            }
+            WidgetChipSpec::Media {
                 title,
-                if artist.is_empty() {
-                    "Not playing".to_owned()
-                } else {
-                    artist
-                },
+                artist,
+                muted,
+            } => chip(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .child(
+                        div()
+                            .max_w(px(86.0))
+                            .overflow_hidden()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgba(t.dock_preview_fg))
+                                    .child(title),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(9.0))
+                                    .text_color(rgba(t.dock_preview_sub))
+                                    .child(if artist.is_empty() {
+                                        "Media".to_owned()
+                                    } else {
+                                        artist
+                                    }),
+                            ),
+                    )
+                    .child(vdiv())
+                    .child(icon_glyph("\u{E892}", 10.0, t.dock_preview_fg))
+                    .child(icon_glyph("\u{E768}", 11.0, t.dock_preview_fg))
+                    .child(icon_glyph("\u{E893}", 10.0, t.dock_preview_fg))
+                    .child(icon_glyph(
+                        if muted { "\u{E74F}" } else { "\u{E767}" },
+                        10.0,
+                        t.dock_preview_sub,
+                    )),
             ),
-            WidgetChipSpec::Audio { volume, muted } => (
-                if muted {
-                    "Muted".to_owned()
-                } else {
-                    format!("{volume}%")
-                },
-                "Audio".to_owned(),
+            WidgetChipSpec::Audio { volume, muted } => chip(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(icon_glyph(
+                        if muted { "\u{E74F}" } else { "\u{E767}" },
+                        13.0,
+                        if muted {
+                            crate::design::gpui_rgba(pal.danger_fg, 0xff)
+                        } else {
+                            t.dock_preview_fg
+                        },
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(t.dock_preview_fg))
+                            .child(if muted {
+                                "Mute".to_owned()
+                            } else {
+                                format!("{volume}%")
+                            }),
+                    ),
             ),
-            WidgetChipSpec::QuickSettings { pills } => (
-                pills
-                    .iter()
-                    .map(|(_, on)| if *on { "On" } else { "Off" })
-                    .collect::<Vec<_>>()
-                    .join(" · "),
-                "Wi-Fi · Bluetooth · Night light".to_owned(),
+            WidgetChipSpec::QuickSettings { pills } => chip(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.0))
+                    .children(pills.into_iter().map(|(glyph, active)| {
+                        div()
+                            .size(px(24.0))
+                            .rounded(px(6.0))
+                            .bg(rgba(if active {
+                                crate::design::gpui_rgba(pal.selected_fill, 0xff)
+                            } else {
+                                track_bg
+                            }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .font_family("Segoe Fluent Icons")
+                                    .text_size(px(11.0))
+                                    .text_color(rgba(if active {
+                                        crate::design::gpui_rgba(pal.selected_fg, 0xff)
+                                    } else {
+                                        t.dock_preview_fg
+                                    }))
+                                    .child(glyph),
+                            )
+                    })),
             ),
-            WidgetChipSpec::Keyboard { code } => (code, "Keyboard layout".to_owned()),
-            WidgetChipSpec::AiDual { rows, .. } => rows.first().map_or_else(
-                || ("—".to_owned(), "Sign in".to_owned()),
-                |(label, used, _, reset)| (format!("{label} {:.0}%", used * 100.0), reset.clone()),
+            WidgetChipSpec::Keyboard { code } => chip(
+                div()
+                    .px(px(6.0))
+                    .py(px(2.0))
+                    .rounded(px(5.0))
+                    .bg(rgba(track_bg))
+                    .text_size(px(12.0))
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgba(t.dock_preview_fg))
+                    .child(code),
             ),
-            WidgetChipSpec::AiAntigravity { columns } => columns
-                .first()
-                .and_then(|(_, rows)| rows.first())
-                .map_or_else(
-                    || ("—".to_owned(), "Sign in".to_owned()),
-                    |(label, used, _, reset)| {
-                        (format!("{label} {:.0}%", used * 100.0), reset.clone())
-                    },
-                ),
-            WidgetChipSpec::AiOpenCode { columns } => columns.first().map_or_else(
-                || ("—".to_owned(), "Sign in".to_owned()),
-                |(label, value, _, _, reset)| (format!("{label} {value}"), reset.clone()),
-            ),
+            WidgetChipSpec::AiDual {
+                provider_id,
+                brand_color,
+                rows,
+            } => {
+                let dot_col =
+                    brand_color.unwrap_or_else(|| widgets::ai_provider_color(provider_id));
+                chip(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .size(px(14.0))
+                                .rounded(px(4.0))
+                                .bg(c_rgba(dot_col, 0x33))
+                                .border_1()
+                                .border_color(c_rgba(dot_col, 0xcc)),
+                        )
+                        .child(div().flex().flex_col().gap(px(3.0)).children(
+                            rows.into_iter().take(2).map(|(lbl, used, col, reset)| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(5.0))
+                                    .child(
+                                        div()
+                                            .w(px(18.0))
+                                            .text_size(px(9.0))
+                                            .text_color(rgba(t.dock_preview_sub))
+                                            .child(lbl),
+                                    )
+                                    .child(mini_bar(used, col, 48.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(9.0))
+                                            .text_color(rgba(t.dock_preview_sub))
+                                            .child(reset),
+                                    )
+                            }),
+                        )),
+                )
+            }
+            WidgetChipSpec::AiAntigravity { columns } => {
+                chip(div().flex().items_center().gap(px(6.0)).children(
+                    columns.into_iter().take(3).map(|(name, rows)| {
+                        let (used, col) = rows
+                            .first()
+                            .map_or((0.0, pal.widget_accent), |(_, u, c, _)| (*u, *c));
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.0))
+                            .child(
+                                div()
+                                    .text_size(px(9.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgba(t.dock_preview_fg))
+                                    .child(name),
+                            )
+                            .child(mini_bar(used, col, 34.0))
+                    }),
+                ))
+            }
+            WidgetChipSpec::AiOpenCode { columns } => {
+                chip(div().flex().items_center().gap(px(7.0)).children(
+                    columns.into_iter().take(3).map(|(lbl, val, used, col, _)| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_size(px(9.0))
+                                    .text_color(rgba(t.dock_preview_sub))
+                                    .child(format!("{lbl} {val}")),
+                            )
+                            .child(mini_bar(used, col, 36.0))
+                    }),
+                ))
+            }
             WidgetChipSpec::AiCopilot {
                 value_text,
                 meta_text,
-                ..
-            } => (value_text, meta_text),
+                used,
+                bar_color,
+            } => chip(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(3.0))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgba(t.dock_preview_fg))
+                                    .child(value_text),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(9.0))
+                                    .text_color(rgba(t.dock_preview_sub))
+                                    .child(meta_text),
+                            ),
+                    )
+                    .child(mini_bar(used, bar_color, 88.0)),
+            ),
             WidgetChipSpec::AiBalance {
-                name, value_text, ..
-            } => (value_text, name.to_owned()),
-            WidgetChipSpec::Simple { top, bottom, .. } => (top, bottom),
+                provider_id,
+                name,
+                value_text,
+                ..
+            } => {
+                let dot_col = widgets::ai_provider_color(provider_id);
+                chip(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(
+                            div()
+                                .size(px(14.0))
+                                .rounded(px(4.0))
+                                .bg(c_rgba(dot_col, 0x33))
+                                .border_1()
+                                .border_color(c_rgba(dot_col, 0xcc)),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(9.0))
+                                        .text_color(rgba(t.dock_preview_sub))
+                                        .child(name),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.0))
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .text_color(rgba(t.dock_preview_fg))
+                                        .child(value_text),
+                                ),
+                        ),
+                )
+            }
+            WidgetChipSpec::Simple {
+                icon_color,
+                top,
+                bottom,
+                ..
+            } => chip(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .child(icon_glyph(
+                        widget_glyph(id),
+                        13.0,
+                        crate::design::gpui_rgba(icon_color, 0xff),
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgba(t.dock_preview_fg))
+                                    .child(top),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(9.0))
+                                    .text_color(rgba(t.dock_preview_sub))
+                                    .child(bottom),
+                            ),
+                    ),
+            ),
         }
     }
 
@@ -411,11 +1055,16 @@ impl SettingsView {
                             16,
                             format!("{scale_pct}%"),
                             |i| {
-                                Box::new(cx.listener(move |this, _, _, cx| {
-                                    this.settings.dock_scale =
-                                        (0.75 + (i as f64) * 0.05).clamp(0.75, 1.50);
-                                    this.auto_save(cx);
-                                }))
+                                let entity = cx.entity().downgrade();
+                                std::rc::Rc::new(move |_win, app| {
+                                    let _ = entity.update(app, |this, cx| {
+                                        let next = (0.75 + (i as f64) * 0.05).clamp(0.75, 1.50);
+                                        if (this.settings.dock_scale - next).abs() > 0.001 {
+                                            this.settings.dock_scale = next;
+                                            this.auto_save(cx);
+                                        }
+                                    });
+                                })
                             },
                         ),
                     )
@@ -431,11 +1080,16 @@ impl SettingsView {
                             17,
                             format!("{} px", self.settings.dock_bottom_gap_pixels),
                             |i| {
-                                Box::new(cx.listener(move |this, _, _, cx| {
-                                    this.settings.dock_bottom_gap_pixels =
-                                        ((i as i32) * 2).clamp(0, 32);
-                                    this.auto_save(cx);
-                                }))
+                                let entity = cx.entity().downgrade();
+                                std::rc::Rc::new(move |_win, app| {
+                                    let _ = entity.update(app, |this, cx| {
+                                        let next = ((i as i32) * 2).clamp(0, 32);
+                                        if this.settings.dock_bottom_gap_pixels != next {
+                                            this.settings.dock_bottom_gap_pixels = next;
+                                            this.auto_save(cx);
+                                        }
+                                    });
+                                })
                             },
                         ),
                     )
@@ -451,10 +1105,16 @@ impl SettingsView {
                             13,
                             format!("{} px", self.settings.dock_icon_padding),
                             |i| {
-                                Box::new(cx.listener(move |this, _, _, cx| {
-                                    this.settings.dock_icon_padding = (i as i32).clamp(0, 12);
-                                    this.auto_save(cx);
-                                }))
+                                let entity = cx.entity().downgrade();
+                                std::rc::Rc::new(move |_win, app| {
+                                    let _ = entity.update(app, |this, cx| {
+                                        let next = (i as i32).clamp(0, 12);
+                                        if this.settings.dock_icon_padding != next {
+                                            this.settings.dock_icon_padding = next;
+                                            this.auto_save(cx);
+                                        }
+                                    });
+                                })
                             },
                         ),
                     )
@@ -691,11 +1351,16 @@ impl SettingsView {
                             17,
                             format!("{opacity_pct}%"),
                             |i| {
-                                Box::new(cx.listener(move |this, _, _, cx| {
-                                    this.settings.dock_opacity =
-                                        (0.20 + (i as f64) * 0.05).clamp(0.20, 1.0);
-                                    this.auto_save(cx);
-                                }))
+                                let entity = cx.entity().downgrade();
+                                std::rc::Rc::new(move |_win, app| {
+                                    let _ = entity.update(app, |this, cx| {
+                                        let next = (0.20 + (i as f64) * 0.05).clamp(0.20, 1.0);
+                                        if (this.settings.dock_opacity - next).abs() > 0.001 {
+                                            this.settings.dock_opacity = next;
+                                            this.auto_save(cx);
+                                        }
+                                    });
+                                })
                             },
                         ),
                     )
@@ -711,11 +1376,16 @@ impl SettingsView {
                             17,
                             radius_label,
                             |i| {
-                                Box::new(cx.listener(move |this, _, _, cx| {
-                                    this.settings.dock_corner_radius =
-                                        Some(((i as i32) * 2).clamp(0, 32));
-                                    this.auto_save(cx);
-                                }))
+                                let entity = cx.entity().downgrade();
+                                std::rc::Rc::new(move |_win, app| {
+                                    let _ = entity.update(app, |this, cx| {
+                                        let next = Some(((i as i32) * 2).clamp(0, 32));
+                                        if this.settings.dock_corner_radius != next {
+                                            this.settings.dock_corner_radius = next;
+                                            this.auto_save(cx);
+                                        }
+                                    });
+                                })
                             },
                         ),
                     )
@@ -773,7 +1443,7 @@ impl SettingsView {
     ) -> AnyElement {
         let wid = w.id;
         let enabled = self.settings.is_widget_enabled(wid);
-        let (top_line, bot_line) = self.widget_preview_lines(wid);
+        let preview = self.render_widget_preview(wid, t);
         let border_col = if enabled { t.accent } else { t.border };
         let card_hover = t.surface_hover;
         let focus_color = t.text_primary;
@@ -782,7 +1452,7 @@ impl SettingsView {
             .id(SharedString::from(format!("wcard-{wid}")))
             .flex_1()
             .min_w_0()
-            .h(px(116.0))
+            .h(px(120.0))
             .flex()
             .flex_col()
             .justify_between()
@@ -804,37 +1474,17 @@ impl SettingsView {
             .child(
                 div()
                     .w_full()
-                    .h(px(52.0))
-                    .rounded(px(8.0))
+                    .h(px(58.0))
+                    .px(px(8.0))
+                    .rounded(px(9.0))
                     .bg(rgba(t.dock_preview_bg))
                     .border_1()
                     .border_color(rgba(t.border))
                     .flex()
                     .items_center()
                     .justify_center()
-                    .child(
-                        div()
-                            .px(px(12.0))
-                            .py(px(4.0))
-                            .rounded(px(7.0))
-                            .bg(rgba(t.surface_muted))
-                            .flex()
-                            .flex_col()
-                            .items_center()
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgba(t.dock_preview_fg))
-                                    .child(top_line),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(rgba(t.dock_preview_sub))
-                                    .child(bot_line),
-                            ),
-                    ),
+                    .overflow_hidden()
+                    .child(preview),
             )
             .child(
                 div()
@@ -1565,6 +2215,7 @@ impl Render for SettingsView {
             .border_color(rgba(t.border))
             .child(
                 div()
+                    .id("settings-titlebar-drag")
                     .flex_1()
                     .h_full()
                     .px(px(14.0))
@@ -1572,6 +2223,9 @@ impl Render for SettingsView {
                     .items_center()
                     .gap(px(8.0))
                     .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down(MouseButton::Left, |_, window, _| {
+                        window.start_window_move();
+                    })
                     .child(icon_glyph("\u{E713}", 13.0, t.text_secondary))
                     .child(
                         div()
