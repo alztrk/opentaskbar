@@ -628,7 +628,8 @@ public partial class MainWindow
 
         foreach (var dock in _secondaryDocks)
         {
-            dock.Configure(_preferences.Current.SecondaryApps, showSecondaryWidgets);
+            dock.Configure(_preferences.Current.SecondaryApps, showSecondaryWidgets,
+                SecondaryDockWindow.AppsAlignment(settings.Layout, settings.Position, settings.ContentAlignment));
             dock.ApplyShelfHeight(effectiveShelf, DockSurfaceHeight);
             dock.PositionOnMonitor();
         }
