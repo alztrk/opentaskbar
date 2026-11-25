@@ -370,7 +370,8 @@ public sealed class SecondaryDockWindow : Window
             mine.Add((app.ExecutablePath, windows, _icons.Get(app.ExecutablePath, windows[0].Handle)));
         }
         // Captionless windows covering the display (games, video) hide this dock like the main one.
-        _fullScreen = foreground != 0 && MonitorFromWindow(foreground, 2) == _monitor && IsFullScreen(foreground);
+        _fullScreen = ShouldHideForFullScreen(_monitor, foreground, IsFullScreenOnMonitor,
+            TaskbarReplacementSession.IsAnyFullScreenOnMonitor);
         ApplyVisibility();
 
         var icons = mine.Select(entry => entry.Icon).ToList();
@@ -446,8 +447,22 @@ public sealed class SecondaryDockWindow : Window
         }
     }
 
-    private bool IsFullScreen(nint window)
-        => IsFullScreenOnMonitor(window, _monitor);
+    /// <summary>
+    /// True when a full-screen window covers this dock's display. Checking only the foreground window is not
+    /// enough: a full-screen video stays on its display after focus moves to another monitor, and the topmost
+    /// dock would then be drawn over it. The foreground check still covers full-screen windows the monitor scan
+    /// skips (for example games without a taskbar button).
+    /// </summary>
+    internal static bool ShouldHideForFullScreen(
+        nint monitor,
+        nint foreground,
+        Func<nint, nint, bool> isForegroundFullScreenOnMonitor,
+        Func<nint, bool> isAnyFullScreenOnMonitor)
+    {
+        if (monitor == 0) return false;
+        if (foreground != 0 && isForegroundFullScreenOnMonitor(foreground, monitor)) return true;
+        return isAnyFullScreenOnMonitor(monitor);
+    }
 
     internal static bool IsWindowOnMonitor(nint window, nint monitor)
     {
