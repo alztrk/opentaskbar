@@ -1188,6 +1188,7 @@ version = "0.1.0"
 dependencies = [
  "ot-core",
  "ot-dock",
+ "ot-render",
  "raw-window-handle",
  "serde",
  "serde_json",

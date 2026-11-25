@@ -74,6 +74,9 @@ pub fn windows_palette() -> bool {
 
 /// `AccentBrush`: the Windows accent, else the palette's own.
 pub fn accent(dark: bool) -> Color {
+    if let Some(themed) = tok("AccentBrush", dark) {
+        return themed;
+    }
     windows_accent().unwrap_or(if dark {
         color(0xFF, 0x38, 0xBD, 0xF8)
     } else {
@@ -83,6 +86,9 @@ pub fn accent(dark: bool) -> Color {
 
 /// `SurfaceHover` (menu items, flyout rows).
 pub fn surface_hover(dark: bool) -> Color {
+    if let Some(themed) = tok("SurfaceHover", dark) {
+        return themed;
+    }
     match (windows_palette(), dark) {
         (true, true) => color(0x14, 0xFF, 0xFF, 0xFF),
         (true, false) => color(0x0D, 0x00, 0x00, 0x00),
@@ -91,7 +97,62 @@ pub fn surface_hover(dark: bool) -> Color {
     }
 }
 
+/// A theme pack's color for `key`, if the active pack sets it.
+fn tok(key: &str, dark: bool) -> Option<Color> {
+    crate::tokens::color_of(key, dark)
+}
+
+/// `ThemeManager.Fill`: the source's stops with their alpha replaced.
+fn with_alpha(gradient: Gradient, alpha: u8) -> Gradient {
+    gradient
+        .into_iter()
+        .map(|(o, c)| (o, color(alpha, c.R, c.G, c.B)))
+        .collect()
+}
+
+/// `TextPrimary`.
+pub fn text_primary(dark: bool) -> Color {
+    tok("TextPrimary", dark).unwrap_or(if dark {
+        color(0xFF, 0xF3, 0xF4, 0xF6)
+    } else {
+        color(0xFF, 0x1B, 0x1B, 0x1B)
+    })
+}
+
+/// `TextSecondary`.
+pub fn text_secondary(dark: bool) -> Color {
+    tok("TextSecondary", dark).unwrap_or(if dark {
+        color(0xFF, 0xAA, 0xB2, 0xC0)
+    } else {
+        color(0xFF, 0x61, 0x66, 0x6E)
+    })
+}
+
+/// `StrokeSubtle`.
+pub fn stroke_subtle(dark: bool) -> Color {
+    tok("StrokeSubtle", dark).unwrap_or(if dark {
+        color(0xFF, 0x3A, 0x43, 0x52)
+    } else {
+        color(0xFF, 0xE5, 0xE5, 0xE5)
+    })
+}
+
+/// `SurfacePopup`.
+pub fn surface_popup(dark: bool) -> Color {
+    tok("SurfacePopup", dark).unwrap_or(if dark {
+        color(0xF7, 0x25, 0x2B, 0x37)
+    } else {
+        color(0xF7, 0xFF, 0xFF, 0xFF)
+    })
+}
+
+/// `StrokeFocus`: the Windows accent (`WindowsPalette`) unless a theme pack sets it.
+pub fn stroke_focus(dark: bool) -> Option<Color> {
+    tok("StrokeFocus", dark).or_else(windows_accent)
+}
+
 pub fn dock_colors(tone: Tone, background: SurfaceBackground, opacity: f64) -> DockColors {
+    let dark = tone == Tone::Dark;
     let alpha = match background {
         SurfaceBackground::Solid => 255,
         _ => (opacity.clamp(0.0, 1.0) * 255.0).round() as u8,
@@ -132,19 +193,21 @@ pub fn dock_colors(tone: Tone, background: SurfaceBackground, opacity: f64) -> D
             color(0xE6, 0x0F, 0x17, 0x2A),
         ),
     };
+    // A theme pack's `DockMaterial` (alpha from the user's surface opacity), `DockBorderMaterial` and indicators.
+    let fill = crate::tokens::gradient("DockMaterial", dark)
+        .map(|g| with_alpha(g, alpha))
+        .unwrap_or(fill);
+    let rim = crate::tokens::gradient("DockBorderMaterial", dark).unwrap_or(rim);
     let none = background == SurfaceBackground::None;
     DockColors {
         fill: (!none).then_some(fill),
         rim: (!none).then_some(rim),
         shadow: !none,
-        indicator,
-        indicator_foreground,
-        glyph,
+        indicator: tok("IndicatorBrush", dark).unwrap_or(indicator),
+        indicator_foreground: tok("IndicatorForegroundBrush", dark).unwrap_or(indicator_foreground),
+        glyph: tok("IconForeground", dark).unwrap_or(glyph),
         // `StartDivider` is filled with `TextSecondary`.
-        separator: match tone {
-            Tone::Dark => color(0xFF, 0xAA, 0xB2, 0xC0),
-            Tone::Light => color(0xFF, 0x61, 0x66, 0x6E),
-        },
+        separator: text_secondary(dark),
     }
 }
 
@@ -236,6 +299,11 @@ pub fn menu_colors(
             (1.0, color(0x14, 0x00, 0x00, 0x00)),
         ]
     };
+    let fill = crate::tokens::gradient("MenuMaterial", dark)
+        .map(|g| with_alpha(g, alpha))
+        .unwrap_or(fill);
+    let stroke = crate::tokens::gradient("MenuStroke", dark).unwrap_or(stroke);
+    let bevel = crate::tokens::gradient("DockInnerBevelMaterial", dark).unwrap_or(bevel);
     let none = background == SurfaceBackground::None;
     let stroke = if none {
         None
@@ -249,26 +317,18 @@ pub fn menu_colors(
         stroke,
         stroke_thickness: border_thickness.clamp(0.0, 12.0) as f32,
         bevel,
-        text: if dark {
-            color(0xFF, 0xF3, 0xF4, 0xF6)
-        } else {
-            color(0xFF, 0x1B, 0x1B, 0x1B)
-        },
-        text_secondary: if dark {
-            color(0xFF, 0xAA, 0xB2, 0xC0)
-        } else {
-            color(0xFF, 0x61, 0x66, 0x6E)
-        },
-        danger: if dark {
+        text: text_primary(dark),
+        text_secondary: text_secondary(dark),
+        danger: tok("DangerText", dark).unwrap_or(if dark {
             color(0xFF, 0xFF, 0x9D, 0xA7)
         } else {
             color(0xFF, 0xAF, 0x23, 0x38)
-        },
-        divider: if dark {
+        }),
+        divider: tok("MenuDivider", dark).unwrap_or(if dark {
             color(0xFF, 0x32, 0x3A, 0x48)
         } else {
             color(0xFF, 0xE8, 0xE8, 0xE8)
-        },
+        }),
         hover: surface_hover(dark),
     }
 }
@@ -367,6 +427,9 @@ pub fn flyout_colors(settings: &ot_core::settings::DockSettings) -> crate::tray_
         settings.menu_border_color.as_deref(),
     );
     let sheen = (settings.menu_background != SurfaceBackground::None).then(|| {
+        if let Some(themed) = crate::tokens::gradient("DockHighlight", dark) {
+            return themed;
+        }
         if dark {
             vec![
                 (0.0, color(0x40, 0xFF, 0xFF, 0xFF)),
@@ -389,8 +452,8 @@ pub fn flyout_colors(settings: &ot_core::settings::DockSettings) -> crate::tray_
         1.0
     };
     let scaled = |c: Color| color((f64::from(c.A) * widget_scale).round() as u8, c.R, c.G, c.B);
-    let accent = windows_accent();
-    if dark {
+    let accent = tok("AccentBrush", dark).or_else(windows_accent);
+    let mut colors = if dark {
         crate::tray_flyout::Colors {
             menu,
             sheen,
@@ -420,7 +483,42 @@ pub fn flyout_colors(settings: &ot_core::settings::DockSettings) -> crate::tray_
             danger_text: color(0xFF, 0xDC, 0x26, 0x26),
             dark,
         }
+    };
+    // `ResolveWidgetHoverSource` / `ResolveWidgetPressedSource`: a pack's card states, else its surface states.
+    if let Some(hover) = tok("WidgetCardHover", dark).or_else(|| tok("SurfaceHover", dark)) {
+        colors.widget_hover = scaled(hover);
     }
+    let pressed = tok("WidgetCardPressed", dark)
+        .or_else(|| tok("SurfacePressed", dark))
+        .or_else(|| {
+            tok("WidgetCardHover", dark).map(|c| {
+                color(
+                    (f64::from(c.A) * 1.5).round().min(255.0) as u8,
+                    c.R,
+                    c.G,
+                    c.B,
+                )
+            })
+        });
+    if let Some(pressed) = pressed {
+        colors.widget_pressed = scaled(pressed);
+    }
+    if let Some(c) = tok("SurfacePressed", dark) {
+        colors.pressed = c;
+    }
+    if let Some(c) = tok("WidgetSelectedFill", dark) {
+        colors.selected = c;
+    }
+    if let Some(c) = tok("WidgetDangerHover", dark) {
+        colors.danger_hover = c;
+    }
+    if let Some(c) = tok("WidgetDangerStroke", dark) {
+        colors.danger_stroke = c;
+    }
+    if let Some(c) = tok("WidgetDangerForeground", dark) {
+        colors.danger_text = c;
+    }
+    colors
 }
 
 /// `light1` of the Windows accent palette (`AccentPalette` bytes 8..11), else the accent mixed 35 % toward white.
@@ -444,62 +542,49 @@ fn accent_light1() -> Option<Color> {
 pub fn panel_palette(settings: &ot_core::settings::DockSettings) -> crate::panel::Palette {
     let flyout = flyout_colors(settings);
     let dark = flyout.dark;
+    let themed_fill = crate::tokens::gradient("WidgetAccentFill", dark)
+        .and_then(|g| Some((g.first()?.1, g.last()?.1)));
     let accent_fill = match (windows_accent(), accent_light1()) {
+        _ if themed_fill.is_some() => themed_fill.unwrap_or_default(),
         (Some(accent), Some(light1)) => (accent, light1),
         _ if dark => (color(0xFF, 0x2D, 0xD4, 0xBF), color(0xFF, 0x0E, 0xA5, 0xE9)),
         _ => (color(0xFF, 0x14, 0xB8, 0xA6), color(0xFF, 0x02, 0x84, 0xC7)),
     };
     crate::panel::Palette {
         dark,
-        text: if dark {
-            color(0xFF, 0xF3, 0xF4, 0xF6)
-        } else {
-            color(0xFF, 0x1B, 0x1B, 0x1B)
-        },
-        text_secondary: if dark {
-            color(0xFF, 0xAA, 0xB2, 0xC0)
-        } else {
-            color(0xFF, 0x61, 0x66, 0x6E)
-        },
-        stroke_subtle: if dark {
-            color(0xFF, 0x3A, 0x43, 0x52)
-        } else {
-            color(0xFF, 0xE5, 0xE5, 0xE5)
-        },
-        surface_selected: if dark {
+        text: text_primary(dark),
+        text_secondary: text_secondary(dark),
+        stroke_subtle: stroke_subtle(dark),
+        surface_selected: tok("SurfaceSelected", dark).unwrap_or(if dark {
             color(0x14, 0xFF, 0xFF, 0xFF)
         } else {
             color(0x0D, 0x00, 0x00, 0x00)
-        },
+        }),
         surface_hover: surface_hover(dark),
         surface_pressed: flyout.pressed,
         // `SurfaceSelectedStrong`: the same overlay as `SurfacePressed` in both palettes.
-        surface_selected_strong: if dark {
+        surface_selected_strong: tok("SurfaceSelectedStrong", dark).unwrap_or(if dark {
             color(0x22, 0xFF, 0xFF, 0xFF)
         } else {
             color(0x16, 0x00, 0x00, 0x00)
-        },
-        surface_popup: if dark {
-            color(0xF7, 0x25, 0x2B, 0x37)
-        } else {
-            color(0xF7, 0xFF, 0xFF, 0xFF)
-        },
+        }),
+        surface_popup: surface_popup(dark),
         selected_fill: flyout.selected,
-        selected_text: if dark {
+        selected_text: tok("WidgetSelectedForeground", dark).unwrap_or(if dark {
             color(0xFF, 0xA2, 0xC0, 0xFF)
         } else {
             color(0xFF, 0x1D, 0x66, 0xD7)
-        },
-        selected_stroke: if dark {
+        }),
+        selected_stroke: tok("WidgetSelectedStroke", dark).unwrap_or(if dark {
             color(0x78, 0x91, 0xB8, 0xFF)
         } else {
             color(0x70, 0x2C, 0x74, 0xE9)
-        },
-        track: if dark {
+        }),
+        track: tok("WidgetTrack", dark).unwrap_or(if dark {
             color(0x2E, 0xFF, 0xFF, 0xFF)
         } else {
             color(0x1F, 0x00, 0x00, 0x00)
-        },
+        }),
         accent_fill,
         danger_hover: flyout.danger_hover,
         danger_stroke: flyout.danger_stroke,
@@ -511,6 +596,12 @@ pub fn panel_palette(settings: &ot_core::settings::DockSettings) -> crate::panel
 
 /// `ShellButtonHover` and `ShellButtonPressed`: the shell buttons' hover and pressed layers.
 pub fn shell_button_colors(dark: bool) -> (Color, Color) {
+    if let (Some(hover), Some(pressed)) = (
+        tok("ShellButtonHover", dark),
+        tok("ShellButtonPressed", dark),
+    ) {
+        return (hover, pressed);
+    }
     match (windows_palette(), dark) {
         (true, true) => (color(0x22, 0xFF, 0xFF, 0xFF), color(0x33, 0xFF, 0xFF, 0xFF)),
         (true, false) => (color(0x14, 0x00, 0x00, 0x00), color(0x22, 0x00, 0x00, 0x00)),
@@ -519,9 +610,18 @@ pub fn shell_button_colors(dark: bool) -> (Color, Color) {
     }
 }
 
+/// `StartTileHover` / `StartTilePressed`: the Start button's states when a theme pack sets them.
+pub fn start_tile_colors(dark: bool) -> Option<(Color, Color)> {
+    let hover = tok("StartTileHover", dark)?;
+    Some((hover, tok("StartTilePressed", dark).unwrap_or(hover)))
+}
+
 /// `SurfaceKeyboardFocus` (the keyboard-focus surface OpenTaskbar's widgets use): from the Windows accent palette as
 /// `WindowsPalette` derives it (dark2 in dark mode, light3 in light mode), else the palette's own color.
 pub fn keyboard_focus_color(dark: bool) -> Color {
+    if let Some(themed) = tok("SurfaceKeyboardFocus", dark) {
+        return themed;
+    }
     let mut palette = [0u8; 64];
     if let Some(read) = user_value(
         r"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent",

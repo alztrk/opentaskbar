@@ -4,7 +4,6 @@
 //! (hidden again after five misses). No click action; the tooltip lists the values.
 
 use ot_core::settings::SystemMeters;
-use ot_render::color;
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
 };
@@ -227,11 +226,7 @@ impl Widget for SystemStats {
     fn draw(&self, canvas: &Canvas) -> WinResult<()> {
         let p = canvas.painter;
         let (primary, secondary) = text_colors(canvas.dark);
-        let stroke = if canvas.dark {
-            color(0xFF, 0x3A, 0x43, 0x52)
-        } else {
-            color(0xFF, 0xE5, 0xE5, 0xE5)
-        };
+        let stroke = crate::theme::stroke_subtle(canvas.dark);
         let h = canvas.height;
         let mut x = PAD;
         canvas.icon("Cpu", x, (h - ICON) / 2.0, ICON, secondary)?;

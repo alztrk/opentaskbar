@@ -7,7 +7,7 @@ use std::cell::RefCell;
 
 use ot_core::settings::DockEdge;
 use ot_render::Composition::{CompositionDrawingSurface, SpriteVisual};
-use ot_render::{Color, Matrix3x2, Renderer, Vector2, color};
+use ot_render::{Color, Matrix3x2, Renderer, Vector2};
 use windows::Win32::Graphics::Direct2D::Common::{D2D_RECT_F, D2D1_COLOR_F};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
@@ -39,18 +39,10 @@ pub struct TooltipColors {
 }
 
 pub fn colors(dark: bool) -> TooltipColors {
-    if dark {
-        TooltipColors {
-            fill: color(0xF7, 0x25, 0x2B, 0x37),
-            stroke: color(0xFF, 0x3A, 0x43, 0x52),
-            text: color(0xFF, 0xF3, 0xF4, 0xF6),
-        }
-    } else {
-        TooltipColors {
-            fill: color(0xF7, 0xFF, 0xFF, 0xFF),
-            stroke: color(0xFF, 0xE5, 0xE5, 0xE5),
-            text: color(0xFF, 0x1B, 0x1B, 0x1B),
-        }
+    TooltipColors {
+        fill: crate::theme::surface_popup(dark),
+        stroke: crate::theme::stroke_subtle(dark),
+        text: crate::theme::text_primary(dark),
     }
 }
 

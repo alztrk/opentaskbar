@@ -84,20 +84,56 @@ pub fn export(
     std::fs::write(path, serialize(settings, pins)).map_err(|_| "ErrorSettingsFileWrite")
 }
 
-/// `FullBackupArchive.Export` (without a theme pack until theme packs are ported: `HasTheme` is false).
+/// `FullBackupArchive.Export`: settings, pins and, when a valid custom theme pack is active, its files under
+/// `theme/`.
 pub fn export_full(
     path: &Path,
     settings: &DockSettings,
     pins: &[PinBackup],
 ) -> Result<(), &'static str> {
+    use ot_core::theme_pack;
+    let theme = settings
+        .theme_pack
+        .as_deref()
+        .filter(|id| theme_pack::is_safe_id(id) && !theme_pack::is_built_in(id))
+        .and_then(|id| {
+            let dir = theme_pack::root().join(id);
+            if theme_pack::validate(&dir).is_some() {
+                return None;
+            }
+            let files = theme_pack::export_files(id).ok()?;
+            files
+                .iter()
+                .all(|(name, _)| theme_pack::is_allowed_file(name))
+                .then(|| {
+                    let name = theme_pack::ThemePack::load(&dir)
+                        .map(|(p, _)| p.display_name())
+                        .unwrap_or_else(|_| id.to_owned());
+                    (id.to_owned(), name, files)
+                })
+        });
     let manifest = serde_json::to_string_pretty(&json!({
-        "Version": 1, "HasTheme": false, "ThemeId": Value::Null, "ThemeName": Value::Null,
+        "Version": 1,
+        "HasTheme": theme.is_some(),
+        "ThemeId": theme.as_ref().map(|t| t.0.clone()),
+        "ThemeName": theme.as_ref().map(|t| t.1.clone()),
     }))
     .unwrap_or_default();
-    let archive = zip_write(&[
+    let settings_json = serialize(settings, pins);
+    let theme_names: Vec<String> = theme
+        .as_ref()
+        .map(|t| t.2.iter().map(|(n, _)| format!("theme/{n}")).collect())
+        .unwrap_or_default();
+    let mut entries: Vec<(&str, &[u8])> = vec![
         ("manifest.json", manifest.as_bytes()),
-        ("settings.json", serialize(settings, pins).as_bytes()),
-    ]);
+        ("settings.json", settings_json.as_bytes()),
+    ];
+    if let Some((_, _, files)) = &theme {
+        for (name, (_, bytes)) in theme_names.iter().zip(files) {
+            entries.push((name, bytes));
+        }
+    }
+    let archive = zip_write(&entries);
     let temporary = path.with_extension("otbackup.tmp");
     std::fs::write(&temporary, archive)
         .and_then(|()| std::fs::rename(&temporary, path))
@@ -107,12 +143,17 @@ pub fn export_full(
         })
 }
 
-/// `FullBackupArchive.Inspect` / `Import`: the settings, the pins and the theme's name when the archive has one
-/// (theme packs are not installed yet: the caller keeps the current theme).
+/// A theme pack carried by a full backup: its id when exported and its files relative to the theme folder.
+pub struct BackupTheme {
+    pub id: Option<String>,
+    pub files: Vec<(String, Vec<u8>)>,
+}
+
+/// `FullBackupArchive.Inspect` / `Import`: the settings, the pins and the theme's files when the archive has one.
 pub fn import_full(
     path: &Path,
     store: &SettingsStore,
-) -> Result<(DockSettings, Vec<PinBackup>, Option<String>), &'static str> {
+) -> Result<(DockSettings, Vec<PinBackup>, Option<BackupTheme>), &'static str> {
     const INVALID: &str = "ErrorFullBackupInvalid";
     let bytes = std::fs::read(path).map_err(|_| INVALID)?;
     if bytes.len() > MAX_BYTES {
@@ -135,13 +176,15 @@ pub fn import_full(
     if has_theme && !entries.iter().any(|(n, _)| n.starts_with("theme/")) {
         return Err(INVALID);
     }
-    let theme = has_theme.then(|| {
-        manifest
-            .get("ThemeName")
-            .or_else(|| manifest.get("ThemeId"))
+    let theme = has_theme.then(|| BackupTheme {
+        id: manifest
+            .get("ThemeId")
             .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
+            .map(str::to_owned),
+        files: entries
+            .iter()
+            .filter_map(|(n, d)| n.strip_prefix("theme/").map(|r| (r.to_owned(), d.clone())))
+            .collect(),
     });
     Ok((settings, pins, theme))
 }
@@ -171,7 +214,7 @@ fn crc32(data: &[u8]) -> u32 {
 }
 
 /// A zip of stored entries with UTF-8 names.
-fn zip_write(entries: &[(&str, &[u8])]) -> Vec<u8> {
+pub(crate) fn zip_write(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut central = Vec::new();
     // DOS date 2026-01-01 00:00 (the content matters, not the time).
@@ -232,7 +275,7 @@ fn u32_at(b: &[u8], at: usize) -> Option<usize> {
 
 /// Reads a zip's file entries (directories skipped); `None` when it is malformed, too large, unsafe (`..` or
 /// absolute names) or uses an unsupported method.
-fn zip_read(bytes: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
+pub(crate) fn zip_read(bytes: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
     let eocd = (0..bytes.len().saturating_sub(21))
         .rev()
         .take(65_557)

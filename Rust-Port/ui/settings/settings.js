@@ -25,6 +25,13 @@
     Calendar: "M8 2v4 M16 2v4 M3 10h18 M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z",
     Mouse: "M12 2a7 7 0 0 0-7 7v6a7 7 0 0 0 14 0V9a7 7 0 0 0-7-7z M12 6v4",
     Sliders: "M4 21v-7 M4 10V3 M12 21v-9 M12 8V3 M20 21v-5 M20 12V3 M1 14h6 M9 8h6 M17 16h6",
+    Plus: "M5 12h14 M12 5v14",
+    Folder: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z",
+    Refresh: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8 M21 3v5h-5 M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16 M8 16H3v5",
+    Duplicate: "M9 9h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1z M5 15H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h11a1 1 0 0 1 1 1v1",
+    Trash: "M3 6h18 M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2 M10 11v6 M14 11v6",
+    Palette: "M12 3a9 9 0 1 0 0 18h1.5a2.5 2.5 0 0 0 0-5H13a2 2 0 0 1 0-4h5a3 3 0 0 0 3-3 6 6 0 0 0-9-6z M7.5 11h.01 M10.5 7.5h.01 M15 7.5h.01",
+    Check: "M20 6L9 17l-5-5",
   };
 
   /// The widget catalog's icons (OpenTaskbar's geometries; "F0"/"F1" ones are filled logos).
@@ -860,6 +867,567 @@
     return page;
   }
 
+  // ---------- Themes ----------
+  const themes = () => state.themes || { builtIn: [], custom: [], swatches: [] };
+
+  /// `TextPrompt.Ask`: a small modal with a text box; resolves to the text, or null when cancelled.
+  function promptText(title, initial) {
+    return new Promise((resolve) => {
+      closePopup();
+      const shade = el("div", "prompt-shade");
+      const box = el("div", "prompt");
+      box.appendChild(el("div", "prompt-title", title));
+      const input = el("input", "prompt-input");
+      input.value = initial || "";
+      box.appendChild(input);
+      const actions = el("div", "prompt-actions");
+      const ok = el("button", "settings-button primary", t("Ok"));
+      const cancel = el("button", "settings-button", t("Cancel"));
+      actions.append(ok, cancel);
+      box.appendChild(actions);
+      shade.appendChild(box);
+      document.body.appendChild(shade);
+      const done = (value) => { shade.remove(); resolve(value); };
+      ok.addEventListener("click", () => done(input.value.trim() || null));
+      cancel.addEventListener("click", () => done(null));
+      shade.addEventListener("mousedown", (e) => { if (e.target === shade) done(null); });
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); ok.click(); }
+        if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(null); }
+      });
+      requestAnimationFrame(() => { input.focus(); input.select(); });
+    });
+  }
+
+  // ---------- Brush picker (`ThemeBrushPicker`) ----------
+  const argbOf = (hex) => {
+    const h = String(hex || "").replace("#", "");
+    const full = h.length === 6 ? "FF" + h : h;
+    if (!/^[0-9a-fA-F]{8}$/.test(full)) return null;
+    return [0, 2, 4, 6].map((i) => parseInt(full.slice(i, i + 2), 16));
+  };
+  const hexOf = (c) => "#" + c.map((v) => Math.round(v).toString(16).padStart(2, "0")).join("").toUpperCase();
+  const cssOf = (c) => `rgba(${c[1]}, ${c[2]}, ${c[3]}, ${(c[0] / 255).toFixed(4)})`;
+  function toHsv(c) {
+    const [r, g, b] = [c[1] / 255, c[2] / 255, c[3] / 255];
+    const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+    let h = 0;
+    if (d > 0) {
+      if (max === r) h = 60 * ((((g - b) / d) % 6));
+      else if (max === g) h = 60 * ((b - r) / d + 2);
+      else h = 60 * ((r - g) / d + 4);
+    }
+    if (h < 0) h += 360;
+    return [h, max <= 0 ? 0 : d / max, max];
+  }
+  function fromHsv(h, sat, v, a = 255) {
+    h = ((h % 360) + 360) % 360; sat = Math.min(1, Math.max(0, sat)); v = Math.min(1, Math.max(0, v));
+    const c = v * sat, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = v - c;
+    const [r, g, b] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+    return [a, Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+  }
+
+  /// Resolves to "#AARRGGBB" (solid) or `{ stops, positions, angle }` (gradient), or null when cancelled.
+  function openBrushPicker(initial) {
+    return new Promise((resolve) => {
+      closePopup();
+      const saved = state.controls;
+      state.controls = [];
+      const isGradient = initial && typeof initial === "object" && Array.isArray(initial.stops);
+      let solid = (!isGradient && argbOf(initial)) || argbOf("#FF708090");
+      let stops = [];
+      let angle = 90;
+      if (isGradient) {
+        stops = initial.stops.map((c, i) => ({ c: argbOf(c) || [255, 0, 0, 0],
+          o: initial.positions ? initial.positions[i] / 100 : i / (initial.stops.length - 1) }));
+        stops.sort((a, b) => a.o - b.o);
+        angle = Math.round(initial.angle ?? 180);
+      }
+      if (stops.length < 2) stops = [{ c: solid.slice(), o: 0 }, { c: [255, 120, 145, 175], o: 1 }];
+      let tab = isGradient ? 1 : 0;
+      let sel = 0;
+      let hue = 0, sat = 0, val = 0;
+      const current = () => (tab === 1 ? stops[sel].c : solid);
+      const setCurrent = (c) => { if (tab === 1) stops[sel].c = c; else solid = c; sync(); };
+      const result = () => {
+        if (tab !== 1) return hexOf(solid);
+        const sorted = stops.slice().sort((a, b) => a.o - b.o);
+        return { stops: sorted.map((x) => hexOf(x.c)), positions: sorted.map((x) => Math.round(x.o * 100000) / 1000), angle };
+      };
+      const previewCss = () => {
+        if (tab !== 1) return cssOf(solid);
+        const sorted = stops.slice().sort((a, b) => a.o - b.o);
+        return `linear-gradient(${angle}deg, ${sorted.map((x) => `${cssOf(x.c)} ${(x.o * 100).toFixed(1)}%`).join(", ")})`;
+      };
+
+      const shade = el("div", "prompt-shade picker-shade");
+      const win = el("div", "picker");
+      const title = el("div", "picker-title");
+      const mark = el("div", "picker-mark");
+      title.append(mark, el("span", "", t("ColorTitle")));
+      const close = el("button", "picker-close");
+      close.innerHTML = "&#xE8BB;";
+      title.appendChild(close);
+      const body = el("div", "picker-body");
+      const scroll = el("div", "picker-scroll");
+
+      // Tabs: Solid / Gradient.
+      const tabs = el("div", "picker-tabs");
+      const tabButtons = ["SurfaceSolid", "SurfaceGradient"].map((key, i) => {
+        const b = el("button", "picker-tab", t(key));
+        b.addEventListener("click", () => { tab = i; sync(); });
+        tabs.appendChild(b);
+        return b;
+      });
+      const panel = el("div", "picker-panel");
+      const solidPanel = el("div", "picker-pane");
+      solidPanel.appendChild(el("div", "picker-text", t("ColorSelectSingle")));
+      const gradPanel = el("div", "picker-pane");
+      gradPanel.appendChild(el("div", "picker-text", t("ColorSelectStop")));
+      const stopChoices = el("div", "picker-stops");
+      const tools = el("div", "picker-tools");
+      const add = el("button", "settings-button picker-button", t("ColorAddStop"));
+      add.addEventListener("click", () => {
+        if (stops.length >= 16) return;
+        stops.push({ c: current().slice(), o: 0.5 });
+        sel = stops.length - 1; sync();
+      });
+      const remove = el("button", "settings-button picker-button", t("ColorRemove"));
+      remove.addEventListener("click", () => {
+        if (stops.length <= 2) return;
+        stops.splice(sel, 1); sel = 0; sync();
+      });
+      tools.append(add, remove);
+      const positionRow = el("div", "picker-row grow");
+      const position = slider({ min: 0, max: 100, step: 1, large: 1, width: 0, value: () => Math.round(stops[sel].o * 100),
+        onInput: (v) => { stops[sel].o = v / 100; sync(); } });
+      const positionValue = el("div", "picker-value");
+      positionRow.append(position, positionValue);
+      const angleRow = el("div", "picker-row angle");
+      const angleValue = el("div", "picker-value");
+      angleRow.append(el("div", "picker-label wide", t("ColorAngle")),
+        slider({ min: 0, max: 360, step: 1, large: 1, width: 180, value: () => angle, onInput: (v) => { angle = v; sync(); } }),
+        angleValue);
+      gradPanel.append(stopChoices, tools, el("div", "picker-text position", t("ColorStopPosition")), positionRow, angleRow);
+      panel.append(solidPanel, gradPanel);
+
+      // Saturation/value field, hue rainbow and slider.
+      const area = el("div", "picker-area");
+      area.appendChild(el("div", "picker-heading", t("ColorTitle")));
+      const field = el("div", "picker-field");
+      const cursor = el("div", "picker-cursor");
+      field.appendChild(cursor);
+      const choose = (e) => {
+        const r = field.getBoundingClientRect();
+        sat = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+        val = Math.min(1, Math.max(0, 1 - (e.clientY - r.top) / r.height));
+        setCurrent(fromHsv(hue, sat, val, current()[0]));
+      };
+      field.addEventListener("pointerdown", (e) => {
+        field.setPointerCapture(e.pointerId); choose(e);
+        const move = (m) => choose(m);
+        const up = () => { field.removeEventListener("pointermove", move); field.removeEventListener("pointerup", up); };
+        field.addEventListener("pointermove", move); field.addEventListener("pointerup", up);
+      });
+      const rainbow = el("div", "picker-rainbow");
+      const hueSlider = slider({ min: 0, max: 360, step: 1, large: 1, width: 305, value: () => Math.round(hue),
+        onInput: (v) => { hue = v; setCurrent(fromHsv(hue, sat, val, current()[0])); } });
+      hueSlider.classList.add("picker-hue");
+      area.append(field, rainbow, hueSlider);
+      const preview = el("div", "picker-preview");
+
+      const channels = ["ColorRed", "ColorGreen", "ColorBlue"].map((key, i) => {
+        const r = el("div", "picker-row channel");
+        r.append(el("div", "picker-label", t(key)), slider({ min: 0, max: 255, step: 1, large: 1, width: 230,
+          value: () => current()[i + 1], onInput: (v) => { const c = current().slice(); c[i + 1] = v; setCurrent(c); } }));
+        return r;
+      });
+      const alphaRow = el("div", "picker-row alpha");
+      const alphaValue = el("div", "picker-value");
+      alphaRow.append(el("div", "picker-label", t("ColorOpacity")), slider({ min: 0, max: 255, step: 1, large: 1, width: 200,
+        value: () => current()[0], onInput: (v) => { const c = current().slice(); c[0] = v; setCurrent(c); } }), alphaValue);
+      const hexRow = el("div", "picker-row hex");
+      const hex = el("input", "picker-hex");
+      const parseHex = () => {
+        const text = hex.value.trim();
+        const c = (text.length === 7 || text.length === 9) && text.startsWith("#") ? argbOf(text) : null;
+        if (c) setCurrent(c); else sync();
+      };
+      hex.addEventListener("blur", parseHex);
+      hex.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") parseHex();
+        if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(null); }
+      });
+      hexRow.append(el("div", "picker-label", t("ColorHEX")), hex);
+
+      scroll.append(tabs, panel, area, preview, ...channels, alphaRow, hexRow);
+      const footer = el("div", "picker-footer");
+      const cancel = el("button", "settings-button picker-button", t("ColorCancel"));
+      const accept = el("button", "settings-button picker-button", t("ColorUse"));
+      footer.append(cancel, accept);
+      body.append(scroll, footer);
+      win.append(title, body);
+      shade.appendChild(win);
+      document.body.appendChild(shade);
+      const local = state.controls;
+      state.controls = saved;
+
+      function sync() {
+        const c = current();
+        tabButtons.forEach((b, i) => b.classList.toggle("selected", i === tab));
+        solidPanel.hidden = tab !== 0;
+        gradPanel.hidden = tab !== 1;
+        stopChoices.innerHTML = "";
+        stops.forEach((stop, i) => {
+          const b = el("button", "settings-button picker-stop" + (i === sel ? " selected" : ""),
+            `${t("ColorStopLabel", i + 1)} · ${hexOf(stop.c)} · ${Math.round(stop.o * 100)}%`);
+          b.addEventListener("click", () => { sel = i; sync(); });
+          stopChoices.appendChild(b);
+        });
+        positionValue.textContent = Math.round(stops[sel].o * 100) + "%";
+        angleValue.textContent = angle + "\u00B0";
+        alphaValue.textContent = Math.round((c[0] / 255) * 100) + "%";
+        if (document.activeElement !== hex) hex.value = hexOf(c);
+        const [h, sv, v] = toHsv(c);
+        hue = sv === 0 || v === 0 ? hue : h;
+        sat = sv; val = v;
+        field.style.background = `linear-gradient(to bottom, rgba(0,0,0,0), #000), linear-gradient(to right, #fff, rgba(255,255,255,0)), ${cssOf(fromHsv(hue, 1, 1))}`;
+        cursor.style.left = Math.round(sat * 305 - 6) + "px";
+        cursor.style.top = Math.round((1 - val) * 126 - 6) + "px";
+        preview.style.background = previewCss();
+        local.forEach((x) => x.update());
+      }
+      function done(value) { shade.remove(); resolve(value); }
+      cancel.addEventListener("click", () => done(null));
+      close.addEventListener("click", () => done(null));
+      accept.addEventListener("click", () => done(result()));
+      shade.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); done(null); } });
+      sync();
+      requestAnimationFrame(() => win.focus());
+      win.tabIndex = -1;
+    });
+  }
+
+  /// "#AARRGGBB" mixed toward `tint` (`BlendColors`), opaque.
+  function blend(base, tint, amount) {
+    const p = (h) => { const x = h.replace("#", ""); const o = x.length === 8 ? 2 : 0;
+      return [0, 2, 4].map((i) => parseInt(x.slice(o + i, o + i + 2), 16)); };
+    const a = p(base), b = p(tint);
+    return "#FF" + a.map((v, i) => Math.round(v * (1 - amount) + b[i] * amount).toString(16).padStart(2, "0")).join("");
+  }
+  const withAlpha = (hex, alpha) => css("#" + alpha + hex.replace("#", "").slice(-6));
+
+  /// `CreateThemeEntryButton`: a miniature desktop with a dock pill, the name and the active badge or palette dots.
+  function themeCard(choice) {
+    const active = (themes().selected ?? null) === (choice.id ?? null)
+      || (choice.id && themes().selected && choice.id.toLowerCase() === String(themes().selected).toLowerCase());
+    const { bg, dock, accent, text } = choice.preview;
+    const card = el("button", "theme-card" + (active ? " active" : ""));
+    card.title = choice.name;
+    const stage = el("div", "theme-stage");
+    stage.style.background = `linear-gradient(135deg, ${css(blend(bg, accent, 0.14))} 0%, ${css(bg)} 65%, `
+      + `${css(blend(bg, "#FF000000", state.dark ? 0.25 : 0.06))} 100%)`;
+    const pill = el("div", "theme-pill");
+    pill.style.background = withAlpha(dock, "EB");
+    pill.style.borderColor = withAlpha(accent, "44");
+    const tile = (alpha, color) => { const d = el("div", "theme-tile"); d.style.background = withAlpha(color, alpha); return d; };
+    pill.appendChild(tile("CC", accent));
+    const activeApp = el("div", "theme-active");
+    activeApp.appendChild(tile("3D", text));
+    const dot = el("div", "theme-dot");
+    dot.style.background = css(accent);
+    activeApp.appendChild(dot);
+    pill.appendChild(activeApp);
+    pill.append(tile("28", text), tile("28", text));
+    const divider = el("div", "theme-divider");
+    divider.style.background = withAlpha(text, "24");
+    pill.appendChild(divider);
+    const clock = el("div", "theme-clock");
+    const bar1 = el("div", "theme-bar1"); bar1.style.background = withAlpha(text, "99");
+    const bar2 = el("div", "theme-bar2"); bar2.style.background = withAlpha(text, "4D");
+    clock.append(bar1, bar2);
+    pill.appendChild(clock);
+    stage.appendChild(pill);
+    const footer = el("div", "theme-footer");
+    footer.appendChild(el("span", "theme-name", choice.name));
+    if (active) {
+      const badge = el("div", "theme-badge");
+      badge.appendChild(icon("Check", 10));
+      footer.appendChild(badge);
+    } else {
+      const dots = el("div", "theme-dots");
+      const a = el("div", "theme-swatch"); a.style.background = css(dock); a.style.borderColor = withAlpha(text, "40");
+      const b = el("div", "theme-swatch accent"); b.style.background = css(accent);
+      dots.append(a, b);
+      footer.appendChild(dots);
+    }
+    card.append(stage, el("div", "theme-rule"), footer);
+    card.addEventListener("click", () => {
+      if (active) return;
+      flush();
+      post({ type: "themeSelect", id: choice.id ?? null });
+    });
+    return card;
+  }
+
+  /// `ThemePropertyEditor` for a custom theme: information fields and the token tabs.
+  function themeEditor(ed, section) {
+    const host = el("div", "editor-body");
+    host.appendChild(section("ThemeInformation"));
+    const info = { name: ed.name, author: ed.author, description: ed.description };
+    let infoTimer = 0;
+    const saveInfo = () => { clearTimeout(infoTimer); infoTimer = 0; post({ type: "themeInfo", ...info }); };
+    const textRow = (labelKey, key) => {
+      const r = el("div", "editor-row");
+      r.appendChild(el("div", "editor-label", t(labelKey)));
+      const input = el("input", "text-field");
+      input.value = info[key] || "";
+      input.dataset.focus = "info-" + key;
+      input.addEventListener("input", () => {
+        info[key] = input.value;
+        clearTimeout(infoTimer);
+        infoTimer = setTimeout(saveInfo, 350);
+      });
+      input.addEventListener("blur", () => { if (infoTimer) saveInfo(); });
+      r.appendChild(input);
+      return r;
+    };
+    host.append(textRow("ThemeFieldName", "name"), textRow("ThemeFieldAuthor", "author"), textRow("ThemeFieldDescription", "description"));
+
+    const tabsHost = el("div", "editor-tabs");
+    const header = el("div", "editor-tab-strip");
+    const content = el("div", "editor-tab-content");
+    tabsHost.append(header, content);
+    const index = Math.min(state.editorTab || 0, ed.sections.length - 1);
+    ed.sections.forEach((sec, i) => {
+      const b = el("button", "editor-tab" + (i === index ? " selected" : ""), sec.title);
+      b.addEventListener("click", () => { state.editorTab = i; rebuildThemes(); });
+      header.appendChild(b);
+    });
+    for (const f of (ed.sections[index] || { fields: [] }).fields) content.appendChild(tokenRow(f));
+    host.appendChild(tabsHost);
+    return host;
+  }
+
+  const saveToken = (key, value) => post({ type: "themeToken", key, value });
+
+  function tokenRow(f) {
+    const r = el("div", "editor-row");
+    r.appendChild(el("div", "editor-label", f.label));
+    if (f.kind === "brush") {
+      const b = el("button", "settings-button brush-field");
+      const sw = el("div", "brush-swatch");
+      sw.style.background = f.css;
+      b.append(sw, el("span", "", t(f.gradient ? "SurfaceGradient" : "SurfaceSolid")));
+      b.addEventListener("click", async () => {
+        const chosen = await openBrushPicker(f.value);
+        if (chosen) saveToken(f.key, chosen);
+      });
+      r.appendChild(b);
+      return r;
+    }
+    const input = el("input", "text-field");
+    input.value = f.text;
+    input.dataset.focus = "token-" + f.key;
+    if (f.kind === "numbers") input.title = t("ThemeFourValueFieldHelp");
+    if (f.kind === "font") input.title = t("ThemeFontFieldHelp");
+    const commit = () => {
+      const text = input.value.trim();
+      if (text === f.text) return;
+      if (f.kind === "number") {
+        const n = Number(text);
+        if (text && Number.isFinite(n) && n >= 0 && n <= 2048) saveToken(f.key, n); else input.value = f.text;
+      } else if (f.kind === "numbers") {
+        const parts = text.split(",").map((x) => x.trim());
+        const ok = (parts.length === 1 || parts.length === 4)
+          && parts.every((x) => x !== "" && Number.isFinite(Number(x)) && Number(x) >= 0 && Number(x) <= 2048);
+        // Always the full four-value form the theme pack expects.
+        if (ok) saveToken(f.key, parts.length === 1 ? Array(4).fill(parts[0]).join(",") : parts.join(","));
+        else input.value = f.text;
+      } else if (text) {
+        saveToken(f.key, text);
+      } else {
+        input.value = f.text;
+      }
+    };
+    input.addEventListener("blur", commit);
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") input.blur(); });
+    r.appendChild(input);
+    return r;
+  }
+
+  /// `AdaptiveGrid` (MinItemWidth 195): as many equal columns as fit.
+  function gallery(list) {
+    const grid = el("div", "theme-grid");
+    for (const choice of list) grid.appendChild(themeCard(choice));
+    const fit = () => {
+      const w = grid.clientWidth;
+      if (w > 0) grid.style.gridTemplateColumns = `repeat(${Math.max(1, Math.floor(w / 195))}, 1fr)`;
+    };
+    new ResizeObserver(fit).observe(grid);
+    return grid;
+  }
+
+  let themesHost = null;
+  let themesControls = [];
+  function rebuildThemes() {
+    if (!themesHost) return;
+    const scroll = document.getElementById("content").scrollTop;
+    state.controls = state.controls.filter((c) => !themesControls.includes(c));
+    const old = themesHost;
+    const focused = document.activeElement;
+    const focusKey = focused && focused.dataset ? focused.dataset.focus : null;
+    const typed = focusKey ? [focused.value, focused.selectionStart, focused.selectionEnd] : null;
+    const fresh = themesPage();
+    fresh.hidden = old.hidden;
+    old.replaceWith(fresh);
+    if (focusKey) {
+      const again = fresh.querySelector(`[data-focus="${focusKey}"]`);
+      if (again) { again.value = typed[0]; again.focus(); again.setSelectionRange(typed[1], typed[2]); }
+    }
+    const p = PAGES.find((x) => x.id === "themes");
+    if (p) p.page = fresh;
+    document.getElementById("content").scrollTop = scroll;
+    requestAnimationFrame(() => fitIcons(fresh));
+  }
+
+  function surfaceRow(kind) {
+    const bgKey = `${kind}Background`, opKey = `${kind}Opacity`;
+    const box = el("div", "stacked-control");
+    const sel = select({
+      options: () => choice("", [["Glass", "SurfaceGlass"], ["Solid", "SurfaceSolid"], ["None", "SurfaceNone"]]),
+      value: () => s()[bgKey], onChange: (v) => set({ [bgKey]: v }, true), glyph: "Layers" });
+    const line = el("div", "surface-line");
+    const sl = slider({ min: 0, max: 100, step: 5, large: 10, value: () => Math.round((s()[opKey] ?? 0.9) * 100),
+      onInput: (v) => set({ [opKey]: v / 100 }) });
+    const value = valueText(48, () => t("OpacityPercent", Math.round((s()[opKey] ?? 0.9) * 100)));
+    line.append(sl, value);
+    box.append(sel, line);
+    const update = () => { line.classList.toggle("disabled", s()[bgKey] === "None"); };
+    state.controls.push({ update });
+    const labels = { Dock: "SurfaceDock", Menu: "SurfaceMenu", Widget: "SurfaceWidget", Settings: "SurfaceSettings" };
+    return row({ label: labels[kind], description: labels[kind] + "Help", control: box });
+  }
+
+  function borderRow() {
+    const box = el("div", "border-control");
+    const keys = ["DockBorderThickness", "MenuBorderThickness", "WidgetBorderThickness", "SettingsBorderThickness"];
+    const sl = slider({ min: 0, max: 6, step: 0.5, large: 1, width: 120,
+      value: () => Math.max(0, Math.min(6, s().MenuBorderThickness ?? 1)),
+      onInput: (v) => set(Object.fromEntries(keys.map((k) => [k, Math.round(v * 2) / 2]))) });
+    const value = valueText(44, () => String(Math.round((s().MenuBorderThickness ?? 1) * 10) / 10), 6);
+    const button = el("button", "border-color");
+    button.title = t("BorderColorLabel");
+    const swatch = el("div", "border-swatch");
+    button.appendChild(swatch);
+    button.addEventListener("click", async () => {
+      flush();
+      const chosen = await openBrushPicker(s().MenuBorderColor || themes().borderDefaultValue || "#70FFFFFF");
+      if (!chosen) return;
+      // `BrushToHex`: a gradient's first stop.
+      post({ type: "borderColorSet", value: typeof chosen === "string" ? chosen : chosen.stops[0] });
+    });
+    const update = () => {
+      const color = s().MenuBorderColor;
+      swatch.style.background = color ? css(color) : (themes().borderDefault || "transparent");
+    };
+    state.controls.push({ update });
+    box.append(sl, value, button);
+    return row({ label: "BorderStyleLabel", description: "BorderStyleHelp", control: box });
+  }
+
+  function themesPage() {
+    const start = state.controls.length;
+    const page = el("div", "page");
+    const add = button("ThemePackNew", "Plus", async () => {
+      const name = await promptText(t("ThemePackNew"), t("ThemePackNewDefault"));
+      if (name) post({ type: "themeNew", name });
+    });
+    page.appendChild(pageHeader("Themes", "SettingsPageThemes", add)).classList.add("themes");
+    const th = themes();
+    page.appendChild(el("div", "theme-label", t("BuiltInThemes")));
+    page.appendChild(gallery(th.builtIn || []));
+    page.appendChild(el("div", "theme-label mine", t("MyThemes")));
+    if ((th.custom || []).length) page.appendChild(gallery(th.custom));
+    else page.appendChild(el("div", "theme-empty", t("NoCustomThemes")));
+
+    const actions = el("div", "theme-actions");
+    if (th.details) actions.appendChild(el("div", "theme-details", th.details));
+    const wrap = el("div", "theme-buttons");
+    const ghost = (key, glyph, onClick, enabled = true, danger = false) => {
+      const b = el("button", "ghost" + (danger ? " danger" : ""));
+      b.append(icon(glyph, 14), el("span", "", t(key)));
+      b.disabled = !enabled;
+      b.addEventListener("click", onClick);
+      return b;
+    };
+    const has = !!th.selected;
+    wrap.append(
+      ghost("ThemePackImport", "Upload", () => post({ type: "themeImport" })),
+      ghost("ThemePackOpenFolder", "Folder", () => post({ type: "themeOpenFolder" })),
+      ghost("ThemePackReload", "Refresh", () => post({ type: "themeReload" })),
+      el("div", "theme-sep"),
+      ghost("ThemePackDuplicate", "Duplicate", async () => {
+        const current = [...(th.builtIn || []), ...(th.custom || [])]
+          .find((c) => c.id && String(c.id).toLowerCase() === String(th.selected).toLowerCase());
+        const name = await promptText(t("ThemePackDuplicate"), `${current ? current.name : th.selected} ${t("ThemePackCopySuffix")}`);
+        if (name) post({ type: "themeDuplicate", name });
+      }, has),
+      ghost("ThemePackExport", "Download", () => post({ type: "themeExport" }), has),
+      ghost("ThemePackDelete", "Trash", () => post({ type: "themeDelete" }), has && !th.selectedBuiltIn, true),
+    );
+    actions.appendChild(wrap);
+    page.appendChild(actions);
+
+    page.appendChild(heading("Theme", true)).classList.add("theme-heading");
+    page.appendChild(group([
+      row({ label: "ColorMode", description: "ThemeHelp",
+        control: settingSelect("Theme", [["System", "Windows"], ["Dark", "Dark"], ["Light", "Light"]], "Palette") }),
+    ]));
+
+    // `ThemePropertyEditor` (read-only part): the current look's colors and, for a built-in look, a copy to edit.
+    const editor = el("div", "theme-editor");
+    const note = state.editorNote && state.editorNote.id === th.selected ? state.editorNote.text : null;
+    editor.appendChild(el("div", "editor-message", note || th.message || ""));
+    const section = (key) => {
+      const h = el("div", "editor-section");
+      h.append(el("div", "editor-heading", t(key)), el("div", "editor-rule"));
+      return h;
+    };
+    editor.appendChild(section("ColorPalette"));
+    const strip = el("div", "swatch-strip");
+    for (const sw of th.swatches || []) {
+      const cell = el("div", "swatch-cell");
+      const block = el("div", "swatch-block");
+      block.style.background = sw.css;
+      cell.append(block, el("div", "swatch-caption", t(sw.label)));
+      strip.appendChild(cell);
+    }
+    editor.appendChild(strip);
+    if (th.editor) editor.appendChild(themeEditor(th.editor, section));
+    if (!th.editable) {
+      editor.appendChild(section("CustomizeAppearance"));
+      const create = el("button", "settings-button primary", t("ThemeCreateEditable"));
+      create.addEventListener("click", () => post({ type: "themeCreateEditable" }));
+      editor.appendChild(create);
+    }
+    page.appendChild(editor);
+
+    page.appendChild(heading("DockGeometry"));
+    const corner = () => s().DockCornerRadius ?? th.cornerDefault ?? 16;
+    page.appendChild(group([
+      row({ label: "DockCornerRadius", description: "DockCornerRadiusDescription",
+        control: [slider({ min: 0, max: 32, step: 1, large: 4, value: corner, onInput: (v) => set({ DockCornerRadius: v }) }),
+          valueText(48, () => `${corner()} px`)] }),
+    ]));
+
+    page.appendChild(heading("SectionSurfaces"));
+    page.appendChild(group(["Dock", "Menu", "Widget", "Settings"].map(surfaceRow).concat([borderRow()])));
+    themesHost = page;
+    themesControls = state.controls.slice(start);
+    return page;
+  }
+
   /// Pages that come with later steps show their heading only.
   function emptyPage(titleKey, subtitleKey) {
     const page = el("div", "page");
@@ -870,7 +1438,7 @@
   const PAGES = [
     { id: "dock", icon: "NavDock", label: "Dock", build: dockPage },
     { id: "widgets", icon: "NavWidgets", label: "Widgets", build: widgetsPage },
-    { id: "themes", icon: "NavThemes", label: "Themes", build: () => emptyPage("Themes", "SettingsPageThemes") },
+    { id: "themes", icon: "NavThemes", label: "Themes", build: themesPage },
     { id: "shortcuts", icon: "NavShortcuts", label: "Shortcuts", build: shortcutsPage },
     { id: "preferences", icon: "NavPreferences", label: "Preferences", bottom: true, build: preferencesPage },
     { id: "about", icon: "NavAbout", label: "About", bottom: true, build: aboutPage },
@@ -939,10 +1507,18 @@
     v("--track", dark ? "#141922" : "#E9E9E9");
     v("--danger-text", dark ? "#FF9DA7" : "#AF2338");
     v("--selected-strong", css(dark ? "#22FFFFFF" : "#16000000"));
+    v("--surface-hover", css(dark ? "#14FFFFFF" : "#0D000000"));
+    v("--surface-selected", css(dark ? "#14FFFFFF" : "#0D000000"));
+    v("--focus", css(theme.focus || theme.accent));
+    v("--popup-solid", dark ? "#252B37" : "#FFFFFF");
     v("--accent", css(theme.accent));
     v("--accent-text", css(theme.accentText));
-    const page = dark ? "#FF1B2029" : "#FFF3F3F3";
-    const sidebar = dark ? "#FF171C26" : "#FFEEEEEE";
+    state.dark = dark;
+    const o = theme.overrides || {};
+    for (const [name, value] of Object.entries(o)) if (name.startsWith("--")) v(name, css(value));
+    const page = o.page || (dark ? "#FF1B2029" : "#FFF3F3F3");
+    v("--page-solid", css("#FF" + page.replace("#", "").slice(-6)));
+    const sidebar = o.sidebar || (dark ? "#FF171C26" : "#FFEEEEEE");
     v("--page", css(page));
     // `SettingsGlassMaterial` / `SettingsSidebarGlass` / `SettingsContentGlass` by the Settings surface style.
     const background = theme.background;
@@ -1004,6 +1580,7 @@
           state.languages = data.languages || [];
           state.hotkeys = data.hotkeys || {};
           state.catalog = data.catalog || [];
+          state.themes = data.themes || null;
           state.version = data.version;
           document.getElementById("version").textContent = "v" + data.version;
           applyTheme(data.theme);
@@ -1019,6 +1596,15 @@
           break;
         case "theme":
           applyTheme(data);
+          break;
+        case "editorMessage":
+          state.editorNote = { id: state.themes && state.themes.selected, text: data };
+          document.querySelectorAll(".editor-message").forEach((m) => { m.textContent = data; });
+          break;
+        case "themes":
+          state.themes = data;
+          rebuildThemes();
+          refresh();
           break;
         case "hotkeys":
           state.hotkeys = data;
@@ -1044,6 +1630,9 @@
     },
   };
 
+  // Script errors go to the app's log.
+  window.addEventListener("error", (e) => post({ type: "log", text: `${e.message} (line ${e.lineno})` }));
+  window.addEventListener("unhandledrejection", (e) => post({ type: "log", text: String(e.reason) }));
   window.addEventListener("beforeunload", flush);
   post({ type: "ready" });
 })();

@@ -86,6 +86,9 @@ fn accent(level: u8, dark: bool) -> Color {
         (2, false) => color(0xFF, 0xDC, 0x26, 0x26),
         (1, true) => color(0xFF, 0xFB, 0xBF, 0x24),
         (1, false) => color(0xFF, 0xD9, 0x77, 0x06),
+        (_, dark) if crate::tokens::color_of("WidgetAccent", dark).is_some() => {
+            crate::tokens::color_of("WidgetAccent", dark).unwrap_or_default()
+        }
         (_, true) => crate::theme::windows_accent().unwrap_or(color(0xFF, 0x2D, 0xD4, 0xBF)),
         (_, false) => crate::theme::windows_accent().unwrap_or(color(0xFF, 0x0D, 0x94, 0x88)),
     }

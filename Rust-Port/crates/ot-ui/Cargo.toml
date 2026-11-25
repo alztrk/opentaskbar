@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 ot-core = { path = "../ot-core" }
 ot-dock = { path = "../ot-dock" }
+ot-render = { path = "../ot-render" }
 serde.workspace = true
 serde_json.workspace = true
 

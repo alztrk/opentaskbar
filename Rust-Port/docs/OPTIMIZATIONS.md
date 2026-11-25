@@ -75,3 +75,11 @@ Catalog numbers: `cargo run -p ot-core --release --example catalog_cost`, 3 runs
 - **Language list built on demand.** Native and English language names come from Windows' ICU when the Settings window opens; nothing is kept while it is closed.
 - **Previews drawn on demand.** A widget's catalog preview is drawn only when its drawer opens (or a setting it shows changes), by the dock's own widget code into a software Direct2D target and encoded as PNG; OpenTaskbar keeps a live widget control per card. The running dock widget is reused when it exists.
 
+## Theme packs
+
+- **Tokens resolved once.** Selecting a theme reads its `widgets\pack.json` once and keeps the typed values for both color modes in two small maps; every palette lookup is a hash lookup. OpenTaskbar re-merges resource dictionaries and rebuilds its generated materials on each change. With no theme selected nothing is kept and the palettes are unchanged.
+- **Built-in themes in the executable.** The six bundled themes (14 files, 16 KB) are embedded and copied only when a file is missing, as OpenTaskbar does with its manifest resources.
+- **No new dependency.** `.ottheme` export and import reuse the zip writer and reader of the backups; the lenient JSON (comments, trailing commas) is a small pre-pass before `serde_json`.
+- **Gallery redrawn on theme events only.** The Themes page is rebuilt when the theme list or selection changes (selection, new, import, delete, reload, size changes for the corner radius), not on other edits.
+- **Editor defaults are a table, not live resources.** The theme editor's default values come from a table generated once from OpenTaskbar's XAML (85 tokens), so no resource dictionary exists at run time; only the Windows-derived colors are computed when the editor opens.
+- **Picker without a second window.** The brush picker is a dialog inside the Settings page instead of another window (OpenTaskbar: a WPF window per opening); nothing is created when it is not open.

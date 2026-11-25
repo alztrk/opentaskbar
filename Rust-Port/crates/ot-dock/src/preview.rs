@@ -135,6 +135,21 @@ pub struct PreviewColors {
 /// The palette brushes the preview uses (`SurfacePopup`, `StrokeSubtle`, `StrokeFocus` (the Windows accent when
 /// there is one, as `WindowsPalette` sets it), `TextPrimary`, `TextSecondary`, `SurfaceSelected`, `SurfaceDanger`).
 pub fn colors(dark: bool, accent: Option<Color>) -> PreviewColors {
+    let mut colors = palette(dark, accent);
+    colors.popup = crate::theme::surface_popup(dark);
+    colors.stroke = crate::theme::stroke_subtle(dark);
+    colors.text = crate::theme::text_primary(dark);
+    colors.text_secondary = crate::theme::text_secondary(dark);
+    if let Some(focus) = crate::tokens::color_of("StrokeFocus", dark) {
+        colors.focus = focus;
+    }
+    if let Some(button) = crate::tokens::color_of("SurfaceSelected", dark) {
+        colors.button = button;
+    }
+    colors
+}
+
+fn palette(dark: bool, accent: Option<Color>) -> PreviewColors {
     if dark {
         PreviewColors {
             popup: color(0xF7, 0x25, 0x2B, 0x37),

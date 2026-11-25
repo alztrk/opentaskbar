@@ -104,6 +104,21 @@ pub struct Card {
 
 /// The plain card (`WidgetCard`, `WidgetCardStroke` of OpenTaskbar before 0.3).
 pub fn neutral_card(dark: bool) -> Card {
+    let mut card = palette_card(dark);
+    if let Some(fill) = crate::tokens::brush("WidgetCard", dark) {
+        card.fill = match fill.0.as_slice() {
+            [(_, a)] => Fill::Solid(*a),
+            [(_, a), .., (_, b)] => Fill::Diagonal(*a, *b),
+            [] => card.fill,
+        };
+    }
+    if let Some(stroke) = crate::tokens::color_of("WidgetCardStroke", dark) {
+        card.stroke = stroke;
+    }
+    card
+}
+
+fn palette_card(dark: bool) -> Card {
     if dark {
         Card {
             fill: Fill::Solid(color(0x14, 0xFF, 0xFF, 0xFF)),
@@ -119,11 +134,10 @@ pub fn neutral_card(dark: bool) -> Card {
 
 /// `TextPrimary` and `TextSecondary`.
 pub fn text_colors(dark: bool) -> (Color, Color) {
-    if dark {
-        (color(0xFF, 0xF3, 0xF4, 0xF6), color(0xFF, 0xAA, 0xB2, 0xC0))
-    } else {
-        (color(0xFF, 0x1B, 0x1B, 0x1B), color(0xFF, 0x61, 0x66, 0x6E))
-    }
+    (
+        crate::theme::text_primary(dark),
+        crate::theme::text_secondary(dark),
+    )
 }
 
 /// `DockSizeProfile.WidgetCardHeight`: the cell height less 2, within 34–46 DIP.

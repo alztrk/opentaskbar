@@ -5,6 +5,7 @@
 pub mod backup;
 pub mod install;
 pub mod settings;
+mod theme_editor;
 pub mod wizard;
 
 pub use wizard::{WizardOptions, WizardOutcome, run};

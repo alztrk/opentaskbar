@@ -1,4 +1,4 @@
-//! Core of OpenTaskBar-Rust: the persisted settings model (compatible with OpenTaskbar's `settings.json`),
+﻿//! Core of OpenTaskBar-Rust: the persisted settings model (compatible with OpenTaskbar's `settings.json`),
 //! its validation and legacy migrations, first-run detection, profiles and localization.
 
 #[macro_use]
@@ -13,6 +13,7 @@ pub mod profiles;
 pub mod settings;
 pub mod startup;
 pub mod store;
+pub mod theme_pack;
 pub mod tray_pin;
 pub mod validate;
 pub mod widgets;

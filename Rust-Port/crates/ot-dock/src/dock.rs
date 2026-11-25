@@ -650,6 +650,26 @@ fn persist(settings: &DockSettings) {
     });
 }
 
+/// `ThemePackReload_Click`: rereads the active theme pack from disk and redraws the dock with it.
+pub fn reload_theme() {
+    with_dock(|dock| {
+        crate::tokens::select(dock.settings.theme_pack.as_deref(), true);
+        let settings = dock.settings.clone();
+        dock.apply(settings);
+    });
+}
+
+/// `DockMetrics.For(size, scale).Radius`: the corner radius used when `DockCornerRadius` is not set.
+pub fn default_corner_radius(settings: &DockSettings) -> i32 {
+    crate::layout::SizeProfile::for_size(
+        settings.size,
+        settings.dock_scale,
+        settings.dock_icon_padding,
+    )
+    .radius
+    .round() as i32
+}
+
 /// Applies new settings to the running dock immediately (theme, material, size, edge, buttons, layout).
 pub fn apply_settings(settings: DockSettings) {
     with_dock(|dock| dock.apply(settings));
@@ -721,6 +741,11 @@ fn with_dock<R>(f: impl FnOnce(&mut Dock) -> R) -> Option<R> {
 
 impl Dock {
     fn new(hwnd: Hwnd, settings: DockSettings) -> WinResult<Self> {
+        // `ThemePacks.InstallBuiltInThemes` + `Select`: before any color is read.
+        if let Err(key) = ot_core::theme_pack::install_built_in() {
+            log::warn(format!("Theme packs: {key}"));
+        }
+        crate::tokens::select(settings.theme_pack.as_deref(), true);
         let renderer = Renderer::new(hwnd)?;
         memory_mark("after renderer");
         let profile = SizeProfile::for_size(
@@ -837,6 +862,7 @@ impl Dock {
         tray_flyout::close();
         crate::panel::close();
         self.keyboard_end(false);
+        crate::tokens::select(settings.theme_pack.as_deref(), false);
         let profile = SizeProfile::for_size(
             settings.size,
             settings.dock_scale,
@@ -1946,11 +1972,8 @@ impl Dock {
             // `TextPrimary`, centered in the icon box.
             tray if tray.starts_with("tray:") => {
                 let name = &tray[5..];
-                let ink = if theme::tone(self.settings.theme) == theme::Tone::Dark {
-                    ot_render::color(0xFF, 0xF3, 0xF4, 0xF6)
-                } else {
-                    ot_render::color(0xFF, 0x1B, 0x1B, 0x1B)
-                };
+                let ink =
+                    theme::text_primary(theme::tone(self.settings.theme) == theme::Tone::Dark);
                 let glyph = ((self.profile.icon * 0.6).round() * self.scale()) as f32;
                 self.renderer.draw(size, size, |context| {
                     // SAFETY: drawing inside BeginDraw/EndDraw.
@@ -3645,17 +3668,12 @@ impl Dock {
             return Some(brush.clone());
         }
         let dark = theme::tone(self.settings.theme) == theme::Tone::Dark;
-        let (fill, stroke) = if dark {
-            (
-                ot_render::color(0xFF, 0xFF, 0x66, 0x73),
-                ot_render::color(0xF7, 0x25, 0x2B, 0x37),
-            )
+        let fill = crate::tokens::color_of("NotificationBrush", dark).unwrap_or(if dark {
+            ot_render::color(0xFF, 0xFF, 0x66, 0x73)
         } else {
-            (
-                ot_render::color(0xFF, 0xD2, 0x2D, 0x42),
-                ot_render::color(0xF7, 0xFF, 0xFF, 0xFF),
-            )
-        };
+            ot_render::color(0xFF, 0xD2, 0x2D, 0x42)
+        });
+        let stroke = theme::surface_popup(dark);
         let scale = self.scale() as f32;
         let size = (9.0 * scale).round().max(1.0) as u32;
         let brush = self
@@ -4001,6 +4019,7 @@ impl Dock {
         let scale = self.scale();
         let dark = theme::tone(self.settings.theme) == theme::Tone::Dark;
         let (hover_color, pressed_color) = theme::shell_button_colors(dark);
+        let start_colors = theme::start_tile_colors(dark);
         // `ControlRadius`: the dock radius less 8 (`RadiusManager`), 0 for an edge-to-edge dock.
         let square = self.placement.is_some_and(|p| p.square_corners);
         let dock_radius = self
@@ -4037,6 +4056,7 @@ impl Dock {
             for index in 0..self.visuals.items.len().min(self.items.len()) {
                 let wanted = self.has_shell_surface(index);
                 let is_pin = matches!(self.items[index].kind, ItemKind::TrayPin(_));
+                let is_start = matches!(self.items[index].kind, ItemKind::Start);
                 let card_and_radius = cards.get(index).copied().flatten();
                 let card = card_and_radius.map(|(c, _)| c);
                 let visual = &mut self.visuals.items[index];
@@ -4142,6 +4162,9 @@ impl Dock {
                         surface
                             .pressed_brush
                             .SetColor(widget_colors.widget_pressed)?;
+                    } else if let (true, Some((hover, pressed))) = (is_start, start_colors) {
+                        surface.hover_brush.SetColor(hover)?;
+                        surface.pressed_brush.SetColor(pressed)?;
                     } else {
                         surface.hover_brush.SetColor(hover_color)?;
                         surface.pressed_brush.SetColor(pressed_color)?;

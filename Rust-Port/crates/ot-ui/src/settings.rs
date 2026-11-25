@@ -15,6 +15,7 @@ use ot_core::language::{AppLanguage, Catalog};
 use ot_core::log;
 use ot_core::settings::{DockSettings, HotkeyChoice, SurfaceBackground};
 use ot_core::store::{SettingsStore, app_data_dir};
+use ot_core::theme_pack::{self, ThemePack};
 use ot_dock::theme::{Tone, tone, windows_accent};
 use raw_window_handle::{
     HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
@@ -680,6 +681,23 @@ fn handle(kind: &str, message: &Value) {
         "hotkey" => record_hotkey(message),
         "hotkeyDisable" => set_hotkey(message["target"].as_str() == Some("dock"), Hotkey::Disabled),
         "hotkeyReset" => set_hotkey(message["target"].as_str() == Some("dock"), Hotkey::Default),
+        "themeSelect" => select_theme(message["id"].as_str().map(str::to_owned)),
+        "themeNew" | "themeDuplicate" | "themeCreateEditable" => new_theme(kind, message),
+        "themeExport" => export_theme(),
+        "themeImport" => import_theme(),
+        "themeDelete" => delete_theme(),
+        "themeOpenFolder" => {
+            let root = theme_pack::root();
+            let _ = std::fs::create_dir_all(&root);
+            shell_open(&root.to_string_lossy());
+        }
+        "themeReload" => {
+            ot_dock::reload_theme();
+            send_themes();
+            send_theme();
+        }
+        "borderColorSet" => set_border_color(message["value"].as_str().unwrap_or_default()),
+        "themeToken" | "themeInfo" => edit_theme(kind, message),
         "export" => export_settings(false),
         "fullExport" => export_settings(true),
         "import" => import_settings(false),
@@ -793,12 +811,40 @@ fn theme_payload(settings: &DockSettings) -> Value {
     let accent_hex = accent
         .map(color_hex)
         .unwrap_or_else(|| (if dark { "#FF38BDF8" } else { "#FF0369A1" }).to_owned());
-    let accent_text = match accent {
+    let mut accent_text = match accent {
         Some(c) => contrast_foreground(c).to_owned(),
         None => (if dark { "#FF05070B" } else { "#FFFFFFFF" }).to_owned(),
     };
+    let token =
+        |key: &str| ot_dock::tokens::color_of(key, dark).map(|c| color_hex((c.A, c.R, c.G, c.B)));
+    let accent_hex = token("AccentBrush").unwrap_or(accent_hex);
+    if let Some(text) = token("AccentText") {
+        accent_text = text;
+    }
+    // A theme pack's page brushes (CSS variable, token); the page keeps its palette for the others.
+    let overrides: Map<String, Value> = [
+        ("--text", "TextPrimary"),
+        ("--text2", "TextSecondary"),
+        ("--stroke", "StrokeSubtle"),
+        ("--control", "SettingsControl"),
+        ("--control-hover", "SettingsControlHover"),
+        ("--track", "SettingsTrack"),
+        ("--danger-text", "DangerText"),
+        ("--selected-strong", "SurfaceSelectedStrong"),
+        ("--surface-hover", "SurfaceHover"),
+        ("--surface-selected", "SurfaceSelected"),
+        ("--popup-solid", "SettingsControl"),
+        ("page", "SettingsBackground"),
+        ("sidebar", "SettingsSidebarOverlay"),
+    ]
+    .iter()
+    .filter_map(|(var, key)| token(key).map(|v| ((*var).to_owned(), Value::String(v))))
+    .collect();
+    let focus = ot_dock::theme::stroke_focus(dark).map(|c| color_hex((c.A, c.R, c.G, c.B)));
     json!({
         "dark": dark,
+        "focus": focus,
+        "overrides": overrides,
         "accent": accent_hex,
         "accentText": accent_text,
         "background": settings.settings_background,
@@ -1139,12 +1185,18 @@ fn import_settings(full: bool) {
     };
     let store = SettingsStore::new(PathBuf::new(), previous.language.clone());
     let result = if full {
-        crate::backup::import_full(&path, &store).map(|(s, p, theme)| {
-            if let Some(theme) = theme {
-                // Theme packs arrive with the Themes page: the current theme stays.
-                log::info(format!(
-                    "Full backup theme \"{theme}\" not restored (theme packs not available yet)."
-                ));
+        crate::backup::import_full(&path, &store).map(|(mut s, p, theme)| {
+            // `FullBackupArchive.Import(restoreTheme: true)`: the theme is installed under a new id and selected.
+            match theme.map(|t| (t.id, theme_pack::import_entries(&t.files))) {
+                Some((_, Ok(id))) => {
+                    log::info(format!("Full backup theme installed as \"{id}\"."));
+                    s.theme_pack = Some(id);
+                }
+                Some((old, Err(key))) => {
+                    log::warn(format!("Full backup theme {old:?} not restored: {key}."));
+                    s.theme_pack = previous.theme_pack.clone();
+                }
+                None => {}
             }
             (s, p)
         })
@@ -1162,9 +1214,6 @@ fn import_settings(full: bool) {
     };
     if settings.pin_order.is_none() {
         settings.pin_order = previous.pin_order.clone();
-    }
-    if full {
-        settings.theme_pack = previous.theme_pack.clone();
     }
     let added = ot_dock::import_pins(&pins);
     log::info(format!(
@@ -1250,6 +1299,7 @@ fn init_payload() -> Value {
             "displays": displays(language),
             "hardware": hardware_rendering(),
             "theme": theme_payload(&s.settings),
+            "themes": themes_payload(&s.settings),
         })
     })
     .unwrap_or(Value::Null)
@@ -1309,8 +1359,15 @@ fn commit(previous: DockSettings, value: Value) {
         }
     };
     let theme_changed = settings.theme != previous.theme
+        || settings.theme_pack != previous.theme_pack
         || settings.settings_background != previous.settings_background
-        || settings.settings_opacity != previous.settings_opacity;
+        || settings.settings_opacity != previous.settings_opacity
+        || settings.settings_border_thickness != previous.settings_border_thickness
+        || settings.settings_border_color != previous.settings_border_color;
+    let themes_changed = theme_changed
+        || settings.size != previous.size
+        || settings.dock_scale != previous.dock_scale
+        || settings.dock_icon_padding != previous.dock_icon_padding;
     let language_changed = settings.language != previous.language;
     with_state(|s| s.settings = settings.clone());
     send("hotkeys", hotkeys_payload(&settings));
@@ -1318,7 +1375,455 @@ fn commit(previous: DockSettings, value: Value) {
     if theme_changed {
         send_theme();
     }
+    if themes_changed || language_changed {
+        send_themes();
+    }
     if language_changed {
         send("strings", json!(Catalog::all(&settings.language)));
     }
+}
+
+// ---------- Themes page ----------
+
+fn hex(c: ot_render::Color) -> String {
+    color_hex((c.A, c.R, c.G, c.B))
+}
+
+/// A token brush (or `fallback`) as CSS: a color or a `linear-gradient`.
+fn brush_css(key: &str, dark: bool, fallback: ot_render::Color) -> String {
+    let rgba = |c: ot_render::Color| {
+        format!(
+            "rgba({}, {}, {}, {:.4})",
+            c.R,
+            c.G,
+            c.B,
+            f64::from(c.A) / 255.0
+        )
+    };
+    match ot_dock::tokens::brush(key, dark) {
+        Some((stops, start, end)) if stops.len() > 1 => {
+            let angle = (f64::from(end.0 - start.0))
+                .atan2(-f64::from(end.1 - start.1))
+                .to_degrees();
+            let list: Vec<String> = stops
+                .iter()
+                .map(|(o, c)| format!("{} {:.1}%", rgba(*c), f64::from(*o) * 100.0))
+                .collect();
+            format!(
+                "linear-gradient({:.1}deg, {})",
+                (angle + 360.0) % 360.0,
+                list.join(", ")
+            )
+        }
+        Some((stops, _, _)) if !stops.is_empty() => rgba(stops[0].1),
+        _ => rgba(fallback),
+    }
+}
+
+/// `ResolveThemePreviewColors`: a gallery card's backdrop, dock, accent and text colors from the pack's widget pack
+/// (first gradient stop), else the defaults.
+fn preview_colors(pack: Option<&ThemePack>, dark: bool) -> Value {
+    let (bg, dock, accent, text) = if dark {
+        (0xFF1B2029u32, 0xFF252B37u32, 0xFF38BDF8u32, 0xFFF3F4F6u32)
+    } else {
+        (0xFFEBEEF3, 0xFFFFFFFF, 0xFF0369A1, 0xFF1B1B1B)
+    };
+    let h = |v: u32| format!("#{v:08X}");
+    if pack.and_then(|p| p.widgets.as_ref()).is_none() {
+        return json!({ "bg": h(bg), "dock": h(dock), "accent": h(accent), "text": h(text) });
+    }
+    let read = |key: &str, default: u32| -> u32 {
+        let Some(widgets) = pack.and_then(|p| p.widgets.as_ref()) else {
+            return default;
+        };
+        let value = widgets.raw(key, dark);
+        let text = value.and_then(|v| {
+            v.as_str().map(str::to_owned).or_else(|| {
+                v.get("stops")
+                    .and_then(|s| s.get(0))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+        });
+        text.and_then(|t| theme_pack::parse_color(&t))
+            .map(|c| c | 0xFF00_0000)
+            .unwrap_or(default)
+    };
+    let bg = read("SettingsBackground", bg);
+    let dock = read("DockMaterial", bg);
+    let accent = read("AccentBrush", read("WidgetAccent", accent));
+    let text = read("TextPrimary", text);
+    json!({ "bg": h(bg), "dock": h(dock), "accent": h(accent), "text": h(text) })
+}
+
+/// `DescribeThemePack`: "Icon pack · Widget pack — Author".
+fn describe(pack: &ThemePack, language: &AppLanguage) -> String {
+    let mut parts = Vec::new();
+    if pack.has_icons {
+        parts.push(Catalog::get("ThemePackIcons", language).into_owned());
+    }
+    if pack.widgets.is_some() {
+        parts.push(Catalog::get("ThemePackWidgets", language).into_owned());
+    }
+    let author = pack
+        .manifest
+        .author
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(|a| format!(" — {a}"))
+        .unwrap_or_default();
+    parts.join(" · ") + &author
+}
+
+/// The Themes page: the gallery (`BuildThemeGallery`), the selected theme's details and the color overview
+/// (`ThemePropertyEditor.ShowColorSwatches`).
+fn themes_payload(settings: &DockSettings) -> Value {
+    let dark = tone(settings.theme) == Tone::Dark;
+    let language = &settings.language;
+    let selected = settings
+        .theme_pack
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let packs = theme_pack::discover();
+    let choice = |pack: &ThemePack| {
+        json!({
+            "id": pack.id,
+            "name": pack.display_name(),
+            "details": describe(pack, language),
+            "preview": preview_colors(Some(pack), dark),
+        })
+    };
+    let mut built_in = vec![json!({
+        "id": Value::Null,
+        "name": Catalog::get("ThemePackNone", language),
+        "details": "",
+        "preview": preview_colors(None, dark),
+    })];
+    let mut custom = Vec::new();
+    for pack in &packs {
+        if pack.is_built_in() {
+            built_in.push(choice(pack));
+        } else {
+            custom.push(choice(pack));
+        }
+    }
+    // A stored theme whose folder is gone stays listed, so an unrelated edit does not clear it.
+    if let Some(id) = selected
+        && !packs.iter().any(|p| p.id.eq_ignore_ascii_case(id))
+    {
+        custom.push(json!({
+            "id": id,
+            "name": format!("{id} (?)"),
+            "details": Catalog::get("ThemePackMissing", language),
+            "preview": preview_colors(None, dark),
+        }));
+    }
+    let active = selected.and_then(|id| packs.iter().find(|p| p.id.eq_ignore_ascii_case(id)));
+    let message = match active {
+        Some(pack) if !pack.is_built_in() => {
+            Catalog::get("ThemeEditing", language).replace("{0}", &pack.display_name())
+        }
+        Some(pack) => pack.display_name(),
+        None => Catalog::get("ThemeWindowsAppearance", language).into_owned(),
+    };
+    let page = if dark { 0xFF1B2029u32 } else { 0xFFF3F3F3 };
+    let control = if dark { 0xFF252B37u32 } else { 0xFFFFFFFF };
+    let argb = |v: u32| ot_render::color((v >> 24) as u8, (v >> 16) as u8, (v >> 8) as u8, v as u8);
+    let swatches = [
+        (
+            "ColorSwatchAccent",
+            "AccentBrush",
+            ot_dock::theme::accent(dark),
+        ),
+        ("ColorSwatchBackground", "SettingsBackground", argb(page)),
+        ("ColorSwatchSurface", "SettingsControl", argb(control)),
+        (
+            "ColorSwatchText",
+            "TextPrimary",
+            ot_dock::theme::text_primary(dark),
+        ),
+        (
+            "ColorSwatchSecondary",
+            "TextSecondary",
+            ot_dock::theme::text_secondary(dark),
+        ),
+        (
+            "ColorSwatchBorder",
+            "StrokeSubtle",
+            ot_dock::theme::stroke_subtle(dark),
+        ),
+    ]
+    .iter()
+    .map(|(label, key, fallback)| json!({ "label": label, "css": brush_css(key, dark, *fallback) }))
+    .collect::<Vec<_>>();
+    let border = settings
+        .menu_border_color
+        .as_deref()
+        .and_then(ot_dock::theme::parse_color);
+    json!({
+        "builtIn": built_in,
+        "custom": custom,
+        "selected": selected,
+        "details": active.map(|p| describe(p, language)).unwrap_or_default(),
+        "selectedBuiltIn": selected.is_some_and(theme_pack::is_built_in),
+        "editable": active.is_some_and(|p| !p.is_built_in()),
+        "message": message,
+        "swatches": swatches,
+        "cornerDefault": ot_dock::default_corner_radius(settings),
+        "borderSwatch": border.map(hex),
+        "editor": active
+            .filter(|p| !p.is_built_in())
+            .map(|p| crate::theme_editor::payload(p, dark, language)),
+        "borderDefaultValue": ot_dock::token_defaults::DEFAULTS
+            .iter()
+            .find(|(k, ..)| *k == "MenuStroke")
+            .map(|&(_, _, d, l)| serde_json::from_str::<Value>(if dark { d } else { l }).unwrap_or(Value::Null)),
+        "borderDefault": brush_css("MenuStroke", dark, if dark {
+            ot_render::color(0x70, 0xFF, 0xFF, 0xFF)
+        } else {
+            ot_render::color(0x85, 0xFF, 0xFF, 0xFF)
+        }),
+    })
+}
+
+fn send_themes() {
+    if let Some(settings) = with_state(|s| s.settings.clone()) {
+        send("themes", themes_payload(&settings));
+    }
+}
+
+/// A theme card clicked: the theme is selected, applied and saved (`ThemePack`, `ThemeApplicationIcons = false`).
+fn select_theme(id: Option<String>) {
+    apply_patch(
+        &json!({ "ThemePack": id, "ThemeApplicationIcons": false })
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+    );
+    send_themes();
+}
+
+/// `ReloadThemePacks`: lists the themes again and selects `id`, saved at once.
+fn reload_themes(id: Option<String>) {
+    select_theme(id);
+    ot_dock::reload_theme();
+    send_themes();
+    send_theme();
+}
+
+/// `ThemePackNew_Click`, `ThemePackDuplicate_Click` and the editor's "Create editable theme".
+fn new_theme(kind: &str, message: &Value) {
+    let Some(settings) = with_state(|s| s.settings.clone()) else {
+        return;
+    };
+    let language = &settings.language;
+    let selected = settings.theme_pack.clone().filter(|s| !s.trim().is_empty());
+    let (name, based_on, done) = match kind {
+        "themeNew" => (
+            message["name"].as_str().unwrap_or_default().to_owned(),
+            None,
+            Some("ThemePackCreated"),
+        ),
+        "themeDuplicate" => {
+            if selected.is_none() {
+                log::report_error("ErrorThemeMissing", language, None);
+                return;
+            }
+            (
+                message["name"].as_str().unwrap_or_default().to_owned(),
+                selected.clone(),
+                Some("ThemePackDuplicated"),
+            )
+        }
+        _ => {
+            // `ThemeNewEditableName` with the current mode ("My Dark Theme").
+            let mode = Catalog::get(
+                if tone(settings.theme) == Tone::Light {
+                    "Light"
+                } else {
+                    "Dark"
+                },
+                language,
+            );
+            (
+                Catalog::get("ThemeNewEditableName", language).replace("{0}", &mode),
+                selected.clone(),
+                None,
+            )
+        }
+    };
+    if name.trim().is_empty() {
+        return;
+    }
+    match theme_pack::create(&name, None, based_on.as_deref()) {
+        Ok(id) => {
+            log::info(format!("Theme pack \"{id}\" created."));
+            reload_themes(Some(id));
+            if let Some(done) = done {
+                message_box(&Catalog::get(done, language));
+            }
+        }
+        Err(error) => {
+            log::warn(format!("Theme creation failed: {error}"));
+            log::report_error("ErrorThemeInstall", language, None);
+        }
+    }
+}
+
+/// `ThemePackExport_Click`: a zip whose entries sit under a folder named after the theme.
+fn export_theme() {
+    let Some(settings) = with_state(|s| s.settings.clone()) else {
+        return;
+    };
+    let language = &settings.language;
+    let Some(id) = settings.theme_pack.clone().filter(|s| !s.trim().is_empty()) else {
+        log::report_error("ErrorThemeMissing", language, None);
+        return;
+    };
+    let files = match theme_pack::export_files(&id) {
+        Ok(files) => files,
+        Err(key) => {
+            log::report_error(key, language, None);
+            return;
+        }
+    };
+    let Some(path) = file_dialog(
+        true,
+        &Catalog::get("ThemePackFileFilter", language),
+        &format!("{id}{}", theme_pack::EXPORT_EXTENSION),
+        theme_pack::EXPORT_EXTENSION,
+    ) else {
+        return;
+    };
+    let names: Vec<String> = files.iter().map(|(n, _)| format!("{id}/{n}")).collect();
+    let entries: Vec<(&str, &[u8])> = names
+        .iter()
+        .zip(&files)
+        .map(|(n, (_, b))| (n.as_str(), b.as_slice()))
+        .collect();
+    match std::fs::write(&path, crate::backup::zip_write(&entries)) {
+        Ok(()) => {
+            log::info(format!("Theme \"{id}\" exported to {}.", path.display()));
+            message_box(&Catalog::get("ThemePackExported", language));
+        }
+        Err(error) => {
+            log::warn(format!("Theme export failed: {error}"));
+            log::report_error("ErrorThemeInstall", language, None);
+        }
+    }
+}
+
+/// `ThemePackImport_Click`.
+fn import_theme() {
+    let Some(settings) = with_state(|s| s.settings.clone()) else {
+        return;
+    };
+    let language = &settings.language;
+    let Some(path) = file_dialog(
+        false,
+        &Catalog::get("ThemePackFileFilter", language),
+        "",
+        theme_pack::EXPORT_EXTENSION,
+    ) else {
+        return;
+    };
+    let entries = std::fs::metadata(&path)
+        .ok()
+        .filter(|m| m.len() <= theme_pack::MAX_UNCOMPRESSED_BYTES)
+        .and_then(|_| std::fs::read(&path).ok())
+        .and_then(|bytes| crate::backup::zip_read(&bytes));
+    let Some(entries) = entries else {
+        log::report_error("ErrorThemeInvalid", language, None);
+        return;
+    };
+    match theme_pack::import_entries(&entries) {
+        Ok(id) => {
+            log::info(format!("Theme \"{id}\" imported from {}.", path.display()));
+            reload_themes(Some(id));
+            message_box(&Catalog::get("ThemePackImported", language));
+        }
+        Err(key) => log::report_error(key, language, None),
+    }
+}
+
+/// `ThemePackDelete_Click`: asked first; the built-in look comes back.
+fn delete_theme() {
+    let Some(settings) = with_state(|s| s.settings.clone()) else {
+        return;
+    };
+    let language = &settings.language;
+    let Some(id) = settings.theme_pack.clone().filter(|s| !s.trim().is_empty()) else {
+        log::report_error("ErrorThemeMissing", language, None);
+        return;
+    };
+    if theme_pack::is_built_in(&id)
+        || !confirm(&Catalog::get("ThemePackDeleteConfirm", language).replace("{0}", &id))
+    {
+        return;
+    }
+    match theme_pack::delete(&id) {
+        Ok(()) => {
+            log::info(format!("Theme \"{id}\" deleted."));
+            reload_themes(None);
+            message_box(&Catalog::get("ThemePackDeleted", language));
+        }
+        Err(key) => log::report_error(key, language, None),
+    }
+}
+
+/// `BorderColorButton_Click` after the brush picker: the color (a gradient's first stop, `BrushToHex`) goes to all
+/// four surfaces.
+fn set_border_color(value: &str) {
+    let Some(color) = theme_pack::parse_color(value) else {
+        return;
+    };
+    let value = format!("#{color:08X}");
+    apply_patch(
+        &json!({
+            "DockBorderColor": value, "MenuBorderColor": value,
+            "WidgetBorderColor": value, "SettingsBorderColor": value,
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_default(),
+    );
+    send(
+        "settings",
+        serde_json::to_value(with_state(|s| s.settings.clone())).unwrap_or(Value::Null),
+    );
+    send_themes();
+}
+
+/// An edit in the theme editor: the token or the theme's information is written to the active custom theme, which is
+/// then reread and applied (`SaveTheme`).
+fn edit_theme(kind: &str, message: &Value) {
+    let Some(settings) = with_state(|s| s.settings.clone()) else {
+        return;
+    };
+    let Some(id) = settings.theme_pack.clone().filter(|s| !s.trim().is_empty()) else {
+        return;
+    };
+    let dark = tone(settings.theme) == Tone::Dark;
+    let language = &settings.language;
+    let result = if kind == "themeToken" {
+        let key = message["key"].as_str().unwrap_or_default();
+        crate::theme_editor::save_token(&id, dark, key, &message["value"]).map_err(|error| {
+            log::warn(format!("Theme token {key} not saved: {error}"));
+            "ThemeSaveFailed"
+        })
+    } else {
+        let text = |name: &str| message[name].as_str().unwrap_or_default().to_owned();
+        crate::theme_editor::save_info(&id, &text("name"), &text("author"), &text("description"))
+    };
+    let note = match result {
+        Ok(()) => Catalog::get("ThemeSavedMessage", language).into_owned(),
+        Err("ThemeNameInvalid") => Catalog::get("ThemeNameInvalid", language).into_owned(),
+        Err(key) => Catalog::get(key, language).replace("{0}", ""),
+    };
+    ot_dock::reload_theme();
+    send_theme();
+    send_themes();
+    send("editorMessage", json!(note));
 }

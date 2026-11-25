@@ -20,6 +20,8 @@ pub mod pins;
 pub mod preview;
 pub mod reorder;
 pub mod theme;
+pub mod token_defaults;
+pub mod tokens;
 pub mod tooltip;
 pub mod tray_flyout;
 pub mod trayapps;
@@ -30,7 +32,7 @@ pub mod widget_preview;
 pub mod widgets;
 
 pub use dock::{
-    apply_and_save, apply_settings, current_settings, export_pins, import_pins, is_running,
-    open_settings_on_start, restart_into_setup, run, set_persist, set_settings_opener,
-    setup_restart_requested, start, stop, widget_preview_png,
+    apply_and_save, apply_settings, current_settings, default_corner_radius, export_pins,
+    import_pins, is_running, open_settings_on_start, reload_theme, restart_into_setup, run,
+    set_persist, set_settings_opener, setup_restart_requested, start, stop, widget_preview_png,
 };
