@@ -114,6 +114,8 @@ pub struct DockSettings {
     pub pin_order: Option<Vec<String>>,
     pub user_pinned_apps: Vec<String>,
     pub user_unpinned_apps: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub user_pinned_background_apps: Vec<String>,
     /// Unknown keys from other OpenTaskbar builds preserved on round-trip save.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -156,6 +158,7 @@ impl Default for DockSettings {
             pin_order: None,
             user_pinned_apps: Vec::new(),
             user_unpinned_apps: Vec::new(),
+            user_pinned_background_apps: Vec::new(),
             extra: Map::new(),
         }
     }

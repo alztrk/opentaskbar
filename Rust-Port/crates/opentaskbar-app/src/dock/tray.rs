@@ -19,10 +19,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use windows_sys::core::BOOL;
 
-use crate::platform::{
-    icon_cache,
-    pins::{self, PinnedApp},
-};
+use crate::platform::{icon_cache, pins};
 use crate::ui::flyout::{self, FlyoutAction, FlyoutBlock, FlyoutIcon, FlyoutSpec};
 use crate::ui::menu::{self, MenuEntry, MenuIcon};
 
@@ -85,7 +82,7 @@ fn is_system_noise(exe_path: &str) -> bool {
         || lower.ends_with(r"\crashpad_handler.exe")
 }
 
-fn friendly_name(exe_path: &str) -> String {
+pub(super) fn friendly_name(exe_path: &str) -> String {
     let stem = Path::new(exe_path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -189,6 +186,45 @@ fn activate_or_relaunch(app: &BackgroundApp) {
     pins::launch_app(app.exe_path.clone(), identity_window, false);
 }
 
+pub(super) fn open_pinned_app(owner_hwnd: usize, path: &str) {
+    if let Some(window) = tracker::enumerate_windows()
+        .into_iter()
+        .find(|window| window.exe_path.eq_ignore_ascii_case(path))
+    {
+        activate_or_relaunch(&BackgroundApp {
+            name: window.title,
+            exe_path: window.exe_path,
+            hwnd: window.hwnd,
+            pid: window.pid,
+        });
+    } else if let Some(app) = enumerate_background_apps()
+        .into_iter()
+        .find(|app| app.exe_path.eq_ignore_ascii_case(path))
+    {
+        activate_or_relaunch(&app);
+    } else if Path::new(path).is_file() {
+        pins::launch_app(path.to_owned(), None, false);
+    } else {
+        show_action_error(
+            owner_hwnd,
+            "Could not open the app. Its executable is unavailable.",
+        );
+    }
+}
+
+pub(super) fn show_pinned_app_menu(owner_hwnd: usize, is_dark: bool, path: &str) -> bool {
+    let entries = vec![
+        MenuEntry::item(1, MenuIcon::Play, format!("Open {}", friendly_name(path))),
+        MenuEntry::item(2, MenuIcon::Pin, "Unpin background app"),
+    ];
+    match menu::show_popup_menu(owner_hwnd, is_dark, entries) {
+        Some(1) => open_pinned_app(owner_hwnd, path),
+        Some(2) => return true,
+        _ => {}
+    }
+    false
+}
+
 fn close_background_app(owner_hwnd: usize, app: &BackgroundApp) {
     let hwnd = app.hwnd as HWND;
     let mut pid = 0;
@@ -235,21 +271,27 @@ pub(super) fn open_background_apps_flyout(
     is_dark: bool,
     anchor_center_x_px: i32,
     anchor_bottom_y_px: i32,
-    dock_pins: &[PinnedApp],
+    pinned_paths: &[String],
 ) -> Option<(String, bool)> {
     let apps = enumerate_background_apps();
-    let matching_pins: Vec<_> = apps
+    let mut rows: Vec<_> = apps
         .iter()
-        .map(|app| {
-            dock_pins.iter().find(|pin| {
-                pin.target_exe
-                    .as_ref()
-                    .is_some_and(|path| path.eq_ignore_ascii_case(&app.exe_path))
-                    || pin.launch_path.eq_ignore_ascii_case(&app.exe_path)
-            })
-        })
+        .map(|app| (app.exe_path.as_str(), Some(app)))
         .collect();
-    let paths: Vec<String> = apps.iter().map(|a| a.exe_path.clone()).collect();
+    for path in pinned_paths {
+        if !rows
+            .iter()
+            .any(|(entry, _)| entry.eq_ignore_ascii_case(path))
+        {
+            rows.push((path, None));
+        }
+    }
+    let is_pinned = |path: &str| {
+        pinned_paths
+            .iter()
+            .any(|pin| pin.eq_ignore_ascii_case(path))
+    };
+    let paths: Vec<String> = rows.iter().map(|(path, _)| (*path).to_owned()).collect();
     let icon_map: HashMap<String, FlyoutIcon> = icon_cache::resolve_batch_raw(&paths)
         .into_iter()
         .filter_map(|(path, raw)| {
@@ -267,18 +309,18 @@ pub(super) fn open_background_apps_flyout(
         .collect();
 
     let mut blocks = Vec::new();
-    if apps.is_empty() {
+    if rows.is_empty() {
         blocks.push(FlyoutBlock::Note("No background apps running.".to_owned()));
     } else {
-        for (i, app) in apps.iter().enumerate() {
+        for (i, (path, app)) in rows.iter().enumerate() {
             let id = 100 + i as u32 * 3;
             blocks.push(FlyoutBlock::AppRow {
                 id,
-                title: app.name.clone(),
-                icon: icon_map.get(&app.exe_path).cloned(),
+                title: app.map_or_else(|| friendly_name(path), |app| app.name.clone()),
+                icon: icon_map.get(*path).cloned(),
                 pin_id: id + 1,
-                pinned: matching_pins[i].is_some(),
-                close_id: id + 2,
+                pinned: is_pinned(path),
+                close_id: app.map(|_| id + 2),
             });
         }
     }
@@ -303,7 +345,7 @@ pub(super) fn open_background_apps_flyout(
         if id < 100 {
             return false;
         }
-        let Some(app) = apps.get(((id - 100) / 3) as usize) else {
+        let Some((_, Some(app))) = rows.get(((id - 100) / 3) as usize) else {
             return false;
         };
         let entries = vec![
@@ -348,16 +390,21 @@ pub(super) fn open_background_apps_flyout(
         Some(FlyoutAction::Primary(id)) if id >= 100 => {
             let offset = id - 100;
             let index = (offset / 3) as usize;
-            if let Some(app) = apps.get(index) {
+            if let Some(&(path, app)) = rows.get(index) {
                 match offset % 3 {
-                    0 => activate_or_relaunch(app),
-                    1 => {
-                        return Some(match matching_pins[index] {
-                            Some(pin) => (pin.launch_path.clone(), false),
-                            None => (app.exe_path.clone(), true),
-                        });
+                    0 => {
+                        if let Some(app) = app {
+                            activate_or_relaunch(app);
+                        } else {
+                            open_pinned_app(owner_hwnd, path);
+                        }
                     }
-                    _ => close_background_app(owner_hwnd, app),
+                    1 => return Some((path.to_owned(), !is_pinned(path))),
+                    _ => {
+                        if let Some(app) = app {
+                            close_background_app(owner_hwnd, app);
+                        }
+                    }
                 }
             }
         }

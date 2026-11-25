@@ -238,6 +238,7 @@ impl SettingsView {
         let saved = settings::load_from(&settings::settings_path());
         self.settings.user_pinned_apps = saved.user_pinned_apps;
         self.settings.user_unpinned_apps = saved.user_unpinned_apps;
+        self.settings.user_pinned_background_apps = saved.user_pinned_background_apps;
         self.settings.pin_order = saved.pin_order;
     }
 

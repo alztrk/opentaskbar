@@ -21,8 +21,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, VK_CONTROL, V
 use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GWL_EXSTYLE, GetSystemMetrics, GetWindowLongPtrW, HWND_TOPMOST, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW,
-    SetWindowPos, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SWP_NOZORDER, SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW, WS_EX_APPWINDOW,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
 use windows_sys::core::BOOL;
 
@@ -30,6 +31,20 @@ const DWMWCP_DONOTROUND: u32 = 1;
 const DWMNCRP_DISABLED: u32 = 1;
 const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
 const MONITORINFOF_PRIMARY: u32 = 1;
+
+pub fn client_area_animations_enabled() -> bool {
+    let mut enabled: BOOL = 1;
+    // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL to the supplied pointer.
+    unsafe {
+        SystemParametersInfoW(
+            SPI_GETCLIENTAREAANIMATION,
+            0,
+            (&mut enabled as *mut BOOL).cast(),
+            0,
+        )
+    };
+    enabled != 0
+}
 
 const MENU_SEARCH: u32 = 999;
 const MENU_FOCUS_MODE: u32 = 998;

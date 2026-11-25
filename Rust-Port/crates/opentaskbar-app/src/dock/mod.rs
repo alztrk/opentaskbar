@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use opentaskbar_core::settings::{
     self, AppTheme, AutoHideMode, DockPosition, DockSettings, SurfaceBackground,
@@ -60,6 +60,7 @@ const MAG_HEADROOM: f32 = 26.0;
 const FISHEYE_PEAK: f32 = 0.42;
 const FISHEYE_RADIUS_SLOTS: f32 = 2.4;
 const BOUNCE_DURATION_SECS: f32 = 0.42;
+const CLOSE_DURATION: Duration = Duration::from_millis(240);
 const DRAG_THRESHOLD_PX: f32 = 6.0;
 
 const TIMER_POLL: usize = 1;
@@ -67,6 +68,7 @@ const TIMER_PREVIEW_SHOW: usize = 2;
 const TIMER_PREVIEW_HIDE: usize = 3;
 const TIMER_WIDGETS: usize = 4;
 const TIMER_PREVIEW_WATCH: usize = 5;
+const TIMER_WINDOW_CLOSE: usize = 6;
 const RESIZE_EDGE_DIPS: f32 = 8.0;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_APP_VSYNC: u32 = WM_APP + 1;
@@ -89,7 +91,7 @@ fn shell_section_width(base: f32) -> f32 {
     base * 3.0 + 4.0 * 2.0 + 17.0
 }
 
-fn widgets_section_width(settings: &DockSettings) -> f32 {
+fn base_widgets_width(settings: &DockSettings) -> f32 {
     let mut w = 0.0;
     if settings.show_tray_button {
         w += settings.icon_dips() + 6.0;
@@ -105,6 +107,44 @@ fn widgets_section_width(settings: &DockSettings) -> f32 {
     } else {
         0.0
     }
+}
+
+fn tray_pin_cell(base: f32) -> f32 {
+    (base * 0.78).max(24.0)
+}
+
+fn visible_tray_pin_count(settings: &DockSettings, slot_count: usize, mon_w_dips: f32) -> usize {
+    if !settings.show_tray_button {
+        return 0;
+    }
+    let base = settings.icon_dips();
+    let apps = slot_count as f32 * base + slot_count.saturating_sub(1) as f32 * slot_gap(settings);
+    let magnification =
+        if slot_count > 0 && settings.magnification_enabled && settings.animations_enabled {
+            base * 1.4
+        } else {
+            0.0
+        };
+    let available = mon_w_dips
+        - 16.0
+        - shell_section_width(base)
+        - base_widgets_width(settings)
+        - apps
+        - magnification
+        - 30.0;
+    ((available.max(0.0) / tray_pin_cell(base)).floor() as usize)
+        .min(settings.user_pinned_background_apps.len())
+}
+
+fn widgets_section_width(settings: &DockSettings, slot_count: usize, mon_w_dips: f32) -> f32 {
+    base_widgets_width(settings)
+        + visible_tray_pin_count(settings, slot_count, mon_w_dips) as f32
+            * tray_pin_cell(settings.icon_dips())
+}
+
+fn tray_pin_rect(tray: DipRect, cell: f32, count: usize, index: usize) -> DipRect {
+    let right = tray.0 - 6.0 - (count - 1 - index) as f32 * cell;
+    (right - cell, tray.1, right, tray.3)
 }
 
 struct WidgetVisual {
@@ -175,11 +215,24 @@ struct DockSlot {
     scale: f32,
     slide_x: f32,
     bounce_started: Option<Instant>,
+    close_started: Option<Instant>,
 }
 
 impl DockSlot {
     fn hwnds(&self) -> Vec<usize> {
         self.windows.iter().map(|w| w.hwnd).collect()
+    }
+
+    fn is_exiting(&self) -> bool {
+        !self.pinned && self.close_started.is_some()
+    }
+
+    fn layout_fraction(&self, now: Instant) -> f32 {
+        if self.is_exiting() {
+            1.0 - close_progress(self.close_started, now)
+        } else {
+            1.0
+        }
     }
 }
 
@@ -198,6 +251,14 @@ struct SlotVisuals {
     bound_source: String,
     bound_has_icon: bool,
     bound_dot_state: u8,
+    fading: bool,
+}
+
+struct TrayPinVisual {
+    bg: VisualNode,
+    icon: VisualNode,
+    source: String,
+    has_icon: bool,
 }
 
 struct TooltipCache {
@@ -228,6 +289,7 @@ struct DockState {
     widget_divider: VisualNode,
     tray_bg: VisualNode,
     tray_node: VisualNode,
+    tray_pin_visuals: Vec<TrayPinVisual>,
     bin_bg: VisualNode,
     bin_node: VisualNode,
     bin_empty_surf: IDCompositionSurface,
@@ -253,12 +315,14 @@ struct DockState {
     hovered_idx: Option<usize>,
     hovered_shell: Option<ShellButton>,
     hovered_tray: bool,
+    hovered_tray_pin: Option<usize>,
     hovered_bin: bool,
     hovered_widget: Option<&'static str>,
     hovered_resize: Option<ResizeEdge>,
     pressed_idx: Option<usize>,
     pressed_shell: Option<ShellButton>,
     pressed_tray: bool,
+    pressed_tray_pin: Option<String>,
     pressed_bin: bool,
     pressed_widget: Option<&'static str>,
     drag: Option<DragState>,
@@ -316,6 +380,24 @@ fn load_effective_pins(settings: &DockSettings) -> Vec<PinnedApp> {
         });
     }
     items
+}
+
+fn update_background_pin(settings: &mut DockSettings, path: &str, pinned: bool) {
+    let matches = |entry: &String| entry.eq_ignore_ascii_case(path);
+    if pinned {
+        if !settings.user_pinned_background_apps.iter().any(matches) {
+            settings.user_pinned_background_apps.push(path.to_owned());
+        }
+        // Older Rust builds stored background pins as ordinary executable pins.
+        settings.user_pinned_apps.retain(|entry| !matches(entry));
+        if let Some(order) = &mut settings.pin_order {
+            order.retain(|entry| !matches(entry));
+        }
+    } else {
+        settings
+            .user_pinned_background_apps
+            .retain(|entry| !matches(entry));
+    }
 }
 
 fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot]) -> Vec<DockSlot> {
@@ -389,6 +471,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                     scale: old.scale,
                     slide_x: old.slide_x,
                     bounce_started: old.bounce_started,
+                    close_started: None,
                 });
             }
         } else if !claimed_exes.contains_key(&old.key)
@@ -412,6 +495,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                 scale: old.scale,
                 slide_x: old.slide_x,
                 bounce_started: old.bounce_started,
+                close_started: None,
             });
         }
     }
@@ -434,6 +518,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
             scale: 1.0,
             slide_x: 0.0,
             bounce_started: None,
+            close_started: None,
         });
     }
 
@@ -465,10 +550,58 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
             scale: 1.0,
             slide_x: 0.0,
             bounce_started: None,
+            close_started: None,
         });
     }
 
     next
+}
+
+fn close_progress(started: Option<Instant>, now: Instant) -> f32 {
+    started.map_or(0.0, |started| {
+        let time = (now.saturating_duration_since(started).as_secs_f32()
+            / CLOSE_DURATION.as_secs_f32())
+        .min(1.0);
+        1.0 - (1.0 - time).powi(2)
+    })
+}
+
+fn last_window_closed(slot: &DockSlot, is_visible: impl Fn(usize) -> bool) -> bool {
+    !slot.windows.is_empty() && slot.windows.iter().all(|window| !is_visible(window.hwnd))
+}
+
+fn tracked_window_is_visible(hwnd: usize) -> bool {
+    // SAFETY: Windows checks the handle. Minimizing leaves WS_VISIBLE set.
+    unsafe { IsWindowVisible(hwnd as HWND) != 0 }
+}
+
+fn keep_closing_slots(
+    previous: &[DockSlot],
+    next: &mut Vec<DockSlot>,
+    now: Instant,
+    is_visible: impl Fn(usize) -> bool,
+) {
+    for (index, old) in previous.iter().enumerate() {
+        let started = match old.close_started {
+            Some(started) if now.saturating_duration_since(started) < CLOSE_DURATION => started,
+            Some(_) => continue,
+            None if last_window_closed(old, &is_visible) => now,
+            None => continue,
+        };
+        if let Some(slot) = next.iter_mut().find(|slot| slot.key == old.key) {
+            if slot.windows.is_empty() {
+                slot.close_started = Some(started);
+                slot.bounce_started = None;
+            }
+        } else if !old.pinned {
+            let mut exiting = old.clone();
+            exiting.windows.clear();
+            exiting.is_foreground = false;
+            exiting.bounce_started = None;
+            exiting.close_started = Some(started);
+            next.insert(index.min(next.len()), exiting);
+        }
+    }
 }
 
 fn pill_height_dips(settings: &DockSettings) -> f32 {
@@ -479,11 +612,15 @@ fn slot_gap(settings: &DockSettings) -> f32 {
     9.0 + settings.dock_icon_padding.max(0) as f32
 }
 
-fn content_min_pill_width(settings: &DockSettings, slot_count: usize) -> f32 {
+fn content_min_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips: f32) -> f32 {
     let base = settings.icon_dips();
     let gap = slot_gap(settings);
     let icons_w = (slot_count as f32) * base + gap * (slot_count.saturating_sub(1) as f32);
-    (shell_section_width(base) + icons_w + widgets_section_width(settings) + 30.0).max(160.0)
+    (shell_section_width(base)
+        + icons_w
+        + widgets_section_width(settings, slot_count, mon_w_dips)
+        + 30.0)
+        .max(160.0)
 }
 
 fn resting_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips: f32) -> f32 {
@@ -491,7 +628,7 @@ fn resting_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips: f3
     if settings.full_width {
         return max_w;
     }
-    let min_w = content_min_pill_width(settings, slot_count);
+    let min_w = content_min_pill_width(settings, slot_count, mon_w_dips);
     let target = settings
         .dock_custom_width_dips
         .map_or(min_w, |custom| custom.max(min_w));
@@ -734,6 +871,7 @@ impl DockState {
             widget_divider,
             tray_bg,
             tray_node,
+            tray_pin_visuals: Vec::new(),
             bin_bg,
             bin_node,
             bin_empty_surf,
@@ -759,12 +897,14 @@ impl DockState {
             hovered_idx: None,
             hovered_shell: None,
             hovered_tray: false,
+            hovered_tray_pin: None,
             hovered_bin: false,
             hovered_widget: None,
             hovered_resize: None,
             pressed_idx: None,
             pressed_shell: None,
             pressed_tray: false,
+            pressed_tray_pin: None,
             pressed_bin: false,
             pressed_widget: None,
             drag: None,
@@ -860,6 +1000,7 @@ impl DockState {
                     bound_source: String::new(),
                     bound_has_icon: false,
                     bound_dot_state: 0,
+                    fading: false,
                 });
             } else {
                 break;
@@ -873,6 +1014,28 @@ impl DockState {
         }
 
         self.dcomp.add_child(&self.dcomp.root, &self.widget_divider);
+        let count = visible_tray_pin_count(&self.settings, self.slots.len(), self.mon_w_dips());
+        self.tray_pin_visuals.truncate(count);
+        if self.hovered_tray_pin.is_some_and(|index| index >= count) {
+            self.hovered_tray_pin = None;
+        }
+        while self.tray_pin_visuals.len() < count {
+            let (Ok(bg), Ok(icon)) = (self.dcomp.create_node(), self.dcomp.create_node()) else {
+                break;
+            };
+            bg.hide();
+            icon.hide();
+            self.tray_pin_visuals.push(TrayPinVisual {
+                bg,
+                icon,
+                source: String::new(),
+                has_icon: false,
+            });
+        }
+        for pin in &self.tray_pin_visuals {
+            self.dcomp.add_child(&self.dcomp.root, &pin.bg);
+            self.dcomp.add_child(&self.dcomp.root, &pin.icon);
+        }
         self.dcomp.add_child(&self.dcomp.root, &self.tray_bg);
         self.dcomp.add_child(&self.dcomp.root, &self.tray_node);
         self.dcomp.add_child(&self.dcomp.root, &self.bin_bg);
@@ -1137,6 +1300,8 @@ impl DockState {
         let next =
             opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
         self.settings = next;
+        self.hovered_tray_pin = None;
+        self.pressed_tray_pin = None;
         self.is_dark = resolve_is_dark(self.settings.theme);
         self.pins = load_effective_pins(&self.settings);
         for wv in &mut self.widget_visuals {
@@ -1164,7 +1329,7 @@ impl DockState {
                 desired_total_px,
             );
         }
-        self.sync_slots();
+        self.sync_slots(false);
         self.sync_window_bounds();
         self.refresh_widgets();
         self.evaluate_auto_hide();
@@ -1173,17 +1338,22 @@ impl DockState {
 
     fn request_missing_icons(&mut self) {
         let mut missing = Vec::new();
-        for slot in &self.slots {
-            if !self.icon_surfaces.contains_key(&slot.icon_source) {
-                if let Some(raw) = icon_cache::read_cached_raw(&slot.icon_source)
+        let sources = self.slots.iter().map(|slot| &slot.icon_source).chain(
+            self.settings
+                .user_pinned_background_apps
+                .iter()
+                .take(self.tray_pin_visuals.len()),
+        );
+        for source in sources {
+            if !self.icon_surfaces.contains_key(source) {
+                if let Some(raw) = icon_cache::read_cached_raw(source)
                     && let Ok(surf) = self.dcomp.create_app_icon_surface(&raw)
                 {
-                    self.icon_surfaces
-                        .insert(slot.icon_source.clone(), Some(surf));
+                    self.icon_surfaces.insert(source.clone(), Some(surf));
                     continue;
                 }
-                if self.in_flight_icons.insert(slot.icon_source.clone()) {
-                    missing.push(slot.icon_source.clone());
+                if self.in_flight_icons.insert(source.clone()) {
+                    missing.push(source.clone());
                 }
             }
         }
@@ -1226,20 +1396,42 @@ impl DockState {
         self.update_visuals();
     }
 
-    fn sync_slots(&mut self) -> bool {
+    fn sync_slots(&mut self, animate_closes: bool) -> bool {
+        if self.drag.is_some() {
+            return false;
+        }
         let running = tracker::enumerate_windows();
-        let next = build_slots(&self.pins, &running, &self.slots);
+        let mut next = build_slots(&self.pins, &running, &self.slots);
+        if animate_closes
+            && self.settings.animations_enabled
+            && win32::client_area_animations_enabled()
+        {
+            keep_closing_slots(
+                &self.slots,
+                &mut next,
+                Instant::now(),
+                tracked_window_is_visible,
+            );
+        }
         let len_changed = next.len() != self.slots.len();
         let changed = len_changed
             || next.iter().zip(self.slots.iter()).any(|(a, b)| {
                 a.key != b.key
                     || a.is_foreground != b.is_foreground
                     || a.windows.len() != b.windows.len()
+                    || a.close_started != b.close_started
             });
         self.slots = next;
         if len_changed {
             self.rebuild_visual_tree();
             self.sync_window_bounds();
+        }
+        if changed {
+            self.update_hovered_index_from_mouse();
+            self.sync_preview_hover();
+        }
+        if self.slots.iter().any(|slot| slot.close_started.is_some()) {
+            self.ensure_animation();
         }
         self.request_missing_icons();
         changed
@@ -1265,11 +1457,18 @@ impl DockState {
         let pill_w = if self.settings.full_width {
             (mon_w - 16.0).max(200.0)
         } else {
-            let icons_w: f32 = self.slots.iter().map(|s| base * s.scale).sum::<f32>()
-                + gap * (self.slots.len().saturating_sub(1) as f32);
+            let now = Instant::now();
+            let mut icons_w = 0.0;
+            let mut largest_fraction = 0.0_f32;
+            for slot in &self.slots {
+                let fraction = slot.layout_fraction(now);
+                icons_w += (base * slot.scale + gap) * fraction;
+                largest_fraction = largest_fraction.max(fraction);
+            }
+            icons_w -= gap * largest_fraction;
             let live_content = (shell_section_width(base)
                 + icons_w
-                + widgets_section_width(&self.settings)
+                + widgets_section_width(&self.settings, self.slots.len(), mon_w)
                 + 30.0)
                 .max(160.0);
             let target = self
@@ -1309,7 +1508,14 @@ impl DockState {
         let pill_w = resting_pill_width(&self.settings, self.slots.len(), mon_w);
         let pill_left = (win_w - pill_w) * 0.5;
         let apps_left = pill_left + 15.0 + shell_section_width(base);
-        apps_left + (idx as f32) * (base + gap) + base * 0.5
+        let now = Instant::now();
+        let before: f32 = self
+            .slots
+            .iter()
+            .take(idx)
+            .map(|slot| (base + gap) * slot.layout_fraction(now))
+            .sum();
+        apps_left + before + base * 0.5
     }
 
     fn live_slot_center_x(&self, idx: usize) -> f32 {
@@ -1317,8 +1523,10 @@ impl DockState {
         let gap = slot_gap(&self.settings);
         let (pill_left, _, _, _) = self.live_pill_geometry();
         let mut cursor = pill_left + 15.0 + shell_section_width(base);
+        let now = Instant::now();
         for i in 0..idx.min(self.slots.len()) {
-            cursor += base * self.slots[i].scale + gap;
+            let slot = &self.slots[i];
+            cursor += (base * slot.scale + gap) * slot.layout_fraction(now);
         }
         let w = self.slots.get(idx).map_or(base, |s| base * s.scale);
         cursor + w * 0.5
@@ -1382,6 +1590,14 @@ impl DockState {
         rc.is_some_and(|(l, t, r, b)| mx >= l && mx <= r && my >= t && my <= b)
     }
 
+    fn hit_tray_pin(&self, tray: Option<DipRect>, mx: f32, my: f32) -> Option<usize> {
+        let tray = tray?;
+        let cell = tray_pin_cell(self.settings.icon_dips());
+        let count = self.tray_pin_visuals.len();
+        (0..count)
+            .find(|&index| Self::hit_rect(Some(tray_pin_rect(tray, cell, count, index)), mx, my))
+    }
+
     fn hit_test_dips(&self, mx: f32, my: f32) -> bool {
         let (_, win_h) = compute_window_dips(&self.settings, self.slots.len(), self.mon_w_dips());
         if self.hide_progress > 0.5 {
@@ -1399,6 +1615,9 @@ impl DockState {
         let base = self.settings.icon_dips();
         let icon_base_bottom = pill_top + 7.5 + base;
         for (idx, slot) in self.slots.iter().enumerate() {
+            if slot.is_exiting() {
+                continue;
+            }
             let dim = base * slot.scale;
             let cx = self.live_slot_center_x(idx) + slot.slide_x;
             let bounce = bounce_offset_dips(slot.bounce_started).unwrap_or(0.0);
@@ -1438,6 +1657,7 @@ impl DockState {
             .slots
             .iter()
             .enumerate()
+            .filter(|(_, slot)| !slot.is_exiting())
             .map(|(i, _)| (i, (mx - self.resting_slot_center_x(i)).abs()))
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .filter(|(_, d)| *d <= max_dist)
@@ -1466,6 +1686,18 @@ impl DockState {
     }
 
     fn step_animations(&mut self, now: Instant) -> bool {
+        if self.drag.is_none() {
+            let previous_count = self.slots.len();
+            self.slots
+                .retain(|slot| !slot.is_exiting() || close_progress(slot.close_started, now) < 1.0);
+            if self.slots.len() != previous_count {
+                self.rebuild_visual_tree();
+                self.sync_window_bounds();
+                self.update_hovered_index_from_mouse();
+                self.sync_preview_hover();
+                self.request_missing_icons();
+            }
+        }
         let dt = self
             .last_frame
             .map_or(1.0 / 60.0, |prev| now.duration_since(prev).as_secs_f32())
@@ -1487,6 +1719,18 @@ impl DockState {
         }
 
         for idx in 0..self.slots.len() {
+            if self.slots[idx].close_started.is_some() {
+                if self.slots[idx].is_exiting()
+                    || close_progress(self.slots[idx].close_started, now) < 1.0
+                {
+                    moving = true;
+                } else {
+                    self.slots[idx].close_started = None;
+                }
+            }
+            if self.slots[idx].is_exiting() {
+                continue;
+            }
             let target = self.target_scale_for(idx);
             let cur = self.slots[idx].scale;
             let diff = target - cur;
@@ -1602,6 +1846,57 @@ impl DockState {
         Some(created)
     }
 
+    fn update_tray_pin_visuals(&mut self, tray: DipRect, icon_top: f32) {
+        let base = self.settings.icon_dips();
+        let cell = tray_pin_cell(base);
+        let dpi = self.dpi;
+        let count = self.tray_pin_visuals.len();
+        for index in 0..count {
+            let path = &self.settings.user_pinned_background_apps[index];
+            let has_icon = self.icon_surfaces.get(path).is_some_and(Option::is_some);
+            if self.tray_pin_visuals[index].source != *path
+                || self.tray_pin_visuals[index].has_icon != has_icon
+            {
+                let path = path.clone();
+                let surface = self.icon_surfaces.get(&path).and_then(Clone::clone);
+                let surface =
+                    surface.or_else(|| self.fallback_surface_for(&tray::friendly_name(&path)));
+                let visual = &mut self.tray_pin_visuals[index];
+                visual.icon.set_content(surface.as_ref());
+                visual.source = path;
+                visual.has_icon = has_icon;
+            }
+            let path = &self.settings.user_pinned_background_apps[index];
+            let pressed = self.pressed_tray_pin.as_deref() == Some(path);
+            let visual = &self.tray_pin_visuals[index];
+            let (left, _, right, _) = tray_pin_rect(tray, cell, count, index);
+            let center = (left + right) * 0.5;
+            if pressed || self.hovered_tray_pin == Some(index) {
+                visual.bg.set_content(Some(if pressed {
+                    &self.shell_bg_press
+                } else {
+                    &self.shell_bg_hover
+                }));
+                visual.bg.set_transform(
+                    (cell - 4.0) / base,
+                    0.78,
+                    (left + 2.0) * dpi,
+                    (icon_top + base * 0.11) * dpi,
+                );
+            } else {
+                visual.bg.hide();
+            }
+            let dim = base * if pressed { 0.56 } else { 0.64 };
+            let scale = dim * dpi / 64.0;
+            visual.icon.set_transform(
+                scale,
+                scale,
+                (center - dim * 0.5) * dpi,
+                (icon_top + (base - dim) * 0.5) * dpi,
+            );
+        }
+    }
+
     fn update_visuals(&mut self) {
         let dpi = self.dpi;
         let base = self.settings.icon_dips();
@@ -1679,6 +1974,7 @@ impl DockState {
         let active_drag = self.drag.filter(|d| d.active);
         let mut cursor_x = pill_left + 15.0 + shell_section_width(base);
         let slot_count = self.slots.len().min(self.slot_visuals.len());
+        let now = Instant::now();
         for idx in 0..slot_count {
             let slot_w = base * self.slots[idx].scale;
             let dragging_this = active_drag.is_some_and(|d| d.idx == idx);
@@ -1694,6 +1990,16 @@ impl DockState {
             let label = self.slots[idx].label.clone();
             let running = !self.slots[idx].windows.is_empty();
             let active = self.slots[idx].is_foreground;
+            let close = close_progress(self.slots[idx].close_started, now);
+            let exiting = self.slots[idx].is_exiting();
+            if exiting || self.slot_visuals[idx].fading {
+                self.slot_visuals[idx].icon.set_opacity(if exiting {
+                    1.0 - close.powi(2)
+                } else {
+                    1.0
+                });
+                self.slot_visuals[idx].fading = exiting;
+            }
 
             let has_real_icon = self
                 .icon_surfaces
@@ -1717,12 +2023,27 @@ impl DockState {
                 self.slot_visuals[idx].icon.hide();
                 self.slot_visuals[idx].dot.hide();
             } else {
-                let ix = cursor_x + slide_x + (slot_w - dim) * 0.5;
-                let iy = icon_base_bottom - lift - dim;
-                let s = (dim * dpi) / 64.0;
-                self.slot_visuals[idx]
-                    .icon
-                    .set_transform(s, s, ix * dpi, iy * dpi);
+                let pulse = (close * std::f32::consts::PI).sin().max(0.0);
+                let (width, height, sink) = if exiting {
+                    let remaining = 1.0 - close;
+                    (dim * remaining.powi(2), dim * remaining, dim * 0.28 * close)
+                } else {
+                    (
+                        dim * (1.0 - 0.20 * pulse),
+                        dim * (1.0 - 0.18 * pulse),
+                        dim * 0.10 * pulse,
+                    )
+                };
+                let slot_center = cursor_x + slot_w * self.slots[idx].layout_fraction(now) * 0.5;
+                let ix = slot_center + slide_x - width * 0.5;
+                let iy =
+                    icon_base_bottom - lift * self.slots[idx].layout_fraction(now) + sink - height;
+                self.slot_visuals[idx].icon.set_transform(
+                    width * dpi / 64.0,
+                    height * dpi / 64.0,
+                    ix * dpi,
+                    iy * dpi,
+                );
 
                 let desired_dot = if !running {
                     0
@@ -1757,11 +2078,11 @@ impl DockState {
                 }
             }
 
-            cursor_x += slot_w + gap;
+            cursor_x += (slot_w + gap) * self.slots[idx].layout_fraction(now);
         }
 
         // 4. Right-side widget strip (Background Apps, Recycle Bin, user-enabled Widgets).
-        let widgets_w = widgets_section_width(&self.settings);
+        let widgets_w = widgets_section_width(&self.settings, self.slots.len(), self.mon_w_dips());
         if widgets_w > 0.0 {
             let mut right_cursor = pill_left + pill_w - 12.0;
             let widget_top = pill_top + (pill_h - 36.0) * 0.5;
@@ -1850,7 +2171,15 @@ impl DockState {
                 let ty = icon_base_top + (base - drawn) * 0.5;
                 self.tray_node
                     .set_transform(scale, scale, tx * dpi, ty * dpi);
+                let tray_rect = (
+                    tx_box,
+                    pill_top + 6.0,
+                    right_cursor,
+                    pill_top + pill_h - 6.0,
+                );
+                self.update_tray_pin_visuals(tray_rect, icon_base_top);
                 right_cursor -= base + 6.0;
+                right_cursor -= tray_pin_cell(base) * self.tray_pin_visuals.len() as f32;
             } else {
                 self.tray_bg.hide();
                 self.tray_node.hide();
@@ -1916,6 +2245,21 @@ impl DockState {
             let (tray_rc, _, _) = self.right_widget_rects_dips();
             let cx = tray_rc.map_or(pill_left + pill_w - 110.0, |(l, _, r, _)| (l + r) * 0.5);
             Some(("Background Apps".to_owned(), cx, pill_top - 8.0))
+        } else if let Some(index) = self.hovered_tray_pin
+            && let Some(path) = self.settings.user_pinned_background_apps.get(index)
+            && let (Some(tray), _, _) = self.right_widget_rects_dips()
+        {
+            let (left, _, right, _) = tray_pin_rect(
+                tray,
+                tray_pin_cell(base),
+                self.tray_pin_visuals.len(),
+                index,
+            );
+            Some((
+                tray::friendly_name(path),
+                (left + right) * 0.5,
+                pill_top - 8.0,
+            ))
         } else if let Some(wid) = self.hovered_widget {
             let (_, _, wrects) = self.right_widget_rects_dips();
             let cx = wrects
@@ -2122,7 +2466,7 @@ impl DockState {
                 ResizeEdge::Right => delta_dips * 2.0,
                 ResizeEdge::Left => -delta_dips * 2.0,
             };
-            let min_w = content_min_pill_width(&self.settings, self.slots.len());
+            let min_w = content_min_pill_width(&self.settings, self.slots.len(), self.mon_w_dips());
             let max_w = (self.mon_w_dips() - 16.0).max(min_w);
             let next_w = (rdrag.start_width_dips + signed)
                 .clamp(min_w, max_w)
@@ -2146,6 +2490,7 @@ impl DockState {
             if resize_edge.is_some() {
                 self.hovered_shell = None;
                 self.hovered_tray = false;
+                self.hovered_tray_pin = None;
                 self.hovered_bin = false;
                 self.hovered_widget = None;
                 self.hover_mouse_x = None;
@@ -2161,19 +2506,22 @@ impl DockState {
 
         let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
         let over_tray = Self::hit_rect(tray_rc, mx, my);
+        let over_tray_pin = self.hit_tray_pin(tray_rc, mx, my);
         let over_bin = Self::hit_rect(bin_rc, mx, my);
         let over_widget = wrects
             .iter()
             .find(|(_, rc)| Self::hit_rect(Some(*rc), mx, my))
             .map(|(id, _)| *id);
         if over_tray != self.hovered_tray
+            || over_tray_pin != self.hovered_tray_pin
             || over_bin != self.hovered_bin
             || over_widget != self.hovered_widget
         {
             self.hovered_tray = over_tray;
+            self.hovered_tray_pin = over_tray_pin;
             self.hovered_bin = over_bin;
             self.hovered_widget = over_widget;
-            if over_tray || over_bin || over_widget.is_some() {
+            if over_tray || over_tray_pin.is_some() || over_bin || over_widget.is_some() {
                 self.hovered_shell = None;
                 self.hover_mouse_x = None;
                 self.hovered_idx = None;
@@ -2182,7 +2530,7 @@ impl DockState {
             self.ensure_animation();
             self.update_visuals();
         }
-        if over_tray || over_bin || over_widget.is_some() {
+        if over_tray || over_tray_pin.is_some() || over_bin || over_widget.is_some() {
             return;
         }
 
@@ -2201,7 +2549,9 @@ impl DockState {
 
         let (pill_left, _, pill_w, _) = self.live_pill_geometry();
         let apps_left = pill_left + 15.0 + shell_section_width(self.settings.icon_dips()) - 6.0;
-        let apps_right = pill_left + pill_w - widgets_section_width(&self.settings) - 10.0;
+        let apps_right = pill_left + pill_w
+            - widgets_section_width(&self.settings, self.slots.len(), self.mon_w_dips())
+            - 10.0;
         if mx >= apps_left && mx <= apps_right && !self.slots.is_empty() {
             if self.hovered_shell.is_some() {
                 self.hovered_shell = None;
@@ -2243,11 +2593,13 @@ impl DockState {
         self.hovered_idx = None;
         self.hovered_shell = None;
         self.hovered_tray = false;
+        self.hovered_tray_pin = None;
         self.hovered_bin = false;
         self.hovered_widget = None;
         self.hovered_resize = None;
         self.pressed_shell = None;
         self.pressed_tray = false;
+        self.pressed_tray_pin = None;
         self.pressed_bin = false;
         self.pressed_widget = None;
         self.pressed_idx = None;
@@ -2276,6 +2628,15 @@ impl DockState {
             return;
         }
         let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
+        if let Some(index) = self.hit_tray_pin(tray_rc, mx, my) {
+            self.pressed_tray_pin = self
+                .settings
+                .user_pinned_background_apps
+                .get(index)
+                .cloned();
+            self.update_visuals();
+            return;
+        }
         if Self::hit_rect(tray_rc, mx, my) {
             self.pressed_tray = true;
             self.update_visuals();
@@ -2326,6 +2687,15 @@ impl DockState {
             return;
         }
         let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
+        if let Some(path) = self.pressed_tray_pin.take() {
+            self.update_visuals();
+            if self.hit_tray_pin(tray_rc, mx, my).is_some_and(|index| {
+                self.settings.user_pinned_background_apps[index].eq_ignore_ascii_case(&path)
+            }) {
+                tray::open_pinned_app(self.hwnd, &path);
+            }
+            return;
+        }
         if self.pressed_tray {
             self.pressed_tray = false;
             self.update_visuals();
@@ -2333,10 +2703,14 @@ impl DockState {
                 && Self::hit_rect(Some(rc), mx, my)
             {
                 let (ax, ay) = self.flyout_anchor_px(rc);
-                if let Some((path, pinned)) =
-                    tray::open_background_apps_flyout(self.hwnd, self.is_dark, ax, ay, &self.pins)
-                {
-                    self.set_dock_pin(&path, pinned);
+                if let Some((path, pinned)) = tray::open_background_apps_flyout(
+                    self.hwnd,
+                    self.is_dark,
+                    ax,
+                    ay,
+                    &self.settings.user_pinned_background_apps,
+                ) {
+                    self.set_background_pin(&path, pinned);
                 }
             }
             return;
@@ -2471,7 +2845,24 @@ impl DockState {
         if !add.iter().any(|entry| entry.eq_ignore_ascii_case(path)) {
             add.push(path.to_owned());
         }
-        if settings::save_to(&settings_path, &next).is_err() {
+        self.save_pin_change(&next);
+    }
+
+    fn set_background_pin(&mut self, path: &str, pinned: bool) {
+        if pinned && !Path::new(path).is_file() {
+            tray::show_action_error(
+                self.hwnd,
+                "Could not pin the background app. Its executable is unavailable.",
+            );
+            return;
+        }
+        let mut next = settings::load_from(&settings::settings_path());
+        update_background_pin(&mut next, path, pinned);
+        self.save_pin_change(&next);
+    }
+
+    fn save_pin_change(&mut self, next: &DockSettings) {
+        if settings::save_to(&settings::settings_path(), next).is_err() {
             tray::show_action_error(
                 self.hwnd,
                 "Could not save the dock pin. Check that the settings folder is writable and try again.",
@@ -2534,7 +2925,7 @@ impl DockState {
                 &self.settings,
             );
             self.pins = load_effective_pins(&self.settings);
-            self.sync_slots();
+            self.sync_slots(false);
             self.update_visuals();
         }
     }
@@ -2542,7 +2933,14 @@ impl DockState {
     fn handle_rbutton_up(&mut self, mx: f32, my: f32) {
         self.hide_preview_now();
 
-        let (_, bin_rc, _) = self.right_widget_rects_dips();
+        let (tray_rc, bin_rc, _) = self.right_widget_rects_dips();
+        if let Some(index) = self.hit_tray_pin(tray_rc, mx, my) {
+            let path = self.settings.user_pinned_background_apps[index].clone();
+            if tray::show_pinned_app_menu(self.hwnd, self.is_dark, &path) {
+                self.set_background_pin(&path, false);
+            }
+            return;
+        }
         if Self::hit_rect(bin_rc, mx, my) {
             match win32::show_recycle_bin_context_menu(self.hwnd, self.is_dark) {
                 RecycleBinAction::Open => pins::launch("shell:RecycleBinFolder".to_owned()),
@@ -2715,6 +3113,7 @@ unsafe extern "system" fn wnd_proc(
             } else if state.hovered_shell.is_some()
                 || state.hovered_idx.is_some()
                 || state.hovered_tray
+                || state.hovered_tray_pin.is_some()
                 || state.hovered_bin
                 || state.hovered_widget.is_some()
             {
@@ -2854,9 +3253,21 @@ unsafe extern "system" fn wnd_proc(
             if state.monitor.is_primary {
                 let _ = opentaskbar_shell::taskbar::ensure_hidden();
             }
-            let slots_changed = state.sync_slots();
+            let slots_changed = state.sync_slots(true);
             state.evaluate_auto_hide();
             if slots_changed {
+                state.update_visuals();
+            }
+            0
+        }
+        WM_TIMER if wparam == TIMER_WINDOW_CLOSE => {
+            if state.drag.is_none()
+                && state
+                    .slots
+                    .iter()
+                    .any(|slot| last_window_closed(slot, tracked_window_is_visible))
+                && state.sync_slots(true)
+            {
                 state.update_visuals();
             }
             0
@@ -2864,6 +3275,7 @@ unsafe extern "system" fn wnd_proc(
         WM_DESTROY => {
             unsafe {
                 KillTimer(hwnd, TIMER_POLL);
+                KillTimer(hwnd, TIMER_WINDOW_CLOSE);
                 KillTimer(hwnd, TIMER_PREVIEW_SHOW);
                 KillTimer(hwnd, TIMER_PREVIEW_HIDE);
                 KillTimer(hwnd, TIMER_PREVIEW_WATCH);
@@ -2957,6 +3369,7 @@ pub fn run(settings: DockSettings) {
                 unsafe {
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
                     SetTimer(hwnd, TIMER_POLL, 800, None);
+                    SetTimer(hwnd, TIMER_WINDOW_CLOSE, 100, None);
                     SetTimer(hwnd, TIMER_WIDGETS, 2000, None);
                 }
                 created.push((hwnd, ptr));
@@ -3095,5 +3508,95 @@ mod tests {
         assert_eq!(after_poll[0].label, "Alpha");
         assert_eq!(after_poll[1].label, "Gamma");
         assert_eq!(after_poll[2].label, "Beta");
+    }
+
+    #[test]
+    fn background_pin_moves_only_the_explicitly_selected_legacy_pin() {
+        let path = r"C:\Apps\Steam.exe";
+        let other = r"C:\Apps\Normal.exe".to_owned();
+        let mut settings = DockSettings {
+            user_pinned_apps: vec![path.to_lowercase(), other.clone()],
+            pin_order: Some(vec![other.clone(), path.to_lowercase()]),
+            ..DockSettings::default()
+        };
+        update_background_pin(&mut settings, path, true);
+        update_background_pin(&mut settings, &path.to_lowercase(), true);
+        assert_eq!(settings.user_pinned_background_apps, [path]);
+        assert_eq!(settings.user_pinned_apps, std::slice::from_ref(&other));
+        assert_eq!(settings.pin_order.as_deref(), Some(&[other][..]));
+
+        update_background_pin(&mut settings, &path.to_lowercase(), false);
+        assert!(settings.user_pinned_background_apps.is_empty());
+        assert!(settings.user_unpinned_apps.is_empty());
+    }
+
+    #[test]
+    fn compact_pins_fit_before_the_background_button_and_overflow_on_narrow_monitors() {
+        let mut settings = DockSettings {
+            user_pinned_background_apps: (0..12).map(|index| format!("app{index}")).collect(),
+            ..DockSettings::default()
+        };
+        let base = settings.icon_dips();
+        let cell = tray_pin_cell(base);
+        assert!(cell < base);
+        let count = visible_tray_pin_count(&settings, 3, 570.0);
+        assert!(count > 0 && count < settings.user_pinned_background_apps.len());
+        assert_eq!(visible_tray_pin_count(&settings, 3, 1920.0), 12);
+        let tray = (500.0, 20.0, 500.0 + base, 70.0);
+        let last = tray_pin_rect(tray, cell, count, count - 1);
+        assert_eq!(last.2, tray.0 - 6.0);
+        let first = tray_pin_rect(tray, cell, count, 0);
+        assert!((first.0 - (tray.0 - 6.0 - count as f32 * cell)).abs() < 0.01);
+        settings.show_tray_button = false;
+        assert_eq!(visible_tray_pin_count(&settings, 3, 1920.0), 0);
+    }
+
+    #[test]
+    fn closing_slot_waits_for_the_last_window_and_cancels_if_the_app_reopens() {
+        let mut windows = vec![RunningWindow {
+            hwnd: 100,
+            pid: 42,
+            title: "First".into(),
+            exe_path: r"C:\Apps\Running.exe".into(),
+            is_foreground: true,
+        }];
+        windows.push(RunningWindow {
+            hwnd: 101,
+            title: "Second".into(),
+            ..windows[0].clone()
+        });
+        let previous = build_slots(&[], &windows, &[]);
+        let now = Instant::now();
+        let mut next = build_slots(&[], &windows[1..], &previous);
+        keep_closing_slots(&previous, &mut next, now, |hwnd| hwnd == 101);
+        assert!(next[0].close_started.is_none());
+
+        let mut closing = build_slots(&[], &[], &next);
+        keep_closing_slots(&next, &mut closing, now, |_| false);
+        assert!(closing[0].is_exiting());
+        assert!(closing[0].windows.is_empty());
+        assert!(closing[0].layout_fraction(now + CLOSE_DURATION / 2) < 0.5);
+        assert_eq!(closing[0].layout_fraction(now + CLOSE_DURATION), 0.0);
+
+        let mut reopened = build_slots(&[], &windows, &closing);
+        keep_closing_slots(&closing, &mut reopened, now, |_| false);
+        assert!(!reopened[0].is_exiting());
+        let mut expired = Vec::new();
+        keep_closing_slots(&closing, &mut expired, now + CLOSE_DURATION, |_| false);
+        assert!(expired.is_empty());
+
+        let pin = PinnedApp {
+            name: "Running".into(),
+            launch_path: windows[0].exe_path.clone(),
+            target_exe: Some(windows[0].exe_path.clone()),
+            icon_source: windows[0].exe_path.clone(),
+        };
+        let pins = [pin];
+        let previous = build_slots(&pins, &windows, &[]);
+        let mut pinned = build_slots(&pins, &[], &previous);
+        keep_closing_slots(&previous, &mut pinned, now, |_| false);
+        assert_eq!(pinned[0].close_started, Some(now));
+        assert!(!pinned[0].is_exiting());
+        assert_eq!(pinned[0].layout_fraction(now + CLOSE_DURATION / 2), 1.0);
     }
 }

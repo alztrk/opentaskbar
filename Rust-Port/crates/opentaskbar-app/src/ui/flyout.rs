@@ -31,12 +31,11 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect,
     GetMessageW, GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, KillTimer, LWA_ALPHA,
-    LoadCursorW, MSG, RegisterClassExW, SPI_GETCLIENTAREAANIMATION, SW_SHOW, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    SystemParametersInfoW, TranslateMessage, WM_ACTIVATE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
-    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    LoadCursorW, MSG, RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_ACTIVATE, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::menu::{MenuIcon, draw_menu_icon};
@@ -121,7 +120,7 @@ pub enum FlyoutBlock {
         icon: Option<FlyoutIcon>,
         pin_id: u32,
         pinned: bool,
-        close_id: u32,
+        close_id: Option<u32>,
     },
     ButtonBar(Vec<(u32, String, bool)>),
     Separator,
@@ -303,12 +302,17 @@ pub fn show_flyout_interactive(
                 ..
             } => {
                 let rects = app_row_targets(pad, width_px - content_right_pad, y, dpi);
-                for (id, rect) in [*menu_id, *pin_id, *close_id].into_iter().zip(rects) {
-                    targets.push(HitTarget {
-                        id,
-                        rect,
-                        menu_id: *menu_id,
-                    });
+                for (id, rect) in [Some(*menu_id), Some(*pin_id), *close_id]
+                    .into_iter()
+                    .zip(rects)
+                {
+                    if let Some(id) = id {
+                        targets.push(HitTarget {
+                            id,
+                            rect,
+                            menu_id: *menu_id,
+                        });
+                    }
                 }
                 y += s(42.0) + s(2.0);
             }
@@ -375,22 +379,8 @@ pub fn show_flyout_interactive(
     let top_y =
         (anchor_bottom_y_px - height_px).clamp(top, (screen.bottom - height_px - margin).max(top));
 
-    let mut animations = 1_i32;
-    if is_tray {
-        unsafe {
-            SystemParametersInfoW(
-                SPI_GETCLIENTAREAANIMATION,
-                0,
-                (&mut animations as *mut i32).cast(),
-                0,
-            )
-        };
-    }
-    let slide_px = if animations != 0 {
-        s(SLIDE_OFFSET_DIPS)
-    } else {
-        0
-    };
+    let animate = !is_tray || win32::client_area_animations_enabled();
+    let slide_px = if animate { s(SLIDE_OFFSET_DIPS) } else { 0 };
     let hwnd = unsafe {
         CreateWindowExW(
             WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
@@ -412,8 +402,7 @@ pub fn show_flyout_interactive(
     }
 
     unsafe {
-        let _ =
-            SetLayeredWindowAttributes(hwnd, 0, if animations != 0 { 0 } else { 255 }, LWA_ALPHA);
+        let _ = SetLayeredWindowAttributes(hwnd, 0, if animate { 0 } else { 255 }, LWA_ALPHA);
         let corner = DWMWCP_ROUND;
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -444,7 +433,7 @@ pub fn show_flyout_interactive(
         slide_px,
         anim_start: Instant::now(),
         closing: false,
-        animating: animations != 0,
+        animating: animate,
         suppress_blur: false,
         on_secondary,
         content_top_px,
@@ -473,7 +462,7 @@ pub fn show_flyout_interactive(
         );
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
-        if animations != 0 {
+        if animate {
             SetTimer(hwnd, TIMER_ANIM, 8, None);
         }
     }
@@ -857,11 +846,11 @@ impl FlyoutState<'_> {
                     let active = self.hovered_id.or(focused_id);
                     if active == Some(*pin_id) {
                         Some(if *pinned {
-                            "Unpin from dock"
+                            "Unpin background app"
                         } else {
-                            "Pin to dock"
+                            "Pin next to Background Apps"
                         })
-                    } else if active == Some(*close_id) {
+                    } else if active.is_some() && active == *close_id {
                         Some("Close app window")
                     } else {
                         None
@@ -1125,7 +1114,7 @@ impl FlyoutState<'_> {
                         );
 
                         for (id, rect, icon, selected, fill, ink) in [
-                            (*pin_id, pin, MenuIcon::Pin, *pinned, hover_bg, accent),
+                            (Some(*pin_id), pin, MenuIcon::Pin, *pinned, hover_bg, accent),
                             (
                                 *close_id,
                                 close,
@@ -1135,6 +1124,7 @@ impl FlyoutState<'_> {
                                 danger_fg,
                             ),
                         ] {
+                            let Some(id) = id else { continue };
                             let active = self.hovered_id == Some(id) || focused_id == Some(id);
                             let inset = s(3.0);
                             if active || selected {

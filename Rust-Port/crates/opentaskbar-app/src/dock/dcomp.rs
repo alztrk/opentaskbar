@@ -25,7 +25,7 @@ use windows::Win32::Graphics::Direct3D11::{
 };
 use windows::Win32::Graphics::DirectComposition::{
     DCompositionCreateDevice2, IDCompositionDevice, IDCompositionMatrixTransform,
-    IDCompositionSurface, IDCompositionTarget, IDCompositionVisual,
+    IDCompositionSurface, IDCompositionTarget, IDCompositionVisual, IDCompositionVisual3,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -56,6 +56,7 @@ pub enum ShellGlyph {
 pub struct VisualNode {
     pub visual: IDCompositionVisual,
     pub transform: IDCompositionMatrixTransform,
+    opacity: Option<IDCompositionVisual3>,
 }
 
 impl VisualNode {
@@ -85,6 +86,15 @@ impl VisualNode {
                 Some(s) => self.visual.SetContent(s),
                 None => self.visual.SetContent(None),
             };
+        }
+    }
+
+    pub fn set_opacity(&self, opacity: f32) {
+        if let Some(visual) = &self.opacity {
+            // SAFETY: The visual belongs to the UI thread and opacity is normalized by the caller.
+            unsafe {
+                let _ = visual.SetOpacity2(opacity);
+            }
         }
     }
 }
@@ -209,7 +219,12 @@ impl DcompEngine {
             let visual = self.dcomp_device.CreateVisual()?;
             let transform = self.dcomp_device.CreateMatrixTransform()?;
             visual.SetTransform(&transform)?;
-            Ok(VisualNode { visual, transform })
+            let opacity = visual.cast().ok();
+            Ok(VisualNode {
+                visual,
+                transform,
+                opacity,
+            })
         }
     }
 
