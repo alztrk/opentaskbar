@@ -392,7 +392,13 @@ public partial class MainWindow
         // Subtract real overflow instead of treating any 1 px as "no room at all": the peak scale now degrades
         // gradually with free space rather than flipping between 1.1x and 1.5x (#127).
         var overflow = DockScrollViewer.ScrollableWidth;
-        if (!IsFullWidth
+        if (!_preferences.Current.MagnificationExpandsDock)
+        {
+            // Fixed frame: the dock keeps its rest width and icons grow in place up to the no-overlap scale.
+            _canExpandSurface = false;
+            _availableExpansion = 0.0;
+        }
+        else if (!IsFullWidth
             && _dockWidthOverride is null
             && _restSurfaceWidth > 0
             && _dockArea.Width > 0)

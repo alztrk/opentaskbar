@@ -135,6 +135,8 @@
   "TerminatePrompt": "Forcer l'arrêt de {1} processus de {0} ? Les données non enregistrées seront perdues. Continuer ?",
   "Magnification": "Agrandissement",
   "MagnificationDescription": "Agrandir les icônes au survol de la souris.",
+  "MagnificationExpandsDock": "Élargir le dock pendant l'agrandissement",
+  "MagnificationExpandsDockDescription": "Le dock s'élargit pour faire de la place aux icônes agrandies. Désactivé : le dock garde sa largeur et les icônes grandissent sur place.",
   "Layout": "Disposition",
   "DockSize": "Taille",
   "DockSizeDescription": "Le format compact correspond à la hauteur de la barre des tâches Windows. Les formats moyen et grand réservent davantage d’espace à l’écran.",

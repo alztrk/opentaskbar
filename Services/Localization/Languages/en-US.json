@@ -212,6 +212,8 @@
   "TerminatePrompt": "Force quit {1} processes belonging to {0}? Unsaved work may be lost. Continue?",
   "Magnification": "Icon magnification",
   "MagnificationDescription": "Magnify icons under the pointer in a smooth wave.",
+  "MagnificationExpandsDock": "Widen dock while magnifying",
+  "MagnificationExpandsDockDescription": "Let the dock grow sideways to make room for magnified icons. Off keeps the dock at a fixed width and icons grow in place.",
   "Layout": "Layout",
   "DockSize": "Dock size",
   "DockSizeDescription": "Compact matches the Windows taskbar height. Medium and Large reserve extra screen space.",

@@ -144,7 +144,8 @@ internal static class SettingsAndAutoHideChecks
                 DockHotkey: HotkeyChoice.WinAltD,
                 Widgets: ["Clock", "Media", "SystemStats"],
                 InstalledWidgets: ["Clock", "Media", "SystemStats"],
-                ThemeApplicationIcons: false);
+                ThemeApplicationIcons: false,
+                MagnificationExpandsDock: false);
             check(store.Save(initial) is null, "Initial custom dock settings must save cleanly.");
 
             var preferences = new ApplicationPreferences(store);
@@ -186,6 +187,10 @@ internal static class SettingsAndAutoHideChecks
             check(reloaded.Error is null, "Reloaded settings after SettingsWindow reopen must stay valid.");
             check(!reloaded.Settings.ThemeApplicationIcons,
                 "Disabling themed application icons must survive settings reopen.");
+            check(!preferences.Current.MagnificationExpandsDock && !reloaded.Settings.MagnificationExpandsDock,
+                "A fixed-width magnification frame must survive settings reopen.");
+            check(new DockSettings().MagnificationExpandsDock,
+                "Magnification must widen the dock by default so existing users keep the current behaviour.");
             check(preferences.Current.AutoHide == AutoHideMode.Smart && reloaded.Settings.AutoHide == AutoHideMode.Smart,
                 "AutoHide preference must not reset when SettingsWindow is reopened.");
             check(preferences.Current.StartPlacement == StartButtonPlacement.End && reloaded.Settings.StartPlacement == StartButtonPlacement.End,

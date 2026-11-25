@@ -135,6 +135,8 @@
   "TerminatePrompt": "{1} Prozesse von {0} sofort beenden? Nicht gespeicherte Daten gehen verloren. Fortfahren?",
   "Magnification": "Vergrößerung",
   "MagnificationDescription": "Dock-Elemente beim Daraufzeigen vergrößern.",
+  "MagnificationExpandsDock": "Dock beim Vergrößern verbreitern",
+  "MagnificationExpandsDockDescription": "Das Dock wächst seitlich, um Platz für vergrößerte Symbole zu schaffen. Aus: Das Dock behält seine Breite und Symbole wachsen an Ort und Stelle.",
   "Layout": "Layout",
   "DockSize": "Größe",
   "DockSizeDescription": "Kompakt entspricht der Höhe der Windows-Taskleiste. Mittel und Groß beanspruchen mehr Bildschirmfläche.",
