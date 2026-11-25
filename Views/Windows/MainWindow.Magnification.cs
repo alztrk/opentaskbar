@@ -129,6 +129,46 @@ public partial class MainWindow
     /// <summary>Minimum DIP change required before writing layout-affecting magnification properties (#128 Finding #5).</summary>
     internal const double MagnificationLayoutDeltaThreshold = 0.25;
 
+    /// <summary>Skips sub-0.0001 scale writes mid-spring, but always writes the exact target once settled.</summary>
+    internal static bool ShouldWriteSpringScale(double current, double next, bool settled) =>
+        settled ? current != next : Math.Abs(current - next) >= 0.0001;
+
+    private double _decayStartExtra = double.NaN;
+    private double _decayStartDelta;
+
+    /// <summary>
+    /// While the pointer is on the dock the frame keeps the whole arch reserve, so a centred dock does not wobble
+    /// as icons re-centre under the pointer (#127). Once the pointer has left, the springs only decay; the frame
+    /// then follows the content back to rest instead of holding the reserve and snapping by its full width on the
+    /// last frame.
+    /// </summary>
+    private double DecayingSurfaceDelta(double reservedDelta, double totalActualExtra)
+    {
+        if (_hasMagnificationPointer)
+        {
+            _decayStartExtra = double.NaN;
+            return reservedDelta;
+        }
+        if (double.IsNaN(_decayStartExtra))
+        {
+            _decayStartExtra = totalActualExtra;
+            _decayStartDelta = reservedDelta;
+        }
+        return ScaleDecayingSurfaceDelta(_decayStartDelta, _decayStartExtra, totalActualExtra);
+    }
+
+    /// <summary>
+    /// Shrinks the reserved frame delta in proportion to the remaining slot expansion, never below the expansion
+    /// the slots still need, so magnified icons are not clipped while they settle.
+    /// </summary>
+    internal static double ScaleDecayingSurfaceDelta(double startDelta, double startExtra, double currentExtra)
+    {
+        if (!double.IsFinite(startDelta) || startDelta <= 0.0) return 0.0;
+        if (!double.IsFinite(startExtra) || startExtra <= 0.0 || !double.IsFinite(currentExtra)) return startDelta;
+        var proportional = startDelta * Math.Clamp(currentExtra / startExtra, 0.0, 1.0);
+        return Math.Max(proportional, Math.Clamp(currentExtra, 0.0, startDelta));
+    }
+
     internal static bool ShouldApplyLayoutDelta(double current, double desired, double threshold = MagnificationLayoutDeltaThreshold) =>
         !double.IsFinite(current) || Math.Abs(current - desired) >= threshold;
 
@@ -750,7 +790,10 @@ public partial class MainWindow
             }
             // StepSpring returns the exact target with zero velocity once settled. Writing the same ScaleX/Y and
             // lift every frame invalidates ~4 transforms per icon for nothing on a transparent layered window.
-            if (Math.Abs(current - next) >= 0.0001)
+            // A settled spring must land exactly on its target. Skipping its last sub-0.0001 step left icons at
+            // e.g. 1.00009x, and across a dozen icons that residue kept the slot extras above the clear threshold,
+            // so the expanded dock frame stayed wide after the pointer had left.
+            if (ShouldWriteSpringScale(current, next, iconSettled))
             {
                 scale.ScaleX = next;
                 scale.ScaleY = next;
@@ -825,8 +868,11 @@ public partial class MainWindow
         if (totalActualExtra > 0.01)
         {
             var canExpandHorizontal = !vertical && _canExpandSurface && _restSurfaceWidth > 0;
-            var surfaceDelta = canExpandHorizontal
+            var reservedDelta = canExpandHorizontal
                 ? Math.Min(_availableExpansion, DockFisheyeLayout.PeakExpansionNeed(Profile.Cell, _sessionMaxScale))
+                : 0.0;
+            var surfaceDelta = canExpandHorizontal
+                ? DecayingSurfaceDelta(reservedDelta, totalActualExtra)
                 : 0.0;
             var surfaceWidth = canExpandHorizontal ? _restSurfaceWidth + surfaceDelta : 0.0;
             var maxScrollWidth = canExpandHorizontal && double.IsFinite(_restScrollMaxWidth)
@@ -931,6 +977,7 @@ public partial class MainWindow
     /// </summary>
     internal void ClearMagnificationLayoutOverrides()
     {
+        _decayStartExtra = double.NaN;
         if (!_magnificationLayoutActive) return;
         EnterLayoutPhase(MagnificationLayoutPhase.ClearingOverrides, active: true, updating: true);
         try
