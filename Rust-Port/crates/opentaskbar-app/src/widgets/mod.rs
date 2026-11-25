@@ -60,41 +60,41 @@ const fn wd(
     }
 }
 
-/// All 23 C# catalog widgets in exact C# category order with C# `FullWidthEstimate` widths.
+/// All 23 C# catalog widgets in exact C# category order with exact C# `FullWidthEstimate` widths.
 pub const ALL_WIDGETS: &[WidgetDescriptor] = &[
     // Time & Weather
     wd("clock", "Clock & Date", "Time & Weather", 148.0),
-    wd("weather", "Weather", "Time & Weather", 196.0),
-    wd("dayprogress", "Day Progress", "Time & Weather", 98.0),
-    wd("stopwatch", "Stopwatch", "Time & Weather", 118.0),
-    wd("countdown", "Countdown", "Time & Weather", 118.0),
+    wd("weather", "Weather", "Time & Weather", 240.0),
+    wd("dayprogress", "Day Progress", "Time & Weather", 96.0),
+    wd("stopwatch", "Stopwatch", "Time & Weather", 124.0),
+    wd("countdown", "Countdown", "Time & Weather", 124.0),
     // System & Hardware
     wd("stats", "System Stats", "System & Hardware", 96.0),
-    wd("netspeed", "Net Speed", "System & Hardware", 122.0),
+    wd("netspeed", "Net Speed", "System & Hardware", 140.0),
     wd("battery", "Battery", "System & Hardware", 96.0),
     wd(
         "bluetoothbattery",
         "Bluetooth Battery",
         "System & Hardware",
-        92.0,
+        78.0,
     ),
     wd("storage", "Storage", "System & Hardware", 136.0),
-    // AI Quotas
-    wd("aiusage_claude", "Claude", "AI Quotas", 146.0),
-    wd("aiusage_codex", "Codex", "AI Quotas", 146.0),
-    wd("aiusage_antigravity", "Antigravity", "AI Quotas", 160.0),
-    wd("aiusage_opencode", "OpenCode", "AI Quotas", 188.0),
-    wd("aiusage_copilot", "Copilot", "AI Quotas", 168.0),
-    wd("aiusage_deepseek", "DeepSeek", "AI Quotas", 128.0),
-    wd("aiusage_openrouter", "OpenRouter", "AI Quotas", 134.0),
-    wd("aiusage_cursor", "Cursor", "AI Quotas", 146.0),
+    // AI Quotas (exact C# `AiUsageWidget.CardWidth` widths)
+    wd("aiusage_claude", "Claude", "AI Quotas", 184.0),
+    wd("aiusage_codex", "Codex", "AI Quotas", 184.0),
+    wd("aiusage_antigravity", "Antigravity", "AI Quotas", 262.0),
+    wd("aiusage_opencode", "OpenCode", "AI Quotas", 296.0),
+    wd("aiusage_copilot", "Copilot", "AI Quotas", 192.0),
+    wd("aiusage_deepseek", "DeepSeek", "AI Quotas", 139.0),
+    wd("aiusage_openrouter", "OpenRouter", "AI Quotas", 139.0),
+    wd("aiusage_cursor", "Cursor", "AI Quotas", 164.0),
     // Media & Controls
-    wd("media", "Media", "Media & Controls", 236.0),
-    wd("audio", "Audio", "Media & Controls", 76.0),
+    wd("media", "Media", "Media & Controls", 256.0),
+    wd("audio", "Audio", "Media & Controls", 78.0),
     wd("quicksettings", "Quick Settings", "Media & Controls", 106.0),
     wd("keyboard", "Keyboard Layout", "Media & Controls", 58.0),
     // Productivity
-    wd("focus", "Focus", "Productivity", 118.0),
+    wd("focus", "Focus", "Productivity", 124.0),
 ];
 
 pub fn ai_provider_color(id: &str) -> Rgb {
@@ -165,6 +165,8 @@ pub struct WidgetRuntime {
     focus_completed: u32,
     weather: Arc<Mutex<telemetry::WeatherCache>>,
     bt_battery: Arc<Mutex<telemetry::BluetoothBatteryCache>>,
+    ai_usage: Arc<Mutex<telemetry::AiUsageCache>>,
+    night_light_on: bool,
     last_tick: Instant,
 }
 
@@ -189,6 +191,8 @@ impl Default for WidgetRuntime {
             focus_completed: 0,
             weather: Arc::new(Mutex::new(telemetry::WeatherCache::default())),
             bt_battery: Arc::new(Mutex::new(telemetry::BluetoothBatteryCache::default())),
+            ai_usage: Arc::new(Mutex::new(telemetry::AiUsageCache::default())),
+            night_light_on: telemetry::read_night_light().unwrap_or(false),
             last_tick: Instant::now(),
         }
     }
@@ -256,37 +260,158 @@ impl WidgetRuntime {
         if settings.is_widget_enabled("bluetoothbattery") {
             telemetry::refresh_bluetooth_battery(&self.bt_battery, false);
         }
+        if settings.is_widget_enabled("quicksettings") {
+            self.night_light_on = telemetry::read_night_light().unwrap_or(self.night_light_on);
+        }
+        for ai in telemetry::AI_PROVIDERS {
+            if settings.is_widget_enabled(ai.id) {
+                telemetry::refresh_ai_provider(&self.ai_usage, ai.id, false);
+            }
+        }
     }
 
     /// Builds the exact C# 1-to-1 `WidgetChipSpec` rendered onto the dock pill.
     pub fn chip_spec(&self, id: &str, settings: &DockSettings, is_dark: bool) -> WidgetChipSpec {
         let pal = design::palette(is_dark);
         if let Some(ai) = telemetry::ai_provider_meta(id) {
-            let detected = telemetry::ai_provider_detected(ai.id);
+            let snap = self
+                .ai_usage
+                .lock()
+                .ok()
+                .and_then(|g| g.providers.get(ai.id).cloned())
+                .unwrap_or_default();
+            let bar_accent = |used: f32| -> Rgb {
+                if used >= 0.90 {
+                    pal.danger
+                } else if used >= 0.75 {
+                    pal.warning
+                } else {
+                    pal.widget_accent
+                }
+            };
             return match ai.id {
-                "aiusage_claude" => WidgetChipSpec::AiDual {
-                    provider_id: ai.id,
-                    brand_color: Some((0xd9, 0x77, 0x57)),
-                    detected,
-                },
-                "aiusage_codex" | "aiusage_cursor" => WidgetChipSpec::AiDual {
-                    provider_id: ai.id,
-                    brand_color: None,
-                    detected,
-                },
-                "aiusage_antigravity" => WidgetChipSpec::AiAntigravity { detected },
-                "aiusage_opencode" => WidgetChipSpec::AiOpenCode { detected },
-                "aiusage_copilot" => WidgetChipSpec::AiCopilot { detected },
+                "aiusage_claude" | "aiusage_codex" => {
+                    let s_win = snap.windows.iter().find(|w| w.label == "5h");
+                    let w_win = snap.windows.iter().find(|w| w.label == "7d");
+                    let rows = vec![
+                        (
+                            "5h".to_owned(),
+                            s_win.map_or(0.0, |w| w.used),
+                            bar_accent(s_win.map_or(0.0, |w| w.used)),
+                            s_win.map_or_else(|| "—".to_owned(), |w| w.reset_text.clone()),
+                        ),
+                        (
+                            "7d".to_owned(),
+                            w_win.map_or(0.0, |w| w.used),
+                            bar_accent(w_win.map_or(0.0, |w| w.used)),
+                            w_win.map_or_else(|| "—".to_owned(), |w| w.reset_text.clone()),
+                        ),
+                    ];
+                    WidgetChipSpec::AiDual {
+                        provider_id: ai.id,
+                        brand_color: (ai.id == "aiusage_claude").then_some((0xd9, 0x77, 0x57)),
+                        rows,
+                    }
+                }
+                "aiusage_cursor" => {
+                    // Exact C# AiUsageWidget.cs: Cursor shows a single long window row (`30d` / `7d`).
+                    let win = snap.windows.first();
+                    let used = win.map_or(0.0, |w| w.used);
+                    WidgetChipSpec::AiDual {
+                        provider_id: ai.id,
+                        brand_color: None,
+                        rows: vec![(
+                            win.map_or_else(|| "30d".to_owned(), |w| w.label.clone()),
+                            used,
+                            bar_accent(used),
+                            win.map_or_else(|| "—".to_owned(), |w| w.reset_text.clone()),
+                        )],
+                    }
+                }
+                "aiusage_antigravity" => {
+                    // Exact C# AiUsageWidget.cs BuildAntigravityPlaceholder: Gemini (5h,7d) | Claude (7d) | Argon (7d)
+                    WidgetChipSpec::AiAntigravity {
+                        columns: vec![
+                            (
+                                "Gemini".to_owned(),
+                                vec![
+                                    ("5h".to_owned(), 0.0, pal.widget_accent, "—".to_owned()),
+                                    ("7d".to_owned(), 0.0, pal.widget_accent, "—".to_owned()),
+                                ],
+                            ),
+                            (
+                                "Claude".to_owned(),
+                                vec![("7d".to_owned(), 0.0, pal.widget_accent, "—".to_owned())],
+                            ),
+                            (
+                                "Argon".to_owned(),
+                                vec![("7d".to_owned(), 0.0, pal.widget_accent, "—".to_owned())],
+                            ),
+                        ],
+                    }
+                }
+                "aiusage_opencode" => {
+                    let cols = ["1h", "7d", "30d"]
+                        .into_iter()
+                        .map(|lbl| {
+                            if let Some(w) = snap.windows.iter().find(|w| w.label == lbl) {
+                                let col = if w.used >= 0.75 {
+                                    bar_accent(w.used)
+                                } else {
+                                    pal.success
+                                };
+                                (
+                                    lbl.to_owned(),
+                                    format!("{:.0}%", w.used * 100.0),
+                                    w.used,
+                                    col,
+                                    w.reset_text.clone(),
+                                )
+                            } else {
+                                (
+                                    lbl.to_owned(),
+                                    "—".to_owned(),
+                                    0.0,
+                                    pal.success,
+                                    "—".to_owned(),
+                                )
+                            }
+                        })
+                        .collect();
+                    WidgetChipSpec::AiOpenCode { columns: cols }
+                }
+                "aiusage_copilot" => {
+                    if let Some(w) = snap.windows.first() {
+                        let col = if w.used >= 0.75 {
+                            bar_accent(w.used)
+                        } else {
+                            (0x9f, 0x9f, 0xf2) // C# CopilotBrandBrush
+                        };
+                        WidgetChipSpec::AiCopilot {
+                            value_text: format!("{:.0}%", w.used * 100.0),
+                            meta_text: w.reset_text.clone(),
+                            used: w.used,
+                            bar_color: col,
+                        }
+                    } else {
+                        WidgetChipSpec::AiCopilot {
+                            value_text: "—".to_owned(),
+                            meta_text: if snap.has_cred { "Monthly" } else { "Sign in" }.to_owned(),
+                            used: 0.0,
+                            bar_color: (0x9f, 0x9f, 0xf2),
+                        }
+                    }
+                }
                 "aiusage_deepseek" | "aiusage_openrouter" => WidgetChipSpec::AiBalance {
                     provider_id: ai.id,
                     name: ai.short,
                     brand_color: ai_provider_color(ai.id),
-                    value_text: if detected { "Ready" } else { "—" }.to_owned(),
+                    value_text: snap.balance_text.unwrap_or_else(|| "—".to_owned()),
                 },
                 _ => WidgetChipSpec::AiDual {
                     provider_id: ai.id,
                     brand_color: None,
-                    detected,
+                    rows: vec![("5h".to_owned(), 0.0, pal.widget_accent, "—".to_owned())],
                 },
             };
         }
@@ -307,39 +432,33 @@ impl WidgetRuntime {
                     .ok()
                     .map(|g| g.clone())
                     .unwrap_or_default();
-                let temp = if snap.temp_c.is_empty() {
-                    "—".to_owned()
-                } else {
-                    snap.temp_c
-                };
+                let available = !snap.temp_c.is_empty();
                 let place = if snap.city.is_empty() {
                     settings.weather_city.clone()
                 } else {
                     snap.city
                 };
-                let condition = if snap.condition.is_empty() {
-                    "Weather".to_owned()
-                } else {
+                let condition = if available {
                     snap.condition
+                } else if snap.loading {
+                    "Loading weather…".to_owned()
+                } else {
+                    "Weather unavailable".to_owned()
                 };
-                let cond_low = condition.to_ascii_lowercase();
-                let is_rain = cond_low.contains("rain")
-                    || cond_low.contains("drizzle")
-                    || cond_low.contains("storm")
-                    || cond_low.contains("shower");
                 // Exact C# WeatherWidget.cs WarmSunBrush (#E5AE5E) & RainBrush (#6EAAF3)
-                let icon_color = if is_rain {
+                let icon_color = if snap.is_rain {
                     (0x6e, 0xaa, 0xf3)
                 } else {
                     (0xe5, 0xae, 0x5e)
                 };
                 WidgetChipSpec::Weather {
+                    available,
                     icon_color,
-                    is_rain,
-                    temp,
+                    is_rain: snap.is_rain,
+                    temp: snap.temp_c,
                     place,
                     condition,
-                    today_range: (!snap.feels_like.is_empty()).then_some(snap.feels_like),
+                    today_range: (!snap.today_range.is_empty()).then_some(snap.today_range),
                 }
             }
             "dayprogress" => {
@@ -395,15 +514,15 @@ impl WidgetRuntime {
                 }
             }
             "bluetoothbattery" => {
-                let devices: Vec<(u32, bool)> = self
+                let devices: Vec<(u32, bool, bool)> = self
                     .bt_battery
                     .lock()
                     .ok()
                     .map(|g| {
                         g.devices
                             .iter()
-                            .take(2)
-                            .map(|d| (d.percent, d.percent <= 20))
+                            .take(3)
+                            .map(|d| (d.percent, d.percent <= 20, d.percent >= 100))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -412,14 +531,14 @@ impl WidgetRuntime {
             "storage" => {
                 let drives: Vec<(String, String)> = sample_drives()
                     .into_iter()
-                    .take(1)
+                    .take(3)
                     .map(|d| (format!("{}:", d.letter), d.format_capacity_pair()))
                     .collect();
                 WidgetChipSpec::Storage { drives }
             }
             "media" => WidgetChipSpec::Media {
-                title: "Media".to_owned(),
-                artist: "Playback".to_owned(),
+                title: "Not playing".to_owned(),
+                artist: String::new(),
                 muted: self.audio_muted,
             },
             "audio" => WidgetChipSpec::Audio {
@@ -427,13 +546,11 @@ impl WidgetRuntime {
                 muted: self.audio_muted,
             },
             "quicksettings" => WidgetChipSpec::QuickSettings {
+                // Exact C# QuickSettingsWidget.xaml: Wi-Fi, Bluetooth, Night Light!
                 pills: [
-                    ("\u{E708}".to_owned(), settings.focus_mode),
-                    (
-                        if is_dark { "\u{E706}" } else { "\u{E708}" }.to_owned(),
-                        settings.theme != AppTheme::System,
-                    ),
-                    ("\u{E713}".to_owned(), false),
+                    ("\u{E701}".to_owned(), false),
+                    ("\u{E702}".to_owned(), false),
+                    ("\u{E708}".to_owned(), self.night_light_on),
                 ],
             },
             "keyboard" => WidgetChipSpec::Keyboard {
@@ -477,14 +594,14 @@ impl WidgetRuntime {
                 _ => "Media".to_owned(),
             },
             "quicksettings" => match sub {
-                Some(0) => if settings.focus_mode {
-                    "Focus Mode · On"
+                Some(0) => "Wi-Fi".to_owned(),
+                Some(1) => "Bluetooth".to_owned(),
+                Some(2) => if self.night_light_on {
+                    "Night Light · On"
                 } else {
-                    "Focus Mode · Off"
+                    "Night Light · Off"
                 }
                 .to_owned(),
-                Some(1) => format!("Theme · {:?}", settings.theme),
-                Some(2) => "Quick Settings".to_owned(),
                 _ => "Quick Settings".to_owned(),
             },
             "audio" => {
@@ -591,7 +708,7 @@ impl WidgetRuntime {
         id: &str,
         rel_x_dips: f32,
         width_dips: f32,
-        settings: &mut DockSettings,
+        _settings: &mut DockSettings,
     ) -> DirectClickOutcome {
         if telemetry::ai_provider_meta(id).is_some() {
             return DirectClickOutcome::OpenFlyout;
@@ -617,19 +734,21 @@ impl WidgetRuntime {
                 }
             }
             "quicksettings" => {
+                // Exact C# QuickSettingsWidget.xaml: Wi-Fi, Bluetooth, Night Light!
                 let third = (width_dips / 3.0).max(1.0);
                 if rel_x_dips < third {
-                    settings.focus_mode = !settings.focus_mode;
-                    DirectClickOutcome::SettingsChanged
+                    pins::launch("ms-settings:network-wifi".to_owned());
+                    DirectClickOutcome::Handled
                 } else if rel_x_dips < third * 2.0 {
-                    settings.theme = match settings.theme {
-                        AppTheme::System => AppTheme::Dark,
-                        AppTheme::Dark => AppTheme::Light,
-                        AppTheme::Light => AppTheme::System,
-                    };
-                    DirectClickOutcome::SettingsChanged
+                    pins::launch("ms-settings:bluetooth".to_owned());
+                    DirectClickOutcome::Handled
                 } else {
-                    DirectClickOutcome::OpenFlyout
+                    if telemetry::toggle_night_light() {
+                        self.night_light_on = !self.night_light_on;
+                    } else {
+                        pins::launch("ms-settings:nightlight".to_owned());
+                    }
+                    DirectClickOutcome::Handled
                 }
             }
             "stopwatch" => {
@@ -959,34 +1078,77 @@ impl WidgetRuntime {
 
         // Exact C# `AiUsageWidget.BuildFlyout`
         if let Some(ai) = telemetry::ai_provider_meta(id) {
-            let detected = telemetry::ai_provider_detected(ai.id);
+            let snap = self
+                .ai_usage
+                .lock()
+                .ok()
+                .and_then(|g| g.providers.get(ai.id).cloned())
+                .unwrap_or_default();
+            let has_data = snap.balance_text.is_some() || !snap.windows.is_empty();
+            let mut blocks = vec![FlyoutBlock::StatusHeader {
+                title: ai.name.to_owned(),
+                status_label: if has_data {
+                    snap.plan.clone().unwrap_or_else(|| "Connected".to_owned())
+                } else if snap.has_cred {
+                    "Configured".to_owned()
+                } else {
+                    "Sign in".to_owned()
+                },
+                status_color: if has_data {
+                    pal.widget_accent
+                } else if snap.has_cred {
+                    pal.accent
+                } else {
+                    pal.warning
+                },
+                action_id: Some(1),
+                action_label: Some("Open".to_owned()),
+            }];
+            if let Some(bal) = &snap.balance_text {
+                blocks.push(FlyoutBlock::Hero {
+                    value: bal.clone(),
+                    caption: Some(
+                        if ai.id == "aiusage_openrouter" {
+                            "Remaining credits"
+                        } else {
+                            "Available balance"
+                        }
+                        .to_owned(),
+                    ),
+                    centered: false,
+                    large: false,
+                    right_meta: None,
+                });
+            }
+            for w in &snap.windows {
+                blocks.push(FlyoutBlock::ProgressBar {
+                    label: w.label.clone(),
+                    value_text: format!("{:.0}% · {}", w.used * 100.0, w.reset_text),
+                    ratio: w.used,
+                    tone: BarTone::Usage,
+                });
+            }
+            if !has_data {
+                blocks.push(FlyoutBlock::Note(format!(
+                    "Sign in via `{}` or save API key to load live usage.",
+                    ai.signin_hint
+                )));
+            }
+            blocks.push(FlyoutBlock::Separator);
+            blocks.push(FlyoutBlock::ButtonBar(vec![
+                (2, "Refresh".to_owned(), false),
+                (1, "Open Dashboard".to_owned(), true),
+            ]));
             let spec = FlyoutSpec {
                 title: String::new(),
                 subtitle: None,
                 width_dips: 280.0,
-                blocks: vec![
-                    FlyoutBlock::StatusHeader {
-                        title: ai.name.to_owned(),
-                        status_label: if detected { "Ready" } else { "Sign in" }.to_owned(),
-                        status_color: if detected {
-                            pal.widget_accent
-                        } else {
-                            pal.warning
-                        },
-                        action_id: Some(1),
-                        action_label: Some("Open".to_owned()),
-                    },
-                    FlyoutBlock::Note(if detected {
-                        "Local session credentials detected.".to_owned()
-                    } else {
-                        format!("Sign in via `{}` to load usage.", ai.signin_hint)
-                    }),
-                    FlyoutBlock::Separator,
-                    FlyoutBlock::ButtonBar(vec![(1, "Open Dashboard".to_owned(), true)]),
-                ],
+                blocks,
             };
-            if flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) == Some(1) {
-                pins::launch(ai.dashboard_url.to_owned());
+            match flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) {
+                Some(1) => pins::launch(ai.dashboard_url.to_owned()),
+                Some(2) => telemetry::refresh_ai_provider(&self.ai_usage, ai.id, true),
+                _ => {}
             }
             return false;
         }

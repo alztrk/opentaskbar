@@ -173,6 +173,7 @@ struct ScrollMetrics {
     vp_right: f32,
     max_scroll: f32,
     offset: f32,
+    shell_start_x: f32,
     apps_start_x: f32,
     right_anchor_x: f32,
     can_scroll_left: bool,
@@ -188,13 +189,15 @@ fn compute_scroll_metrics(
     vp_right: f32,
     apps_w: f32,
     right_w: f32,
+    shell_w: f32,
     scroll_offset: f32,
 ) -> ScrollMetrics {
     let vp_w = (vp_right - vp_left).max(1.0);
-    let content_w = 4.0 + apps_w + right_w + 4.0;
+    let content_w = 4.0 + shell_w + apps_w + right_w + 4.0;
     let max_scroll = (content_w - vp_w).max(0.0);
     let offset = scroll_offset.clamp(0.0, max_scroll);
-    let apps_start_x = vp_left + 4.0 - offset;
+    let shell_start_x = vp_left + 4.0 - offset;
+    let apps_start_x = shell_start_x + shell_w;
     let right_anchor_x = if max_scroll > 0.5 {
         vp_left + content_w - 4.0 - offset
     } else {
@@ -205,6 +208,7 @@ fn compute_scroll_metrics(
         vp_right,
         max_scroll,
         offset,
+        shell_start_x,
         apps_start_x,
         right_anchor_x,
         can_scroll_left: max_scroll > 0.5 && offset > 1.0,
@@ -690,7 +694,7 @@ fn content_min_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips
     (shell_section_width(base)
         + icons_w
         + widgets_section_width(settings, slot_count, mon_w_dips)
-        + 30.0)
+        + 31.0)
         .max(160.0)
 }
 
@@ -1132,14 +1136,15 @@ impl DockState {
         self.dcomp.add_child(&self.dcomp.root, &self.pill.left);
         self.dcomp.add_child(&self.dcomp.root, &self.pill.center);
         self.dcomp.add_child(&self.dcomp.root, &self.pill.right);
-        for i in 0..3 {
-            self.dcomp.add_child(&self.dcomp.root, &self.shell_bgs[i]);
-            self.dcomp.add_child(&self.dcomp.root, &self.shell_icons[i]);
-        }
-        self.dcomp.add_child(&self.dcomp.root, &self.divider);
         self.scroll_container.remove_all_children();
         self.dcomp
             .add_child(&self.dcomp.root, &self.scroll_container);
+
+        for i in 0..3 {
+            self.scroll_container.add_child(&self.shell_bgs[i]);
+            self.scroll_container.add_child(&self.shell_icons[i]);
+        }
+        self.scroll_container.add_child(&self.divider);
 
         while self.slot_visuals.len() < self.slots.len() {
             if let (Ok(icon), Ok(dot)) = (self.dcomp.create_node(), self.dcomp.create_node()) {
@@ -1701,7 +1706,7 @@ impl DockState {
             let live_content = (shell_section_width(base)
                 + icons_w
                 + widgets_section_width(&self.settings, self.slots.len(), mon_w)
-                + 30.0)
+                + 31.0)
                 .max(160.0);
             let max_w = (mon_w - 16.0).max(200.0);
             let floor_w = scroll_min_pill_width(&self.settings).min(live_content);
@@ -1737,11 +1742,18 @@ impl DockState {
     fn live_scroll_metrics(&self) -> ScrollMetrics {
         let base = self.settings.icon_dips();
         let (pill_left, _, pill_w, _) = self.live_pill_geometry();
-        let vp_left = pill_left + 15.0 + shell_section_width(base) - 4.0;
+        let vp_left = pill_left + 15.0;
         let vp_right = (pill_left + pill_w - 8.0).max(vp_left + 1.0);
         let apps_w = self.live_apps_width_dips();
         let right_w = widgets_section_width(&self.settings, self.slots.len(), self.mon_w_dips());
-        compute_scroll_metrics(vp_left, vp_right, apps_w, right_w, self.scroll_offset)
+        compute_scroll_metrics(
+            vp_left,
+            vp_right,
+            apps_w,
+            right_w,
+            shell_section_width(base),
+            self.scroll_offset,
+        )
     }
 
     /// Returns `Some(false)` for left `<` scroll button, `Some(true)` for right `>` scroll button.
@@ -1823,8 +1835,8 @@ impl DockState {
 
     fn live_shell_center_x(&self, kind: ShellButton) -> f32 {
         let base = self.settings.icon_dips();
-        let (pill_left, _, _, _) = self.live_pill_geometry();
-        pill_left + 15.0 + (kind.index() as f32) * (base + 4.0) + base * 0.5
+        let sm = self.live_scroll_metrics();
+        sm.shell_start_x + (kind.index() as f32) * (base + 4.0) + base * 0.5
     }
 
     fn right_widget_rects_dips(
@@ -1940,13 +1952,14 @@ impl DockState {
 
     fn hit_shell_button(&self, mx: f32, my: f32) -> Option<ShellButton> {
         let base = self.settings.icon_dips();
-        let (pill_left, pill_top, _, pill_h) = self.live_pill_geometry();
+        let (_, pill_top, _, pill_h) = self.live_pill_geometry();
+        let sm = self.live_scroll_metrics();
         if my < pill_top || my > pill_top + pill_h {
             return None;
         }
         for kind in ShellButton::ALL {
-            let x = pill_left + 15.0 + (kind.index() as f32) * (base + 4.0);
-            if mx >= x && mx <= x + base {
+            let x = sm.shell_start_x + (kind.index() as f32) * (base + 4.0);
+            if mx >= sm.vp_left.max(x) && mx <= sm.vp_right.min(x + base) {
                 return Some(kind);
             }
         }
@@ -2262,15 +2275,16 @@ impl DockState {
         let icon_base_top = pill_top + 7.5;
         let icon_base_bottom = icon_base_top + base;
         let dot_top = icon_base_bottom + 4.5;
+        let sm = self.live_scroll_metrics();
 
-        // 2. Shell buttons + left divider (vertically centered inside the dock pill).
+        // 2. Shell buttons + divider share the horizontally clipped content coordinate space.
         let shell_top = pill_top + (pill_h - base) * 0.5;
         let box_sz_px = (base * dpi).ceil();
         let glyph_dips = (base * 0.68).max(22.0);
         let glyph_surf_px = (glyph_dips * dpi).ceil();
         for kind in ShellButton::ALL {
             let i = kind.index();
-            let x = pill_left + 15.0 + (i as f32) * (base + 4.0);
+            let x = sm.shell_start_x + (i as f32) * (base + 4.0);
             let box_x_px = (x * dpi).round();
             let box_y_px = (shell_top * dpi).round();
             let hovered = self.hovered_shell == Some(kind);
@@ -2292,14 +2306,13 @@ impl DockState {
             self.shell_icons[i].set_transform(scale, scale, gx_px, gy_px);
         }
 
-        let div_x = pill_left + 15.0 + base * 3.0 + 4.0 * 2.0 + 8.0;
+        let div_x = sm.shell_start_x + base * 3.0 + 4.0 * 2.0 + 8.0;
         let div_y = pill_top + (pill_h - 26.0) * 0.5;
         self.divider
             .set_transform(1.0, 1.0, (div_x * dpi).round(), (div_y * dpi).round());
 
         // Hardware-clip scrollable content horizontally to the dock viewport while keeping
         // full vertical headroom (`0.0 .. win_h`) so magnified app icons are never clipped above.
-        let sm = self.live_scroll_metrics();
         self.scroll_offset = sm.offset;
         self.scroll_target = self.scroll_target.clamp(0.0, sm.max_scroll);
         DcompEngine::update_clip_rect(
@@ -4158,17 +4171,28 @@ mod tests {
     #[test]
     fn scroll_metrics_prevent_apps_and_widgets_overlap_and_clamp_edge_indicators() {
         // Natural-width dock (`vp_w = apps_w + right_w + 11.0`): never triggers false scrollbars.
-        let natural =
-            compute_scroll_metrics(150.0, 150.0 + 260.0 + 320.0 + 11.0, 260.0, 320.0, 0.0);
+        let shell_w = 200.0;
+        let natural = compute_scroll_metrics(
+            150.0,
+            150.0 + shell_w + 260.0 + 320.0 + 12.0,
+            260.0,
+            320.0,
+            shell_w,
+            0.0,
+        );
         assert_eq!(natural.max_scroll, 0.0);
         assert!(!natural.can_scroll_left);
         assert!(!natural.can_scroll_right);
-        assert_eq!(natural.apps_start_x, 154.0);
-        assert_eq!(natural.right_anchor_x, 150.0 + 260.0 + 320.0 + 11.0 - 4.0);
+        assert_eq!(natural.shell_start_x, 154.0);
+        assert_eq!(natural.apps_start_x, natural.shell_start_x + shell_w);
+        assert_eq!(
+            natural.right_anchor_x,
+            150.0 + shell_w + 260.0 + 320.0 + 12.0 - 4.0
+        );
 
         // Overflowing dock (e.g. many apps + many widgets): zero overlap and accurate chevrons.
-        let start = compute_scroll_metrics(150.0, 750.0, 420.0, 620.0, 0.0);
-        assert!(start.max_scroll > 400.0);
+        let start = compute_scroll_metrics(150.0, 750.0, 420.0, 620.0, shell_w, 0.0);
+        assert!(start.max_scroll > 600.0);
         assert!(!start.can_scroll_left);
         assert!(start.can_scroll_right);
         let apps_end = start.apps_start_x + 420.0;
@@ -4178,12 +4202,23 @@ mod tests {
             "widgets ({widgets_left}) must never overlap apps ({apps_end})"
         );
 
-        let mid = compute_scroll_metrics(150.0, 750.0, 420.0, 620.0, start.max_scroll * 0.5);
+        let mid =
+            compute_scroll_metrics(150.0, 750.0, 420.0, 620.0, shell_w, start.max_scroll * 0.5);
         assert!(mid.can_scroll_left);
         assert!(mid.can_scroll_right);
+        assert!(mid.shell_start_x < start.shell_start_x);
+        assert_eq!(mid.apps_start_x, mid.shell_start_x + shell_w);
 
-        let end = compute_scroll_metrics(150.0, 750.0, 420.0, 620.0, start.max_scroll + 200.0);
+        let end = compute_scroll_metrics(
+            150.0,
+            750.0,
+            420.0,
+            620.0,
+            shell_w,
+            start.max_scroll + 200.0,
+        );
         assert!((end.offset - start.max_scroll).abs() < 0.01);
+        assert!(end.shell_start_x < end.vp_left);
         assert!(end.can_scroll_left);
         assert!(!end.can_scroll_right);
         assert!((end.right_anchor_x - 746.0).abs() < 0.01);

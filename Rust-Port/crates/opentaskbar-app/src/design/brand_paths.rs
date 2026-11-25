@@ -140,7 +140,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-fn parse_stream_geometry(data: &str) -> (bool, Vec<PathOp>) {
+fn parse_stream_geometry(data: &str) -> (bool, Vec<PathOp>, usize) {
     let mut p = Parser::new(data);
     let mut winding = true;
     if p.peek() == Some(b'F') {
@@ -318,11 +318,11 @@ fn parse_stream_geometry(data: &str) -> (bool, Vec<PathOp>) {
             }
         }
     }
-    (winding, ops)
+    (winding, ops, p.pos)
 }
 
 unsafe fn build_path_geometry(factory: &ID2D1Factory1, data: &str) -> Result<ID2D1PathGeometry> {
-    let (winding, ops) = parse_stream_geometry(data);
+    let (winding, ops, _) = parse_stream_geometry(data);
     unsafe {
         let geom = factory.CreatePathGeometry()?;
         let sink = geom.Open()?;
@@ -485,7 +485,13 @@ mod tests {
         ];
         for id in ids {
             let raw = brand_path_data(id).expect("missing brand path");
-            let (_, ops) = parse_stream_geometry(raw);
+            let (_, ops, consumed) = parse_stream_geometry(raw);
+            assert_eq!(
+                consumed,
+                raw.len(),
+                "parser stopped early for {id} at {consumed}/{}",
+                raw.len()
+            );
             assert!(
                 ops.len() >= 5,
                 "expected non-trivial path ops for {id}, got {}",
