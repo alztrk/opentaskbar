@@ -40,10 +40,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 pub mod dcomp;
 pub mod preview;
+pub mod show_desktop;
 pub mod tray;
 
 use self::dcomp::{DcompEngine, PillNodes, ShellGlyph, VisualNode};
 use self::preview::{PreviewItem, PreviewPopup};
+use self::show_desktop::ShowDesktopCorner;
 use crate::platform::icon_cache::{self, RawIcon};
 use crate::platform::pins::{self, PinnedApp};
 use crate::platform::win32::{
@@ -59,7 +61,6 @@ const FISHEYE_PEAK: f32 = 0.42;
 const FISHEYE_RADIUS_SLOTS: f32 = 2.4;
 const BOUNCE_DURATION_SECS: f32 = 0.42;
 const DRAG_THRESHOLD_PX: f32 = 6.0;
-const SHOW_DESKTOP_W_DIPS: f32 = 8.0;
 
 const TIMER_POLL: usize = 1;
 const TIMER_PREVIEW_SHOW: usize = 2;
@@ -98,9 +99,6 @@ fn widgets_section_width(settings: &DockSettings) -> f32 {
     }
     for wd in widgets::active_widgets(settings) {
         w += wd.width_dips + 6.0;
-    }
-    if settings.show_desktop_button {
-        w += SHOW_DESKTOP_W_DIPS + 6.0;
     }
     if w > 0.0 {
         w + 13.0 // left divider + breathing room
@@ -237,8 +235,7 @@ struct DockState {
     bin_is_full: bool,
     widget_visuals: Vec<WidgetVisual>,
     widget_runtime: WidgetRuntime,
-    sd_bg: VisualNode,
-    show_desktop_node: VisualNode,
+    show_desktop_corner: Option<ShowDesktopCorner>,
     dot_running: IDCompositionSurface,
     dot_active: IDCompositionSurface,
     icon_surfaces: HashMap<String, Option<IDCompositionSurface>>,
@@ -258,7 +255,6 @@ struct DockState {
     hovered_tray: bool,
     hovered_bin: bool,
     hovered_widget: Option<&'static str>,
-    hovered_show_desktop: bool,
     hovered_resize: Option<ResizeEdge>,
     pressed_idx: Option<usize>,
     pressed_shell: Option<ShellButton>,
@@ -688,16 +684,8 @@ impl DockState {
             &bin_empty_surf
         }));
 
-        let sd_bg = dcomp.create_node()?;
-        sd_bg.hide();
-        let show_desktop_node = dcomp.create_node()?;
-        let sd_surf = dcomp.create_rounded_rect_surface(
-            (3.0 * dpi).ceil() as u32,
-            (24.0 * dpi).ceil() as u32,
-            1.5 * dpi,
-            div_rgb,
-        )?;
-        show_desktop_node.set_content(Some(&sd_surf));
+        let show_desktop_corner =
+            ShowDesktopCorner::new(monitor, is_dark, settings.show_desktop_button);
 
         let dot_h_px = (3.5 * dpi).ceil() as u32;
         let dot_running = dcomp.create_rounded_rect_surface(
@@ -752,8 +740,7 @@ impl DockState {
             bin_is_full,
             widget_visuals: Vec::new(),
             widget_runtime: WidgetRuntime::default(),
-            sd_bg,
-            show_desktop_node,
+            show_desktop_corner,
             dot_running,
             dot_active,
             icon_surfaces: HashMap::new(),
@@ -773,7 +760,6 @@ impl DockState {
             hovered_tray: false,
             hovered_bin: false,
             hovered_widget: None,
-            hovered_show_desktop: false,
             hovered_resize: None,
             pressed_idx: None,
             pressed_shell: None,
@@ -894,9 +880,6 @@ impl DockState {
             self.dcomp.add_child(&self.dcomp.root, &wv.bg);
             self.dcomp.add_child(&self.dcomp.root, &wv.node);
         }
-        self.dcomp.add_child(&self.dcomp.root, &self.sd_bg);
-        self.dcomp
-            .add_child(&self.dcomp.root, &self.show_desktop_node);
 
         self.dcomp.add_child(&self.dcomp.root, &self.drag_ghost);
         self.dcomp.add_child(&self.dcomp.root, &self.tooltip_node);
@@ -1160,6 +1143,9 @@ impl DockState {
         }
         self.tooltip_cache = None;
         self.rebuild_theme_surfaces();
+        if let Some(ref corner) = self.show_desktop_corner {
+            corner.update(self.is_dark, self.settings.show_desktop_button);
+        }
         if self.monitor.is_primary {
             let auto_hide = self.settings.auto_hide != AutoHideMode::Disabled;
             let desired_total_dips = pill_height_dips(&self.settings) + VERTICAL_EDGE_GAP * 2.0;
@@ -1336,16 +1322,6 @@ impl DockState {
         pill_left + 15.0 + (kind.index() as f32) * (base + 4.0) + base * 0.5
     }
 
-    fn show_desktop_rect_dips(&self) -> Option<(f32, f32, f32, f32)> {
-        if !self.settings.show_desktop_button {
-            return None;
-        }
-        let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
-        let right = pill_left + pill_w - 8.0;
-        let left = right - SHOW_DESKTOP_W_DIPS;
-        Some((left, pill_top + 6.0, right, pill_top + pill_h - 6.0))
-    }
-
     fn right_widget_rects_dips(
         &self,
     ) -> (
@@ -1355,9 +1331,6 @@ impl DockState {
     ) {
         let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
         let mut right_cursor = pill_left + pill_w - 12.0;
-        if self.settings.show_desktop_button {
-            right_cursor -= SHOW_DESKTOP_W_DIPS + 6.0;
-        }
         let mut widget_rects = Vec::with_capacity(self.widget_visuals.len());
         for wv in self.widget_visuals.iter().rev() {
             let l = right_cursor - wv.width_dips;
@@ -1443,11 +1416,6 @@ impl DockState {
             }
         }
         None
-    }
-
-    fn hit_show_desktop(&self, mx: f32, my: f32) -> bool {
-        self.show_desktop_rect_dips()
-            .is_some_and(|(l, t, r, b)| mx >= l && mx <= r && my >= t && my <= b)
     }
 
     fn update_hovered_index_from_mouse(&mut self) {
@@ -1784,39 +1752,11 @@ impl DockState {
             cursor_x += slot_w + gap;
         }
 
-        // 4. Right-side macOS-style widget strip (System Stats, Clock & Date, Show Desktop).
+        // 4. Right-side widget strip (Background Apps, Recycle Bin, user-enabled Widgets).
         let widgets_w = widgets_section_width(&self.settings);
         if widgets_w > 0.0 {
             let mut right_cursor = pill_left + pill_w - 12.0;
             let widget_top = pill_top + (pill_h - 36.0) * 0.5;
-
-            if self.settings.show_desktop_button {
-                let sd_x = right_cursor - 3.0;
-                let sd_y = pill_top + (pill_h - 24.0) * 0.5;
-                if self.hovered_show_desktop {
-                    self.sd_bg.set_content(Some(&self.shell_bg_hover));
-                    let sx = SHOW_DESKTOP_W_DIPS / base;
-                    let sy = 32.0 / base;
-                    self.sd_bg.set_transform(
-                        sx,
-                        sy,
-                        ((right_cursor - SHOW_DESKTOP_W_DIPS + 1.0) * dpi).round(),
-                        ((pill_top + (pill_h - 32.0) * 0.5) * dpi).round(),
-                    );
-                } else {
-                    self.sd_bg.hide();
-                }
-                self.show_desktop_node.set_transform(
-                    1.0,
-                    1.0,
-                    (sd_x * dpi).round(),
-                    (sd_y * dpi).round(),
-                );
-                right_cursor -= SHOW_DESKTOP_W_DIPS + 6.0;
-            } else {
-                self.sd_bg.hide();
-                self.show_desktop_node.hide();
-            }
 
             for wv in self.widget_visuals.iter().rev() {
                 let wx = right_cursor - wv.width_dips;
@@ -1925,8 +1865,6 @@ impl DockState {
                 wv.bg.hide();
                 wv.node.hide();
             }
-            self.sd_bg.hide();
-            self.show_desktop_node.hide();
         }
 
         // 5. Floating cursor-tracking drag ghost.
@@ -1962,11 +1900,6 @@ impl DockState {
             .and_then(|p| p.owner_key());
         let tooltip_info: Option<(String, f32, f32)> = if active_drag.is_some() {
             None
-        } else if self.hovered_show_desktop {
-            let cx = self
-                .show_desktop_rect_dips()
-                .map_or(pill_left + pill_w - 12.0, |(l, _, r, _)| (l + r) * 0.5);
-            Some(("Show Desktop".to_owned(), cx, pill_top - 8.0))
         } else if self.hovered_bin {
             let (_, bin_rc, _) = self.right_widget_rects_dips();
             let cx = bin_rc.map_or(pill_left + pill_w - 60.0, |(l, _, r, _)| (l + r) * 0.5);
@@ -2206,7 +2139,7 @@ impl DockState {
                 self.hovered_shell = None;
                 self.hovered_tray = false;
                 self.hovered_bin = false;
-                self.hovered_show_desktop = false;
+                self.hovered_widget = None;
                 self.hover_mouse_x = None;
                 self.hovered_idx = None;
                 self.sync_preview_hover();
@@ -2215,24 +2148,6 @@ impl DockState {
             }
         }
         if resize_edge.is_some() {
-            return;
-        }
-
-        let over_sd = self.hit_show_desktop(mx, my);
-        if over_sd != self.hovered_show_desktop {
-            self.hovered_show_desktop = over_sd;
-            if over_sd {
-                self.hovered_shell = None;
-                self.hovered_tray = false;
-                self.hovered_bin = false;
-                self.hover_mouse_x = None;
-                self.hovered_idx = None;
-                self.sync_preview_hover();
-            }
-            self.ensure_animation();
-            self.update_visuals();
-        }
-        if over_sd {
             return;
         }
 
@@ -2322,7 +2237,6 @@ impl DockState {
         self.hovered_tray = false;
         self.hovered_bin = false;
         self.hovered_widget = None;
-        self.hovered_show_desktop = false;
         self.hovered_resize = None;
         self.pressed_shell = None;
         self.pressed_tray = false;
@@ -2351,9 +2265,6 @@ impl DockState {
                 start_screen_x: pt.x,
                 start_width_dips: pill_w,
             });
-            return;
-        }
-        if self.hit_show_desktop(mx, my) {
             return;
         }
         let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
@@ -2404,10 +2315,6 @@ impl DockState {
                 &opentaskbar_core::settings::settings_path(),
                 &self.settings,
             );
-            return;
-        }
-        if self.hit_show_desktop(mx, my) {
-            opentaskbar_shell::taskbar::show_desktop();
             return;
         }
         let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
@@ -2762,7 +2669,6 @@ unsafe extern "system" fn wnd_proc(
                 || state.hovered_tray
                 || state.hovered_bin
                 || state.hovered_widget.is_some()
-                || state.hovered_show_desktop
             {
                 IDC_HAND
             } else {
