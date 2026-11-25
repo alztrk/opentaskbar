@@ -417,14 +417,17 @@ impl PreviewPopup {
                     right: card.close_rect.left - (4.0 * dpi).round() as i32,
                     bottom: card.card_rect.top + header_h,
                 };
-                let mut title_w: Vec<u16> = card.item.title.encode_utf16().collect();
-                DrawTextW(
-                    hdc,
-                    title_w.as_mut_ptr(),
-                    title_w.len() as i32,
-                    &mut title_rc,
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                );
+                if !card.item.title.is_empty() {
+                    let mut title_w: Vec<u16> =
+                        card.item.title.encode_utf16().chain(Some(0)).collect();
+                    DrawTextW(
+                        hdc,
+                        title_w.as_mut_ptr(),
+                        (title_w.len() - 1) as i32,
+                        &mut title_rc,
+                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                    );
+                }
 
                 // Close button (`X`).
                 if is_hovered || is_close_hovered {

@@ -74,7 +74,11 @@ pub unsafe fn draw_fluent_icon_gdi(
 ) {
     let sz = size_px.max(10);
     let font_name: Vec<u16> = "Segoe Fluent Icons\0".encode_utf16().collect();
-    let mut glyph: Vec<u16> = fluent_glyph(icon).encode_utf16().collect();
+    let text = fluent_glyph(icon);
+    if text.is_empty() {
+        return;
+    }
+    let mut glyph: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
     let half = sz;
     let mut rc = RECT {
         left: cx - half,
@@ -104,7 +108,7 @@ pub unsafe fn draw_fluent_icon_gdi(
         DrawTextW(
             hdc,
             glyph.as_mut_ptr(),
-            glyph.len() as i32,
+            (glyph.len() - 1) as i32,
             &mut rc,
             DT_CENTER | DT_VCENTER | DT_SINGLELINE,
         );

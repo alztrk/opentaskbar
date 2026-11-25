@@ -3684,12 +3684,42 @@ impl Drop for DockState {
     }
 }
 
+thread_local! {
+    /// Prevents re-entrant `&mut DockState` aliasing when modal flyouts/menus or
+    /// synchronous Win32 callbacks (`SetWindowPos`) dispatch messages to the dock window.
+    static DOCK_WNDPROC_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+struct DockWndProcGuard;
+
+impl DockWndProcGuard {
+    fn try_enter() -> Option<Self> {
+        DOCK_WNDPROC_ACTIVE.with(|flag| {
+            if flag.get() {
+                None
+            } else {
+                flag.set(true);
+                Some(Self)
+            }
+        })
+    }
+}
+
+impl Drop for DockWndProcGuard {
+    fn drop(&mut self) {
+        DOCK_WNDPROC_ACTIVE.with(|flag| flag.set(false));
+    }
+}
+
 unsafe extern "system" fn wnd_proc(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    let Some(_guard) = DockWndProcGuard::try_enter() else {
+        return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+    };
     let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DockState };
     if ptr.is_null() {
         return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };

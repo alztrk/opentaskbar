@@ -265,6 +265,21 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
+/// Null-terminated, empty-safe wrapper around `user32!DrawTextW`.
+///
+/// Passing an empty `Vec<u16>` pointer (`NonNull::dangling() == 0x2`) to `DrawTextW`
+/// causes an access violation (`0xC0000005`) inside `user32.dll` on Windows 11.
+unsafe fn draw_gdi_text(hdc: HDC, text: &str, rc: &mut RECT, format: u32) {
+    if text.is_empty() {
+        return;
+    }
+    let mut buf: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    let len = (buf.len() - 1) as i32;
+    unsafe {
+        DrawTextW(hdc, buf.as_mut_ptr(), len, rc, format);
+    }
+}
+
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
     u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16)
 }
@@ -1151,11 +1166,9 @@ impl FlyoutState<'_> {
                     right: w - pad,
                     bottom: pad + s(22.0),
                 };
-                let mut tw: Vec<u16> = self.spec.title.encode_utf16().collect();
-                DrawTextW(
+                draw_gdi_text(
                     hdc,
-                    tw.as_mut_ptr(),
-                    tw.len() as i32,
+                    &self.spec.title,
                     &mut hrc,
                     DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                 );
@@ -1191,11 +1204,9 @@ impl FlyoutState<'_> {
                         right: w - pad,
                         bottom: pad + s(42.0),
                     };
-                    let mut sw: Vec<u16> = sub.encode_utf16().collect();
-                    DrawTextW(
+                    draw_gdi_text(
                         hdc,
-                        sw.as_mut_ptr(),
-                        sw.len() as i32,
+                        sub,
                         &mut src,
                         DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                     );
@@ -1224,7 +1235,7 @@ impl FlyoutState<'_> {
                         let pt = if *large { 40.0 } else { 27.0 };
                         let val_h = if *large { s(46.0) } else { s(32.0) };
                         let hero_font = mk_font(pt, 700);
-                        SelectObject(hdc, hero_font as _);
+                        let prev_font = SelectObject(hdc, hero_font as _);
                         SetTextColor(hdc, text_fg);
                         let mut hrc = RECT {
                             left: pad,
@@ -1233,14 +1244,8 @@ impl FlyoutState<'_> {
                             bottom: y + val_h,
                         };
                         let align = if *centered { DT_CENTER } else { DT_LEFT };
-                        let mut vw: Vec<u16> = value.encode_utf16().collect();
-                        DrawTextW(
-                            hdc,
-                            vw.as_mut_ptr(),
-                            vw.len() as i32,
-                            &mut hrc,
-                            align | DT_VCENTER | DT_SINGLELINE,
-                        );
+                        draw_gdi_text(hdc, value, &mut hrc, align | DT_VCENTER | DT_SINGLELINE);
+                        SelectObject(hdc, prev_font);
                         DeleteObject(hero_font as _);
 
                         if let Some(meta) = right_meta {
@@ -1252,11 +1257,9 @@ impl FlyoutState<'_> {
                                 right: w - right_pad,
                                 bottom: y + s(22.0),
                             };
-                            let mut mw: Vec<u16> = meta.encode_utf16().collect();
-                            DrawTextW(
+                            draw_gdi_text(
                                 hdc,
-                                mw.as_mut_ptr(),
-                                mw.len() as i32,
+                                meta,
                                 &mut mrc,
                                 DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                             );
@@ -1271,11 +1274,9 @@ impl FlyoutState<'_> {
                                 right: w - right_pad,
                                 bottom: y + s(16.0),
                             };
-                            let mut cw: Vec<u16> = cap.encode_utf16().collect();
-                            DrawTextW(
+                            draw_gdi_text(
                                 hdc,
-                                cw.as_mut_ptr(),
-                                cw.len() as i32,
+                                cap,
                                 &mut crc,
                                 align | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                             );
@@ -1328,11 +1329,9 @@ impl FlyoutState<'_> {
                                 right: r,
                                 bottom: y + nav_h,
                             };
-                            let mut gw: Vec<u16> = glyph.encode_utf16().collect();
-                            DrawTextW(
+                            draw_gdi_text(
                                 hdc,
-                                gw.as_mut_ptr(),
-                                gw.len() as i32,
+                                glyph,
                                 &mut rc,
                                 DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                             );
@@ -1350,11 +1349,9 @@ impl FlyoutState<'_> {
                             bottom: y + nav_h,
                         };
                         let title_str = format!("{} {}", telemetry::month_name(*month), year);
-                        let mut tw: Vec<u16> = title_str.encode_utf16().collect();
-                        DrawTextW(
+                        draw_gdi_text(
                             hdc,
-                            tw.as_mut_ptr(),
-                            tw.len() as i32,
+                            &title_str,
                             &mut title_rc,
                             DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                         );
@@ -1372,11 +1369,9 @@ impl FlyoutState<'_> {
                                 right: pad + ((i as i32) + 1) * cell_w,
                                 bottom: y + s(18.0),
                             };
-                            let mut dw: Vec<u16> = dow.encode_utf16().collect();
-                            DrawTextW(
+                            draw_gdi_text(
                                 hdc,
-                                dw.as_mut_ptr(),
-                                dw.len() as i32,
+                                dow,
                                 &mut rc,
                                 DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                             );
@@ -1463,11 +1458,9 @@ impl FlyoutState<'_> {
                                 bottom: b,
                             };
                             let ds = cd.to_string();
-                            let mut dw: Vec<u16> = ds.encode_utf16().collect();
-                            DrawTextW(
+                            draw_gdi_text(
                                 hdc,
-                                dw.as_mut_ptr(),
-                                dw.len() as i32,
+                                &ds,
                                 &mut rc,
                                 DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                             );
@@ -1492,21 +1485,12 @@ impl FlyoutState<'_> {
                             right: pad + content_w,
                             bottom: y + s(20.0),
                         };
-                        let mut lw: Vec<u16> = label.encode_utf16().collect();
-                        DrawTextW(
-                            hdc,
-                            lw.as_mut_ptr(),
-                            lw.len() as i32,
-                            &mut hrc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-                        );
+                        draw_gdi_text(hdc, label, &mut hrc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                         SelectObject(hdc, small_font as _);
                         SetTextColor(hdc, muted_fg);
-                        let mut vw: Vec<u16> = value_text.encode_utf16().collect();
-                        DrawTextW(
+                        draw_gdi_text(
                             hdc,
-                            vw.as_mut_ptr(),
-                            vw.len() as i32,
+                            value_text,
                             &mut hrc,
                             DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
                         );
@@ -1536,11 +1520,9 @@ impl FlyoutState<'_> {
                             right: dev_r - s(8.0),
                             bottom: dev_top + dev_h,
                         };
-                        let mut dw: Vec<u16> = device_name.encode_utf16().collect();
-                        DrawTextW(
+                        draw_gdi_text(
                             hdc,
-                            dw.as_mut_ptr(),
-                            dw.len() as i32,
+                            device_name,
                             &mut drc,
                             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                         );
@@ -1582,7 +1564,7 @@ impl FlyoutState<'_> {
                             0,
                             wide("Segoe Fluent Icons").as_ptr(),
                         );
-                        SelectObject(hdc, glyph_font as _);
+                        let prev_font = SelectObject(hdc, glyph_font as _);
                         SetTextColor(hdc, m_fg);
                         let mut mrc = RECT {
                             left: mute_l,
@@ -1590,16 +1572,13 @@ impl FlyoutState<'_> {
                             right: mute_l + mute_w,
                             bottom: dev_top + dev_h,
                         };
-                        let mut mg: Vec<u16> = if *muted { "\u{E74F}" } else { "\u{E767}" }
-                            .encode_utf16()
-                            .collect();
-                        DrawTextW(
+                        draw_gdi_text(
                             hdc,
-                            mg.as_mut_ptr(),
-                            mg.len() as i32,
+                            if *muted { "\u{E74F}" } else { "\u{E767}" },
                             &mut mrc,
                             DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                         );
+                        SelectObject(hdc, prev_font);
                         DeleteObject(glyph_font as _);
 
                         // 3. C# `WidgetSlider`: 5px track + Aurora teal fill + 10px circular thumb
@@ -1671,25 +1650,16 @@ impl FlyoutState<'_> {
                             right: pad + content_w,
                             bottom: y + s(18.0),
                         };
-                        let mut lw: Vec<u16> = label.encode_utf16().collect();
-                        DrawTextW(
-                            hdc,
-                            lw.as_mut_ptr(),
-                            lw.len() as i32,
-                            &mut lrc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE,
-                        );
+                        draw_gdi_text(hdc, label, &mut lrc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
                         let val_full = match detail_text {
                             Some(d) => format!("{d}  {value_text}"),
                             None => value_text.clone(),
                         };
                         SelectObject(hdc, bold_font as _);
                         SetTextColor(hdc, gdi_rgb(*color));
-                        let mut vw: Vec<u16> = val_full.encode_utf16().collect();
-                        DrawTextW(
+                        draw_gdi_text(
                             hdc,
-                            vw.as_mut_ptr(),
-                            vw.len() as i32,
+                            &val_full,
                             &mut lrc,
                             DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
                         );
@@ -1753,11 +1723,9 @@ impl FlyoutState<'_> {
                                 right: l + tw - s(8.0),
                                 bottom: t + s(20.0),
                             };
-                            let mut lw: Vec<u16> = lbl.encode_utf16().collect();
-                            DrawTextW(
+                            draw_gdi_text(
                                 hdc,
-                                lw.as_mut_ptr(),
-                                lw.len() as i32,
+                                lbl,
                                 &mut lrc,
                                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                             );
@@ -1769,11 +1737,9 @@ impl FlyoutState<'_> {
                                 right: l + tw - s(8.0),
                                 bottom: t + tile_h - s(5.0),
                             };
-                            let mut vw: Vec<u16> = val.encode_utf16().collect();
-                            DrawTextW(
+                            draw_gdi_text(
                                 hdc,
-                                vw.as_mut_ptr(),
-                                vw.len() as i32,
+                                val,
                                 &mut vrc,
                                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                             );
@@ -1819,14 +1785,7 @@ impl FlyoutState<'_> {
                             right: bx + bw,
                             bottom: by + bh,
                         };
-                        let mut cw: Vec<u16> = code.encode_utf16().collect();
-                        DrawTextW(
-                            hdc,
-                            cw.as_mut_ptr(),
-                            cw.len() as i32,
-                            &mut brc,
-                            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                        );
+                        draw_gdi_text(hdc, code, &mut brc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
                         SelectObject(
                             hdc,
@@ -1843,11 +1802,9 @@ impl FlyoutState<'_> {
                             right: pad + content_w - s(8.0),
                             bottom: y + h,
                         };
-                        let mut tw: Vec<u16> = title.encode_utf16().collect();
-                        DrawTextW(
+                        draw_gdi_text(
                             hdc,
-                            tw.as_mut_ptr(),
-                            tw.len() as i32,
+                            title,
                             &mut trc,
                             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                         );
@@ -1869,11 +1826,9 @@ impl FlyoutState<'_> {
                             right: pad + content_w - s(90.0),
                             bottom: y + h,
                         };
-                        let mut tw: Vec<u16> = title.encode_utf16().collect();
-                        DrawTextW(
+                        draw_gdi_text(
                             hdc,
-                            tw.as_mut_ptr(),
-                            tw.len() as i32,
+                            title,
                             &mut trc,
                             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                         );
@@ -1902,11 +1857,9 @@ impl FlyoutState<'_> {
                                 right: pad + content_w,
                                 bottom: y + h,
                             };
-                            let mut lw: Vec<u16> = lbl.encode_utf16().collect();
-                            DrawTextW(
+                            draw_gdi_text(
                                 hdc,
-                                lw.as_mut_ptr(),
-                                lw.len() as i32,
+                                lbl,
                                 &mut brc,
                                 DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                             );
@@ -1923,11 +1876,9 @@ impl FlyoutState<'_> {
                             right: right_edge,
                             bottom: y + h,
                         };
-                        let mut sw: Vec<u16> = status_label.encode_utf16().collect();
-                        DrawTextW(
+                        draw_gdi_text(
                             hdc,
-                            sw.as_mut_ptr(),
-                            sw.len() as i32,
+                            status_label,
                             &mut src,
                             DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
                         );
@@ -1991,11 +1942,9 @@ impl FlyoutState<'_> {
                                 right: left + tw - s(8.0),
                                 bottom: top + s(24.0),
                             };
-                            let mut tw_u16: Vec<u16> = title.encode_utf16().collect();
-                            DrawTextW(
+                            draw_gdi_text(
                                 hdc,
-                                tw_u16.as_mut_ptr(),
-                                tw_u16.len() as i32,
+                                title,
                                 &mut trc,
                                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                             );
@@ -2007,11 +1956,9 @@ impl FlyoutState<'_> {
                                 right: left + tw - s(8.0),
                                 bottom: top + tile_h - s(6.0),
                             };
-                            let mut sw_u16: Vec<u16> = state_lbl.encode_utf16().collect();
-                            DrawTextW(
+                            draw_gdi_text(
                                 hdc,
-                                sw_u16.as_mut_ptr(),
-                                sw_u16.len() as i32,
+                                state_lbl,
                                 &mut src,
                                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                             );
@@ -2028,24 +1975,15 @@ impl FlyoutState<'_> {
                             right: pad + content_w,
                             bottom: y + h,
                         };
-                        let mut lw: Vec<u16> = label.encode_utf16().collect();
-                        DrawTextW(
+                        draw_gdi_text(
                             hdc,
-                            lw.as_mut_ptr(),
-                            lw.len() as i32,
+                            label,
                             &mut rc,
                             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                         );
                         SelectObject(hdc, bold_font as _);
                         SetTextColor(hdc, text_fg);
-                        let mut vw: Vec<u16> = value.encode_utf16().collect();
-                        DrawTextW(
-                            hdc,
-                            vw.as_mut_ptr(),
-                            vw.len() as i32,
-                            &mut rc,
-                            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-                        );
+                        draw_gdi_text(hdc, value, &mut rc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
                         y += h;
                     }
                     FlyoutBlock::ProgressBar {
@@ -2063,20 +2001,16 @@ impl FlyoutState<'_> {
                             right: pad + content_w,
                             bottom: y + s(16.0),
                         };
-                        let mut lw: Vec<u16> = label.encode_utf16().collect();
-                        DrawTextW(
+                        draw_gdi_text(
                             hdc,
-                            lw.as_mut_ptr(),
-                            lw.len() as i32,
+                            label,
                             &mut rc,
                             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                         );
                         SetTextColor(hdc, text_fg);
-                        let mut vw: Vec<u16> = value_text.encode_utf16().collect();
-                        DrawTextW(
+                        draw_gdi_text(
                             hdc,
-                            vw.as_mut_ptr(),
-                            vw.len() as i32,
+                            value_text,
                             &mut rc,
                             DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
                         );
@@ -2144,11 +2078,9 @@ impl FlyoutState<'_> {
                             right: pad + content_w - s(10.0),
                             bottom: y + if subtitle.is_some() { s(21.0) } else { h },
                         };
-                        let mut tw: Vec<u16> = title.encode_utf16().collect();
-                        DrawTextW(
+                        draw_gdi_text(
                             hdc,
-                            tw.as_mut_ptr(),
-                            tw.len() as i32,
+                            title,
                             &mut trc,
                             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                         );
@@ -2162,11 +2094,9 @@ impl FlyoutState<'_> {
                                 right: pad + content_w - s(10.0),
                                 bottom: y + h - s(3.0),
                             };
-                            let mut sw: Vec<u16> = sub.encode_utf16().collect();
-                            DrawTextW(
+                            draw_gdi_text(
                                 hdc,
-                                sw.as_mut_ptr(),
-                                sw.len() as i32,
+                                sub,
                                 &mut src,
                                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                             );
@@ -2180,14 +2110,7 @@ impl FlyoutState<'_> {
                                 right: pad + content_w - s(10.0),
                                 bottom: y + h,
                             };
-                            let mut bw: Vec<u16> = b.encode_utf16().collect();
-                            DrawTextW(
-                                hdc,
-                                bw.as_mut_ptr(),
-                                bw.len() as i32,
-                                &mut brc,
-                                DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-                            );
+                            draw_gdi_text(hdc, b, &mut brc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
                         }
                         y += h + s(4.0);
                     }
@@ -2238,11 +2161,9 @@ impl FlyoutState<'_> {
                             right: app.right - s(6.0),
                             ..app
                         };
-                        let mut title: Vec<u16> = title.encode_utf16().collect();
-                        DrawTextW(
+                        draw_gdi_text(
                             hdc,
-                            title.as_mut_ptr(),
-                            title.len() as i32,
+                            title,
                             &mut rect,
                             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
                         );
@@ -2320,11 +2241,9 @@ impl FlyoutState<'_> {
                                 right: left + bw,
                                 bottom: y + h,
                             };
-                            let mut lw: Vec<u16> = label.encode_utf16().collect();
-                            DrawTextW(
+                            draw_gdi_text(
                                 hdc,
-                                lw.as_mut_ptr(),
-                                lw.len() as i32,
+                                label,
                                 &mut brc,
                                 DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                             );
@@ -2351,11 +2270,9 @@ impl FlyoutState<'_> {
                             right: pad + content_w,
                             bottom: y + h,
                         };
-                        let mut nw: Vec<u16> = text.encode_utf16().collect();
-                        DrawTextW(
+                        draw_gdi_text(
                             hdc,
-                            nw.as_mut_ptr(),
-                            nw.len() as i32,
+                            text,
                             &mut rc,
                             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
                         );
@@ -2601,7 +2518,38 @@ unsafe extern "system" fn flyout_wnd_proc(
 
 #[cfg(test)]
 mod tests {
-    use super::{app_row_targets, pt_in_rect};
+    use super::{
+        DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, RECT, app_row_targets, draw_gdi_text,
+        pt_in_rect,
+    };
+    use windows_sys::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC};
+
+    #[test]
+    fn draw_gdi_text_ignores_empty_strings_without_crashing() {
+        unsafe {
+            let hdc = CreateCompatibleDC(std::ptr::null_mut());
+            assert!(!hdc.is_null());
+            let mut rc = RECT {
+                left: 0,
+                top: 0,
+                right: 120,
+                bottom: 24,
+            };
+            draw_gdi_text(
+                hdc,
+                "",
+                &mut rc,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            draw_gdi_text(
+                hdc,
+                "Today",
+                &mut rc,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+            );
+            DeleteDC(hdc);
+        }
+    }
 
     #[test]
     fn background_app_targets_do_not_overlap_at_supported_scales() {
