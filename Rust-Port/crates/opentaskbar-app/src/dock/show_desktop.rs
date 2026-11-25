@@ -15,17 +15,16 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST,
-    IDC_HAND, LoadCursorW, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOSIZE, SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow, ULW_ALPHA,
-    UpdateLayeredWindow, WM_LBUTTONUP, WM_MOUSEMOVE, WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    IDC_HAND, LoadCursorW, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetCursor,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::platform::win32::MonitorInfo;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const STRIP_W_DIPS: f32 = 10.0;
-const STRIP_H_DIPS: f32 = 44.0;
 
 struct CornerState {
     hwnd: HWND,
@@ -77,10 +76,12 @@ impl CornerState {
                 px[3] = 1;
             }
 
-            // On hover, draw only a subtle Windows 11-style 2px vertical hairline.
+            // On hover, draw only a subtle Windows 11-style 1.5px vertical hairline scaled to dock height.
             if self.hovered {
                 let line_w = (1.5 * self.dpi).round().max(1.0) as usize;
-                let line_h = (22.0 * self.dpi).round() as usize;
+                let line_h = ((h as f32) * 0.45)
+                    .round()
+                    .clamp(16.0 * self.dpi, 34.0 * self.dpi) as usize;
                 let x0 = (w.saturating_sub(line_w + (3.0 * self.dpi).round() as usize)).min(w);
                 let x1 = (x0 + line_w).min(w);
                 let y0 = h.saturating_sub(line_h) / 2;
@@ -145,7 +146,12 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 impl ShowDesktopCorner {
-    pub fn new(monitor: MonitorInfo, is_dark: bool, visible: bool) -> Option<Self> {
+    pub fn new(
+        monitor: MonitorInfo,
+        height_dips: f32,
+        is_dark: bool,
+        visible: bool,
+    ) -> Option<Self> {
         let class_name = wide("OpenTaskBarShowDesktop");
         let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
         let wc = WNDCLASSEXW {
@@ -161,7 +167,7 @@ impl ShowDesktopCorner {
         }
 
         let w = (STRIP_W_DIPS * monitor.dpi_scale).round() as i32;
-        let h = (STRIP_H_DIPS * monitor.dpi_scale).round() as i32;
+        let h = (height_dips.clamp(32.0, 96.0) * monitor.dpi_scale).round() as i32;
         let x = monitor.right - w;
         let y = monitor.bottom - h;
 
@@ -197,38 +203,27 @@ impl ShowDesktopCorner {
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
             (*state).render();
-            SetWindowPos(
-                hwnd,
-                HWND_TOPMOST,
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
+            SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
             ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
         }
         Some(Self { hwnd, state })
     }
 
-    pub fn update(&self, is_dark: bool, visible: bool) {
+    pub fn update(&self, monitor: MonitorInfo, height_dips: f32, is_dark: bool, visible: bool) {
+        let w = (STRIP_W_DIPS * monitor.dpi_scale).round() as i32;
+        let h = (height_dips.clamp(32.0, 96.0) * monitor.dpi_scale).round() as i32;
+        let x = monitor.right - w;
+        let y = monitor.bottom - h;
         unsafe {
             if !self.state.is_null() {
+                (*self.state).w_px = w;
+                (*self.state).h_px = h;
+                (*self.state).dpi = monitor.dpi_scale;
                 (*self.state).is_dark = is_dark;
                 (*self.state).render();
             }
+            SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
             ShowWindow(self.hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
-            if visible {
-                SetWindowPos(
-                    self.hwnd,
-                    HWND_TOPMOST,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                );
-            }
         }
     }
 }

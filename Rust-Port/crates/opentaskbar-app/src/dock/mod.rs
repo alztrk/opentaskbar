@@ -14,7 +14,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 
 use opentaskbar_core::settings::{
-    AppTheme, AutoHideMode, DockPosition, DockSettings, SurfaceBackground,
+    self, AppTheme, AutoHideMode, DockPosition, DockSettings, SurfaceBackground,
 };
 use opentaskbar_shell::tracker::{self, RunningWindow};
 use windows::Win32::Graphics::DirectComposition::IDCompositionSurface;
@@ -30,12 +30,12 @@ use windows_sys::Win32::UI::Shell::DragAcceptFiles;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
     GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect, HTCLIENT, HTTRANSPARENT,
-    IDC_ARROW, IDC_HAND, IDC_SIZEWE, IsIconic, IsWindowVisible, KillTimer, LoadCursorW, MSG,
-    PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetCursor, SetTimer,
-    SetWindowLongPtrW, TranslateMessage, WM_APP, WM_DESTROY, WM_DROPFILES, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
+    HWND_BROADCAST, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IsIconic, IsWindowVisible, KillTimer,
+    LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW,
+    SetCursor, SetTimer, SetWindowLongPtrW, TranslateMessage, WM_APP, WM_DESTROY, WM_DROPFILES,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCHITTEST, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
 };
 
 pub mod dcomp;
@@ -684,8 +684,9 @@ impl DockState {
             &bin_empty_surf
         }));
 
+        let corner_h = pill_h + settings.dock_bottom_gap_pixels.max(0) as f32;
         let show_desktop_corner =
-            ShowDesktopCorner::new(monitor, is_dark, settings.show_desktop_button);
+            ShowDesktopCorner::new(monitor, corner_h, is_dark, settings.show_desktop_button);
 
         let dot_h_px = (3.5 * dpi).ceil() as u32;
         let dot_running = dcomp.create_rounded_rect_surface(
@@ -1144,7 +1145,14 @@ impl DockState {
         self.tooltip_cache = None;
         self.rebuild_theme_surfaces();
         if let Some(ref corner) = self.show_desktop_corner {
-            corner.update(self.is_dark, self.settings.show_desktop_button);
+            let corner_h = pill_height_dips(&self.settings)
+                + self.settings.dock_bottom_gap_pixels.max(0) as f32;
+            corner.update(
+                self.monitor,
+                corner_h,
+                self.is_dark,
+                self.settings.show_desktop_button,
+            );
         }
         if self.monitor.is_primary {
             let auto_hide = self.settings.auto_hide != AutoHideMode::Disabled;
@@ -2325,7 +2333,11 @@ impl DockState {
                 && Self::hit_rect(Some(rc), mx, my)
             {
                 let (ax, ay) = self.flyout_anchor_px(rc);
-                tray::open_background_apps_flyout(self.hwnd, self.is_dark, ax, ay);
+                if let Some((path, pinned)) =
+                    tray::open_background_apps_flyout(self.hwnd, self.is_dark, ax, ay, &self.pins)
+                {
+                    self.set_dock_pin(&path, pinned);
+                }
             }
             return;
         }
@@ -2444,42 +2456,40 @@ impl DockState {
         let Some(slot) = self.slots.get(idx).cloned() else {
             return;
         };
-        if slot.pinned {
-            self.settings
-                .user_pinned_apps
-                .retain(|p| !p.eq_ignore_ascii_case(&slot.launch_path));
-            if !self
-                .settings
-                .user_unpinned_apps
-                .iter()
-                .any(|p| p.eq_ignore_ascii_case(&slot.launch_path))
-            {
-                self.settings
-                    .user_unpinned_apps
-                    .push(slot.launch_path.clone());
-            }
-        } else {
-            self.settings
-                .user_unpinned_apps
-                .retain(|p| !p.eq_ignore_ascii_case(&slot.launch_path));
-            if !self
-                .settings
-                .user_pinned_apps
-                .iter()
-                .any(|p| p.eq_ignore_ascii_case(&slot.launch_path))
-            {
-                self.settings
-                    .user_pinned_apps
-                    .push(slot.launch_path.clone());
-            }
+        self.set_dock_pin(&slot.launch_path, !slot.pinned);
+    }
+
+    fn set_dock_pin(&mut self, path: &str, pinned: bool) {
+        if pinned && pins::pin_from_path(path).is_none() {
+            tray::show_action_error(
+                self.hwnd,
+                "Could not pin the app. Its executable or shortcut is unavailable.",
+            );
+            return;
         }
-        let _ = opentaskbar_core::settings::save_to(
-            &opentaskbar_core::settings::settings_path(),
-            &self.settings,
-        );
-        self.pins = load_effective_pins(&self.settings);
-        self.sync_slots();
-        self.update_visuals();
+        let settings_path = settings::settings_path();
+        let mut next = settings::load_from(&settings_path);
+        let (add, remove) = if pinned {
+            (&mut next.user_pinned_apps, &mut next.user_unpinned_apps)
+        } else {
+            (&mut next.user_unpinned_apps, &mut next.user_pinned_apps)
+        };
+        remove.retain(|entry| !entry.eq_ignore_ascii_case(path));
+        if !add.iter().any(|entry| entry.eq_ignore_ascii_case(path)) {
+            add.push(path.to_owned());
+        }
+        if settings::save_to(&settings_path, &next).is_err() {
+            tray::show_action_error(
+                self.hwnd,
+                "Could not save the dock pin. Check that the settings folder is writable and try again.",
+            );
+            return;
+        }
+
+        self.reload_settings_live();
+        if self.settings.show_on_all_monitors && self.reload_msg != 0 {
+            unsafe { PostMessageW(HWND_BROADCAST, self.reload_msg, self.hwnd, 0) };
+        }
     }
 
     fn handle_drop_files(&mut self, hdrop: usize) {
@@ -2640,7 +2650,9 @@ unsafe extern "system" fn wnd_proc(
     let state = unsafe { &mut *ptr };
 
     if msg != 0 && msg == state.reload_msg {
-        state.reload_settings_live();
+        if wparam != state.hwnd {
+            state.reload_settings_live();
+        }
         return 0;
     }
 
