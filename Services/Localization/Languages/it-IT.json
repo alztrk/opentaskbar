@@ -135,6 +135,8 @@
   "TerminatePrompt": "Terminare forzatamente {1} processi di {0}? I dati non salvati andranno persi. Continuare?",
   "Magnification": "Ingrandimento",
   "MagnificationDescription": "Ingrandisce le icone al passaggio del mouse.",
+  "MagnificationExpandsDock": "Allarga il dock durante l'ingrandimento",
+  "MagnificationExpandsDockDescription": "Il dock si allarga lateralmente per fare spazio alle icone ingrandite. Disattivato: il dock mantiene la larghezza e le icone crescono sul posto.",
   "Layout": "Layout",
   "DockSize": "Dimensioni",
   "DockSizeDescription": "Il formato compatto corrisponde all’altezza della barra delle applicazioni di Windows. I formati medio e grande occupano più spazio sullo schermo.",

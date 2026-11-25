@@ -135,6 +135,8 @@
   "TerminatePrompt": "Geforceerd {1} processen van {0} beëindigen? Niet-opgeslagen werk kan verloren gaan. Doorgaan?",
   "Magnification": "Pictogramvergroting",
   "MagnificationDescription": "Vergroot pictogrammen wanneer de muisaanwijzer erover beweegt.",
+  "MagnificationExpandsDock": "Dock verbreden bij vergroten",
+  "MagnificationExpandsDockDescription": "Het dock wordt breder om ruimte te maken voor vergrote pictogrammen. Uit: het dock houdt een vaste breedte en pictogrammen groeien op hun plek.",
   "Layout": "Indeling",
   "DockSize": "Dockgrootte",
   "DockSizeDescription": "Compact komt overeen met de hoogte van de Windows-taakbalk. Middel en groot nemen meer schermruimte in.",

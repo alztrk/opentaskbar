@@ -135,6 +135,8 @@
   "TerminatePrompt": "是否强行终止属于 {0} 的 {1} 个进程？未保存的数据可能会丢失。是否继续？",
   "Magnification": "放大特效",
   "MagnificationDescription": "鼠标悬停在程序坞项目上时放大图标。",
+  "MagnificationExpandsDock": "放大时加宽程序坞",
+  "MagnificationExpandsDockDescription": "放大图标时向两侧加宽程序坞。关闭后程序坞宽度保持不变，图标在原位放大。",
   "Layout": "布局",
   "DockSize": "尺寸",
   "DockSizeDescription": "紧凑大小与 Windows 任务栏高度相同。中等和大型会占用更多屏幕空间。",

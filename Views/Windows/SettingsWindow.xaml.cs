@@ -181,6 +181,7 @@ public partial class SettingsWindow : Window
         SelectChoice(AutoHideBox, _applied.AutoHide.ToString());
         LoadSurfaceStyles(_applied);
         MagnificationToggle.IsChecked = _applied.MagnificationEnabled;
+        MagnificationExpandsDockToggle.IsChecked = _applied.MagnificationExpandsDock;
         SelectChoice(SizeBox, _applied.Size.ToString());
         DockIconPaddingSlider.Value = _applied.DockIconPadding;
         UpdateDockIconPaddingLabel();
@@ -534,6 +535,7 @@ public partial class SettingsWindow : Window
             DynamicIslandBackgroundColor = _dynamicIslandBackgroundColor,
             DynamicIslandOpacity = Math.Round(DynamicIslandOpacitySlider.Value) / 100,
             MagnificationEnabled = MagnificationToggle.IsChecked == true,
+            MagnificationExpandsDock = MagnificationExpandsDockToggle.IsChecked == true,
             Layout = Choice(PositionBox) == "FullWidth" ? DockLayout.FullWidth : DockLayout.Floating,
             Size = Enum.TryParse<DockSize>(Choice(SizeBox), out var size) ? size : DockSize.Compact,
             DockIconPadding = (int)Math.Round(DockIconPaddingSlider.Value),
@@ -2790,6 +2792,7 @@ public partial class SettingsWindow : Window
         SelectChoice(AutoHideBox, settings.AutoHide.ToString());
         LoadSurfaceStyles(settings);
         MagnificationToggle.IsChecked = settings.MagnificationEnabled;
+        MagnificationExpandsDockToggle.IsChecked = settings.MagnificationExpandsDock;
         SelectChoice(SizeBox, settings.Size.ToString());
         DockIconPaddingSlider.Value = settings.DockIconPadding;
         DockScaleSlider.Value = Math.Round(settings.DockScale * 100);
@@ -2837,6 +2840,7 @@ public partial class SettingsWindow : Window
             UpdateAutoHideControls();
             AnimationsToggle.IsChecked = defaults.AnimationsEnabled;
             MagnificationToggle.IsChecked = defaults.MagnificationEnabled;
+            MagnificationExpandsDockToggle.IsChecked = defaults.MagnificationExpandsDock;
             PreviewsToggle.IsChecked = defaults.PreviewsEnabled;
             DynamicIslandEnabledToggle.IsChecked = defaults.DynamicIslandEnabled;
             SelectChoice(DynamicIslandVisibilityBox, defaults.DynamicIslandVisibility.ToString());

@@ -135,6 +135,8 @@
   "TerminatePrompt": "Wymusić zakończenie {1} procesów należących do {0}? Niezapisane dane mogą zostać utracone. Kontynuować?",
   "Magnification": "Powiększenie ikon",
   "MagnificationDescription": "Powiększaj ikony aplikacji po najechaniu kursorem myszy.",
+  "MagnificationExpandsDock": "Poszerzaj dock podczas powiększania",
+  "MagnificationExpandsDockDescription": "Dock rozszerza się na boki, aby zrobić miejsce dla powiększonych ikon. Wyłączone: dock ma stałą szerokość, a ikony rosną w miejscu.",
   "Layout": "Układ",
   "DockSize": "Rozmiar doku",
   "DockSizeDescription": "Rozmiar kompaktowy odpowiada wysokości paska zadań Windows. Średni i duży zajmują więcej miejsca na ekranie.",

@@ -135,6 +135,8 @@
   "TerminatePrompt": "Forçar o encerramento de {1} processos de {0}? Dados não salvos serão perdidos. Continuar?",
   "Magnification": "Ampliação",
   "MagnificationDescription": "Ampliar ícones ao passar o cursor do mouse.",
+  "MagnificationExpandsDock": "Alargar o dock ao ampliar",
+  "MagnificationExpandsDockDescription": "O dock cresce para os lados para abrir espaço aos ícones ampliados. Desativado: o dock mantém a largura e os ícones crescem no lugar.",
   "Layout": "Layout",
   "DockSize": "Tamanho",
   "DockSizeDescription": "O tamanho compacto corresponde à altura da barra de tarefas do Windows. Os tamanhos médio e grande reservam mais espaço na tela.",

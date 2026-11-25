@@ -209,6 +209,8 @@
   "TerminatePrompt": "{0} uygulamasına ait {1} süreç zorla sonlandırılacak. Kaydedilmemiş çalışmalar kaybolabilir. Devam edilsin?",
   "Magnification": "Simge büyütme",
   "MagnificationDescription": "İşaretçinin altındaki simgeleri dalga gibi büyüt.",
+  "MagnificationExpandsDock": "Büyütürken dock'u genişlet",
+  "MagnificationExpandsDockDescription": "Büyüyen simgelere yer açmak için dock'u yanlara genişlet. Kapalıyken dock sabit genişlikte kalır, simgeler yerinde büyür.",
   "Layout": "Yerleşim",
   "DockSize": "Dock boyutu",
   "DockSizeDescription": "Kompakt, Windows görev çubuğu yüksekliğine oturur. Orta ve Büyük ek ekran alanı ayırır.",

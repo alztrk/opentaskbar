@@ -164,6 +164,7 @@ public sealed record DockSettings(
     DockContentAlignment ContentAlignment = DockContentAlignment.Center,
     DockSize Size = DockSize.Compact,
     bool MagnificationEnabled = true,
+    bool MagnificationExpandsDock = true,
     bool ShowClock = false,
     bool ShowMedia = false,
     bool ShowSystemStats = false,

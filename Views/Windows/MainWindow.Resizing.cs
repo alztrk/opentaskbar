@@ -215,6 +215,7 @@ public partial class MainWindow
         var magnificationHeadroom = _preferences.Current.MagnificationEnabled
             && _preferences.Current.EffectiveAnimationsEnabled
             && _dockWidthOverride is null
+            && _preferences.Current.MagnificationExpandsDock
             ? DockFisheyeLayout.PeakExpansionNeed(Profile.Cell, DockMetrics.HoverScale)
             : 0.0;
         var shadowMarginPerSide = ComputeShadowMarginPerSide(DockShadowLayer.Effect);

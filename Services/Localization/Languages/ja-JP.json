@@ -135,6 +135,8 @@
   "TerminatePrompt": "{0} の {1} 個のプロセスを強制終了します。未保存の作業は失われる可能性があります。続行しますか？",
   "Magnification": "アイコン拡大",
   "MagnificationDescription": "ポインターの下のアイコンをなめらかな波で拡大します。",
+  "MagnificationExpandsDock": "拡大時に Dock を広げる",
+  "MagnificationExpandsDockDescription": "拡大したアイコンのために Dock を左右に広げます。オフにすると Dock の幅は固定され、アイコンはその場で拡大します。",
   "Layout": "レイアウト",
   "DockSize": "ドック サイズ",
   "DockSizeDescription": "コンパクトは Windows タスクバーと同じ高さです。中と大は追加の画面領域を確保します。",

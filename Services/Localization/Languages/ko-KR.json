@@ -135,6 +135,8 @@
   "TerminatePrompt": "{0}에 속한 프로세스 {1}개를 강제 종료하시겠습니까? 저장되지 않은 작업이 손실될 수 있습니다. 계속할까요?",
   "Magnification": "확대 효과",
   "MagnificationDescription": "마우스를 올릴 때 독 아이콘을 확대합니다.",
+  "MagnificationExpandsDock": "확대 시 독 넓히기",
+  "MagnificationExpandsDockDescription": "확대된 아이콘을 위해 독을 좌우로 넓힙니다. 끄면 독 너비가 고정되고 아이콘이 제자리에서 커집니다.",
   "Layout": "레이아웃",
   "DockSize": "크기",
   "DockSizeDescription": "컴팩트 크기는 Windows 작업 표시줄 높이와 같습니다. 중간 및 큰 크기는 화면 공간을 더 차지합니다.",
