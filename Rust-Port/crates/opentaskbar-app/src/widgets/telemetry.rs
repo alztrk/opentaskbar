@@ -106,9 +106,18 @@ pub fn local_clock_strings() -> (String, String) {
     unsafe {
         GetLocalTime(&mut st);
     }
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let dow = DAYS.get(usize::from(st.wDayOfWeek)).copied().unwrap_or("");
+    let mon = MONTHS
+        .get(usize::from(st.wMonth.saturating_sub(1)))
+        .copied()
+        .unwrap_or("");
     (
         format!("{:02}:{:02}", st.wHour, st.wMinute),
-        format!("{:02}.{:02}.{}", st.wDay, st.wMonth, st.wYear),
+        format!("{dow}, {} {mon}", st.wDay),
     )
 }
 
@@ -195,6 +204,19 @@ pub fn adjust_audio_volume(delta_pct: i32) {
     }
 }
 
+pub fn set_audio_volume(pct: u32) {
+    let Some(ep) = endpoint_volume() else {
+        return;
+    };
+    let scalar = (pct.min(100) as f32) / 100.0;
+    unsafe {
+        let _ = ep.SetMasterVolumeLevelScalar(scalar, std::ptr::null());
+        if pct > 0 {
+            let _ = ep.SetMute(false, std::ptr::null());
+        }
+    }
+}
+
 pub fn toggle_audio_mute() {
     let Some(ep) = endpoint_volume() else {
         return;
@@ -275,11 +297,11 @@ fn read_total_net_bytes() -> (u64, u64) {
 
 pub fn format_speed(bps: u64) -> String {
     if bps >= 1_048_576 {
-        format!("{:.1}M", bps as f64 / 1_048_576.0)
+        format!("{:.1} MB/s", bps as f64 / 1_048_576.0)
     } else if bps >= 1024 {
-        format!("{}K", bps / 1024)
+        format!("{} KB/s", bps / 1024)
     } else {
-        format!("{bps}B")
+        format!("{bps} B/s")
     }
 }
 
@@ -456,6 +478,20 @@ pub fn activate_keyboard_layout(hkl: isize) {
     unsafe {
         ActivateKeyboardLayout(hkl as _, 0);
     }
+}
+
+pub fn cycle_keyboard_layout() {
+    let layouts = installed_keyboard_layouts();
+    if layouts.len() < 2 {
+        return;
+    }
+    let active = active_keyboard_code();
+    let idx = layouts
+        .iter()
+        .position(|(_, code)| code == &active)
+        .unwrap_or(0);
+    let next = (idx + 1) % layouts.len();
+    activate_keyboard_layout(layouts[next].0);
 }
 
 // --- Day Progress ---

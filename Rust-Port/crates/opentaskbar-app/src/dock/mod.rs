@@ -43,7 +43,7 @@ pub mod preview;
 pub mod show_desktop;
 pub mod tray;
 
-use self::dcomp::{DcompEngine, PillNodes, ShellGlyph, VisualNode};
+use self::dcomp::{DcompEngine, PillNodes, ShellGlyph, VisualNode, WidgetInteraction};
 use self::preview::{PreviewItem, PreviewPopup};
 use self::show_desktop::ShowDesktopCorner;
 use crate::design;
@@ -320,6 +320,7 @@ struct DockState {
     hovered_tray_pin: Option<usize>,
     hovered_bin: bool,
     hovered_widget: Option<&'static str>,
+    hovered_widget_sub: Option<u8>,
     hovered_resize: Option<ResizeEdge>,
     pressed_idx: Option<usize>,
     pressed_shell: Option<ShellButton>,
@@ -913,6 +914,7 @@ impl DockState {
             hovered_tray_pin: None,
             hovered_bin: false,
             hovered_widget: None,
+            hovered_widget_sub: None,
             hovered_resize: None,
             pressed_idx: None,
             pressed_shell: None,
@@ -1095,10 +1097,21 @@ impl DockState {
         let mut changed = false;
         let widget_h = design::widget_height_dips(pill_height_dips(&self.settings));
         for wv in &mut self.widget_visuals {
+            let interaction = if self.pressed_widget == Some(wv.id) {
+                WidgetInteraction::Pressed(self.hovered_widget_sub)
+            } else if self.hovered_widget == Some(wv.id) {
+                WidgetInteraction::Hovered(self.hovered_widget_sub)
+            } else {
+                WidgetInteraction::Idle
+            };
             let spec = self
                 .widget_runtime
                 .chip_spec(wv.id, &self.settings, self.is_dark);
-            let key = format!("{}|{widget_h:.1}|{}", spec.cache_key(), self.is_dark);
+            let key = format!(
+                "{}|{widget_h:.1}|{}|{interaction:?}",
+                spec.cache_key(),
+                self.is_dark
+            );
             if key != wv.last_key
                 && let Ok(surf) = self.dcomp.create_widget_chip_surface(
                     &spec,
@@ -1106,6 +1119,7 @@ impl DockState {
                     widget_h,
                     self.dpi,
                     self.is_dark,
+                    interaction,
                 )
             {
                 wv.node.set_content(Some(&surf));
@@ -2112,23 +2126,9 @@ impl DockState {
 
             for wv in self.widget_visuals.iter().rev() {
                 let wx = right_cursor - wv.width_dips;
-                let is_pressed = self.pressed_widget == Some(wv.id);
-                let is_hovered = self.hovered_widget == Some(wv.id);
-                if is_pressed || is_hovered {
-                    wv.bg.set_content(Some(if is_pressed {
-                        &self.shell_bg_press
-                    } else {
-                        &self.shell_bg_hover
-                    }));
-                    wv.bg.set_transform(
-                        wv.width_dips / base,
-                        widget_h / base,
-                        (wx * dpi).round(),
-                        (widget_top * dpi).round(),
-                    );
-                } else {
-                    wv.bg.hide();
-                }
+                // Widget hover/press states are rendered natively on the card surface itself
+                // so corner radii never distort when stretched across wide widget cards.
+                wv.bg.hide();
                 wv.node
                     .set_transform(1.0, 1.0, (wx * dpi).round(), (widget_top * dpi).round());
                 right_cursor -= wv.width_dips + 6.0;
@@ -2277,9 +2277,9 @@ impl DockState {
                 .iter()
                 .find(|(id, _)| *id == wid)
                 .map_or(pill_left + pill_w - 60.0, |(_, (l, _, r, _))| (l + r) * 0.5);
-            let label = widgets::widget_descriptor(wid)
-                .map_or(wid, |d| d.name)
-                .to_owned();
+            let label =
+                self.widget_runtime
+                    .hover_tooltip(wid, self.hovered_widget_sub, &self.settings);
             Some((label, cx, pill_top - 8.0))
         } else if let Some(shell) = self.hovered_shell {
             Some((
@@ -2519,24 +2519,41 @@ impl DockState {
         let over_tray = Self::hit_rect(tray_rc, mx, my);
         let over_tray_pin = self.hit_tray_pin(tray_rc, mx, my);
         let over_bin = Self::hit_rect(bin_rc, mx, my);
-        let over_widget = wrects
+        let over_widget_hit = wrects
             .iter()
             .find(|(_, rc)| Self::hit_rect(Some(*rc), mx, my))
-            .map(|(id, _)| *id);
+            .copied();
+        let over_widget = over_widget_hit.map(|(id, _)| id);
+        let over_widget_sub = over_widget_hit.and_then(|(id, rc)| {
+            let rel_x = mx - rc.0;
+            let w = (rc.2 - rc.0).max(1.0);
+            match id {
+                "media" | "quicksettings" => Some(((rel_x / (w / 3.0)).floor() as u8).min(2)),
+                "audio" => Some(if rel_x < 35.0 { 0 } else { 1 }),
+                _ => None,
+            }
+        });
         if over_tray != self.hovered_tray
             || over_tray_pin != self.hovered_tray_pin
             || over_bin != self.hovered_bin
             || over_widget != self.hovered_widget
+            || over_widget_sub != self.hovered_widget_sub
         {
+            let widget_changed =
+                over_widget != self.hovered_widget || over_widget_sub != self.hovered_widget_sub;
             self.hovered_tray = over_tray;
             self.hovered_tray_pin = over_tray_pin;
             self.hovered_bin = over_bin;
             self.hovered_widget = over_widget;
+            self.hovered_widget_sub = over_widget_sub;
             if over_tray || over_tray_pin.is_some() || over_bin || over_widget.is_some() {
                 self.hovered_shell = None;
                 self.hover_mouse_x = None;
                 self.hovered_idx = None;
                 self.sync_preview_hover();
+            }
+            if widget_changed {
+                self.refresh_widgets();
             }
             self.ensure_animation();
             self.update_visuals();
@@ -2602,11 +2619,13 @@ impl DockState {
         }
         self.hover_mouse_x = None;
         self.hovered_idx = None;
+        let had_widget = self.hovered_widget.is_some() || self.pressed_widget.is_some();
         self.hovered_shell = None;
         self.hovered_tray = false;
         self.hovered_tray_pin = None;
         self.hovered_bin = false;
         self.hovered_widget = None;
+        self.hovered_widget_sub = None;
         self.hovered_resize = None;
         self.pressed_shell = None;
         self.pressed_tray = false;
@@ -2614,6 +2633,9 @@ impl DockState {
         self.pressed_bin = false;
         self.pressed_widget = None;
         self.pressed_idx = None;
+        if had_widget {
+            self.refresh_widgets();
+        }
         self.schedule_preview_hide();
         self.evaluate_auto_hide();
         self.ensure_animation();
@@ -2663,6 +2685,7 @@ impl DockState {
             .find(|(_, rc)| Self::hit_rect(Some(*rc), mx, my))
         {
             self.pressed_widget = Some(*wid);
+            self.refresh_widgets();
             self.update_visuals();
             return;
         }
@@ -2740,24 +2763,44 @@ impl DockState {
                 .iter()
                 .find(|(id, rc)| *id == wid && Self::hit_rect(Some(*rc), mx, my))
             {
-                let (ax, ay) = self.flyout_anchor_px(*rc);
-                let changed = self.widget_runtime.open_widget_flyout(
-                    wid,
-                    self.hwnd,
-                    self.is_dark,
-                    ax,
-                    ay,
-                    &mut self.settings,
-                );
-                if changed {
-                    let _ = opentaskbar_core::settings::save_to(
-                        &opentaskbar_core::settings::settings_path(),
-                        &self.settings,
-                    );
-                    self.reload_settings_live();
-                } else {
-                    self.refresh_widgets();
-                    self.update_visuals();
+                let rel_x = mx - rc.0;
+                let width = (rc.2 - rc.0).max(1.0);
+                let outcome =
+                    self.widget_runtime
+                        .handle_direct_click(wid, rel_x, width, &mut self.settings);
+                match outcome {
+                    widgets::DirectClickOutcome::SettingsChanged => {
+                        let _ = opentaskbar_core::settings::save_to(
+                            &opentaskbar_core::settings::settings_path(),
+                            &self.settings,
+                        );
+                        self.reload_settings_live();
+                    }
+                    widgets::DirectClickOutcome::Handled => {
+                        self.refresh_widgets();
+                        self.update_visuals();
+                    }
+                    widgets::DirectClickOutcome::OpenFlyout => {
+                        let (ax, ay) = self.flyout_anchor_px(*rc);
+                        let changed = self.widget_runtime.open_widget_flyout(
+                            wid,
+                            self.hwnd,
+                            self.is_dark,
+                            ax,
+                            ay,
+                            &mut self.settings,
+                        );
+                        if changed {
+                            let _ = opentaskbar_core::settings::save_to(
+                                &opentaskbar_core::settings::settings_path(),
+                                &self.settings,
+                            );
+                            self.reload_settings_live();
+                        } else {
+                            self.refresh_widgets();
+                            self.update_visuals();
+                        }
+                    }
                 }
             }
             return;
@@ -2944,7 +2987,7 @@ impl DockState {
     fn handle_rbutton_up(&mut self, mx: f32, my: f32) {
         self.hide_preview_now();
 
-        let (tray_rc, bin_rc, _) = self.right_widget_rects_dips();
+        let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
         if let Some(index) = self.hit_tray_pin(tray_rc, mx, my) {
             let path = self.settings.user_pinned_background_apps[index].clone();
             if tray::show_pinned_app_menu(self.hwnd, self.is_dark, &path) {
@@ -2961,6 +3004,28 @@ impl DockState {
                     self.update_visuals();
                 }
                 RecycleBinAction::None => {}
+            }
+            return;
+        }
+        if let Some((wid, _)) = wrects
+            .iter()
+            .find(|(_, rc)| Self::hit_rect(Some(*rc), mx, my))
+            && let Some(outcome) = self
+                .widget_runtime
+                .handle_secondary_click(wid, &mut self.settings)
+        {
+            match outcome {
+                widgets::DirectClickOutcome::SettingsChanged => {
+                    let _ = opentaskbar_core::settings::save_to(
+                        &opentaskbar_core::settings::settings_path(),
+                        &self.settings,
+                    );
+                    self.reload_settings_live();
+                }
+                widgets::DirectClickOutcome::Handled | widgets::DirectClickOutcome::OpenFlyout => {
+                    self.refresh_widgets();
+                    self.update_visuals();
+                }
             }
             return;
         }

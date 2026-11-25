@@ -27,7 +27,7 @@ use crate::ui::flyout::{self, BarTone, FlyoutBlock, FlyoutSpec};
 pub use telemetry::{
     active_keyboard_code, adjust_audio_volume, day_progress_metrics, empty_recycle_bin,
     get_audio_state, is_recycle_bin_non_empty, local_clock_strings, sample_battery, sample_drives,
-    sample_ram_info, toggle_audio_mute,
+    sample_ram_info, set_audio_volume, toggle_audio_mute,
 };
 
 pub const WIDGET_CATEGORIES: &[&str] = &[
@@ -60,41 +60,42 @@ const fn wd(
     }
 }
 
-/// All 23 C# catalog widgets in exact C# category and declaration order, with archetype-matched widths.
+/// All 23 C# catalog widgets in exact C# category and declaration order, sized for
+/// self-contained, directly glanceable on-dock cards (no flyout required).
 pub const ALL_WIDGETS: &[WidgetDescriptor] = &[
     // Time & Weather
-    wd("clock", "Clock & Date", "Time & Weather", 78.0),
-    wd("weather", "Weather", "Time & Weather", 68.0),
-    wd("dayprogress", "Day Progress", "Time & Weather", 66.0),
-    wd("stopwatch", "Stopwatch", "Time & Weather", 72.0),
-    wd("countdown", "Countdown", "Time & Weather", 72.0),
+    wd("clock", "Clock & Date", "Time & Weather", 92.0),
+    wd("weather", "Weather", "Time & Weather", 118.0),
+    wd("dayprogress", "Day Progress", "Time & Weather", 102.0),
+    wd("stopwatch", "Stopwatch", "Time & Weather", 104.0),
+    wd("countdown", "Countdown", "Time & Weather", 104.0),
     // System & Hardware
-    wd("stats", "System Stats", "System & Hardware", 80.0),
-    wd("netspeed", "Net Speed", "System & Hardware", 78.0),
-    wd("battery", "Battery", "System & Hardware", 64.0),
+    wd("stats", "System Stats", "System & Hardware", 132.0),
+    wd("netspeed", "Net Speed", "System & Hardware", 108.0),
+    wd("battery", "Battery", "System & Hardware", 102.0),
     wd(
         "bluetoothbattery",
         "Bluetooth Battery",
         "System & Hardware",
-        66.0,
+        118.0,
     ),
-    wd("storage", "Storage", "System & Hardware", 72.0),
+    wd("storage", "Storage", "System & Hardware", 116.0),
     // AI Quotas
-    wd("aiusage_claude", "Claude", "AI Quotas", 70.0),
-    wd("aiusage_codex", "Codex", "AI Quotas", 68.0),
-    wd("aiusage_antigravity", "Antigravity", "AI Quotas", 84.0),
-    wd("aiusage_opencode", "OpenCode", "AI Quotas", 80.0),
-    wd("aiusage_copilot", "Copilot", "AI Quotas", 74.0),
-    wd("aiusage_deepseek", "DeepSeek", "AI Quotas", 80.0),
-    wd("aiusage_openrouter", "OpenRouter", "AI Quotas", 86.0),
-    wd("aiusage_cursor", "Cursor", "AI Quotas", 70.0),
+    wd("aiusage_claude", "Claude", "AI Quotas", 104.0),
+    wd("aiusage_codex", "Codex", "AI Quotas", 102.0),
+    wd("aiusage_antigravity", "Antigravity", "AI Quotas", 118.0),
+    wd("aiusage_opencode", "OpenCode", "AI Quotas", 114.0),
+    wd("aiusage_copilot", "Copilot", "AI Quotas", 106.0),
+    wd("aiusage_deepseek", "DeepSeek", "AI Quotas", 114.0),
+    wd("aiusage_openrouter", "OpenRouter", "AI Quotas", 120.0),
+    wd("aiusage_cursor", "Cursor", "AI Quotas", 104.0),
     // Media & Controls
-    wd("media", "Media", "Media & Controls", 40.0),
-    wd("audio", "Audio", "Media & Controls", 66.0),
-    wd("quicksettings", "Quick Settings", "Media & Controls", 40.0),
-    wd("keyboard", "Keyboard Layout", "Media & Controls", 44.0),
+    wd("media", "Media", "Media & Controls", 106.0),
+    wd("audio", "Audio", "Media & Controls", 114.0),
+    wd("quicksettings", "Quick Settings", "Media & Controls", 106.0),
+    wd("keyboard", "Keyboard Layout", "Media & Controls", 52.0),
     // Productivity
-    wd("focus", "Focus", "Productivity", 72.0),
+    wd("focus", "Focus", "Productivity", 108.0),
 ];
 
 pub fn ai_provider_color(id: &str) -> Rgb {
@@ -111,8 +112,30 @@ pub fn ai_provider_color(id: &str) -> Rgb {
     }
 }
 
-const STACKS_WIDGET: WidgetDescriptor = wd("stacks", "Folder Stacks", "System & Hardware", 58.0);
-const GROUPS_WIDGET: WidgetDescriptor = wd("groups", "App Groups", "System & Hardware", 58.0);
+fn ai_provider_monogram(id: &str) -> &'static str {
+    match id {
+        "aiusage_claude" => "C",
+        "aiusage_codex" => "X",
+        "aiusage_antigravity" => "A",
+        "aiusage_opencode" => "O",
+        "aiusage_copilot" => "G",
+        "aiusage_deepseek" => "D",
+        "aiusage_openrouter" => "R",
+        "aiusage_cursor" => "K",
+        _ => "?",
+    }
+}
+
+/// Result of a direct left-click on a dock widget chip (avoids opening unnecessary flyouts).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirectClickOutcome {
+    Handled,
+    SettingsChanged,
+    OpenFlyout,
+}
+
+const STACKS_WIDGET: WidgetDescriptor = wd("stacks", "Folder Stacks", "System & Hardware", 94.0);
+const GROUPS_WIDGET: WidgetDescriptor = wd("groups", "App Groups", "System & Hardware", 94.0);
 
 pub fn widget_descriptor(id: &str) -> Option<&'static WidgetDescriptor> {
     if id.eq_ignore_ascii_case("stacks") {
@@ -230,12 +253,13 @@ impl WidgetRuntime {
         }
     }
 
-    /// Builds the archetype-matched `WidgetChipSpec` rendered onto the dock pill.
+    /// Builds the self-contained, directly glanceable `WidgetChipSpec` rendered onto the dock pill.
     pub fn chip_spec(&self, id: &str, settings: &DockSettings, is_dark: bool) -> WidgetChipSpec {
         let pal = design::palette(is_dark);
         if let Some(ai) = telemetry::ai_provider_meta(id) {
-            return WidgetChipSpec::Provider {
-                label: ai.name.to_owned(),
+            return WidgetChipSpec::ProviderBadge {
+                name: ai.name.to_owned(),
+                monogram: ai_provider_monogram(ai.id).to_owned(),
                 color: ai_provider_color(ai.id),
                 detected: telemetry::ai_provider_detected(ai.id),
             };
@@ -246,149 +270,546 @@ impl WidgetRuntime {
                 WidgetChipSpec::DateTime { time, date }
             }
             "weather" => {
-                let temp = self
+                let snap = self
                     .weather
                     .lock()
                     .ok()
-                    .map(|g| g.temp_c.clone())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "--°".to_owned());
-                WidgetChipSpec::IconValue {
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
+                let temp = if snap.temp_c.is_empty() {
+                    "--°C".to_owned()
+                } else {
+                    snap.temp_c
+                };
+                let subtitle = if !snap.condition.is_empty() {
+                    snap.condition
+                } else if !snap.city.is_empty() {
+                    snap.city
+                } else {
+                    settings.weather_city.clone()
+                };
+                let cond_low = subtitle.to_ascii_lowercase();
+                let icon_color = if cond_low.contains("rain")
+                    || cond_low.contains("drizzle")
+                    || cond_low.contains("storm")
+                {
+                    pal.accent
+                } else if cond_low.contains("sun") || cond_low.contains("clear") {
+                    pal.warning
+                } else {
+                    (0x38, 0xbd, 0xf8)
+                };
+                WidgetChipSpec::IconTwoLine {
                     icon: ChipIcon::SunCloud,
-                    value: temp,
-                    active_tint: false,
+                    icon_color,
+                    top: temp,
+                    bottom: subtitle,
+                    bottom_color: None,
+                    active_tint: None,
+                    bar: None,
                 }
             }
             "dayprogress" => {
-                let (day, _, _, _) = day_progress_metrics();
-                WidgetChipSpec::ProgressRing {
+                let (day, _, _, left) = day_progress_metrics();
+                WidgetChipSpec::RingTwoLine {
                     ratio: day,
-                    value: format!("{:.0}%", day * 100.0),
-                    color: pal.accent,
-                    active_tint: false,
+                    ring_color: pal.accent,
+                    top: format!("{:.0}%", day * 100.0),
+                    bottom: format!("{left}h left"),
+                    bottom_color: None,
+                    active_tint: None,
                 }
             }
-            "stopwatch" => WidgetChipSpec::IconValue {
-                icon: ChipIcon::Timer,
-                value: format!(
-                    "{:02}:{:02}",
-                    self.stopwatch_secs / 60,
-                    self.stopwatch_secs % 60
-                ),
-                active_tint: self.stopwatch_running,
-            },
+            "stopwatch" => {
+                let time = if self.stopwatch_secs >= 3600 {
+                    format!(
+                        "{}:{:02}:{:02}",
+                        self.stopwatch_secs / 3600,
+                        (self.stopwatch_secs % 3600) / 60,
+                        self.stopwatch_secs % 60
+                    )
+                } else {
+                    format!(
+                        "{:02}:{:02}",
+                        self.stopwatch_secs / 60,
+                        self.stopwatch_secs % 60
+                    )
+                };
+                WidgetChipSpec::IconTwoLine {
+                    icon: ChipIcon::Timer,
+                    icon_color: if self.stopwatch_running {
+                        pal.success
+                    } else {
+                        pal.text_secondary
+                    },
+                    top: time,
+                    bottom: if self.stopwatch_running {
+                        "Running"
+                    } else {
+                        "Click start"
+                    }
+                    .to_owned(),
+                    bottom_color: self.stopwatch_running.then_some(pal.success),
+                    active_tint: self.stopwatch_running.then_some(pal.success),
+                    bar: None,
+                }
+            }
             "countdown" => {
                 let ratio = if self.countdown_total_secs > 0 {
                     self.countdown_remaining_secs as f32 / self.countdown_total_secs as f32
                 } else {
                     0.0
                 };
-                WidgetChipSpec::ProgressRing {
+                let ring_col = if self.countdown_running && ratio <= 0.2 {
+                    pal.warning
+                } else {
+                    pal.accent
+                };
+                WidgetChipSpec::RingTwoLine {
                     ratio,
-                    value: format!(
+                    ring_color: ring_col,
+                    top: format!(
                         "{:02}:{:02}",
                         self.countdown_remaining_secs / 60,
                         self.countdown_remaining_secs % 60
                     ),
-                    color: pal.accent,
-                    active_tint: self.countdown_running,
+                    bottom: if self.countdown_running {
+                        "Counting".to_owned()
+                    } else {
+                        format!("{}m timer", self.countdown_total_secs / 60)
+                    },
+                    bottom_color: self.countdown_running.then_some(ring_col),
+                    active_tint: self.countdown_running.then_some(ring_col),
                 }
             }
             "focus" => {
                 let ratio = self.focus_remaining_secs as f32 / (25.0 * 60.0);
-                WidgetChipSpec::ProgressRing {
+                let col = if settings.focus_mode {
+                    pal.warning
+                } else {
+                    pal.accent
+                };
+                WidgetChipSpec::RingTwoLine {
                     ratio,
-                    value: format!(
+                    ring_color: col,
+                    top: format!(
                         "{:02}:{:02}",
                         self.focus_remaining_secs / 60,
                         self.focus_remaining_secs % 60
                     ),
-                    color: if settings.focus_mode {
-                        pal.warning
+                    bottom: if settings.focus_mode {
+                        "Focus On"
+                    } else if self.focus_running {
+                        "Active"
                     } else {
-                        pal.accent
-                    },
-                    active_tint: self.focus_running || settings.focus_mode,
+                        "Pomodoro"
+                    }
+                    .to_owned(),
+                    bottom_color: (settings.focus_mode || self.focus_running).then_some(col),
+                    active_tint: (settings.focus_mode || self.focus_running).then_some(col),
                 }
             }
-            "stats" => WidgetChipSpec::DualMetric {
-                top: format!("CPU {:>2}%", self.cpu_pct),
-                bot: format!("RAM {:>2}%", self.ram_pct),
-                top_color: None,
-                bot_color: None,
-                bars: Some((self.cpu_pct as f32 / 100.0, self.ram_pct as f32 / 100.0)),
-            },
-            "netspeed" => WidgetChipSpec::DualMetric {
-                top: format!("↓ {}", telemetry::format_speed(self.net.rx_bps)),
-                bot: format!("↑ {}", telemetry::format_speed(self.net.tx_bps)),
-                top_color: None,
-                bot_color: None,
-                bars: None,
+            "stats" => {
+                let cpu_r = self.cpu_pct as f32 / 100.0;
+                let ram_r = self.ram_pct as f32 / 100.0;
+                WidgetChipSpec::DualBars {
+                    top_label: "CPU".to_owned(),
+                    top_val: format!("{}%", self.cpu_pct),
+                    top_ratio: cpu_r,
+                    top_color: design::meter_color(&pal, cpu_r),
+                    bot_label: "RAM".to_owned(),
+                    bot_val: format!("{}%", self.ram_pct),
+                    bot_ratio: ram_r,
+                    bot_color: design::meter_color(&pal, ram_r),
+                }
+            }
+            "netspeed" => WidgetChipSpec::NetTraffic {
+                down: telemetry::format_speed(self.net.rx_bps),
+                up: telemetry::format_speed(self.net.tx_bps),
             },
             "battery" => {
                 let b = sample_battery();
-                let val = if !b.has_battery {
+                let ratio = b.percent as f32 / 100.0;
+                let top = if !b.has_battery {
                     "AC".to_owned()
                 } else {
                     format!("{}%", b.percent)
                 };
-                WidgetChipSpec::IconValue {
-                    icon: ChipIcon::Battery,
-                    value: val,
-                    active_tint: b.charging,
+                let bottom = if !b.has_battery {
+                    "Desktop".to_owned()
+                } else if b.charging {
+                    "Charging".to_owned()
+                } else if let Some(secs) = b.life_secs {
+                    format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+                } else if b.on_ac {
+                    "Plugged".to_owned()
+                } else {
+                    "Battery".to_owned()
+                };
+                WidgetChipSpec::BatteryGraphic {
+                    percent: b.percent,
+                    has_battery: b.has_battery,
+                    charging: b.charging,
+                    top,
+                    bottom,
+                    level_color: design::level_color(&pal, ratio),
                 }
             }
             "bluetoothbattery" => {
-                let val = self
+                let first = self
                     .bt_battery
                     .lock()
                     .ok()
-                    .and_then(|g| g.devices.first().map(|d| format!("{}%", d.percent)))
-                    .unwrap_or_else(|| "--".to_owned());
-                WidgetChipSpec::IconValue {
-                    icon: ChipIcon::Bluetooth,
-                    value: val,
-                    active_tint: false,
+                    .and_then(|g| g.devices.first().cloned());
+                if let Some(dev) = first {
+                    let ratio = dev.percent as f32 / 100.0;
+                    let col = design::level_color(&pal, ratio);
+                    let short: String = dev.name.chars().take(10).collect();
+                    WidgetChipSpec::IconTwoLine {
+                        icon: ChipIcon::Bluetooth,
+                        icon_color: pal.accent,
+                        top: format!("{short} {}%", dev.percent),
+                        bottom: String::new(),
+                        bottom_color: None,
+                        active_tint: None,
+                        bar: Some((ratio, col)),
+                    }
+                } else {
+                    WidgetChipSpec::IconTwoLine {
+                        icon: ChipIcon::Bluetooth,
+                        icon_color: pal.text_secondary,
+                        top: "Bluetooth".to_owned(),
+                        bottom: "No devices".to_owned(),
+                        bottom_color: None,
+                        active_tint: None,
+                        bar: None,
+                    }
                 }
             }
             "storage" => {
-                let val = sample_drives()
-                    .first()
-                    .map(|d| format!("{:.0}G", d.free_gb))
-                    .unwrap_or_else(|| "--".to_owned());
-                WidgetChipSpec::IconValue {
-                    icon: ChipIcon::Drive,
-                    value: val,
-                    active_tint: false,
+                if let Some(d) = sample_drives().first() {
+                    let used = (d.total_gb - d.free_gb).max(0.0);
+                    let ratio = (used / d.total_gb.max(1.0)) as f32;
+                    let col = design::meter_color(&pal, ratio);
+                    WidgetChipSpec::IconTwoLine {
+                        icon: ChipIcon::Drive,
+                        icon_color: col,
+                        top: format!("{}: {:.0} GB", d.letter, d.free_gb),
+                        bottom: String::new(),
+                        bottom_color: None,
+                        active_tint: None,
+                        bar: Some((ratio, col)),
+                    }
+                } else {
+                    WidgetChipSpec::IconTwoLine {
+                        icon: ChipIcon::Drive,
+                        icon_color: pal.text_secondary,
+                        top: "Storage".to_owned(),
+                        bottom: "No drives".to_owned(),
+                        bottom_color: None,
+                        active_tint: None,
+                        bar: None,
+                    }
                 }
             }
-            "media" => WidgetChipSpec::IconOnly(ChipIcon::Music),
-            "audio" => WidgetChipSpec::IconValue {
-                icon: if self.audio_muted {
-                    ChipIcon::SpeakerMuted
-                } else {
-                    ChipIcon::Speaker
-                },
-                value: if self.audio_muted {
-                    "Mute".to_owned()
-                } else {
-                    format!("{}%", self.audio_vol)
-                },
-                active_tint: false,
+            "media" => WidgetChipSpec::InlineControls {
+                buttons: vec![
+                    ("\u{E892}".to_owned(), false, pal.accent),
+                    ("\u{E768}".to_owned(), true, pal.accent),
+                    ("\u{E893}".to_owned(), false, pal.accent),
+                ],
             },
-            "quicksettings" => WidgetChipSpec::IconOnly(ChipIcon::Sliders),
+            "audio" => WidgetChipSpec::AudioSlider {
+                volume: self.audio_vol,
+                muted: self.audio_muted,
+            },
+            "quicksettings" => {
+                let theme_glyph = if is_dark { "\u{E706}" } else { "\u{E708}" };
+                WidgetChipSpec::InlineControls {
+                    buttons: vec![
+                        ("\u{E708}".to_owned(), settings.focus_mode, pal.warning),
+                        (
+                            theme_glyph.to_owned(),
+                            settings.theme != AppTheme::System,
+                            pal.accent,
+                        ),
+                        ("\u{E713}".to_owned(), false, pal.accent),
+                    ],
+                }
+            }
             "keyboard" => WidgetChipSpec::Keycap(active_keyboard_code()),
-            "stacks" => WidgetChipSpec::IconValue {
+            "stacks" => WidgetChipSpec::IconTwoLine {
                 icon: ChipIcon::Folder,
-                value: settings.stack_folders.len().to_string(),
-                active_tint: false,
+                icon_color: pal.warning,
+                top: "Stacks".to_owned(),
+                bottom: format!("{} folders", settings.stack_folders.len()),
+                bottom_color: None,
+                active_tint: None,
+                bar: None,
             },
-            "groups" => WidgetChipSpec::IconValue {
+            "groups" => WidgetChipSpec::IconTwoLine {
                 icon: ChipIcon::Grid,
-                value: settings.app_groups.len().to_string(),
-                active_tint: false,
+                icon_color: pal.accent,
+                top: "Groups".to_owned(),
+                bottom: format!("{} groups", settings.app_groups.len()),
+                bottom_color: None,
+                active_tint: None,
+                bar: None,
             },
             _ => WidgetChipSpec::Keycap(id.chars().take(3).collect::<String>().to_uppercase()),
+        }
+    }
+
+    /// Builds a concise, information-rich hover tooltip directly above the dock widget
+    /// so secondary details and action hints are visible without opening a flyout.
+    pub fn hover_tooltip(&self, id: &str, sub: Option<u8>, settings: &DockSettings) -> String {
+        if let Some(ai) = telemetry::ai_provider_meta(id) {
+            let status = if telemetry::ai_provider_detected(ai.id) {
+                "Ready · Click for dashboard"
+            } else {
+                "Sign in · Click for dashboard"
+            };
+            return format!("{} · {status}", ai.name);
+        }
+        match id {
+            "media" => match sub {
+                Some(0) => "Previous Track".to_owned(),
+                Some(1) => "Play / Pause".to_owned(),
+                Some(2) => "Next Track".to_owned(),
+                _ => "Media Controls".to_owned(),
+            },
+            "quicksettings" => match sub {
+                Some(0) => if settings.focus_mode {
+                    "Focus Mode (On)"
+                } else {
+                    "Focus Mode (Off)"
+                }
+                .to_owned(),
+                Some(1) => format!("Theme: {:?} · Click to cycle", settings.theme),
+                Some(2) => "Open Settings".to_owned(),
+                _ => "Quick Settings".to_owned(),
+            },
+            "audio" => match sub {
+                Some(0) => if self.audio_muted {
+                    "Click to Unmute"
+                } else {
+                    "Click to Mute"
+                }
+                .to_owned(),
+                _ => "Click or scroll to set volume".to_owned(),
+            },
+            "weather" => {
+                let snap = self
+                    .weather
+                    .lock()
+                    .ok()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
+                let city = if snap.city.is_empty() {
+                    settings.weather_city.clone()
+                } else {
+                    snap.city
+                };
+                if !snap.feels_like.is_empty() && !snap.humidity.is_empty() {
+                    format!(
+                        "{city} · Feels {} · {} humidity",
+                        snap.feels_like, snap.humidity
+                    )
+                } else {
+                    format!("{city} · Click to refresh")
+                }
+            }
+            "stats" => {
+                let (_, used_gb, total_gb) = sample_ram_info();
+                format!(
+                    "RAM {used_gb:.1}/{total_gb:.0} GB · Up {}",
+                    telemetry::system_uptime_string()
+                )
+            }
+            "dayprogress" => {
+                let (_, week, year, left) = day_progress_metrics();
+                format!(
+                    "{left}h left · Week {:.0}% · Year {:.0}%",
+                    week * 100.0,
+                    year * 100.0
+                )
+            }
+            "stopwatch" => "Click Start/Pause · Right-click Reset".to_owned(),
+            "countdown" => "Click Start/Pause · Right-click 5/15/25m".to_owned(),
+            "focus" => "Click Pomodoro · Right-click Focus Mode".to_owned(),
+            "keyboard" => "Click to switch keyboard layout".to_owned(),
+            "storage" => {
+                let drives = sample_drives();
+                if drives.len() > 1 {
+                    drives
+                        .iter()
+                        .take(3)
+                        .map(|d| format!("{}: {:.0}G", d.letter, d.free_gb))
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                } else if let Some(d) = drives.first() {
+                    format!(
+                        "{}: {:.0} GB free of {:.0} GB",
+                        d.letter, d.free_gb, d.total_gb
+                    )
+                } else {
+                    "Storage".to_owned()
+                }
+            }
+            "netspeed" => "Click for Network Settings".to_owned(),
+            "battery" => "Click for Power Settings".to_owned(),
+            "bluetoothbattery" => "Click to refresh Bluetooth battery".to_owned(),
+            "clock" => "Click for Notifications & Calendar".to_owned(),
+            _ => widget_descriptor(id).map_or(id, |d| d.name).to_owned(),
+        }
+    }
+
+    /// Handles a direct left-click on a dock widget chip without opening a flyout.
+    pub fn handle_direct_click(
+        &mut self,
+        id: &str,
+        rel_x_dips: f32,
+        width_dips: f32,
+        settings: &mut DockSettings,
+    ) -> DirectClickOutcome {
+        if let Some(ai) = telemetry::ai_provider_meta(id) {
+            pins::launch(ai.dashboard_url.to_owned());
+            return DirectClickOutcome::Handled;
+        }
+        match id {
+            "media" => {
+                let third = (width_dips / 3.0).max(1.0);
+                if rel_x_dips < third {
+                    telemetry::send_media_vk(VK_MEDIA_PREV_TRACK);
+                } else if rel_x_dips < third * 2.0 {
+                    telemetry::send_media_vk(VK_MEDIA_PLAY_PAUSE);
+                } else {
+                    telemetry::send_media_vk(VK_MEDIA_NEXT_TRACK);
+                }
+                DirectClickOutcome::Handled
+            }
+            "audio" => {
+                // Left 35 DIPs toggles mute; right slider region sets exact volume percentage.
+                if rel_x_dips < 35.0 {
+                    toggle_audio_mute();
+                } else {
+                    let slider_l = 39.0;
+                    let slider_r = (width_dips - 9.0).max(slider_l + 10.0);
+                    let pct = (((rel_x_dips - slider_l) / (slider_r - slider_l)).clamp(0.0, 1.0)
+                        * 100.0)
+                        .round() as u32;
+                    set_audio_volume(pct);
+                }
+                (self.audio_vol, self.audio_muted) = get_audio_state();
+                DirectClickOutcome::Handled
+            }
+            "quicksettings" => {
+                let third = (width_dips / 3.0).max(1.0);
+                if rel_x_dips < third {
+                    settings.focus_mode = !settings.focus_mode;
+                    DirectClickOutcome::SettingsChanged
+                } else if rel_x_dips < third * 2.0 {
+                    settings.theme = match settings.theme {
+                        AppTheme::System => AppTheme::Dark,
+                        AppTheme::Dark => AppTheme::Light,
+                        AppTheme::Light => AppTheme::System,
+                    };
+                    DirectClickOutcome::SettingsChanged
+                } else {
+                    crate::ui::settings::spawn_settings_window();
+                    DirectClickOutcome::Handled
+                }
+            }
+            "keyboard" => {
+                telemetry::cycle_keyboard_layout();
+                DirectClickOutcome::Handled
+            }
+            "stopwatch" => {
+                self.stopwatch_running = !self.stopwatch_running;
+                DirectClickOutcome::Handled
+            }
+            "countdown" => {
+                if self.countdown_remaining_secs == 0 {
+                    self.countdown_remaining_secs = self.countdown_total_secs;
+                }
+                self.countdown_running = !self.countdown_running;
+                DirectClickOutcome::Handled
+            }
+            "focus" => {
+                if self.focus_remaining_secs == 0 {
+                    self.focus_remaining_secs = 25 * 60;
+                }
+                self.focus_running = !self.focus_running;
+                DirectClickOutcome::Handled
+            }
+            "clock" => {
+                opentaskbar_shell::taskbar::open_notifications();
+                DirectClickOutcome::Handled
+            }
+            "weather" => {
+                telemetry::refresh_weather(&self.weather, &settings.weather_city, true);
+                DirectClickOutcome::Handled
+            }
+            "stats" => {
+                pins::launch("taskmgr.exe".to_owned());
+                DirectClickOutcome::Handled
+            }
+            "netspeed" => {
+                pins::launch("ms-settings:network".to_owned());
+                DirectClickOutcome::Handled
+            }
+            "battery" => {
+                pins::launch("ms-settings:powersleep".to_owned());
+                DirectClickOutcome::Handled
+            }
+            "bluetoothbattery" => {
+                telemetry::refresh_bluetooth_battery(&self.bt_battery, true);
+                DirectClickOutcome::Handled
+            }
+            "storage" => {
+                pins::launch("explorer.exe".to_owned());
+                DirectClickOutcome::Handled
+            }
+            "dayprogress" => {
+                pins::launch("ms-settings:dateandtime".to_owned());
+                DirectClickOutcome::Handled
+            }
+            "stacks" | "groups" => DirectClickOutcome::OpenFlyout,
+            _ => DirectClickOutcome::Handled,
+        }
+    }
+
+    /// Handles a quick secondary (right-click) reset/toggle action on interactive timer/control widgets.
+    pub fn handle_secondary_click(
+        &mut self,
+        id: &str,
+        settings: &mut DockSettings,
+    ) -> Option<DirectClickOutcome> {
+        match id {
+            "stopwatch" => {
+                self.stopwatch_running = false;
+                self.stopwatch_secs = 0;
+                Some(DirectClickOutcome::Handled)
+            }
+            "countdown" => {
+                self.countdown_running = false;
+                self.countdown_total_secs = match self.countdown_total_secs / 60 {
+                    5 => 15 * 60,
+                    15 => 25 * 60,
+                    _ => 5 * 60,
+                };
+                self.countdown_remaining_secs = self.countdown_total_secs;
+                Some(DirectClickOutcome::Handled)
+            }
+            "focus" => {
+                settings.focus_mode = !settings.focus_mode;
+                Some(DirectClickOutcome::SettingsChanged)
+            }
+            "audio" => {
+                pins::launch("ms-settings:sound".to_owned());
+                Some(DirectClickOutcome::Handled)
+            }
+            _ => None,
         }
     }
 
