@@ -1,16 +1,13 @@
 //! On-demand GPUI Settings window (`OpenTaskBar.exe --settings`).
 //!
-//! Fixed-size (`880 x 600`) iOS + shadcn/ui window matching C# OpenTaskbar's tabs and
-//! all 23 catalog widgets across 5 categories, with interactive Widget Preview Cards,
-//! inline widget controls, smooth page transitions, visible scrollbar, and instant auto-save.
+//! Grouped settings with a responsive navigation pane and immediate dock updates.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, App, Application, Bounds, Context, ScrollHandle,
-    SharedString, Window, WindowBounds, WindowOptions, div, ease_out_quint, prelude::*, px, rgba,
-    size,
+    AnyElement, App, Application, Bounds, Context, FocusHandle, KeyBinding, ScrollHandle,
+    SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions, actions, div, prelude::*,
+    px, rgba, size,
 };
 use opentaskbar_core::settings::{
     self, AppTheme, AutoHideMode, DockAppGroup, DockPosition, DockProfile, DockSettings, DockSize,
@@ -22,16 +19,23 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::platform::{pins, win32};
 use crate::ui::components::{
-    self as ui, ButtonVariant, UiTheme, badge, button, icon_glyph, ios_switch, section_card,
-    segmented_item, segmented_track, setting_row, sidebar_nav_item, stepper,
+    ButtonVariant, UiTheme, badge, button, icon_glyph, ios_switch, section_card, segmented_item,
+    segmented_track, setting_row, sidebar_nav_item, stepper,
 };
 use crate::widgets::{self, telemetry};
 
 pub const SETTINGS_ARG: &str = "--settings";
 pub const RELOAD_MSG_NAME: &str = "OpenTaskBarReloadSettings";
 
-const WIN_W: f32 = 880.0;
-const WIN_H: f32 = 600.0;
+const WIN_W: f32 = 920.0;
+const WIN_H: f32 = 680.0;
+const MIN_WIDTH: f32 = 540.0;
+const MIN_HEIGHT: f32 = 428.0;
+const SIDEBAR_BREAKPOINT: f32 = 680.0;
+const SIDEBAR_WIDTH: f32 = 220.0;
+const WIDGET_COLUMNS_BREAKPOINT: f32 = 520.0;
+
+actions!(settings_navigation, [TabNext, TabPrevious]);
 
 pub fn spawn_settings_window() {
     if let Ok(exe) = std::env::current_exe() {
@@ -78,6 +82,17 @@ impl SettingsPage {
             Self::Stacks => "\u{E8B7}",
             Self::Preferences => "\u{E713}",
             Self::About => "\u{E946}",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Dock => "Adjust the dock layout and how it behaves on your displays.",
+            Self::Widgets => "Choose which widgets appear on the dock and configure them.",
+            Self::Themes => "Customize the dock colors, materials, and effects.",
+            Self::Stacks => "Organize dock shortcuts into folders and app groups.",
+            Self::Preferences => "Manage startup, profiles, and settings backups.",
+            Self::About => "View the version and open local application files.",
         }
     }
 }
@@ -190,20 +205,24 @@ fn user_folder(name: &str) -> Option<String> {
 
 struct SettingsView {
     page: SettingsPage,
-    page_epoch: usize,
+    focus: FocusHandle,
     settings: DockSettings,
     startup_enabled: bool,
     scroll_handle: ScrollHandle,
+    save_failed: bool,
 }
 
 impl SettingsView {
-    fn new(settings: DockSettings) -> Self {
+    fn new(settings: DockSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let focus = cx.focus_handle();
+        focus.focus(window);
         Self {
             page: SettingsPage::Dock,
-            page_epoch: 0,
+            focus,
             settings,
             startup_enabled: win32::is_startup_enabled(),
             scroll_handle: ScrollHandle::new(),
+            save_failed: false,
         }
     }
 
@@ -217,7 +236,20 @@ impl SettingsView {
     }
 
     fn auto_save(&mut self, cx: &mut Context<Self>) {
-        if settings::save_to(&settings::settings_path(), &self.settings).is_ok() {
+        self.sync_dock_pins();
+        self.save_settings(cx);
+    }
+
+    fn sync_dock_pins(&mut self) {
+        let saved = settings::load_from(&settings::settings_path());
+        self.settings.user_pinned_apps = saved.user_pinned_apps;
+        self.settings.user_unpinned_apps = saved.user_unpinned_apps;
+        self.settings.pin_order = saved.pin_order;
+    }
+
+    fn save_settings(&mut self, cx: &mut Context<Self>) {
+        self.save_failed = settings::save_to(&settings::settings_path(), &self.settings).is_err();
+        if !self.save_failed {
             notify_docks_reload();
         }
         cx.notify();
@@ -697,6 +729,7 @@ impl SettingsView {
         let (top_line, bot_line) = widget_preview_lines(wid, &self.settings);
         let border_col = if enabled { t.accent } else { t.border };
         let card_hover = t.surface_hover;
+        let focus_color = t.text_primary;
 
         let inline_controls: Option<AnyElement> =
             match wid {
@@ -837,6 +870,8 @@ impl SettingsView {
             .border_1()
             .border_color(rgba(border_col))
             .cursor_pointer()
+            .tab_index(0)
+            .focus(move |style| style.border_color(rgba(focus_color)))
             .hover(move |s| s.bg(rgba(card_hover)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let cur = this.settings.is_widget_enabled(wid);
@@ -925,7 +960,12 @@ impl SettingsView {
         card.into_any_element()
     }
 
-    fn render_widgets(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_widgets(
+        &self,
+        t: &UiTheme,
+        columns: usize,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
         let mut out: Vec<AnyElement> = Vec::new();
         let active_count = widgets::ALL_WIDGETS
             .iter()
@@ -977,12 +1017,12 @@ impl SettingsView {
                     .child(cat)
                     .into_any_element(),
             );
-            for pair in items.chunks(2) {
+            for group in items.chunks(columns) {
                 let mut row = div().w_full().flex().gap(px(10.0));
-                for &w in pair {
+                for &w in group {
                     row = row.child(self.render_widget_card(w, t, cx));
                 }
-                if pair.len() == 1 {
+                if group.len() < columns {
                     row = row.child(div().flex_1());
                 }
                 out.push(row.into_any_element());
@@ -1246,6 +1286,7 @@ impl SettingsView {
                                 "Export",
                                 ButtonVariant::Secondary,
                                 cx.listener(|this, _, _, cx| {
+                                    this.sync_dock_pins();
                                     let dst = settings::app_data_dir().join("settings.backup.json");
                                     let _ = settings::save_to(&dst, &this.settings);
                                     cx.notify();
@@ -1260,7 +1301,7 @@ impl SettingsView {
                                     let src = settings::app_data_dir().join("settings.backup.json");
                                     if src.exists() {
                                         this.settings = settings::load_from(&src);
-                                        this.auto_save(cx);
+                                        this.save_settings(cx);
                                     }
                                 }),
                             )),
@@ -1277,7 +1318,7 @@ impl SettingsView {
                             ButtonVariant::Destructive,
                             cx.listener(|this, _, _, cx| {
                                 this.settings = DockSettings::default();
-                                this.auto_save(cx);
+                                this.save_settings(cx);
                             }),
                         ),
                     )
@@ -1360,8 +1401,12 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme();
+        let width = window.viewport_size().width;
+        let narrow = width < px(SIDEBAR_BREAKPOINT);
+        let inset = px(if narrow { 20.0 } else { 32.0 });
+        let content_width = width - inset * 2.0 - px(if narrow { 0.0 } else { SIDEBAR_WIDTH });
         let active_widgets_count = widgets::ALL_WIDGETS
             .iter()
             .filter(|w| self.settings.is_widget_enabled(w.id))
@@ -1382,19 +1427,26 @@ impl Render for SettingsView {
                     cx.listener(move |this, _, _, cx| {
                         if this.page != p {
                             this.page = p;
-                            this.page_epoch = this.page_epoch.wrapping_add(1);
                             this.scroll_handle.set_offset(gpui::point(px(0.0), px(0.0)));
                             cx.notify();
                         }
                     }),
                 )
+                .when(narrow, |item| item.w(px(156.0)))
                 .into_any_element()
             })
             .collect();
 
         let content_blocks = match self.page {
             SettingsPage::Dock => self.render_dock(&t, cx),
-            SettingsPage::Widgets => self.render_widgets(&t, cx),
+            SettingsPage::Widgets => {
+                let columns = if content_width < px(WIDGET_COLUMNS_BREAKPOINT) {
+                    1
+                } else {
+                    2
+                };
+                self.render_widgets(&t, columns, cx)
+            }
             SettingsPage::Themes => self.render_themes(&t, cx),
             SettingsPage::Stacks => self.render_stacks(&t, cx),
             SettingsPage::Preferences => self.render_preferences(&t, cx),
@@ -1425,52 +1477,55 @@ impl Render for SettingsView {
         };
 
         let sidebar = div()
-            .w(px(208.0))
             .flex_shrink_0()
-            .h_full()
             .flex()
             .flex_col()
-            .p(px(12.0))
+            .gap(px(16.0))
+            .p(px(16.0))
             .bg(rgba(t.sidebar_bg))
-            .border_r_1()
             .border_color(rgba(t.border))
+            .when(narrow, |panel| panel.w_full().border_b_1())
+            .when(!narrow, |panel| {
+                panel.w(px(SIDEBAR_WIDTH)).h_full().border_r_1()
+            })
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
+                    .px(px(4.0))
+                    .child(
+                        div()
+                            .size(px(32.0))
+                            .rounded(px(10.0))
+                            .bg(rgba(t.accent_soft))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(icon_glyph("\u{E713}", 16.0, t.accent)),
+                    )
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("OpenTaskbar"),
+                    ),
+            )
             .child(
                 div()
                     .w_full()
                     .flex()
-                    .flex_col()
-                    .gap(px(3.0))
-                    .child(
-                        div()
-                            .px(px(10.0))
-                            .pt(px(6.0))
-                            .pb(px(12.0))
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(px(14.5))
-                                    .font_weight(gpui::FontWeight::BOLD)
-                                    .text_color(rgba(t.text_primary))
-                                    .child("OpenTaskBar"),
-                            )
-                            .child(ui::badge(&t, "v0.1", true)),
-                    )
+                    .gap(px(4.0))
+                    .when(narrow, |nav| nav.flex_wrap())
+                    .when(!narrow, |nav| nav.flex_col())
                     .children(nav_items),
             );
 
-        let animated_content = div()
+        let page_content = div()
             .w_full()
             .flex()
             .flex_col()
-            .gap(px(12.0))
-            .children(content_blocks)
-            .with_animation(
-                ("settings-page-anim", self.page_epoch),
-                Animation::new(Duration::from_millis(165)).with_easing(ease_out_quint()),
-                |el, delta| el.opacity(delta).pt(px((1.0 - delta) * 10.0)),
-            );
+            .gap(px(20.0))
+            .children(content_blocks);
 
         let mut scroll_wrap = div().flex_1().min_h_0().w_full().relative().child(
             div()
@@ -1482,9 +1537,9 @@ impl Render for SettingsView {
                 .on_scroll_wheel(cx.listener(|_, _, _, cx| {
                     cx.notify();
                 }))
-                .px(px(22.0))
-                .py(px(16.0))
-                .child(animated_content),
+                .px(inset)
+                .py(px(20.0))
+                .child(page_content),
         );
 
         if let Some(sb) = scrollbar_el {
@@ -1494,37 +1549,61 @@ impl Render for SettingsView {
         let main = div()
             .flex_1()
             .min_w_0()
-            .h_full()
+            .min_h_0()
             .flex()
             .flex_col()
-            .bg(rgba(t.canvas_bg))
             .child(
                 div()
                     .w_full()
-                    .px(px(22.0))
-                    .py(px(15.0))
+                    .flex_shrink_0()
+                    .px(inset)
+                    .py(px(if narrow { 12.0 } else { 22.0 }))
                     .border_b_1()
                     .border_color(rgba(t.border))
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
-                    .child(icon_glyph(self.page.glyph(), 17.0, t.accent))
+                    .gap(px(14.0))
                     .child(
                         div()
-                            .text_size(px(17.5))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgba(t.text_primary))
-                            .child(self.page.title()),
+                            .size(px(42.0))
+                            .flex_shrink_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(12.0))
+                            .bg(rgba(t.accent_soft))
+                            .child(icon_glyph(self.page.glyph(), 20.0, t.accent)),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.0))
+                            .child(div().text_size(px(25.0)).font_weight(gpui::FontWeight::SEMIBOLD).child(self.page.title()))
+                            .child(div().text_size(px(13.0)).text_color(rgba(t.text_secondary)).child(self.page.description())),
                     ),
             )
+            .when(self.save_failed, |panel| panel.child(
+                div().px(inset).py(px(8.0)).bg(rgba(t.destructive_soft))
+                    .text_color(rgba(t.destructive)).text_size(px(13.0))
+                    .child("Could not save settings. Check that the settings folder is writable and try again."),
+            ))
             .child(scroll_wrap);
 
         div()
+            .id("settings")
+            .track_focus(&self.focus)
+            .tab_group()
+            .on_action(|_: &TabNext, window, _| window.focus_next())
+            .on_action(|_: &TabPrevious, window, _| window.focus_prev())
             .w_full()
             .h_full()
             .flex()
-            .overflow_hidden()
+            .when(narrow, |root| root.flex_col())
             .bg(rgba(t.canvas_bg))
+            .font_family("Segoe UI")
+            .text_size(px(14.0))
             .text_color(rgba(t.text_primary))
             .child(sidebar)
             .child(main)
@@ -1534,16 +1613,22 @@ impl Render for SettingsView {
 pub fn run_settings_window() {
     let loaded = settings::load_from(&settings::settings_path());
     Application::new().run(move |cx: &mut App| {
-        let fixed = size(px(WIN_W), px(WIN_H));
-        let bounds = Bounds::centered(None, fixed, cx);
+        cx.bind_keys([
+            KeyBinding::new("tab", TabNext, None),
+            KeyBinding::new("shift-tab", TabPrevious, None),
+        ]);
+        let bounds = Bounds::centered(None, size(px(WIN_W), px(WIN_H)), cx);
         let _ = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                is_resizable: false,
-                window_min_size: Some(fixed),
+                window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("OpenTaskbar Settings".into()),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| SettingsView::new(loaded.clone())),
+            |window, cx| cx.new(|cx| SettingsView::new(loaded.clone(), window, cx)),
         );
         cx.activate(true);
     });

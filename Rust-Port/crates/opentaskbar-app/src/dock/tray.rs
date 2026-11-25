@@ -13,12 +13,15 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
-    IsWindow, IsWindowVisible, PostMessageW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
-    WM_CLOSE,
+    IsWindow, IsWindowVisible, MB_ICONWARNING, MB_OK, MessageBoxW, PostMessageW, SW_RESTORE,
+    SW_SHOW, SetForegroundWindow, ShowWindow, WM_CLOSE,
 };
 use windows_sys::core::BOOL;
 
-use crate::platform::{icon_cache, pins};
+use crate::platform::{
+    icon_cache,
+    pins::{self, PinnedApp},
+};
 use crate::ui::flyout::{self, FlyoutAction, FlyoutBlock, FlyoutIcon, FlyoutSpec};
 use crate::ui::menu::{self, MenuEntry, MenuIcon};
 
@@ -170,14 +173,31 @@ fn activate_or_relaunch(app: &BackgroundApp) {
     }
 }
 
-fn close_background_app(app: &BackgroundApp) {
-    if app.hwnd != 0 {
-        unsafe {
-            if IsWindow(app.hwnd as HWND) != 0 {
-                PostMessageW(app.hwnd as HWND, WM_CLOSE, 0, 0);
-            }
-        }
+fn close_background_app(owner_hwnd: usize, app: &BackgroundApp) {
+    let hwnd = app.hwnd as HWND;
+    let mut pid = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    let same_process = pid == app.pid
+        && process_image_path(pid).is_some_and(|path| path.eq_ignore_ascii_case(&app.exe_path));
+    if !same_process || unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) } == 0 {
+        show_action_error(
+            owner_hwnd,
+            "Could not close the app window. Reopen Background Apps and try again.",
+        );
     }
+}
+
+pub(super) fn show_action_error(owner_hwnd: usize, message: &str) {
+    let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+    let title: Vec<u16> = "OpenTaskbar".encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        MessageBoxW(
+            owner_hwnd as HWND,
+            message.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONWARNING,
+        )
+    };
 }
 
 fn terminate_pid(pid: u32) {
@@ -194,13 +214,25 @@ fn terminate_pid(pid: u32) {
 }
 
 /// Opens our shared `DockFlyout` for Background Apps with icons, scroll overflow, and right-click menu.
-pub fn open_background_apps_flyout(
+pub(super) fn open_background_apps_flyout(
     owner_hwnd: usize,
     is_dark: bool,
     anchor_center_x_px: i32,
     anchor_bottom_y_px: i32,
-) {
+    dock_pins: &[PinnedApp],
+) -> Option<(String, bool)> {
     let apps = enumerate_background_apps();
+    let matching_pins: Vec<_> = apps
+        .iter()
+        .map(|app| {
+            dock_pins.iter().find(|pin| {
+                pin.target_exe
+                    .as_ref()
+                    .is_some_and(|path| path.eq_ignore_ascii_case(&app.exe_path))
+                    || pin.launch_path.eq_ignore_ascii_case(&app.exe_path)
+            })
+        })
+        .collect();
     let paths: Vec<String> = apps.iter().map(|a| a.exe_path.clone()).collect();
     let icon_map: HashMap<String, FlyoutIcon> = icon_cache::resolve_batch_raw(&paths)
         .into_iter()
@@ -223,13 +255,14 @@ pub fn open_background_apps_flyout(
         blocks.push(FlyoutBlock::Note("No background apps running.".to_owned()));
     } else {
         for (i, app) in apps.iter().enumerate() {
-            blocks.push(FlyoutBlock::ActionRow {
-                id: 100 + i as u32,
+            let id = 100 + i as u32 * 3;
+            blocks.push(FlyoutBlock::AppRow {
+                id,
                 title: app.name.clone(),
-                subtitle: None,
-                badge: None,
                 icon: icon_map.get(&app.exe_path).cloned(),
-                destructive: false,
+                pin_id: id + 1,
+                pinned: matching_pins[i].is_some(),
+                close_id: id + 2,
             });
         }
     }
@@ -240,9 +273,12 @@ pub fn open_background_apps_flyout(
     ]));
 
     let spec = FlyoutSpec {
-        title: format!("Background Apps ({})", apps.len()),
-        subtitle: None,
-        width_dips: 268.0,
+        title: "Background Apps".to_owned(),
+        subtitle: Some(match apps.len() {
+            1 => "1 app running in the background".to_owned(),
+            count => format!("{count} apps running in the background"),
+        }),
+        width_dips: 336.0,
         blocks,
     };
 
@@ -250,7 +286,7 @@ pub fn open_background_apps_flyout(
         if id < 100 {
             return false;
         }
-        let Some(app) = apps.get((id - 100) as usize) else {
+        let Some(app) = apps.get(((id - 100) / 3) as usize) else {
             return false;
         };
         let entries = vec![
@@ -265,8 +301,8 @@ pub fn open_background_apps_flyout(
                 true
             }
             2 => {
-                close_background_app(app);
-                false
+                close_background_app(owner_hwnd, app);
+                true
             }
             3 => {
                 terminate_pid(app.pid);
@@ -288,10 +324,22 @@ pub fn open_background_apps_flyout(
         Some(FlyoutAction::Primary(1)) => pins::launch("taskmgr.exe".to_owned()),
         Some(FlyoutAction::Primary(2)) => opentaskbar_shell::taskbar::open_tray_overflow(),
         Some(FlyoutAction::Primary(id)) if id >= 100 => {
-            if let Some(app) = apps.get((id - 100) as usize) {
-                activate_or_relaunch(app);
+            let offset = id - 100;
+            let index = (offset / 3) as usize;
+            if let Some(app) = apps.get(index) {
+                match offset % 3 {
+                    0 => activate_or_relaunch(app),
+                    1 => {
+                        return Some(match matching_pins[index] {
+                            Some(pin) => (pin.launch_path.clone(), false),
+                            None => (app.exe_path.clone(), true),
+                        });
+                    }
+                    _ => close_background_app(owner_hwnd, app),
+                }
             }
         }
         _ => {}
     }
+    None
 }

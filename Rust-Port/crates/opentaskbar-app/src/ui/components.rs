@@ -9,6 +9,10 @@
 
 use gpui::{AnyElement, Div, SharedString, div, prelude::*, px, rgba};
 
+const PANEL_RADIUS: f32 = 16.0;
+const CONTROL_RADIUS: f32 = 9.0;
+const ROW_INSET: f32 = 16.0;
+
 /// Semantic iOS + shadcn/ui color palette for GPUI surfaces.
 #[derive(Clone, Copy)]
 pub struct UiTheme {
@@ -37,46 +41,46 @@ impl UiTheme {
     pub fn new(is_dark: bool) -> Self {
         if is_dark {
             Self {
-                canvas_bg: 0x09090bff,
-                sidebar_bg: 0x111114ff,
-                surface: 0x18181bff,
-                surface_muted: 0x222227ff,
-                surface_hover: 0x292930ff,
+                canvas_bg: 0x18191dff,
+                sidebar_bg: 0x202126ff,
+                surface: 0x24262cff,
+                surface_muted: 0x1a1b20ff,
+                surface_hover: 0x2e3038ff,
                 dock_preview_bg: 0x11141dff,
                 border: 0xffffff16,
                 separator: 0xffffff10,
-                text_primary: 0xfafafaff,
-                text_secondary: 0xa1a1aaff,
-                accent: 0x0a84ffff,
-                accent_soft: 0x0a84ff26,
-                accent_fg: 0xffffffff,
+                text_primary: 0xf5f6f8ff,
+                text_secondary: 0xaeb2beff,
+                accent: 0x7fb7ffff,
+                accent_soft: 0x7fb7ff22,
+                accent_fg: 0x18191dff,
                 switch_off: 0x39393dff,
                 switch_on: 0x30d158ff,
                 switch_thumb: 0xffffffff,
-                destructive: 0xff453aff,
-                destructive_soft: 0xff453a20,
+                destructive: 0xffa2a8ff,
+                destructive_soft: 0xffa2a824,
                 scrollbar_thumb: 0xffffff38,
             }
         } else {
             Self {
-                canvas_bg: 0xf2f2f7ff,
-                sidebar_bg: 0xf9f9fbff,
+                canvas_bg: 0xf1f2f6ff,
+                sidebar_bg: 0xfafafcff,
                 surface: 0xffffffff,
                 surface_muted: 0xefeff4ff,
                 surface_hover: 0xe5e5eaff,
                 dock_preview_bg: 0x1c202bff,
                 border: 0x00000014,
                 separator: 0x0000000e,
-                text_primary: 0x09090bff,
-                text_secondary: 0x52525bff,
-                accent: 0x007affff,
-                accent_soft: 0x007aff1c,
+                text_primary: 0x191b22ff,
+                text_secondary: 0x515766ff,
+                accent: 0x0f59a7ff,
+                accent_soft: 0x0f59a71a,
                 accent_fg: 0xffffffff,
                 switch_off: 0xd1d1d6ff,
                 switch_on: 0x34c759ff,
                 switch_thumb: 0xffffffff,
-                destructive: 0xff3b30ff,
-                destructive_soft: 0xff3b3018,
+                destructive: 0xa42137ff,
+                destructive_soft: 0xa4213718,
                 scrollbar_thumb: 0x00000038,
             }
         }
@@ -102,7 +106,7 @@ pub fn section_card(theme: &UiTheme, title: impl Into<SharedString>, rows: Vec<A
         .w_full()
         .flex()
         .flex_col()
-        .rounded(px(12.0))
+        .rounded(px(PANEL_RADIUS))
         .bg(rgba(theme.surface))
         .border_1()
         .border_color(rgba(theme.border))
@@ -112,7 +116,7 @@ pub fn section_card(theme: &UiTheme, title: impl Into<SharedString>, rows: Vec<A
     for (idx, row) in rows.into_iter().enumerate() {
         card = card.child(row);
         if idx + 1 < count {
-            card = card.child(div().h(px(1.0)).mx(px(14.0)).bg(rgba(theme.separator)));
+            card = card.child(div().h(px(1.0)).mx(px(ROW_INSET)).bg(rgba(theme.separator)));
         }
     }
 
@@ -120,11 +124,11 @@ pub fn section_card(theme: &UiTheme, title: impl Into<SharedString>, rows: Vec<A
         .w_full()
         .flex()
         .flex_col()
-        .gap(px(6.0))
+        .gap(px(8.0))
         .child(
             div()
                 .px(px(4.0))
-                .text_size(px(11.5))
+                .text_size(px(13.0))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgba(theme.text_secondary))
                 .child(title.into()),
@@ -141,11 +145,10 @@ pub fn setting_row(
 ) -> Div {
     let mut left = div()
         .flex_1()
-        .min_w_0()
+        .min_w(px(150.0))
         .flex()
         .items_center()
         .gap(px(10.0))
-        .pr(px(12.0))
         .overflow_hidden();
 
     if let Some(g) = icon {
@@ -167,10 +170,12 @@ pub fn setting_row(
         .w_full()
         .min_w_0()
         .flex()
+        .flex_wrap()
         .items_center()
         .justify_between()
-        .px(px(14.0))
-        .py(px(10.0))
+        .gap(px(12.0))
+        .px(px(ROW_INSET))
+        .py(px(12.0))
         .child(left)
         .child(div().flex_shrink_0().child(control))
 }
@@ -194,7 +199,14 @@ pub fn ios_switch(
         .w(px(42.0))
         .h(px(24.0))
         .rounded(px(12.0))
+        .border_1()
+        .border_color(rgba(track_bg))
         .bg(rgba(track_bg))
+        .tab_index(0)
+        .focus({
+            let accent = theme.accent;
+            move |style| style.border_color(rgba(accent))
+        })
         .cursor_pointer()
         .flex()
         .items_center()
@@ -205,7 +217,7 @@ pub fn ios_switch(
                 .h(px(20.0))
                 .rounded(px(10.0))
                 .bg(rgba(theme.switch_thumb))
-                .ml(thumb_left),
+                .ml(thumb_left - px(1.0)),
         )
 }
 
@@ -260,9 +272,9 @@ pub fn button(
 
     div()
         .id(id)
-        .px(px(10.0))
-        .py(px(5.0))
-        .rounded(px(7.0))
+        .px(px(12.0))
+        .py(px(7.0))
+        .rounded(px(CONTROL_RADIUS))
         .bg(rgba(bg))
         .border_1()
         .border_color(rgba(border))
@@ -271,6 +283,11 @@ pub fn button(
         .text_color(rgba(fg))
         .cursor_pointer()
         .flex_shrink_0()
+        .tab_index(0)
+        .focus({
+            let focus = theme.text_primary;
+            move |style| style.border_color(rgba(focus))
+        })
         .hover(move |s| s.bg(rgba(hover_bg)))
         .on_click(on_click)
         .child(label.into())
@@ -282,7 +299,7 @@ pub fn segmented_track(theme: &UiTheme, items: Vec<AnyElement>) -> Div {
         .items_center()
         .gap(px(2.0))
         .p(px(2.5))
-        .rounded(px(8.0))
+        .rounded(px(CONTROL_RADIUS))
         .bg(rgba(theme.surface_muted))
         .border_1()
         .border_color(rgba(theme.border))
@@ -314,8 +331,10 @@ pub fn segmented_item(
     div()
         .id(id)
         .px(px(9.0))
-        .py(px(4.0))
-        .rounded(px(6.0))
+        .py(px(5.0))
+        .rounded(px(CONTROL_RADIUS - 3.0))
+        .border_1()
+        .border_color(rgba(if active { theme.border } else { 0 }))
         .bg(rgba(bg))
         .text_size(px(11.5))
         .font_weight(if active {
@@ -325,6 +344,11 @@ pub fn segmented_item(
         })
         .text_color(rgba(fg))
         .cursor_pointer()
+        .tab_index(0)
+        .focus({
+            let accent = theme.accent;
+            move |style| style.border_color(rgba(accent))
+        })
         .hover(move |s| s.bg(rgba(hover_bg)))
         .on_click(on_click)
         .child(label.into())
@@ -353,12 +377,19 @@ pub fn stepper(
         .child(
             div()
                 .id(id_minus)
-                .w(px(24.0))
-                .h(px(22.0))
+                .w(px(28.0))
+                .h(px(26.0))
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded(px(5.0))
+                .border_1()
+                .border_color(rgba(0))
+                .tab_index(0)
+                .focus({
+                    let accent = theme.accent;
+                    move |style| style.border_color(rgba(accent))
+                })
                 .text_size(px(13.0))
                 .text_color(rgba(theme.text_primary))
                 .cursor_pointer()
@@ -380,12 +411,19 @@ pub fn stepper(
         .child(
             div()
                 .id(id_plus)
-                .w(px(24.0))
-                .h(px(22.0))
+                .w(px(28.0))
+                .h(px(26.0))
                 .flex()
                 .items_center()
                 .justify_center()
                 .rounded(px(5.0))
+                .border_1()
+                .border_color(rgba(0))
+                .tab_index(0)
+                .focus({
+                    let accent = theme.accent;
+                    move |style| style.border_color(rgba(accent))
+                })
                 .text_size(px(13.0))
                 .text_color(rgba(theme.text_primary))
                 .cursor_pointer()
@@ -403,7 +441,7 @@ pub fn sidebar_nav_item(
     count_badge: Option<String>,
     active: bool,
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
-) -> impl IntoElement {
+) -> gpui::Stateful<Div> {
     let bg = if active {
         theme.accent_soft
     } else {
@@ -432,9 +470,16 @@ pub fn sidebar_nav_item(
         .items_center()
         .justify_between()
         .px(px(10.0))
-        .py(px(7.5))
-        .rounded(px(8.0))
+        .min_h(px(38.0))
+        .rounded(px(CONTROL_RADIUS))
+        .border_1()
+        .border_color(rgba(if active { theme.accent_soft } else { 0 }))
         .bg(rgba(bg))
+        .tab_index(0)
+        .focus({
+            let accent = theme.accent;
+            move |style| style.border_color(rgba(accent))
+        })
         .cursor_pointer()
         .hover(move |s| s.bg(rgba(hover)))
         .on_click(on_click)

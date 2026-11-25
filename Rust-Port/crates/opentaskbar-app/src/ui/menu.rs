@@ -133,7 +133,14 @@ fn pt_in_rect(r: &RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
 }
 
-unsafe fn draw_menu_icon(hdc: HDC, icon: MenuIcon, cx: i32, cy: i32, dpi: f32, color: u32) {
+pub(super) unsafe fn draw_menu_icon(
+    hdc: HDC,
+    icon: MenuIcon,
+    cx: i32,
+    cy: i32,
+    dpi: f32,
+    color: u32,
+) {
     if icon == MenuIcon::None {
         return;
     }

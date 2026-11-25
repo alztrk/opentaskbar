@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Redesigned the Rust port's Settings and Background Apps panels with coordinated light and dark themes, responsive Settings navigation, and inline dock pin and window close controls.
+
 - Read playback progress from the matching LibreWolf tab when Windows omits the timeline and the browser exposes a verifiable player position and duration. Show an unavailable-duration status when neither source has a usable timeline.
 
 - Added transition and error states to Wi-Fi and Bluetooth controls, waited for Windows to confirm radio changes (#161), and placed direct Night Light control and Windows quick settings shortcuts side by side in the dock.
