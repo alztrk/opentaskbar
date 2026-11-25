@@ -405,7 +405,7 @@ fn dock_menu_entries(focus_mode: bool) -> Vec<MenuEntry> {
                 "Focus Mode"
             },
         ),
-        MenuEntry::item(MENU_SETTINGS, MenuIcon::Settings, "Settings..."),
+        MenuEntry::item(MENU_SETTINGS, MenuIcon::Settings, "Settings"),
         MenuEntry::with_shortcut(
             MENU_TASKMGR,
             MenuIcon::Activity,
@@ -435,7 +435,7 @@ pub fn show_start_context_menu(hwnd: usize, is_dark: bool) -> ContextAction {
             "Ctrl+Shift+Esc",
         ),
         MenuEntry::with_shortcut(MENU_EXPLORER, MenuIcon::Folder, "File Explorer", "Win+E"),
-        MenuEntry::with_shortcut(MENU_RUN, MenuIcon::Play, "Run...", "Win+R"),
+        MenuEntry::with_shortcut(MENU_RUN, MenuIcon::Play, "Run", "Win+R"),
         MenuEntry::item(MENU_TERMINAL, MenuIcon::Terminal, "Terminal"),
         MenuEntry::item(MENU_TERMINAL_ADMIN, MenuIcon::Shield, "Terminal (Admin)"),
         MenuEntry::Separator,

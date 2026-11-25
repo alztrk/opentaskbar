@@ -222,7 +222,7 @@ impl DcompEngine {
 
         let dwrite_factory: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
-        let font_name = HSTRING::from("Segoe UI");
+        let font_name = HSTRING::from("Segoe UI Variable Text");
         let locale = HSTRING::from("en-US");
         let tooltip_format = unsafe {
             let fmt = dwrite_factory.CreateTextFormat(
@@ -348,7 +348,7 @@ impl DcompEngine {
         let mk_fmt = |size: f32, bold: bool, align_left: bool| -> Result<IDWriteTextFormat> {
             unsafe {
                 let fmt = self.dwrite_factory.CreateTextFormat(
-                    &HSTRING::from("Segoe UI"),
+                    &HSTRING::from("Segoe UI Variable Text"),
                     None,
                     if bold {
                         DWRITE_FONT_WEIGHT_SEMI_BOLD
@@ -813,6 +813,9 @@ impl DcompEngine {
         let dc: ID2D1DeviceContext = unsafe { surface.BeginDraw(None, &mut offset)? };
         unsafe {
             dc.SetDpi(96.0, 96.0);
+            dc.SetTextAntialiasMode(
+                windows::Win32::Graphics::Direct2D::D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+            );
             dc.SetTransform(&Matrix3x2::translation(offset.x as f32, offset.y as f32));
             dc.Clear(Some(&D2D1_COLOR_F {
                 r: 0.0,

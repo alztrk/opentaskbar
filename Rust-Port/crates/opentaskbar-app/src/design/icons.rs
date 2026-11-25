@@ -113,7 +113,7 @@ pub unsafe fn draw_fluent_icon_gdi(
             0,
             0,
             0,
-            5, // CLEARTYPE_QUALITY
+            4, // ANTIALIASED_QUALITY (grayscale AA, zero RGB ClearType fringing on dark surfaces)
             0,
             font_name.as_ptr(),
         );

@@ -758,7 +758,7 @@ impl FlyoutState<'_> {
             FillRect(hdc, &ps.rcPaint, bg_brush);
             DeleteObject(bg_brush as _);
 
-            let fname = wide("Segoe UI");
+            let fname = wide("Segoe UI Variable Text");
             let title_font = CreateFontW(
                 -s(if self.keyboard_navigation { 18.0 } else { 14.5 }),
                 0,
@@ -771,7 +771,7 @@ impl FlyoutState<'_> {
                 0,
                 0,
                 0,
-                5,
+                4, // ANTIALIASED_QUALITY
                 0,
                 fname.as_ptr(),
             );
@@ -787,7 +787,7 @@ impl FlyoutState<'_> {
                 0,
                 0,
                 0,
-                5,
+                4, // ANTIALIASED_QUALITY
                 0,
                 fname.as_ptr(),
             );
@@ -803,7 +803,7 @@ impl FlyoutState<'_> {
                 0,
                 0,
                 0,
-                5,
+                4, // ANTIALIASED_QUALITY
                 0,
                 fname.as_ptr(),
             );
@@ -894,7 +894,7 @@ impl FlyoutState<'_> {
                             0,
                             0,
                             0,
-                            5,
+                            4, // ANTIALIASED_QUALITY
                             0,
                             fname.as_ptr(),
                         );
