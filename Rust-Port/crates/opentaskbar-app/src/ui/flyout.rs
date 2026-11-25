@@ -1211,6 +1211,7 @@ impl FlyoutState<'_> {
                                 icon_y + icon_size / 2,
                                 dpi,
                                 muted_fg,
+                                app_fill,
                             );
                         }
                         SelectObject(hdc, body_font as _);
@@ -1243,6 +1244,7 @@ impl FlyoutState<'_> {
                             let Some(id) = id else { continue };
                             let active = self.hovered_id == Some(id) || focused_id == Some(id);
                             let inset = s(3.0);
+                            let btn_bg = if active || selected { fill } else { bg };
                             if active || selected {
                                 fill_round_rect(
                                     hdc,
@@ -1261,6 +1263,7 @@ impl FlyoutState<'_> {
                                 (y + rect.bottom) / 2,
                                 dpi,
                                 if active || selected { ink } else { muted_fg },
+                                btn_bg,
                             );
                         }
                         y = app.bottom + s(2.0);

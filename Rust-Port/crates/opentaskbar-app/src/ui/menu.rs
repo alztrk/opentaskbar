@@ -12,9 +12,8 @@ use windows_sys::Win32::Graphics::Dwm::{
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DT_LEFT, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, HDC, InvalidateRect, LineTo,
-    MoveToEx, PAINTSTRUCT, PS_SOLID, Rectangle, RoundRect, SelectObject, SetBkMode, SetTextColor,
-    TRANSPARENT,
+    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect, HDC, InvalidateRect, LineTo, MoveToEx,
+    PAINTSTRUCT, PS_SOLID, RoundRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -42,7 +41,6 @@ const PAD_Y_DIPS: f32 = 6.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuIcon {
-    None,
     Settings,
     Activity,
     Folder,
@@ -137,146 +135,30 @@ pub(super) unsafe fn draw_menu_icon(
     cy: i32,
     dpi: f32,
     color: u32,
+    bg_color: u32,
 ) {
-    if icon == MenuIcon::None {
-        return;
-    }
-    let s = |v: f32| (v * dpi).round() as i32;
-    let stroke_w = (1.4 * dpi).round().max(1.0) as i32;
+    use crate::design::icons::{self, AppIcon};
+    let app_icon = match icon {
+        MenuIcon::Settings => AppIcon::Settings,
+        MenuIcon::Activity => AppIcon::Activity,
+        MenuIcon::Folder => AppIcon::Folder,
+        MenuIcon::Terminal => AppIcon::Terminal,
+        MenuIcon::Shield => AppIcon::Shield,
+        MenuIcon::Play => AppIcon::Play,
+        MenuIcon::Monitor => AppIcon::Monitor,
+        MenuIcon::Refresh => AppIcon::RefreshCw,
+        MenuIcon::Power => AppIcon::Power,
+        MenuIcon::Plus => AppIcon::Plus,
+        MenuIcon::Pin => AppIcon::Pin,
+        MenuIcon::Close => AppIcon::Close,
+        MenuIcon::Trash => AppIcon::Trash2,
+        MenuIcon::ChevronLeft => AppIcon::ChevronLeft,
+        MenuIcon::ChevronRight => AppIcon::ChevronRight,
+        MenuIcon::Layers => AppIcon::Layers,
+    };
+    let size_px = (15.0 * dpi).round() as i32;
     unsafe {
-        let pen = CreatePen(PS_SOLID, stroke_w, color);
-        let null_brush = windows_sys::Win32::Graphics::Gdi::GetStockObject(
-            windows_sys::Win32::Graphics::Gdi::NULL_BRUSH,
-        );
-        let old_pen = SelectObject(hdc, pen as _);
-        let old_brush = SelectObject(hdc, null_brush);
-
-        match icon {
-            MenuIcon::None => {}
-            MenuIcon::Settings => {
-                Ellipse(hdc, cx - s(5.0), cy - s(5.0), cx + s(5.0), cy + s(5.0));
-                Ellipse(hdc, cx - s(2.0), cy - s(2.0), cx + s(2.0), cy + s(2.0));
-            }
-            MenuIcon::Activity => {
-                MoveToEx(hdc, cx - s(6.0), cy, std::ptr::null_mut());
-                LineTo(hdc, cx - s(3.0), cy);
-                LineTo(hdc, cx - s(1.0), cy - s(4.5));
-                LineTo(hdc, cx + s(1.5), cy + s(4.0));
-                LineTo(hdc, cx + s(3.5), cy);
-                LineTo(hdc, cx + s(6.0), cy);
-            }
-            MenuIcon::Folder => {
-                RoundRect(
-                    hdc,
-                    cx - s(6.0),
-                    cy - s(4.0),
-                    cx + s(6.0),
-                    cy + s(5.0),
-                    s(2.0),
-                    s(2.0),
-                );
-                MoveToEx(hdc, cx - s(5.5), cy - s(4.0), std::ptr::null_mut());
-                LineTo(hdc, cx - s(4.0), cy - s(5.5));
-                LineTo(hdc, cx - s(0.5), cy - s(5.5));
-                LineTo(hdc, cx + s(1.0), cy - s(4.0));
-            }
-            MenuIcon::Terminal => {
-                MoveToEx(hdc, cx - s(5.5), cy - s(3.5), std::ptr::null_mut());
-                LineTo(hdc, cx - s(1.5), cy);
-                LineTo(hdc, cx - s(5.5), cy + s(3.5));
-                MoveToEx(hdc, cx + s(0.5), cy + s(3.5), std::ptr::null_mut());
-                LineTo(hdc, cx + s(5.5), cy + s(3.5));
-            }
-            MenuIcon::Shield => {
-                MoveToEx(hdc, cx, cy - s(6.0), std::ptr::null_mut());
-                LineTo(hdc, cx + s(5.0), cy - s(3.5));
-                LineTo(hdc, cx + s(4.5), cy + s(1.5));
-                LineTo(hdc, cx, cy + s(6.0));
-                LineTo(hdc, cx - s(4.5), cy + s(1.5));
-                LineTo(hdc, cx - s(5.0), cy - s(3.5));
-                LineTo(hdc, cx, cy - s(6.0));
-            }
-            MenuIcon::Play => {
-                MoveToEx(hdc, cx - s(3.5), cy - s(5.0), std::ptr::null_mut());
-                LineTo(hdc, cx + s(5.0), cy);
-                LineTo(hdc, cx - s(3.5), cy + s(5.0));
-                LineTo(hdc, cx - s(3.5), cy - s(5.0));
-            }
-            MenuIcon::Monitor => {
-                RoundRect(
-                    hdc,
-                    cx - s(6.0),
-                    cy - s(5.0),
-                    cx + s(6.0),
-                    cy + s(2.5),
-                    s(2.0),
-                    s(2.0),
-                );
-                MoveToEx(hdc, cx - s(2.5), cy + s(5.0), std::ptr::null_mut());
-                LineTo(hdc, cx + s(2.5), cy + s(5.0));
-                MoveToEx(hdc, cx, cy + s(2.5), std::ptr::null_mut());
-                LineTo(hdc, cx, cy + s(5.0));
-            }
-            MenuIcon::Refresh => {
-                Ellipse(hdc, cx - s(5.0), cy - s(5.0), cx + s(5.0), cy + s(5.0));
-                MoveToEx(hdc, cx + s(2.0), cy - s(5.5), std::ptr::null_mut());
-                LineTo(hdc, cx + s(5.5), cy - s(3.0));
-            }
-            MenuIcon::Power => {
-                Ellipse(hdc, cx - s(5.0), cy - s(4.0), cx + s(5.0), cy + s(5.5));
-                MoveToEx(hdc, cx, cy - s(6.0), std::ptr::null_mut());
-                LineTo(hdc, cx, cy);
-            }
-            MenuIcon::Plus => {
-                MoveToEx(hdc, cx - s(5.0), cy, std::ptr::null_mut());
-                LineTo(hdc, cx + s(5.0), cy);
-                MoveToEx(hdc, cx, cy - s(5.0), std::ptr::null_mut());
-                LineTo(hdc, cx, cy + s(5.0));
-            }
-            MenuIcon::Pin => {
-                MoveToEx(hdc, cx - s(3.5), cy - s(5.0), std::ptr::null_mut());
-                LineTo(hdc, cx + s(3.5), cy - s(5.0));
-                MoveToEx(hdc, cx - s(2.5), cy - s(5.0), std::ptr::null_mut());
-                LineTo(hdc, cx - s(4.0), cy + s(1.0));
-                LineTo(hdc, cx + s(4.0), cy + s(1.0));
-                LineTo(hdc, cx + s(2.5), cy - s(5.0));
-                MoveToEx(hdc, cx, cy + s(1.0), std::ptr::null_mut());
-                LineTo(hdc, cx, cy + s(6.0));
-            }
-            MenuIcon::Close => {
-                MoveToEx(hdc, cx - s(4.5), cy - s(4.5), std::ptr::null_mut());
-                LineTo(hdc, cx + s(4.5), cy + s(4.5));
-                MoveToEx(hdc, cx + s(4.5), cy - s(4.5), std::ptr::null_mut());
-                LineTo(hdc, cx - s(4.5), cy + s(4.5));
-            }
-            MenuIcon::Trash => {
-                MoveToEx(hdc, cx - s(5.5), cy - s(4.0), std::ptr::null_mut());
-                LineTo(hdc, cx + s(5.5), cy - s(4.0));
-                MoveToEx(hdc, cx - s(2.0), cy - s(6.0), std::ptr::null_mut());
-                LineTo(hdc, cx + s(2.0), cy - s(6.0));
-                Rectangle(hdc, cx - s(4.0), cy - s(4.0), cx + s(4.0), cy + s(5.5));
-            }
-            MenuIcon::ChevronLeft => {
-                MoveToEx(hdc, cx + s(2.5), cy - s(4.5), std::ptr::null_mut());
-                LineTo(hdc, cx - s(2.5), cy);
-                LineTo(hdc, cx + s(2.5), cy + s(4.5));
-            }
-            MenuIcon::ChevronRight => {
-                MoveToEx(hdc, cx - s(2.5), cy - s(4.5), std::ptr::null_mut());
-                LineTo(hdc, cx + s(2.5), cy);
-                LineTo(hdc, cx - s(2.5), cy + s(4.5));
-            }
-            MenuIcon::Layers => {
-                Rectangle(hdc, cx - s(5.5), cy - s(5.0), cx + s(2.0), cy + s(1.5));
-                MoveToEx(hdc, cx - s(2.0), cy + s(4.5), std::ptr::null_mut());
-                LineTo(hdc, cx + s(5.5), cy + s(4.5));
-                LineTo(hdc, cx + s(5.5), cy - s(1.5));
-            }
-        }
-
-        SelectObject(hdc, old_pen);
-        SelectObject(hdc, old_brush);
-        DeleteObject(pen as _);
+        icons::draw_svg_icon_gdi(hdc, app_icon, cx, cy, size_px, color, bg_color);
     }
 }
 
@@ -499,10 +381,14 @@ impl MenuState {
                             bottom: y_cursor + row_h,
                         });
                         let is_hovered = self.hovered == Some(idx);
+                        let row_bg = if is_hovered {
+                            if *destructive { danger_bg } else { hover_bg }
+                        } else {
+                            bg
+                        };
                         if is_hovered {
-                            let hcol = if *destructive { danger_bg } else { hover_bg };
-                            let hb = CreateSolidBrush(hcol);
-                            let hp = CreatePen(PS_SOLID, 1, hcol);
+                            let hb = CreateSolidBrush(row_bg);
+                            let hp = CreatePen(PS_SOLID, 1, row_bg);
                             let ob = SelectObject(hdc, hb as _);
                             let op = SelectObject(hdc, hp as _);
                             RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
@@ -526,6 +412,7 @@ impl MenuState {
                             (rc.top + rc.bottom) / 2,
                             dpi,
                             ic_col,
+                            row_bg,
                         );
 
                         let old_font = SelectObject(hdc, main_font as _);

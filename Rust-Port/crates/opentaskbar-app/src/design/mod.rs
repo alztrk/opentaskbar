@@ -4,6 +4,8 @@
 //! `ui/menu.rs`), and GPUI (`ui/components.rs`, `ui/settings.rs`) so every surface speaks
 //! one cohesive visual language.
 
+pub mod icons;
+
 /// RGB color tuple `(r, g, b)`.
 pub type Rgb = (u8, u8, u8);
 

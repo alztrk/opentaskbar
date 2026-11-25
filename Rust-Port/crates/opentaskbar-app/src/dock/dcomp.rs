@@ -8,13 +8,15 @@
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
-    D2D1_PIXEL_FORMAT,
+    D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1_BITMAP_PROPERTIES1, D2D1_CAP_STYLE_ROUND, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE,
+    D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM, D2D1_CAP_STYLE_ROUND,
+    D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED, D2D1_COLOR_SPACE_SRGB,
+    D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LINE_JOIN_ROUND,
-    D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1, D2D1CreateFactory, ID2D1Device,
-    ID2D1DeviceContext, ID2D1Factory1, ID2D1StrokeStyle,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1,
+    D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
@@ -40,7 +42,10 @@ use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::core::{HSTRING, Interface, Result};
 use windows_numerics::{Matrix3x2, Vector2};
 
-use crate::design::{self, Rgb};
+use crate::design::{
+    self, Rgb,
+    icons::{self, AppIcon},
+};
 use crate::platform::icon_cache::RawIcon;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,7 +338,6 @@ impl DcompEngine {
             pal.text_secondary.2,
             0.92,
         );
-        let accent_c = color_rgba(pal.accent.0, pal.accent.1, pal.accent.2, 1.0);
         let track_c = if is_dark {
             color_rgba(0xff, 0xff, 0xff, 0.16)
         } else {
@@ -388,7 +392,6 @@ impl DcompEngine {
         self.draw_surface(w_px, h_px, |dc, _w, _h| unsafe {
             let p_brush = dc.CreateSolidColorBrush(&fg_p, None)?;
             let s_brush = dc.CreateSolidColorBrush(&fg_s, None)?;
-            let a_brush = dc.CreateSolidColorBrush(&accent_c, None)?;
             let tr_brush = dc.CreateSolidColorBrush(&track_c, None)?;
             let mut prev = Matrix3x2::identity();
             dc.GetTransform(&mut prev);
@@ -404,7 +407,7 @@ impl DcompEngine {
             let cy = height_dips * 0.5;
             match spec {
                 WidgetChipSpec::IconOnly(icon) => {
-                    draw_chip_icon(dc, *icon, width_dips * 0.5, cy, 16.0, &p_brush, &stroke)?;
+                    draw_chip_icon(dc, *icon, width_dips * 0.5, cy, 16.0, dpi, pal.text_primary)?;
                 }
                 WidgetChipSpec::IconValue {
                     icon,
@@ -425,8 +428,12 @@ impl DcompEngine {
                         };
                         dc.FillRoundedRectangle(&rr, &tb);
                     }
-                    let icon_brush = if *active_tint { &a_brush } else { &p_brush };
-                    draw_chip_icon(dc, *icon, 14.0, cy, 14.0, icon_brush, &stroke)?;
+                    let icon_rgb = if *active_tint {
+                        pal.accent
+                    } else {
+                        pal.text_primary
+                    };
+                    draw_chip_icon(dc, *icon, 14.0, cy, 15.0, dpi, icon_rgb)?;
                     let wtxt: Vec<u16> = value.encode_utf16().collect();
                     dc.DrawText(
                         &wtxt,
@@ -820,6 +827,7 @@ impl DcompEngine {
 
     /// Creates a 3-piece horizontal pill (left cap, 1px stretchable center, right cap) so
     /// widening/narrowing the dock pill during fisheye never redraws any GPU texture.
+    /// Includes a subtle vertical depth gradient and a top-edge specular inner highlight.
     pub fn create_pill_nodes(
         &self,
         radius_px: f32,
@@ -833,13 +841,54 @@ impl DcompEngine {
         let cap_w = (r.ceil() as u32).max(2);
         let bw = dpi.max(1.0);
         let half_bw = bw * 0.5;
-        let bg_col = color_rgba(bg.0, bg.1, bg.2, bg.3);
+        let is_dark = (u16::from(bg.0) + u16::from(bg.1) + u16::from(bg.2)) < 384;
+        let top_bg = color_rgba(
+            bg.0.saturating_add(if is_dark { 10 } else { 6 }),
+            bg.1.saturating_add(if is_dark { 10 } else { 6 }),
+            bg.2.saturating_add(if is_dark { 12 } else { 6 }),
+            bg.3,
+        );
+        let bot_bg = color_rgba(bg.0, bg.1, bg.2, bg.3);
         let bd_col = color_rgba(border.0, border.1, border.2, border.3);
+        let spec_col = if is_dark {
+            color_rgba(0xff, 0xff, 0xff, 0.14)
+        } else {
+            color_rgba(0xff, 0xff, 0xff, 0.72)
+        };
+
+        let make_grad = |dc: &ID2D1DeviceContext, fh: f32| unsafe {
+            let stops = [
+                D2D1_GRADIENT_STOP {
+                    position: 0.0,
+                    color: top_bg,
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 1.0,
+                    color: bot_bg,
+                },
+            ];
+            let coll = dc.CreateGradientStopCollection(
+                &stops,
+                D2D1_COLOR_SPACE_SRGB,
+                D2D1_COLOR_SPACE_SRGB,
+                D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                D2D1_EXTEND_MODE_CLAMP,
+                D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+            )?;
+            dc.CreateLinearGradientBrush(
+                &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                    startPoint: Vector2 { X: 0.0, Y: 0.0 },
+                    endPoint: Vector2 { X: 0.0, Y: fh },
+                },
+                None,
+                &coll,
+            )
+        };
 
         let left_surf = self.draw_surface(cap_w, h, |dc, w, fh| unsafe {
-            let bg_brush = dc.CreateSolidColorBrush(&bg_col, None)?;
+            let bg_brush = make_grad(dc, fh)?;
             let bd_brush = dc.CreateSolidColorBrush(&bd_col, None)?;
-            // Draw a wider rounded rect clipped to the left cap so the right seam is square.
+            let spec_brush = dc.CreateSolidColorBrush(&spec_col, None)?;
             let rr = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
                     left: half_bw,
@@ -849,6 +898,16 @@ impl DcompEngine {
                 },
                 radiusX: r,
                 radiusY: r,
+            };
+            let inner_rr = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: half_bw + bw,
+                    top: half_bw + bw,
+                    right: w + r * 2.0,
+                    bottom: fh - half_bw - bw,
+                },
+                radiusX: (r - bw).max(1.0),
+                radiusY: (r - bw).max(1.0),
             };
             dc.PushAxisAlignedClip(
                 &D2D_RECT_F {
@@ -860,6 +919,18 @@ impl DcompEngine {
                 windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
             );
             dc.FillRoundedRectangle(&rr, &bg_brush);
+            // Top-half specular inner rim
+            dc.PushAxisAlignedClip(
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: w,
+                    bottom: (r + bw * 2.0).min(fh * 0.5),
+                },
+                windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            );
+            dc.DrawRoundedRectangle(&inner_rr, &spec_brush, bw, None);
+            dc.PopAxisAlignedClip();
             if border.3 > 0.0 {
                 dc.DrawRoundedRectangle(&rr, &bd_brush, bw, None);
             }
@@ -868,8 +939,9 @@ impl DcompEngine {
         })?;
 
         let center_surf = self.draw_surface(1, h, |dc, _w, fh| unsafe {
-            let bg_brush = dc.CreateSolidColorBrush(&bg_col, None)?;
+            let bg_brush = make_grad(dc, fh)?;
             let bd_brush = dc.CreateSolidColorBrush(&bd_col, None)?;
+            let spec_brush = dc.CreateSolidColorBrush(&spec_col, None)?;
             dc.FillRectangle(
                 &D2D_RECT_F {
                     left: 0.0,
@@ -878,6 +950,20 @@ impl DcompEngine {
                     bottom: fh - half_bw,
                 },
                 &bg_brush,
+            );
+            // Subtle top-edge specular inner highlight
+            dc.DrawLine(
+                Vector2 {
+                    X: 0.0,
+                    Y: half_bw + bw,
+                },
+                Vector2 {
+                    X: 1.0,
+                    Y: half_bw + bw,
+                },
+                &spec_brush,
+                bw,
+                None,
             );
             if border.3 > 0.0 {
                 dc.DrawLine(
@@ -905,8 +991,9 @@ impl DcompEngine {
         })?;
 
         let right_surf = self.draw_surface(cap_w, h, |dc, w, fh| unsafe {
-            let bg_brush = dc.CreateSolidColorBrush(&bg_col, None)?;
+            let bg_brush = make_grad(dc, fh)?;
             let bd_brush = dc.CreateSolidColorBrush(&bd_col, None)?;
+            let spec_brush = dc.CreateSolidColorBrush(&spec_col, None)?;
             let rr = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
                     left: -(r * 2.0),
@@ -916,6 +1003,16 @@ impl DcompEngine {
                 },
                 radiusX: r,
                 radiusY: r,
+            };
+            let inner_rr = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: -(r * 2.0),
+                    top: half_bw + bw,
+                    right: w - half_bw - bw,
+                    bottom: fh - half_bw - bw,
+                },
+                radiusX: (r - bw).max(1.0),
+                radiusY: (r - bw).max(1.0),
             };
             dc.PushAxisAlignedClip(
                 &D2D_RECT_F {
@@ -927,6 +1024,17 @@ impl DcompEngine {
                 windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
             );
             dc.FillRoundedRectangle(&rr, &bg_brush);
+            dc.PushAxisAlignedClip(
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: w,
+                    bottom: (r + bw * 2.0).min(fh * 0.5),
+                },
+                windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+            );
+            dc.DrawRoundedRectangle(&inner_rr, &spec_brush, bw, None);
+            dc.PopAxisAlignedClip();
             if border.3 > 0.0 {
                 dc.DrawRoundedRectangle(&rr, &bd_brush, bw, None);
             }
@@ -982,237 +1090,100 @@ impl DcompEngine {
         size_px: u32,
         is_dark: bool,
     ) -> Result<IDCompositionSurface> {
-        let stroke_props = D2D1_STROKE_STYLE_PROPERTIES1 {
-            startCap: D2D1_CAP_STYLE_ROUND,
-            endCap: D2D1_CAP_STYLE_ROUND,
-            lineJoin: D2D1_LINE_JOIN_ROUND,
-            miterLimit: 10.0,
-            ..Default::default()
-        };
-        let stroke: ID2D1StrokeStyle = unsafe {
-            self.d2d_factory
-                .CreateStrokeStyle(&stroke_props, None)?
-                .into()
-        };
-        let fg = if is_dark {
-            color_rgba(0xe2, 0xe8, 0xf0, 1.0)
-        } else {
-            color_rgba(0x1e, 0x29, 0x3b, 1.0)
-        };
-        let start_blue = if is_dark {
-            color_rgba(0x38, 0xbd, 0xf8, 1.0)
-        } else {
-            color_rgba(0x02, 0x84, 0xc7, 1.0)
-        };
+        let pal = design::palette(is_dark);
 
-        self.draw_surface(size_px, size_px, |dc, w, _h| unsafe {
-            let s = w / 24.0;
-            match kind {
-                ShellGlyph::Start => {
-                    let brush = dc.CreateSolidColorBrush(&start_blue, None)?;
-                    let rects = [(2.5, 2.5), (12.8, 2.5), (2.5, 12.8), (12.8, 12.8)];
-                    for (x, y) in rects {
-                        let rr = D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F {
-                                left: x * s,
-                                top: y * s,
-                                right: (x + 8.7) * s,
-                                bottom: (y + 8.7) * s,
-                            },
-                            radiusX: 1.6 * s,
-                            radiusY: 1.6 * s,
-                        };
-                        dc.FillRoundedRectangle(&rr, &brush);
-                    }
-                }
-                ShellGlyph::Search => {
-                    let brush = dc.CreateSolidColorBrush(&fg, None)?;
-                    let ellipse = D2D1_ELLIPSE {
-                        point: Vector2 {
-                            X: 11.0 * s,
-                            Y: 11.0 * s,
+        self.draw_surface(size_px, size_px, |dc, w, h| unsafe {
+            if kind == ShellGlyph::Start {
+                // Crisp Windows 11 4-pane logo with diagonal sky-to-azure gradient.
+                let s = w / 24.0;
+                let stops = if is_dark {
+                    [
+                        D2D1_GRADIENT_STOP {
+                            position: 0.0,
+                            color: color_rgba(0x60, 0xcd, 0xff, 1.0),
                         },
-                        radiusX: 7.5 * s,
-                        radiusY: 7.5 * s,
-                    };
-                    dc.DrawEllipse(&ellipse, &brush, 2.1 * s, Some(&stroke));
-                    dc.DrawLine(
-                        Vector2 {
-                            X: 16.3 * s,
-                            Y: 16.3 * s,
+                        D2D1_GRADIENT_STOP {
+                            position: 1.0,
+                            color: color_rgba(0x00, 0x78, 0xd4, 1.0),
                         },
-                        Vector2 {
-                            X: 20.5 * s,
-                            Y: 20.5 * s,
+                    ]
+                } else {
+                    [
+                        D2D1_GRADIENT_STOP {
+                            position: 0.0,
+                            color: color_rgba(0x00, 0x95, 0xf6, 1.0),
                         },
-                        &brush,
-                        2.1 * s,
-                        Some(&stroke),
-                    );
-                }
-                ShellGlyph::TaskView => {
-                    let brush = dc.CreateSolidColorBrush(&fg, None)?;
-                    let front = D2D1_ROUNDED_RECT {
+                        D2D1_GRADIENT_STOP {
+                            position: 1.0,
+                            color: color_rgba(0x00, 0x5f, 0xb8, 1.0),
+                        },
+                    ]
+                };
+                let coll = dc.CreateGradientStopCollection(
+                    &stops,
+                    D2D1_COLOR_SPACE_SRGB,
+                    D2D1_COLOR_SPACE_SRGB,
+                    D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                    D2D1_EXTEND_MODE_CLAMP,
+                    D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+                )?;
+                let brush = dc.CreateLinearGradientBrush(
+                    &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                        startPoint: Vector2 {
+                            X: 2.5 * s,
+                            Y: 2.5 * s,
+                        },
+                        endPoint: Vector2 {
+                            X: 21.5 * s,
+                            Y: 21.5 * s,
+                        },
+                    },
+                    None,
+                    &coll,
+                )?;
+                let rects = [(2.5, 2.5), (12.8, 2.5), (2.5, 12.8), (12.8, 12.8)];
+                for (x, y) in rects {
+                    let rr = D2D1_ROUNDED_RECT {
                         rect: D2D_RECT_F {
-                            left: 2.5 * s,
-                            top: 4.0 * s,
-                            right: 16.0 * s,
-                            bottom: 14.5 * s,
+                            left: x * s,
+                            top: y * s,
+                            right: (x + 8.7) * s,
+                            bottom: (y + 8.7) * s,
                         },
-                        radiusX: 2.2 * s,
-                        radiusY: 2.2 * s,
+                        radiusX: 1.6 * s,
+                        radiusY: 1.6 * s,
                     };
-                    dc.DrawRoundedRectangle(&front, &brush, 2.0 * s, Some(&stroke));
-                    // Draw the tucked back window's visible bottom + right edges cleanly.
-                    dc.DrawLine(
-                        Vector2 {
-                            X: 8.5 * s,
-                            Y: 18.5 * s,
-                        },
-                        Vector2 {
-                            X: 19.3 * s,
-                            Y: 18.5 * s,
-                        },
-                        &brush,
-                        2.0 * s,
-                        Some(&stroke),
-                    );
-                    dc.DrawLine(
-                        Vector2 {
-                            X: 21.5 * s,
-                            Y: 8.5 * s,
-                        },
-                        Vector2 {
-                            X: 21.5 * s,
-                            Y: 16.3 * s,
-                        },
-                        &brush,
-                        2.0 * s,
-                        Some(&stroke),
-                    );
-                    dc.DrawLine(
-                        Vector2 {
-                            X: 19.3 * s,
-                            Y: 18.5 * s,
-                        },
-                        Vector2 {
-                            X: 21.5 * s,
-                            Y: 16.3 * s,
-                        },
-                        &brush,
-                        2.0 * s,
-                        Some(&stroke),
-                    );
+                    dc.FillRoundedRectangle(&rr, &brush);
                 }
-                ShellGlyph::TrayChevron => {
-                    let brush = dc.CreateSolidColorBrush(&fg, None)?;
-                    dc.DrawLine(
-                        Vector2 {
-                            X: 6.5 * s,
-                            Y: 14.5 * s,
-                        },
-                        Vector2 {
-                            X: 12.0 * s,
-                            Y: 9.0 * s,
-                        },
-                        &brush,
-                        2.1 * s,
-                        Some(&stroke),
-                    );
-                    dc.DrawLine(
-                        Vector2 {
-                            X: 12.0 * s,
-                            Y: 9.0 * s,
-                        },
-                        Vector2 {
-                            X: 17.5 * s,
-                            Y: 14.5 * s,
-                        },
-                        &brush,
-                        2.1 * s,
-                        Some(&stroke),
-                    );
-                }
-                ShellGlyph::RecycleBinEmpty | ShellGlyph::RecycleBinFull => {
-                    let full = kind == ShellGlyph::RecycleBinFull;
-                    let brush = dc.CreateSolidColorBrush(&fg, None)?;
-                    // Lid bar + handle
-                    dc.DrawLine(
-                        Vector2 {
-                            X: 4.5 * s,
-                            Y: 6.5 * s,
-                        },
-                        Vector2 {
-                            X: 19.5 * s,
-                            Y: 6.5 * s,
-                        },
-                        &brush,
-                        1.9 * s,
-                        Some(&stroke),
-                    );
-                    dc.DrawLine(
-                        Vector2 {
-                            X: 9.0 * s,
-                            Y: 4.0 * s,
-                        },
-                        Vector2 {
-                            X: 15.0 * s,
-                            Y: 4.0 * s,
-                        },
-                        &brush,
-                        1.9 * s,
-                        Some(&stroke),
-                    );
-                    // Bin body
-                    let body = D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F {
-                            left: 6.2 * s,
-                            top: 6.8 * s,
-                            right: 17.8 * s,
-                            bottom: 20.5 * s,
-                        },
-                        radiusX: 2.0 * s,
-                        radiusY: 2.0 * s,
-                    };
-                    if full {
-                        let fill_c = if is_dark {
-                            color_rgba(0x38, 0xbd, 0xf8, 0.35)
-                        } else {
-                            color_rgba(0x02, 0x84, 0xc7, 0.25)
-                        };
-                        let fill_brush = dc.CreateSolidColorBrush(&fill_c, None)?;
-                        dc.FillRoundedRectangle(&body, &fill_brush);
-                    }
-                    dc.DrawRoundedRectangle(&body, &brush, 1.8 * s, Some(&stroke));
-                    // Vertical ribs
-                    dc.DrawLine(
-                        Vector2 {
-                            X: 10.2 * s,
-                            Y: 10.5 * s,
-                        },
-                        Vector2 {
-                            X: 10.2 * s,
-                            Y: 17.2 * s,
-                        },
-                        &brush,
-                        1.6 * s,
-                        Some(&stroke),
-                    );
-                    dc.DrawLine(
-                        Vector2 {
-                            X: 13.8 * s,
-                            Y: 10.5 * s,
-                        },
-                        Vector2 {
-                            X: 13.8 * s,
-                            Y: 17.2 * s,
-                        },
-                        &brush,
-                        1.6 * s,
-                        Some(&stroke),
-                    );
-                }
+                return Ok(());
             }
+
+            let app_icon = match kind {
+                ShellGlyph::Start => unreachable!(),
+                ShellGlyph::Search => AppIcon::Search,
+                ShellGlyph::TaskView => AppIcon::TaskView,
+                ShellGlyph::TrayChevron => AppIcon::TrayChevron,
+                ShellGlyph::RecycleBinEmpty => AppIcon::RecycleBinEmpty,
+                ShellGlyph::RecycleBinFull => AppIcon::RecycleBinFull,
+            };
+            let color = if kind == ShellGlyph::RecycleBinFull {
+                pal.accent
+            } else {
+                pal.text_primary
+            };
+            draw_svg_bitmap_d2d(
+                dc,
+                app_icon,
+                D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: w,
+                    bottom: h,
+                },
+                size_px,
+                color,
+                0.96,
+            )?;
             Ok(())
         })
     }
@@ -1333,19 +1304,17 @@ impl DcompEngine {
         let w_px = (w_dips * dpi).ceil() as u32;
         let h_px = (h_dips * dpi).ceil() as u32;
 
-        let (bg_c, bd_c, fg_c) = if is_dark {
-            (
-                color_rgba(0x18, 0x1b, 0x24, 0.95),
-                color_rgba(0xff, 0xff, 0xff, 0.17),
-                color_rgba(0xf8, 0xfa, 0xfc, 1.0),
-            )
-        } else {
-            (
-                color_rgba(0xf8, 0xfa, 0xfc, 0.96),
-                color_rgba(0x0f, 0x17, 0x2a, 0.14),
-                color_rgba(0x0f, 0x17, 0x2a, 1.0),
-            )
-        };
+        let pal = design::palette(is_dark);
+        let (bg_c, bd_c, fg_c) = (
+            color_rgba(pal.surface.0, pal.surface.1, pal.surface.2, 0.96),
+            color_rgba(pal.border_rgb.0, pal.border_rgb.1, pal.border_rgb.2, 0.90),
+            color_rgba(
+                pal.text_primary.0,
+                pal.text_primary.1,
+                pal.text_primary.2,
+                1.0,
+            ),
+        );
 
         let surface = self.draw_surface(w_px, h_px, |dc, w, h| unsafe {
             let bg = dc.CreateSolidColorBrush(&bg_c, None)?;
@@ -1400,201 +1369,86 @@ impl DcompEngine {
 #[allow(dead_code)]
 fn _unused_rect_check(_: RECT, _: D2D_SIZE_F) {}
 
+unsafe fn draw_svg_bitmap_d2d(
+    dc: &ID2D1DeviceContext,
+    icon: AppIcon,
+    dest: D2D_RECT_F,
+    raster_px: u32,
+    color: Rgb,
+    alpha: f32,
+) -> Result<()> {
+    let px_size = raster_px.clamp(8, 256);
+    let Some(premul) = icons::render_svg_premul_bgra(icon, px_size, color, alpha) else {
+        return Ok(());
+    };
+    let props = D2D1_BITMAP_PROPERTIES1 {
+        pixelFormat: D2D1_PIXEL_FORMAT {
+            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+        },
+        dpiX: 96.0,
+        dpiY: 96.0,
+        ..Default::default()
+    };
+    unsafe {
+        let bitmap = dc.CreateBitmap(
+            D2D_SIZE_U {
+                width: px_size,
+                height: px_size,
+            },
+            Some(premul.as_ptr().cast()),
+            px_size * 4,
+            &props,
+        )?;
+        dc.DrawBitmap(
+            &bitmap,
+            Some(&dest),
+            1.0,
+            D2D1_INTERPOLATION_MODE_LINEAR,
+            None,
+            None,
+        );
+    }
+    Ok(())
+}
+
 unsafe fn draw_chip_icon(
     dc: &ID2D1DeviceContext,
     icon: ChipIcon,
     cx: f32,
     cy: f32,
-    size: f32,
-    brush: &windows::Win32::Graphics::Direct2D::ID2D1SolidColorBrush,
-    stroke: &ID2D1StrokeStyle,
+    size_dips: f32,
+    dpi: f32,
+    color: Rgb,
 ) -> Result<()> {
-    let r = size * 0.5;
-    let sw = 1.6_f32;
-    let l = |x1: f32, y1: f32, x2: f32, y2: f32| unsafe {
-        dc.DrawLine(
-            Vector2 {
-                X: cx + x1 * r,
-                Y: cy + y1 * r,
-            },
-            Vector2 {
-                X: cx + x2 * r,
-                Y: cy + y2 * r,
-            },
-            brush,
-            sw,
-            Some(stroke),
-        );
+    let app_icon = match icon {
+        ChipIcon::Sliders => AppIcon::Sliders,
+        ChipIcon::Music => AppIcon::Music,
+        ChipIcon::Speaker => AppIcon::Volume2,
+        ChipIcon::SpeakerMuted => AppIcon::VolumeX,
+        ChipIcon::SunCloud => AppIcon::SunCloud,
+        ChipIcon::Battery => AppIcon::Battery,
+        ChipIcon::Bluetooth => AppIcon::Bluetooth,
+        ChipIcon::Drive => AppIcon::HardDrive,
+        ChipIcon::Timer => AppIcon::Timer,
+        ChipIcon::Folder => AppIcon::Folder,
+        ChipIcon::Grid => AppIcon::LayoutGrid,
     };
+    let half = size_dips * 0.5;
+    let raster_px = (size_dips * dpi).round().max(12.0) as u32;
     unsafe {
-        match icon {
-            ChipIcon::Sliders => {
-                l(-0.8, -0.45, 0.8, -0.45);
-                l(-0.8, 0.45, 0.8, 0.45);
-                dc.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: Vector2 {
-                            X: cx - 0.25 * r,
-                            Y: cy - 0.45 * r,
-                        },
-                        radiusX: 2.2,
-                        radiusY: 2.2,
-                    },
-                    brush,
-                );
-                dc.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: Vector2 {
-                            X: cx + 0.3 * r,
-                            Y: cy + 0.45 * r,
-                        },
-                        radiusX: 2.2,
-                        radiusY: 2.2,
-                    },
-                    brush,
-                );
-            }
-            ChipIcon::Music => {
-                l(-0.2, 0.5, -0.2, -0.6);
-                l(-0.2, -0.6, 0.65, -0.8);
-                l(0.65, -0.8, 0.65, 0.35);
-                dc.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: Vector2 {
-                            X: cx - 0.45 * r,
-                            Y: cy + 0.55 * r,
-                        },
-                        radiusX: 2.2,
-                        radiusY: 1.8,
-                    },
-                    brush,
-                );
-                dc.FillEllipse(
-                    &D2D1_ELLIPSE {
-                        point: Vector2 {
-                            X: cx + 0.4 * r,
-                            Y: cy + 0.4 * r,
-                        },
-                        radiusX: 2.2,
-                        radiusY: 1.8,
-                    },
-                    brush,
-                );
-            }
-            ChipIcon::Speaker | ChipIcon::SpeakerMuted => {
-                l(-0.75, -0.25, -0.35, -0.25);
-                l(-0.75, 0.25, -0.35, 0.25);
-                l(-0.75, -0.25, -0.75, 0.25);
-                l(-0.35, -0.25, 0.1, -0.65);
-                l(-0.35, 0.25, 0.1, 0.65);
-                l(0.1, -0.65, 0.1, 0.65);
-                if icon == ChipIcon::Speaker {
-                    l(0.45, -0.3, 0.6, 0.0);
-                    l(0.6, 0.0, 0.45, 0.3);
-                } else {
-                    l(0.4, -0.35, 0.85, 0.35);
-                    l(0.85, -0.35, 0.4, 0.35);
-                }
-            }
-            ChipIcon::SunCloud => {
-                dc.DrawEllipse(
-                    &D2D1_ELLIPSE {
-                        point: Vector2 { X: cx, Y: cy },
-                        radiusX: 0.42 * r,
-                        radiusY: 0.42 * r,
-                    },
-                    brush,
-                    sw,
-                    None,
-                );
-                l(0.0, -0.9, 0.0, -0.72);
-                l(0.0, 0.72, 0.0, 0.9);
-                l(-0.9, 0.0, -0.72, 0.0);
-                l(0.72, 0.0, 0.9, 0.0);
-            }
-            ChipIcon::Battery => {
-                let rr = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: cx - 0.85 * r,
-                        top: cy - 0.48 * r,
-                        right: cx + 0.62 * r,
-                        bottom: cy + 0.48 * r,
-                    },
-                    radiusX: 2.0,
-                    radiusY: 2.0,
-                };
-                dc.DrawRoundedRectangle(&rr, brush, sw, None);
-                l(0.82, -0.22, 0.82, 0.22);
-            }
-            ChipIcon::Bluetooth => {
-                l(0.0, -0.8, 0.0, 0.8);
-                l(0.0, -0.8, 0.55, -0.35);
-                l(0.55, -0.35, -0.45, 0.35);
-                l(-0.45, -0.35, 0.55, 0.35);
-                l(0.55, 0.35, 0.0, 0.8);
-            }
-            ChipIcon::Drive => {
-                let rr = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: cx - 0.8 * r,
-                        top: cy - 0.45 * r,
-                        right: cx + 0.8 * r,
-                        bottom: cy + 0.45 * r,
-                    },
-                    radiusX: 2.2,
-                    radiusY: 2.2,
-                };
-                dc.DrawRoundedRectangle(&rr, brush, sw, None);
-                l(-0.4, 0.05, 0.05, 0.05);
-            }
-            ChipIcon::Timer => {
-                dc.DrawEllipse(
-                    &D2D1_ELLIPSE {
-                        point: Vector2 {
-                            X: cx,
-                            Y: cy + 0.08 * r,
-                        },
-                        radiusX: 0.65 * r,
-                        radiusY: 0.65 * r,
-                    },
-                    brush,
-                    sw,
-                    None,
-                );
-                l(0.0, 0.08, 0.0, -0.28);
-                l(0.0, 0.08, 0.32, 0.08);
-                l(-0.25, -0.82, 0.25, -0.82);
-            }
-            ChipIcon::Folder => {
-                let rr = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F {
-                        left: cx - 0.8 * r,
-                        top: cy - 0.45 * r,
-                        right: cx + 0.8 * r,
-                        bottom: cy + 0.6 * r,
-                    },
-                    radiusX: 2.0,
-                    radiusY: 2.0,
-                };
-                dc.DrawRoundedRectangle(&rr, brush, sw, None);
-                l(-0.8, -0.45, -0.2, -0.72);
-            }
-            ChipIcon::Grid => {
-                for (ox, oy) in [(-0.45, -0.45), (0.45, -0.45), (-0.45, 0.45), (0.45, 0.45)] {
-                    dc.FillEllipse(
-                        &D2D1_ELLIPSE {
-                            point: Vector2 {
-                                X: cx + ox * r,
-                                Y: cy + oy * r,
-                            },
-                            radiusX: 1.8,
-                            radiusY: 1.8,
-                        },
-                        brush,
-                    );
-                }
-            }
-        }
+        draw_svg_bitmap_d2d(
+            dc,
+            app_icon,
+            D2D_RECT_F {
+                left: cx - half,
+                top: cy - half,
+                right: cx + half,
+                bottom: cy + half,
+            },
+            raster_px,
+            color,
+            0.96,
+        )
     }
-    Ok(())
 }
