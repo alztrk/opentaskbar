@@ -252,6 +252,16 @@ fn hicon_to_bgra(hicon: HICON) -> Option<RawIcon> {
     }
 }
 
+/// Extracts the native Windows Shell Recycle Bin icon (Empty or Full) from `imageres.dll`
+/// at crisp 64x64 BGRA32 resolution.
+pub fn extract_recycle_bin_icon(full: bool) -> Option<RawIcon> {
+    let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+    // Windows 10/11 `imageres.dll` resource IDs: -55 = Empty Recycle Bin, -54 = Full Recycle Bin.
+    let res_id = if full { -54 } else { -55 };
+    let spec = format!(r"{root}\System32\imageres.dll,{res_id}");
+    extract_private_icon(&spec)
+}
+
 /// Extracts directly from `.exe` / `.ico` / `.dll` via `PrivateExtractIconsW` (mirrors C# `GetExecutableIcon`).
 fn extract_private_icon(spec: &str) -> Option<RawIcon> {
     let (path, index) = split_icon_location(spec);

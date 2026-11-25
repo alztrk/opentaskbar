@@ -295,6 +295,7 @@ struct DockState {
     bin_node: VisualNode,
     bin_empty_surf: IDCompositionSurface,
     bin_full_surf: IDCompositionSurface,
+    bin_surf_px: f32,
     bin_is_full: bool,
     widget_visuals: Vec<WidgetVisual>,
     widget_runtime: WidgetRuntime,
@@ -812,10 +813,19 @@ impl DockState {
         let bin_bg = dcomp.create_node()?;
         bin_bg.hide();
         let bin_node = dcomp.create_node()?;
-        let bin_empty_surf =
-            dcomp.create_shell_glyph_surface(ShellGlyph::RecycleBinEmpty, glyph_px, is_dark)?;
-        let bin_full_surf =
-            dcomp.create_shell_glyph_surface(ShellGlyph::RecycleBinFull, glyph_px, is_dark)?;
+        let (bin_empty_surf, bin_full_surf, bin_surf_px) = match (
+            icon_cache::extract_recycle_bin_icon(false)
+                .and_then(|raw| dcomp.create_app_icon_surface(&raw).ok()),
+            icon_cache::extract_recycle_bin_icon(true)
+                .and_then(|raw| dcomp.create_app_icon_surface(&raw).ok()),
+        ) {
+            (Some(empty), Some(full)) => (empty, full, 64.0),
+            _ => (
+                dcomp.create_shell_glyph_surface(ShellGlyph::RecycleBinEmpty, glyph_px, is_dark)?,
+                dcomp.create_shell_glyph_surface(ShellGlyph::RecycleBinFull, glyph_px, is_dark)?,
+                glyph_px as f32,
+            ),
+        };
         let bin_is_full = widgets::is_recycle_bin_non_empty();
         bin_node.set_content(Some(if bin_is_full {
             &bin_full_surf
@@ -878,6 +888,7 @@ impl DockState {
             bin_node,
             bin_empty_surf,
             bin_full_surf,
+            bin_surf_px,
             bin_is_full,
             widget_visuals: Vec::new(),
             widget_runtime: WidgetRuntime::default(),
@@ -1260,17 +1271,30 @@ impl DockState {
         {
             self.tray_node.set_content(Some(&s));
         }
-        if let Ok(s) =
-            self.dcomp
-                .create_shell_glyph_surface(ShellGlyph::RecycleBinEmpty, glyph_px, is_dark)
-        {
-            self.bin_empty_surf = s;
-        }
-        if let Ok(s) =
-            self.dcomp
-                .create_shell_glyph_surface(ShellGlyph::RecycleBinFull, glyph_px, is_dark)
-        {
-            self.bin_full_surf = s;
+        if let (Some(empty), Some(full)) = (
+            icon_cache::extract_recycle_bin_icon(false)
+                .and_then(|raw| self.dcomp.create_app_icon_surface(&raw).ok()),
+            icon_cache::extract_recycle_bin_icon(true)
+                .and_then(|raw| self.dcomp.create_app_icon_surface(&raw).ok()),
+        ) {
+            self.bin_empty_surf = empty;
+            self.bin_full_surf = full;
+            self.bin_surf_px = 64.0;
+        } else {
+            if let Ok(s) = self.dcomp.create_shell_glyph_surface(
+                ShellGlyph::RecycleBinEmpty,
+                glyph_px,
+                is_dark,
+            ) {
+                self.bin_empty_surf = s;
+            }
+            if let Ok(s) =
+                self.dcomp
+                    .create_shell_glyph_surface(ShellGlyph::RecycleBinFull, glyph_px, is_dark)
+            {
+                self.bin_full_surf = s;
+            }
+            self.bin_surf_px = glyph_px as f32;
         }
         self.bin_node.set_content(Some(if self.bin_is_full {
             &self.bin_full_surf
@@ -1934,39 +1958,33 @@ impl DockState {
         let icon_base_bottom = icon_base_top + base;
         let dot_top = icon_base_bottom + 4.5;
 
-        // 2. Shell buttons + left divider.
-        let shell_top = icon_base_top;
+        // 2. Shell buttons + left divider (vertically centered inside the dock pill).
+        let shell_top = pill_top + (pill_h - base) * 0.5;
+        let box_sz_px = (base * dpi).ceil();
         let glyph_dips = (base * 0.68).max(22.0);
+        let glyph_surf_px = (glyph_dips * dpi).ceil();
         for kind in ShellButton::ALL {
             let i = kind.index();
             let x = pill_left + 15.0 + (i as f32) * (base + 4.0);
+            let box_x_px = (x * dpi).round();
+            let box_y_px = (shell_top * dpi).round();
             let hovered = self.hovered_shell == Some(kind);
             let pressed = self.pressed_shell == Some(kind);
             if pressed {
                 self.shell_bgs[i].set_content(Some(&self.shell_bg_press));
-                self.shell_bgs[i].set_transform(
-                    1.0,
-                    1.0,
-                    (x * dpi).round(),
-                    (shell_top * dpi).round(),
-                );
+                self.shell_bgs[i].set_transform(1.0, 1.0, box_x_px, box_y_px);
             } else if hovered {
                 self.shell_bgs[i].set_content(Some(&self.shell_bg_hover));
-                self.shell_bgs[i].set_transform(
-                    1.0,
-                    1.0,
-                    (x * dpi).round(),
-                    (shell_top * dpi).round(),
-                );
+                self.shell_bgs[i].set_transform(1.0, 1.0, box_x_px, box_y_px);
             } else {
                 self.shell_bgs[i].hide();
             }
 
             let scale = if pressed { 0.88 } else { 1.0 };
-            let drawn = glyph_dips * scale;
-            let gx = x + (base - drawn) * 0.5;
-            let gy = shell_top + (base - drawn) * 0.5;
-            self.shell_icons[i].set_transform(scale, scale, gx * dpi, gy * dpi);
+            let drawn_px = glyph_surf_px * scale;
+            let gx_px = (box_x_px + (box_sz_px - drawn_px) * 0.5).round();
+            let gy_px = (box_y_px + (box_sz_px - drawn_px) * 0.5).round();
+            self.shell_icons[i].set_transform(scale, scale, gx_px, gy_px);
         }
 
         let div_x = pill_left + 15.0 + base * 3.0 + 4.0 * 2.0 + 8.0;
@@ -2118,31 +2136,28 @@ impl DockState {
 
             if self.settings.show_recycle_bin {
                 let bx_box = right_cursor - base;
+                let box_x_px = (bx_box * dpi).round();
+                let box_y_px = (shell_top * dpi).round();
                 if self.pressed_bin {
                     self.bin_bg.set_content(Some(&self.shell_bg_press));
-                    self.bin_bg.set_transform(
-                        1.0,
-                        1.0,
-                        (bx_box * dpi).round(),
-                        (icon_base_top * dpi).round(),
-                    );
+                    self.bin_bg.set_transform(1.0, 1.0, box_x_px, box_y_px);
                 } else if self.hovered_bin {
                     self.bin_bg.set_content(Some(&self.shell_bg_hover));
-                    self.bin_bg.set_transform(
-                        1.0,
-                        1.0,
-                        (bx_box * dpi).round(),
-                        (icon_base_top * dpi).round(),
-                    );
+                    self.bin_bg.set_transform(1.0, 1.0, box_x_px, box_y_px);
                 } else {
                     self.bin_bg.hide();
                 }
-                let scale = if self.pressed_bin { 0.88 } else { 1.0 };
-                let drawn = glyph_dips * scale;
-                let bx = bx_box + (base - drawn) * 0.5;
-                let by = icon_base_top + (base - drawn) * 0.5;
-                self.bin_node
-                    .set_transform(scale, scale, bx * dpi, by * dpi);
+                let press_s = if self.pressed_bin { 0.88 } else { 1.0 };
+                let target_px = if self.bin_surf_px >= 63.0 {
+                    // Native Windows 64x64 Recycle Bin icon: match app icon optical size inside button.
+                    (base * 0.86 * dpi * press_s).round()
+                } else {
+                    glyph_surf_px * press_s
+                };
+                let scale = target_px / self.bin_surf_px;
+                let bx_px = (box_x_px + (box_sz_px - target_px) * 0.5).round();
+                let by_px = (box_y_px + (box_sz_px - target_px) * 0.5).round();
+                self.bin_node.set_transform(scale, scale, bx_px, by_px);
                 right_cursor -= base + 6.0;
             } else {
                 self.bin_bg.hide();
@@ -2151,38 +2166,29 @@ impl DockState {
 
             if self.settings.show_tray_button {
                 let tx_box = right_cursor - base;
+                let box_x_px = (tx_box * dpi).round();
+                let box_y_px = (shell_top * dpi).round();
                 if self.pressed_tray {
                     self.tray_bg.set_content(Some(&self.shell_bg_press));
-                    self.tray_bg.set_transform(
-                        1.0,
-                        1.0,
-                        (tx_box * dpi).round(),
-                        (icon_base_top * dpi).round(),
-                    );
+                    self.tray_bg.set_transform(1.0, 1.0, box_x_px, box_y_px);
                 } else if self.hovered_tray {
                     self.tray_bg.set_content(Some(&self.shell_bg_hover));
-                    self.tray_bg.set_transform(
-                        1.0,
-                        1.0,
-                        (tx_box * dpi).round(),
-                        (icon_base_top * dpi).round(),
-                    );
+                    self.tray_bg.set_transform(1.0, 1.0, box_x_px, box_y_px);
                 } else {
                     self.tray_bg.hide();
                 }
                 let scale = if self.pressed_tray { 0.88 } else { 1.0 };
-                let drawn = glyph_dips * scale;
-                let tx = tx_box + (base - drawn) * 0.5;
-                let ty = icon_base_top + (base - drawn) * 0.5;
-                self.tray_node
-                    .set_transform(scale, scale, tx * dpi, ty * dpi);
+                let drawn_px = glyph_surf_px * scale;
+                let tx_px = (box_x_px + (box_sz_px - drawn_px) * 0.5).round();
+                let ty_px = (box_y_px + (box_sz_px - drawn_px) * 0.5).round();
+                self.tray_node.set_transform(scale, scale, tx_px, ty_px);
                 let tray_rect = (
                     tx_box,
                     pill_top + 6.0,
                     right_cursor,
                     pill_top + pill_h - 6.0,
                 );
-                self.update_tray_pin_visuals(tray_rect, icon_base_top);
+                self.update_tray_pin_visuals(tray_rect, shell_top);
                 right_cursor -= base + 6.0;
                 right_cursor -= tray_pin_cell(base) * self.tray_pin_visuals.len() as f32;
             } else {

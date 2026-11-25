@@ -58,7 +58,7 @@ fn lucide_inner(icon: AppIcon) -> &'static str {
     match icon {
         AppIcon::Search => r#"<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>"#,
         AppIcon::TaskView => {
-            r#"<rect width="14" height="10" x="2" y="3" rx="2"/><path d="M8 17h10a2 2 0 0 0 2-2V9"/>"#
+            r#"<rect width="14" height="10" x="3" y="5" rx="2"/><path d="M9 19h10a2 2 0 0 0 2-2v-6"/>"#
         }
         AppIcon::TrayChevron => r#"<path d="m18 15-6-6-6 6"/>"#,
         AppIcon::RecycleBinEmpty => {
