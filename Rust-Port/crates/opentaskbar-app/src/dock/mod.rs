@@ -37,6 +37,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmFlush, DwmGetWindowAttribute,
+    DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTONEAREST, MonitorFromWindow, ScreenToClient,
@@ -77,10 +78,10 @@ use self::dcomp::{DcompEngine, PillNodes, ShellGlyph, VisualNode, WidgetInteract
 use self::dynamic_island::{InputDisposition, IslandInput, IslandState};
 use self::layout::{
     anchor_from_window_rect, bounce_direction, capture_expansion_budget, drop_targets_recycle_bin,
-    effective_edge, escape_closes_transient, hide_offset, is_full_screen_on_monitor,
-    is_injected_key_event, keyboard_next_index, revealed_guard_should_hide,
-    start_menu_hide_fallback, step_spring, wheel_to_axis_delta, win_key_modifier_pressed,
-    win_key_reveal_allowed, win_key_reveal_enabled,
+    effective_animations_enabled, effective_edge, escape_closes_transient, hide_offset,
+    is_full_screen_on_monitor, is_injected_key_event, keyboard_next_index,
+    revealed_guard_should_hide, start_menu_hide_fallback, step_spring, vsync_tick_allowed,
+    wheel_to_axis_delta, win_key_modifier_pressed, win_key_reveal_allowed, win_key_reveal_enabled,
 };
 use self::preview::{PreviewItem, PreviewPopup};
 use self::show_desktop::ShowDesktopCorner;
@@ -158,6 +159,39 @@ static WIN_KEY_REVEAL_GATE: AtomicBool = AtomicBool::new(true);
 /// A Start-button toggle is ignored within this window to stop a double click
 /// (or a cloak + pointer-up race) from opening and immediately closing Start.
 const START_TOGGLE_DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// Applies the real DWM backdrop to a dock/island HWND without replacing the
+/// DirectComposition transparency already owned by this module.
+///
+/// TODO(WS-B): `design::glass::apply_window_backdrop` is the agreed single source
+/// (DWMWA_SYSTEMBACKDROP_TYPE + SetWindowCompositionAttribute acrylic fallback)
+/// but is not present in this worktree yet. Swap the body below for a plain call
+/// once that module lands; the call sites and signature already match.
+pub fn apply_dock_backdrop(hwnd: usize, is_dark: bool) -> bool {
+    if hwnd == 0 {
+        return false;
+    }
+    const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+    const DWMSBT_TRANSIENTWINDOW: u32 = 3;
+    const DWMWCP_ROUND: u32 = 2;
+    let dark = u32::from(is_dark);
+    let corner = DWMWCP_ROUND;
+    let backdrop = DWMSBT_TRANSIENTWINDOW;
+    let mut ok = true;
+    unsafe {
+        for (attr, value) in [
+            (DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const u32),
+            (DWMWA_WINDOW_CORNER_PREFERENCE, &corner as *const u32),
+            (DWMWA_SYSTEMBACKDROP_TYPE, &backdrop as *const u32),
+        ] {
+            ok &= DwmSetWindowAttribute(hwnd as HWND, attr, value.cast(), size_of::<u32>() as u32)
+                == 0;
+        }
+    }
+    ok
+}
 
 fn anchor_is_valid(anchor: (i32, i32, i32, i32)) -> bool {
     anchor.2 > anchor.0 && anchor.3 > anchor.1
@@ -1445,7 +1479,7 @@ impl DockState {
 
         let initial_fps = Self::compute_target_fps(&settings, &monitor.device_name);
         crate::ui::flyout::set_motion_prefs(
-            settings.animations_enabled && !settings.focus_mode,
+            effective_animations_enabled(settings.animations_enabled, settings.focus_mode),
             initial_fps,
         );
         let target_fps = Arc::new(AtomicU32::new(initial_fps));
@@ -1574,6 +1608,10 @@ impl DockState {
     }
 
     fn compute_target_fps(settings: &DockSettings, device_name: &str) -> u32 {
+        // 0 parks the VSync producer at its condvar (DwmFlush when awake).
+        if !effective_animations_enabled(settings.animations_enabled, settings.focus_mode) {
+            return 0;
+        }
         let hz = win32::monitor_refresh_hz(device_name);
         match settings.animation_fps {
             Some(fps) if fps < hz => fps.clamp(15, hz),
@@ -1651,6 +1689,22 @@ impl DockState {
     }
 
     fn ensure_animation(&mut self) {
+        // C# `EffectiveAnimationsEnabled` gate. With the toggle off (or in Focus
+        // Mode) the VSync producer must stay parked at its condvar, and auto-hide
+        // must snap instantly instead of waiting for frames that never arrive.
+        if !effective_animations_enabled(self.settings.animations_enabled, self.settings.focus_mode)
+        {
+            self.set_animating(false);
+            self.last_frame = None;
+            self.last_animation_request = None;
+            let snapped = if self.target_hidden { 1.0 } else { 0.0 };
+            if (self.hide_progress - snapped).abs() > f32::EPSILON {
+                self.hide_progress = snapped;
+                self.update_visuals();
+            }
+            return;
+        }
+
         let now = Instant::now();
         // Rate-limit repeated wake-ups only while the VSync loop is already running;
         // if VSync is idle, never drop a wake-up (e.g. a window close right after hover).
@@ -2370,10 +2424,14 @@ impl DockState {
         let updated_fps = Self::compute_target_fps(&self.settings, &self.monitor.device_name);
         self.target_fps.store(updated_fps, Ordering::Relaxed);
         crate::ui::flyout::set_motion_prefs(
-            self.settings.animations_enabled && !self.settings.focus_mode,
+            effective_animations_enabled(
+                self.settings.animations_enabled,
+                self.settings.focus_mode,
+            ),
             updated_fps,
         );
         self.is_dark = resolve_is_dark(self.settings.theme);
+        apply_dock_backdrop(self.hwnd, self.is_dark);
         if let Some(ref mut island) = self.dynamic_island {
             island.apply(&self.settings, &self.all_monitors, self.is_dark);
         }
@@ -2519,9 +2577,14 @@ impl DockState {
         }
         self.running_windows = running.clone();
         let mut next = build_slots(&self.pins, &running, &self.slots);
+        // DComp close motion does not use WPF's client-area animation APIs, so the
+        // OS `SPI_GETCLIENTAREAANIMATION` flag must not veto it (it is frequently
+        // off in VMs / battery-saver even when the in-app toggle is on).
         if animate_closes
-            && self.settings.animations_enabled
-            && win32::client_area_animations_enabled()
+            && effective_animations_enabled(
+                self.settings.animations_enabled,
+                self.settings.focus_mode,
+            )
         {
             keep_closing_slots(
                 &self.slots,
@@ -3144,6 +3207,34 @@ impl DockState {
     }
 
     fn step_animations(&mut self, now: Instant) -> bool {
+        // With animations disabled there must be no spring/fisheye/bounce math on
+        // the VSync path, and no exiting slots waiting for a close animation that
+        // will never be ticked. Snap to the final state in one pass.
+        if !effective_animations_enabled(self.settings.animations_enabled, self.settings.focus_mode)
+        {
+            let previous_count = self.slots.len();
+            self.slots.retain(|slot| !slot.is_exiting());
+            if self.slots.len() != previous_count {
+                self.rebuild_visual_tree();
+                self.sync_window_bounds();
+                self.update_hovered_index_from_mouse();
+                self.sync_preview_hover();
+                self.request_missing_icons();
+            }
+            for slot in &mut self.slots {
+                slot.close_started = None;
+                slot.scale = 1.0;
+                slot.scale_velocity = 0.0;
+                slot.slide_x = 0.0;
+                slot.bounce_started = None;
+            }
+            self.hide_progress = if self.target_hidden { 1.0 } else { 0.0 };
+            self.scroll_offset = self
+                .scroll_target
+                .clamp(0.0, self.live_scroll_metrics().max_scroll);
+            self.last_frame = None;
+            return false;
+        }
         if self.drag.is_none() {
             let previous_count = self.slots.len();
             self.slots
@@ -6282,7 +6373,11 @@ unsafe extern "system" fn wnd_proc(
             state.tick_pending.store(false, Ordering::Release);
             let moving = state.step_animations(Instant::now());
             state.update_visuals();
-            if !moving {
+            let effective = effective_animations_enabled(
+                state.settings.animations_enabled,
+                state.settings.focus_mode,
+            );
+            if !vsync_tick_allowed(effective, moving) {
                 state.set_animating(false);
             }
             0
@@ -6447,7 +6542,11 @@ unsafe extern "system" fn wnd_proc(
             if state.refresh_widgets() {
                 state.update_visuals();
             }
-            if state.widget_runtime.needs_animation_tick(&state.settings) {
+            if effective_animations_enabled(
+                state.settings.animations_enabled,
+                state.settings.focus_mode,
+            ) && state.widget_runtime.needs_animation_tick(&state.settings)
+            {
                 let interval = state.widget_anim_interval_ms();
                 unsafe {
                     SetTimer(hwnd, TIMER_WIDGET_ANIM, interval, None);
@@ -6460,7 +6559,11 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_TIMER if wparam == TIMER_WIDGET_ANIM => {
-            if state.widget_runtime.needs_animation_tick(&state.settings) {
+            if effective_animations_enabled(
+                state.settings.animations_enabled,
+                state.settings.focus_mode,
+            ) && state.widget_runtime.needs_animation_tick(&state.settings)
+            {
                 if state.refresh_widgets() {
                     state.update_visuals();
                 }
@@ -6597,6 +6700,7 @@ pub fn run(settings: DockSettings) {
         }
         let hwnd_val = hwnd as usize;
         win32::configure_native_dock_hwnd(hwnd_val);
+        apply_dock_backdrop(hwnd_val, resolve_is_dark(settings.theme));
         unsafe {
             DragAcceptFiles(hwnd, 1);
             let _ = WTSRegisterSessionNotification(hwnd, 0);

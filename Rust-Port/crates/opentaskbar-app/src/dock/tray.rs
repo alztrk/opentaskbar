@@ -356,16 +356,43 @@ pub(super) fn open_background_apps_flyout(
             });
         }
     }
+    // WS-C's `WindowsTray` is the canonical key; older catalogs still ship the
+    // `TraySettings` translation, so keep it as a fallback until WS-F lands the
+    // new key in all 14 locales (same pattern as `page_count_text`).
+    let tray_settings_label = {
+        let label = loc::t("WindowsTray");
+        if label == "WindowsTray" {
+            loc::t("TraySettings")
+        } else {
+            label
+        }
+    };
     blocks.push(FlyoutBlock::Separator);
     blocks.push(FlyoutBlock::ButtonBar(vec![
         (1, loc::t("TaskManager"), false),
-        (2, loc::t("TraySettings"), false),
+        (2, tray_settings_label, false),
     ]));
 
     let apps_word = loc::t("LauncherApps").to_lowercase();
+    let subtitle = if apps.len() == 1 {
+        let label = loc::t("TrayAppsRunningOne");
+        if label == "TrayAppsRunningOne" {
+            format!("1 {apps_word}")
+        } else {
+            label
+        }
+    } else {
+        const KEY: &str = "TrayAppsRunningMany";
+        let template = loc::t(KEY);
+        if template == KEY {
+            format!("{} {apps_word}", apps.len())
+        } else {
+            loc::t_fmt(KEY, &[&apps.len().to_string()])
+        }
+    };
     let spec = FlyoutSpec {
         title: loc::t("TrayApps"),
-        subtitle: Some(format!("{} {apps_word}", apps.len())),
+        subtitle: Some(subtitle),
         width_dips: 336.0,
         blocks,
     };
