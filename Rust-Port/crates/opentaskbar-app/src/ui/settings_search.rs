@@ -244,6 +244,12 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
         ),
         SettingsSearchEntry::new(
             SettingsPage::Themes,
+            "AnimationFps",
+            &loc::t("Animations"),
+            "fps frame rate hz refresh animations",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Themes,
             "SurfaceDock",
             &loc::t("SectionSurfaces"),
             "dock acrylic material surface",

@@ -2470,6 +2470,49 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
+                    {
+                        let max_hz = win32::max_connected_refresh_hz().max(15);
+                        let max_step = (max_hz - 15 + 1) as usize;
+                        let current_step = match self.settings.animation_fps {
+                            Some(fps) => (fps.clamp(15, max_hz) - 15) as usize,
+                            None => max_step,
+                        };
+                        let fps_label = match self.settings.animation_fps {
+                            Some(fps) => format!("{} FPS", fps.clamp(15, max_hz)),
+                            None => format!("{} ({max_hz} Hz)", loc::t("AnimationFpsAuto")),
+                        };
+                        let fps_entity = cx.entity().downgrade();
+                        self.target_row(
+                            "AnimationFps",
+                            t,
+                            Some("\u{EC4A}"),
+                            loc::t("AnimationFps"),
+                            live_slider(
+                                "anim-fps",
+                                t,
+                                current_step as f32 / max_step.max(1) as f32,
+                                max_step + 1,
+                                fps_label,
+                                move |i| {
+                                    let entity = fps_entity.clone();
+                                    std::rc::Rc::new(move |_win, app| {
+                                        let _ = entity.update(app, |this, cx| {
+                                            let next = if i >= max_step {
+                                                None
+                                            } else {
+                                                Some((15 + i as u32).min(max_hz))
+                                            };
+                                            if this.settings.animation_fps != next {
+                                                this.settings.animation_fps = next;
+                                                this.auto_save(cx);
+                                            }
+                                        });
+                                    })
+                                },
+                            ),
+                        )
+                        .into_any_element()
+                    },
                 ],
             )
             .into_any_element(),
