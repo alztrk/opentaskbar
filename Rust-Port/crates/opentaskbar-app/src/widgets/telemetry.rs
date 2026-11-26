@@ -4146,7 +4146,8 @@ pub fn sample_gpu_temp() -> Option<(u32, Option<u32>)> {
         let spawned = std::thread::Builder::new()
             .name("opentaskbar-gpu".to_owned())
             .spawn(|| {
-                let usage = sample_gpu_usage().map(|r| (r * 100.0).round().clamp(0.0, 100.0) as u32);
+                let usage =
+                    sample_gpu_usage().map(|r| (r * 100.0).round().clamp(0.0, 100.0) as u32);
                 let temp = sample_gpu_temperature()
                     .filter(|c| c.is_finite() && *c > 0.0 && *c < 150.0)
                     .map(|c| c.round() as u32);

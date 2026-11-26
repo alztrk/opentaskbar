@@ -374,11 +374,16 @@ mod tests {
     fn catalogs_have_no_cp437_mojibake() {
         for (tag, source) in CATALOG_SOURCES {
             assert!(
-                !source.chars().any(|c| ('\u{2500}'..='\u{257F}').contains(&c)),
+                !source
+                    .chars()
+                    .any(|c| ('\u{2500}'..='\u{257F}').contains(&c)),
                 "{tag} contains CP437 box-drawing mojibake"
             );
         }
-        assert_eq!(tr("tr-TR", "UpdateAvailableTitle"), "OpenTaskbar Güncellemesi");
+        assert_eq!(
+            tr("tr-TR", "UpdateAvailableTitle"),
+            "OpenTaskbar Güncellemesi"
+        );
         assert!(tr("tr-TR", "WidgetMediaDescription").starts_with("Çalan medya için"));
     }
 }
