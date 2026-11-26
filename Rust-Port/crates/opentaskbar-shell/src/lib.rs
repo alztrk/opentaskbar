@@ -5,6 +5,7 @@
 
 pub mod appbar;
 pub mod flyout_journal;
+pub mod flyout_reposition;
 pub mod flyout_writer;
 pub mod journal;
 pub mod native_tray;

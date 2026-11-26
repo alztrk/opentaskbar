@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_CONTROL, VK_LEFT,
-    VK_LWIN, VK_RIGHT, VK_TAB,
+    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, SendInput,
+    VK_CONTROL, VK_LEFT, VK_LWIN, VK_RIGHT, VK_RWIN, VK_TAB,
 };
 use windows_sys::Win32::UI::Shell::{ABE_BOTTOM, ABS_AUTOHIDE};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -244,14 +244,24 @@ pub fn end_replacement() {
 
 // ---- Native Windows shell triggers ----
 
-fn key_input(vk: u16, up: bool) -> INPUT {
+/// The Windows key must carry `KEYEVENTF_EXTENDEDKEY`; without it injected
+/// keydowns are swallowed by Explorer's shell keyboard handling.
+fn is_extended_key(vk: u16) -> bool {
+    matches!(vk, VK_LWIN | VK_RWIN)
+}
+
+fn key_input(vk: u16, up: bool, extended: bool) -> INPUT {
+    let mut flags = if up { KEYEVENTF_KEYUP } else { 0 };
+    if extended {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
     INPUT {
         r#type: INPUT_KEYBOARD,
         Anonymous: INPUT_0 {
             ki: KEYBDINPUT {
                 wVk: vk,
                 wScan: 0,
-                dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                dwFlags: flags,
                 time: 0,
                 dwExtraInfo: 0,
             },
@@ -259,26 +269,43 @@ fn key_input(vk: u16, up: bool) -> INPUT {
     }
 }
 
-fn send_chord(keys: &[u16]) {
-    let mut inputs = Vec::with_capacity(keys.len() * 2);
-    for &vk in keys {
-        inputs.push(key_input(vk, false));
-    }
-    for &vk in keys.iter().rev() {
-        inputs.push(key_input(vk, true));
-    }
-    // SAFETY: properly sized INPUT array for SendInput.
-    unsafe {
-        SendInput(
-            inputs.len() as u32,
-            inputs.as_ptr(),
-            size_of::<INPUT>() as i32,
-        );
-    }
+fn send_key(vk: u16, up: bool) -> bool {
+    let input = key_input(vk, up, is_extended_key(vk));
+    // SAFETY: one properly sized INPUT structure for SendInput.
+    unsafe { SendInput(1, &input, size_of::<INPUT>() as i32) == 1 }
 }
 
+/// Sends the keys with a ~20 ms down/up separation: a single batched
+/// `SendInput` of all events makes Explorer treat Win-key chords as a single
+/// synthetic press instead of a shell shortcut.
+fn send_chord(keys: &[u16]) -> bool {
+    if keys.is_empty() {
+        return false;
+    }
+    let mut ok = true;
+    for &vk in keys {
+        ok &= send_key(vk, false);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    for &vk in keys.iter().rev() {
+        ok &= send_key(vk, true);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    ok
+}
+
+/// Preferred Start entry point: `SC_TASKLIST` posted to the dock (owner) HWND.
+/// Falls back to the injected Win-key chord when no valid owner is supplied.
+pub fn open_start_menu_with_owner(owner_hwnd: usize) -> bool {
+    if owner_hwnd != 0 && crate::flyout_reposition::open_start_via_syscommand(owner_hwnd) {
+        return true;
+    }
+    send_chord(&[VK_LWIN])
+}
+
+/// Backwards-compatible wrapper for callers that do not have an owner HWND.
 pub fn open_start_menu() {
-    send_chord(&[VK_LWIN]);
+    let _ = open_start_menu_with_owner(0);
 }
 
 pub fn open_search() {
@@ -374,4 +401,35 @@ pub fn open_tray_overflow() {
             send_chord(&[0x20]); // VK_SPACE
         })
         .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn win_key_is_marked_extended() {
+        assert!(is_extended_key(VK_LWIN));
+        assert!(is_extended_key(VK_RWIN));
+        assert!(!is_extended_key(b'S' as u16));
+        assert!(!is_extended_key(VK_TAB));
+    }
+
+    #[test]
+    fn key_input_sets_extended_and_keyup_flags() {
+        let down = key_input(VK_LWIN, false, true);
+        let up = key_input(VK_LWIN, true, true);
+        let plain = key_input(b'S' as u16, false, false);
+        // SAFETY: these INPUT unions were just built by `key_input` with the
+        // keyboard variant active, so reading `ki` is well defined.
+        unsafe {
+            assert_eq!(down.Anonymous.ki.dwFlags, KEYEVENTF_EXTENDEDKEY);
+            assert_eq!(
+                up.Anonymous.ki.dwFlags,
+                KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP
+            );
+            assert_eq!(down.Anonymous.ki.wVk, VK_LWIN);
+            assert_eq!(plain.Anonymous.ki.dwFlags, 0);
+        }
+    }
 }
