@@ -70,9 +70,9 @@ The default look takes its colors from the user's Windows personalization settin
 - Pointer movement calculates a $C^1$-smooth raised-cosine bell curve from invariant resting centers captured in `DockHost` coordinates:
   $$f(d) = \frac{1 + \cos(\pi \cdot d / R)}{2}, \quad S(d) = 1.0 + (S_{\text{eff}} - 1.0) \cdot f(d)$$
 - Influence radius scales with the active cell size (`cell * 2.8`, min `110 DIP`; tightened to `cell * 2.1`, min `95 DIP` on constrained docks).
-- Frame-rate independent spring physics (`stiffness = 280`, `damping = 30`) drives both growth and settle smoothly without oscillation.
+- Frame-rate independent spring physics (`stiffness = 280`, `damping = 30`) drives both growth and settling smoothly without oscillation.
 - When monitor space allows, button slots (`SlotExpansionFactor = 0.95`) and the floating `DockSurface` expand synchronously so icons, active indicator dots, tooltips, and click targets move together with zero overlap. When the dock is full-width, scrolling, or width-locked, `ComputeEffectiveMaxScale` smoothly caps peak scale to guarantee at least `4 DIP` clearance between adjacent icons.
-- Items scale anchored at `IconScaleOrigin` (`(0.5, 1.0)` on bottom edge, `(0.0, 0.5)` on left, `(1.0, 0.5)` on right) with a subtle headroom-clamped lift (`<= 1.0 DIP`). Hovering widgets, resize thumbs, or edge scroll chevrons smoothly settles magnification so interactive controls never shift under the pointer.
+- Items scale anchored at `IconScaleOrigin` (`(0.5, 1.0)` on bottom edge, `(0.0, 0.5)` on left, `(1.0, 0.5)` on right) with a subtle headroom-clamped lift (`<= 1.0 DIP`). Hovering widgets, resize thumbs, or edge scroll chevrons smoothly settle magnification so interactive controls never shift under the pointer.
 
 ### Multi-Window Live Thumbnails
 - Interactive live DWM thumbnails are created using `DwmRegisterThumbnail`.
