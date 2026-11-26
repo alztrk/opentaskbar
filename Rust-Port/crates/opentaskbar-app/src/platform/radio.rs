@@ -33,8 +33,11 @@ const RADIO_STATE_DISABLED: i32 = 3;
 const RADIO_KIND_WIFI: i32 = 1;
 const RADIO_KIND_BLUETOOTH: i32 = 3;
 const RO_INIT_MULTITHREADED: i32 = 1;
-const ASYNC_POLL_LIMIT: usize = 200; // 2 s at 10 ms
-const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+// WS-4: bound the whole SetStateAsync/GetRadiosAsync/RequestAccessAsync chain to
+// ~2 s (3 * 600 ms) so a UI toggle never needs the Settings fallback.
+const ASYNC_POLL_LIMIT: usize = 300; // 600 ms at 2 ms
+const ASYNC_POLL_INTERVAL: Duration = Duration::from_millis(2);
+const REFRESH_INTERVAL: Duration = Duration::from_secs(4);
 
 // IIDs from Windows.Foundation and Windows.Devices.Radios metadata.
 const IID_IASYNC_INFO: GUID = GUID::from_u128(0x0000_0036_0000_0000_c000_0000_0000_0046);
@@ -122,21 +125,23 @@ struct RadioVtbl {
 
 /// `Windows.Foundation.IAsyncInfo` (`{00000036-0000-0000-C000-000000000046}`),
 /// queried separately from `IAsyncOperation<T>` because WinRT interfaces do not
-/// flatten required interfaces into a single vtable.
+/// flatten required interfaces into a single vtable. `IAsyncInfo` derives from
+/// `IInspectable`, so its five methods follow the six IUnknown/IInspectable slots.
+/// Omitting those five slots was the reason status always read as `Started(0)`.
 #[repr(C)]
 struct AsyncInfoVtbl {
     base: WinRtVtbl,
     _get_id: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32,
     get_status: unsafe extern "system" fn(*mut c_void, *mut i32) -> i32,
-    _get_error_code: unsafe extern "system" fn(*mut c_void, *mut i32) -> i32,
+    get_error_code: unsafe extern "system" fn(*mut c_void, *mut i32) -> i32,
     _cancel: unsafe extern "system" fn(*mut c_void) -> i32,
     close: unsafe extern "system" fn(*mut c_void) -> i32,
 }
 
-/// `Windows.Foundation.IAsyncOperation<T>` vtable (`put_Completed`, `get_Completed`, `GetResults`).
+/// `Windows.Foundation.IAsyncOperation<T>`: IAsyncInfo base + three own methods.
 #[repr(C)]
 struct AsyncOpPtrVtbl {
-    base: WinRtVtbl,
+    base: AsyncInfoVtbl,
     _put_completed: unsafe extern "system" fn(*mut c_void, *mut c_void) -> i32,
     _get_completed: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> i32,
     get_results: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> i32,
@@ -144,7 +149,7 @@ struct AsyncOpPtrVtbl {
 
 #[repr(C)]
 struct AsyncOpEnumVtbl {
-    base: WinRtVtbl,
+    base: AsyncInfoVtbl,
     _put_completed: unsafe extern "system" fn(*mut c_void, *mut c_void) -> i32,
     _get_completed: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> i32,
     get_results: unsafe extern "system" fn(*mut c_void, *mut i32) -> i32,
@@ -169,6 +174,8 @@ static REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 
 #[cfg(test)]
 static REFRESH_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_SUPPRESS_WRITES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(test)]
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -240,7 +247,7 @@ fn wait_async_completed(operation: *mut c_void) -> bool {
         if status != ASYNC_STATUS_STARTED {
             break;
         }
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(ASYNC_POLL_INTERVAL);
     }
     release(info);
     done
@@ -372,10 +379,10 @@ fn request_access(statics: *mut c_void) -> bool {
     status == Some(RADIO_ACCESS_STATUS_ALLOWED)
 }
 
-fn refresh_cache() -> bool {
+fn refresh_cache_in_apartment() -> bool {
     #[cfg(test)]
     REFRESH_CALLS.fetch_add(1, Ordering::Relaxed);
-    on_worker(|| {
+    {
         let Some(statics) = activate_statics() else {
             return false;
         };
@@ -403,8 +410,12 @@ fn refresh_cache() -> bool {
         WIFI_STATE.store(wifi, Ordering::Relaxed);
         BLUETOOTH_STATE.store(bluetooth, Ordering::Relaxed);
         allowed
-    })
-    .unwrap_or(false)
+    }
+}
+
+/// Single-shot refresh for callers that are not already on a COM apartment.
+fn refresh_cache() -> bool {
+    on_worker(refresh_cache_in_apartment).unwrap_or(false)
 }
 
 /// Fire-and-forget cache refresh. Spawns a COM/MTA worker but never joins it,
@@ -440,7 +451,7 @@ pub fn normalize_kind(kind: &str) -> Option<i32> {
 /// WS-1: this is called from the dock UI thread, which also owns the
 /// WH_MOUSE_LL / WH_KEYBOARD_LL hooks. It must NEVER do `thread::spawn + join`
 /// or COM polling here. A cold/unknown cache (`-1`) reads as `false`; the
-/// 2-second `install_state_monitor()` thread performs the real refresh.
+/// 4-second `install_state_monitor()` thread performs the real refresh.
 pub fn state(kind: &str) -> bool {
     let slot = match normalize_kind(kind) {
         Some(RADIO_KIND_WIFI) => &WIFI_STATE,
@@ -450,88 +461,132 @@ pub fn state(kind: &str) -> bool {
     slot.load(Ordering::Relaxed) == 1
 }
 
-/// Requests Access + enumerates radios + sets the target state on every radio of
-/// the requested kind, then refreshes the cached state.
-pub fn set(kind: &str, on: bool) -> bool {
+/// Real WinRT write in the calling COM/MTA apartment. `SetStateAsync` returns
+/// `IAsyncOperation<RadioAccessStatus>`: we poll `IAsyncInfo::Status` (via
+/// `wait_async_completed`) and read the enum result; `IAsyncAction::GetResults`
+/// is intentionally never called for a void action.
+fn set_in_apartment(kind_value: i32, target: i32) -> bool {
+    #[cfg(test)]
+    if TEST_SUPPRESS_WRITES.load(Ordering::Relaxed) {
+        return false;
+    }
+    let Some(factory) = activate_statics() else {
+        return false;
+    };
+    let Some(statics) = query(factory, &IID_RADIO_STATICS) else {
+        release(factory);
+        return false;
+    };
+    release(factory);
+    if !request_access(statics) {
+        release(statics);
+        return false;
+    }
+    let mut any = false;
+    for radio in collect_radios(statics) {
+        if radio_kind(radio) != Some(kind_value) {
+            release(radio);
+            continue;
+        }
+        if !matches!(radio_state(radio), Some(RADIO_STATE_ON | RADIO_STATE_OFF)) {
+            release(radio);
+            continue;
+        }
+        let Some(table) = vtbl::<RadioVtbl>(radio) else {
+            release(radio);
+            continue;
+        };
+        // SAFETY: live IRadio; the async operation is owned by us. The result is
+        // an enum (Allowed = 1), read only after the IAsyncInfo reports Completed.
+        let mut operation = ptr::null_mut();
+        let started = unsafe { ((*table).set_state_async)(radio, target, &mut operation) } == 0
+            && !operation.is_null();
+        if started {
+            let status = wait_async_enum(operation);
+            release(operation);
+            any |= status == Some(RADIO_ACCESS_STATUS_ALLOWED);
+        }
+        release(radio);
+    }
+    release(statics);
+    any
+}
+
+fn cache_toggle(kind_value: i32, on: bool) {
+    let value = if on { 1i8 } else { 0 };
+    match kind_value {
+        RADIO_KIND_WIFI => WIFI_STATE.store(value, Ordering::Relaxed),
+        RADIO_KIND_BLUETOOTH => BLUETOOTH_STATE.store(value, Ordering::Relaxed),
+        _ => {}
+    }
+}
+
+/// Blocking variant for background callers and tests: performs the real WinRT
+/// toggle on a COM worker and joins it. Never call from the UI/hook thread.
+pub fn set_blocking(kind: &str, on: bool) -> bool {
     let Some(kind_value) = normalize_kind(kind) else {
         return false;
     };
     let target = if on { RADIO_STATE_ON } else { RADIO_STATE_OFF };
-    let changed = on_worker(move || {
-        let Some(factory) = activate_statics() else {
-            return false;
-        };
-        let Some(statics) = query(factory, &IID_RADIO_STATICS) else {
-            release(factory);
-            return false;
-        };
-        release(factory);
-        if !request_access(statics) {
-            release(statics);
-            return false;
-        }
-        let mut any = false;
-        for radio in collect_radios(statics) {
-            if radio_kind(radio) != Some(kind_value) {
-                release(radio);
-                continue;
-            }
-            if !matches!(radio_state(radio), Some(RADIO_STATE_ON | RADIO_STATE_OFF)) {
-                release(radio);
-                continue;
-            }
-            let Some(table) = vtbl::<RadioVtbl>(radio) else {
-                release(radio);
-                continue;
-            };
-            // SAFETY: live IRadio; the async operation is owned by us.
-            let mut operation = ptr::null_mut();
-            let started = unsafe { ((*table).set_state_async)(radio, target, &mut operation) } == 0
-                && !operation.is_null();
-            if started {
-                let status = wait_async_enum(operation);
-                release(operation);
-                any |= status == Some(RADIO_ACCESS_STATUS_ALLOWED);
-            }
-            release(radio);
-        }
-        release(statics);
-        any
-    })
-    .unwrap_or(false);
+    let changed = on_worker(move || set_in_apartment(kind_value, target)).unwrap_or(false);
     if changed {
-        let value = if on { 1i8 } else { 0 };
-        match kind_value {
-            RADIO_KIND_WIFI => WIFI_STATE.store(value, Ordering::Relaxed),
-            RADIO_KIND_BLUETOOTH => BLUETOOTH_STATE.store(value, Ordering::Relaxed),
-            _ => {}
-        }
-        // WS-1: refresh_cache() (COM spawn + join) is monitor/worker-only.
-        // Trigger a non-blocking refresh instead so the click never blocks
-        // the hook-owning UI thread.
+        cache_toggle(kind_value, on);
         refresh_async();
     }
     changed
 }
 
+/// UI-thread API. Never spawns+joins here: the WinRT write and the state refresh
+/// both run on detached workers, while the cached state is updated optimistically
+/// so the Quick Settings chip flips immediately. Returns `false` only for an
+/// unknown kind or if a worker could not be started.
+pub fn set(kind: &str, on: bool) -> bool {
+    let Some(kind_value) = normalize_kind(kind) else {
+        return false;
+    };
+    let target = if on { RADIO_STATE_ON } else { RADIO_STATE_OFF };
+    let spawned = std::thread::Builder::new()
+        .name("opentaskbar-radio-set".into())
+        .spawn(move || {
+            if set_in_apartment(kind_value, target) {
+                refresh_async();
+            }
+        });
+    if spawned.is_err() {
+        return false;
+    }
+    cache_toggle(kind_value, on);
+    true
+}
+
 /// Starts a background state-refresh loop. C# uses WinRT `StateChanged`;
-/// polling at 2 s keeps the same cache freshness without needing a typed
-/// delegate (which requires the lead-owned Cargo feature).
+/// polling at 4 s keeps the same cache freshness without needing a typed
+/// delegate. The apartment is initialized once and the loop never spawns or
+/// joins a helper thread (WS-4: remove the per-tick thread churn).
 pub fn install_state_monitor() {
     if MONITOR_STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
-    let _ = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("opentaskbar-radio-watch".into())
         .spawn(|| {
+            let api = combase();
+            // SAFETY: this thread owns its WinRT apartment for its whole lifetime.
+            if let Some(api) = api {
+                unsafe { (api.initialize)(RO_INIT_MULTITHREADED) };
+            }
             loop {
-                refresh_cache();
+                refresh_cache_in_apartment();
                 if let Ok(mut last) = LAST_REFRESH.lock() {
                     *last = Some(std::time::Instant::now());
                 }
                 std::thread::sleep(REFRESH_INTERVAL);
             }
         });
+    if spawned.is_err() {
+        MONITOR_STARTED.store(false, Ordering::SeqCst);
+        return;
+    }
     log::info("Radio state monitor started.");
 }
 
@@ -566,6 +621,24 @@ mod tests {
         let _ = refresh_cache();
         let _ = state("wifi");
         let _ = state("bluetooth");
+    }
+
+    #[test]
+    fn set_is_non_blocking_and_updates_cache_optimistically() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Tests must never flip the developer's actual Wi-Fi adapter.
+        TEST_SUPPRESS_WRITES.store(true, Ordering::Relaxed);
+        assert!(!set("nightlight", true), "unknown kinds must be rejected");
+        WIFI_STATE.store(-1, Ordering::Relaxed);
+        assert!(set("wifi", true), "a valid toggle must not report failure");
+        assert_eq!(WIFI_STATE.load(Ordering::Relaxed), 1);
+        assert!(set("wi-fi", false));
+        assert_eq!(WIFI_STATE.load(Ordering::Relaxed), 0);
+        WIFI_STATE.store(-1, Ordering::Relaxed);
+        assert!(!set_blocking("nightlight", true));
+        TEST_SUPPRESS_WRITES.store(false, Ordering::Relaxed);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! `PKEY_Link_TargetParsingPath` (`::{4234d49b-0245-4df3-b780-3893943456e1}\<AUMID>`),
 //! `IShellLinkW::GetIconLocation`, and `IShellLinkW::GetPath`.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +16,11 @@ use windows::Win32::System::Com::{
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::Win32::UI::Shell::{IShellLinkW, SLGP_RAWPATH, ShellLink};
 use windows::core::{GUID, HSTRING, Interface};
+use windows_sys::Win32::System::Registry::{
+    HKEY_CURRENT_USER, KEY_READ, REG_BINARY, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+};
+
+use super::taskbar_pin_monitor::extract_aumids;
 
 mod launch;
 pub use launch::{launch, launch_app, launch_elevated, launch_with_args};
@@ -267,15 +273,192 @@ fn manifest_app_id(xml: &str, relative_exe: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub fn load_pins() -> Vec<PinnedApp> {
-    let dir = pins_dir();
-    let Ok(entries) = fs::read_dir(&dir) else {
+// ---------------------------------------------------------------------------
+// Windows 11 packaged pins (Explorer Taskband\Favorites, C# parity)
+// ---------------------------------------------------------------------------
+
+const TASKBAND_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband";
+const FAVORITES_VALUE: &str = "Favorites";
+
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
+}
+
+/// Raw `HKCU\...\Taskband\Favorites` blob; absent keys simply mean no packaged pins.
+fn taskband_favorites() -> Option<Vec<u8>> {
+    let key_path = wide(TASKBAND_KEY);
+    let value = wide(FAVORITES_VALUE);
+    // SAFETY: read-only registry access with NUL-terminated UTF-16 names.
+    unsafe {
+        let mut key = std::ptr::null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, key_path.as_ptr(), 0, KEY_READ, &mut key) != 0 {
+            return None;
+        }
+        let mut size = 0u32;
+        let status = RegQueryValueExW(
+            key,
+            value.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut size,
+        );
+        if status != 0 || size < 4 {
+            let _ = RegCloseKey(key);
+            return None;
+        }
+        let mut buffer = vec![0u8; size as usize];
+        let mut kind = 0u32;
+        let status = RegQueryValueExW(
+            key,
+            value.as_ptr(),
+            std::ptr::null_mut(),
+            &mut kind,
+            buffer.as_mut_ptr(),
+            &mut size,
+        );
+        let _ = RegCloseKey(key);
+        (status == 0 && kind == REG_BINARY).then_some(buffer)
+    }
+}
+
+/// `(display name, relative executable)` for an `<Application Id="...">` entry.
+fn manifest_application(xml: &str, app_id: &str) -> Option<(Option<String>, Option<String>)> {
+    let manifest = roxmltree::Document::parse(xml).ok()?;
+    let mut display = None;
+    let mut executable = None;
+    let mut found = false;
+    for node in manifest.descendants().filter(|n| n.tag_name().name() == "Application") {
+        if !node
+            .attribute("Id")
+            .is_some_and(|id| id.eq_ignore_ascii_case(app_id))
+        {
+            continue;
+        }
+        let relative = node.attribute("Executable").map(str::trim).filter(|exe| {
+            !exe.is_empty() && !exe.contains('$') && exe.ends_with(".exe")
+        });
+        executable = relative.map(str::to_owned);
+        display = node
+            .children()
+            .find(|n| n.tag_name().name() == "VisualElements")
+            .and_then(|n| n.attribute("DisplayName"))
+            .map(str::to_owned);
+        found = true;
+        break;
+    }
+    if !found {
+        return None;
+    }
+    if display.is_none() {
+        display = manifest
+            .descendants()
+            .find(|n| n.tag_name().name() == "DisplayName")
+            .and_then(|n| n.text())
+            .map(str::to_owned);
+    }
+    Some((display, executable))
+}
+
+fn is_resource_reference(value: &str) -> bool {
+    value.trim_start().to_ascii_lowercase().starts_with("ms-resource:")
+}
+
+/// AUMID → readable exe + icon source. Packaged apps with ACL-protected or
+/// virtual executables fall back to `shell:AppsFolder\<AUMID>` for both launch
+/// and icon (C# `WindowsTaskbarPinImporter.TryResolvePackagedApp`).
+pub fn resolve_packaged_app(aumid: &str) -> Option<PinnedApp> {
+    let (family, app) = aumid.split_once('!')?;
+    let (package, publisher) = family.rsplit_once('_')?;
+    if !is_packaged_aumid(aumid) {
+        return None;
+    }
+    let root = std::env::var_os("ProgramFiles")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
+        .join("WindowsApps");
+
+    let mut fallback_display = None;
+    let mut result = None;
+    if let Ok(entries) = fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            let Some(name) = dir.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let prefix = format!("{package}_");
+            if !name.starts_with(&prefix) || !name.ends_with(&format!("_{publisher}")) {
+                continue;
+            }
+            let Ok(xml) = fs::read_to_string(dir.join("AppxManifest.xml")) else {
+                continue;
+            };
+            let Some((display, relative)) = manifest_application(&xml, app) else {
+                continue;
+            };
+            if let Some(display) = display
+                && !is_resource_reference(&display)
+            {
+                fallback_display = Some(display);
+            }
+            let exe = relative
+                .map(|relative| dir.join(relative.replace('/', "\\")))
+                .filter(|path| path.is_file())
+                .map(|path| path.to_string_lossy().into_owned());
+            if let Some(exe) = exe {
+                result = Some(PinnedApp {
+                    name: fallback_display
+                        .clone()
+                        .unwrap_or_else(|| app.to_owned()),
+                    launch_path: exe.clone(),
+                    target_exe: Some(exe.clone()),
+                    icon_source: exe,
+                });
+                break;
+            }
+        }
+    }
+    Some(result.unwrap_or_else(|| {
+        let launch_path = format!("{APPS_FOLDER_PREFIX}{aumid}");
+        PinnedApp {
+            name: fallback_display.unwrap_or_else(|| app.to_owned()),
+            launch_path: launch_path.clone(),
+            target_exe: None,
+            icon_source: launch_path,
+        }
+    }))
+}
+
+/// Imports packaged taskbar pins from the Explorer Taskband registry blob.
+/// Windows 11 no longer creates `.lnk` files for Store apps, so this is the
+/// only source for their AUMIDs. Missing/unreadable keys yield an empty list.
+pub fn import_packaged_pins() -> Vec<PinnedApp> {
+    let Some(blob) = taskband_favorites() else {
         return Vec::new();
     };
+    let mut seen = HashSet::new();
+    let mut pins = Vec::new();
+    for aumid in extract_aumids(&blob) {
+        if !seen.insert(aumid.to_ascii_lowercase()) {
+            continue;
+        }
+        if let Some(pin) = resolve_packaged_app(&aumid) {
+            pins.push(pin);
+        }
+    }
+    pins.sort_by_key(|a| a.name.to_lowercase());
+    pins
+}
+
+pub fn load_pins() -> Vec<PinnedApp> {
+    let dir = pins_dir();
+    let entries = fs::read_dir(&dir).ok();
     // SAFETY: initialize COM STA for resolving `.lnk` shortcuts on this thread.
     let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
 
     let mut items: Vec<PinnedApp> = entries
+        .into_iter()
+        .flatten()
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
@@ -321,6 +504,18 @@ pub fn load_pins() -> Vec<PinnedApp> {
             })
         })
         .collect();
+
+    // Windows 11 stores packaged pins only in the Taskband blob; merge them
+    // with `.lnk` pins and keep one row per launch target.
+    let mut seen: HashSet<String> = items
+        .iter()
+        .map(|item| item.launch_path.to_ascii_lowercase())
+        .collect();
+    for pin in import_packaged_pins() {
+        if seen.insert(pin.launch_path.to_ascii_lowercase()) {
+            items.push(pin);
+        }
+    }
     items.sort_by_key(|a| a.name.to_lowercase());
     items
 }
@@ -403,5 +598,29 @@ mod tests {
         );
         assert_eq!(manifest_app_id(xml, "Unknown.exe"), None);
         assert_eq!(manifest_app_id("<invalid>", "Unknown.exe"), None);
+    }
+
+    #[test]
+    fn manifest_application_resolves_display_name_and_executable() {
+        let xml = r#"<Package xmlns="urn:test">
+            <Properties><DisplayName>Example App</DisplayName></Properties>
+            <Applications>
+                <Application Id="Client" Executable="Client.exe">
+                    <VisualElements DisplayName="Example Client"/>
+                </Application>
+            </Applications>
+        </Package>"#;
+        assert_eq!(
+            manifest_application(xml, "client"),
+            Some((Some("Example Client".to_owned()), Some("Client.exe".to_owned())))
+        );
+        assert_eq!(manifest_application(xml, "Missing"), None);
+    }
+
+    #[test]
+    fn packaged_pin_import_degrades_gracefully_without_taskband() {
+        assert!(resolve_packaged_app("not-an-aumid").is_none());
+        // No Explorer Taskband on CI: must return an empty list, never panic.
+        let _ = import_packaged_pins();
     }
 }

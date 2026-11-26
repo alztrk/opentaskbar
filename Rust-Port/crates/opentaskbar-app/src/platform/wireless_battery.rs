@@ -15,7 +15,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+use std::io::{Read, Write};
 use std::mem::size_of;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -227,6 +229,7 @@ const HKEY_CURRENT_USER: Handle = 0x8000_0001u32 as i32 as isize;
 const HKEY_LOCAL_MACHINE: Handle = 0x8000_0002u32 as i32 as isize;
 const KEY_READ: u32 = 0x2_0019;
 const REG_SZ: u32 = 1;
+const REG_BINARY: u32 = 3;
 const REG_DWORD: u32 = 4;
 
 #[link(name = "kernel32")]
@@ -2322,6 +2325,308 @@ fn probe_ble_gatt(_devices: &[HidDevice], cancel: &AtomicBool) -> Vec<WirelessRe
 }
 
 // ---------------------------------------------------------------------------
+// WS-4: Bluetooth PnP reader + G-Hub WebSocket / SteelSeries coreProps loopback
+// ---------------------------------------------------------------------------
+
+/// Accepts only an explicitly loopback WebSocket/HTTP endpoint for the given port.
+fn parse_loopback_endpoint(uri: &str, expected_port: u16, allow_websocket: bool) -> Option<String> {
+    let lower = uri.to_ascii_lowercase();
+    let scheme_end = lower.find("://")?;
+    let scheme = &lower[..scheme_end];
+    if !(scheme == "http" || (allow_websocket && scheme == "ws")) {
+        return None;
+    }
+    let rest = &lower[scheme_end + 3..];
+    let authority = rest.split('/').next()?.split('?').next()?;
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, port.parse::<u16>().ok()?),
+        None => (authority, if allow_websocket { 80 } else { 80 }),
+    };
+    if port != expected_port || !matches!(host, "127.0.0.1" | "localhost" | "[::1]") {
+        return None;
+    }
+    Some(format!("{host}:{port}"))
+}
+
+/// Reads a 0..100 battery value from a PnP registry value (DWORD, one-byte
+/// BLOB or decimal string) without assuming a fixed value type.
+fn reg_percent(key: Handle, name: &str) -> Option<i32> {
+    let mut buffer = [0u8; 64];
+    let mut size = buffer.len() as u32;
+    let mut kind = 0u32;
+    // SAFETY: owned buffer outlives the call; name is NUL-terminated.
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            wide(name).as_ptr(),
+            std::ptr::null_mut(),
+            &mut kind,
+            buffer.as_mut_ptr(),
+            &mut size,
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let value = match kind {
+        REG_DWORD if size >= 4 => u32::from_le_bytes(buffer[..4].try_into().ok()?) as i32,
+        REG_BINARY if size >= 1 => buffer[0] as i32,
+        REG_SZ => {
+            let text = utf16_from_bytes(&buffer[..size.min(buffer.len() as u32) as usize]);
+            text.trim().parse::<i32>().ok()?
+        }
+        _ => return None,
+    };
+    (0..=100).contains(&value).then_some(value)
+}
+
+/// Reads battery percentages from Bluetooth PnP device nodes (~150 ms) rather
+/// than starting a fresh association discovery (~30 s). Both the classic
+/// `Enum\Bluetooth` tree and the BTHENUM tree are scanned; a device instance is
+/// only reported when its node is present (connected).
+fn bluetooth_pnp_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
+    const BATTERY_LEVEL_PROPERTY: &str = "{104ea319-6ee2-4701-bd47-8ddbf425bbe5} 2";
+    const BATTERY_LIFE_PROPERTY: &str = "System.Devices.BatteryLife";
+    const NAME_KEYS: &[&str] = &["FriendlyName", "Name", "DisplayName"];
+    const LEVEL_KEYS: &[&str] = &[
+        BATTERY_LEVEL_PROPERTY,
+        BATTERY_LIFE_PROPERTY,
+        "BatteryLevel",
+        "BatteryPercent",
+    ];
+    const ROOTS: &[(Handle, &str)] = &[
+        (HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Enum\Bluetooth"),
+        (HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Enum\BTHENUM"),
+    ];
+
+    let mut seen = HashSet::new();
+    let mut readings = Vec::new();
+    for (root, path) in ROOTS {
+        if cancel.load(Ordering::Relaxed) || readings.len() >= 32 {
+            break;
+        }
+        let Some(key) = RegKey::open(*root, path) else {
+            continue;
+        };
+        for family in reg_subkeys(key.raw()).into_iter().take(64) {
+            if cancel.load(Ordering::Relaxed) || readings.len() >= 32 {
+                break;
+            }
+            let Some(family_key) = RegKey::open(key.raw(), &family) else {
+                continue;
+            };
+            for instance in reg_subkeys(family_key.raw()).into_iter().take(64) {
+                if cancel.load(Ordering::Relaxed) || readings.len() >= 32 {
+                    break;
+                }
+                let Some(node) = RegKey::open(family_key.raw(), &instance) else {
+                    continue;
+                };
+                let level = LEVEL_KEYS
+                    .iter()
+                    .find_map(|name| reg_percent(node.raw(), name))
+                    .or_else(|| {
+                        RegKey::open(node.raw(), "Device Parameters")
+                            .and_then(|params| {
+                                LEVEL_KEYS
+                                    .iter()
+                                    .find_map(|name| reg_percent(params.raw(), name))
+                            })
+                    });
+                let Some(level) = level else {
+                    continue;
+                };
+                let name = NAME_KEYS
+                    .iter()
+                    .find_map(|name| reg_string(node.raw(), name))
+                    .unwrap_or_else(|| normalize_name(&instance));
+                if is_ignored_wired_device(&name) {
+                    continue;
+                }
+                let id = format!("bt-pnp:{:08X}", fnv1a_u32(format!("{family}\\{instance}").as_bytes()));
+                if seen.insert(id.clone()) {
+                    readings.push(reading(
+                        id,
+                        name,
+                        percent_01(level),
+                        true,
+                        false,
+                        BatterySource::Bluetooth,
+                    ));
+                }
+            }
+        }
+    }
+    readings
+}
+
+/// Minimal RFC 6455 client for G-Hub's loopback WebSocket (`ws://127.0.0.1:9010`).
+fn ghub_websocket_json(cancel: &AtomicBool) -> Option<String> {
+    const ENDPOINT: &str = "ws://127.0.0.1:9010";
+    if !is_valid_ghub_uri(ENDPOINT) {
+        return None;
+    }
+    let authority = parse_loopback_endpoint(ENDPOINT, 9010, true)?;
+    let mut stream = TcpStream::connect_timeout(
+        &authority.to_socket_addrs().ok()?.next()?,
+        Duration::from_millis(300),
+    )
+    .ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
+
+    let request = format!(
+        "GET / HTTP/1.1\r\nHost: {authority}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+         Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\
+         Origin: file://\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut headers = Vec::new();
+    let mut byte = [0u8; 1];
+    while headers.len() < 8192 {
+        if stream.read_exact(&mut byte).is_err() || cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        headers.push(byte[0]);
+        if headers.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    if !String::from_utf8_lossy(&headers).starts_with("HTTP/1.1 101") {
+        return None;
+    }
+
+    let payload = br#"{"msgId":"ot-1","verb":"GET","path":"/devices/list"}"#;
+    let mask = [
+        (std::process::id() & 0xff) as u8,
+        (std::process::id() >> 8) as u8,
+        0x5a,
+        0xa3,
+    ];
+    let mut frame = vec![0x81, 0x80 | payload.len() as u8];
+    frame.extend_from_slice(&mask);
+    frame.extend(payload.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]));
+    stream.write_all(&frame).ok()?;
+
+    let mut head = [0u8; 2];
+    stream.read_exact(&mut head).ok()?;
+    let mut len = (head[1] & 0x7f) as usize;
+    if len == 126 {
+        let mut ext = [0u8; 2];
+        stream.read_exact(&mut ext).ok()?;
+        len = u16::from_be_bytes(ext) as usize;
+    } else if len == 127 {
+        let mut ext = [0u8; 8];
+        stream.read_exact(&mut ext).ok()?;
+        len = u64::from_be_bytes(ext) as usize;
+    }
+    if len == 0 || len > 256 * 1024 {
+        return None;
+    }
+    let mut body = vec![0u8; len];
+    stream.read_exact(&mut body).ok()?;
+    Some(String::from_utf8_lossy(&body).into_owned())
+}
+
+fn probe_ghub_loopback(cancel: &AtomicBool) -> Vec<WirelessReading> {
+    let Some(json) = ghub_websocket_json(cancel) else {
+        return Vec::new();
+    };
+    parse_ghub_json(&json)
+        .into_iter()
+        .map(|b| {
+            reading(
+                format!("ghub:{}", b.id),
+                b.name,
+                percent_01(b.level),
+                b.connected,
+                b.charging,
+                b.source,
+            )
+        })
+        .collect()
+}
+
+/// One bounded HTTP/1.0 GET against a validated loopback endpoint.
+fn loopback_get(authority: &str, path: &str) -> Option<String> {
+    let mut stream = TcpStream::connect_timeout(
+        &authority.to_socket_addrs().ok()?.next()?,
+        Duration::from_millis(300),
+    )
+    .ok()?;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
+    let request = format!("GET {path} HTTP/1.0\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).ok()?;
+    let mut body = Vec::new();
+    let mut chunk = [0u8; 8192];
+    while body.len() < 256 * 1024 {
+        let read = stream.read(&mut chunk).ok()?;
+        if read == 0 {
+            break;
+        }
+        body.extend_from_slice(&chunk[..read]);
+    }
+    let split = body.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let head = String::from_utf8_lossy(&body[..split]);
+    if !head.starts_with("HTTP/1.") || !head.lines().next()?.contains(" 200 ") {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&body[split + 4..]).into_owned())
+}
+
+fn probe_steelseries_loopback(cancel: &AtomicBool) -> Vec<WirelessReading> {
+    let program_data = std::env::var_os("ProgramData")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    let path = program_data
+        .join("SteelSeries")
+        .join("SteelSeries Engine 3")
+        .join("coreProps.json");
+    let Ok(json) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Some(url) = parse_coreprops_endpoint(&json) else {
+        return Vec::new();
+    };
+    let Some(port) = url_port(&url) else {
+        return Vec::new();
+    };
+    let Some(authority) = parse_loopback_endpoint(&url, port, false) else {
+        return Vec::new();
+    };
+    for relative in ["/battery", "/devices", "/game_metadata"] {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let Some(body) = loopback_get(&authority, relative) else {
+            continue;
+        };
+        let readings = parse_steelseries_gg_json(&body);
+        if !readings.is_empty() {
+            return readings
+                .into_iter()
+                .map(|b| {
+                    reading(
+                        format!("ss-gg:{}", b.id),
+                        b.name,
+                        percent_01(b.level),
+                        b.connected,
+                        b.charging,
+                        b.source,
+                    )
+                })
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+fn url_port(url: &str) -> Option<u16> {
+    let authority = url.split("://").nth(1)?.split('/').next()?;
+    authority.rsplit_once(':').map(|(_, port)| port.parse().ok())?
+}
+
+// ---------------------------------------------------------------------------
 // Sağlayıcı 7-12: vendor HID pil capacity (gerçek HID usage değerleri)
 // ---------------------------------------------------------------------------
 
@@ -2483,11 +2788,11 @@ fn run_probe(
         | BatterySource::CompxAtkVxe
         | BatterySource::GamepadHid
         | BatterySource::Keyboard24gHid => probe_vendor_hid(devices, cancel, source),
-        // Passive / loopback sources are handled by WS-G's pure parsers below;
-        // this WIP transport has no direct HID probe for them.
-        BatterySource::Bluetooth | BatterySource::SteelSeriesGg | BatterySource::LogitechGHub => {
-            Vec::new()
-        }
+        // WS-4: real passive transports (PnP registry + loopback JSON) now feed
+        // the same parsers instead of only being exposed as standalone helpers.
+        BatterySource::Bluetooth => bluetooth_pnp_readings(cancel),
+        BatterySource::LogitechGHub => probe_ghub_loopback(cancel),
+        BatterySource::SteelSeriesGg => probe_steelseries_loopback(cancel),
     }
 }
 
@@ -2515,19 +2820,23 @@ pub fn read_all() -> Vec<WirelessReading> {
     ];
     let (sender, receiver) = mpsc::channel::<Vec<WirelessReading>>();
     let mut cancellations = Vec::with_capacity(sources.len());
+    let mut threads = Vec::with_capacity(sources.len());
     for source in sources {
         let sender = sender.clone();
         let devices = Arc::clone(&devices);
         let cancel = Arc::new(AtomicBool::new(false));
         cancellations.push(Arc::clone(&cancel));
-        let _ = std::thread::Builder::new()
+        if let Ok(handle) = std::thread::Builder::new()
             .name(format!("ot-wb-{source:?}"))
             .spawn(move || {
                 let result =
                     catch_unwind(AssertUnwindSafe(|| run_probe(source, &devices, &cancel)))
                         .unwrap_or_default();
                 let _ = sender.send(result);
-            });
+            })
+        {
+            threads.push(handle);
+        }
     }
     drop(sender);
     let deadline = Instant::now() + PROVIDER_TIMEOUT;
@@ -2542,6 +2851,18 @@ pub fn read_all() -> Vec<WirelessReading> {
     }
     for cancel in &cancellations {
         cancel.store(true, Ordering::Relaxed);
+    }
+    // WS-4: previously the handles were dropped without joining, so blocked HID
+    // probes leaked one thread per poll (~10 threads / 10 s). Give cancelled
+    // probes a bounded grace period, then join every finished thread.
+    let join_deadline = Instant::now() + Duration::from_millis(400);
+    while Instant::now() < join_deadline && threads.iter().any(|handle| !handle.is_finished()) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    for handle in threads {
+        if handle.is_finished() {
+            let _ = handle.join();
+        }
     }
     finalize(fresh)
 }
@@ -3691,17 +4012,81 @@ impl From<&DockSettings> for AggregatorSettings {
     }
 }
 
-/// Live transport readings with the persisted dock settings applied.
+/// Converts a live transport reading into the aggregator's richer type.
+fn to_battery_reading(item: &WirelessReading) -> BatteryReading {
+    let level = (item.level_01 * 100.0).round().clamp(0.0, 100.0) as u32;
+    let mut reading = BatteryReading::new(&item.id, &item.name, level, item.is_charging, item.source);
+    reading.connected = item.is_connected;
+    reading.stale = item.stale;
+    reading
+}
+
+fn to_wireless_reading(item: BatteryReading) -> WirelessReading {
+    let mut wireless = reading(
+        item.id,
+        item.name,
+        percent_01(item.level),
+        item.connected,
+        item.charging,
+        item.source,
+    );
+    wireless.stale = item.stale;
+    wireless
+}
+
+static AGG_GATE: OnceLock<Mutex<()>> = OnceLock::new();
+static LAST_AGGREGATE: Mutex<Option<(Instant, Vec<WirelessReading>)>> = Mutex::new(None);
+
+fn cached_aggregate() -> Option<Vec<WirelessReading>> {
+    LAST_AGGREGATE
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|(_, readings)| readings.clone())
+}
+
+/// Live transports + the real aggregator (outlier guard, 30-minute stale
+/// retention, ignore/alias policy and the on-disk JSON cache). The poll cadence
+/// comes from `WirelessBatteryPollSeconds`; intermediate callers receive the
+/// last aggregate instead of starting another round of HID probes.
 pub fn read_all_with_settings(settings: &DockSettings) -> Vec<WirelessReading> {
-    let agg = AggregatorSettings::from(settings);
-    read_all()
+    let agg_settings = AggregatorSettings::from(settings);
+    let interval = Duration::from_secs(agg_settings.poll_seconds_clamped() as u64);
+
+    if let Ok(last) = LAST_AGGREGATE.lock()
+        && let Some((sampled_at, readings)) = last.as_ref()
+        && sampled_at.elapsed() < interval
+    {
+        return readings.clone();
+    }
+
+    let gate = AGG_GATE.get_or_init(|| Mutex::new(()));
+    let Ok(_guard) = gate.try_lock() else {
+        return cached_aggregate().unwrap_or_default();
+    };
+    // Another poll may have completed while this caller waited for the gate.
+    if let Ok(last) = LAST_AGGREGATE.lock()
+        && let Some((sampled_at, readings)) = last.as_ref()
+        && sampled_at.elapsed() < interval
+    {
+        return readings.clone();
+    }
+
+    let fresh: Vec<BatteryReading> = read_all()
+        .iter()
+        .map(to_battery_reading)
+        .collect();
+    let mut aggregator = WirelessBatteryAggregator::new(agg_settings);
+    let merged = aggregator
+        .merge(fresh)
         .into_iter()
-        .filter(|reading| agg.allows_reading(reading))
-        .map(|mut reading| {
-            reading.name = agg.display_name_of(&reading);
-            reading
-        })
-        .collect()
+        .map(to_wireless_reading)
+        .collect::<Vec<_>>();
+
+    if let Ok(mut last) = LAST_AGGREGATE.lock() {
+        *last = Some((Instant::now(), merged.clone()));
+    }
+    merged
 }
 
 pub struct WirelessBatteryAggregator {
@@ -3946,6 +4331,69 @@ pub fn probe_report(descriptor: &HidInterfaceDescriptor, report: &[u8]) -> Optio
 #[cfg(test)]
 mod ws_g_tests {
     use super::*;
+
+    #[test]
+    fn ws4_loopback_endpoints_are_strictly_local() {
+        assert_eq!(
+            parse_loopback_endpoint("ws://127.0.0.1:9010", 9010, true).as_deref(),
+            Some("127.0.0.1:9010")
+        );
+        assert_eq!(
+            parse_loopback_endpoint("http://localhost:57342", 57342, false).as_deref(),
+            Some("localhost:57342")
+        );
+        assert!(parse_loopback_endpoint("ws://evil.example.com:9010", 9010, true).is_none());
+        assert!(parse_loopback_endpoint("http://127.0.0.1:9011", 9010, false).is_none());
+        assert_eq!(url_port("http://127.0.0.1:57342/battery"), Some(57342));
+    }
+
+    #[test]
+    fn ws4_ghub_and_steelseries_parsers_feed_aggregator_shape() {
+        let ghub = r#"{"devices":[{"name":"G Pro","id":"mouse-1","battery":75,"charging":true}]}"#;
+        let parsed = parse_ghub_json(ghub);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].level, 75);
+        let wireless = reading(
+            format!("ghub:{}", parsed[0].id),
+            parsed[0].name.clone(),
+            percent_01(parsed[0].level),
+            parsed[0].connected,
+            parsed[0].charging,
+            parsed[0].source,
+        );
+        assert_eq!(wireless.level_percent(), 75);
+        assert_eq!(wireless.source, BatterySource::LogitechGHub);
+
+        let gg = r#"{"batteryLevel":42,"deviceName":"Arctis"}"#;
+        let parsed = parse_steelseries_gg_json(gg);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].level, 42);
+    }
+
+    #[test]
+    fn ws4_aggregator_converts_live_readings_and_honours_poll_interval() {
+        let dock = opentaskbar_core::settings::DockSettings {
+            wireless_battery_poll_seconds: 15,
+            ..Default::default()
+        };
+        let agg = AggregatorSettings::from(&dock);
+        let live = reading(
+            "bt-pnp:1".into(),
+            "Headset".into(),
+            0.8,
+            true,
+            false,
+            BatterySource::Bluetooth,
+        );
+        let battery = to_battery_reading(&live);
+        assert_eq!(battery.level, 80);
+        let restored = to_wireless_reading(battery);
+        assert_eq!(restored.level_percent(), 80);
+        assert_eq!(restored.source, BatterySource::Bluetooth);
+        assert_eq!(agg.poll_seconds_clamped(), 15);
+        // The cache gate is keyed by the setting; no hardware is needed here.
+        assert!(cached_aggregate().is_none_or(|items| items.len() <= 64));
+    }
 
     fn desc(vid: u16, pid: u16, page: u16, len: u16) -> HidInterfaceDescriptor {
         HidInterfaceDescriptor {

@@ -60,9 +60,26 @@ unsafe impl Send for SendHandle {}
 /// Registers a callback for pin changes. Multiple listeners are supported; a
 /// throwing/panicking listener cannot take down the watch thread because each
 /// invocation is isolated by `catch_unwind`.
+///
+/// Production subscription is self-contained: the first listener also arms the
+/// registry watcher, so callers do not have to remember a separate
+/// `start_watch()` call. `start_watch()` remains idempotent for existing wiring.
 pub fn subscribe(listener: impl Fn(PinChange) + Send + 'static) {
-    if let Ok(mut listeners) = LISTENERS.lock() {
-        listeners.push(Box::new(listener));
+    let first = match LISTENERS.lock() {
+        Ok(mut listeners) => {
+            let first = listeners.is_empty();
+            listeners.push(Box::new(listener));
+            first
+        }
+        Err(poisoned) => {
+            let mut listeners = poisoned.into_inner();
+            let first = listeners.is_empty();
+            listeners.push(Box::new(listener));
+            first
+        }
+    };
+    if first && !RUNNING.load(Ordering::SeqCst) {
+        let _ = start_watch();
     }
 }
 
@@ -386,6 +403,20 @@ mod tests {
             odd.extend_from_slice(&unit.to_le_bytes());
         }
         assert!(extract_aumids(&odd).contains(&aumid.to_owned()));
+    }
+
+    #[test]
+    fn subscribe_registers_production_listener() {
+        let before = LISTENERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        subscribe(|_| {});
+        let after = LISTENERS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        assert_eq!(after, before + 1);
     }
 
     #[test]

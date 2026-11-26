@@ -11,18 +11,26 @@
 //! NOTE for lead/WS-B: `platform::win32_ex::set_default_audio_device(id)` currently forwards to
 //! telemetry; it should delegate to `core_audio::set_default_device(id)` after merge.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
-    DEVICE_STATE_ACTIVE, EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eMultimedia,
-    eRender,
+    AudioSessionStateActive, AudioSessionStateInactive, DEVICE_STATE_ACTIVE, EDataFlow,
+    IAudioSessionControl, IAudioSessionControl2, IAudioSessionManager2,
+    IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, eCapture, eMultimedia, eRender,
 };
-use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, STGM_READ};
-use windows::core::{GUID, Interface, PCWSTR};
+use windows::Win32::System::Com::{
+    CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
+    CoUninitialize, STGM_READ,
+};
+use windows::core::{GUID, Interface, PCWSTR, PWSTR};
+use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
 
 /// Endpoint as `(endpoint id, friendly name)`.
 pub type AudioDevice = (String, String);
@@ -509,6 +517,288 @@ pub fn find_app_session(sessions: &[AppAudioSession], source_id: &str) -> Option
     best.cloned()
 }
 
+// ---------------------------------------------------------------------------------------------
+// Real WASAPI app sessions (C# `CoreAudio.ListAppSessions` / `AppAudioSessionMatcher`)
+// ---------------------------------------------------------------------------------------------
+
+/// Stable mixer id shared with the widget/dock layers: `"<pid>:<exe-stem>"`.
+pub fn session_id(process_id: u32, exe_stem: &str) -> String {
+    let stem: String = exe_stem
+        .trim()
+        .chars()
+        .map(|c| if c == ':' || c.is_control() { '_' } else { c })
+        .collect();
+    format!("{process_id}:{stem}")
+}
+
+/// Parses a [`session_id`] back into `(pid, exe_stem)`.
+pub fn parse_session_id(id: &str) -> Option<(u32, &str)> {
+    let (pid, stem) = id.split_once(':')?;
+    let pid = pid.parse::<u32>().ok()?;
+    (!stem.is_empty() && !stem.contains(':')).then_some((pid, stem))
+}
+
+fn clamp_unit(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+/// Balances `CoInitializeEx`; a mismatched apartment leaves COM untouched.
+struct ComGuard {
+    initialized: bool,
+}
+
+impl ComGuard {
+    fn new() -> Self {
+        // SAFETY: no out-pointers; an RPC_E_CHANGED_MODE error means this thread
+        // already has another apartment, which we must not uninitialize.
+        let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
+        Self { initialized }
+    }
+}
+
+impl Drop for ComGuard {
+    fn drop(&mut self) {
+        if self.initialized {
+            // SAFETY: paired with a successful CoInitializeEx above.
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
+/// Copies and frees a COM-allocated `PWSTR`.
+unsafe fn take_pwstr(text: PWSTR) -> Option<String> {
+    if text.is_null() {
+        return None;
+    }
+    // SAFETY: COM owns a NUL-terminated wide string at this pointer.
+    unsafe {
+        let value = text.to_string().ok();
+        CoTaskMemFree(Some(text.as_ptr().cast()));
+        value
+    }
+}
+
+/// Process executable stem via `QueryFullProcessImageNameW`; never dereferences a PID.
+fn exe_stem_for_pid(pid: u32) -> Option<String> {
+    // SAFETY: OpenProcess returns an owned handle; the buffer outlives the call.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return None;
+        }
+        let mut buffer = [0u16; 1024];
+        let mut len = buffer.len() as u32;
+        let ok = QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut len) != 0;
+        let _ = CloseHandle(process);
+        if !ok || len == 0 {
+            return None;
+        }
+        let full = String::from_utf16_lossy(&buffer[..len as usize]);
+        let stem = executable_name(&full);
+        (!stem.is_empty()).then(|| stem.to_owned())
+    }
+}
+
+/// Best-effort AUMID from the session instance identifier (`...|<AUMID>|...`).
+fn aumid_from_instance(identifier: &str) -> Option<String> {
+    let mut candidate = None;
+    for part in identifier.split(['|', '\\']) {
+        let part = part.trim();
+        if part.len() > 16 && part.contains('!') && is_packaged_aumid(part) {
+            candidate = Some(part.to_owned());
+            break;
+        }
+    }
+    candidate
+}
+
+fn is_packaged_aumid(id: &str) -> bool {
+    let Some((family, app)) = id.split_once('!') else {
+        return false;
+    };
+    let Some((_, publisher)) = family.rsplit_once('_') else {
+        return false;
+    };
+    publisher.len() == 13 && publisher.bytes().all(|c| c.is_ascii_alphanumeric()) && !app.is_empty()
+}
+
+/// Converts one `IAudioSessionControl` into a mixer row. The caller owns `control`.
+unsafe fn session_from_control(
+    control: &IAudioSessionControl,
+    own_pid: u32,
+) -> Option<AppAudioSession> {
+    // SAFETY: `control` is a live COM interface from `IAudioSessionEnumerator::GetSession`.
+    unsafe {
+        let state_value = control.GetState().ok()?.0;
+        let state = match state_value {
+            x if x == AudioSessionStateActive.0 => AppAudioSessionState::Active,
+            x if x == AudioSessionStateInactive.0 => AppAudioSessionState::Inactive,
+            _ => return None, // expired session
+        };
+        let ctl2 = control.cast::<IAudioSessionControl2>().ok()?;
+        let process_id = ctl2.GetProcessId().unwrap_or(0);
+        let system_sounds = ctl2.IsSystemSoundsSession().is_ok();
+        if process_id == 0 || (process_id == own_pid && !system_sounds) {
+            return None;
+        }
+        let volume_interface = control.cast::<ISimpleAudioVolume>().ok()?;
+        let volume = clamp_unit(volume_interface.GetMasterVolume().ok()?);
+        let muted = volume_interface.GetMute().ok()?.as_bool();
+        let instance = ctl2
+            .GetSessionInstanceIdentifier()
+            .ok()
+            .and_then(|text| take_pwstr(text));
+        let app_user_model_id = instance
+            .as_deref()
+            .and_then(aumid_from_instance);
+        let name = if system_sounds {
+            "SystemSounds".to_owned()
+        } else {
+            exe_stem_for_pid(process_id).or_else(|| {
+                control
+                    .GetDisplayName()
+                    .ok()
+                    .and_then(|text| take_pwstr(text))
+                    .map(|name| name.trim().to_owned())
+            })?
+        };
+        Some(AppAudioSession {
+            process_id,
+            name,
+            app_user_model_id,
+            window_app_user_model_id: None,
+            state,
+            volume,
+            muted,
+        })
+    }
+}
+
+/// Enumerates real per-app sessions on all active render endpoints, deduplicated by stable id.
+///
+/// Returns an empty vector on headless/no-audio machines; always safe to call from any thread.
+pub fn list_app_sessions() -> Vec<AppAudioSession> {
+    let _com = ComGuard::new();
+    let mut sessions = Vec::new();
+    let mut seen = HashSet::new();
+    // SAFETY: every COM interface below owns its reference and releases it on drop.
+    unsafe {
+        let Ok(enumerator) =
+            CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+        else {
+            return sessions;
+        };
+        let Ok(devices) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) else {
+            return sessions;
+        };
+        let Ok(count) = devices.GetCount() else {
+            return sessions;
+        };
+        let own_pid = std::process::id();
+        for device_index in 0..count.min(64) {
+            let Ok(device) = devices.Item(device_index) else {
+                continue;
+            };
+            let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else {
+                continue;
+            };
+            let Ok(session_enum) = manager.GetSessionEnumerator() else {
+                continue;
+            };
+            let Ok(session_count) = session_enum.GetCount() else {
+                continue;
+            };
+            for session_index in 0..session_count.clamp(0, 64) {
+                let Ok(control) = session_enum.GetSession(session_index) else {
+                    continue;
+                };
+                if let Some(session) = session_from_control(&control, own_pid)
+                    && seen.insert(session_id(session.process_id, &session.name))
+                {
+                    sessions.push(session);
+                }
+            }
+        }
+    }
+    sessions
+}
+
+/// Finds the live `ISimpleAudioVolume` for a stable `"<pid>:<stem>"` id.
+unsafe fn find_session_volume(id: &str) -> Option<ISimpleAudioVolume> {
+    let (pid, stem) = parse_session_id(id)?;
+    // SAFETY: all interfaces are owned locals and release themselves on drop.
+    unsafe {
+        let enumerator =
+            CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+        let devices = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE).ok()?;
+        for device_index in 0..devices.GetCount().ok()?.min(64) {
+            let Ok(device) = devices.Item(device_index) else {
+                continue;
+            };
+            let Ok(manager) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) else {
+                continue;
+            };
+            let Ok(sessions) = manager.GetSessionEnumerator() else {
+                continue;
+            };
+            let Ok(count) = sessions.GetCount() else {
+                continue;
+            };
+            for session_index in 0..count.clamp(0, 64) {
+                let Ok(control) = sessions.GetSession(session_index) else {
+                    continue;
+                };
+                let Ok(ctl2) = control.cast::<IAudioSessionControl2>() else {
+                    continue;
+                };
+                if ctl2.GetProcessId().unwrap_or(0) != pid {
+                    continue;
+                }
+                let matches = if stem == "SystemSounds" {
+                    ctl2.IsSystemSoundsSession().is_ok()
+                } else {
+                    exe_stem_for_pid(pid).is_some_and(|name| name == stem)
+                };
+                if matches {
+                    return control.cast::<ISimpleAudioVolume>().ok();
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Writes a real per-app volume in `[0, 1]`. `false` for unknown ids / COM failures.
+pub fn set_app_volume(id: &str, volume: f32) -> bool {
+    if !volume.is_finite() {
+        return false;
+    }
+    let _com = ComGuard::new();
+    // SAFETY: `find_session_volume` only returns a live COM interface.
+    unsafe {
+        let Some(session) = find_session_volume(id) else {
+            return false;
+        };
+        session.SetMasterVolume(clamp_unit(volume), std::ptr::null()).is_ok()
+    }
+}
+
+/// Mutes / unmutes a real per-app session. `false` for unknown ids / COM failures.
+pub fn set_app_mute(id: &str, muted: bool) -> bool {
+    let _com = ComGuard::new();
+    // SAFETY: `find_session_volume` only returns a live COM interface.
+    unsafe {
+        let Some(session) = find_session_volume(id) else {
+            return false;
+        };
+        session.SetMute(muted, std::ptr::null()).is_ok()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,5 +855,40 @@ mod tests {
     #[test]
     fn set_default_device_rejects_empty_id() {
         assert!(!set_default_device(""));
+    }
+
+    #[test]
+    fn session_ids_round_trip_and_sanitize() {
+        assert_eq!(session_id(42, "chrome"), "42:chrome");
+        assert_eq!(parse_session_id("42:chrome"), Some((42, "chrome")));
+        assert_eq!(session_id(7, "a:b\nc"), "7:a_b_c");
+        assert_eq!(parse_session_id("bad"), None);
+        assert_eq!(parse_session_id("x:y"), None);
+        assert_eq!(parse_session_id("1:a:b"), None);
+    }
+
+    #[test]
+    fn aumid_is_recovered_from_session_instance_identifier() {
+        let id = "Microsoft.Windows.ShellExperienceHost_cw5n1h2txyewy!App";
+        let instance = format!(r"\\?\audioendpoint|1|1234|{id}|0");
+        assert_eq!(aumid_from_instance(&instance).as_deref(), Some(id));
+        assert_eq!(aumid_from_instance("no-aumid-here"), None);
+    }
+
+    #[test]
+    fn app_session_setters_reject_invalid_ids_without_com() {
+        assert!(!set_app_volume("", 0.5));
+        assert!(!set_app_mute("not-a-session", true));
+        assert!(!set_app_volume("1:app", f32::NAN));
+        assert_eq!(clamp_unit(2.0), 1.0);
+    }
+
+    #[test]
+    fn endpoint_events_are_queued_for_widgets() {
+        let before = take_events().len();
+        push_event(AudioEventKind::DeviceAdded, &PCWSTR::null());
+        assert!(!take_events().is_empty());
+        assert!(take_events().is_empty());
+        let _ = before;
     }
 }
