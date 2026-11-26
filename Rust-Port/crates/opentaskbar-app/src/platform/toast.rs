@@ -236,7 +236,10 @@ fn show_via_host(kind: ToastKind, title: &str, body: &str, action: Option<&str>)
     let xml = build_toast_xml(kind, title, body, action);
     let script = powershell_script(&xml);
     let path = script_path();
-    let written = fs::write(&path, &script).is_ok();
+    // PowerShell 5.1 reads `-File` scripts without a UTF-8 BOM using the legacy ANSI code page,
+    // which corrupts non-ASCII characters (e.g. Turkish diacritics) in toast notifications.
+    let utf8_bom_script = format!("\u{FEFF}{script}");
+    let written = fs::write(&path, utf8_bom_script.as_bytes()).is_ok();
     let spawned = written
         && std::process::Command::new("powershell.exe")
             .args([

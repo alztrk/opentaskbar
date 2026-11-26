@@ -262,6 +262,8 @@ pub struct WidgetRuntime {
     weather_fail_count: u32,
     weather_retry_at: Option<Instant>,
     bt_battery: Arc<Mutex<telemetry::BluetoothBatteryCache>>,
+    wb_in_flight: Arc<std::sync::atomic::AtomicBool>,
+    last_wb_poll: Option<Instant>,
     notified_low_bt: HashSet<String>,
     ai_usage: Arc<Mutex<telemetry::AiUsageCache>>,
     media_session: Arc<Mutex<telemetry::MediaSessionSnapshot>>,
@@ -322,6 +324,8 @@ impl Default for WidgetRuntime {
             weather_fail_count: 0,
             weather_retry_at: None,
             bt_battery: Arc::new(Mutex::new(telemetry::BluetoothBatteryCache::default())),
+            wb_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            last_wb_poll: None,
             notified_low_bt: HashSet::new(),
             ai_usage: Arc::new(Mutex::new(telemetry::AiUsageCache::default())),
             media_session: Arc::new(Mutex::new(telemetry::MediaSessionSnapshot::default())),
@@ -643,35 +647,60 @@ impl WidgetRuntime {
             }
         }
         if settings.is_widget_enabled("bluetoothbattery") {
-            let readings = wireless_battery::read_all_with_settings(settings);
-            if readings.is_empty() {
-                telemetry::refresh_bluetooth_battery(&self.bt_battery, false);
-            } else if let Ok(mut cache) = self.bt_battery.lock() {
-                cache.devices = readings
-                    .into_iter()
-                    .map(|reading| BluetoothBatteryDevice {
-                        kind: match reading.source {
-                            wireless_battery::BatterySource::GamepadHid
-                            | wireless_battery::BatterySource::XInput => {
-                                BluetoothDeviceKind::Gamepad
-                            }
-                            wireless_battery::BatterySource::LogitechHidPlusPlus
-                            | wireless_battery::BatterySource::Keyboard24gHid => {
-                                BluetoothDeviceKind::Keyboard
-                            }
-                            wireless_battery::BatterySource::RazerHid
-                            | wireless_battery::BatterySource::SteelSeriesHid
-                            | wireless_battery::BatterySource::CompxAtkVxe => {
-                                BluetoothDeviceKind::Mouse
-                            }
-                            _ => BluetoothDeviceKind::Headphones,
-                        },
-                        name: reading.name,
-                        percent: (reading.level_01 * 100.0).round().clamp(0.0, 100.0) as u32,
+            // Wireless HID/GATT probes can take up to PROVIDER_TIMEOUT (1.2 s), so keep polling
+            // strictly off the UI thread and read the cached snapshot non-blockingly.
+            if self
+                .last_wb_poll
+                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(10))
+                && !self
+                    .wb_in_flight
+                    .swap(true, std::sync::atomic::Ordering::AcqRel)
+            {
+                self.last_wb_poll = Some(now);
+                let settings_clone = settings.clone();
+                let bt_cache = Arc::clone(&self.bt_battery);
+                let in_flight = Arc::clone(&self.wb_in_flight);
+                let spawned = std::thread::Builder::new()
+                    .name("opentaskbar-wb".to_owned())
+                    .spawn(move || {
+                        let readings = wireless_battery::read_all_with_settings(&settings_clone);
+                        if readings.is_empty() {
+                            telemetry::refresh_bluetooth_battery(&bt_cache, false);
+                        } else if let Ok(mut cache) = bt_cache.lock() {
+                            cache.devices = readings
+                                .into_iter()
+                                .map(|reading| BluetoothBatteryDevice {
+                                    kind: match reading.source {
+                                        wireless_battery::BatterySource::GamepadHid
+                                        | wireless_battery::BatterySource::XInput => {
+                                            BluetoothDeviceKind::Gamepad
+                                        }
+                                        wireless_battery::BatterySource::LogitechHidPlusPlus
+                                        | wireless_battery::BatterySource::Keyboard24gHid => {
+                                            BluetoothDeviceKind::Keyboard
+                                        }
+                                        wireless_battery::BatterySource::RazerHid
+                                        | wireless_battery::BatterySource::SteelSeriesHid
+                                        | wireless_battery::BatterySource::CompxAtkVxe => {
+                                            BluetoothDeviceKind::Mouse
+                                        }
+                                        _ => BluetoothDeviceKind::Headphones,
+                                    },
+                                    name: reading.name,
+                                    percent: (reading.level_01 * 100.0).round().clamp(0.0, 100.0)
+                                        as u32,
+                                })
+                                .collect();
+                            cache.last_fetch = Some(Instant::now());
+                            cache.loading = false;
+                        }
+                        in_flight.store(false, std::sync::atomic::Ordering::Release);
                     })
-                    .collect();
-                cache.last_fetch = Some(now);
-                cache.loading = false;
+                    .is_ok();
+                if !spawned {
+                    self.wb_in_flight
+                        .store(false, std::sync::atomic::Ordering::Release);
+                }
             }
             // Ignored devices, aliases and listen-only were applied by `read_all_with_settings`;
             // the low-level provider cadence and flyout remain WS-G owned.

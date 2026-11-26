@@ -575,6 +575,10 @@ struct DockState {
     divider: VisualNode,
     scroll_container: VisualNode,
     scroll_clip: IDCompositionRectangleClip,
+    /// Rounded capsule clip matching the dock pill inner geometry for widgets and pill-bound
+    /// controls so overflowing cards never poke past the pill's rounded corners.
+    pill_scroll_container: VisualNode,
+    pill_scroll_clip: IDCompositionRectangleClip,
     scroll_prev_node: VisualNode,
     scroll_next_node: VisualNode,
     scroll_prev_surf: IDCompositionSurface,
@@ -1183,6 +1187,9 @@ impl DockState {
         let scroll_container = dcomp.create_node()?;
         let scroll_clip = dcomp.create_rect_clip()?;
         scroll_container.set_clip(&scroll_clip);
+        let pill_scroll_container = dcomp.create_node()?;
+        let pill_scroll_clip = dcomp.create_rect_clip()?;
+        pill_scroll_container.set_clip(&pill_scroll_clip);
         let se_w_px = (SCROLL_EDGE_W_DIPS * dpi).ceil() as u32;
         let se_h_px = (pill_h * dpi).ceil() as u32;
         let scroll_prev_surf = dcomp.create_scroll_edge_surface(
@@ -1334,6 +1341,8 @@ impl DockState {
             divider,
             scroll_container,
             scroll_clip,
+            pill_scroll_container,
+            pill_scroll_clip,
             scroll_prev_node,
             scroll_next_node,
             scroll_prev_surf,
@@ -1510,15 +1519,18 @@ impl DockState {
         self.dcomp.add_child(&self.dcomp.root, &self.pill.left);
         self.dcomp.add_child(&self.dcomp.root, &self.pill.center);
         self.dcomp.add_child(&self.dcomp.root, &self.pill.right);
+        self.pill_scroll_container.remove_all_children();
+        self.dcomp
+            .add_child(&self.dcomp.root, &self.pill_scroll_container);
         self.scroll_container.remove_all_children();
         self.dcomp
             .add_child(&self.dcomp.root, &self.scroll_container);
 
         for i in 0..3 {
-            self.scroll_container.add_child(&self.shell_bgs[i]);
-            self.scroll_container.add_child(&self.shell_icons[i]);
+            self.pill_scroll_container.add_child(&self.shell_bgs[i]);
+            self.pill_scroll_container.add_child(&self.shell_icons[i]);
         }
-        self.scroll_container.add_child(&self.divider);
+        self.pill_scroll_container.add_child(&self.divider);
 
         while self.slot_visuals.len() < self.slots.len() {
             if let (Ok(icon), Ok(dot), Ok(badge)) = (
@@ -1553,11 +1565,11 @@ impl DockState {
             }
         }
         for wv in &self.widget_visuals {
-            self.scroll_container.add_child(&wv.bg);
-            self.scroll_container.add_child(&wv.node);
+            self.pill_scroll_container.add_child(&wv.bg);
+            self.pill_scroll_container.add_child(&wv.node);
         }
 
-        self.scroll_container.add_child(&self.widget_divider);
+        self.pill_scroll_container.add_child(&self.widget_divider);
         let count = visible_tray_pin_count(&self.settings, self.slots.len(), self.mon_w_dips());
         self.tray_pin_visuals.truncate(count);
         if self.hovered_tray_pin.is_some_and(|index| index >= count) {
@@ -1578,13 +1590,13 @@ impl DockState {
             });
         }
         for pin in &self.tray_pin_visuals {
-            self.scroll_container.add_child(&pin.bg);
-            self.scroll_container.add_child(&pin.icon);
+            self.pill_scroll_container.add_child(&pin.bg);
+            self.pill_scroll_container.add_child(&pin.icon);
         }
-        self.scroll_container.add_child(&self.tray_bg);
-        self.scroll_container.add_child(&self.tray_node);
-        self.scroll_container.add_child(&self.bin_bg);
-        self.scroll_container.add_child(&self.bin_node);
+        self.pill_scroll_container.add_child(&self.tray_bg);
+        self.pill_scroll_container.add_child(&self.tray_node);
+        self.pill_scroll_container.add_child(&self.bin_bg);
+        self.pill_scroll_container.add_child(&self.bin_node);
 
         self.dcomp
             .add_child(&self.dcomp.root, &self.scroll_prev_node);
@@ -3089,16 +3101,38 @@ impl DockState {
                 .set_transform(1.0, 1.0, (div_x * dpi).round(), (div_y * dpi).round());
         }
 
-        // Hardware-clip scrollable content horizontally to the dock viewport while keeping
-        // full vertical headroom (`0.0 .. win_h`) so magnified app icons are never clipped above.
+        // Hardware-clip scrollable content to the dock viewport:
+        // - `pill_scroll_clip` uses the exact inner rounded pill capsule so widgets and pill-bound
+        //   controls never bleed outside the rounded corners when scrolled.
+        // - `scroll_clip` keeps top headroom (`0.0`) so magnified app icons rise freely above the
+        //   pill, while still rounding the bottom corners flush with the pill.
         self.scroll_offset = sm.offset;
         self.scroll_target = self.scroll_target.clamp(0.0, sm.max_scroll);
-        DcompEngine::update_clip_rect(
+        let clip_inset_px = (1.0 * dpi).max(1.0);
+        let pill_h_px = (pill_h * dpi).round();
+        let clip_left_px = pill_left_px + clip_inset_px;
+        let clip_top_px = pill_top_px + clip_inset_px;
+        let clip_right_px = (pill_left_px + pill_w_px - clip_inset_px).max(clip_left_px);
+        let clip_bottom_px = (pill_top_px + pill_h_px - clip_inset_px).max(clip_top_px);
+        let clip_radius_px = (self.settings.corner_radius_dips() * dpi - clip_inset_px)
+            .clamp(0.0, (clip_bottom_px - clip_top_px) * 0.5);
+        DcompEngine::update_rounded_clip_rect(
+            &self.pill_scroll_clip,
+            clip_left_px,
+            clip_top_px,
+            clip_right_px,
+            clip_bottom_px,
+            clip_radius_px,
+            clip_radius_px,
+        );
+        DcompEngine::update_rounded_clip_rect(
             &self.scroll_clip,
-            (sm.vp_left * dpi).floor(),
+            clip_left_px,
             0.0,
-            (sm.vp_right * dpi).ceil(),
-            (win_h * dpi).ceil(),
+            clip_right_px,
+            clip_bottom_px,
+            0.0,
+            clip_radius_px,
         );
 
         // 3. Unified app slots (inside clipped scroll container).

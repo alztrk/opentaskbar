@@ -438,6 +438,39 @@ impl DcompEngine {
         }
     }
 
+    /// Updates a DirectComposition clip to a rounded capsule matching the dock pill inner edge
+    /// so scrolled widgets and controls never bleed outside the rounded corners.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_rounded_clip_rect(
+        clip: &IDCompositionRectangleClip,
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+        top_radius: f32,
+        bottom_radius: f32,
+    ) {
+        let w = (right - left).max(0.0);
+        let h = (bottom - top).max(0.0);
+        let max_r = (w * 0.5).min(h * 0.5);
+        let tr = top_radius.clamp(0.0, max_r);
+        let br = bottom_radius.clamp(0.0, max_r);
+        unsafe {
+            let _ = clip.SetLeft2(left);
+            let _ = clip.SetTop2(top);
+            let _ = clip.SetRight2(right.max(left));
+            let _ = clip.SetBottom2(bottom.max(top));
+            let _ = clip.SetTopLeftRadiusX2(tr);
+            let _ = clip.SetTopLeftRadiusY2(tr);
+            let _ = clip.SetTopRightRadiusX2(tr);
+            let _ = clip.SetTopRightRadiusY2(tr);
+            let _ = clip.SetBottomLeftRadiusX2(br);
+            let _ = clip.SetBottomLeftRadiusY2(br);
+            let _ = clip.SetBottomRightRadiusX2(br);
+            let _ = clip.SetBottomRightRadiusY2(br);
+        }
+    }
+
     /// Creates a directional edge-fade scrim + crisp Fluent chevron button for overflowing dock scroll.
     #[allow(clippy::too_many_arguments)]
     pub fn create_scroll_edge_surface(

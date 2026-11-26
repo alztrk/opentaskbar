@@ -4130,58 +4130,42 @@ pub fn parse_gpu_temperature_kelvin(raw: &str) -> Option<u32> {
 type GpuSample = (Option<(u32, Option<u32>)>, Option<Instant>);
 
 static GPU_SAMPLE: std::sync::Mutex<GpuSample> = std::sync::Mutex::new((None, None));
+static GPU_SAMPLE_IN_FLIGHT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
-/// Samples GPU utilisation (%) and, when the platform exposes it, temperature (°C).
+/// Non-blocking sample of GPU utilisation (%) and temperature (°C) using native PDH + WDDM/NVML/ADL.
 ///
-/// Returns `None` when no GPU counter is available (e.g. integrated GPU without PDH data).
-/// Results are cached for 2 seconds to keep the 15 FPS dock tick cheap.
+/// Returns the most recent cached sample immediately so dock startup and UI ticks never stall on
+/// performance-counter or driver queries; refreshes happen on a background thread at most every 2 s.
 pub fn sample_gpu_temp() -> Option<(u32, Option<u32>)> {
-    if let Ok(g) = GPU_SAMPLE.lock()
-        && let (Some(v), Some(at)) = (g.0, g.1)
-        && at.elapsed().as_secs() < 2
-    {
-        return Some(v);
-    }
-    let mut usage = None;
-    let mut temp = None;
-    if let Ok(out) = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "(Get-Counter '\\GPU Engine(*)\\Utilization Percentage' -ErrorAction SilentlyContinue).CounterSamples | ForEach-Object { $_.CookedValue }",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        && out.status.success()
-    {
-        let text = String::from_utf8_lossy(&out.stdout);
-        let values: Vec<f64> = text
-            .lines()
-            .filter_map(|l| l.trim().parse::<f64>().ok())
-            .collect();
-        if !values.is_empty() {
-            usage = Some((values.iter().sum::<f64>().round() as u32).min(100));
+    let (cached, is_stale) = match GPU_SAMPLE.lock() {
+        Ok(g) => (g.0, g.1.is_none_or(|at| at.elapsed().as_secs() >= 2)),
+        Err(_) => (None, false),
+    };
+    if is_stale && !GPU_SAMPLE_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        let spawned = std::thread::Builder::new()
+            .name("opentaskbar-gpu".to_owned())
+            .spawn(|| {
+                let usage = sample_gpu_usage().map(|r| (r * 100.0).round().clamp(0.0, 100.0) as u32);
+                let temp = sample_gpu_temperature()
+                    .filter(|c| c.is_finite() && *c > 0.0 && *c < 150.0)
+                    .map(|c| c.round() as u32);
+                let result = if usage.is_some() || temp.is_some() {
+                    Some((usage.unwrap_or(0), temp))
+                } else {
+                    None
+                };
+                if let Ok(mut g) = GPU_SAMPLE.lock() {
+                    *g = (result, Some(Instant::now()));
+                }
+                GPU_SAMPLE_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
+            })
+            .is_ok();
+        if !spawned {
+            GPU_SAMPLE_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
         }
     }
-    if let Ok(out) = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            "(Get-CimInstance -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue | Select-Object -First 1).CurrentTemperature",
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        && out.status.success()
-    {
-        temp = parse_gpu_temperature_kelvin(&String::from_utf8_lossy(&out.stdout));
-    }
-    let result = usage.map(|u| (u, temp));
-    if let Ok(mut g) = GPU_SAMPLE.lock() {
-        *g = (result, Some(Instant::now()));
-    }
-    result
+    cached
 }
 
 // ============================================================================================
