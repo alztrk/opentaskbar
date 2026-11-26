@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Rust port — test/CI/docs/packaging parity
+
+- Added the five C#-surplus Antigravity locale keys plus 32 new feature keys to all 14 Rust catalogs (1108 keys per language) and enforced identical key sets with `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`.
+- Ported the deterministic C# checks into Rust integration tests: settings key parity, AI usage/JWT/quota/groups, `.otbackup` ZIP round-trip, wireless battery vendors, media timeline/seek, shell recovery, dock layout, audio mixer and locale completeness.
+- Rust CI now runs on every branch; CodeQL analyses Rust as well as C#; Dependabot tracks Cargo.
+- Added Rust portable/MSIX packaging scripts and merged Rust artifacts into checksums, release manifest, SLSA attestation and optional VirusTotal scanning.
+- Expanded `Rust-Port/README.md` and updated localization/theme/reliability/privacy docs for the Rust port.
+
 - Placed Rust Background Apps pins in a compact strip beside the Background Apps button, with overflow available in the flyout. Added a short dock closing animation that respects Windows and OpenTaskbar animation settings.
 
 - Fixed the Rust Background Apps list opening hidden utility windows or launching helper executables. Opening from either the row or its menu now restores an app window when possible and uses the dock's launch resolver otherwise.

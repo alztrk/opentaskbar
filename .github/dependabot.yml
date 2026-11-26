@@ -8,6 +8,15 @@ updates:
     labels:
       - dependencies
 
+  - package-ecosystem: cargo
+    directory: /Rust-Port
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+
   - package-ecosystem: github-actions
     directory: /
     schedule:

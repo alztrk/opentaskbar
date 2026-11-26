@@ -217,6 +217,23 @@ pub fn tr(culture: &str, key: &str) -> String {
     lookup(culture, key).unwrap_or_else(|| key.to_owned())
 }
 
+/// Sorted catalog keys for `culture`; empty when the tag is unsupported.
+///
+/// Exposed so the integration key-parity tests can assert that all 14 embedded
+/// catalogs share one identical key set (§C3 / DoD #3).
+pub fn keys(culture: &str) -> Vec<String> {
+    let mut keys: Vec<String> = catalog_for(culture)
+        .map(|catalog| catalog.keys().cloned().collect())
+        .unwrap_or_default();
+    keys.sort();
+    keys
+}
+
+/// Number of entries in a catalog (0 for an unsupported culture).
+pub fn key_count(culture: &str) -> usize {
+    catalog_for(culture).map_or(0, |catalog| catalog.len())
+}
+
 /// Translate and replace `{0}`, `{1}`, ... placeholders with `args`.
 pub fn t_fmt(key: &str, args: &[&str]) -> String {
     let template = t(key);
@@ -290,5 +307,66 @@ mod tests {
         assert!(!set_language("xx-YY"));
         assert_eq!(language(), "tr-TR");
         let _ = set_language(DEFAULT_LANGUAGE);
+    }
+
+    #[test]
+    fn all_catalogs_share_one_identical_key_set() {
+        let reference = keys(DEFAULT_LANGUAGE);
+        assert_eq!(reference.len(), 1129);
+        for (tag, _) in LANGUAGES {
+            assert_eq!(key_count(tag), reference.len(), "{tag} key count differs");
+            assert_eq!(keys(tag), reference, "{tag} key set differs");
+        }
+        assert_eq!(key_count("xx-YY"), 0);
+    }
+
+    #[test]
+    fn c3_new_keys_resolve_in_every_catalog() {
+        const NEW_KEYS: &[&str] = &[
+            // C#-surplus Antigravity keys.
+            "WidgetAiUsageAntigravity",
+            "WidgetAiUsageAntigravityDescription",
+            "AiUsageGroupGemini",
+            "AiUsageGroupClaudeGpt",
+            "AiUsageAntigravityGroupsLabel",
+            // Rust-port feature keys (C3 prefixes).
+            "SpeedTestDownload",
+            "SpeedTestUpload",
+            "SpeedTestJitter",
+            "SpeedTestResult",
+            "SpeedTestRunning",
+            "FocusBreakTitle",
+            "FocusBreakStart",
+            "FocusBreakSkip",
+            "FocusBreakCountdown",
+            "FocusBreakComplete",
+            "FocusSession",
+            "RadioWifi",
+            "RadioBluetooth",
+            "RadioOn",
+            "RadioOff",
+            "FullBackupInspect",
+            "FullBackupContents",
+            "ThemeEditorTitle",
+            "ThemeEditorSave",
+            "ThemeEditorReset",
+            "ThemeEditorToken",
+            "ThemeEditorAdvanced",
+            "ThemeEditorAutosave",
+            "SeekTo",
+            "SeekLabel",
+            "SeekDuration",
+            "SeekUnavailable",
+            "HardwareUnavailable",
+            "StartMenuOpen",
+            "StartMenuClose",
+            "StartMenuToggle",
+            "ProfileHiddenApps",
+        ];
+        for (tag, _) in LANGUAGES {
+            for key in NEW_KEYS {
+                assert_ne!(tr(tag, key), *key, "{tag} missing {key}");
+            }
+        }
     }
 }

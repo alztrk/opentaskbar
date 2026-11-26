@@ -23,10 +23,15 @@ serde_json = { version = "1", features = ["preserve_order"] }
 smallvec = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 windows = { version = "0.61", features = [
+    # WS-B: WinRT Start-menu/MSIX identity (Windows.ApplicationModel) and radio
+    # toggles (Windows.Devices.Radios). Kept in the workspace root so every
+    # crate can opt in without editing this file again.
+    "ApplicationModel",
     "Data_Xml_Dom",
     "Devices_Bluetooth",
     "Devices_Bluetooth_GenericAttributeProfile",
     "Devices_Enumeration",
+    "Devices_Radios",
     "Foundation",
     "Media_Control",
     "Storage_Streams",

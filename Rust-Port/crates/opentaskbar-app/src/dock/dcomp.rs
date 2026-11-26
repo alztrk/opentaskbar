@@ -1366,46 +1366,258 @@ impl DcompEngine {
                             &s_brush,
                         );
                     } else {
-                        let card_rr = D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F {
-                                left: 0.0,
-                                top: 0.0,
-                                right: width_dips,
-                                bottom: height_dips,
-                            },
-                            radiusX: 10.0,
-                            radiusY: 10.0,
+                        // Liquid Glass inset capsule battery card (12 DIP outer glass card +
+                        // recessed liquid chamber + terminal nub + dual-layer charging meniscus).
+                        let effective_border = if border_rgb.is_none() && *percent <= 20 {
+                            Some(pal.danger)
+                        } else {
+                            border_rgb
                         };
-                        let base_track = dc.CreateSolidColorBrush(
+                        draw_chip_card(
+                            dc,
+                            width_dips,
+                            height_dips,
+                            is_dark,
+                            None,
+                            interaction,
+                            effective_border,
+                            border_width_dips,
+                        )?;
+
+                        let pad_x = 4.0_f32;
+                        let pad_y = 4.0_f32;
+                        let cap_reserve = 4.5_f32;
+                        let bx = pad_x;
+                        let by = pad_y;
+                        let bw = (width_dips - pad_x * 2.0 - cap_reserve).max(12.0);
+                        let bh = (height_dips - pad_y * 2.0).max(12.0);
+                        let br = (bh * 0.28).min(8.5);
+
+                        let chamber_rr = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: bx,
+                                top: by,
+                                right: bx + bw,
+                                bottom: by + bh,
+                            },
+                            radiusX: br,
+                            radiusY: br,
+                        };
+                        let chamber_bg = dc.CreateSolidColorBrush(
                             &if is_dark {
-                                color_rgba(0xff, 0xff, 0xff, 0.09)
+                                color_rgba(0x00, 0x00, 0x00, 0.28)
                             } else {
-                                color_rgba(0x00, 0x00, 0x00, 0.07)
+                                color_rgba(0x18, 0x18, 0x1b, 0.085)
                             },
                             None,
                         )?;
-                        dc.FillRoundedRectangle(&card_rr, &base_track);
+                        dc.FillRoundedRectangle(&chamber_rr, &chamber_bg);
 
-                        // Exact C# BatteryWidget.PaletteForLevel vertical gradient stops
-                        let (top_c, bot_c) = if *percent <= 20 {
-                            ((0xb2, 0x60, 0x67), (0x98, 0x50, 0x5a))
+                        // Aurora-aligned palette: (left_col, right_col, glow_col, back_wave_col)
+                        let (left_c, right_c, glow_c, back_c) = if *percent <= 20 {
+                            (
+                                (0xc2_u8, 0x30_u8, 0x42_u8),
+                                (0xec_u8, 0x5e_u8, 0x6c_u8),
+                                (0xf8_u8, 0x71_u8, 0x71_u8),
+                                (0xf4_u8, 0x80_u8, 0x8a_u8),
+                            )
                         } else if *percent <= 50 {
-                            ((0xb9, 0x95, 0x63), (0x96, 0x76, 0x48))
+                            (
+                                (0xc0_u8, 0x7e_u8, 0x22_u8),
+                                (0xf2_u8, 0xb8_u8, 0x4e_u8),
+                                (0xfb_u8, 0xbf_u8, 0x24_u8),
+                                (0xf5_u8, 0xc8_u8, 0x70_u8),
+                            )
                         } else {
-                            ((0x58, 0xa8, 0x9c), (0x3e, 0x82, 0x7e))
+                            (
+                                (0x1d_u8, 0x94_u8, 0x86_u8),
+                                (0x44_u8, 0xd6_u8, 0xb8_u8),
+                                (0x2d_u8, 0xd4_u8, 0xbf_u8),
+                                (0x60_u8, 0xe2_u8, 0xc8_u8),
+                            )
                         };
-                        let stops = [
+
+                        // Subtle right-side micro battery terminal nub.
+                        let nub_h = (bh * 0.36).round().max(6.0);
+                        let nub_y = by + (bh - nub_h) * 0.5;
+                        let nub_rr = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: bx + bw + 1.6,
+                                top: nub_y,
+                                right: bx + bw + 4.0,
+                                bottom: nub_y + nub_h,
+                            },
+                            radiusX: 1.2,
+                            radiusY: 1.2,
+                        };
+                        let nub_col = if *percent >= 98 {
+                            color_rgba(right_c.0, right_c.1, right_c.2, 0.95)
+                        } else if is_dark {
+                            color_rgba(0xff, 0xff, 0xff, 0.24)
+                        } else {
+                            color_rgba(0x18, 0x18, 0x1b, 0.22)
+                        };
+                        let nub_b = dc.CreateSolidColorBrush(&nub_col, None)?;
+                        dc.FillRoundedRectangle(&nub_rr, &nub_b);
+
+                        // Clip liquid fill, meniscus glow, bubbles, and sheen strictly to the chamber.
+                        let fill_frac = ((*percent).clamp(4, 100) as f32) / 100.0;
+                        let edge_x = bx + bw * fill_frac;
+                        let amp = 2.8_f32.min((edge_x - bx) * 0.30);
+
+                        let chamber_mask: windows::Win32::Graphics::Direct2D::ID2D1Geometry = self
+                            .d2d_factory
+                            .CreateRoundedRectangleGeometry(&chamber_rr)?
+                            .into();
+                        let layer_params =
+                            windows::Win32::Graphics::Direct2D::D2D1_LAYER_PARAMETERS1 {
+                                contentBounds: chamber_rr.rect,
+                                geometricMask: std::mem::ManuallyDrop::new(Some(chamber_mask)),
+                                maskAntialiasMode:
+                                    windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                maskTransform: Matrix3x2::identity(),
+                                opacity: 1.0,
+                                opacityBrush: std::mem::ManuallyDrop::new(None),
+                                layerOptions:
+                                    windows::Win32::Graphics::Direct2D::D2D1_LAYER_OPTIONS1_NONE,
+                            };
+                        dc.PushLayer(&layer_params, None);
+
+                        // 1. Soft ambient glow halo along the meniscus into the empty side.
+                        if *percent > 4 && *percent < 98 {
+                            let glow_stops = [
+                                D2D1_GRADIENT_STOP {
+                                    position: 0.0,
+                                    color: color_rgba(glow_c.0, glow_c.1, glow_c.2, 0.0),
+                                },
+                                D2D1_GRADIENT_STOP {
+                                    position: 0.5,
+                                    color: color_rgba(glow_c.0, glow_c.1, glow_c.2, 0.44),
+                                },
+                                D2D1_GRADIENT_STOP {
+                                    position: 1.0,
+                                    color: color_rgba(glow_c.0, glow_c.1, glow_c.2, 0.0),
+                                },
+                            ];
+                            let glow_sc = dc.CreateGradientStopCollection(
+                                &glow_stops,
+                                D2D1_COLOR_SPACE_SRGB,
+                                D2D1_COLOR_SPACE_SRGB,
+                                D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                                D2D1_EXTEND_MODE_CLAMP,
+                                D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+                            )?;
+                            let glow_b = dc.CreateLinearGradientBrush(
+                                &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                                    startPoint: Vector2 {
+                                        X: edge_x - 10.0,
+                                        Y: by,
+                                    },
+                                    endPoint: Vector2 {
+                                        X: edge_x + 12.0,
+                                        Y: by,
+                                    },
+                                },
+                                None,
+                                &glow_sc,
+                            )?;
+                            dc.FillRectangle(
+                                &D2D_RECT_F {
+                                    left: edge_x - 10.0,
+                                    top: by,
+                                    right: edge_x + 12.0,
+                                    bottom: by + bh,
+                                },
+                                &glow_b,
+                            );
+                        }
+
+                        let build_wave =
+                            |ex: f32, wave_amp: f32, phase: f32, filled: bool| -> Result<windows::Win32::Graphics::Direct2D::ID2D1PathGeometry> {
+                                let half = bh * 0.5;
+                                let p = phase.rem_euclid(1.0);
+                                let y0 = by - p * bh;
+                                let path = self.d2d_factory.CreatePathGeometry()?;
+                                let sink = path.Open()?;
+                                if filled {
+                                    sink.BeginFigure(
+                                        Vector2 { X: bx, Y: y0 },
+                                        windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_BEGIN_FILLED,
+                                    );
+                                    sink.AddLine(Vector2 { X: ex, Y: y0 });
+                                } else {
+                                    sink.BeginFigure(
+                                        Vector2 { X: ex, Y: y0 },
+                                        D2D1_FIGURE_BEGIN_HOLLOW,
+                                    );
+                                }
+                                // Period 1: y0 -> y0 + bh
+                                sink.AddBezier(&windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
+                                    point1: Vector2 { X: ex + wave_amp, Y: y0 + half * 0.36 },
+                                    point2: Vector2 { X: ex + wave_amp, Y: y0 + half * 0.64 },
+                                    point3: Vector2 { X: ex, Y: y0 + half },
+                                });
+                                sink.AddBezier(&windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
+                                    point1: Vector2 { X: ex - wave_amp, Y: y0 + half + half * 0.36 },
+                                    point2: Vector2 { X: ex - wave_amp, Y: y0 + half + half * 0.64 },
+                                    point3: Vector2 { X: ex, Y: y0 + bh },
+                                });
+                                // Period 2: y0 + bh -> y0 + 2 * bh (seamless loop)
+                                sink.AddBezier(&windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
+                                    point1: Vector2 { X: ex + wave_amp, Y: y0 + bh + half * 0.36 },
+                                    point2: Vector2 { X: ex + wave_amp, Y: y0 + bh + half * 0.64 },
+                                    point3: Vector2 { X: ex, Y: y0 + bh + half },
+                                });
+                                sink.AddBezier(&windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
+                                    point1: Vector2 { X: ex - wave_amp, Y: y0 + bh + half + half * 0.36 },
+                                    point2: Vector2 { X: ex - wave_amp, Y: y0 + bh + half + half * 0.64 },
+                                    point3: Vector2 { X: ex, Y: y0 + bh * 2.0 },
+                                });
+                                if filled {
+                                    sink.AddLine(Vector2 {
+                                        X: bx,
+                                        Y: y0 + bh * 2.0,
+                                    });
+                                    sink.EndFigure(
+                                        windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_END_CLOSED,
+                                    );
+                                } else {
+                                    sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                                }
+                                sink.Close()?;
+                                Ok(path.into())
+                            };
+
+                        // 2. Secondary out-of-phase depth wave while charging below 100%.
+                        if *charging && *percent < 100 {
+                            let back_geom: windows::Win32::Graphics::Direct2D::ID2D1Geometry =
+                                build_wave(
+                                    (edge_x + 2.2).min(bx + bw),
+                                    amp * 0.85,
+                                    *wave_phase + 0.45,
+                                    true,
+                                )?
+                                .into();
+                            let back_b = dc.CreateSolidColorBrush(
+                                &color_rgba(back_c.0, back_c.1, back_c.2, 0.34),
+                                None,
+                            )?;
+                            dc.FillGeometry(&back_geom, &back_b, None);
+                        }
+
+                        // 3. Primary liquid fill with horizontal brightening toward the active edge.
+                        let liq_stops = [
                             D2D1_GRADIENT_STOP {
                                 position: 0.0,
-                                color: color_rgba(top_c.0, top_c.1, top_c.2, 0.96),
+                                color: color_rgba(left_c.0, left_c.1, left_c.2, 0.96),
                             },
                             D2D1_GRADIENT_STOP {
                                 position: 1.0,
-                                color: color_rgba(bot_c.0, bot_c.1, bot_c.2, 0.96),
+                                color: color_rgba(right_c.0, right_c.1, right_c.2, 0.98),
                             },
                         ];
-                        let stop_col = dc.CreateGradientStopCollection(
-                            &stops,
+                        let liq_sc = dc.CreateGradientStopCollection(
+                            &liq_stops,
                             D2D1_COLOR_SPACE_SRGB,
                             D2D1_COLOR_SPACE_SRGB,
                             D2D1_BUFFER_PRECISION_8BPC_UNORM,
@@ -1414,136 +1626,99 @@ impl DcompEngine {
                         )?;
                         let liq_b = dc.CreateLinearGradientBrush(
                             &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                                startPoint: Vector2 { X: 0.0, Y: 0.0 },
+                                startPoint: Vector2 { X: bx, Y: by },
                                 endPoint: Vector2 {
-                                    X: 0.0,
-                                    Y: height_dips,
+                                    X: edge_x.max(bx + 1.0),
+                                    Y: by + bh * 0.5,
                                 },
                             },
                             None,
-                            &stop_col,
+                            &liq_sc,
                         )?;
 
-                        let edge_x = width_dips * ((*percent).clamp(2, 100) as f32 / 100.0);
-                        let card_mask: windows::Win32::Graphics::Direct2D::ID2D1Geometry =
-                            self.d2d_factory.CreateRoundedRectangleGeometry(&card_rr)?.into();
-                        let layer_params = windows::Win32::Graphics::Direct2D::D2D1_LAYER_PARAMETERS1 {
-                            contentBounds: card_rr.rect,
-                            geometricMask: std::mem::ManuallyDrop::new(Some(card_mask)),
-                            maskAntialiasMode:
-                                windows::Win32::Graphics::Direct2D::D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                            maskTransform: Matrix3x2::identity(),
-                            opacity: 1.0,
-                            opacityBrush: std::mem::ManuallyDrop::new(None),
-                            layerOptions:
-                                windows::Win32::Graphics::Direct2D::D2D1_LAYER_OPTIONS1_NONE,
-                        };
-                        dc.PushLayer(&layer_params, None);
-
-                        // Build liquid geometry (2-period sinusoidal meniscus when charging & < 100%).
                         let liquid_geom: windows::Win32::Graphics::Direct2D::ID2D1Geometry =
                             if *charging && *percent < 100 {
-                                let amp = 3.2_f32.min(edge_x * 0.35);
-                                let half = height_dips * 0.5;
-                                let y0 = -(wave_phase.clamp(0.0, 1.0)) * height_dips;
-                                let path = self.d2d_factory.CreatePathGeometry()?;
-                                let sink = path.Open()?;
-                                sink.BeginFigure(
-                                    Vector2 { X: 0.0, Y: y0 },
-                                    windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_BEGIN_FILLED,
-                                );
-                                sink.AddLine(Vector2 { X: edge_x, Y: y0 });
-                                // Period 1: y0 -> y0 + height_dips
-                                sink.AddBezier(&windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
-                                    point1: Vector2 {
-                                        X: edge_x + amp,
-                                        Y: y0 + half * 0.36,
-                                    },
-                                    point2: Vector2 {
-                                        X: edge_x + amp,
-                                        Y: y0 + half * 0.64,
-                                    },
-                                    point3: Vector2 {
-                                        X: edge_x,
-                                        Y: y0 + half,
-                                    },
-                                });
-                                sink.AddBezier(&windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
-                                    point1: Vector2 {
-                                        X: edge_x - amp,
-                                        Y: y0 + half + half * 0.36,
-                                    },
-                                    point2: Vector2 {
-                                        X: edge_x - amp,
-                                        Y: y0 + half + half * 0.64,
-                                    },
-                                    point3: Vector2 {
-                                        X: edge_x,
-                                        Y: y0 + height_dips,
-                                    },
-                                });
-                                // Period 2: y0 + height_dips -> y0 + 2 * height_dips (seamless loop)
-                                sink.AddBezier(&windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
-                                    point1: Vector2 {
-                                        X: edge_x + amp,
-                                        Y: y0 + height_dips + half * 0.36,
-                                    },
-                                    point2: Vector2 {
-                                        X: edge_x + amp,
-                                        Y: y0 + height_dips + half * 0.64,
-                                    },
-                                    point3: Vector2 {
-                                        X: edge_x,
-                                        Y: y0 + height_dips + half,
-                                    },
-                                });
-                                sink.AddBezier(&windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
-                                    point1: Vector2 {
-                                        X: edge_x - amp,
-                                        Y: y0 + height_dips + half + half * 0.36,
-                                    },
-                                    point2: Vector2 {
-                                        X: edge_x - amp,
-                                        Y: y0 + height_dips + half + half * 0.64,
-                                    },
-                                    point3: Vector2 {
-                                        X: edge_x,
-                                        Y: y0 + height_dips * 2.0,
-                                    },
-                                });
-                                sink.AddLine(Vector2 {
-                                    X: 0.0,
-                                    Y: y0 + height_dips * 2.0,
-                                });
-                                sink.EndFigure(
-                                    windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_END_CLOSED,
-                                );
-                                sink.Close()?;
-                                path.into()
+                                build_wave(edge_x, amp, *wave_phase, true)?.into()
                             } else {
                                 self.d2d_factory
                                     .CreateRectangleGeometry(&D2D_RECT_F {
-                                        left: 0.0,
-                                        top: 0.0,
+                                        left: bx,
+                                        top: by,
                                         right: edge_x,
-                                        bottom: height_dips,
+                                        bottom: by + bh,
                                     })?
                                     .into()
                             };
-
                         dc.FillGeometry(&liquid_geom, &liq_b, None);
 
-                        // Exact C# -22deg skewed left-to-right charging sheen clipped strictly to liquid fill.
+                        // 4. Top glass gloss inside the liquid fill.
+                        let gloss_stops = [
+                            D2D1_GRADIENT_STOP {
+                                position: 0.0,
+                                color: color_rgba(0xff, 0xff, 0xff, 0.22),
+                            },
+                            D2D1_GRADIENT_STOP {
+                                position: 1.0,
+                                color: color_rgba(0xff, 0xff, 0xff, 0.0),
+                            },
+                        ];
+                        let gloss_sc = dc.CreateGradientStopCollection(
+                            &gloss_stops,
+                            D2D1_COLOR_SPACE_SRGB,
+                            D2D1_COLOR_SPACE_SRGB,
+                            D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                            D2D1_EXTEND_MODE_CLAMP,
+                            D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+                        )?;
+                        let gloss_b = dc.CreateLinearGradientBrush(
+                            &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                                startPoint: Vector2 { X: bx, Y: by },
+                                endPoint: Vector2 {
+                                    X: bx,
+                                    Y: by + bh * 0.46,
+                                },
+                            },
+                            None,
+                            &gloss_sc,
+                        )?;
+                        dc.FillGeometry(&liquid_geom, &gloss_b, None);
+
+                        // 5. Charging micro-particles + -22deg skewed sheen clipped to liquid fill.
                         if *charging {
-                            let sheen_w = 54.0_f32;
+                            if edge_x - bx > 18.0 {
+                                let span = (edge_x - bx - 8.0).max(4.0);
+                                for i in 0..3 {
+                                    let p = (*wave_phase + i as f32 * 0.33).rem_euclid(1.0);
+                                    let px = bx + 4.0 + p * span;
+                                    let py = by
+                                        + bh * (0.28 + i as f32 * 0.22)
+                                        + (p * std::f32::consts::TAU + i as f32).sin() * 2.0;
+                                    let alpha = (p * std::f32::consts::PI).sin() * 0.36;
+                                    if alpha > 0.02 {
+                                        let pb = dc.CreateSolidColorBrush(
+                                            &color_rgba(0xff, 0xff, 0xff, alpha),
+                                            None,
+                                        )?;
+                                        dc.FillEllipse(
+                                            &D2D1_ELLIPSE {
+                                                point: Vector2 { X: px, Y: py },
+                                                radiusX: 1.35,
+                                                radiusY: 1.35,
+                                            },
+                                            &pb,
+                                        );
+                                    }
+                                }
+                            }
+                            let sheen_w = 48.0_f32;
                             let t = (wave_phase / 0.875).clamp(0.0, 1.0);
                             let eased = if t < 0.5 {
                                 4.0 * t * t * t
                             } else {
                                 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
                             };
-                            let start_x = -sheen_w - 28.0;
-                            let end_x = edge_x + 28.0;
+                            let start_x = bx - sheen_w - 20.0;
+                            let end_x = edge_x + 20.0;
                             let sx = start_x + (end_x - start_x) * eased;
                             let sheen_stops = [
                                 D2D1_GRADIENT_STOP {
@@ -1551,16 +1726,16 @@ impl DcompEngine {
                                     color: color_rgba(0xff, 0xff, 0xff, 0.0),
                                 },
                                 D2D1_GRADIENT_STOP {
-                                    position: 0.30,
-                                    color: color_rgba(0xff, 0xff, 0xff, 0.09),
+                                    position: 0.35,
+                                    color: color_rgba(0xff, 0xff, 0xff, 0.10),
                                 },
                                 D2D1_GRADIENT_STOP {
                                     position: 0.50,
-                                    color: color_rgba(0xff, 0xff, 0xff, 0.21),
+                                    color: color_rgba(0xff, 0xff, 0xff, 0.24),
                                 },
                                 D2D1_GRADIENT_STOP {
-                                    position: 0.70,
-                                    color: color_rgba(0xff, 0xff, 0xff, 0.09),
+                                    position: 0.65,
+                                    color: color_rgba(0xff, 0xff, 0xff, 0.10),
                                 },
                                 D2D1_GRADIENT_STOP {
                                     position: 1.0,
@@ -1577,10 +1752,10 @@ impl DcompEngine {
                             )?;
                             let sheen_b = dc.CreateLinearGradientBrush(
                                 &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                                    startPoint: Vector2 { X: sx, Y: 0.0 },
+                                    startPoint: Vector2 { X: sx, Y: by },
                                     endPoint: Vector2 {
                                         X: sx + sheen_w,
-                                        Y: height_dips * 0.40,
+                                        Y: by + bh * 0.42,
                                     },
                                 },
                                 None,
@@ -1589,37 +1764,95 @@ impl DcompEngine {
                             dc.FillGeometry(&liquid_geom, &sheen_b, None);
                         }
 
+                        // 6. Crisp meniscus highlight line along the liquid edge.
+                        if *percent > 4 && *percent < 99 {
+                            let edge_b = dc.CreateSolidColorBrush(
+                                &color_rgba(0xff, 0xff, 0xff, 0.44),
+                                None,
+                            )?;
+                            if *charging {
+                                let edge_geom: windows::Win32::Graphics::Direct2D::ID2D1Geometry =
+                                    build_wave(edge_x, amp, *wave_phase, false)?.into();
+                                dc.DrawGeometry(&edge_geom, &edge_b, 1.1, Some(&stroke));
+                            } else {
+                                dc.DrawLine(
+                                    Vector2 {
+                                        X: edge_x - 0.5,
+                                        Y: by,
+                                    },
+                                    Vector2 {
+                                        X: edge_x - 0.5,
+                                        Y: by + bh,
+                                    },
+                                    &edge_b,
+                                    1.1,
+                                    None,
+                                );
+                            }
+                        }
+
                         dc.PopLayer();
-                        // Drop ManuallyDrop geometricMask cleanly after PopLayer.
                         let _ = std::mem::ManuallyDrop::into_inner(layer_params.geometricMask);
 
-                        // Hover/press overlay above liquid fill (exact C# _hoverOverlay/_pressOverlay)
+                        // Recessed inner hairline stroke around the capsule chamber.
+                        let chamber_rim_rr = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: bx + 0.5,
+                                top: by + 0.5,
+                                right: bx + bw - 0.5,
+                                bottom: by + bh - 0.5,
+                            },
+                            radiusX: (br - 0.5).max(1.0),
+                            radiusY: (br - 0.5).max(1.0),
+                        };
+                        let chamber_rim_b = dc.CreateSolidColorBrush(
+                            &if is_dark {
+                                color_rgba(0xff, 0xff, 0xff, 0.12)
+                            } else {
+                                color_rgba(0x18, 0x18, 0x1b, 0.10)
+                            },
+                            None,
+                        )?;
+                        dc.DrawRoundedRectangle(&chamber_rim_rr, &chamber_rim_b, 0.85, None);
+
                         draw_chip_overlay(dc, width_dips, height_dips, is_dark, interaction)?;
 
+                        // Adaptive ink contrast: dark text on uncovered Light track, crisp white + shadow otherwise.
+                        let use_dark_ink = !is_dark && *percent < 50;
+                        let fg_rgb = if use_dark_ink {
+                            pal.text_primary
+                        } else {
+                            (0xff, 0xff, 0xff)
+                        };
+                        let fg_b = dc.CreateSolidColorBrush(
+                            &color_rgba(fg_rgb.0, fg_rgb.1, fg_rgb.2, if use_dark_ink { 0.94 } else { 0.98 }),
+                            None,
+                        )?;
+                        let sh_b = dc.CreateSolidColorBrush(&color_rgba(0, 0, 0, 0.32), None)?;
+
                         let label = format!("{percent}%");
-                        let sh_b = dc.CreateSolidColorBrush(&color_rgba(0, 0, 0, 0.35), None)?;
-                        let wh_b =
-                            dc.CreateSolidColorBrush(&color_rgba(0xff, 0xff, 0xff, 0.98), None)?;
+                        let chamber_cx = bx + bw * 0.5;
                         if *charging {
-                            // Crisp native Fluent bolt (`IconZap` \u{E945}) + drop shadow left of `%` (exact C# `BatteryWidget.cs`)
-                            let bolt_w = 13.0;
-                            let text_w = (label.len() as f32 * 8.2).max(24.0);
+                            let bolt_w = 12.0;
+                            let text_w = (label.len() as f32 * 8.0).max(22.0);
                             let total_w = bolt_w + text_w;
-                            let start_x = (width_dips - total_w) * 0.5;
-                            draw_fluent_str_d2d(
-                                &self.dwrite_factory,
-                                dc,
-                                "\u{E945}",
-                                D2D_RECT_F {
-                                    left: start_x,
-                                    top: cy - 6.0 + 1.0,
-                                    right: start_x + 12.0,
-                                    bottom: cy + 6.0 + 1.0,
-                                },
-                                11.0,
-                                (0, 0, 0),
-                                0.35,
-                            )?;
+                            let start_x = chamber_cx - total_w * 0.5;
+                            if !use_dark_ink {
+                                draw_fluent_str_d2d(
+                                    &self.dwrite_factory,
+                                    dc,
+                                    "\u{E945}",
+                                    D2D_RECT_F {
+                                        left: start_x,
+                                        top: cy - 6.0 + 1.0,
+                                        right: start_x + 11.5,
+                                        bottom: cy + 6.0 + 1.0,
+                                    },
+                                    11.0,
+                                    (0, 0, 0),
+                                    0.32,
+                                )?;
+                            }
                             draw_fluent_str_d2d(
                                 &self.dwrite_factory,
                                 dc,
@@ -1627,57 +1860,61 @@ impl DcompEngine {
                                 D2D_RECT_F {
                                     left: start_x,
                                     top: cy - 6.0,
-                                    right: start_x + 12.0,
+                                    right: start_x + 11.5,
                                     bottom: cy + 6.0,
                                 },
                                 11.0,
-                                (0xff, 0xff, 0xff),
-                                0.98,
+                                fg_rgb,
+                                if use_dark_ink { 0.94 } else { 0.98 },
                             )?;
-                            draw_text(
-                                &label,
-                                &fmt_13_b_l,
-                                D2D_RECT_F {
-                                    left: start_x + bolt_w,
-                                    top: 1.0,
-                                    right: width_dips - 4.0,
-                                    bottom: height_dips + 1.0,
-                                },
-                                &sh_b,
-                            );
+                            if !use_dark_ink {
+                                draw_text(
+                                    &label,
+                                    &fmt_13_b_l,
+                                    D2D_RECT_F {
+                                        left: start_x + bolt_w,
+                                        top: 1.0,
+                                        right: bx + bw - 2.0,
+                                        bottom: height_dips + 1.0,
+                                    },
+                                    &sh_b,
+                                );
+                            }
                             draw_text(
                                 &label,
                                 &fmt_13_b_l,
                                 D2D_RECT_F {
                                     left: start_x + bolt_w,
                                     top: 0.0,
-                                    right: width_dips - 4.0,
+                                    right: bx + bw - 2.0,
                                     bottom: height_dips,
                                 },
-                                &wh_b,
+                                &fg_b,
                             );
                         } else {
+                            if !use_dark_ink {
+                                draw_text(
+                                    &label,
+                                    &fmt_13_b_c,
+                                    D2D_RECT_F {
+                                        left: bx,
+                                        top: 1.0,
+                                        right: bx + bw,
+                                        bottom: height_dips + 1.0,
+                                    },
+                                    &sh_b,
+                                );
+                            }
                             draw_text(
                                 &label,
                                 &fmt_13_b_c,
                                 D2D_RECT_F {
-                                    left: 4.0,
-                                    top: 1.0,
-                                    right: width_dips - 4.0,
-                                    bottom: height_dips + 1.0,
-                                },
-                                &sh_b,
-                            );
-                            draw_text(
-                                &label,
-                                &fmt_13_b_c,
-                                D2D_RECT_F {
-                                    left: 4.0,
+                                    left: bx,
                                     top: 0.0,
-                                    right: width_dips - 4.0,
+                                    right: bx + bw,
                                     bottom: height_dips,
                                 },
-                                &wh_b,
+                                &fg_b,
                             );
                         }
                     }

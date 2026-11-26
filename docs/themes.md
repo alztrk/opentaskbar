@@ -120,3 +120,14 @@ Token names are listed in [Design/Tokens/](../Design/Tokens/) (`Typography`, `Sp
 ## Licensing
 
 Custom icon packs should only contain images you have permission to distribute. App logos may be trademarks. Bundled themes do not ship replacement app icons.
+
+## Rust port
+
+The Rust port reads the same `%LOCALAPPDATA%\OpenTaskbar\Themes` folder and the same `theme.json` / `icons\pack.json` / `widgets\pack.json` files, so themes are interchangeable between builds. The six bundled themes are installed on first launch. `preserveOriginalIcons` and the icon-matching order described above are honoured by the Rust `platform::icon_pack` path.
+
+Differences worth knowing:
+
+- The Rust widget token resolver converts design tokens to typed values (brush, color, corner radius, thickness, font family) with a 256-token limit; unknown or wrongly typed tokens are skipped instead of aborting theme load.
+- Windows accentPalette and `SystemUsesLightTheme` are read live by the Rust palette listener; a change is applied to the dock, menu, widgets and Settings surfaces without a restart.
+- The theme editor is behind the `enable_theme_editor` flag (default off). With it off, the Rust Settings window still lists, imports and exports themes but does not expose token editing.
+- A full backup (`.otbackup`) includes the active custom theme; importing it can restore settings alone or settings plus the theme. The archive contract is covered by `tests/full_backup.rs`.

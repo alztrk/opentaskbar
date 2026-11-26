@@ -1,16 +1,19 @@
 name: Rust Port CI
 
+# Runs on every branch (not just rust-port) so integration worktrees and feature
+# branches get the same gate as the eventual merge onto rust-port/master.
 on:
   push:
-    branches: [rust-port]
     paths:
       - "Rust-Port/**"
+      - "scripts/check-locale-parity.ps1"
       - ".github/workflows/rust-ci.yml"
   pull_request:
-    branches: [rust-port]
     paths:
       - "Rust-Port/**"
+      - "scripts/check-locale-parity.ps1"
       - ".github/workflows/rust-ci.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -39,3 +42,13 @@ jobs:
         run: cargo test --workspace
       - name: Release build
         run: cargo build --workspace --release
+
+  locale-parity:
+    name: Locale key parity (14 languages)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare C# and Rust catalog key sets
+        shell: pwsh
+        working-directory: .
+        run: ./scripts/check-locale-parity.ps1

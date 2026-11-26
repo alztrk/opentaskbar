@@ -96,3 +96,17 @@ Record the exact OS build and app commit for each run. If a live test cannot be 
 ## Exit criteria and evidence
 
 For each case record: OS build, display topology, DPI, target monitor, taskbar edge, exact steps, expected/actual result, screenshot/video, logs, CPU/memory/handle measurements when applicable, and regression test reference. Do not mark any case passing based on static review alone. Implement P0 fixes before broad UI refactors; split fixes into narrowly scoped PRs.
+
+## Rust port parity controls
+
+The Rust port applies the same three regression classes above through its own deterministic test files under `Rust-Port/crates/opentaskbar-core/tests/`:
+
+| Risk class | Rust source-level check | Live Windows evidence still required |
+|---|---|---|
+| External lifecycle races (Explorer, shell broadcasts, taskbar journal) | `shell_recovery.rs` — journal line parsing, retry backoff, watchdog args, `finally` modifier release, 3-attempt restore verification | Explorer restart recovery, `TaskbarCreated` reconcile, watchdog heartbeat, native flyout repositioning |
+| Layout feedback loops (magnification, gap/height units, reorder hysteresis) | `dock_layout_extra.rs` — critically damped spring, raised-cosine falloff, overlap guard, gap/height resolution, pinned-group ordering | Vertical dock hit-testing, DPI changes, multi-monitor edges, fullscreen overlay filtering |
+| Validation gaps between simulation and Windows | `full_backup.rs`, `wireless_battery_vendors.rs`, `media_timeline.rs`, `audio_mixer.rs`, `ai_usage_logic.rs`, `opentaskbar_core_tests.rs`, `i18n_parity.rs`, `telemetry_parity.rs` | Real HID reports, WinRT radio toggles, CoreAudio session matching, LibreWolf UIA, provider OAuth and quota refreshes |
+
+The same caveat applies: a passing Rust source-level check is **not** live compatibility evidence. Keep the "Windows compatibility evidence" table above for both builds, and record the Rust worktree commit and OS build separately.
+
+Reliability-related flags and their safe defaults are documented in `Rust-Port/README.md`. In particular `enable_live_tray_host=false` and `native_flyout_reposition=false` keep the native shell untouched until a live Windows run has validated the replacement path. Release-level reproducibility is enforced by `checksums.txt`, `release-manifest.json`, `actions/attest` SLSA provenance and the optional VirusTotal step in `.github/workflows/release.yml`, which now covers the Rust artifacts as well as the C# ones.
