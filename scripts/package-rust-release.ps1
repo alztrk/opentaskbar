@@ -109,6 +109,14 @@ if (Test-Path -LiteralPath $checksumsPath -PathType Leaf) {
             $checksums[$Matches[2].Trim()] = $Matches[1].ToLowerInvariant()
         }
     }
+    # Drop rows whose artifact is not in this release directory: a stale
+    # checksums.txt can carry C# rows from an older tag, and publishing them
+    # next to the current assets breaks reproducibility checks.
+    foreach ($name in @($checksums.Keys)) {
+        if (-not (Test-Path -LiteralPath (Join-Path $OutputDir $name) -PathType Leaf)) {
+            $checksums.Remove($name)
+        }
+    }
 }
 foreach ($entry in $newEntries) { $checksums[$entry.name] = $entry.sha256 }
 $checksumLines = @($checksums.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Value) *$($_.Key)" })

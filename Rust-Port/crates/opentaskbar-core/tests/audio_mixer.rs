@@ -1,6 +1,12 @@
-//! C# `AudioMixerChecks` / `MediaVolumeChecks` / `AppAudioSessionMatcher` parity
-//! (pure portion). WS-C owns the CoreAudio wiring, absent from this worktree's
-//! baseline; these standalone tests pin wheel accumulation and session scoring.
+//! C# `AudioMixerChecks` / `MediaVolumeChecks` / `AppAudioSessionMatcher` parity.
+//!
+//! Wheel accumulation and session scoring are kept as reference vectors; the
+//! bridge tests below assert the CoreAudio production surface and the real
+//! `WheelVolumeEnabled` setting round-trip through `DockSettings`.
+
+mod common;
+
+use opentaskbar_core::settings::DockSettings;
 
 /// A full 120-delta wheel notch equals 10% volume; the fractional remainder is
 /// carried across notches instead of being discarded.
@@ -161,4 +167,50 @@ fn app_sessions_aggregate_by_executable_path() {
     assert_eq!(rows[0].0, "C:\\edge.exe");
     assert_eq!(rows[0].1, 50.0);
     assert_eq!(rows[1].1, 60.0);
+}
+
+/// Production bridge: wheel volume is a real persisted setting and the audio
+/// mixer's enumerator/writers are `pub` in the app crate.
+#[test]
+fn production_mixer_surface_and_wheel_setting_match_the_reference() {
+    let mut settings = DockSettings::default();
+    assert!(!settings.wheel_volume_enabled, "wheel volume is opt-in");
+    settings.wheel_volume_enabled = true;
+    let json = serde_json::to_value(&settings).expect("settings serialize");
+    assert_eq!(json["WheelVolumeEnabled"], true);
+    let back: DockSettings = serde_json::from_value(json).expect("settings round-trip");
+    assert!(back.wheel_volume_enabled);
+
+    common::assert_source_has(
+        "crates/opentaskbar-app/src/widgets/media_ext.rs",
+        &["pub fn list_app_sessions() -> Vec<AudioAppSession>"],
+    );
+    common::assert_source_has(
+        "crates/opentaskbar-app/src/widgets/diagnostics.rs",
+        &["pub fn set_app_volume(", "pub fn set_app_mute("],
+    );
+    common::assert_source_has(
+        "crates/opentaskbar-app/src/widgets/media_ext.rs",
+        &["pub fn volume_from_wheel("],
+    );
+    // The reference must not regress to a plain 120-delta notch.
+    let mut remainder = 0.0;
+    assert_eq!(volume_from_wheel(50.0, 120, &mut remainder), 60.0);
+    assert_eq!(volume_from_wheel(60.0, 6, &mut remainder), 61.0);
+    assert_eq!(volume_from_wheel(61.0, 6, &mut remainder), 61.0);
+}
+
+/// Enumerating real sessions needs a live CoreAudio device and the app crate's
+/// private session struct; keep this bridge ignored until the orchestrator
+/// exposes a seam that a core integration test can call.
+#[test]
+#[ignore = "WS-4: CoreAudio session API is private to opentaskbar-app and needs a live device"]
+fn production_app_session_matching_matches_the_reference_scores() {
+    let foreground = session(42, "msedge", "C:\\Program Files\\msedge.exe", 80.0);
+    let other = session(7, "msedge helper", "C:\\other.exe", 80.0);
+    assert!(score_session(&foreground, 42, "msedge") > score_session(&other, 42, "msedge"));
+    common::assert_source_has(
+        "crates/opentaskbar-app/src/widgets/media_ext.rs",
+        &["list_app_sessions"],
+    );
 }

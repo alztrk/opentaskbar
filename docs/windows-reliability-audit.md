@@ -109,4 +109,19 @@ The Rust port applies the same three regression classes above through its own de
 
 The same caveat applies: a passing Rust source-level check is **not** live compatibility evidence. Keep the "Windows compatibility evidence" table above for both builds, and record the Rust worktree commit and OS build separately.
 
-Reliability-related flags and their safe defaults are documented in `Rust-Port/README.md`. In particular `enable_live_tray_host=false` and `native_flyout_reposition=false` keep the native shell untouched until a live Windows run has validated the replacement path. Release-level reproducibility is enforced by `checksums.txt`, `release-manifest.json`, `actions/attest` SLSA provenance and the optional VirusTotal step in `.github/workflows/release.yml`, which now covers the Rust artifacts as well as the C# ones.
+### Rust port live smoke list
+
+Run every row on a real Windows session before signing off a release candidate. Record OS build, Rust worktree commit, display topology, DPI, actual result and logs; **not run** is the only valid initial status.
+
+| # | Smoke case | Steps | Pass condition | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| S1 | Start/flyout anchoring | Open and close Start 10× in quick succession, then Search and Control Center; restart Explorer mid-sequence. | One generation per open; no stale close cancels a newer open; flyout follows the anchor on both monitors. | not run |
+| S2 | Auto-hide and shell overlays | Hover the dock edge, open Task View/Alt-Tab, enter a fullscreen app, switch back. | Dock reveals on pointer entry; overlays never leave the dock hidden or stuck visible. | not run |
+| S3 | Watchdog and clean exit | Kill `OpenTaskBar.exe` with Task Manager, then close it normally. | Watchdog restores the shell once on kill; no restore after a clean exit; one process and one heartbeat event throughout. | not run |
+| S4 | Radio toggles | Toggle Wi-Fi and Bluetooth from Quick Settings with airplane mode on and off. | UI state matches the OS after each click; no UI-thread stall or crash from async completion. | not run |
+| S5 | Multi-monitor and mirrored dock | Move the dock between displays, disconnect/reconnect the secondary display, set a negative virtual-screen origin. | `enumerate_monitors` sees the live topology; no orphan dock, mirrored dock follows `target_display`. | not run |
+| S6 | Night Light and media | Toggle Night Light; play/pause/seek a track and a LibreWolf YouTube tab. | Registry payload decodes to the new state; stale samples are rejected; seek and rate changes stay clamped. | not run |
+| S7 | Full backup | Export, inspect, then import on a temp profile; edit the manifest `Version` to `2` and retry; craft `../` and `.exe` theme entries. | Version 1 round-trips settings/pins/theme; other versions are rejected; traversal/`.exe` entries never leave staging. | not run |
+| S8 | Updater and single instance | Run the portable updater with a Unicode path containing `%`; launch a second dock process. | Script keeps the path intact, has no BOM, and replaces atomically; second instance exits via the named mutex. | not run |
+
+Reliability-related flags and their real defaults are documented in `Rust-Port/README.md`. `enable_live_tray_host=false` keeps the native tray untouched; `native_flyout_reposition=true` is now the default because Start/Search/Control Center repositioning is generation-cancelled and journal-backed — set it to `false` to fall back to journal-read-only/legacy positioning if a live regression appears. Release-level reproducibility is enforced by generated `checksums.txt` (no stale C# rows are tracked in the repository), `release-manifest.json`, `actions/attest` SLSA provenance and the optional VirusTotal step in `.github/workflows/release.yml`, which now covers the Rust artifacts as well as the C# ones.

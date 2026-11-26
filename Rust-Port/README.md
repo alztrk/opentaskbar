@@ -2,7 +2,7 @@
 
 A clean-sheet Rust + GPUI implementation of the OpenTaskbar floating dock and widget shell for Windows 10/11. It targets the same `settings.json` schema, locale catalogs, theme packs and recovery journal as the C# build, so switching between builds never loses user data.
 
-> Status: in active parity work. Features marked **flag** are shipped behind a setting in `DockSettings.extra` and default to the safe value. The C# build remains the reference implementation.
+> Status: in active parity work. Features marked **flag** are controlled by `DockSettings.extra`; each row below states the real default and its fallback. `native_flyout_reposition` is **on by default** now that Start anchoring is verified and journal-backed. The C# build remains the reference implementation.
 
 ## Crates
 
@@ -68,16 +68,26 @@ The C# `IsValid()` rules are mirrored in the Rust validation path: hotkeys must 
 
 ### Feature flags
 
-Riskier integrations default to the safe behaviour and can be enabled from `DockSettings.extra`:
+Every flag is read from `DockSettings.extra` (PascalCase aliases are accepted where noted). Defaults below match the code, not an aspirational safe list:
 
-| Flag | Default | Safe fallback |
+| Flag | Default | Behaviour / fallback |
 | :--- | :--- | :--- |
-| `enable_live_tray_host` | `false` | Registry discovery only; native tray untouched. |
-| `native_flyout_reposition` | `false` | Journal read only; legacy position logic. |
-| `enable_vendor_battery_probes` | `false` | Generic HID capacity reading. |
-| `enable_theme_editor` | `false` | List + import/export only. |
-| `enable_vertical_dock` | `true` | Bottom edge if hit-testing fails. |
-| `enable_ai_oauth` | `true` | "Sign in" state when no token is present. |
+| `enable_live_tray_host` | `false` | Opt-in only: registry discovery and the light strip keep the native tray untouched. |
+| `native_flyout_reposition` | **`true`** | Both shell writers follow one switch (`NativeFlyoutReposition` alias accepted). Verified Start anchoring is generation-cancelled; Search/Control Center join the same worker in the final WS-3 integration. `false` keeps journal restore and legacy positioning. |
+| `enable_vertical_dock` | `true` | Left/right edges are live; `false` degrades every edge to `Bottom`. |
+| `enable_vendor_battery_probes` | `false` (planned WS-4) | Generic HID capacity reading until vendor transports are enabled explicitly. |
+| `enable_theme_editor` | `false` (planned WS-7) | List/import/export only until token editing is enabled explicitly. |
+| `enable_ai_oauth` | `true` (planned WS-5/WS-7) | Cursor/AI sign-in flows; a missing token stays in the "Sign in" state. |
+
+### Live shell APIs
+
+The final integration wires these production entry points; integration test files under `crates/opentaskbar-core/tests/` pin their contracts even where the owning workstream has not landed yet (those cases are `#[ignore]`d with a note):
+
+- Start/flyout: `open_start_via_syscommand(owner_hwnd)` (non-blocking post), `close_start(hwnd)` with an HWND/token guard, `was_open_at_press()`, and `reposition_flyout(FlyoutKind, anchor, hwnd)` (`reposition_start` remains as the Start wrapper). `mark_opened()` only fires from the uncloaked hook, so a generation is counted once.
+- Shell/watchdog: `tracker::enumerate_windows_async(tx)`, `window_rules::has_taskbar_button` (ITaskbarList_Deleted, cloak and extended-style rules), `modifiers::{note_down, note_up, release_all}` with `finally` semantics, and a one-process watchdog with heartbeat/clean-exit verification.
+- Devices: `core_audio::list_app_sessions()` plus writable `set_app_volume/mute`, `radio::set(kind, on) -> bool` (completion-event wait, no `GetResults` on the Set operation, fire-and-forget refresh), and `wireless_battery::read_all_with_settings()`.
+- Media/Night Light: `media_ext::librewolf_timeline(source_app_id, title)`, `confirm_seek(...)` rejecting stale samples, and `telemetry::{read_night_light, toggle_night_light}` with the encoded registry payload.
+- Reliability: `single_instance::SingleInstance::acquire` (named mutex), `DockSettings::validate()` (theme ids, ranges, hotkeys), and `update::write_updater_script` (Unicode-safe, no BOM).
 
 ## Localization
 
@@ -92,9 +102,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-`tests/` ports the deterministic parts of the C# checks: settings key parity, AI usage/JWT/quota logic, `.otbackup` ZIP round-trip, wireless battery vendor parsing, media timeline/seek, shell recovery/journal, dock layout math, audio mixer scoring and locale completeness. Cross-WS platform code is intentionally not referenced; each file notes which workstream owns the live implementation.
+`crates/opentaskbar-core/tests/` ports the deterministic parts of the C# checks: settings key parity, AI usage/JWT/quota logic, `.otbackup` ZIP round-trip, wireless battery vendor parsing, media timeline/seek, shell recovery/journal, dock layout math, audio mixer scoring and locale completeness. Where the production API is a private function in another crate, a bridge test asserts the production source contract instead of duplicating it; cases that need a not-yet-landed cross-WS API are `#[ignore]`d with the owning workstream named in the message. Core-owned behaviour (settings enums/validation, i18n, the single-instance mutex) is tested against the real production functions.
 
-`rust-ci.yml` runs on every branch; `codeql.yml` analyses both C# and Rust; `dependabot.yml` tracks NuGet, Cargo and Actions.
+`rust-ci.yml` runs on every branch and also when C# locale catalogs change; `codeql.yml` scans Rust on every branch/PR and keeps C# on master; `dependabot.yml` tracks NuGet, Cargo and Actions. `scripts/check-locale-parity.ps1` gates 14 × 999 C# keys against 14 × 1129 Rust keys.
 
 ## Privacy
 

@@ -6,11 +6,15 @@ on:
   push:
     paths:
       - "Rust-Port/**"
+      # Locale catalogs are mirrored into Rust by include_str!, so a C#-only
+      # key change must trigger the Rust key-parity gate as well.
+      - "Services/Localization/Languages/**"
       - "scripts/check-locale-parity.ps1"
       - ".github/workflows/rust-ci.yml"
   pull_request:
     paths:
       - "Rust-Port/**"
+      - "Services/Localization/Languages/**"
       - "scripts/check-locale-parity.ps1"
       - ".github/workflows/rust-ci.yml"
   workflow_dispatch:

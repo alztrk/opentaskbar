@@ -12,6 +12,12 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 $langs = @('de-DE','en-US','es-ES','fr-FR','it-IT','ja-JP','ko-KR','nl-NL','pl-PL','pt-BR','ru-RU','tr-TR','uk-UA','zh-CN')
+# 14 C# catalogs x 999 keys are mirrored by 14 Rust catalogs x 1129 keys; the
+# 130 extra Rust keys are the port's feature keys and must stay identical across
+# every language. These numbers are a hard gate, not just a display string.
+$expectedLanguages = 14
+$expectedCsKeys = 999
+$expectedRustKeys = 1129
 $csDir = Join-Path $RepoRoot 'Services\Localization\Languages'
 $rustDir = Join-Path $RepoRoot 'Rust-Port\crates\opentaskbar-core\locales'
 
@@ -48,7 +54,17 @@ $referenceCs = @($csSets['en-US'] | Sort-Object)
 $referenceRust = @($rustSets['en-US'] | Sort-Object)
 $failures = [System.Collections.Generic.List[string]]::new()
 
+if (@($langs).Count -ne $expectedLanguages) {
+    $failures.Add("Expected $expectedLanguages catalogs, found $(@($langs).Count).")
+}
+
 foreach ($lang in $langs) {
+    if (@($csSets[$lang]).Count -ne $expectedCsKeys) {
+        $failures.Add("C# catalog $lang has $(@($csSets[$lang]).Count) keys; expected $expectedCsKeys.")
+    }
+    if (@($rustSets[$lang]).Count -ne $expectedRustKeys) {
+        $failures.Add("Rust catalog $lang has $(@($rustSets[$lang]).Count) keys; expected $expectedRustKeys.")
+    }
     if ((@($csSets[$lang] | Sort-Object) -join "`n") -ne ($referenceCs -join "`n")) {
         $failures.Add("C# key set differs for $lang")
     }
@@ -69,5 +85,5 @@ if ($failures.Count -gt 0) {
 }
 
 if (-not $Quiet) {
-    Write-Host "Locale parity OK: 14 C# catalogs x $(@($referenceCs).Count) keys; 14 Rust catalogs x $(@($referenceRust).Count) keys; $($required.Count) new keys present everywhere." -ForegroundColor Green
+    Write-Host "Locale parity OK: $($langs.Count) C# catalogs x $($referenceCs.Count) keys; $($langs.Count) Rust catalogs x $($referenceRust.Count) keys; $($required.Count) new keys present everywhere." -ForegroundColor Green
 }

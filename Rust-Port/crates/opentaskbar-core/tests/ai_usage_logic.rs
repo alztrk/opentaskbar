@@ -1,9 +1,13 @@
-//! C# `AiUsageChecks` parity (pure portion).
+//! C# `AiUsageChecks` parity.
 //!
-//! WS-G owns the live provider/telemetry code, which is not present in this
-//! worktree's baseline. These tests port the deterministic logic only: JWT
-//! expiry inspection, quota/pace/reset math, severity thresholds and the
-//! Antigravity model-group split used by the 8th AI provider.
+//! The deterministic logic (JWT expiry, quota/pace/reset, severity and the
+//! Antigravity model-group split) is kept as reference vectors. Bridge tests
+//! below compare those vectors against the real provider/group flags and
+//! serde representation in `opentaskbar-core::settings`.
+
+mod common;
+
+use opentaskbar_core::settings::{DockSettings, ai_providers, antigravity_groups};
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
@@ -226,4 +230,50 @@ fn antigravity_group_filter_hides_and_isolates_groups() {
     assert_eq!(visible_groups(&models, "Gemini"), vec!["Gemini"]);
     assert_eq!(visible_groups(&models, "ClaudeGpt"), vec!["Claude / GPT"]);
     assert!(visible_groups(&models, "Hidden").is_empty());
+}
+
+/// Production bridge: the eight provider bits and the Antigravity group bits
+/// are real core constants; the reference grouping must agree with them and
+/// with the C# flag-string serialization.
+#[test]
+fn production_provider_and_group_flags_match_the_reference_grouping() {
+    assert_eq!(ai_providers::ALL, 0b1111_1111);
+    assert_eq!(ai_providers::WIDGETS.len(), 8);
+    assert_eq!(
+        ai_providers::WIDGETS[2],
+        (ai_providers::ANTIGRAVITY, "AiUsageAntigravity")
+    );
+    assert_eq!(antigravity_groups::ALL, 0b0111);
+    assert_eq!(group_for_model("gemini-2.5-pro"), AiGroup::Gemini);
+
+    let settings = DockSettings {
+        ai_usage_providers: ai_providers::CLAUDE | ai_providers::ANTIGRAVITY,
+        antigravity_groups: antigravity_groups::GEMINI | antigravity_groups::ARGON,
+        ..DockSettings::default()
+    };
+    let json = serde_json::to_value(&settings).expect("settings serialize");
+    assert_eq!(json["AiUsageProviders"], "Claude, Antigravity");
+    assert_eq!(json["AntigravityGroups"], "Gemini, Argon");
+    let back: DockSettings = serde_json::from_value(json).expect("settings round-trip");
+    assert_eq!(
+        back.ai_usage_providers,
+        ai_providers::CLAUDE | ai_providers::ANTIGRAVITY
+    );
+    assert_eq!(
+        back.antigravity_groups,
+        antigravity_groups::GEMINI | antigravity_groups::ARGON
+    );
+    assert_eq!(
+        visible_groups(&["gemini-flash", "claude-sonnet-4"], "Gemini"),
+        vec!["Gemini"]
+    );
+
+    common::assert_source_has(
+        "crates/opentaskbar-core/src/settings.rs",
+        &[
+            "AiUsageAntigravity",
+            "antigravity_groups::ALL",
+            "parse_flag_names",
+        ],
+    );
 }

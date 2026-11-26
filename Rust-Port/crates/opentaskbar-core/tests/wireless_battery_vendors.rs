@@ -1,9 +1,13 @@
-//! C# `WirelessBatteryChecks` / `BluetoothBatteryChecks` parity (pure portion).
+//! C# `WirelessBatteryChecks` / `BluetoothBatteryChecks` parity.
 //!
-//! WS-G owns the HID/WinRT transports, which are absent from this worktree's
-//! baseline. Each vendor parser below is a standalone reference implementation
-//! of its report format and is tested with valid AND malformed payloads so the
-//! contract is checkable before the transports land.
+//! Each vendor parser below is a reference implementation of its report format,
+//! tested with valid and malformed payloads. Bridge tests compare the VID
+//! constants and aggregator settings against production sources/core APIs;
+//! live HID transport calls are pinned by an `#[ignore]`d bridge.
+
+mod common;
+
+use opentaskbar_core::settings::DockSettings;
 
 fn percent(value: u8) -> Option<u8> {
     (value <= 100).then_some(value)
@@ -241,4 +245,65 @@ fn aliases_and_ignored_lists_are_case_insensitive() {
     let ignored = ["guid:abc", "*virtual*"];
     assert!(is_ignored("virtual keyboard", &ignored));
     assert!(!is_ignored("real keyboard", &ignored));
+}
+
+/// Production bridge: the vendor VIDs are public constants in the device
+/// worktree's parser module, and the aggregator settings are real core fields.
+#[test]
+fn production_vendor_ids_and_aggregator_settings_match_the_reference() {
+    const VENDORS: &str = "crates/opentaskbar-app/src/platform/wireless_battery.rs";
+    let source = common::source(VENDORS);
+    assert_eq!(common::numeric_const(&source, "ASUS_VID"), Some(0x0B05));
+    assert_eq!(common::numeric_const(&source, "CORSAIR_VID"), Some(0x1B1C));
+    common::assert_source_has(VENDORS, &["0x03F0", "0x0951", "BatterySource::AsusRogHid"]);
+
+    let mut settings = DockSettings::default();
+    assert_eq!(settings.wireless_battery_poll_seconds, 30);
+    settings.wireless_battery_poll_seconds = 45;
+    settings.wireless_battery_low_threshold = 20;
+    settings
+        .wireless_device_aliases
+        .insert("mouse 2.4g".to_owned(), "Desk Mouse".to_owned());
+    settings.ignored_wireless_devices = vec!["*virtual*".to_owned()];
+    assert!(settings.validate().is_empty(), "fixture must be valid");
+    let json = serde_json::to_value(&settings).expect("settings serialize");
+    assert_eq!(json["WirelessBatteryPollSeconds"], 45);
+    assert_eq!(json["WirelessBatteryLowThreshold"], 20);
+    let back: DockSettings = serde_json::from_value(json).expect("settings round-trip");
+    assert_eq!(back.wireless_battery_poll_seconds, 45);
+    assert_eq!(back.wireless_device_aliases["mouse 2.4g"], "Desk Mouse");
+    assert!(is_ignored(
+        "virtual keyboard",
+        &back
+            .ignored_wireless_devices
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+    ));
+
+    common::assert_source_has(
+        "crates/opentaskbar-core/src/settings.rs",
+        &[
+            "wireless_battery_poll_seconds",
+            "WirelessPollOutOfRange",
+            "WirelessDeviceAliasesInvalid",
+        ],
+    );
+}
+
+/// Live HID/WinRT transports belong to WS-4; the reference report vectors are
+/// checked here, but calling the private parser needs an exposed seam.
+#[test]
+#[ignore = "WS-4: HID report parsers are private to opentaskbar-app and need live devices"]
+fn production_hid_parsers_match_the_reference_vectors() {
+    common::assert_source_has(
+        "crates/opentaskbar-app/src/platform/wireless_battery.rs",
+        &["ASUS_VID", "CORSAIR_VID", "hyperx_family"],
+    );
+    let mut report = vec![0u8; 64];
+    report[0] = 0x12;
+    report[12] = 78;
+    assert_eq!(asus_rog(0x0B05, &report), Some(78));
+    assert_eq!(asus_rog(0x1B1C, &report), None);
+    assert_eq!(outlier_filter(&[80, 82, 79, 81, 5]), Some(80));
 }

@@ -1,6 +1,11 @@
-//! C# `MediaTimeline` / `LibreWolfMediaTimeline` / `MediaVolumeChecks` parity
-//! (pure portion). WS-C owns the live player and flyout wiring, which is absent
-//! from this worktree's baseline, so these are standalone reference tests.
+//! C# `MediaTimeline` / `LibreWolfMediaTimeline` / `MediaVolumeChecks` parity.
+//!
+//! The deterministic helpers are kept as reference vectors; bridge tests below
+//! assert that the production implementations in `widgets/media_ext.rs` still
+//! expose the same guards/signatures. `librewolf_timeline` and `confirm_seek`
+//! belong to WS-6 and are pinned by an `#[ignore]`d bridge until they land.
+
+mod common;
 
 /// Parse `m:ss` or `h:mm:ss` (and plain seconds) into seconds.
 fn parse_clock(label: &str) -> Option<u32> {
@@ -123,15 +128,92 @@ fn librewolf_parser_rejects_foreign_sites_and_bad_labels() {
     assert!(librewolf_timeline("music.youtube.com|Song").is_none());
 }
 
+/// Minimal player state: pausing must freeze the clock, a seek commit must
+/// replace the position, and neither operation may leave the clamped range.
+#[derive(Debug, Clone, Copy)]
+struct PlayerState {
+    position: u32,
+    duration: u32,
+    paused: bool,
+}
+
+impl PlayerState {
+    fn new(position: u32, duration: u32) -> Self {
+        Self {
+            position,
+            duration,
+            paused: false,
+        }
+    }
+
+    fn tick(&mut self, seconds: u32) {
+        if !self.paused {
+            self.position = (self.position + seconds).min(self.duration);
+        }
+    }
+
+    fn pause(&mut self) {
+        self.paused = true;
+    }
+
+    fn seek(&mut self, ratio: f32) {
+        self.position = seek_position(ratio, self.duration);
+    }
+}
+
 #[test]
-fn pause_keeps_position_and_seek_updates_it() {
-    let duration = 240;
-    let position = 60;
-    // Pausing does not advance the slider; a seek commit replaces the position.
-    let paused = position;
-    assert_eq!(paused, 60);
-    let seeked = seek_position(progress_ratio(paused, duration), duration);
-    assert_eq!(seeked, 60);
-    let seeked = seek_position(0.75, duration);
-    assert_eq!(seeked, 180);
+fn pause_freezes_the_clock_and_seek_replaces_the_position() {
+    let mut player = PlayerState::new(60, 240);
+    player.tick(5);
+    assert_eq!(player.position, 65);
+
+    player.pause();
+    player.tick(30);
+    assert_eq!(player.position, 65, "paused playback must not advance");
+    player.seek(progress_ratio(player.position, player.duration));
+    assert_eq!(player.position, 65, "seeking to the same ratio is a no-op");
+
+    player.seek(0.75);
+    assert_eq!(player.position, 180);
+    player.seek(2.0);
+    assert_eq!(player.position, 240, "seek stays inside the timeline");
+    player.tick(30);
+    assert_eq!(player.position, 240);
+}
+
+/// Live part of the contract: these helpers are `pub` in the app crate, so a
+/// source-level bridge is enough to detect drift without a circular dependency.
+#[test]
+fn production_media_helpers_keep_the_reference_guards() {
+    const MEDIA_EXT: &str = "crates/opentaskbar-app/src/widgets/media_ext.rs";
+    let source = common::source(MEDIA_EXT);
+    assert!(source.contains("pub fn format_time(secs: u64)"));
+    assert!(source.contains("pub fn seek_ratio(position: u64, duration: u64)"));
+    assert!(source.contains("if duration == 0"));
+    assert!(source.contains("pub fn volume_from_wheel(current_pct: u32, delta: i32"));
+    // Every reference vector above is expressed in seconds/f32; production
+    // uses u64/i32, so the guards (not the types) are the shared contract.
+    assert_eq!(format_clock(3723), "1:02:03");
+    assert_eq!(progress_ratio(200, 100), 1.0);
+}
+
+/// WS-6 owns these two functions. The bridge is deliberately ignored in this
+/// worktree; unignore it once `opentaskbar-core` can dev-depend on the app
+/// crate, or move it next to the implementation there.
+#[test]
+#[ignore = "WS-6: librewolf_timeline/confirm_seek are not landed in this worktree yet"]
+fn production_librewolf_timeline_and_confirm_seek_contract() {
+    common::assert_source_has(
+        "crates/opentaskbar-app/src/widgets/media_ext.rs",
+        &[
+            "pub fn librewolf_timeline(source_app_id: &str, title: &str)",
+            "pub fn confirm_seek(",
+        ],
+    );
+    let dump = "music.youtube.com|Bohemian Rhapsody|1:23 / 4:56|slider";
+    let (title, position, duration) = librewolf_timeline(dump).expect("must parse");
+    assert_eq!(
+        (title.as_str(), position, duration),
+        ("Bohemian Rhapsody", 83, 296)
+    );
 }

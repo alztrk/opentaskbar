@@ -1,10 +1,11 @@
 name: CodeQL
 
+# No branch filter here: the Rust job must scan every branch and PR, including
+# the short-lived integration worktrees. The C# job keeps its master-only scope
+# through its own `if` guard below.
 on:
   push:
-    branches: [master]
   pull_request:
-    branches: [master]
   schedule:
     - cron: '27 4 * * 1'
 
@@ -14,6 +15,12 @@ permissions:
 jobs:
   analyze:
     name: Analyze (C#)
+    # Master-only (plus the weekly schedule) as before; branches and PRs are
+    # covered by the Rust job below.
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
+      (github.event_name == 'pull_request' && github.base_ref == 'master')
     runs-on: windows-latest
     permissions:
       actions: read
@@ -51,6 +58,7 @@ jobs:
 
   analyze-rust:
     name: Analyze (Rust)
+    # Intentionally unguarded: every push, every PR, every branch.
     runs-on: windows-latest
     permissions:
       actions: read
