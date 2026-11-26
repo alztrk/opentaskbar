@@ -430,13 +430,28 @@ pub fn dropdown(
     options: Vec<DropdownOption>,
     on_toggle: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
 ) -> Div {
+    dropdown_labeled(id, theme, open, None, options, on_toggle)
+}
+
+/// Same dropdown, but with an explicit trigger label (used by compact `...` action menus
+/// where the trigger must not show the name of the first action).
+pub fn dropdown_labeled(
+    id: impl Into<SharedString>,
+    theme: &UiTheme,
+    open: bool,
+    trigger_label: Option<SharedString>,
+    options: Vec<DropdownOption>,
+    on_toggle: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> Div {
     let id: SharedString = id.into();
-    let current_label = options
-        .iter()
-        .find(|o| o.selected)
-        .or_else(|| options.first())
-        .map(|o| o.label.clone())
-        .unwrap_or_default();
+    let current_label = trigger_label.unwrap_or_else(|| {
+        options
+            .iter()
+            .find(|o| o.selected)
+            .or_else(|| options.first())
+            .map(|o| o.label.clone())
+            .unwrap_or_default()
+    });
     let current_flag = options
         .iter()
         .find(|o| o.selected)

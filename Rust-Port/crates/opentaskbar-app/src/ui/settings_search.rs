@@ -769,49 +769,42 @@ pub const SETTINGS_ROWS: &[RowDef] = &[
     // Dock — Utilities
     (
         "Dock",
-        "Dock Utilities",
+        "SearchSectionDockUtilities",
         "Background Apps",
         "ShowTrayButton",
         &["tray", "system tray"],
     ),
     (
         "Dock",
-        "Dock Utilities",
+        "SearchSectionDockUtilities",
         "Recycle Bin",
         "ShowRecycleBin",
         &["bin", "trash"],
     ),
     (
         "Dock",
-        "Dock Utilities",
+        "SearchSectionDockUtilities",
         "Show Desktop Strip",
         "ShowDesktopButton",
         &["show desktop"],
     ),
     (
         "Dock",
-        "Dock Utilities",
+        "SearchSectionDockUtilities",
         "Search Button",
         "ShowSearchButton",
         &["search"],
     ),
     (
         "Dock",
-        "Dock Utilities",
+        "SearchSectionDockUtilities",
         "Task View Button",
         "ShowTaskViewButton",
         &["task view"],
     ),
     (
         "Dock",
-        "Dock Utilities",
-        "Folder Stack",
-        "StackFolders",
-        &["folder", "stack", "watcher"],
-    ),
-    (
-        "Dock",
-        "Dock Utilities",
+        "SearchSectionDockUtilities",
         "App Groups",
         "AppGroups",
         &["group"],
@@ -819,56 +812,56 @@ pub const SETTINGS_ROWS: &[RowDef] = &[
     // Themes
     (
         "Themes",
-        "Theme & Surfaces",
+        "SearchSectionThemeSurfaces",
         "Theme",
         "Theme",
         &["dark", "light", "system"],
     ),
     (
         "Themes",
-        "Theme & Surfaces",
+        "SearchSectionThemeSurfaces",
         "Theme Pack",
         "ThemePack",
         &["gallery", "swatch", "bundled"],
     ),
     (
         "Themes",
-        "Theme & Surfaces",
+        "SearchSectionThemeSurfaces",
         "Application Icons",
         "ThemeApplicationIcons",
         &["icon pack"],
     ),
     (
         "Themes",
-        "Theme & Surfaces",
+        "SearchSectionThemeSurfaces",
         "Background",
         "DockBackground",
         &["glass", "solid", "acrylic"],
     ),
     (
         "Themes",
-        "Theme & Surfaces",
+        "SearchSectionThemeSurfaces",
         "Opacity",
         "DockOpacity",
         &["transparency"],
     ),
     (
         "Themes",
-        "Theme & Surfaces",
+        "SearchSectionThemeSurfaces",
         "Corner Radius",
         "DockCornerRadius",
         &["round"],
     ),
     (
         "Themes",
-        "Theme & Surfaces",
+        "SearchSectionThemeSurfaces",
         "Theme Editor",
         "ThemeTokens",
         &["token", "brush", "color", "editor"],
     ),
     (
         "Themes",
-        "Theme & Surfaces",
+        "SearchSectionThemeSurfaces",
         "Theme Brush Picker",
         "ThemeBrushPicker",
         &["hsv", "gradient", "alpha", "hex", "stops", "angle"],
@@ -1004,7 +997,7 @@ pub const SETTINGS_ROWS: &[RowDef] = &[
     (
         "Preferences",
         "Backup",
-        "Settings Backup",
+        "SettingsBackup",
         "SettingsBackup",
         &["json", "export", "import"],
     ),
@@ -1121,26 +1114,9 @@ impl SearchCatalog {
         Self { entries }
     }
 
-    /// Adds user-defined rows (folder stacks, profiles) so searches follow the live config.
+    /// Adds user-defined rows (profiles) so searches follow the live config.
     pub fn from_settings(settings: &DockSettings) -> Self {
         let mut catalog = Self::new();
-        for folder in &settings.stack_folders {
-            catalog.entries.push(SearchEntry {
-                page: "Dock",
-                section: "Dock Utilities",
-                label: format!(
-                    "Folder: {}",
-                    std::path::Path::new(folder)
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                ),
-                field: "StackFolders",
-                keywords: &["folder", "stack", "path"],
-                widget_id: Some("stacks"),
-                has_panel: true,
-            });
-        }
         for profile in &settings.profiles {
             catalog.entries.push(SearchEntry {
                 page: "Dock",
