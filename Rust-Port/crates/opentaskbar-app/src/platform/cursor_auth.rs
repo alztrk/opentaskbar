@@ -9,14 +9,21 @@
 //!
 //! No token is ever written to settings/log/argv.
 
-use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use windows_sys::Win32::Foundation::LocalFree;
+use windows_sys::Win32::Networking::WinHttp::{
+    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_ADDREQ_FLAG_REPLACE,
+    WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
+    WinHttpAddRequestHeaders, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
+    WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
+    WinHttpSendRequest, WinHttpSetTimeouts,
+};
 use windows_sys::Win32::Security::Cryptography::{
-    CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
+    BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom, CRYPT_INTEGER_BLOB,
+    CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
 };
 
 const CLIENT_ID: &str = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
@@ -60,6 +67,160 @@ fn token_path() -> PathBuf {
 /// Test hook: replaces the token file location.
 pub fn set_token_path(path: PathBuf) {
     let _ = FILE_OVERRIDE.set(path);
+}
+
+// ---------------------------------------------------------------------------------------------
+// In-process HTTPS + CSPRNG. Secrets stay in memory; they are never passed to a child process
+// argument list (where any process could observe them via the command line).
+//
+// NOTE (cross-WS): `widgets::telemetry::winhttp_json` is private to that module, so it cannot be
+// called from `platform::cursor_auth` without editing a file owned by another workstream. This is
+// a local, equivalent in-process WinHTTP helper; `telemetry.rs` is left untouched.
+// ---------------------------------------------------------------------------------------------
+
+/// Splits an `https://host/path` URL into `(host, path)`.
+fn split_https_url(url: &str) -> Option<(&str, &str)> {
+    let rest = url.strip_prefix("https://")?;
+    match rest.find('/') {
+        Some(index) => Some((&rest[..index], &rest[index..])),
+        None => Some((rest, "/")),
+    }
+}
+
+/// Minimal synchronous HTTPS request via WinHTTP. `body` is sent as raw bytes in-process.
+fn winhttp_request(
+    method: &str,
+    host: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+) -> Option<(u32, Vec<u8>)> {
+    const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+    let agent: Vec<u16> = "OpenTaskbar\0".encode_utf16().collect();
+    let host_w: Vec<u16> = host.encode_utf16().chain(Some(0)).collect();
+    let verb_w: Vec<u16> = method.encode_utf16().chain(Some(0)).collect();
+    let path_w: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let session = WinHttpOpen(
+            agent.as_ptr(),
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+        );
+        if session.is_null() {
+            return None;
+        }
+        let _ = WinHttpSetTimeouts(session, 3_000, 3_000, 10_000, 15_000);
+        let connect = WinHttpConnect(session, host_w.as_ptr(), 443, 0);
+        if connect.is_null() {
+            WinHttpCloseHandle(session);
+            return None;
+        }
+        let request = WinHttpOpenRequest(
+            connect,
+            verb_w.as_ptr(),
+            path_w.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            WINHTTP_FLAG_SECURE,
+        );
+        if request.is_null() {
+            WinHttpCloseHandle(connect);
+            WinHttpCloseHandle(session);
+            return None;
+        }
+        let mut header_text = String::new();
+        for (key, value) in headers {
+            header_text.push_str(key);
+            header_text.push_str(": ");
+            header_text.push_str(value);
+            header_text.push_str("\r\n");
+        }
+        if !header_text.is_empty() {
+            let header_wide: Vec<u16> = header_text.encode_utf16().collect();
+            let _ = WinHttpAddRequestHeaders(
+                request,
+                header_wide.as_ptr(),
+                header_wide.len() as u32,
+                WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE,
+            );
+        }
+        let body_ptr: *const std::ffi::c_void =
+            body.map_or(std::ptr::null(), |bytes| bytes.as_ptr().cast());
+        let body_len = body.map_or(0, |bytes| bytes.len()) as u32;
+        let sent = WinHttpSendRequest(
+            request,
+            std::ptr::null(),
+            0,
+            body_ptr,
+            body_len,
+            body_len,
+            0,
+        ) != 0
+            && WinHttpReceiveResponse(request, std::ptr::null_mut()) != 0;
+        let result = if sent {
+            let mut status = 0u32;
+            let mut status_size = std::mem::size_of::<u32>() as u32;
+            let _ = WinHttpQueryHeaders(
+                request,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                std::ptr::null(),
+                (&mut status as *mut u32).cast(),
+                &mut status_size,
+                std::ptr::null_mut(),
+            );
+            let mut response = Vec::new();
+            loop {
+                let mut available = 0u32;
+                if WinHttpQueryDataAvailable(request, &mut available) == 0 || available == 0 {
+                    break;
+                }
+                if response.len() + available as usize > MAX_RESPONSE_BYTES {
+                    break;
+                }
+                let start = response.len();
+                response.resize(start + available as usize, 0);
+                let mut read = 0u32;
+                if WinHttpReadData(
+                    request,
+                    response[start..].as_mut_ptr().cast(),
+                    available,
+                    &mut read,
+                ) == 0
+                    || read == 0
+                {
+                    response.truncate(start);
+                    break;
+                }
+                response.truncate(start + read as usize);
+            }
+            Some((status, response))
+        } else {
+            None
+        };
+        WinHttpCloseHandle(request);
+        WinHttpCloseHandle(connect);
+        WinHttpCloseHandle(session);
+        result
+    }
+}
+
+/// Cryptographically secure random bytes from the system CSPRNG (BCryptGenRandom).
+fn random_bytes<const N: usize>() -> Option<[u8; N]> {
+    let mut bytes = [0u8; N];
+    // SAFETY: a null algorithm handle is valid with BCRYPT_USE_SYSTEM_PREFERRED_RNG; `bytes` is
+    // writable for exactly `N` bytes and `N` is passed as the buffer length.
+    let status = unsafe {
+        BCryptGenRandom(
+            std::ptr::null_mut(),
+            bytes.as_mut_ptr(),
+            bytes.len() as u32,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    };
+    (status == 0).then_some(bytes)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -288,23 +449,13 @@ fn unprotect(encrypted: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Pure JSON payload builder used by `save_tokens` (also used in tests).
+///
+/// Uses `serde_json` so backslashes, quotes, CR/LF, tabs and every control character are escaped
+/// correctly; the result always round-trips through [`parse_token_payload`].
 pub fn token_json(access: &str, refresh: Option<&str>) -> String {
-    let mut access_escaped = String::new();
-    for c in access.chars() {
-        match c {
-            '"' => access_escaped.push_str("\\\""),
-            '\\' => access_escaped.push_str("\\\\"),
-            '\n' => access_escaped.push_str("\\n"),
-            _ => access_escaped.push(c),
-        }
-    }
     match refresh.filter(|r| !r.trim().is_empty()) {
-        Some(r) => format!(
-            "{{\"accessToken\":\"{}\",\"refreshToken\":\"{}\"}}",
-            access_escaped,
-            r.replace('"', "\\\"")
-        ),
-        None => format!("{{\"accessToken\":\"{access_escaped}\"}}"),
+        Some(r) => serde_json::json!({ "accessToken": access, "refreshToken": r }).to_string(),
+        None => serde_json::json!({ "accessToken": access }).to_string(),
     }
 }
 
@@ -428,27 +579,42 @@ pub fn is_expiring_soon(jwt: &str) -> bool {
 /// Starts a browser PKCE login. Pass the returned `login_url` to the OS browser, then call
 /// `sign_in_finish(&start)` on a background thread.
 pub fn sign_in_start() -> SignInStart {
-    let mut seed = [0u8; 32];
-    // No RNG crate dependency: mix process id, nanoseconds and address entropy.
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let seed_addr = seed.as_ptr() as usize;
-    for (i, byte) in seed.iter_mut().enumerate() {
-        *byte = ((now >> (i % 8 * 8)) as u8)
-            ^ (std::process::id() as u8).wrapping_mul(i as u8 + 1)
-            ^ (seed_addr >> (i % 8 * 8)) as u8;
-    }
-    let verifier = base64url(&seed);
+    // 32 bytes for the PKCE verifier + 16 bytes for a version-4 UUID, all from the CSPRNG.
+    // Never fall back to time/PID/stack entropy: that would be predictable.
+    let Some(seed) = random_bytes::<48>() else {
+        // Fail closed: no usable verifier and no stale pending login that a later
+        // `sign_in_finish()` could complete. Do not publish a broken URL.
+        if let Ok(mut pending) = PENDING_LOGIN.lock() {
+            *pending = None;
+        }
+        return SignInStart {
+            verifier: String::new(),
+            challenge: String::new(),
+            uuid: String::new(),
+            login_url: String::new(),
+        };
+    };
+    let verifier = base64url(&seed[..32]);
     let challenge = pkce_challenge(&verifier);
+    let b = &seed[32..];
     let uuid = format!(
-        "{:08x}-{:04x}-4{:03x}-a{:03x}-{:012x}",
-        now as u32,
-        (now >> 32) as u16,
-        std::process::id(),
-        (now >> 16) as u16,
-        now
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0],
+        b[1],
+        b[2],
+        b[3],
+        b[4],
+        b[5],
+        b[6] & 0x0f,
+        b[7],
+        (b[8] & 0x3f) | 0x80,
+        b[9],
+        b[10],
+        b[11],
+        b[12],
+        b[13],
+        b[14],
+        b[15]
     );
     let login_url =
         format!("https://cursor.com/loginDeepControl?challenge={challenge}&uuid={uuid}&mode=login");
@@ -482,30 +648,25 @@ pub fn sign_in_finish() -> bool {
 /// Polls the browser login every 2 s for up to 3 minutes. Returns `true` when tokens were saved.
 pub fn sign_in_finish_with(start: &SignInStart) -> bool {
     let url = poll_url(&start.uuid, &start.verifier);
+    let Some((host, path)) = split_https_url(&url) else {
+        return false;
+    };
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
     while std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_secs(2));
         if SIGNING_OUT.load(Ordering::Acquire) {
             return false;
         }
-        let output = std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                &format!(
-                    "$r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 -Headers @{{'User-Agent'='OpenTaskbar'}} '{url}'; $r.Content"
-                ),
-            ])
-            .creation_flags(0x0800_0000)
-            .output();
-        let Ok(out) = output else {
+        // The verifier travels in-process as a WinHTTP request path, never in an argv.
+        let Some((status, body)) =
+            winhttp_request("GET", host, path, &[("User-Agent", "OpenTaskbar")], None)
+        else {
             continue;
         };
-        if !out.status.success() {
+        if !(200..300).contains(&status) {
             continue;
         }
-        let text = String::from_utf8_lossy(&out.stdout);
+        let text = String::from_utf8_lossy(&body);
         let (access, refresh) = parse_token_payload(&text);
         if let Some(access) = access {
             let _ = save_tokens(&access, refresh.as_deref());
@@ -572,30 +733,37 @@ pub fn refresh(refresh_token: &str) -> RefreshResult {
             session_expired: false,
         };
     }
-    let payload = format!(
-        "{{\"grant_type\":\"refresh_token\",\"client_id\":\"{CLIENT_ID}\",\"refresh_token\":\"{}\"}}",
-        refresh_token.replace('"', "\\\"")
-    );
-    let ps = format!(
-        "$body='{payload}'; $r=Invoke-WebRequest -UseBasicParsing -TimeoutSec 15 -Method Post -ContentType 'application/json' -Headers @{{'User-Agent'='OpenTaskbar'}} -Body $body '{API_BASE}/oauth/token'; $r.Content"
-    );
-    let out = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
-        .creation_flags(0x0800_0000)
-        .output();
-    let Ok(out) = out else {
-        return RefreshResult {
-            refresh_token: Some(refresh_token.to_owned()),
-            ..Default::default()
-        };
+    let payload = serde_json::json!({
+        "grant_type": "refresh_token",
+        "client_id": CLIENT_ID,
+        "refresh_token": refresh_token,
+    })
+    .to_string();
+    let keep_old = || RefreshResult {
+        refresh_token: Some(refresh_token.to_owned()),
+        ..Default::default()
     };
-    if !out.status.success() {
-        return RefreshResult {
-            refresh_token: Some(refresh_token.to_owned()),
-            ..Default::default()
-        };
+    let token_url = format!("{API_BASE}/oauth/token");
+    let Some((host, path)) = split_https_url(&token_url) else {
+        return keep_old();
+    };
+    // The refresh token is a raw UTF-8 body buffer passed in-process; it never appears in an argv.
+    let Some((status, body)) = winhttp_request(
+        "POST",
+        host,
+        path,
+        &[
+            ("User-Agent", "OpenTaskbar"),
+            ("Content-Type", "application/json"),
+        ],
+        Some(payload.as_bytes()),
+    ) else {
+        return keep_old();
+    };
+    if !(200..300).contains(&status) {
+        return keep_old();
     }
-    let result = parse_refresh_response(&String::from_utf8_lossy(&out.stdout), refresh_token);
+    let result = parse_refresh_response(&String::from_utf8_lossy(&body), refresh_token);
     if result.session_expired {
         sign_out();
     } else if let (Some(a), Some(r)) = (&result.access_token, &result.refresh_token) {
@@ -675,5 +843,79 @@ mod tests {
         let jwt = format!("hdr.{} .sig", base64url(br#"{"exp":1000000000}"#)).replace(" .", ".");
         assert!(is_expiring_soon(&jwt));
         assert!(!is_expiring_soon("not-a-jwt"));
+    }
+
+    #[test]
+    fn secrets_never_reach_child_process_arguments() {
+        // Source-level assertion: the production half of this file must not construct a child
+        // process at all, so a verifier/refresh token cannot appear in an argv.
+        let src = include_str!("cursor_auth.rs");
+        let production = src.split("#[cfg(test)]").next().unwrap_or(src);
+        for forbidden in [
+            "Command::new",
+            "creation_flags",
+            "-Command",
+            "Invoke-WebRequest",
+            "powershell",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "production code must not contain {forbidden:?}"
+            );
+        }
+        assert!(production.contains("WinHttpSendRequest"));
+    }
+
+    #[test]
+    fn pkce_verifier_is_32_csprng_bytes_base64url() {
+        let first = sign_in_start();
+        let second = sign_in_start();
+        // 32 bytes -> 43 unpadded base64url characters.
+        assert_eq!(first.verifier.len(), 43);
+        assert!(
+            first
+                .verifier
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        );
+        assert_ne!(first.verifier, second.verifier);
+        assert_ne!(first.uuid, second.uuid);
+        assert_eq!(first.uuid.len(), 36);
+        assert!(first.uuid.contains("-4"));
+        assert_eq!(first.challenge, pkce_challenge(&first.verifier));
+        // The CSPRNG itself yields distinct, non-degenerate buffers.
+        let a = random_bytes::<32>().unwrap();
+        let b = random_bytes::<32>().unwrap();
+        assert_ne!(a, b);
+        assert!(a.iter().any(|byte| *byte != 0));
+    }
+
+    #[test]
+    fn token_json_roundtrips_control_characters() {
+        let access = "acc\\one\r\ntwo\tthree\u{0001}\"quoted\"";
+        let refresh = "ref\\x\r\ny\u{0002}\"q\"";
+        let json = token_json(access, Some(refresh));
+        assert!(json.contains("\\\\"));
+        assert!(json.contains("\\r"));
+        assert!(json.contains("\\n"));
+        assert!(json.contains("\\t"));
+        let (a, r) = parse_token_payload(&json);
+        assert_eq!(a.as_deref(), Some(access));
+        assert_eq!(r.as_deref(), Some(refresh));
+        let json = token_json(access, Some("   "));
+        assert!(!json.contains("refreshToken"));
+        let (a, r) = parse_token_payload(&json);
+        assert_eq!(a.as_deref(), Some(access));
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn https_url_split_keeps_query_and_host() {
+        let url = poll_url("uuid-1", "verifier-X");
+        let (host, path) = split_https_url(&url).unwrap();
+        assert_eq!(host, "api2.cursor.sh");
+        assert_eq!(path, "/auth/poll?uuid=uuid-1&verifier=verifier-X");
+        assert_eq!(split_https_url("https://api2.cursor.sh").unwrap().1, "/");
+        assert!(split_https_url("http://api2.cursor.sh/x").is_none());
     }
 }
