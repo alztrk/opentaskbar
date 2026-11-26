@@ -106,22 +106,12 @@ enum HostKind {
     ShellExperience,
 }
 
+#[derive(Default)]
 struct Inner {
     is_open: bool,
     closed_at: Option<Instant>,
     pressed_at: Option<Instant>,
     start_window: usize,
-}
-
-impl Default for Inner {
-    fn default() -> Self {
-        Self {
-            is_open: false,
-            closed_at: None,
-            pressed_at: None,
-            start_window: 0,
-        }
-    }
 }
 
 static STATE: Mutex<Inner> = Mutex::new(Inner {

@@ -4325,9 +4325,11 @@ impl DockState {
             // the dismissal grace, not a foreground-only change.
             start_menu_state::reset();
             restore_app_foreground(self.start_restore_hwnd, hwnd);
-        } else if !opentaskbar_shell::flyout_reposition::open_start_via_syscommand(self.hwnd) {
-            // Fallback for shell versions that reject SC_TASKLIST from a tool window.
-            opentaskbar_shell::taskbar::open_start_menu();
+        } else {
+            // `open_start_via_syscommand` already verifies the open and falls
+            // back to VK_LWIN internally — a second chord here would toggle it
+            // straight back closed.
+            let _ = opentaskbar_shell::flyout_reposition::open_start_via_syscommand(self.hwnd);
         }
         self.pressed_shell_start_was_open = false;
     }

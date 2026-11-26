@@ -7,6 +7,7 @@
 
 use crate::design::{self, fonts, gdi_rgb};
 use opentaskbar_shell::tracker;
+use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION, DWM_TNP_VISIBLE,
@@ -20,7 +21,6 @@ use windows_sys::Win32::Graphics::Gdi::{
     DrawTextW, EndPaint, FillRect, InvalidateRect, LineTo, MoveToEx, PAINTSTRUCT, PS_SOLID,
     RoundRect, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
-use std::sync::OnceLock;
 
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
