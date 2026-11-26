@@ -1,10 +1,12 @@
 //! Win32 running-window enumeration with DWM cloaked filtering and activation helpers.
 
+use std::sync::mpsc;
+
 use windows::Win32::Foundation::HWND as WinHwnd;
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
 use windows::Win32::UI::Shell::IVirtualDesktopManager;
 use windows::core::GUID;
-use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
@@ -17,6 +19,24 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_CLOSE, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 use windows_sys::core::BOOL;
+
+// `GetApplicationUserModelId` lives in `Win32_Storage_Packaging_Appx`, whose
+// windows-sys feature is owned by the orchestrator's workspace Cargo.toml.
+// Declaring the kernel32 entry point here keeps this module self-contained and
+// avoids a cross-worktree Cargo edit.
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
+const MAX_AUMID_UTF16_UNITS: u32 = 4096;
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    /// With a null/short buffer this returns ERROR_INSUFFICIENT_BUFFER and
+    /// writes the required UTF-16 length (including the terminator).
+    fn GetApplicationUserModelId(
+        hprocess: HANDLE,
+        applicationusermodelidlength: *mut u32,
+        applicationusermodelid: *mut u16,
+    ) -> u32;
+}
 
 thread_local! {
     /// `IVirtualDesktopManager` is apartment-bound, so it is cached per dock UI thread.
@@ -50,10 +70,15 @@ pub struct RunningWindow {
     pub pid: u32,
     pub title: String,
     pub exe_path: String,
+    /// Packaged-app AppUserModelID, empty for classic Win32 processes. Mirrors
+    /// the C# `TrackedWindow.AppUserModelId` used for AUMID-aware pin matching.
+    pub aumid: String,
     pub is_foreground: bool,
 }
 
-fn is_cloaked(hwnd: HWND) -> bool {
+/// Raw `DWMWA_CLOAKED` value (0 when the query failed). Kept separate from the
+/// boolean helper so the `CLOAKED_SHELL` virtual-desktop exception survives.
+fn cloak_state(hwnd: HWND) -> u32 {
     let mut cloaked: u32 = 0;
     // SAFETY: querying DWMWA_CLOAKED into a local u32.
     let hr = unsafe {
@@ -64,7 +89,11 @@ fn is_cloaked(hwnd: HWND) -> bool {
             size_of::<u32>() as u32,
         )
     };
-    hr == 0 && cloaked != 0
+    if hr == 0 { cloaked } else { 0 }
+}
+
+fn is_cloaked(hwnd: HWND) -> bool {
+    cloak_state(hwnd) != 0
 }
 
 fn has_app_window_style(hwnd: HWND) -> bool {
@@ -79,7 +108,40 @@ fn has_app_window_style(hwnd: HWND) -> bool {
         && ((style & WS_EX_TOOLWINDOW == 0 && owner.is_null()) || style & WS_EX_APPWINDOW != 0)
 }
 
-fn process_image_path(pid: u32) -> Option<String> {
+/// AppUserModelID of a packaged process via `GetApplicationUserModelId`.
+/// Classic Win32 processes (and handles we cannot query) return an empty
+/// string, matching the C# `GetProcessPackagedAppId` fallback behaviour.
+fn process_aumid(handle: HANDLE) -> String {
+    // SAFETY: null buffer with a length out-parameter is the documented
+    // "query required size" call; it writes length and returns
+    // ERROR_INSUFFICIENT_BUFFER.
+    let mut length = 0u32;
+    let status = unsafe { GetApplicationUserModelId(handle, &mut length, std::ptr::null_mut()) };
+    if status != ERROR_INSUFFICIENT_BUFFER || length == 0 || length > MAX_AUMID_UTF16_UNITS {
+        return String::new();
+    }
+    let mut buffer = vec![0u16; length as usize];
+    // SAFETY: writable buffer of exactly the reported length, owned for the call.
+    let status = unsafe { GetApplicationUserModelId(handle, &mut length, buffer.as_mut_ptr()) };
+    if status != 0 || length == 0 {
+        return String::new();
+    }
+    let end = (length as usize).min(buffer.len());
+    let mut chars = &buffer[..end];
+    while chars.last() == Some(&0) {
+        chars = &chars[..chars.len() - 1];
+    }
+    String::from_utf16_lossy(chars)
+}
+
+struct ProcessInfo {
+    exe_path: String,
+    aumid: String,
+}
+
+/// Opens one limited-query handle and reads both the image path and the
+/// packaged AUMID, so enumeration pays for only one `OpenProcess` per window.
+fn process_info(pid: u32) -> Option<ProcessInfo> {
     // SAFETY: limited query handle closed before returning.
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
@@ -89,9 +151,17 @@ fn process_image_path(pid: u32) -> Option<String> {
         let mut buf = [0u16; 1024];
         let mut len = buf.len() as u32;
         let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
+        let aumid = process_aumid(handle);
         CloseHandle(handle);
-        (ok != 0 && len > 0).then(|| String::from_utf16_lossy(&buf[..len as usize]))
+        (ok != 0 && len > 0).then(|| ProcessInfo {
+            exe_path: String::from_utf16_lossy(&buf[..len as usize]),
+            aumid,
+        })
     }
+}
+
+fn process_image_path(pid: u32) -> Option<String> {
+    process_info(pid).map(|info| info.exe_path)
 }
 
 fn window_title(hwnd: HWND) -> String {
@@ -130,10 +200,13 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     // SAFETY: `lparam` points to `EnumCtx` alive for the duration of `EnumWindows`.
     unsafe {
         let ctx = &mut *(lparam as *mut EnumCtx);
-        if IsWindowVisible(hwnd) == 0 || is_cloaked(hwnd) {
+        if IsWindowVisible(hwnd) == 0 {
             return 1;
         }
-        if !has_app_window_style(hwnd) {
+        // One authoritative shell-eligibility check: WS_EX owner/tool/noactivate
+        // rules, ITaskbarList_Deleted, hidden DWM cloak (with the shell-cloak
+        // exception) and hidden immersive frames.
+        if !crate::window_rules::has_taskbar_button_for_hwnd(hwnd as usize, cloak_state(hwnd)) {
             return 1;
         }
         let title = window_title(hwnd);
@@ -145,17 +218,18 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
         if pid == 0 || pid == ctx.self_pid {
             return 1;
         }
-        let Some(exe_path) = process_image_path(pid) else {
+        let Some(info) = process_info(pid) else {
             return 1;
         };
-        if is_shell_noise(&exe_path) {
+        if is_shell_noise(&info.exe_path) {
             return 1;
         }
         ctx.out.push(RunningWindow {
             hwnd: hwnd as usize,
             pid,
             title,
-            exe_path,
+            exe_path: info.exe_path,
+            aumid: info.aumid,
             is_foreground: hwnd == ctx.foreground,
         });
         1
@@ -174,6 +248,23 @@ pub fn enumerate_windows() -> Vec<RunningWindow> {
         EnumWindows(Some(enum_proc), (&mut ctx as *mut EnumCtx) as LPARAM);
     }
     ctx.out
+}
+
+/// Non-blocking snapshot: runs the synchronous enumeration on a worker thread
+/// and delivers the result through `tx`. Callers (e.g. the dock's 800 ms
+/// refresh) must never block the UI thread on `OpenProcess`/DWM/COM calls.
+/// The synchronous [`enumerate_windows`] API is kept for callers that already
+/// run off the UI thread.
+pub fn enumerate_windows_async(tx: mpsc::Sender<Vec<RunningWindow>>) {
+    let result = std::thread::Builder::new()
+        .name("opentaskbar-window-enum".into())
+        .spawn(move || {
+            let windows = enumerate_windows();
+            let _ = tx.send(windows);
+        });
+    if let Err(err) = result {
+        opentaskbar_core::log::warn(format!("Window enumeration worker failed: {err}"));
+    }
 }
 
 /// Finds a visible or hidden application window for an already verified process.
@@ -436,5 +527,49 @@ mod tests {
 
         let app = HiddenWindow::new(0, w!("Application window"));
         assert_eq!(find_app_window(pid), Some(app.0 as usize));
+    }
+
+    #[test]
+    fn running_window_carries_the_packaged_aumid() {
+        let window = RunningWindow {
+            hwnd: 42,
+            pid: 7,
+            title: "WhatsApp".into(),
+            exe_path: r"C:\WhatsApp.Root.exe".into(),
+            aumid: "5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App".into(),
+            is_foreground: false,
+        };
+        let cloned = window.clone();
+        assert_eq!(cloned.aumid, "5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App");
+        assert_eq!(cloned.exe_path, r"C:\WhatsApp.Root.exe");
+        assert_eq!(cloned.hwnd, 42);
+
+        let classic = RunningWindow {
+            aumid: String::new(),
+            ..window
+        };
+        assert!(classic.aumid.is_empty());
+    }
+
+    #[test]
+    fn process_info_rejects_an_invalid_pid_and_aumid_rejects_a_null_handle() {
+        assert!(process_info(u32::MAX).is_none());
+        assert!(process_image_path(u32::MAX).is_none());
+        // A null process handle is never a packaged app.
+        assert!(process_aumid(std::ptr::null_mut()).is_empty());
+    }
+
+    #[test]
+    fn async_snapshot_delivers_a_vector_without_blocking() {
+        let (tx, rx) = mpsc::channel();
+        enumerate_windows_async(tx);
+        let snapshot = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("worker must deliver a snapshot");
+        // In a headless CI run there may be no eligible windows; the contract
+        // is that the worker sends a well-formed (possibly empty) snapshot.
+        assert!(snapshot
+            .iter()
+            .all(|window| !window.exe_path.is_empty() && window.hwnd != 0));
     }
 }

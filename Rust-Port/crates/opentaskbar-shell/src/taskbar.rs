@@ -16,7 +16,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetWindowPos, ShowWindow, WM_APP,
 };
 
-use crate::{appbar, flyout_writer, journal, native_tray, session, watchdog};
+use crate::{appbar, flyout_writer, journal, modifiers, native_tray, session, watchdog};
 
 const APPBAR_CALLBACK_MSG: u32 = WM_APP + 0x52;
 
@@ -278,20 +278,51 @@ fn send_key(vk: u16, up: bool) -> bool {
 /// Sends the keys with a ~20 ms down/up separation: a single batched
 /// `SendInput` of all events makes Explorer treat Win-key chords as a single
 /// synthetic press instead of a shell shortcut.
+///
+/// Every successful keydown/keyup is recorded in [`modifiers`]. If any
+/// `SendInput` fails (partial keydown or keyup), the finally path drains the
+/// tracker and injects key-ups for the still-held keys, so a stuck modifier
+/// can never survive a failed chord.
 pub(crate) fn send_chord(keys: &[u16]) -> bool {
     if keys.is_empty() {
         return false;
     }
     let mut ok = true;
+
     for &vk in keys {
-        ok &= send_key(vk, false);
+        if !send_key(vk, false) {
+            ok = false;
+            break;
+        }
+        modifiers::note_down(vk);
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+
+    // Reverse key-ups, always attempted even if a keydown or keyup failed.
     for &vk in keys.iter().rev() {
-        ok &= send_key(vk, true);
+        if send_key(vk, true) {
+            modifiers::note_up(vk);
+        } else {
+            ok = false;
+        }
         std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    if !ok {
+        release_held_keys();
     }
     ok
+}
+
+/// Releases every key still tracked as held by an injected chord and clears
+/// the tracker. Wire this to the session-unlock handler (alongside
+/// `session::install_shell_hooks`) so a lock that swallowed key-ups cannot
+/// leave Win/Ctrl/Alt stuck down. Safe to call repeatedly: a second call with
+/// nothing held is a no-op.
+pub fn release_held_keys() {
+    for vk in modifiers::release_all() {
+        let _ = send_key(vk, true);
+    }
 }
 
 /// Preferred Start entry point: `SC_TASKLIST` posted to the dock (owner) HWND.
@@ -408,6 +439,11 @@ pub fn open_tray_overflow() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_chord_is_rejected_without_injecting_keys() {
+        assert!(!send_chord(&[]));
+    }
 
     #[test]
     fn win_key_is_marked_extended() {
