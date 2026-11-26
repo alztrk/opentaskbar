@@ -159,13 +159,6 @@ static WIN_KEY_REVEAL_GATE: AtomicBool = AtomicBool::new(true);
 /// (or a cloak + pointer-up race) from opening and immediately closing Start.
 const START_TOGGLE_DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// Applies the real DWM/acrylic backdrop to a dock or island HWND. The
-/// composition policy lives in `design::glass`; the DirectComposition
-/// transparency owned by this module is left untouched.
-pub fn apply_dock_backdrop(hwnd: usize, is_dark: bool) -> bool {
-    crate::design::glass::apply_window_backdrop(hwnd, is_dark)
-}
-
 fn anchor_is_valid(anchor: (i32, i32, i32, i32)) -> bool {
     anchor.2 > anchor.0 && anchor.3 > anchor.1
 }
@@ -2404,7 +2397,6 @@ impl DockState {
             updated_fps,
         );
         self.is_dark = resolve_is_dark(self.settings.theme);
-        apply_dock_backdrop(self.hwnd, self.is_dark);
         if let Some(ref mut island) = self.dynamic_island {
             island.apply(&self.settings, &self.all_monitors, self.is_dark);
         }
@@ -6673,7 +6665,6 @@ pub fn run(settings: DockSettings) {
         }
         let hwnd_val = hwnd as usize;
         win32::configure_native_dock_hwnd(hwnd_val);
-        apply_dock_backdrop(hwnd_val, resolve_is_dark(settings.theme));
         unsafe {
             DragAcceptFiles(hwnd, 1);
             let _ = WTSRegisterSessionNotification(hwnd, 0);

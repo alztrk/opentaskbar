@@ -405,7 +405,6 @@ impl DynamicIslandWindow {
         }
         let hwnd_val = hwnd as usize;
         win32::configure_native_dock_hwnd(hwnd_val);
-        super::apply_dock_backdrop(hwnd_val, is_dark);
 
         let dcomp = match DcompEngine::new(hwnd_val) {
             Ok(engine) => engine,
@@ -513,9 +512,6 @@ impl DynamicIslandWindow {
     fn apply_internal(&mut self, widget_ids: Vec<String>, settings: &DockSettings, is_dark: bool) {
         self.settings = settings.clone();
         self.is_dark = is_dark;
-        // Daily/theme changes are delivered through Apply; keep the DWM material in
-        // sync instead of leaving a stale dark/light backdrop on the island HWND.
-        super::apply_dock_backdrop(self.hwnd, self.is_dark);
 
         let display_order = settings
             .dynamic_island_widget_orders
