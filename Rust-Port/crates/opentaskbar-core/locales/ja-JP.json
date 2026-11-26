@@ -409,6 +409,7 @@
   "PlacementStart": "先頭",
   "PlacementEnd": "末尾",
   "PlacementHidden": "非表示",
+  "PlacementInWidgets": "ウィジェット内",
   "WheelVolume": "ホイールで音量を変更",
   "WheelVolumeDescription": "ドック上のマウス ホイールで音量を変更します。アイコン上ではそのアプリのウィンドウを切り替えます。",
   "CheckUpdatesSetting": "更新プログラムを自動的に確認",
@@ -1334,5 +1335,7 @@
   "WirelessBatteryRestoreIgnored": "復元されたデバイスは無視されました",
   "WirelessBatteryStale": "バッテリー情報が古くなっています",
   "WirelessBatterySubtitle": "Bluetooth デバイス",
-  "WirelessBatteryThresholdButton": "低下しきい値"
+  "WirelessBatteryThresholdButton": "低下しきい値",
+  "GpuEngine": "GPU エンジン",
+  "OpenLocation": "場所を開く"
 }

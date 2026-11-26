@@ -409,6 +409,7 @@
   "PlacementStart": "First",
   "PlacementEnd": "Last",
   "PlacementHidden": "Hidden",
+  "PlacementInWidgets": "In Widgets",
   "WheelVolume": "Wheel changes volume",
   "WheelVolumeDescription": "The mouse wheel over the dock changes the volume; over an icon it cycles that app’s windows.",
   "CheckUpdatesSetting": "Check for updates automatically",
@@ -1334,5 +1335,7 @@
   "WirelessBatteryRestoreIgnored": "Restored devices were ignored",
   "WirelessBatteryStale": "Battery data is out of date",
   "WirelessBatterySubtitle": "Bluetooth devices",
-  "WirelessBatteryThresholdButton": "Low threshold"
+  "WirelessBatteryThresholdButton": "Low threshold",
+  "GpuEngine": "GPU Engine",
+  "OpenLocation": "Open location"
 }

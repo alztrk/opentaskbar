@@ -409,6 +409,7 @@
   "PlacementStart": "位于首端",
   "PlacementEnd": "位于尾端",
   "PlacementHidden": "隐藏",
+  "PlacementInWidgets": "在小组件中",
   "WheelVolume": "滚轮调节音量",
   "WheelVolumeDescription": "在程序坞上滚动鼠标滚轮可调节音量；在图标上滚动可切换该应用的窗口。",
   "CheckUpdatesSetting": "自动检查可用版本更新",
@@ -1334,5 +1335,7 @@
   "WirelessBatteryRestoreIgnored": "已忽略恢复的设备",
   "WirelessBatteryStale": "电池数据已过期",
   "WirelessBatterySubtitle": "蓝牙设备",
-  "WirelessBatteryThresholdButton": "低阈值"
+  "WirelessBatteryThresholdButton": "低阈值",
+  "GpuEngine": "GPU 引擎",
+  "OpenLocation": "打开位置"
 }

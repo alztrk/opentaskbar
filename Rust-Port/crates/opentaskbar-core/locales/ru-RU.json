@@ -409,6 +409,7 @@
   "PlacementStart": "В начале",
   "PlacementEnd": "В конце",
   "PlacementHidden": "Скрыта",
+  "PlacementInWidgets": "В виджетах",
   "WheelVolume": "Управление громкостью колесиком мыши",
   "WheelVolumeDescription": "Колёсико над панелью dock меняет громкость, а над значком переключает окна соответствующего приложения.",
   "CheckUpdatesSetting": "Автоматически проверять наличие обновлений",
@@ -1334,5 +1335,7 @@
   "WirelessBatteryRestoreIgnored": "Восстановленные устройства проигнорированы",
   "WirelessBatteryStale": "Данные о батарее устарели",
   "WirelessBatterySubtitle": "Устройства Bluetooth",
-  "WirelessBatteryThresholdButton": "Низкий порог"
+  "WirelessBatteryThresholdButton": "Низкий порог",
+  "GpuEngine": "Движок GPU",
+  "OpenLocation": "Открыть расположение"
 }

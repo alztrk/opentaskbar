@@ -5,6 +5,7 @@
 //! complete 24-widget catalog plus settings-access helpers that are resilient to WS-A moving a
 //! key from `DockSettings.extra` into a typed field.
 
+use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::DockSettings;
 
 use super::{ALL_WIDGETS, WidgetDescriptor};
@@ -146,12 +147,29 @@ impl WidgetOption {
         })
     }
 
+    /// Category label for the current locale (same keys as `ui::settings::category_label`).
+    fn localized_category(&self) -> String {
+        let key = match self.descriptor.category {
+            "Time & Weather" => "WidgetCategoryTime",
+            "System & Hardware" => "WidgetCategorySystem",
+            "AI Quotas" => "WidgetCategoryAi",
+            "Media & Controls" => "WidgetCategoryMedia",
+            "Productivity" => "WidgetCategoryProductivity",
+            other => other,
+        };
+        loc::t(key)
+    }
+
     pub fn matches_search(&self, query: &str) -> bool {
         let q = query.trim().to_ascii_lowercase();
+        let localized_name = super::widget_name(self.descriptor.id);
+        let localized_category = self.localized_category();
         q.is_empty()
             || self.descriptor.name.to_ascii_lowercase().contains(&q)
+            || localized_name.to_ascii_lowercase().contains(&q)
             || self.descriptor.id.to_ascii_lowercase().contains(&q)
             || self.descriptor.category.to_ascii_lowercase().contains(&q)
+            || localized_category.to_ascii_lowercase().contains(&q)
     }
 }
 

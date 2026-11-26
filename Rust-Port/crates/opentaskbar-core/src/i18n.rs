@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn all_catalogs_share_one_identical_key_set() {
         let reference = keys(DEFAULT_LANGUAGE);
-        assert_eq!(reference.len(), 1336);
+        assert_eq!(reference.len(), 1339);
         for (tag, _) in LANGUAGES {
             assert_eq!(key_count(tag), reference.len(), "{tag} key count differs");
             assert_eq!(keys(tag), reference, "{tag} key set differs");
@@ -362,6 +362,10 @@ mod tests {
             "StartMenuClose",
             "StartMenuToggle",
             "ProfileHiddenApps",
+            // Keys replacing the last user-visible English literals.
+            "PlacementInWidgets",
+            "OpenLocation",
+            "GpuEngine",
         ];
         for (tag, _) in LANGUAGES {
             for key in NEW_KEYS {

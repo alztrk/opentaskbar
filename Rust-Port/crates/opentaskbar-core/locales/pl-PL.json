@@ -409,6 +409,7 @@
   "PlacementStart": "Na początku",
   "PlacementEnd": "Na końcu",
   "PlacementHidden": "Ukryty",
+  "PlacementInWidgets": "W widżetach",
   "WheelVolume": "Regulacja głośności kółkiem myszy",
   "WheelVolumeDescription": "Kółko myszy nad dokiem zmienia głośność, a nad ikoną przełącza okna danej aplikacji.",
   "CheckUpdatesSetting": "Sprawdzaj aktualizacje automatycznie",
@@ -1334,5 +1335,7 @@
   "WirelessBatteryRestoreIgnored": "Przywrócone urządzenia zostały zignorowane",
   "WirelessBatteryStale": "Dane baterii są nieaktualne",
   "WirelessBatterySubtitle": "Urządzenia Bluetooth",
-  "WirelessBatteryThresholdButton": "Niski próg"
+  "WirelessBatteryThresholdButton": "Niski próg",
+  "GpuEngine": "Silnik GPU",
+  "OpenLocation": "Otwórz lokalizację"
 }

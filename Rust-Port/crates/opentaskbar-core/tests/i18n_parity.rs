@@ -11,7 +11,7 @@ const LANGS: &[&str] = &[
     "ru-RU", "tr-TR", "uk-UA", "zh-CN",
 ];
 
-const EXPECTED_KEY_COUNT: usize = 1336;
+const EXPECTED_KEY_COUNT: usize = 1339;
 
 const C3_NEW_KEYS: &[&str] = &[
     // The five keys C# has and the pre-port Rust catalogs lacked.
@@ -53,6 +53,10 @@ const C3_NEW_KEYS: &[&str] = &[
     "StartMenuClose",
     "StartMenuToggle",
     "ProfileHiddenApps",
+    // Replacements for the remaining user-visible English literals.
+    "PlacementInWidgets",
+    "OpenLocation",
+    "GpuEngine",
 ];
 
 #[test]
@@ -122,4 +126,68 @@ fn missing_key_falls_back_to_the_key_itself_and_formatting_works() {
         "DefinitelyMissingKey_12345"
     );
     assert!(i18n::t_fmt("SeekTo", &["02:30"]).contains("02:30"));
+}
+
+/// The C3 merge overwrote nine genuine tr-TR labels with en-US (or ASCII-only)
+/// text. Keep the Turkish values so a later merge cannot silently regress them.
+#[test]
+fn turkish_focus_and_radio_labels_stay_translated() {
+    const TURKISH: &[(&str, &str)] = &[
+        ("FocusBreakTitle", "Mola zamanı"),
+        ("FocusBreakStart", "Molayı başlat"),
+        ("FocusBreakSkip", "Molayı atla"),
+        ("FocusBreakCountdown", "Mola {0} sn içinde başlıyor"),
+        ("FocusBreakComplete", "Mola tamamlandı"),
+        ("FocusSession", "Oturum {0}"),
+        ("RadioOn", "Açık"),
+        ("RadioOff", "Kapalı"),
+        ("DockBottomGap", "Alt boşluk"),
+    ];
+    for (key, expected) in TURKISH {
+        assert_eq!(
+            i18n::tr("tr-TR", key),
+            *expected,
+            "{key} regressed to the {DEFAULT_LANGUAGE} value",
+        );
+        assert_ne!(
+            i18n::tr("tr-TR", key),
+            i18n::tr(DEFAULT_LANGUAGE, key),
+            "{key} is no longer translated",
+        );
+    }
+}
+
+fn placeholders(value: &str) -> Vec<&str> {
+    let mut found = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.find('{') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('}') else {
+            break;
+        };
+        let token = &after[..=end];
+        if token[1..token.len() - 1].parse::<usize>().is_ok() {
+            found.push(token);
+        }
+        rest = &after[end + 1..];
+    }
+    // Translations may reorder arguments (e.g. TerminatePrompt); only the
+    // multiset of placeholders must survive.
+    found.sort_unstable();
+    found
+}
+
+#[test]
+fn no_catalog_has_empty_values_or_lost_placeholders() {
+    for tag in LANGS {
+        for key in i18n::keys(DEFAULT_LANGUAGE) {
+            let value = i18n::tr(tag, &key);
+            assert!(!value.trim().is_empty(), "{tag}/{key} is empty");
+            assert_eq!(
+                placeholders(&value),
+                placeholders(&i18n::tr(DEFAULT_LANGUAGE, &key)),
+                "{tag}/{key} lost or gained a placeholder",
+            );
+        }
+    }
 }

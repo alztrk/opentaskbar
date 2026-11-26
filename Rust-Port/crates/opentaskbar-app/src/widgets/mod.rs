@@ -190,6 +190,8 @@ pub fn widget_name(id: &str) -> String {
         "keyboard" => loc::t("WidgetKeyboardLayout"),
         "focus" => loc::t("WidgetFocus"),
         "showdesktop" => loc::t("WidgetShowDesktop"),
+        "stacks" => loc::t("FolderStacks"),
+        "groups" => loc::t("AppGroups"),
         _ => widget_descriptor(id).map_or_else(|| id.to_owned(), |d| d.name.to_owned()),
     }
 }
@@ -1705,7 +1707,7 @@ impl WidgetRuntime {
                 }
             }
             "bluetoothbattery" => loc::t("BluetoothBattery").to_owned(),
-            _ => widget_descriptor(id).map_or(id, |d| d.name).to_owned(),
+            _ => widget_name(id),
         }
     }
 

@@ -409,6 +409,7 @@
   "PlacementStart": "На початку",
   "PlacementEnd": "У кінці",
   "PlacementHidden": "Приховано",
+  "PlacementInWidgets": "У віджетах",
   "WheelVolume": "Регулювання гучності коліщатком миші",
   "WheelVolumeDescription": "Коліщатко над док-панеллю змінює гучність, а над піктограмою перемикає вікна відповідної програми.",
   "CheckUpdatesSetting": "Автоматично перевіряти оновлення",
@@ -1334,5 +1335,7 @@
   "WirelessBatteryRestoreIgnored": "Відновлені пристрої проігноровано",
   "WirelessBatteryStale": "Дані про батарею застарілі",
   "WirelessBatterySubtitle": "Пристрої Bluetooth",
-  "WirelessBatteryThresholdButton": "Низький поріг"
+  "WirelessBatteryThresholdButton": "Низький поріг",
+  "GpuEngine": "Двигун GPU",
+  "OpenLocation": "Відкрити розташування"
 }

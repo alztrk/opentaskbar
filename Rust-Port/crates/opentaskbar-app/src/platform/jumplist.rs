@@ -35,6 +35,7 @@ use std::ptr::{null, null_mut};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
 
+use opentaskbar_core::i18n as loc;
 use windows::core::GUID;
 
 // ---------------------------------------------------------------------------
@@ -1377,7 +1378,7 @@ pub fn explorer_select(path: &str) -> BuildLaunchInfo {
     info.display_name = PathBuf::from(path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "Open location".to_owned());
+        .unwrap_or_else(|| loc::t("OpenLocation"));
     info
 }
 

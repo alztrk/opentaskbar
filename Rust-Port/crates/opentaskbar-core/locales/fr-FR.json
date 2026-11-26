@@ -409,6 +409,7 @@
   "PlacementStart": "Au début",
   "PlacementEnd": "À la fin",
   "PlacementHidden": "Masqué",
+  "PlacementInWidgets": "Dans les widgets",
   "WheelVolume": "Contrôle du volume à la molette",
   "WheelVolumeDescription": "La molette sur le dock règle le volume ; sur une icône, elle fait défiler les fenêtres de l’application correspondante.",
   "CheckUpdatesSetting": "Rechercher automatiquement les mises à jour",
@@ -1334,5 +1335,7 @@
   "WirelessBatteryRestoreIgnored": "Les appareils restaurés ont été ignorés",
   "WirelessBatteryStale": "Les données de la batterie sont obsolètes",
   "WirelessBatterySubtitle": "Appareils Bluetooth",
-  "WirelessBatteryThresholdButton": "Seuil bas"
+  "WirelessBatteryThresholdButton": "Seuil bas",
+  "GpuEngine": "Moteur GPU",
+  "OpenLocation": "Ouvrir l'emplacement"
 }

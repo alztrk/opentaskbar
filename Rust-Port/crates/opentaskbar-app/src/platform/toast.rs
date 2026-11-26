@@ -4,6 +4,7 @@
 //! Action Center notifications, then renders a `ToastGeneric` XML template. The action
 //! button uses `activationType="protocol"`, so no WinRT event sink is required.
 
+use opentaskbar_core::i18n as loc;
 use windows::Data::Xml::Dom::XmlDocument;
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 use windows::core::HSTRING;
@@ -224,11 +225,11 @@ pub fn show_info_toast(message: &str) -> bool {
 /// Shows an update toast with a `Download` action. Clicking it must call
 /// `handle_activation_argument("action=update")` via the app entry point.
 pub fn show_update_toast_for_release(version_tag: &str, release_url: &str) -> bool {
-    let title = "Update available";
-    let body = format!("OpenTaskbar {version_tag} is ready to download.");
-    let action = format!("Download {version_tag}");
+    let title = loc::t("UpdateAvailableTitle");
+    let body = loc::t_fmt("UpdateToastBody", &[version_tag]);
+    let action = loc::t_fmt("UpdateDownload", &[version_tag]);
     let _ = release_url;
-    show_via_host(ToastKind::Update, title, &body, Some(&action))
+    show_via_host(ToastKind::Update, &title, &body, Some(&action))
 }
 
 fn show_via_host(kind: ToastKind, title: &str, body: &str, action: Option<&str>) -> bool {

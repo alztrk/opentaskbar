@@ -37,7 +37,6 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmFlush, DwmGetWindowAttribute,
-    DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTONEAREST, MonitorFromWindow, ScreenToClient,
@@ -160,37 +159,11 @@ static WIN_KEY_REVEAL_GATE: AtomicBool = AtomicBool::new(true);
 /// (or a cloak + pointer-up race) from opening and immediately closing Start.
 const START_TOGGLE_DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// Applies the real DWM backdrop to a dock/island HWND without replacing the
-/// DirectComposition transparency already owned by this module.
-///
-/// TODO(WS-B): `design::glass::apply_window_backdrop` is the agreed single source
-/// (DWMWA_SYSTEMBACKDROP_TYPE + SetWindowCompositionAttribute acrylic fallback)
-/// but is not present in this worktree yet. Swap the body below for a plain call
-/// once that module lands; the call sites and signature already match.
+/// Applies the real DWM/acrylic backdrop to a dock or island HWND. The
+/// composition policy lives in `design::glass`; the DirectComposition
+/// transparency owned by this module is left untouched.
 pub fn apply_dock_backdrop(hwnd: usize, is_dark: bool) -> bool {
-    if hwnd == 0 {
-        return false;
-    }
-    const DWMWA_USE_IMMERSIVE_DARK_MODE: u32 = 20;
-    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
-    const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
-    const DWMSBT_TRANSIENTWINDOW: u32 = 3;
-    const DWMWCP_ROUND: u32 = 2;
-    let dark = u32::from(is_dark);
-    let corner = DWMWCP_ROUND;
-    let backdrop = DWMSBT_TRANSIENTWINDOW;
-    let mut ok = true;
-    unsafe {
-        for (attr, value) in [
-            (DWMWA_USE_IMMERSIVE_DARK_MODE, &dark as *const u32),
-            (DWMWA_WINDOW_CORNER_PREFERENCE, &corner as *const u32),
-            (DWMWA_SYSTEMBACKDROP_TYPE, &backdrop as *const u32),
-        ] {
-            ok &= DwmSetWindowAttribute(hwnd as HWND, attr, value.cast(), size_of::<u32>() as u32)
-                == 0;
-        }
-    }
-    ok
+    crate::design::glass::apply_window_backdrop(hwnd, is_dark)
 }
 
 fn anchor_is_valid(anchor: (i32, i32, i32, i32)) -> bool {

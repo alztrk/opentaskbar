@@ -409,6 +409,7 @@
   "PlacementStart": "Aan het begin",
   "PlacementEnd": "Aan het einde",
   "PlacementHidden": "Verborgen",
+  "PlacementInWidgets": "In widgets",
   "WheelVolume": "Volumeregeling met muiswiel",
   "WheelVolumeDescription": "Boven het dock verandert het muiswiel het volume; boven een pictogram wisselt het tussen de vensters van die app.",
   "CheckUpdatesSetting": "Automatisch op updates controleren",
@@ -1334,5 +1335,7 @@
   "WirelessBatteryRestoreIgnored": "Herstelde apparaten werden genegeerd",
   "WirelessBatteryStale": "Batterijgegevens zijn verouderd",
   "WirelessBatterySubtitle": "Bluetooth-apparaten",
-  "WirelessBatteryThresholdButton": "Lage drempel"
+  "WirelessBatteryThresholdButton": "Lage drempel",
+  "GpuEngine": "GPU-engine",
+  "OpenLocation": "Locatie openen"
 }

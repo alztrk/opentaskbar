@@ -409,6 +409,7 @@
   "PlacementStart": "Am Anfang",
   "PlacementEnd": "Am Ende",
   "PlacementHidden": "Ausgeblendet",
+  "PlacementInWidgets": "In den Widgets",
   "WheelVolume": "Lautstärkeregelung per Mausrad",
   "WheelVolumeDescription": "Über dem Dock ändert das Mausrad die Lautstärke; über einem Symbol wechselt es zwischen den Fenstern der jeweiligen App.",
   "CheckUpdatesSetting": "Automatisch nach Updates suchen",
@@ -1334,5 +1335,7 @@
   "WirelessBatteryRestoreIgnored": "Wiederhergestellte Geräte wurden ignoriert",
   "WirelessBatteryStale": "Batteriedaten sind veraltet",
   "WirelessBatterySubtitle": "Bluetooth-Geräte",
-  "WirelessBatteryThresholdButton": "Niedrige Schwelle"
+  "WirelessBatteryThresholdButton": "Niedrige Schwelle",
+  "GpuEngine": "GPU-Engine",
+  "OpenLocation": "Speicherort öffnen"
 }

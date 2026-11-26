@@ -484,7 +484,7 @@ impl PdhGpu {
     }
 
     /// Collects one sample and returns the busiest engine load in percent (`0..=100`) together
-    /// with the engine kind that produced it (e.g. `"3D"`; `"GPU Engine"` when unknown).
+    /// with the engine kind that produced it (e.g. `"3D"`; the localized `GpuEngine` label when unknown).
     fn read_max(&mut self) -> Option<(f64, String)> {
         unsafe {
             if PdhCollectQueryData(self.query) != 0 {
@@ -536,9 +536,7 @@ impl PdhGpu {
                     // `>=` keeps an engine label even for an idle (0%) GPU, as the old flyout did.
                     if value >= best {
                         best = value;
-                        best_engine = engine
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| "GPU Engine".to_owned());
+                        best_engine = engine.map_or_else(|| loc::t("GpuEngine"), str::to_owned);
                     }
                     if let (Some(key), Some(engine)) = (gpu_engine_key(&name), engine) {
                         let entry = by_engine.entry(key).or_insert((0.0, engine.to_owned()));
@@ -573,7 +571,7 @@ impl PdhGpu {
                 {
                     found = true;
                     best = formatted.value.max(0.0);
-                    best_engine = "GPU Engine".to_owned();
+                    best_engine = loc::t("GpuEngine");
                 }
             }
             found.then_some((best, best_engine))

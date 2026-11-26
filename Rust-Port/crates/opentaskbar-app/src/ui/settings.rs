@@ -25,11 +25,6 @@ use opentaskbar_core::settings::{
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde_json::{Map, Value, json};
-use windows_sys::Win32::Foundation::HWND;
-use windows_sys::Win32::Graphics::Dwm::{
-    DWMWA_BORDER_COLOR, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DwmSetWindowAttribute,
-};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
 };
@@ -254,11 +249,7 @@ fn high_contrast_enabled() -> bool {
 }
 
 /// Applies the acrylic/system backdrop as soon as the settings window opens.
-///
-/// NOTE(WS-D): WS-B owns `design::glass::apply_window_backdrop(hwnd, is_dark)` as the single
-/// source of truth for DWM `DWMWA_SYSTEMBACKDROP_TYPE` + acrylic fallback. That module is not
-/// present in this worktree yet; once `fix-glass` merges, replace the inline DWM block below
-/// with a direct `crate::design::glass::apply_window_backdrop(hwnd as usize, is_dark)` call.
+/// The DWM/Win10-acrylic policy lives in `design::glass` (single source of truth).
 fn apply_settings_backdrop(window: &Window, is_dark: bool) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
@@ -266,32 +257,8 @@ fn apply_settings_backdrop(window: &Window, is_dark: bool) {
     let RawWindowHandle::Win32(win32_handle) = handle.as_raw() else {
         return;
     };
-    let hwnd = win32_handle.hwnd.get() as HWND;
-    let dark: u32 = u32::from(is_dark);
-    let border_none: u32 = 0xFFFF_FFFF; // DWMWA_COLOR_NONE
-    // DWMSBT_NONE (1) for High Contrast, DWMSBT_TRANSIENTWINDOW (3) acrylic otherwise.
-    let backdrop: u32 = if high_contrast_enabled() { 1 } else { 3 };
-    // SAFETY: `hwnd` belongs to this window and all attribute values are plain u32s.
-    unsafe {
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
-            (&dark as *const u32).cast(),
-            size_of::<u32>() as u32,
-        );
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR as u32,
-            (&border_none as *const u32).cast(),
-            size_of::<u32>() as u32,
-        );
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE as u32,
-            (&backdrop as *const u32).cast(),
-            size_of::<u32>() as u32,
-        );
-    }
+    let hwnd = win32_handle.hwnd.get() as usize;
+    let _ = crate::design::glass::apply_window_backdrop(hwnd, is_dark);
 }
 
 // ---------------------------------------------------------------------------
@@ -4564,10 +4531,13 @@ impl SettingsView {
             "start-placement",
             t,
             [
-                ("Start", StartButtonPlacement::Start),
-                ("End", StartButtonPlacement::End),
-                ("Hidden", StartButtonPlacement::Hidden),
-                ("In Widgets", StartButtonPlacement::InWidgets),
+                (loc::t("PlacementStart"), StartButtonPlacement::Start),
+                (loc::t("PlacementEnd"), StartButtonPlacement::End),
+                (loc::t("PlacementHidden"), StartButtonPlacement::Hidden),
+                (
+                    loc::t("PlacementInWidgets"),
+                    StartButtonPlacement::InWidgets,
+                ),
             ]
             .into_iter()
             .map(|(label, placement)| {
