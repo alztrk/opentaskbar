@@ -34,17 +34,20 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM}
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmFlush, DwmGetWindowAttribute,
 };
-use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+use windows_sys::Win32::Graphics::Gdi::{
+    MONITOR_DEFAULTTONEAREST, MonitorFromWindow, ScreenToClient,
+};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Threading::AttachThreadInput;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    UnregisterHotKey, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_RIGHT, VK_RWIN, VK_TAB,
+    GetAsyncKeyState, RegisterHotKey, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT,
+    TrackMouseEvent, UnregisterHotKey, VK_CONTROL, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_RIGHT, VK_RWIN,
+    VK_SHIFT, VK_TAB,
 };
 use windows_sys::Win32::UI::Shell::DragAcceptFiles;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     ASFW_ANY, AllowSetForegroundWindow, CS_DBLCLKS, CallNextHookEx, CreateWindowExW,
-    DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClassNameW, GetCursorPos,
+    DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetCursorPos,
     GetForegroundWindow, GetMessageW, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
     HHOOK, HTCLIENT, HTTRANSPARENT, HWND_BROADCAST, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IsIconic,
     IsWindow, IsWindowVisible, IsZoomed, KillTimer, LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW,
@@ -69,8 +72,9 @@ use self::dynamic_island::{InputDisposition, IslandInput, IslandState};
 use self::layout::{
     anchor_from_window_rect, bounce_direction, capture_expansion_budget, drop_targets_recycle_bin,
     effective_edge, escape_closes_transient, hide_offset, is_full_screen_on_monitor,
-    is_injected_key_event, is_shell_overlay_class, keyboard_next_index, revealed_guard_should_hide,
-    start_menu_hide_fallback, step_spring, wheel_to_axis_delta, win_key_reveal_enabled,
+    is_injected_key_event, keyboard_next_index, revealed_guard_should_hide,
+    start_menu_hide_fallback, step_spring, wheel_to_axis_delta, win_key_modifier_pressed,
+    win_key_reveal_allowed, win_key_reveal_enabled,
 };
 use self::preview::{PreviewItem, PreviewPopup};
 use self::show_desktop::ShowDesktopCorner;
@@ -122,19 +126,86 @@ const HOTKEY_DOCK_ID: i32 = 0x4F02;
 /// the Win-key grace window and C# `WinKeyRevealMonitor`.
 const WINKEY_REVEAL_MS: u64 = 600;
 
-/// Last known physical rect of the dock's Start button, in screen coordinates.
-/// `on_opened` (WS-B) reads it from the UI thread to anchor the Start flyout.
-static START_BUTTON_ANCHOR: Mutex<(i32, i32, i32, i32)> = Mutex::new((0, 0, 0, 0));
+/// One dock window's Start-button rect, in physical screen coordinates.
+type AnchorEntry = (usize, (i32, i32, i32, i32));
+
+/// Physical rects of each dock window's Start button, keyed by dock HWND.
+/// `on_opened` (WS-B) runs on the WinEvent thread, so the registry is shared
+/// rather than thread-local; the primary dock is registered first.
+static START_BUTTON_ANCHORS: Mutex<Vec<AnchorEntry>> = Mutex::new(Vec::new());
 /// Gate shared with the global low-level keyboard hook, which has no `DockState`.
 static WIN_KEY_REVEAL_GATE: AtomicBool = AtomicBool::new(true);
+/// A Start-button toggle is ignored within this window to stop a double click
+/// (or a cloak + pointer-up race) from opening and immediately closing Start.
+const START_TOGGLE_DEBOUNCE: Duration = Duration::from_millis(300);
+
+fn anchor_is_valid(anchor: (i32, i32, i32, i32)) -> bool {
+    anchor.2 > anchor.0 && anchor.3 > anchor.1
+}
+
+fn first_valid_anchor(anchors: &[AnchorEntry]) -> (i32, i32, i32, i32) {
+    anchors
+        .iter()
+        .find_map(|(_, rect)| anchor_is_valid(*rect).then_some(*rect))
+        .unwrap_or((0, 0, 0, 0))
+}
+
+/// Picks the Start button rect of the dock on the monitor hosting `hwnd`.
+/// `monitor_of` returns 0 for an invalid handle, which falls back to the first
+/// valid dock. Kept pure so multi-monitor selection is unit testable.
+fn select_anchor_for(
+    anchors: &[AnchorEntry],
+    hwnd: usize,
+    monitor_of: impl Fn(usize) -> usize,
+) -> (i32, i32, i32, i32) {
+    let fallback = first_valid_anchor(anchors);
+    if hwnd == 0 {
+        return fallback;
+    }
+    let target = monitor_of(hwnd);
+    if target == 0 {
+        return fallback;
+    }
+    anchors
+        .iter()
+        .find(|(dock_hwnd, rect)| anchor_is_valid(*rect) && monitor_of(*dock_hwnd) == target)
+        .map(|(_, rect)| *rect)
+        .unwrap_or(fallback)
+}
 
 /// Screen rect of the Start button most recently laid out by any dock window.
 /// `(0, 0, 0, 0)` means no visible Start button has been laid out yet.
 pub fn start_button_anchor() -> (i32, i32, i32, i32) {
-    START_BUTTON_ANCHOR
+    START_BUTTON_ANCHORS
         .lock()
-        .map(|anchor| *anchor)
+        .map(|anchors| first_valid_anchor(&anchors))
         .unwrap_or((0, 0, 0, 0))
+}
+
+/// Per-monitor variant used by `on_opened`: a global single anchor puts the
+/// flyout on the wrong screen when docks exist on several monitors.
+pub fn start_button_anchor_for(hwnd: usize) -> (i32, i32, i32, i32) {
+    let Ok(anchors) = START_BUTTON_ANCHORS.lock() else {
+        return (0, 0, 0, 0);
+    };
+    let monitor_of = |handle: usize| -> usize {
+        if handle == 0 {
+            return 0;
+        }
+        // SAFETY: monitor queries tolerate stale handles and return NULL.
+        unsafe { MonitorFromWindow(handle as HWND, MONITOR_DEFAULTTONEAREST) as usize }
+    };
+    select_anchor_for(&anchors, hwnd, monitor_of)
+}
+
+fn publish_start_button_anchor(hwnd: usize, anchor: (i32, i32, i32, i32)) {
+    if let Ok(mut anchors) = START_BUTTON_ANCHORS.lock() {
+        if let Some(entry) = anchors.iter_mut().find(|(owner, _)| *owner == hwnd) {
+            entry.1 = anchor;
+        } else {
+            anchors.push((hwnd, anchor));
+        }
+    }
 }
 
 fn set_win_key_reveal_gate(settings: &DockSettings) {
@@ -146,9 +217,11 @@ fn set_win_key_reveal_gate(settings: &DockSettings) {
 
 /// Restores focus to the app that owned the foreground before Start was opened.
 /// `AllowSetForegroundWindow` + `AttachThreadInput` cover the usual foreground
-/// lock when the shell currently owns the foreground.
-fn restore_app_foreground(hwnd: usize) {
-    if hwnd == 0 {
+/// lock when the shell currently owns the foreground. Both fallback results are
+/// checked so a failed attach is never reported as a successful focus return.
+fn restore_app_foreground(hwnd: usize, start_hwnd: usize) {
+    // Never hand focus back to the Start flyout itself.
+    if hwnd == 0 || hwnd == start_hwnd {
         return;
     }
     unsafe {
@@ -157,17 +230,42 @@ fn restore_app_foreground(hwnd: usize) {
             return;
         }
         AllowSetForegroundWindow(ASFW_ANY);
-        if SetForegroundWindow(target) == 0 {
+        let mut granted = SetForegroundWindow(target) != 0;
+        if !granted {
             let foreground = GetForegroundWindow();
-            let target_thread = GetWindowThreadProcessId(target, std::ptr::null_mut());
-            let foreground_thread = GetWindowThreadProcessId(foreground, std::ptr::null_mut());
-            if target_thread != 0 && foreground_thread != 0 && target_thread != foreground_thread {
-                AttachThreadInput(foreground_thread, target_thread, 1);
-                SetForegroundWindow(target);
-                AttachThreadInput(foreground_thread, target_thread, 0);
+            if foreground != target {
+                let target_thread = GetWindowThreadProcessId(target, std::ptr::null_mut());
+                let foreground_thread = GetWindowThreadProcessId(foreground, std::ptr::null_mut());
+                if target_thread != 0
+                    && foreground_thread != 0
+                    && target_thread != foreground_thread
+                    && AttachThreadInput(foreground_thread, target_thread, 1) != 0
+                {
+                    granted = SetForegroundWindow(target) != 0;
+                    let _ = AttachThreadInput(foreground_thread, target_thread, 0);
+                }
             }
         }
+        if GetForegroundWindow() != target {
+            opentaskbar_core::log::warn(format!(
+                "Focus return failed for {hwnd:#x} (SetForegroundWindow={granted})."
+            ));
+        }
     }
+}
+
+/// A Start window that was already foreground when the button went down is not
+/// a valid restore target; keep the real app saved before the menu opened.
+fn restore_target_for_press(foreground: usize, start_hwnd: usize, dock_hwnd: usize) -> usize {
+    if foreground == 0 || foreground == start_hwnd || foreground == dock_hwnd {
+        0
+    } else {
+        foreground
+    }
+}
+
+fn start_toggle_allowed(last_toggle: Option<Instant>, now: Instant) -> bool {
+    last_toggle.is_none_or(|last| now.saturating_duration_since(last) >= START_TOGGLE_DEBOUNCE)
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -530,12 +628,14 @@ struct DockState {
     hovered_resize: Option<ResizeEdge>,
     pressed_idx: Option<usize>,
     pressed_shell: Option<ShellButton>,
-    /// Start-menu state sampled on pointer down so a press that dismisses the
-    /// menu is not immediately followed by a reopen on pointer up.
+    /// Start-menu state sampled on pointer down (cached, no UI-thread EnumWindows).
+    /// The open/close decision is made from this snapshot alone on pointer up.
     pressed_shell_start_was_open: bool,
-    /// Foreground app window at the moment Start was pressed; focus is returned
-    /// here when the same press dismisses the menu.
-    start_press_foreground: usize,
+    /// Last real application foreground before Start opened. A Start window that
+    /// is foreground at press time is never stored as a restore target.
+    start_restore_hwnd: usize,
+    /// Debounce stamp for the Start toggle (open + immediate close race).
+    start_toggle_last: Option<Instant>,
     pressed_tray: bool,
     pressed_tray_pin: Option<String>,
     pressed_bin: bool,
@@ -1284,7 +1384,8 @@ impl DockState {
             pressed_idx: None,
             pressed_shell: None,
             pressed_shell_start_was_open: false,
-            start_press_foreground: 0,
+            start_restore_hwnd: 0,
+            start_toggle_last: None,
             pressed_tray: false,
             pressed_tray_pin: None,
             pressed_bin: false,
@@ -1642,12 +1743,20 @@ impl DockState {
             || self
                 .win_key_grace_until
                 .is_some_and(|until| Instant::now() < until);
-        let start_menu_open = crate::platform::start_menu_state::is_open()
-            || crate::platform::start_menu_state::is_open_now();
+        // Cached state only: `is_open_now()` walks windows and is reserved for
+        // the WinEvent hook, where it does not block the UI thread.
+        let start_menu_open = crate::platform::start_menu_state::is_open();
         let anchored = opentaskbar_shell::flyout_reposition::is_anchored();
-        // If the shell could not reposition the Start flyout, hiding the dock is
-        // the only way to guarantee no visual overlap remains.
-        let should_hide = if start_menu_hide_fallback(start_menu_open, anchored) {
+        let anchor_pending = opentaskbar_shell::flyout_reposition::anchor_pending();
+        // If the shell's reposition attempt finished without anchoring Start,
+        // hiding the dock is the only way to guarantee no overlap remains.
+        // While the attempt is pending the dock must stay put (no ~800 ms flicker).
+        let should_hide = if start_menu_hide_fallback(
+            start_menu_open,
+            anchored,
+            anchor_pending,
+            self.settings.auto_hide,
+        ) {
             true
         } else {
             revealed_guard_should_hide(
@@ -1731,11 +1840,10 @@ impl DockState {
                 {
                     continue;
                 }
-                let mut class_buf = [0u16; 64];
-                let len = GetClassNameW(hwnd, class_buf.as_mut_ptr(), class_buf.len() as i32);
-                if len > 0
-                    && is_shell_overlay_class(&String::from_utf16_lossy(&class_buf[..len as usize]))
-                {
+                // Single source of truth (WS-B): class list plus exe/PID check
+                // for CoreWindow hosts, so a random UWP overlay is not ignored.
+                // The snapshot already holds the exe path, avoiding a second query.
+                if crate::platform::win32_ex::is_shell_overlay_for(win.hwnd, &win.exe_path) {
                     continue;
                 }
                 let mut rc: RECT = std::mem::zeroed();
@@ -1969,6 +2077,7 @@ impl DockState {
             opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
         self.settings = next;
         set_win_key_reveal_gate(&self.settings);
+        crate::apply_native_flyout_reposition(&self.settings);
         self.refresh_start_button_anchor();
         // The Settings window runs in a separate process: apply its language change here too.
         loc::set_language(&self.settings.language);
@@ -2447,9 +2556,7 @@ impl DockState {
     /// lands directly above the button that was clicked.
     fn refresh_start_button_anchor(&self) {
         if !is_shell_button_visible(&self.settings, ShellButton::Start) {
-            if let Ok(mut anchor) = START_BUTTON_ANCHOR.lock() {
-                *anchor = (0, 0, 0, 0);
-            }
+            publish_start_button_anchor(self.hwnd, (0, 0, 0, 0));
             return;
         }
         let base = self.settings.icon_dips();
@@ -2473,9 +2580,7 @@ impl DockState {
             button,
             self.dpi,
         );
-        if let Ok(mut cached) = START_BUTTON_ANCHOR.lock() {
-            *cached = anchor;
-        }
+        publish_start_button_anchor(self.hwnd, anchor);
     }
 
     fn flyout_anchor_px(&self, rect: DipRect) -> (i32, i32) {
@@ -4151,12 +4256,25 @@ impl DockState {
 
         if let Some(shell) = self.hit_shell_button(mx, my) {
             if shell == ShellButton::Start {
+                use crate::platform::start_menu_state;
                 let now = Instant::now();
-                crate::platform::start_menu_state::note_press(now);
-                self.pressed_shell_start_was_open = crate::platform::start_menu_state::is_open()
-                    || crate::platform::start_menu_state::is_open_now();
-                // Remember where focus was so dismissing Start can hand it back.
-                self.start_press_foreground = unsafe { GetForegroundWindow() } as usize;
+                start_menu_state::note_press(now);
+                // Snapshot once, on down. No live `is_open_now()` here or on up.
+                let was_open = start_menu_state::is_open();
+                self.pressed_shell_start_was_open = was_open;
+                if !was_open {
+                    // Save the last real app before Start opens; a Start window
+                    // that is foreground on down must not become the target.
+                    let foreground = unsafe { GetForegroundWindow() } as usize;
+                    let target = restore_target_for_press(
+                        foreground,
+                        start_menu_state::start_window(),
+                        self.hwnd,
+                    );
+                    if target != 0 {
+                        self.start_restore_hwnd = target;
+                    }
+                }
             }
             self.pressed_shell = Some(shell);
             self.update_visuals();
@@ -4187,10 +4305,14 @@ impl DockState {
             return;
         }
         let now = Instant::now();
-        let was_open = self.pressed_shell_start_was_open
-            || start_menu_state::was_open_at_press(now)
-            || start_menu_state::is_open()
-            || start_menu_state::is_open_now();
+        if !start_toggle_allowed(self.start_toggle_last, now) {
+            self.pressed_shell_start_was_open = false;
+            return;
+        }
+        self.start_toggle_last = Some(now);
+        // Decision comes only from the pointer-down snapshot: re-querying the
+        // live state here could turn a dismiss into a reopen after the cloak.
+        let was_open = self.pressed_shell_start_was_open;
         if was_open {
             let hwnd = match start_menu_state::start_window() {
                 0 => opentaskbar_shell::flyout_reposition::find_start_window().unwrap_or(0),
@@ -4199,8 +4321,10 @@ impl DockState {
             if hwnd != 0 {
                 let _ = opentaskbar_shell::flyout_reposition::close_start(hwnd);
             }
+            // WS-B's reset() also clears start_window; the cloak alone stamps
+            // the dismissal grace, not a foreground-only change.
             start_menu_state::reset();
-            restore_app_foreground(self.start_press_foreground);
+            restore_app_foreground(self.start_restore_hwnd, hwnd);
         } else if !opentaskbar_shell::flyout_reposition::open_start_via_syscommand(self.hwnd) {
             // Fallback for shell versions that reject SC_TASKLIST from a tool window.
             opentaskbar_shell::taskbar::open_start_menu();
@@ -5170,22 +5294,28 @@ unsafe extern "system" fn win_key_hook(code: i32, wparam: WPARAM, lparam: LPARAM
         && matches!(msg, WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP)
     {
         let info = unsafe { &*(lparam as *const KbdLlHookStruct) };
-        // Synthetic Win taps (RDP, automation, IME) must never reveal the dock.
-        if is_injected_key_event(info.flags) {
-            WIN_KEY_ALONE.with(|flag| flag.set(false));
+        // Read the previous tap state, then clear it unconditionally BEFORE the
+        // injected/modifier/gate checks: a rejected key must never leave a
+        // stale "Win alone" flag behind (including while the gate is off).
+        let was_alone = WIN_KEY_ALONE.with(std::cell::Cell::get);
+        WIN_KEY_ALONE.with(|flag| flag.set(false));
+        // SAFETY: GetAsyncKeyState takes a virtual-key code and is safe to call
+        // from a low-level hook; the high bit marks a held modifier.
+        let ctrl_down = unsafe { GetAsyncKeyState(VK_CONTROL as i32) };
+        let shift_down = unsafe { GetAsyncKeyState(VK_SHIFT as i32) };
+        let modifier = win_key_modifier_pressed(info.flags, ctrl_down, shift_down);
+        let injected = is_injected_key_event(info.flags);
+        let gate = WIN_KEY_REVEAL_GATE.load(Ordering::Relaxed);
+        if !win_key_reveal_allowed(gate, injected, modifier) {
             return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
         }
-        if !WIN_KEY_REVEAL_GATE.load(Ordering::Relaxed) {
-            return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
-        }
+        // Alt is covered by LLKHF_ALTDOWN in `info.flags`.
         let is_win = info.vk_code == VK_LWIN as u32 || info.vk_code == VK_RWIN as u32;
         match msg {
             WM_KEYDOWN | WM_SYSKEYDOWN => {
                 WIN_KEY_ALONE.with(|flag| flag.set(is_win));
             }
             _ => {
-                let was_alone = WIN_KEY_ALONE.with(std::cell::Cell::get);
-                WIN_KEY_ALONE.with(|flag| flag.set(false));
                 if is_win && was_alone {
                     DOCK_HWNDS.with(|list| {
                         for hwnd in list.borrow().iter() {
@@ -5397,6 +5527,13 @@ unsafe extern "system" fn wnd_proc(
             let mx = loword_i16(lparam) / state.dpi;
             let my = hiword_i16(lparam) / state.dpi;
             state.handle_lbutton_down(mx, my);
+            // The dock can take focus while WS_EX_NOACTIVATE suppresses the
+            // foreground hook; tell WS-B so Start's cached state is refreshed
+            // (after the down snapshot was taken). Gate on cached state so the
+            // live validation inside the API never runs on an ordinary click.
+            if crate::platform::start_menu_state::is_open() {
+                crate::platform::start_menu_state::on_dock_activated();
+            }
             0
         }
         WM_LBUTTONUP => {
@@ -5430,6 +5567,9 @@ unsafe extern "system" fn wnd_proc(
             let mx = loword_i16(lparam) / state.dpi;
             let my = hiword_i16(lparam) / state.dpi;
             state.handle_rbutton_up(mx, my);
+            if crate::platform::start_menu_state::is_open() {
+                crate::platform::start_menu_state::on_dock_activated();
+            }
             state.reconcile_pointer_after_interaction();
             0
         }
@@ -5824,6 +5964,70 @@ pub fn run(settings: DockSettings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multi_monitor_anchor_selects_the_dock_on_the_start_monitor() {
+        let anchors = [
+            (11, (100, 900, 160, 940)),     // primary dock
+            (22, (-1860, 900, -1800, 940)), // left secondary dock
+            (33, (0, 0, 0, 0)),             // hidden Start button
+        ];
+        let monitors = |hwnd: usize| match hwnd {
+            11 => 1,
+            22 | 33 => 2,
+            900 => 2, // the Start window lives on monitor 2
+            _ => 0,
+        };
+        // Start on monitor 2 must use the secondary dock, not the global primary.
+        assert_eq!(
+            select_anchor_for(&anchors, 900, monitors),
+            (-1860, 900, -1800, 940)
+        );
+        assert_eq!(
+            select_anchor_for(&anchors, 11, monitors),
+            (100, 900, 160, 940)
+        );
+        // Empty anchor is never chosen; unknown monitors fall back to the first
+        // valid dock so a missing monitor cannot leave Start unanchored.
+        assert_eq!(
+            select_anchor_for(&anchors, 0, monitors),
+            (100, 900, 160, 940)
+        );
+        assert_eq!(
+            select_anchor_for(&[(33, (0, 0, 0, 0))], 900, monitors),
+            (0, 0, 0, 0)
+        );
+        assert!(!anchor_is_valid((0, 0, 0, 0)));
+        assert!(anchor_is_valid((0, 0, 1, 1)));
+    }
+
+    #[test]
+    fn start_toggle_debounces_rapid_double_clicks() {
+        let now = Instant::now();
+        assert!(start_toggle_allowed(None, now));
+        assert!(!start_toggle_allowed(
+            Some(now - Duration::from_millis(100)),
+            now
+        ));
+        assert!(start_toggle_allowed(
+            Some(now - Duration::from_millis(301)),
+            now
+        ));
+        assert!(!start_toggle_allowed(
+            Some(now + Duration::from_millis(50)),
+            now
+        ));
+    }
+
+    #[test]
+    fn start_foreground_is_not_a_focus_restore_target() {
+        // Foreground is the Start flyout or our own dock: keep the prior app.
+        assert_eq!(restore_target_for_press(0, 0, 10), 0);
+        assert_eq!(restore_target_for_press(99, 99, 10), 0);
+        assert_eq!(restore_target_for_press(10, 99, 10), 0);
+        // A real app is remembered as the restore target.
+        assert_eq!(restore_target_for_press(42, 99, 10), 42);
+    }
 
     #[test]
     fn negative_x_secondary_monitor_positions_correctly() {

@@ -32,23 +32,33 @@ fn enable_dpi_awareness() {
     }
 }
 
-/// Reads an opt-in flag from the settings `extra` map (C# has no matching key).
-#[cfg(windows)]
-fn extra_flag(
-    settings: &opentaskbar_core::settings::DockSettings,
-    key: &str,
-    default: bool,
-) -> bool {
-    match settings.extra.get(key) {
-        Some(serde_json::Value::Bool(value)) => *value,
-        _ => default,
-    }
-}
-
 /// Cheap, non-blocking shell-change callback for the WinEvent watcher.
 #[cfg(windows)]
 fn on_shell_change() {
     opentaskbar_core::log::event("ShellChanged", &[]);
+}
+
+/// Single switch for native Start-flyout repositioning. PascalCase is the
+/// legacy settings key; the snake_case key is canonical and defaults to on.
+#[cfg(windows)]
+pub(crate) fn native_flyout_reposition_enabled(
+    settings: &opentaskbar_core::settings::DockSettings,
+) -> bool {
+    settings
+        .extra
+        .get("native_flyout_reposition")
+        .or_else(|| settings.extra.get("NativeFlyoutReposition"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Applies the same value to both shell writers so a disabled setting cannot
+/// leave the window-writer active while the reposition thread is stopped.
+#[cfg(windows)]
+pub(crate) fn apply_native_flyout_reposition(settings: &opentaskbar_core::settings::DockSettings) {
+    let enabled = native_flyout_reposition_enabled(settings);
+    opentaskbar_shell::flyout_writer::set_enabled(Some(enabled));
+    opentaskbar_shell::flyout_reposition::set_enabled(Some(enabled));
 }
 
 /// Shared startup wiring for the Settings process and the dock process.
@@ -92,6 +102,12 @@ fn main() {
         }
         enable_dpi_awareness();
         if args.iter().any(|a| a == ui::settings::SETTINGS_ARG) {
+            opentaskbar_core::log::init(
+                opentaskbar_core::settings::app_data_dir().join("opentaskbar.log"),
+            );
+            std::panic::set_hook(Box::new(|info| {
+                opentaskbar_core::log::error(format!("SETTINGS PANIC: {info}"));
+            }));
             let settings =
                 opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
             opentaskbar_core::i18n::init(Some(&settings.language));
@@ -131,15 +147,16 @@ fn main() {
         apply_startup_context(&settings);
         platform::startup_registration::sync_on_startup(false, false);
         opentaskbar_shell::watchdog::arm();
-        opentaskbar_shell::flyout_writer::set_enabled(Some(extra_flag(
-            &settings,
-            "NativeFlyoutReposition",
-            true,
-        )));
+        apply_native_flyout_reposition(&settings);
         // UNCLOAKED Start flyout: pin it above the dock Start button. If the
         // reposition thread cannot anchor it, `evaluate_auto_hide` hides the dock.
         platform::start_menu_state::on_opened(|hwnd| {
-            let (left, top, right, bottom) = dock::start_button_anchor();
+            // Invalidate the previous anchor first, even when no dock anchor is
+            // available yet, so cached anchored state never hides a fresh menu.
+            opentaskbar_shell::flyout_reposition::mark_opened();
+            // Multi-monitor: the dock on the Start window's monitor owns the
+            // anchor; a single global rect would target the wrong screen.
+            let (left, top, right, bottom) = dock::start_button_anchor_for(hwnd);
             if left == right || top == bottom {
                 return;
             }

@@ -49,6 +49,10 @@ pub const REVEALED_GUARD_MS: u64 = 200;
 pub const WIN_KEY_GRACE_MS: u64 = 600;
 /// `LLKHF_INJECTED` in the low-level keyboard hook flags (`KBDLLHOOKSTRUCT`).
 pub const LLKHF_INJECTED: u32 = 0x10;
+/// `LLKHF_ALTDOWN`: an Alt modifier was held for the low-level key event.
+pub const LLKHF_ALTDOWN: u32 = 0x20;
+/// Win32 class name of the shell's per-monitor XAML/CoreWindow island host.
+pub const CORE_WINDOW_CLASS: &str = "windows.ui.core.corewindow";
 pub const HOVER_INTENT_MS: u64 = 350;
 pub const DRAG_HOVER_MS: u64 = 450;
 pub const PREVIEW_GRACE_MS: u64 = 250;
@@ -325,16 +329,41 @@ pub fn is_shell_overlay_class(class_name: &str) -> bool {
             | "taskswitcherwnd"
             // Windows 10/11 Start flyout and its light-dismiss surface. Without these,
             // smart auto-hide sees Start as an overlapping app window.
-            | "windows.ui.core.corewindow"
+            | CORE_WINDOW_CLASS
             | "startmenusizingframe"
             | "shell_lightdismissoverlay"
     )
+}
+
+/// `is_shell_overlay_class` with host validation for `Windows.UI.Core.CoreWindow`.
+/// Any UWP app can own a CoreWindow, so the class alone must not mark it as a
+/// shell overlay: only the Start / ShellExperienceHost processes qualify.
+/// WS-B's `win32_ex::is_shell_overlay` is the single Win32 call site; this pure
+/// helper documents the policy and keeps it unit testable.
+pub fn is_shell_overlay_class_for_host(class: &str, trusted_start_host: bool) -> bool {
+    if class.trim().eq_ignore_ascii_case(CORE_WINDOW_CLASS) {
+        return trusted_start_host;
+    }
+    is_shell_overlay_class(class)
 }
 
 /// `WM_APP_WINKEY_REVEAL` posts from the low-level hook must ignore injected
 /// key events (synthetic Win taps from RemoteDesktop, automation, IME, ...).
 pub fn is_injected_key_event(flags: u32) -> bool {
     flags & LLKHF_INJECTED != 0
+}
+
+/// A standalone Win tap is not standalone when Alt (hook flag), Ctrl or Shift
+/// (`GetAsyncKeyState` high bit) was held. `ctrl_down`/`shift_down` are the raw
+/// signed values from `GetAsyncKeyState`.
+pub fn win_key_modifier_pressed(flags: u32, ctrl_down: i16, shift_down: i16) -> bool {
+    flags & LLKHF_ALTDOWN != 0 || ctrl_down < 0 || shift_down < 0
+}
+
+/// Final gate for the low-level hook. The injected/modifier checks run before
+/// the feature gate so `WIN_KEY_ALONE` is cleared on every rejected event.
+pub fn win_key_reveal_allowed(gate: bool, injected: bool, modifier: bool) -> bool {
+    gate && !injected && !modifier
 }
 
 /// Single decision table for the Win-key reveal and its grace window: a Win tap
@@ -345,8 +374,15 @@ pub fn win_key_reveal_enabled(reveal_dock_on_win_key: bool, auto_hide: AutoHideM
 
 /// Start flyout policy: when Start is open but the shell reposition thread could
 /// not anchor it above the dock, hide the dock instead of leaving an overlap.
-pub fn start_menu_hide_fallback(menu_open: bool, anchored: bool) -> bool {
-    menu_open && !anchored
+/// An attempt still in flight (`anchor_pending`) is *not* a failure: the ~800 ms
+/// reposition window must not make the dock flicker while the shell animates.
+pub fn start_menu_hide_fallback(
+    menu_open: bool,
+    anchored: bool,
+    anchor_pending: bool,
+    auto_hide: AutoHideMode,
+) -> bool {
+    menu_open && !anchored && !anchor_pending && auto_hide != AutoHideMode::Disabled
 }
 
 /// Converts a DIP button rect inside the dock window into a physical screen rect.
@@ -717,17 +753,33 @@ pub fn slide_for(item: usize, dragged: usize, insertion_index: usize, dragged_si
     0.0
 }
 
-/// Rewrites the persisted order so pinned shell groups lead and trail the strip.
-pub fn apply_pinned_groups(order: &[String], settings: &DockSettings) -> Vec<String> {
-    let mut lead = Vec::new();
-    // Typed field first; the legacy `extra["StartPlacement"] = "Hidden"` value is
-    // still honoured for settings files written before the typed field existed.
-    let legacy_hidden = settings
+/// Resolves the persisted placement. Settings written before the typed field
+/// used `extra["StartPlacement"]` as a string; unknown values fall back to the
+/// typed field instead of silently disabling the button.
+pub fn normalized_start_placement(settings: &DockSettings) -> StartButtonPlacement {
+    if let Some(raw) = settings
         .extra
         .get("StartPlacement")
         .and_then(|v| v.as_str())
-        == Some("Hidden");
-    if settings.start_placement != StartButtonPlacement::Hidden && !legacy_hidden {
+    {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "hidden" => return StartButtonPlacement::Hidden,
+            "end" => return StartButtonPlacement::End,
+            "inwidgets" => return StartButtonPlacement::InWidgets,
+            "start" => return StartButtonPlacement::Start,
+            _ => {}
+        }
+    }
+    settings.start_placement
+}
+
+/// Rewrites the persisted order so pinned shell groups lead and trail the strip.
+/// `End` / `InWidgets` move the Start token into the trailing (widget/tray)
+/// group instead of leaving the setting ineffective at the head of the strip.
+pub fn apply_pinned_groups(order: &[String], settings: &DockSettings) -> Vec<String> {
+    let placement = normalized_start_placement(settings);
+    let mut lead = Vec::new();
+    if placement == StartButtonPlacement::Start {
         lead.push("start".to_owned());
     }
     if settings
@@ -754,11 +806,17 @@ pub fn apply_pinned_groups(order: &[String], settings: &DockSettings) -> Vec<Str
             .filter(|token| !is_pinned_token(token))
             .cloned(),
     );
+    if placement == StartButtonPlacement::End {
+        result.push("start".to_owned());
+    }
     if settings.show_tray_button {
         result.push("tray".to_owned());
     }
     if settings.show_recycle_bin {
         result.push("bin".to_owned());
+    }
+    if placement == StartButtonPlacement::InWidgets {
+        result.push("start".to_owned());
     }
     result
 }
@@ -1203,6 +1261,18 @@ mod tests {
         assert!(is_shell_overlay_class("Windows.UI.Core.CoreWindow"));
         assert!(is_shell_overlay_class("StartMenuSizingFrame"));
         assert!(is_shell_overlay_class("Shell_LightDismissOverlay"));
+        // A random UWP CoreWindow is not a shell overlay until its host PID/exe
+        // is validated by `win32_ex::is_shell_overlay`.
+        assert!(is_shell_overlay_class_for_host(
+            "Windows.UI.Core.CoreWindow",
+            true
+        ));
+        assert!(!is_shell_overlay_class_for_host(
+            "Windows.UI.Core.CoreWindow",
+            false
+        ));
+        assert!(is_shell_overlay_class_for_host("Shell_TrayWnd", false));
+        assert!(!is_shell_overlay_class_for_host("Notepad", true));
         let m = monitor();
         assert!(is_full_screen_on_monitor((0, 0, 1920, 1080), m.clone(), 2));
         assert!(!is_full_screen_on_monitor((100, 0, 1820, 1080), m, 2));
@@ -1217,6 +1287,20 @@ mod tests {
     }
 
     #[test]
+    fn win_key_gate_rejects_injected_and_modified_taps() {
+        // Gate, injected and modifier are all checked before the hook's flag reset.
+        assert!(win_key_reveal_allowed(true, false, false));
+        assert!(!win_key_reveal_allowed(true, true, false));
+        assert!(!win_key_reveal_allowed(true, false, true));
+        assert!(!win_key_reveal_allowed(false, false, false));
+        // Alt comes from the hook flags; Ctrl/Shift from GetAsyncKeyState.
+        assert!(!win_key_modifier_pressed(0, 0, 0));
+        assert!(win_key_modifier_pressed(LLKHF_ALTDOWN, 0, 0));
+        assert!(win_key_modifier_pressed(0, -32768, 0));
+        assert!(win_key_modifier_pressed(0, 0, -1));
+    }
+
+    #[test]
     fn win_key_reveal_gate_decision_table() {
         assert!(win_key_reveal_enabled(true, AutoHideMode::Always));
         assert!(win_key_reveal_enabled(true, AutoHideMode::Smart));
@@ -1227,11 +1311,72 @@ mod tests {
     }
 
     #[test]
-    fn start_menu_hide_fallback_only_when_unanchored() {
-        assert!(start_menu_hide_fallback(true, false));
-        assert!(!start_menu_hide_fallback(true, true));
-        assert!(!start_menu_hide_fallback(false, false));
-        assert!(!start_menu_hide_fallback(false, true));
+    fn start_menu_hide_fallback_waits_for_a_failed_anchor_attempt() {
+        assert!(start_menu_hide_fallback(
+            true,
+            false,
+            false,
+            AutoHideMode::Always
+        ));
+        assert!(!start_menu_hide_fallback(
+            true,
+            true,
+            false,
+            AutoHideMode::Always
+        ));
+        // An attempt still running (~800 ms) must not flicker the dock.
+        assert!(!start_menu_hide_fallback(
+            true,
+            false,
+            true,
+            AutoHideMode::Always
+        ));
+        assert!(!start_menu_hide_fallback(
+            true,
+            false,
+            false,
+            AutoHideMode::Disabled
+        ));
+        assert!(!start_menu_hide_fallback(
+            false,
+            false,
+            false,
+            AutoHideMode::Smart
+        ));
+    }
+
+    #[test]
+    fn start_menu_sequence_pending_anchored_close_reopen_never_flickers() {
+        // UNCLOAKED arrives while the reposition worker is still in flight.
+        let pending = start_menu_hide_fallback(true, false, true, AutoHideMode::Always);
+        assert!(!pending, "dock must stay put during the ~800 ms attempt");
+        // Worker succeeded: anchored, still no hide.
+        assert!(!start_menu_hide_fallback(
+            true,
+            true,
+            false,
+            AutoHideMode::Always
+        ));
+        // Attempt completed without anchoring: genuine overlap risk, hide.
+        assert!(start_menu_hide_fallback(
+            true,
+            false,
+            false,
+            AutoHideMode::Always
+        ));
+        // Cloak closes Start; the next reopen is pending again, not a hide.
+        assert!(!start_menu_hide_fallback(
+            false,
+            false,
+            false,
+            AutoHideMode::Always
+        ));
+        assert!(!start_menu_hide_fallback(
+            true,
+            false,
+            true,
+            AutoHideMode::Smart
+        ));
     }
 
     #[test]
@@ -1416,6 +1561,52 @@ mod tests {
             !apply_pinned_groups(&order, &settings)
                 .iter()
                 .any(|s| s == "start")
+        );
+    }
+
+    #[test]
+    fn start_placement_end_and_in_widgets_move_the_token_to_the_trail() {
+        let mut settings = DockSettings {
+            show_tray_button: true,
+            show_recycle_bin: true,
+            ..DockSettings::default()
+        };
+        let order = ["app:a", "widget:clock"].map(str::to_owned);
+
+        settings.start_placement = StartButtonPlacement::Start;
+        let head = apply_pinned_groups(&order, &settings);
+        assert_eq!(head.first().map(String::as_str), Some("start"));
+
+        settings.start_placement = StartButtonPlacement::End;
+        let end = apply_pinned_groups(&order, &settings);
+        assert!(end.first().is_none_or(|s| s != "start"));
+        assert_eq!(end, ["app:a", "widget:clock", "start", "tray", "bin"]);
+
+        settings.start_placement = StartButtonPlacement::InWidgets;
+        let widgets = apply_pinned_groups(&order, &settings);
+        assert_eq!(widgets, ["app:a", "widget:clock", "tray", "bin", "start"]);
+
+        // Legacy string values keep working, and unknown strings normalize to
+        // the typed field rather than silently dropping the button.
+        let mut legacy = DockSettings::default();
+        legacy.extra.insert("StartPlacement".into(), json!("End"));
+        assert_eq!(
+            normalized_start_placement(&legacy),
+            StartButtonPlacement::End
+        );
+        legacy
+            .extra
+            .insert("StartPlacement".into(), json!("InWidgets"));
+        assert_eq!(
+            normalized_start_placement(&legacy),
+            StartButtonPlacement::InWidgets
+        );
+        legacy
+            .extra
+            .insert("StartPlacement".into(), json!("SomethingElse"));
+        assert_eq!(
+            normalized_start_placement(&legacy),
+            StartButtonPlacement::Start
         );
     }
 
