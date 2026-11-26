@@ -91,7 +91,7 @@ The final integration wires these production entry points; integration test file
 
 ## Localization
 
-14 cultures ship as embedded JSON: `de-DE`, `en-US`, `es-ES`, `fr-FR`, `it-IT`, `ja-JP`, `ko-KR`, `nl-NL`, `pl-PL`, `pt-BR`, `ru-RU`, `tr-TR`, `uk-UA`, `zh-CN`. Every catalog has the **same 1129 keys** — the 999 C# keys plus Rust-port additions (DI/calendar/font, new widget features and the 5 Antigravity keys). `opentaskbar_core::i18n::{t, tr, t_fmt}` resolve with exact → same-language → `en-US` → key-name fallback; a missing key never crashes. Key parity is enforced by `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`. See [docs/localization.md](../docs/localization.md).
+14 cultures ship as embedded JSON: `de-DE`, `en-US`, `es-ES`, `fr-FR`, `it-IT`, `ja-JP`, `ko-KR`, `nl-NL`, `pl-PL`, `pt-BR`, `ru-RU`, `tr-TR`, `uk-UA`, `zh-CN`. Every catalog has the **same 1331 keys** — the 999 C# keys plus Rust-port additions (DI/calendar/font, new widget features, the 5 Antigravity keys and 202 new UI localization keys for island details, Settings/theme and widgets). `opentaskbar_core::i18n::{t, tr, t_fmt}` resolve with exact → same-language → `en-US` → key-name fallback; a missing key never crashes. Key parity is enforced by `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`. See [docs/localization.md](../docs/localization.md).
 
 ## Tests and CI
 
@@ -104,7 +104,7 @@ cargo test --workspace
 
 `crates/opentaskbar-core/tests/` ports the deterministic parts of the C# checks: settings key parity, AI usage/JWT/quota logic, `.otbackup` ZIP round-trip, wireless battery vendor parsing, media timeline/seek, shell recovery/journal, dock layout math, audio mixer scoring and locale completeness. Where the production API is a private function in another crate, a bridge test asserts the production source contract instead of duplicating it; cases that need a not-yet-landed cross-WS API are `#[ignore]`d with the owning workstream named in the message. Core-owned behaviour (settings enums/validation, i18n, the single-instance mutex) is tested against the real production functions.
 
-`rust-ci.yml` runs on every branch and also when C# locale catalogs change; `codeql.yml` scans Rust on every branch/PR and keeps C# on master; `dependabot.yml` tracks NuGet, Cargo and Actions. `scripts/check-locale-parity.ps1` gates 14 × 999 C# keys against 14 × 1129 Rust keys.
+`rust-ci.yml` runs on every branch and also when C# locale catalogs change; `codeql.yml` scans Rust on every branch/PR and keeps C# on master; `dependabot.yml` tracks NuGet, Cargo and Actions. `scripts/check-locale-parity.ps1` gates 14 × 999 C# keys against 14 × 1331 Rust keys.
 
 ## Privacy
 
