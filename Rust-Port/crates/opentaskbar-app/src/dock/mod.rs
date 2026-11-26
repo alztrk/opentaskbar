@@ -118,6 +118,9 @@ const WM_APP_VSYNC: u32 = WM_APP + 1;
 const WM_APP_ICONS: u32 = WM_APP + 2;
 const WM_APP_PREVIEW_LEAVE: u32 = WM_APP + 3;
 const WM_APP_WINKEY_REVEAL: u32 = WM_APP + 4;
+/// Idle-side settings reload: keeps disk I/O and the full DComp rebuild out of
+/// the hover/mouse/timer hot path.
+const WM_APP_SETTINGS_RELOAD: u32 = WM_APP + 5;
 const WM_HOTKEY: u32 = 0x0312;
 const HOTKEY_LAUNCHER_ID: i32 = 0x4F01;
 const HOTKEY_DOCK_ID: i32 = 0x4F02;
@@ -653,12 +656,25 @@ struct DockState {
     session_max_scale: f32,
     /// 450 ms drag-hover bring-to-front gesture.
     drag_hover_started: Option<Instant>,
-    /// Smart auto-hide rescans when the window set changes or once per second.
+    /// Smart auto-hide rescans only on a genuine shell/foreground change, never
+    /// from a mouse event or the 200 ms revealed-guard tick. Even then the 1 s
+    /// `last_overlap_scan` throttle applies.
     overlap_dirty: bool,
     /// Standalone Win-key press keeps the dock revealed for a short grace window.
     win_key_grace_until: Option<Instant>,
     last_overlap_scan: Option<Instant>,
     cached_overlap: bool,
+    /// Cached `flyout_reposition::is_anchored()` answer (>=2 s TTL). The 200 ms
+    /// guard tick reads the cache instead of validating the Start process.
+    cached_anchored: Option<(Instant, bool)>,
+    last_anchor_pending: bool,
+    last_start_menu_open: bool,
+    /// Deduplicates 1000 Hz `WM_MOUSEMOVE` floods at identical coordinates.
+    last_mouse_move: Option<(f32, f32)>,
+    /// `WM_APP_SETTINGS_RELOAD` is posted once; the idle message performs the save + reload.
+    settings_reload_pending: bool,
+    /// Rate-limits animation wake-ups to one per VSync frame (>=8 ms).
+    last_animation_request: Option<Instant>,
     /// Dynamic Island page/expanded state (headless policy, shared with the dock host).
     island: IslandState,
     scroll_offset: f32,
@@ -1409,6 +1425,12 @@ impl DockState {
             win_key_grace_until: None,
             last_overlap_scan: None,
             cached_overlap: false,
+            cached_anchored: None,
+            last_anchor_pending: false,
+            last_start_menu_open: false,
+            last_mouse_move: None,
+            settings_reload_pending: false,
+            last_animation_request: None,
             island: IslandState::new(Vec::new()),
             scroll_offset: 0.0,
             scroll_target: 0.0,
@@ -1505,12 +1527,18 @@ impl DockState {
     }
 
     fn ensure_animation(&mut self) {
-        if self.last_frame.is_none() {
-            self.last_frame = Some(Instant::now());
+        let now = Instant::now();
+        // Repeated wake-ups inside one frame (e.g. a 1000 Hz mouse flood) are dropped.
+        if !layout::animation_request_due(self.last_animation_request, now) {
+            return;
         }
-        // Clear any dropped `WM_APP_VSYNC` flag (e.g. skipped while a modal flyout/menu held
-        // `DockWndProcGuard`) so the VSync thread can never stall permanently.
-        self.tick_pending.store(false, Ordering::Release);
+        self.last_animation_request = Some(now);
+        if self.last_frame.is_none() {
+            self.last_frame = Some(now);
+        }
+        // `tick_pending` belongs to the VSync producer and is cleared ONLY by the
+        // `WM_APP_VSYNC` handler. Clearing it here would make the VSync thread post
+        // a fresh message for every animation request on the mouse hot path.
         self.set_animating(true);
     }
 
@@ -1720,6 +1748,34 @@ impl DockState {
     }
 
     fn evaluate_auto_hide(&mut self) {
+        self.evaluate_auto_hide_inner(true);
+    }
+
+    /// 200 ms revealed-guard tick: only cached shell data may be read here.
+    /// No overlap rescan, no Start-process validation (WS-2 hot path).
+    fn evaluate_auto_hide_guard(&mut self) {
+        self.evaluate_auto_hide_inner(false);
+    }
+
+    /// Reads `is_anchored()` at most once every `ANCHOR_CACHE_TTL`, and never from
+    /// the 200 ms guard tick. WS-3 owns the >=2 s PID -> exe cache inside the
+    /// shell API; this snapshot keeps its process query off the guard tick too.
+    fn anchored_for_decision(&mut self, now: Instant, allow_cross_process: bool) -> bool {
+        if !allow_cross_process {
+            return self.cached_anchored.is_some_and(|(_, value)| value);
+        }
+        let stale = self
+            .cached_anchored
+            .is_none_or(|(at, _)| now.saturating_duration_since(at) >= layout::ANCHOR_CACHE_TTL);
+        if stale {
+            let anchored = opentaskbar_shell::flyout_reposition::is_anchored();
+            self.cached_anchored = Some((now, anchored));
+        }
+        self.cached_anchored.is_some_and(|(_, value)| value)
+    }
+
+    fn evaluate_auto_hide_inner(&mut self, allow_cross_process: bool) {
+        let now = Instant::now();
         let pointer_busy = self.tracking_mouse
             || self.drag.is_some()
             || self
@@ -1736,17 +1792,24 @@ impl DockState {
         let at_edge = unsafe { GetCursorPos(&mut pt) != 0 }
             && layout::is_at_edge_trigger(edge, self.monitor.clone(), pt.x, pt.y, self.dpi);
         let overlap = if self.settings.auto_hide == AutoHideMode::Smart {
-            // RevealedGuardTimer marks the scan dirty on window changes; re-scan at most once/second otherwise.
-            let now = Instant::now();
-            let due = self.overlap_dirty
-                || self
-                    .last_overlap_scan
-                    .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(1));
-            if due {
-                self.overlap_dirty = false;
-                self.last_overlap_scan = Some(now);
-                self.cached_overlap = self.is_overlapped_by_window();
+            if allow_cross_process {
+                // `dirty` comes only from a real shell/foreground change; even then
+                // it cannot shorten the 1 s minimum between cross-process scans.
+                let periodic_due = self.last_overlap_scan.is_none_or(|t| {
+                    now.saturating_duration_since(t) >= layout::OVERLAP_SCAN_MIN_INTERVAL
+                });
+                if layout::overlap_scan_due(
+                    self.last_overlap_scan,
+                    self.overlap_dirty,
+                    periodic_due,
+                    now,
+                ) {
+                    self.overlap_dirty = false;
+                    self.last_overlap_scan = Some(now);
+                    self.cached_overlap = self.is_overlapped_by_window();
+                }
             }
+            // The 200 ms guard tick deliberately reuses the cached result.
             self.cached_overlap
         } else {
             false
@@ -1758,8 +1821,18 @@ impl DockState {
         // Cached state only: `is_open_now()` walks windows and is reserved for
         // the WinEvent hook, where it does not block the UI thread.
         let start_menu_open = crate::platform::start_menu_state::is_open();
-        let anchored = opentaskbar_shell::flyout_reposition::is_anchored();
         let anchor_pending = opentaskbar_shell::flyout_reposition::anchor_pending();
+        if allow_cross_process
+            && (anchor_pending != self.last_anchor_pending
+                || start_menu_open != self.last_start_menu_open)
+        {
+            // An attempt concluded or Start visibility changed: the cached
+            // answer is stale and must be re-read on this (non-guard) scan.
+            self.last_anchor_pending = anchor_pending;
+            self.last_start_menu_open = start_menu_open;
+            self.cached_anchored = None;
+        }
+        let anchored = self.anchored_for_decision(now, allow_cross_process);
         // If the shell's reposition attempt finished without anchoring Start,
         // hiding the dock is the only way to guarantee no overlap remains.
         // While the attempt is pending the dock must stay put (no ~800 ms flicker).
@@ -2084,6 +2157,26 @@ impl DockState {
         self.rebuild_visual_tree();
     }
 
+    /// Requests the disk save + full DComp rebuild on the idle `WM_APP_SETTINGS_RELOAD`
+    /// message instead of inside a hover timer / `WM_MOUSEMOVE` handler.
+    fn defer_settings_reload(&mut self) {
+        if layout::claim_deferred_reload(&mut self.settings_reload_pending) {
+            unsafe {
+                let _ = PostMessageW(self.hwnd as HWND, WM_APP_SETTINGS_RELOAD, 0, 0);
+            }
+        }
+    }
+
+    /// Idle half of the deferred reload. The flyout already mutated `self.settings`
+    /// in memory, so persist that change before re-reading it from disk.
+    fn flush_deferred_settings_reload(&mut self) {
+        if !layout::take_deferred_reload(&mut self.settings_reload_pending) {
+            return;
+        }
+        let _ = settings::save_to(&settings::settings_path(), &self.settings);
+        self.reload_settings_live();
+    }
+
     fn reload_settings_live(&mut self) {
         let next =
             opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
@@ -2267,6 +2360,9 @@ impl DockState {
             self.sync_window_bounds();
         }
         if changed {
+            // A window set / foreground change is a genuine shell change: request
+            // one overlap rescan (still gated by the 1 s minimum interval).
+            self.overlap_dirty = true;
             self.update_hovered_index_from_mouse();
             self.sync_preview_hover();
         }
@@ -3865,11 +3961,9 @@ impl DockState {
         );
         self.hover_flyout_open = false;
         if changed {
-            let _ = opentaskbar_core::settings::save_to(
-                &opentaskbar_core::settings::settings_path(),
-                &self.settings,
-            );
-            self.reload_settings_live();
+            // Disk I/O + full DComp rebuild move to the idle
+            // `WM_APP_SETTINGS_RELOAD` message; the mouse/timer path only posts.
+            self.defer_settings_reload();
         } else {
             self.refresh_widgets();
         }
@@ -4175,7 +4269,8 @@ impl DockState {
     /// Reconciles pointer hover and animation state after drags, modal flyouts, or context menus,
     /// where `WM_MOUSELEAVE` or `WM_APP_VSYNC` may have been suppressed.
     fn reconcile_pointer_after_interaction(&mut self) {
-        self.tick_pending.store(false, Ordering::Release);
+        // Do NOT clear `tick_pending` here: it belongs to the VSync producer and
+        // clearing it on the interaction path floods the queue with new ticks.
         if self.drag.is_some() || self.resize_drag.is_some() || self.scroll_pan.is_some() {
             return;
         }
@@ -4190,6 +4285,8 @@ impl DockState {
 
     fn handle_mouse_leave(&mut self) {
         self.tracking_mouse = false;
+        // Re-entry at the same coordinates must run hit testing again.
+        self.last_mouse_move = None;
         // A slider capture keeps the panel open; `on_leave` is a no-op while captured.
         self.cancel_widget_hover();
         if self.drag.is_some() || self.resize_drag.is_some() || self.scroll_pan.is_some() {
@@ -5241,7 +5338,10 @@ impl DockState {
         self.hovered_resize = None;
         self.hover_mouse_x = None;
         self.hovered_idx = None;
+        self.last_mouse_move = None;
         self.win_key_grace_until = None;
+        // Session switch/lock is a genuine shell change: request a rescan, still
+        // subject to the 1 s minimum interval.
         self.overlap_dirty = true;
         self.evaluate_auto_hide();
         self.ensure_animation();
@@ -5482,6 +5582,14 @@ unsafe extern "system" fn wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     let Some(_guard) = DockWndProcGuard::try_enter() else {
+        // A reentrant call must not consume the VSync pending flag: it is cleared
+        // only in the WM_APP_VSYNC handler. Re-post the tick instead of dropping it,
+        // otherwise the VSync thread would stall with `tick_pending` stuck true.
+        if msg == WM_APP_VSYNC {
+            unsafe {
+                let _ = PostMessageW(hwnd, msg, wparam, lparam);
+            }
+        }
         return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
     };
     let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut DockState };
@@ -5551,7 +5659,12 @@ unsafe extern "system" fn wnd_proc(
         WM_MOUSEMOVE => {
             let mx = loword_i16(lparam) / state.dpi;
             let my = hiword_i16(lparam) / state.dpi;
-            state.handle_mouse_move(mx, my);
+            // 1000 Hz mice repeat the same point many times; hit testing and
+            // animation wake-ups must run only for a genuinely new coordinate.
+            if layout::mouse_move_coalesce(&mut state.last_mouse_move, mx, my) {
+                state.handle_mouse_move(mx, my);
+            }
+            // Still drain a pending flyout armed by the hover-intent timer.
             state.open_pending_hover_flyout();
             0
         }
@@ -5641,6 +5754,11 @@ unsafe extern "system" fn wnd_proc(
             state.evaluate_auto_hide();
             0
         }
+        WM_APP_SETTINGS_RELOAD => {
+            // Idle half: save + reload only once per coalesced request.
+            state.flush_deferred_settings_reload();
+            0
+        }
         WM_HOTKEY => {
             match wparam as i32 {
                 HOTKEY_LAUNCHER_ID => {
@@ -5673,8 +5791,9 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_TIMER if wparam == TIMER_REVEALED_GUARD => {
-            state.overlap_dirty = true;
-            state.evaluate_auto_hide();
+            // Never mark overlap dirty here: the 200 ms tick must not turn into a
+            // cross-process window scan (nor a Start-process validation).
+            state.evaluate_auto_hide_guard();
             0
         }
         WM_TIMER if wparam == TIMER_HOVER_INTENT => {

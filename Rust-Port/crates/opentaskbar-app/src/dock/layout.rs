@@ -23,6 +23,8 @@
 //!   dock still uses the existing `WM_DROPFILES` inbound path only.
 #![allow(dead_code)]
 
+use std::time::{Duration, Instant};
+
 use opentaskbar_core::settings::{
     AutoHideMode, DockEdge, DockPosition, DockSettings, StartButtonPlacement,
 };
@@ -1100,6 +1102,67 @@ pub fn hover_panel_stays_open(
     pointer_valid || slider_captured
 }
 
+// ---- Dock message-loop hot-path policies (WS-2) --------------------------------
+
+/// Minimum age of the last Smart-overlap scan. The 200 ms revealed-guard tick and
+/// mouse events may never shorten it, even when a real shell/foreground change
+/// raised `dirty`.
+pub const OVERLAP_SCAN_MIN_INTERVAL: Duration = Duration::from_secs(1);
+/// Repeating `ensure_animation()` calls inside one VSync frame are dropped.
+pub const ANIMATION_REQUEST_MIN_INTERVAL: Duration = Duration::from_millis(8);
+/// Minimum age of a cached anchored answer; the Start-window process validation
+/// (owned by WS-3) must not run on the 200 ms guard tick.
+pub const ANCHOR_CACHE_TTL: Duration = Duration::from_secs(2);
+
+/// Pure throttle decision for the cross-process overlap scan.
+///
+/// `dirty` is only raised by a genuine shell/foreground change (never by a mouse
+/// event or the revealed-guard tick). It *requests* a rescan but cannot bypass
+/// the minimum interval. `periodic_due` is the ordinary ~1 s deadline.
+pub fn overlap_scan_due(
+    last_scan: Option<Instant>,
+    dirty: bool,
+    periodic_due: bool,
+    now: Instant,
+) -> bool {
+    let min_age_met = last_scan
+        .is_none_or(|last| now.saturating_duration_since(last) >= OVERLAP_SCAN_MIN_INTERVAL);
+    min_age_met && (dirty || periodic_due)
+}
+
+/// Rate limit for animation wake-ups: repeated calls within a single frame would
+/// otherwise post a fresh `WM_APP_VSYNC` on every high-polling-rate mouse event.
+pub fn animation_request_due(last_request: Option<Instant>, now: Instant) -> bool {
+    last_request
+        .is_none_or(|last| now.saturating_duration_since(last) >= ANIMATION_REQUEST_MIN_INTERVAL)
+}
+
+/// Coalesces identical `WM_MOUSEMOVE` positions. Returns `true` only for a
+/// genuinely new point, and records it so a 1000 Hz mouse cannot re-enter the
+/// dock hit-testing/animation path with the same coordinates.
+pub fn mouse_move_coalesce(last: &mut Option<(f32, f32)>, mx: f32, my: f32) -> bool {
+    if *last == Some((mx, my)) {
+        return false;
+    }
+    *last = Some((mx, my));
+    true
+}
+
+/// Claims the deferred-settings-reload request. Only the first claim posts
+/// `WM_APP_SETTINGS_RELOAD`; further ones coalesce into the pending flag.
+pub fn claim_deferred_reload(pending: &mut bool) -> bool {
+    if *pending {
+        return false;
+    }
+    *pending = true;
+    true
+}
+
+/// Consumes the pending deferred reload flag on the idle message.
+pub fn take_deferred_reload(pending: &mut bool) -> bool {
+    std::mem::replace(pending, false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1748,5 +1811,100 @@ mod tests {
         assert!(!hover_panel_stays_open(349, true, false, false));
         assert!(hover_panel_stays_open(350, false, true, false));
         assert!(!hover_panel_stays_open(500, true, true, true));
+    }
+
+    #[test]
+    fn overlap_scan_throttle_decision_table() {
+        let now = Instant::now();
+        // With no prior scan the first request (dirty or the initial periodic
+        // deadline) is due; a scan still needs an actual request.
+        assert!(overlap_scan_due(None, false, true, now));
+        assert!(overlap_scan_due(None, true, false, now));
+        assert!(overlap_scan_due(None, true, true, now));
+        assert!(!overlap_scan_due(None, false, false, now));
+        // A real shell/foreground change (dirty) may NEVER bypass the 1 s minimum.
+        assert!(!overlap_scan_due(
+            Some(now - Duration::from_millis(100)),
+            true,
+            true,
+            now
+        ));
+        assert!(!overlap_scan_due(
+            Some(now - Duration::from_millis(999)),
+            true,
+            false,
+            now
+        ));
+        // A periodic deadline is equally throttled.
+        assert!(!overlap_scan_due(
+            Some(now - Duration::from_millis(200)),
+            false,
+            true,
+            now
+        ));
+        // At the deadline either a dirty request or the periodic tick scans once.
+        assert!(overlap_scan_due(
+            Some(now - OVERLAP_SCAN_MIN_INTERVAL),
+            false,
+            true,
+            now
+        ));
+        assert!(overlap_scan_due(
+            Some(now - Duration::from_secs(2)),
+            true,
+            false,
+            now
+        ));
+    }
+
+    #[test]
+    fn animation_request_rate_limit_decision_table() {
+        let now = Instant::now();
+        assert!(animation_request_due(None, now));
+        assert!(!animation_request_due(
+            Some(now - Duration::from_millis(1)),
+            now
+        ));
+        assert!(!animation_request_due(
+            Some(now - Duration::from_millis(7)),
+            now
+        ));
+        assert!(animation_request_due(
+            Some(now - ANIMATION_REQUEST_MIN_INTERVAL),
+            now
+        ));
+        assert!(animation_request_due(
+            Some(now - Duration::from_millis(100)),
+            now
+        ));
+    }
+
+    #[test]
+    fn identical_mouse_moves_are_coalesced() {
+        let mut last = None;
+        assert!(mouse_move_coalesce(&mut last, 120.0, 40.0));
+        assert_eq!(last, Some((120.0, 40.0)));
+        // A 1000 Hz mouse delivering the same point does no hit-test work.
+        assert!(!mouse_move_coalesce(&mut last, 120.0, 40.0));
+        assert!(!mouse_move_coalesce(&mut last, 120.0, 40.0));
+        assert!(mouse_move_coalesce(&mut last, 120.5, 40.0));
+        assert!(mouse_move_coalesce(&mut last, 120.5, 40.5));
+        assert_eq!(last, Some((120.5, 40.5)));
+    }
+
+    #[test]
+    fn deferred_settings_reload_flag_coalesces_and_consumes() {
+        let mut pending = false;
+        assert!(claim_deferred_reload(&mut pending));
+        assert!(pending);
+        // Many hover-close events in one frame produce a single posted message.
+        assert!(!claim_deferred_reload(&mut pending));
+        assert!(!claim_deferred_reload(&mut pending));
+        assert!(take_deferred_reload(&mut pending));
+        assert!(!pending);
+        assert!(!take_deferred_reload(&mut pending));
+        // A later change can arm a fresh reload.
+        assert!(claim_deferred_reload(&mut pending));
+        assert!(take_deferred_reload(&mut pending));
     }
 }
