@@ -72,6 +72,17 @@ impl SurfaceStyle {
             border_color,
         }
     }
+
+    /// Contract alias: `SurfaceStyle::set_opacity(kind, value)` updates only that
+    /// surface through the shared theme manager.
+    pub fn set_opacity(kind: SurfaceKind, opacity: f64) -> Result<(), &'static str> {
+        ThemeManager::set_opacity(kind, opacity)
+    }
+
+    /// Contract alias: `SurfaceStyle::opacity(kind)` reads only that surface.
+    pub fn opacity(kind: SurfaceKind) -> f64 {
+        ThemeManager::opacity(kind)
+    }
 }
 
 impl Default for SurfaceStyle {
@@ -119,6 +130,9 @@ struct ThemeState {
     generation: u64,
     legacy_opacity: f64,
     settings_opacity: f64,
+    /// Explicit per-surface opacity values. These win over the legacy global
+    /// `surface_opacity` fallback on every `apply`, so live previews survive a reload.
+    opacity_overrides: BTreeMap<SurfaceKind, f64>,
 }
 
 impl Default for ThemeState {
@@ -145,6 +159,7 @@ impl Default for ThemeState {
             generation: 0,
             legacy_opacity: 0.9,
             settings_opacity: 0.95,
+            opacity_overrides: BTreeMap::new(),
         };
         state.rebuild_all();
         state
@@ -203,6 +218,9 @@ impl ThemeState {
 
     fn build(&self, kind: SurfaceKind) -> SurfaceMaterials {
         let style = self.style(kind);
+        // Glass/Solid/None is derived from the effective per-surface opacity so the
+        // material layer and the backdrop engine always agree on the same choice.
+        let background = background_for_opacity(style.background, style.opacity);
         let fill_source = match kind {
             SurfaceKind::Dock => self.material_source("DockMaterial"),
             SurfaceKind::Menu | SurfaceKind::Widget => self.material_source("MenuMaterial"),
@@ -221,7 +239,7 @@ impl ThemeState {
         } else {
             1.0
         };
-        let border_material = if style.background == SurfaceBackground::None {
+        let border_material = if background == SurfaceBackground::None {
             transparent()
         } else if let Some(color) = style.border_color {
             TokenValue::Solid(color)
@@ -233,12 +251,12 @@ impl ThemeState {
         let mut content = None;
         if kind == SurfaceKind::Settings {
             let source = self.brush("SettingsSidebarOverlay");
-            sidebar = Some(match style.background {
+            sidebar = Some(match background {
                 SurfaceBackground::None => transparent(),
                 SurfaceBackground::Solid => source.with_alpha(255),
                 SurfaceBackground::Glass => source.with_alpha(scaled_alpha(style.opacity)),
             });
-            content = Some(match style.background {
+            content = Some(match background {
                 SurfaceBackground::Solid => self.brush("SettingsBackground").with_alpha(255),
                 // SettingsFrame already paints behind the window: avoid double stacking.
                 _ => transparent(),
@@ -268,7 +286,7 @@ impl ThemeState {
                 .cloned()
                 .unwrap_or_else(|| self.brush("WidgetCardPressed"))
         };
-        let scale = if style.background == SurfaceBackground::Glass {
+        let scale = if background == SurfaceBackground::Glass {
             style.opacity
         } else {
             1.0
@@ -280,7 +298,7 @@ impl ThemeState {
             sheen,
             border_material,
             border_thickness: thickness,
-            shadow_opacity: if style.background == SurfaceBackground::None {
+            shadow_opacity: if background == SurfaceBackground::None {
                 0.0
             } else {
                 0.45
@@ -302,6 +320,34 @@ fn scaled_alpha(opacity: f64) -> u8 {
 
 fn transparent() -> TokenValue {
     TokenValue::Solid(Rgba::new(0, 0, 0, 0))
+}
+
+/// Clamps an opacity into `0.0..=1.0`; non-finite values mean "no surface".
+pub fn clamp_opacity(opacity: f64) -> f64 {
+    if !opacity.is_finite() {
+        return 0.0;
+    }
+    opacity.clamp(0.0, 1.0)
+}
+
+/// Decides Glass / Solid / None from the effective per-surface opacity.
+/// An explicit `Solid` or `None` request is honoured; `Glass` becomes `None`
+/// at zero opacity and `Solid` at full opacity.
+pub fn background_for_opacity(requested: SurfaceBackground, opacity: f64) -> SurfaceBackground {
+    match requested {
+        SurfaceBackground::None => SurfaceBackground::None,
+        SurfaceBackground::Solid => SurfaceBackground::Solid,
+        SurfaceBackground::Glass => {
+            let opacity = clamp_opacity(opacity);
+            if opacity <= 0.0 {
+                SurfaceBackground::None
+            } else if opacity >= 1.0 {
+                SurfaceBackground::Solid
+            } else {
+                SurfaceBackground::Glass
+            }
+        }
+    }
 }
 
 fn apply_fill(source: TokenValue, style: SurfaceStyle) -> TokenValue {
@@ -481,10 +527,17 @@ impl ThemeManager {
             };
             state.base = default_palette(dark);
             state.styles.clear();
+            let overrides = state.opacity_overrides.clone();
             for kind in SurfaceKind::ALL {
                 let style = settings
-                    .map(|s| style_from_settings(s, kind))
-                    .unwrap_or_default();
+                    .map(|s| style_from_settings(s, kind, &overrides))
+                    .unwrap_or_else(|| {
+                        let mut style = SurfaceStyle::default();
+                        if let Some(opacity) = overrides.get(&kind) {
+                            style.opacity = *opacity;
+                        }
+                        style
+                    });
                 state.styles.insert(kind, style);
             }
             state.legacy_opacity = state.style(SurfaceKind::Dock).opacity;
@@ -534,6 +587,63 @@ impl ThemeManager {
 
     pub fn get_surface(kind: SurfaceKind) -> SurfaceStyle {
         lock().style(kind)
+    }
+
+    /// Effective opacity of a single surface (WS-B cross-WS API).
+    pub fn opacity(kind: SurfaceKind) -> f64 {
+        lock().style(kind).opacity
+    }
+
+    /// Sets the opacity of one surface only. The value is recorded as a per-kind
+    /// override so a later `apply(settings)` cannot reset it from the global fallback.
+    pub fn set_opacity(kind: SurfaceKind, opacity: f64) -> Result<(), &'static str> {
+        if !opacity.is_finite() || !(0.0..=1.0).contains(&opacity) {
+            return Err("opacity out of range");
+        }
+        {
+            let mut state = lock();
+            if !state.initialized {
+                return Err("theme not initialized");
+            }
+            state.opacity_overrides.insert(kind, opacity);
+            let current = state.style(kind);
+            state.styles.insert(
+                kind,
+                SurfaceStyle::new(
+                    current.background,
+                    opacity,
+                    current.border_thickness,
+                    current.border_color,
+                ),
+            );
+            if kind == SurfaceKind::Dock {
+                state.legacy_opacity = opacity;
+            }
+            if kind == SurfaceKind::Settings {
+                state.settings_opacity = opacity;
+            }
+            state.generation = state.generation.wrapping_add(1);
+            state.rebuild(kind);
+        }
+        Self::notify(Some(kind));
+        Ok(())
+    }
+
+    /// Glass / Solid / None for one surface, derived from its own opacity.
+    pub fn effective_background(kind: SurfaceKind) -> SurfaceBackground {
+        let state = lock();
+        let style = state.style(kind);
+        background_for_opacity(style.background, style.opacity)
+    }
+
+    /// Drops explicit per-surface overrides; the next `apply(settings)` restores
+    /// the settings/global values.
+    pub fn clear_opacity_overrides() {
+        {
+            let mut state = lock();
+            state.opacity_overrides.clear();
+        }
+        Self::notify_all();
     }
 
     /// Live preview of one surface. Invalid opacity / uninitialized theme is rejected.
@@ -658,9 +768,9 @@ impl ThemeManager {
         let state = lock();
         state.initialized
             && state.current == settings.theme
-            && SurfaceKind::ALL
-                .iter()
-                .all(|kind| state.style(*kind) == style_from_settings(settings, *kind))
+            && SurfaceKind::ALL.iter().all(|kind| {
+                state.style(*kind) == style_from_settings(settings, *kind, &state.opacity_overrides)
+            })
     }
 
     /// Layered token lookup (theme pack > Windows > base palette).
@@ -685,6 +795,16 @@ impl ThemeManager {
         let state = lock();
         notify(&state, surface);
     }
+}
+
+/// Module-level alias of [`ThemeManager::set_opacity`] for cross-WS callers.
+pub fn set_opacity(kind: SurfaceKind, opacity: f64) -> Result<(), &'static str> {
+    ThemeManager::set_opacity(kind, opacity)
+}
+
+/// Module-level alias of [`ThemeManager::opacity`] for cross-WS callers.
+pub fn opacity(kind: SurfaceKind) -> f64 {
+    ThemeManager::opacity(kind)
 }
 
 /// Applies the theme editor's saved tokens to the **real** palette.
@@ -765,21 +885,33 @@ pub fn token_overrides_from_json(map: &serde_json::Map<String, Value>) -> TokenM
     out
 }
 
-fn style_from_settings(settings: &DockSettings, kind: SurfaceKind) -> SurfaceStyle {
-    let background = |name: &str| -> SurfaceBackground {
+fn style_from_settings(
+    settings: &DockSettings,
+    kind: SurfaceKind,
+    overrides: &BTreeMap<SurfaceKind, f64>,
+) -> SurfaceStyle {
+    let background = |name: &str, typed: SurfaceBackground| -> SurfaceBackground {
         match settings.extra.get(name).and_then(|v| v.as_str()) {
             Some("Solid") => SurfaceBackground::Solid,
             Some("None") => SurfaceBackground::None,
-            _ => SurfaceBackground::Glass,
+            Some("Glass") => SurfaceBackground::Glass,
+            _ => typed,
         }
     };
-    let number = |name: &str, fallback: f64| -> f64 {
+    let number = |name: &str, typed: f64, fallback: f64| -> f64 {
         settings
             .extra
             .get(name)
             .and_then(|v| v.as_f64())
-            .unwrap_or(fallback)
+            .unwrap_or(if typed.is_finite() { typed } else { fallback })
     };
+    // Legacy global opacity stays as the fallback for surfaces without their own
+    // value; explicit per-surface overrides (set_opacity) win over everything.
+    let global = settings
+        .extra
+        .get("SurfaceOpacity")
+        .and_then(|value| value.as_f64())
+        .unwrap_or(settings.surface_opacity);
     let color = |name: &str| -> Option<Rgba> {
         settings
             .extra
@@ -787,7 +919,7 @@ fn style_from_settings(settings: &DockSettings, kind: SurfaceKind) -> SurfaceSty
             .and_then(|v| v.as_str())
             .and_then(Rgba::from_hex)
     };
-    match kind {
+    let mut style = match kind {
         SurfaceKind::Dock => SurfaceStyle::new(
             settings.dock_background,
             settings.dock_opacity,
@@ -795,24 +927,32 @@ fn style_from_settings(settings: &DockSettings, kind: SurfaceKind) -> SurfaceSty
             color("DockBorderColor"),
         ),
         SurfaceKind::Menu => SurfaceStyle::new(
-            background("MenuBackground"),
-            number("MenuOpacity", 0.9),
-            number("MenuBorderThickness", 1.0),
+            background("MenuBackground", settings.menu_background),
+            number("MenuOpacity", settings.menu_opacity, global),
+            number("MenuBorderThickness", settings.menu_border_thickness, 1.0),
             color("MenuBorderColor"),
         ),
         SurfaceKind::Widget => SurfaceStyle::new(
-            background("WidgetBackground"),
-            number("WidgetOpacity", 0.9),
-            number("WidgetBorderThickness", 1.0),
+            background("WidgetBackground", settings.widget_background),
+            number("WidgetOpacity", settings.widget_opacity, global),
+            number("WidgetBorderThickness", settings.widget_border_thickness, 1.0),
             color("WidgetBorderColor"),
         ),
         SurfaceKind::Settings => SurfaceStyle::new(
-            background("SettingsBackground"),
-            number("SettingsOpacity", 0.95),
-            number("SettingsBorderThickness", 1.0),
+            background("SettingsBackground", settings.settings_background),
+            number(
+                "SettingsOpacity",
+                settings.settings_opacity,
+                global.clamp(0.6, 1.0),
+            ),
+            number("SettingsBorderThickness", settings.settings_border_thickness, 1.0),
             color("SettingsBorderColor"),
         ),
+    };
+    if let Some(opacity) = overrides.get(&kind) {
+        style.opacity = *opacity;
     }
+    style
 }
 
 /// Helper for consumers that need to convert a token to the C#-style mode name.
@@ -850,6 +990,7 @@ impl ThemeState {
             generation: self.generation,
             legacy_opacity: self.legacy_opacity,
             settings_opacity: self.settings_opacity,
+            opacity_overrides: self.opacity_overrides.clone(),
         };
         clone.styles.insert(kind, style);
         clone.build(kind)
@@ -959,5 +1100,87 @@ mod tests {
         assert!(ThemeManager::set_surface_opacity(f64::NAN).is_err());
         assert!(ThemeManager::set_settings_opacity(0.2).is_err());
         assert!(ThemeManager::set_border(SurfaceKind::Widget, 13.0, None).is_err());
+    }
+
+    #[test]
+    fn background_mode_is_derived_from_opacity() {
+        assert_eq!(
+            background_for_opacity(SurfaceBackground::Glass, 0.0),
+            SurfaceBackground::None
+        );
+        assert_eq!(
+            background_for_opacity(SurfaceBackground::Glass, 0.5),
+            SurfaceBackground::Glass
+        );
+        assert_eq!(
+            background_for_opacity(SurfaceBackground::Glass, 1.0),
+            SurfaceBackground::Solid
+        );
+        assert_eq!(
+            background_for_opacity(SurfaceBackground::Glass, f64::NAN),
+            SurfaceBackground::None
+        );
+        assert_eq!(
+            background_for_opacity(SurfaceBackground::Solid, 0.5),
+            SurfaceBackground::Solid
+        );
+        assert_eq!(
+            background_for_opacity(SurfaceBackground::None, 0.5),
+            SurfaceBackground::None
+        );
+        assert_eq!(clamp_opacity(-1.0), 0.0);
+        assert_eq!(clamp_opacity(2.0), 1.0);
+    }
+
+    #[test]
+    fn per_surface_opacity_wins_over_global_fallback_and_survives_reapply() {
+        ThemeManager::clear_opacity_overrides();
+        ThemeManager::apply(AppTheme::Dark, None);
+
+        // Four independent surfaces; a change to one never touches the others.
+        assert!(set_opacity(SurfaceKind::Dock, 0.55).is_ok());
+        assert!(set_opacity(SurfaceKind::Menu, 0.70).is_ok());
+        assert!(ThemeManager::set_opacity(SurfaceKind::Widget, 0.80).is_ok());
+        assert!(set_opacity(SurfaceKind::Settings, 0.65).is_ok());
+        assert_eq!(opacity(SurfaceKind::Dock), 0.55);
+        assert_eq!(opacity(SurfaceKind::Menu), 0.70);
+        assert_eq!(ThemeManager::opacity(SurfaceKind::Widget), 0.80);
+        assert_eq!(ThemeManager::get_surface(SurfaceKind::Settings).opacity, 0.65);
+        assert!(set_opacity(SurfaceKind::Dock, f64::NAN).is_err());
+        assert!(set_opacity(SurfaceKind::Menu, 1.2).is_err());
+
+        // Legacy global fallback applies only where no per-kind value is usable.
+        ThemeManager::clear_opacity_overrides();
+        let settings = DockSettings {
+            surface_opacity: 0.75,
+            menu_opacity: f64::NAN,
+            ..DockSettings::default()
+        };
+        ThemeManager::apply(AppTheme::Dark, Some(&settings));
+        assert_eq!(opacity(SurfaceKind::Menu), 0.75);
+
+        // Explicit per-surface values beat both typed settings and the global key.
+        assert!(set_opacity(SurfaceKind::Menu, 0.60).is_ok());
+        assert!(set_opacity(SurfaceKind::Settings, 0.85).is_ok());
+        ThemeManager::apply(AppTheme::Dark, Some(&settings));
+        assert_eq!(opacity(SurfaceKind::Menu), 0.60);
+        assert_eq!(opacity(SurfaceKind::Settings), 0.85);
+
+        // The backdrop mode follows the opacity API, not a separate toggle.
+        assert_eq!(
+            ThemeManager::effective_background(SurfaceKind::Menu),
+            SurfaceBackground::Glass
+        );
+        assert!(set_opacity(SurfaceKind::Menu, 1.0).is_ok());
+        assert_eq!(
+            ThemeManager::effective_background(SurfaceKind::Menu),
+            SurfaceBackground::Solid
+        );
+        assert!(set_opacity(SurfaceKind::Menu, 0.0).is_ok());
+        assert_eq!(
+            ThemeManager::effective_background(SurfaceKind::Menu),
+            SurfaceBackground::None
+        );
+        ThemeManager::clear_opacity_overrides();
     }
 }
