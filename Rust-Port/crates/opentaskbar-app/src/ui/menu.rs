@@ -38,11 +38,13 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetCursorPos,
-    GetMessageW, GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LoadCursorW, MSG,
-    RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_ACTIVATE, WM_ERASEBKGND,
-    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    GetMenu, GetMenuItemCount, GetMenuItemID, GetMenuStringW, GetMessageW, GetSystemMenu,
+    GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LoadCursorW, MF_BYPOSITION, MSG,
+    RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW, SetCursor,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+    WM_ACTIVATE, WM_COMMAND, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_PAINT, WM_SETCURSOR, WM_SYSCOMMAND, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 use opentaskbar_core::settings::DockSettings;
@@ -215,6 +217,95 @@ impl BorderStyle {
             1.0
         };
         Self { rgb, width_dips }
+    }
+}
+
+/// High bit marks a command as `WM_SYSCOMMAND` (target application's system menu).
+#[allow(dead_code)] // consumed by dock/window menus after WS-B `win32_ex` lands
+pub const NATIVE_SYS_COMMAND_FLAG: u32 = 0x8000_0000;
+
+#[allow(dead_code)]
+fn encode_native_command(id: u32, system: bool) -> u32 {
+    if system {
+        id | NATIVE_SYS_COMMAND_FLAG
+    } else {
+        id & !NATIVE_SYS_COMMAND_FLAG
+    }
+}
+
+/// Reads the target window's own `GetMenu` / `GetSystemMenu` commands (C#
+/// `ApplicationWindowMenu.cs`). WS-B `win32_ex` will expose richer wrappers after merge.
+#[allow(dead_code)] // consumed by dock/window menus after WS-B `win32_ex` lands
+pub fn native_app_menu_entries(target_hwnd: usize) -> Vec<MenuEntry> {
+    if target_hwnd == 0 {
+        return Vec::new();
+    }
+    let hwnd = target_hwnd as HWND;
+    let mut out = Vec::new();
+    // SAFETY: `hwnd` is a caller-supplied live window; menu handles belong to it.
+    unsafe {
+        for (menu, system) in [(GetMenu(hwnd), false), (GetSystemMenu(hwnd, 0), true)] {
+            if menu.is_null() {
+                continue;
+            }
+            let count = GetMenuItemCount(menu).max(0) as usize;
+            for pos in 0..count.min(64) {
+                let id = GetMenuItemID(menu, pos as i32);
+                if id == u32::MAX {
+                    // Separator or submenu entry: expose only separators for now.
+                    let mut probe = [0u16; 2];
+                    let len =
+                        GetMenuStringW(menu, pos as u32, probe.as_mut_ptr(), 2, MF_BYPOSITION);
+                    if len == 0 {
+                        out.push(MenuEntry::Separator);
+                    }
+                    continue;
+                }
+                let mut label = vec![0u16; 128];
+                let len = GetMenuStringW(
+                    menu,
+                    pos as u32,
+                    label.as_mut_ptr(),
+                    label.len() as i32,
+                    MF_BYPOSITION,
+                );
+                if len <= 0 {
+                    continue;
+                }
+                let text = String::from_utf16_lossy(&label[..len as usize])
+                    .replace('&', "")
+                    .trim()
+                    .to_owned();
+                if text.is_empty() {
+                    continue;
+                }
+                out.push(MenuEntry::item(
+                    encode_native_command(id, system),
+                    MenuIcon::Terminal,
+                    text,
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Executes a native menu command on the target window via `WM_COMMAND` / `WM_SYSCOMMAND`.
+#[allow(dead_code)] // consumed by dock/window menus after WS-B `win32_ex` lands
+pub fn invoke_native_app_command(target_hwnd: usize, command_id: u32) -> bool {
+    if target_hwnd == 0 {
+        return false;
+    }
+    let system = command_id & NATIVE_SYS_COMMAND_FLAG != 0;
+    let command = command_id & !NATIVE_SYS_COMMAND_FLAG;
+    // SAFETY: target window is owned by the caller; both messages are standard Win32 commands.
+    unsafe {
+        let result = if system {
+            SendMessageW(target_hwnd as HWND, WM_SYSCOMMAND, command as usize, 0)
+        } else {
+            SendMessageW(target_hwnd as HWND, WM_COMMAND, command as usize, 0)
+        };
+        result == 0
     }
 }
 
@@ -1084,5 +1175,19 @@ unsafe extern "system" fn menu_wnd_proc(
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NATIVE_SYS_COMMAND_FLAG, encode_native_command};
+
+    #[test]
+    fn native_commands_encode_system_flag_without_losing_the_id() {
+        let app = encode_native_command(42, false);
+        let sys = encode_native_command(0xF020, true);
+        assert_eq!(app, 42);
+        assert_ne!(sys & NATIVE_SYS_COMMAND_FLAG, 0);
+        assert_eq!(sys & !NATIVE_SYS_COMMAND_FLAG, 0xF020);
     }
 }
