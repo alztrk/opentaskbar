@@ -30,7 +30,7 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
-    IsWindowVisible,
+    IsWindow, IsWindowVisible,
 };
 
 use opentaskbar_core::log;
@@ -112,6 +112,11 @@ struct Inner {
     closed_at: Option<Instant>,
     pressed_at: Option<Instant>,
     start_window: usize,
+    /// The window a real CLOAKED event dismissed. A cloaked handle is normally
+    /// still alive, so it must be excluded from live "open" checks until an
+    /// UNCLOAKED event clears it — otherwise a genuine close would toggle
+    /// straight back open on the next press.
+    closed_window: usize,
 }
 
 static STATE: Mutex<Inner> = Mutex::new(Inner {
@@ -119,18 +124,21 @@ static STATE: Mutex<Inner> = Mutex::new(Inner {
     closed_at: None,
     pressed_at: None,
     start_window: 0,
+    closed_window: 0,
 });
 static CLOAK_HOOK: AtomicIsize = AtomicIsize::new(0);
 static FOREGROUND_HOOK: AtomicIsize = AtomicIsize::new(0);
 static INSTALL: Mutex<()> = Mutex::new(());
 static ON_OPENED: Mutex<Option<fn(usize)>> = Mutex::new(None);
 
-/// Host identity is stable per PID, so the expensive process query is cached.
-/// `is_open_now()` walks host windows from a WinEvent hook, where a repeated
-/// `OpenProcess` / `QueryFullProcessImageNameW` per window would dominate cost.
-static HOST_CACHE: LazyLock<Mutex<HashMap<u32, HostKind>>> =
+/// Host identity is stable per PID, so the expensive process query is cached
+/// for a short window. `is_open_now()` walks host windows from a WinEvent hook,
+/// where a repeated `OpenProcess` / `QueryFullProcessImageNameW` per window
+/// would dominate cost. The TTL also ensures a recycled PID is re-queried.
+static HOST_CACHE: LazyLock<Mutex<HashMap<u32, (HostKind, Instant)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 const HOST_CACHE_MAX: usize = 256;
+const HOST_CACHE_TTL: Duration = Duration::from_secs(2);
 
 // ---------------------------------------------------------------------------
 // Pure helpers (kept side-effect free so the state rules are testable).
@@ -237,6 +245,49 @@ fn was_open_at_press_impl(
     closed_at.is_some_and(|closed| within_grace(closed, press))
 }
 
+/// Pure TTL check. Future timestamps saturate to fresh rather than panicking.
+#[must_use]
+fn host_cache_entry_fresh(sampled_at: Instant, now: Instant) -> bool {
+    now.duration_since(sampled_at) < HOST_CACHE_TTL
+}
+
+/// A cloaked Start window is still open when it belongs to a host process and
+/// has not been dismissed by a real CLOAKED event. Alt+Tab hides the flyout via
+/// DWM cloaking without closing it, so filtering cloaked windows out broke the
+/// Start-button toggle after a switcher session.
+#[must_use]
+fn window_counts_as_open(
+    hwnd: usize,
+    dismissed_hwnd: usize,
+    alive: bool,
+    visible: bool,
+    cloaked: bool,
+    include_cloaked: bool,
+    host_is_start: bool,
+) -> bool {
+    hwnd != 0
+        && hwnd != dismissed_hwnd
+        && alive
+        && visible
+        && host_is_start
+        && (!cloaked || include_cloaked)
+}
+
+/// Dock activation and foreground changes never enumerate windows: they either
+/// keep a genuinely open Start flag or clear it while preserving the cloak
+/// grace stamp.
+#[must_use]
+fn refresh_without_enumeration(
+    cached_open: bool,
+    closed_at: Option<Instant>,
+) -> (bool, Option<Instant>) {
+    if cached_open {
+        opened_state()
+    } else {
+        foreground_closed_state(closed_at)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Win32 inspection.
 // ---------------------------------------------------------------------------
@@ -256,27 +307,41 @@ fn process_exe(pid: u32) -> Option<String> {
     }
 }
 
-fn host_kind_for_pid(pid: u32) -> HostKind {
+/// Returns the cached host kind for `pid`, calling `lookup` only when no fresh
+/// entry exists. `now` is injected so the 2 s TTL is testable without sleeping.
+/// A poisoned mutex degrades to a cache miss (fail-closed, as before).
+fn cached_host_kind_with(
+    pid: u32,
+    now: Instant,
+    lookup: impl FnOnce(u32) -> Option<String>,
+) -> HostKind {
     if pid == 0 {
         return HostKind::None;
     }
     if let Ok(cache) = HOST_CACHE.lock()
-        && let Some(&cached) = cache.get(&pid)
+        && let Some(&(cached, sampled_at)) = cache.get(&pid)
+        && host_cache_entry_fresh(sampled_at, now)
     {
         return cached;
     }
-    let kind = process_exe(pid)
+    let kind = lookup(pid)
         .as_deref()
         .map(host_kind_from_exe)
         .unwrap_or(HostKind::None);
     if let Ok(mut cache) = HOST_CACHE.lock() {
-        // Long sessions recycle PIDs; cap the cache instead of growing forever.
+        // Long sessions recycle PIDs; cap the cache instead of growing forever
+        // and drop entries that have expired.
+        cache.retain(|_, (_, sampled_at)| host_cache_entry_fresh(*sampled_at, now));
         if cache.len() >= HOST_CACHE_MAX {
             cache.clear();
         }
-        cache.insert(pid, kind);
+        cache.insert(pid, (kind, now));
     }
     kind
+}
+
+fn host_kind_for_pid(pid: u32) -> HostKind {
+    cached_host_kind_with(pid, Instant::now(), process_exe)
 }
 
 /// True when `pid` belongs to a Start / Shell host process. Exposed for
@@ -353,12 +418,20 @@ fn is_on_screen(hwnd: HWND) -> bool {
 struct EnumContext {
     windows: Vec<usize>,
     pid: Option<u32>,
+    dismissed: usize,
+    include_cloaked: bool,
 }
 
-/// Enumerates on-screen Start windows, optionally limited to one host PID.
-/// No minimum rect is applied: Win10 emits uncloak events with a tiny rect
-/// while the flyout is still animating.
-fn find_visible_start_windows(pid: Option<u32>) -> Vec<usize> {
+/// Enumerates Start host windows. The strict form (`include_cloaked = false`)
+/// is used by the CLOAKED hook to decide whether another *visible* Start window
+/// keeps the flyout open; the live form includes cloaked-but-live windows and
+/// excludes the one an actual CLOAKED event dismissed. No minimum rect is
+/// applied: Win10 emits uncloak events with a tiny rect during animation.
+fn find_start_windows_with(
+    pid: Option<u32>,
+    include_cloaked: bool,
+    dismissed: usize,
+) -> Vec<usize> {
     unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> i32 {
         unsafe {
             // SAFETY: `lparam` points at a context alive for the synchronous enumeration.
@@ -370,7 +443,16 @@ fn find_visible_start_windows(pid: Option<u32>) -> Vec<usize> {
                     return 1;
                 }
             }
-            if is_start_menu_process(hwnd) && is_on_screen(hwnd) {
+            let visible = IsWindowVisible(hwnd) != 0;
+            if window_counts_as_open(
+                hwnd as usize,
+                context.dismissed,
+                IsWindow(hwnd) != 0,
+                visible,
+                is_cloaked(hwnd),
+                context.include_cloaked,
+                is_start_menu_process(hwnd),
+            ) {
                 context.windows.push(hwnd as usize);
             }
             1
@@ -380,6 +462,8 @@ fn find_visible_start_windows(pid: Option<u32>) -> Vec<usize> {
     let mut context = EnumContext {
         windows: Vec::new(),
         pid,
+        dismissed,
+        include_cloaked,
     };
     // SAFETY: synchronous enumeration with an owned, live context.
     unsafe {
@@ -388,9 +472,40 @@ fn find_visible_start_windows(pid: Option<u32>) -> Vec<usize> {
     context.windows
 }
 
-/// Enumerates on-screen Start menu windows (all host processes).
+/// Strict, on-screen-only enumeration used by the CLOAKED hook.
+fn find_visible_start_windows(pid: Option<u32>) -> Vec<usize> {
+    find_start_windows_with(pid, false, 0)
+}
+
+/// Live query across all host processes: cloaked-but-live Start windows count
+/// as open (Alt+Tab), while a genuinely dismissed handle does not.
 pub fn find_start_menu_windows() -> Vec<usize> {
-    find_visible_start_windows(None)
+    let dismissed = STATE.lock().map(|state| state.closed_window).unwrap_or(0);
+    find_start_windows_with(None, true, dismissed)
+}
+
+/// Checks only the cached Start handle — no `EnumWindows`, so dock activation
+/// can refresh the toggle state without a live scan on the UI thread.
+fn cached_start_is_open() -> bool {
+    let (hwnd, dismissed) = STATE
+        .lock()
+        .map(|state| (state.start_window, state.closed_window))
+        .unwrap_or((0, 0));
+    if hwnd == 0 {
+        return false;
+    }
+    // SAFETY: revalidate the cached handle before using it as an open signal.
+    let alive = unsafe { IsWindow(hwnd as HWND) != 0 };
+    let visible = unsafe { IsWindowVisible(hwnd as HWND) != 0 };
+    window_counts_as_open(
+        hwnd,
+        dismissed,
+        alive,
+        visible,
+        is_cloaked(hwnd as HWND),
+        true,
+        is_start_menu_process(hwnd as HWND),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +517,9 @@ fn mark_open() {
         let (is_open, closed_at) = opened_state();
         state.is_open = is_open;
         state.closed_at = closed_at;
+        // The same HWND is alive but cloaked after a genuine close; an
+        // UNCLOAKED event is the only signal that clears that exclusion.
+        state.closed_window = 0;
     }
 }
 
@@ -489,6 +607,9 @@ unsafe extern "system" fn on_cloak_event(
             if let Ok(mut state) = STATE.lock() {
                 state.is_open = is_open;
                 state.closed_at = closed_at;
+                // Exclude this cloaked handle from live open checks until it
+                // uncloaks again, so a real dismissal still toggles correctly.
+                state.closed_window = if is_open { 0 } else { hwnd as usize };
             }
         }
     }
@@ -600,10 +721,18 @@ pub fn on_foreground_changed(is_start_menu: bool) {
 
 /// Hook point for WS-C's dock activation handler (right-click / focus). Like a
 /// foreground change, this is not a dismissal: it refreshes the cached flag
-/// without producing a false "Start just closed" grace signal.
+/// without producing a false "Start just closed" grace signal. It uses only
+/// the cached HWND — no live `EnumWindows` scan on the UI thread.
 pub fn on_dock_activated() {
-    if !is_start_menu_open_now() {
-        mark_foreground_inactive();
+    let (was_open, closed_at) = STATE
+        .lock()
+        .map(|state| (state.is_open, state.closed_at))
+        .unwrap_or((false, None));
+    let (is_open, closed_at) =
+        refresh_without_enumeration(was_open && cached_start_is_open(), closed_at);
+    if let Ok(mut state) = STATE.lock() {
+        state.is_open = is_open;
+        state.closed_at = closed_at;
     }
 }
 
@@ -641,6 +770,7 @@ fn reset_inner(state: &mut Inner) {
     state.pressed_at = None;
     // A stale HWND must not be fed to close_start on the next toggle.
     state.start_window = 0;
+    state.closed_window = 0;
 }
 
 pub fn reset() {
@@ -654,9 +784,11 @@ pub fn start_window() -> usize {
     STATE.lock().map(|state| state.start_window).unwrap_or(0)
 }
 
-/// True while the Start menu is actually on screen (visible and not cloaked).
-/// Alt+Tab takes the foreground while the menu stays open beneath the switcher,
-/// so the cached Start window and a full enumeration are checked as well.
+/// True while the Start menu is still logically open. A cloaked-but-live host
+/// window counts as open (Alt+Tab hides the flyout without dismissing it), but
+/// a window explicitly dismissed by a CLOAKED event does not. The foreground
+/// and cached-window checks run first; the full enumeration is only a fallback
+/// for a Start window we have not seen yet.
 pub fn is_start_menu_open_now() -> bool {
     // SAFETY: foreground window query.
     let foreground = unsafe { GetForegroundWindow() };
@@ -664,13 +796,8 @@ pub fn is_start_menu_open_now() -> bool {
         remember_start_window(foreground);
         return true;
     }
-    let cached = STATE.lock().map(|state| state.start_window).unwrap_or(0);
-    if cached != 0 {
-        let hwnd = cached as HWND;
-        // SAFETY: cached window is re-validated by process and visibility.
-        if is_start_menu_process(hwnd) && is_on_screen(hwnd) {
-            return true;
-        }
+    if cached_start_is_open() {
+        return true;
     }
     let windows = find_start_menu_windows();
     if let Some(&first) = windows.first() {
@@ -871,12 +998,14 @@ mod tests {
             closed_at: Some(now),
             pressed_at: Some(now),
             start_window: 0x1234,
+            closed_window: 0x1234,
         };
         reset_inner(&mut inner);
         assert!(!inner.is_open);
         assert_eq!(inner.closed_at, None);
         assert_eq!(inner.pressed_at, None);
         assert_eq!(inner.start_window, 0);
+        assert_eq!(inner.closed_window, 0);
     }
 
     #[test]
@@ -892,5 +1021,99 @@ mod tests {
         ));
         assert!(!is_start_host_exe(r"C:\Temp\notepad.exe"));
         assert_eq!(host_kind_for_pid(0), HostKind::None);
+    }
+
+    #[test]
+    fn host_cache_expires_after_two_seconds() {
+        use std::cell::Cell;
+        assert_eq!(HOST_CACHE_TTL, Duration::from_secs(2));
+        let pid = 4_000_000_123u32; // test-only PID, never a real host process
+        let base = Instant::now();
+        let calls = Cell::new(0);
+        let exe = r"C:\Windows\SystemApps\StartMenuExperienceHost.exe".to_owned();
+
+        assert_eq!(
+            cached_host_kind_with(pid, base, |_| {
+                calls.set(calls.get() + 1);
+                Some(exe.clone())
+            }),
+            HostKind::StartExperience
+        );
+        assert_eq!(calls.get(), 1);
+
+        // Still fresh: no OpenProcess / QueryFullProcessImageNameW on the hook.
+        assert_eq!(
+            cached_host_kind_with(pid, base + Duration::from_millis(1999), |_| {
+                calls.set(calls.get() + 1);
+                None
+            }),
+            HostKind::StartExperience
+        );
+        assert_eq!(calls.get(), 1);
+
+        // Expired: one fresh lookup, and the failure is cached as None too.
+        let expired = base + HOST_CACHE_TTL;
+        assert_eq!(
+            cached_host_kind_with(pid, expired, |_| {
+                calls.set(calls.get() + 1);
+                None
+            }),
+            HostKind::None
+        );
+        assert_eq!(calls.get(), 2);
+        assert_eq!(
+            cached_host_kind_with(pid, expired + Duration::from_millis(1), |_| {
+                calls.set(calls.get() + 1);
+                Some(exe)
+            }),
+            HostKind::None
+        );
+        assert_eq!(calls.get(), 2);
+        let _ = HOST_CACHE.lock().map(|mut cache| cache.remove(&pid));
+    }
+
+    #[test]
+    fn cloaked_live_window_counts_as_open_until_dismissed() {
+        let hwnd = 0x42usize;
+        // On-screen Start counts in both the strict hook and the live query.
+        assert!(window_counts_as_open(hwnd, 0, true, true, false, false, true));
+        assert!(window_counts_as_open(hwnd, 0, true, true, false, true, true));
+        // Cloaked but alive: only the live query counts it (Alt+Tab).
+        assert!(!window_counts_as_open(hwnd, 0, true, true, true, false, true));
+        assert!(window_counts_as_open(hwnd, 0, true, true, true, true, true));
+        // A real CLOAKED dismissal excludes that same handle from live checks.
+        assert!(!window_counts_as_open(hwnd, hwnd, true, true, true, true, true));
+        // Dead / hidden / unrelated-process windows never count.
+        assert!(!window_counts_as_open(hwnd, 0, false, true, true, true, true));
+        assert!(!window_counts_as_open(hwnd, 0, true, false, true, true, true));
+        assert!(!window_counts_as_open(hwnd, 0, true, true, true, true, false));
+        assert!(!window_counts_as_open(0, 0, true, true, true, true, true));
+    }
+
+    #[test]
+    fn dock_activation_refresh_preserves_the_close_grace() {
+        let cloak_at = Instant::now();
+        let stamp = Some(cloak_at);
+        // A still-open Start keeps the cached flag; no grace stamp is created.
+        assert_eq!(refresh_without_enumeration(true, None), (true, None));
+        // Losing Start without a cloak clears the flag but keeps the real stamp.
+        let (open, closed_at) = refresh_without_enumeration(false, stamp);
+        assert!(!open);
+        assert_eq!(closed_at, stamp);
+        assert!(was_open_at_press_impl(
+            false,
+            false,
+            closed_at,
+            cloak_at + Duration::from_millis(20)
+        ));
+    }
+
+    #[test]
+    fn was_open_at_press_public_api_stays_available_for_ws8() {
+        let now = Instant::now();
+        // Must remain callable from the dock without a live-query parameter.
+        let _ = was_open_at_press(now);
+        assert!(was_open_at_press_with(true, now));
+        assert!(!was_open_at_press_with(false, now));
     }
 }
