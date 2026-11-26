@@ -1,9 +1,11 @@
 //! C# `ShellRecoveryChecks` / `TaskbarRecoveryChecks` / flyout journal parity.
 //!
 //! These tests pin the wire format and retry policy. Bridge tests assert the
-//! same contract against the production shell modules that already exist; the
-//! watchdog argument parser belongs to WS-2 and is pinned by an `#[ignore]`d
-//! bridge until that API is reachable from this crate.
+//! same contract against the production shell modules that already exist,
+//! including the WS-2 watchdog argument form. The C#-style `generation`/`seq`
+//! journal line is now written/read by `flyout_journal.rs` (in a separate file
+//! so the native watchdog's four-field position journal stays intact); the
+//! shell crate's own unit tests exercise the real file API.
 
 mod common;
 
@@ -240,12 +242,11 @@ fn production_watchdog_and_journal_contract() {
     assert_eq!(retry_backoff(20), 5000);
 }
 
-/// WS-2 adds the watchdog argument parser/process handle test in its own
-/// crate. This bridge pins the argument form but cannot call the private API
-/// from `opentaskbar-core`; it stays ignored until the orchestrator wires a
-/// dev-dependency or moves the bridge next to the implementation.
+/// WS-2's `parse_watchdog_arg` is private to `opentaskbar-shell`, so this
+/// bridge checks the argument form the public `arm()` entry point passes to
+/// the native watchdog against the shipped source, while the vector parser
+/// above keeps the accepted shape anchored.
 #[test]
-#[ignore = "WS-2: watchdog arg parser and spawned process are private to opentaskbar-shell"]
 fn production_watchdog_accepts_the_reference_arguments() {
     let args = parse_watchdog_args(&[
         "--heartbeat-seconds=5",
@@ -257,19 +258,45 @@ fn production_watchdog_accepts_the_reference_arguments() {
     assert_eq!(args.restore_timeout_ms, 3000);
     common::assert_source_has(
         "crates/opentaskbar-shell/src/watchdog.rs",
-        &["--watchdog={pid}:{token}"],
+        &[
+            "--watchdog={pid}:{token}",
+            "fn watchdog_arg(",
+            "strip_prefix(\"--watchdog=\")",
+            "split_once(':')",
+        ],
     );
 }
 
-/// The C# flyout journal uses `START generation=… seq=…`, while the current
-/// Rust shell journal uses `handle pid left top` / tag lines. WS-2/WS-3 must
-/// align the wire format before this bridge can run.
+/// The C# flyout lines are now a real wire format in `flyout_journal.rs`:
+/// `FlyoutKindRecord::from_line` parses them and `to_line` writes them, with an
+/// atomic `*.tmp` + rename journal for all three kinds. The shell crate's unit
+/// tests round-trip the real file API; this bridge pins that API and the exact
+/// reference lines from `ShellRecoveryChecks`.
 #[test]
-#[ignore = "WS-2/WS-3: Rust flyout journal wire format must match the C# generation/seq format"]
 fn production_flyout_journal_accepts_generation_and_seq() {
     common::assert_source_has(
         "crates/opentaskbar-shell/src/flyout_journal.rs",
-        &["generation", "seq"],
+        &[
+            "generation=",
+            "seq=",
+            "pub enum FlyoutKind",
+            "pub struct FlyoutKindRecord",
+            "pub fn from_line(",
+            "pub fn to_line(",
+            "pub fn write_kind_records_to(",
+            "pub fn read_kind_records_from(",
+            "pub fn write_all_with_meta(",
+            "pub fn read_with_meta(",
+            "kind_journal_path",
+        ],
+    );
+    common::assert_source_has(
+        "crates/opentaskbar-shell/src/flyout_journal.rs",
+        &[
+            "kind_records_format_and_parse_all_three_c_sharp_lines",
+            "kind_journal_file_round_trips_generation_and_seq",
+            "position_journal_meta_is_backward_compatible",
+        ],
     );
     for line in [
         "START generation=42 seq=7",

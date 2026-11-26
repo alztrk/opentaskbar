@@ -153,11 +153,7 @@ impl FlyoutKind {
 /// Bumped on every new reposition request for a given flyout. Workers capture
 /// it and abort as soon as a newer request (or a journal restore) supersedes
 /// them. A single global counter would let one surface cancel another.
-static GENERATION: [AtomicU64; 3] = [
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-    AtomicU64::new(0),
-];
+static GENERATION: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
 static ANCHORED: AtomicBool = AtomicBool::new(false);
 static ANCHOR_VALID: AtomicBool = AtomicBool::new(false);
 static ANCHORED_HWND: AtomicUsize = AtomicUsize::new(0);
@@ -573,7 +569,9 @@ fn begin_close(hwnd: usize) -> (u64, usize) {
 /// (`mark_opened`) clears the session *and* advances the generation, so either
 /// signal alone is enough to reject a stale close.
 fn close_session_is_current(session: (u64, usize)) -> bool {
-    let owner = CLOSE_SESSION.lock().is_ok_and(|current| *current == session);
+    let owner = CLOSE_SESSION
+        .lock()
+        .is_ok_and(|current| *current == session);
     owner && token_is_current(session.0, generation_for(FlyoutKind::Start))
 }
 
@@ -1003,10 +1001,10 @@ fn find_search_windows() -> Vec<usize> {
         .into_iter()
         .map(|(hwnd, _)| hwnd)
         .collect();
-    if windows.is_empty() {
-        if let Some(hwnd) = find_search_window_by_title() {
-            windows.push(hwnd);
-        }
+    if windows.is_empty()
+        && let Some(hwnd) = find_search_window_by_title()
+    {
+        windows.push(hwnd);
     }
     windows
 }
@@ -1023,7 +1021,9 @@ fn find_control_center_window() -> Option<usize> {
     if !window_belongs_to(hwnd as usize, flyout_writer::CONTROL_CENTER_EXES) {
         return None;
     }
-    window_rect(hwnd as usize).is_some_and(|r| rect_area(r) > 0).then_some(hwnd as usize)
+    window_rect(hwnd as usize)
+        .is_some_and(|r| rect_area(r) > 0)
+        .then_some(hwnd as usize)
 }
 
 fn work_area(anchor: Anchor) -> Anchor {
@@ -1086,7 +1086,10 @@ pub fn reposition_flyout(kind: FlyoutKind, anchor: Anchor, hwnd_hint: usize) -> 
         return false;
     }
     if !anchor.is_valid() {
-        log::warn(format!("{}Anchor rejected an empty anchor rect.", kind.label()));
+        log::warn(format!(
+            "{}Anchor rejected an empty anchor rect.",
+            kind.label()
+        ));
         if kind == FlyoutKind::Start {
             mark_closed();
         }
@@ -1102,9 +1105,9 @@ pub fn reposition_flyout(kind: FlyoutKind, anchor: Anchor, hwnd_hint: usize) -> 
     let writer_token = flyout_writer::generation();
     let edge = load_from(&settings_path()).edge;
     let name = format!("opentaskbar-{}-anchor", kind.label().to_ascii_lowercase());
-    let spawned = thread::Builder::new().name(name).spawn(move || {
-        flyout_worker(kind, anchor, hwnd_hint, edge, token, writer_token)
-    });
+    let spawned = thread::Builder::new()
+        .name(name)
+        .spawn(move || flyout_worker(kind, anchor, hwnd_hint, edge, token, writer_token));
     if spawned.is_err() {
         log::error(format!(
             "{}Anchor could not spawn its reposition worker.",
@@ -1178,9 +1181,7 @@ fn flyout_worker(
     match kind {
         FlyoutKind::Start => start_worker(anchor, hwnd_hint, edge, token, writer_token, work),
         FlyoutKind::Search => search_worker(anchor, edge, token, writer_token, work),
-        FlyoutKind::ControlCenter => {
-            control_center_worker(anchor, edge, token, writer_token, work)
-        }
+        FlyoutKind::ControlCenter => control_center_worker(anchor, edge, token, writer_token, work),
     }
 }
 
@@ -1254,7 +1255,10 @@ fn start_worker(
         }
         // Explorer can re-assert its own Z-order/position right after the
         // entrance transition; one final move wins that race.
-        if cancelled(FlyoutKind::Start, token, writer_token) || !is_valid_hwnd(hwnd) || !apply_position(hwnd, x, y) {
+        if cancelled(FlyoutKind::Start, token, writer_token)
+            || !is_valid_hwnd(hwnd)
+            || !apply_position(hwnd, x, y)
+        {
             return;
         }
         if !set_anchored(hwnd, token, writer_token) {
@@ -1313,7 +1317,7 @@ fn largest_window(candidates: Vec<usize>) -> Option<usize> {
             continue;
         };
         let area = rect_area(rect);
-        if area > 0 && best.map_or(true, |(_, previous)| area > previous) {
+        if area > 0 && best.is_none_or(|(_, previous)| area > previous) {
             best = Some((hwnd, area));
         }
     }
@@ -1330,13 +1334,7 @@ fn window_pid(hwnd: usize) -> u32 {
 /// C# `RepositionSearchAsync` parity: bounded discovery, journal the original
 /// rect, re-assert across settle frames. Search uses its own generation, so it
 /// never cancels a Start worker running at the same time.
-fn search_worker(
-    anchor: Anchor,
-    edge: DockEdge,
-    token: u64,
-    writer_token: u64,
-    work: Anchor,
-) {
+fn search_worker(anchor: Anchor, edge: DockEdge, token: u64, writer_token: u64, work: Anchor) {
     for _ in 0..SEARCH_ATTEMPTS {
         thread::sleep(Duration::from_millis(SEARCH_DELAY_MS));
         if cancelled(FlyoutKind::Search, token, writer_token) {
@@ -1356,15 +1354,8 @@ fn search_worker(
         }
         journal_original(hwnd, window_pid(hwnd), false, work);
         let dpi = dpi_for(hwnd);
-        let (x, y) = compute_flyout_target(
-            FlyoutKind::Search,
-            anchor,
-            width,
-            height,
-            work,
-            edge,
-            dpi,
-        );
+        let (x, y) =
+            compute_flyout_target(FlyoutKind::Search, anchor, width, height, work, edge, dpi);
         if cancelled(FlyoutKind::Search, token, writer_token) || !is_window_live(hwnd) {
             return;
         }
@@ -2100,11 +2091,27 @@ mod tests {
             bottom: 1040,
         };
         assert_eq!(
-            compute_flyout_target(FlyoutKind::Start, anchor, 640, 724, work(), DockEdge::Bottom, 96),
+            compute_flyout_target(
+                FlyoutKind::Start,
+                anchor,
+                640,
+                724,
+                work(),
+                DockEdge::Bottom,
+                96
+            ),
             compute_target(anchor, 640, 724, work(), DockEdge::Bottom, 96)
         );
         assert_eq!(
-            compute_flyout_target(FlyoutKind::Search, anchor, 640, 724, work(), DockEdge::Bottom, 96),
+            compute_flyout_target(
+                FlyoutKind::Search,
+                anchor,
+                640,
+                724,
+                work(),
+                DockEdge::Bottom,
+                96
+            ),
             compute_search_target(anchor, 640, 724, work(), DockEdge::Bottom, 96)
         );
         assert_eq!(
@@ -2120,7 +2127,10 @@ mod tests {
             compute_control_center_target(anchor, 640, 724, work(), DockEdge::Bottom, 96)
         );
         // Search tracks the button with an 8 px margin; Control Center centers.
-        assert_eq!(compute_search_target(anchor, 640, 724, work(), DockEdge::Bottom, 96), (92, 268));
+        assert_eq!(
+            compute_search_target(anchor, 640, 724, work(), DockEdge::Bottom, 96),
+            (92, 268)
+        );
         assert_eq!(
             compute_control_center_target(anchor, 640, 724, work(), DockEdge::Bottom, 96),
             (8, 264)

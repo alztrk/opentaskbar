@@ -175,7 +175,8 @@ static REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 #[cfg(test)]
 static REFRESH_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
-static TEST_SUPPRESS_WRITES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static TEST_SUPPRESS_WRITES: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 #[cfg(test)]
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 

@@ -26,6 +26,7 @@ use opentaskbar_core::settings::{
     self, AppTheme, AutoHideMode, DockSettings, MiddleClickAction, StartButtonAction,
     StartButtonPlacement, SurfaceBackground,
 };
+use opentaskbar_shell::flyout_reposition::FlyoutKind;
 use opentaskbar_shell::tracker::{self, RunningWindow};
 use windows::Win32::Graphics::DirectComposition::{
     IDCompositionRectangleClip, IDCompositionSurface,
@@ -131,6 +132,10 @@ const WM_APP_SETTINGS_RELOAD: u32 = WM_APP + 5;
 const WM_APP_WHEEL_ROUTE: u32 = WM_APP + 6;
 /// EVENT_SYSTEM_ALERT queue drain: refresh notification badges on every dock.
 const WM_APP_NOTIFICATION_BADGE: u32 = WM_APP + 7;
+/// Posted by Search / Control Center open paths. The UI thread resolves the
+/// per-monitor anchor and schedules the reposition worker; the open path only
+/// posts, so it never blocks on settings I/O or shell animation frames.
+const WM_APP_SHELL_FLYOUT: u32 = WM_APP + 8;
 const WM_HOTKEY: u32 = 0x0312;
 const HOTKEY_LAUNCHER_ID: i32 = 0x4F01;
 const HOTKEY_DOCK_ID: i32 = 0x4F02;
@@ -139,13 +144,15 @@ const HOTKEY_DOCK_ID: i32 = 0x4F02;
 /// the Win-key grace window and C# `WinKeyRevealMonitor`.
 const WINKEY_REVEAL_MS: u64 = 600;
 
-/// One dock window's Start-button rect, in physical screen coordinates.
-type AnchorEntry = (usize, (i32, i32, i32, i32));
+/// One dock window's shell-button rect, in physical screen coordinates. The
+/// `FlyoutKind` tag keeps Start/Search/ControlCenter anchors independent: each
+/// native flyout owns its own generation and its own per-monitor selection.
+type AnchorEntry = (usize, FlyoutKind, (i32, i32, i32, i32));
 
-/// Physical rects of each dock window's Start button, keyed by dock HWND.
+/// Physical rects of every dock's shell buttons, keyed by (dock HWND, kind).
 /// `on_opened` (WS-B) runs on the WinEvent thread, so the registry is shared
 /// rather than thread-local; the primary dock is registered first.
-static START_BUTTON_ANCHORS: Mutex<Vec<AnchorEntry>> = Mutex::new(Vec::new());
+static SHELL_BUTTON_ANCHORS: Mutex<Vec<AnchorEntry>> = Mutex::new(Vec::new());
 /// Gate shared with the global low-level keyboard hook, which has no `DockState`.
 static WIN_KEY_REVEAL_GATE: AtomicBool = AtomicBool::new(true);
 /// A Start-button toggle is ignored within this window to stop a double click
@@ -156,22 +163,24 @@ fn anchor_is_valid(anchor: (i32, i32, i32, i32)) -> bool {
     anchor.2 > anchor.0 && anchor.3 > anchor.1
 }
 
-fn first_valid_anchor(anchors: &[AnchorEntry]) -> (i32, i32, i32, i32) {
+fn first_valid_anchor(anchors: &[AnchorEntry], kind: FlyoutKind) -> (i32, i32, i32, i32) {
     anchors
         .iter()
-        .find_map(|(_, rect)| anchor_is_valid(*rect).then_some(*rect))
+        .find_map(|(_, k, rect)| (*k == kind && anchor_is_valid(*rect)).then_some(*rect))
         .unwrap_or((0, 0, 0, 0))
 }
 
-/// Picks the Start button rect of the dock on the monitor hosting `hwnd`.
-/// `monitor_of` returns 0 for an invalid handle, which falls back to the first
-/// valid dock. Kept pure so multi-monitor selection is unit testable.
+/// Picks the button rect of the dock on the monitor hosting `hwnd`, for one
+/// specific flyout kind. `monitor_of` returns 0 for an invalid handle, which
+/// falls back to the first valid dock of that kind. Kept pure so multi-monitor
+/// and per-kind selection are unit testable.
 fn select_anchor_for(
     anchors: &[AnchorEntry],
+    kind: FlyoutKind,
     hwnd: usize,
     monitor_of: impl Fn(usize) -> usize,
 ) -> (i32, i32, i32, i32) {
-    let fallback = first_valid_anchor(anchors);
+    let fallback = first_valid_anchor(anchors, kind);
     if hwnd == 0 {
         return fallback;
     }
@@ -181,24 +190,27 @@ fn select_anchor_for(
     }
     anchors
         .iter()
-        .find(|(dock_hwnd, rect)| anchor_is_valid(*rect) && monitor_of(*dock_hwnd) == target)
-        .map(|(_, rect)| *rect)
+        .find(|(dock_hwnd, k, rect)| {
+            *k == kind && anchor_is_valid(*rect) && monitor_of(*dock_hwnd) == target
+        })
+        .map(|(_, _, rect)| *rect)
         .unwrap_or(fallback)
 }
 
-/// Screen rect of the Start button most recently laid out by any dock window.
-/// `(0, 0, 0, 0)` means no visible Start button has been laid out yet.
-pub fn start_button_anchor() -> (i32, i32, i32, i32) {
-    START_BUTTON_ANCHORS
+/// Screen rect of the button for `kind` most recently laid out by any dock.
+/// `(0, 0, 0, 0)` means no visible button has been laid out yet.
+pub fn shell_button_anchor(kind: FlyoutKind) -> (i32, i32, i32, i32) {
+    SHELL_BUTTON_ANCHORS
         .lock()
-        .map(|anchors| first_valid_anchor(&anchors))
+        .map(|anchors| first_valid_anchor(&anchors, kind))
         .unwrap_or((0, 0, 0, 0))
 }
 
-/// Per-monitor variant used by `on_opened`: a global single anchor puts the
-/// flyout on the wrong screen when docks exist on several monitors.
-pub fn start_button_anchor_for(hwnd: usize) -> (i32, i32, i32, i32) {
-    let Ok(anchors) = START_BUTTON_ANCHORS.lock() else {
+/// Per-monitor variant used by the flyout callbacks: a global single anchor
+/// puts the flyout on the wrong screen when docks exist on several monitors.
+/// `hwnd == 0` (unknown flyout HWND) falls back to the first valid dock.
+pub fn shell_button_anchor_for(hwnd: usize, kind: FlyoutKind) -> (i32, i32, i32, i32) {
+    let Ok(anchors) = SHELL_BUTTON_ANCHORS.lock() else {
         return (0, 0, 0, 0);
     };
     let monitor_of = |handle: usize| -> usize {
@@ -208,16 +220,47 @@ pub fn start_button_anchor_for(hwnd: usize) -> (i32, i32, i32, i32) {
         // SAFETY: monitor queries tolerate stale handles and return NULL.
         unsafe { MonitorFromWindow(handle as HWND, MONITOR_DEFAULTTONEAREST) as usize }
     };
-    select_anchor_for(&anchors, hwnd, monitor_of)
+    select_anchor_for(&anchors, kind, hwnd, monitor_of)
 }
 
-fn publish_start_button_anchor(hwnd: usize, anchor: (i32, i32, i32, i32)) {
-    if let Ok(mut anchors) = START_BUTTON_ANCHORS.lock() {
-        if let Some(entry) = anchors.iter_mut().find(|(owner, _)| *owner == hwnd) {
-            entry.1 = anchor;
+/// Screen rect of the Start button most recently laid out by any dock window.
+pub fn start_button_anchor() -> (i32, i32, i32, i32) {
+    shell_button_anchor(FlyoutKind::Start)
+}
+
+/// Back-compatible per-monitor Start lookup used by `on_opened`.
+pub fn start_button_anchor_for(hwnd: usize) -> (i32, i32, i32, i32) {
+    shell_button_anchor_for(hwnd, FlyoutKind::Start)
+}
+
+fn publish_shell_button_anchor(hwnd: usize, kind: FlyoutKind, anchor: (i32, i32, i32, i32)) {
+    if let Ok(mut anchors) = SHELL_BUTTON_ANCHORS.lock() {
+        if let Some(entry) = anchors
+            .iter_mut()
+            .find(|(owner, k, _)| *owner == hwnd && *k == kind)
+        {
+            entry.2 = anchor;
         } else {
-            anchors.push((hwnd, anchor));
+            anchors.push((hwnd, kind, anchor));
         }
+    }
+}
+
+/// Wire codes used by `WM_APP_SHELL_FLYOUT`: stable, distinct per kind, and
+/// deliberately small so the message payload stays obvious at every call site.
+fn flyout_code(kind: FlyoutKind) -> usize {
+    match kind {
+        FlyoutKind::Start => 0,
+        FlyoutKind::Search => 1,
+        FlyoutKind::ControlCenter => 2,
+    }
+}
+
+fn flyout_kind_from_code(code: usize) -> FlyoutKind {
+    match code {
+        1 => FlyoutKind::Search,
+        2 => FlyoutKind::ControlCenter,
+        _ => FlyoutKind::Start,
     }
 }
 
@@ -343,14 +386,21 @@ fn shell_section_width(settings: &DockSettings) -> f32 {
 
 fn widgets_strip_width(settings: &DockSettings, has_apps: bool) -> f32 {
     let active = widgets::active_widgets(settings);
-    let start_in_widgets = layout::start_strip_group(settings) == layout::StartStripGroup::InWidgets
+    let start_in_widgets = layout::start_strip_group(settings)
+        == layout::StartStripGroup::InWidgets
         && is_shell_button_visible(settings, ShellButton::Start);
     if active.is_empty() && !start_in_widgets {
         return 0.0;
     }
     let gap_before = if has_apps { 8.0 } else { 0.0 };
     let cards_w: f32 = active.iter().map(|wd| wd.width_dips + 6.0).sum();
-    gap_before + cards_w + if start_in_widgets { settings.icon_dips() + 6.0 } else { 0.0 }
+    gap_before
+        + cards_w
+        + if start_in_widgets {
+            settings.icon_dips() + 6.0
+        } else {
+            0.0
+        }
 }
 
 fn base_trail_width(settings: &DockSettings) -> f32 {
@@ -1141,22 +1191,6 @@ fn bounce_offset_dips(started: Option<Instant>) -> Option<f32> {
     Some(y)
 }
 
-/// Cross-WS API NOTE (WS-2): the contract's
-/// `tracker::enumerate_windows_async(tx: Sender<Vec<RunningWindow>>)` is not
-/// present in this worktree. This local shim has the identical signature and
-/// semantics so the dock UI thread is already off the `EnumWindows +
-/// OpenProcess` path; delete it in favour of the tracker function when WS-2
-/// lands, without touching any call site.
-fn enumerate_windows_async(tx: mpsc::Sender<Vec<RunningWindow>>) {
-    std::thread::Builder::new()
-        .name("dock-windows".to_owned())
-        .spawn(move || {
-            let windows = tracker::enumerate_windows();
-            let _ = tx.send(windows);
-        })
-        .ok();
-}
-
 fn spawn_settings_window() {
     let Ok(exe) = std::env::current_exe() else {
         return;
@@ -1727,7 +1761,7 @@ impl DockState {
                     // widget cards; `secondary_widgets = false` suppresses them on
                     // any secondary dock, while island placement keeps its priority.
                     !self.light_strip
-                        && !(self.is_secondary && !self.settings.secondary_widgets)
+                        && (!self.is_secondary || self.settings.secondary_widgets)
                         && !dynamic_island::is_widget_placed_on_connected_display(
                             &self.settings,
                             wd.id,
@@ -2288,7 +2322,7 @@ impl DockState {
         self.settings = next;
         set_win_key_reveal_gate(&self.settings);
         crate::apply_native_flyout_reposition(&self.settings);
-        self.refresh_start_button_anchor();
+        self.refresh_shell_button_anchors();
         // The Settings window runs in a separate process: apply its language change here too.
         loc::set_language(&self.settings.language);
         design::fonts::apply_settings(&self.settings);
@@ -2458,7 +2492,7 @@ impl DockState {
             let (tx, rx) = mpsc::channel();
             self.window_snapshot_rx = Some(rx);
             self.window_snapshot_in_flight = true;
-            enumerate_windows_async(tx);
+            opentaskbar_shell::tracker::enumerate_windows_async(tx);
         }
         let mut running = self.running_windows.clone();
         if self.light_strip {
@@ -2537,7 +2571,7 @@ impl DockState {
             self.last_window_rect = Some(rect);
             win32::reposition_dock_window(self.hwnd, rect.0, rect.1, rect.2, rect.3);
         }
-        self.refresh_start_button_anchor();
+        self.refresh_shell_button_anchors();
     }
 
     fn mon_w_dips(&self) -> f32 {
@@ -2825,7 +2859,8 @@ impl DockState {
         let start_in_widgets = layout::start_strip_group(&self.settings)
             == layout::StartStripGroup::InWidgets
             && is_shell_button_visible(&self.settings, ShellButton::Start);
-        let start_index = layout::resolved_start_widget_index(&self.settings, self.widget_visuals.len());
+        let start_index =
+            layout::resolved_start_widget_index(&self.settings, self.widget_visuals.len());
         let mut widget_rects = Vec::with_capacity(self.widget_visuals.len());
         for (index, wv) in self.widget_visuals.iter().enumerate() {
             if start_in_widgets && index == start_index {
@@ -2858,36 +2893,63 @@ impl DockState {
         (tray, bin, widget_rects)
     }
 
-    /// Publishes the dock Start button's screen rect for the Start-menu `on_opened`
-    /// callback. Uses the same shell-button layout as hit testing, so the flyout
-    /// lands directly above the button that was clicked.
-    fn refresh_start_button_anchor(&self) {
-        if !is_shell_button_visible(&self.settings, ShellButton::Start) {
-            publish_start_button_anchor(self.hwnd, (0, 0, 0, 0));
-            return;
+    /// DIP rect of a shell button, resolved with the same layout as hit testing
+    /// and drawing. `None` means the button is hidden in the current settings.
+    fn shell_button_anchor_dips(&self, kind: ShellButton) -> Option<DipRect> {
+        if !is_shell_button_visible(&self.settings, kind) {
+            return None;
         }
         let base = self.settings.icon_dips();
         let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
-        let center_x = self.live_shell_center_x(ShellButton::Start).clamp(
+        let center_x = self.live_shell_center_x(kind).clamp(
             pill_left + 1.0,
             (pill_left + pill_w - 1.0).max(pill_left + 1.0),
         );
-        let button = (
+        Some((
             center_x - base * 0.5,
             pill_top + 4.0,
             center_x + base * 0.5,
             pill_top + pill_h - 4.0,
-        );
+        ))
+    }
+
+    /// Publishes the screen rects of the dock's Start, Search and tray/notification
+    /// buttons. Start feeds the `on_opened` hook; Search and Control Center are
+    /// resolved from the same registry when their flyouts open. All three use the
+    /// live shell-button layout, so a flyout lands above the button that was clicked.
+    fn refresh_shell_button_anchors(&self) {
         let mut win_rc: RECT = unsafe { std::mem::zeroed() };
         unsafe {
             GetWindowRect(self.hwnd as HWND, &mut win_rc);
         }
-        let anchor = anchor_from_window_rect(
-            (win_rc.left, win_rc.top, win_rc.right, win_rc.bottom),
-            button,
-            self.dpi,
-        );
-        publish_start_button_anchor(self.hwnd, anchor);
+        let window = (win_rc.left, win_rc.top, win_rc.right, win_rc.bottom);
+
+        for (shell, kind) in [
+            (ShellButton::Start, FlyoutKind::Start),
+            (ShellButton::Search, FlyoutKind::Search),
+        ] {
+            let anchor = self
+                .shell_button_anchor_dips(shell)
+                .map(|button| anchor_from_window_rect(window, button, self.dpi))
+                .unwrap_or((0, 0, 0, 0));
+            publish_shell_button_anchor(self.hwnd, kind, anchor);
+        }
+
+        // Control Center follows the tray/notification button at the trailing
+        // edge of the pill (the same rect used for tray hit testing).
+        let (tray, _, _) = self.right_widget_rects_dips();
+        let anchor = tray
+            .map(|rc| anchor_from_window_rect(window, rc, self.dpi))
+            .unwrap_or((0, 0, 0, 0));
+        publish_shell_button_anchor(self.hwnd, FlyoutKind::ControlCenter, anchor);
+    }
+
+    /// Non-blocking flyout trigger: open paths only post a message, leaving the
+    /// anchor lookup and worker spawn to the UI thread's normal message pump.
+    fn request_flyout_anchor(&self, kind: FlyoutKind) {
+        unsafe {
+            let _ = PostMessageW(self.hwnd as HWND, WM_APP_SHELL_FLYOUT, flyout_code(kind), 0);
+        }
     }
 
     fn flyout_anchor_px(&self, rect: DipRect) -> (i32, i32) {
@@ -4532,8 +4594,7 @@ impl DockState {
             use crate::platform::start_menu_state;
             let now = Instant::now();
             start_menu_state::note_press(now);
-            let was_open =
-                start_menu_state::is_open() || start_menu_state::was_open_at_press(now);
+            let was_open = start_menu_state::is_open() || start_menu_state::was_open_at_press(now);
             self.pressed_shell_start_was_open = was_open;
             if !was_open {
                 let foreground = unsafe { GetForegroundWindow() } as usize;
@@ -4641,6 +4702,7 @@ impl DockState {
     fn toggle_start_menu(&mut self) {
         use crate::platform::start_menu_state;
         if self.settings.start_action == StartButtonAction::Launcher {
+            self.request_flyout_anchor(FlyoutKind::Search);
             opentaskbar_shell::taskbar::open_search();
             self.pressed_shell_start_was_open = false;
             return;
@@ -4702,7 +4764,10 @@ impl DockState {
             if self.hit_shell_button(mx, my) == Some(shell) {
                 match shell {
                     ShellButton::Start => self.toggle_start_menu(),
-                    ShellButton::Search => opentaskbar_shell::taskbar::open_search(),
+                    ShellButton::Search => {
+                        self.request_flyout_anchor(FlyoutKind::Search);
+                        opentaskbar_shell::taskbar::open_search();
+                    }
                     ShellButton::TaskView => opentaskbar_shell::taskbar::open_task_view(),
                 }
             }
@@ -5385,7 +5450,10 @@ impl DockState {
 
     fn execute_context_action(&mut self, action: ContextAction) {
         match action {
-            ContextAction::Search => opentaskbar_shell::taskbar::open_search(),
+            ContextAction::Search => {
+                self.request_flyout_anchor(FlyoutKind::Search);
+                opentaskbar_shell::taskbar::open_search();
+            }
             ContextAction::ApplyProfile(idx) => {
                 if let Some(prof) = self.settings.profiles.get(idx).cloned() {
                     self.settings.position = prof.position;
@@ -5463,7 +5531,10 @@ impl DockState {
             ContextAction::Terminal => pins::launch("wt.exe".to_owned()),
             ContextAction::TerminalAdmin => pins::launch_elevated("wt.exe".to_owned()),
             ContextAction::RunDialog => opentaskbar_shell::taskbar::open_run_dialog(),
-            ContextAction::Notifications => opentaskbar_shell::taskbar::open_notifications(),
+            ContextAction::Notifications => {
+                self.request_flyout_anchor(FlyoutKind::ControlCenter);
+                opentaskbar_shell::taskbar::open_notifications();
+            }
             ContextAction::DeviceManager => pins::launch("devmgmt.msc".to_owned()),
             ContextAction::DiskManagement => pins::launch("diskmgmt.msc".to_owned()),
             ContextAction::ComputerManagement => pins::launch("compmgmt.msc".to_owned()),
@@ -5808,12 +5879,7 @@ unsafe extern "system" fn notification_alert_hook(
     DOCK_HWNDS.with(|list| {
         for dock in list.borrow().iter() {
             unsafe {
-                let _ = PostMessageW(
-                    *dock as HWND,
-                    WM_APP_NOTIFICATION_BADGE,
-                    0,
-                    0,
-                );
+                let _ = PostMessageW(*dock as HWND, WM_APP_NOTIFICATION_BADGE, 0, 0);
             }
         }
     });
@@ -5849,12 +5915,8 @@ unsafe extern "system" fn mouse_wheel_hook(code: i32, wparam: WPARAM, lparam: LP
         DOCK_HWNDS.with(|list| {
             for hwnd in list.borrow().iter() {
                 unsafe {
-                    let _ = PostMessageW(
-                        *hwnd as HWND,
-                        WM_APP_WHEEL_ROUTE,
-                        payload,
-                        point as LPARAM,
-                    );
+                    let _ =
+                        PostMessageW(*hwnd as HWND, WM_APP_WHEEL_ROUTE, payload, point as LPARAM);
                 }
             }
         });
@@ -5953,9 +6015,8 @@ unsafe extern "system" fn wnd_proc(
         // VSync producer cannot stall with `tick_pending` stuck true, and a
         // re-post loop can never spin forever.
         if msg == WM_APP_VSYNC {
-            let repost = VSYNC_REPOST_PENDING.with(|pending| {
-                layout::vsync_repost_allowed(pending.replace(true))
-            });
+            let repost = VSYNC_REPOST_PENDING
+                .with(|pending| layout::vsync_repost_allowed(pending.replace(true)));
             if repost {
                 unsafe {
                     let _ = PostMessageW(hwnd, msg, wparam, lparam);
@@ -6153,9 +6214,17 @@ unsafe extern "system" fn wnd_proc(
             state.drain_notification_badges();
             0
         }
+        WM_APP_SHELL_FLYOUT => {
+            let kind = flyout_kind_from_code(wparam);
+            // Unknown flyout HWND: pass 0 and let the reposition worker discover
+            // the Search / Control Center window.
+            crate::on_shell_flyout_opened(kind, lparam as usize);
+            0
+        }
         WM_HOTKEY => {
             match wparam as i32 {
                 HOTKEY_LAUNCHER_ID => {
+                    state.request_flyout_anchor(FlyoutKind::Search);
                     opentaskbar_shell::taskbar::open_search();
                 }
                 HOTKEY_DOCK_ID => {
@@ -6176,6 +6245,11 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_WTSSESSION_CHANGE => {
             let event = wparam as u32;
+            if matches!(event, WTS_SESSION_LOGOFF | WTS_SESSION_LOCK) {
+                // A keyup lost across the secure desktop can leave a synthetic
+                // modifier held down; release before the session is suspended.
+                opentaskbar_shell::taskbar::release_held_keys();
+            }
             if matches!(
                 event,
                 WTS_SESSION_LOGOFF | WTS_SESSION_LOCK | WTS_SESSION_UNLOCK
@@ -6418,8 +6492,16 @@ pub fn run(settings: DockSettings) {
             reload_msg,
             settings.clone(),
             initial_pins.clone(),
-            if light_strip { Vec::new() } else { initial_slots.clone() },
-            if light_strip { Vec::new() } else { initial_running.clone() },
+            if light_strip {
+                Vec::new()
+            } else {
+                initial_slots.clone()
+            },
+            if light_strip {
+                Vec::new()
+            } else {
+                initial_running.clone()
+            },
             rect,
             !is_primary,
             light_strip,
@@ -6560,39 +6642,120 @@ mod tests {
     use super::*;
 
     #[test]
-    fn multi_monitor_anchor_selects_the_dock_on_the_start_monitor() {
+    fn multi_monitor_anchor_selects_the_dock_on_the_flyout_monitor() {
         let anchors = [
-            (11, (100, 900, 160, 940)),     // primary dock
-            (22, (-1860, 900, -1800, 940)), // left secondary dock
-            (33, (0, 0, 0, 0)),             // hidden Start button
+            (11, FlyoutKind::Start, (100, 900, 160, 940)), // primary dock
+            (22, FlyoutKind::Start, (-1860, 900, -1800, 940)), // left secondary dock
+            (33, FlyoutKind::Start, (0, 0, 0, 0)),         // hidden Start button
         ];
         let monitors = |hwnd: usize| match hwnd {
             11 => 1,
             22 | 33 => 2,
-            900 => 2, // the Start window lives on monitor 2
+            900 => 2, // the flyout lives on monitor 2
             _ => 0,
         };
-        // Start on monitor 2 must use the secondary dock, not the global primary.
+        // A flyout on monitor 2 must use the secondary dock, not the global primary.
         assert_eq!(
-            select_anchor_for(&anchors, 900, monitors),
+            select_anchor_for(&anchors, FlyoutKind::Start, 900, monitors),
             (-1860, 900, -1800, 940)
         );
         assert_eq!(
-            select_anchor_for(&anchors, 11, monitors),
+            select_anchor_for(&anchors, FlyoutKind::Start, 11, monitors),
             (100, 900, 160, 940)
         );
         // Empty anchor is never chosen; unknown monitors fall back to the first
-        // valid dock so a missing monitor cannot leave Start unanchored.
+        // valid dock so a missing monitor cannot leave a flyout unanchored.
         assert_eq!(
-            select_anchor_for(&anchors, 0, monitors),
+            select_anchor_for(&anchors, FlyoutKind::Start, 0, monitors),
             (100, 900, 160, 940)
         );
         assert_eq!(
-            select_anchor_for(&[(33, (0, 0, 0, 0))], 900, monitors),
+            select_anchor_for(
+                &[(33, FlyoutKind::Start, (0, 0, 0, 0))],
+                FlyoutKind::Start,
+                900,
+                monitors
+            ),
             (0, 0, 0, 0)
         );
         assert!(!anchor_is_valid((0, 0, 0, 0)));
         assert!(anchor_is_valid((0, 0, 1, 1)));
+    }
+
+    #[test]
+    fn shell_anchors_are_selected_per_kind_not_across_kinds() {
+        // Same dock, three different buttons; each kind must resolve its own rect.
+        let anchors = [
+            (11, FlyoutKind::Start, (100, 900, 160, 940)),
+            (11, FlyoutKind::Search, (200, 900, 260, 940)),
+            (11, FlyoutKind::ControlCenter, (300, 900, 360, 940)),
+            // A second monitor's buttons must never leak into the first.
+            (22, FlyoutKind::Start, (-1860, 900, -1800, 940)),
+            (22, FlyoutKind::Search, (-1860, 900, -1800, 940)),
+        ];
+        let monitors = |hwnd: usize| match hwnd {
+            11 => 1,
+            22 => 2,
+            900 => 2,
+            _ => 0,
+        };
+        for (kind, expected) in [
+            (FlyoutKind::Start, (-1860, 900, -1800, 940)),
+            (FlyoutKind::Search, (-1860, 900, -1800, 940)),
+            // No CC dock on monitor 2: fall back to the first valid *CC* rect,
+            // never to another kind's rect on the same monitor.
+            (FlyoutKind::ControlCenter, (300, 900, 360, 940)),
+        ] {
+            assert_eq!(select_anchor_for(&anchors, kind, 900, monitors), expected);
+        }
+        assert_eq!(
+            first_valid_anchor(&anchors, FlyoutKind::ControlCenter),
+            (300, 900, 360, 940)
+        );
+        assert_eq!(
+            select_anchor_for(&anchors, FlyoutKind::ControlCenter, 11, monitors),
+            (300, 900, 360, 940)
+        );
+        // An invalid rect for one kind cannot act as a fallback for another.
+        let only_invalid = [(11, FlyoutKind::Search, (0, 0, 0, 0))];
+        assert_eq!(
+            select_anchor_for(&only_invalid, FlyoutKind::ControlCenter, 900, monitors),
+            (0, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn flyout_message_codes_are_distinct_and_round_trip() {
+        let mut codes = std::collections::HashSet::new();
+        for kind in [
+            FlyoutKind::Start,
+            FlyoutKind::Search,
+            FlyoutKind::ControlCenter,
+        ] {
+            let code = flyout_code(kind);
+            assert!(codes.insert(code), "duplicate flyout code for {kind:?}");
+            assert_eq!(flyout_kind_from_code(code), kind);
+        }
+        // Unknown codes default to Start instead of dispatching a wrong flyout.
+        assert_eq!(flyout_kind_from_code(usize::MAX), FlyoutKind::Start);
+    }
+
+    #[test]
+    fn every_shell_flyout_open_path_posts_the_anchor_request() {
+        // Source-level assertion: opening Search/CC must only post the message;
+        // the anchor lookup and worker spawn belong to the UI-thread handler.
+        let dock_src = include_str!("mod.rs");
+        let main_src = include_str!("../main.rs");
+        for needle in [
+            "self.request_flyout_anchor(FlyoutKind::Search);",
+            "state.request_flyout_anchor(FlyoutKind::Search);",
+            "self.request_flyout_anchor(FlyoutKind::ControlCenter);",
+            "crate::on_shell_flyout_opened(kind, lparam as usize);",
+        ] {
+            assert!(dock_src.contains(needle), "dock must contain {needle:?}");
+        }
+        assert!(main_src.contains("dock::shell_button_anchor_for(hwnd, kind)"));
+        assert!(main_src.contains("reposition_flyout(kind, anchor, hwnd)"));
     }
 
     #[test]
@@ -6686,6 +6849,7 @@ mod tests {
             title: "Gamma Window".into(),
             exe_path: r"C:\Gamma.exe".into(),
             is_foreground: true,
+            aumid: String::new(),
         }];
         let initial = build_slots(&pins, &running, &[]);
         assert_eq!(initial.len(), 3);
@@ -6746,6 +6910,7 @@ mod tests {
             title: "First".into(),
             exe_path: r"C:\Apps\Running.exe".into(),
             is_foreground: true,
+            aumid: String::new(),
         }];
         windows.push(RunningWindow {
             hwnd: 101,

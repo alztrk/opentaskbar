@@ -41,7 +41,11 @@ pub struct WidgetPollSnapshot {
 
 impl WidgetPollSnapshot {
     /// Builds a snapshot with explicit data (used by unit tests and by the runtime bootstrap).
-    pub fn with_samples(drives: Vec<DriveSpace>, keyboard_code: String, sampled_at: Instant) -> Self {
+    pub fn with_samples(
+        drives: Vec<DriveSpace>,
+        keyboard_code: String,
+        sampled_at: Instant,
+    ) -> Self {
         let fixed_ready_drives = fixed_ready(&drives);
         Self {
             drives,

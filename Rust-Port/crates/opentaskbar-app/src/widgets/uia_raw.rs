@@ -74,8 +74,7 @@ struct AutomationVtbl {
     _p19: usize,
     _p20: usize,
     _p21: usize,
-    create_property_condition:
-        unsafe extern "system" fn(ComPtr, i32, VARIANT, *mut ComPtr) -> i32,
+    create_property_condition: unsafe extern "system" fn(ComPtr, i32, VARIANT, *mut ComPtr) -> i32,
 }
 
 /// IUIAutomationElement vtable: slots 5 (`FindAll`), 15 (`GetCurrentPattern`) and 21
@@ -153,11 +152,7 @@ impl Com {
         let mut out: ComPtr = ptr::null_mut();
         // SAFETY: `self.0` is live and `out` receives one reference on success.
         let hr = unsafe { (vtable::<UnknownVtbl>(self.0).query_interface)(self.0, iid, &mut out) };
-        if hr >= 0 {
-            Self::from_ptr(out)
-        } else {
-            None
-        }
+        if hr >= 0 { Self::from_ptr(out) } else { None }
     }
 }
 
@@ -262,7 +257,9 @@ impl Element {
     pub fn current_name(&self) -> Option<String> {
         let mut raw: *mut u16 = ptr::null_mut();
         // SAFETY: `raw` is a live BSTR out-parameter freed by `BSTR::from_raw` below.
-        let hr = unsafe { (vtable::<ElementVtbl>(self.0.as_ptr()).current_name)(self.0.as_ptr(), &mut raw) };
+        let hr = unsafe {
+            (vtable::<ElementVtbl>(self.0.as_ptr()).current_name)(self.0.as_ptr(), &mut raw)
+        };
         if hr < 0 || raw.is_null() {
             return None;
         }
@@ -293,7 +290,8 @@ impl Element {
         let pattern = self.pattern(UIA_VALUE_PATTERN_ID, &IID_IUI_AUTOMATION_VALUE_PATTERN)?;
         let mut raw: *mut u16 = ptr::null_mut();
         // SAFETY: the pattern is live; the BSTR out-parameter is freed below.
-        let hr = unsafe { (vtable::<ValueVtbl>(pattern.as_ptr()).value)(pattern.as_ptr(), &mut raw) };
+        let hr =
+            unsafe { (vtable::<ValueVtbl>(pattern.as_ptr()).value)(pattern.as_ptr(), &mut raw) };
         if hr < 0 || raw.is_null() {
             return None;
         }
@@ -304,8 +302,10 @@ impl Element {
 
     /// RangeValuePattern `(minimum, maximum, value)`.
     pub fn range_value(&self) -> Option<(f64, f64, f64)> {
-        let pattern = self
-            .pattern(UIA_RANGE_VALUE_PATTERN_ID, &IID_IUI_AUTOMATION_RANGE_VALUE_PATTERN)?;
+        let pattern = self.pattern(
+            UIA_RANGE_VALUE_PATTERN_ID,
+            &IID_IUI_AUTOMATION_RANGE_VALUE_PATTERN,
+        )?;
         let vtbl = unsafe { vtable::<RangeValueVtbl>(pattern.as_ptr()) };
         let mut value = 0.0;
         let mut maximum = 0.0;
@@ -321,7 +321,6 @@ impl Element {
         }
         Some((minimum, maximum, value))
     }
-
 }
 
 /// Marker guard: keeps the `ElementArray` COM reference alive while iterating.
@@ -343,10 +342,10 @@ impl ElementArray {
         for index in 0..count.min(256) {
             let mut raw: ComPtr = ptr::null_mut();
             // SAFETY: `raw` receives one reference and is released on Drop.
-            if unsafe { (vtbl.get_element)(self.0.as_ptr(), index, &mut raw) } >= 0 {
-                if let Some(com) = Com::from_ptr(raw) {
-                    elements.push(Element(com));
-                }
+            if unsafe { (vtbl.get_element)(self.0.as_ptr(), index, &mut raw) } >= 0
+                && let Some(com) = Com::from_ptr(raw)
+            {
+                elements.push(Element(com));
             }
         }
         Some(elements)

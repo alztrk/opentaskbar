@@ -319,7 +319,7 @@ pub enum TaskViewAction {
     TaskView,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MonitorInfo {
     pub handle: usize,
     pub device_name: String,
@@ -354,6 +354,36 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
+/// Pure Win32->`MonitorInfo` conversion shared by `EnumDisplayMonitors` and the
+/// single-monitor fallback. Kept side-effect free so signed virtual-desktop
+/// origins and DPI scaling can be tested without a live display.
+fn monitor_from_raw(
+    handle: usize,
+    device_name: String,
+    rect: (i32, i32, i32, i32),
+    dpi_x: u32,
+    is_primary: bool,
+) -> MonitorInfo {
+    let (left, top, right, bottom) = rect;
+    let dpi_scale = if dpi_x == 0 { 1.0 } else { dpi_x as f32 / 96.0 };
+    MonitorInfo {
+        handle,
+        device_name,
+        left,
+        top,
+        right,
+        bottom,
+        dpi_scale,
+        is_primary,
+    }
+}
+
+/// Primary monitor first; the fallback entry is already primary when present.
+fn order_monitors(mut monitors: Vec<MonitorInfo>) -> Vec<MonitorInfo> {
+    monitors.sort_by_key(|monitor| !monitor.is_primary);
+    monitors
+}
+
 /// Enumerates all active monitors with signed physical coordinates and per-monitor DPI.
 /// Primary monitor is always placed first; supports negative coordinates (left-of-primary monitors).
 pub fn enumerate_monitors() -> Vec<MonitorInfo> {
@@ -372,23 +402,24 @@ pub fn enumerate_monitors() -> Vec<MonitorInfo> {
                 let mut dpi_x = 96u32;
                 let mut dpi_y = 96u32;
                 let _ = GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
-                let dpi_scale = if dpi_x == 0 { 1.0 } else { dpi_x as f32 / 96.0 };
                 let end = info
                     .szDevice
                     .iter()
                     .position(|&c| c == 0)
                     .unwrap_or(info.szDevice.len());
                 let device_name = String::from_utf16_lossy(&info.szDevice[..end]);
-                list.push(MonitorInfo {
-                    handle: hmon as usize,
+                list.push(monitor_from_raw(
+                    hmon as usize,
                     device_name,
-                    left: info.monitorInfo.rcMonitor.left,
-                    top: info.monitorInfo.rcMonitor.top,
-                    right: info.monitorInfo.rcMonitor.right,
-                    bottom: info.monitorInfo.rcMonitor.bottom,
-                    dpi_scale,
-                    is_primary: (info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0,
-                });
+                    (
+                        info.monitorInfo.rcMonitor.left,
+                        info.monitorInfo.rcMonitor.top,
+                        info.monitorInfo.rcMonitor.right,
+                        info.monitorInfo.rcMonitor.bottom,
+                    ),
+                    dpi_x,
+                    (info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0,
+                ));
             }
             1
         }
@@ -406,20 +437,15 @@ pub fn enumerate_monitors() -> Vec<MonitorInfo> {
     }
     if monitors.is_empty() {
         let (w, h) = primary_screen_px();
-        monitors.push(MonitorInfo {
-            handle: 0,
-            device_name: r"\\.\DISPLAY1".to_owned(),
-            left: 0,
-            top: 0,
-            right: w,
-            bottom: h,
-            dpi_scale: 1.0,
-            is_primary: true,
-        });
-    } else {
-        monitors.sort_by_key(|m| !m.is_primary);
+        monitors.push(monitor_from_raw(
+            0,
+            r"\\.\DISPLAY1".to_owned(),
+            (0, 0, w, h),
+            96,
+            true,
+        ));
     }
-    monitors
+    order_monitors(monitors)
 }
 
 pub fn monitor_refresh_hz(device_name: &str) -> u32 {
@@ -1273,5 +1299,64 @@ pub fn set_startup_enabled(enabled: bool) {
             let _ = RegDeleteValueW(hkey, name.as_ptr());
         }
         RegCloseKey(hkey);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MonitorInfo, monitor_from_raw, order_monitors};
+
+    #[test]
+    fn enumerate_monitors_seam_handles_negative_origins_and_dpi() {
+        // Left-of-primary monitor: the virtual desktop origin is negative.
+        let secondary = monitor_from_raw(
+            7,
+            r"\\.\DISPLAY2".to_owned(),
+            (-1920, -120, 0, 960),
+            192,
+            false,
+        );
+        let primary = monitor_from_raw(9, r"\\.\DISPLAY1".to_owned(), (0, 0, 2560, 1440), 96, true);
+        assert_eq!((secondary.left, secondary.right), (-1920, 0));
+        assert_eq!((secondary.top, secondary.bottom), (-120, 960));
+        assert_eq!(secondary.width(), 1920);
+        assert_eq!(secondary.height(), 1080);
+        assert_eq!(secondary.dpi_scale, 2.0);
+        assert_eq!(primary.dpi_scale, 1.0);
+        assert_eq!(primary.display_label(), "DISPLAY1");
+        assert_eq!(secondary.left + secondary.width(), 0, "no gap at origin");
+
+        // A zero DPI reading must not divide by zero or invert the scale.
+        let fallback = monitor_from_raw(0, String::new(), (0, 0, 1366, 768), 0, true);
+        assert_eq!(fallback.dpi_scale, 1.0);
+        assert_eq!(fallback.display_label(), "Display");
+    }
+
+    #[test]
+    fn enumerate_monitors_seam_orders_primary_first_without_a_display() {
+        let secondary = MonitorInfo {
+            handle: 7,
+            device_name: "DISPLAY2".to_owned(),
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1080,
+            dpi_scale: 1.0,
+            is_primary: false,
+        };
+        let primary = MonitorInfo {
+            handle: 9,
+            device_name: "DISPLAY1".to_owned(),
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+            dpi_scale: 1.0,
+            is_primary: true,
+        };
+        let ordered = order_monitors(vec![secondary.clone(), primary.clone()]);
+        assert_eq!(ordered[0], primary);
+        assert_eq!(ordered[1], secondary);
+        assert!(order_monitors(Vec::new()).is_empty());
     }
 }

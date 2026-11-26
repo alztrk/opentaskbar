@@ -2224,6 +2224,40 @@ fn encode_night_light_toggle(orig: &[u8], on: bool) -> Option<Vec<u8>> {
     Some(out)
 }
 
+#[cfg(test)]
+mod night_light_tests {
+    use super::{decode_night_light_on, encode_night_light_toggle};
+
+    #[test]
+    fn night_light_encode_decode_round_trip() {
+        for on in [true, false] {
+            let encoded = encode_night_light_toggle(&[], on).expect("payload must encode");
+            assert_eq!(
+                decode_night_light_on(&encoded),
+                Some(on),
+                "round-trip must preserve the Night Light state"
+            );
+
+            // The registry blob normally carries the 16-byte CloudStore header.
+            let mut with_header = vec![2u8, 0, 0, 0];
+            with_header.extend_from_slice(&[0u8; 12]);
+            with_header.extend_from_slice(&encoded);
+            assert_eq!(decode_night_light_on(&with_header), Some(on));
+        }
+
+        let off = encode_night_light_toggle(&[], false).unwrap();
+        let on = encode_night_light_toggle(&[], true).unwrap();
+        assert_ne!(off, on, "toggle must actually rewrite the bond flags");
+        assert_eq!(decode_night_light_on(&on), Some(true));
+        assert_eq!(decode_night_light_on(&off), Some(false));
+
+        // C# writes an empty-envelope sentinel when Night Light was never enabled.
+        const EMPTY_ENVELOPE: [u8; 13] = [0x43, 0x42, 1, 0, 0x0A, 2, 1, 0, 0x2A, 0x2A, 0, 0, 0];
+        assert_eq!(decode_night_light_on(&EMPTY_ENVELOPE), Some(false));
+        assert_eq!(decode_night_light_on(b"not a CloudStore blob"), None);
+    }
+}
+
 // --- Weather (exact C# `WeatherService.cs` Open-Meteo API) ---
 
 #[derive(Clone, Default)]

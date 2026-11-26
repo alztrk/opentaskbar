@@ -2,8 +2,8 @@
 //!
 //! The deterministic helpers are kept as reference vectors; bridge tests below
 //! assert that the production implementations in `widgets/media_ext.rs` still
-//! expose the same guards/signatures. `librewolf_timeline` and `confirm_seek`
-//! belong to WS-6 and are pinned by an `#[ignore]`d bridge until they land.
+//! expose the same guards/signatures, including the WS-6 `librewolf_timeline`
+//! and `confirm_seek` surface.
 
 mod common;
 
@@ -197,17 +197,19 @@ fn production_media_helpers_keep_the_reference_guards() {
     assert_eq!(progress_ratio(200, 100), 1.0);
 }
 
-/// WS-6 owns these two functions. The bridge is deliberately ignored in this
-/// worktree; unignore it once `opentaskbar-core` can dev-depend on the app
-/// crate, or move it next to the implementation there.
+/// WS-6 landed both functions as `pub` in the app crate. They need a live UIA
+/// window to run, and the app is bin-only, so this bridge pins the shipped
+/// signatures while the parsing/seek vectors above exercise the reference
+/// semantics.
 #[test]
-#[ignore = "WS-6: librewolf_timeline/confirm_seek are not landed in this worktree yet"]
 fn production_librewolf_timeline_and_confirm_seek_contract() {
     common::assert_source_has(
         "crates/opentaskbar-app/src/widgets/media_ext.rs",
         &[
             "pub fn librewolf_timeline(source_app_id: &str, title: &str)",
             "pub fn confirm_seek(",
+            "fn matches_document(",
+            "\"progress-bar\"",
         ],
     );
     let dump = "music.youtube.com|Bohemian Rhapsody|1:23 / 4:56|slider";

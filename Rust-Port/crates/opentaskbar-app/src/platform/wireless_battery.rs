@@ -2340,7 +2340,7 @@ fn parse_loopback_endpoint(uri: &str, expected_port: u16, allow_websocket: bool)
     let authority = rest.split('/').next()?.split('?').next()?;
     let (host, port) = match authority.rsplit_once(':') {
         Some((host, port)) => (host, port.parse::<u16>().ok()?),
-        None => (authority, if allow_websocket { 80 } else { 80 }),
+        None => (authority, 80),
     };
     if port != expected_port || !matches!(host, "127.0.0.1" | "localhost" | "[::1]") {
         return None;
@@ -2395,7 +2395,10 @@ fn bluetooth_pnp_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
         "BatteryPercent",
     ];
     const ROOTS: &[(Handle, &str)] = &[
-        (HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Enum\Bluetooth"),
+        (
+            HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Enum\Bluetooth",
+        ),
         (HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Enum\BTHENUM"),
     ];
 
@@ -2426,12 +2429,11 @@ fn bluetooth_pnp_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
                     .iter()
                     .find_map(|name| reg_percent(node.raw(), name))
                     .or_else(|| {
-                        RegKey::open(node.raw(), "Device Parameters")
-                            .and_then(|params| {
-                                LEVEL_KEYS
-                                    .iter()
-                                    .find_map(|name| reg_percent(params.raw(), name))
-                            })
+                        RegKey::open(node.raw(), "Device Parameters").and_then(|params| {
+                            LEVEL_KEYS
+                                .iter()
+                                .find_map(|name| reg_percent(params.raw(), name))
+                        })
                     });
                 let Some(level) = level else {
                     continue;
@@ -2443,7 +2445,10 @@ fn bluetooth_pnp_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
                 if is_ignored_wired_device(&name) {
                     continue;
                 }
-                let id = format!("bt-pnp:{:08X}", fnv1a_u32(format!("{family}\\{instance}").as_bytes()));
+                let id = format!(
+                    "bt-pnp:{:08X}",
+                    fnv1a_u32(format!("{family}\\{instance}").as_bytes())
+                );
                 if seen.insert(id.clone()) {
                     readings.push(reading(
                         id,
@@ -2623,7 +2628,9 @@ fn probe_steelseries_loopback(cancel: &AtomicBool) -> Vec<WirelessReading> {
 
 fn url_port(url: &str) -> Option<u16> {
     let authority = url.split("://").nth(1)?.split('/').next()?;
-    authority.rsplit_once(':').map(|(_, port)| port.parse().ok())?
+    authority
+        .rsplit_once(':')
+        .map(|(_, port)| port.parse().ok())?
 }
 
 // ---------------------------------------------------------------------------
@@ -4015,7 +4022,8 @@ impl From<&DockSettings> for AggregatorSettings {
 /// Converts a live transport reading into the aggregator's richer type.
 fn to_battery_reading(item: &WirelessReading) -> BatteryReading {
     let level = (item.level_01 * 100.0).round().clamp(0.0, 100.0) as u32;
-    let mut reading = BatteryReading::new(&item.id, &item.name, level, item.is_charging, item.source);
+    let mut reading =
+        BatteryReading::new(&item.id, &item.name, level, item.is_charging, item.source);
     reading.connected = item.is_connected;
     reading.stale = item.stale;
     reading
@@ -4072,10 +4080,7 @@ pub fn read_all_with_settings(settings: &DockSettings) -> Vec<WirelessReading> {
         return readings.clone();
     }
 
-    let fresh: Vec<BatteryReading> = read_all()
-        .iter()
-        .map(to_battery_reading)
-        .collect();
+    let fresh: Vec<BatteryReading> = read_all().iter().map(to_battery_reading).collect();
     let mut aggregator = WirelessBatteryAggregator::new(agg_settings);
     let merged = aggregator
         .merge(fresh)

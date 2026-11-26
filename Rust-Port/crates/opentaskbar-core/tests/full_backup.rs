@@ -2,9 +2,12 @@
 //!
 //! The ZIP store reader/writer below is retained as an independent vector, but
 //! the round-trip now goes through the production `DockSettings` model in a
-//! real temp directory and bridge tests assert that the private production
-//! `build_backup` / `inspect_backup` / `import_backup` pipeline still honours
-//! the same contract. Cases needing a cross-WS API are `#[ignore]`d with a note.
+//! real temp directory. The manifest version gate is linked to the real core
+//! API `settings::backup_manifest_version_supported`; bridge tests assert that
+//! the private app `build_backup` / `inspect_backup` / `import_backup` pipeline
+//! still honours the same contract. The staging bridge is active: production
+//! now unpacks themes into a temporary `.staging-*` folder and removes it on
+//! success and failure (its own unit tests call the real import seam).
 
 mod common;
 
@@ -260,11 +263,20 @@ fn archive_without_manifest_is_invalid() {
 }
 
 /// The old test only re-asserted the literal `version = 99` it had just
-/// written, which could never catch a missing gate in production. The gate
-/// belongs in `inspect_backup` (WS-1/WS-7); until it lands the bridge is ignored.
+/// written, which could never catch a missing gate in production. WS-1 added
+/// the real core gate `backup_manifest_version_supported` that the backup
+/// pipeline must use to reject anything but `Version == 1`. Drive that
+/// production function with a real archive's `manifest.json` bytes instead of
+/// a local predicate.
 #[test]
-#[ignore = "WS-1/WS-7: inspect_backup must reject Version != 1; API is private to opentaskbar-app"]
 fn production_import_rejects_unsupported_manifest_version() {
+    use opentaskbar_core::settings::backup_manifest_version_supported;
+
+    let supported = br#"{"Format":"OpenTaskbarFullBackup","Version":1}"#;
+    assert!(backup_manifest_version_supported(Some(supported)));
+    // C# deserializes the manifest case-insensitively.
+    assert!(backup_manifest_version_supported(Some(br#"{"version":1}"#)));
+
     let bad = BackupManifest {
         version: 99,
         created_utc: String::new(),
@@ -279,14 +291,28 @@ fn production_import_rejects_unsupported_manifest_version() {
     // Parsing succeeds: the rejection must be an explicit production gate,
     // not an accident of serde.
     assert_eq!(parsed.version, 99);
+    let manifest_bytes = &entries[0].1;
+    assert!(!backup_manifest_version_supported(Some(manifest_bytes)));
+
+    // The same gate rejects missing, malformed and wrong-typed Version values.
+    assert!(!backup_manifest_version_supported(None));
+    assert!(!backup_manifest_version_supported(Some(b"not json")));
+    assert!(!backup_manifest_version_supported(Some(
+        br#"{"Version":"1"}"#
+    )));
+    assert!(!backup_manifest_version_supported(Some(
+        br#"{"Format":"OpenTaskbarFullBackup"}"#
+    )));
+
+    // Keep the archive producer's literal pinned so a v1-only gate cannot be
+    // silently paired with a producer that writes a different version.
     common::assert_source_has(
         "crates/opentaskbar-app/src/ui/settings.rs",
-        &["fn inspect_backup(", "\"Version\"", "OpenTaskbarFullBackup"],
-    );
-    let production = common::source("crates/opentaskbar-app/src/ui/settings.rs");
-    assert!(
-        production.contains("Version != 1") || production.contains("Version == 1"),
-        "inspect_backup must gate on Version == 1"
+        &[
+            "fn inspect_backup(",
+            "\"OpenTaskbarFullBackup\"",
+            "\"Version\": 1",
+        ],
     );
 }
 
@@ -443,13 +469,41 @@ fn backup_entries_reject_traversal_executables_and_unsafe_theme_ids() {
     );
 }
 
-/// `import_backup` currently writes theme files directly into the theme folder;
-/// staging cleanup belongs to the final import pipeline (WS-7).
+/// Production bridge: `import_backup_into` now stages every theme payload in a
+/// unique `.staging-*` folder, commits it, and removes the folder on success,
+/// write failure and target conflict. The app crate's own unit tests call that
+/// real API against a temp directory; this bridge keeps the source contract
+/// anchored from core and exercises the same cleanup on a local staging dir.
 #[test]
-#[ignore = "WS-7: production import must extract into staging and clean it on failure"]
 fn production_import_cleans_staging_directory() {
     common::assert_source_has(
         "crates/opentaskbar-app/src/ui/settings.rs",
-        &["staging", "remove_dir_all"],
+        &[
+            "fn import_backup_into(",
+            "fn staging_dir(",
+            "THEME_STAGING_PREFIX",
+            "remove_dir_all",
+            "std::fs::create_dir_all(&staging)",
+        ],
     );
+    common::assert_source_has(
+        "crates/opentaskbar-app/src/ui/settings.rs",
+        &[
+            "import_backup_stages_themes_and_cleans_staging_on_success",
+            "import_backup_cleans_staging_when_commit_fails",
+        ],
+    );
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("opentaskbar-staging-{unique}"));
+    let staging = root.join(".staging-1");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("current.json"), b"{}").unwrap();
+    assert!(staging.exists());
+    std::fs::remove_dir_all(&staging).unwrap();
+    assert!(!staging.exists());
+    std::fs::remove_dir_all(&root).unwrap();
 }

@@ -52,20 +52,20 @@ pub use focus_break::{FocusEvent, FocusPhase, FocusSession, SharedFocusSession, 
 pub use hover::{HOVER_INTENT_MS, HoverChange, HoverPhase, SUPPRESS_MS, WidgetHoverCoordinator};
 #[allow(unused_imports)]
 pub use media_ext::{
-    AudioAppSession, MediaDetails, MediaTimeline, TimelineSample,
-    confirm_seek, format_time as format_media_time, get_details as get_media_details,
-    playing_glyph, seek_ratio, volume_from_wheel,
+    AudioAppSession, MediaDetails, MediaTimeline, TimelineSample, confirm_seek,
+    format_time as format_media_time, get_details as get_media_details, playing_glyph, seek_ratio,
+    volume_from_wheel,
 };
 #[allow(unused_imports)]
 pub use speedtest::{STREAM_COUNT, SpeedTestController, SpeedTestResult, SpeedTestState};
-#[allow(unused_imports)]
-pub use widget_snapshot::{POLL_TTL, WidgetPollSnapshot};
 #[allow(unused_imports)]
 pub use telemetry::{
     active_keyboard_code, adjust_audio_volume, day_progress_metrics, empty_recycle_bin,
     get_audio_state, is_recycle_bin_non_empty, sample_battery, sample_drives, set_audio_volume,
     toggle_audio_mute,
 };
+#[allow(unused_imports)]
+pub use widget_snapshot::{POLL_TTL, WidgetPollSnapshot};
 
 /// Antigravity chip rows: `(window label, used_01, bar color, reset text)`.
 type AntigravityChipRow = (String, f32, Rgb, String);
@@ -534,7 +534,8 @@ impl WidgetRuntime {
             .ok()
             .map(|guard| guard.clone())
             .unwrap_or_default();
-        snap.position_secs = media_ext::displayed_position(&self.media_timeline, &snap, self.now_secs());
+        snap.position_secs =
+            media_ext::displayed_position(&self.media_timeline, &snap, self.now_secs());
         snap
     }
 
@@ -3226,7 +3227,7 @@ impl WidgetRuntime {
                                 .media_session
                                 .lock()
                                 .ok()
-                                .map_or(0, |g| g.duration_secs as u64);
+                                .map_or(0, |g| g.duration_secs);
                             let target = media_ext::seek_position(ratio, dur);
                             if telemetry::media_seek(target) {
                                 // Anchor locally at once; a stale SMTC echo of the old position
@@ -3723,6 +3724,9 @@ mod tests {
             .media_timeline
             .update(sample, 1.0, runtime.now_secs(), runtime.now_secs());
         let shown = runtime.media_snapshot().position_secs;
-        assert!(shown >= 10, "extrapolated position must not rewind the SMTC sample");
+        assert!(
+            shown >= 10,
+            "extrapolated position must not rewind the SMTC sample"
+        );
     }
 }

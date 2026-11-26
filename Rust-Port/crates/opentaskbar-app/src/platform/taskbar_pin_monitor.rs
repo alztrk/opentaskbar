@@ -407,15 +407,9 @@ mod tests {
 
     #[test]
     fn subscribe_registers_production_listener() {
-        let before = LISTENERS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len();
+        let before = LISTENERS.lock().unwrap_or_else(|e| e.into_inner()).len();
         subscribe(|_| {});
-        let after = LISTENERS
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .len();
+        let after = LISTENERS.lock().unwrap_or_else(|e| e.into_inner()).len();
         assert_eq!(after, before + 1);
     }
 

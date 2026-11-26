@@ -2,7 +2,9 @@
 //!
 //! The deterministic layout math is kept as reference vectors, and bridge
 //! tests below compare it against the real core enums/metrics and the
-//! production `apply_pinned_groups` source in the app crate.
+//! production `apply_pinned_groups` source in the app crate. The C# vectors
+//! are also executed against the real function by the app crate's own unit
+//! tests (the core crate cannot link a bin-only target).
 
 mod common;
 
@@ -232,8 +234,9 @@ fn production_metrics_match_the_reference_vectors() {
 }
 
 /// `apply_pinned_groups` lives in the app crate and is private to its layout
-/// module; the production constants are checked here, and the runtime call is
-/// pinned by an ignored bridge until a dev-dependency is available.
+/// module; the production constants and the app-side unit test are checked
+/// here. The runtime C# vectors are exercised by
+/// `c_sharp_pinned_group_vectors_call_the_production_function` in `layout.rs`.
 #[test]
 fn production_pinned_group_tokens_match_the_reference() {
     let source = common::source("crates/opentaskbar-app/src/dock/layout.rs");
@@ -245,14 +248,26 @@ fn production_pinned_group_tokens_match_the_reference() {
     }
     assert!(source.contains("pub fn apply_pinned_groups("));
     assert!(source.contains("PINNED_LEAD_TOKENS"));
+    assert!(
+        source.contains("c_sharp_pinned_group_vectors_call_the_production_function"),
+        "the C# vectors must call the real app-side function"
+    );
     assert_eq!(
         apply_pinned_groups(&["app:a", "start", "bin"]),
         vec!["start", "app:a", "bin"]
     );
 }
 
+/// `apply_pinned_groups` is `pub` in `opentaskbar-app`, but that crate is a
+/// bin-only target with no library for a core integration test to link, and a
+/// Cargo dev-dependency would be circular. App-side counterpart now exists:
+/// `layout.rs::tests::c_sharp_pinned_group_vectors_call_the_production_function`
+/// runs these C# vectors against the real production function; the active
+/// bridge above pins that test and the signature. This body remains a local
+/// reference vector, so it stays ignored rather than posing as a production
+/// test.
 #[test]
-#[ignore = "WS-8: apply_pinned_groups is private to opentaskbar-app; move this bridge next to it"]
+#[ignore = "app-side counterpart exists: layout.rs unit test calls real apply_pinned_groups; core is bin-only (local self-test)"]
 fn production_apply_pinned_groups_matches_reference_vectors() {
     // The WS-8 implementation additionally honours StartPlacement::End and
     // StartButtonPlacement::InWidgets, which the pure reference predates.

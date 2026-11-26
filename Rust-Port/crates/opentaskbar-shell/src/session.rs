@@ -319,10 +319,7 @@ fn set_shell_change_callback(callback: Option<fn()>) {
 /// `extern "system"` WinEvent callback is undefined behaviour and would abort
 /// the process, so the hook must swallow it.
 fn invoke_shell_change_callback() {
-    let callback = SHELL_CHANGE_CALLBACK
-        .lock()
-        .ok()
-        .and_then(|slot| *slot);
+    let callback = SHELL_CHANGE_CALLBACK.lock().ok().and_then(|slot| *slot);
     if let Some(callback) = callback {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
     }
@@ -467,8 +464,7 @@ mod tests {
         assert!(!should_re_register_taskbar(true, 0, 2, 1, 3));
     }
 
-    static CALLBACK_CALLS: std::sync::atomic::AtomicUsize =
-        std::sync::atomic::AtomicUsize::new(0);
+    static CALLBACK_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
     fn counting_callback() {
         CALLBACK_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -485,18 +481,12 @@ mod tests {
         set_shell_change_callback(Some(counting_callback));
         invoke_shell_change_callback();
         invoke_shell_change_callback();
-        assert_eq!(
-            CALLBACK_CALLS.load(std::sync::atomic::Ordering::SeqCst),
-            2
-        );
+        assert_eq!(CALLBACK_CALLS.load(std::sync::atomic::Ordering::SeqCst), 2);
 
         // The callback is stored as Option<fn()>; None disables it.
         set_shell_change_callback(None);
         invoke_shell_change_callback();
-        assert_eq!(
-            CALLBACK_CALLS.load(std::sync::atomic::Ordering::SeqCst),
-            2
-        );
+        assert_eq!(CALLBACK_CALLS.load(std::sync::atomic::Ordering::SeqCst), 2);
 
         // A panicking callback must be swallowed by catch_unwind, not abort.
         set_shell_change_callback(Some(panicking_callback));

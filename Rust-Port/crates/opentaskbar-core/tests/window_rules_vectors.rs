@@ -2,8 +2,9 @@
 //! module (WS-2). The shell crate already ships `window_rules.rs`, but it is a
 //! separate crate with no dev-dependency path back from `opentaskbar-core`, so
 //! the executable vectors live here and a source bridge pins the production
-//! constants. `#[ignore]`d bridges name the API to call once the orchestrator
-//! wires the crates together.
+//! constants. The active bridge below also pins the public
+//! `has_taskbar_button_for_hwnd` entry point used by the running-window
+//! tracker.
 
 mod common;
 
@@ -137,14 +138,20 @@ fn production_window_rule_constants_match_the_vectors() {
     );
 }
 
+/// The live `has_taskbar_button_for_hwnd` needs a real HWND and lives in the
+/// shell crate (no core dev-dependency path), so the ten C# vectors stay in
+/// the local helper while this bridge pins the shipped public entry point and
+/// the style constants it consumes.
 #[test]
-#[ignore = "WS-2: opentaskbar-shell has no dev-dependency path from opentaskbar-core tests"]
 fn production_has_taskbar_button_matches_the_csharp_vectors() {
-    // Once wired, replace the local helper with
-    // `opentaskbar_shell::window_rules::has_taskbar_button` for all ten vectors.
     assert!(!has_taskbar_button(WS_EX_APPWINDOW, true, true));
     common::assert_source_has(
         "crates/opentaskbar-shell/src/window_rules.rs",
-        &["pub fn has_taskbar_button("],
+        &[
+            "pub fn has_taskbar_button(",
+            "pub fn has_taskbar_button_for_hwnd(",
+            "WS_EX_APPWINDOW",
+            "WS_EX_TOOLWINDOW",
+        ],
     );
 }

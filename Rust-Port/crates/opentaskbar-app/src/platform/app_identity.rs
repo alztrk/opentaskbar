@@ -178,10 +178,16 @@ mod tests {
     #[test]
     fn startup_task_enabled_states_match_winrt_enum() {
         assert!(!is_enabled_startup_state(StartupTaskState::Disabled.0));
-        assert!(!is_enabled_startup_state(StartupTaskState::DisabledByUser.0));
+        assert!(!is_enabled_startup_state(
+            StartupTaskState::DisabledByUser.0
+        ));
         assert!(is_enabled_startup_state(StartupTaskState::Enabled.0));
-        assert!(!is_enabled_startup_state(StartupTaskState::DisabledByPolicy.0));
-        assert!(is_enabled_startup_state(StartupTaskState::EnabledByPolicy.0));
+        assert!(!is_enabled_startup_state(
+            StartupTaskState::DisabledByPolicy.0
+        ));
+        assert!(is_enabled_startup_state(
+            StartupTaskState::EnabledByPolicy.0
+        ));
     }
 
     #[test]

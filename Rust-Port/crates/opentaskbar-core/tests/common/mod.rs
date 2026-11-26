@@ -9,8 +9,9 @@
 //! test even when the pure reference implementation is unchanged.
 //!
 //! Nothing here calls a not-yet-existing API: every reference test keeps
-//! compiling, and cases that need a cross-WS runtime API are `#[ignore]`d in
-//! the test file that owns the contract.
+//! compiling. Private app/shell helpers now have in-crate unit tests that call
+//! the real functions; the sole remaining `#[ignore]` is a local reference
+//! vector for `apply_pinned_groups` (the app-side vector test is active).
 
 #![allow(dead_code)]
 

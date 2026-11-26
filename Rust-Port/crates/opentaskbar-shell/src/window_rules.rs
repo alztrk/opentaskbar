@@ -89,8 +89,13 @@ pub fn has_taskbar_button_for_hwnd(hwnd: usize, cloaked: u32) -> bool {
     let has_owner = unsafe { !GetWindow(hwnd as HWND, GW_OWNER).is_null() };
     let mut class_buffer = [0u16; 64];
     // SAFETY: bounded UTF-16 buffer on a live HWND from the caller.
-    let length =
-        unsafe { GetClassNameW(hwnd as HWND, class_buffer.as_mut_ptr(), class_buffer.len() as i32) };
+    let length = unsafe {
+        GetClassNameW(
+            hwnd as HWND,
+            class_buffer.as_mut_ptr(),
+            class_buffer.len() as i32,
+        )
+    };
     if length > 0 {
         let class = String::from_utf16_lossy(&class_buffer[..length as usize]);
         if is_hidden_immersive_frame(&class, style) {

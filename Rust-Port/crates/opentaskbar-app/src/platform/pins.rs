@@ -328,16 +328,20 @@ fn manifest_application(xml: &str, app_id: &str) -> Option<(Option<String>, Opti
     let mut display = None;
     let mut executable = None;
     let mut found = false;
-    for node in manifest.descendants().filter(|n| n.tag_name().name() == "Application") {
+    for node in manifest
+        .descendants()
+        .filter(|n| n.tag_name().name() == "Application")
+    {
         if !node
             .attribute("Id")
             .is_some_and(|id| id.eq_ignore_ascii_case(app_id))
         {
             continue;
         }
-        let relative = node.attribute("Executable").map(str::trim).filter(|exe| {
-            !exe.is_empty() && !exe.contains('$') && exe.ends_with(".exe")
-        });
+        let relative = node
+            .attribute("Executable")
+            .map(str::trim)
+            .filter(|exe| !exe.is_empty() && !exe.contains('$') && exe.ends_with(".exe"));
         executable = relative.map(str::to_owned);
         display = node
             .children()
@@ -361,7 +365,10 @@ fn manifest_application(xml: &str, app_id: &str) -> Option<(Option<String>, Opti
 }
 
 fn is_resource_reference(value: &str) -> bool {
-    value.trim_start().to_ascii_lowercase().starts_with("ms-resource:")
+    value
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("ms-resource:")
 }
 
 /// AUMID → readable exe + icon source. Packaged apps with ACL-protected or
@@ -407,9 +414,7 @@ pub fn resolve_packaged_app(aumid: &str) -> Option<PinnedApp> {
                 .map(|path| path.to_string_lossy().into_owned());
             if let Some(exe) = exe {
                 result = Some(PinnedApp {
-                    name: fallback_display
-                        .clone()
-                        .unwrap_or_else(|| app.to_owned()),
+                    name: fallback_display.clone().unwrap_or_else(|| app.to_owned()),
                     launch_path: exe.clone(),
                     target_exe: Some(exe.clone()),
                     icon_source: exe,
@@ -612,7 +617,10 @@ mod tests {
         </Package>"#;
         assert_eq!(
             manifest_application(xml, "client"),
-            Some((Some("Example Client".to_owned()), Some("Client.exe".to_owned())))
+            Some((
+                Some("Example Client".to_owned()),
+                Some("Client.exe".to_owned())
+            ))
         );
         assert_eq!(manifest_application(xml, "Missing"), None);
     }

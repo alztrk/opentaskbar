@@ -4,9 +4,11 @@
 //! single-instance mutex.
 //!
 //! Everything that core can reach is exercised against the real production
-//! API (`single_instance`, `settings::AutoHideMode`). Private app/shell seams
-//! are pinned by source bridges; runtime bridges that need a not-yet-landed
-//! cross-WS API or a live device are `#[ignore]`d with the reason.
+//! API (`single_instance`, `settings::AutoHideMode`). Private app/shell seams are
+//! pinned by source bridges that read the production files at test time.
+//! Private app helpers now have in-crate unit tests that call the real API
+//! (Night Light encode/decode and the pure monitor-enumeration seam), so their
+//! core bridges are active too.
 
 mod common;
 
@@ -61,30 +63,56 @@ fn production_radio_set_exposes_the_completion_wait_seam() {
     assert!(source.contains("RADIO_KIND_WIFI") && source.contains("RADIO_KIND_BLUETOOTH"));
 }
 
+/// WS-4 landed `set_blocking` for background callers: `set` (the UI-thread API)
+/// now only spawns a detached worker and flips the cached state, while the real
+/// WinRT write polls `IAsyncInfo::Status` instead of calling `GetResults` on the
+/// void Set action. Check the shipped bodies, not a local copy of the old seam.
 #[test]
-#[ignore = "WS-4: set() must wait on completion without GetResults and refresh fire-and-forget"]
-fn production_radio_set_never_reads_async_results_or_joins_a_worker() {
-    let source = common::source("crates/opentaskbar-app/src/platform/radio.rs");
-    let at = source
-        .find("pub fn set(kind: &str, on: bool) -> bool")
-        .expect("set() must exist");
-    let body = &source[at..];
-    let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+fn production_radio_set_spawns_a_detached_worker_and_polls_completion() {
+    let source =
+        common::source("crates/opentaskbar-app/src/platform/radio.rs").replace("\r\n", "\n");
+    let body_of = |marker: &str| -> &str {
+        let at = source.find(marker).expect("production function must exist");
+        let body = &source[at..];
+        &body[..body.find("\n}\n").unwrap_or(body.len())]
+    };
+
+    let ui_set = body_of("pub fn set(kind: &str, on: bool) -> bool");
     assert!(
-        body.contains("wait_async_completed"),
-        "wait on IAsyncAction completion"
+        ui_set.contains("std::thread::Builder::new()"),
+        "the UI thread must hand the write to a worker"
     );
     assert!(
-        !body.contains("get_results"),
-        "GetResults on Set is invalid"
+        !ui_set.contains("join()"),
+        "UI thread must never block on a worker join"
     );
     assert!(
-        !body.contains("handle.join()"),
-        "UI thread must not block on a join"
+        ui_set.contains("cache_toggle("),
+        "the chip must flip optimistically before the worker finishes"
     );
     assert!(
-        body.contains("refresh_async()"),
-        "refresh must be fire-and-forget"
+        ui_set.contains("set_in_apartment(") && ui_set.contains("refresh_async()"),
+        "the worker must perform the write and refresh fire-and-forget"
+    );
+    assert!(
+        !ui_set.contains("set_blocking("),
+        "the blocking sibling must never be called from the UI thread"
+    );
+
+    let apartment = body_of("fn set_in_apartment(");
+    assert!(
+        apartment.contains("wait_async_enum(") && source.contains("fn wait_async_enum("),
+        "poll IAsyncInfo::Status before reading the enum result"
+    );
+    assert!(
+        !apartment.contains("get_results"),
+        "GetResults on a void Set action is invalid"
+    );
+
+    let blocking = body_of("pub fn set_blocking(");
+    assert!(
+        blocking.contains("on_worker(") && blocking.contains("refresh_async()"),
+        "set_blocking deliberately joins a COM worker for background callers"
     );
 }
 
@@ -190,9 +218,23 @@ fn night_light_payload_vectors_use_the_production_constants() {
     );
 }
 
+/// The private app helpers now have an in-crate unit test that calls the real
+/// `encode_night_light_toggle` / `decode_night_light_on` pair (with and without
+/// the CloudStore header). This bridge checks that test is still wired to the
+/// shipped functions and re-runs the independent vector round-trip as well.
 #[test]
-#[ignore = "WS-6: encode/decode helpers are private to opentaskbar-app and need registry access"]
 fn production_night_light_round_trips_the_encoded_payload() {
+    common::assert_source_has(
+        "crates/opentaskbar-app/src/widgets/telemetry.rs",
+        &[
+            "night_light_encode_decode_round_trip",
+            "mod night_light_tests",
+            "encode_night_light_toggle(&[], on)",
+            "decode_night_light_on(&encoded)",
+            "fn encode_night_light_toggle(",
+            "fn decode_night_light_on(",
+        ],
+    );
     let source = common::source("crates/opentaskbar-app/src/widgets/telemetry.rs");
     let envelope = common::byte_array_const(&source, "ENVELOPE_PREFIX").unwrap();
     let payload = common::byte_array_const(&source, "PAYLOAD_PREFIX").unwrap();
@@ -225,12 +267,38 @@ fn watchdog_process_contract_is_one_process_arg_heartbeat_clean_exit() {
     );
 }
 
+/// WS-2's public shell surface is `arm` / `heartbeat` / `is_armed` /
+/// `notify_clean_exit`. The spawned process itself still needs a live Windows
+/// session, but the argument round-trip and the clean-exit ordering are pinned
+/// against the shipped source: `arm` validates the `--watchdog=<pid>:<token>`
+/// argument it passes to the native watchdog before spawning, and
+/// `notify_clean_exit` stops the heartbeat before signalling the clean-exit
+/// event so a dead dock can never be kept "alive" by a stale pulse.
 #[test]
-#[ignore = "WS-2: spawning the watchdog process requires the shell crate's private handle"]
-fn production_watchdog_restores_on_kill_and_not_on_clean_exit() {
+fn production_watchdog_arg_round_trip_and_clean_exit_ordering() {
+    const WATCHDOG: &str = "crates/opentaskbar-shell/src/watchdog.rs";
     common::assert_source_has(
-        "crates/opentaskbar-shell/src/watchdog.rs",
-        &["start(", "notify_clean_exit", "EVENT_PREFIX"],
+        WATCHDOG,
+        &[
+            "pub fn arm(",
+            "pub fn heartbeat(",
+            "pub fn is_armed(",
+            "pub fn notify_clean_exit(",
+            "fn parse_watchdog_arg(",
+            "fn watchdog_arg(",
+            "EVENT_PREFIX",
+            "HEARTBEAT_PREFIX",
+        ],
+    );
+    let source = common::source(WATCHDOG);
+    let at = source
+        .find("pub fn notify_clean_exit(")
+        .expect("clean-exit entry point must exist");
+    let body = &source[at..];
+    let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
+    assert!(
+        body.contains("stop_heartbeat_and_signal("),
+        "heartbeat must stop before the clean-exit event is signalled"
     );
 }
 
@@ -281,11 +349,25 @@ fn monitor_enumeration_seam_handles_negative_origins() {
     );
 }
 
+/// `enumerate_monitors` still needs live displays, but its pure
+/// `monitor_from_raw` / `order_monitors` seam is now unit-tested in the app
+/// crate without any Win32 enumeration. This bridge pins that seam, the live
+/// Win32 calls and the app-side tests so the production path cannot drift from
+/// the negative-origin/DPI reference above.
 #[test]
-#[ignore = "WS-8: enumerate_monitors is private to opentaskbar-app and needs live displays"]
 fn production_enumerate_monitors_matches_the_seam() {
-    let source = common::source("crates/opentaskbar-app/src/platform/win32.rs");
-    assert!(source.contains("pub fn enumerate_monitors() -> Vec<MonitorInfo>"));
+    common::assert_source_has(
+        "crates/opentaskbar-app/src/platform/win32.rs",
+        &[
+            "pub fn enumerate_monitors() -> Vec<MonitorInfo>",
+            "fn monitor_from_raw(",
+            "fn order_monitors(",
+            "EnumDisplayMonitors",
+            "GetMonitorInfoW",
+            "enumerate_monitors_seam_handles_negative_origins_and_dpi",
+            "enumerate_monitors_seam_orders_primary_first_without_a_display",
+        ],
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -369,8 +451,9 @@ fn auto_hide_state_machine_respects_mode_and_overlays() {
     );
 }
 
+/// Source bridge (not a live window): the dock must still use the same
+/// `AutoHideMode` variants the core state machine above is built around.
 #[test]
-#[ignore = "WS-8: live auto-hide transition needs a real shell/dock window"]
 fn production_auto_hide_machine_matches_the_reference() {
     common::assert_source_has(
         "crates/opentaskbar-app/src/dock/mod.rs",
@@ -434,8 +517,10 @@ fn updater_script_bytes_keep_unicode_and_escape_percent() {
     assert!(script.bytes().all(|byte| byte != 0), "no NUL bytes");
 }
 
+/// Source bridge: `write_updater_script` writes a real file from the app
+/// process, so this test pins its presence and its `fs::write(path, script)`
+/// byte-for-byte contract instead of invoking it from the core crate.
 #[test]
-#[ignore = "WS-5: write_updater_script is private to opentaskbar-app and writes a real file"]
 fn production_write_updater_script_matches_the_byte_contract() {
     common::assert_source_has(
         "crates/opentaskbar-app/src/platform/update.rs",

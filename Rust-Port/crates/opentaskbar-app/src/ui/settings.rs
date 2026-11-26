@@ -5,7 +5,6 @@
 //! dynamic search catalogue and widget panel host (C# `SettingsWindow` parity).
 
 use std::collections::BTreeMap;
-use std::io::Write;
 use std::time::Instant;
 
 use std::ops::Range;
@@ -566,7 +565,41 @@ fn inspect_backup(bytes: &[u8]) -> BackupPreview {
     }
 }
 
+/// Prefix of the temporary staging folder used while importing theme files.
+/// A `.otbackup` is unpacked here first so a failure can never leave a
+/// half-written theme file in the live theme folder.
+const THEME_STAGING_PREFIX: &str = ".staging-";
+
+fn staging_dir(root: &std::path::Path) -> std::path::PathBuf {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    root.join(format!(
+        "{THEME_STAGING_PREFIX}{}-{unique}",
+        std::process::id()
+    ))
+}
+
+/// Validated `theme/…` entries shared by the staging and commit passes.
+fn theme_entries(entries: &BTreeMap<String, Vec<u8>>) -> Vec<(std::path::PathBuf, &[u8])> {
+    entries
+        .iter()
+        .filter_map(|(name, data)| {
+            let rel = name.strip_prefix("theme/")?;
+            let path = safe_backup_path(rel)?;
+            (!path.as_os_str().is_empty()).then_some((path, data.as_slice()))
+        })
+        .collect()
+}
+
 fn import_backup(bytes: &[u8]) -> Result<DockSettings, String> {
+    import_backup_into(bytes, &theme_folder())
+}
+
+/// Real import path with an injectable theme root. All theme payloads land in
+/// a unique staging directory first, are committed with a second pass, and the
+/// staging directory is removed on success, failure and cancellation alike.
+fn import_backup_into(bytes: &[u8], root: &std::path::Path) -> Result<DockSettings, String> {
     let preview = inspect_backup(bytes);
     if !preview.valid {
         return Err(preview
@@ -600,21 +633,44 @@ fn import_backup(bytes: &[u8]) -> Result<DockSettings, String> {
                 .collect()
         });
     }
-    let root = theme_folder();
-    for (name, data) in &entries {
-        let Some(rel) = name.strip_prefix("theme/") else {
-            continue;
-        };
-        let Some(path) = safe_backup_path(rel) else {
-            continue;
-        };
-        let target = root.join(path);
-        if let Some(parent) = target.parent() {
-            let _ = std::fs::create_dir_all(parent);
+
+    std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+    let staging = staging_dir(root);
+    std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+    let cleanup = || {
+        let _ = std::fs::remove_dir_all(&staging);
+    };
+
+    let themes = theme_entries(&entries);
+    let staged = (|| -> Result<(), String> {
+        for (rel, data) in &themes {
+            let target = staging.join(rel);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(&target, data).map_err(|e| e.to_string())?;
         }
-        let mut file = std::fs::File::create(target).map_err(|e| e.to_string())?;
-        file.write_all(data).map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    if let Err(err) = staged {
+        cleanup();
+        return Err(err);
     }
+
+    let committed = (|| -> Result<(), String> {
+        for (rel, _) in &themes {
+            let source = staging.join(rel);
+            let target = root.join(rel);
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            let data = std::fs::read(&source).map_err(|e| e.to_string())?;
+            std::fs::write(&target, data).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    })();
+    cleanup();
+    committed?;
     Ok(next)
 }
 
@@ -759,6 +815,9 @@ fn weather_country_for(city_label: &str) -> String {
         .map(|(_, display)| display)
         .unwrap_or_else(|| "Turkey".to_owned())
 }
+
+/// Shared handler shape used by the theme-editor sliders.
+type UiHandler = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
 
 type ThemeSwatch = (
     &'static str,
@@ -1878,7 +1937,7 @@ impl SettingsView {
                                 return;
                             }
                             let start = cursor_auth::sign_in_start();
-                            let _ = pins::launch(start.login_url);
+                            pins::launch(start.login_url);
                             this.ai_status = "Waiting for browser sign-in…".to_owned();
                             cx.notify();
                             // `sign_in_start` stores the pending PKCE challenge;
@@ -2421,7 +2480,7 @@ impl SettingsView {
             BrushSpec::Solid(color) => *color,
             BrushSpec::Gradient(gradient) => gradient.stops.first().copied().unwrap_or_default(),
         };
-        let hue_handler = |i: usize| -> std::rc::Rc<dyn Fn(&mut Window, &mut App)> {
+        let hue_handler = |i: usize| -> UiHandler {
             let entity = cx.entity().downgrade();
             std::rc::Rc::new(move |_win, app| {
                 let _ = entity.update(app, |this, cx| {
@@ -2431,7 +2490,7 @@ impl SettingsView {
                 });
             })
         };
-        let sat_handler = |i: usize| -> std::rc::Rc<dyn Fn(&mut Window, &mut App)> {
+        let sat_handler = |i: usize| -> UiHandler {
             let entity = cx.entity().downgrade();
             std::rc::Rc::new(move |_win, app| {
                 let _ = entity.update(app, |this, cx| {
@@ -2440,7 +2499,7 @@ impl SettingsView {
                 });
             })
         };
-        let val_handler = |i: usize| -> std::rc::Rc<dyn Fn(&mut Window, &mut App)> {
+        let val_handler = |i: usize| -> UiHandler {
             let entity = cx.entity().downgrade();
             std::rc::Rc::new(move |_win, app| {
                 let _ = entity.update(app, |this, cx| {
@@ -2449,7 +2508,7 @@ impl SettingsView {
                 });
             })
         };
-        let alpha_handler = |i: usize| -> std::rc::Rc<dyn Fn(&mut Window, &mut App)> {
+        let alpha_handler = |i: usize| -> UiHandler {
             let entity = cx.entity().downgrade();
             std::rc::Rc::new(move |_win, app| {
                 let _ = entity.update(app, |this, cx| {
@@ -2458,7 +2517,7 @@ impl SettingsView {
                 });
             })
         };
-        let angle_handler = |i: usize| -> std::rc::Rc<dyn Fn(&mut Window, &mut App)> {
+        let angle_handler = |i: usize| -> UiHandler {
             let entity = cx.entity().downgrade();
             std::rc::Rc::new(move |_win, app| {
                 let _ = entity.update(app, |this, cx| {
@@ -7600,13 +7659,13 @@ impl Render for SettingsView {
 mod tests {
     use super::{
         BrushMode, DockSettings, ai_cli_sign_in_command, brush_to_json, build_backup, build_brush,
-        city_list, civil_from_days, inspect_backup, persist_theme_tokens, safe_backup_path,
-        weather_country_for, zip_store, zip_unstore,
+        city_list, civil_from_days, import_backup_into, inspect_backup, persist_theme_tokens,
+        safe_backup_path, weather_country_for, zip_store, zip_unstore,
     };
     use crate::design::brush::Hsv;
     use crate::design::theme::{apply_token_overrides, token_overrides_from_json};
     use crate::design::tokens::{Rgba, TokenMap, TokenValue};
-    use serde_json::{Map, Value};
+    use serde_json::Map;
 
     #[test]
     fn stored_zip_round_trips_entries() {
@@ -7634,6 +7693,98 @@ mod tests {
             preview.settings.map(|s| s.weather_city),
             Some("Izmir, Turkey".to_owned())
         );
+    }
+
+    fn backup_with_themes(themes: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut entries = vec![
+            (
+                "manifest.json".to_owned(),
+                br#"{"Format":"OpenTaskbarFullBackup","Version":1}"#.to_vec(),
+            ),
+            (
+                "settings.json".to_owned(),
+                br#"{"ThemePack":"catppuccin","ExtraFutureKey":true}"#.to_vec(),
+            ),
+            (
+                "pins.json".to_owned(),
+                br#"{"PinnedApps":["app:a"],"UnpinnedApps":[]}"#.to_vec(),
+            ),
+        ];
+        entries.extend(
+            themes
+                .iter()
+                .map(|(name, data)| (format!("theme/{name}"), (*data).to_vec())),
+        );
+        zip_store(&entries)
+    }
+
+    fn temp_theme_root(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("ot-import-{}-{tag}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn staging_folders(root: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".staging-"))
+            .collect()
+    }
+
+    #[test]
+    fn import_backup_stages_themes_and_cleans_staging_on_success() {
+        let root = temp_theme_root("success");
+        let bytes = backup_with_themes(&[
+            ("current.json", br#"{"Id":"catppuccin"}"#),
+            ("nested/accent.json", br##"{"Accent":"#A0B0C0"}"##),
+            // Unsafe entries must be skipped, never written inside the staging folder.
+            ("../escape.json", b"escape"),
+        ]);
+
+        let imported = import_backup_into(&bytes, &root).expect("import must succeed");
+        assert_eq!(imported.theme_pack, "catppuccin");
+        assert_eq!(imported.user_pinned_apps, ["app:a"]);
+        assert_eq!(imported.extra["ExtraFutureKey"], serde_json::json!(true));
+        assert_eq!(
+            std::fs::read(root.join("current.json")).unwrap(),
+            br#"{"Id":"catppuccin"}"#
+        );
+        assert_eq!(
+            std::fs::read(root.join("nested").join("accent.json")).unwrap(),
+            br##"{"Accent":"#A0B0C0"}"##
+        );
+        assert!(!root.join("escape.json").exists());
+        assert!(
+            staging_folders(&root).is_empty(),
+            "staging directory must be removed after a successful import"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn import_backup_cleans_staging_when_commit_fails() {
+        let root = temp_theme_root("failure");
+        // A directory at the target path makes the commit pass fail after staging succeeded.
+        std::fs::create_dir(root.join("blocked.json")).unwrap();
+        let bytes = backup_with_themes(&[("blocked.json", b"theme payload")]);
+
+        assert!(import_backup_into(&bytes, &root).is_err());
+        assert!(
+            staging_folders(&root).is_empty(),
+            "staging directory must be removed when a theme write fails"
+        );
+        assert!(
+            std::fs::read(root.join("blocked.json")).is_err(),
+            "the commit must not turn a target directory into a file"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

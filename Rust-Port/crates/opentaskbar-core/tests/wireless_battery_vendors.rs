@@ -2,8 +2,9 @@
 //!
 //! Each vendor parser below is a reference implementation of its report format,
 //! tested with valid and malformed payloads. Bridge tests compare the VID
-//! constants and aggregator settings against production sources/core APIs;
-//! live HID transport calls are pinned by an `#[ignore]`d bridge.
+//! constants and aggregator settings against production sources/core APIs.
+//! Live HID transport calls still need a device, but the shipped private
+//! report parsers are pinned by an active source bridge.
 
 mod common;
 
@@ -291,14 +292,22 @@ fn production_vendor_ids_and_aggregator_settings_match_the_reference() {
     );
 }
 
-/// Live HID/WinRT transports belong to WS-4; the reference report vectors are
-/// checked here, but calling the private parser needs an exposed seam.
+/// The vendor report parsers are private to the bin-only app crate, so a core
+/// integration test cannot call them and a live HID device is needed to run
+/// them. This bridge pins the shipped parser/VID surface while the vectors
+/// above keep the expected report semantics anchored.
 #[test]
-#[ignore = "WS-4: HID report parsers are private to opentaskbar-app and need live devices"]
 fn production_hid_parsers_match_the_reference_vectors() {
     common::assert_source_has(
         "crates/opentaskbar-app/src/platform/wireless_battery.rs",
-        &["ASUS_VID", "CORSAIR_VID", "hyperx_family"],
+        &[
+            "ASUS_VID",
+            "CORSAIR_VID",
+            "hyperx_family",
+            "fn direct_byte_report(",
+            "fn ss_parse(",
+            "fn razer_parse_reply(",
+        ],
     );
     let mut report = vec![0u8; 64];
     report[0] = 0x12;

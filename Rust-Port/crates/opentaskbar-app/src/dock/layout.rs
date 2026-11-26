@@ -1253,8 +1253,7 @@ pub fn vsync_repost_allowed(already_reposted: bool) -> bool {
 pub const WINDOW_SNAPSHOT_MIN_INTERVAL: Duration = Duration::from_millis(750);
 pub fn window_snapshot_due(last: Option<Instant>, in_flight: bool, now: Instant) -> bool {
     !in_flight
-        && last
-            .is_none_or(|at| now.saturating_duration_since(at) >= WINDOW_SNAPSHOT_MIN_INTERVAL)
+        && last.is_none_or(|at| now.saturating_duration_since(at) >= WINDOW_SNAPSHOT_MIN_INTERVAL)
 }
 
 /// Mouse-driven `refresh_widgets` calls collapse into at most one chip rebuild
@@ -1775,6 +1774,74 @@ mod tests {
         );
     }
 
+    /// C# `DockLayoutChecks` vectors driven through the shipped function, not
+    /// through a local copy of the grouping rule.
+    #[test]
+    fn c_sharp_pinned_group_vectors_call_the_production_function() {
+        let mut settings = DockSettings {
+            show_tray_button: true,
+            show_recycle_bin: true,
+            ..DockSettings::default()
+        };
+        settings
+            .extra
+            .insert("ShowSearchButton".into(), json!(true));
+        settings
+            .extra
+            .insert("ShowTaskViewButton".into(), json!(true));
+
+        let cases: [(&[&str], &[&str]); 3] = [
+            (
+                &[
+                    "app:b", "bin", "search", "app:a", "tray", "start", "taskview",
+                ],
+                &[
+                    "start", "search", "taskview", "app:b", "app:a", "tray", "bin",
+                ],
+            ),
+            (
+                &["bin", "app:x", "tray", "start"],
+                &["start", "search", "taskview", "app:x", "tray", "bin"],
+            ),
+            (
+                &["app:a", "widget:clock"],
+                &[
+                    "start",
+                    "search",
+                    "taskview",
+                    "app:a",
+                    "widget:clock",
+                    "tray",
+                    "bin",
+                ],
+            ),
+        ];
+        for (input, expected) in cases {
+            let order: Vec<String> = input.iter().map(|token| (*token).to_owned()).collect();
+            let expected: Vec<String> = expected.iter().map(|token| (*token).to_owned()).collect();
+            assert_eq!(apply_pinned_groups(&order, &settings), expected);
+        }
+
+        // Mirrored input keeps the same group edges; the flags decide presence.
+        let mirrored: Vec<String> = ["start", "tray", "app:x", "bin"]
+            .iter()
+            .map(|token| (*token).to_owned())
+            .collect();
+        let applied = apply_pinned_groups(&mirrored, &settings);
+        assert_eq!(applied.first().map(String::as_str), Some("start"));
+        assert_eq!(applied.last().map(String::as_str), Some("bin"));
+
+        settings
+            .extra
+            .insert("ShowSearchButton".into(), json!(false));
+        settings
+            .extra
+            .insert("ShowTaskViewButton".into(), json!(false));
+        let applied = apply_pinned_groups(&mirrored, &settings);
+        assert!(!applied.iter().any(|token| token == "search"));
+        assert!(!applied.iter().any(|token| token == "taskview"));
+    }
+
     #[test]
     fn move_visible_item_keeps_hidden_items_in_place() {
         let saved = [
@@ -2032,16 +2099,16 @@ mod tests {
             .extra
             .insert("StartPlacement".into(), json!("InWidgets"));
         assert_eq!(start_strip_group(&legacy), StartStripGroup::InWidgets);
-        legacy
-            .extra
-            .insert("StartPlacement".into(), json!("End"));
+        legacy.extra.insert("StartPlacement".into(), json!("End"));
         assert_eq!(start_strip_group(&legacy), StartStripGroup::AfterApps);
     }
 
     #[test]
     fn start_widget_index_clamps_to_the_widget_strip() {
-        let mut settings = DockSettings::default();
-        settings.start_widget_index = 5;
+        let mut settings = DockSettings {
+            start_widget_index: 5,
+            ..DockSettings::default()
+        };
         assert_eq!(resolved_start_widget_index(&settings, 3), 3);
         assert_eq!(resolved_start_widget_index(&settings, 8), 5);
         settings.start_widget_index = -2;

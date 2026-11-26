@@ -782,7 +782,9 @@ impl DynamicIslandWindow {
         let Some(id) = self.current_page_id().map(str::to_owned) else {
             return;
         };
-        let spec = self.widget_runtime.chip_spec(&id, &self.settings, self.is_dark);
+        let spec = self
+            .widget_runtime
+            .chip_spec(&id, &self.settings, self.is_dark);
         let lines = spec.details_lines();
         self.island.request_details(|widget_id| {
             let mut details = WidgetDetails::new(widget_id, widget_id);
@@ -1310,8 +1312,7 @@ unsafe extern "system" fn island_wnd_proc(
             let vk = wparam as u16;
             if vk == VK_ESCAPE {
                 // Escape collapses the in-place details panel (shared state machine).
-                if state.island.pre_process_input(IslandInput::Escape)
-                    == InputDisposition::Consumed
+                if state.island.pre_process_input(IslandInput::Escape) == InputDisposition::Consumed
                 {
                     state.width_dips = state.width_for_current_page();
                     state.position_window();
@@ -1817,10 +1818,7 @@ mod tests {
         let mut island = IslandState::new(pages());
         let collapsed = width_for_page("clock", false);
         island.request_details(|id| {
-            Some(
-                WidgetDetails::new(id, "Date and time")
-                    .line("Timezone", "Europe/Istanbul"),
-            )
+            Some(WidgetDetails::new(id, "Date and time").line("Timezone", "Europe/Istanbul"))
         });
         let now = Instant::now();
         assert!(island.current_width(now + Duration::from_millis(200)) >= collapsed + 246.0 - 0.01);

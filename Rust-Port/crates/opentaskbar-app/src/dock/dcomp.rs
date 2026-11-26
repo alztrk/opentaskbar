@@ -246,15 +246,10 @@ impl WidgetChipSpec {
                 }
                 out
             }
-            Self::DayProgress {
-                percent, unit, ..
-            } => vec![
-                line("Elapsed", percent.clone()),
-                line("Unit", unit.clone()),
-            ],
-            Self::Timed {
-                text, running, ..
-            } => vec![
+            Self::DayProgress { percent, unit, .. } => {
+                vec![line("Elapsed", percent.clone()), line("Unit", unit.clone())]
+            }
+            Self::Timed { text, running, .. } => vec![
                 line("Time", text.clone()),
                 line(
                     "State",
@@ -292,12 +287,7 @@ impl WidgetChipSpec {
             ],
             Self::Bluetooth { devices } => devices
                 .iter()
-                .map(|(kind, percent, _, _)| {
-                    line(
-                        "Device",
-                        format!("{kind:?} {percent}%"),
-                    )
-                })
+                .map(|(kind, percent, _, _)| line("Device", format!("{kind:?} {percent}%")))
                 .collect(),
             Self::Storage { drives } => drives
                 .iter()
@@ -339,16 +329,18 @@ impl WidgetChipSpec {
                 .iter()
                 .map(|(name, used, _, reset)| line(name, format!("{used:.0}% · {reset}")))
                 .collect(),
-            Self::AiAntigravity { columns } => columns
-                .iter()
-                .flat_map(|(header, rows)| {
-                    let mut out = vec![line(header, "Quota".to_owned())];
-                    out.extend(rows.iter().map(|(name, used, _, reset)| {
-                        line(name, format!("{used:.0}% · {reset}"))
-                    }));
-                    out
-                })
-                .collect(),
+            Self::AiAntigravity { columns } => {
+                columns
+                    .iter()
+                    .flat_map(|(header, rows)| {
+                        let mut out = vec![line(header, "Quota".to_owned())];
+                        out.extend(rows.iter().map(|(name, used, _, reset)| {
+                            line(name, format!("{used:.0}% · {reset}"))
+                        }));
+                        out
+                    })
+                    .collect()
+            }
             Self::AiOpenCode { columns } => columns
                 .iter()
                 .map(|(name, pct, _, _, reset)| line(name, format!("{pct} · {reset}")))

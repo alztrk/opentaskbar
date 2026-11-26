@@ -1076,17 +1076,31 @@ mod tests {
     fn cloaked_live_window_counts_as_open_until_dismissed() {
         let hwnd = 0x42usize;
         // On-screen Start counts in both the strict hook and the live query.
-        assert!(window_counts_as_open(hwnd, 0, true, true, false, false, true));
-        assert!(window_counts_as_open(hwnd, 0, true, true, false, true, true));
+        assert!(window_counts_as_open(
+            hwnd, 0, true, true, false, false, true
+        ));
+        assert!(window_counts_as_open(
+            hwnd, 0, true, true, false, true, true
+        ));
         // Cloaked but alive: only the live query counts it (Alt+Tab).
-        assert!(!window_counts_as_open(hwnd, 0, true, true, true, false, true));
+        assert!(!window_counts_as_open(
+            hwnd, 0, true, true, true, false, true
+        ));
         assert!(window_counts_as_open(hwnd, 0, true, true, true, true, true));
         // A real CLOAKED dismissal excludes that same handle from live checks.
-        assert!(!window_counts_as_open(hwnd, hwnd, true, true, true, true, true));
+        assert!(!window_counts_as_open(
+            hwnd, hwnd, true, true, true, true, true
+        ));
         // Dead / hidden / unrelated-process windows never count.
-        assert!(!window_counts_as_open(hwnd, 0, false, true, true, true, true));
-        assert!(!window_counts_as_open(hwnd, 0, true, false, true, true, true));
-        assert!(!window_counts_as_open(hwnd, 0, true, true, true, true, false));
+        assert!(!window_counts_as_open(
+            hwnd, 0, false, true, true, true, true
+        ));
+        assert!(!window_counts_as_open(
+            hwnd, 0, true, false, true, true, true
+        ));
+        assert!(!window_counts_as_open(
+            hwnd, 0, true, true, true, true, false
+        ));
         assert!(!window_counts_as_open(0, 0, true, true, true, true, true));
     }
 

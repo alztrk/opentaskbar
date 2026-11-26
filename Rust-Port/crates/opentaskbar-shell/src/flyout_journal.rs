@@ -31,6 +31,82 @@ pub struct FlyoutPosition {
     pub top: i32,
 }
 
+/// C# `ShellFlyoutPositionRegistry.Generation` and the per-record sequence.
+/// The native watchdog only consumes the first four fields of a position line,
+/// so these tokens are appended by the opt-in `write_all_to_with_meta` writer;
+/// the reader accepts both the legacy four-field form and the extended one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JournalMeta {
+    pub generation: u64,
+    pub seq: u64,
+}
+
+/// The C# flyout kinds whose intent journal carries `generation`/`seq` tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlyoutKind {
+    Start,
+    Search,
+    ControlCenter,
+}
+
+impl FlyoutKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Start => "START",
+            Self::Search => "SEARCH",
+            Self::ControlCenter => "CONTROL_CENTER",
+        }
+    }
+}
+
+/// One `START generation=42 seq=7` style journal line (C# parity).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlyoutKindRecord {
+    pub kind: FlyoutKind,
+    pub generation: u32,
+    pub seq: u32,
+}
+
+impl FlyoutKindRecord {
+    /// Serializes the C# wire form, e.g. `CONTROL_CENTER generation=9 seq=3`.
+    pub fn to_line(self) -> String {
+        format!(
+            "{} generation={} seq={}",
+            self.kind.as_str(),
+            self.generation,
+            self.seq
+        )
+    }
+
+    /// Parses the C# wire form. Unknown keys, missing fields and extra tokens
+    /// are rejected so a truncated journal line never restores stale metadata.
+    #[must_use]
+    pub fn from_line(line: &str) -> Option<Self> {
+        let mut words = line.split_whitespace();
+        let kind = match words.next()? {
+            "START" => FlyoutKind::Start,
+            "SEARCH" => FlyoutKind::Search,
+            "CONTROL_CENTER" => FlyoutKind::ControlCenter,
+            _ => return None,
+        };
+        let (mut generation, mut seq) = (None, None);
+        for word in words {
+            let (key, value) = word.split_once('=')?;
+            let number = parse_unsigned(value)?;
+            match key {
+                "generation" => generation = Some(number),
+                "seq" => seq = Some(number),
+                _ => return None,
+            }
+        }
+        Some(Self {
+            kind,
+            generation: generation?,
+            seq: seq?,
+        })
+    }
+}
+
 const MAX_ENTRIES: usize = 16;
 
 /// Tag-keyed positions for our own flyouts (dock flyouts are not shell flyouts, so the
@@ -89,6 +165,57 @@ pub fn read_tag(tag: &str) -> Option<(i32, i32)> {
         .map(|(_, left, top)| (left, top))
 }
 
+/// Separate file for the C#-style flyout intent lines. Keeping it apart from
+/// `flyout-positions.txt` preserves the native watchdog's four-field format.
+fn kind_journal_path() -> PathBuf {
+    journal_path().with_file_name("flyout-kind-journal.txt")
+}
+
+/// Persists the flyout kind/generation/sequence lines atomically (`*.tmp` + rename).
+pub fn write_kind_records(records: &[FlyoutKindRecord]) {
+    write_kind_records_to(&kind_journal_path(), records);
+}
+
+/// Testable/injectable variant of [`write_kind_records`].
+pub fn write_kind_records_to(path: &Path, records: &[FlyoutKindRecord]) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let mut content = String::new();
+    for record in records.iter().take(MAX_ENTRIES) {
+        content.push_str(&record.to_line());
+        content.push('\n');
+    }
+    let temporary = tmp_path(path);
+    if fs::write(&temporary, content).is_err() {
+        return;
+    }
+    if fs::rename(&temporary, path).is_err() && path.exists() && fs::remove_file(path).is_ok() {
+        let _ = fs::rename(&temporary, path);
+    }
+}
+
+/// Reads the C#-style flyout intent lines, skipping malformed ones.
+#[must_use]
+pub fn read_kind_records() -> Vec<FlyoutKindRecord> {
+    read_kind_records_from(&kind_journal_path())
+}
+
+/// Testable/injectable variant of [`read_kind_records`].
+#[must_use]
+pub fn read_kind_records_from(path: &Path) -> Vec<FlyoutKindRecord> {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    raw.lines()
+        .take(MAX_ENTRIES)
+        .filter_map(FlyoutKindRecord::from_line)
+        .collect()
+}
+
 /// Journal dosyasının yolu (`LOCALAPPDATA` yoksa geçici dizin).
 pub fn journal_path() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
@@ -133,6 +260,26 @@ pub fn write_all(positions: &[FlyoutPosition]) {
 }
 
 fn write_all_to(path: &Path, positions: &[FlyoutPosition]) {
+    write_all_to_with_meta_inner(path, positions, None);
+}
+
+/// Writes the four-field journal plus `generation=<n> seq=<n>` tokens. The
+/// legacy writer/reader and the native watchdog keep working unchanged: the
+/// first four whitespace fields are identical.
+pub fn write_all_with_meta(positions: &[FlyoutPosition], meta: JournalMeta) {
+    write_all_to_with_meta(&journal_path(), positions, meta);
+}
+
+/// Injectable-path variant of [`write_all_with_meta`].
+pub fn write_all_to_with_meta(path: &Path, positions: &[FlyoutPosition], meta: JournalMeta) {
+    write_all_to_with_meta_inner(path, positions, Some(meta));
+}
+
+fn write_all_to_with_meta_inner(
+    path: &Path,
+    positions: &[FlyoutPosition],
+    meta: Option<JournalMeta>,
+) {
     let Some(parent) = path.parent() else {
         return;
     };
@@ -144,10 +291,21 @@ fn write_all_to(path: &Path, positions: &[FlyoutPosition]) {
         if position.handle == 0 {
             continue;
         }
-        content.push_str(&format!(
-            "{} {} {} {}\n",
-            position.handle, position.pid, position.left, position.top
-        ));
+        match meta {
+            Some(meta) => content.push_str(&format!(
+                "{} {} {} {} generation={} seq={}\n",
+                position.handle,
+                position.pid,
+                position.left,
+                position.top,
+                meta.generation,
+                meta.seq
+            )),
+            None => content.push_str(&format!(
+                "{} {} {} {}\n",
+                position.handle, position.pid, position.left, position.top
+            )),
+        }
     }
     let temporary = tmp_path(path);
     if fs::write(&temporary, content).is_err() {
@@ -161,39 +319,74 @@ fn write_all_to(path: &Path, positions: &[FlyoutPosition]) {
 }
 
 /// Journal'daki tüm geçerli pozisyonları okur (bozuk satırlar atlanır).
+#[must_use]
 pub fn read() -> Vec<FlyoutPosition> {
     read_from(&journal_path())
 }
 
 fn read_from(path: &Path) -> Vec<FlyoutPosition> {
+    read_from_with_meta(path)
+        .into_iter()
+        .map(|(position, _)| position)
+        .collect()
+}
+
+/// Reads positions together with their optional `generation`/`seq` tokens.
+/// A legacy four-field line yields [`JournalMeta::default`].
+#[must_use]
+pub fn read_with_meta() -> Vec<(FlyoutPosition, JournalMeta)> {
+    read_from_with_meta(&journal_path())
+}
+
+/// Injectable-path variant of [`read_with_meta`].
+#[must_use]
+pub fn read_from_with_meta(path: &Path) -> Vec<(FlyoutPosition, JournalMeta)> {
     let Ok(raw) = fs::read_to_string(path) else {
         return Vec::new();
     };
-    let mut positions = Vec::with_capacity(MAX_ENTRIES);
-    for line in raw.lines().take(MAX_ENTRIES) {
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        if fields.len() != 4 {
-            continue;
-        }
-        let (Some(handle), Some(pid), Some(left), Some(top)) = (
-            parse_unsigned(fields[0]),
-            parse_unsigned(fields[1]),
-            parse_signed(fields[2]),
-            parse_signed(fields[3]),
-        ) else {
-            continue;
-        };
-        // HWND 0 hiçbir zaman geri yüklenemez; C# journal'ı da bunu atar.
-        if handle != 0 {
-            positions.push(FlyoutPosition {
-                handle,
-                pid,
-                left,
-                top,
-            });
+    raw.lines()
+        .take(MAX_ENTRIES)
+        .filter_map(parse_position_line)
+        .collect()
+}
+
+fn parse_position_line(line: &str) -> Option<(FlyoutPosition, JournalMeta)> {
+    let mut words = line.split_whitespace();
+    let handle: usize = parse_unsigned(words.next()?)?;
+    let pid: u32 = parse_unsigned(words.next()?)?;
+    let left = parse_signed(words.next()?)?;
+    let top = parse_signed(words.next()?)?;
+    let mut meta = JournalMeta::default();
+    let (mut saw_generation, mut saw_seq) = (false, false);
+    for word in words {
+        let (key, value) = word.split_once('=')?;
+        let number: u64 = parse_unsigned(value)?;
+        match key {
+            "generation" => {
+                meta.generation = number;
+                saw_generation = true;
+            }
+            "seq" => {
+                meta.seq = number;
+                saw_seq = true;
+            }
+            _ => return None,
         }
     }
-    positions
+    // A half-written metadata pair is as unusable as a truncated C# line.
+    if saw_generation != saw_seq {
+        return None;
+    }
+    // HWND 0 hiçbir zaman geri yüklenemez; C# journal'ı da bunu atar.
+    (handle != 0).then_some((
+        FlyoutPosition {
+            handle,
+            pid,
+            left,
+            top,
+        },
+        meta,
+    ))
 }
 
 fn parse_unsigned<T: FromStr>(text: &str) -> Option<T> {
@@ -375,5 +568,115 @@ mod tests {
         write_all_to(&path, &positions);
         assert_eq!(read_from(&path).len(), MAX_ENTRIES);
         clear_from(&path);
+    }
+
+    #[test]
+    fn kind_records_format_and_parse_all_three_c_sharp_lines() {
+        for (line, kind, generation, seq) in [
+            ("START generation=42 seq=7", FlyoutKind::Start, 42, 7),
+            ("SEARCH generation=1 seq=2", FlyoutKind::Search, 1, 2),
+            (
+                "CONTROL_CENTER generation=9 seq=3",
+                FlyoutKind::ControlCenter,
+                9,
+                3,
+            ),
+        ] {
+            let record = FlyoutKindRecord::from_line(line).expect("C# line must parse");
+            assert_eq!(record.kind, kind);
+            assert_eq!((record.generation, record.seq), (generation, seq));
+            assert_eq!(record.to_line(), line);
+        }
+        for bad in [
+            "",
+            "UNKNOWN generation=1 seq=1",
+            "START generation=x seq=1",
+            "START generation=1",
+            "START generation=1 seq=1 extra=a",
+            "start generation=1 seq=1",
+        ] {
+            assert_eq!(FlyoutKindRecord::from_line(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn kind_journal_file_round_trips_generation_and_seq() {
+        let path = test_path("kinds");
+        clear_from(&path);
+        let records = [
+            FlyoutKindRecord {
+                kind: FlyoutKind::Start,
+                generation: 42,
+                seq: 7,
+            },
+            FlyoutKindRecord {
+                kind: FlyoutKind::Search,
+                generation: 42,
+                seq: 8,
+            },
+            FlyoutKindRecord {
+                kind: FlyoutKind::ControlCenter,
+                generation: 43,
+                seq: 1,
+            },
+        ];
+        write_kind_records_to(&path, &records);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "START generation=42 seq=7\nSEARCH generation=42 seq=8\nCONTROL_CENTER generation=43 seq=1\n"
+        );
+        assert_eq!(read_kind_records_from(&path), records);
+        assert!(!tmp_path(&path).exists());
+        clear_from(&path);
+    }
+
+    #[test]
+    fn position_journal_meta_is_backward_compatible() {
+        let path = test_path("meta");
+        clear_from(&path);
+
+        // A legacy four-field line must still read, with default metadata.
+        fs::write(&path, "1234 56 -320 17\n").unwrap();
+        let (position, meta) = &read_from_with_meta(&path)[0];
+        assert_eq!(
+            *position,
+            FlyoutPosition {
+                handle: 1234,
+                pid: 56,
+                left: -320,
+                top: 17
+            }
+        );
+        assert_eq!(*meta, JournalMeta::default());
+        assert_eq!(read_from(&path).len(), 1);
+
+        // The extended line keeps the first four fields intact for the native
+        // watchdog and round-trips generation/seq through the Rust reader.
+        let meta = JournalMeta {
+            generation: 11,
+            seq: 29,
+        };
+        write_all_to_with_meta(&path, &[*position], meta);
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "1234 56 -320 17 generation=11 seq=29\n");
+        assert!(text.starts_with("1234 56 -320 17 "));
+        let (read_position, read_meta) = &read_from_with_meta(&path)[0];
+        assert_eq!(*read_position, *position);
+        assert_eq!(*read_meta, meta);
+        assert_eq!(read_from(&path).len(), 1);
+
+        // Rewriting with the legacy writer restores the shipped format exactly.
+        write_all_to(&path, &[*position]);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "1234 56 -320 17\n");
+        clear_from(&path);
+    }
+
+    #[test]
+    fn malformed_meta_tokens_are_rejected() {
+        assert!(parse_position_line("1234 56 1 2 generation=1 seq=2").is_some());
+        assert!(parse_position_line("0 56 1 2 generation=1 seq=2").is_none());
+        assert!(parse_position_line("1234 56 1 2 generation=x seq=2").is_none());
+        assert!(parse_position_line("1234 56 1 2 generation=1").is_none());
+        assert!(parse_position_line("1234 56 1 2 generation=1 seq=2 other=3").is_none());
     }
 }

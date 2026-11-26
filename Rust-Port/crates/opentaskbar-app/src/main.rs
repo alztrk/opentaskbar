@@ -38,6 +38,35 @@ fn on_shell_change() {
     opentaskbar_core::log::event("ShellChanged", &[]);
 }
 
+/// Wires the native Search and Control Center flyouts to the same per-monitor
+/// dock anchors as Start. The dock posts `WM_APP_SHELL_FLYOUT` from every open
+/// path; this handler resolves the anchor on the UI thread and hands the actual
+/// move to `reposition_flyout`, which runs it on a background worker.
+///
+/// Start is deliberately excluded: its verified-open hook stays in
+/// `platform::start_menu_state::on_opened`, and each `FlyoutKind` owns its own
+/// generation, so scheduling Search/CC never bumps (or is bumped by) Start.
+/// `hwnd == 0` means the flyout HWND is not known yet; the worker discovers it.
+#[cfg(windows)]
+pub(crate) fn on_shell_flyout_opened(
+    kind: opentaskbar_shell::flyout_reposition::FlyoutKind,
+    hwnd: usize,
+) {
+    use opentaskbar_shell::flyout_reposition::{Anchor, FlyoutKind, reposition_flyout};
+
+    if kind == FlyoutKind::Start {
+        return;
+    }
+    let (left, top, right, bottom) = dock::shell_button_anchor_for(hwnd, kind);
+    let anchor = Anchor {
+        left,
+        top,
+        right,
+        bottom,
+    };
+    let _ = reposition_flyout(kind, anchor, hwnd);
+}
+
 /// Single switch for native Start-flyout repositioning. PascalCase is the
 /// legacy settings key; the snake_case key is canonical and defaults to on.
 #[cfg(windows)]
@@ -66,6 +95,9 @@ pub(crate) fn apply_native_flyout_reposition(settings: &opentaskbar_core::settin
 fn apply_startup_context(settings: &opentaskbar_core::settings::DockSettings) {
     let _ = platform::theme_packs::install_bundled();
     design::theme::ThemeManager::apply(settings.theme, Some(settings));
+    // Theme-pack token overrides saved by the in-app editor must reach the
+    // live palette before any window is created.
+    design::theme::apply_saved_token_overrides(settings);
     let _ = design::windows_palette::install_listener();
     platform::icon_pack::set_active_pack(None);
     if !settings.theme_pack.trim().is_empty() {

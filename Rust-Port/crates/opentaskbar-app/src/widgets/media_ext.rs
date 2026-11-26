@@ -6,15 +6,12 @@
 //! echoes after a seek.
 
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use opentaskbar_core::settings::DockSettings;
 use windows::Win32::Foundation::PROPERTYKEY;
-use windows::Win32::System::Com::{
-    COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
-};
+use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 use windows::core::GUID;
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
@@ -118,7 +115,12 @@ pub fn read_range(minimum: f64, duration: f64, position: f64) -> Option<(f64, f6
 
 /// C# `LibreWolfMediaTimeline.ReadClockRange`: require the displayed clock to agree with the
 /// numeric range either in seconds or in milliseconds before accepting it.
-pub fn read_clock_range(minimum: f64, duration: f64, position: f64, label: &str) -> Option<(f64, f64)> {
+pub fn read_clock_range(
+    minimum: f64,
+    duration: f64,
+    position: f64,
+    label: &str,
+) -> Option<(f64, f64)> {
     let (shown_position, shown_duration) = parse_progress_label(label)?;
     if duration.floor() == shown_duration && position.floor() == shown_position {
         return read_range(minimum, duration, position);
@@ -385,7 +387,7 @@ pub fn librewolf_timeline(source_app_id: &str, title: &str) -> Option<(f64, f64)
         if !source_matches_window(source_app_id, app_id.as_deref(), &process_stem) {
             continue;
         }
-        let Some(root_com) = uia.element_from_handle(hwnd as *mut c_void) else {
+        let Some(root_com) = uia.element_from_handle(hwnd) else {
             continue;
         };
         let root = Element::from_com(root_com);
@@ -417,7 +419,11 @@ pub fn librewolf_timeline(source_app_id: &str, title: &str) -> Option<(f64, f64)
 
 /// Searches one document for progress controls. YouTube Music uses the named `progress-bar`;
 /// generic documents use `Slider` controls whose value label must agree with the numeric range.
-fn find_controls(uia: &Automation, document: &Element, is_youtube_music: bool) -> Option<(f64, f64)> {
+fn find_controls(
+    uia: &Automation,
+    document: &Element,
+    is_youtube_music: bool,
+) -> Option<(f64, f64)> {
     let condition = if is_youtube_music {
         uia.property_condition_text(uia_raw::UIA_AUTOMATION_ID_PROPERTY_ID, "progress-bar")?
     } else {
@@ -507,10 +513,9 @@ impl MediaTimeline {
         // confirmed anchor, but remember the sample so a genuinely new item is still detectable.
         if let Some(until) = self.seek_hold_until
             && timestamp < until
-            && self
-                .sample
-                .as_ref()
-                .is_some_and(|prev| prev.identity == sample.identity && prev.end_secs == sample.end_secs)
+            && self.sample.as_ref().is_some_and(|prev| {
+                prev.identity == sample.identity && prev.end_secs == sample.end_secs
+            })
         {
             let expected = self.position_at(timestamp);
             if (sample.position_secs - expected).abs() > SEEK_STALE_TOLERANCE_SECS {
@@ -824,7 +829,9 @@ pub fn volume_from_wheel(current_pct: u32, delta: i32, remainder: &mut i32) -> u
 /// Maps a real WS-4 `core_audio::AppAudioSession` into the widget-facing session. Kept as a
 /// pure adapter so the orchestrator can swap the data source at merge time without touching any
 /// flyout code.
-pub fn session_from_core(session: &crate::platform::core_audio::AppAudioSession) -> AudioAppSession {
+pub fn session_from_core(
+    session: &crate::platform::core_audio::AppAudioSession,
+) -> AudioAppSession {
     use crate::platform::core_audio::AppAudioSessionState;
     let volume = if session.volume.is_finite() {
         (session.volume.clamp(0.0, 1.0) * 100.0).round() as u32
@@ -952,23 +959,26 @@ mod tests {
 
     #[test]
     fn only_exact_youtube_music_origin_uses_named_progress_bar() {
-        assert_eq!(url_host("https://music.youtube.com/watch"), Some("music.youtube.com"));
+        assert_eq!(
+            url_host("https://music.youtube.com/watch"),
+            Some("music.youtube.com")
+        );
         assert_eq!(
             url_host("https://music.youtube.com.example/watch"),
             Some("music.youtube.com.example")
         );
         assert_eq!(
-            matches_document("https://music.youtube.com.example/watch", "Artist | Track", "Track"),
+            matches_document(
+                "https://music.youtube.com.example/watch",
+                "Artist | Track",
+                "Track"
+            ),
             Some(false)
         );
         assert!(url_host("https://music.youtube.com:444/watch").is_none());
         assert!(url_host("http://music.youtube.com/watch").is_none());
         assert_eq!(
-            matches_document(
-                "https://music.youtube.com/watch",
-                "Artist | Track",
-                "Track"
-            ),
+            matches_document("https://music.youtube.com/watch", "Artist | Track", "Track"),
             Some(true)
         );
         assert_eq!(
@@ -987,10 +997,7 @@ mod tests {
 
     #[test]
     fn browser_range_and_clock_range_validation() {
-        assert_eq!(
-            read_range(0.0, 294.0, 281.0),
-            Some((281.0, 294.0))
-        );
+        assert_eq!(read_range(0.0, 294.0, 281.0), Some((281.0, 294.0)));
         assert_eq!(read_range(0.0, 0.0, 0.0), None);
         assert_eq!(read_range(0.0, f64::INFINITY, 20.0), None);
         assert_eq!(read_range(0.0, 60.0, 70.0), None);
@@ -1026,7 +1033,13 @@ mod tests {
 
     // --- MediaTimeline / confirm_seek: port of MediaVolumeChecks.cs:90-123 ---
 
-    fn sample(identity: &str, start: f64, end: f64, position: f64, updated: Option<f64>) -> TimelineSample {
+    fn sample(
+        identity: &str,
+        start: f64,
+        end: f64,
+        position: f64,
+        updated: Option<f64>,
+    ) -> TimelineSample {
         TimelineSample {
             identity: identity.to_owned(),
             start_secs: start,
@@ -1041,17 +1054,41 @@ mod tests {
         let mut timeline = MediaTimeline::default();
         let unstamped = sample("song", 0.0, 60.0, 0.0, None);
         timeline.update(unstamped.clone(), 1.0, 0.0, 0.0);
-        assert_eq!(timeline.position_at(0.0), 0.0, "an unstamped timeline must not jump to the end");
+        assert_eq!(
+            timeline.position_at(0.0),
+            0.0,
+            "an unstamped timeline must not jump to the end"
+        );
         timeline.update(unstamped.clone(), 1.0, 8.0, 8.0);
-        assert_eq!(timeline.position_at(8.0), 8.0, "polling the same timeline must not restart the clock");
+        assert_eq!(
+            timeline.position_at(8.0),
+            8.0,
+            "polling the same timeline must not restart the clock"
+        );
         timeline.update(unstamped.clone(), 0.0, 9.0, 9.0);
-        assert_eq!(timeline.position_at(20.0), 9.0, "pausing must freeze the last estimated position");
+        assert_eq!(
+            timeline.position_at(20.0),
+            9.0,
+            "pausing must freeze the last estimated position"
+        );
         timeline.update(unstamped.clone(), 2.0, 20.0, 20.0);
-        assert_eq!(timeline.position_at(22.0), 13.0, "resume must exclude paused time and respect rate");
+        assert_eq!(
+            timeline.position_at(22.0),
+            13.0,
+            "resume must exclude paused time and respect rate"
+        );
         confirm_seek(&mut timeline, 40.0, 22.0);
         timeline.update(unstamped.clone(), 2.0, 24.0, 24.0);
-        assert_eq!(timeline.position_at(24.0), 44.0, "a confirmed seek must survive a repeated old sample");
-        assert_eq!(timeline.position_at(40.0), 60.0, "progress must stop at the end of the item");
+        assert_eq!(
+            timeline.position_at(24.0),
+            44.0,
+            "a confirmed seek must survive a repeated old sample"
+        );
+        assert_eq!(
+            timeline.position_at(40.0),
+            60.0,
+            "progress must stop at the end of the item"
+        );
     }
 
     #[test]
@@ -1061,23 +1098,39 @@ mod tests {
         let next = sample("second", 5.0, 30.0, 5.0, Some(41.0));
         timeline.update(next.clone(), 1.0, 43.0, 43.0);
         assert_eq!(timeline.duration(), 25.0);
-        assert_eq!(timeline.position_at(43.0), 2.0, "a new item starts from its own timestamp");
+        assert_eq!(
+            timeline.position_at(43.0),
+            2.0,
+            "a new item starts from its own timestamp"
+        );
         timeline.update(
             sample("second", 5.0, 30.0, 12.0, Some(-3600.0)),
             1.0,
             44.0,
             44.0,
         );
-        assert_eq!(timeline.position_at(44.0), 7.0, "a stale provider timestamp must not jump to the end");
+        assert_eq!(
+            timeline.position_at(44.0),
+            7.0,
+            "a stale provider timestamp must not jump to the end"
+        );
         timeline.update(
             sample("second", 5.0, 30.0, 25.0, Some(35.0)),
             1.0,
             45.0,
             45.0,
         );
-        assert_eq!(timeline.position_at(45.0), 20.0, "a future timestamp must not fake completion");
+        assert_eq!(
+            timeline.position_at(45.0),
+            20.0,
+            "a future timestamp must not fake completion"
+        );
         timeline.update(sample("second", 5.0, 5.0, 0.0, Some(46.0)), 0.0, 46.0, 46.0);
-        assert_eq!(timeline.duration(), 0.0, "duration 0 clears the previous item");
+        assert_eq!(
+            timeline.duration(),
+            0.0,
+            "duration 0 clears the previous item"
+        );
         assert_eq!(timeline.position_at(46.0), 0.0);
     }
 
@@ -1090,7 +1143,11 @@ mod tests {
         assert_eq!(timeline.position_at(10.0), 40.0);
         // Provider still reports the pre-seek position within the hold window.
         timeline.update(snapshot.clone(), 1.0, 11.0, 11.0);
-        assert_eq!(timeline.position_at(11.0), 41.0, "stale echo must not rewind the seek");
+        assert_eq!(
+            timeline.position_at(11.0),
+            41.0,
+            "stale echo must not rewind the seek"
+        );
         // A genuinely different item is accepted even inside the hold window.
         timeline.update(sample("other", 0.0, 100.0, 0.0, None), 1.0, 11.5, 11.5);
         assert_eq!(timeline.position_at(11.5), 0.0);
@@ -1102,7 +1159,11 @@ mod tests {
         let item = sample("song", 0.0, 120.0, 60.0, Some(0.0));
         timeline.update(item.clone(), 0.0, 0.0, 0.0);
         timeline.update(item.clone(), 0.0, 10.0, 10.0);
-        assert_eq!(timeline.position_at(30.0), 60.0, "rate 0 must freeze progress");
+        assert_eq!(
+            timeline.position_at(30.0),
+            60.0,
+            "rate 0 must freeze progress"
+        );
         assert_eq!(timeline.rate(), 0.0);
         timeline.update(sample("song", 0.0, 0.0, 0.0, None), 1.0, 31.0, 31.0);
         assert_eq!(timeline.duration(), 0.0);
@@ -1123,7 +1184,10 @@ mod tests {
         snap.fetched_at = Some(epoch + std::time::Duration::from_millis(500));
         let first = timeline_from_snapshot(&snap, epoch);
         let second = timeline_from_snapshot(&snap, epoch);
-        assert_eq!(first, second, "the same SMTC fetch must produce the same sample");
+        assert_eq!(
+            first, second,
+            "the same SMTC fetch must produce the same sample"
+        );
         assert_eq!(first.updated_at, Some(0.5));
         assert_eq!(first.identity, "Song\u{1f}Artist");
     }

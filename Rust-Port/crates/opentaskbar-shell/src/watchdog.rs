@@ -106,10 +106,7 @@ fn parse_watchdog_arg(arg: &str) -> Option<(u32, String)> {
     let rest = arg.strip_prefix("--watchdog=")?;
     let (pid, token) = rest.split_once(':')?;
     let pid = pid.parse::<u32>().ok()?;
-    if pid == 0
-        || token.is_empty()
-        || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
+    if pid == 0 || token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return None;
     }
     Some((pid, token.to_owned()))

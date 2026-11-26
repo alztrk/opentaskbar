@@ -1179,18 +1179,17 @@ unsafe extern "system" fn menu_wnd_proc(
                 if !unsafe { (*pane_ptr).is_submenu } && !session_ptr.is_null() {
                     // Clone before touching the session: `open_submenu` borrows
                     // `session.root`, which aliases `pane_ptr` for the root menu.
+                    let pane = unsafe { pane_ptr.as_ref() }
+                        .expect("menu pane pointer must be valid in its own wndproc");
                     let sub_items: Option<Vec<MenuEntry>> = match next {
-                        Some(idx) => unsafe {
-                            match (&(*pane_ptr).entries).get(idx) {
-                                Some(MenuEntry::Submenu { items, .. }) => Some(items.clone()),
-                                _ => None,
-                            }
+                        Some(idx) => match pane.entries.get(idx) {
+                            Some(MenuEntry::Submenu { items, .. }) => Some(items.clone()),
+                            _ => None,
                         },
                         None => None,
                     };
-                    let row_rect: Option<RECT> = next.and_then(|idx| unsafe {
-                        (&(*pane_ptr).row_rects).get(idx).copied().flatten()
-                    });
+                    let row_rect: Option<RECT> =
+                        next.and_then(|idx| pane.row_rects.get(idx).copied().flatten());
                     unsafe {
                         let session = &mut *session_ptr;
                         if let (Some(idx), Some(items), Some(rc)) = (next, sub_items, row_rect) {

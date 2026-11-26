@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
     AudioSessionStateActive, AudioSessionStateInactive, DEVICE_STATE_ACTIVE, EDataFlow,
-    IAudioSessionControl, IAudioSessionControl2, IAudioSessionManager2,
-    IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, eCapture, eMultimedia, eRender,
+    IAudioSessionControl, IAudioSessionControl2, IAudioSessionManager2, IMMDeviceEnumerator,
+    ISimpleAudioVolume, MMDeviceEnumerator, eCapture, eMultimedia, eRender,
 };
 use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoTaskMemFree,
@@ -652,9 +652,7 @@ unsafe fn session_from_control(
             .GetSessionInstanceIdentifier()
             .ok()
             .and_then(|text| take_pwstr(text));
-        let app_user_model_id = instance
-            .as_deref()
-            .and_then(aumid_from_instance);
+        let app_user_model_id = instance.as_deref().and_then(aumid_from_instance);
         let name = if system_sounds {
             "SystemSounds".to_owned()
         } else {
@@ -733,8 +731,11 @@ unsafe fn find_session_volume(id: &str) -> Option<ISimpleAudioVolume> {
     // SAFETY: all interfaces are owned locals and release themselves on drop.
     unsafe {
         let enumerator =
-            CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-        let devices = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE).ok()?;
+            CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .ok()?;
+        let devices = enumerator
+            .EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
+            .ok()?;
         for device_index in 0..devices.GetCount().ok()?.min(64) {
             let Ok(device) = devices.Item(device_index) else {
                 continue;
@@ -783,7 +784,9 @@ pub fn set_app_volume(id: &str, volume: f32) -> bool {
         let Some(session) = find_session_volume(id) else {
             return false;
         };
-        session.SetMasterVolume(clamp_unit(volume), std::ptr::null()).is_ok()
+        session
+            .SetMasterVolume(clamp_unit(volume), std::ptr::null())
+            .is_ok()
     }
 }
 

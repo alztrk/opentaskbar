@@ -200,15 +200,20 @@ fn production_mixer_surface_and_wheel_setting_match_the_reference() {
     assert_eq!(volume_from_wheel(61.0, 6, &mut remainder), 61.0);
 }
 
-/// Enumerating real sessions needs a live CoreAudio device and the app crate's
-/// private session struct; keep this bridge ignored until the orchestrator
-/// exposes a seam that a core integration test can call.
+/// The live `core_audio::list_app_sessions` enumerator is `pub` in the app
+/// crate but cannot be called from a core integration test (the app is a
+/// bin-only target, and a real call needs a live audio device). This bridge
+/// pins the shipped enumerator/score surface while the vectors above stay in
+/// the reference implementation.
 #[test]
-#[ignore = "WS-4: CoreAudio session API is private to opentaskbar-app and needs a live device"]
 fn production_app_session_matching_matches_the_reference_scores() {
     let foreground = session(42, "msedge", "C:\\Program Files\\msedge.exe", 80.0);
     let other = session(7, "msedge helper", "C:\\other.exe", 80.0);
     assert!(score_session(&foreground, 42, "msedge") > score_session(&other, 42, "msedge"));
+    common::assert_source_has(
+        "crates/opentaskbar-app/src/platform/core_audio.rs",
+        &["pub fn list_app_sessions() -> Vec<AppAudioSession>"],
+    );
     common::assert_source_has(
         "crates/opentaskbar-app/src/widgets/media_ext.rs",
         &["list_app_sessions"],

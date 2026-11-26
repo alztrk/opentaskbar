@@ -568,8 +568,10 @@ mod tests {
             .expect("worker must deliver a snapshot");
         // In a headless CI run there may be no eligible windows; the contract
         // is that the worker sends a well-formed (possibly empty) snapshot.
-        assert!(snapshot
-            .iter()
-            .all(|window| !window.exe_path.is_empty() && window.hwnd != 0));
+        assert!(
+            snapshot
+                .iter()
+                .all(|window| !window.exe_path.is_empty() && window.hwnd != 0)
+        );
     }
 }
