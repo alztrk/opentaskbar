@@ -1337,5 +1337,8 @@
   "WirelessBatterySubtitle": "Bluetooth devices",
   "WirelessBatteryThresholdButton": "Low threshold",
   "GpuEngine": "GPU Engine",
-  "OpenLocation": "Open location"
+  "OpenLocation": "Open location",
+  "DropdownSearchPlaceholder": "Search...",
+  "DropdownNoResults": "No results found",
+  "WeatherLocationUsed": "Using your location"
 }

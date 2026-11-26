@@ -1337,5 +1337,8 @@
   "WirelessBatterySubtitle": "Пристрої Bluetooth",
   "WirelessBatteryThresholdButton": "Низький поріг",
   "GpuEngine": "Двигун GPU",
-  "OpenLocation": "Відкрити розташування"
+  "OpenLocation": "Відкрити розташування",
+  "DropdownSearchPlaceholder": "Пошук...",
+  "DropdownNoResults": "Результатів не знайдено",
+  "WeatherLocationUsed": "Використовується ваше місцезнаходження"
 }

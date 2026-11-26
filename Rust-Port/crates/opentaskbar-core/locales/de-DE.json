@@ -1337,5 +1337,8 @@
   "WirelessBatterySubtitle": "Bluetooth-Geräte",
   "WirelessBatteryThresholdButton": "Niedrige Schwelle",
   "GpuEngine": "GPU-Engine",
-  "OpenLocation": "Speicherort öffnen"
+  "OpenLocation": "Speicherort öffnen",
+  "DropdownSearchPlaceholder": "Suchen...",
+  "DropdownNoResults": "Keine Ergebnisse gefunden",
+  "WeatherLocationUsed": "Ihr Standort wird verwendet"
 }

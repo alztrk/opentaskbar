@@ -11,7 +11,7 @@ const LANGS: &[&str] = &[
     "ru-RU", "tr-TR", "uk-UA", "zh-CN",
 ];
 
-const EXPECTED_KEY_COUNT: usize = 1339;
+const EXPECTED_KEY_COUNT: usize = 1342;
 
 const C3_NEW_KEYS: &[&str] = &[
     // The five keys C# has and the pre-port Rust catalogs lacked.
@@ -57,6 +57,10 @@ const C3_NEW_KEYS: &[&str] = &[
     "PlacementInWidgets",
     "OpenLocation",
     "GpuEngine",
+    // Searchable country/city pickers and automatic geolocation status.
+    "DropdownSearchPlaceholder",
+    "DropdownNoResults",
+    "WeatherLocationUsed",
 ];
 
 #[test]

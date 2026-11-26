@@ -360,25 +360,208 @@ fn urlencode(s: &str) -> String {
     out
 }
 
-/// Windows Geolocation (best-effort). Returns a display city name, or `None` when denied.
-pub fn geolocate_city() -> Option<String> {
+/// Outcome of the Windows location-capability check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocationAccess {
+    Granted,
+    Denied,
+    Unavailable,
+}
+
+/// A single raw geolocation fix emitted by the WinRT probe (status + optional address/coordinates).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GeolocationSample {
+    /// Raw `GeolocationAccessStatus` value (1 = Allowed, 2/3/4 = denied/disabled).
+    pub access: i32,
+    pub city: String,
+    pub country: String,
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+impl GeolocationSample {
+    pub fn has_coordinates(&self) -> bool {
+        self.latitude.is_finite()
+            && self.longitude.is_finite()
+            && self.latitude.abs() <= 90.0
+            && self.longitude.abs() <= 180.0
+            && (self.latitude != 0.0 || self.longitude != 0.0)
+    }
+}
+
+/// Maps `Windows.Devices.Geolocation.GeolocationAccessStatus` to the decision-table enum.
+pub fn location_access_from_status(status: i32) -> LocationAccess {
+    match status {
+        1 => LocationAccess::Granted,
+        2..=4 => LocationAccess::Denied,
+        _ => LocationAccess::Unavailable,
+    }
+}
+
+/// Pure auto-fill decision: only an empty saved city with granted access may be overwritten.
+pub fn should_auto_geolocate(saved_city: &str, access: LocationAccess) -> bool {
+    saved_city.trim().is_empty() && access == LocationAccess::Granted
+}
+
+/// Parses the `status|city|country|lat|lon` line printed by the PowerShell probe.
+pub fn parse_geolocation_response(raw: &str) -> Option<GeolocationSample> {
+    let line = raw.lines().find(|line| !line.trim().is_empty())?.trim();
+    let mut fields = line.split('|');
+    let access = fields.next()?.trim().parse::<i32>().ok()?;
+    let city = fields.next().unwrap_or_default().trim().to_owned();
+    let country = fields.next().unwrap_or_default().trim().to_owned();
+    let latitude = fields
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    let longitude = fields
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    Some(GeolocationSample {
+        access,
+        city,
+        country,
+        latitude,
+        longitude,
+    })
+}
+
+/// Converts a country hint (ISO code, English or Turkish name) to the catalogue display name.
+/// Unknown or empty hints fall back to the offline catalogue's first country.
+pub fn country_display_name(hint: &str) -> String {
+    let hint = hint.trim();
+    if hint.is_empty() {
+        return COUNTRIES[0].1.to_owned();
+    }
+    if let Some((_, name)) = COUNTRIES.iter().find(|(code, name)| {
+        code.eq_ignore_ascii_case(hint)
+            || name.eq_ignore_ascii_case(hint)
+            || (is_turkey(name) && is_turkey(hint))
+    }) {
+        return (*name).to_owned();
+    }
+    hint.to_owned()
+}
+
+/// Resolves a city/country hint pair through the offline catalogue. A missing country hint is
+/// inferred from the cached city list before falling back to the catalogue default.
+pub fn resolve_location(country_hint: &str, city_hint: &str) -> Option<(String, String)> {
+    let city = city_hint.trim();
+    if city.is_empty() {
+        return None;
+    }
+    let country = if country_hint.trim().is_empty() {
+        find_cached_country_for_city(city)
+            .map(country_display_name)
+            .unwrap_or_else(|| country_display_name(""))
+    } else {
+        country_display_name(country_hint)
+    };
+    Some((country, city.to_owned()))
+}
+
+/// Reads the per-user Windows "Let apps access your location" consent store. `None` means the
+/// registry is inconclusive, in which case `RequestAccessAsync` remains authoritative.
+fn registry_location_permission() -> Option<bool> {
+    use windows_sys::Win32::System::Registry::{
+        HKEY_CURRENT_USER, KEY_READ, REG_SZ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+    };
+    let path: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\location\0"
+        .encode_utf16()
+        .collect();
+    let value: Vec<u16> = "Value\0".encode_utf16().collect();
+    unsafe {
+        let mut key: *mut std::ffi::c_void = std::ptr::null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut key) != 0 {
+            return None;
+        }
+        let mut kind = 0u32;
+        let mut data = [0u16; 32];
+        let mut len = (data.len() * 2) as u32;
+        let ok = RegQueryValueExW(
+            key,
+            value.as_ptr(),
+            std::ptr::null(),
+            &mut kind,
+            data.as_mut_ptr().cast(),
+            &mut len,
+        ) == 0;
+        RegCloseKey(key);
+        if !ok || kind != REG_SZ {
+            return None;
+        }
+        let count = (len as usize / 2).min(data.len());
+        let consent = String::from_utf16_lossy(&data[..count])
+            .trim()
+            .to_ascii_lowercase();
+        match consent.as_str() {
+            "allow" => Some(true),
+            "deny" => Some(false),
+            _ => None,
+        }
+    }
+}
+
+fn geolocation_sample() -> Option<GeolocationSample> {
     let ps = r#"
-Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$ErrorActionPreference = 'Stop'
 try {
+  Add-Type -AssemblyName System.Runtime.WindowsRuntime
   $t = [Windows.Devices.Geolocation.Geolocator, Windows.Devices.Geolocation, ContentType = WindowsRuntime]
+  $status = [int]($t::RequestAccessAsync().AsTask().GetAwaiter().GetResult())
+  if ($status -ne 1) { "$status|||0|0"; exit }
   $g = New-Object $t
   $g.DesiredAccuracy = 100
   $p = $g.GetGeopositionAsync().AsTask().GetAwaiter().GetResult()
-  $p.CivicAddress.City
-} catch { '' }
+  $city = $p.CivicAddress.City
+  $country = $p.CivicAddress.Country
+  $lat = $p.Coordinate.Point.Position.Latitude
+  $lon = $p.Coordinate.Point.Position.Longitude
+  "{0}|{1}|{2}|{3}|{4}" -f $status, $city, $country, $lat, $lon
+} catch {
+  "-1|||0|0"
+}
 "#;
     let out = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-NonInteractive", "-Command", ps])
         .creation_flags(0x0800_0000)
         .output()
         .ok()?;
-    let city = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    (!city.is_empty()).then_some(city)
+    parse_geolocation_response(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Best-effort Windows geolocation: checks the capability consent store, asks WinRT for
+/// permission, then resolves a `(country, city)` pair from the civic address, reverse geocoding
+/// of the coordinate fix, or the offline catalogue. `None` means denied/unavailable — callers
+/// silently keep their saved location.
+pub fn geolocate() -> Option<(String, String)> {
+    if registry_location_permission() == Some(false) {
+        return None;
+    }
+    let sample = geolocation_sample()?;
+    if location_access_from_status(sample.access) != LocationAccess::Granted {
+        return None;
+    }
+    if let Some(pair) = resolve_location(&sample.country, &sample.city) {
+        return Some(pair);
+    }
+    if sample.has_coordinates()
+        && let Some(geo) =
+            crate::widgets::telemetry::reverse_geocode(sample.latitude, sample.longitude, "en")
+    {
+        return resolve_location(&geo.country, &geo.name);
+    }
+    None
+}
+
+/// Windows Geolocation (best-effort). Returns a display city name, or `None` when denied.
+pub fn geolocate_city() -> Option<String> {
+    geolocate().map(|(_, city)| city)
 }
 
 /// Normalises the UI language to an Open-Meteo `language` query value.
@@ -472,6 +655,58 @@ mod tests {
         let parsed = parse_cities_payload(payload);
         assert_eq!(parsed, vec!["Ankara", "Antalya", "Izmir"]);
         assert!(parse_cities_payload("not json").is_empty());
+    }
+
+    #[test]
+    fn geolocation_decision_table() {
+        assert_eq!(location_access_from_status(1), LocationAccess::Granted);
+        for denied in [2, 3, 4] {
+            assert_eq!(location_access_from_status(denied), LocationAccess::Denied);
+        }
+        for unknown in [0, -1, 99] {
+            assert_eq!(
+                location_access_from_status(unknown),
+                LocationAccess::Unavailable
+            );
+        }
+        // Only an empty saved city with granted access is overwritten.
+        assert!(should_auto_geolocate("", LocationAccess::Granted));
+        assert!(should_auto_geolocate("  ", LocationAccess::Granted));
+        assert!(!should_auto_geolocate(
+            "Izmir, Turkey",
+            LocationAccess::Granted
+        ));
+        assert!(!should_auto_geolocate("", LocationAccess::Denied));
+        assert!(!should_auto_geolocate("", LocationAccess::Unavailable));
+    }
+
+    #[test]
+    fn geolocation_response_and_catalog_resolution() {
+        let sample = parse_geolocation_response("1|İstanbul|Turkey|41.008|28.978\n")
+            .expect("probe line must parse");
+        assert_eq!(sample.access, 1);
+        assert_eq!(sample.city, "İstanbul");
+        assert!(sample.has_coordinates());
+        assert_eq!(
+            resolve_location(&sample.country, &sample.city),
+            Some(("Turkey".to_owned(), "İstanbul".to_owned()))
+        );
+        // Denied status still parses, but the decision table blocks the auto-fill.
+        let denied = parse_geolocation_response("2|||0|0").unwrap();
+        assert_eq!(
+            location_access_from_status(denied.access),
+            LocationAccess::Denied
+        );
+        assert!(!denied.has_coordinates());
+        assert!(parse_geolocation_response("nonsense").is_none());
+        // Empty country hints are recovered from the offline city catalogue.
+        assert_eq!(
+            resolve_location("", "Ankara"),
+            Some(("Turkey".to_owned(), "Ankara".to_owned()))
+        );
+        assert_eq!(country_display_name("TR"), "Turkey");
+        assert_eq!(country_display_name("Türkiye"), "Turkey");
+        assert_eq!(resolve_location("TR", ""), None);
     }
 
     #[test]
