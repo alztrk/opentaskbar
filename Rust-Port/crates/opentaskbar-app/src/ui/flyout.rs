@@ -18,19 +18,44 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::design::fonts;
+use windows::Win32::Foundation::RECT as WinRect;
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+};
+use windows::Win32::Graphics::Direct2D::{
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_ELLIPSE,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory1,
+    ID2D1SolidColorBrush,
+};
+use windows::Win32::Graphics::DirectWrite::{
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+    DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT,
+    DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL,
+    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_TEXT_RANGE,
+    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, IDWriteTypography,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Gdi::HDC as WinHdc;
+use windows::core::HSTRING;
+use windows_numerics::Vector2;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
     DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleBitmap,
-    CreateCompatibleDC, CreateFontW, CreatePen, CreateSolidBrush, DIB_RGB_COLORS, DT_CENTER,
-    DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteDC,
-    DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, GetMonitorInfoW, HBRUSH, HDC, HFONT,
-    HPEN, IntersectClipRect, InvalidateRect, LineTo, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromPoint, MoveToEx, PAINTSTRUCT, PS_NULL, PS_SOLID, RestoreDC, RoundRect, SRCCOPY,
-    SaveDC, SelectObject, SetBkMode, SetTextColor, StretchDIBits, TRANSPARENT,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GetMonitorInfoW, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT, SRCCOPY, SelectObject,
+};
+#[cfg(test)]
+use windows_sys::Win32::Graphics::Gdi::{
+    DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DrawTextW, HDC,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -51,7 +76,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
 };
 
-use super::menu::{BorderStyle, MenuIcon, draw_menu_icon};
+use super::menu::BorderStyle;
 use crate::design::{self, Rgb, gdi_rgb};
 use crate::platform::win32;
 use crate::widgets::telemetry;
@@ -59,7 +84,8 @@ use crate::widgets::telemetry;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
 const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
-const MAX_FLYOUT_H_DIPS: f32 = 460.0;
+const MAX_FLYOUT_H_DIPS: f32 = 500.0;
+const FLYOUT_PAD_DIPS: f32 = 16.0;
 const TIMER_ANIM: usize = 1;
 const TIMER_DISMISS: usize = 2;
 const DISMISS_POLL_MS: u32 = 45;
@@ -244,6 +270,14 @@ pub enum FlyoutBlock {
         large: bool,
         right_meta: Option<String>,
     },
+    /// Integrated horizontal header with tinted Fluent icon well, title/subtitle, and bold right value.
+    HeroHeader {
+        glyph: u16,
+        glyph_color: Rgb,
+        title: String,
+        subtitle: Option<String>,
+        right_value: Option<String>,
+    },
     /// C# `ClockWidget.BuildCalendar`: interactive month/year nav + 7-col calendar grid.
     CalendarGrid {
         year: i32,
@@ -295,6 +329,25 @@ pub enum FlyoutBlock {
     },
     /// 2-column Control Center toggle tile grid (`(id, title, state_label, active)`).
     ToggleGrid(Vec<(u32, String, String, bool)>),
+    /// 2-column Control Center toggle tiles with crisp Fluent icons (`(id, glyph, title, state_label, active)`).
+    IconToggleGrid(Vec<(u32, u16, String, String, bool)>),
+    /// Compact stat row with leading tinted Fluent icon glyph (e.g. weather forecast or status).
+    GlyphStatRow {
+        glyph: u16,
+        glyph_color: Rgb,
+        label: String,
+        detail: Option<String>,
+        value: String,
+    },
+    /// Interactive action card with leading tinted Fluent icon glyph, title, subtitle, and badge.
+    GlyphActionRow {
+        id: u32,
+        glyph: u16,
+        glyph_color: Rgb,
+        title: String,
+        subtitle: Option<String>,
+        badge: Option<String>,
+    },
     StatRow {
         label: String,
         value: String,
@@ -433,120 +486,415 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
-/// Per-paint GDI object cache. A flyout paint previously created and deleted a brush/pen for
-/// every rounded rectangle (15+ per frame) plus five fonts, regardless of whether the color or
-/// font had already been used. Handles live for one paint and are released together.
-#[derive(Default)]
-struct FlyoutGdi {
-    brushes: HashMap<u32, HBRUSH>,
-    pens: HashMap<(u32, i32), HPEN>,
-    fonts: HashMap<(i32, i32), HFONT>,
-    fluent_fonts: HashMap<(i32, i32), HFONT>,
-}
-
-impl FlyoutGdi {
-    fn brush(&mut self, color: u32) -> HBRUSH {
-        if let Some(&handle) = self.brushes.get(&color) {
-            return handle;
-        }
-        let handle = unsafe { CreateSolidBrush(color) };
-        self.brushes.insert(color, handle);
-        handle
-    }
-
-    /// Solid pen of `width_px`; a non-positive width yields a `PS_NULL` pen so
-    /// callers can skip the stroke without branching on GDI object selection.
-    fn pen(&mut self, color: u32, width_px: i32) -> HPEN {
-        let key = (color, width_px);
-        if let Some(&handle) = self.pens.get(&key) {
-            return handle;
-        }
-        let (style, width) = if width_px > 0 {
-            (PS_SOLID, width_px)
-        } else {
-            (PS_NULL, 0)
-        };
-        let handle = unsafe { CreatePen(style, width, color) };
-        self.pens.insert(key, handle);
-        handle
-    }
-
-    fn font(&mut self, height_px: i32, weight: i32) -> HFONT {
-        let height_px = fonts::scaled_size(height_px as f32).round() as i32;
-        let key = (height_px, weight);
-        if let Some(&handle) = self.fonts.get(&key) {
-            return handle;
-        }
-        let handle = unsafe {
-            CreateFontW(
-                height_px,
-                0,
-                0,
-                0,
-                weight,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                5, // CLEARTYPE_QUALITY
-                0,
-                wide(fonts::native_ui_face()).as_ptr(),
-            )
-        };
-        self.fonts.insert(key, handle);
-        handle
-    }
-
-    fn fluent_font(&mut self, height_px: i32) -> HFONT {
-        let key = (height_px, 400);
-        if let Some(&handle) = self.fluent_fonts.get(&key) {
-            return handle;
-        }
-        let handle = unsafe {
-            CreateFontW(
-                height_px,
-                0,
-                0,
-                0,
-                400,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                4,
-                0,
-                wide("Segoe Fluent Icons").as_ptr(),
-            )
-        };
-        self.fluent_fonts.insert(key, handle);
-        handle
-    }
-}
-
-impl Drop for FlyoutGdi {
-    fn drop(&mut self) {
-        unsafe {
-            for &handle in self.brushes.values() {
-                let _ = DeleteObject(handle as _);
-            }
-            for &handle in self.pens.values() {
-                let _ = DeleteObject(handle as _);
-            }
-            for &handle in self.fonts.values().chain(self.fluent_fonts.values()) {
-                let _ = DeleteObject(handle as _);
-            }
-        }
-    }
-}
-
-/// Null-terminated, empty-safe wrapper around `user32!DrawTextW`.
+/// Direct2D + DirectWrite anti-aliased renderer cached per UI thread.
 ///
-/// Passing an empty `Vec<u16>` pointer (`NonNull::dangling() == 0x2`) to `DrawTextW`
-/// causes an access violation (`0xC0000005`) inside `user32.dll` on Windows 11.
+/// Renders into a 32-bit DIB section via `ID2D1DCRenderTarget::BindDC` so every
+/// rounded card, circular thumb, slider track, sparkline, Fluent icon, and text run
+/// gets crisp subpixel anti-aliasing and tabular numerals without rewriting the Win32
+/// popup HWND lifecycle.
+struct FlyoutD2d {
+    _factory: ID2D1Factory1,
+    dwrite: IDWriteFactory,
+    target: ID2D1DCRenderTarget,
+    tabular: Option<IDWriteTypography>,
+    formats: HashMap<(bool, u16, u16, u8, String), IDWriteTextFormat>,
+}
+
+thread_local! {
+    static FLYOUT_D2D: RefCell<Option<FlyoutD2d>> = const { RefCell::new(None) };
+}
+
+fn d2d_rgba(c: Rgb, a: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: f32::from(c.0) / 255.0,
+        g: f32::from(c.1) / 255.0,
+        b: f32::from(c.2) / 255.0,
+        a: a.clamp(0.0, 1.0),
+    }
+}
+
+fn d2d_rect(l: f32, t: f32, r: f32, b: f32) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: l,
+        top: t,
+        right: r,
+        bottom: b,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TextAlign {
+    Left,
+    Center,
+    Right,
+}
+
+impl TextAlign {
+    const fn code(self) -> u8 {
+        match self {
+            Self::Left => 0,
+            Self::Center => 1,
+            Self::Right => 2,
+        }
+    }
+}
+
+impl FlyoutD2d {
+    fn create() -> Option<Self> {
+        unsafe {
+            let factory: ID2D1Factory1 =
+                D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()?;
+            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
+            let props = D2D1_RENDER_TARGET_PROPERTIES {
+                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                usage: D2D1_RENDER_TARGET_USAGE_NONE,
+                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+            };
+            let target = factory.CreateDCRenderTarget(&props).ok()?;
+            target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            let tabular = dwrite.CreateTypography().ok().inspect(|typo| {
+                let _ = typo.AddFontFeature(DWRITE_FONT_FEATURE {
+                    nameTag: DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+                    parameter: 1,
+                });
+            });
+            Some(Self {
+                _factory: factory,
+                dwrite,
+                target,
+                tabular,
+                formats: HashMap::new(),
+            })
+        }
+    }
+
+    fn brush(&self, color: D2D1_COLOR_F) -> Option<ID2D1SolidColorBrush> {
+        unsafe { self.target.CreateSolidColorBrush(&color, None).ok() }
+    }
+
+    fn text_format(
+        &mut self,
+        fluent: bool,
+        size_px: f32,
+        weight: DWRITE_FONT_WEIGHT,
+        align: TextAlign,
+    ) -> Option<IDWriteTextFormat> {
+        let eff_size = if fluent {
+            size_px.max(9.0)
+        } else {
+            fonts::scaled_size(size_px).max(9.0)
+        };
+        let family = if fluent {
+            "Segoe Fluent Icons".to_owned()
+        } else {
+            fonts::ui_family_list()
+        };
+        let key = (
+            fluent,
+            (eff_size * 2.0).round() as u16,
+            weight.0 as u16,
+            align.code(),
+            family.clone(),
+        );
+        if let Some(fmt) = self.formats.get(&key) {
+            return Some(fmt.clone());
+        }
+        let locale = if fluent {
+            "en-US".to_owned()
+        } else {
+            fonts::ui_locale()
+        };
+        unsafe {
+            let fmt = self
+                .dwrite
+                .CreateTextFormat(
+                    &HSTRING::from(family.as_str()),
+                    None,
+                    weight,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    eff_size,
+                    &HSTRING::from(locale.as_str()),
+                )
+                .ok()?;
+            let _ = fmt.SetTextAlignment(match align {
+                TextAlign::Left => DWRITE_TEXT_ALIGNMENT_LEADING,
+                TextAlign::Center => DWRITE_TEXT_ALIGNMENT_CENTER,
+                TextAlign::Right => DWRITE_TEXT_ALIGNMENT_TRAILING,
+            });
+            let _ = fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+            let _ = fmt.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            let trimming = DWRITE_TRIMMING {
+                granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                delimiter: 0,
+                delimiterCount: 0,
+            };
+            let sign = self.dwrite.CreateEllipsisTrimmingSign(&fmt).ok();
+            let _ = fmt.SetTrimming(&trimming, sign.as_ref());
+            if self.formats.len() > 96 {
+                self.formats.clear();
+            }
+            self.formats.insert(key, fmt.clone());
+            Some(fmt)
+        }
+    }
+
+    fn fill_rrect(&self, l: f32, t: f32, r: f32, b: f32, rad: f32, color: D2D1_COLOR_F) {
+        if r <= l || b <= t {
+            return;
+        }
+        if let Some(brush) = self.brush(color) {
+            let rr = D2D1_ROUNDED_RECT {
+                rect: d2d_rect(l, t, r, b),
+                radiusX: rad,
+                radiusY: rad,
+            };
+            unsafe {
+                self.target.FillRoundedRectangle(&rr, &brush);
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stroke_rrect(
+        &self,
+        l: f32,
+        t: f32,
+        r: f32,
+        b: f32,
+        rad: f32,
+        color: D2D1_COLOR_F,
+        stroke_w: f32,
+    ) {
+        if stroke_w <= 0.0 || r <= l || b <= t {
+            return;
+        }
+        if let Some(brush) = self.brush(color) {
+            let inset = stroke_w * 0.5;
+            let rr = D2D1_ROUNDED_RECT {
+                rect: d2d_rect(l + inset, t + inset, r - inset, b - inset),
+                radiusX: (rad - inset).max(0.0),
+                radiusY: (rad - inset).max(0.0),
+            };
+            unsafe {
+                self.target
+                    .DrawRoundedRectangle(&rr, &brush, stroke_w, None);
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn fill_rrect_bordered(
+        &self,
+        l: f32,
+        t: f32,
+        r: f32,
+        b: f32,
+        rad: f32,
+        fill: D2D1_COLOR_F,
+        border: D2D1_COLOR_F,
+        stroke_w: f32,
+    ) {
+        self.fill_rrect(l, t, r, b, rad, fill);
+        self.stroke_rrect(l, t, r, b, rad, border, stroke_w);
+    }
+
+    fn fill_circle(&self, cx: f32, cy: f32, rad: f32, color: D2D1_COLOR_F) {
+        if rad <= 0.0 {
+            return;
+        }
+        if let Some(brush) = self.brush(color) {
+            let ell = D2D1_ELLIPSE {
+                point: Vector2 { X: cx, Y: cy },
+                radiusX: rad,
+                radiusY: rad,
+            };
+            unsafe {
+                self.target.FillEllipse(&ell, &brush);
+            }
+        }
+    }
+
+    fn stroke_circle(&self, cx: f32, cy: f32, rad: f32, color: D2D1_COLOR_F, stroke_w: f32) {
+        if rad <= 0.0 || stroke_w <= 0.0 {
+            return;
+        }
+        if let Some(brush) = self.brush(color) {
+            let ell = D2D1_ELLIPSE {
+                point: Vector2 { X: cx, Y: cy },
+                radiusX: rad,
+                radiusY: rad,
+            };
+            unsafe {
+                self.target.DrawEllipse(&ell, &brush, stroke_w, None);
+            }
+        }
+    }
+
+    fn draw_line(&self, x0: f32, y0: f32, x1: f32, y1: f32, color: D2D1_COLOR_F, stroke_w: f32) {
+        if let Some(brush) = self.brush(color) {
+            unsafe {
+                self.target.DrawLine(
+                    Vector2 { X: x0, Y: y0 },
+                    Vector2 { X: x1, Y: y1 },
+                    &brush,
+                    stroke_w,
+                    None,
+                );
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text(
+        &mut self,
+        text: &str,
+        rect: D2D_RECT_F,
+        size_px: f32,
+        weight: DWRITE_FONT_WEIGHT,
+        align: TextAlign,
+        color: D2D1_COLOR_F,
+        tabular: bool,
+    ) {
+        if text.is_empty() || rect.right <= rect.left || rect.bottom <= rect.top {
+            return;
+        }
+        let Some(fmt) = self.text_format(false, size_px, weight, align) else {
+            return;
+        };
+        let Some(brush) = self.brush(color) else {
+            return;
+        };
+        let wtxt: Vec<u16> = text.encode_utf16().collect();
+        unsafe {
+            if let Ok(layout) = self.dwrite.CreateTextLayout(
+                &wtxt,
+                &fmt,
+                (rect.right - rect.left).max(1.0),
+                (rect.bottom - rect.top).max(1.0),
+            ) {
+                if tabular && let Some(typo) = &self.tabular {
+                    let _ = layout.SetTypography(
+                        typo,
+                        DWRITE_TEXT_RANGE {
+                            startPosition: 0,
+                            length: wtxt.len() as u32,
+                        },
+                    );
+                }
+                self.target.DrawTextLayout(
+                    Vector2 {
+                        X: rect.left,
+                        Y: rect.top,
+                    },
+                    &layout,
+                    &brush,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                );
+            }
+        }
+    }
+
+    fn draw_glyph(&mut self, glyph: char, rect: D2D_RECT_F, size_px: f32, color: D2D1_COLOR_F) {
+        let Some(fmt) =
+            self.text_format(true, size_px, DWRITE_FONT_WEIGHT_NORMAL, TextAlign::Center)
+        else {
+            return;
+        };
+        let Some(brush) = self.brush(color) else {
+            return;
+        };
+        let mut buf = [0u16; 2];
+        let encoded = glyph.encode_utf16(&mut buf);
+        unsafe {
+            self.target.DrawText(
+                encoded,
+                &fmt,
+                &rect,
+                &brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+            );
+        }
+    }
+
+    fn draw_bgra_icon(&self, icon: &FlyoutIcon, dst: D2D_RECT_F) {
+        let w = icon.width;
+        let h = icon.height;
+        if w == 0 || h == 0 || icon.bgra.len() < (w as usize) * (h as usize) * 4 {
+            return;
+        }
+        // Direct2D expects premultiplied BGRA for `D2D1_ALPHA_MODE_PREMULTIPLIED`.
+        let mut premul = Vec::with_capacity(icon.bgra.len());
+        for px in icon.bgra.chunks_exact(4) {
+            let a = u16::from(px[3]);
+            premul.push(((u16::from(px[0]) * a + 127) / 255) as u8);
+            premul.push(((u16::from(px[1]) * a + 127) / 255) as u8);
+            premul.push(((u16::from(px[2]) * a + 127) / 255) as u8);
+            premul.push(px[3]);
+        }
+        let props = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        unsafe {
+            if let Ok(bitmap) = self.target.CreateBitmap(
+                D2D_SIZE_U {
+                    width: w,
+                    height: h,
+                },
+                Some(premul.as_ptr().cast()),
+                w * 4,
+                &props,
+            ) {
+                self.target.DrawBitmap(
+                    &bitmap,
+                    Some(&dst),
+                    1.0,
+                    D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                    None,
+                );
+            }
+        }
+    }
+
+    fn draw_cover_image(&self, path: &str, dst: D2D_RECT_F) {
+        let Ok(img) = image::open(path) else {
+            return;
+        };
+        let rgba = img.to_rgba8();
+        let (w, h) = (rgba.width(), rgba.height());
+        if w == 0 || h == 0 {
+            return;
+        }
+        let mut bgra = Vec::with_capacity(w as usize * h as usize * 4);
+        for px in rgba.as_raw().chunks_exact(4) {
+            bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
+        }
+        self.draw_bgra_icon(
+            &FlyoutIcon {
+                width: w,
+                height: h,
+                bgra,
+            },
+            dst,
+        );
+    }
+}
+
+/// Null-terminated, empty-safe wrapper around `user32!DrawTextW` (kept for unit test coverage).
+#[cfg(test)]
 unsafe fn draw_gdi_text(hdc: HDC, text: &str, rc: &mut RECT, format: u32) {
     if text.is_empty() {
         return;
@@ -558,11 +906,12 @@ unsafe fn draw_gdi_text(hdc: HDC, text: &str, rc: &mut RECT, format: u32) {
     }
 }
 
+#[cfg(test)]
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
     u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16)
 }
 
-/// Linear blend of two COLORREFs used by the four-ring soft shadow.
+#[cfg(test)]
 fn blend_rgb(from: u32, to: u32, t: f32) -> u32 {
     let channel = |shift: u32| {
         let a = ((from >> shift) & 0xff) as f32;
@@ -594,68 +943,35 @@ fn app_row_targets(left: i32, right: i32, top: i32, dpi: f32) -> [RECT; 3] {
     })
 }
 
-fn fill_round_rect_bordered(
-    gdi: &mut FlyoutGdi,
-    hdc: HDC,
-    rc: RECT,
-    rad: i32,
-    fill_color: u32,
-    border_color: u32,
-    border_width_px: i32,
-) {
-    unsafe {
-        let brush = gdi.brush(fill_color);
-        let pen = gdi.pen(border_color, border_width_px);
-        let ob = SelectObject(hdc, brush as _);
-        let op = SelectObject(hdc, pen as _);
-        RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, rad, rad);
-        SelectObject(hdc, ob);
-        SelectObject(hdc, op);
+fn is_single_pua_glyph(s: &str) -> Option<char> {
+    let mut chars = s.chars();
+    let ch = chars.next()?;
+    if chars.next().is_none() && (0xE000..=0xF8FF).contains(&(ch as u32)) {
+        Some(ch)
+    } else {
+        None
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn fill_round_rect(
-    gdi: &mut FlyoutGdi,
-    hdc: HDC,
-    l: i32,
-    t: i32,
-    r: i32,
-    b: i32,
-    rad: i32,
-    color: u32,
-) {
-    fill_round_rect_bordered(
-        gdi,
-        hdc,
-        RECT {
-            left: l,
-            top: t,
-            right: r,
-            bottom: b,
-        },
-        rad,
-        color,
-        color,
-        1,
-    );
+fn is_audio_input_label(label: &str) -> bool {
+    label == loc::t("AudioInput") || label.eq_ignore_ascii_case("input")
 }
 
 /// Computes the layout height and content-space hit targets for `spec`.
 fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<HitTarget>) {
     let s = |v: f32| (v * dpi).round() as i32;
-    let pad = s(14.0);
+    let pad = s(FLYOUT_PAD_DIPS);
     let content_right_pad = pad + s(4.0);
     let has_header = !spec.title.is_empty();
     let header_h = if !has_header {
         0
     } else if spec.subtitle.is_some() {
-        s(44.0)
+        s(42.0)
     } else {
-        s(26.0)
+        s(24.0)
     };
     let content_top_px = if has_header {
-        pad + header_h + s(6.0)
+        pad + header_h + s(8.0)
     } else {
         pad
     };
@@ -667,8 +983,11 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
     for block in &spec.blocks {
         match block {
             FlyoutBlock::Hero { caption, large, .. } => {
-                let val_h = if *large { s(48.0) } else { s(34.0) };
-                y += val_h + if caption.is_some() { s(20.0) } else { s(6.0) };
+                let val_h = if *large { s(46.0) } else { s(34.0) };
+                y += val_h + if caption.is_some() { s(22.0) } else { s(6.0) };
+            }
+            FlyoutBlock::HeroHeader { .. } => {
+                y += s(52.0);
             }
             FlyoutBlock::CalendarGrid {
                 prev_year_id,
@@ -679,83 +998,42 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                 day_id_base,
                 ..
             } => {
-                // Navigation bar (`<<` `<` `Month YYYY` `>` `>>`)
-                let nav_h = s(28.0);
-                let btn_w = s(26.0);
+                let nav_h = s(30.0);
+                let btn_w = s(28.0);
                 let gap = s(2.0);
                 let left = pad;
                 let right = pad + content_w;
-                targets.push(HitTarget {
-                    id: *prev_year_id,
-                    menu_id: *prev_year_id,
-                    is_slider: false,
-                    is_seek: false,
-                    is_text: false,
-                    rect: RECT {
-                        left,
-                        top: y,
-                        right: left + btn_w,
-                        bottom: y + nav_h,
-                    },
-                });
-                targets.push(HitTarget {
-                    id: *prev_month_id,
-                    menu_id: *prev_month_id,
-                    is_slider: false,
-                    is_seek: false,
-                    is_text: false,
-                    rect: RECT {
-                        left: left + btn_w + gap,
-                        top: y,
-                        right: left + btn_w * 2 + gap,
-                        bottom: y + nav_h,
-                    },
-                });
-                targets.push(HitTarget {
-                    id: *title_id,
-                    menu_id: *title_id,
-                    is_slider: false,
-                    is_seek: false,
-                    is_text: false,
-                    rect: RECT {
-                        left: left + btn_w * 2 + gap * 2,
-                        top: y,
-                        right: right - btn_w * 2 - gap * 2,
-                        bottom: y + nav_h,
-                    },
-                });
-                targets.push(HitTarget {
-                    id: *next_month_id,
-                    menu_id: *next_month_id,
-                    is_slider: false,
-                    is_seek: false,
-                    is_text: false,
-                    rect: RECT {
-                        left: right - btn_w * 2 - gap,
-                        top: y,
-                        right: right - btn_w - gap,
-                        bottom: y + nav_h,
-                    },
-                });
-                targets.push(HitTarget {
-                    id: *next_year_id,
-                    menu_id: *next_year_id,
-                    is_slider: false,
-                    is_seek: false,
-                    is_text: false,
-                    rect: RECT {
-                        left: right - btn_w,
-                        top: y,
-                        right,
-                        bottom: y + nav_h,
-                    },
-                });
+                for (id, bl, br) in [
+                    (*prev_year_id, left, left + btn_w),
+                    (*prev_month_id, left + btn_w + gap, left + btn_w * 2 + gap),
+                    (
+                        *title_id,
+                        left + btn_w * 2 + gap * 2,
+                        right - btn_w * 2 - gap * 2,
+                    ),
+                    (*next_month_id, right - btn_w * 2 - gap, right - btn_w - gap),
+                    (*next_year_id, right - btn_w, right),
+                ] {
+                    targets.push(HitTarget {
+                        id,
+                        menu_id: id,
+                        is_slider: false,
+                        is_seek: false,
+                        is_text: false,
+                        rect: RECT {
+                            left: bl,
+                            top: y,
+                            right: br,
+                            bottom: y + nav_h,
+                        },
+                    });
+                }
                 y += nav_h + s(8.0);
                 // Weekday labels row
                 y += s(20.0);
-                // 6 rows x 7 cols of 31px day cells
+                // 6 rows x 7 cols of 32px day cells
                 let cell_w = content_w / 7;
-                let cell_h = s(31.0);
+                let cell_h = s(32.0);
                 for cell in 0..42i32 {
                     let row = cell / 7;
                     let col = cell % 7;
@@ -769,20 +1047,19 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                         is_seek: false,
                         is_text: false,
                         rect: RECT {
-                            left: cx + s(1.5),
-                            top: cy + s(1.5),
-                            right: cx + cell_w - s(1.5),
-                            bottom: cy + cell_h - s(1.5),
+                            left: cx + s(2.0),
+                            top: cy + s(2.0),
+                            right: cx + cell_w - s(2.0),
+                            bottom: cy + cell_h - s(2.0),
                         },
                     });
                 }
-                y += 6 * cell_h + s(4.0);
+                y += 6 * cell_h + s(6.0);
             }
             FlyoutBlock::AudioSliderSection {
                 mute_id, slider_id, ..
             } => {
-                // Heading row (20px) + Device/Mute row (32px + 8px) + Slider row (20px + 4px)
-                let dev_top = y + s(24.0);
+                let dev_top = y + s(22.0);
                 let mute_w = s(32.0);
                 targets.push(HitTarget {
                     id: *mute_id,
@@ -818,12 +1095,12 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
             }
             FlyoutBlock::MetricTiles(tiles) => {
                 let rows = tiles.len().div_ceil(2) as i32;
-                let tile_h = s(44.0);
-                let gap = s(6.0);
+                let tile_h = s(48.0);
+                let gap = s(8.0);
                 y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
             }
             FlyoutBlock::BadgeRow { id, .. } => {
-                let h = s(34.0);
+                let h = s(38.0);
                 targets.push(HitTarget {
                     id: *id,
                     menu_id: *id,
@@ -861,8 +1138,8 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
             }
             FlyoutBlock::ToggleGrid(tiles) => {
                 let rows = tiles.len().div_ceil(2) as i32;
-                let tile_h = s(48.0);
-                let gap = s(6.0);
+                let tile_h = s(52.0);
+                let gap = s(8.0);
                 let tw = ((content_w - gap) / 2).max(s(80.0));
                 for (i, (id, _, _, _)) in tiles.iter().enumerate() {
                     let col = (i % 2) as i32;
@@ -885,10 +1162,62 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                 }
                 y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
             }
+            FlyoutBlock::IconToggleGrid(tiles) => {
+                let rows = tiles.len().div_ceil(2) as i32;
+                let tile_h = s(56.0);
+                let gap = s(8.0);
+                let tw = ((content_w - gap) / 2).max(s(80.0));
+                for (i, (id, _, _, _, _)) in tiles.iter().enumerate() {
+                    let col = (i % 2) as i32;
+                    let row = (i / 2) as i32;
+                    let left = pad + col * (tw + gap);
+                    let top = y + row * (tile_h + gap);
+                    targets.push(HitTarget {
+                        id: *id,
+                        menu_id: *id,
+                        is_slider: false,
+                        is_seek: false,
+                        is_text: false,
+                        rect: RECT {
+                            left,
+                            top,
+                            right: left + tw,
+                            bottom: top + tile_h,
+                        },
+                    });
+                }
+                y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
+            }
+            FlyoutBlock::GlyphStatRow { .. } => y += s(30.0),
+            FlyoutBlock::GlyphActionRow { id, subtitle, .. } => {
+                let h = if subtitle.is_some() { s(44.0) } else { s(38.0) };
+                targets.push(HitTarget {
+                    id: *id,
+                    menu_id: *id,
+                    is_slider: false,
+                    is_seek: false,
+                    is_text: false,
+                    rect: RECT {
+                        left: pad,
+                        top: y,
+                        right: pad + content_w,
+                        bottom: y + h,
+                    },
+                });
+                y += h + s(5.0);
+            }
             FlyoutBlock::StatRow { .. } => y += s(24.0),
-            FlyoutBlock::ProgressBar { .. } => y += s(34.0),
+            FlyoutBlock::ProgressBar {
+                label, value_text, ..
+            } => {
+                if label.is_empty() && value_text.is_empty() {
+                    y += s(16.0);
+                } else {
+                    y += s(34.0);
+                }
+            }
             FlyoutBlock::ActionRow { id, subtitle, .. } => {
-                let h = if subtitle.is_some() { s(40.0) } else { s(32.0) };
+                let h = if subtitle.is_some() { s(42.0) } else { s(34.0) };
                 targets.push(HitTarget {
                     id: *id,
                     menu_id: *id,
@@ -926,10 +1255,10 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                         });
                     }
                 }
-                y += s(42.0) + s(2.0);
+                y += s(42.0) + s(3.0);
             }
             FlyoutBlock::ButtonBar(buttons) => {
-                let h = s(31.0);
+                let h = s(34.0);
                 let count = buttons.len().max(1) as i32;
                 let gap = s(6.0);
                 let bw = ((content_w - gap * (count - 1)) / count).max(s(40.0));
@@ -970,7 +1299,7 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                 y += s(44.0);
             }
             FlyoutBlock::TextInput { id, .. } => {
-                let box_top = y + s(17.0);
+                let box_top = y + s(18.0);
                 targets.push(HitTarget {
                     id: *id,
                     menu_id: *id,
@@ -981,13 +1310,12 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                         left: pad,
                         top: box_top,
                         right: pad + content_w,
-                        bottom: box_top + s(30.0),
+                        bottom: box_top + s(32.0),
                     },
                 });
-                y += s(53.0);
+                y += s(56.0);
             }
             FlyoutBlock::Chart { series, .. } => {
-                // Header + plot + one legend row (regardless of series count).
                 let _ = series;
                 y += s(80.0);
             }
@@ -995,31 +1323,36 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                 y += s(size_dips.clamp(24.0, 160.0)) + s(8.0);
             }
             FlyoutBlock::IconBar { buttons } => {
-                let bw = s(34.0);
-                let gap = s(6.0);
-                for (i, (id, _, _, _)) in buttons.iter().enumerate() {
-                    let left = pad + (i as i32) * (bw + gap);
-                    if left + bw > pad + content_w {
-                        break;
+                if !buttons.is_empty() {
+                    let cols = buttons.len().min(4) as i32;
+                    let gap = s(6.0);
+                    let bw = ((content_w - gap * (cols - 1)) / cols).max(s(44.0));
+                    let bh = s(48.0);
+                    for (i, (id, _, _, _)) in buttons.iter().enumerate() {
+                        let col = (i as i32) % cols;
+                        let row = (i as i32) / cols;
+                        let left = pad + col * (bw + gap);
+                        let top = y + row * (bh + gap);
+                        targets.push(HitTarget {
+                            id: *id,
+                            menu_id: *id,
+                            is_slider: false,
+                            is_seek: false,
+                            is_text: false,
+                            rect: RECT {
+                                left,
+                                top,
+                                right: left + bw,
+                                bottom: top + bh,
+                            },
+                        });
                     }
-                    targets.push(HitTarget {
-                        id: *id,
-                        menu_id: *id,
-                        is_slider: false,
-                        is_seek: false,
-                        is_text: false,
-                        rect: RECT {
-                            left,
-                            top: y,
-                            right: left + bw,
-                            bottom: y + s(44.0),
-                        },
-                    });
+                    let rows = buttons.len().div_ceil(cols as usize) as i32;
+                    y += rows * bh + (rows - 1).max(0) * gap + s(6.0);
                 }
-                y += s(44.0) + s(6.0);
             }
-            FlyoutBlock::Separator => y += s(12.0),
-            FlyoutBlock::Note(_) => y += s(22.0),
+            FlyoutBlock::Separator => y += s(14.0),
+            FlyoutBlock::Note(_) => y += s(24.0),
         }
     }
     (content_top_px, (y - content_top_px).max(s(24.0)), targets)
@@ -1388,7 +1721,7 @@ fn show_flyout_impl<'a>(
     let dpi = win32::dpi_scale(owner_hwnd);
     let s = |v: f32| (v * dpi).round() as i32;
     let width_px = s(spec.width_dips.clamp(240.0, 380.0));
-    let pad = s(14.0);
+    let pad = s(FLYOUT_PAD_DIPS);
     let (content_top_px, content_h_px, targets) = layout_flyout(&spec, width_px, dpi);
     let max_h_px = s(MAX_FLYOUT_H_DIPS);
     let height_px = (content_top_px + content_h_px + pad).min(max_h_px);
@@ -1598,117 +1931,9 @@ fn show_flyout_impl<'a>(
     selected
 }
 
-fn draw_bgra_icon(hdc: HDC, icon: &FlyoutIcon, bg_rgb: u32, dst_x: i32, dst_y: i32, dst_sz: i32) {
-    let sw = icon.width as usize;
-    let sh = icon.height as usize;
-    let dw = dst_sz.max(1) as usize;
-    let dh = dw;
-    if sw == 0 || sh == 0 || icon.bgra.len() < sw * sh * 4 {
-        return;
-    }
-    let bg_r = (bg_rgb & 0xff) as f32;
-    let bg_g = ((bg_rgb >> 8) & 0xff) as f32;
-    let bg_b = ((bg_rgb >> 16) & 0xff) as f32;
-
-    let mut flat = vec![0u8; dw * dh * 4];
-    let scale_x = sw as f32 / dw as f32;
-    let scale_y = sh as f32 / dh as f32;
-
-    for dy in 0..dh {
-        let sy0 = (dy as f32 * scale_y).floor() as usize;
-        let sy1 = (((dy + 1) as f32 * scale_y).ceil() as usize).clamp(sy0 + 1, sh);
-        for dx in 0..dw {
-            let sx0 = (dx as f32 * scale_x).floor() as usize;
-            let sx1 = (((dx + 1) as f32 * scale_x).ceil() as usize).clamp(sx0 + 1, sw);
-            let (mut pb, mut pg, mut pr, mut pa) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-            let mut count = 0.0f32;
-            for sy in sy0..sy1 {
-                for sx in sx0..sx1 {
-                    let off = (sy * sw + sx) * 4;
-                    let a = f32::from(icon.bgra[off + 3]) / 255.0;
-                    pb += f32::from(icon.bgra[off]) * a;
-                    pg += f32::from(icon.bgra[off + 1]) * a;
-                    pr += f32::from(icon.bgra[off + 2]) * a;
-                    pa += a;
-                    count += 1.0;
-                }
-            }
-            let inv_n = 1.0 / count.max(1.0);
-            let a = (pa * inv_n).clamp(0.0, 1.0);
-            let inv_a = 1.0 - a;
-            let out_b = (pb * inv_n + bg_b * inv_a).round().clamp(0.0, 255.0) as u8;
-            let out_g = (pg * inv_n + bg_g * inv_a).round().clamp(0.0, 255.0) as u8;
-            let out_r = (pr * inv_n + bg_r * inv_a).round().clamp(0.0, 255.0) as u8;
-            let dst = (dy * dw + dx) * 4;
-            flat[dst] = out_b;
-            flat[dst + 1] = out_g;
-            flat[dst + 2] = out_r;
-            flat[dst + 3] = 255;
-        }
-    }
-
-    let bmi = BITMAPINFO {
-        bmiHeader: BITMAPINFOHEADER {
-            biSize: size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: dw as i32,
-            biHeight: -(dh as i32),
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB,
-            ..unsafe { std::mem::zeroed() }
-        },
-        ..unsafe { std::mem::zeroed() }
-    };
-    unsafe {
-        StretchDIBits(
-            hdc,
-            dst_x,
-            dst_y,
-            dw as i32,
-            dh as i32,
-            0,
-            0,
-            dw as i32,
-            dh as i32,
-            flat.as_ptr().cast(),
-            &bmi,
-            DIB_RGB_COLORS,
-            0x00CC_0020,
-        );
-    }
-}
-
 /// `m:ss` caption for `FlyoutBlock::SeekSlider`.
 fn format_clock(secs: u32) -> String {
     format!("{}:{:02}", secs / 60, secs % 60)
-}
-
-/// Decodes an optional cover-art / flag file into the BGRA format used by `draw_bgra_icon`.
-fn draw_cover_image(hdc: HDC, path: &str, bg_rgb: u32, dst_x: i32, dst_y: i32, dst_sz: i32) {
-    let Ok(img) = image::open(path) else {
-        return;
-    };
-    let rgba = img.to_rgba8();
-    let (w, h) = (rgba.width(), rgba.height());
-    if w == 0 || h == 0 {
-        return;
-    }
-    let mut bgra = Vec::with_capacity(w as usize * h as usize * 4);
-    for px in rgba.as_raw().chunks_exact(4) {
-        bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-    }
-    draw_bgra_icon(
-        hdc,
-        &FlyoutIcon {
-            width: w,
-            height: h,
-            bgra,
-        },
-        bg_rgb,
-        dst_x,
-        dst_y,
-        dst_sz,
-    );
 }
 
 impl FlyoutState<'_> {
@@ -1940,93 +2165,147 @@ impl FlyoutState<'_> {
             return;
         }
         let dpi = self.dpi;
+        let sf = |v: f32| v * dpi;
         let s = |v: f32| (v * dpi).round() as i32;
-        let pad = s(14.0);
+        let pad = s(FLYOUT_PAD_DIPS);
+        let pad_f = pad as f32;
         let right_pad = pad + s(4.0);
-        let radius = s(8.0);
+        let card_r = sf(10.0);
+        let pill_r = sf(8.0);
         let mut client = RECT::default();
         unsafe { GetClientRect(self.hwnd, &mut client) };
         let w = client.right.max(1);
         let h = client.bottom.max(1);
+        let wf = w as f32;
         let content_w = (w - pad - right_pad).max(s(120.0));
+        let content_wf = content_w as f32;
         let focused_id = self.keyboard_index.map(|index| self.targets[index].id);
 
         let pal = design::palette_with_border(self.is_dark, Some(self.border.rgb));
-        let border_w_px = (self.border.width_dips * dpi).round() as i32;
-        let bg = gdi_rgb(pal.surface);
-        let card_bg = gdi_rgb(pal.elevated);
-        let hover_bg = gdi_rgb(pal.hover);
-        let border_col = gdi_rgb(pal.border_rgb);
-        let accent = gdi_rgb(pal.widget_accent);
-        let sel_fill = gdi_rgb(pal.selected_fill);
-        let sel_stroke = gdi_rgb(pal.selected_stroke);
-        let sel_fg = gdi_rgb(pal.selected_fg);
-        let text_fg = gdi_rgb(pal.text_primary);
-        let muted_fg = gdi_rgb(pal.text_secondary);
-        let danger_bg = gdi_rgb(pal.danger_hover_bg);
-        let danger_fg = gdi_rgb(pal.danger_fg);
-        let sep_col = gdi_rgb(pal.sep_rgb);
-        let scroll_col = gdi_rgb(pal.text_secondary);
-        let track_col = if self.is_dark {
-            rgb(0x3b, 0x44, 0x55)
+        let border_w = (self.border.width_dips * dpi).clamp(1.0, 2.0);
+        let surface_c = d2d_rgba(pal.surface, 1.0);
+        let card_bg = d2d_rgba(pal.elevated, 1.0);
+        let hover_bg = d2d_rgba(pal.hover, 1.0);
+        let border_col = d2d_rgba(pal.border_rgb, if self.is_dark { 0.85 } else { 1.0 });
+        let subtle_border = d2d_rgba(pal.border_rgb, if self.is_dark { 0.55 } else { 0.85 });
+        let accent = d2d_rgba(pal.widget_accent, 1.0);
+        let accent_blue = d2d_rgba(pal.widget_blue, 1.0);
+        let sel_fill = d2d_rgba(pal.selected_fill, 1.0);
+        let sel_stroke = d2d_rgba(pal.selected_stroke, 1.0);
+        let sel_fg = d2d_rgba(pal.selected_fg, 1.0);
+        let primary_fill = if self.is_dark { sel_fill } else { accent_blue };
+        let primary_stroke = if self.is_dark {
+            sel_stroke
         } else {
-            rgb(0xdc, 0xe1, 0xe8)
+            accent_blue
         };
+        let primary_fg = if self.is_dark {
+            d2d_rgba(pal.text_primary, 1.0)
+        } else {
+            d2d_rgba((0xff, 0xff, 0xff), 1.0)
+        };
+        let text_fg = d2d_rgba(pal.text_primary, 1.0);
+        let muted_fg = d2d_rgba(pal.text_secondary, 1.0);
+        let dim_fg = if self.is_dark {
+            d2d_rgba((0x5c, 0x62, 0x70), 1.0)
+        } else {
+            d2d_rgba((0xae, 0xb4, 0xbe), 1.0)
+        };
+        let danger_bg = d2d_rgba(pal.danger_hover_bg, 1.0);
+        let danger_stroke = d2d_rgba(pal.danger, 0.72);
+        let danger_fg = d2d_rgba(pal.danger_fg, 1.0);
+        let sep_col = d2d_rgba(pal.sep_rgb, if self.is_dark { 0.85 } else { 1.0 });
+        let scroll_col = d2d_rgba(pal.text_secondary, 0.45);
+        let track_col = if self.is_dark {
+            d2d_rgba((0x34, 0x39, 0x45), 1.0)
+        } else {
+            d2d_rgba((0xdc, 0xe1, 0xe8), 1.0)
+        };
+        let thumb_core = d2d_rgba((0xff, 0xff, 0xff), 1.0);
+        let thumb_halo = d2d_rgba(pal.widget_accent, 0.22);
 
-        let mut gdi = FlyoutGdi::default();
+        let mem_dc = unsafe { CreateCompatibleDC(screen_hdc) };
+        if mem_dc.is_null() {
+            unsafe { EndPaint(self.hwnd, &ps) };
+            return;
+        }
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..unsafe { std::mem::zeroed() }
+            },
+            ..unsafe { std::mem::zeroed() }
+        };
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mem_bmp = unsafe {
+            CreateDIBSection(
+                mem_dc,
+                &bmi,
+                DIB_RGB_COLORS,
+                &mut bits,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if mem_bmp.is_null() {
+            unsafe {
+                DeleteDC(mem_dc);
+                EndPaint(self.hwnd, &ps);
+            }
+            return;
+        }
+        let old_bmp = unsafe { SelectObject(mem_dc, mem_bmp as _) };
 
-        unsafe {
-            let mem_dc = CreateCompatibleDC(screen_hdc);
-            let mem_bmp = if !mem_dc.is_null() {
-                CreateCompatibleBitmap(screen_hdc, w, h)
-            } else {
-                std::ptr::null_mut()
+        let _ = self.shadow_rings;
+        FLYOUT_D2D.with(|slot| {
+            let mut guard = slot.borrow_mut();
+            if guard.is_none() {
+                *guard = FlyoutD2d::create();
+            }
+            let Some(d2d) = guard.as_mut() else {
+                return;
             };
-            let old_bmp = if !mem_bmp.is_null() {
-                SelectObject(mem_dc, mem_bmp as _)
-            } else {
-                std::ptr::null_mut()
+            let win_rc = WinRect {
+                left: 0,
+                top: 0,
+                right: w,
+                bottom: h,
             };
-            let hdc = if !mem_bmp.is_null() {
-                mem_dc
-            } else {
-                screen_hdc
-            };
+            if unsafe { d2d.target.BindDC(WinHdc(mem_dc as _), &win_rc) }.is_err() {
+                *guard = None;
+                return;
+            }
+            unsafe {
+                d2d.target.BeginDraw();
+                d2d.target.Clear(Some(&surface_c));
+            }
 
-            FillRect(hdc, &client, gdi.brush(bg));
+            // Crisp top specular highlight along the upper flyout rim.
+            d2d.draw_line(
+                sf(12.0),
+                0.5,
+                (wf - sf(12.0)).max(sf(12.0)),
+                0.5,
+                d2d_rgba(pal.specular_top, if self.is_dark { 0.45 } else { 0.8 }),
+                1.0,
+            );
 
-            // Top specular hairline for clean surface elevation; DWM handles the rounded outer
-            // shadow and border (`DWMWCP_ROUND` + `DWMWA_BORDER_COLOR`) without square corner clipping.
-            let _ = self.shadow_rings;
-            let spec_pen = gdi.pen(gdi_rgb(pal.specular_top), 1);
-            let prev_pen = SelectObject(hdc, spec_pen as _);
-            MoveToEx(hdc, s(10.0), 0, std::ptr::null_mut());
-            LineTo(hdc, (w - s(10.0)).max(s(10.0)), 0);
-            SelectObject(hdc, prev_pen);
-
-            let title_font = gdi.font(-s(14.0), 600);
-            let body_font = gdi.font(-s(12.0), 500);
-            let bold_font = gdi.font(-s(12.0), 600);
-            let small_font = gdi.font(-s(11.0), 400);
-            let tiny_font = gdi.font(-s(10.0), 500);
-            SetBkMode(hdc, TRANSPARENT as i32);
-
-            let old_f = SelectObject(hdc, title_font as _);
+            // Header title + optional subtitle.
             if !self.spec.title.is_empty() {
-                SetTextColor(hdc, text_fg);
-                let mut hrc = RECT {
-                    left: pad,
-                    top: pad,
-                    right: w - pad,
-                    bottom: pad + s(22.0),
-                };
-                draw_gdi_text(
-                    hdc,
+                d2d.draw_text(
                     &self.spec.title,
-                    &mut hrc,
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                    d2d_rect(pad_f, pad_f, wf - pad_f, pad_f + sf(22.0)),
+                    sf(14.5),
+                    DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                    TextAlign::Left,
+                    text_fg,
+                    false,
                 );
-
                 let action_label = self.spec.blocks.iter().find_map(|block| match block {
                     FlyoutBlock::AppRow {
                         pin_id,
@@ -2050,34 +2329,33 @@ impl FlyoutState<'_> {
                     _ => None,
                 });
                 if let Some(sub) = action_label.as_deref().or(self.spec.subtitle.as_deref()) {
-                    SelectObject(hdc, small_font as _);
-                    SetTextColor(hdc, muted_fg);
-                    let mut src = RECT {
-                        left: pad,
-                        top: pad + s(24.0),
-                        right: w - pad,
-                        bottom: pad + s(42.0),
-                    };
-                    draw_gdi_text(
-                        hdc,
+                    d2d.draw_text(
                         sub,
-                        &mut src,
-                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                        d2d_rect(pad_f, pad_f + sf(23.0), wf - pad_f, pad_f + sf(41.0)),
+                        sf(11.5),
+                        DWRITE_FONT_WEIGHT_NORMAL,
+                        TextAlign::Left,
+                        muted_fg,
+                        false,
                     );
                 }
             }
 
-            let saved = SaveDC(hdc);
-            IntersectClipRect(
-                hdc,
-                0,
-                self.content_top_px,
-                w,
-                self.content_top_px + self.viewport_h_px,
-            );
+            unsafe {
+                d2d.target.PushAxisAlignedClip(
+                    &d2d_rect(
+                        0.0,
+                        self.content_top_px as f32,
+                        wf,
+                        (self.content_top_px + self.viewport_h_px) as f32,
+                    ),
+                    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                );
+            }
 
             let mut y = self.content_top_px - self.scroll_y;
             for block in &self.spec.blocks {
+                let yf = y as f32;
                 match block {
                     FlyoutBlock::Hero {
                         value,
@@ -2086,57 +2364,147 @@ impl FlyoutState<'_> {
                         large,
                         right_meta,
                     } => {
-                        let pt = if *large { 40.0 } else { 27.0 };
-                        let val_h = if *large { s(46.0) } else { s(32.0) };
-                        let hero_font = gdi.font(-s(pt), 700);
-                        let prev_font = SelectObject(hdc, hero_font as _);
-                        SetTextColor(hdc, text_fg);
-                        let mut hrc = RECT {
-                            left: pad,
-                            top: y,
-                            right: w - right_pad,
-                            bottom: y + val_h,
-                        };
-                        let align = if *centered { DT_CENTER } else { DT_LEFT };
-                        draw_gdi_text(hdc, value, &mut hrc, align | DT_VCENTER | DT_SINGLELINE);
-                        SelectObject(hdc, prev_font);
-
-                        if let Some(meta) = right_meta {
-                            SelectObject(hdc, small_font as _);
-                            SetTextColor(hdc, muted_fg);
-                            let mut mrc = RECT {
-                                left: pad + content_w / 2,
-                                top: y + s(4.0),
-                                right: w - right_pad,
-                                bottom: y + s(22.0),
-                            };
-                            draw_gdi_text(
-                                hdc,
-                                meta,
-                                &mut mrc,
-                                DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                            );
-                        }
-                        y += val_h + s(2.0);
-                        if let Some(cap) = caption {
-                            SelectObject(hdc, small_font as _);
-                            SetTextColor(hdc, muted_fg);
-                            let mut crc = RECT {
-                                left: pad,
-                                top: y,
-                                right: w - right_pad,
-                                bottom: y + s(16.0),
-                            };
-                            draw_gdi_text(
-                                hdc,
-                                cap,
-                                &mut crc,
-                                align | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                            );
-                            y += s(20.0);
+                        let pt = if *large { 38.0 } else { 28.0 };
+                        let val_h = if *large { s(46.0) } else { s(34.0) };
+                        let align = if *centered {
+                            TextAlign::Center
                         } else {
-                            y += s(4.0);
+                            TextAlign::Left
+                        };
+                        let right_limit = if right_meta.is_some() && !*centered {
+                            pad_f + content_wf - sf(68.0)
+                        } else {
+                            pad_f + content_wf
+                        };
+                        d2d.draw_text(
+                            value,
+                            d2d_rect(pad_f, yf, right_limit, yf + val_h as f32),
+                            sf(pt),
+                            DWRITE_FONT_WEIGHT_BOLD,
+                            align,
+                            text_fg,
+                            true,
+                        );
+                        if let Some(meta) = right_meta {
+                            let pill_w = sf(64.0).min(content_wf * 0.35);
+                            let pill_h = sf(22.0);
+                            let pl = pad_f + content_wf - pill_w;
+                            let pt_y = yf + ((val_h as f32) - pill_h) * 0.5;
+                            d2d.fill_rrect_bordered(
+                                pl,
+                                pt_y,
+                                pl + pill_w,
+                                pt_y + pill_h,
+                                sf(6.0),
+                                card_bg,
+                                subtle_border,
+                                1.0,
+                            );
+                            d2d.draw_text(
+                                meta,
+                                d2d_rect(pl + sf(4.0), pt_y, pl + pill_w - sf(4.0), pt_y + pill_h),
+                                sf(10.5),
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                TextAlign::Center,
+                                muted_fg,
+                                true,
+                            );
                         }
+                        if let Some(cap) = caption {
+                            d2d.draw_text(
+                                cap,
+                                d2d_rect(
+                                    pad_f,
+                                    yf + val_h as f32 + sf(2.0),
+                                    pad_f + content_wf,
+                                    yf + val_h as f32 + sf(20.0),
+                                ),
+                                sf(12.0),
+                                DWRITE_FONT_WEIGHT_NORMAL,
+                                align,
+                                muted_fg,
+                                false,
+                            );
+                            y += val_h + s(22.0);
+                        } else {
+                            y += val_h + s(6.0);
+                        }
+                    }
+                    FlyoutBlock::HeroHeader {
+                        glyph,
+                        glyph_color,
+                        title,
+                        subtitle,
+                        right_value,
+                    } => {
+                        let well = sf(44.0);
+                        let well_fill =
+                            d2d_rgba(*glyph_color, if self.is_dark { 0.16 } else { 0.13 });
+                        let well_stroke =
+                            d2d_rgba(*glyph_color, if self.is_dark { 0.34 } else { 0.28 });
+                        d2d.fill_rrect_bordered(
+                            pad_f,
+                            yf,
+                            pad_f + well,
+                            yf + well,
+                            sf(12.0),
+                            well_fill,
+                            well_stroke,
+                            1.0,
+                        );
+                        let ch = char::from_u32(u32::from(*glyph)).unwrap_or('\u{E706}');
+                        d2d.draw_glyph(
+                            ch,
+                            d2d_rect(pad_f, yf, pad_f + well, yf + well),
+                            sf(22.0),
+                            d2d_rgba(*glyph_color, 1.0),
+                        );
+
+                        let right_w = if right_value.is_some() { sf(82.0) } else { 0.0 };
+                        let text_l = pad_f + well + sf(12.0);
+                        let text_r = (pad_f + content_wf - right_w).max(text_l + sf(40.0));
+                        if let Some(sub) = subtitle {
+                            d2d.draw_text(
+                                title,
+                                d2d_rect(text_l, yf + sf(2.0), text_r, yf + sf(24.0)),
+                                sf(15.0),
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                TextAlign::Left,
+                                text_fg,
+                                false,
+                            );
+                            d2d.draw_text(
+                                sub,
+                                d2d_rect(text_l, yf + sf(24.0), text_r, yf + sf(42.0)),
+                                sf(12.0),
+                                DWRITE_FONT_WEIGHT_NORMAL,
+                                TextAlign::Left,
+                                muted_fg,
+                                false,
+                            );
+                        } else {
+                            d2d.draw_text(
+                                title,
+                                d2d_rect(text_l, yf, text_r, yf + well),
+                                sf(15.0),
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                TextAlign::Left,
+                                text_fg,
+                                false,
+                            );
+                        }
+                        if let Some(rv) = right_value {
+                            d2d.draw_text(
+                                rv,
+                                d2d_rect(text_r, yf, pad_f + content_wf, yf + well),
+                                sf(26.0),
+                                DWRITE_FONT_WEIGHT_BOLD,
+                                TextAlign::Right,
+                                text_fg,
+                                true,
+                            );
+                        }
+                        y += s(52.0);
                     }
                     FlyoutBlock::CalendarGrid {
                         year,
@@ -2150,112 +2518,106 @@ impl FlyoutState<'_> {
                         next_year_id,
                         day_id_base,
                     } => {
-                        let nav_h = s(28.0);
-                        let btn_w = s(26.0);
+                        let nav_h = s(30.0);
+                        let nav_hf = nav_h as f32;
+                        let btn_w = s(28.0);
                         let gap = s(2.0);
                         let right = pad + content_w;
                         let nav_btns = [
-                            (*prev_year_id, "«", pad, pad + btn_w),
+                            (*prev_year_id, '\u{E76B}', true, pad, pad + btn_w),
                             (
                                 *prev_month_id,
-                                "‹",
+                                '\u{E76B}',
+                                false,
                                 pad + btn_w + gap,
                                 pad + btn_w * 2 + gap,
                             ),
                             (
                                 *next_month_id,
-                                "›",
+                                '\u{E76C}',
+                                false,
                                 right - btn_w * 2 - gap,
                                 right - btn_w - gap,
                             ),
-                            (*next_year_id, "»", right - btn_w, right),
+                            (*next_year_id, '\u{E76C}', true, right - btn_w, right),
                         ];
-                        SelectObject(hdc, bold_font as _);
-                        for (id, glyph, l, r) in nav_btns {
-                            if self.hovered_id == Some(id) {
-                                fill_round_rect(
-                                    &mut gdi,
-                                    hdc,
-                                    l,
-                                    y,
-                                    r,
-                                    y + nav_h,
-                                    s(7.0),
-                                    hover_bg,
+                        for (id, glyph, double, l, r) in nav_btns {
+                            let lf = l as f32;
+                            let rf = r as f32;
+                            let hov = self.hovered_id == Some(id);
+                            if hov {
+                                d2d.fill_rrect(lf, yf, rf, yf + nav_hf, sf(7.0), hover_bg);
+                            }
+                            let fg = if hov { text_fg } else { muted_fg };
+                            if double {
+                                let shift = sf(2.6);
+                                d2d.draw_glyph(
+                                    glyph,
+                                    d2d_rect(lf - shift, yf, rf - shift, yf + nav_hf),
+                                    sf(9.5),
+                                    fg,
+                                );
+                                d2d.draw_glyph(
+                                    glyph,
+                                    d2d_rect(lf + shift, yf, rf + shift, yf + nav_hf),
+                                    sf(9.5),
+                                    fg,
+                                );
+                            } else {
+                                d2d.draw_glyph(
+                                    glyph,
+                                    d2d_rect(lf, yf, rf, yf + nav_hf),
+                                    sf(11.0),
+                                    fg,
                                 );
                             }
-                            SetTextColor(hdc, text_fg);
-                            let mut rc = RECT {
-                                left: l,
-                                top: y,
-                                right: r,
-                                bottom: y + nav_h,
-                            };
-                            draw_gdi_text(
-                                hdc,
-                                glyph,
-                                &mut rc,
-                                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                            );
                         }
-                        let tl = pad + btn_w * 2 + gap * 2;
-                        let tr = right - btn_w * 2 - gap * 2;
+                        let tl = (pad + btn_w * 2 + gap * 2) as f32;
+                        let tr = (right - btn_w * 2 - gap * 2) as f32;
                         if self.hovered_id == Some(*title_id) {
-                            fill_round_rect(&mut gdi, hdc, tl, y, tr, y + nav_h, s(7.0), hover_bg);
+                            d2d.fill_rrect(tl, yf, tr, yf + nav_hf, sf(7.0), hover_bg);
                         }
-                        SetTextColor(hdc, text_fg);
-                        let mut title_rc = RECT {
-                            left: tl,
-                            top: y,
-                            right: tr,
-                            bottom: y + nav_h,
-                        };
                         let title_str = format!("{} {}", telemetry::month_name(*month), year);
-                        draw_gdi_text(
-                            hdc,
+                        d2d.draw_text(
                             &title_str,
-                            &mut title_rc,
-                            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                            d2d_rect(tl, yf, tr, yf + nav_hf),
+                            sf(13.0),
+                            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                            TextAlign::Center,
+                            text_fg,
+                            true,
                         );
                         y += nav_h + s(8.0);
 
-                        // Weekday headers (Monday first, matching European/Turkish calendar convention)
+                        // Weekday headers (Monday first).
                         let cell_w = content_w / 7;
-                        SelectObject(hdc, tiny_font as _);
-                        SetTextColor(hdc, muted_fg);
                         let dows: Vec<String> =
                             (0..7).map(telemetry::weekday_short_monday_first).collect();
                         for (i, dow) in dows.iter().enumerate() {
-                            let mut rc = RECT {
-                                left: pad + (i as i32) * cell_w,
-                                top: y,
-                                right: pad + ((i as i32) + 1) * cell_w,
-                                bottom: y + s(18.0),
-                            };
-                            draw_gdi_text(
-                                hdc,
-                                dow.as_str(),
-                                &mut rc,
-                                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                            let cl = (pad + (i as i32) * cell_w) as f32;
+                            let cr = (pad + ((i as i32) + 1) * cell_w) as f32;
+                            d2d.draw_text(
+                                dow,
+                                d2d_rect(cl, y as f32, cr, y as f32 + sf(18.0)),
+                                sf(10.5),
+                                DWRITE_FONT_WEIGHT_MEDIUM,
+                                TextAlign::Center,
+                                muted_fg,
+                                false,
                             );
                         }
                         y += s(20.0);
 
                         let first_wd = telemetry::weekday_of(*year, *month, 1);
-                        let mon_offset = ((first_wd + 6) % 7) as i32; // 0=Mon..6=Sun
+                        let mon_offset = ((first_wd + 6) % 7) as i32;
                         let prev_m = if *month == 1 { 12 } else { *month - 1 };
                         let prev_y = if *month == 1 { *year - 1 } else { *year };
                         let prev_days = telemetry::days_in_month(prev_y, prev_m) as i32;
                         let cur_days = telemetry::days_in_month(*year, *month) as i32;
                         let next_m = if *month == 12 { 1 } else { *month + 1 };
                         let next_y = if *month == 12 { *year + 1 } else { *year };
-                        let cell_h = s(31.0);
-                        let cell_r = s(7.0);
-                        let dim_fg = if self.is_dark {
-                            rgb(0x63, 0x6c, 0x7c)
-                        } else {
-                            rgb(0xb0, 0xb5, 0xbe)
-                        };
+                        let cell_h = s(32.0);
+                        let cell_r = sf(8.0);
 
                         for cell in 0..42i32 {
                             let row = cell / 7;
@@ -2269,78 +2631,66 @@ impl FlyoutState<'_> {
                                 (*year, *month, d_idx as u32, true)
                             };
                             let is_today = (cy, cm, cd) == *today;
-                            let is_sel = selected.is_some_and(|s| s == (cy, cm, cd)) && !is_today;
+                            let is_sel =
+                                selected.is_some_and(|sel| sel == (cy, cm, cd)) && !is_today;
                             let id = day_id_base + cell as u32;
                             let is_hov = self.hovered_id == Some(id);
 
-                            let l = pad + col * cell_w + s(1.5);
-                            let t = y + row * cell_h + s(1.5);
-                            let r = pad + (col + 1) * cell_w - s(1.5);
-                            let b = y + (row + 1) * cell_h - s(1.5);
+                            let l = (pad + col * cell_w) as f32 + sf(2.0);
+                            let t = (y + row * cell_h) as f32 + sf(2.0);
+                            let r = (pad + (col + 1) * cell_w) as f32 - sf(2.0);
+                            let b = (y + (row + 1) * cell_h) as f32 - sf(2.0);
 
-                            let cell_rc = RECT {
-                                left: l,
-                                top: t,
-                                right: r,
-                                bottom: b,
-                            };
                             if is_today {
-                                fill_round_rect_bordered(
-                                    &mut gdi,
-                                    hdc,
-                                    cell_rc,
+                                d2d.fill_rrect_bordered(
+                                    l,
+                                    t,
+                                    r,
+                                    b,
                                     cell_r,
-                                    sel_fill,
-                                    sel_stroke,
-                                    border_w_px,
+                                    primary_fill,
+                                    primary_stroke,
+                                    border_w,
                                 );
                             } else if is_sel {
-                                fill_round_rect_bordered(
-                                    &mut gdi,
-                                    hdc,
-                                    cell_rc,
+                                d2d.fill_rrect_bordered(
+                                    l,
+                                    t,
+                                    r,
+                                    b,
                                     cell_r,
-                                    hover_bg,
-                                    border_col,
-                                    border_w_px,
+                                    card_bg,
+                                    accent_blue,
+                                    1.2,
                                 );
                             } else if is_hov {
-                                fill_round_rect(&mut gdi, hdc, l, t, r, b, cell_r, hover_bg);
+                                d2d.fill_rrect(l, t, r, b, cell_r, hover_bg);
                             }
 
-                            SelectObject(
-                                hdc,
-                                if is_today || is_sel {
-                                    bold_font as _
-                                } else {
-                                    body_font as _
-                                },
-                            );
-                            SetTextColor(
-                                hdc,
-                                if is_today {
-                                    sel_fg
-                                } else if in_month {
-                                    text_fg
-                                } else {
-                                    dim_fg
-                                },
-                            );
-                            let mut rc = RECT {
-                                left: l,
-                                top: t,
-                                right: r,
-                                bottom: b,
+                            let fg = if is_today {
+                                primary_fg
+                            } else if in_month {
+                                text_fg
+                            } else {
+                                dim_fg
+                            };
+                            let weight = if is_today || is_sel {
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD
+                            } else {
+                                DWRITE_FONT_WEIGHT_NORMAL
                             };
                             let ds = cd.to_string();
-                            draw_gdi_text(
-                                hdc,
+                            d2d.draw_text(
                                 &ds,
-                                &mut rc,
-                                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                d2d_rect(l, t, r, b),
+                                sf(12.0),
+                                weight,
+                                TextAlign::Center,
+                                fg,
+                                true,
                             );
                         }
-                        y += 6 * cell_h + s(4.0);
+                        y += 6 * cell_h + s(6.0);
                     }
                     FlyoutBlock::AudioSliderSection {
                         label,
@@ -2351,150 +2701,151 @@ impl FlyoutState<'_> {
                         mute_id,
                         slider_id,
                     } => {
-                        // 1. Heading row (`Output` left, `67%` right)
-                        SelectObject(hdc, bold_font as _);
-                        SetTextColor(hdc, text_fg);
-                        let mut hrc = RECT {
-                            left: pad,
-                            top: y,
-                            right: pad + content_w,
-                            bottom: y + s(20.0),
-                        };
-                        draw_gdi_text(hdc, label, &mut hrc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-                        SelectObject(hdc, small_font as _);
-                        SetTextColor(hdc, muted_fg);
-                        draw_gdi_text(
-                            hdc,
+                        let is_input = is_audio_input_label(label);
+                        d2d.draw_text(
+                            label,
+                            d2d_rect(pad_f, yf, pad_f + content_wf - sf(48.0), yf + sf(18.0)),
+                            sf(12.5),
+                            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                            TextAlign::Left,
+                            text_fg,
+                            false,
+                        );
+                        d2d.draw_text(
                             value_text,
-                            &mut hrc,
-                            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+                            d2d_rect(
+                                pad_f + content_wf - sf(56.0),
+                                yf,
+                                pad_f + content_wf,
+                                yf + sf(18.0),
+                            ),
+                            sf(11.5),
+                            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                            TextAlign::Right,
+                            if *muted { danger_fg } else { muted_fg },
+                            true,
                         );
 
-                        // 2. Device box + 32x32 Mute button
-                        let dev_top = y + s(24.0);
+                        let dev_top = y + s(22.0);
+                        let dev_top_f = dev_top as f32;
                         let dev_h = s(32.0);
+                        let dev_hf = dev_h as f32;
                         let mute_w = s(32.0);
-                        let dev_r = pad + content_w - mute_w - s(8.0);
-                        fill_round_rect_bordered(
-                            &mut gdi,
-                            hdc,
-                            RECT {
-                                left: pad,
-                                top: dev_top,
-                                right: dev_r,
-                                bottom: dev_top + dev_h,
-                            },
-                            radius,
+                        let mute_wf = mute_w as f32;
+                        let dev_r = pad_f + content_wf - mute_wf - sf(8.0);
+                        d2d.fill_rrect_bordered(
+                            pad_f,
+                            dev_top_f,
+                            dev_r,
+                            dev_top_f + dev_hf,
+                            pill_r,
                             card_bg,
-                            border_col,
-                            border_w_px,
+                            subtle_border,
+                            1.0,
                         );
-                        SelectObject(hdc, small_font as _);
-                        SetTextColor(hdc, text_fg);
-                        let mut drc = RECT {
-                            left: pad + s(10.0),
-                            top: dev_top,
-                            right: dev_r - s(8.0),
-                            bottom: dev_top + dev_h,
-                        };
-                        draw_gdi_text(
-                            hdc,
+                        let dev_icon = if is_input { '\u{E720}' } else { '\u{E7F5}' };
+                        d2d.draw_glyph(
+                            dev_icon,
+                            d2d_rect(
+                                pad_f + sf(6.0),
+                                dev_top_f,
+                                pad_f + sf(26.0),
+                                dev_top_f + dev_hf,
+                            ),
+                            sf(12.5),
+                            muted_fg,
+                        );
+                        d2d.draw_text(
                             device_name,
-                            &mut drc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            d2d_rect(
+                                pad_f + sf(28.0),
+                                dev_top_f,
+                                dev_r - sf(8.0),
+                                dev_top_f + dev_hf,
+                            ),
+                            sf(11.5),
+                            DWRITE_FONT_WEIGHT_NORMAL,
+                            TextAlign::Left,
+                            text_fg,
+                            false,
                         );
 
-                        let mute_l = pad + content_w - mute_w;
+                        let mute_l = pad_f + content_wf - mute_wf;
                         let mute_hov = self.hovered_id == Some(*mute_id);
                         let (m_bg, m_bd, m_fg) = if *muted {
-                            (danger_bg, gdi_rgb(pal.danger), danger_fg)
+                            (danger_bg, danger_stroke, danger_fg)
                         } else if mute_hov {
                             (hover_bg, border_col, text_fg)
                         } else {
-                            (card_bg, border_col, muted_fg)
+                            (card_bg, subtle_border, muted_fg)
                         };
-                        fill_round_rect_bordered(
-                            &mut gdi,
-                            hdc,
-                            RECT {
-                                left: mute_l,
-                                top: dev_top,
-                                right: mute_l + mute_w,
-                                bottom: dev_top + dev_h,
-                            },
-                            radius,
+                        d2d.fill_rrect_bordered(
+                            mute_l,
+                            dev_top_f,
+                            mute_l + mute_wf,
+                            dev_top_f + dev_hf,
+                            pill_r,
                             m_bg,
                             m_bd,
-                            border_w_px,
+                            1.0,
                         );
-                        let glyph_font = gdi.fluent_font(-s(14.0));
-                        let prev_font = SelectObject(hdc, glyph_font as _);
-                        SetTextColor(hdc, m_fg);
-                        let mut mrc = RECT {
-                            left: mute_l,
-                            top: dev_top,
-                            right: mute_l + mute_w,
-                            bottom: dev_top + dev_h,
+                        let mute_glyph = if is_input {
+                            if *muted { '\u{EC54}' } else { '\u{E720}' }
+                        } else if *muted {
+                            '\u{E74F}'
+                        } else {
+                            '\u{E767}'
                         };
-                        draw_gdi_text(
-                            hdc,
-                            if *muted { "\u{E74F}" } else { "\u{E767}" },
-                            &mut mrc,
-                            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                        d2d.draw_glyph(
+                            mute_glyph,
+                            d2d_rect(mute_l, dev_top_f, mute_l + mute_wf, dev_top_f + dev_hf),
+                            sf(14.0),
+                            m_fg,
                         );
-                        SelectObject(hdc, prev_font);
 
-                        // 3. C# `WidgetSlider`: 5px track + Aurora teal fill + 10px circular thumb
+                        // Anti-aliased pill slider track + Aurora fill + circular thumb with halo.
                         let slider_top = dev_top + dev_h + s(8.0);
-                        let mid_y = slider_top + s(10.0);
-                        let tr_h = s(5.0).max(4);
-                        fill_round_rect(
-                            &mut gdi,
-                            hdc,
-                            pad,
-                            mid_y - tr_h / 2,
-                            pad + content_w,
-                            mid_y + tr_h / 2,
-                            tr_h,
+                        let mid_y = slider_top as f32 + sf(10.0);
+                        let tr_h = sf(5.0).max(4.0);
+                        let tr_r = tr_h * 0.5;
+                        d2d.fill_rrect(
+                            pad_f,
+                            mid_y - tr_r,
+                            pad_f + content_wf,
+                            mid_y + tr_r,
+                            tr_r,
                             track_col,
                         );
                         let r_clamped = if *muted { 0.0 } else { ratio.clamp(0.0, 1.0) };
-                        let fill_w = (content_w as f32 * r_clamped).round() as i32;
-                        if fill_w > s(2.0) {
-                            fill_round_rect(
-                                &mut gdi,
-                                hdc,
-                                pad,
-                                mid_y - tr_h / 2,
-                                pad + fill_w,
-                                mid_y + tr_h / 2,
-                                tr_h,
+                        let fill_w = content_wf * r_clamped;
+                        if fill_w > sf(2.0) {
+                            d2d.fill_rrect(
+                                pad_f,
+                                mid_y - tr_r,
+                                pad_f + fill_w,
+                                mid_y + tr_r,
+                                tr_r,
                                 accent,
                             );
                         }
-                        let thumb_r = if self.hovered_id == Some(*slider_id)
+                        let hot_slider = self.hovered_id == Some(*slider_id)
                             || self
                                 .dragging_slider
-                                .is_some_and(|(sid, _, _)| sid == *slider_id)
-                        {
-                            s(6.0)
-                        } else {
-                            s(5.0)
-                        };
-                        let tx = (pad + fill_w).clamp(pad + thumb_r, pad + content_w - thumb_r);
-                        let tb = gdi.brush(text_fg);
-                        let tp = gdi.pen(text_fg, 1);
-                        let ob = SelectObject(hdc, tb as _);
-                        let op = SelectObject(hdc, tp as _);
-                        Ellipse(
-                            hdc,
-                            tx - thumb_r,
-                            mid_y - thumb_r,
-                            tx + thumb_r,
-                            mid_y + thumb_r,
+                                .is_some_and(|(sid, _, _)| sid == *slider_id);
+                        let thumb_r = if hot_slider { sf(6.5) } else { sf(5.5) };
+                        let tx =
+                            (pad_f + fill_w).clamp(pad_f + thumb_r, pad_f + content_wf - thumb_r);
+                        if hot_slider {
+                            d2d.fill_circle(tx, mid_y, thumb_r + sf(3.5), thumb_halo);
+                        }
+                        d2d.fill_circle(tx, mid_y, thumb_r, thumb_core);
+                        d2d.stroke_circle(
+                            tx,
+                            mid_y,
+                            thumb_r,
+                            if *muted { muted_fg } else { accent },
+                            sf(1.6).max(1.2),
                         );
-                        SelectObject(hdc, ob);
-                        SelectObject(hdc, op);
 
                         y = slider_top + s(24.0);
                     }
@@ -2505,110 +2856,118 @@ impl FlyoutState<'_> {
                         samples,
                         color,
                     } => {
-                        SelectObject(hdc, body_font as _);
-                        SetTextColor(hdc, text_fg);
-                        let mut lrc = RECT {
-                            left: pad,
-                            top: y,
-                            right: pad + content_w,
-                            bottom: y + s(18.0),
-                        };
-                        draw_gdi_text(hdc, label, &mut lrc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                        d2d.draw_text(
+                            label,
+                            d2d_rect(pad_f, yf, pad_f + content_wf * 0.55, yf + sf(18.0)),
+                            sf(12.0),
+                            DWRITE_FONT_WEIGHT_MEDIUM,
+                            TextAlign::Left,
+                            text_fg,
+                            false,
+                        );
                         let val_full = match detail_text {
                             Some(d) => format!("{d}  {value_text}"),
                             None => value_text.clone(),
                         };
-                        SelectObject(hdc, bold_font as _);
-                        SetTextColor(hdc, gdi_rgb(*color));
-                        draw_gdi_text(
-                            hdc,
+                        let col = d2d_rgba(*color, 1.0);
+                        d2d.draw_text(
                             &val_full,
-                            &mut lrc,
-                            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+                            d2d_rect(
+                                pad_f + content_wf * 0.4,
+                                yf,
+                                pad_f + content_wf,
+                                yf + sf(18.0),
+                            ),
+                            sf(12.0),
+                            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                            TextAlign::Right,
+                            col,
+                            true,
                         );
 
-                        // Vector sparkline matching C# `TelemetrySparkline.cs` (height 22px).
-                        let plot_top = y + s(21.0);
-                        let plot_h = s(22.0);
+                        let plot_top = yf + sf(21.0);
+                        let plot_h = sf(22.0);
                         let plot_bot = plot_top + plot_h;
-                        let base_pen = gdi.pen(sep_col, 1);
-                        let op = SelectObject(hdc, base_pen as _);
-                        MoveToEx(hdc, pad, plot_bot, std::ptr::null_mut());
-                        LineTo(hdc, pad + content_w, plot_bot);
-                        SelectObject(hdc, op);
+                        d2d.draw_line(pad_f, plot_bot, pad_f + content_wf, plot_bot, sep_col, 1.0);
 
                         if !samples.is_empty() {
-                            let line_pen =
-                                gdi.pen(gdi_rgb(*color), (1.5 * dpi).round().max(1.0) as i32);
-                            let op = SelectObject(hdc, line_pen as _);
                             let n = samples.len();
-                            let py = |v: f32| {
-                                plot_bot
-                                    - (v.clamp(0.0, 1.0) * (plot_h - s(3.0)) as f32).round() as i32
-                            };
+                            let py = |v: f32| plot_bot - v.clamp(0.0, 1.0) * (plot_h - sf(3.0));
                             if n == 1 {
                                 let y0 = py(samples[0]);
-                                MoveToEx(hdc, pad, y0, std::ptr::null_mut());
-                                LineTo(hdc, pad + content_w, y0);
+                                d2d.draw_line(
+                                    pad_f,
+                                    y0,
+                                    pad_f + content_wf,
+                                    y0,
+                                    col,
+                                    sf(1.5).max(1.2),
+                                );
                             } else {
-                                let step = content_w as f32 / (n - 1) as f32;
-                                MoveToEx(hdc, pad, py(samples[0]), std::ptr::null_mut());
-                                for (i, &val) in samples.iter().enumerate().skip(1) {
-                                    let px = pad + (i as f32 * step).round() as i32;
-                                    LineTo(hdc, px, py(val));
+                                let step = content_wf / (n - 1) as f32;
+                                for i in 1..n {
+                                    d2d.draw_line(
+                                        pad_f + (i - 1) as f32 * step,
+                                        py(samples[i - 1]),
+                                        pad_f + i as f32 * step,
+                                        py(samples[i]),
+                                        col,
+                                        sf(1.6).max(1.2),
+                                    );
                                 }
                             }
-                            SelectObject(hdc, op);
                         }
                         y += s(48.0);
                     }
                     FlyoutBlock::MetricTiles(tiles) => {
                         let rows = tiles.len().div_ceil(2) as i32;
-                        let tile_h = s(44.0);
-                        let gap = s(6.0);
+                        let tile_h = s(48.0);
+                        let tile_hf = tile_h as f32;
+                        let gap = s(8.0);
                         let tw = ((content_w - gap) / 2).max(s(80.0));
+                        let twf = tw as f32;
                         for (i, (lbl, val)) in tiles.iter().enumerate() {
                             let col = (i % 2) as i32;
                             let row = (i / 2) as i32;
-                            let l = pad + col * (tw + gap);
-                            let t = y + row * (tile_h + gap);
-                            fill_round_rect(
-                                &mut gdi,
-                                hdc,
+                            let l = (pad + col * (tw + gap)) as f32;
+                            let t = (y + row * (tile_h + gap)) as f32;
+                            d2d.fill_rrect_bordered(
                                 l,
                                 t,
-                                l + tw,
-                                t + tile_h,
-                                radius,
+                                l + twf,
+                                t + tile_hf,
+                                card_r,
                                 card_bg,
+                                subtle_border,
+                                1.0,
                             );
-                            SelectObject(hdc, tiny_font as _);
-                            SetTextColor(hdc, muted_fg);
-                            let mut lrc = RECT {
-                                left: l + s(8.0),
-                                top: t + s(5.0),
-                                right: l + tw - s(8.0),
-                                bottom: t + s(20.0),
-                            };
-                            draw_gdi_text(
-                                hdc,
+                            d2d.draw_text(
                                 lbl,
-                                &mut lrc,
-                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                d2d_rect(
+                                    l + sf(10.0),
+                                    t + sf(6.0),
+                                    l + twf - sf(10.0),
+                                    t + sf(21.0),
+                                ),
+                                sf(10.5),
+                                DWRITE_FONT_WEIGHT_MEDIUM,
+                                TextAlign::Left,
+                                muted_fg,
+                                false,
                             );
-                            SelectObject(hdc, bold_font as _);
-                            SetTextColor(hdc, text_fg);
-                            let mut vrc = RECT {
-                                left: l + s(8.0),
-                                top: t + s(21.0),
-                                right: l + tw - s(8.0),
-                                bottom: t + tile_h - s(5.0),
-                            };
-                            draw_gdi_text(
-                                hdc,
+                            d2d.draw_text(
                                 val,
-                                &mut vrc,
-                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                d2d_rect(
+                                    l + sf(10.0),
+                                    t + sf(22.0),
+                                    l + twf - sf(10.0),
+                                    t + tile_hf - sf(6.0),
+                                ),
+                                sf(13.0),
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                TextAlign::Left,
+                                text_fg,
+                                true,
                             );
                         }
                         y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
@@ -2619,72 +2978,90 @@ impl FlyoutState<'_> {
                         title,
                         active,
                     } => {
-                        let h = s(34.0);
+                        let h = s(38.0);
+                        let hf = h as f32;
                         let hovered = self.hovered_id == Some(*id);
-                        let row_bg = if hovered {
-                            hover_bg
-                        } else if *active {
-                            card_bg
-                        } else {
-                            bg
-                        };
                         if hovered || *active {
-                            fill_round_rect(
-                                &mut gdi,
-                                hdc,
-                                pad,
-                                y,
-                                pad + content_w,
-                                y + h,
-                                radius,
-                                row_bg,
+                            d2d.fill_rrect_bordered(
+                                pad_f,
+                                yf,
+                                pad_f + content_wf,
+                                yf + hf,
+                                pill_r,
+                                if hovered { hover_bg } else { card_bg },
+                                if *active { sel_stroke } else { subtle_border },
+                                1.0,
                             );
                         }
-                        let bw = s(34.0);
-                        let bh = s(22.0);
-                        let bx = pad + s(8.0);
-                        let by = y + (h - bh) / 2;
-                        fill_round_rect(
-                            &mut gdi,
-                            hdc,
+                        let bw = sf(34.0);
+                        let bh = sf(24.0);
+                        let bx = pad_f + sf(8.0);
+                        let by = yf + (hf - bh) * 0.5;
+                        d2d.fill_rrect_bordered(
                             bx,
                             by,
                             bx + bw,
                             by + bh,
-                            s(5.0),
-                            if *active { sel_fill } else { card_bg },
-                        );
-                        SelectObject(hdc, bold_font as _);
-                        SetTextColor(hdc, if *active { sel_fg } else { text_fg });
-                        let mut brc = RECT {
-                            left: bx,
-                            top: by,
-                            right: bx + bw,
-                            bottom: by + bh,
-                        };
-                        draw_gdi_text(hdc, code, &mut brc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-                        SelectObject(
-                            hdc,
+                            sf(6.0),
+                            if *active { primary_fill } else { card_bg },
                             if *active {
-                                bold_font as _
+                                primary_stroke
                             } else {
-                                body_font as _
+                                subtle_border
                             },
+                            1.0,
                         );
-                        SetTextColor(hdc, text_fg);
-                        let mut trc = RECT {
-                            left: bx + bw + s(10.0),
-                            top: y,
-                            right: pad + content_w - s(8.0),
-                            bottom: y + h,
-                        };
-                        draw_gdi_text(
-                            hdc,
+                        let code_fg = if *active { primary_fg } else { text_fg };
+                        if let Some(ch) = is_single_pua_glyph(code) {
+                            d2d.draw_glyph(
+                                ch,
+                                d2d_rect(bx, by, bx + bw, by + bh),
+                                sf(13.0),
+                                code_fg,
+                            );
+                        } else {
+                            d2d.draw_text(
+                                code,
+                                d2d_rect(bx, by, bx + bw, by + bh),
+                                sf(11.0),
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                TextAlign::Center,
+                                code_fg,
+                                true,
+                            );
+                        }
+                        let right_inset = if *active { sf(28.0) } else { sf(10.0) };
+                        d2d.draw_text(
                             title,
-                            &mut trc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            d2d_rect(
+                                bx + bw + sf(10.0),
+                                yf,
+                                pad_f + content_wf - right_inset,
+                                yf + hf,
+                            ),
+                            sf(12.5),
+                            if *active {
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD
+                            } else {
+                                DWRITE_FONT_WEIGHT_NORMAL
+                            },
+                            TextAlign::Left,
+                            text_fg,
+                            false,
                         );
+                        if *active {
+                            d2d.draw_glyph(
+                                '\u{E73E}',
+                                d2d_rect(
+                                    pad_f + content_wf - sf(26.0),
+                                    yf,
+                                    pad_f + content_wf - sf(6.0),
+                                    yf + hf,
+                                ),
+                                sf(12.0),
+                                accent,
+                            );
+                        }
                         y += h + s(4.0);
                     }
                     FlyoutBlock::StatusHeader {
@@ -2695,173 +3072,382 @@ impl FlyoutState<'_> {
                         action_label,
                     } => {
                         let h = s(28.0);
-                        SelectObject(hdc, bold_font as _);
-                        SetTextColor(hdc, text_fg);
-                        let mut trc = RECT {
-                            left: pad,
-                            top: y,
-                            right: pad + content_w - s(90.0),
-                            bottom: y + h,
-                        };
-                        draw_gdi_text(
-                            hdc,
+                        let hf = h as f32;
+                        d2d.draw_text(
                             title,
-                            &mut trc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            d2d_rect(pad_f, yf, pad_f + content_wf - sf(90.0), yf + hf),
+                            sf(12.5),
+                            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                            TextAlign::Left,
+                            text_fg,
+                            false,
                         );
-
                         let right_edge = if let (Some(id), Some(lbl)) = (*action_id, action_label) {
-                            let bw = s(64.0);
-                            let bl = pad + content_w - bw;
+                            let bw = sf(64.0);
+                            let bl = pad_f + content_wf - bw;
                             let hovered = self.hovered_id == Some(id);
-                            fill_round_rect_bordered(
-                                &mut gdi,
-                                hdc,
-                                RECT {
-                                    left: bl,
-                                    top: y + s(2.0),
-                                    right: pad + content_w,
-                                    bottom: y + h - s(2.0),
-                                },
-                                s(6.0),
+                            d2d.fill_rrect_bordered(
+                                bl,
+                                yf + sf(2.0),
+                                pad_f + content_wf,
+                                yf + hf - sf(2.0),
+                                sf(6.0),
                                 if hovered { hover_bg } else { card_bg },
-                                border_col,
-                                1,
+                                subtle_border,
+                                1.0,
                             );
-                            SelectObject(hdc, tiny_font as _);
-                            SetTextColor(hdc, text_fg);
-                            let mut brc = RECT {
-                                left: bl,
-                                top: y,
-                                right: pad + content_w,
-                                bottom: y + h,
-                            };
-                            draw_gdi_text(
-                                hdc,
+                            d2d.draw_text(
                                 lbl,
-                                &mut brc,
-                                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                                d2d_rect(bl, yf, pad_f + content_wf, yf + hf),
+                                sf(10.5),
+                                DWRITE_FONT_WEIGHT_MEDIUM,
+                                TextAlign::Center,
+                                text_fg,
+                                false,
                             );
-                            bl - s(8.0)
+                            bl - sf(8.0)
                         } else {
-                            pad + content_w
+                            pad_f + content_wf
                         };
-
-                        SelectObject(hdc, small_font as _);
-                        SetTextColor(hdc, muted_fg);
-                        let mut src = RECT {
-                            left: pad + content_w / 3,
-                            top: y,
-                            right: right_edge,
-                            bottom: y + h,
-                        };
-                        draw_gdi_text(
-                            hdc,
+                        d2d.draw_text(
                             status_label,
-                            &mut src,
-                            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+                            d2d_rect(pad_f + content_wf * 0.33, yf, right_edge, yf + hf),
+                            sf(11.0),
+                            DWRITE_FONT_WEIGHT_NORMAL,
+                            TextAlign::Right,
+                            muted_fg,
+                            false,
                         );
-                        let dot_r = s(3.0).max(2);
-                        let dot_x = right_edge - s(status_label.len() as f32 * 6.5 + 8.0);
-                        let dot_y = y + h / 2;
-                        let db = gdi.brush(gdi_rgb(*status_color));
-                        let dp = gdi.pen(gdi_rgb(*status_color), 1);
-                        let ob = SelectObject(hdc, db as _);
-                        let op = SelectObject(hdc, dp as _);
-                        Ellipse(
-                            hdc,
-                            dot_x - dot_r,
-                            dot_y - dot_r,
-                            dot_x + dot_r,
-                            dot_y + dot_r,
-                        );
-                        SelectObject(hdc, ob);
-                        SelectObject(hdc, op);
-
+                        let dot_r = sf(3.2).max(2.5);
+                        let dot_x = right_edge - sf(status_label.len() as f32 * 6.2 + 8.0);
+                        d2d.fill_circle(dot_x, yf + hf * 0.5, dot_r, d2d_rgba(*status_color, 1.0));
                         y += h + s(6.0);
                     }
                     FlyoutBlock::ToggleGrid(tiles) => {
                         let rows = tiles.len().div_ceil(2) as i32;
-                        let tile_h = s(48.0);
-                        let gap = s(6.0);
+                        let tile_h = s(52.0);
+                        let tile_hf = tile_h as f32;
+                        let gap = s(8.0);
                         let tw = ((content_w - gap) / 2).max(s(80.0));
+                        let twf = tw as f32;
                         for (i, (id, title, state_lbl, active)) in tiles.iter().enumerate() {
                             let col = (i % 2) as i32;
                             let row = (i / 2) as i32;
-                            let left = pad + col * (tw + gap);
-                            let top = y + row * (tile_h + gap);
+                            let left = (pad + col * (tw + gap)) as f32;
+                            let top = (y + row * (tile_h + gap)) as f32;
                             let hovered = self.hovered_id == Some(*id);
                             let (fill, bd) = if *active {
                                 (sel_fill, sel_stroke)
                             } else if hovered {
                                 (hover_bg, border_col)
                             } else {
-                                (card_bg, border_col)
+                                (card_bg, subtle_border)
                             };
-                            fill_round_rect_bordered(
-                                &mut gdi,
-                                hdc,
-                                RECT {
-                                    left,
-                                    top,
-                                    right: left + tw,
-                                    bottom: top + tile_h,
-                                },
-                                radius,
+                            d2d.fill_rrect_bordered(
+                                left,
+                                top,
+                                left + twf,
+                                top + tile_hf,
+                                card_r,
                                 fill,
                                 bd,
-                                border_w_px,
+                                border_w,
                             );
-                            SelectObject(hdc, bold_font as _);
-                            SetTextColor(hdc, if *active { sel_fg } else { text_fg });
-                            let mut trc = RECT {
-                                left: left + s(10.0),
-                                top: top + s(6.0),
-                                right: left + tw - s(8.0),
-                                bottom: top + s(24.0),
-                            };
-                            draw_gdi_text(
-                                hdc,
+                            d2d.draw_text(
                                 title,
-                                &mut trc,
-                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                d2d_rect(
+                                    left + sf(11.0),
+                                    top + sf(8.0),
+                                    left + twf - sf(10.0),
+                                    top + sf(26.0),
+                                ),
+                                sf(12.5),
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                TextAlign::Left,
+                                if *active { sel_fg } else { text_fg },
+                                false,
                             );
-                            SelectObject(hdc, small_font as _);
-                            SetTextColor(hdc, muted_fg);
-                            let mut src = RECT {
-                                left: left + s(10.0),
-                                top: top + s(25.0),
-                                right: left + tw - s(8.0),
-                                bottom: top + tile_h - s(6.0),
-                            };
-                            draw_gdi_text(
-                                hdc,
+                            d2d.draw_text(
                                 state_lbl,
-                                &mut src,
-                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                d2d_rect(
+                                    left + sf(11.0),
+                                    top + sf(27.0),
+                                    left + twf - sf(10.0),
+                                    top + tile_hf - sf(7.0),
+                                ),
+                                sf(11.0),
+                                DWRITE_FONT_WEIGHT_NORMAL,
+                                TextAlign::Left,
+                                muted_fg,
+                                false,
                             );
                         }
                         y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
                     }
+                    FlyoutBlock::IconToggleGrid(tiles) => {
+                        let rows = tiles.len().div_ceil(2) as i32;
+                        let tile_h = s(56.0);
+                        let tile_hf = tile_h as f32;
+                        let gap = s(8.0);
+                        let tw = ((content_w - gap) / 2).max(s(80.0));
+                        let twf = tw as f32;
+                        for (i, (id, glyph, title, state_lbl, active)) in tiles.iter().enumerate() {
+                            let col = (i % 2) as i32;
+                            let row = (i / 2) as i32;
+                            let left = (pad + col * (tw + gap)) as f32;
+                            let top = (y + row * (tile_h + gap)) as f32;
+                            let hovered = self.hovered_id == Some(*id);
+                            let (fill, bd) = if *active {
+                                (sel_fill, sel_stroke)
+                            } else if hovered {
+                                (hover_bg, border_col)
+                            } else {
+                                (card_bg, subtle_border)
+                            };
+                            d2d.fill_rrect_bordered(
+                                left,
+                                top,
+                                left + twf,
+                                top + tile_hf,
+                                card_r,
+                                fill,
+                                bd,
+                                border_w,
+                            );
+                            let well = sf(30.0);
+                            let wl = left + sf(10.0);
+                            let wt = top + (tile_hf - well) * 0.5;
+                            let well_bg = if *active {
+                                d2d_rgba(pal.widget_blue, if self.is_dark { 0.24 } else { 0.16 })
+                            } else {
+                                d2d_rgba(pal.text_secondary, if self.is_dark { 0.12 } else { 0.10 })
+                            };
+                            d2d.fill_rrect(wl, wt, wl + well, wt + well, sf(8.0), well_bg);
+                            let ch = char::from_u32(u32::from(*glyph)).unwrap_or('\u{E713}');
+                            d2d.draw_glyph(
+                                ch,
+                                d2d_rect(wl, wt, wl + well, wt + well),
+                                sf(14.0),
+                                if *active { sel_fg } else { muted_fg },
+                            );
+                            let tl = wl + well + sf(9.0);
+                            let tr = left + twf - sf(8.0);
+                            d2d.draw_text(
+                                title,
+                                d2d_rect(tl, top + sf(9.0), tr, top + sf(27.0)),
+                                sf(12.0),
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                TextAlign::Left,
+                                if *active { sel_fg } else { text_fg },
+                                false,
+                            );
+                            d2d.draw_text(
+                                state_lbl,
+                                d2d_rect(tl, top + sf(28.0), tr, top + tile_hf - sf(8.0)),
+                                sf(11.0),
+                                DWRITE_FONT_WEIGHT_NORMAL,
+                                TextAlign::Left,
+                                muted_fg,
+                                false,
+                            );
+                        }
+                        y += rows * tile_h + (rows - 1).max(0) * gap + s(6.0);
+                    }
+                    FlyoutBlock::GlyphStatRow {
+                        glyph,
+                        glyph_color,
+                        label,
+                        detail,
+                        value,
+                    } => {
+                        let h = s(30.0);
+                        let hf = h as f32;
+                        let icon_sz = sf(22.0);
+                        let it = yf + (hf - icon_sz) * 0.5;
+                        d2d.fill_rrect(
+                            pad_f,
+                            it,
+                            pad_f + icon_sz,
+                            it + icon_sz,
+                            sf(6.0),
+                            d2d_rgba(*glyph_color, if self.is_dark { 0.15 } else { 0.12 }),
+                        );
+                        let ch = char::from_u32(u32::from(*glyph)).unwrap_or('\u{E706}');
+                        d2d.draw_glyph(
+                            ch,
+                            d2d_rect(pad_f, it, pad_f + icon_sz, it + icon_sz),
+                            sf(12.0),
+                            d2d_rgba(*glyph_color, 1.0),
+                        );
+                        let text_l = pad_f + icon_sz + sf(9.0);
+                        let val_w = sf(78.0);
+                        let mid_r = (pad_f + content_wf - val_w).max(text_l + sf(40.0));
+                        let combined = match detail {
+                            Some(d) if !d.is_empty() => format!("{label} · {d}"),
+                            _ => label.clone(),
+                        };
+                        d2d.draw_text(
+                            &combined,
+                            d2d_rect(text_l, yf, mid_r, yf + hf),
+                            sf(12.0),
+                            DWRITE_FONT_WEIGHT_MEDIUM,
+                            TextAlign::Left,
+                            text_fg,
+                            false,
+                        );
+                        d2d.draw_text(
+                            value,
+                            d2d_rect(mid_r, yf, pad_f + content_wf, yf + hf),
+                            sf(12.0),
+                            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                            TextAlign::Right,
+                            text_fg,
+                            true,
+                        );
+                        y += h;
+                    }
+                    FlyoutBlock::GlyphActionRow {
+                        id,
+                        glyph,
+                        glyph_color,
+                        title,
+                        subtitle,
+                        badge,
+                    } => {
+                        let h = if subtitle.is_some() { s(44.0) } else { s(38.0) };
+                        let hf = h as f32;
+                        let hovered = self.hovered_id == Some(*id);
+                        d2d.fill_rrect_bordered(
+                            pad_f,
+                            yf,
+                            pad_f + content_wf,
+                            yf + hf,
+                            card_r,
+                            if hovered { hover_bg } else { card_bg },
+                            if hovered { border_col } else { subtle_border },
+                            1.0,
+                        );
+                        let well = sf(28.0);
+                        let wl = pad_f + sf(8.0);
+                        let wt = yf + (hf - well) * 0.5;
+                        d2d.fill_rrect(
+                            wl,
+                            wt,
+                            wl + well,
+                            wt + well,
+                            sf(7.0),
+                            d2d_rgba(*glyph_color, if self.is_dark { 0.16 } else { 0.13 }),
+                        );
+                        let ch = char::from_u32(u32::from(*glyph)).unwrap_or('\u{E8B7}');
+                        d2d.draw_glyph(
+                            ch,
+                            d2d_rect(wl, wt, wl + well, wt + well),
+                            sf(14.0),
+                            d2d_rgba(*glyph_color, 1.0),
+                        );
+                        let text_l = wl + well + sf(10.0);
+                        let right_reserve = if badge.is_some() { sf(68.0) } else { sf(24.0) };
+                        let text_r = (pad_f + content_wf - right_reserve).max(text_l + sf(40.0));
+                        if let Some(sub) = subtitle {
+                            d2d.draw_text(
+                                title,
+                                d2d_rect(text_l, yf + sf(4.0), text_r, yf + sf(22.0)),
+                                sf(12.5),
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                TextAlign::Left,
+                                text_fg,
+                                false,
+                            );
+                            d2d.draw_text(
+                                sub,
+                                d2d_rect(text_l, yf + sf(22.0), text_r, yf + hf - sf(4.0)),
+                                sf(11.0),
+                                DWRITE_FONT_WEIGHT_NORMAL,
+                                TextAlign::Left,
+                                muted_fg,
+                                false,
+                            );
+                        } else {
+                            d2d.draw_text(
+                                title,
+                                d2d_rect(text_l, yf, text_r, yf + hf),
+                                sf(12.5),
+                                DWRITE_FONT_WEIGHT_MEDIUM,
+                                TextAlign::Left,
+                                text_fg,
+                                false,
+                            );
+                        }
+                        if let Some(b) = badge {
+                            d2d.draw_text(
+                                b,
+                                d2d_rect(text_r, yf, pad_f + content_wf - sf(22.0), yf + hf),
+                                sf(11.0),
+                                DWRITE_FONT_WEIGHT_MEDIUM,
+                                TextAlign::Right,
+                                muted_fg,
+                                true,
+                            );
+                        }
+                        d2d.draw_glyph(
+                            '\u{E76C}',
+                            d2d_rect(
+                                pad_f + content_wf - sf(22.0),
+                                yf,
+                                pad_f + content_wf - sf(6.0),
+                                yf + hf,
+                            ),
+                            sf(10.0),
+                            if hovered { text_fg } else { muted_fg },
+                        );
+                        y += h + s(5.0);
+                    }
                     FlyoutBlock::StatRow { label, value } => {
                         let h = s(24.0);
-                        SelectObject(hdc, small_font as _);
-                        SetTextColor(hdc, muted_fg);
-                        let mut rc = RECT {
-                            left: pad,
-                            top: y,
-                            right: pad + content_w,
-                            bottom: y + h,
-                        };
-                        draw_gdi_text(
-                            hdc,
+                        let hf = h as f32;
+                        let is_section_heading = value.is_empty();
+                        d2d.draw_text(
                             label,
-                            &mut rc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            d2d_rect(
+                                pad_f,
+                                yf,
+                                if is_section_heading {
+                                    pad_f + content_wf
+                                } else {
+                                    pad_f + content_wf * 0.62
+                                },
+                                yf + hf,
+                            ),
+                            if is_section_heading {
+                                sf(11.5)
+                            } else {
+                                sf(12.0)
+                            },
+                            if is_section_heading {
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD
+                            } else {
+                                DWRITE_FONT_WEIGHT_NORMAL
+                            },
+                            TextAlign::Left,
+                            muted_fg,
+                            false,
                         );
-                        SelectObject(hdc, bold_font as _);
-                        SetTextColor(hdc, text_fg);
-                        draw_gdi_text(hdc, value, &mut rc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                        if !value.is_empty() {
+                            d2d.draw_text(
+                                value,
+                                d2d_rect(
+                                    pad_f + content_wf * 0.45,
+                                    yf,
+                                    pad_f + content_wf,
+                                    yf + hf,
+                                ),
+                                sf(12.0),
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                TextAlign::Right,
+                                text_fg,
+                                true,
+                            );
+                        }
                         y += h;
                     }
                     FlyoutBlock::ProgressBar {
@@ -2870,61 +3456,62 @@ impl FlyoutState<'_> {
                         ratio,
                         tone,
                     } => {
-                        let h = s(34.0);
-                        SelectObject(hdc, small_font as _);
-                        SetTextColor(hdc, muted_fg);
-                        let mut rc = RECT {
-                            left: pad,
-                            top: y,
-                            right: pad + content_w,
-                            bottom: y + s(16.0),
+                        let compact = label.is_empty() && value_text.is_empty();
+                        let bar_top = if compact {
+                            yf + sf(4.0)
+                        } else {
+                            d2d.draw_text(
+                                label,
+                                d2d_rect(pad_f, yf, pad_f + content_wf * 0.65, yf + sf(16.0)),
+                                sf(11.5),
+                                DWRITE_FONT_WEIGHT_MEDIUM,
+                                TextAlign::Left,
+                                muted_fg,
+                                false,
+                            );
+                            d2d.draw_text(
+                                value_text,
+                                d2d_rect(
+                                    pad_f + content_wf * 0.5,
+                                    yf,
+                                    pad_f + content_wf,
+                                    yf + sf(16.0),
+                                ),
+                                sf(11.5),
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                TextAlign::Right,
+                                text_fg,
+                                true,
+                            );
+                            yf + sf(21.0)
                         };
-                        draw_gdi_text(
-                            hdc,
-                            label,
-                            &mut rc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                        );
-                        SetTextColor(hdc, text_fg);
-                        draw_gdi_text(
-                            hdc,
-                            value_text,
-                            &mut rc,
-                            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-                        );
-
-                        let bar_top = y + s(21.0);
-                        let bar_h = s(6.0);
-                        fill_round_rect(
-                            &mut gdi,
-                            hdc,
-                            pad,
+                        let bar_h = sf(6.0).max(5.0);
+                        let bar_r = bar_h * 0.5;
+                        d2d.fill_rrect(
+                            pad_f,
                             bar_top,
-                            pad + content_w,
+                            pad_f + content_wf,
                             bar_top + bar_h,
-                            s(3.0),
+                            bar_r,
                             track_col,
                         );
-
-                        let fill_w = (content_w as f32 * ratio.clamp(0.0, 1.0)).round() as i32;
-                        if fill_w > s(3.0) {
+                        let fill_w = content_wf * ratio.clamp(0.0, 1.0);
+                        if fill_w > sf(2.0) {
                             let meter_rgb = match tone {
-                                BarTone::Accent => pal.widget_blue,
+                                BarTone::Accent => pal.widget_accent,
                                 BarTone::Usage => design::meter_color(&pal, *ratio),
                                 BarTone::Level => design::level_color(&pal, *ratio),
                             };
-                            fill_round_rect(
-                                &mut gdi,
-                                hdc,
-                                pad,
+                            d2d.fill_rrect(
+                                pad_f,
                                 bar_top,
-                                pad + fill_w,
+                                pad_f + fill_w.max(bar_h),
                                 bar_top + bar_h,
-                                s(3.0),
-                                gdi_rgb(meter_rgb),
+                                bar_r,
+                                d2d_rgba(meter_rgb, 1.0),
                             );
                         }
-                        y += h;
+                        y += if compact { s(16.0) } else { s(34.0) };
                     }
                     FlyoutBlock::ActionRow {
                         id,
@@ -2934,72 +3521,79 @@ impl FlyoutState<'_> {
                         icon,
                         destructive,
                     } => {
-                        let h = if subtitle.is_some() { s(40.0) } else { s(32.0) };
+                        let h = if subtitle.is_some() { s(42.0) } else { s(34.0) };
+                        let hf = h as f32;
                         let hovered = self.hovered_id == Some(*id);
-                        let fill = if hovered {
-                            if *destructive { danger_bg } else { hover_bg }
+                        let (fill, bd) = if hovered {
+                            if *destructive {
+                                (danger_bg, danger_stroke)
+                            } else {
+                                (hover_bg, border_col)
+                            }
                         } else {
-                            card_bg
+                            (card_bg, subtle_border)
                         };
-                        fill_round_rect(
-                            &mut gdi,
-                            hdc,
-                            pad,
-                            y,
-                            pad + content_w,
-                            y + h,
-                            radius,
+                        d2d.fill_rrect_bordered(
+                            pad_f,
+                            yf,
+                            pad_f + content_wf,
+                            yf + hf,
+                            pill_r,
                             fill,
+                            bd,
+                            1.0,
                         );
 
-                        let mut text_left = pad + s(10.0);
+                        let mut text_left = pad_f + sf(11.0);
                         if let Some(ic) = icon {
-                            let isz = s(18.0);
-                            draw_bgra_icon(hdc, ic, fill, pad + s(8.0), y + (h - isz) / 2, isz);
-                            text_left = pad + s(34.0);
+                            let isz = sf(18.0);
+                            let iy = yf + (hf - isz) * 0.5;
+                            d2d.draw_bgra_icon(
+                                ic,
+                                d2d_rect(pad_f + sf(9.0), iy, pad_f + sf(9.0) + isz, iy + isz),
+                            );
+                            text_left = pad_f + sf(35.0);
                         }
-
-                        SelectObject(hdc, body_font as _);
-                        SetTextColor(hdc, if *destructive { danger_fg } else { text_fg });
-                        let mut trc = RECT {
-                            left: text_left,
-                            top: y + if subtitle.is_some() { s(3.0) } else { 0 },
-                            right: pad + content_w - s(10.0),
-                            bottom: y + if subtitle.is_some() { s(21.0) } else { h },
+                        let right_limit = if badge.is_some() {
+                            pad_f + content_wf - sf(62.0)
+                        } else {
+                            pad_f + content_wf - sf(10.0)
                         };
-                        draw_gdi_text(
-                            hdc,
+                        d2d.draw_text(
                             title,
-                            &mut trc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            d2d_rect(
+                                text_left,
+                                yf + if subtitle.is_some() { sf(3.0) } else { 0.0 },
+                                right_limit,
+                                yf + if subtitle.is_some() { sf(21.0) } else { hf },
+                            ),
+                            sf(12.5),
+                            DWRITE_FONT_WEIGHT_MEDIUM,
+                            TextAlign::Left,
+                            if *destructive { danger_fg } else { text_fg },
+                            false,
                         );
-
                         if let Some(sub) = subtitle {
-                            SelectObject(hdc, small_font as _);
-                            SetTextColor(hdc, muted_fg);
-                            let mut src = RECT {
-                                left: text_left,
-                                top: y + s(20.0),
-                                right: pad + content_w - s(10.0),
-                                bottom: y + h - s(3.0),
-                            };
-                            draw_gdi_text(
-                                hdc,
+                            d2d.draw_text(
                                 sub,
-                                &mut src,
-                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                d2d_rect(text_left, yf + sf(21.0), right_limit, yf + hf - sf(3.0)),
+                                sf(11.0),
+                                DWRITE_FONT_WEIGHT_NORMAL,
+                                TextAlign::Left,
+                                muted_fg,
+                                false,
                             );
                         }
                         if let Some(b) = badge {
-                            SelectObject(hdc, small_font as _);
-                            SetTextColor(hdc, muted_fg);
-                            let mut brc = RECT {
-                                left: text_left,
-                                top: y,
-                                right: pad + content_w - s(10.0),
-                                bottom: y + h,
-                            };
-                            draw_gdi_text(hdc, b, &mut brc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                            d2d.draw_text(
+                                b,
+                                d2d_rect(right_limit, yf, pad_f + content_wf - sf(10.0), yf + hf),
+                                sf(11.0),
+                                DWRITE_FONT_WEIGHT_MEDIUM,
+                                TextAlign::Right,
+                                muted_fg,
+                                true,
+                            );
                         }
                         y += h + s(4.0);
                     }
@@ -3016,135 +3610,133 @@ impl FlyoutState<'_> {
                             || focused_id == Some(*id)
                             || self.hovered_id == Some(*pin_id)
                             || (*close_id).is_some_and(|cid| self.hovered_id == Some(cid));
-                        // Transparent resting rows that softly illuminate on hover (clean Raycast/macOS list).
-                        let app_fill = if row_hovered { hover_bg } else { bg };
                         if row_hovered {
-                            fill_round_rect(
-                                &mut gdi,
-                                hdc,
-                                app.left,
-                                y,
-                                close.right,
-                                app.bottom,
-                                s(8.0),
+                            d2d.fill_rrect(
+                                app.left as f32,
+                                yf,
+                                close.right as f32,
+                                app.bottom as f32,
+                                pill_r,
                                 hover_bg,
                             );
                         }
-                        let icon_size = s(22.0);
-                        let icon_x = app.left + s(10.0);
-                        let icon_y = y + (app.bottom - y - icon_size) / 2;
+                        let icon_size = sf(22.0);
+                        let icon_x = app.left as f32 + sf(10.0);
+                        let icon_y = yf + ((app.bottom - y) as f32 - icon_size) * 0.5;
                         if let Some(icon) = icon {
-                            draw_bgra_icon(hdc, icon, app_fill, icon_x, icon_y, icon_size);
+                            d2d.draw_bgra_icon(
+                                icon,
+                                d2d_rect(icon_x, icon_y, icon_x + icon_size, icon_y + icon_size),
+                            );
                         } else {
-                            draw_menu_icon(
-                                hdc,
-                                MenuIcon::Layers,
-                                icon_x + icon_size / 2,
-                                icon_y + icon_size / 2,
-                                dpi,
+                            d2d.draw_glyph(
+                                '\u{E81E}',
+                                d2d_rect(icon_x, icon_y, icon_x + icon_size, icon_y + icon_size),
+                                sf(15.0),
                                 muted_fg,
                             );
                         }
-                        SelectObject(hdc, body_font as _);
-                        SetTextColor(hdc, text_fg);
-                        let mut rect = RECT {
-                            left: app.left + s(42.0),
-                            right: app.right - s(6.0),
-                            ..app
-                        };
-                        draw_gdi_text(
-                            hdc,
+                        d2d.draw_text(
                             title,
-                            &mut rect,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX,
+                            d2d_rect(
+                                app.left as f32 + sf(42.0),
+                                yf,
+                                app.right as f32 - sf(6.0),
+                                app.bottom as f32,
+                            ),
+                            sf(12.5),
+                            DWRITE_FONT_WEIGHT_MEDIUM,
+                            TextAlign::Left,
+                            text_fg,
+                            false,
                         );
 
-                        for (id, rect, icon, selected, fill, ink) in [
-                            (Some(*pin_id), pin, MenuIcon::Pin, *pinned, sel_fill, sel_fg),
+                        for (btn_id, rect, glyph, selected, fill, ink) in [
                             (
-                                *close_id,
-                                close,
-                                MenuIcon::Close,
-                                false,
-                                danger_bg,
-                                danger_fg,
+                                Some(*pin_id),
+                                pin,
+                                if *pinned { '\u{E718}' } else { '\u{E840}' },
+                                *pinned,
+                                sel_fill,
+                                sel_fg,
                             ),
+                            (*close_id, close, '\u{E711}', false, danger_bg, danger_fg),
                         ] {
-                            let Some(id) = id else { continue };
-                            let active = self.hovered_id == Some(id) || focused_id == Some(id);
-                            let inset = s(3.0);
+                            let Some(btn_id) = btn_id else { continue };
+                            let active =
+                                self.hovered_id == Some(btn_id) || focused_id == Some(btn_id);
+                            let inset = sf(4.0);
                             if active || selected {
-                                fill_round_rect(
-                                    &mut gdi,
-                                    hdc,
-                                    rect.left + inset,
-                                    y + inset,
-                                    rect.right - inset,
-                                    rect.bottom - inset,
-                                    s(8.0),
+                                d2d.fill_rrect(
+                                    rect.left as f32 + inset,
+                                    yf + inset,
+                                    rect.right as f32 - inset,
+                                    rect.bottom as f32 - inset,
+                                    sf(7.0),
                                     fill,
                                 );
                             }
-                            draw_menu_icon(
-                                hdc,
-                                icon,
-                                (rect.left + rect.right) / 2,
-                                (y + rect.bottom) / 2,
-                                dpi,
+                            d2d.draw_glyph(
+                                glyph,
+                                d2d_rect(
+                                    rect.left as f32,
+                                    yf,
+                                    rect.right as f32,
+                                    rect.bottom as f32,
+                                ),
+                                sf(12.0),
                                 if active || selected { ink } else { muted_fg },
                             );
                         }
-                        y = app.bottom + s(2.0);
+                        y = app.bottom + s(3.0);
                     }
                     FlyoutBlock::ButtonBar(buttons) => {
-                        let h = s(31.0);
+                        let h = s(34.0);
+                        let hf = h as f32;
                         let count = buttons.len().max(1) as i32;
                         let gap = s(6.0);
                         let bw = ((content_w - gap * (count - 1)) / count).max(s(40.0));
+                        let bwf = bw as f32;
                         for (i, (id, label, primary)) in buttons.iter().enumerate() {
-                            let left = pad + (i as i32) * (bw + gap);
+                            let left = (pad + (i as i32) * (bw + gap)) as f32;
                             let hovered = self.hovered_id == Some(*id) || focused_id == Some(*id);
-                            // Exact C# `WidgetFlyoutPrimaryButton` / `WidgetFlyoutActionButton`
                             let (fill, bd, fg) = if *primary {
-                                (sel_fill, sel_stroke, text_fg)
+                                (
+                                    if hovered && self.is_dark {
+                                        d2d_rgba((0x2b, 0x40, 0x61), 1.0)
+                                    } else {
+                                        primary_fill
+                                    },
+                                    primary_stroke,
+                                    primary_fg,
+                                )
                             } else if hovered {
                                 (hover_bg, border_col, text_fg)
                             } else {
-                                (card_bg, border_col, text_fg)
+                                (card_bg, subtle_border, text_fg)
                             };
-                            fill_round_rect_bordered(
-                                &mut gdi,
-                                hdc,
-                                RECT {
-                                    left,
-                                    top: y,
-                                    right: left + bw,
-                                    bottom: y + h,
-                                },
-                                radius,
+                            d2d.fill_rrect_bordered(
+                                left,
+                                yf,
+                                left + bwf,
+                                yf + hf,
+                                pill_r,
                                 fill,
                                 bd,
-                                border_w_px,
+                                border_w,
                             );
-
-                            SelectObject(hdc, bold_font as _);
-                            SetTextColor(hdc, fg);
-                            let mut brc = RECT {
-                                left,
-                                top: y,
-                                right: left + bw,
-                                bottom: y + h,
-                            };
-                            draw_gdi_text(
-                                hdc,
+                            d2d.draw_text(
                                 label,
-                                &mut brc,
-                                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                d2d_rect(left + sf(6.0), yf, left + bwf - sf(6.0), yf + hf),
+                                sf(12.0),
+                                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                TextAlign::Center,
+                                fg,
+                                false,
                             );
                         }
                         y += h + s(6.0);
                     }
-                    // ---- C2 blocks (WS-C contract) ----
                     FlyoutBlock::SeekSlider {
                         id,
                         label,
@@ -3152,81 +3744,68 @@ impl FlyoutState<'_> {
                         duration_secs,
                         ratio,
                     } => {
-                        SelectObject(hdc, bold_font as _);
-                        SetTextColor(hdc, text_fg);
-                        let mut lrc = RECT {
-                            left: pad,
-                            top: y,
-                            right: pad + content_w / 2,
-                            bottom: y + s(18.0),
-                        };
-                        draw_gdi_text(hdc, label, &mut lrc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                        d2d.draw_text(
+                            label,
+                            d2d_rect(pad_f, yf, pad_f + content_wf * 0.5, yf + sf(18.0)),
+                            sf(12.0),
+                            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                            TextAlign::Left,
+                            text_fg,
+                            false,
+                        );
                         let times = format!(
                             "{} / {}",
                             format_clock(*position_secs),
                             format_clock(*duration_secs)
                         );
-                        SelectObject(hdc, small_font as _);
-                        SetTextColor(hdc, muted_fg);
-                        let mut trc = RECT {
-                            left: pad + content_w / 2,
-                            top: y,
-                            right: pad + content_w,
-                            bottom: y + s(18.0),
-                        };
-                        draw_gdi_text(hdc, &times, &mut trc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-
-                        let track_top = y + s(20.0);
-                        let mid_y = track_top + s(9.0);
-                        let tr_h = s(5.0).max(4);
-                        fill_round_rect(
-                            &mut gdi,
-                            hdc,
-                            pad,
-                            mid_y - tr_h / 2,
-                            pad + content_w,
-                            mid_y + tr_h / 2,
-                            tr_h,
+                        d2d.draw_text(
+                            &times,
+                            d2d_rect(
+                                pad_f + content_wf * 0.5,
+                                yf,
+                                pad_f + content_wf,
+                                yf + sf(18.0),
+                            ),
+                            sf(11.0),
+                            DWRITE_FONT_WEIGHT_NORMAL,
+                            TextAlign::Right,
+                            muted_fg,
+                            true,
+                        );
+                        let mid_y = yf + sf(29.0);
+                        let tr_h = sf(5.0).max(4.0);
+                        let tr_r = tr_h * 0.5;
+                        d2d.fill_rrect(
+                            pad_f,
+                            mid_y - tr_r,
+                            pad_f + content_wf,
+                            mid_y + tr_r,
+                            tr_r,
                             track_col,
                         );
-                        let r = ratio.clamp(0.0, 1.0);
-                        let fill_w = (content_w as f32 * r).round() as i32;
-                        if fill_w > s(2.0) {
-                            fill_round_rect(
-                                &mut gdi,
-                                hdc,
-                                pad,
-                                mid_y - tr_h / 2,
-                                pad + fill_w,
-                                mid_y + tr_h / 2,
-                                tr_h,
+                        let fill_w = content_wf * ratio.clamp(0.0, 1.0);
+                        if fill_w > sf(2.0) {
+                            d2d.fill_rrect(
+                                pad_f,
+                                mid_y - tr_r,
+                                pad_f + fill_w,
+                                mid_y + tr_r,
+                                tr_r,
                                 accent,
                             );
                         }
-                        let dragging = self
-                            .dragging_slider
-                            .is_some_and(|(sid, _, seek)| sid == *id && seek);
-                        let thumb_r = if dragging || self.hovered_id == Some(*id) {
-                            s(6.0)
-                        } else {
-                            s(5.0)
-                        };
-                        let tx = (pad + fill_w).clamp(pad + thumb_r, pad + content_w - thumb_r);
-                        let tb = CreateSolidBrush(accent);
-                        let tp = CreatePen(PS_SOLID, 1, accent);
-                        let ob = SelectObject(hdc, tb as _);
-                        let op = SelectObject(hdc, tp as _);
-                        Ellipse(
-                            hdc,
-                            tx - thumb_r,
-                            mid_y - thumb_r,
-                            tx + thumb_r,
-                            mid_y + thumb_r,
-                        );
-                        SelectObject(hdc, ob);
-                        SelectObject(hdc, op);
-                        DeleteObject(tb as _);
-                        DeleteObject(tp as _);
+                        let hot = self.hovered_id == Some(*id)
+                            || self
+                                .dragging_slider
+                                .is_some_and(|(sid, _, seek)| sid == *id && seek);
+                        let thumb_r = if hot { sf(6.5) } else { sf(5.5) };
+                        let tx =
+                            (pad_f + fill_w).clamp(pad_f + thumb_r, pad_f + content_wf - thumb_r);
+                        if hot {
+                            d2d.fill_circle(tx, mid_y, thumb_r + sf(3.5), thumb_halo);
+                        }
+                        d2d.fill_circle(tx, mid_y, thumb_r, thumb_core);
+                        d2d.stroke_circle(tx, mid_y, thumb_r, accent, sf(1.6).max(1.2));
                         y += s(44.0);
                     }
                     FlyoutBlock::TextInput {
@@ -3236,35 +3815,32 @@ impl FlyoutState<'_> {
                         numeric,
                         ..
                     } => {
-                        SelectObject(hdc, small_font as _);
-                        SetTextColor(hdc, muted_fg);
-                        let mut lrc = RECT {
-                            left: pad,
-                            top: y,
-                            right: pad + content_w,
-                            bottom: y + s(16.0),
-                        };
-                        draw_gdi_text(
-                            hdc,
+                        d2d.draw_text(
                             label,
-                            &mut lrc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            d2d_rect(pad_f, yf, pad_f + content_wf, yf + sf(16.0)),
+                            sf(11.0),
+                            DWRITE_FONT_WEIGHT_MEDIUM,
+                            TextAlign::Left,
+                            muted_fg,
+                            false,
                         );
-                        let box_top = y + s(17.0);
+                        let box_top = yf + sf(18.0);
+                        let box_h = sf(32.0);
                         let editing = self.editing.as_ref().is_some_and(|(eid, _)| eid == id);
-                        fill_round_rect_bordered(
-                            &mut gdi,
-                            hdc,
-                            RECT {
-                                left: pad,
-                                top: box_top,
-                                right: pad + content_w,
-                                bottom: box_top + s(30.0),
+                        let hovered = self.hovered_id == Some(*id);
+                        d2d.fill_rrect_bordered(
+                            pad_f,
+                            box_top,
+                            pad_f + content_wf,
+                            box_top + box_h,
+                            pill_r,
+                            if editing || hovered {
+                                hover_bg
+                            } else {
+                                card_bg
                             },
-                            radius,
-                            if editing { hover_bg } else { card_bg },
                             if editing { accent } else { border_col },
-                            1,
+                            if editing { 1.5 } else { 1.0 },
                         );
                         let shown = if editing {
                             let buf = self.editing.as_ref().map(|(_, b)| b.as_str()).unwrap_or("");
@@ -3272,66 +3848,53 @@ impl FlyoutState<'_> {
                         } else {
                             value.clone()
                         };
-                        SelectObject(hdc, body_font as _);
-                        SetTextColor(hdc, if editing { text_fg } else { muted_fg });
-                        let mut vrc = RECT {
-                            left: pad + s(8.0),
-                            top: box_top,
-                            right: pad + content_w - s(8.0),
-                            bottom: box_top + s(30.0),
-                        };
-                        draw_gdi_text(
-                            hdc,
+                        d2d.draw_text(
                             &shown,
-                            &mut vrc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            d2d_rect(
+                                pad_f + sf(10.0),
+                                box_top,
+                                pad_f + content_wf - sf(28.0),
+                                box_top + box_h,
+                            ),
+                            sf(12.5),
+                            DWRITE_FONT_WEIGHT_MEDIUM,
+                            TextAlign::Left,
+                            if editing { text_fg } else { muted_fg },
+                            *numeric,
                         );
                         if *numeric {
-                            SelectObject(hdc, tiny_font as _);
-                            SetTextColor(hdc, muted_fg);
-                            let mut hrc = RECT {
-                                left: pad + content_w - s(38.0),
-                                top: box_top,
-                                right: pad + content_w - s(6.0),
-                                bottom: box_top + s(30.0),
-                            };
-                            draw_gdi_text(
-                                hdc,
-                                "#",
-                                &mut hrc,
-                                DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+                            d2d.draw_glyph(
+                                '\u{E916}',
+                                d2d_rect(
+                                    pad_f + content_wf - sf(26.0),
+                                    box_top,
+                                    pad_f + content_wf - sf(6.0),
+                                    box_top + box_h,
+                                ),
+                                sf(12.0),
+                                muted_fg,
                             );
                         }
-                        y += s(53.0);
+                        y += s(56.0);
                     }
                     FlyoutBlock::Chart {
                         label,
                         series,
                         accent: series_accent,
                     } => {
-                        SelectObject(hdc, bold_font as _);
-                        SetTextColor(hdc, text_fg);
-                        let mut lrc = RECT {
-                            left: pad,
-                            top: y,
-                            right: pad + content_w,
-                            bottom: y + s(16.0),
-                        };
-                        draw_gdi_text(
-                            hdc,
+                        d2d.draw_text(
                             label,
-                            &mut lrc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            d2d_rect(pad_f, yf, pad_f + content_wf, yf + sf(16.0)),
+                            sf(12.0),
+                            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                            TextAlign::Left,
+                            text_fg,
+                            false,
                         );
-                        let plot_top = y + s(18.0);
-                        let plot_h = s(42.0);
+                        let plot_top = yf + sf(18.0);
+                        let plot_h = sf(42.0);
                         let plot_bot = plot_top + plot_h;
-                        let baseline = CreatePen(PS_SOLID, 1, sep_col);
-                        let op = SelectObject(hdc, baseline as _);
-                        MoveToEx(hdc, pad, plot_bot, std::ptr::null_mut());
-                        LineTo(hdc, pad + content_w, plot_bot);
-                        SelectObject(hdc, op);
-                        DeleteObject(baseline as _);
+                        d2d.draw_line(pad_f, plot_bot, pad_f + content_wf, plot_bot, sep_col, 1.0);
 
                         let palette_colors = [
                             *series_accent,
@@ -3345,65 +3908,58 @@ impl FlyoutState<'_> {
                                 continue;
                             }
                             let peak = points.iter().copied().fold(0.0f32, f32::max).max(0.01);
-                            let line = CreatePen(
-                                PS_SOLID,
-                                (1.5 * dpi).round().max(1.0) as i32,
-                                gdi_rgb(palette_colors[series_idx % palette_colors.len()]),
-                            );
-                            let op = SelectObject(hdc, line as _);
+                            let col =
+                                d2d_rgba(palette_colors[series_idx % palette_colors.len()], 1.0);
                             let px = |i: usize| {
-                                pad + if points.len() == 1 {
-                                    content_w
-                                } else {
-                                    (i as f32 * content_w as f32 / (points.len() - 1) as f32)
-                                        .round() as i32
-                                }
+                                pad_f
+                                    + if points.len() == 1 {
+                                        content_wf
+                                    } else {
+                                        i as f32 * content_wf / (points.len() - 1) as f32
+                                    }
                             };
-                            let py = |v: f32| {
-                                plot_bot
-                                    - ((v / peak).clamp(0.0, 1.0) * (plot_h - s(3.0)) as f32)
-                                        .round() as i32
-                            };
-                            MoveToEx(hdc, px(0), py(points[0]), std::ptr::null_mut());
-                            for (i, &value) in points.iter().enumerate().skip(1) {
-                                LineTo(hdc, px(i), py(value));
+                            let py =
+                                |v: f32| plot_bot - (v / peak).clamp(0.0, 1.0) * (plot_h - sf(3.0));
+                            for i in 1..points.len() {
+                                d2d.draw_line(
+                                    px(i - 1),
+                                    py(points[i - 1]),
+                                    px(i),
+                                    py(points[i]),
+                                    col,
+                                    sf(1.6).max(1.2),
+                                );
                             }
-                            SelectObject(hdc, op);
-                            DeleteObject(line as _);
                         }
 
-                        let mut legend_x = pad;
-                        SelectObject(hdc, tiny_font as _);
-                        SetTextColor(hdc, muted_fg);
+                        let mut legend_x = pad_f;
                         for (i, (name, _)) in series.iter().enumerate().take(3) {
-                            let dash =
-                                CreateSolidBrush(gdi_rgb(palette_colors[i % palette_colors.len()]));
-                            fill_round_rect(
-                                &mut gdi,
-                                hdc,
+                            let swatch = d2d_rgba(palette_colors[i % palette_colors.len()], 1.0);
+                            d2d.fill_rrect(
                                 legend_x,
-                                plot_bot + s(4.0),
-                                legend_x + s(8.0),
-                                plot_bot + s(10.0),
-                                s(2.0),
-                                gdi_rgb(palette_colors[i % palette_colors.len()]),
+                                plot_bot + sf(5.0),
+                                legend_x + sf(8.0),
+                                plot_bot + sf(11.0),
+                                sf(2.0),
+                                swatch,
                             );
-                            DeleteObject(dash as _);
-                            legend_x += s(12.0);
-                            let mut nrc = RECT {
-                                left: legend_x,
-                                top: plot_bot + s(2.0),
-                                right: (legend_x + s(80.0)).min(pad + content_w),
-                                bottom: plot_bot + s(14.0),
-                            };
-                            draw_gdi_text(
-                                hdc,
+                            legend_x += sf(12.0);
+                            d2d.draw_text(
                                 name,
-                                &mut nrc,
-                                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                                d2d_rect(
+                                    legend_x,
+                                    plot_bot + sf(2.0),
+                                    (legend_x + sf(80.0)).min(pad_f + content_wf),
+                                    plot_bot + sf(16.0),
+                                ),
+                                sf(10.5),
+                                DWRITE_FONT_WEIGHT_MEDIUM,
+                                TextAlign::Left,
+                                muted_fg,
+                                false,
                             );
-                            legend_x += s(86.0);
-                            if legend_x >= pad + content_w {
+                            legend_x += sf(86.0);
+                            if legend_x >= pad_f + content_wf {
                                 break;
                             }
                         }
@@ -3415,154 +3971,102 @@ impl FlyoutState<'_> {
                         size_dips,
                     } => {
                         let sz = s(size_dips.clamp(24.0, 160.0));
-                        fill_round_rect(&mut gdi, hdc, pad, y, pad + sz, y + sz, radius, card_bg);
+                        let szf = sz as f32;
+                        d2d.fill_rrect_bordered(
+                            pad_f,
+                            yf,
+                            pad_f + szf,
+                            yf + szf,
+                            card_r,
+                            card_bg,
+                            subtle_border,
+                            1.0,
+                        );
                         if let Some(path) = path.as_deref().filter(|p| !p.is_empty()) {
-                            draw_cover_image(hdc, path, card_bg, pad, y, sz);
+                            d2d.draw_cover_image(path, d2d_rect(pad_f, yf, pad_f + szf, yf + szf));
                         } else {
-                            let gfont = CreateFontW(
-                                -((sz as f32 * 0.62) as i32),
-                                0,
-                                0,
-                                0,
-                                400,
-                                0,
-                                0,
-                                0,
-                                0,
-                                0,
-                                0,
-                                4,
-                                0,
-                                wide("Segoe Fluent Icons").as_ptr(),
+                            let ch = char::from_u32(u32::from(*glyph)).unwrap_or('\u{E9AA}');
+                            d2d.draw_glyph(
+                                ch,
+                                d2d_rect(pad_f, yf, pad_f + szf, yf + szf),
+                                szf * 0.56,
+                                text_fg,
                             );
-                            let prev_font = SelectObject(hdc, gfont as _);
-                            SetTextColor(hdc, text_fg);
-                            let gc = char::from_u32(u32::from(*glyph))
-                                .unwrap_or('\u{E9AA}')
-                                .to_string();
-                            let mut grc = RECT {
-                                left: pad,
-                                top: y,
-                                right: pad + sz,
-                                bottom: y + sz,
-                            };
-                            draw_gdi_text(
-                                hdc,
-                                &gc,
-                                &mut grc,
-                                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                            );
-                            SelectObject(hdc, prev_font);
-                            DeleteObject(gfont as _);
                         }
                         y += sz + s(8.0);
                     }
                     FlyoutBlock::IconBar { buttons } => {
-                        let bw = s(34.0);
-                        let gap = s(6.0);
-                        for (i, (id, label, glyph, active)) in buttons.iter().enumerate() {
-                            let left = pad + (i as i32) * (bw + gap);
-                            if left + bw > pad + content_w {
-                                break;
-                            }
-                            let hot = self.hovered_id == Some(*id) || focused_id == Some(*id);
-                            let (fill, bd, fg) = if *active {
-                                (sel_fill, sel_stroke, sel_fg)
-                            } else if hot {
-                                (hover_bg, border_col, text_fg)
-                            } else {
-                                (card_bg, border_col, muted_fg)
-                            };
-                            fill_round_rect_bordered(
-                                &mut gdi,
-                                hdc,
-                                RECT {
+                        if !buttons.is_empty() {
+                            let cols = buttons.len().min(4) as i32;
+                            let gap = s(6.0);
+                            let bw = ((content_w - gap * (cols - 1)) / cols).max(s(44.0));
+                            let bwf = bw as f32;
+                            let bh = s(48.0);
+                            let bhf = bh as f32;
+                            for (i, (id, label, glyph, active)) in buttons.iter().enumerate() {
+                                let col = (i as i32) % cols;
+                                let row = (i as i32) / cols;
+                                let left = (pad + col * (bw + gap)) as f32;
+                                let top = (y + row * (bh + gap)) as f32;
+                                let hot = self.hovered_id == Some(*id) || focused_id == Some(*id);
+                                let (fill, bd, icon_fg) = if *active {
+                                    (sel_fill, sel_stroke, sel_fg)
+                                } else if hot {
+                                    (hover_bg, border_col, text_fg)
+                                } else {
+                                    (card_bg, subtle_border, muted_fg)
+                                };
+                                d2d.fill_rrect_bordered(
                                     left,
-                                    top: y,
-                                    right: left + bw,
-                                    bottom: y + s(30.0),
-                                },
-                                radius,
-                                fill,
-                                bd,
-                                1,
-                            );
-                            let gfont = CreateFontW(
-                                -s(14.0),
-                                0,
-                                0,
-                                0,
-                                400,
-                                0,
-                                0,
-                                0,
-                                0,
-                                0,
-                                0,
-                                4,
-                                0,
-                                wide("Segoe Fluent Icons").as_ptr(),
-                            );
-                            let prev_font = SelectObject(hdc, gfont as _);
-                            SetTextColor(hdc, fg);
-                            let gc = char::from_u32(u32::from(*glyph))
-                                .unwrap_or('\u{E9AA}')
-                                .to_string();
-                            let mut grc = RECT {
-                                left,
-                                top: y,
-                                right: left + bw,
-                                bottom: y + s(30.0),
-                            };
-                            draw_gdi_text(
-                                hdc,
-                                &gc,
-                                &mut grc,
-                                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                            );
-                            SelectObject(hdc, prev_font);
-                            DeleteObject(gfont as _);
-                            SelectObject(hdc, tiny_font as _);
-                            SetTextColor(hdc, if hot { text_fg } else { muted_fg });
-                            let mut lrc = RECT {
-                                left: left - s(4.0),
-                                top: y + s(30.0),
-                                right: left + bw + s(4.0),
-                                bottom: y + s(44.0),
-                            };
-                            draw_gdi_text(
-                                hdc,
-                                label,
-                                &mut lrc,
-                                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                            );
+                                    top,
+                                    left + bwf,
+                                    top + bhf,
+                                    pill_r,
+                                    fill,
+                                    bd,
+                                    1.0,
+                                );
+                                let ch = char::from_u32(u32::from(*glyph)).unwrap_or('\u{E713}');
+                                d2d.draw_glyph(
+                                    ch,
+                                    d2d_rect(left, top + sf(4.0), left + bwf, top + sf(28.0)),
+                                    sf(14.5),
+                                    icon_fg,
+                                );
+                                d2d.draw_text(
+                                    label,
+                                    d2d_rect(
+                                        left + sf(4.0),
+                                        top + sf(28.0),
+                                        left + bwf - sf(4.0),
+                                        top + bhf - sf(4.0),
+                                    ),
+                                    sf(10.0),
+                                    DWRITE_FONT_WEIGHT_MEDIUM,
+                                    TextAlign::Center,
+                                    if hot || *active { text_fg } else { muted_fg },
+                                    false,
+                                );
+                            }
+                            let rows = buttons.len().div_ceil(cols as usize) as i32;
+                            y += rows * bh + (rows - 1).max(0) * gap + s(6.0);
                         }
-                        y += s(44.0) + s(6.0);
                     }
                     FlyoutBlock::Separator => {
-                        let pen = gdi.pen(sep_col, 1);
-                        let op = SelectObject(hdc, pen as _);
-                        let sy = y + s(6.0);
-                        MoveToEx(hdc, pad, sy, std::ptr::null_mut());
-                        LineTo(hdc, pad + content_w, sy);
-                        SelectObject(hdc, op);
-                        y += s(12.0);
+                        let sy = yf + sf(7.0);
+                        d2d.draw_line(pad_f, sy, pad_f + content_wf, sy, sep_col, 1.0);
+                        y += s(14.0);
                     }
                     FlyoutBlock::Note(text) => {
-                        let h = s(22.0);
-                        SelectObject(hdc, small_font as _);
-                        SetTextColor(hdc, muted_fg);
-                        let mut rc = RECT {
-                            left: pad,
-                            top: y,
-                            right: pad + content_w,
-                            bottom: y + h,
-                        };
-                        draw_gdi_text(
-                            hdc,
+                        let h = s(24.0);
+                        d2d.draw_text(
                             text,
-                            &mut rc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                            d2d_rect(pad_f, yf, pad_f + content_wf, yf + h as f32),
+                            sf(11.5),
+                            DWRITE_FONT_WEIGHT_NORMAL,
+                            TextAlign::Left,
+                            muted_fg,
+                            false,
                         );
                         y += h;
                     }
@@ -3571,47 +4075,51 @@ impl FlyoutState<'_> {
             if let Some(index) = self.keyboard_index
                 && let Some(t) = self.targets.get(index)
             {
-                let mut rect = t.rect;
-                rect.left += s(2.0);
-                rect.right -= s(2.0);
-                rect.top += s(2.0) - self.scroll_y;
-                rect.bottom -= s(2.0) + self.scroll_y;
-                let brush = gdi.brush(accent);
-                windows_sys::Win32::Graphics::Gdi::FrameRect(hdc, &rect, brush);
+                d2d.stroke_rrect(
+                    t.rect.left as f32 + sf(1.0),
+                    (t.rect.top - self.scroll_y) as f32 + sf(1.0),
+                    t.rect.right as f32 - sf(1.0),
+                    (t.rect.bottom - self.scroll_y) as f32 - sf(1.0),
+                    pill_r,
+                    accent,
+                    1.5,
+                );
             }
-            RestoreDC(hdc, saved);
+            unsafe {
+                d2d.target.PopAxisAlignedClip();
+            }
 
-            // Visible thin scrollbar thumb when content overflows
+            // Thin anti-aliased scrollbar thumb when content overflows.
             let max_s = self.max_scroll();
             if max_s > 0 && self.content_h_px > 0 {
-                let track_h = self.viewport_h_px;
-                let thumb_h = ((track_h as f32 * track_h as f32 / self.content_h_px as f32) as i32)
-                    .clamp(s(22.0), track_h);
+                let track_h = self.viewport_h_px as f32;
+                let thumb_h =
+                    (track_h * track_h / self.content_h_px as f32).clamp(sf(24.0), track_h);
                 let ratio = self.scroll_y as f32 / max_s as f32;
-                let thumb_top = self.content_top_px + ((track_h - thumb_h) as f32 * ratio) as i32;
-                let sb_w = s(4.0).max(3);
-                let sb_left = w - s(8.0);
-                fill_round_rect(
-                    &mut gdi,
-                    hdc,
+                let thumb_top = self.content_top_px as f32 + (track_h - thumb_h) * ratio;
+                let sb_w = sf(4.0).max(3.0);
+                let sb_left = wf - sf(7.5);
+                d2d.fill_rrect(
                     sb_left,
                     thumb_top,
                     sb_left + sb_w,
                     thumb_top + thumb_h,
-                    sb_w,
+                    sb_w * 0.5,
                     scroll_col,
                 );
             }
 
-            SelectObject(hdc, old_f);
-            if !mem_bmp.is_null() {
-                let _ = BitBlt(screen_hdc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
-                SelectObject(mem_dc, old_bmp);
-                DeleteObject(mem_bmp as _);
+            let end_res = unsafe { d2d.target.EndDraw(None, None) };
+            if end_res.is_err() {
+                *guard = None;
             }
-            if !mem_dc.is_null() {
-                DeleteDC(mem_dc);
-            }
+        });
+
+        unsafe {
+            let _ = BitBlt(screen_hdc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
+            SelectObject(mem_dc, old_bmp);
+            DeleteObject(mem_bmp as _);
+            DeleteDC(mem_dc);
             EndPaint(self.hwnd, &ps);
         }
     }
@@ -4161,5 +4669,61 @@ mod tests {
             anchor,
             8
         ));
+    }
+
+    #[test]
+    fn redesigned_flyout_blocks_layout_without_truncation() {
+        let spec = FlyoutSpec {
+            title: "Redesign".to_owned(),
+            subtitle: Some("Sub".to_owned()),
+            width_dips: 332.0,
+            blocks: vec![
+                FlyoutBlock::HeroHeader {
+                    glyph: 0xE706,
+                    glyph_color: (0xfb, 0xbf, 0x24),
+                    title: "Istanbul".to_owned(),
+                    subtitle: Some("Clear".to_owned()),
+                    right_value: Some("21°C".to_owned()),
+                },
+                FlyoutBlock::IconToggleGrid(vec![
+                    (1, 0xE701, "Wi-Fi".to_owned(), "On".to_owned(), true),
+                    (2, 0xE702, "Bluetooth".to_owned(), "Off".to_owned(), false),
+                ]),
+                FlyoutBlock::GlyphStatRow {
+                    glyph: 0xE753,
+                    glyph_color: (0xa2, 0xc0, 0xff),
+                    label: "Tomorrow".to_owned(),
+                    detail: Some("Cloudy".to_owned()),
+                    value: "18° / 11°".to_owned(),
+                },
+                FlyoutBlock::GlyphActionRow {
+                    id: 50,
+                    glyph: 0xE8B7,
+                    glyph_color: (0xfb, 0xbf, 0x24),
+                    title: "Downloads".to_owned(),
+                    subtitle: Some("C:\\Users\\Downloads".to_owned()),
+                    badge: None,
+                },
+                FlyoutBlock::IconBar {
+                    buttons: (100..108)
+                        .map(|id| (id, format!("Btn {id}"), 0xE713, false))
+                        .collect(),
+                },
+            ],
+        };
+        let (top, height, targets) = layout_flyout(&spec, 332, 1.0);
+        assert!(top > 0 && height > 200);
+        // All 8 IconBar buttons must have hit targets across 2 rows of 4 (zero truncation).
+        for id in 100..108 {
+            assert!(
+                targets.iter().any(|t| t.id == id),
+                "missing IconBar target {id}"
+            );
+        }
+        assert!(targets.iter().any(|t| t.id == 1));
+        assert!(targets.iter().any(|t| t.id == 2));
+        assert!(targets.iter().any(|t| t.id == 50));
+        assert_eq!(super::is_single_pua_glyph("\u{E7F5}"), Some('\u{E7F5}'));
+        assert_eq!(super::is_single_pua_glyph("TR"), None);
     }
 }

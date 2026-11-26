@@ -7,8 +7,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::DockSettings;
 
+use crate::design;
 use crate::ui::flyout::{BarTone, FlyoutBlock, FlyoutSpec};
 
 use super::catalog_ops::{setting_i64, setting_value};
@@ -245,57 +247,93 @@ pub fn play_break_chime() {
     }
 }
 
-/// Builds the live focus flyout including Break phase info, session number and presets.
+/// Builds the redesigned live focus flyout with localized phase/session status and presets.
 pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
     let ratio = session.progress_ratio();
-    let total_label = match session.phase {
-        FocusPhase::Focus => format!("{}m focus", session.focus_minutes),
-        FocusPhase::Break => format!("{}m break", session.break_minutes),
+    let is_break = session.phase == FocusPhase::Break;
+    let phase_label = loc::t(if is_break { "Break" } else { "Focus" });
+    let phase_mins = if is_break {
+        session.break_minutes
+    } else {
+        session.focus_minutes
     };
+    let duration_label = loc::t_fmt("MinutesShort", &[&phase_mins.to_string()]);
+    let session_progress = format!("{}/{}", session.session_number, session.sessions_target);
+    let session_badge = loc::t_fmt("FocusSession", &[&session_progress]);
+    let completed_sessions = loc::t_fmt(
+        "FocusSessionsCount",
+        &[&session.sessions_completed.to_string()],
+    );
+    let completed_mins = loc::t_fmt("MinutesShort", &[&session.focus_minutes_total.to_string()]);
+    let pal = design::DARK;
+    let phase_color = if is_break {
+        pal.success
+    } else {
+        pal.widget_accent
+    };
+    let phase_glyph = if is_break { 0xE708 } else { 0xE916 };
+
     FlyoutSpec {
         title: String::new(),
         subtitle: None,
         width_dips: 316.0,
         blocks: vec![
-            FlyoutBlock::StatRow {
-                label: "Focus".to_owned(),
-                value: session.session_label(),
+            FlyoutBlock::GlyphStatRow {
+                glyph: phase_glyph,
+                glyph_color: phase_color,
+                label: phase_label.clone(),
+                detail: Some(duration_label),
+                value: session_badge,
             },
             FlyoutBlock::Hero {
                 value: format_mm_ss(session.remaining_secs),
-                caption: Some(format!("{} · {}", session.phase.label(), total_label)),
-                centered: false,
+                caption: None,
+                centered: true,
                 large: true,
                 right_meta: None,
             },
             FlyoutBlock::ProgressBar {
-                label: session.phase.label().to_owned(),
+                label: phase_label,
                 value_text: format!("{:.0}%", ratio * 100.0),
                 ratio,
-                tone: if session.phase == FocusPhase::Break {
+                tone: if is_break {
                     BarTone::Level
                 } else {
                     BarTone::Accent
                 },
             },
             FlyoutBlock::StatRow {
-                label: "Completed".to_owned(),
-                value: format!(
-                    "{} sessions · {}m",
-                    session.sessions_completed, session.focus_minutes_total
-                ),
+                label: loc::t("FocusSessionCount"),
+                value: format!("{completed_sessions} · {completed_mins}"),
             },
+            FlyoutBlock::Separator,
             FlyoutBlock::ButtonBar(vec![
-                (15, "15m".to_owned(), session.focus_minutes == 15),
-                (25, "25m".to_owned(), session.focus_minutes == 25),
-                (50, "50m".to_owned(), session.focus_minutes == 50),
+                (
+                    15,
+                    loc::t_fmt("MinutesShort", &["15"]),
+                    session.focus_minutes == 15,
+                ),
+                (
+                    25,
+                    loc::t_fmt("MinutesShort", &["25"]),
+                    session.focus_minutes == 25,
+                ),
+                (
+                    50,
+                    loc::t_fmt("MinutesShort", &["50"]),
+                    session.focus_minutes == 50,
+                ),
             ]),
             FlyoutBlock::ButtonBar(vec![
-                (4, "Skip".to_owned(), false),
-                (2, "Reset".to_owned(), false),
+                (4, loc::t("FocusSkip"), false),
+                (2, loc::t("FocusReset"), false),
                 (
                     1,
-                    if session.running { "Pause" } else { "Start" }.to_owned(),
+                    loc::t(if session.running {
+                        "FocusPause"
+                    } else {
+                        "FocusStart"
+                    }),
                     true,
                 ),
             ]),

@@ -1038,7 +1038,8 @@ fn close_progress(started: Option<Instant>, now: Instant) -> f32 {
         let time = (now.saturating_duration_since(started).as_secs_f32()
             / CLOSE_DURATION.as_secs_f32())
         .min(1.0);
-        1.0 - (1.0 - time).powi(2)
+        // Smooth cubic ease-out so app-close shrink/fade decelerates naturally.
+        1.0 - (1.0 - time).powi(3)
     })
 }
 
@@ -1633,6 +1634,11 @@ impl DockState {
             .ok();
     }
 
+    fn is_animating(&self) -> bool {
+        let (lock, _) = &*self.anim_signal;
+        *lock.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn set_animating(&self, active: bool) {
         let (lock, cvar) = &*self.anim_signal;
         let mut guard = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -1646,8 +1652,9 @@ impl DockState {
 
     fn ensure_animation(&mut self) {
         let now = Instant::now();
-        // Repeated wake-ups inside one frame (e.g. a 1000 Hz mouse flood) are dropped.
-        if !layout::animation_request_due(self.last_animation_request, now) {
+        // Rate-limit repeated wake-ups only while the VSync loop is already running;
+        // if VSync is idle, never drop a wake-up (e.g. a window close right after hover).
+        if self.is_animating() && !layout::animation_request_due(self.last_animation_request, now) {
             return;
         }
         self.last_animation_request = Some(now);
@@ -2486,15 +2493,21 @@ impl DockState {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
         }
+        let mut running = self.running_windows.clone();
+        let mut pruned_closed = false;
+        if animate_closes {
+            let before = running.len();
+            running.retain(|window| tracked_window_is_visible(window.hwnd));
+            pruned_closed = running.len() != before;
+        }
         if !self.window_snapshot_in_flight
-            && layout::window_snapshot_due(self.last_window_snapshot, false, now)
+            && (pruned_closed || layout::window_snapshot_due(self.last_window_snapshot, false, now))
         {
             let (tx, rx) = mpsc::channel();
             self.window_snapshot_rx = Some(rx);
             self.window_snapshot_in_flight = true;
             opentaskbar_shell::tracker::enumerate_windows_async(tx);
         }
-        let mut running = self.running_windows.clone();
         if self.light_strip {
             // A shelf strip reserves space and hosts shell buttons only.
             running.clear();
@@ -2621,6 +2634,10 @@ impl DockState {
     }
 
     fn live_pill_geometry(&self) -> (f32, f32, f32, f32) {
+        self.live_pill_geometry_at(Instant::now())
+    }
+
+    fn live_pill_geometry_at(&self, now: Instant) -> (f32, f32, f32, f32) {
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
         let mon_w = self.mon_w_dips();
@@ -2628,7 +2645,6 @@ impl DockState {
         let pill_w = if self.settings.full_width {
             (mon_w - 16.0).max(200.0)
         } else {
-            let now = Instant::now();
             let mut icons_w = 0.0;
             let mut largest_fraction = 0.0_f32;
             for slot in &self.slots {
@@ -2657,12 +2673,15 @@ impl DockState {
     }
 
     fn live_apps_width_dips(&self) -> f32 {
+        self.live_apps_width_dips_at(Instant::now())
+    }
+
+    fn live_apps_width_dips_at(&self, now: Instant) -> f32 {
         if self.slots.is_empty() {
             return 0.0;
         }
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
-        let now = Instant::now();
         let mut w = 0.0;
         let mut largest_fraction = 0.0_f32;
         for slot in &self.slots {
@@ -2675,10 +2694,19 @@ impl DockState {
 
     /// Same as `live_scroll_metrics`, but reuses pill geometry the caller has already computed.
     fn scroll_metrics_for_pill(&self, pill_left: f32, pill_w: f32) -> ScrollMetrics {
+        self.scroll_metrics_for_pill_at(pill_left, pill_w, Instant::now())
+    }
+
+    fn scroll_metrics_for_pill_at(
+        &self,
+        pill_left: f32,
+        pill_w: f32,
+        now: Instant,
+    ) -> ScrollMetrics {
         // Flush with the outer rounded edges of the dock pill (matching C# `MainWindow.xaml`).
         let vp_left = pill_left + 1.0;
         let vp_right = (pill_left + pill_w - 1.0).max(vp_left + 1.0);
-        let apps_w = self.live_apps_width_dips();
+        let apps_w = self.live_apps_width_dips_at(now);
         let mut widgets_w = self.live_widgets_strip_width(apps_w > 0.0);
         let mut trail_w = self.live_trail_section_width();
         let group = layout::start_strip_group(&self.settings);
@@ -3367,12 +3395,13 @@ impl DockState {
     }
 
     fn update_visuals(&mut self) {
+        let now = Instant::now();
         let dpi = self.dpi;
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
         let (win_w, win_h) =
             compute_window_dips(&self.settings, self.slots.len(), self.mon_w_dips());
-        let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
+        let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry_at(now);
 
         // Auto-hide slide translation on root visual (zero child recalculation).
         let edge = effective_edge(&self.settings);
@@ -3407,7 +3436,7 @@ impl DockState {
         let icon_base_top = pill_top + 7.5;
         let icon_base_bottom = icon_base_top + base;
         let dot_top = icon_base_bottom + 4.5;
-        let sm = self.scroll_metrics_for_pill(pill_left, pill_w);
+        let sm = self.scroll_metrics_for_pill_at(pill_left, pill_w, now);
 
         // 2. Shell buttons + divider share the horizontally clipped content coordinate space.
         let shell_top = pill_top + (pill_h - base) * 0.5;
@@ -3495,7 +3524,6 @@ impl DockState {
         let active_drag = self.drag.filter(|d| d.active);
         let mut cursor_x = sm.apps_start_x;
         let slot_count = self.slots.len().min(self.slot_visuals.len());
-        let now = Instant::now();
         for idx in 0..slot_count {
             let slot_w = base * self.slots[idx].scale;
             let dragging_this = active_drag.is_some_and(|d| d.idx == idx);
@@ -3548,13 +3576,14 @@ impl DockState {
             } else {
                 let pulse = (close * std::f32::consts::PI).sin().max(0.0);
                 let (width, height, sink) = if exiting {
-                    let remaining = 1.0 - close;
-                    (dim * remaining.powi(2), dim * remaining, dim * 0.28 * close)
+                    // Uniform aspect-ratio shrink with gentle downward ease-out fade.
+                    let remaining = (1.0 - close).max(0.0);
+                    (dim * remaining, dim * remaining, dim * 0.22 * close)
                 } else {
                     (
-                        dim * (1.0 - 0.20 * pulse),
-                        dim * (1.0 - 0.18 * pulse),
-                        dim * 0.10 * pulse,
+                        dim * (1.0 - 0.16 * pulse),
+                        dim * (1.0 - 0.16 * pulse),
+                        dim * 0.08 * pulse,
                     )
                 };
                 let slot_center = cursor_x + slot_w * self.slots[idx].layout_fraction(now) * 0.5;
@@ -3644,7 +3673,7 @@ impl DockState {
         // 4. Widgets inline right after apps (same main strip as C# `RebuildDockOrder`).
         let widget_h = design::widget_height_dips(pill_h);
         let widget_top = pill_top + (pill_h - widget_h) * 0.5;
-        let apps_w = self.live_apps_width_dips();
+        let apps_w = self.live_apps_width_dips_at(now);
         let mut wx = sm.apps_start_x + if apps_w > 0.0 { apps_w + 8.0 } else { 0.0 };
         for wv in &self.widget_visuals {
             // Widget hover/press states are rendered natively on the card surface itself
@@ -5839,8 +5868,12 @@ thread_local! {
     static DOCK_WNDPROC_ACTIVE: std::cell::RefCell<Vec<usize>> =
         const { std::cell::RefCell::new(Vec::new()) };
     /// A VSync tick re-entering the guard is re-posted at most once; a second
-    /// re-entry must be dropped instead of ping-ponging forever.
+    /// re-entry must be dropped instead of ping-ponging forever, and recorded here
+    /// so the outermost `DockWndProcGuard::drop` delivers one recovery tick and
+    /// `tick_pending` can never wedge `true` after a modal menu or flyout.
     static VSYNC_REPOST_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static VSYNC_DROPPED_HWNDS: std::cell::RefCell<Vec<usize>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     /// Active dock window handles on this UI thread for `WH_MOUSE_LL` wheel routing.
     static DOCK_HWNDS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -5985,11 +6018,39 @@ impl DockWndProcGuard {
     }
 }
 
+fn mark_vsync_dropped(hwnd: usize) {
+    VSYNC_DROPPED_HWNDS.with(|list| {
+        let mut list = list.borrow_mut();
+        if !list.contains(&hwnd) {
+            list.push(hwnd);
+        }
+    });
+}
+
+fn take_vsync_dropped(hwnd: usize) -> bool {
+    VSYNC_DROPPED_HWNDS.with(|list| {
+        let mut list = list.borrow_mut();
+        if let Some(pos) = list.iter().position(|&h| h == hwnd) {
+            list.swap_remove(pos);
+            true
+        } else {
+            false
+        }
+    })
+}
+
 impl Drop for DockWndProcGuard {
     fn drop(&mut self) {
+        let hwnd = self.0;
         DOCK_WNDPROC_ACTIVE.with(|active| {
-            active.borrow_mut().retain(|&hwnd| hwnd != self.0);
+            active.borrow_mut().retain(|&h| h != hwnd);
         });
+        if take_vsync_dropped(hwnd) {
+            VSYNC_REPOST_PENDING.with(|pending| pending.set(false));
+            unsafe {
+                let _ = PostMessageW(hwnd as HWND, WM_APP_VSYNC, 0, 0);
+            }
+        }
     }
 }
 
@@ -6066,6 +6127,10 @@ unsafe extern "system" fn wnd_proc(
                 unsafe {
                     let _ = PostMessageW(hwnd, msg, wparam, lparam);
                 }
+            } else {
+                // Record the dropped VSync tick so exiting the modal guard recovers
+                // `tick_pending` with one fresh WM_APP_VSYNC instead of stalling permanently.
+                mark_vsync_dropped(hwnd as usize);
             }
         }
         return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
@@ -6584,7 +6649,7 @@ pub fn run(settings: DockSettings) {
                 unsafe {
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
                     SetTimer(hwnd, TIMER_POLL, 800, None);
-                    SetTimer(hwnd, TIMER_WINDOW_CLOSE, 100, None);
+                    SetTimer(hwnd, TIMER_WINDOW_CLOSE, 50, None);
                     SetTimer(hwnd, TIMER_WIDGETS, 2000, None);
                 }
                 created.push((hwnd, ptr));
@@ -7118,6 +7183,16 @@ mod tests {
         assert!(DockWndProcGuard::try_enter(22).is_none());
         drop(second);
         assert!(DockWndProcGuard::try_enter(22).is_some());
+    }
+
+    #[test]
+    fn vsync_dropped_during_reentry_is_marked_and_cleared_once() {
+        let hwnd = 0xDEAD_BEEFusize;
+        assert!(!take_vsync_dropped(hwnd));
+        mark_vsync_dropped(hwnd);
+        mark_vsync_dropped(hwnd);
+        assert!(take_vsync_dropped(hwnd));
+        assert!(!take_vsync_dropped(hwnd));
     }
 
     #[test]

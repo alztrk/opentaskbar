@@ -383,17 +383,6 @@ impl Default for WidgetRuntime {
     }
 }
 
-fn action_row(id: u32, title: impl Into<String>, badge: Option<String>) -> FlyoutBlock {
-    FlyoutBlock::ActionRow {
-        id,
-        title: title.into(),
-        subtitle: None,
-        badge,
-        icon: None,
-        destructive: false,
-    }
-}
-
 fn format_mm_ss(total_secs: u64) -> String {
     if total_secs >= 3600 {
         format!(
@@ -423,12 +412,14 @@ fn gpu_metrics_visible(samples: u32, misses: u32) -> bool {
     misses < 5 && samples >= 2
 }
 
-/// C# `QuickSettingsWidget` radio state labels: `Loading`, `Unavailable`, `On`, `Off`.
-fn radio_label(on: bool, loading: bool) -> &'static str {
+/// Localized radio state label for Quick Settings tiles.
+fn radio_label(on: bool, loading: bool) -> String {
     if loading {
-        "Loading"
+        loc::t("QuickLoading")
+    } else if on {
+        loc::t("QuickOn")
     } else {
-        if on { "On" } else { "Off" }
+        loc::t("QuickOff")
     }
 }
 
@@ -461,20 +452,62 @@ fn weather_temp(celsius: &str, settings: &DockSettings) -> String {
     }
 }
 
+/// Native Windows 10/11 `Segoe Fluent Icons` weather glyph matching both English and Turkish conditions.
 fn weather_icon_glyph(condition: &str) -> u16 {
-    let c = condition.to_ascii_lowercase();
-    if c.contains("thunder") {
-        0xFD3E // Thunderstorm
-    } else if c.contains("snow") {
-        0xF7D2 // Snow
-    } else if c.contains("rain") || c.contains("showers") || c.contains("drizzle") {
-        0xF743 // Rain
-    } else if c.contains("fog") {
-        0xF75E // Fog
-    } else if c.contains("cloud") || c.contains("overcast") {
-        0xF83D // Cloudy
+    let c = condition.to_lowercase();
+    if c.contains("thunder") || c.contains("storm") || c.contains("fırtına") || c.contains("gök")
+    {
+        0xE945 // LightningBolt
+    } else if c.contains("snow") || c.contains("kar") || c.contains("sleet") || c.contains("ice") {
+        0xE9CA // Frigid / Snowflake
+    } else if c.contains("rain")
+        || c.contains("shower")
+        || c.contains("drizzle")
+        || c.contains("yağmur")
+        || c.contains("sağanak")
+    {
+        0xEB42 // Drop / Rain
+    } else if c.contains("fog")
+        || c.contains("mist")
+        || c.contains("haze")
+        || c.contains("sis")
+        || c.contains("cloud")
+        || c.contains("overcast")
+        || c.contains("bulut")
+    {
+        0xE753 // Cloud
     } else {
-        0xF7B5 // Sunny
+        0xE706 // Brightness / Sun
+    }
+}
+
+/// Semantic accent color for weather glyphs (warm amber sun, cool sky rain/snow, slate cloud, amber storm).
+fn weather_icon_color(condition: &str, is_dark: bool) -> Rgb {
+    let pal = design::palette(is_dark);
+    let c = condition.to_lowercase();
+    if c.contains("thunder") || c.contains("storm") || c.contains("fırtına") || c.contains("gök")
+    {
+        pal.warning
+    } else if c.contains("snow")
+        || c.contains("kar")
+        || c.contains("rain")
+        || c.contains("shower")
+        || c.contains("drizzle")
+        || c.contains("yağmur")
+        || c.contains("sağanak")
+    {
+        pal.accent
+    } else if c.contains("fog")
+        || c.contains("mist")
+        || c.contains("haze")
+        || c.contains("sis")
+        || c.contains("cloud")
+        || c.contains("overcast")
+        || c.contains("bulut")
+    {
+        pal.widget_blue
+    } else {
+        pal.warning
     }
 }
 
@@ -504,23 +537,6 @@ fn shortcut_uri(id: u32) -> &'static str {
         114 => "ms-settings:dateandtime",
         115 => "ms-settings:taskbar",
         _ => "ms-settings:",
-    }
-}
-
-fn weather_icon_glyph_text(condition: &str) -> &'static str {
-    let c = condition.to_ascii_lowercase();
-    if c.contains("thunder") {
-        "⚡"
-    } else if c.contains("snow") {
-        "❄"
-    } else if c.contains("rain") || c.contains("showers") || c.contains("drizzle") {
-        "🌧"
-    } else if c.contains("fog") {
-        "🌫"
-    } else if c.contains("cloud") || c.contains("overcast") {
-        "☁"
-    } else {
-        "☀"
     }
 }
 
@@ -1791,15 +1807,16 @@ impl WidgetRuntime {
         FlyoutSpec {
             title: String::new(),
             subtitle: None,
-            width_dips: 312.0,
+            width_dips: 316.0,
             blocks: vec![
                 FlyoutBlock::Hero {
                     value: info.time_hm,
-                    caption: Some(info.full_date.clone()),
+                    caption: Some(info.full_date),
                     centered: false,
                     large: false,
                     right_meta: Some(info.tz_label),
                 },
+                FlyoutBlock::Separator,
                 FlyoutBlock::CalendarGrid {
                     year: shown_y,
                     month: shown_m,
@@ -1813,13 +1830,9 @@ impl WidgetRuntime {
                     day_id_base: 100,
                 },
                 FlyoutBlock::Separator,
-                FlyoutBlock::StatRow {
-                    label: format!("Today · {}", info.full_date),
-                    value: String::new(),
-                },
                 FlyoutBlock::ButtonBar(vec![
-                    (10, loc::t("GoToToday").to_owned(), false),
-                    (11, "Date & Time".to_owned(), false),
+                    (10, loc::t("GoToToday"), false),
+                    (11, loc::t("LauncherDateTime"), false),
                 ]),
             ],
         }
@@ -1827,16 +1840,16 @@ impl WidgetRuntime {
 
     fn build_audio_mixer_spec(&self) -> FlyoutSpec {
         let (out_vol, out_muted) = get_audio_state();
-        let out_name =
-            telemetry::default_audio_device_name(false).unwrap_or_else(|| "Speakers".to_owned());
+        let out_name = telemetry::default_audio_device_name(false)
+            .unwrap_or_else(|| loc::t("AudioOutputDevices"));
         let mic = telemetry::get_mic_state();
         let (in_vol, in_muted) = mic.unwrap_or((0, true));
-        let in_name = telemetry::default_audio_device_name(true)
-            .unwrap_or_else(|| loc::t("NoMicDevice").to_owned());
+        let in_name =
+            telemetry::default_audio_device_name(true).unwrap_or_else(|| loc::t("NoMicDevice"));
 
         let mut blocks = vec![
             FlyoutBlock::AudioSliderSection {
-                label: "Output".to_owned(),
+                label: loc::t("AudioOutput"),
                 device_name: out_name.clone(),
                 value_text: if out_muted {
                     "0%".to_owned()
@@ -1850,10 +1863,10 @@ impl WidgetRuntime {
             },
             FlyoutBlock::Separator,
             FlyoutBlock::AudioSliderSection {
-                label: "Input".to_owned(),
+                label: loc::t("AudioInput"),
                 device_name: in_name,
                 value_text: if mic.is_none() {
-                    "—".to_owned()
+                    "-".to_owned()
                 } else if in_muted {
                     "0%".to_owned()
                 } else {
@@ -1868,12 +1881,15 @@ impl WidgetRuntime {
                 mute_id: 3,
                 slider_id: 4,
             },
-            FlyoutBlock::Separator,
         ];
         let sessions = diagnostics::list_app_audio_sessions();
         if !sessions.is_empty() {
             blocks.push(FlyoutBlock::Separator);
-            for (index, session) in sessions.iter().take(8).enumerate() {
+            blocks.push(FlyoutBlock::StatRow {
+                label: loc::t("AudioApps"),
+                value: String::new(),
+            });
+            for (index, session) in sessions.iter().take(6).enumerate() {
                 blocks.push(FlyoutBlock::AudioSliderSection {
                     label: session.label.clone(),
                     device_name: session.id.clone(),
@@ -1885,89 +1901,33 @@ impl WidgetRuntime {
                 });
             }
         }
-        // C4 `platform::core_audio` output endpoint selector (WS-C), ids 200..=205.
         let devices = audio_output_devices();
-        let mut device_blocks: Vec<FlyoutBlock> = devices
-            .iter()
-            .enumerate()
-            .take(6)
-            .map(|(i, (_, name))| FlyoutBlock::BadgeRow {
-                id: 200 + i as u32,
-                code: "\u{E7F5}".to_owned(), // Headphone glyph (C# AudioWidget device selector)
-                title: name.clone(),
-                active: name.eq_ignore_ascii_case(&out_name),
-            })
-            .collect();
-        if !device_blocks.is_empty() {
-            device_blocks.insert(
-                0,
-                FlyoutBlock::StatRow {
-                    label: "Output device".to_owned(),
-                    value: String::new(),
-                },
-            );
-            device_blocks.push(FlyoutBlock::Separator);
+        if !devices.is_empty() {
+            blocks.push(FlyoutBlock::Separator);
+            blocks.push(FlyoutBlock::StatRow {
+                label: loc::t("AudioOutputDevices"),
+                value: String::new(),
+            });
+            for (i, (_, name)) in devices.iter().enumerate().take(6) {
+                blocks.push(FlyoutBlock::BadgeRow {
+                    id: 200 + i as u32,
+                    code: "\u{E7F5}".to_owned(),
+                    title: name.clone(),
+                    active: name.eq_ignore_ascii_case(&out_name),
+                });
+            }
         }
+        blocks.push(FlyoutBlock::Separator);
+        blocks.push(FlyoutBlock::ButtonBar(vec![(
+            5,
+            loc::t_fmt("RadioSettings", &[&loc::t("LauncherSound")]),
+            false,
+        )]));
         FlyoutSpec {
             title: loc::t("WidgetAudio"),
             subtitle: None,
-            width_dips: 314.0,
-            blocks: {
-                blocks.extend(device_blocks);
-                blocks.push(FlyoutBlock::ButtonBar(vec![(
-                    5,
-                    loc::t_fmt("RadioSettings", &[&loc::t("LauncherSound")]).to_owned(),
-                    false,
-                )]));
-                blocks
-            },
-        }
-    }
-
-    fn build_focus_spec(&self) -> FlyoutSpec {
-        let total = (self.focus_preset_mins * 60).max(1) as f32;
-        let ratio = (self.focus_remaining_secs as f32 / total).clamp(0.0, 1.0);
-        FlyoutSpec {
-            title: String::new(),
-            subtitle: None,
-            width_dips: 316.0,
-            blocks: vec![
-                FlyoutBlock::StatRow {
-                    label: "Focus".to_owned(),
-                    value: format!("{} sessions", self.focus_completed),
-                },
-                FlyoutBlock::Hero {
-                    value: format_mm_ss(self.focus_remaining_secs),
-                    caption: None,
-                    centered: false,
-                    large: true,
-                    right_meta: None,
-                },
-                FlyoutBlock::ProgressBar {
-                    label: String::new(),
-                    value_text: String::new(),
-                    ratio,
-                    tone: BarTone::Accent,
-                },
-                FlyoutBlock::ButtonBar(vec![
-                    (15, "15m".to_owned(), self.focus_preset_mins == 15),
-                    (25, "25m".to_owned(), self.focus_preset_mins == 25),
-                    (50, "50m".to_owned(), self.focus_preset_mins == 50),
-                ]),
-                FlyoutBlock::ButtonBar(vec![
-                    (2, loc::t("Reset").to_owned(), false),
-                    (
-                        1,
-                        if self.focus_running {
-                            loc::t("TimedWidgetPause")
-                        } else {
-                            loc::t("TimedWidgetStart")
-                        }
-                        .to_owned(),
-                        true,
-                    ),
-                ]),
-            ],
+            width_dips: 320.0,
+            blocks,
         }
     }
 
@@ -1975,42 +1935,42 @@ impl WidgetRuntime {
         let mut blocks = vec![
             FlyoutBlock::Hero {
                 value: format_mm_ss_cs(self.stopwatch_secs, self.stopwatch_cs),
-                caption: Some("Quick action: click the tile play/pause button".to_owned()),
+                caption: None,
                 centered: true,
                 large: true,
                 right_meta: None,
             },
-            FlyoutBlock::ButtonBar(vec![(3, "Lap".to_owned(), false)]),
+            FlyoutBlock::ButtonBar(vec![
+                (
+                    1,
+                    loc::t(if self.stopwatch_running {
+                        "TimedWidgetPause"
+                    } else {
+                        "TimedWidgetStart"
+                    }),
+                    true,
+                ),
+                (3, loc::t("StopwatchLap"), false),
+                (2, loc::t("Reset"), false),
+            ]),
+            FlyoutBlock::Separator,
         ];
         if self.stopwatch_laps.is_empty() {
-            blocks.push(FlyoutBlock::Note(loc::t("StopwatchNoLaps").to_owned()));
+            blocks.push(FlyoutBlock::Note(loc::t("StopwatchNoLaps")));
         } else {
+            let lap_label = loc::t("StopwatchLap");
             for (i, &lap) in self.stopwatch_laps.iter().rev().take(6).enumerate() {
                 let num = self.stopwatch_laps.len() - i;
                 blocks.push(FlyoutBlock::StatRow {
-                    label: format!("{num:02}"),
+                    label: format!("{lap_label} {num:02}"),
                     value: format_mm_ss(lap),
                 });
             }
         }
-        blocks.push(FlyoutBlock::Separator);
-        blocks.push(FlyoutBlock::ButtonBar(vec![
-            (
-                1,
-                if self.stopwatch_running {
-                    loc::t("TimedWidgetPause")
-                } else {
-                    loc::t("TimedWidgetStart")
-                }
-                .to_owned(),
-                true,
-            ),
-            (2, loc::t("Reset").to_owned(), false),
-        ]));
         FlyoutSpec {
             title: loc::t("WidgetStopwatch"),
             subtitle: None,
-            width_dips: 300.0,
+            width_dips: 304.0,
             blocks,
         }
     }
@@ -2026,7 +1986,7 @@ impl WidgetRuntime {
         FlyoutSpec {
             title: loc::t("WidgetCountdown"),
             subtitle: None,
-            width_dips: 300.0,
+            width_dips: 308.0,
             blocks: vec![
                 FlyoutBlock::Hero {
                     value: format_mm_ss(self.countdown_remaining_secs),
@@ -2042,17 +2002,14 @@ impl WidgetRuntime {
                     tone: BarTone::Accent,
                 },
                 FlyoutBlock::ButtonBar(vec![
-                    (5, "5 min".to_owned(), mins == 5),
-                    (10, "10 min".to_owned(), mins == 10),
+                    (5, loc::t_fmt("MinutesShort", &["5"]), mins == 5),
+                    (10, loc::t_fmt("MinutesShort", &["10"]), mins == 10),
+                    (15, loc::t_fmt("MinutesShort", &["15"]), mins == 15),
+                    (30, loc::t_fmt("MinutesShort", &["30"]), mins == 30),
                 ]),
-                FlyoutBlock::ButtonBar(vec![
-                    (15, "15 min".to_owned(), mins == 15),
-                    (30, "30 min".to_owned(), mins == 30),
-                ]),
-                // C# `TimedWidgetPanel` custom duration (C2 TextInput, validated 1-1440 minutes).
                 FlyoutBlock::TextInput {
                     id: 50,
-                    label: "Custom minutes (1-1440)".to_owned(),
+                    label: loc::t("CountdownMinutes"),
                     value: format!("{mins}"),
                     numeric: true,
                     min: 1.0,
@@ -2062,15 +2019,14 @@ impl WidgetRuntime {
                 FlyoutBlock::ButtonBar(vec![
                     (
                         1,
-                        if self.countdown_running {
-                            loc::t("TimedWidgetPause")
+                        loc::t(if self.countdown_running {
+                            "TimedWidgetPause"
                         } else {
-                            loc::t("TimedWidgetStart")
-                        }
-                        .to_owned(),
+                            "TimedWidgetStart"
+                        }),
                         true,
                     ),
-                    (2, loc::t("Reset").to_owned(), false),
+                    (2, loc::t("Reset"), false),
                 ]),
             ],
         }
@@ -2298,51 +2254,55 @@ impl WidgetRuntime {
                 } else {
                     snap.condition.clone()
                 };
+                let unit_label = match settings.weather_unit {
+                    opentaskbar_core::settings::TemperatureUnit::Celsius => "°C",
+                    opentaskbar_core::settings::TemperatureUnit::Fahrenheit => "°F",
+                };
                 let mut blocks = vec![
-                    // C2 `Image` block for the weather icon (Segoe glyph fallback).
-                    FlyoutBlock::Image {
+                    FlyoutBlock::HeroHeader {
                         glyph: weather_icon_glyph(&snap.condition),
-                        path: None,
-                        size_dips: 32.0,
-                    },
-                    FlyoutBlock::Hero {
-                        value: city,
-                        caption: Some(cond),
-                        centered: false,
-                        large: false,
-                        right_meta: Some(temp),
+                        glyph_color: weather_icon_color(&snap.condition, is_dark),
+                        title: if city.is_empty() {
+                            loc::t("WidgetWeather")
+                        } else {
+                            city.clone()
+                        },
+                        subtitle: Some(cond),
+                        right_value: Some(temp),
                     },
                     FlyoutBlock::MetricTiles(vec![
-                        (loc::t("FeelsLikeLabel").to_owned(), feels),
-                        ("Humidity".to_owned(), hum),
-                        ("Wind".to_owned(), wind),
-                        ("Source".to_owned(), "wttr.in".to_owned()),
+                        (loc::t("FeelsLikeLabel"), feels),
+                        (loc::t("WeatherHumidity"), hum),
+                        (loc::t("WeatherWind"), wind),
+                        (loc::t("WeatherTemperatureUnit"), unit_label.to_owned()),
                     ]),
                 ];
-                // C# `WeatherWidget` 3-day forecast (data already collected in telemetry).
                 if !snap.forecast_days.is_empty() {
                     blocks.push(FlyoutBlock::Separator);
                     blocks.push(FlyoutBlock::StatRow {
-                        label: "3-Day Forecast".to_owned(),
+                        label: loc::t("WeatherForecast3Days"),
                         value: String::new(),
                     });
                     for (day, condition, high_low) in snap.forecast_days.iter().take(3) {
-                        blocks.push(FlyoutBlock::StatRow {
-                            label: format!("{} {}", weather_icon_glyph_text(condition), day),
-                            value: format!("{} · {}", high_low, condition),
+                        blocks.push(FlyoutBlock::GlyphStatRow {
+                            glyph: weather_icon_glyph(condition),
+                            glyph_color: weather_icon_color(condition, is_dark),
+                            label: day.clone(),
+                            detail: Some(condition.clone()),
+                            value: high_low.clone(),
                         });
                     }
                 }
                 blocks.push(FlyoutBlock::Separator);
                 blocks.push(FlyoutBlock::ButtonBar(vec![(
                     1,
-                    loc::t("AiUsageRefresh").to_owned(),
+                    loc::t("AiUsageRefresh"),
                     false,
                 )]));
                 let spec = FlyoutSpec {
                     title: String::new(),
                     subtitle: None,
-                    width_dips: 296.0,
+                    width_dips: 312.0,
                     blocks,
                 };
                 if flyout::show_flyout_with_border(
@@ -2376,7 +2336,7 @@ impl WidgetRuntime {
                 let spec = FlyoutSpec {
                     title: loc::t("WidgetKeyboardLayout"),
                     subtitle: None,
-                    width_dips: 240.0,
+                    width_dips: 268.0,
                     blocks,
                 };
                 if let Some(act) = flyout::show_flyout_with_border(
@@ -2512,9 +2472,8 @@ impl WidgetRuntime {
             }
             "quicksettings" => {
                 let mut settings_changed = false;
-                // C# `Radio*` states: Loading / TurningOn / TurningOff / On / Off / Unavailable.
-                let wifi_state = radio_label(self.wifi_on, self.radio_loading).to_owned();
-                let bt_state = radio_label(self.bluetooth_on, self.radio_loading).to_owned();
+                let wifi_state = radio_label(self.wifi_on, self.radio_loading);
+                let bt_state = radio_label(self.bluetooth_on, self.radio_loading);
                 let build_qs_spec = |settings: &DockSettings,
                                      night_light: bool,
                                      wifi_state: &str,
@@ -2523,66 +2482,76 @@ impl WidgetRuntime {
                                      bt_on: bool| {
                     let (vol, muted) = get_audio_state();
                     let out_name = telemetry::default_audio_device_name(false)
-                        .unwrap_or_else(|| "Speakers".to_owned());
+                        .unwrap_or_else(|| loc::t("AudioOutputDevices"));
                     let hide_label = match settings.auto_hide {
                         AutoHideMode::Disabled => loc::t("QuickOff"),
-                        AutoHideMode::Smart => "Smart".to_owned(),
-                        AutoHideMode::Always => "Always".to_owned(),
+                        AutoHideMode::Smart => loc::t("AutoHideSmart"),
+                        AutoHideMode::Always => loc::t("AutoHideAlways"),
                     };
                     let theme_label = match settings.theme {
-                        AppTheme::System => "System",
-                        AppTheme::Dark => "Dark",
-                        AppTheme::Light => "Light",
+                        AppTheme::System => loc::t("DateFormatSystem"),
+                        AppTheme::Dark => loc::t("Dark"),
+                        AppTheme::Light => loc::t("Light"),
                     };
                     FlyoutSpec {
                         title: loc::t("WidgetQuickSettings"),
                         subtitle: None,
-                        width_dips: 312.0,
+                        width_dips: 332.0,
                         blocks: vec![
-                            FlyoutBlock::ToggleGrid(vec![
-                                (5, "Wi-Fi".to_owned(), wifi_state.to_owned(), wifi_on),
-                                (6, "Bluetooth".to_owned(), bt_state.to_owned(), bt_on),
+                            FlyoutBlock::IconToggleGrid(vec![
+                                (
+                                    5,
+                                    0xE701,
+                                    loc::t("RadioWifi"),
+                                    wifi_state.to_owned(),
+                                    wifi_on,
+                                ),
+                                (
+                                    6,
+                                    0xE702,
+                                    loc::t("RadioBluetooth"),
+                                    bt_state.to_owned(),
+                                    bt_on,
+                                ),
                                 (
                                     1,
-                                    loc::t("FocusMode").to_owned(),
-                                    if settings.focus_mode {
-                                        loc::t("QuickOn")
+                                    0xF4B9,
+                                    loc::t("FocusMode"),
+                                    loc::t(if settings.focus_mode {
+                                        "QuickOn"
                                     } else {
-                                        loc::t("QuickOff")
-                                    }
-                                    .to_owned(),
+                                        "QuickOff"
+                                    }),
                                     settings.focus_mode,
                                 ),
                                 (
                                     2,
-                                    "Auto-Hide".to_owned(),
-                                    hide_label.to_owned(),
+                                    0xE7B3,
+                                    loc::t("AutoHide"),
+                                    hide_label,
                                     settings.auto_hide != AutoHideMode::Disabled,
                                 ),
                                 (
                                     3,
-                                    "Theme".to_owned(),
-                                    theme_label.to_owned(),
+                                    0xE790,
+                                    loc::t("Theme"),
+                                    theme_label,
                                     settings.theme != AppTheme::System,
                                 ),
                                 (
                                     7,
-                                    loc::t("NightLight").to_owned(),
-                                    if night_light {
-                                        loc::t("QuickOn")
-                                    } else {
-                                        loc::t("QuickOff")
-                                    }
-                                    .to_owned(),
+                                    0xE708,
+                                    loc::t("NightLight"),
+                                    loc::t(if night_light { "QuickOn" } else { "QuickOff" }),
                                     night_light,
                                 ),
                             ]),
                             FlyoutBlock::Separator,
                             FlyoutBlock::AudioSliderSection {
-                                label: "Volume".to_owned(),
+                                label: loc::t("Volume"),
                                 device_name: out_name,
                                 value_text: if muted {
-                                    "Muted".to_owned()
+                                    "0%".to_owned()
                                 } else {
                                     format!("{vol}%")
                                 },
@@ -2592,30 +2561,22 @@ impl WidgetRuntime {
                                 slider_id: 10,
                             },
                             FlyoutBlock::Separator,
-                            // C2 `IconBar` — 16 C# Control Center shortcuts (ms-settings URIs).
+                            // 2x4 symmetric grid of core Windows Settings shortcuts (zero truncation).
                             FlyoutBlock::IconBar {
                                 buttons: vec![
-                                    (100, "Wi-Fi".to_owned(), 0xE701, wifi_on),
-                                    (101, "Bluetooth".to_owned(), 0xE702, bt_on),
-                                    (102, "Airplane mode".to_owned(), 0xF71D, true),
-                                    (103, "Night Light".to_owned(), 0xE708, night_light),
-                                    (104, "Battery saver".to_owned(), 0xE7EF, true),
-                                    (105, "Focus assist".to_owned(), 0xF4B9, settings.focus_mode),
-                                    (106, "Display".to_owned(), 0xE7F3, true),
-                                    (107, "Sound".to_owned(), 0xE7F5, true),
-                                    (108, "Network".to_owned(), 0xE705, true),
-                                    (109, "VPN".to_owned(), 0xE7A2, true),
-                                    (110, "Nearby sharing".to_owned(), 0xE8D2, true),
-                                    (111, "Project".to_owned(), 0xE7F6, true),
-                                    (112, "Tablet mode".to_owned(), 0xE7F9, true),
-                                    (113, "Mobile hotspot".to_owned(), 0xE7B7, true),
-                                    (114, "Date & time".to_owned(), 0xE7F2, true),
-                                    (115, "Taskbar".to_owned(), 0xE7F7, true),
+                                    (106, loc::t("LauncherDisplay"), 0xE7F4, false),
+                                    (107, loc::t("LauncherSound"), 0xE767, false),
+                                    (108, loc::t("LauncherNetwork"), 0xE774, false),
+                                    (109, loc::t("LauncherVpn"), 0xE705, false),
+                                    (104, loc::t("QuickEnergySaver"), 0xE7EF, false),
+                                    (102, loc::t("QuickAirplaneMode"), 0xE709, false),
+                                    (114, loc::t("LauncherDateTime"), 0xE787, false),
+                                    (115, loc::t("LauncherTaskbar"), 0xE75C, false),
                                 ],
                             },
                             FlyoutBlock::ButtonBar(vec![
-                                (8, loc::t("Settings").to_owned(), true),
-                                (9, "Show Desktop".to_owned(), false),
+                                (8, loc::t("Settings"), true),
+                                (9, loc::t("WidgetShowDesktop"), false),
                             ]),
                         ],
                     }
@@ -2715,9 +2676,9 @@ impl WidgetRuntime {
                                 pins::launch("ms-settings:network-wifi".to_owned());
                             }
                             let cur_wifi = if self.radio_unavailable {
-                                "Unavailable".to_owned()
+                                loc::t("QuickUnavailable")
                             } else {
-                                radio_label(self.wifi_on, false).to_owned()
+                                radio_label(self.wifi_on, false)
                             };
                             LiveOutcome::Update(build_qs_spec(
                                 settings,
@@ -2738,9 +2699,9 @@ impl WidgetRuntime {
                                 pins::launch("ms-settings:bluetooth".to_owned());
                             }
                             let cur_bt = if self.radio_unavailable {
-                                "Unavailable".to_owned()
+                                loc::t("QuickUnavailable")
                             } else {
-                                radio_label(self.bluetooth_on, false).to_owned()
+                                radio_label(self.bluetooth_on, false)
                             };
                             LiveOutcome::Update(build_qs_spec(
                                 settings,
@@ -2785,6 +2746,7 @@ impl WidgetRuntime {
                 return Self::flyout_settings_changed("quicksettings", settings_changed);
             }
             "stacks" => {
+                let pal = design::palette(is_dark);
                 let mut blocks: Vec<FlyoutBlock> = settings
                     .stack_folders
                     .iter()
@@ -2794,18 +2756,23 @@ impl WidgetRuntime {
                             .file_name()
                             .and_then(|s| s.to_str())
                             .unwrap_or(path);
-                        action_row(100 + i as u32, name, Some("Folder".to_owned()))
+                        FlyoutBlock::GlyphActionRow {
+                            id: 100 + i as u32,
+                            glyph: 0xE8B7,
+                            glyph_color: pal.warning,
+                            title: name.to_owned(),
+                            subtitle: Some(path.clone()),
+                            badge: None,
+                        }
                     })
                     .collect();
                 if blocks.is_empty() {
-                    blocks.push(FlyoutBlock::Note(
-                        "Add folder stacks in Settings -> Extras.".to_owned(),
-                    ));
+                    blocks.push(FlyoutBlock::Note(loc::t("StackEmpty")));
                 }
                 let spec = FlyoutSpec {
                     title: loc::t("FolderStacks"),
                     subtitle: None,
-                    width_dips: 276.0,
+                    width_dips: 300.0,
                     blocks,
                 };
                 if let Some(act) = flyout::show_flyout_with_border(
@@ -2822,27 +2789,28 @@ impl WidgetRuntime {
                 }
             }
             "groups" => {
+                let pal = design::palette(is_dark);
+                let apps_word = loc::t("LauncherApps").to_lowercase();
                 let mut blocks: Vec<FlyoutBlock> = settings
                     .app_groups
                     .iter()
                     .enumerate()
-                    .map(|(i, g)| {
-                        action_row(
-                            100 + i as u32,
-                            g.name.clone(),
-                            Some(format!("{} apps", g.executable_paths.len())),
-                        )
+                    .map(|(i, g)| FlyoutBlock::GlyphActionRow {
+                        id: 100 + i as u32,
+                        glyph: 0xF0E2,
+                        glyph_color: pal.accent,
+                        title: g.name.clone(),
+                        subtitle: None,
+                        badge: Some(format!("{} {}", g.executable_paths.len(), apps_word)),
                     })
                     .collect();
                 if blocks.is_empty() {
-                    blocks.push(FlyoutBlock::Note(
-                        "Create app groups in Settings -> Extras.".to_owned(),
-                    ));
+                    blocks.push(FlyoutBlock::Note(loc::t("GroupEmptyHint")));
                 }
                 let spec = FlyoutSpec {
                     title: loc::t("AppGroups"),
                     subtitle: None,
-                    width_dips: 276.0,
+                    width_dips: 296.0,
                     blocks,
                 };
                 if let Some(act) = flyout::show_flyout_with_border(

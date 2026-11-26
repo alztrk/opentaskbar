@@ -342,7 +342,7 @@ pub(super) fn open_background_apps_flyout(
 
     let mut blocks = Vec::new();
     if rows.is_empty() {
-        blocks.push(FlyoutBlock::Note("No background apps running.".to_owned()));
+        blocks.push(FlyoutBlock::Note(loc::t("TrayEmpty")));
     } else {
         for (i, (path, app)) in rows.iter().enumerate() {
             let id = 100 + i as u32 * 3;
@@ -358,16 +358,14 @@ pub(super) fn open_background_apps_flyout(
     }
     blocks.push(FlyoutBlock::Separator);
     blocks.push(FlyoutBlock::ButtonBar(vec![
-        (1, loc::t("TaskManager").to_owned(), false),
-        (2, "Windows Tray".to_owned(), false),
+        (1, loc::t("TaskManager"), false),
+        (2, loc::t("TraySettings"), false),
     ]));
 
+    let apps_word = loc::t("LauncherApps").to_lowercase();
     let spec = FlyoutSpec {
-        title: loc::t("TrayApps").to_owned(),
-        subtitle: Some(match apps.len() {
-            1 => "1 app running in the background".to_owned(),
-            count => format!("{count} apps running in the background"),
-        }),
+        title: loc::t("TrayApps"),
+        subtitle: Some(format!("{} {apps_word}", apps.len())),
         width_dips: 336.0,
         blocks,
     };
@@ -381,7 +379,11 @@ pub(super) fn open_background_apps_flyout(
             return false;
         };
         let entries = vec![
-            MenuEntry::item(1, MenuIcon::Play, format!("Open {}", app.name)),
+            MenuEntry::item(
+                1,
+                MenuIcon::Play,
+                format!("{} · {}", loc::t("Open"), app.name),
+            ),
             MenuEntry::item(2, MenuIcon::Close, loc::t("CloseWindow")),
             MenuEntry::Separator,
             MenuEntry::destructive(3, MenuIcon::Power, loc::t("Terminate")),
