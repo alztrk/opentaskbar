@@ -21,7 +21,7 @@ pub mod media_ext;
 pub mod speedtest;
 pub mod telemetry;
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 
 use crate::design::{self, Rgb};
-use crate::dock::dcomp::{ChipIcon, WidgetChipSpec};
+use crate::dock::dcomp::{ChipIcon, SystemStatColumn, WidgetChipSpec};
 use crate::platform::{pins, toast, wireless_battery};
 use crate::ui::flyout::{self, BarTone, FlyoutBlock, FlyoutSpec, LiveEvent, LiveOutcome};
 use crate::ui::menu::BorderStyle;
@@ -94,7 +94,7 @@ const fn wd(
     }
 }
 
-/// All 24 C# catalog widgets in exact C# category order with exact C# `FullWidthEstimate` widths.
+/// All 23 catalog widgets in category order with their baseline Dock widths.
 pub const ALL_WIDGETS: &[WidgetDescriptor] = &[
     // Time & Weather
     wd("clock", "Clock & Date", "Time & Weather", 148.0),
@@ -103,8 +103,8 @@ pub const ALL_WIDGETS: &[WidgetDescriptor] = &[
     wd("stopwatch", "Stopwatch", "Time & Weather", 124.0),
     wd("countdown", "Countdown", "Time & Weather", 124.0),
     // System & Hardware
-    wd("stats", "System Stats", "System & Hardware", 96.0),
-    wd("netspeed", "Net Speed", "System & Hardware", 140.0),
+    wd("stats", "System Stats", "System & Hardware", 114.0),
+    wd("netspeed", "Net Speed", "System & Hardware", 156.0),
     wd("battery", "Battery", "System & Hardware", 96.0),
     wd(
         "bluetoothbattery",
@@ -113,8 +113,7 @@ pub const ALL_WIDGETS: &[WidgetDescriptor] = &[
         78.0,
     ),
     wd("storage", "Storage", "System & Hardware", 136.0),
-    // AI Quotas (unified summary + exact C# `AiUsageWidget.CardWidth` widths)
-    wd("aiusage_all", "AI Quotas (All)", "AI Quotas", 156.0),
+    // AI Quotas (8 individual provider widgets)
     wd("aiusage_claude", "Claude", "AI Quotas", 184.0),
     wd("aiusage_codex", "Codex", "AI Quotas", 184.0),
     wd("aiusage_antigravity", "Antigravity", "AI Quotas", 262.0),
@@ -126,7 +125,7 @@ pub const ALL_WIDGETS: &[WidgetDescriptor] = &[
     // Media & Controls
     wd("media", "Media", "Media & Controls", 256.0),
     wd("audio", "Audio", "Media & Controls", 78.0),
-    wd("quicksettings", "Quick Settings", "Media & Controls", 106.0),
+    wd("quicksettings", "Quick Settings", "Media & Controls", 112.0),
     wd("keyboard", "Keyboard Layout", "Media & Controls", 58.0),
     // Productivity
     wd("focus", "Focus", "Productivity", 124.0),
@@ -235,6 +234,11 @@ pub struct WidgetRuntime {
     gpu_misses: u32,
     /// Consecutive successful GPU probes; C# requires 2 samples before showing meters.
     gpu_samples: u32,
+    /// Number of active stat columns on the Dock chip (1..=4), synced on `tick` for dynamic width.
+    stats_col_count: u8,
+    /// Rolling 10-sample throughput history (bytes/sec) for the NetSpeed sparkline chip.
+    net_down_history: VecDeque<u64>,
+    net_up_history: VecDeque<u64>,
     audio_vol: u32,
     audio_muted: bool,
     /// Accumulated wheel delta for 120-delta = 10% volume steps.
@@ -296,6 +300,9 @@ impl Default for WidgetRuntime {
             gpu_temp_c: None,
             gpu_misses: 0,
             gpu_samples: 0,
+            stats_col_count: 2,
+            net_down_history: VecDeque::from([0u64; 10]),
+            net_up_history: VecDeque::from([0u64; 10]),
             audio_vol: 50,
             audio_muted: false,
             volume_wheel_remainder: 0,
@@ -552,6 +559,10 @@ impl WidgetRuntime {
         self.last_poll = Some(now);
 
         if settings.is_widget_enabled("stats") {
+            let show_cpu = settings.stats_meters & 1 != 0;
+            let show_ram = settings.stats_meters & 2 != 0;
+            let show_gpu = settings.stats_meters & 16 != 0;
+            let show_gpu_temp = settings.stats_meters & 32 != 0;
             (self.cpu_pct, self.ram_pct) = self.stats.sample();
             self.stats_uptime = telemetry::system_uptime_string();
             if self
@@ -570,13 +581,14 @@ impl WidgetRuntime {
                     })
                     .ok();
             }
-            // C4: WS-G provides `sample_gpu_temp()`; 5 misses / 2 samples hysteresis.
-            if let Some((pct, temp)) = telemetry::sample_gpu_temp() {
+            if (show_gpu || show_gpu_temp)
+                && let Some((pct, temp)) = telemetry::sample_gpu_temp()
+            {
                 self.gpu_pct = pct;
                 self.gpu_temp_c = temp;
                 self.gpu_samples = self.gpu_samples.saturating_add(1);
                 self.gpu_misses = 0;
-            } else {
+            } else if show_gpu || show_gpu_temp {
                 self.gpu_misses = self.gpu_misses.saturating_add(1);
                 if self.gpu_misses >= 5 {
                     self.gpu_samples = 0;
@@ -584,6 +596,11 @@ impl WidgetRuntime {
                     self.gpu_pct = 0;
                 }
             }
+            let cols = u8::from(show_cpu)
+                + u8::from(show_ram)
+                + u8::from(show_gpu)
+                + u8::from(show_gpu_temp);
+            self.stats_col_count = cols.max(1);
         }
         if settings.is_widget_enabled("audio")
             || settings.is_widget_enabled("media")
@@ -595,7 +612,15 @@ impl WidgetRuntime {
             telemetry::refresh_media_session(&self.media_session, false);
         }
         if settings.is_widget_enabled("netspeed") {
-            self.net.sample();
+            let (rx, tx) = self.net.sample();
+            if self.net_down_history.len() >= 10 {
+                self.net_down_history.pop_front();
+            }
+            self.net_down_history.push_back(rx);
+            if self.net_up_history.len() >= 10 {
+                self.net_up_history.pop_front();
+            }
+            self.net_up_history.push_back(tx);
             if self.speedtest.poll(now, self.speedtest_started_at) {
                 self.speedtest_started_at = None;
             }
@@ -721,6 +746,12 @@ impl WidgetRuntime {
     /// and `BluetoothBatteryWidget` multi-device width expansion).
     pub fn widget_width_dips(&self, id: &str) -> f32 {
         match id {
+            "stats" => match self.stats_col_count {
+                1 => 64.0,
+                2 => 114.0,
+                3 => 168.0,
+                _ => 226.0,
+            },
             "storage" => {
                 let n = sample_drives().len().clamp(1, 3);
                 (n as f32 * 116.0).max(124.0)
@@ -1051,38 +1082,69 @@ impl WidgetRuntime {
                 }
             }
             "stats" => {
-                let load_fg = |pct: u32| -> Rgb {
-                    if pct >= 90 {
-                        pal.danger
-                    } else if pct >= 75 {
-                        pal.warning
-                    } else {
-                        pal.text_primary
-                    }
-                };
                 let show_cpu = settings.stats_meters & 1 != 0;
                 let show_ram = settings.stats_meters & 2 != 0;
-                // C# SystemStatsWidget: GPU meter appears only after 2 samples and hides after
-                // 5 consecutive misses; its value is appended to the RAM column when available.
-                let gpu_suffix = if gpu_metrics_visible(self.gpu_samples, self.gpu_misses) {
-                    format!(" · GPU {}%", self.gpu_pct)
-                } else {
-                    String::new()
-                };
-                WidgetChipSpec::SystemStats {
-                    cpu_text: if show_cpu {
-                        format!("{}%", self.cpu_pct)
-                    } else {
-                        String::new()
-                    },
-                    cpu_color: load_fg(self.cpu_pct),
-                    ram_text: if show_ram {
-                        format!("{}%{}", self.ram_pct, gpu_suffix)
-                    } else {
-                        String::new()
-                    },
-                    ram_color: load_fg(self.ram_pct),
+                let show_gpu = settings.stats_meters & 16 != 0;
+                let show_gpu_temp = settings.stats_meters & 32 != 0;
+                let mut columns = Vec::with_capacity(4);
+                if show_cpu {
+                    columns.push(SystemStatColumn {
+                        label: "CPU".to_owned(),
+                        value_text: format!("{}%", self.cpu_pct),
+                        ratio: (self.cpu_pct as f32 / 100.0).clamp(0.0, 1.0),
+                        bar_color: pal.widget_blue,
+                        warm_text: self.cpu_pct >= 85,
+                    });
                 }
+                if show_ram {
+                    columns.push(SystemStatColumn {
+                        label: "RAM".to_owned(),
+                        value_text: format!("{}%", self.ram_pct),
+                        ratio: (self.ram_pct as f32 / 100.0).clamp(0.0, 1.0),
+                        bar_color: pal.widget_accent,
+                        warm_text: self.ram_pct >= 85,
+                    });
+                }
+                if show_gpu {
+                    let gpu_ready = gpu_metrics_visible(self.gpu_samples, self.gpu_misses);
+                    columns.push(SystemStatColumn {
+                        label: "GPU".to_owned(),
+                        value_text: if gpu_ready {
+                            format!("{}%", self.gpu_pct)
+                        } else {
+                            "—".to_owned()
+                        },
+                        ratio: if gpu_ready {
+                            (self.gpu_pct as f32 / 100.0).clamp(0.0, 1.0)
+                        } else {
+                            0.0
+                        },
+                        bar_color: pal.success,
+                        warm_text: gpu_ready && self.gpu_pct >= 85,
+                    });
+                }
+                if show_gpu_temp {
+                    let unit_lbl = match settings.weather_unit {
+                        opentaskbar_core::settings::TemperatureUnit::Celsius => "GPU °C",
+                        opentaskbar_core::settings::TemperatureUnit::Fahrenheit => "GPU °F",
+                    };
+                    let (val_txt, ratio, warm) = match self.gpu_temp_c {
+                        Some(c) => (
+                            telemetry::format_temperature(f64::from(c), settings.weather_unit),
+                            (c as f32 / 100.0).clamp(0.0, 1.0),
+                            c >= 60,
+                        ),
+                        None => ("—".to_owned(), 0.0, false),
+                    };
+                    columns.push(SystemStatColumn {
+                        label: unit_lbl.to_owned(),
+                        value_text: val_txt,
+                        ratio,
+                        bar_color: pal.warning,
+                        warm_text: warm,
+                    });
+                }
+                WidgetChipSpec::SystemStats { columns }
             }
             "netspeed" => {
                 let down = if self.speedtest.state() == SpeedTestState::Downloading {
@@ -1090,9 +1152,35 @@ impl WidgetRuntime {
                 } else {
                     telemetry::format_speed(self.net.rx_bps)
                 };
+                let peak_down = self
+                    .net_down_history
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(0)
+                    .max(64 * 1024) as f32;
+                let peak_up = self
+                    .net_up_history
+                    .iter()
+                    .copied()
+                    .max()
+                    .unwrap_or(0)
+                    .max(64 * 1024) as f32;
+                let down_history: Vec<f32> = self
+                    .net_down_history
+                    .iter()
+                    .map(|&v| (v as f32 / peak_down).clamp(0.04, 1.0))
+                    .collect();
+                let up_history: Vec<f32> = self
+                    .net_up_history
+                    .iter()
+                    .map(|&v| (v as f32 / peak_up).clamp(0.04, 1.0))
+                    .collect();
                 WidgetChipSpec::NetSpeed {
                     down,
                     up: telemetry::format_speed(self.net.tx_bps),
+                    down_history,
+                    up_history,
                 }
             }
             "battery" => {
@@ -3432,8 +3520,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_24_csharp_widgets_registered_with_valid_categories() {
-        assert_eq!(ALL_WIDGETS.len(), 24);
+    fn all_23_widgets_registered_with_valid_categories() {
+        assert_eq!(ALL_WIDGETS.len(), 23);
         let mut seen = std::collections::HashSet::new();
         for w in ALL_WIDGETS {
             assert!(seen.insert(w.id), "duplicate widget id {}", w.id);

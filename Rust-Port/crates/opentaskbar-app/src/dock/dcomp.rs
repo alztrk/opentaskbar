@@ -78,6 +78,16 @@ pub enum IslandButton {
     Expand,
 }
 
+/// One telemetry column rendered inside `WidgetChipSpec::SystemStats` (CPU, RAM, GPU, GPU °C).
+#[derive(Clone, Debug)]
+pub struct SystemStatColumn {
+    pub label: String,
+    pub value_text: String,
+    pub ratio: f32,
+    pub bar_color: Rgb,
+    pub warm_text: bool,
+}
+
 /// Exact C# 1-to-1 dock widget specs ported from `Widgets/*.xaml` and `Widgets/*.cs`.
 #[derive(Clone, Debug)]
 pub enum WidgetChipSpec {
@@ -109,15 +119,15 @@ pub enum WidgetChipSpec {
         running: bool,
         text: String,
     },
-    /// C# `SystemStatsWidget.xaml`: `[CPU / 14%] | [RAM / 48%]` with threshold foreground colors
-    SystemStats {
-        cpu_text: String,
-        cpu_color: Rgb,
-        ram_text: String,
-        ram_color: Rgb,
+    /// Calm monochrome System Stats columns (`CPU | RAM | GPU | GPU °C`) with 2px bottom hairline bars.
+    SystemStats { columns: Vec<SystemStatColumn> },
+    /// Frameless live-updating dual-channel sparkline + tabular download/upload speed rows.
+    NetSpeed {
+        down: String,
+        up: String,
+        down_history: Vec<f32>,
+        up_history: Vec<f32>,
     },
-    /// C# `NetSpeedWidget.cs`: `[Wifi 15px] [↓ green speed / ↑ blue speed]`
-    NetSpeed { down: String, up: String },
     /// C# `BatteryWidget.cs`: full-card horizontal liquid fill gradient + shadowed white `%` + bolt
     BatteryLiquid {
         present: bool,
@@ -1184,11 +1194,110 @@ impl DcompEngine {
                         0.96,
                     )?;
                 }
-                WidgetChipSpec::SystemStats {
-                    cpu_text,
-                    cpu_color,
-                    ram_text,
-                    ram_color,
+                WidgetChipSpec::SystemStats { columns } => {
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
+                    if columns.is_empty() {
+                        draw_text(
+                            "—",
+                            &fmt_115_b_c,
+                            D2D_RECT_F {
+                                left: 8.0,
+                                top: 0.0,
+                                right: width_dips - 8.0,
+                                bottom: height_dips,
+                            },
+                            &s_brush,
+                        );
+                    } else {
+                        let count = columns.len().min(4);
+                        let pad_x = 10.0_f32;
+                        let gap = 10.0_f32;
+                        let usable = (width_dips - pad_x * 2.0 - gap * (count.saturating_sub(1) as f32)).max(24.0);
+                        let col_w = usable / count as f32;
+                        let warm_col = if is_dark { pal.warning } else { (0xb4, 0x53, 0x09) };
+                        let warm_b = dc.CreateSolidColorBrush(
+                            &color_rgba(warm_col.0, warm_col.1, warm_col.2, 0.98),
+                            None,
+                        )?;
+                        let bar_y = (height_dips - 8.5).max(height_dips * 0.72);
+                        for (i, col) in columns.iter().take(4).enumerate() {
+                            let cx_l = pad_x + i as f32 * (col_w + gap);
+                            if i > 0 {
+                                draw_vdiv(cx_l - gap * 0.5, 20.0);
+                            }
+                            draw_text(
+                                &col.label,
+                                &fmt_9_l,
+                                D2D_RECT_F {
+                                    left: cx_l,
+                                    top: 4.5,
+                                    right: cx_l + col_w,
+                                    bottom: 16.0,
+                                },
+                                &s_brush,
+                            );
+                            draw_text(
+                                &col.value_text,
+                                &fmt_125_b_l,
+                                D2D_RECT_F {
+                                    left: cx_l,
+                                    top: 15.0,
+                                    right: cx_l + col_w,
+                                    bottom: bar_y - 1.5,
+                                },
+                                if col.warm_text { &warm_b } else { &p_brush },
+                            );
+                            // Subtle 2px bottom hairline progress bar.
+                            dc.FillRoundedRectangle(
+                                &D2D1_ROUNDED_RECT {
+                                    rect: D2D_RECT_F {
+                                        left: cx_l,
+                                        top: bar_y,
+                                        right: cx_l + col_w,
+                                        bottom: bar_y + 2.0,
+                                    },
+                                    radiusX: 1.0,
+                                    radiusY: 1.0,
+                                },
+                                &tr_brush,
+                            );
+                            let fill_w = (col_w * col.ratio.clamp(0.0, 1.0)).min(col_w);
+                            if fill_w >= 1.5 {
+                                let fb = dc.CreateSolidColorBrush(
+                                    &color_rgba(col.bar_color.0, col.bar_color.1, col.bar_color.2, 0.96),
+                                    None,
+                                )?;
+                                dc.FillRoundedRectangle(
+                                    &D2D1_ROUNDED_RECT {
+                                        rect: D2D_RECT_F {
+                                            left: cx_l,
+                                            top: bar_y,
+                                            right: cx_l + fill_w,
+                                            bottom: bar_y + 2.0,
+                                        },
+                                        radiusX: 1.0,
+                                        radiusY: 1.0,
+                                    },
+                                    &fb,
+                                );
+                            }
+                        }
+                    }
+                }
+                WidgetChipSpec::NetSpeed {
+                    down,
+                    up,
+                    down_history,
+                    up_history,
                 } => {
                     draw_chip_card(
                         dc,
@@ -1200,139 +1309,197 @@ impl DcompEngine {
                         border_rgb,
                         border_width_dips,
                     )?;
-                    // SystemStatsWidget.xaml: [CPU 10px / 14% 12px] | [RAM 10px / 48% 12px]
-                    let mid_x = width_dips * 0.5;
-                    let mid_y = height_dips * 0.46;
-                    let cpu_b = dc.CreateSolidColorBrush(
-                        &color_rgba(cpu_color.0, cpu_color.1, cpu_color.2, 0.98),
+                    // Frameless stationary 38x22 dual-stream sparkline on the left.
+                    let sx = 10.0_f32;
+                    let sw = 38.0_f32;
+                    let sh = 22.0_f32;
+                    let sy = cy - sh * 0.5;
+                    let build_spark = |samples: &[f32], closed: bool| -> Result<(windows::Win32::Graphics::Direct2D::ID2D1PathGeometry, Vector2)> {
+                        let pts: Vec<Vector2> = if samples.len() >= 2 {
+                            let n = samples.len();
+                            samples
+                                .iter()
+                                .enumerate()
+                                .map(|(i, &v)| {
+                                    let x = sx + 1.0 + (i as f32 / (n - 1) as f32) * (sw - 2.0);
+                                    let norm = v.clamp(0.05, 1.0);
+                                    let y = (sy + sh - 2.0) - norm * (sh - 5.0);
+                                    Vector2 { X: x, Y: y }
+                                })
+                                .collect()
+                        } else {
+                            vec![
+                                Vector2 { X: sx + 1.0, Y: sy + sh - 3.0 },
+                                Vector2 { X: sx + sw - 1.0, Y: sy + sh - 3.0 },
+                            ]
+                        };
+                        let path = self.d2d_factory.CreatePathGeometry()?;
+                        let sink = path.Open()?;
+                        sink.BeginFigure(
+                            pts[0],
+                            if closed {
+                                windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_BEGIN_FILLED
+                            } else {
+                                D2D1_FIGURE_BEGIN_HOLLOW
+                            },
+                        );
+                        for pair in pts.windows(2) {
+                            let (p0, p1) = (pair[0], pair[1]);
+                            let mx = (p0.X + p1.X) * 0.5;
+                            sink.AddBezier(&windows::Win32::Graphics::Direct2D::Common::D2D1_BEZIER_SEGMENT {
+                                point1: Vector2 { X: mx, Y: p0.Y },
+                                point2: Vector2 { X: mx, Y: p1.Y },
+                                point3: p1,
+                            });
+                        }
+                        let tip = *pts.last().unwrap_or(&pts[0]);
+                        if closed {
+                            sink.AddLine(Vector2 { X: tip.X, Y: sy + sh });
+                            sink.AddLine(Vector2 { X: pts[0].X, Y: sy + sh });
+                            sink.EndFigure(
+                                windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_END_CLOSED,
+                            );
+                        } else {
+                            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                        }
+                        sink.Close()?;
+                        Ok((path.into(), tip))
+                    };
+
+                    let (down_area, tip) = build_spark(down_history, true)?;
+                    let area_stops = [
+                        D2D1_GRADIENT_STOP {
+                            position: 0.0,
+                            color: color_rgba(pal.success.0, pal.success.1, pal.success.2, 0.28),
+                        },
+                        D2D1_GRADIENT_STOP {
+                            position: 1.0,
+                            color: color_rgba(pal.success.0, pal.success.1, pal.success.2, 0.0),
+                        },
+                    ];
+                    let area_sc = dc.CreateGradientStopCollection(
+                        &area_stops,
+                        D2D1_COLOR_SPACE_SRGB,
+                        D2D1_COLOR_SPACE_SRGB,
+                        D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                        D2D1_EXTEND_MODE_CLAMP,
+                        D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+                    )?;
+                    let area_b = dc.CreateLinearGradientBrush(
+                        &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                            startPoint: Vector2 { X: sx, Y: sy },
+                            endPoint: Vector2 { X: sx, Y: sy + sh },
+                        },
+                        None,
+                        &area_sc,
+                    )?;
+                    dc.FillGeometry(&down_area, &area_b, None);
+
+                    let (up_line, _) = build_spark(up_history, false)?;
+                    let up_b = dc.CreateSolidColorBrush(
+                        &color_rgba(pal.widget_blue.0, pal.widget_blue.1, pal.widget_blue.2, 0.82),
                         None,
                     )?;
-                    let ram_b = dc.CreateSolidColorBrush(
-                        &color_rgba(ram_color.0, ram_color.1, ram_color.2, 0.98),
+                    dc.DrawGeometry(&up_line, &up_b, 1.25, Some(&stroke));
+
+                    let (down_line, _) = build_spark(down_history, false)?;
+                    let down_b = dc.CreateSolidColorBrush(
+                        &color_rgba(pal.success.0, pal.success.1, pal.success.2, 0.98),
                         None,
                     )?;
-                    draw_text(
-                        "CPU",
-                        &fmt_10_l,
-                        D2D_RECT_F {
-                            left: 9.0,
-                            top: (mid_y - 13.0).max(2.0),
-                            right: mid_x - 4.0,
-                            bottom: mid_y,
+                    dc.DrawGeometry(&down_line, &down_b, 1.5, Some(&stroke));
+                    dc.FillEllipse(
+                        &D2D1_ELLIPSE {
+                            point: tip,
+                            radiusX: 1.5,
+                            radiusY: 1.5,
                         },
-                        &s_brush,
+                        &down_b,
                     );
-                    draw_text(
-                        cpu_text,
-                        &fmt_12_b_l,
-                        D2D_RECT_F {
-                            left: 9.0,
-                            top: mid_y - 1.0,
-                            right: mid_x - 4.0,
-                            bottom: (mid_y + 15.0).min(height_dips - 2.0),
-                        },
-                        &cpu_b,
-                    );
-                    draw_vdiv(mid_x - 0.5, 20.0);
-                    draw_text(
-                        "RAM",
-                        &fmt_10_l,
-                        D2D_RECT_F {
-                            left: mid_x + 6.0,
-                            top: (mid_y - 13.0).max(2.0),
-                            right: width_dips - 6.0,
-                            bottom: mid_y,
-                        },
-                        &s_brush,
-                    );
-                    draw_text(
-                        ram_text,
-                        &fmt_12_b_l,
-                        D2D_RECT_F {
-                            left: mid_x + 6.0,
-                            top: mid_y - 1.0,
-                            right: width_dips - 6.0,
-                            bottom: (mid_y + 15.0).min(height_dips - 2.0),
-                        },
-                        &ram_b,
-                    );
-                }
-                WidgetChipSpec::NetSpeed { down, up } => {
-                    draw_chip_card(
-                        dc,
-                        width_dips,
-                        height_dips,
-                        is_dark,
-                        None,
-                        interaction,
-                        border_rgb,
-                        border_width_dips,
-                    )?;
-                    // NetSpeedWidget.cs: [Wifi 15px Secondary] + [↓ WidgetGreen + 11.5px] / [↑ WidgetBlue + 11.5px]
-                    draw_fluent_str_d2d(
-                        &self.dwrite_factory,
-                        dc,
-                        "\u{E701}",
-                        D2D_RECT_F {
-                            left: 9.0,
-                            top: cy - 8.5,
-                            right: 25.0,
-                            bottom: cy + 8.5,
-                        },
-                        14.5,
-                        pal.text_secondary,
-                        0.90,
-                    )?;
+
+                    draw_vdiv(sx + sw + 6.0, 20.0);
+
+                    let rx = sx + sw + 13.0;
                     let mid = height_dips * 0.5;
+                    fn split_speed(s: &str) -> (&str, &str) {
+                        s.rsplit_once(' ').unwrap_or((s, ""))
+                    }
+                    let (d_num, d_unit) = split_speed(down);
+                    let (u_num, u_unit) = split_speed(up);
+                    let unit_x = (width_dips - 36.0).max(rx + 42.0);
+
                     draw_fluent_str_d2d(
                         &self.dwrite_factory,
                         dc,
                         "\u{E74B}",
                         D2D_RECT_F {
-                            left: 31.0,
+                            left: rx,
                             top: (mid - 14.0).max(2.0),
-                            right: 43.0,
+                            right: rx + 11.0,
                             bottom: mid,
                         },
-                        10.0,
+                        9.5,
                         pal.success,
                         0.98,
                     )?;
                     draw_text(
-                        down,
+                        d_num,
                         &fmt_115_b_l,
                         D2D_RECT_F {
-                            left: 45.0,
+                            left: rx + 13.0,
                             top: (mid - 15.0).max(2.0),
-                            right: width_dips - 6.0,
+                            right: unit_x - 2.0,
                             bottom: mid + 1.0,
                         },
                         &p_brush,
                     );
+                    draw_text(
+                        d_unit,
+                        &fmt_95_l,
+                        D2D_RECT_F {
+                            left: unit_x,
+                            top: (mid - 14.0).max(2.0),
+                            right: width_dips - 6.0,
+                            bottom: mid + 1.0,
+                        },
+                        &s_brush,
+                    );
+
                     draw_fluent_str_d2d(
                         &self.dwrite_factory,
                         dc,
                         "\u{E74A}",
                         D2D_RECT_F {
-                            left: 31.0,
+                            left: rx,
                             top: mid,
-                            right: 43.0,
+                            right: rx + 11.0,
                             bottom: (mid + 14.0).min(height_dips - 2.0),
                         },
-                        10.0,
+                        9.5,
                         pal.widget_blue,
                         0.98,
                     )?;
                     draw_text(
-                        up,
+                        u_num,
                         &fmt_115_b_l,
                         D2D_RECT_F {
-                            left: 45.0,
+                            left: rx + 13.0,
                             top: mid - 1.0,
-                            right: width_dips - 6.0,
+                            right: unit_x - 2.0,
                             bottom: (mid + 15.0).min(height_dips - 2.0),
                         },
                         &p_brush,
+                    );
+                    draw_text(
+                        u_unit,
+                        &fmt_95_l,
+                        D2D_RECT_F {
+                            left: unit_x,
+                            top: mid,
+                            right: width_dips - 6.0,
+                            bottom: (mid + 14.0).min(height_dips - 2.0),
+                        },
+                        &s_brush,
                     );
                 }
                 WidgetChipSpec::BatteryLiquid {
@@ -2233,53 +2400,174 @@ impl DcompEngine {
                         border_rgb,
                         border_width_dips,
                     )?;
-                    // QuickSettingsWidget.xaml: 3 x 27x27 rounded pills with 4px gap + 8px padding
-                    let sz = 27.0_f32.min(height_dips - 6.0);
-                    let gap = 4.0;
+                    // 3 borderless circular 30x30 glass buttons with optically centered vector icons.
+                    let sz = 30.0_f32.min(height_dips - 6.0);
+                    let r = sz * 0.5;
+                    let gap = 4.0_f32;
                     let start_x = (width_dips - (sz * 3.0 + gap * 2.0)) * 0.5;
-                    let py = cy - sz * 0.5;
-                    for (i, (glyph, active)) in pills.iter().enumerate() {
-                        let px = start_x + i as f32 * (sz + gap);
-                        let rect = D2D_RECT_F {
-                            left: px,
-                            top: py,
-                            right: px + sz,
-                            bottom: py + sz,
-                        };
-                        let rr = D2D1_ROUNDED_RECT {
-                            rect,
-                            radiusX: 7.0,
-                            radiusY: 7.0,
+                    for (i, (_glyph, active)) in pills.iter().enumerate() {
+                        let cx_btn = start_x + i as f32 * (sz + gap) + r;
+                        let ell = D2D1_ELLIPSE {
+                            point: Vector2 { X: cx_btn, Y: cy },
+                            radiusX: r,
+                            radiusY: r,
                         };
                         let hov = active_sub == Some(i as u8);
+                        let is_night = i == 2;
                         if *active {
-                            dc.FillRoundedRectangle(&rr, &sel_fill_b);
-                            dc.DrawRoundedRectangle(&rr, &sel_stroke_b, 1.0, None);
-                        } else if hov {
-                            let hb = dc.CreateSolidColorBrush(
-                                &if is_dark {
-                                    color_rgba(0xff, 0xff, 0xff, 0.14)
+                            let fill = if is_night {
+                                if is_dark {
+                                    color_rgba(0xfb, 0xbf, 0x24, 0.16)
                                 } else {
-                                    color_rgba(0x00, 0x00, 0x00, 0.09)
-                                },
-                                None,
-                            )?;
-                            dc.FillRoundedRectangle(&rr, &hb);
+                                    color_rgba(0xd9, 0x77, 0x06, 0.14)
+                                }
+                            } else if is_dark {
+                                color_rgba(0xff, 0xff, 0xff, if hov { 0.20 } else { 0.14 })
+                            } else {
+                                color_rgba(0x18, 0x18, 0x1b, if hov { 0.15 } else { 0.10 })
+                            };
+                            let fb = dc.CreateSolidColorBrush(&fill, None)?;
+                            dc.FillEllipse(&ell, &fb);
+                        } else if hov {
+                            let fill = if is_dark {
+                                color_rgba(0xff, 0xff, 0xff, 0.08)
+                            } else {
+                                color_rgba(0x00, 0x00, 0x00, 0.06)
+                            };
+                            let hb = dc.CreateSolidColorBrush(&fill, None)?;
+                            dc.FillEllipse(&ell, &hb);
                         }
-                        let col = if *active {
-                            pal.selected_fg
+
+                        let icon_color = if *active {
+                            if is_night {
+                                if is_dark {
+                                    color_rgba(0xfc, 0xd3, 0x4d, 0.98)
+                                } else {
+                                    color_rgba(0xb4, 0x53, 0x09, 0.98)
+                                }
+                            } else if is_dark {
+                                color_rgba(0xff, 0xff, 0xff, 0.98)
+                            } else {
+                                color_rgba(0x18, 0x18, 0x1b, 0.98)
+                            }
+                        } else if is_dark {
+                            color_rgba(0xf4, 0xf4, 0xf5, if hov { 0.78 } else { 0.36 })
                         } else {
-                            pal.text_secondary
+                            color_rgba(0x18, 0x18, 0x1b, if hov { 0.78 } else { 0.36 })
                         };
-                        draw_fluent_str_d2d(
-                            &self.dwrite_factory,
-                            dc,
-                            glyph,
-                            rect,
-                            14.5,
-                            col,
-                            0.96,
-                        )?;
+                        let ib = dc.CreateSolidColorBrush(&icon_color, None)?;
+
+                        match i {
+                            0 => {
+                                // Symmetrical centered Wi-Fi fan (3 arcs + dot).
+                                let oy = cy + 5.0;
+                                for rad in [3.8_f32, 7.0_f32, 10.2_f32] {
+                                    let a0 = -std::f32::consts::FRAC_PI_4 * 3.0;
+                                    let a1 = -std::f32::consts::FRAC_PI_4;
+                                    let path = self.d2d_factory.CreatePathGeometry()?;
+                                    let sink = path.Open()?;
+                                    sink.BeginFigure(
+                                        Vector2 {
+                                            X: cx_btn + a0.cos() * rad,
+                                            Y: oy + a0.sin() * rad,
+                                        },
+                                        D2D1_FIGURE_BEGIN_HOLLOW,
+                                    );
+                                    sink.AddArc(&D2D1_ARC_SEGMENT {
+                                        point: Vector2 {
+                                            X: cx_btn + a1.cos() * rad,
+                                            Y: oy + a1.sin() * rad,
+                                        },
+                                        size: D2D_SIZE_F {
+                                            width: rad,
+                                            height: rad,
+                                        },
+                                        rotationAngle: 0.0,
+                                        sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                                        arcSize: D2D1_ARC_SIZE_SMALL,
+                                    });
+                                    sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                                    sink.Close()?;
+                                    dc.DrawGeometry(&path, &ib, 1.65, Some(&stroke));
+                                }
+                                dc.FillEllipse(
+                                    &D2D1_ELLIPSE {
+                                        point: Vector2 { X: cx_btn, Y: oy },
+                                        radiusX: 1.1,
+                                        radiusY: 1.1,
+                                    },
+                                    &ib,
+                                );
+                            }
+                            1 => {
+                                // Optically centered geometric Bluetooth rune.
+                                let sc = 0.62_f32;
+                                let pt = |x: f32, y: f32| Vector2 {
+                                    X: cx_btn + (x - 12.0) * sc,
+                                    Y: cy + (y - 12.0) * sc,
+                                };
+                                let path = self.d2d_factory.CreatePathGeometry()?;
+                                let sink = path.Open()?;
+                                sink.BeginFigure(pt(7.0, 7.0), D2D1_FIGURE_BEGIN_HOLLOW);
+                                sink.AddLine(pt(17.0, 17.0));
+                                sink.AddLine(pt(12.0, 22.0));
+                                sink.AddLine(pt(12.0, 2.0));
+                                sink.AddLine(pt(17.0, 7.0));
+                                sink.AddLine(pt(7.0, 17.0));
+                                sink.EndFigure(D2D1_FIGURE_END_OPEN);
+                                sink.Close()?;
+                                dc.DrawGeometry(&path, &ib, 1.6, Some(&stroke));
+                            }
+                            _ => {
+                                // Balanced crescent moon (filled when Night Light active, stroked when off).
+                                let sc = 0.64_f32;
+                                let pt = |x: f32, y: f32| Vector2 {
+                                    X: cx_btn + (x - 12.0) * sc,
+                                    Y: cy + (y - 12.0) * sc,
+                                };
+                                let rad = 8.5 * sc;
+                                let path = self.d2d_factory.CreatePathGeometry()?;
+                                let sink = path.Open()?;
+                                sink.BeginFigure(
+                                    pt(20.2, 14.4),
+                                    if *active {
+                                        windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_BEGIN_FILLED
+                                    } else {
+                                        D2D1_FIGURE_BEGIN_HOLLOW
+                                    },
+                                );
+                                sink.AddArc(&D2D1_ARC_SEGMENT {
+                                    point: pt(9.6, 3.8),
+                                    size: D2D_SIZE_F {
+                                        width: rad,
+                                        height: rad,
+                                    },
+                                    rotationAngle: 0.0,
+                                    sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                                    arcSize: D2D1_ARC_SIZE_SMALL,
+                                });
+                                sink.AddArc(&D2D1_ARC_SEGMENT {
+                                    point: pt(20.2, 14.4),
+                                    size: D2D_SIZE_F {
+                                        width: rad,
+                                        height: rad,
+                                    },
+                                    rotationAngle: 0.0,
+                                    sweepDirection:
+                                        windows::Win32::Graphics::Direct2D::D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
+                                    arcSize: D2D1_ARC_SIZE_LARGE,
+                                });
+                                sink.EndFigure(
+                                    windows::Win32::Graphics::Direct2D::Common::D2D1_FIGURE_END_CLOSED,
+                                );
+                                sink.Close()?;
+                                if *active {
+                                    dc.FillGeometry(&path, &ib, None);
+                                } else {
+                                    dc.DrawGeometry(&path, &ib, 1.6, Some(&stroke));
+                                }
+                            }
+                        }
                     }
                 }
                 WidgetChipSpec::Keyboard { code } => {

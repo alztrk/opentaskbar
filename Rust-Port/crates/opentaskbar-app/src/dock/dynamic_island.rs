@@ -59,7 +59,6 @@ const DEFAULT_WIDGET_ORDER: &[&str] = &[
     "battery",
     "bluetoothbattery",
     "storage",
-    "aiusage_all",
     "aiusage_claude",
     "aiusage_codex",
     "aiusage_opencode",

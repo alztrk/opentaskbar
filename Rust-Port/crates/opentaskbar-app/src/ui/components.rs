@@ -8,8 +8,8 @@
 //!   `stepper`, `button`, `badge`, `sidebar_nav_item`, and `scrollbar_overlay`.
 
 use gpui::{
-    AnyElement, Div, KeyDownEvent, MouseButton, ScrollAnchor, SharedString, div, prelude::*, px,
-    rgba,
+    AnyElement, Div, KeyDownEvent, MouseButton, ScrollAnchor, SharedString, deferred, div, img,
+    prelude::*, px, rgba,
 };
 
 use crate::design::{self, fonts, gpui_rgba};
@@ -101,8 +101,7 @@ pub fn section_card(theme: &UiTheme, title: impl Into<SharedString>, rows: Vec<A
         .rounded(px(PANEL_RADIUS))
         .bg(rgba(theme.surface))
         .border(px(theme.border_width))
-        .border_color(rgba(theme.border))
-        .overflow_hidden();
+        .border_color(rgba(theme.border));
 
     let count = rows.len();
     for (idx, row) in rows.into_iter().enumerate() {
@@ -410,6 +409,219 @@ pub fn button(
         .child(label.into())
 }
 
+/// One selectable entry inside [`dropdown`].
+pub struct DropdownOption {
+    pub label: SharedString,
+    pub flag_path: Option<SharedString>,
+    pub glyph: Option<&'static str>,
+    pub selected: bool,
+    pub on_select: std::rc::Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>,
+}
+
+/// Custom desktop dropdown replacing `segmented_track` with optional country flag images
+/// and a deferred floating popover menu that never clips inside cards or scroll views.
+pub fn dropdown(
+    id: impl Into<SharedString>,
+    theme: &UiTheme,
+    open: bool,
+    options: Vec<DropdownOption>,
+    on_toggle: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> Div {
+    let id: SharedString = id.into();
+    let current_label = options
+        .iter()
+        .find(|o| o.selected)
+        .or_else(|| options.first())
+        .map(|o| o.label.clone())
+        .unwrap_or_default();
+    let current_flag = options
+        .iter()
+        .find(|o| o.selected)
+        .or_else(|| options.first())
+        .and_then(|o| o.flag_path.clone());
+    let current_glyph = options
+        .iter()
+        .find(|o| o.selected)
+        .or_else(|| options.first())
+        .and_then(|o| o.glyph);
+
+    let trigger_bg = if open {
+        theme.surface_hover
+    } else {
+        theme.surface_muted
+    };
+    let trigger_border = if open { theme.accent } else { theme.border };
+    let hover_bg = theme.surface_hover;
+    let accent = theme.accent;
+
+    let mut trigger_left = div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .min_w_0()
+        .overflow_hidden();
+    if let Some(path) = current_flag {
+        trigger_left = trigger_left.child(
+            img(path)
+                .w(px(18.0))
+                .h(px(13.0))
+                .rounded(px(2.5))
+                .flex_shrink_0(),
+        );
+    } else if let Some(g) = current_glyph {
+        trigger_left = trigger_left.child(icon_glyph(g, 12.0, theme.text_secondary));
+    }
+    trigger_left = trigger_left.child(
+        div()
+            .text_size(px(fonts::scaled_size(12.0)))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(rgba(theme.text_primary))
+            .overflow_hidden()
+            .child(current_label),
+    );
+
+    let trigger = div()
+        .id(SharedString::from(format!("dd-trig-{id}")))
+        .min_w(px(148.0))
+        .h(px(32.0))
+        .px(px(11.0))
+        .rounded(px(CONTROL_RADIUS))
+        .bg(rgba(trigger_bg))
+        .border_1()
+        .border_color(rgba(trigger_border))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(10.0))
+        .cursor_pointer()
+        .tab_index(0)
+        .focus(move |style| style.border_color(rgba(accent)))
+        .hover(move |s| s.bg(rgba(hover_bg)))
+        .active(|s| s.opacity(0.88))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            on_toggle(window, cx);
+        })
+        .child(trigger_left)
+        .child(icon_glyph(
+            if open { "\u{E70E}" } else { "\u{E70D}" },
+            10.0,
+            if open {
+                theme.accent
+            } else {
+                theme.text_secondary
+            },
+        ));
+
+    let mut wrap = div().relative().flex_shrink_0().child(trigger);
+
+    if open {
+        let mut menu_list = div()
+            .id(SharedString::from(format!("dd-menu-{id}")))
+            .w(px(216.0))
+            .max_h(px(240.0))
+            .overflow_y_scroll()
+            .p(px(4.0))
+            .rounded(px(10.0))
+            .bg(rgba(theme.surface))
+            .border_1()
+            .border_color(rgba(theme.border))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            });
+
+        for (idx, opt) in options.into_iter().enumerate() {
+            let opt_bg = if opt.selected {
+                theme.accent_soft
+            } else {
+                0x00000000
+            };
+            let opt_fg = if opt.selected {
+                theme.accent
+            } else {
+                theme.text_primary
+            };
+            let opt_hover = if opt.selected {
+                theme.accent_soft
+            } else {
+                theme.surface_hover
+            };
+            let cb = opt.on_select;
+            let mut left = div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .min_w_0()
+                .overflow_hidden();
+            if let Some(path) = opt.flag_path {
+                left = left.child(
+                    img(path)
+                        .w(px(18.0))
+                        .h(px(13.0))
+                        .rounded(px(2.5))
+                        .flex_shrink_0(),
+                );
+            } else if let Some(g) = opt.glyph {
+                left = left.child(icon_glyph(g, 12.0, opt_fg));
+            }
+            left = left.child(
+                div()
+                    .text_size(px(fonts::scaled_size(12.0)))
+                    .font_weight(if opt.selected {
+                        gpui::FontWeight::SEMIBOLD
+                    } else {
+                        gpui::FontWeight::MEDIUM
+                    })
+                    .text_color(rgba(opt_fg))
+                    .overflow_hidden()
+                    .child(opt.label),
+            );
+
+            menu_list = menu_list.child(
+                div()
+                    .id(SharedString::from(format!("dd-opt-{id}-{idx}")))
+                    .w_full()
+                    .min_h(px(30.0))
+                    .px(px(9.0))
+                    .py(px(5.0))
+                    .rounded(px(6.0))
+                    .bg(rgba(opt_bg))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(10.0))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(rgba(opt_hover)))
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        cx.stop_propagation();
+                        cb(window, cx);
+                    })
+                    .child(left)
+                    .when(opt.selected, |row| {
+                        row.child(icon_glyph("\u{E73E}", 11.0, accent))
+                    }),
+            );
+        }
+
+        let popover = deferred(
+            div()
+                .occlude()
+                .absolute()
+                .top(px(36.0))
+                .right_0()
+                .child(menu_list),
+        )
+        .with_priority(1);
+        wrap = wrap.child(popover);
+    }
+
+    wrap
+}
+
+#[allow(dead_code)]
 pub fn segmented_track(theme: &UiTheme, items: Vec<AnyElement>) -> Div {
     let mut track = div()
         .flex()
@@ -427,6 +639,7 @@ pub fn segmented_track(theme: &UiTheme, items: Vec<AnyElement>) -> Div {
     track
 }
 
+#[allow(dead_code)]
 pub fn segmented_item(
     id: impl Into<gpui::ElementId>,
     theme: &UiTheme,

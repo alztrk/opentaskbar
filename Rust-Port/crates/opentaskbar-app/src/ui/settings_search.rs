@@ -18,6 +18,8 @@ pub(crate) struct SettingsSearchEntry {
     pub(crate) section: String,
     pub(crate) keywords: &'static str,
     pub(crate) widget_filter: Option<&'static str>,
+    /// Widget card to auto-expand when jumping to a per-widget inline setting.
+    pub(crate) expand_widget: Option<&'static str>,
     /// Stable id of the rendered row/card. Defaults to the locale key of `title` and can be
     /// overridden when the same label appears in more than one section.
     pub(crate) row_id: String,
@@ -41,6 +43,25 @@ impl SettingsSearchEntry {
             section: loc::t(section_key),
             keywords,
             widget_filter: None,
+            expand_widget: None,
+            row_id: row_id.to_owned(),
+        }
+    }
+
+    fn widget_setting(
+        widget_id: &'static str,
+        title_key: &str,
+        section_key: &str,
+        keywords: &'static str,
+        row_id: &str,
+    ) -> Self {
+        Self {
+            page: SettingsPage::Widgets,
+            title: loc::t(title_key),
+            section: loc::t(section_key),
+            keywords,
+            widget_filter: Some("All"),
+            expand_widget: Some(widget_id),
             row_id: row_id.to_owned(),
         }
     }
@@ -149,48 +170,69 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             &loc::t("SectionInteractions"),
             "middle click close new window mouse wheel",
         ),
-        // Widgets — clock & stats
-        SettingsSearchEntry::new(
-            SettingsPage::Widgets,
+        // Widgets — inline card settings (clock, stats, weather, bluetooth battery)
+        SettingsSearchEntry::widget_setting(
+            "clock",
             "ClockFormat24Hour",
             &loc::t("WidgetClock"),
             "time 24 hour am pm clock",
+            "ClockFormat24Hour",
         ),
-        SettingsSearchEntry::new(
-            SettingsPage::Widgets,
+        SettingsSearchEntry::widget_setting(
+            "clock",
             "ClockShowSeconds",
             &loc::t("WidgetClock"),
             "clock seconds time",
+            "ClockShowSeconds",
         ),
-        SettingsSearchEntry::new(
-            SettingsPage::Widgets,
+        SettingsSearchEntry::widget_setting(
+            "clock",
             "DateStyleDayShort",
             &loc::t("WidgetClock"),
             "weekday date day",
+            "DateStyleDayShort",
         ),
-        SettingsSearchEntry::new(
-            SettingsPage::Widgets,
+        SettingsSearchEntry::widget_setting(
+            "clock",
             "ClockDateLayout",
             &loc::t("WidgetClock"),
             "date beside below layout",
+            "ClockDateLayout",
         ),
-        SettingsSearchEntry::new(
-            SettingsPage::Widgets,
+        SettingsSearchEntry::widget_setting(
+            "clock",
             "ClockDateFormat",
             &loc::t("WidgetClock"),
             "date format yyyy mm dd",
+            "ClockDateFormat",
         ),
-        SettingsSearchEntry::new(
-            SettingsPage::Widgets,
+        SettingsSearchEntry::widget_setting(
+            "stats",
             "Cpu",
             &loc::t("StatsSettingsHeading"),
             "cpu processor meter percentage",
+            "Cpu",
         ),
-        SettingsSearchEntry::new(
-            SettingsPage::Widgets,
+        SettingsSearchEntry::widget_setting(
+            "stats",
             "Memory",
             &loc::t("StatsSettingsHeading"),
             "ram memory meter percentage",
+            "Memory",
+        ),
+        SettingsSearchEntry::widget_setting(
+            "stats",
+            "Gpu",
+            &loc::t("StatsSettingsHeading"),
+            "gpu graphics meter percentage",
+            "Gpu",
+        ),
+        SettingsSearchEntry::widget_setting(
+            "stats",
+            "GpuTemperature",
+            &loc::t("StatsSettingsHeading"),
+            "gpu temperature thermal degrees celsius fahrenheit sicaklik",
+            "GpuTemperature",
         ),
         SettingsSearchEntry::new(
             SettingsPage::DynamicIsland,
@@ -223,14 +265,15 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             &loc::t("DynamicIslandTitle"),
             "dynamic island widget location display dock",
         ),
-        SettingsSearchEntry::new(
-            SettingsPage::Widgets,
+        SettingsSearchEntry::widget_setting(
+            "weather",
             "WeatherUnit",
             &loc::t("WidgetWeather"),
             "weather temperature unit celsius fahrenheit c f",
+            "WeatherUnit",
         ),
-        SettingsSearchEntry::with_row_id(
-            SettingsPage::Widgets,
+        SettingsSearchEntry::widget_setting(
+            "bluetoothbattery",
             "WirelessBatteryAlertLabel",
             &loc::t("WidgetBluetoothBattery"),
             "wireless bluetooth battery low alert threshold percent",
@@ -401,6 +444,7 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             section: super::settings::category_label(widget.category),
             keywords: widget.id,
             widget_filter: Some(widget.category),
+            expand_widget: None,
             row_id: format!("widget-{}", widget.id),
         });
     }

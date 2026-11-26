@@ -128,6 +128,7 @@ impl WidgetOption {
                 descriptor.id,
                 "clock"
                     | "weather"
+                    | "stats"
                     | "countdown"
                     | "focus"
                     | "bluetoothbattery"
@@ -296,8 +297,8 @@ mod tests {
     }
 
     #[test]
-    fn catalog_has_24_entries() {
-        assert_eq!(catalog().len(), 24);
+    fn catalog_has_23_entries() {
+        assert_eq!(catalog().len(), 23);
         assert!(WidgetOption::for_id("showdesktop").is_some());
         assert!(WidgetOption::for_id("clock").unwrap().has_settings);
         assert!(!WidgetOption::for_id("netspeed").unwrap().has_settings);
