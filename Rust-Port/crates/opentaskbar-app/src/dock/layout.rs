@@ -26,7 +26,7 @@
 use std::time::{Duration, Instant};
 
 use opentaskbar_core::settings::{
-    AutoHideMode, DockEdge, DockPosition, DockSettings, StartButtonPlacement,
+    AutoHideMode, DockEdge, DockPosition, DockSettings, SecondaryAppScope, StartButtonPlacement,
 };
 
 use crate::platform::win32::MonitorInfo;
@@ -1163,6 +1163,108 @@ pub fn take_deferred_reload(pending: &mut bool) -> bool {
     std::mem::replace(pending, false)
 }
 
+// ---------------------------------------------------------------------------
+// WS-8 live dock policies. Pure so draw / hit-test / host wiring share one
+// decision table and every gate is unit-testable without a desktop session.
+// ---------------------------------------------------------------------------
+
+/// C# `DwmEnableAeroPeek`: the REG_DWORD is absent by default (enabled). Only an
+/// explicit `0` disables Aero Peek; any other value (including REG_SZ garbage
+/// coerced to a number by the caller) keeps the feature on.
+pub fn aero_peek_enabled(registry_value: Option<u32>) -> bool {
+    registry_value.unwrap_or(1) != 0
+}
+
+/// Where the Start button lives in the live strip. Derived from the very same
+/// `apply_pinned_groups` policy the settings UI previews, so `End` / `InWidgets`
+/// cannot drift between the saved order, the DComp draw pass and hit testing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartStripGroup {
+    Head,
+    AfterApps,
+    InWidgets,
+}
+
+pub fn start_strip_group(settings: &DockSettings) -> StartStripGroup {
+    let order = apply_pinned_groups(&[], settings);
+    let start = order.iter().position(|token| token == "start");
+    let trail = order
+        .iter()
+        .position(|token| token == "tray" || token == "bin");
+    match (start, trail) {
+        (Some(start), Some(trail)) if start > trail => StartStripGroup::InWidgets,
+        (Some(_), _) if normalized_start_placement(settings) == StartButtonPlacement::End => {
+            StartStripGroup::AfterApps
+        }
+        _ => StartStripGroup::Head,
+    }
+}
+
+/// `StartWidgetIndex` is the zero-based insertion slot inside the widget strip
+/// when Start is placed `InWidgets`. Negative / out-of-range values clamp to the
+/// strip so the button always lands on a real cell.
+pub fn resolved_start_widget_index(settings: &DockSettings, widget_count: usize) -> usize {
+    (settings.start_widget_index.max(0) as usize).min(widget_count)
+}
+
+/// Mirroring wins over the light-strip default: `mirror_main_dock` explicitly
+/// asks for a full clone on every monitor. Otherwise the secondary policy applies.
+pub fn secondary_dock_layout(settings: &DockSettings, is_primary: bool) -> SecondaryLayout {
+    if !is_primary && settings.mirror_main_dock && settings.show_on_all_monitors {
+        SecondaryLayout::PrimaryDock
+    } else {
+        secondary_layout(settings, is_primary)
+    }
+}
+
+/// `secondary_apps = AllMonitors` keeps every running window on a secondary
+/// strip; the default scopes notifications to the monitor hosting the window.
+pub fn secondary_apps_all_monitors(settings: &DockSettings) -> bool {
+    matches!(settings.secondary_apps, SecondaryAppScope::AllMonitors)
+}
+
+/// Notification badge accumulation for an EVENT_SYSTEM_ALERT. Counts saturate
+/// at 99 (`+99` is the widest badge the chip can paint).
+pub fn notification_badge_count(current: u32, increment: u32) -> u32 {
+    current.saturating_add(increment.max(1)).min(99)
+}
+
+/// Packs a physical cursor point into `LPARAM` for the coordinate-only wheel
+/// route. The hook never calls `WindowFromPoint`; the UI thread unpacks and
+/// hit-tests against its own dock rects.
+pub fn pack_cursor_point(x: i32, y: i32) -> isize {
+    (((y as i64) << 32) | (x as u32 as i64)) as isize
+}
+
+pub fn unpack_cursor_point(packed: isize) -> (i32, i32) {
+    let bits = packed as u64;
+    (bits as u32 as i32, (bits >> 32) as u32 as i32)
+}
+
+/// A reentrant `WM_APP_VSYNC` may be re-posted at most once. A second re-entry
+/// must drop the tick or the guard/ping-pong would spin forever.
+pub fn vsync_repost_allowed(already_reposted: bool) -> bool {
+    !already_reposted
+}
+
+/// Minimum age of a cross-process window snapshot. `sync_slots` runs on the
+/// 800 ms TIMER_POLL; it reuses the last snapshot between due deadlines and
+/// never performs `EnumWindows + OpenProcess` directly on the UI thread.
+pub const WINDOW_SNAPSHOT_MIN_INTERVAL: Duration = Duration::from_millis(750);
+pub fn window_snapshot_due(last: Option<Instant>, in_flight: bool, now: Instant) -> bool {
+    !in_flight
+        && last
+            .is_none_or(|at| now.saturating_duration_since(at) >= WINDOW_SNAPSHOT_MIN_INTERVAL)
+}
+
+/// Mouse-driven `refresh_widgets` calls collapse into at most one chip rebuild
+/// per frame budget. Settings reloads and animation ticks call the unthrottled
+/// entry point explicitly.
+pub const WIDGET_REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(120);
+pub fn widget_refresh_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|at| now.saturating_duration_since(at) >= WIDGET_REFRESH_MIN_INTERVAL)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1906,5 +2008,116 @@ mod tests {
         // A later change can arm a fresh reload.
         assert!(claim_deferred_reload(&mut pending));
         assert!(take_deferred_reload(&mut pending));
+    }
+
+    #[test]
+    fn aero_peek_registry_gate_defaults_on_and_explicit_zero_disables() {
+        assert!(aero_peek_enabled(None));
+        assert!(aero_peek_enabled(Some(1)));
+        assert!(aero_peek_enabled(Some(0xffff_ffff)));
+        assert!(!aero_peek_enabled(Some(0)));
+    }
+
+    #[test]
+    fn start_strip_group_comes_from_the_live_pinned_group_policy() {
+        let mut settings = DockSettings::default();
+        assert_eq!(start_strip_group(&settings), StartStripGroup::Head);
+        settings.start_placement = StartButtonPlacement::End;
+        assert_eq!(start_strip_group(&settings), StartStripGroup::AfterApps);
+        settings.start_placement = StartButtonPlacement::InWidgets;
+        assert_eq!(start_strip_group(&settings), StartStripGroup::InWidgets);
+        // Legacy extra string drives the same decision.
+        let mut legacy = DockSettings::default();
+        legacy
+            .extra
+            .insert("StartPlacement".into(), json!("InWidgets"));
+        assert_eq!(start_strip_group(&legacy), StartStripGroup::InWidgets);
+        legacy
+            .extra
+            .insert("StartPlacement".into(), json!("End"));
+        assert_eq!(start_strip_group(&legacy), StartStripGroup::AfterApps);
+    }
+
+    #[test]
+    fn start_widget_index_clamps_to_the_widget_strip() {
+        let mut settings = DockSettings::default();
+        settings.start_widget_index = 5;
+        assert_eq!(resolved_start_widget_index(&settings, 3), 3);
+        assert_eq!(resolved_start_widget_index(&settings, 8), 5);
+        settings.start_widget_index = -2;
+        assert_eq!(resolved_start_widget_index(&settings, 3), 0);
+    }
+
+    #[test]
+    fn mirror_overrides_light_strip_but_not_single_monitor_mode() {
+        let mut settings = DockSettings::default();
+        assert_eq!(
+            secondary_dock_layout(&settings, false),
+            SecondaryLayout::LightStrip
+        );
+        settings.mirror_main_dock = true;
+        assert_eq!(
+            secondary_dock_layout(&settings, false),
+            SecondaryLayout::PrimaryDock
+        );
+        assert_eq!(
+            secondary_dock_layout(&settings, true),
+            SecondaryLayout::PrimaryDock
+        );
+        settings.show_on_all_monitors = false;
+        assert_eq!(
+            secondary_dock_layout(&settings, false),
+            SecondaryLayout::Hidden
+        );
+        assert!(!secondary_apps_all_monitors(&settings));
+        settings.secondary_apps = SecondaryAppScope::AllMonitors;
+        assert!(secondary_apps_all_monitors(&settings));
+    }
+
+    #[test]
+    fn notification_badges_saturate_at_99() {
+        assert_eq!(notification_badge_count(0, 1), 1);
+        assert_eq!(notification_badge_count(5, 3), 8);
+        assert_eq!(notification_badge_count(98, 5), 99);
+        assert_eq!(notification_badge_count(0, 0), 1);
+    }
+
+    #[test]
+    fn cursor_point_survives_lparam_round_trip() {
+        for &(x, y) in &[(0, 0), (120, 40), (-1920, 1080), (3839, -12)] {
+            assert_eq!(unpack_cursor_point(pack_cursor_point(x, y)), (x, y));
+        }
+    }
+
+    #[test]
+    fn vsync_repost_is_single_shot() {
+        assert!(vsync_repost_allowed(false));
+        assert!(!vsync_repost_allowed(true));
+    }
+
+    #[test]
+    fn window_snapshot_and_widget_refresh_are_throttled() {
+        let now = Instant::now();
+        assert!(window_snapshot_due(None, false, now));
+        assert!(!window_snapshot_due(None, true, now));
+        assert!(!window_snapshot_due(
+            Some(now - Duration::from_millis(100)),
+            false,
+            now
+        ));
+        assert!(window_snapshot_due(
+            Some(now - WINDOW_SNAPSHOT_MIN_INTERVAL),
+            false,
+            now
+        ));
+        assert!(widget_refresh_due(None, now));
+        assert!(!widget_refresh_due(
+            Some(now - Duration::from_millis(20)),
+            now
+        ));
+        assert!(widget_refresh_due(
+            Some(now - WIDGET_REFRESH_MIN_INTERVAL),
+            now
+        ));
     }
 }

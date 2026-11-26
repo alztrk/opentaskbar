@@ -17,6 +17,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -30,7 +31,9 @@ use windows::Win32::Graphics::DirectComposition::{
     IDCompositionRectangleClip, IDCompositionSurface,
 };
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, HANDLE, HMODULE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmFlush, DwmGetWindowAttribute,
 };
@@ -38,7 +41,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTONEAREST, MonitorFromWindow, ScreenToClient,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::System::Threading::AttachThreadInput;
+use windows_sys::Win32::System::Threading::{
+    AttachThreadInput, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, RegisterHotKey, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT,
     TrackMouseEvent, UnregisterHotKey, VK_CONTROL, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_RIGHT, VK_RWIN,
@@ -57,7 +62,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
     WM_NCHITTEST, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW,
     WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WS_VISIBLE, WindowFromPoint,
+    WS_VISIBLE,
 };
 
 pub mod dcomp;
@@ -121,6 +126,11 @@ const WM_APP_WINKEY_REVEAL: u32 = WM_APP + 4;
 /// Idle-side settings reload: keeps disk I/O and the full DComp rebuild out of
 /// the hover/mouse/timer hot path.
 const WM_APP_SETTINGS_RELOAD: u32 = WM_APP + 5;
+/// `WH_MOUSE_LL` posts only the cursor point; the UI thread hit-tests it against
+/// its own dock rects (no `WindowFromPoint` from a low-level hook).
+const WM_APP_WHEEL_ROUTE: u32 = WM_APP + 6;
+/// EVENT_SYSTEM_ALERT queue drain: refresh notification badges on every dock.
+const WM_APP_NOTIFICATION_BADGE: u32 = WM_APP + 7;
 const WM_HOTKEY: u32 = 0x0312;
 const HOTKEY_LAUNCHER_ID: i32 = 0x4F01;
 const HOTKEY_DOCK_ID: i32 = 0x4F02;
@@ -293,6 +303,31 @@ fn is_shell_button_visible(settings: &DockSettings, kind: ShellButton) -> bool {
     }
 }
 
+fn is_lead_shell_button(settings: &DockSettings, kind: ShellButton) -> bool {
+    is_shell_button_visible(settings, kind)
+        && (kind != ShellButton::Start
+            || layout::start_strip_group(settings) == layout::StartStripGroup::Head)
+}
+
+fn lead_shell_count(settings: &DockSettings) -> usize {
+    ShellButton::ALL
+        .iter()
+        .filter(|&&kind| is_lead_shell_button(settings, kind))
+        .count()
+}
+
+/// Width of the lead shell group. When Start is `End` / `InWidgets` it leaves
+/// this group and is laid out with the trailing / widget group instead.
+fn shell_lead_width(settings: &DockSettings) -> f32 {
+    let base = settings.icon_dips();
+    let count = lead_shell_count(settings);
+    if count == 0 {
+        0.0
+    } else {
+        base * (count as f32) + 4.0 * ((count - 1) as f32) + 17.0
+    }
+}
+
 fn shell_section_width(settings: &DockSettings) -> f32 {
     let base = settings.icon_dips();
     let count = ShellButton::ALL
@@ -308,12 +343,14 @@ fn shell_section_width(settings: &DockSettings) -> f32 {
 
 fn widgets_strip_width(settings: &DockSettings, has_apps: bool) -> f32 {
     let active = widgets::active_widgets(settings);
-    if active.is_empty() {
+    let start_in_widgets = layout::start_strip_group(settings) == layout::StartStripGroup::InWidgets
+        && is_shell_button_visible(settings, ShellButton::Start);
+    if active.is_empty() && !start_in_widgets {
         return 0.0;
     }
     let gap_before = if has_apps { 8.0 } else { 0.0 };
     let cards_w: f32 = active.iter().map(|wd| wd.width_dips + 6.0).sum();
-    gap_before + cards_w
+    gap_before + cards_w + if start_in_widgets { settings.icon_dips() + 6.0 } else { 0.0 }
 }
 
 fn base_trail_width(settings: &DockSettings) -> f32 {
@@ -567,8 +604,18 @@ struct DockState {
     settings: DockSettings,
     pins: Vec<PinnedApp>,
     slots: Vec<DockSlot>,
-    /// Window snapshot from the last `sync_slots` call, reused by auto-hide overlap checks.
+    /// Window snapshot from the last async `sync_slots` call, reused by auto-hide overlap checks.
     running_windows: Vec<RunningWindow>,
+    /// Worker replies to `enumerate_windows_async`; the UI thread only drains them.
+    window_snapshot_rx: Option<mpsc::Receiver<Vec<RunningWindow>>>,
+    window_snapshot_in_flight: bool,
+    last_window_snapshot: Option<Instant>,
+    /// Mouse-driven chip rebuilds collapse into one per frame budget.
+    last_widget_refresh: Option<Instant>,
+    /// Secondary docks either mirror the main strip or reserve a light shelf.
+    is_secondary: bool,
+    light_strip: bool,
+    appbar_registered: bool,
     dcomp: DcompEngine,
     pill: PillNodes,
     shell_bgs: [VisualNode; 3],
@@ -735,6 +782,18 @@ fn load_effective_pins(settings: &DockSettings) -> Vec<PinnedApp> {
                 .unwrap_or(usize::MAX)
         });
     }
+    // WS-8 live placement: resolve the saved item order through the same
+    // pinned-group policy the settings UI previews. `End` / `InWidgets` move the
+    // Start token into the trailing group instead of leaving the setting inert.
+    let mut tokens: Vec<String> = settings.dock_item_order.clone();
+    tokens.extend(items.iter().map(|pin| pin.launch_path.clone()));
+    let grouped = layout::apply_pinned_groups(&tokens, settings);
+    items.sort_by_key(|pin| {
+        grouped
+            .iter()
+            .position(|token| token.eq_ignore_ascii_case(&pin.launch_path))
+            .unwrap_or(usize::MAX)
+    });
     items
 }
 
@@ -1082,6 +1141,22 @@ fn bounce_offset_dips(started: Option<Instant>) -> Option<f32> {
     Some(y)
 }
 
+/// Cross-WS API NOTE (WS-2): the contract's
+/// `tracker::enumerate_windows_async(tx: Sender<Vec<RunningWindow>>)` is not
+/// present in this worktree. This local shim has the identical signature and
+/// semantics so the dock UI thread is already off the `EnumWindows +
+/// OpenProcess` path; delete it in favour of the tracker function when WS-2
+/// lands, without touching any call site.
+fn enumerate_windows_async(tx: mpsc::Sender<Vec<RunningWindow>>) {
+    std::thread::Builder::new()
+        .name("dock-windows".to_owned())
+        .spawn(move || {
+            let windows = tracker::enumerate_windows();
+            let _ = tx.send(windows);
+        })
+        .ok();
+}
+
 fn spawn_settings_window() {
     let Ok(exe) = std::env::current_exe() else {
         return;
@@ -1102,6 +1177,8 @@ impl DockState {
         initial_slots: Vec<DockSlot>,
         initial_running: Vec<RunningWindow>,
         initial_rect: (i32, i32, i32, i32),
+        is_secondary: bool,
+        light_strip: bool,
     ) -> windows::core::Result<Self> {
         let dpi = monitor.dpi_scale;
         let is_dark = resolve_is_dark(settings.theme);
@@ -1348,6 +1425,13 @@ impl DockState {
             pins,
             slots: initial_slots,
             running_windows: initial_running,
+            window_snapshot_rx: None,
+            window_snapshot_in_flight: false,
+            last_window_snapshot: None,
+            last_widget_refresh: None,
+            is_secondary,
+            light_strip,
+            appbar_registered: false,
             dcomp,
             pill,
             shell_bgs,
@@ -1639,11 +1723,16 @@ impl DockState {
             widgets::active_widgets(&self.settings)
                 .into_iter()
                 .filter(|wd| {
-                    !dynamic_island::is_widget_placed_on_connected_display(
-                        &self.settings,
-                        wd.id,
-                        &self.all_monitors,
-                    )
+                    // A secondary light strip reserves shelf space but carries no
+                    // widget cards; `secondary_widgets = false` suppresses them on
+                    // any secondary dock, while island placement keeps its priority.
+                    !self.light_strip
+                        && !(self.is_secondary && !self.settings.secondary_widgets)
+                        && !dynamic_island::is_widget_placed_on_connected_display(
+                            &self.settings,
+                            wd.id,
+                            &self.all_monitors,
+                        )
                 })
                 .collect();
         let same = self.widget_visuals.len() == active.len()
@@ -1745,6 +1834,18 @@ impl DockState {
             }
         }
         changed
+    }
+
+    /// Mouse / hover paths run at up to 1000 Hz. Rebuilding widget chips is
+    /// cheap but not free; coalesce those requests into one per frame budget.
+    /// Settings reloads and animation ticks call `refresh_widgets` directly.
+    fn refresh_widgets_throttled(&mut self) -> bool {
+        let now = Instant::now();
+        if !layout::widget_refresh_due(self.last_widget_refresh, now) {
+            return false;
+        }
+        self.last_widget_refresh = Some(now);
+        self.refresh_widgets()
     }
 
     fn evaluate_auto_hide(&mut self) {
@@ -2161,8 +2262,12 @@ impl DockState {
     /// message instead of inside a hover timer / `WM_MOUSEMOVE` handler.
     fn defer_settings_reload(&mut self) {
         if layout::claim_deferred_reload(&mut self.settings_reload_pending) {
-            unsafe {
-                let _ = PostMessageW(self.hwnd as HWND, WM_APP_SETTINGS_RELOAD, 0, 0);
+            let posted = unsafe { PostMessageW(self.hwnd as HWND, WM_APP_SETTINGS_RELOAD, 0, 0) };
+            if posted == 0 {
+                // No idle message will ever consume the flag; roll it back so a
+                // later hover-close can arm a fresh reload instead of being
+                // coalesced into a request that was never delivered.
+                self.settings_reload_pending = false;
             }
         }
     }
@@ -2260,7 +2365,8 @@ impl DockState {
         }
         self.sync_slots(false);
         self.sync_window_bounds();
-        self.refresh_widgets();
+        // Settings reload is a deliberate full rebuild, not a hot-path wake-up.
+        let _ = self.refresh_widgets();
         self.evaluate_auto_hide();
         self.update_visuals();
     }
@@ -2329,12 +2435,43 @@ impl DockState {
         if self.drag.is_some() {
             return false;
         }
-        self.running_windows = tracker::enumerate_windows();
-        if self.settings.current_desktop_only {
-            self.running_windows
-                .retain(|window| tracker::is_on_current_desktop(window.hwnd));
+        let now = Instant::now();
+        // The UI thread never runs EnumWindows/OpenProcess. It only drains a
+        // worker reply and starts one throttled request when none is in flight.
+        if let Some(rx) = &self.window_snapshot_rx {
+            match rx.try_recv() {
+                Ok(windows) => {
+                    self.running_windows = windows;
+                    self.last_window_snapshot = Some(now);
+                    self.window_snapshot_in_flight = false;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.window_snapshot_in_flight = false;
+                    self.window_snapshot_rx = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
         }
-        let mut next = build_slots(&self.pins, &self.running_windows, &self.slots);
+        if !self.window_snapshot_in_flight
+            && layout::window_snapshot_due(self.last_window_snapshot, false, now)
+        {
+            let (tx, rx) = mpsc::channel();
+            self.window_snapshot_rx = Some(rx);
+            self.window_snapshot_in_flight = true;
+            enumerate_windows_async(tx);
+        }
+        let mut running = self.running_windows.clone();
+        if self.light_strip {
+            // A shelf strip reserves space and hosts shell buttons only.
+            running.clear();
+        } else if self.is_secondary && !layout::secondary_apps_all_monitors(&self.settings) {
+            running.retain(|window| win32::is_window_on_monitor(window.hwnd, self.monitor.handle));
+        }
+        if self.settings.current_desktop_only {
+            running.retain(|window| tracker::is_on_current_desktop(window.hwnd));
+        }
+        self.running_windows = running.clone();
+        let mut next = build_slots(&self.pins, &running, &self.slots);
         if animate_closes
             && self.settings.animations_enabled
             && win32::client_area_animations_enabled()
@@ -2435,7 +2572,18 @@ impl DockState {
     }
 
     fn live_widgets_section_width(&self) -> f32 {
-        self.live_widgets_strip_width(!self.slots.is_empty()) + self.live_trail_section_width()
+        let group = layout::start_strip_group(&self.settings);
+        let start_w = if is_shell_button_visible(&self.settings, ShellButton::Start) {
+            self.settings.icon_dips() + 6.0
+        } else {
+            0.0
+        };
+        self.live_widgets_strip_width(!self.slots.is_empty())
+            + self.live_trail_section_width()
+            + match group {
+                layout::StartStripGroup::Head => 0.0,
+                layout::StartStripGroup::AfterApps | layout::StartStripGroup::InWidgets => start_w,
+            }
     }
 
     fn live_pill_geometry(&self) -> (f32, f32, f32, f32) {
@@ -2497,14 +2645,25 @@ impl DockState {
         let vp_left = pill_left + 1.0;
         let vp_right = (pill_left + pill_w - 1.0).max(vp_left + 1.0);
         let apps_w = self.live_apps_width_dips();
-        let widgets_w = self.live_widgets_strip_width(apps_w > 0.0);
-        let trail_w = self.live_trail_section_width();
+        let mut widgets_w = self.live_widgets_strip_width(apps_w > 0.0);
+        let mut trail_w = self.live_trail_section_width();
+        let group = layout::start_strip_group(&self.settings);
+        let start_w = if is_shell_button_visible(&self.settings, ShellButton::Start) {
+            self.settings.icon_dips() + 6.0
+        } else {
+            0.0
+        };
+        match group {
+            layout::StartStripGroup::InWidgets => widgets_w += start_w,
+            layout::StartStripGroup::AfterApps => trail_w += start_w,
+            layout::StartStripGroup::Head => {}
+        }
         compute_scroll_metrics(
             vp_left,
             vp_right,
             apps_w + widgets_w,
             trail_w,
-            shell_section_width(&self.settings),
+            shell_lead_width(&self.settings),
             self.scroll_offset,
         )
     }
@@ -2607,15 +2766,47 @@ impl DockState {
         cursor + w * 0.5
     }
 
-    fn live_shell_center_x(&self, kind: ShellButton) -> f32 {
+    /// Draw, hit-test and the Start anchor all resolve the same center. `End`
+    /// places Start immediately before the trailing tray/bin group; `InWidgets`
+    /// inserts it at `StartWidgetIndex` inside the widget strip.
+    fn shell_center_x_in(&self, kind: ShellButton, sm: &ScrollMetrics) -> f32 {
         let base = self.settings.icon_dips();
+        if !is_shell_button_visible(&self.settings, kind) {
+            return sm.shell_start_x + base * 0.5;
+        }
+        let group = layout::start_strip_group(&self.settings);
+        if kind == ShellButton::Start && group != layout::StartStripGroup::Head {
+            match group {
+                layout::StartStripGroup::AfterApps => {
+                    sm.right_anchor_x - self.live_trail_section_width() - base * 0.5 - 2.0
+                }
+                layout::StartStripGroup::InWidgets => {
+                    let apps_w = self.live_apps_width_dips();
+                    let mut wx = sm.apps_start_x + if apps_w > 0.0 { apps_w + 8.0 } else { 0.0 };
+                    let index = layout::resolved_start_widget_index(
+                        &self.settings,
+                        self.widget_visuals.len(),
+                    );
+                    for wv in self.widget_visuals.iter().take(index) {
+                        wx += wv.width_dips + 6.0;
+                    }
+                    wx + base * 0.5
+                }
+                layout::StartStripGroup::Head => sm.shell_start_x + base * 0.5,
+            }
+        } else {
+            let slot = ShellButton::ALL
+                .iter()
+                .take_while(|&&k| k != kind)
+                .filter(|&&k| is_lead_shell_button(&self.settings, k))
+                .count();
+            sm.shell_start_x + (slot as f32) * (base + 4.0) + base * 0.5
+        }
+    }
+
+    fn live_shell_center_x(&self, kind: ShellButton) -> f32 {
         let sm = self.live_scroll_metrics();
-        let slot = ShellButton::ALL
-            .iter()
-            .take_while(|&&k| k != kind)
-            .filter(|&&k| is_shell_button_visible(&self.settings, k))
-            .count();
-        sm.shell_start_x + (slot as f32) * (base + 4.0) + base * 0.5
+        self.shell_center_x_in(kind, &sm)
     }
 
     fn right_widget_rects_dips(
@@ -2631,13 +2822,21 @@ impl DockState {
         // while Background Apps (`tray`) and Recycle Bin (`bin`) stay pinned to the trailing edge.
         let apps_w = self.live_apps_width_dips();
         let mut wx = sm.apps_start_x + if apps_w > 0.0 { apps_w + 8.0 } else { 0.0 };
+        let start_in_widgets = layout::start_strip_group(&self.settings)
+            == layout::StartStripGroup::InWidgets
+            && is_shell_button_visible(&self.settings, ShellButton::Start);
+        let start_index = layout::resolved_start_widget_index(&self.settings, self.widget_visuals.len());
         let mut widget_rects = Vec::with_capacity(self.widget_visuals.len());
-        for wv in &self.widget_visuals {
+        for (index, wv) in self.widget_visuals.iter().enumerate() {
+            if start_in_widgets && index == start_index {
+                wx += self.settings.icon_dips() + 6.0;
+            }
             let l = wx;
             let r = wx + wv.width_dips;
             widget_rects.push((wv.id, (l, pill_top + 6.0, r, pill_top + pill_h - 6.0)));
             wx = r + 6.0;
         }
+        let _ = wx;
         let mut right_cursor = sm.right_anchor_x;
         let bin = if self.settings.show_recycle_bin {
             let bw = self.settings.icon_dips();
@@ -2780,16 +2979,15 @@ impl DockState {
         if my < pill_top || my > pill_top + pill_h {
             return None;
         }
-        let mut slot = 0usize;
         for kind in ShellButton::ALL {
             if !is_shell_button_visible(&self.settings, kind) {
                 continue;
             }
-            let x = sm.shell_start_x + (slot as f32) * (base + 4.0);
-            if mx >= sm.vp_left.max(x) && mx <= sm.vp_right.min(x + base) {
+            let center = self.shell_center_x_in(kind, &sm);
+            let left = center - base * 0.5;
+            if mx >= sm.vp_left.max(left) && mx <= sm.vp_right.min(left + base) {
                 return Some(kind);
             }
-            slot += 1;
         }
         None
     }
@@ -3154,7 +3352,6 @@ impl DockState {
         let box_sz_px = (base * dpi).ceil();
         let glyph_dips = (base * 0.68).max(22.0);
         let glyph_surf_px = (glyph_dips * dpi).ceil();
-        let mut visible_shell_count = 0usize;
         for kind in ShellButton::ALL {
             let i = kind.index();
             if !is_shell_button_visible(&self.settings, kind) {
@@ -3162,8 +3359,8 @@ impl DockState {
                 self.shell_icons[i].hide();
                 continue;
             }
-            let x = sm.shell_start_x + (visible_shell_count as f32) * (base + 4.0);
-            visible_shell_count += 1;
+            // Single source of truth with hit testing and Start anchoring.
+            let x = self.shell_center_x_in(kind, &sm) - base * 0.5;
             let box_x_px = (x * dpi).round();
             let box_y_px = (shell_top * dpi).round();
             let hovered = self.hovered_shell == Some(kind);
@@ -3186,12 +3383,13 @@ impl DockState {
         }
 
         let div_y = pill_top + (pill_h - 26.0) * 0.5;
-        if visible_shell_count == 0 {
+        let lead_count = lead_shell_count(&self.settings);
+        if lead_count == 0 {
             self.divider.hide();
         } else {
             let div_x = sm.shell_start_x
-                + base * (visible_shell_count as f32)
-                + 4.0 * ((visible_shell_count - 1) as f32)
+                + base * (lead_count as f32)
+                + 4.0 * ((lead_count - 1) as f32)
                 + 8.0;
             self.divider
                 .set_transform(1.0, 1.0, (div_x * dpi).round(), (div_y * dpi).round());
@@ -3779,7 +3977,11 @@ impl DockState {
 
         if let Some(ref mut preview) = self.preview {
             preview.show(&key, &items, anchor_x, anchor_bottom_y, self.is_dark);
-            if let Some(first) = items.first() {
+            // DWM Aero Peek is user-controlled: HKCU\...\DWM\EnableAeroPeek = 0
+            // means no live preview even though the thumbnails still render.
+            if preview::aero_peek_enabled()
+                && let Some(first) = items.first()
+            {
                 preview::activate_live_preview(first.hwnd);
             }
             unsafe {
@@ -3902,7 +4104,7 @@ impl DockState {
             changed |= self.widget_runtime.hover.on_leave(&expanded, now) == HoverChange::Collapse;
         }
         if changed {
-            self.refresh_widgets();
+            self.refresh_widgets_throttled();
             self.update_visuals();
         }
     }
@@ -3965,7 +4167,7 @@ impl DockState {
             // `WM_APP_SETTINGS_RELOAD` message; the mouse/timer path only posts.
             self.defer_settings_reload();
         } else {
-            self.refresh_widgets();
+            self.refresh_widgets_throttled();
         }
         self.finish_widget_hover_flyout(&id);
     }
@@ -3978,7 +4180,7 @@ impl DockState {
         }
         self.widget_runtime.hover.suppress(id, now);
         self.reconcile_pointer_after_interaction();
-        self.refresh_widgets();
+        self.refresh_widgets_throttled();
         self.update_visuals();
     }
 
@@ -3993,7 +4195,7 @@ impl DockState {
         self.widget_runtime.hover.suppress(&id, now);
         self.disarm_hover_intent();
         if ended == HoverChange::Collapse {
-            self.refresh_widgets();
+            self.refresh_widgets_throttled();
         }
         self.update_visuals();
     }
@@ -4118,7 +4320,7 @@ impl DockState {
                 self.hovered_idx = None;
                 self.sync_preview_hover();
                 if had_widget {
-                    self.refresh_widgets();
+                    self.refresh_widgets_throttled();
                 }
             }
             self.ensure_animation();
@@ -4126,6 +4328,21 @@ impl DockState {
         }
         if over_scroll.is_some() {
             self.cancel_widget_hover();
+            return;
+        }
+
+        // `End` / `InWidgets` place the Start button inside the trailing group,
+        // so shell hit testing must precede the widget/tray boxes to win ties.
+        if let Some(shell) = self.hit_shell_button(mx, my) {
+            let changed = self.hovered_shell != Some(shell) || self.hover_mouse_x.is_some();
+            self.hovered_shell = Some(shell);
+            self.hover_mouse_x = None;
+            self.hovered_idx = None;
+            self.sync_preview_hover();
+            if changed {
+                self.ensure_animation();
+                self.update_visuals();
+            }
             return;
         }
 
@@ -4182,26 +4399,13 @@ impl DockState {
                 self.sync_preview_hover();
             }
             if widget_changed {
-                self.refresh_widgets();
+                self.refresh_widgets_throttled();
             }
             self.ensure_animation();
             self.update_visuals();
         }
         self.sync_widget_hover(mx, my);
         if over_tray || over_tray_pin.is_some() || over_bin || over_widget.is_some() {
-            return;
-        }
-
-        if let Some(shell) = self.hit_shell_button(mx, my) {
-            let changed = self.hovered_shell != Some(shell) || self.hover_mouse_x.is_some();
-            self.hovered_shell = Some(shell);
-            self.hover_mouse_x = None;
-            self.hovered_idx = None;
-            self.sync_preview_hover();
-            if changed {
-                self.ensure_animation();
-                self.update_visuals();
-            }
             return;
         }
 
@@ -4312,11 +4516,38 @@ impl DockState {
         self.scroll_pan = None;
         self.pressed_idx = None;
         if had_widget {
-            self.refresh_widgets();
+            self.refresh_widgets_throttled();
         }
         self.schedule_preview_hide();
         self.evaluate_auto_hide();
         self.ensure_animation();
+        self.update_visuals();
+    }
+
+    /// Pointer-down snapshot for a shell button. The Start decision also folds
+    /// in WS-3's `was_open_at_press(now)`, which attributes a cloak that landed
+    /// immediately before the click to the same gesture.
+    fn press_shell_button(&mut self, shell: ShellButton) {
+        if shell == ShellButton::Start {
+            use crate::platform::start_menu_state;
+            let now = Instant::now();
+            start_menu_state::note_press(now);
+            let was_open =
+                start_menu_state::is_open() || start_menu_state::was_open_at_press(now);
+            self.pressed_shell_start_was_open = was_open;
+            if !was_open {
+                let foreground = unsafe { GetForegroundWindow() } as usize;
+                let target = restore_target_for_press(
+                    foreground,
+                    start_menu_state::start_window(),
+                    self.hwnd,
+                );
+                if target != 0 {
+                    self.start_restore_hwnd = target;
+                }
+            }
+        }
+        self.pressed_shell = Some(shell);
         self.update_visuals();
     }
 
@@ -4343,6 +4574,11 @@ impl DockState {
         if let Some(is_next) = self.hit_scroll_button(mx, my) {
             self.pressed_scroll = Some(is_next);
             self.update_visuals();
+            return;
+        }
+        // Trailing Start (`End` / `InWidgets`) shares a box with widgets/tray.
+        if let Some(shell) = self.hit_shell_button(mx, my) {
+            self.press_shell_button(shell);
             return;
         }
         let sm = self.live_scroll_metrics();
@@ -4380,37 +4616,11 @@ impl DockState {
                 .hover
                 .begin_slider_capture(wid, slider_id);
             self.hover_capture_id = Some((*wid).to_owned());
-            self.refresh_widgets();
+            self.refresh_widgets_throttled();
             self.update_visuals();
             return;
         }
 
-        if let Some(shell) = self.hit_shell_button(mx, my) {
-            if shell == ShellButton::Start {
-                use crate::platform::start_menu_state;
-                let now = Instant::now();
-                start_menu_state::note_press(now);
-                // Snapshot once, on down. No live `is_open_now()` here or on up.
-                let was_open = start_menu_state::is_open();
-                self.pressed_shell_start_was_open = was_open;
-                if !was_open {
-                    // Save the last real app before Start opens; a Start window
-                    // that is foreground on down must not become the target.
-                    let foreground = unsafe { GetForegroundWindow() } as usize;
-                    let target = restore_target_for_press(
-                        foreground,
-                        start_menu_state::start_window(),
-                        self.hwnd,
-                    );
-                    if target != 0 {
-                        self.start_restore_hwnd = target;
-                    }
-                }
-            }
-            self.pressed_shell = Some(shell);
-            self.update_visuals();
-            return;
-        }
         if let Some(idx) = self.hovered_idx {
             let center = self.live_slot_center_x(idx);
             self.pressed_idx = Some(idx);
@@ -4441,9 +4651,11 @@ impl DockState {
             return;
         }
         self.start_toggle_last = Some(now);
-        // Decision comes only from the pointer-down snapshot: re-querying the
-        // live state here could turn a dismiss into a reopen after the cloak.
-        let was_open = self.pressed_shell_start_was_open;
+        // WS-3's was_open_at_press folds a cloak that landed immediately before
+        // the click into the down snapshot; a live re-query here would turn a
+        // dismiss into a reopen after the cloak.
+        let was_open =
+            self.pressed_shell_start_was_open || start_menu_state::was_open_at_press(now);
         if was_open {
             let hwnd = match start_menu_state::start_window() {
                 0 => opentaskbar_shell::flyout_reposition::find_start_window().unwrap_or(0),
@@ -4481,6 +4693,19 @@ impl DockState {
                 self.scroll_by_step(is_next);
             }
             self.update_visuals();
+            return;
+        }
+        // Shell buttons are resolved before widgets/tray so a trailing Start
+        // button cannot be swallowed by an overlapping widget chip.
+        if let Some(shell) = self.pressed_shell.take() {
+            self.update_visuals();
+            if self.hit_shell_button(mx, my) == Some(shell) {
+                match shell {
+                    ShellButton::Start => self.toggle_start_menu(),
+                    ShellButton::Search => opentaskbar_shell::taskbar::open_search(),
+                    ShellButton::TaskView => opentaskbar_shell::taskbar::open_task_view(),
+                }
+            }
             return;
         }
         let sm = self.live_scroll_metrics();
@@ -4547,7 +4772,7 @@ impl DockState {
                         self.reload_settings_live();
                     }
                     widgets::DirectClickOutcome::Handled => {
-                        self.refresh_widgets();
+                        self.refresh_widgets_throttled();
                         self.update_visuals();
                     }
                     widgets::DirectClickOutcome::OpenFlyout => {
@@ -4569,7 +4794,7 @@ impl DockState {
                             );
                             self.reload_settings_live();
                         } else {
-                            self.refresh_widgets();
+                            self.refresh_widgets_throttled();
                             self.update_visuals();
                         }
                     }
@@ -4577,18 +4802,6 @@ impl DockState {
             }
             return;
         }
-        if let Some(shell) = self.pressed_shell.take() {
-            self.update_visuals();
-            if self.hit_shell_button(mx, my) == Some(shell) {
-                match shell {
-                    ShellButton::Start => self.toggle_start_menu(),
-                    ShellButton::Search => opentaskbar_shell::taskbar::open_search(),
-                    ShellButton::TaskView => opentaskbar_shell::taskbar::open_task_view(),
-                }
-            }
-            return;
-        }
-
         let was_drag = self.finish_drag();
         let clicked_idx = self.pressed_idx.take();
         if was_drag {
@@ -4675,13 +4888,13 @@ impl DockState {
     fn handle_mouse_wheel(&mut self, delta: i16, horizontal: bool) {
         if !horizontal && self.hovered_widget == Some("audio") {
             widgets::adjust_audio_volume(if delta > 0 { 4 } else { -4 });
-            self.refresh_widgets();
+            self.refresh_widgets_throttled();
             self.update_visuals();
             return;
         }
         if !horizontal && self.hovered_widget == Some("keyboard") && delta != 0 {
             self.widget_runtime.cycle_keyboard_layout(delta < 0);
-            self.refresh_widgets();
+            self.refresh_widgets_throttled();
             self.update_visuals();
             return;
         }
@@ -4720,7 +4933,6 @@ impl DockState {
     }
 
     /// Entry point for notification aggregation (`RunningAppProjection.HasNotification`).
-    #[allow(dead_code)]
     fn set_notification_badge(&mut self, launch_path: &str, count: u32) {
         if let Some(slot) = self
             .slots
@@ -4730,6 +4942,41 @@ impl DockState {
             slot.badge = count;
         }
         self.update_visuals();
+    }
+
+    /// Drains EVENT_SYSTEM_ALERT posts on the UI thread. Even when badges are
+    /// disabled the queue is cleared so it cannot grow across a long session.
+    fn drain_notification_badges(&mut self) {
+        let alerts: Vec<String> = NOTIFICATION_ALERTS
+            .lock()
+            .map(|mut queue| std::mem::take(&mut *queue))
+            .unwrap_or_default();
+        if alerts.is_empty() {
+            return;
+        }
+        if !self.settings.notification_badges_enabled
+            || !layout::notification_badges_enabled(&self.settings)
+        {
+            return;
+        }
+        let counts = NOTIFICATION_COUNTS.lock();
+        let mut seen: HashSet<String> = HashSet::new();
+        for path in alerts {
+            if !seen.insert(path.clone()) {
+                continue;
+            }
+            let count = counts
+                .as_ref()
+                .ok()
+                .and_then(|entries| {
+                    entries
+                        .iter()
+                        .find(|(exe, _)| exe == &path)
+                        .map(|(_, count)| *count)
+                })
+                .unwrap_or(1);
+            self.set_notification_badge(&path, count);
+        }
     }
 
     fn set_dock_pin(&mut self, path: &str, pinned: bool) {
@@ -4823,7 +5070,7 @@ impl DockState {
             && delete_files_to_recycle_bin(self.hwnd, &files)
         {
             self.bin_is_full = widgets::is_recycle_bin_non_empty();
-            self.refresh_widgets();
+            self.refresh_widgets_throttled();
             self.update_visuals();
             return;
         }
@@ -4881,7 +5128,7 @@ impl DockState {
                 RecycleBinAction::Open => pins::launch("shell:RecycleBinFolder".to_owned()),
                 RecycleBinAction::Empty => {
                     widgets::empty_recycle_bin();
-                    self.refresh_widgets();
+                    self.refresh_widgets_throttled();
                     self.update_visuals();
                 }
                 RecycleBinAction::None => {}
@@ -5004,7 +5251,7 @@ impl DockState {
                             }
                             widgets::DirectClickOutcome::Handled
                             | widgets::DirectClickOutcome::OpenFlyout => {
-                                self.refresh_widgets();
+                                self.refresh_widgets_throttled();
                                 self.update_visuals();
                             }
                         }
@@ -5470,10 +5717,120 @@ unsafe extern "system" fn win_key_hook(code: i32, wparam: WPARAM, lparam: LPARAM
 thread_local! {
     static WIN_KEY_ALONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Prevents re-entrant `&mut DockState` aliasing when modal flyouts/menus or
-    /// synchronous Win32 callbacks (`SetWindowPos`) dispatch messages to the dock window.
-    static DOCK_WNDPROC_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// synchronous Win32 callbacks (`SetWindowPos`) dispatch messages back to the
+    /// *same* dock window. HWND-keyed so a second dock on this UI thread is not
+    /// blocked by the first one's modal loop.
+    static DOCK_WNDPROC_ACTIVE: std::cell::RefCell<Vec<usize>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// A VSync tick re-entering the guard is re-posted at most once; a second
+    /// re-entry must be dropped instead of ping-ponging forever.
+    static VSYNC_REPOST_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Active dock window handles on this UI thread for `WH_MOUSE_LL` wheel routing.
     static DOCK_HWNDS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+const EVENT_SYSTEM_ALERT: u32 = 0x0010;
+const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
+const WINEVENT_SKIPOWNPROCESS: u32 = 0x0002;
+const OBJID_WINDOW: i32 = 0;
+
+type WinEventProc = unsafe extern "system" fn(HANDLE, u32, HWND, i32, i32, u32, u32);
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn SetWinEventHook(
+        event_min: u32,
+        event_max: u32,
+        hmod: HMODULE,
+        callback: Option<WinEventProc>,
+        id_process: u32,
+        id_thread: u32,
+        flags: u32,
+    ) -> HANDLE;
+    fn UnhookWinEvent(hook: HANDLE) -> i32;
+}
+
+/// Alert queue and per-executable counts shared by the WinEvent callback and
+/// the dock UI threads. The callback only records a path and posts a message;
+/// no badge surface is created off-thread.
+static NOTIFICATION_ALERTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+static NOTIFICATION_COUNTS: Mutex<Vec<(String, u32)>> = Mutex::new(Vec::new());
+
+/// Resolves the executable behind an alert window once, on the hook thread.
+fn exe_path_from_hwnd(hwnd: HWND) -> String {
+    let mut pid = 0u32;
+    unsafe {
+        if hwnd.is_null() || GetWindowThreadProcessId(hwnd, &mut pid) == 0 || pid == 0 {
+            return String::new();
+        }
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return String::new();
+        }
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
+        CloseHandle(handle);
+        if ok == 0 || len == 0 {
+            String::new()
+        } else {
+            String::from_utf16_lossy(&buf[..len as usize])
+        }
+    }
+}
+
+unsafe extern "system" fn notification_alert_hook(
+    _hook: HANDLE,
+    _event: u32,
+    hwnd: HWND,
+    id_object: i32,
+    _id_child: i32,
+    _id_event_thread: u32,
+    _time_ms: u32,
+) {
+    if id_object != OBJID_WINDOW || hwnd.is_null() {
+        return;
+    }
+    let path = exe_path_from_hwnd(hwnd);
+    if path.is_empty() {
+        return;
+    }
+    if let Ok(mut counts) = NOTIFICATION_COUNTS.lock() {
+        if let Some(entry) = counts.iter_mut().find(|(exe, _)| exe == &path) {
+            entry.1 = layout::notification_badge_count(entry.1, 1);
+        } else {
+            counts.push((path.clone(), 1));
+        }
+    }
+    if let Ok(mut queue) = NOTIFICATION_ALERTS.lock() {
+        queue.push(path);
+    }
+    DOCK_HWNDS.with(|list| {
+        for dock in list.borrow().iter() {
+            unsafe {
+                let _ = PostMessageW(
+                    *dock as HWND,
+                    WM_APP_NOTIFICATION_BADGE,
+                    0,
+                    0,
+                );
+            }
+        }
+    });
+}
+
+fn install_notification_alert_hook() -> HANDLE {
+    unsafe {
+        SetWinEventHook(
+            EVENT_SYSTEM_ALERT,
+            EVENT_SYSTEM_ALERT,
+            std::ptr::null_mut(),
+            Some(notification_alert_hook),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        )
+    }
 }
 
 /// Routes `WM_MOUSEWHEEL` / `WM_MOUSEHWHEEL` to unfocused `WS_EX_NOACTIVATE` dock windows
@@ -5482,33 +5839,40 @@ thread_local! {
 unsafe extern "system" fn mouse_wheel_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let msg = wparam as u32;
     if code >= 0 && (msg == WM_MOUSEWHEEL || msg == WM_MOUSEHWHEEL) && lparam != 0 {
-        let busy = DOCK_WNDPROC_ACTIVE.with(std::cell::Cell::get);
-        if !busy {
-            let info = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
-            let target = unsafe { WindowFromPoint(info.pt) };
-            let target_val = target as usize;
-            if target_val != 0 && DOCK_HWNDS.with(|list| list.borrow().contains(&target_val)) {
-                let delta = ((info.mouseData >> 16) & 0xffff) as u16;
+        // Low-level hooks must not call WindowFromPoint (cross-thread / DPI
+        // ambiguity). Post the raw coordinates + delta and let the UI thread
+        // hit-test its own dock rects in the normal message pump.
+        let info = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
+        let delta = ((info.mouseData >> 16) & 0xffff) as u16;
+        let payload = ((delta as usize) << 1) | usize::from(msg == WM_MOUSEHWHEEL);
+        let point = layout::pack_cursor_point(info.pt.x, info.pt.y);
+        DOCK_HWNDS.with(|list| {
+            for hwnd in list.borrow().iter() {
                 unsafe {
-                    let _ = PostMessageW(target, msg, (delta as usize) << 16, 0);
+                    let _ = PostMessageW(
+                        *hwnd as HWND,
+                        WM_APP_WHEEL_ROUTE,
+                        payload,
+                        point as LPARAM,
+                    );
                 }
-                return 1;
             }
-        }
+        });
     }
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
 }
 
-struct DockWndProcGuard;
+struct DockWndProcGuard(usize);
 
 impl DockWndProcGuard {
-    fn try_enter() -> Option<Self> {
-        DOCK_WNDPROC_ACTIVE.with(|flag| {
-            if flag.get() {
+    fn try_enter(hwnd: usize) -> Option<Self> {
+        DOCK_WNDPROC_ACTIVE.with(|active| {
+            let mut active = active.borrow_mut();
+            if active.contains(&hwnd) {
                 None
             } else {
-                flag.set(true);
-                Some(Self)
+                active.push(hwnd);
+                Some(Self(hwnd))
             }
         })
     }
@@ -5516,7 +5880,9 @@ impl DockWndProcGuard {
 
 impl Drop for DockWndProcGuard {
     fn drop(&mut self) {
-        DOCK_WNDPROC_ACTIVE.with(|flag| flag.set(false));
+        DOCK_WNDPROC_ACTIVE.with(|active| {
+            active.borrow_mut().retain(|&hwnd| hwnd != self.0);
+        });
     }
 }
 
@@ -5581,13 +5947,19 @@ unsafe extern "system" fn wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    let Some(_guard) = DockWndProcGuard::try_enter() else {
+    let Some(_guard) = DockWndProcGuard::try_enter(hwnd as usize) else {
         // A reentrant call must not consume the VSync pending flag: it is cleared
-        // only in the WM_APP_VSYNC handler. Re-post the tick instead of dropping it,
-        // otherwise the VSync thread would stall with `tick_pending` stuck true.
+        // only in the normal WM_APP_VSYNC handler. Re-post at most once so the
+        // VSync producer cannot stall with `tick_pending` stuck true, and a
+        // re-post loop can never spin forever.
         if msg == WM_APP_VSYNC {
-            unsafe {
-                let _ = PostMessageW(hwnd, msg, wparam, lparam);
+            let repost = VSYNC_REPOST_PENDING.with(|pending| {
+                layout::vsync_repost_allowed(pending.replace(true))
+            });
+            if repost {
+                unsafe {
+                    let _ = PostMessageW(hwnd, msg, wparam, lparam);
+                }
             }
         }
         return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
@@ -5727,6 +6099,7 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_APP_VSYNC => {
+            VSYNC_REPOST_PENDING.with(|pending| pending.set(false));
             state.tick_pending.store(false, Ordering::Release);
             let moving = state.step_animations(Instant::now());
             state.update_visuals();
@@ -5757,6 +6130,27 @@ unsafe extern "system" fn wnd_proc(
         WM_APP_SETTINGS_RELOAD => {
             // Idle half: save + reload only once per coalesced request.
             state.flush_deferred_settings_reload();
+            0
+        }
+        WM_APP_WHEEL_ROUTE => {
+            // Coordinate-only wheel route: hit-test on this UI thread against
+            // the dock's own rects (never from the low-level hook).
+            let horizontal = (wparam & 1) != 0;
+            let delta = (wparam >> 1) as u32 as i16;
+            let (x, y) = layout::unpack_cursor_point(lparam);
+            let mut pt = POINT { x, y };
+            unsafe {
+                ScreenToClient(hwnd, &mut pt);
+            }
+            let mx = pt.x as f32 / state.dpi;
+            let my = pt.y as f32 / state.dpi;
+            if state.hit_test_dips(mx, my) {
+                state.handle_mouse_wheel(delta, horizontal);
+            }
+            0
+        }
+        WM_APP_NOTIFICATION_BADGE => {
+            state.drain_notification_badges();
             0
         }
         WM_HOTKEY => {
@@ -5962,10 +6356,21 @@ pub fn run(settings: DockSettings) {
     let reload_msg = unsafe { RegisterWindowMessageW(wide(settings_ui::RELOAD_MSG_NAME).as_ptr()) };
 
     let all_monitors = win32::enumerate_monitors();
-    let target_monitors: Vec<MonitorInfo> = if settings.show_on_all_monitors {
-        all_monitors
+    let target_monitors: Vec<MonitorInfo> = if let Some(ref target) = settings.target_display {
+        let named: Vec<MonitorInfo> = all_monitors
+            .iter()
+            .filter(|monitor| monitor.device_name.eq_ignore_ascii_case(target))
+            .cloned()
+            .collect();
+        if named.is_empty() {
+            all_monitors.iter().take(1).cloned().collect()
+        } else {
+            named
+        }
+    } else if settings.show_on_all_monitors || settings.mirror_main_dock {
+        all_monitors.clone()
     } else {
-        all_monitors.into_iter().take(1).collect()
+        all_monitors.iter().take(1).cloned().collect()
     };
 
     let ex_style = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP;
@@ -5975,7 +6380,10 @@ pub fn run(settings: DockSettings) {
         let is_primary = monitor.is_primary;
         let dpi_scale = monitor.dpi_scale;
         let mon_handle = monitor.handle;
-        let rect = compute_window_rect(&settings, initial_slots.len(), monitor.clone());
+        let dock_layout = layout::secondary_dock_layout(&settings, is_primary);
+        let light_strip = dock_layout == layout::SecondaryLayout::LightStrip;
+        let initial_count = if light_strip { 0 } else { initial_slots.len() };
+        let rect = compute_window_rect(&settings, initial_count, monitor.clone());
         let hwnd = unsafe {
             CreateWindowExW(
                 ex_style,
@@ -6010,11 +6418,33 @@ pub fn run(settings: DockSettings) {
             reload_msg,
             settings.clone(),
             initial_pins.clone(),
-            initial_slots.clone(),
-            initial_running.clone(),
+            if light_strip { Vec::new() } else { initial_slots.clone() },
+            if light_strip { Vec::new() } else { initial_running.clone() },
             rect,
+            !is_primary,
+            light_strip,
         ) {
-            Ok(state) => {
+            Ok(mut state) => {
+                if light_strip {
+                    // Secondary shelf reservation: register an AppBar and let
+                    // Explorer trim the rect instead of cloning the shell's bar.
+                    let edge = layout::appbar_position_flags(layout::effective_edge(&settings));
+                    opentaskbar_shell::appbar::register(hwnd_val, 0, "secondary-light-strip");
+                    let requested = RECT {
+                        left: rect.0,
+                        top: rect.1,
+                        right: rect.0 + rect.2,
+                        bottom: rect.1 + rect.3,
+                    };
+                    opentaskbar_shell::appbar::set_position(
+                        hwnd_val,
+                        edge,
+                        requested,
+                        true,
+                        "secondary-light-strip",
+                    );
+                    state.appbar_registered = true;
+                }
                 let ptr = Box::into_raw(Box::new(state));
                 unsafe {
                     SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
@@ -6071,6 +6501,7 @@ pub fn run(settings: DockSettings) {
         unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_wheel_hook), hinstance, 0) };
     let key_hook: HHOOK =
         unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(win_key_hook), hinstance, 0) };
+    let alert_hook = install_notification_alert_hook();
 
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     loop {
@@ -6094,6 +6525,11 @@ pub fn run(settings: DockSettings) {
             let _ = UnhookWindowsHookEx(key_hook);
         }
     }
+    if !alert_hook.is_null() {
+        unsafe {
+            let _ = UnhookWinEvent(alert_hook);
+        }
+    }
     let owner = HOTKEY_OWNER.take();
     if owner != 0 {
         unsafe {
@@ -6106,6 +6542,9 @@ pub fn run(settings: DockSettings) {
 
     for (hwnd, ptr) in created {
         unsafe {
+            if (*ptr).appbar_registered {
+                opentaskbar_shell::appbar::unregister(hwnd as usize, "secondary-light-strip");
+            }
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             DestroyWindow(hwnd);
             drop(Box::from_raw(ptr));
@@ -6437,5 +6876,40 @@ mod tests {
             last_widget_right < trail_left,
             "widgets end ({last_widget_right}) must stay left of trail group ({trail_left})"
         );
+    }
+
+    #[test]
+    fn wheel_route_payload_encodes_delta_axis_and_point() {
+        // Mirrors what mouse_wheel_hook posts and WM_APP_WHEEL_ROUTE decodes.
+        let delta: i16 = 240;
+        let horizontal = true;
+        let payload = ((delta as u16 as usize) << 1) | usize::from(horizontal);
+        assert_eq!((payload >> 1) as u32 as i16, delta);
+        assert_eq!((payload & 1) != 0, horizontal);
+        let point = layout::pack_cursor_point(120, -40);
+        assert_eq!(layout::unpack_cursor_point(point), (120, -40));
+    }
+
+    #[test]
+    fn wndproc_guard_is_scoped_per_hwnd() {
+        let first = DockWndProcGuard::try_enter(11).expect("first dock");
+        let second = DockWndProcGuard::try_enter(22).expect("second dock is not blocked");
+        assert!(DockWndProcGuard::try_enter(11).is_none());
+        drop(first);
+        assert!(DockWndProcGuard::try_enter(11).is_some());
+        assert!(DockWndProcGuard::try_enter(22).is_none());
+        drop(second);
+        assert!(DockWndProcGuard::try_enter(22).is_some());
+    }
+
+    #[test]
+    fn async_snapshot_and_widget_refresh_throttles_come_from_one_policy() {
+        // The dock host consumes the layout policy; keep the budget constants
+        // below the 800 ms TIMER_POLL so no hot path can starve a snapshot.
+        assert!(layout::WINDOW_SNAPSHOT_MIN_INTERVAL <= Duration::from_millis(800));
+        assert!(layout::WIDGET_REFRESH_MIN_INTERVAL >= Duration::from_millis(8));
+        let now = Instant::now();
+        assert!(!layout::window_snapshot_due(Some(now), true, now));
+        assert!(layout::widget_refresh_due(None, now));
     }
 }

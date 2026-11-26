@@ -16,7 +16,8 @@ use windows::Win32::Graphics::DirectComposition::IDCompositionRectangleClip;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_LEFT, VK_RIGHT,
+    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_ESCAPE, VK_LEFT,
+    VK_RIGHT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW,
@@ -236,6 +237,11 @@ struct DynamicIslandWindow {
     hide_progress: f32,
     hide_last_tick: Option<Instant>,
     widget_runtime: WidgetRuntime,
+    /// Expanded-details state machine. Shared with the dock host so Escape,
+    /// paging and `request_details()` follow one policy.
+    island: IslandState,
+    details_bg: VisualNode,
+    details_node: VisualNode,
 }
 
 impl DynamicIslandWindow {
@@ -300,6 +306,12 @@ impl DynamicIslandWindow {
         }
         dcomp.add_child(&dcomp.root, &chrome_node);
         dcomp.add_child(&dcomp.root, &viewport_node);
+        let details_bg = dcomp.create_node().ok()?;
+        let details_node = dcomp.create_node().ok()?;
+        details_bg.hide();
+        details_node.hide();
+        dcomp.add_child(&dcomp.root, &details_bg);
+        dcomp.add_child(&dcomp.root, &details_node);
 
         let mut widget_runtime = WidgetRuntime::default();
         widget_runtime.tick(settings);
@@ -334,6 +346,9 @@ impl DynamicIslandWindow {
             hide_progress: 1.0,
             hide_last_tick: None,
             widget_runtime,
+            island: IslandState::new(widget_ids.clone()),
+            details_bg,
+            details_node,
         });
 
         let ptr = (&mut *boxed as *mut Self) as isize;
@@ -390,6 +405,10 @@ impl DynamicIslandWindow {
             self.slide_offset_px = -((self.current_page as f32) * self.viewport_width_px());
             self.rebuild_page_nodes();
         }
+        // Keep the shared state machine's page view in sync without losing the
+        // expanded flag: a settings reload must not silently collapse the island.
+        self.island.page_ids = self.page_ids.clone();
+        self.island.page_index = self.current_page.min(self.page_ids.len().saturating_sub(1));
 
         self.width_dips = self.width_for_current_page();
         self.position_window();
@@ -428,11 +447,16 @@ impl DynamicIslandWindow {
     }
 
     fn width_for_current_page(&self) -> f32 {
-        let widget_w = self
-            .current_page_id()
-            .map(|id| self.widget_runtime.widget_width_dips(id))
-            .unwrap_or(240.0);
-        let preferred = widget_w + LEFT_CONTROLS_DIPS + RIGHT_CONTROLS_DIPS + 16.0;
+        // Expanded: the shared IslandState eases from the collapsed chip width
+        // to `collapsed + DETAILS_PANEL_WIDTH_DIPS` (media keeps its 560px page).
+        let content_w = if self.island.expanded {
+            self.island.current_width(Instant::now())
+        } else {
+            self.current_page_id()
+                .map(|id| self.widget_runtime.widget_width_dips(id))
+                .unwrap_or(240.0)
+        };
+        let preferred = content_w + LEFT_CONTROLS_DIPS + RIGHT_CONTROLS_DIPS + 16.0;
         let monitor_dips = self.monitor.width() as f32 / self.monitor.dpi_scale.max(0.5);
         policy::clamp_window_width(
             preferred,
@@ -557,6 +581,71 @@ impl DynamicIslandWindow {
                 + self.slide_offset_px;
             node.set_transform(1.0, 1.0, x_px.round(), top_px.round());
         }
+
+        // Expanded details panel: in-place (the island window itself grows by
+        // 246 DIP via IslandState::current_width), never a separate flyout.
+        if self.island.expanded {
+            let details = self.island.details.clone().unwrap_or_else(|| {
+                let mut fallback = WidgetDetails::new(
+                    self.current_page_id().unwrap_or("widget"),
+                    self.current_page_id().unwrap_or("Widget"),
+                );
+                fallback
+                    .lines
+                    .push(DetailLine::new("Details", "No details available"));
+                fallback
+            });
+            let summary = details
+                .lines
+                .iter()
+                .take(3)
+                .map(|line| format!("{}: {}", line.label, line.value))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let panel_w = DETAILS_PANEL_WIDTH_DIPS;
+            let panel_h = COMPACT_HEIGHT_DIPS - 8.0;
+            let panel_x = (self.width_dips - RIGHT_CONTROLS_DIPS - panel_w - 4.0) * dpi;
+            let panel_y = 4.0 * dpi;
+            let bg = self.dcomp.create_rounded_rect_surface(
+                (panel_w * dpi).ceil() as u32,
+                (panel_h * dpi).ceil() as u32,
+                8.0 * dpi,
+                if self.is_dark {
+                    (0x1b, 0x21, 0x2d, 0.97)
+                } else {
+                    (0xf2, 0xf4, 0xfa, 0.97)
+                },
+            );
+            let text = self.dcomp.create_widget_text_surface(
+                &details.title,
+                Some(&summary),
+                panel_w - 10.0,
+                panel_h - 2.0,
+                dpi,
+                self.is_dark,
+            );
+            match (bg, text) {
+                (Ok(bg), Ok(text)) => {
+                    self.details_bg.set_content(Some(&bg));
+                    self.details_bg
+                        .set_transform(1.0, 1.0, panel_x.round(), panel_y.round());
+                    self.details_node.set_content(Some(&text));
+                    self.details_node.set_transform(
+                        1.0,
+                        1.0,
+                        (panel_x + 5.0 * dpi).round(),
+                        (panel_y + 1.0 * dpi).round(),
+                    );
+                }
+                _ => {
+                    self.details_bg.hide();
+                    self.details_node.hide();
+                }
+            }
+        } else {
+            self.details_bg.hide();
+            self.details_node.hide();
+        }
         self.dcomp.commit();
     }
 
@@ -635,6 +724,12 @@ impl DynamicIslandWindow {
         }
         let target = index.min(self.page_ids.len() - 1);
         self.current_page = target;
+        self.island.page_index = target;
+        self.island.details = None;
+        self.island.details_requested = false;
+        if self.island.expanded {
+            self.request_details();
+        }
         let target_offset = -(target as f32) * self.viewport_width_px();
         if animate && self.settings.animations_enabled && !self.settings.focus_mode {
             self.slide_anim = Some(SlideAnim {
@@ -664,6 +759,38 @@ impl DynamicIslandWindow {
         if target != self.current_page {
             self.set_current_page(target, true);
         }
+    }
+
+    /// In-place expand/collapse. The island window grows by the 246 DIP details
+    /// panel (see `IslandState::current_width`); no separate flyout is opened.
+    fn set_expanded(&mut self, expanded: bool) {
+        if !self.island.set_expanded(expanded) {
+            return;
+        }
+        if expanded {
+            self.request_details();
+        }
+        self.width_dips = self.width_for_current_page();
+        self.position_window();
+        self.render_all();
+    }
+
+    /// `TimedWidgetTile.DetailsRequested`: ask the shared `IslandState` for a
+    /// one-shot payload from the live chip spec, so the panel always mirrors
+    /// what the collapsed chip is showing.
+    fn request_details(&mut self) {
+        let Some(id) = self.current_page_id().map(str::to_owned) else {
+            return;
+        };
+        let spec = self.widget_runtime.chip_spec(&id, &self.settings, self.is_dark);
+        let lines = spec.details_lines();
+        self.island.request_details(|widget_id| {
+            let mut details = WidgetDetails::new(widget_id, widget_id);
+            for (label, value) in lines {
+                details.lines.push(DetailLine::new(label, value));
+            }
+            Some(details).filter(|details| !details.is_empty())
+        });
     }
 
     fn tick(&mut self) {
@@ -969,7 +1096,10 @@ impl DynamicIslandWindow {
                 match btn {
                     IslandButton::Prev => self.move_page(-1),
                     IslandButton::Next => self.move_page(1),
-                    IslandButton::Expand => self.open_current_flyout(),
+                    IslandButton::Expand => {
+                        let expanded = self.island.expanded;
+                        self.set_expanded(!expanded);
+                    }
                 }
             }
             return;
@@ -1178,7 +1308,16 @@ unsafe extern "system" fn island_wnd_proc(
         }
         WM_KEYDOWN => {
             let vk = wparam as u16;
-            if vk == VK_LEFT {
+            if vk == VK_ESCAPE {
+                // Escape collapses the in-place details panel (shared state machine).
+                if state.island.pre_process_input(IslandInput::Escape)
+                    == InputDisposition::Consumed
+                {
+                    state.width_dips = state.width_for_current_page();
+                    state.position_window();
+                    state.render_all();
+                }
+            } else if vk == VK_LEFT {
                 state.move_page(-1);
             } else if vk == VK_RIGHT {
                 state.move_page(1);
@@ -1671,6 +1810,27 @@ mod tests {
         assert_eq!(island.details.as_ref().unwrap().lines.len(), 2);
         // A second request on the same page must not fire the provider again.
         assert!(!island.request_details(|_| panic!("provider must not be called twice")));
+    }
+
+    #[test]
+    fn in_place_expand_grows_by_details_panel_and_escape_collapses() {
+        let mut island = IslandState::new(pages());
+        let collapsed = width_for_page("clock", false);
+        island.request_details(|id| {
+            Some(
+                WidgetDetails::new(id, "Date and time")
+                    .line("Timezone", "Europe/Istanbul"),
+            )
+        });
+        let now = Instant::now();
+        assert!(island.current_width(now + Duration::from_millis(200)) >= collapsed + 246.0 - 0.01);
+        assert_eq!(
+            island.pre_process_input(IslandInput::Escape),
+            InputDisposition::Consumed
+        );
+        assert!(!island.expanded);
+        assert!(island.details.is_none());
+        assert_eq!(island.current_width(now), collapsed);
     }
 
     #[test]
