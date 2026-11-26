@@ -32,6 +32,12 @@ static REGISTRY: Mutex<Registry> = Mutex::new(Registry::new());
 const MAX_ENTRIES: usize = 16;
 const FLAG_NAME: &str = "native_flyout_reposition";
 
+/// Exact executable file names of each shell flyout host. Shared with the
+/// reposition workers so discovery and journaling cannot drift apart.
+pub const START_EXE: &str = "startmenuexperiencehost.exe";
+pub const SEARCH_EXES: &[&str] = &["searchhost.exe", "searchapp.exe"];
+pub const CONTROL_CENTER_EXES: &[&str] = &["shellexperiencehost.exe", "systemsettings.exe"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FlyoutPosition {
     pub hwnd: usize,
@@ -342,16 +348,17 @@ pub fn find_flyout_windows(exe_names: &[&str]) -> Vec<(usize, u32)> {
 
 /// Records Start's original position (Windows 10/11 `StartMenuExperienceHost`).
 pub fn write_start() {
-    for (hwnd, pid) in find_flyout_windows(&["startmenuexperiencehost.exe"]) {
+    for (hwnd, pid) in find_flyout_windows(&[START_EXE]) {
         if let Some((left, top, width, height)) = window_origin(hwnd) {
             remember(hwnd, pid, left, top, width, height);
         }
     }
 }
 
-/// Records Windows Search's original position (`SearchHost.exe`).
+/// Records Windows Search's original position (`SearchHost.exe` / SearchApp on
+/// Windows 10).
 pub fn write_search() {
-    for (hwnd, pid) in find_flyout_windows(&["searchhost.exe"]) {
+    for (hwnd, pid) in find_flyout_windows(SEARCH_EXES) {
         if let Some((left, top, width, height)) = window_origin(hwnd) {
             remember(hwnd, pid, left, top, width, height);
         }
@@ -361,7 +368,7 @@ pub fn write_search() {
 /// Records Control Center / Quick Settings' original position. Windows 11 hosts
 /// it in `ShellExperienceHost.exe`, Windows 10 in `SystemSettings.exe`.
 pub fn write_control_center() {
-    for (hwnd, pid) in find_flyout_windows(&["shellexperiencehost.exe", "systemsettings.exe"]) {
+    for (hwnd, pid) in find_flyout_windows(CONTROL_CENTER_EXES) {
         if let Some((left, top, width, height)) = window_origin(hwnd) {
             remember(hwnd, pid, left, top, width, height);
         }
@@ -412,6 +419,28 @@ mod tests {
         assert!(!rect_is_journalable(100, 99));
         assert!(rect_is_journalable(100, 100));
         assert!(rect_is_journalable(1920, 1080));
+    }
+
+    #[test]
+    fn journaled_flyout_hosts_are_shared_with_reposition_discovery() {
+        assert_eq!(START_EXE, "startmenuexperiencehost.exe");
+        assert_eq!(SEARCH_EXES, &["searchhost.exe", "searchapp.exe"]);
+        assert_eq!(
+            CONTROL_CENTER_EXES,
+            &["shellexperiencehost.exe", "systemsettings.exe"]
+        );
+        assert!(exe_name_matches(
+            r"C:\Windows\SystemApps\SearchHost.exe",
+            SEARCH_EXES
+        ));
+        assert!(exe_name_matches(
+            r"C:\Windows\SystemApps\SystemSettings.exe",
+            CONTROL_CENTER_EXES
+        ));
+        assert!(!exe_name_matches(
+            r"C:\Temp\evil-searchhost.exe",
+            SEARCH_EXES
+        ));
     }
 
     #[test]

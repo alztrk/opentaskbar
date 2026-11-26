@@ -7,16 +7,25 @@
 //!
 //! - [`find_start_window`] discovers the live Start window (PID first, class
 //!   and localized title as a fallback),
-//! - [`reposition_start`] schedules a bounded, generation-cancellable move
-//!   loop,
-//! - [`is_anchored`] reports whether the last loop actually succeeded and the
-//!   window is still open, [`anchor_pending`] reports an in-flight attempt,
-//! - [`close_start`] / [`open_start_via_syscommand`] perform **verified** shell
-//!   triggers: a focus + injected `VK_ESCAPE` close, and an `SC_TASKLIST` post
-//!   with a `VK_LWIN` chord fallback. State flags move only after verification.
+//! - [`reposition_flyout`] schedules a bounded, generation-cancellable move
+//!   loop for [`FlyoutKind::Start`], [`FlyoutKind::Search`] or
+//!   [`FlyoutKind::ControlCenter`]; [`reposition_start`] is the Start wrapper,
+//! - [`is_anchored`] reports whether the last Start loop actually succeeded and
+//!   the window is still open, [`anchor_pending`] reports an in-flight attempt,
+//! - [`close_start`] focuses the flyout and injects `VK_ESCAPE` (falling back to
+//!   posted key messages when focus cannot be acquired), and
+//!   [`open_start_via_syscommand`] posts `SC_TASKLIST` **without blocking**.
+//!
+//! Generation ownership is strict: `mark_opened()` is fired only by the
+//! UNCLOAKED hook, *after* the new anchor worker has been scheduled, so a
+//! verification step can never cancel that worker. Verification of a shell
+//! open (and its `VK_LWIN` fallback) runs on a worker thread and never touches
+//! the generation counter. A delayed close carries a token/HWND guard so it
+//! cannot invalidate a newer open.
 //!
 //! `flyout_writer::remember()` is called with the *original* position before
-//! the first move, so the native watchdog can restore Start on shutdown.
+//! the first move, so the native watchdog can restore every flyout on
+//! shutdown.
 
 use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
@@ -89,7 +98,18 @@ const ATTEMPTS: usize = 40;
 const ATTEMPT_DELAY_MS: u64 = 20;
 const SETTLE_FRAMES: usize = 6;
 const SETTLE_DELAY_MS: u64 = 25;
+/// C# `RepositionSearchAsync`: 35 attempts x 20 ms, then 5 settle frames x 30 ms.
+const SEARCH_ATTEMPTS: usize = 35;
+const SEARCH_DELAY_MS: u64 = 20;
+const SEARCH_SETTLE_FRAMES: usize = 5;
+const SEARCH_SETTLE_DELAY_MS: u64 = 30;
+/// C# `RepositionControlCenterAsync`: 24 attempts x 25 ms and one 75 ms re-assert.
+const CONTROL_CENTER_ATTEMPTS: usize = 24;
+const CONTROL_CENTER_DELAY_MS: u64 = 25;
+const CONTROL_CENTER_REASSERT_MS: u64 = 75;
 const SWP_FLAGS: u32 = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+const CONTROL_CENTER_CLASS: &str = "ControlCenterWindow";
+const SEARCH_TITLES: [&str; 3] = ["Search", "Arama", "Ara"];
 /// The `is_anchored` → `is_valid_hwnd` → `pid_is_start_host` chain is polled on
 /// the dock's 200 ms tick. Reopening the process and reading its image path on
 /// every tick is pure disk/process I/O on a hot path, so both successful and
@@ -99,9 +119,45 @@ const SWP_FLAGS: u32 = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
 const PID_EXE_CACHE_TTL: Duration = Duration::from_secs(2);
 static PID_EXE_CACHE: OnceLock<Mutex<HashMap<u32, (String, Instant)>>> = OnceLock::new();
 
-/// Bumped on every new reposition request. Workers capture it and abort as
-/// soon as a newer request (or a journal restore) supersedes them.
-static GENERATION: AtomicU64 = AtomicU64::new(0);
+/// Which native shell flyout a reposition worker owns. Each kind has its own
+/// generation, mirroring the C# per-surface `CancellationTokenSource`: opening
+/// Search must not cancel an in-flight Start worker (and vice versa).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FlyoutKind {
+    #[default]
+    Start,
+    Search,
+    ControlCenter,
+}
+
+impl FlyoutKind {
+    #[must_use]
+    const fn index(self) -> usize {
+        match self {
+            Self::Start => 0,
+            Self::Search => 1,
+            Self::ControlCenter => 2,
+        }
+    }
+
+    #[must_use]
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Start => "Start",
+            Self::Search => "Search",
+            Self::ControlCenter => "ControlCenter",
+        }
+    }
+}
+
+/// Bumped on every new reposition request for a given flyout. Workers capture
+/// it and abort as soon as a newer request (or a journal restore) supersedes
+/// them. A single global counter would let one surface cancel another.
+static GENERATION: [AtomicU64; 3] = [
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+    AtomicU64::new(0),
+];
 static ANCHORED: AtomicBool = AtomicBool::new(false);
 static ANCHOR_VALID: AtomicBool = AtomicBool::new(false);
 static ANCHORED_HWND: AtomicUsize = AtomicUsize::new(0);
@@ -285,6 +341,96 @@ fn max(a: i32, b: i32) -> i32 {
     a.max(b)
 }
 
+/// C# `ComputeSearchPosition` parity. Search uses the margin (not the larger
+/// flyout gap) for its bottom-edge vertical offset and tracks the button's
+/// horizontal position on a bottom dock.
+#[must_use]
+pub fn compute_search_target(
+    anchor: Anchor,
+    flyout_width: i32,
+    flyout_height: i32,
+    work: Anchor,
+    edge: DockEdge,
+    dpi: u32,
+) -> (i32, i32) {
+    let margin = scale_px(8, dpi);
+    let gap = scale_px(12, dpi);
+    let min_x = work.left + margin;
+    let max_x = max(min_x, work.right - flyout_width - margin);
+    let min_y = work.top + margin;
+    let max_y = max(min_y, work.bottom - flyout_height - margin);
+    match edge {
+        DockEdge::Left => (
+            clamp(anchor.right + gap, min_x, max_x),
+            side_flyout_y(anchor, flyout_height, work, dpi),
+        ),
+        DockEdge::Right => (
+            clamp(anchor.left - flyout_width - gap, min_x, max_x),
+            side_flyout_y(anchor, flyout_height, work, dpi),
+        ),
+        DockEdge::Bottom => (
+            clamp(anchor.left - margin, min_x, max_x),
+            clamp(anchor.top - flyout_height - margin, min_y, max_y),
+        ),
+    }
+}
+
+/// C# `RepositionControlCenterAsync` parity: the panel is centered on the
+/// anchor for a bottom dock, or centered vertically beside a side dock.
+#[must_use]
+pub fn compute_control_center_target(
+    anchor: Anchor,
+    flyout_width: i32,
+    flyout_height: i32,
+    work: Anchor,
+    edge: DockEdge,
+    dpi: u32,
+) -> (i32, i32) {
+    let margin = scale_px(8, dpi);
+    let gap = scale_px(12, dpi);
+    let min_x = work.left + margin;
+    let max_x = max(min_x, work.right - flyout_width - margin);
+    let min_y = work.top + margin;
+    let max_y = max(min_y, work.bottom - flyout_height - margin);
+    let center_x = (anchor.left + anchor.right) / 2;
+    let center_y = (anchor.top + anchor.bottom) / 2;
+    match edge {
+        DockEdge::Left => (
+            clamp(anchor.right + gap, min_x, max_x),
+            clamp(center_y - flyout_height / 2, min_y, max_y),
+        ),
+        DockEdge::Right => (
+            clamp(anchor.left - flyout_width - gap, min_x, max_x),
+            clamp(center_y - flyout_height / 2, min_y, max_y),
+        ),
+        DockEdge::Bottom => (
+            clamp(center_x - flyout_width / 2, min_x, max_x),
+            clamp(anchor.top - flyout_height - gap, min_y, max_y),
+        ),
+    }
+}
+
+/// Geometry for a specific flyout kind. Start keeps the full-screen canvas
+/// compensation; Search and Control Center use their own C#-parity formulas.
+#[must_use]
+pub fn compute_flyout_target(
+    kind: FlyoutKind,
+    anchor: Anchor,
+    width: i32,
+    height: i32,
+    work: Anchor,
+    edge: DockEdge,
+    dpi: u32,
+) -> (i32, i32) {
+    match kind {
+        FlyoutKind::Start => compute_target(anchor, width, height, work, edge, dpi),
+        FlyoutKind::Search => compute_search_target(anchor, width, height, work, edge, dpi),
+        FlyoutKind::ControlCenter => {
+            compute_control_center_target(anchor, width, height, work, edge, dpi)
+        }
+    }
+}
+
 /// Reads the Windows 11 taskbar alignment setting (`TaskbarAl` under
 /// `HKCU\...\Explorer\Advanced`); `0` means left-aligned. Missing or malformed
 /// values fall back to the centered default.
@@ -364,21 +510,27 @@ fn token_is_current(token: u64, current: u64) -> bool {
     token == current
 }
 
-fn generation() -> u64 {
-    GENERATION.load(Ordering::Acquire)
+fn generation_for(kind: FlyoutKind) -> u64 {
+    GENERATION[kind.index()].load(Ordering::Acquire)
 }
 
-/// A worker stops when a newer request arrives or when `flyout_writer`
-/// restores/clears the journal (its generation is bumped on both paths).
-fn cancelled(token: u64, writer_token: u64) -> bool {
-    !token_is_current(token, generation()) || !flyout_writer::is_current(writer_token)
+/// Advances one flyout's generation and returns the freshly captured token.
+fn bump_generation(kind: FlyoutKind) -> u64 {
+    GENERATION[kind.index()].fetch_add(1, Ordering::AcqRel) + 1
+}
+
+/// A worker stops when a newer request for *its* flyout arrives or when
+/// `flyout_writer` restores/clears the journal (its generation is bumped on
+/// both paths).
+fn cancelled(kind: FlyoutKind, token: u64, writer_token: u64) -> bool {
+    !token_is_current(token, generation_for(kind)) || !flyout_writer::is_current(writer_token)
 }
 
 /// Publishes an anchor only if no newer request/journal restore superseded the
 /// worker in the meantime. The final `cancelled` check happens immediately
 /// before the state stores so a stale worker cannot win a race.
 fn set_anchored(hwnd: usize, token: u64, writer_token: u64) -> bool {
-    if cancelled(token, writer_token) || !is_valid_hwnd(hwnd) {
+    if cancelled(FlyoutKind::Start, token, writer_token) || !is_valid_hwnd(hwnd) {
         return false;
     }
     ANCHORED_HWND.store(hwnd, Ordering::Release);
@@ -394,25 +546,99 @@ fn clear_anchor_state() {
     ANCHOR_ATTEMPT.store(false, Ordering::Release);
 }
 
+/// The HWND + generation of the close currently in progress. Both fields are
+/// guarded by one mutex so the token and the handle are always observed as a
+/// pair: a new open clears the session, which makes a delayed close harmless.
+static CLOSE_SESSION: Mutex<(u64, usize)> = Mutex::new((0, 0));
+
+fn clear_close_session() {
+    if let Ok(mut session) = CLOSE_SESSION.lock() {
+        *session = (0, 0);
+    }
+}
+
+/// Begins a close session. The generation bump invalidates a stale anchor
+/// worker immediately; the returned pair is the token the caller must present
+/// before it is allowed to call `mark_closed()`.
+fn begin_close(hwnd: usize) -> (u64, usize) {
+    let token = bump_generation(FlyoutKind::Start);
+    let session = (token, hwnd);
+    if let Ok(mut current) = CLOSE_SESSION.lock() {
+        *current = session;
+    }
+    session
+}
+
+/// True while this close still owns the Start transition. A genuine open
+/// (`mark_opened`) clears the session *and* advances the generation, so either
+/// signal alone is enough to reject a stale close.
+fn close_session_is_current(session: (u64, usize)) -> bool {
+    let owner = CLOSE_SESSION.lock().is_ok_and(|current| *current == session);
+    owner && token_is_current(session.0, generation_for(FlyoutKind::Start))
+}
+
+/// Clears the session on drop, but only while it still belongs to this close.
+struct CloseSessionGuard((u64, usize));
+
+impl Drop for CloseSessionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut current) = CLOSE_SESSION.lock()
+            && *current == self.0
+        {
+            *current = (0, 0);
+        }
+    }
+}
+
 /// Invalidates a previous result without claiming a verified open. Used at the
 /// start of an open trigger so the dock never sees a stale anchor while the
-/// verification window is in progress.
-fn invalidate_anchor() {
-    GENERATION.fetch_add(1, Ordering::AcqRel);
+/// verification window is in progress. Returns the new generation so callers
+/// can pass it to a verification worker.
+fn invalidate_anchor() -> u64 {
+    let token = bump_generation(FlyoutKind::Start);
     clear_anchor_state();
+    token
 }
 
-/// Clears the anchored flag only after a *verified* close. WS-C can call this
-/// from its Start close/focus handler in addition to the built-in monitor.
+/// Clears the anchored flag and cancels any pending close. WS-C calls this from
+/// the CLOAKED hook for a genuine dismissal.
 pub fn mark_closed() {
-    invalidate_anchor();
+    let _ = invalidate_anchor();
+    clear_close_session();
 }
 
-/// Called after an open trigger has been verified with `find_start_window()`.
-/// A fresh Start opening invalidates any previous anchoring result (including
-/// `ANCHOR_VALID` and the old HWND) until the new flyout has been moved.
+/// The **only** place that claims a verified open. Called from the UNCLOAKED
+/// hook (after the new anchor has been scheduled), never from an open trigger
+/// or its verification worker — that double bump used to cancel the fresh
+/// worker. It also invalidates any close still in flight.
 pub fn mark_opened() {
-    invalidate_anchor();
+    let _ = invalidate_anchor();
+    clear_close_session();
+}
+
+/// How ESC reaches the flyout. A focused window accepts global `SendInput`;
+/// otherwise the key is posted directly to its HWND so injected input cannot
+/// land in an unrelated foreground window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EscDelivery {
+    SendInput,
+    Posted,
+}
+
+#[must_use]
+pub fn esc_delivery(foreground_acquired: bool) -> EscDelivery {
+    if foreground_acquired {
+        EscDelivery::SendInput
+    } else {
+        EscDelivery::Posted
+    }
+}
+
+/// The `VK_LWIN` fallback fires only when the shell post failed or the open
+/// could not be verified. Pure so the worker policy is testable.
+#[must_use]
+pub fn open_fallback_needed(posted: bool, verified: bool) -> bool {
+    !posted || !verified
 }
 
 /// True whether an anchor attempt is currently scheduled but not concluded.
@@ -732,6 +958,74 @@ fn find_start_window_by_title() -> Option<usize> {
     None
 }
 
+/// True when `hwnd` belongs to one of the exact host executable names. Unlike
+/// a class/title match this cannot authorize moving a recycled handle owned by
+/// an unrelated process.
+fn window_belongs_to(hwnd: usize, exe_names: &[&str]) -> bool {
+    let mut pid = 0u32;
+    // SAFETY: querying the PID of a handle discovered in this enumeration pass.
+    unsafe { GetWindowThreadProcessId(hwnd as HWND, &mut pid) };
+    if pid == 0 {
+        return false;
+    }
+    process_exe(pid).is_some_and(|exe| {
+        let name = flyout_writer::exe_file_name(&exe)
+            .trim()
+            .to_ascii_lowercase();
+        exe_names.iter().any(|candidate| name == *candidate)
+    })
+}
+
+/// Windows 10 Search fallback (C# `FindLegacySearchWindows`): a localized
+/// `Windows.UI.Core.CoreWindow` whose PID still belongs to a Search host.
+fn find_search_window_by_title() -> Option<usize> {
+    let class = wide(CORE_WINDOW_CLASS);
+    for title in SEARCH_TITLES {
+        let name = wide(title);
+        // SAFETY: null-terminated UTF-16 literals; the handle is validated next.
+        let hwnd = unsafe { FindWindowW(class.as_ptr(), name.as_ptr()) };
+        if hwnd.is_null() || !is_window_live(hwnd as usize) {
+            continue;
+        }
+        if window_belongs_to(hwnd as usize, flyout_writer::SEARCH_EXES)
+            && window_rect(hwnd as usize).is_some_and(|r| rect_area(r) > 0)
+        {
+            return Some(hwnd as usize);
+        }
+    }
+    None
+}
+
+/// Finds Search windows with the same PID check the journal writer uses. The
+/// caller picks the largest rect (matching C# `OrderByDescending(area)`).
+fn find_search_windows() -> Vec<usize> {
+    let mut windows: Vec<usize> = flyout_writer::find_flyout_windows(flyout_writer::SEARCH_EXES)
+        .into_iter()
+        .map(|(hwnd, _)| hwnd)
+        .collect();
+    if windows.is_empty() {
+        if let Some(hwnd) = find_search_window_by_title() {
+            windows.push(hwnd);
+        }
+    }
+    windows
+}
+
+/// Control Center is a specific window class; the PID check keeps a spoofed
+/// class name from authorizing a move of an unrelated application.
+fn find_control_center_window() -> Option<usize> {
+    let class = wide(CONTROL_CENTER_CLASS);
+    // SAFETY: a fixed null-terminated class name with a null window title.
+    let hwnd = unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) };
+    if hwnd.is_null() || !is_window_live(hwnd as usize) {
+        return None;
+    }
+    if !window_belongs_to(hwnd as usize, flyout_writer::CONTROL_CENTER_EXES) {
+        return None;
+    }
+    window_rect(hwnd as usize).is_some_and(|r| rect_area(r) > 0).then_some(hwnd as usize)
+}
+
 fn work_area(anchor: Anchor) -> Anchor {
     let rect = RECT {
         left: anchor.left,
@@ -776,53 +1070,79 @@ fn apply_position(hwnd: usize, x: i32, y: i32) -> bool {
 
 // ---- Public entry points -------------------------------------------------------
 
-/// Schedules the Start flyout reposition on a background worker.
+/// Schedules a native flyout reposition on a background worker for `kind`.
 ///
-/// Returns `false` only when nothing could be scheduled (invalid anchor or
-/// thread creation failure). The actual result is reported asynchronously via
-/// [`is_anchored`], so the UI thread never blocks on shell animation frames.
-/// A new call cancels any in-flight worker via the generation token.
-pub fn reposition_start(anchor: Anchor, hwnd_hint: usize) -> bool {
+/// Returns `false` only when nothing could be scheduled (disabled feature,
+/// invalid anchor or thread creation failure). The real result is reported
+/// asynchronously via [`is_anchored`] for Start, so the UI thread never blocks
+/// on shell animation frames. A new call cancels any in-flight worker for the
+/// *same* flyout via its generation token, and journal restore cancels all.
+pub fn reposition_flyout(kind: FlyoutKind, anchor: Anchor, hwnd_hint: usize) -> bool {
     if !is_enabled() {
-        log::info("StartAnchor disabled by the native flyout flag.");
+        log::info(format!(
+            "{}Anchor disabled by the native flyout flag.",
+            kind.label()
+        ));
         return false;
     }
     if !anchor.is_valid() {
-        log::warn("StartAnchor rejected an empty anchor rect.");
-        mark_closed();
+        log::warn(format!("{}Anchor rejected an empty anchor rect.", kind.label()));
+        if kind == FlyoutKind::Start {
+            mark_closed();
+        }
         return false;
     }
-    let token = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
-    ANCHORED.store(false, Ordering::Release);
-    ANCHOR_VALID.store(true, Ordering::Release);
-    ANCHORED_HWND.store(0, Ordering::Release);
-    ANCHOR_ATTEMPT.store(true, Ordering::Release);
+    let token = bump_generation(kind);
+    if kind == FlyoutKind::Start {
+        ANCHORED.store(false, Ordering::Release);
+        ANCHOR_VALID.store(true, Ordering::Release);
+        ANCHORED_HWND.store(0, Ordering::Release);
+        ANCHOR_ATTEMPT.store(true, Ordering::Release);
+    }
     let writer_token = flyout_writer::generation();
     let edge = load_from(&settings_path()).edge;
-    let anchor_copy = anchor;
-
-    let spawned = thread::Builder::new()
-        .name("opentaskbar-start-anchor".into())
-        .spawn(move || anchor_worker(anchor_copy, hwnd_hint, edge, token, writer_token));
+    let name = format!("opentaskbar-{}-anchor", kind.label().to_ascii_lowercase());
+    let spawned = thread::Builder::new().name(name).spawn(move || {
+        flyout_worker(kind, anchor, hwnd_hint, edge, token, writer_token)
+    });
     if spawned.is_err() {
-        log::error("StartAnchor could not spawn its reposition worker.");
-        mark_closed();
+        log::error(format!(
+            "{}Anchor could not spawn its reposition worker.",
+            kind.label()
+        ));
+        if kind == FlyoutKind::Start {
+            mark_closed();
+        }
         return false;
     }
     log::info(format!(
-        "StartAnchor scheduled [{},{}-{},{}], edge {edge:?}, hint {hwnd_hint:#x}.",
-        anchor.left, anchor.top, anchor.right, anchor.bottom
+        "{}Anchor scheduled [{},{}-{},{}], edge {edge:?}, hint {hwnd_hint:#x}.",
+        kind.label(),
+        anchor.left,
+        anchor.top,
+        anchor.right,
+        anchor.bottom
     ));
     true
 }
 
-/// Clears the pending flag on every worker exit path, but never steals it from
-/// a newer attempt (or from a close/open transition that bumped the token).
-struct PendingGuard(u64);
+/// Back-compatible Start entry point. Kept for the app's UNCLOAKED callback.
+pub fn reposition_start(anchor: Anchor, hwnd_hint: usize) -> bool {
+    reposition_flyout(FlyoutKind::Start, anchor, hwnd_hint)
+}
+
+/// Clears the Start pending flag on every worker exit path, but never steals it
+/// from a newer attempt (or from a close/open transition that bumped the token).
+struct PendingGuard {
+    token: u64,
+    kind: FlyoutKind,
+}
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        if token_is_current(self.0, generation()) {
+        if self.kind == FlyoutKind::Start
+            && token_is_current(self.token, generation_for(FlyoutKind::Start))
+        {
             ANCHOR_ATTEMPT.store(false, Ordering::Release);
         }
     }
@@ -846,12 +1166,45 @@ fn journal_original(hwnd: usize, pid: u32, canvas: bool, work: Anchor) {
     flyout_writer::remember(hwnd, pid, left, top, width, height);
 }
 
-fn anchor_worker(anchor: Anchor, hwnd_hint: usize, edge: DockEdge, token: u64, writer_token: u64) {
-    let _pending = PendingGuard(token);
+fn flyout_worker(
+    kind: FlyoutKind,
+    anchor: Anchor,
+    hwnd_hint: usize,
+    edge: DockEdge,
+    token: u64,
+    writer_token: u64,
+) {
     let work = work_area(anchor);
+    match kind {
+        FlyoutKind::Start => start_worker(anchor, hwnd_hint, edge, token, writer_token, work),
+        FlyoutKind::Search => search_worker(anchor, edge, token, writer_token, work),
+        FlyoutKind::ControlCenter => {
+            control_center_worker(anchor, edge, token, writer_token, work)
+        }
+    }
+}
+
+fn dpi_for(hwnd: usize) -> u32 {
+    // SAFETY: DPI query on a handle validated by the caller.
+    let dpi = unsafe { GetDpiForWindow(hwnd as HWND) };
+    if dpi == 0 { 96 } else { dpi }
+}
+
+fn start_worker(
+    anchor: Anchor,
+    hwnd_hint: usize,
+    edge: DockEdge,
+    token: u64,
+    writer_token: u64,
+    work: Anchor,
+) {
+    let _pending = PendingGuard {
+        token,
+        kind: FlyoutKind::Start,
+    };
     for _ in 0..ATTEMPTS {
         thread::sleep(Duration::from_millis(ATTEMPT_DELAY_MS));
-        if cancelled(token, writer_token) {
+        if cancelled(FlyoutKind::Start, token, writer_token) {
             return;
         }
         // A cloak-event HWND can be recycled; revalidate every round, then
@@ -886,7 +1239,7 @@ fn anchor_worker(anchor: Anchor, hwnd_hint: usize, edge: DockEdge, token: u64, w
         let dpi = unsafe { GetDpiForWindow(hwnd as HWND) };
         let dpi = if dpi == 0 { 96 } else { dpi };
         let (x, y) = compute_target(anchor, width, height, work, edge, dpi);
-        if cancelled(token, writer_token) || !is_valid_hwnd(hwnd) {
+        if cancelled(FlyoutKind::Start, token, writer_token) || !is_valid_hwnd(hwnd) {
             return;
         }
         if !apply_position(hwnd, x, y) {
@@ -894,14 +1247,14 @@ fn anchor_worker(anchor: Anchor, hwnd_hint: usize, edge: DockEdge, token: u64, w
         }
         for _ in 0..SETTLE_FRAMES {
             thread::sleep(Duration::from_millis(SETTLE_DELAY_MS));
-            if cancelled(token, writer_token) || !is_valid_hwnd(hwnd) {
+            if cancelled(FlyoutKind::Start, token, writer_token) || !is_valid_hwnd(hwnd) {
                 return;
             }
             apply_position(hwnd, x, y);
         }
         // Explorer can re-assert its own Z-order/position right after the
         // entrance transition; one final move wins that race.
-        if cancelled(token, writer_token) || !is_valid_hwnd(hwnd) || !apply_position(hwnd, x, y) {
+        if cancelled(FlyoutKind::Start, token, writer_token) || !is_valid_hwnd(hwnd) || !apply_position(hwnd, x, y) {
             return;
         }
         if !set_anchored(hwnd, token, writer_token) {
@@ -933,7 +1286,7 @@ fn monitor_while_open(hwnd: usize, token: u64, writer_token: u64) {
     let mut misses = 0u8;
     loop {
         thread::sleep(Duration::from_millis(100));
-        if cancelled(token, writer_token) {
+        if cancelled(FlyoutKind::Start, token, writer_token) {
             return;
         }
         if is_valid_hwnd(hwnd) {
@@ -947,6 +1300,163 @@ fn monitor_while_open(hwnd: usize, token: u64, writer_token: u64) {
             }
         }
     }
+}
+
+/// Picks the largest live window (C#'s `OrderByDescending(area).First()`).
+fn largest_window(candidates: Vec<usize>) -> Option<usize> {
+    let mut best: Option<(usize, i64)> = None;
+    for hwnd in candidates {
+        if !is_window_live(hwnd) {
+            continue;
+        }
+        let Some(rect) = window_rect(hwnd) else {
+            continue;
+        };
+        let area = rect_area(rect);
+        if area > 0 && best.map_or(true, |(_, previous)| area > previous) {
+            best = Some((hwnd, area));
+        }
+    }
+    best.map(|(hwnd, _)| hwnd)
+}
+
+fn window_pid(hwnd: usize) -> u32 {
+    let mut pid = 0u32;
+    // SAFETY: querying the PID of a handle validated by the caller.
+    unsafe { GetWindowThreadProcessId(hwnd as HWND, &mut pid) };
+    pid
+}
+
+/// C# `RepositionSearchAsync` parity: bounded discovery, journal the original
+/// rect, re-assert across settle frames. Search uses its own generation, so it
+/// never cancels a Start worker running at the same time.
+fn search_worker(
+    anchor: Anchor,
+    edge: DockEdge,
+    token: u64,
+    writer_token: u64,
+    work: Anchor,
+) {
+    for _ in 0..SEARCH_ATTEMPTS {
+        thread::sleep(Duration::from_millis(SEARCH_DELAY_MS));
+        if cancelled(FlyoutKind::Search, token, writer_token) {
+            return;
+        }
+        let Some(hwnd) = largest_window(find_search_windows()) else {
+            continue;
+        };
+        let Some(rect) = window_rect(hwnd) else {
+            continue;
+        };
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        // A search flyout smaller than this is an entrance animation frame.
+        if width < 100 || height < 100 {
+            continue;
+        }
+        journal_original(hwnd, window_pid(hwnd), false, work);
+        let dpi = dpi_for(hwnd);
+        let (x, y) = compute_flyout_target(
+            FlyoutKind::Search,
+            anchor,
+            width,
+            height,
+            work,
+            edge,
+            dpi,
+        );
+        if cancelled(FlyoutKind::Search, token, writer_token) || !is_window_live(hwnd) {
+            return;
+        }
+        if !apply_position(hwnd, x, y) {
+            continue;
+        }
+        for _ in 0..SEARCH_SETTLE_FRAMES {
+            thread::sleep(Duration::from_millis(SEARCH_SETTLE_DELAY_MS));
+            if cancelled(FlyoutKind::Search, token, writer_token) || !is_window_live(hwnd) {
+                return;
+            }
+            apply_position(hwnd, x, y);
+        }
+        log::result(
+            "SearchAnchor",
+            "anchored",
+            true,
+            true,
+            &[
+                ("hwnd", format!("{hwnd:#x}")),
+                ("x", x.to_string()),
+                ("y", y.to_string()),
+            ],
+        );
+        return;
+    }
+    log::result("SearchAnchor", "window-not-found", false, false, &[]);
+}
+
+/// C# `RepositionControlCenterAsync` parity: class + PID discovery, one
+/// re-assert after the shell finishes its entrance animation, and the same
+/// journal remember/restore path as the other flyouts.
+fn control_center_worker(
+    anchor: Anchor,
+    edge: DockEdge,
+    token: u64,
+    writer_token: u64,
+    work: Anchor,
+) {
+    for _ in 0..CONTROL_CENTER_ATTEMPTS {
+        thread::sleep(Duration::from_millis(CONTROL_CENTER_DELAY_MS));
+        if cancelled(FlyoutKind::ControlCenter, token, writer_token) {
+            return;
+        }
+        let Some(hwnd) = find_control_center_window() else {
+            continue;
+        };
+        let Some(rect) = window_rect(hwnd) else {
+            continue;
+        };
+        let width = rect.right - rect.left;
+        let height = rect.bottom - rect.top;
+        if width < 80 || height < 80 {
+            continue;
+        }
+        journal_original(hwnd, window_pid(hwnd), false, work);
+        let dpi = dpi_for(hwnd);
+        let (x, y) = compute_flyout_target(
+            FlyoutKind::ControlCenter,
+            anchor,
+            width,
+            height,
+            work,
+            edge,
+            dpi,
+        );
+        if cancelled(FlyoutKind::ControlCenter, token, writer_token)
+            || !is_window_live(hwnd)
+            || !apply_position(hwnd, x, y)
+        {
+            return;
+        }
+        // One real re-assert after the entrance animation (C# line: 75 ms).
+        thread::sleep(Duration::from_millis(CONTROL_CENTER_REASSERT_MS));
+        if cancelled(FlyoutKind::ControlCenter, token, writer_token) || !is_window_live(hwnd) {
+            return;
+        }
+        apply_position(hwnd, x, y);
+        log::result(
+            "ControlCenterAnchor",
+            "anchored",
+            true,
+            true,
+            &[
+                ("hwnd", format!("{hwnd:#x}")),
+                ("x", x.to_string()),
+                ("y", y.to_string()),
+            ],
+        );
+        return;
+    }
+    log::result("ControlCenterAnchor", "window-not-found", false, false, &[]);
 }
 
 /// Pure close verification: a close is genuine only when the original window
@@ -993,51 +1503,75 @@ fn wait_for_open(before: Option<usize>, timeout: Duration) -> bool {
     }
 }
 
-/// Dismisses the flyout by focusing it and injecting a real `VK_ESCAPE`
-/// down/up pair (scan code + extended flag). Win10's `CoreWindow` ignores
-/// posted key messages, so a `PostMessageW` pair is kept only as a best-effort
-/// fallback. `mark_closed()` runs only after the window is actually gone.
-pub fn close_start(hwnd: usize) -> bool {
-    if !is_window_live(hwnd) {
-        // Already gone: the state flags must still be cleared for WS-C.
-        mark_closed();
-        return true;
-    }
-    let handle = hwnd as HWND;
-    // SAFETY: focusing a window that just passed the liveness check.
-    unsafe {
-        SetForegroundWindow(handle);
-    }
-    let mapped = unsafe { MapVirtualKeyW(VK_ESCAPE as u32, MAPVK_VK_TO_VSC) };
-    let scan = if mapped == 0 { 1 } else { mapped as u16 };
-    let inputs = escape_inputs(scan).map(keyboard_input);
-    // SAFETY: two properly sized keyboard INPUT structures sent in order.
-    let sent = unsafe {
-        SendInput(
-            inputs.len() as u32,
-            inputs.as_ptr(),
-            size_of::<INPUT>() as i32,
-        ) == inputs.len() as u32
-    };
-    if !sent {
-        log::warn(format!(
-            "StartAnchor ESC SendInput failed for hwnd {hwnd:#x}."
-        ));
-    }
-    if wait_for_close(hwnd, Duration::from_millis(180)) {
-        mark_closed();
-        return true;
-    }
-    // Best-effort fallback. A successful post by itself is NOT a success.
+fn post_escape(handle: HWND) {
     for (message, key) in escape_messages() {
         // SAFETY: posting a keyboard notification with no pointer payload.
         unsafe {
             PostMessageW(handle, message, key as usize, 0);
         }
     }
+}
+
+/// Dismisses the flyout with an `VK_ESCAPE` pair and verifies the specific
+/// HWND is gone before clearing state.
+///
+/// `mark_closed()` is fenced by a token/HWND session: a new open clears the
+/// session and advances the generation, so a delayed close can no longer
+/// invalidate the newer open's worker. If the flyout cannot be focused, no
+/// global `SendInput` is injected — the ESC is posted directly to its HWND so
+/// it cannot land in an unrelated foreground window.
+pub fn close_start(hwnd: usize) -> bool {
+    let session = begin_close(hwnd);
+    let _guard = CloseSessionGuard(session);
+    let still_current = || close_session_is_current(session);
+
+    if !is_window_live(hwnd) {
+        // Already gone: only clear state if this close still owns the session.
+        if still_current() {
+            mark_closed();
+        }
+        return true;
+    }
+    let handle = hwnd as HWND;
+    // SAFETY: focusing a window that just passed the liveness check.
+    let focused = unsafe { SetForegroundWindow(handle) != 0 };
+    match esc_delivery(focused) {
+        EscDelivery::SendInput => {
+            let mapped = unsafe { MapVirtualKeyW(VK_ESCAPE as u32, MAPVK_VK_TO_VSC) };
+            let scan = if mapped == 0 { 1 } else { mapped as u16 };
+            let inputs = escape_inputs(scan).map(keyboard_input);
+            // SAFETY: two properly sized keyboard INPUT structures sent in order.
+            let sent = unsafe {
+                SendInput(
+                    inputs.len() as u32,
+                    inputs.as_ptr(),
+                    size_of::<INPUT>() as i32,
+                ) == inputs.len() as u32
+            };
+            if !sent {
+                log::warn(format!(
+                    "StartAnchor ESC SendInput failed for hwnd {hwnd:#x}."
+                ));
+            }
+        }
+        EscDelivery::Posted => {
+            log::warn(format!(
+                "StartAnchor could not focus hwnd {hwnd:#x}; posting ESC directly."
+            ));
+            post_escape(handle);
+        }
+    }
+    if still_current() && wait_for_close(hwnd, Duration::from_millis(180)) {
+        mark_closed();
+        return true;
+    }
+    // Best-effort fallback. A successful post by itself is NOT a success.
+    post_escape(handle);
     let verified = wait_for_close(hwnd, Duration::from_millis(120));
     if verified {
-        mark_closed();
+        if still_current() {
+            mark_closed();
+        }
     } else {
         log::warn(format!(
             "StartAnchor ESC could not verify close of hwnd {hwnd:#x}."
@@ -1046,12 +1580,57 @@ pub fn close_start(hwnd: usize) -> bool {
     verified
 }
 
+fn anchored_hwnd() -> Option<usize> {
+    let hwnd = ANCHORED_HWND.load(Ordering::Acquire);
+    (hwnd != 0).then_some(hwnd)
+}
+
+/// Verification of a shell open, moved off the UI thread. It only logs and may
+/// inject the `VK_LWIN` fallback: the UNCLOAKED hook is the sole owner of
+/// `mark_opened()`, and a generation change means that hook already took over.
+fn verify_open_worker(
+    owner_hwnd: usize,
+    before: Option<usize>,
+    posted: bool,
+    token: u64,
+    writer_token: u64,
+) {
+    if cancelled(FlyoutKind::Start, token, writer_token) {
+        return;
+    }
+    let mut verified = posted && wait_for_open(before, Duration::from_millis(220));
+    if open_fallback_needed(posted, verified) {
+        if cancelled(FlyoutKind::Start, token, writer_token) {
+            return;
+        }
+        if !crate::taskbar::send_chord(&[VK_LWIN]) {
+            log::warn("StartAnchor VK_LWIN fallback could not inject a chord.");
+        }
+        verified = wait_for_open(before, Duration::from_millis(260));
+    }
+    if verified {
+        log::result(
+            "StartAnchor",
+            "opened",
+            true,
+            true,
+            &[("owner", format!("{owner_hwnd:#x}"))],
+        );
+    } else {
+        log::warn("StartAnchor open could not be verified (SC_TASKLIST + VK_LWIN).");
+    }
+}
+
 /// Opens Start by posting `SC_TASKLIST` to the *owner* window (the dock), not
 /// to our own hidden window. This keeps Explorer's activation/focus bookkeeping
-/// intact and works when the keyboard hook filters injected Win keys. The open
-/// is verified with `find_start_window()` within ~220 ms; if it did not open,
-/// an extended `VK_LWIN` chord is tried as a fallback. `mark_opened()` runs
-/// only after a verified open.
+/// intact and works when the keyboard hook filters injected Win keys.
+///
+/// **Non-blocking**: it returns the post result immediately. The old UI-thread
+/// `find_start_window()` scan and both verification waits now run in
+/// [`verify_open_worker`]. `mark_opened()` is never called here — it belongs
+/// exclusively to the UNCLOAKED hook, which fires *before* the new anchor
+/// worker captures its token. That removes the double generation bump which
+/// used to cancel the fresh worker.
 pub fn open_start_via_syscommand(owner_hwnd: usize) -> bool {
     if owner_hwnd == 0 || unsafe { IsWindow(owner_hwnd as HWND) != TRUE } {
         log::warn(format!(
@@ -1059,8 +1638,11 @@ pub fn open_start_via_syscommand(owner_hwnd: usize) -> bool {
         ));
         return false;
     }
-    invalidate_anchor();
-    let before = find_start_window();
+    // Cheap snapshot from the last anchor; no full window/process enumeration
+    // on the UI thread.
+    let before = anchored_hwnd();
+    let token = invalidate_anchor();
+    let writer_token = flyout_writer::generation();
     // SAFETY: a parameterless system command posted to a validated window.
     let posted =
         unsafe { PostMessageW(owner_hwnd as HWND, WM_SYSCOMMAND, SC_TASKLIST as usize, 0) == TRUE };
@@ -1069,23 +1651,30 @@ pub fn open_start_via_syscommand(owner_hwnd: usize) -> bool {
             "StartAnchor SC_TASKLIST post failed for owner {owner_hwnd:#x}."
         ));
     }
-    if (!posted || !wait_for_open(before, Duration::from_millis(220)))
-        && !crate::taskbar::send_chord(&[VK_LWIN])
-    {
-        log::warn("StartAnchor VK_LWIN fallback could not inject a chord.");
+    let spawned = thread::Builder::new()
+        .name("opentaskbar-start-verify".into())
+        .spawn(move || verify_open_worker(owner_hwnd, before, posted, token, writer_token));
+    if spawned.is_err() {
+        log::error("StartAnchor could not spawn its open verification worker.");
     }
-    if wait_for_open(before, Duration::from_millis(260)) {
-        mark_opened();
-        return true;
-    }
-    log::warn("StartAnchor open could not be verified (SC_TASKLIST + VK_LWIN).");
-    false
+    posted
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::cell::Cell;
+    use std::sync::MutexGuard;
+
+    /// Generation and close-session statics are process-wide, so tests that
+    /// advance them must not overlap.
+    static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
+    fn serial() -> MutexGuard<'static, ()> {
+        TEST_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     fn work() -> Anchor {
         Anchor {
@@ -1312,6 +1901,7 @@ mod tests {
 
     #[test]
     fn state_flags_transition_on_open_and_close() {
+        let _serial = serial();
         set_enabled(Some(true));
         assert!(is_enabled());
         mark_opened();
@@ -1417,5 +2007,151 @@ mod tests {
             .is_none()
         );
         assert_eq!(calls.get(), 0);
+    }
+
+    // ---- P0 / parity regression tests ----------------------------------------
+
+    #[test]
+    fn open_trigger_does_not_cancel_the_new_worker() {
+        let _serial = serial();
+        set_enabled(Some(true));
+        let writer = flyout_writer::generation();
+
+        let base = generation_for(FlyoutKind::Start);
+        // Non-blocking open trigger: exactly one bump, no mark_opened().
+        let trigger = invalidate_anchor();
+        assert_eq!(trigger, base + 1);
+        // UNCLOAKED hook (main.rs): mark_opened(), then reposition_start().
+        mark_opened();
+        let hook = generation_for(FlyoutKind::Start);
+        assert_eq!(hook, trigger + 1);
+        let worker = bump_generation(FlyoutKind::Start);
+        assert_eq!(worker, hook + 1);
+        assert!(!cancelled(FlyoutKind::Start, worker, writer));
+
+        // The old P0 bug: a second mark_opened() after the worker was queued
+        // advanced the generation and cancelled that worker mid-entrance.
+        mark_opened();
+        assert!(cancelled(FlyoutKind::Start, worker, writer));
+    }
+
+    #[test]
+    fn delayed_close_cannot_invalidate_a_new_open() {
+        let _serial = serial();
+        let old = begin_close(0x1234);
+        assert!(close_session_is_current(old));
+        assert!(token_is_current(old.0, generation_for(FlyoutKind::Start)));
+
+        // A fresh UNCLOAKED open clears the session and advances the generation.
+        mark_opened();
+        assert!(!close_session_is_current(old));
+        assert!(!token_is_current(old.0, generation_for(FlyoutKind::Start)));
+        clear_close_session();
+    }
+
+    #[test]
+    fn close_session_is_pinned_to_its_hwnd() {
+        let _serial = serial();
+        let first = begin_close(0x1111);
+        let second = begin_close(0x2222);
+        assert!(!close_session_is_current(first));
+        assert!(close_session_is_current(second));
+        clear_close_session();
+        assert!(!close_session_is_current(second));
+    }
+
+    #[test]
+    fn focus_failure_switches_esc_to_the_targeted_post_path() {
+        assert_eq!(esc_delivery(true), EscDelivery::SendInput);
+        assert_eq!(esc_delivery(false), EscDelivery::Posted);
+        // The posted pair is always keydown then keyup.
+        assert_eq!(escape_messages().len(), 2);
+    }
+
+    #[test]
+    fn open_fallback_only_fires_for_an_unverified_post() {
+        assert!(!open_fallback_needed(true, true));
+        assert!(open_fallback_needed(true, false));
+        assert!(open_fallback_needed(false, true));
+        assert!(open_fallback_needed(false, false));
+    }
+
+    #[test]
+    fn flyout_kinds_have_independent_generations() {
+        let _serial = serial();
+        let start = generation_for(FlyoutKind::Start);
+        let search = generation_for(FlyoutKind::Search);
+        let cc = generation_for(FlyoutKind::ControlCenter);
+        assert_eq!(bump_generation(FlyoutKind::Search), search + 1);
+        // Repositioning Search must not cancel a Start or Control Center worker.
+        assert_eq!(generation_for(FlyoutKind::Start), start);
+        assert_eq!(generation_for(FlyoutKind::ControlCenter), cc);
+        assert_eq!(FlyoutKind::Start.index(), 0);
+        assert_eq!(FlyoutKind::Search.index(), 1);
+        assert_eq!(FlyoutKind::ControlCenter.index(), 2);
+    }
+
+    #[test]
+    fn all_three_flyout_kinds_use_their_own_geometry() {
+        let anchor = Anchor {
+            left: 100,
+            top: 1000,
+            right: 160,
+            bottom: 1040,
+        };
+        assert_eq!(
+            compute_flyout_target(FlyoutKind::Start, anchor, 640, 724, work(), DockEdge::Bottom, 96),
+            compute_target(anchor, 640, 724, work(), DockEdge::Bottom, 96)
+        );
+        assert_eq!(
+            compute_flyout_target(FlyoutKind::Search, anchor, 640, 724, work(), DockEdge::Bottom, 96),
+            compute_search_target(anchor, 640, 724, work(), DockEdge::Bottom, 96)
+        );
+        assert_eq!(
+            compute_flyout_target(
+                FlyoutKind::ControlCenter,
+                anchor,
+                640,
+                724,
+                work(),
+                DockEdge::Bottom,
+                96
+            ),
+            compute_control_center_target(anchor, 640, 724, work(), DockEdge::Bottom, 96)
+        );
+        // Search tracks the button with an 8 px margin; Control Center centers.
+        assert_eq!(compute_search_target(anchor, 640, 724, work(), DockEdge::Bottom, 96), (92, 268));
+        assert_eq!(
+            compute_control_center_target(anchor, 640, 724, work(), DockEdge::Bottom, 96),
+            (8, 264)
+        );
+    }
+
+    #[test]
+    fn reposition_flyout_rejects_an_empty_anchor_for_every_kind() {
+        let _serial = serial();
+        set_enabled(Some(true));
+        for kind in [
+            FlyoutKind::Start,
+            FlyoutKind::Search,
+            FlyoutKind::ControlCenter,
+        ] {
+            assert!(!reposition_flyout(kind, Anchor::default(), 0), "{kind:?}");
+        }
+        assert_eq!(FlyoutKind::default(), FlyoutKind::Start);
+        assert_eq!(FlyoutKind::Start.label(), "Start");
+        assert_eq!(FlyoutKind::Search.label(), "Search");
+        assert_eq!(FlyoutKind::ControlCenter.label(), "ControlCenter");
+    }
+
+    #[test]
+    fn search_and_control_center_workers_match_c_sharp_timing() {
+        assert_eq!(SEARCH_ATTEMPTS, 35);
+        assert_eq!(SEARCH_DELAY_MS, 20);
+        assert_eq!(SEARCH_SETTLE_FRAMES, 5);
+        assert_eq!(SEARCH_SETTLE_DELAY_MS, 30);
+        assert_eq!(CONTROL_CENTER_ATTEMPTS, 24);
+        assert_eq!(CONTROL_CENTER_DELAY_MS, 25);
+        assert_eq!(CONTROL_CENTER_REASSERT_MS, 75);
     }
 }
