@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::hotkey::{HotkeyBinding, HotkeyChoice};
 use serde::de::{Deserializer, Error as DeError, Visitor};
 use serde::{Deserialize, Serialize, Serializer};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 // ---- WIP helpers kept from the pre-integration port ----
 
@@ -108,6 +108,40 @@ where
 }
 
 pub const DYNAMIC_ISLAND_ALL_DISPLAYS: &str = "*";
+
+/// C# property names that the port exposes under a different Rust field name. `save_to` writes
+/// both spellings so a settings.json written by Rust is readable by the C# build as well; the
+/// canonical (Rust) spelling wins when both appear in a file that is loaded again.
+const SETTINGS_ALIAS_PAIRS: [(&str, &str); 5] = [
+    ("EnabledWidgets", "Widgets"),
+    ("ShowClockWidget", "ShowClock"),
+    ("ShowSystemStatsWidget", "ShowSystemStats"),
+    ("FocusMode", "FocusModeEnabled"),
+    ("UserPinnedBackgroundApps", "PinnedTrayIcons"),
+];
+
+/// Collapses the double-spelled keys written by `save_to`. Serde rejects a JSON object that maps
+/// two keys onto the same struct field, so the canonical key is kept before deserialization.
+fn dedupe_written_aliases(map: &mut Map<String, Value>) {
+    for (canonical, alias) in SETTINGS_ALIAS_PAIRS {
+        if map.contains_key(canonical) {
+            map.remove(alias);
+        }
+    }
+    // `FullWidth` is a bool in Rust; C# persists the same value as the `DockLayout` enum name.
+    if map.contains_key("FullWidth") {
+        map.remove("Layout");
+    }
+    if let Some(Value::Array(profiles)) = map.get_mut("Profiles") {
+        for profile in profiles.iter_mut() {
+            if let Value::Object(object) = profile
+                && object.contains_key("EnabledWidgets")
+            {
+                object.remove("Widgets");
+            }
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DockPosition {
@@ -1403,6 +1437,9 @@ pub fn normalize_legacy_json(raw: &str) -> String {
         return raw.to_owned();
     };
 
+    // Files saved by this port carry both the Rust key and the C# alias for the same value.
+    dedupe_written_aliases(&mut root);
+
     // v0.2.x bottom gap: DockBottomGap -> DockBottomGapPixels.
     if !root.contains_key("DockBottomGapPixels")
         && let Some(gap) = root
@@ -1663,11 +1700,45 @@ fn is_border_valid(thickness: f64, color: Option<&str>) -> bool {
         })
 }
 
+/// Key used by C# `StringComparer.OrdinalIgnoreCase` (invariant simple uppercase, no culture).
+fn ordinal_ignore_case_key(value: &str) -> String {
+    let mut key = String::with_capacity(value.len());
+    for c in value.chars() {
+        key.extend(c.to_uppercase());
+    }
+    key
+}
+
 fn has_duplicates_ignore_case(values: &[String]) -> bool {
     let mut seen = BTreeSet::new();
     values
         .iter()
-        .any(|value| !seen.insert(value.to_ascii_lowercase()))
+        .any(|value| !seen.insert(ordinal_ignore_case_key(value)))
+}
+
+fn has_duplicate_keys_ignore_case<'a>(mut keys: impl Iterator<Item = &'a String>) -> bool {
+    let mut seen = BTreeSet::new();
+    keys.any(|key| !seen.insert(ordinal_ignore_case_key(key)))
+}
+
+/// Key used by C# `StringComparer.CurrentCultureIgnoreCase`. The full culture table is not
+/// available in `core`, so the persisted UI language selects the one casing rule that changes
+/// equality decisions: Turkish (`i`/`İ` and `I`/`ı` pairs). Everything else uses invariant
+/// uppercase, matching the ordinal comparer C# uses for the remaining settings.
+fn culture_ignore_case_key(value: &str, turkish: bool) -> String {
+    let mut key = String::with_capacity(value.len());
+    for c in value.chars() {
+        if turkish {
+            match c {
+                'i' => key.push('\u{0130}'), // Turkish: i -> İ
+                'ı' => key.push('I'),        // Turkish: ı -> I
+                _ => key.extend(c.to_uppercase()),
+            }
+        } else {
+            key.extend(c.to_uppercase());
+        }
+    }
+    key
 }
 
 fn contains_blank(values: &[String]) -> bool {
@@ -1706,6 +1777,7 @@ impl DockSettings {
     /// Returns one stable code per violated C# validation rule; empty means valid.
     pub fn validate(&self) -> Vec<&'static str> {
         let mut errors: Vec<&'static str> = Vec::new();
+        let turkish = self.language.trim().to_ascii_lowercase().starts_with("tr");
 
         // Width / height / spacing ranges (C# sliders).
         if !(100..=5000).contains(&self.dock_width_pixels) {
@@ -1849,11 +1921,11 @@ impl DockSettings {
             errors.push("HotkeysConflict");
         }
 
-        // Profiles: unique names, valid widgets/ranges/hotkeys.
+        // Profiles: unique names (CurrentCultureIgnoreCase), valid widgets/ranges/hotkeys.
         let mut profile_names = BTreeSet::new();
         for profile in &self.profiles {
             if profile.name.trim().is_empty()
-                || !profile_names.insert(profile.name.to_ascii_lowercase())
+                || !profile_names.insert(culture_ignore_case_key(&profile.name, turkish))
             {
                 errors.push("ProfileInvalid");
                 break;
@@ -1914,19 +1986,19 @@ impl DockSettings {
             }
         }
 
-        // Groups: unique ids/names and no executable shared between groups.
+        // Groups: unique ids (ordinal ignore case), names (culture ignore case) and paths.
         let mut group_ids = BTreeSet::new();
         let mut group_names = BTreeSet::new();
         let mut group_paths = BTreeSet::new();
         for group in &self.app_groups {
             if group.id.trim().is_empty()
                 || group.name.trim().is_empty()
-                || !group_ids.insert(group.id.to_ascii_lowercase())
-                || !group_names.insert(group.name.to_ascii_lowercase())
+                || !group_ids.insert(ordinal_ignore_case_key(&group.id))
+                || !group_names.insert(culture_ignore_case_key(&group.name, turkish))
                 || group
                     .executable_paths
                     .iter()
-                    .any(|path| !group_paths.insert(path.to_ascii_lowercase()))
+                    .any(|path| !group_paths.insert(ordinal_ignore_case_key(path)))
             {
                 errors.push("AppGroupsInvalid");
                 break;
@@ -2022,14 +2094,17 @@ impl DockSettings {
             errors.push("DateFormatInvalid");
         }
 
-        // Dynamic Island order/placement maps (keys must be catalog widgets).
+        // Dynamic Island order/placement maps (keys must be catalog widgets, unique under C#'s
+        // OrdinalIgnoreCase comparer — `"Clock"` and `"clock"` are the same placement).
         let typed_placements_invalid = self.dynamic_island_placements.len() > CATALOG_WIDGET_COUNT
+            || has_duplicate_keys_ignore_case(self.dynamic_island_placements.keys())
             || self.dynamic_island_placements.iter().any(|(id, display)| {
                 !is_supported_widget_id(id) || display.trim().is_empty() || display.len() > 32
             });
         let extra_placements_invalid = match self.extra.get("DynamicIslandPlacements") {
             Some(Value::Object(placements)) => {
                 placements.len() > CATALOG_WIDGET_COUNT
+                    || has_duplicate_keys_ignore_case(placements.keys())
                     || placements.iter().any(|(id, display)| {
                         !is_supported_widget_id(id)
                             || !display
@@ -2102,7 +2177,39 @@ pub fn settings_path() -> PathBuf {
     app_data_dir().join("settings.json")
 }
 
-/// Loads settings from `path`; backs up corrupt JSON before returning defaults.
+/// C# `FullBackupArchive.CurrentVersion`. Any other manifest version is unsupported.
+pub const BACKUP_MANIFEST_VERSION: u64 = 1;
+
+/// Backs up an unusable settings file without replacing the original, like C#
+/// `DockSettingsStore.BackupInvalidSettingsFile`.
+fn backup_invalid_settings(path: &Path) {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let backup = path.with_file_name(format!("settings.json.invalid-{stamp}"));
+    // Keep the original in place: one malformed field must not destroy the only copy.
+    let _ = fs::copy(path, backup);
+}
+
+/// Mirrors the C# `FullBackupArchive` manifest gate: `inspect_backup` must reject archives whose
+/// `manifest.json` carries a `Version` other than 1 (C# rejects the v99 probe archive).
+/// `None` means the entry is missing. C# deserializes the manifest case-insensitively.
+pub fn backup_manifest_version_supported(manifest: Option<&[u8]>) -> bool {
+    let Some(raw) = manifest else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(raw) else {
+        return false;
+    };
+    value
+        .get("Version")
+        .or_else(|| value.get("version"))
+        .and_then(Value::as_u64)
+        == Some(BACKUP_MANIFEST_VERSION)
+}
+
+/// Loads settings from `path`. Corrupt JSON and settings that fail the C# `IsValid()` rules both
+/// fall back to defaults and leave a timestamped backup of the rejected file behind.
 pub fn load_from(path: &Path) -> DockSettings {
     let Ok(raw) = fs::read_to_string(path) else {
         return DockSettings::default();
@@ -2117,26 +2224,91 @@ pub fn load_from(path: &Path) -> DockSettings {
             settings.dynamic_island_opacity = settings.dynamic_island_opacity.clamp(0.1, 1.0);
             settings.surface_opacity = settings.surface_opacity.clamp(0.1, 1.0);
             settings.ui_font_size = settings.ui_font_size.clamp(9.0, 24.0);
-            settings
+            let errors = settings.validate();
+            if errors.is_empty() {
+                settings
+            } else {
+                crate::log::warn(format!(
+                    "settings: invalid settings rejected ({errors:?}); using defaults from {}",
+                    path.display()
+                ));
+                crate::log::report_error("ErrorDockSettingsInvalid", &[]);
+                backup_invalid_settings(path);
+                DockSettings::default()
+            }
         }
-        Err(_) => {
-            let stamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs());
-            let backup = path.with_file_name(format!("settings.json.invalid-{stamp}"));
-            // Keep the original in place: one malformed field must not destroy the only copy.
-            let _ = fs::copy(path, backup);
+        Err(error) => {
+            crate::log::warn(format!(
+                "settings: unreadable settings ({error}); using defaults from {}",
+                path.display()
+            ));
+            crate::log::report_error("ErrorDockSettingsRead", &[]);
+            backup_invalid_settings(path);
             DockSettings::default()
         }
     }
 }
 
-/// Atomically writes settings to `path`.
+/// Writes the six C#-facing alias keys next to their Rust canonical keys so a settings.json
+/// produced by the port loses nothing when the C# build reads it. Profiles use `Widgets` as their
+/// only alias in `DockProfile`.
+fn write_settings_aliases(root: &mut Map<String, Value>, settings: &DockSettings) {
+    root.insert("EnabledWidgets".to_owned(), json!(settings.enabled_widgets));
+    root.insert("Widgets".to_owned(), json!(settings.enabled_widgets));
+    root.insert(
+        "ShowClockWidget".to_owned(),
+        json!(settings.show_clock_widget),
+    );
+    root.insert("ShowClock".to_owned(), json!(settings.show_clock_widget));
+    root.insert(
+        "ShowSystemStatsWidget".to_owned(),
+        json!(settings.show_system_stats_widget),
+    );
+    root.insert(
+        "ShowSystemStats".to_owned(),
+        json!(settings.show_system_stats_widget),
+    );
+    root.insert("FullWidth".to_owned(), json!(settings.full_width));
+    root.insert(
+        "Layout".to_owned(),
+        json!(if settings.full_width {
+            "FullWidth"
+        } else {
+            "Floating"
+        }),
+    );
+    root.insert("FocusMode".to_owned(), json!(settings.focus_mode));
+    root.insert("FocusModeEnabled".to_owned(), json!(settings.focus_mode));
+    root.insert(
+        "UserPinnedBackgroundApps".to_owned(),
+        json!(settings.user_pinned_background_apps),
+    );
+    root.insert(
+        "PinnedTrayIcons".to_owned(),
+        json!(settings.user_pinned_background_apps),
+    );
+
+    if let Some(Value::Array(profiles)) = root.get_mut("Profiles") {
+        for (entry, profile) in profiles.iter_mut().zip(settings.profiles.iter()) {
+            if let Value::Object(object) = entry {
+                object.insert("EnabledWidgets".to_owned(), json!(profile.enabled_widgets));
+                object.insert("Widgets".to_owned(), json!(profile.enabled_widgets));
+            }
+        }
+    }
+}
+
+/// Atomically writes settings to `path`, including the C# alias spellings of aliased keys.
 pub fn save_to(path: &Path, settings: &DockSettings) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(settings)
+    let mut value = serde_json::to_value(settings)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if let Value::Object(root) = &mut value {
+        write_settings_aliases(root, settings);
+    }
+    let json = serde_json::to_string_pretty(&value)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, json)?;
@@ -2701,5 +2873,198 @@ mod tests {
         assert_eq!(loaded.fisheye_intensity, FisheyeIntensity::Strong);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn invalid_settings_fall_back_to_defaults_and_are_backed_up() {
+        let dir = temp_dir("cfg-invalid");
+        let path = dir.join("settings.json");
+        // Both values are outside the C# slider ranges; the JSON itself is perfectly valid.
+        fs::write(&path, r#"{"FocusMinutes":0,"DockWidthPixels":10}"#).unwrap();
+
+        let loaded = load_from(&path);
+        assert_eq!(loaded.focus_minutes, 25);
+        assert_eq!(loaded.dock_width_pixels, 900);
+        assert!(path.exists(), "the rejected original must be kept");
+        let has_backup = fs::read_dir(&dir).unwrap().flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("settings.json.invalid-")
+        });
+        assert!(has_backup, "invalid settings must be backed up");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn valid_settings_load_without_creating_a_backup() {
+        let dir = temp_dir("cfg-valid-no-backup");
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"FocusMinutes":30,"DockWidthPixels":1200}"#).unwrap();
+
+        let loaded = load_from(&path);
+        assert_eq!(loaded.focus_minutes, 30);
+        assert_eq!(loaded.dock_width_pixels, 1200);
+        assert!(!fs::read_dir(&dir).unwrap().flatten().any(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("settings.json.invalid-")
+        }));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_writes_csharp_aliases_next_to_canonical_keys() {
+        let dir = temp_dir("cfg-alias-write");
+        let path = dir.join("settings.json");
+        let settings = DockSettings {
+            enabled_widgets: vec!["Clock".to_owned(), "Media".to_owned()],
+            show_clock_widget: true,
+            show_system_stats_widget: true,
+            full_width: true,
+            focus_mode: true,
+            user_pinned_background_apps: vec!["path:app.exe".to_owned()],
+            profiles: vec![DockProfile {
+                name: "Focus".to_owned(),
+                enabled_widgets: vec!["Clock".to_owned()],
+                installed_widgets: vec!["Clock".to_owned()],
+                ..DockProfile::default()
+            }],
+            ..DockSettings::default()
+        };
+        save_to(&path, &settings).unwrap();
+
+        let raw = fs::read_to_string(&path).unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        let root = value.as_object().unwrap();
+        for (canonical, alias) in [
+            ("EnabledWidgets", "Widgets"),
+            ("ShowClockWidget", "ShowClock"),
+            ("ShowSystemStatsWidget", "ShowSystemStats"),
+            ("FocusMode", "FocusModeEnabled"),
+            ("UserPinnedBackgroundApps", "PinnedTrayIcons"),
+        ] {
+            assert_eq!(
+                root.get(canonical),
+                root.get(alias),
+                "missing {canonical}/{alias} pair in {raw}"
+            );
+        }
+        assert_eq!(root.get("FullWidth").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            root.get("Layout").and_then(Value::as_str),
+            Some("FullWidth")
+        );
+        assert_eq!(
+            root.get("Widgets").and_then(Value::as_array).unwrap().len(),
+            2
+        );
+        let profile = root
+            .get("Profiles")
+            .and_then(Value::as_array)
+            .and_then(|p| p.first())
+            .and_then(Value::as_object)
+            .unwrap();
+        assert_eq!(profile.get("EnabledWidgets"), profile.get("Widgets"));
+        assert_eq!(
+            profile
+                .get("Widgets")
+                .and_then(Value::as_array)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Rust must still read its own double-spelled file, and keep the canonical values.
+        let loaded = load_from(&path);
+        assert_eq!(loaded.enabled_widgets, settings.enabled_widgets);
+        assert_eq!(loaded.show_clock_widget, settings.show_clock_widget);
+        assert_eq!(
+            loaded.show_system_stats_widget,
+            settings.show_system_stats_widget
+        );
+        assert!(loaded.full_width && loaded.focus_mode);
+        assert_eq!(
+            loaded.user_pinned_background_apps,
+            settings.user_pinned_background_apps
+        );
+        assert_eq!(loaded.profiles[0].enabled_widgets, ["Clock"]);
+        assert!(loaded.extra.is_empty(), "aliases must not leak into extra");
+        assert!(loaded.profiles[0].extra.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn island_placements_dedupe_ordinal_ignore_case() {
+        let mut placements = HashMap::new();
+        placements.insert("Clock".to_owned(), "*".to_owned());
+        placements.insert("clock".to_owned(), "*".to_owned());
+        let s = DockSettings {
+            dynamic_island_placements: placements,
+            ..DockSettings::default()
+        };
+        assert!(s.validate().contains(&"IslandPlacementInvalid"));
+
+        let dir = temp_dir("cfg-island-dedupe");
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            r#"{"DynamicIslandPlacements":{"Clock":"*","clock":"*"}}"#,
+        )
+        .unwrap();
+        assert_eq!(load_from(&path), DockSettings::default());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn profile_names_dedupe_with_current_culture_rules() {
+        let profile = |name: &str| DockProfile {
+            name: name.to_owned(),
+            ..DockProfile::default()
+        };
+        // Turkish CurrentCultureIgnoreCase treats i/İ and I/ı as the same letter.
+        let tr = DockSettings {
+            language: "tr-TR".to_owned(),
+            profiles: vec![profile("i"), profile("İ")],
+            ..DockSettings::default()
+        };
+        assert!(tr.validate().contains(&"ProfileInvalid"));
+        let tr = DockSettings {
+            language: "tr-TR".to_owned(),
+            profiles: vec![profile("I"), profile("ı")],
+            ..DockSettings::default()
+        };
+        assert!(tr.validate().contains(&"ProfileInvalid"));
+        // Invariant culture keeps i and İ apart but folds I and ı together.
+        let en = DockSettings {
+            language: "en-US".to_owned(),
+            profiles: vec![profile("i"), profile("İ")],
+            ..DockSettings::default()
+        };
+        assert!(en.validate().is_empty(), "{:?}", en.validate());
+        let en = DockSettings {
+            language: "en-US".to_owned(),
+            profiles: vec![profile("I"), profile("ı")],
+            ..DockSettings::default()
+        };
+        assert!(en.validate().contains(&"ProfileInvalid"));
+    }
+
+    #[test]
+    fn backup_manifest_version_gate_matches_csharp() {
+        assert!(backup_manifest_version_supported(Some(
+            br#"{"Format":"OpenTaskbarFullBackup","Version":1,"CreatedUtc":"2026-01-01T00:00:00Z"}"#
+        )));
+        assert!(backup_manifest_version_supported(Some(br#"{"version":1}"#)));
+        for raw in [
+            br#"{"Version":99}"#.as_slice(),
+            br#"{"Version":2}"#,
+            br#"{"Version":"1"}"#,
+            br#"{"Version":null}"#,
+            b"{}",
+            b"not json",
+        ] {
+            assert!(!backup_manifest_version_supported(Some(raw)), "{raw:?}");
+        }
+        assert!(!backup_manifest_version_supported(None));
     }
 }
