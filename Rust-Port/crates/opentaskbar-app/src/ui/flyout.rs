@@ -9,7 +9,7 @@
 //!   `StatusHeader`, `Hero`, `ToggleGrid`, `ProgressBar`, `StatRow`, `ActionRow`, `AppRow`, `ButtonBar`
 //! - Mouse-wheel vertical scrolling + thin scrollbar thumb + toggle-close suppression.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -28,18 +28,20 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    VK_BACK, VK_ESCAPE, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB,
+    GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_BACK,
+    VK_ESCAPE, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClientRect,
-    GetMessageW, GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, KillTimer, LWA_ALPHA,
-    LoadCursorW, MSG, RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    GWLP_USERDATA, GetClassNameW, GetClientRect, GetMessageW, GetWindowLongPtrW, HC_ACTION, HHOOK,
+    HWND_TOPMOST, IDC_ARROW, IDC_HAND, KillTimer, LWA_ALPHA, LoadCursorW, MSG, MSLLHOOKSTRUCT,
+    PostMessageW, RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage, WM_ACTIVATE, WM_CHAR,
-    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
+    SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
+    UnhookWindowsHookEx, WH_MOUSE_LL, WM_ACTIVATE, WM_CHAR, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN,
     WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
 };
 
 use super::menu::{MenuIcon, draw_menu_icon};
@@ -54,6 +56,56 @@ const TIMER_ANIM: usize = 1;
 const OPEN_ANIM_MS: f32 = 175.0;
 const CLOSE_ANIM_MS: f32 = 95.0;
 const SLIDE_OFFSET_DIPS: f32 = 7.0;
+/// Private message posted by the WH_MOUSE_LL hook when an external #32768 menu closes.
+const WM_APP_MENU_DONE: u32 = 0x8001;
+
+/// Tracks the native `WM_COMMAND`/`#32768` context menu opened from a flyout.
+static EXTERNAL_MENU_ACTIVE: AtomicBool = AtomicBool::new(false);
+static HOOK_TARGET: AtomicUsize = AtomicUsize::new(0);
+
+/// C# `DockFlyout.RetainForExternalContextMenu`: keep the flyout alive while the target
+/// application's own native context menu (#32768) is on screen.
+#[allow(dead_code)] // invoked by WS-D dock windows after merge
+pub fn retain_for_external_context_menu(active: bool) {
+    EXTERNAL_MENU_ACTIVE.store(active, Ordering::Release);
+}
+
+pub fn external_context_menu_active() -> bool {
+    EXTERNAL_MENU_ACTIVE.load(Ordering::Acquire)
+}
+
+/// Dock edge the flyout is anchored to (side docks open sideways instead of upward).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FlyoutEdge {
+    #[default]
+    Bottom,
+    #[allow(dead_code)] // used by WS-D vertical dock after merge
+    Left,
+    #[allow(dead_code)]
+    Right,
+}
+
+/// Optional C# `DockFlyout` lifecycle / placement behavior. Existing constructors keep their
+/// defaults so widget call sites are unaffected.
+#[derive(Clone, Copy, Debug)]
+pub struct FlyoutOptions {
+    pub stays_open: bool,
+    pub retain_for_external_context_menu: bool,
+    pub edge: FlyoutEdge,
+    /// Number of soft shadow rings drawn along the popup edge.
+    pub shadow_rings: u8,
+}
+
+impl Default for FlyoutOptions {
+    fn default() -> Self {
+        Self {
+            stays_open: false,
+            retain_for_external_context_menu: false,
+            edge: FlyoutEdge::Bottom,
+            shadow_rings: 4,
+        }
+    }
+}
 
 static LAST_CLOSED: OnceLock<Mutex<Option<(String, Instant)>>> = OnceLock::new();
 
@@ -106,13 +158,22 @@ pub enum FlyoutAction {
 #[derive(Clone, Debug)]
 pub enum LiveEvent {
     Click(u32),
-    Slider { id: u32, ratio: f32 },
+    Slider {
+        id: u32,
+        ratio: f32,
+    },
     /// Media timeline scrubbing — `ratio` is in `0.0..=1.0`.
     #[allow(dead_code)] // consumed by WS-C widgets after merge
-    Seek { id: u32, ratio: f32 },
+    Seek {
+        id: u32,
+        ratio: f32,
+    },
     /// Text input committed with Enter (numeric inputs are clamped to their bounds).
     #[allow(dead_code)] // consumed by WS-C widgets after merge
-    TextCommit { id: u32, text: String },
+    TextCommit {
+        id: u32,
+        text: String,
+    },
 }
 
 /// Result of handling a `LiveEvent`: either replace the flyout spec in place or close cleanly.
@@ -302,6 +363,9 @@ struct FlyoutState<'a> {
     closing: bool,
     animating: bool,
     suppress_blur: bool,
+    stays_open: bool,
+    hook: Option<HHOOK>,
+    shadow_rings: u8,
     on_secondary: Option<&'a mut dyn FnMut(u32) -> bool>,
     on_live: Option<&'a mut dyn FnMut(LiveEvent) -> LiveOutcome>,
     content_top_px: i32,
@@ -342,6 +406,16 @@ unsafe fn draw_gdi_text(hdc: HDC, text: &str, rc: &mut RECT, format: u32) {
 
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
     u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16)
+}
+
+/// Linear blend of two COLORREFs used by the four-ring soft shadow.
+fn blend_rgb(from: u32, to: u32, t: f32) -> u32 {
+    let channel = |shift: u32| {
+        let a = ((from >> shift) & 0xff) as f32;
+        let b = ((to >> shift) & 0xff) as f32;
+        ((a + (b - a) * t.clamp(0.0, 1.0)).round() as u32) & 0xff
+    };
+    rgb(channel(0) as u8, channel(8) as u8, channel(16) as u8)
 }
 
 fn pt_in_rect(r: &RECT, x: i32, y: i32) -> bool {
@@ -520,8 +594,8 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                         id,
                         menu_id: id,
                         is_slider: false,
-                    is_seek: false,
-                    is_text: false,
+                        is_seek: false,
+                        is_text: false,
                         rect: RECT {
                             left: cx + s(1.5),
                             top: cy + s(1.5),
@@ -601,8 +675,8 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                         id,
                         menu_id: id,
                         is_slider: false,
-                    is_seek: false,
-                    is_text: false,
+                        is_seek: false,
+                        is_text: false,
                         rect: RECT {
                             left: pad + content_w - bw,
                             top: y,
@@ -627,8 +701,8 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                         id: *id,
                         menu_id: *id,
                         is_slider: false,
-                    is_seek: false,
-                    is_text: false,
+                        is_seek: false,
+                        is_text: false,
                         rect: RECT {
                             left,
                             top,
@@ -675,8 +749,8 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                             rect,
                             menu_id: *menu_id,
                             is_slider: false,
-                    is_seek: false,
-                    is_text: false,
+                            is_seek: false,
+                            is_text: false,
                         });
                     }
                 }
@@ -693,8 +767,8 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                         id: *id,
                         menu_id: *id,
                         is_slider: false,
-                    is_seek: false,
-                    is_text: false,
+                        is_seek: false,
+                        is_text: false,
                         rect: RECT {
                             left,
                             top: y,
@@ -820,6 +894,7 @@ pub fn show_flyout_live(
         spec,
         None,
         Some(&mut on_live),
+        FlyoutOptions::default(),
     );
 }
 
@@ -842,7 +917,61 @@ pub fn show_flyout_interactive(
         spec,
         on_secondary,
         None,
+        FlyoutOptions::default(),
     )
+}
+
+/// Shows a flyout with explicit lifecycle/placement options (`DockFlyout.cs` parity).
+#[allow(dead_code)] // consumed by WS-D dock flyouts after merge
+pub fn show_flyout_with_options(
+    tag: &str,
+    owner_hwnd: usize,
+    is_dark: bool,
+    anchor_center_x_px: i32,
+    anchor_bottom_y_px: i32,
+    spec: FlyoutSpec,
+    options: FlyoutOptions,
+) -> Option<FlyoutAction> {
+    show_flyout_impl(
+        tag,
+        owner_hwnd,
+        is_dark,
+        anchor_center_x_px,
+        anchor_bottom_y_px,
+        spec,
+        None,
+        None,
+        options,
+    )
+}
+
+/// WH_MOUSE_LL observer that distinguishes clicks on the native `#32768` context menu class
+/// from ordinary clicks (C# `DockFlyout` + `RetainForExternalContextMenu`).
+unsafe extern "system" fn external_menu_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code == HC_ACTION as i32
+        && matches!(
+            wparam as u32,
+            WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP
+        )
+    {
+        let info = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
+        let under_cursor = unsafe { WindowFromPoint(info.pt) };
+        let mut class = [0u16; 64];
+        let len = unsafe { GetClassNameW(under_cursor, class.as_mut_ptr(), class.len() as i32) };
+        let is_native_menu =
+            len > 0 && String::from_utf16_lossy(&class[..len as usize]).starts_with("#32768");
+        if is_native_menu {
+            EXTERNAL_MENU_ACTIVE.store(true, Ordering::Release);
+        } else if EXTERNAL_MENU_ACTIVE.swap(false, Ordering::AcqRel) {
+            let target = HOOK_TARGET.load(Ordering::Acquire) as HWND;
+            if !target.is_null() {
+                unsafe {
+                    PostMessageW(target, WM_APP_MENU_DONE, 0, 0);
+                }
+            }
+        }
+    }
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -855,6 +984,7 @@ fn show_flyout_impl<'a>(
     spec: FlyoutSpec,
     on_secondary: Option<&'a mut dyn FnMut(u32) -> bool>,
     on_live: Option<&'a mut dyn FnMut(LiveEvent) -> LiveOutcome>,
+    options: FlyoutOptions,
 ) -> Option<FlyoutAction> {
     if should_suppress_reopen(tag) {
         return None;
@@ -910,10 +1040,23 @@ fn show_flyout_impl<'a>(
     let margin = s(10.0);
     let left = screen.left + margin;
     let top = screen.top + margin;
-    let x = (anchor_center_x_px - width_px / 2)
-        .clamp(left, (screen.right - width_px - margin).max(left));
-    let top_y =
-        (anchor_bottom_y_px - height_px).clamp(top, (screen.bottom - height_px - margin).max(top));
+    let max_x = (screen.right - width_px - margin).max(left);
+    let max_y = (screen.bottom - height_px - margin).max(top);
+    let (x, top_y) = match options.edge {
+        FlyoutEdge::Bottom => (
+            (anchor_center_x_px - width_px / 2).clamp(left, max_x),
+            (anchor_bottom_y_px - height_px).clamp(top, max_y),
+        ),
+        // Side docks: open beside the anchor, vertically centred on it.
+        FlyoutEdge::Left => (
+            anchor_center_x_px.clamp(left, max_x),
+            (anchor_bottom_y_px - height_px / 2).clamp(top, max_y),
+        ),
+        FlyoutEdge::Right => (
+            (anchor_center_x_px - width_px).clamp(left, max_x),
+            (anchor_bottom_y_px - height_px / 2).clamp(top, max_y),
+        ),
+    };
 
     let animate = win32::client_area_animations_enabled();
     let slide_px = if animate { s(SLIDE_OFFSET_DIPS) } else { 0 };
@@ -974,6 +1117,9 @@ fn show_flyout_impl<'a>(
         closing: false,
         animating: animate,
         suppress_blur: false,
+        stays_open: options.stays_open,
+        hook: None,
+        shadow_rings: options.shadow_rings.min(8),
         on_secondary,
         on_live,
         content_top_px,
@@ -1009,6 +1155,19 @@ fn show_flyout_impl<'a>(
         }
     }
 
+    if options.retain_for_external_context_menu {
+        HOOK_TARGET.store(hwnd as usize, Ordering::Release);
+        let hook = unsafe {
+            SetWindowsHookExW(
+                WH_MOUSE_LL,
+                Some(external_menu_hook),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        state.hook = if hook.is_null() { None } else { Some(hook) };
+    }
+
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     while !state.done.load(Ordering::Acquire) {
         let ret = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
@@ -1022,6 +1181,13 @@ fn show_flyout_impl<'a>(
     }
 
     let selected = state.selected;
+    if let Some(hook) = state.hook.take() {
+        unsafe {
+            UnhookWindowsHookEx(hook);
+        }
+    }
+    HOOK_TARGET.store(0, Ordering::Release);
+    EXTERNAL_MENU_ACTIVE.store(false, Ordering::Release);
     unsafe {
         KillTimer(hwnd, TIMER_ANIM);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
@@ -1410,6 +1576,29 @@ impl FlyoutState<'_> {
             let bg_brush = CreateSolidBrush(bg);
             FillRect(hdc, &ps.rcPaint, bg_brush);
             DeleteObject(bg_brush as _);
+
+            // Four concentric soft-shadow rings along the popup edge (C# DockFlyout shadow).
+            let rings = self.shadow_rings.max(1);
+            for ring in 0..rings {
+                let inset = ring as i32;
+                let rc = RECT {
+                    left: ps.rcPaint.left + inset,
+                    top: ps.rcPaint.top + inset,
+                    right: ps.rcPaint.right - inset,
+                    bottom: ps.rcPaint.bottom - inset,
+                };
+                if rc.left >= rc.right || rc.top >= rc.bottom {
+                    break;
+                }
+                let shade = blend_rgb(
+                    gdi_rgb(pal.canvas),
+                    bg,
+                    (ring + 1) as f32 / (rings + 1) as f32,
+                );
+                let ring_brush = CreateSolidBrush(shade);
+                windows_sys::Win32::Graphics::Gdi::FrameRect(hdc, &rc, ring_brush);
+                DeleteObject(ring_brush as _);
+            }
 
             // Top specular hairline for crisp Apple/Raycast surface elevation.
             let spec_pen = CreatePen(PS_SOLID, 1, gdi_rgb(pal.specular_top));
@@ -2569,12 +2758,7 @@ impl FlyoutState<'_> {
                             right: pad + content_w,
                             bottom: y + s(18.0),
                         };
-                        draw_gdi_text(
-                            hdc,
-                            &times,
-                            &mut trc,
-                            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-                        );
+                        draw_gdi_text(hdc, &times, &mut trc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
 
                         let track_top = y + s(20.0);
                         let mid_y = track_top + s(9.0);
@@ -2614,7 +2798,13 @@ impl FlyoutState<'_> {
                         let tp = CreatePen(PS_SOLID, 1, accent);
                         let ob = SelectObject(hdc, tb as _);
                         let op = SelectObject(hdc, tp as _);
-                        Ellipse(hdc, tx - thumb_r, mid_y - thumb_r, tx + thumb_r, mid_y + thumb_r);
+                        Ellipse(
+                            hdc,
+                            tx - thumb_r,
+                            mid_y - thumb_r,
+                            tx + thumb_r,
+                            mid_y + thumb_r,
+                        );
                         SelectObject(hdc, ob);
                         SelectObject(hdc, op);
                         DeleteObject(tb as _);
@@ -2657,11 +2847,7 @@ impl FlyoutState<'_> {
                             if editing { accent } else { border_col },
                         );
                         let shown = if editing {
-                            let buf = self
-                                .editing
-                                .as_ref()
-                                .map(|(_, b)| b.as_str())
-                                .unwrap_or("");
+                            let buf = self.editing.as_ref().map(|(_, b)| b.as_str()).unwrap_or("");
                             format!("{buf}|")
                         } else {
                             value.clone()
@@ -2755,13 +2941,12 @@ impl FlyoutState<'_> {
                             };
                             let py = |v: f32| {
                                 plot_bot
-                                    - ((v / peak).clamp(0.0, 1.0)
-                                        * (plot_h - s(3.0)) as f32)
+                                    - ((v / peak).clamp(0.0, 1.0) * (plot_h - s(3.0)) as f32)
                                         .round() as i32
                             };
                             MoveToEx(hdc, px(0), py(points[0]), std::ptr::null_mut());
-                            for i in 1..points.len() {
-                                LineTo(hdc, px(i), py(points[i]));
+                            for (i, &value) in points.iter().enumerate().skip(1) {
+                                LineTo(hdc, px(i), py(value));
                             }
                             SelectObject(hdc, op);
                             DeleteObject(line as _);
@@ -2771,9 +2956,8 @@ impl FlyoutState<'_> {
                         SelectObject(hdc, tiny_font as _);
                         SetTextColor(hdc, muted_fg);
                         for (i, (name, _)) in series.iter().enumerate().take(3) {
-                            let dash = CreateSolidBrush(gdi_rgb(
-                                palette_colors[i % palette_colors.len()],
-                            ));
+                            let dash =
+                                CreateSolidBrush(gdi_rgb(palette_colors[i % palette_colors.len()]));
                             fill_round_rect(
                                 hdc,
                                 legend_x,
@@ -3101,6 +3285,11 @@ unsafe extern "system" fn flyout_wnd_proc(
             state.step_animation();
             0
         }
+        // The low-level hook reports that the external #32768 menu has closed.
+        WM_APP_MENU_DONE if wparam == 0 && lparam == 0 => {
+            state.begin_close();
+            0
+        }
         WM_LBUTTONDOWN => {
             if !state.closing {
                 let x = (lparam as u32 & 0xffff) as i16 as i32;
@@ -3108,7 +3297,11 @@ unsafe extern "system" fn flyout_wnd_proc(
                 if let Some(target) = state.hit_at(x, y) {
                     if target.is_text {
                         // C2 TextInput: clicking the field starts in-place editing.
-                        if state.editing.as_ref().is_none_or(|(id, _)| *id != target.id) {
+                        if state
+                            .editing
+                            .as_ref()
+                            .is_none_or(|(id, _)| *id != target.id)
+                        {
                             state.commit_editing();
                         }
                         state.begin_editing(target.id);
@@ -3116,8 +3309,7 @@ unsafe extern "system" fn flyout_wnd_proc(
                         unsafe {
                             SetCapture(hwnd);
                         }
-                        state.dragging_slider =
-                            Some((target.id, target.rect, target.is_seek));
+                        state.dragging_slider = Some((target.id, target.rect, target.is_seek));
                         let w = (target.rect.right - target.rect.left).max(1) as f32;
                         let ratio = ((x - target.rect.left) as f32 / w).clamp(0.0, 1.0);
                         let event = if target.is_seek {
@@ -3228,14 +3420,14 @@ unsafe extern "system" fn flyout_wnd_proc(
         }
         WM_KILLFOCUS => {
             state.commit_editing();
-            if !state.suppress_blur {
+            if !state.suppress_blur && !state.stays_open && !external_context_menu_active() {
                 state.begin_close();
             }
             0
         }
         WM_ACTIVATE if (wparam & 0xffff) == 0 => {
             state.commit_editing();
-            if !state.suppress_blur {
+            if !state.suppress_blur && !state.stays_open && !external_context_menu_active() {
                 state.begin_close();
             }
             0
@@ -3247,8 +3439,9 @@ unsafe extern "system" fn flyout_wnd_proc(
 #[cfg(test)]
 mod tests {
     use super::{
-        DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, FlyoutBlock, FlyoutSpec, LiveEvent,
-        RECT, app_row_targets, draw_gdi_text, format_clock, layout_flyout, pt_in_rect,
+        DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, FlyoutBlock, FlyoutEdge,
+        FlyoutOptions, FlyoutSpec, LiveEvent, RECT, app_row_targets, blend_rgb, draw_gdi_text,
+        format_clock, layout_flyout, pt_in_rect,
     };
     use windows_sys::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC};
 
@@ -3337,9 +3530,17 @@ mod tests {
         let (top, height, targets) = layout_flyout(&spec, 320, 1.0);
         assert!(top > 0 && height > 0);
         // SeekSlider is draggable, TextInput focusable, IconBar has one button.
-        assert!(targets.iter().any(|t| t.id == 11 && t.is_slider && t.is_seek));
+        assert!(
+            targets
+                .iter()
+                .any(|t| t.id == 11 && t.is_slider && t.is_seek)
+        );
         assert!(targets.iter().any(|t| t.id == 12 && t.is_text));
-        assert!(targets.iter().any(|t| t.id == 13 && !t.is_slider && !t.is_text));
+        assert!(
+            targets
+                .iter()
+                .any(|t| t.id == 13 && !t.is_slider && !t.is_text)
+        );
 
         // LiveEvent owns text, so the enum cannot be Copy.
         let event = LiveEvent::TextCommit {
@@ -3354,5 +3555,15 @@ mod tests {
             _ => panic!("wrong event"),
         }
         assert_eq!(format_clock(125), "2:05");
+    }
+
+    #[test]
+    fn flyout_options_defaults_match_the_shared_dock_flyout() {
+        let options = FlyoutOptions::default();
+        assert!(!options.stays_open);
+        assert!(!options.retain_for_external_context_menu);
+        assert_eq!(options.edge, FlyoutEdge::Bottom);
+        assert_eq!(options.shadow_rings, 4);
+        assert_eq!(blend_rgb(0x000000, 0xffffff, 0.5), 0x808080);
     }
 }

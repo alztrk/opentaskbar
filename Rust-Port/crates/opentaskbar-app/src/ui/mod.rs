@@ -3,4 +3,7 @@
 pub mod components;
 pub mod flyout;
 pub mod menu;
+pub mod prompt;
 pub mod settings;
+pub mod settings_search;
+pub mod text_input;
