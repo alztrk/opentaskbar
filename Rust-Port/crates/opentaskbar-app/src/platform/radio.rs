@@ -164,6 +164,13 @@ static WIFI_STATE: AtomicI8 = AtomicI8::new(-1);
 static BLUETOOTH_STATE: AtomicI8 = AtomicI8::new(-1);
 static MONITOR_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static LAST_REFRESH: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+/// Coalesces fire-and-forget refresh requests so a UI click cannot pile up COM workers.
+static REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+static REFRESH_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn vtbl<T>(object: *mut c_void) -> Option<*const T> {
     if object.is_null() {
@@ -366,6 +373,8 @@ fn request_access(statics: *mut c_void) -> bool {
 }
 
 fn refresh_cache() -> bool {
+    #[cfg(test)]
+    REFRESH_CALLS.fetch_add(1, Ordering::Relaxed);
     on_worker(|| {
         let Some(statics) = activate_statics() else {
             return false;
@@ -398,6 +407,24 @@ fn refresh_cache() -> bool {
     .unwrap_or(false)
 }
 
+/// Fire-and-forget cache refresh. Spawns a COM/MTA worker but never joins it,
+/// so a UI-thread caller cannot be blocked by the (up to ~4 s) async polling.
+/// Redundant requests are coalesced while one refresh is in flight.
+pub fn refresh_async() {
+    if REFRESH_IN_FLIGHT.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("opentaskbar-radio-refresh".into())
+        .spawn(|| {
+            refresh_cache();
+            REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+        });
+    if spawned.is_err() {
+        REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
 /// Normalizes a kind string from the Quick Settings widget.
 pub fn normalize_kind(kind: &str) -> Option<i32> {
     let kind = kind.trim().to_ascii_lowercase();
@@ -408,18 +435,18 @@ pub fn normalize_kind(kind: &str) -> Option<i32> {
     }
 }
 
-/// True when the requested radio is on. Unknown/denied state is reported as
-/// false so the widget never claims a radio is on without WinRT confirmation.
+/// True when the requested radio is on, read purely from the cache.
+///
+/// WS-1: this is called from the dock UI thread, which also owns the
+/// WH_MOUSE_LL / WH_KEYBOARD_LL hooks. It must NEVER do `thread::spawn + join`
+/// or COM polling here. A cold/unknown cache (`-1`) reads as `false`; the
+/// 2-second `install_state_monitor()` thread performs the real refresh.
 pub fn state(kind: &str) -> bool {
     let slot = match normalize_kind(kind) {
         Some(RADIO_KIND_WIFI) => &WIFI_STATE,
         Some(RADIO_KIND_BLUETOOTH) => &BLUETOOTH_STATE,
         _ => return false,
     };
-    let cached = slot.load(Ordering::Relaxed);
-    if cached < 0 {
-        refresh_cache();
-    }
     slot.load(Ordering::Relaxed) == 1
 }
 
@@ -472,7 +499,18 @@ pub fn set(kind: &str, on: bool) -> bool {
         any
     })
     .unwrap_or(false);
-    refresh_cache();
+    if changed {
+        let value = if on { 1i8 } else { 0 };
+        match kind_value {
+            RADIO_KIND_WIFI => WIFI_STATE.store(value, Ordering::Relaxed),
+            RADIO_KIND_BLUETOOTH => BLUETOOTH_STATE.store(value, Ordering::Relaxed),
+            _ => {}
+        }
+        // WS-1: refresh_cache() (COM spawn + join) is monitor/worker-only.
+        // Trigger a non-blocking refresh instead so the click never blocks
+        // the hook-owning UI thread.
+        refresh_async();
+    }
     changed
 }
 
@@ -520,10 +558,40 @@ mod tests {
 
     #[test]
     fn winrt_radio_refresh_completes_without_crashing() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Exercises the real combase.dll WinRT activation, QueryInterface(IAsyncInfo),
         // and IAsyncOperation::GetResults path that previously faulted with 0xC0000005.
         let _ = refresh_cache();
         let _ = state("wifi");
         let _ = state("bluetooth");
+    }
+
+    #[test]
+    fn state_reads_cache_only_without_refresh_or_join() {
+        let _guard = TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = REFRESH_CALLS.load(Ordering::Relaxed);
+
+        // Cached values are returned without touching COM or spawning a worker.
+        WIFI_STATE.store(1, Ordering::Relaxed);
+        BLUETOOTH_STATE.store(0, Ordering::Relaxed);
+        assert!(state("wifi"));
+        assert!(!state("bluetooth"));
+        assert!(!state("nightlight"));
+
+        // A cold (-1) cache is reported as false; the monitor thread refreshes it.
+        WIFI_STATE.store(-1, Ordering::Relaxed);
+        BLUETOOTH_STATE.store(-1, Ordering::Relaxed);
+        assert!(!state("wifi"));
+        assert!(!state("bluetooth"));
+
+        assert_eq!(
+            REFRESH_CALLS.load(Ordering::Relaxed),
+            before,
+            "state() must never call refresh_cache() (spawn + join) on the UI path"
+        );
     }
 }

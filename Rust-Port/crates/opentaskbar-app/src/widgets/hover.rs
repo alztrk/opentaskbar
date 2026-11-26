@@ -95,6 +95,11 @@ impl WidgetHoverCoordinator {
 
     /// C# `WidgetHoverCoordinator.Enter`: arm the 350 ms intent timer.
     /// Returns `true` when the widget was already expanded (no visual change needed).
+    ///
+    /// WS-1: this is also called on every `WM_MOUSEMOVE` while the pointer stays on
+    /// the same chip. Only the *first* entry (or an inconsistent pending state)
+    /// may (re)arm `pending_since`; repeated moves must not restart the intent
+    /// timer, otherwise hover intent can never fire under a high polling rate.
     pub fn on_enter(&mut self, id: &str, now: Instant) -> bool {
         if self.expanded_id.as_deref() == Some(id) {
             return true;
@@ -106,8 +111,11 @@ impl WidgetHoverCoordinator {
         if self.captured.is_some() {
             return false;
         }
+        let first_entry = self.pending_id.as_deref() != Some(id);
         self.pending_id = Some(id.to_owned());
-        self.pending_since = Some(now);
+        if first_entry || self.pending_since.is_none() {
+            self.pending_since = Some(now);
+        }
         if self.phase != HoverPhase::Captured {
             self.phase = HoverPhase::Pending;
         }
@@ -317,5 +325,35 @@ mod tests {
         assert!(!c.is_suppressed("clock", t0 + Duration::from_millis(301)));
         c.on_enter("clock", t0 + Duration::from_millis(400));
         assert_eq!(c.tick(t0 + Duration::from_millis(800)), HoverChange::Expand);
+    }
+
+    #[test]
+    fn repeated_enter_does_not_restart_intent_timer() {
+        let mut c = WidgetHoverCoordinator::new();
+        let t0 = Instant::now();
+        assert!(!c.on_enter("stats", t0));
+        // High-polling-rate mouse moves over the same chip must not re-arm the timer.
+        for ms in [10, 50, 120, 250, 340] {
+            assert!(!c.on_enter("stats", t0 + Duration::from_millis(ms)));
+        }
+        assert_eq!(c.tick(t0 + Duration::from_millis(349)), HoverChange::None);
+        assert_eq!(c.tick(t0 + Duration::from_millis(350)), HoverChange::Expand);
+        assert_eq!(c.expanded_id(), Some("stats"));
+    }
+
+    #[test]
+    fn reenter_after_leave_restarts_intent_timer() {
+        let mut c = WidgetHoverCoordinator::new();
+        let t0 = Instant::now();
+        c.on_enter("media", t0);
+        c.on_enter("media", t0 + Duration::from_millis(200));
+        assert_eq!(
+            c.on_leave("media", t0 + Duration::from_millis(250)),
+            HoverChange::None
+        );
+        // New entry after a leave is a fresh 350 ms intent window.
+        assert!(!c.on_enter("media", t0 + Duration::from_millis(300)));
+        assert_eq!(c.tick(t0 + Duration::from_millis(500)), HoverChange::None);
+        assert_eq!(c.tick(t0 + Duration::from_millis(650)), HoverChange::Expand);
     }
 }

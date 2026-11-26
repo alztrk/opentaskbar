@@ -2199,6 +2199,14 @@ impl WidgetRuntime {
         }
     }
 
+    /// WS-1: `open_widget_flyout`'s return value means "persist settings and reload
+    /// them live". Only a real `LiveEvent::Click` / `TextCommit` that actually
+    /// changed a setting may return `true`; opening a flyout on hover must never
+    /// do so (on the dock UI thread that chain blocks the WH_MOUSE_LL hook owner).
+    fn flyout_settings_changed(id: &str, live_change: bool) -> bool {
+        live_change && matches!(id, "quicksettings" | "bluetoothbattery")
+    }
+
     pub fn open_widget_flyout(
         &mut self,
         id: &str,
@@ -2680,6 +2688,9 @@ impl WidgetRuntime {
                 let low = setting_i64(settings, "WirelessBatteryLowThreshold", 20) as u32;
                 let interval = setting_i64(settings, "WirelessBatteryPollSeconds", 60) as u64;
                 let listen_only = setting_bool(settings, "WirelessBatteryListenOnly", false);
+                // WS-1: only a real live-event click/commit may request a settings save.
+                // Hover-generated flyouts must leave this `false`.
+                let mut settings_changed = false;
                 let build = |_settings: &DockSettings, selected: usize, rename_value: String| {
                     let devices: Vec<_> = self
                         .bt_battery
@@ -2791,12 +2802,14 @@ impl WidgetRuntime {
                                         "IgnoredWirelessDevices",
                                         serde_json::json!(list),
                                     );
+                                    settings_changed = true;
                                 }
                             }
                             LiveOutcome::Update(build(settings, 0, String::new()))
                         }
                         LiveEvent::Click(3) => {
                             set_setting(settings, "IgnoredWirelessDevices", serde_json::json!([]));
+                            settings_changed = true;
                             LiveOutcome::Update(build(settings, 0, String::new()))
                         }
                         LiveEvent::Click(4) => {
@@ -2812,6 +2825,7 @@ impl WidgetRuntime {
                                 "WirelessBatteryPollSeconds",
                                 serde_json::json!(next),
                             );
+                            settings_changed = true;
                             LiveOutcome::Update(build(settings, 0, String::new()))
                         }
                         LiveEvent::Click(5) => {
@@ -2822,6 +2836,7 @@ impl WidgetRuntime {
                                 "WirelessBatteryLowThreshold",
                                 serde_json::json!(next),
                             );
+                            settings_changed = true;
                             LiveOutcome::Update(build(settings, 0, String::new()))
                         }
                         LiveEvent::Click(6) => {
@@ -2846,6 +2861,7 @@ impl WidgetRuntime {
                                 "WirelessBatteryListenOnly",
                                 serde_json::json!(next),
                             );
+                            settings_changed = true;
                             LiveOutcome::Update(build(settings, 0, String::new()))
                         }
                         LiveEvent::Click(8) => {
@@ -2866,13 +2882,16 @@ impl WidgetRuntime {
                                     "WirelessDeviceAliases",
                                     serde_json::json!(map),
                                 );
+                                settings_changed = true;
                             }
                             LiveOutcome::Update(build(settings, 0, String::new()))
                         }
                         _ => LiveOutcome::Close,
                     },
                 );
-                return true;
+                // WS-1: no unconditional `true` — a hover-opened flyout must not
+                // trigger settings save + live reload on the hook-owning UI thread.
+                return Self::flyout_settings_changed("bluetoothbattery", settings_changed);
             }
             // C# `StorageWidget` expanded drives flyout (DriveType.Fixed && IsReady).
             "storage" => {
@@ -3458,9 +3477,7 @@ impl WidgetRuntime {
                         _ => LiveOutcome::Close,
                     },
                 );
-                if settings_changed {
-                    return true;
-                }
+                return Self::flyout_settings_changed("quicksettings", settings_changed);
             }
             "stacks" => {
                 let mut blocks: Vec<FlyoutBlock> = settings
@@ -3569,5 +3586,32 @@ mod tests {
         assert!(widget_descriptor("bluetoothbattery").is_some());
         assert!(widget_descriptor("dayprogress").is_some());
         assert!(widget_descriptor("keyboard").is_some());
+    }
+
+    #[test]
+    fn hover_does_not_request_settings_reload() {
+        // WS-1 regression: opening a flyout on hover (no live user event) must
+        // never report "settings changed" to the dock, even for the
+        // bluetoothbattery widget that used to return `true` unconditionally.
+        assert!(!WidgetRuntime::flyout_settings_changed(
+            "bluetoothbattery",
+            false
+        ));
+        assert!(!WidgetRuntime::flyout_settings_changed(
+            "quicksettings",
+            false
+        ));
+        assert!(!WidgetRuntime::flyout_settings_changed("stats", false));
+        // Real click/commit paths keep the previous save + live-reload behaviour.
+        assert!(WidgetRuntime::flyout_settings_changed(
+            "bluetoothbattery",
+            true
+        ));
+        assert!(WidgetRuntime::flyout_settings_changed(
+            "quicksettings",
+            true
+        ));
+        // Widgets without a click-driven settings mutation never request a reload.
+        assert!(!WidgetRuntime::flyout_settings_changed("stats", true));
     }
 }
