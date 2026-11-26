@@ -6,6 +6,7 @@
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use windows::Win32::Foundation::HWND as WinHwnd;
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -64,6 +65,9 @@ const ROW_H_DIPS: f32 = 32.0;
 const SEP_H_DIPS: f32 = 9.0;
 const PAD_X_DIPS: f32 = 5.0;
 const PAD_Y_DIPS: f32 = 5.0;
+/// Time the pointer is allowed to travel from a parent row into the submenu
+/// before the submenu is considered abandoned.
+const SUBMENU_HOVER_GRACE_MS: u64 = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuIcon {
@@ -344,6 +348,12 @@ struct MenuSession {
     border: BorderStyle,
     root: *mut MenuPane,
     submenu: Option<Box<MenuPane>>,
+    /// Monotonic open time, used for the parent-to-submenu travel grace window.
+    submenu_opened_at: Option<Instant>,
+    /// Cached parent geometry (screen coords) so hover checks never need to
+    /// hold a borrow of `root` while closing the submenu.
+    submenu_parent_rect: Option<RECT>,
+    submenu_parent_row: Option<RECT>,
     selected_id: Option<u32>,
     done: AtomicBool,
 }
@@ -354,6 +364,57 @@ fn wide(text: &str) -> Vec<u16> {
 
 fn pt_in_rect(r: &RECT, x: i32, y: i32) -> bool {
     x >= r.left && x < r.right && y >= r.top && y < r.bottom
+}
+
+/// Translates a pane-local row rect into screen coordinates using the pane's
+/// own stored rect — no `GetWindowRect`/`WindowFromPoint` round trip needed.
+fn screen_row_rect(pane_rect: &RECT, row_rect: &RECT) -> RECT {
+    RECT {
+        left: pane_rect.left + row_rect.left,
+        top: pane_rect.top + row_rect.top,
+        right: pane_rect.left + row_rect.right,
+        bottom: pane_rect.top + row_rect.bottom,
+    }
+}
+
+/// Pure lifetime policy for a hover submenu. Returns `true` when the submenu
+/// must be closed for the current pointer position.
+///
+/// The pointer is kept alive while it is over the parent submenu row or over
+/// the submenu pane itself. While the short grace window is still running,
+/// the whole parent pane is also considered "in transit" — this covers the
+/// padding strip between the row rect and the submenu's left edge, where the
+/// parent receives `WM_MOUSEMOVE` with no hovered row before the pointer ever
+/// reaches the submenu HWND. Outside those rects the submenu closes promptly.
+fn should_close_submenu(
+    submenu_open: bool,
+    elapsed_ms_since_open: Option<u64>,
+    pointer_screen: Option<(i32, i32)>,
+    parent_rect: Option<RECT>,
+    parent_row_rect: Option<RECT>,
+    submenu_rect: Option<RECT>,
+    grace_ms: u64,
+) -> bool {
+    if !submenu_open {
+        return false;
+    }
+    let Some((x, y)) = pointer_screen else {
+        // Pointer position is unavailable (e.g. `GetCursorPos` failed): do not
+        // keep an orphaned submenu alive without any hit-test information.
+        return true;
+    };
+    if submenu_rect.is_some_and(|r| pt_in_rect(&r, x, y)) {
+        return false;
+    }
+    if parent_row_rect.is_some_and(|r| pt_in_rect(&r, x, y)) {
+        return false;
+    }
+    if elapsed_ms_since_open.is_some_and(|ms| ms <= grace_ms)
+        && parent_rect.is_some_and(|r| pt_in_rect(&r, x, y))
+    {
+        return false;
+    }
+    true
 }
 
 fn rgba_f(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
@@ -715,6 +776,9 @@ pub fn show_popup_menu_with_border(
         border,
         root: std::ptr::null_mut(),
         submenu: None,
+        submenu_opened_at: None,
+        submenu_parent_rect: None,
+        submenu_parent_row: None,
         selected_id: None,
         done: AtomicBool::new(false),
     });
@@ -747,6 +811,9 @@ impl MenuSession {
         if let Some(mut sub) = self.submenu.take() {
             destroy_pane(&mut sub);
         }
+        self.submenu_opened_at = None;
+        self.submenu_parent_rect = None;
+        self.submenu_parent_row = None;
         if !self.root.is_null() {
             let root = unsafe { &mut *self.root };
             if root.open_submenu_idx.take().is_some() {
@@ -794,11 +861,49 @@ impl MenuSession {
         {
             self.submenu = Some(sub_pane);
             root.open_submenu_idx = Some(parent_idx);
+            self.submenu_opened_at = Some(Instant::now());
+            self.submenu_parent_rect = Some(root.screen_rect);
+            self.submenu_parent_row = row_rects_row(&root, parent_idx);
             unsafe {
                 InvalidateRect(root.hwnd, std::ptr::null(), 0);
             }
         }
     }
+
+    /// Re-evaluates the hovered submenu against the current pointer position.
+    ///
+    /// Only owned geometry is read from the panes: `root` aliases the pane
+    /// pointer used by `WndProc`, so no `&MenuPane` may be alive while
+    /// `close_submenu` takes `&mut MenuSession` and mutates the root pane.
+    fn refresh_submenu_hover(&mut self, pointer_screen: Option<(i32, i32)>) {
+        if self.submenu.is_none() {
+            return;
+        }
+        let elapsed_ms = self
+            .submenu_opened_at
+            .map(|opened| opened.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        let submenu_rect = self.submenu.as_ref().map(|sub| sub.screen_rect);
+        if should_close_submenu(
+            true,
+            elapsed_ms,
+            pointer_screen,
+            self.submenu_parent_rect,
+            self.submenu_parent_row,
+            submenu_rect,
+            SUBMENU_HOVER_GRACE_MS,
+        ) {
+            self.close_submenu();
+        }
+    }
+}
+
+/// Copies the screen-space rect of a parent pane's row (if any).
+fn row_rects_row(pane: &MenuPane, idx: usize) -> Option<RECT> {
+    pane.row_rects
+        .get(idx)
+        .copied()
+        .flatten()
+        .map(|row| screen_row_rect(&pane.screen_rect, &row))
 }
 
 impl MenuPane {
@@ -1192,15 +1297,31 @@ unsafe extern "system" fn menu_wnd_proc(
                         next.and_then(|idx| pane.row_rects.get(idx).copied().flatten());
                     unsafe {
                         let session = &mut *session_ptr;
-                        if let (Some(idx), Some(items), Some(rc)) = (next, sub_items, row_rect) {
-                            session.open_submenu(idx, items, rc);
-                        } else {
-                            session.close_submenu();
+                        match (next, sub_items, row_rect) {
+                            (Some(idx), Some(items), Some(rc)) => {
+                                session.open_submenu(idx, items, rc)
+                            }
+                            // Moved to a different row: that is an explicit
+                            // intent change, not a transition into the submenu.
+                            (Some(_), _, _) => session.close_submenu(),
+                            // No hovered row: this is the padding gap between
+                            // the parent row and the submenu edge. The grace
+                            // policy below decides whether to keep it open.
+                            (None, _, _) => {}
                         }
                     }
                 }
                 unsafe {
                     InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+            }
+            // `hovered` stays `None` while the pointer crosses the padding strip
+            // on its way to the submenu, so a hover-change-only check would
+            // destroy the submenu too early. Re-evaluate every move instead.
+            if !unsafe { (*pane_ptr).is_submenu } && !session_ptr.is_null() {
+                let origin = unsafe { ((*pane_ptr).screen_rect.left, (*pane_ptr).screen_rect.top) };
+                unsafe {
+                    (*session_ptr).refresh_submenu_hover(Some((x + origin.0, y + origin.1)));
                 }
             }
             0
@@ -1210,6 +1331,16 @@ unsafe extern "system" fn menu_wnd_proc(
                 (*pane_ptr).tracking = false;
                 if (*pane_ptr).hovered.take().is_some() {
                     InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+            }
+            if !session_ptr.is_null() {
+                let mut pt = POINT { x: 0, y: 0 };
+                let pointer = unsafe { GetCursorPos(&mut pt) != 0 }.then_some((pt.x, pt.y));
+                // Leaving the parent pane is normal when the pointer enters the
+                // submenu; the pure policy keeps it alive if the pointer is on
+                // the submenu (or still on its parent row during the grace).
+                unsafe {
+                    (*session_ptr).refresh_submenu_hover(pointer);
                 }
             }
             0
@@ -1309,9 +1440,10 @@ unsafe extern "system" fn menu_wnd_proc(
 #[cfg(test)]
 mod tests {
     use super::{
-        MenuWndProcGuard, NATIVE_SYS_COMMAND_FLAG, encode_native_command, measure_entries,
-        pt_in_rect,
+        MenuWndProcGuard, NATIVE_SYS_COMMAND_FLAG, SUBMENU_HOVER_GRACE_MS, encode_native_command,
+        measure_entries, pt_in_rect, screen_row_rect, should_close_submenu,
     };
+    use windows_sys::Win32::Foundation::RECT;
 
     #[test]
     fn wndproc_guard_rejects_same_hwnd_reentry_and_allows_others() {
@@ -1353,5 +1485,124 @@ mod tests {
         assert_eq!(app, 42);
         assert_ne!(sys & NATIVE_SYS_COMMAND_FLAG, 0);
         assert_eq!(sys & !NATIVE_SYS_COMMAND_FLAG, 0xF020);
+    }
+
+    #[test]
+    fn submenu_lifetime_keeps_pointer_on_parent_row_or_submenu() {
+        let parent = RECT {
+            left: 100,
+            top: 100,
+            right: 356,
+            bottom: 400,
+        };
+        let row = RECT {
+            left: 105,
+            top: 132,
+            right: 351,
+            bottom: 164,
+        };
+        let submenu = RECT {
+            left: 354,
+            top: 132,
+            right: 586,
+            bottom: 400,
+        };
+        let close = |elapsed, pointer| {
+            should_close_submenu(
+                true,
+                elapsed,
+                pointer,
+                Some(parent),
+                Some(row),
+                Some(submenu),
+                SUBMENU_HOVER_GRACE_MS,
+            )
+        };
+
+        // Parent row and submenu pane are always safe, regardless of grace.
+        assert!(!close(None, Some((200, 148))));
+        assert!(!close(None, Some((400, 148))));
+        // Half-open rect boundaries: submenu.left is inclusive, row.right is not.
+        assert!(!close(None, Some((354, 148))));
+        assert!(close(None, Some((351, 148))));
+        // Outside both rects closes immediately, even during grace.
+        assert!(close(Some(0), Some((700, 148))));
+        // No pointer information cannot keep an orphaned submenu alive.
+        assert!(close(Some(0), None));
+        // Not open: nothing to close.
+        assert!(!should_close_submenu(
+            false,
+            None,
+            Some((700, 148)),
+            Some(parent),
+            Some(row),
+            Some(submenu),
+            SUBMENU_HOVER_GRACE_MS,
+        ));
+    }
+
+    #[test]
+    fn submenu_lifetime_grace_covers_parent_padding_gap() {
+        let parent = RECT {
+            left: 100,
+            top: 100,
+            right: 356,
+            bottom: 400,
+        };
+        let row = RECT {
+            left: 105,
+            top: 132,
+            right: 351,
+            bottom: 164,
+        };
+        let submenu = RECT {
+            left: 354,
+            top: 132,
+            right: 586,
+            bottom: 400,
+        };
+        // The 3px strip between the row rect and the submenu's left edge is
+        // inside the parent pane but in neither hit-test rect.
+        let gap = (352, 148);
+        assert!(pt_in_rect(&parent, gap.0, gap.1));
+        assert!(!pt_in_rect(&row, gap.0, gap.1));
+        assert!(!pt_in_rect(&submenu, gap.0, gap.1));
+        let close = |elapsed| {
+            should_close_submenu(
+                true,
+                Some(elapsed),
+                Some(gap),
+                Some(parent),
+                Some(row),
+                Some(submenu),
+                SUBMENU_HOVER_GRACE_MS,
+            )
+        };
+        assert!(!close(0));
+        assert!(!close(SUBMENU_HOVER_GRACE_MS));
+        assert!(close(SUBMENU_HOVER_GRACE_MS + 1));
+    }
+
+    #[test]
+    fn screen_row_rect_translates_pane_local_rows() {
+        let pane = RECT {
+            left: -120,
+            top: 40,
+            right: 136,
+            bottom: 340,
+        };
+        let row = RECT {
+            left: 5,
+            top: 32,
+            right: 251,
+            bottom: 64,
+        };
+        let screen = screen_row_rect(&pane, &row);
+        assert_eq!(screen.left, -115);
+        assert_eq!(screen.top, 72);
+        assert_eq!(screen.right, 131);
+        assert_eq!(screen.bottom, 104);
+        assert!(pt_in_rect(&screen, -115, 72));
+        assert!(!pt_in_rect(&screen, 131, 72));
     }
 }
