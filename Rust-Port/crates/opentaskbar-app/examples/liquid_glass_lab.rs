@@ -30,7 +30,8 @@ use windows::UI::Composition::Effects::{SceneLightingEffect, SceneLightingEffect
 use windows::UI::Composition::{
     AmbientLight, CompositionBackdropBrush, CompositionBrush, CompositionColorBrush,
     CompositionDrawingSurface, CompositionEffectSourceParameter, CompositionGraphicsDevice,
-    CompositionStretch, Compositor, ContainerVisual, DistantLight, PointLight, SpriteVisual,
+    CompositionStretch, Compositor, ContainerVisual, DistantLight, DropShadow, PointLight,
+    SpriteVisual,
 };
 use windows::Win32::Foundation::{HWND as WinHwnd, POINT as WinPoint};
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -77,10 +78,11 @@ use windows::core::{GUID, HSTRING, Interface, PCWSTR, Result as WinResult, imple
 use windows_numerics::{Vector2, Vector3};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
-    DWMNCRP_DISABLED, DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DwmExtendFrameIntoClientArea,
     DwmSetWindowAttribute,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Controls::MARGINS;
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
@@ -98,13 +100,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_DONOTROUND: u32 = 1;
+const DWMWA_USE_HOSTBACKDROPBRUSH: u32 = 17;
 const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
 
-// Window & two floating glass capsule geometries (in DIPs).
-const WIN_W_DIPS: f32 = 620.0;
-const WIN_H_DIPS: f32 = 310.0;
-const CARD_RECT_DIPS: (f32, f32, f32, f32, f32) = (24.0, 20.0, 572.0, 178.0, 22.0);
-const DOCK_RECT_DIPS: (f32, f32, f32, f32, f32) = (24.0, 218.0, 572.0, 68.0, 26.0);
+// Window & two floating glass capsule geometries (in DIPs), with outer shadow margin.
+const WIN_W_DIPS: f32 = 648.0;
+const WIN_H_DIPS: f32 = 344.0;
+const CARD_RECT_DIPS: (f32, f32, f32, f32, f32) = (38.0, 26.0, 572.0, 182.0, 22.0);
+const DOCK_RECT_DIPS: (f32, f32, f32, f32, f32) = (38.0, 228.0, 572.0, 68.0, 26.0);
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(Some(0)).collect()
@@ -334,11 +337,11 @@ impl GlassParams {
         Self {
             preset_name: "1 · Liquid Glass",
             is_dark,
-            blur_sigma: 22.0,
-            saturation: 1.55,
-            tint_alpha: if is_dark { 0.20 } else { 0.28 },
-            specular: 1.45,
-            shine: 44.0,
+            blur_sigma: 18.0,
+            saturation: 1.45,
+            tint_alpha: if is_dark { 0.14 } else { 0.22 },
+            specular: 0.72,
+            shine: 56.0,
             pointer_light: true,
         }
     }
@@ -347,11 +350,11 @@ impl GlassParams {
         Self {
             preset_name: "2 · Kristal Cam",
             is_dark,
-            blur_sigma: 10.0,
-            saturation: 1.72,
-            tint_alpha: if is_dark { 0.10 } else { 0.16 },
-            specular: 1.85,
-            shine: 58.0,
+            blur_sigma: 8.0,
+            saturation: 1.65,
+            tint_alpha: if is_dark { 0.07 } else { 0.12 },
+            specular: 0.95,
+            shine: 72.0,
             pointer_light: true,
         }
     }
@@ -360,11 +363,11 @@ impl GlassParams {
         Self {
             preset_name: "3 · Derin Buzlu",
             is_dark,
-            blur_sigma: 34.0,
-            saturation: 1.28,
-            tint_alpha: if is_dark { 0.36 } else { 0.44 },
-            specular: 0.90,
-            shine: 28.0,
+            blur_sigma: 30.0,
+            saturation: 1.25,
+            tint_alpha: if is_dark { 0.28 } else { 0.38 },
+            specular: 0.50,
+            shine: 36.0,
             pointer_light: true,
         }
     }
@@ -373,11 +376,11 @@ impl GlassParams {
         Self {
             preset_name: "4 · Füme Cam",
             is_dark,
-            blur_sigma: 18.0,
-            saturation: 1.12,
-            tint_alpha: if is_dark { 0.50 } else { 0.54 },
-            specular: 0.55,
-            shine: 24.0,
+            blur_sigma: 16.0,
+            saturation: 1.10,
+            tint_alpha: if is_dark { 0.42 } else { 0.48 },
+            specular: 0.35,
+            shine: 32.0,
             pointer_light: true,
         }
     }
@@ -387,9 +390,16 @@ impl GlassParams {
 // Procedural 3D Convex Bevel Normal Map Generator (Signed Distance Field)
 // ============================================================================
 
-/// Generates a premultiplied BGRA8 tangent-space normal map for a convex glass capsule.
-/// The outer `bevel_px` rim curves smoothly outward like a polished optical lens so DWM's
-/// `SceneLightingEffect` physically bends specular reflections around the edges and corners.
+const BAYER_4X4: [[f32; 4]; 4] = [
+    [0.0 / 16.0, 8.0 / 16.0, 2.0 / 16.0, 10.0 / 16.0],
+    [12.0 / 16.0, 4.0 / 16.0, 14.0 / 16.0, 6.0 / 16.0],
+    [3.0 / 16.0, 11.0 / 16.0, 1.0 / 16.0, 9.0 / 16.0],
+    [15.0 / 16.0, 7.0 / 16.0, 13.0 / 16.0, 5.0 / 16.0],
+];
+
+/// Generates a premultiplied BGRA8 tangent-space normal map for a thin optical glass bevel.
+/// Interior pixels remain strictly flat `(0, 0, 1)` to eliminate 8-bit quantization banding,
+/// while the narrow outer `bevel_px` rim curves smoothly with 4x4 ordered dithering.
 fn build_bevel_normal_map(width: u32, height: u32, radius_px: f32, bevel_px: f32) -> Vec<u8> {
     let w = width as usize;
     let h = height as usize;
@@ -399,7 +409,7 @@ fn build_bevel_normal_map(width: u32, height: u32, radius_px: f32, bevel_px: f32
     let r = radius_px.min(hw).min(hh).max(2.0);
     let bx = (hw - r).max(0.0);
     let by = (hh - r).max(0.0);
-    let bevel = bevel_px.max(4.0);
+    let bevel = bevel_px.max(3.0);
 
     for py in 0..h {
         let y = py as f32 + 0.5 - hh;
@@ -413,42 +423,40 @@ fn build_bevel_normal_map(width: u32, height: u32, radius_px: f32, bevel_px: f32
             let inside = ax.max(ay).min(0.0);
             let sdf = outside + inside - r; // <= 0 inside capsule
 
-            // Outward gradient of the rounded-box SDF.
-            let (gx, gy) = if qx > 0.0 || qy > 0.0 {
-                let len = (qx * qx + qy * qy).sqrt().max(1e-4);
-                ((qx / len) * x.signum(), (qy / len) * y.signum())
-            } else if ax > ay {
-                (x.signum(), 0.0)
-            } else {
-                (0.0, y.signum())
-            };
-
             let inward = (-sdf).max(0.0);
-            let (nx, ny, nz) = if inward < bevel {
-                // Smooth convex lens curvature at the rim flattening into the glass plateau.
+            let (nx, ny, nz, dither) = if inward < bevel {
+                // Outward gradient of the rounded-box SDF.
+                let (gx, gy) = if qx > 0.0 || qy > 0.0 {
+                    let len = (qx * qx + qy * qy).sqrt().max(1e-4);
+                    ((qx / len) * x.signum(), (qy / len) * y.signum())
+                } else if ax > ay {
+                    (x.signum(), 0.0)
+                } else {
+                    (0.0, y.signum())
+                };
+                // Smooth concave-to-convex glass bevel rolloff confined to the thin optical rim.
                 let u = (inward / bevel).clamp(0.0, 1.0);
-                let curve = (1.0 - u).powf(1.45);
-                // Add subtle macro dome across the capsule face.
-                let dome_x = (x / hw.max(1.0)) * 0.08;
-                let dome_y = (y / hh.max(1.0)) * 0.14;
-                let vx = gx * curve * 0.88 + dome_x;
-                let vy = gy * curve * 0.88 + dome_y;
+                let curve = (1.0 - u).powf(2.0) * 0.72;
+                let vx = gx * curve;
+                let vy = gy * curve;
                 let vz = 1.0_f32;
                 let len = (vx * vx + vy * vy + vz * vz).sqrt();
-                (vx / len, vy / len, vz / len)
+                let d = (BAYER_4X4[py & 3][px & 3] - 0.5) * 0.9;
+                (vx / len, vy / len, vz / len, d)
             } else {
-                // Subtle broad lens dome in the center so light sweeps smoothly across the surface.
-                let vx = (x / hw.max(1.0)) * 0.08;
-                let vy = (y / hh.max(1.0)) * 0.14;
-                let vz = 1.0_f32;
-                let len = (vx * vx + vy * vy + vz * vz).sqrt();
-                (vx / len, vy / len, vz / len)
+                // Strictly flat interior -> exact (128, 128, 255), zero vertical banding.
+                (0.0, 0.0, 1.0, 0.0)
             };
 
-            // Tangent-space normal encoding in BGRA (B=Z, G=Y, R=X).
-            let r_u8 = ((nx * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8;
-            let g_u8 = ((ny * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8;
-            let b_u8 = ((nz * 0.5 + 0.5).clamp(0.0, 1.0) * 255.0).round() as u8;
+            let r_u8 = ((nx * 0.5 + 0.5) * 255.0 + dither)
+                .clamp(0.0, 255.0)
+                .round() as u8;
+            let g_u8 = ((ny * 0.5 + 0.5) * 255.0 + dither)
+                .clamp(0.0, 255.0)
+                .round() as u8;
+            let b_u8 = ((nz * 0.5 + 0.5) * 255.0 + dither)
+                .clamp(0.0, 255.0)
+                .round() as u8;
             let off = (py * w + px) * 4;
             out[off] = b_u8;
             out[off + 1] = g_u8;
@@ -469,10 +477,13 @@ struct GlassPiece {
     w_px: f32,
     h_px: f32,
     radius_px: f32,
+    _shadow_visual: SpriteVisual,
+    drop_shadow: DropShadow,
     glass_visual: SpriteVisual,
     _overlay_visual: SpriteVisual,
     normal_surface: CompositionDrawingSurface,
     overlay_surface: CompositionDrawingSurface,
+    _mask_surface: CompositionDrawingSurface,
 }
 
 impl GlassPiece {
@@ -498,6 +509,39 @@ impl GlassPiece {
         let clip = compositor.CreateGeometricClip()?;
         clip.SetGeometry(&geom)?;
 
+        // Soft GPU floating drop shadow behind the glass capsule.
+        let mask_surface = gfx_device.CreateDrawingSurface(
+            Size {
+                Width: w_px,
+                Height: h_px,
+            },
+            DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            DirectXAlphaMode::Premultiplied,
+        )?;
+        upload_pill_mask(&mask_surface, w_px, h_px, radius_px)?;
+        let mask_brush = compositor.CreateSurfaceBrushWithSurface(&mask_surface)?;
+        mask_brush.SetStretch(CompositionStretch::Fill)?;
+
+        let drop_shadow = compositor.CreateDropShadow()?;
+        drop_shadow.SetMask(&mask_brush)?;
+        drop_shadow.SetBlurRadius(24.0 * dpi)?;
+        drop_shadow.SetOffset(Vector3 {
+            X: 0.0,
+            Y: 8.0 * dpi,
+            Z: 0.0,
+        })?;
+        drop_shadow.SetColor(ui_color(115, 0, 0, 0))?;
+
+        let shadow_visual = compositor.CreateSpriteVisual()?;
+        shadow_visual.SetSize(Vector2 { X: w_px, Y: h_px })?;
+        shadow_visual.SetOffset(Vector3 {
+            X: x_px,
+            Y: y_px,
+            Z: 0.0,
+        })?;
+        shadow_visual.SetShadow(&drop_shadow)?;
+        parent.Children()?.InsertAtTop(&shadow_visual)?;
+
         let glass_visual = compositor.CreateSpriteVisual()?;
         glass_visual.SetSize(Vector2 { X: w_px, Y: h_px })?;
         glass_visual.SetOffset(Vector3 {
@@ -521,7 +565,7 @@ impl GlassPiece {
             w_px as u32,
             h_px as u32,
             radius_px,
-            22.0 * dpi,
+            6.5 * dpi,
         )?;
 
         let overlay_surface = gfx_device.CreateDrawingSurface(
@@ -542,6 +586,7 @@ impl GlassPiece {
             Y: y_px,
             Z: 0.0,
         })?;
+        overlay_visual.SetClip(&clip)?;
         overlay_visual.SetBrush(&overlay_brush)?;
         parent.Children()?.InsertAtTop(&overlay_visual)?;
 
@@ -551,10 +596,13 @@ impl GlassPiece {
             w_px,
             h_px,
             radius_px,
+            _shadow_visual: shadow_visual,
+            drop_shadow,
             glass_visual,
             _overlay_visual: overlay_visual,
             normal_surface,
             overlay_surface,
+            _mask_surface: mask_surface,
         })
     }
 
@@ -565,9 +613,9 @@ impl GlassPiece {
         params: GlassParams,
     ) -> WinResult<()> {
         let tint_rgb = if params.is_dark {
-            ui_color(255, 18, 20, 26)
+            ui_color(255, 16, 20, 28)
         } else {
-            ui_color(255, 248, 250, 255)
+            ui_color(255, 248, 251, 255)
         };
         let tint_brush: CompositionColorBrush = compositor.CreateColorBrushWithColor(tint_rgb)?;
 
@@ -615,18 +663,19 @@ impl GlassPiece {
         scene_light.SetName(&HSTRING::from("GlassLight"))?;
         scene_light.SetNormalMapSource(&normal_param)?;
         scene_light.SetAmbientAmount(0.0)?;
-        scene_light.SetDiffuseAmount(if params.is_dark { 0.09 } else { 0.14 })?;
+        scene_light.SetDiffuseAmount(if params.is_dark { 0.025 } else { 0.04 })?;
         scene_light.SetSpecularAmount(params.specular)?;
         scene_light.SetSpecularShine(params.shine)?;
         scene_light.SetReflectanceModel(SceneLightingEffectReflectanceModel::BlinnPhong)?;
         let light_source: IGraphicsEffectSource = scene_light.cast()?;
 
-        // 5. Additive optical composite: `tinted_glass + 3D_specular_reflection`.
+        // 5. Soft optical Screen blend (`s1 + k * s2 * (1 - s1)`) -> never clips to white chrome.
+        let k = if params.is_dark { 0.62 } else { 0.50 };
         let final_effect: IGraphicsEffect = IGraphicsEffect::from(ArithmeticCompositeEffect {
             name: RefCell::new(HSTRING::from("FinalGlass")),
-            c1: 0.0,
+            c1: -k,
             c2: 1.0,
-            c3: 1.0,
+            c3: k,
             c4: 0.0,
             source1: tinted,
             source2: light_source,
@@ -639,8 +688,45 @@ impl GlassPiece {
         effect_brush.SetSourceParameter(&HSTRING::from("NormalMap"), &normal_brush)?;
         let brush: CompositionBrush = effect_brush.cast()?;
         self.glass_visual.SetBrush(&brush)?;
+
+        self.drop_shadow.SetColor(if params.is_dark {
+            ui_color(115, 0, 0, 0)
+        } else {
+            ui_color(68, 12, 24, 38)
+        })?;
         Ok(())
     }
+}
+
+fn upload_pill_mask(
+    surface: &CompositionDrawingSurface,
+    w_px: f32,
+    h_px: f32,
+    radius_px: f32,
+) -> WinResult<()> {
+    let interop: ICompositionDrawingSurfaceInterop = surface.cast()?;
+    let mut offset = WinPoint::default();
+    let dc: ID2D1DeviceContext = unsafe { interop.BeginDraw(None, &mut offset)? };
+    let ox = offset.x as f32;
+    let oy = offset.y as f32;
+    unsafe {
+        dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        dc.Clear(Some(&rgba_f(0, 0, 0, 0.0)));
+        let white = dc.CreateSolidColorBrush(&rgba_f(255, 255, 255, 1.0), None)?;
+        let rr = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: ox,
+                top: oy,
+                right: ox + w_px,
+                bottom: oy + h_px,
+            },
+            radiusX: radius_px,
+            radiusY: radius_px,
+        };
+        dc.FillRoundedRectangle(&rr, &white);
+        interop.EndDraw()?;
+    }
+    Ok(())
 }
 
 fn upload_normal_map(
@@ -776,29 +862,29 @@ impl LabState {
         ambient_light.Targets()?.Add(&card.glass_visual)?;
         ambient_light.Targets()?.Add(&dock.glass_visual)?;
 
-        // Overhead directional sky light -> crisp top bevel reflection + corner curl.
+        // Overhead top-left directional sky light -> harmonizes with the top-left Fresnel rim.
         let distant_light = compositor.CreateDistantLight()?;
         distant_light.SetCoordinateSpace(&root)?;
         distant_light.SetDirection(Vector3 {
-            X: 0.12,
-            Y: 0.62,
-            Z: -0.78,
+            X: -0.22,
+            Y: -0.62,
+            Z: -0.75,
         })?;
-        distant_light.SetColor(ui_color(255, 240, 248, 255))?;
+        distant_light.SetColor(ui_color(255, 232, 244, 255))?;
         distant_light.Targets()?.Add(&card.glass_visual)?;
         distant_light.Targets()?.Add(&dock.glass_visual)?;
 
-        // Interactive cursor-tracking 3D PointLight -> glides across bevels & corners at full VSync.
+        // Focused cursor-tracking 3D PointLight -> glides smoothly across the thin glass bevel.
         let point_light = compositor.CreatePointLight()?;
         point_light.SetCoordinateSpace(&root)?;
         point_light.SetColor(ui_color(255, 224, 242, 255))?;
         point_light.SetConstantAttenuation(1.0)?;
-        point_light.SetLinearAttenuation(0.0022)?;
-        point_light.SetQuadraticAttenuation(0.000_008)?;
+        point_light.SetLinearAttenuation(0.0045)?;
+        point_light.SetQuadraticAttenuation(0.000_022)?;
         point_light.SetOffset(Vector3 {
-            X: WIN_W_DIPS * dpi * 0.5,
-            Y: WIN_H_DIPS * dpi * 0.45,
-            Z: 54.0 * dpi,
+            X: WIN_W_DIPS * dpi * 0.35,
+            Y: WIN_H_DIPS * dpi * 0.25,
+            Z: 38.0 * dpi,
         })?;
         point_light.Targets()?.Add(&card.glass_visual)?;
         point_light.Targets()?.Add(&dock.glass_visual)?;
@@ -860,7 +946,7 @@ impl LabState {
         let _ = self.point_light.SetOffset(Vector3 {
             X: x,
             Y: y,
-            Z: 50.0 * self.dpi,
+            Z: 38.0 * self.dpi,
         });
         let next_icon = self.hit_test_dock_icon(x, y);
         if next_icon != self.hovered_icon {
@@ -906,9 +992,9 @@ impl LabState {
         r: f32,
     ) -> WinResult<()> {
         let is_dark = self.params.is_dark;
-        let spec_scale = (self.params.specular / 1.45).clamp(0.25, 1.4);
+        let spec_scale = (self.params.specular / 0.72).clamp(0.25, 1.35);
 
-        // 1. Subtle top inner glass gloss gradient (gives thickness & optical depth).
+        // 1. Subtle top inner glass gloss gradient (gives thin optical depth without fogging).
         let gloss_stops = [
             D2D1_GRADIENT_STOP {
                 position: 0.0,
@@ -916,21 +1002,21 @@ impl LabState {
                     255,
                     255,
                     255,
-                    if is_dark { 0.14 } else { 0.34 } * spec_scale,
+                    if is_dark { 0.11 } else { 0.28 } * spec_scale,
                 ),
             },
             D2D1_GRADIENT_STOP {
-                position: 0.42,
+                position: 0.36,
                 color: rgba_f(
                     255,
                     255,
                     255,
-                    if is_dark { 0.02 } else { 0.06 } * spec_scale,
+                    if is_dark { 0.015 } else { 0.04 } * spec_scale,
                 ),
             },
             D2D1_GRADIENT_STOP {
                 position: 1.0,
-                color: rgba_f(0, 0, 0, if is_dark { 0.08 } else { 0.02 }),
+                color: rgba_f(0, 0, 0, if is_dark { 0.05 } else { 0.015 }),
             },
         ];
         unsafe {
@@ -962,7 +1048,30 @@ impl LabState {
             };
             dc.FillRoundedRectangle(&body_rr, &gloss_brush);
 
-            // 2. Outer Fresnel rim: brightest at top edge, soft cyan-white caustic at bottom.
+            // 2. Outer dark hairline glass separator (keeps capsule edges crisp over bright scenes).
+            let sep_w = (1.0 * self.dpi).max(1.0);
+            let sep_inset = sep_w * 0.5;
+            let sep_brush = dc.CreateSolidColorBrush(
+                &if is_dark {
+                    rgba_f(0, 0, 0, 0.26)
+                } else {
+                    rgba_f(15, 23, 42, 0.16)
+                },
+                None,
+            )?;
+            let sep_rr = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: ox + sep_inset,
+                    top: oy + sep_inset,
+                    right: ox + w - sep_inset,
+                    bottom: oy + h - sep_inset,
+                },
+                radiusX: (r - sep_inset).max(1.0),
+                radiusY: (r - sep_inset).max(1.0),
+            };
+            dc.DrawRoundedRectangle(&sep_rr, &sep_brush, sep_w, None);
+
+            // 3. Inner Fresnel rim: brightest at top-left, delicate cyan caustic rebound at bottom.
             let rim_stops = [
                 D2D1_GRADIENT_STOP {
                     position: 0.0,
@@ -970,34 +1079,34 @@ impl LabState {
                         255,
                         255,
                         255,
-                        if is_dark { 0.56 } else { 0.88 } * spec_scale,
+                        if is_dark { 0.44 } else { 0.80 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
                     position: 0.35,
                     color: rgba_f(
-                        210,
-                        232,
+                        215,
+                        236,
                         255,
-                        if is_dark { 0.18 } else { 0.42 } * spec_scale,
+                        if is_dark { 0.14 } else { 0.36 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
                     position: 0.82,
                     color: rgba_f(
-                        180,
-                        215,
+                        190,
+                        220,
                         255,
-                        if is_dark { 0.10 } else { 0.25 } * spec_scale,
+                        if is_dark { 0.08 } else { 0.22 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
                     position: 1.0,
                     color: rgba_f(
-                        210,
-                        240,
+                        215,
+                        242,
                         255,
-                        if is_dark { 0.30 } else { 0.55 } * spec_scale,
+                        if is_dark { 0.24 } else { 0.48 } * spec_scale,
                     ),
                 },
             ];
@@ -1012,13 +1121,16 @@ impl LabState {
             let rim_brush = dc.CreateLinearGradientBrush(
                 &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
                     startPoint: Vector2 { X: ox, Y: oy },
-                    endPoint: Vector2 { X: ox, Y: oy + h },
+                    endPoint: Vector2 {
+                        X: ox + w * 0.25,
+                        Y: oy + h,
+                    },
                 },
                 None,
                 &rim_coll,
             )?;
-            let stroke_w = (1.25 * self.dpi).max(1.0);
-            let inset = stroke_w * 0.5;
+            let stroke_w = (1.15 * self.dpi).max(1.0);
+            let inset = sep_w + stroke_w * 0.5;
             let rim_rr = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
                     left: ox + inset,
@@ -1031,7 +1143,7 @@ impl LabState {
             };
             dc.DrawRoundedRectangle(&rim_rr, &rim_brush, stroke_w, None);
 
-            // 3. Subtle chromatic prism sheen along the top inner specular bevel.
+            // 4. Subtle chromatic prism sheen along the top inner optical edge.
             let prism_stops = [
                 D2D1_GRADIENT_STOP {
                     position: 0.0,
@@ -1040,10 +1152,10 @@ impl LabState {
                 D2D1_GRADIENT_STOP {
                     position: 0.22,
                     color: rgba_f(
-                        140,
-                        220,
+                        150,
+                        225,
                         255,
-                        if is_dark { 0.34 } else { 0.52 } * spec_scale,
+                        if is_dark { 0.26 } else { 0.44 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
@@ -1052,16 +1164,16 @@ impl LabState {
                         255,
                         255,
                         255,
-                        if is_dark { 0.48 } else { 0.72 } * spec_scale,
+                        if is_dark { 0.36 } else { 0.62 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
                     position: 0.78,
                     color: rgba_f(
-                        235,
-                        195,
+                        230,
+                        198,
                         255,
-                        if is_dark { 0.26 } else { 0.40 } * spec_scale,
+                        if is_dark { 0.20 } else { 0.34 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
@@ -1091,14 +1203,14 @@ impl LabState {
             dc.DrawLine(
                 Vector2 {
                     X: ox + r * 0.7,
-                    Y: oy + 1.5 * self.dpi,
+                    Y: oy + 2.0 * self.dpi,
                 },
                 Vector2 {
                     X: ox + w - r * 0.7,
-                    Y: oy + 1.5 * self.dpi,
+                    Y: oy + 2.0 * self.dpi,
                 },
                 &prism_brush,
-                (1.1 * self.dpi).max(1.0),
+                (1.0 * self.dpi).max(1.0),
                 None,
             );
         }
@@ -1199,7 +1311,7 @@ impl LabState {
 
         self.draw_fresnel_rim(&dc, ox, oy, w, h, self.card.radius_px)?;
 
-        // Header row.
+        // Header row with clean inset pill badge for active preset.
         self.draw_text(
             &dc,
             "OpenTaskbar Liquid Glass Lab",
@@ -1217,23 +1329,49 @@ impl LabState {
                 fluent: false,
             },
         )?;
+        let badge_rect = D2D_RECT_F {
+            left: ox + w - s(158.0),
+            top: oy + s(15.0),
+            right: ox + w - s(20.0),
+            bottom: oy + s(41.0),
+        };
+        unsafe {
+            let badge_fill = dc.CreateSolidColorBrush(
+                &if p.is_dark {
+                    rgba_f(56, 189, 248, 0.16)
+                } else {
+                    rgba_f(14, 116, 214, 0.14)
+                },
+                None,
+            )?;
+            let badge_stroke = dc.CreateSolidColorBrush(
+                &if p.is_dark {
+                    rgba_f(125, 211, 252, 0.36)
+                } else {
+                    rgba_f(14, 116, 214, 0.32)
+                },
+                None,
+            )?;
+            let badge_rr = D2D1_ROUNDED_RECT {
+                rect: badge_rect,
+                radiusX: s(13.0),
+                radiusY: s(13.0),
+            };
+            dc.FillRoundedRectangle(&badge_rr, &badge_fill);
+            dc.DrawRoundedRectangle(&badge_rr, &badge_stroke, 1.0, None);
+        }
         self.draw_text(
             &dc,
             p.preset_name,
-            D2D_RECT_F {
-                left: ox + w - s(175.0),
-                top: oy + s(16.0),
-                right: ox + w - s(20.0),
-                bottom: oy + s(40.0),
-            },
+            badge_rect,
             TextStyle {
-                size_dips: 12.5,
+                size_dips: 11.5,
                 weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
-                align: 2,
+                align: 1,
                 color: if p.is_dark {
-                    rgba_f(130, 220, 255, 0.96)
+                    rgba_f(152, 228, 255, 0.98)
                 } else {
-                    rgba_f(14, 102, 208, 0.96)
+                    rgba_f(12, 92, 188, 0.96)
                 },
                 fluent: false,
             },
@@ -1623,13 +1761,28 @@ fn main() {
     let win_w = (WIN_W_DIPS * dpi).round() as i32;
     let win_h = (WIN_H_DIPS * dpi).round() as i32;
     unsafe {
-        let ncrp: u32 = DWMNCRP_DISABLED as u32;
-        let _ = DwmSetWindowAttribute(
+        // Required on Windows 11 for Win32 HWNDs to sample live desktop content via HostBackdropBrush.
+        let use_host_backdrop: u32 = 1;
+        let hr_hb = DwmSetWindowAttribute(
             hwnd,
-            DWMWA_NCRENDERING_POLICY as u32,
-            (&ncrp as *const u32).cast(),
+            DWMWA_USE_HOSTBACKDROPBRUSH,
+            (&use_host_backdrop as *const u32).cast(),
             size_of::<u32>() as u32,
         );
+        if hr_hb < 0 {
+            eprintln!(
+                "Warning: DWMWA_USE_HOSTBACKDROPBRUSH failed: 0x{:08X}",
+                hr_hb as u32
+            );
+        }
+        let margins = MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
+        };
+        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+
         let corner = DWMWCP_DONOTROUND;
         let _ = DwmSetWindowAttribute(
             hwnd,
