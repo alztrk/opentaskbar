@@ -256,53 +256,15 @@ pub fn find_newer() -> Result<Option<Release>, ()> {
 }
 
 fn valid_digest(digest: Option<&str>) -> bool {
-    match digest {
-        Some(value) => {
-            value.len() == 71
-                && value[..7].eq_ignore_ascii_case("sha256:")
-                && value[7..].bytes().all(|b| b.is_ascii_hexdigit())
-        }
-        None => false,
-    }
+    is_valid_sha256_digest(digest)
 }
 
 fn escape_batch(value: &str) -> Result<String, &'static str> {
-    if value.trim().is_empty() {
-        return Err("ErrorUpdatePath");
-    }
-    if value
-        .chars()
-        .any(|c| c.is_control() || c == '"' || c == '\0')
-    {
-        return Err("ErrorUpdatePath");
-    }
-    Ok(value.replace('%', "%%"))
+    escape_batch_value(value).map_err(|_| "ErrorUpdatePath")
 }
 
 fn updater_script(source: &str, target: &str) -> Result<String, &'static str> {
-    Ok([
-        "@echo off".to_owned(),
-        "chcp 65001 >nul".to_owned(),
-        format!("set \"SRC={}\"", escape_batch(source)?),
-        format!("set \"DST={}\"", escape_batch(target)?),
-        "set ATTEMPTS=0".to_owned(),
-        ":wait_loop".to_owned(),
-        "timeout /t 1 /nobreak >nul".to_owned(),
-        "copy /y \"%SRC%\" \"%DST%\" >nul 2>&1".to_owned(),
-        "if not errorlevel 1 if exist \"%DST%\" goto launch".to_owned(),
-        "set /a ATTEMPTS+=1".to_owned(),
-        "if %ATTEMPTS% lss 30 goto wait_loop".to_owned(),
-        "goto cleanup".to_owned(),
-        String::new(),
-        ":launch".to_owned(),
-        "del /f /q \"%SRC%\" >nul 2>&1".to_owned(),
-        "start \"\" \"%DST%\"".to_owned(),
-        String::new(),
-        ":cleanup".to_owned(),
-        "del /f /q \"%~f0\" >nul 2>&1".to_owned(),
-        String::new(),
-    ]
-    .join("\r\n"))
+    generate_updater_script(Path::new(source), Path::new(target))
 }
 
 fn update_dir() -> PathBuf {
@@ -376,7 +338,10 @@ pub fn download_and_apply(release: &Release) -> Result<(), &'static str> {
         let _ = fs::remove_file(&part);
         return Err("ErrorUpdateExecutableInvalid");
     }
-    let expected = hex_to_bytes(&digest[7..]).ok_or("ErrorUpdateExecutableInvalid")?;
+    let expected = digest
+        .get(7..)
+        .and_then(hex_to_bytes)
+        .ok_or("ErrorUpdateExecutableInvalid")?;
     let actual = Sha256::digest(&bytes);
     if actual.as_slice() != expected.as_slice() {
         let _ = fs::remove_file(&part);
@@ -778,7 +743,9 @@ pub fn download_and_apply_update(release: &DetailedRelease) -> UpdateOutcome {
         let _ = fs::remove_file(&part);
         return UpdateOutcome::failure("ErrorUpdateExecutableInvalid", None);
     }
-    let expected = &release.sha256.as_deref().unwrap()[7..];
+    let Some(expected) = release.sha256.as_deref().and_then(|value| value.get(7..)) else {
+        return UpdateOutcome::failure("ErrorUpdateExecutableInvalid", None);
+    };
     let expected = (0..expected.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&expected[i..i + 2], 16))
@@ -809,13 +776,18 @@ pub fn download_and_apply_update(release: &DetailedRelease) -> UpdateOutcome {
 }
 
 pub fn is_valid_sha256_digest(digest: Option<&str>) -> bool {
-    matches!(
-        digest,
-        Some(digest)
-            if digest.len() == 71
-                && digest.to_ascii_lowercase().starts_with("sha256:")
-                && digest[7..].bytes().all(|b| b.is_ascii_hexdigit())
-    )
+    match digest {
+        Some(value) => {
+            value.len() == 71
+                && value
+                    .get(..7)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("sha256:"))
+                && value
+                    .get(7..)
+                    .is_some_and(|hex| hex.bytes().all(|b| b.is_ascii_hexdigit()))
+        }
+        None => false,
+    }
 }
 
 /// Rejects control characters, quotes and newlines in batch paths (C# `EscapeBatchValue`).
@@ -861,6 +833,7 @@ pub fn generate_updater_script(temp_exe: &Path, target_exe: &Path) -> Result<Str
     .join("\r\n"))
 }
 
+/// Writes the batch script as plain UTF-8 bytes (no BOM: a BOM breaks `@echo off` on line 1).
 pub fn write_updater_script(
     path: &Path,
     temp_exe: &Path,
@@ -1215,5 +1188,48 @@ mod parity_tests {
                 .collect::<String>(),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+
+    #[test]
+    fn digest_validation_never_panics_on_multibyte_input() {
+        // 71 bytes total, but byte 7 lands inside a 4-byte character: get(..7) must return None.
+        let split_character = format!("😀{}", "a".repeat(67));
+        assert!(!is_valid_sha256_digest(Some(&split_character)));
+        assert!(!valid_digest(Some(&split_character)));
+        // ASCII prefix, but the 64-byte tail is multi-byte UTF-8, not hex digits.
+        let multibyte_tail = format!("sha256:{}", "ç".repeat(32));
+        assert_eq!(multibyte_tail.len(), 71);
+        assert!(!is_valid_sha256_digest(Some(&multibyte_tail)));
+        assert!(!valid_digest(Some(&multibyte_tail)));
+        assert!(is_valid_sha256_digest(Some(
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        )));
+    }
+
+    #[test]
+    fn write_updater_script_handles_unicode_spaces_and_percent() {
+        let dir =
+            std::env::temp_dir().join(format!("opentaskbar-update-test-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let script_path = dir.join("apply-update.cmd");
+        let temp_exe =
+            Path::new(r"C:\Users\agnes\AppData\Local\Temp\Yeni Güncelleme %1\OpenTaskbar.exe");
+        let target_exe = Path::new(r"C:\Program Files\OpenTaskbar %D\OpenTaskbar.exe");
+        write_updater_script(&script_path, temp_exe, target_exe).unwrap();
+        let bytes = fs::read(&script_path).unwrap();
+        let _ = fs::remove_file(&script_path);
+        let _ = fs::remove_dir(&dir);
+        assert!(
+            !bytes.starts_with(&[0xEF, 0xBB, 0xBF]),
+            "the .cmd file must not start with a UTF-8 BOM"
+        );
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.starts_with("@echo off\r\n"));
+        assert!(text.contains("chcp 65001 >nul"));
+        assert!(text.contains(
+            r#"set "SRC=C:\Users\agnes\AppData\Local\Temp\Yeni Güncelleme %%1\OpenTaskbar.exe""#
+        ));
+        assert!(text.contains(r#"set "DST=C:\Program Files\OpenTaskbar %%D\OpenTaskbar.exe""#));
+        assert!(text.contains("goto launch"));
     }
 }
