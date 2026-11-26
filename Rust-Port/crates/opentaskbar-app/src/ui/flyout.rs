@@ -62,8 +62,12 @@ const TIMER_ANIM: usize = 1;
 const OPEN_ANIM_MS: f32 = 175.0;
 const CLOSE_ANIM_MS: f32 = 95.0;
 const SLIDE_OFFSET_DIPS: f32 = 7.0;
-/// Private message posted by the WH_MOUSE_LL hook when an external #32768 menu closes.
-const WM_APP_MENU_DONE: u32 = 0x8001;
+/// Private message posted by the WH_MOUSE_LL hook for every button click. The
+/// hook itself must never call `WindowFromPoint`/`GetClassNameW`: a hung foreign
+/// window would block the low-level hook and freeze the whole system's input.
+/// Coordinates travel in (wparam, lparam); the UI-thread wndproc performs the
+/// #32768 class check and keeps the flyout alive while that menu is open.
+const WM_APP_MENU_CANDIDATE: u32 = 0x8002;
 
 /// Tracks the native `WM_COMMAND`/`#32768` context menu opened from a flyout.
 static EXTERNAL_MENU_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -78,13 +82,20 @@ pub fn set_motion_prefs(animations_enabled: bool, target_fps: u32) {
     FLYOUT_TARGET_FPS.store(target_fps, Ordering::Relaxed);
 }
 
-fn flyout_anim_interval_ms() -> u32 {
-    let fps = FLYOUT_TARGET_FPS.load(Ordering::Relaxed);
+/// Pure timer interval for a given target FPS. `0` means auto: ~60 Hz instead
+/// of the old 125 Hz, halving the SetWindowPos + SetLayeredWindowAttributes
+/// load on the dock UI thread (which also hosts the low-level input hooks).
+#[must_use]
+fn anim_interval_for_fps(fps: u32) -> u32 {
     if fps == 0 {
-        8
+        16
     } else {
         (1000 / fps.max(15)).max(4)
     }
+}
+
+fn flyout_anim_interval_ms() -> u32 {
+    anim_interval_for_fps(FLYOUT_TARGET_FPS.load(Ordering::Relaxed))
 }
 
 /// C# `DockFlyout.RetainForExternalContextMenu`: keep the flyout alive while the target
@@ -1174,8 +1185,45 @@ pub fn show_flyout_with_options(
     )
 }
 
-/// WH_MOUSE_LL observer that distinguishes clicks on the native `#32768` context menu class
-/// from ordinary clicks (C# `DockFlyout` + `RetainForExternalContextMenu`).
+/// Screen coordinates are carried through the private message as `(wparam,
+/// lparam)`. Cast via `u32` so negative multi-monitor coordinates survive the
+/// round trip regardless of pointer width.
+#[must_use]
+fn pack_point(x: i32, y: i32) -> (WPARAM, LPARAM) {
+    (x as u32 as WPARAM, y as u32 as LPARAM)
+}
+
+#[must_use]
+fn unpack_point(wparam: WPARAM, lparam: LPARAM) -> (i32, i32) {
+    (wparam as u32 as i32, lparam as u32 as i32)
+}
+
+/// The hook's entire payload path, factored so it can be tested without
+/// installing a real low-level hook. `target == 0` is a no-op.
+fn post_menu_candidate(
+    target: usize,
+    point: POINT,
+    mut post: impl FnMut(HWND, u32, WPARAM, LPARAM),
+) {
+    if target == 0 {
+        return;
+    }
+    let (x, y) = pack_point(point.x, point.y);
+    post(target as HWND, WM_APP_MENU_CANDIDATE, x, y);
+}
+
+/// Kept pure so the `#32768` discrimination can be tested off the UI thread.
+#[must_use]
+fn is_native_menu_class(class: &[u16]) -> bool {
+    String::from_utf16_lossy(class).starts_with("#32768")
+}
+
+/// WH_MOUSE_LL observer for clicks (C# `DockFlyout` + `RetainForExternalContextMenu`).
+///
+/// Deliberately minimal: it only reads the system-provided point and posts a
+/// private message to our own flyout. All `WindowFromPoint`/`GetClassNameW`
+/// work happens later in `flyout_wnd_proc` on the UI thread, so a hung foreign
+/// window cannot stall the low-level hook and lock the whole system's input.
 unsafe extern "system" fn external_menu_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32
         && matches!(
@@ -1183,22 +1231,16 @@ unsafe extern "system" fn external_menu_hook(code: i32, wparam: WPARAM, lparam: 
             WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP
         )
     {
+        // SAFETY: for HC_ACTION mouse messages the system supplies a valid
+        // MSLLHOOKSTRUCT pointer for the lifetime of this callback.
         let info = unsafe { &*(lparam as *const MSLLHOOKSTRUCT) };
-        let under_cursor = unsafe { WindowFromPoint(info.pt) };
-        let mut class = [0u16; 64];
-        let len = unsafe { GetClassNameW(under_cursor, class.as_mut_ptr(), class.len() as i32) };
-        let is_native_menu =
-            len > 0 && String::from_utf16_lossy(&class[..len as usize]).starts_with("#32768");
-        if is_native_menu {
-            EXTERNAL_MENU_ACTIVE.store(true, Ordering::Release);
-        } else if EXTERNAL_MENU_ACTIVE.swap(false, Ordering::AcqRel) {
-            let target = HOOK_TARGET.load(Ordering::Acquire) as HWND;
-            if !target.is_null() {
-                unsafe {
-                    PostMessageW(target, WM_APP_MENU_DONE, 0, 0);
-                }
-            }
-        }
+        let target = HOOK_TARGET.load(Ordering::Acquire);
+        // SAFETY: a private message posted to the flyout window registered in
+        // HOOK_TARGET; no synchronous Win32 calls against the window under the
+        // cursor happen in the hook.
+        post_menu_candidate(target, info.pt, |hwnd, msg, x, y| unsafe {
+            PostMessageW(hwnd, msg, x, y);
+        });
     }
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
 }
@@ -3554,9 +3596,23 @@ unsafe extern "system" fn flyout_wnd_proc(
             state.step_animation();
             0
         }
-        // The low-level hook reports that the external #32768 menu has closed.
-        WM_APP_MENU_DONE if wparam == 0 && lparam == 0 => {
-            state.begin_close();
+        // The low-level hook only posts coordinates; the class/identity check
+        // runs here on the UI thread, where a hung foreign window cannot block
+        // system-wide input. Preserves the #32768 retain/close behavior.
+        WM_APP_MENU_CANDIDATE => {
+            let (x, y) = unpack_point(wparam, lparam);
+            let point = POINT { x, y };
+            // SAFETY: a window lookup and class read on the UI thread; a null
+            // point hit yields an empty class and is treated as an ordinary click.
+            let under_cursor = unsafe { WindowFromPoint(point) };
+            let mut class = [0u16; 64];
+            let len =
+                unsafe { GetClassNameW(under_cursor, class.as_mut_ptr(), class.len() as i32) };
+            if len > 0 && is_native_menu_class(&class[..len as usize]) {
+                EXTERNAL_MENU_ACTIVE.store(true, Ordering::Release);
+            } else if EXTERNAL_MENU_ACTIVE.swap(false, Ordering::AcqRel) {
+                state.begin_close();
+            }
             0
         }
         WM_LBUTTONDOWN => {
@@ -3709,8 +3765,10 @@ unsafe extern "system" fn flyout_wnd_proc(
 mod tests {
     use super::{
         DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, FlyoutBlock, FlyoutEdge,
-        FlyoutOptions, FlyoutSpec, LiveEvent, RECT, app_row_targets, blend_rgb, draw_gdi_text,
-        format_clock, layout_flyout, pt_in_rect,
+        FlyoutOptions, FlyoutSpec, LiveEvent, POINT, RECT, WM_APP_MENU_CANDIDATE,
+        anim_interval_for_fps, app_row_targets, blend_rgb, draw_gdi_text, format_clock,
+        is_native_menu_class, layout_flyout, pack_point, post_menu_candidate, pt_in_rect,
+        unpack_point,
     };
     use windows_sys::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC};
 
@@ -3834,5 +3892,52 @@ mod tests {
         assert_eq!(options.edge, FlyoutEdge::Bottom);
         assert_eq!(options.shadow_rings, 4);
         assert_eq!(blend_rgb(0x000000, 0xffffff, 0.5), 0x808080);
+    }
+
+    #[test]
+    fn default_anim_interval_is_16ms() {
+        // Auto mode: 16 ms ticks (~60 Hz) rather than 8 ms (125 Hz).
+        assert_eq!(anim_interval_for_fps(0), 16);
+        assert_eq!(anim_interval_for_fps(60), 16);
+        assert_eq!(anim_interval_for_fps(120), 8);
+        assert_eq!(anim_interval_for_fps(15), 66);
+        assert_eq!(anim_interval_for_fps(1), 66); // clamped to 15 FPS
+    }
+
+    #[test]
+    fn deferred_menu_candidate_carries_exact_screen_point() {
+        for (x, y) in [(0, 0), (1920, 1080), (-12, 34), (i32::MIN, i32::MAX)] {
+            let (wparam, lparam) = pack_point(x, y);
+            assert_eq!(unpack_point(wparam, lparam), (x, y));
+        }
+
+        let mut calls = Vec::new();
+        post_menu_candidate(0x1234, POINT { x: -12, y: 34 }, |hwnd, msg, x, y| {
+            calls.push((hwnd, msg, unpack_point(x, y)));
+        });
+        assert_eq!(
+            calls,
+            vec![(0x1234 as super::HWND, WM_APP_MENU_CANDIDATE, (-12, 34))]
+        );
+        assert_ne!(WM_APP_MENU_CANDIDATE, 0x8001); // distinct from retired MENU_DONE
+
+        calls.clear();
+        post_menu_candidate(0, POINT { x: 5, y: 6 }, |hwnd, msg, x, y| {
+            calls.push((hwnd, msg, unpack_point(x, y)));
+        });
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn native_menu_class_check_keeps_hash_32768_discrimination() {
+        let menu: Vec<u16> = "#32768".encode_utf16().collect();
+        let menu_variant: Vec<u16> = "#32768-NativeMenu".encode_utf16().collect();
+        let tray: Vec<u16> = "Shell_TrayWnd".encode_utf16().collect();
+        let flyout: Vec<u16> = "OpenTaskBarFlyout".encode_utf16().collect();
+        assert!(is_native_menu_class(&menu));
+        assert!(is_native_menu_class(&menu_variant));
+        assert!(!is_native_menu_class(&tray));
+        assert!(!is_native_menu_class(&flyout));
+        assert!(!is_native_menu_class(&[]));
     }
 }

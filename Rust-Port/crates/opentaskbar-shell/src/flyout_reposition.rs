@@ -18,9 +18,10 @@
 //! `flyout_writer::remember()` is called with the *original* position before
 //! the first move, so the native watchdog can restore Start on shutdown.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -89,6 +90,14 @@ const ATTEMPT_DELAY_MS: u64 = 20;
 const SETTLE_FRAMES: usize = 6;
 const SETTLE_DELAY_MS: u64 = 25;
 const SWP_FLAGS: u32 = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE;
+/// The `is_anchored` → `is_valid_hwnd` → `pid_is_start_host` chain is polled on
+/// the dock's 200 ms tick. Reopening the process and reading its image path on
+/// every tick is pure disk/process I/O on a hot path, so both successful and
+/// failed lookups are memoized for a short window. An empty string is the
+/// failure sentinel; a failed lookup keeps returning `false` just like the
+/// uncached code, but no longer retries the process query on the next tick.
+const PID_EXE_CACHE_TTL: Duration = Duration::from_secs(2);
+static PID_EXE_CACHE: OnceLock<Mutex<HashMap<u32, (String, Instant)>>> = OnceLock::new();
 
 /// Bumped on every new reposition request. Workers capture it and abort as
 /// soon as a newer request (or a journal restore) supersedes them.
@@ -470,6 +479,56 @@ fn process_exe(pid: u32) -> Option<String> {
     }
 }
 
+fn pid_exe_cache() -> &'static Mutex<HashMap<u32, (String, Instant)>> {
+    PID_EXE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Pure TTL check. `Instant::duration_since` saturates at zero, so a timestamp
+/// from the future is treated as fresh rather than panicking.
+#[must_use]
+fn cache_entry_fresh(sampled_at: Instant, now: Instant, ttl: Duration) -> bool {
+    now.duration_since(sampled_at) < ttl
+}
+
+#[must_use]
+fn non_empty_exe(exe: &str) -> Option<String> {
+    (!exe.is_empty()).then(|| exe.to_owned())
+}
+
+/// Returns the cached image path for `pid`, querying `lookup` only when no fresh
+/// entry exists. `now` is injected so the TTL can be verified without sleeping
+/// or depending on the wall clock; production always passes `Instant::now()`.
+/// A poisoned mutex is treated as a cache miss (and simply bypasses caching),
+/// preserving the old fail-closed behavior instead of propagating a panic.
+fn cached_process_exe_with(
+    pid: u32,
+    now: Instant,
+    lookup: impl FnOnce(u32) -> Option<String>,
+) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    let cache = pid_exe_cache();
+    if let Ok(guard) = cache.lock()
+        && let Some((exe, sampled_at)) = guard.get(&pid)
+        && cache_entry_fresh(*sampled_at, now, PID_EXE_CACHE_TTL)
+    {
+        return non_empty_exe(exe);
+    }
+    // Failures are cached as an empty string too: a dead PID stays invalid for
+    // this short window instead of reopening the process on every 200 ms tick.
+    let exe = lookup(pid).unwrap_or_default();
+    if let Ok(mut guard) = cache.lock() {
+        guard.retain(|_, (_, at)| cache_entry_fresh(*at, now, PID_EXE_CACHE_TTL));
+        guard.insert(pid, (exe.clone(), now));
+    }
+    non_empty_exe(&exe)
+}
+
+fn process_exe_cached(pid: u32) -> Option<String> {
+    cached_process_exe_with(pid, Instant::now(), process_exe)
+}
+
 fn is_cloaked(hwnd: HWND) -> bool {
     let mut cloaked = 0u32;
     // SAFETY: reading a single DWORD attribute from a live window handle.
@@ -505,7 +564,7 @@ pub fn exe_is_start_host(exe: &str) -> bool {
 }
 
 fn pid_is_start_host(pid: u32) -> bool {
-    process_exe(pid).is_some_and(|exe| exe_is_start_host(&exe))
+    process_exe_cached(pid).is_some_and(|exe| exe_is_start_host(&exe))
 }
 
 #[must_use]
@@ -1026,6 +1085,7 @@ pub fn open_start_via_syscommand(owner_hwnd: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     fn work() -> Anchor {
         Anchor {
@@ -1277,5 +1337,85 @@ mod tests {
         assert!(!override_is_enabled(0));
         set_enabled(None);
         assert!(is_enabled());
+    }
+
+    #[test]
+    fn pid_exe_cache_expires_at_two_seconds() {
+        assert_eq!(PID_EXE_CACHE_TTL, Duration::from_secs(2));
+        let at = Instant::now();
+        assert!(cache_entry_fresh(
+            at,
+            at + Duration::from_millis(1999),
+            PID_EXE_CACHE_TTL
+        ));
+        assert!(!cache_entry_fresh(
+            at,
+            at + PID_EXE_CACHE_TTL,
+            PID_EXE_CACHE_TTL
+        ));
+        // A future timestamp must not panic the polling chain.
+        assert!(cache_entry_fresh(
+            at + Duration::from_secs(10),
+            at,
+            PID_EXE_CACHE_TTL
+        ));
+    }
+
+    #[test]
+    fn pid_exe_lookup_is_skipped_until_ttl_expires() {
+        let pid = u32::MAX - 11; // test-only PID, never a real Start host
+        let base = Instant::now();
+        let calls = Cell::new(0);
+        let exe = r"C:\Windows\SystemApps\StartMenuExperienceHost.exe".to_owned();
+
+        let hit = cached_process_exe_with(pid, base, |_| {
+            calls.set(calls.get() + 1);
+            Some(exe.clone())
+        });
+        assert!(hit.is_some_and(|path| exe_is_start_host(&path)));
+        assert_eq!(calls.get(), 1);
+
+        // Still fresh: the lookup closure must not run at all (no OpenProcess /
+        // QueryFullProcessImageNameW on the 200 ms anchor tick).
+        let hit = cached_process_exe_with(pid, base + Duration::from_millis(1999), |_| {
+            calls.set(calls.get() + 1);
+            None
+        });
+        assert!(hit.is_some_and(|path| exe_is_start_host(&path)));
+        assert_eq!(calls.get(), 1);
+
+        // Expired: one fresh lookup, and a failure is cached as an empty string.
+        let expired = base + PID_EXE_CACHE_TTL;
+        assert!(
+            cached_process_exe_with(pid, expired, |_| {
+                calls.set(calls.get() + 1);
+                None
+            })
+            .is_none()
+        );
+        assert_eq!(calls.get(), 2);
+        assert!(
+            cached_process_exe_with(pid, expired + Duration::from_millis(1), |_| {
+                calls.set(calls.get() + 1);
+                Some(exe)
+            })
+            .is_none()
+        );
+        assert_eq!(calls.get(), 2);
+
+        let _ = pid_exe_cache().lock().map(|mut cache| cache.remove(&pid));
+    }
+
+    #[test]
+    fn pid_zero_never_reaches_the_lookup() {
+        let calls = Cell::new(0);
+        assert!(
+            cached_process_exe_with(0, Instant::now(), |_| {
+                calls.set(calls.get() + 1);
+                Some("startmenuexperiencehost.exe".to_owned())
+            })
+            .is_none()
+        );
+        assert_eq!(calls.get(), 0);
     }
 }
