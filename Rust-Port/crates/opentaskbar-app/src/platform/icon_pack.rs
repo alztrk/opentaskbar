@@ -3,10 +3,11 @@
 //! Windows-independent port of C# `IconPack`. A pack is a folder with `pack.json` at
 //! its root and optional images; the manifest maps match keys to image paths relative
 //! to that folder. Lookup order matches C# exactly:
-//! special key → AUMID (and package name) → full exe path → exe file name → stem.
+//! special key ΓåÆ AUMID (and package name) ΓåÆ full exe path ΓåÆ exe file name ΓåÆ stem.
 //! No COM/GDI is used; this module only resolves paths.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use std::path::Component;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
@@ -57,43 +58,19 @@ pub const IMAGE_EXTENSIONS: &[&str] = &[".png", ".ico", ".jpg", ".jpeg", ".bmp"]
 const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
 const MAX_ICON_KEYS: usize = 512;
 
-/// The plate drawn behind icons the pack has no image for.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum IconPackShape {
-    #[default]
-    None,
-    Leaf,
-    Petal,
-    Rounded,
-    Circle,
-}
-
-/// Plate settings for unthemed apps. `background: None` means automatic tinting.
-#[derive(Clone, Debug, PartialEq)]
-pub struct IconFallback {
-    pub shape: IconPackShape,
-    pub background: Option<String>,
-    pub icon_scale: f32,
-}
-
-impl Default for IconFallback {
-    fn default() -> Self {
-        Self {
-            shape: IconPackShape::None,
-            background: None,
-            icon_scale: 0.64,
-        }
-    }
-}
+/// Backwards-compatible name for the unified fallback plate.
+pub type IconFallback = IconPackFallback;
 
 /// Contents of `pack.json`. `directory` is kept privately so mapped paths can be
 /// resolved and validated by [`find_icon`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct IconPackManifest {
     pub name: String,
     pub author: String,
-    pub icons: HashMap<String, String>,
-    pub fallback: Option<IconFallback>,
+    /// Free-form pack description (WS-F C# parity).
+    pub description: String,
+    pub icons: BTreeMap<String, String>,
+    pub fallback: Option<IconPackFallback>,
     directory: PathBuf,
 }
 
@@ -200,9 +177,11 @@ fn parse_shape(text: &str) -> IconPackShape {
     }
 }
 
-fn parse_fallback(object: &Map<String, Value>) -> IconFallback {
-    let shape = match object_get_ci(object, "shape") {
-        Some(Value::String(shape)) => parse_shape(shape),
+fn parse_fallback(object: &Map<String, Value>) -> IconPackFallback {
+    let ci = |key: &str| object_get_ci(object, key);
+    // C# pack manifests allow either names or the numeric shape values.
+    let shape = match ci("shape") {
+        Some(Value::String(shape)) => IconPackShape::parse(shape).unwrap_or_default(),
         Some(Value::Number(number)) => match number.as_u64() {
             Some(1) => IconPackShape::Leaf,
             Some(2) => IconPackShape::Petal,
@@ -212,22 +191,33 @@ fn parse_fallback(object: &Map<String, Value>) -> IconFallback {
         },
         _ => IconPackShape::None,
     };
-    let background = object_get_ci(object, "background")
+    let sharp_corner = ci("sharpCorner")
+        .or_else(|| ci("sharp_corner"))
+        .and_then(Value::as_str)
+        .and_then(IconPackCorner::parse)
+        .unwrap_or_default();
+    let corner_radius = ci("cornerRadius").and_then(Value::as_f64).unwrap_or(0.5);
+    // `None`/empty/"auto" mean automatic tinting from the icon.
+    let background = ci("background")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|text| !text.is_empty() && !text.eq_ignore_ascii_case("auto"))
-        .map(str::to_string);
+        .map(str::to_owned)
+        .unwrap_or_else(|| "auto".to_owned());
     // C# `IconPack.Fallback` clamps the runtime scale to 0.1..=1.0.
-    let icon_scale = object_get_ci(object, "iconScale")
+    let icon_scale = ci("iconScale")
         .and_then(Value::as_f64)
         .filter(|scale| scale.is_finite())
-        .map(|scale| scale.clamp(0.1, 1.0) as f32)
+        .map(|scale| scale.clamp(0.1, 1.0))
         .unwrap_or(0.64);
-    IconFallback {
+    IconPackFallback {
         shape,
+        sharp_corner,
+        corner_radius,
         background,
         icon_scale,
     }
+    .clamped()
 }
 
 /// Reads `pack.json` from `directory`, returning `None` if it is missing, too large,
@@ -246,6 +236,7 @@ pub fn load(directory: &Path) -> Option<IconPackManifest> {
     let mut manifest = IconPackManifest::new(directory.to_path_buf());
     manifest.name = string_ci(&value, "name");
     manifest.author = string_ci(&value, "author");
+    manifest.description = string_ci(&value, "description");
     if let Some(icons) = json_get_ci(&value, "icons").and_then(Value::as_object) {
         for (key, value) in icons {
             if manifest.icons.len() >= MAX_ICON_KEYS {
@@ -307,59 +298,11 @@ fn candidate_keys(exe_path: &str, app_id: Option<&str>, special_key: Option<&str
     keys
 }
 
-fn lookup<'a>(icons: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
+fn lookup<'a>(icons: &'a BTreeMap<String, String>, key: &str) -> Option<&'a str> {
     icons
         .iter()
         .find(|(candidate, _)| candidate.eq_ignore_ascii_case(key))
         .map(|(_, relative)| relative.as_str())
-}
-
-/// Resolves a relative image path inside the pack. Paths escaping the pack, or pointing
-/// to a non-image or missing file, are ignored.
-fn resolve_inside_pack(directory: &Path, relative: &str) -> Option<String> {
-    let relative = relative.trim().replace('\\', "/");
-    if relative.is_empty() || relative.starts_with('/') {
-        return None;
-    }
-    let parts: Vec<&str> = relative.split('/').collect();
-    if parts.iter().any(|part| {
-        part.is_empty()
-            || *part == "."
-            || *part == ".."
-            || part.contains(':')
-            || part.contains('\0')
-    }) {
-        return None;
-    }
-
-    let mut full = directory.to_path_buf();
-    for part in &parts {
-        full.push(part);
-    }
-    let (Ok(base), Ok(absolute)) = (std::path::absolute(directory), std::path::absolute(&full))
-    else {
-        return None;
-    };
-    if !absolute.starts_with(&base) || absolute == base {
-        return None;
-    }
-    if let (Ok(resolved_base), Ok(resolved)) =
-        (fs::canonicalize(directory), fs::canonicalize(&full))
-        && !resolved.starts_with(&resolved_base)
-    {
-        return None;
-    }
-    if !absolute.is_file() {
-        return None;
-    }
-    let extension = absolute
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| format!(".{}", extension.to_ascii_lowercase()))?;
-    if !IMAGE_EXTENSIONS.contains(&extension.as_str()) {
-        return None;
-    }
-    Some(absolute.to_string_lossy().into_owned())
 }
 
 /// Returns the absolute image path this pack uses for the app, or `None` when it has
@@ -373,9 +316,10 @@ pub fn find_icon(
 ) -> Option<String> {
     for key in candidate_keys(exe_path, app_id, special_key) {
         if let Some(relative) = lookup(&manifest.icons, &key)
-            && let Some(path) = resolve_inside_pack(&manifest.directory, relative)
+            && let Some(path) =
+                resolve_inside_pack(&manifest.directory, Path::new(&relative.replace('\\', "/")))
         {
-            return Some(path);
+            return Some(path.to_string_lossy().into_owned());
         }
     }
 
@@ -400,8 +344,8 @@ pub fn find_icon(
             } else {
                 format!("{folder}/{stem}{extension}")
             };
-            if let Some(path) = resolve_inside_pack(&manifest.directory, &relative) {
-                return Some(path);
+            if let Some(path) = resolve_inside_pack(&manifest.directory, Path::new(&relative)) {
+                return Some(path.to_string_lossy().into_owned());
             }
         }
     }
@@ -471,8 +415,8 @@ mod tests {
         assert_eq!(manifest.directory(), dir.as_path());
         let fallback = manifest.fallback.as_ref().expect("fallback");
         assert_eq!(fallback.shape, IconPackShape::Circle);
-        assert_eq!(fallback.background.as_deref(), Some("#FF101010"));
-        assert!((fallback.icon_scale - 0.9).abs() < f32::EPSILON);
+        assert_eq!(fallback.background, "#FF101010");
+        assert!((fallback.icon_scale - 0.9).abs() < f64::EPSILON);
         assert!(load(&temp.path().join("missing")).is_none());
     }
 
@@ -484,8 +428,8 @@ mod tests {
         let manifest = load(&dir).expect("load manifest");
         let fallback = manifest.fallback.as_ref().expect("fallback");
         assert_eq!(fallback.shape, IconPackShape::None);
-        assert_eq!(fallback.background, None);
-        assert!((fallback.icon_scale - 1.0).abs() < f32::EPSILON);
+        assert_eq!(fallback.background, "auto");
+        assert!((fallback.icon_scale - 1.0).abs() < f64::EPSILON);
 
         write(
             &dir.join("pack.json"),
@@ -494,8 +438,8 @@ mod tests {
         let manifest = load(&dir).expect("load manifest");
         let fallback = manifest.fallback.as_ref().expect("fallback");
         assert_eq!(fallback.shape, IconPackShape::Rounded);
-        assert_eq!(fallback.background, None);
-        assert!((fallback.icon_scale - 0.1).abs() < f32::EPSILON);
+        assert_eq!(fallback.background, "auto");
+        assert!((fallback.icon_scale - 0.1).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -620,5 +564,409 @@ mod tests {
             None
         );
         assert!(find_icon(&manifest, "", None, None).is_none());
+    }
+}
+
+// ---- C# icon-pack parity (WS-F) ----
+/// The square corner of a `Leaf` plate, or the first square corner of a `Petal` plate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IconPackCorner {
+    TopLeft,
+    #[default]
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+impl IconPackCorner {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        match text.to_ascii_lowercase().as_str() {
+            "topleft" => Some(Self::TopLeft),
+            "topright" => Some(Self::TopRight),
+            "bottomleft" => Some(Self::BottomLeft),
+            "bottomright" => Some(Self::BottomRight),
+            _ => None,
+        }
+    }
+}
+
+/// Plate shape applied to app icons the pack has no image for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IconPackShape {
+    #[default]
+    None,
+    Leaf,
+    Petal,
+    Rounded,
+    Circle,
+}
+
+impl IconPackShape {
+    pub(crate) fn parse(text: &str) -> Option<Self> {
+        match text.to_ascii_lowercase().as_str() {
+            "none" => Some(Self::None),
+            "leaf" => Some(Self::Leaf),
+            "petal" => Some(Self::Petal),
+            "rounded" => Some(Self::Rounded),
+            "circle" => Some(Self::Circle),
+            _ => None,
+        }
+    }
+}
+
+impl IconPackCorner {
+    pub fn opposite(self) -> Self {
+        match self {
+            Self::TopLeft => Self::BottomRight,
+            Self::TopRight => Self::BottomLeft,
+            Self::BottomLeft => Self::TopRight,
+            Self::BottomRight => Self::TopLeft,
+        }
+    }
+}
+
+/// C# `IconPackFallback` with defaults and clamping applied on read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IconPackFallback {
+    pub shape: IconPackShape,
+    pub sharp_corner: IconPackCorner,
+    pub corner_radius: f64,
+    /// Hex color or `"auto"` (derive from the icon).
+    pub background: String,
+    pub icon_scale: f64,
+}
+
+impl Default for IconPackFallback {
+    fn default() -> Self {
+        Self {
+            shape: IconPackShape::None,
+            sharp_corner: IconPackCorner::TopRight,
+            corner_radius: 0.5,
+            background: "auto".to_owned(),
+            icon_scale: 0.64,
+        }
+    }
+}
+
+impl IconPackFallback {
+    pub fn from_value(value: &Value) -> Result<Self, String> {
+        let Some(object) = value.as_object() else {
+            return Err("Fallback must be an object".into());
+        };
+        let string = |key: &str| object.get(key).and_then(Value::as_str);
+        let number =
+            |key: &str, default: f64| object.get(key).and_then(Value::as_f64).unwrap_or(default);
+        let shape = string("shape")
+            .and_then(IconPackShape::parse)
+            .unwrap_or_default();
+        let sharp_corner = string("sharpCorner")
+            .or_else(|| string("sharp_corner"))
+            .and_then(IconPackCorner::parse)
+            .unwrap_or_default();
+        let fallback = Self::default();
+        Ok(Self {
+            shape,
+            sharp_corner,
+            corner_radius: number("cornerRadius", fallback.corner_radius),
+            background: string("background").unwrap_or("auto").to_owned(),
+            icon_scale: number("iconScale", fallback.icon_scale),
+        })
+    }
+
+    /// Load-time normalization: radius 0..1, scale 0.1..1.0 (C# `IconPack.Fallback`).
+    pub fn clamped(&self) -> Self {
+        let finite = |v: f64, fallback: f64| if v.is_finite() { v } else { fallback };
+        Self {
+            corner_radius: finite(self.corner_radius, 0.5).clamp(0.0, 1.0),
+            icon_scale: finite(self.icon_scale, 0.64).clamp(0.1, 1.0),
+            ..self.clone()
+        }
+    }
+
+    /// Corners kept square for the plate geometry.
+    pub fn square_corners(&self) -> Vec<IconPackCorner> {
+        match self.shape {
+            IconPackShape::Leaf | IconPackShape::Petal => vec![self.sharp_corner],
+            IconPackShape::None | IconPackShape::Rounded | IconPackShape::Circle => Vec::new(),
+        }
+        .into_iter()
+        .chain((self.shape == IconPackShape::Petal).then_some(self.sharp_corner.opposite()))
+        .collect()
+    }
+}
+
+impl IconPackManifest {
+    /// Parses a `pack.json` document (C# `IconPack` parity).
+    pub fn from_str(text: &str) -> Result<Self, String> {
+        let value = crate::design::widget_pack::parse_json_lenient(text)?;
+        let Some(object) = value.as_object() else {
+            return Err("icon pack manifest must be an object".into());
+        };
+        let string = |key: &str| {
+            object
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_owned()
+        };
+        let icons = object
+            .get("icons")
+            .and_then(Value::as_object)
+            .map(|map| {
+                map.iter()
+                    .filter_map(|(key, value)| value.as_str().map(|v| (key.clone(), v.to_owned())))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let fallback = object
+            .get("fallback")
+            .map(IconPackFallback::from_value)
+            .transpose()?
+            .map(|fallback| fallback.clamped());
+        Ok(Self {
+            name: string("name"),
+            author: string("author"),
+            description: string("description"),
+            icons,
+            fallback,
+            directory: PathBuf::new(),
+        })
+    }
+
+    /// Serializes the manifest back to a JSON value.
+    pub fn to_value(&self) -> Value {
+        let mut object = Map::new();
+        object.insert("name".into(), Value::String(self.name.clone()));
+        object.insert("author".into(), Value::String(self.author.clone()));
+        object.insert("description".into(), Value::String(self.description.clone()));
+        object.insert(
+            "icons".into(),
+            Value::Object(
+                self.icons
+                    .iter()
+                    .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                    .collect(),
+            ),
+        );
+        Value::Object(object)
+    }
+}
+
+/// An icon pack loaded from a folder under the themes root.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IconPack {
+    pub id: String,
+    pub directory: PathBuf,
+    pub manifest: IconPackManifest,
+    icons: BTreeMap<String, String>,
+}
+
+impl IconPack {
+    pub fn load(directory: &Path) -> Result<Self, String> {
+        let id = directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let path = directory.join(MANIFEST_FILE_NAME);
+        let meta = fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        if meta.len() > MAX_MANIFEST_BYTES {
+            return Err(format!("{} exceeds size limit.", path.display()));
+        }
+        let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let manifest =
+            IconPackManifest::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        let icons = manifest
+            .icons
+            .iter()
+            .filter(|(key, value)| !key.trim().is_empty() && !value.trim().is_empty())
+            .map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned()))
+            .collect();
+        Ok(Self {
+            id,
+            directory: directory.to_path_buf(),
+            manifest,
+            icons,
+        })
+    }
+
+    pub fn display_name(&self) -> &str {
+        let name = self.manifest.name.as_str();
+        if name.trim().is_empty() { &self.id } else { name }
+    }
+
+    pub fn fallback(&self) -> IconPackFallback {
+        self.manifest
+            .fallback
+            .as_ref()
+            .map(IconPackFallback::clamped)
+            .unwrap_or_default()
+    }
+
+    /// Keys tried in order: special, AUMID/package, full path, file name, stem.
+    pub fn candidate_keys<'a>(
+        executable_path: Option<&'a str>,
+        app_id: Option<&'a str>,
+        special_key: Option<&'a str>,
+    ) -> Vec<&'a str> {
+        if let Some(special) = special_key.filter(|key| !key.trim().is_empty()) {
+            return vec![special];
+        }
+        let mut out = Vec::new();
+        if let Some(app) = app_id.filter(|id| !id.trim().is_empty()) {
+            out.push(app);
+            let package = app.split('!').next().unwrap_or(app);
+            if let Some(index) = package.rfind('_')
+                && index > 0
+            {
+                out.push(&package[..index]);
+            }
+            out.push(package);
+        }
+        if let Some(exe) = executable_path.filter(|path| !path.trim().is_empty()) {
+            out.push(exe);
+            if let Some(name) = Path::new(exe).file_name().and_then(|n| n.to_str()) {
+                out.push(name);
+            }
+            if let Some(stem) = Path::new(exe).file_stem().and_then(|n| n.to_str()) {
+                out.push(stem);
+            }
+        }
+        out
+    }
+
+    /// The image file the pack uses, or `None` when it has none. Mapped paths cannot escape
+    /// the pack folder. An image named after the executable in `/` or `icons/` needs no mapping.
+    pub fn find_icon_file(
+        &self,
+        executable_path: Option<&str>,
+        app_id: Option<&str>,
+        special_key: Option<&str>,
+    ) -> Option<PathBuf> {
+        for key in Self::candidate_keys(executable_path, app_id, special_key) {
+            if let Some(relative) = self.icons.get(key)
+                && let Some(found) = resolve_inside_pack(&self.directory, Path::new(relative))
+            {
+                return Some(found);
+            }
+        }
+        let stem = special_key
+            .map(|key| key.trim_start_matches('@'))
+            .or_else(|| executable_path.and_then(|path| Path::new(path).file_stem()?.to_str()))
+            .filter(|stem| !stem.trim().is_empty())?;
+        for folder in ["", "icons"] {
+            for extension in IMAGE_EXTENSIONS {
+                let relative = Path::new(folder).join(format!("{stem}{extension}"));
+                if let Some(found) = resolve_inside_pack(&self.directory, &relative) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+}
+
+/// Resolves a pack-relative path, rejecting absolute paths and `..` traversal.
+pub fn resolve_inside_pack(root: &Path, relative: &Path) -> Option<PathBuf> {
+    if relative.is_absolute() {
+        return None;
+    }
+    let mut safe = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => safe.push(part),
+            Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    let full = root.join(safe);
+    let extension = full.extension()?.to_str()?.to_ascii_lowercase();
+    if !IMAGE_EXTENSIONS
+        .iter()
+        .any(|ext| extension == ext.trim_start_matches('.'))
+    {
+        return None;
+    }
+    if let (Ok(resolved_root), Ok(resolved_full)) =
+        (fs::canonicalize(root), fs::canonicalize(&full))
+        && !resolved_full.starts_with(&resolved_root)
+    {
+        return None;
+    }
+    full.is_file().then_some(full)
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+
+    #[test]
+    fn fallback_clamps_scale_and_reports_leaf_petal_corners() {
+        let fallback = IconPackFallback {
+            icon_scale: 4.0,
+            corner_radius: -1.0,
+            shape: IconPackShape::Petal,
+            sharp_corner: IconPackCorner::TopLeft,
+            ..IconPackFallback::default()
+        }
+        .clamped();
+        assert_eq!(fallback.icon_scale, 1.0);
+        assert_eq!(fallback.corner_radius, 0.0);
+        assert_eq!(
+            fallback.square_corners(),
+            vec![IconPackCorner::TopLeft, IconPackCorner::BottomRight]
+        );
+        assert_eq!(IconPackFallback::default().clamped().icon_scale, 0.64);
+    }
+
+    #[test]
+    fn candidate_key_order_matches_csharp() {
+        let keys = IconPack::candidate_keys(
+            Some(r"C:\Apps\firefox.exe"),
+            Some("FirefoxFirefox_1.0!app"),
+            None,
+        );
+        assert_eq!(
+            keys,
+            vec![
+                "FirefoxFirefox_1.0!app",
+                "FirefoxFirefox",
+                "FirefoxFirefox_1.0",
+                r"C:\Apps\firefox.exe",
+                "firefox.exe",
+                "firefox"
+            ]
+        );
+        assert_eq!(
+            IconPack::candidate_keys(None, None, Some("@recyclebin")),
+            vec!["@recyclebin"]
+        );
+    }
+
+    #[test]
+    fn rejects_paths_escaping_the_pack() {
+        let root = Path::new("C:\\packs\\nord");
+        assert!(resolve_inside_pack(root, Path::new("..\\evil.png")).is_none());
+        assert!(resolve_inside_pack(root, Path::new("C:\\evil.png")).is_none());
+        assert!(resolve_inside_pack(root, Path::new("icons\\x.txt")).is_none());
+    }
+
+    #[test]
+    fn loads_bundled_icon_manifests_if_any() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../themes");
+        for id in [
+            "catppuccin",
+            "gruvbox",
+            "nord",
+            "prism",
+            "solarized",
+            "tokyo-night",
+        ] {
+            let dir = root.join(id).join("icons");
+            if dir.join(MANIFEST_FILE_NAME).exists() {
+                let pack = IconPack::load(&dir).unwrap_or_else(|e| panic!("{id}: {e}"));
+                assert!(!pack.id.is_empty());
+            }
+        }
     }
 }
