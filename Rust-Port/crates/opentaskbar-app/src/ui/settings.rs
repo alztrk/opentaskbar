@@ -2766,53 +2766,88 @@ impl SettingsView {
                             ),
                     )
                 } else {
-                    let ratio = (percent as f32 / 100.0).clamp(0.02, 1.0);
+                    let ratio = (percent as f32 / 100.0).clamp(0.04, 1.0);
                     let fill_col = if percent <= 20 {
-                        (0xb2, 0x60, 0x67)
+                        (0xec, 0x5e, 0x6c)
                     } else if percent <= 50 {
-                        (0xb9, 0x95, 0x63)
+                        (0xf2, 0xb8, 0x4e)
                     } else {
-                        (0x58, 0xa8, 0x9c)
+                        (0x34, 0xbf, 0xa3)
                     };
-                    let card_w = 94.0_f32;
-                    let fill_w = (card_w * ratio).round();
+                    let chamber_bg = if is_dark { 0x0000_0048 } else { 0x1818_1b16 };
+                    let chamber_bd = if is_dark { 0xffff_ff1f } else { 0x1818_1b1a };
+                    let nub_bg = if percent >= 98 {
+                        crate::design::gpui_rgba(fill_col, 0xf2)
+                    } else if is_dark {
+                        0xffff_ff3d
+                    } else {
+                        0x1818_1b38
+                    };
+                    let chamber_w = 82.0_f32;
+                    let fill_w = (chamber_w * ratio).round();
+                    let use_dark_ink = !is_dark && percent < 50;
+                    let text_col = if use_dark_ink {
+                        t.text_primary
+                    } else {
+                        0xffff_ffff
+                    };
                     div()
-                        .relative()
-                        .w(px(card_w))
-                        .h(px(40.0))
-                        .rounded(px(10.0))
+                        .w(px(96.0))
+                        .h(px(42.0))
+                        .p(px(4.0))
+                        .rounded(px(12.0))
                         .bg(rgba(chip_bg))
                         .border_1()
                         .border_color(rgba(chip_bd))
-                        .overflow_hidden()
                         .flex()
                         .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .absolute()
-                                .left_0()
-                                .top_0()
-                                .bottom_0()
-                                .w(px(fill_w))
-                                .bg(c_rgba(fill_col, 0xf2)),
-                        )
+                        .gap(px(2.0))
                         .child(
                             div()
                                 .relative()
+                                .w(px(chamber_w))
+                                .h_full()
+                                .rounded(px(8.0))
+                                .bg(rgba(chamber_bg))
+                                .border_1()
+                                .border_color(rgba(chamber_bd))
+                                .overflow_hidden()
                                 .flex()
                                 .items_center()
-                                .gap(px(4.0))
-                                .when(charging, |row| {
-                                    row.child(icon_glyph("\u{E945}", 11.0, 0xffffffff))
-                                })
+                                .justify_center()
                                 .child(
                                     div()
-                                        .text_size(px(fonts::scaled_size(13.0)))
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .text_color(rgba(0xffffffff))
-                                        .child(format!("{percent}%")),
+                                        .absolute()
+                                        .left_0()
+                                        .top_0()
+                                        .bottom_0()
+                                        .w(px(fill_w))
+                                        .bg(c_rgba(fill_col, 0xf2)),
+                                )
+                                .child(
+                                    div()
+                                        .relative()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(3.0))
+                                        .when(charging, |row| {
+                                            row.child(icon_glyph("\u{E945}", 11.0, text_col))
+                                        })
+                                        .child(
+                                            div()
+                                                .text_size(px(fonts::scaled_size(13.0)))
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .text_color(rgba(text_col))
+                                                .child(format!("{percent}%")),
+                                        ),
                                 ),
+                        )
+                        .child(
+                            div()
+                                .w(px(2.5))
+                                .h(px(12.0))
+                                .rounded(px(1.5))
+                                .bg(rgba(nub_bg)),
                         )
                         .into_any_element()
                 }
@@ -6828,6 +6863,7 @@ mod tests {
 pub fn run_settings_window() {
     let loaded = settings::load_from(&settings::settings_path());
     Application::new().run(move |cx: &mut App| {
+        let _ = fonts::load_bundled_fonts(cx);
         cx.bind_keys([
             KeyBinding::new("tab", TabNext, None),
             KeyBinding::new("shift-tab", TabPrevious, None),

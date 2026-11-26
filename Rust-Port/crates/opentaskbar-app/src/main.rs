@@ -6,8 +6,9 @@
 //! - `--restore`: restores Explorer's taskbar from the recovery journal and exits.
 //! - default: acquires single-instance lock, loads settings, and runs the native dock.
 #![cfg_attr(windows, windows_subsystem = "windows")]
-// WS-E/F/G/H modules merged ahead of their WS-D call sites and WS-H tests/docs. Keep the
-// intermediate integration tree warning-clean without deleting the staged public API.
+// The merged C#-parity modules expose a deliberately broad public API (hardware
+// vendors, theme tokens, flyout blocks, shell helpers). Individual call sites are
+// wired incrementally; keep the surface warning-clean without deleting code.
 #![allow(dead_code)]
 
 #[cfg(windows)]
@@ -31,11 +32,56 @@ fn enable_dpi_awareness() {
     }
 }
 
+/// Reads an opt-in flag from the settings `extra` map (C# has no matching key).
+#[cfg(windows)]
+fn extra_flag(
+    settings: &opentaskbar_core::settings::DockSettings,
+    key: &str,
+    default: bool,
+) -> bool {
+    match settings.extra.get(key) {
+        Some(serde_json::Value::Bool(value)) => *value,
+        _ => default,
+    }
+}
+
+/// Cheap, non-blocking shell-change callback for the WinEvent watcher.
+#[cfg(windows)]
+fn on_shell_change() {
+    opentaskbar_core::log::event("ShellChanged", &[]);
+}
+
+/// Shared startup wiring for the Settings process and the dock process.
+#[cfg(windows)]
+fn apply_startup_context(settings: &opentaskbar_core::settings::DockSettings) {
+    let _ = platform::theme_packs::install_bundled();
+    design::theme::ThemeManager::apply(settings.theme, Some(settings));
+    let _ = design::windows_palette::install_listener();
+    platform::icon_pack::set_active_pack(None);
+    if !settings.theme_pack.trim().is_empty() {
+        let dir = std::env::var_os("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join("OpenTaskbar")
+            .join("Themes")
+            .join(&settings.theme_pack);
+        platform::icon_pack::set_active_pack(Some(dir.as_path()));
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     #[cfg(windows)]
     {
+        platform::render_mode::apply_cli_args(&args);
+        if let Some(arg) = args
+            .iter()
+            .find(|a| a.starts_with("--update") || a.starts_with("action=update"))
+            && platform::toast::handle_activation_argument(arg)
+        {
+            return;
+        }
         if args.iter().any(|a| a == platform::icon_cache::WORKER_ARG) {
             platform::icon_cache::run_worker();
             return;
@@ -50,19 +96,7 @@ fn main() {
                 opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
             opentaskbar_core::i18n::init(Some(&settings.language));
             design::fonts::apply_settings(&settings);
-            let theme_dir = if settings.theme_pack.trim().is_empty() {
-                None
-            } else {
-                Some(
-                    std::env::var_os("LOCALAPPDATA")
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(std::env::temp_dir)
-                        .join("OpenTaskbar")
-                        .join("Themes")
-                        .join(&settings.theme_pack),
-                )
-            };
-            platform::icon_pack::set_active_pack(theme_dir.as_deref());
+            apply_startup_context(&settings);
             ui::settings::run_settings_window();
             return;
         }
@@ -94,19 +128,18 @@ fn main() {
             opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
         opentaskbar_core::i18n::init(Some(&settings.language));
         design::fonts::apply_settings(&settings);
-        let theme_dir = if settings.theme_pack.trim().is_empty() {
-            None
-        } else {
-            Some(
-                std::env::var_os("LOCALAPPDATA")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(std::env::temp_dir)
-                    .join("OpenTaskbar")
-                    .join("Themes")
-                    .join(&settings.theme_pack),
-            )
-        };
-        platform::icon_pack::set_active_pack(theme_dir.as_deref());
+        apply_startup_context(&settings);
+        platform::startup_registration::sync_on_startup(false, false);
+        opentaskbar_shell::watchdog::arm();
+        opentaskbar_shell::flyout_writer::set_enabled(Some(extra_flag(
+            &settings,
+            "NativeFlyoutReposition",
+            false,
+        )));
+        platform::start_menu_state::install_hook();
+        platform::taskbar_pin_monitor::start_watch();
+        platform::radio::install_state_monitor();
+        opentaskbar_shell::session::install_shell_hooks(on_shell_change);
         // Non-blocking startup update check with an Action Center toast (C# NotificationService).
         if settings.check_updates {
             std::thread::spawn(|| {
@@ -122,6 +155,7 @@ fn main() {
         }
         opentaskbar_core::log::info("Starting OpenTaskBar hybrid dock.");
         let panicked = std::panic::catch_unwind(|| dock::run(settings)).is_err();
+        opentaskbar_shell::watchdog::notify_clean_exit();
         opentaskbar_shell::taskbar::end_replacement();
         if panicked {
             opentaskbar_core::log::error(
