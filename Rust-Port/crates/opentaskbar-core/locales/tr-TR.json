@@ -878,7 +878,7 @@
   "DockTopGap": "Ust bosluk",
   "DockTopGapDescription": "Gorev cubugunun ustundeki bosluk (0 = kenara yapisik).",
   "DockTopGapUnit": "Ust birim",
-  "DockBottomGap": "Alt bosluk",
+  "DockBottomGap": "Alt boşluk",
   "DockBottomGapDescription": "Gorev cubugunun altindaki bosluk (0 = kenara yapisik).",
   "DockBottomGapUnit": "Alt birim",
   "BorderStyleLabel": "Kenarlık stili",
@@ -1127,5 +1127,11 @@
   "WeatherLocation": "Hava durumu konumu",
   "SettingsSaveError": "Ayarlar kaydedilemedi. Ayar klasörünün yazılabilir olduğunu kontrol edip tekrar deneyin.",
   "WidgetPanelHint": "Bu widget'ın açılır panelini yapılandırın veya önizleyin.",
-  "WidgetPreviewFlyout": "Açılır paneli önizle"
+  "WidgetPreviewFlyout": "Açılır paneli önizle",
+  "WidgetFlyoutTrigger": "Widget açılır pencere tetikleyici",
+  "WidgetFlyoutTriggerClick": "Tıklayınca",
+  "WidgetFlyoutTriggerHover": "Üzerine gelince",
+  "StartButtonPlacement": "Başlat düğmesi konumu",
+  "StartWidgetIndex": "Başlat widget sırası",
+  "DynamicIslandEmpty": "Dinamik Ada"
 }

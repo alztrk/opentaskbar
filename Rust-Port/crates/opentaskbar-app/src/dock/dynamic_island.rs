@@ -153,6 +153,25 @@ impl DynamicIslandManager {
                 );
             }
         }
+        // Keep the island visible when the feature is enabled even before any widget is assigned.
+        if desired.is_empty() {
+            let fallback_monitors: Vec<&MonitorInfo> = if settings.show_on_all_monitors {
+                monitors.iter().collect()
+            } else {
+                monitors
+                    .iter()
+                    .find(|m| m.is_primary)
+                    .or_else(|| monitors.first())
+                    .into_iter()
+                    .collect()
+            };
+            for mon in fallback_monitors {
+                desired.insert(
+                    mon.device_name.to_ascii_lowercase(),
+                    (mon.clone(), Vec::new()),
+                );
+            }
+        }
 
         let stale_keys: Vec<String> = self
             .windows
@@ -447,6 +466,10 @@ impl DynamicIslandWindow {
     }
 
     fn width_for_current_page(&self) -> f32 {
+        if self.page_ids.is_empty() {
+            let monitor_dips = self.monitor.width() as f32 / self.monitor.dpi_scale.max(0.5);
+            return policy::clamp_window_width(220.0, monitor_dips, 180.0, MAX_WIDTH_DIPS, 16.0);
+        }
         // Expanded: the shared IslandState eases from the collapsed chip width
         // to `collapsed + DETAILS_PANEL_WIDTH_DIPS` (media keeps its 560px page).
         let content_w = if self.island.expanded {
@@ -641,6 +664,29 @@ impl DynamicIslandWindow {
                     self.details_bg.hide();
                     self.details_node.hide();
                 }
+            }
+        } else if self.page_ids.is_empty() {
+            self.details_bg.hide();
+            let label = loc::t("DynamicIslandEmpty");
+            let text_w = (self.width_dips - 28.0).max(80.0);
+            let text_h = COMPACT_HEIGHT_DIPS - 10.0;
+            if let Ok(text) = self.dcomp.create_widget_text_surface(
+                &label,
+                None,
+                text_w,
+                text_h,
+                dpi,
+                self.is_dark,
+            ) {
+                self.details_node.set_content(Some(&text));
+                self.details_node.set_transform(
+                    1.0,
+                    1.0,
+                    (14.0 * dpi).round(),
+                    (5.0 * dpi).round(),
+                );
+            } else {
+                self.details_node.hide();
             }
         } else {
             self.details_bg.hide();
@@ -843,7 +889,6 @@ impl DynamicIslandWindow {
         };
 
         let should_show = self.settings.dynamic_island_enable
-            && !self.page_ids.is_empty()
             && !self.settings.focus_mode
             && auto_hide_allows
             && policy::should_show(
@@ -1141,6 +1186,7 @@ impl DynamicIslandWindow {
 
     fn handle_rbutton_up(&mut self) {
         let Some(wid) = self.current_page_id().map(str::to_owned) else {
+            settings_ui::spawn_settings_window();
             return;
         };
         let reset_label = loc::t("Reset");

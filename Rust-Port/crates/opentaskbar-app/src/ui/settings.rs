@@ -50,9 +50,7 @@ use crate::ui::components::{
 };
 use crate::ui::menu::{self, BorderStyle, MenuEntry, MenuIcon};
 use crate::ui::prompt;
-use crate::ui::settings_search::{
-    self, SearchCatalog, SearchEntry, SettingsSearchEntry, widget_has_settings,
-};
+use crate::ui::settings_search::{self, SettingsSearchEntry};
 use crate::ui::text_input::{TextInput, apply_keystroke, clamp_numeric};
 use crate::widgets;
 
@@ -919,9 +917,6 @@ struct SettingsView {
     update_status: String,
     update_release: Option<update::Release>,
     // Search (C# SettingsWindow.Search.cs parity)
-    search_query: String,
-    search_hits: Vec<SearchEntry>,
-    search_focused: bool,
     // WidgetPanelHost (Escape / focus return / 300 ms suppress / preview toggle)
     widget_panel: Option<&'static str>,
     panel_opened_at: Option<Instant>,
@@ -1008,9 +1003,6 @@ impl SettingsView {
             save_pending: false,
             update_status: String::new(),
             update_release: None,
-            search_query: String::new(),
-            search_hits: Vec::new(),
-            search_focused: false,
             widget_panel: None,
             panel_opened_at: None,
             flyout_preview: true,
@@ -1321,16 +1313,6 @@ impl SettingsView {
         }
     }
 
-    fn refresh_search(&mut self) {
-        let catalog = SearchCatalog::from_settings(&self.settings);
-        debug_assert!(!catalog.entries().is_empty());
-        self.search_hits = catalog
-            .search(&self.search_query)
-            .into_iter()
-            .cloned()
-            .collect();
-    }
-
     /// C# `WidgetPanelHost`: Escape/focus return plus 300 ms suppress after close.
     fn close_widget_panel(&mut self, window: &mut Window) {
         if self.widget_panel.take().is_some() {
@@ -1382,134 +1364,6 @@ impl SettingsView {
             });
         })
         .detach();
-    }
-
-    // ---- Settings search (dynamic catalogue) --------------------------------
-
-    fn render_search(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let query = if self.search_query.is_empty() {
-            "Search settings, widget panels, DockTopGapPixels, LauncherHotkey…".to_owned()
-        } else {
-            self.search_query.clone()
-        };
-        let border = if self.search_focused {
-            t.accent
-        } else {
-            t.border
-        };
-        let field = div()
-            .id("settings-search-input")
-            .tab_index(0)
-            .w_full()
-            .h(px(34.0))
-            .px(px(10.0))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .rounded(px(9.0))
-            .bg(rgba(t.surface))
-            .border_1()
-            .border_color(rgba(border))
-            .focus(|style| style.border_color(rgba(t.accent)))
-            .on_click(cx.listener(|this, _, window, cx| {
-                this.search_focused = true;
-                this.focus.focus(window);
-                cx.notify();
-            }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                let mut buffer = this.search_query.clone();
-                if apply_keystroke(
-                    &mut buffer,
-                    &event.keystroke.key,
-                    event.keystroke.key_char.as_deref(),
-                    false,
-                ) {
-                    this.search_query = buffer;
-                    this.refresh_search();
-                } else if event.keystroke.key == "escape" {
-                    this.search_query.clear();
-                    this.search_hits.clear();
-                }
-                cx.notify();
-            }))
-            .child(icon_glyph("\u{E721}", 14.0, t.text_secondary))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(13.0))
-                    .text_color(rgba(if self.search_query.is_empty() {
-                        t.text_secondary
-                    } else {
-                        t.text_primary
-                    }))
-                    .child(query),
-            )
-            .when(!self.search_query.is_empty(), |row| {
-                row.child(icon_glyph("\u{E711}", 12.0, t.text_secondary))
-            });
-
-        let mut out = vec![field.into_any_element()];
-        if !self.search_query.is_empty() {
-            let count = self.search_hits.len();
-            out.push(
-                div()
-                    .w_full()
-                    .text_size(px(11.0))
-                    .text_color(rgba(t.text_secondary))
-                    .child(format!("{count} matches"))
-                    .into_any_element(),
-            );
-            let hover_bg = t.surface_hover;
-            for (i, hit) in self.search_hits.iter().take(40).enumerate() {
-                let page = hit.page;
-                let widget_id = hit.widget_id;
-                let label = hit.label.clone();
-                let section = hit.section.to_owned();
-                let field_name = hit.field.to_owned();
-                let row = div()
-                    .id(SharedString::from(format!("search-hit-{i}")))
-                    .w_full()
-                    .min_w_0()
-                    .px(px(12.0))
-                    .py(px(8.0))
-                    .rounded(px(8.0))
-                    .bg(rgba(t.surface))
-                    .border_1()
-                    .border_color(rgba(t.border))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(rgba(hover_bg)))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.page = SettingsPage::from_name(page);
-                        this.search_query.clear();
-                        this.search_hits.clear();
-                        this.scroll_handle.set_offset(gpui::point(px(0.0), px(0.0)));
-                        if let Some(id) = widget_id
-                            && widget_has_settings(id)
-                        {
-                            this.open_widget_panel(id, window);
-                        }
-                        cx.notify();
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(13.0))
-                            .text_color(rgba(t.text_primary))
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .text_size(px(10.0))
-                            .text_color(rgba(t.text_secondary))
-                            .child(format!("{section} · {field_name}")),
-                    );
-                out.push(row.into_any_element());
-            }
-        }
-        out
     }
 
     // ---- WidgetPanelHost -----------------------------------------------------
@@ -4515,7 +4369,7 @@ impl SettingsView {
         let mut out = vec![
             section_card(
                 t,
-                format!("{} & {}", loc::t("SectionDockLayout"), loc::t("Dimensions")),
+                loc::t("SectionDockLayout"),
                 vec![
                     self.target_row(
                         "DockAlignment",
@@ -4529,14 +4383,14 @@ impl SettingsView {
                         "StartPlacement",
                         t,
                         Some("\u{E7C5}"),
-                        "Start Button Placement",
+                        loc::t("StartButtonPlacement"),
                         start_placement_dd,
                     ),
                     self.target_row(
                         "StartWidgetIndex",
                         t,
                         Some("\u{E9A6}"),
-                        "Start Widget Index",
+                        loc::t("StartWidgetIndex"),
                         stepper(
                             "start-widget-index-minus",
                             "start-widget-index-plus",
@@ -5967,13 +5821,14 @@ impl SettingsView {
                     ))
                     .child(
                         div()
+                            .whitespace_nowrap()
                             .text_size(px(fonts::scaled_size(11.5)))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(rgba(btn_fg))
                             .child(if expanded {
                                 loc::t("Close")
                             } else {
-                                loc::t("SettingsTitle")
+                                loc::t("Settings")
                             }),
                     ),
             )
@@ -6010,28 +5865,38 @@ impl SettingsView {
             .when(!expanded, |b| b.w_full())
             .child(preview);
 
-        let mut meta = div().flex().flex_col().gap(px(2.0)).min_w_0().child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(7.0))
-                .min_w_0()
-                .child(icon_glyph(
-                    widget_glyph(wid),
-                    13.5,
-                    if enabled { t.accent } else { t.text_secondary },
-                ))
-                .child(
-                    div()
-                        .text_size(px(fonts::scaled_size(12.5)))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(rgba(t.text_primary))
-                        .child(widgets::widget_name(w.id)),
-                ),
-        );
+        let mut meta = div()
+            .flex_1()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .min_w_0()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .min_w_0()
+                    .child(icon_glyph(
+                        widget_glyph(wid),
+                        13.5,
+                        if enabled { t.accent } else { t.text_secondary },
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(fonts::scaled_size(12.5)))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(t.text_primary))
+                            .child(widgets::widget_name(w.id)),
+                    ),
+            );
         if let Some(sub) = summary {
             meta = meta.child(
                 div()
+                    .w_full()
+                    .min_w_0()
                     .pl(px(21.0))
                     .text_size(px(fonts::scaled_size(11.0)))
                     .text_color(rgba(t.text_secondary))
@@ -6039,8 +5904,12 @@ impl SettingsView {
             );
         }
 
+        // Only flex-grow horizontally when laid out beside the preview in the expanded header;
+        // inside the vertical collapsed `head` column, `.flex_1()` would collapse `flex-basis`
+        // height to 0 and cause cards to overlap subsequent rows.
         let footer = div()
-            .flex_1()
+            .when(expanded, |f| f.flex_1())
+            .when(!expanded, |f| f.w_full())
             .min_w_0()
             .flex()
             .items_center()
@@ -6078,7 +5947,7 @@ impl SettingsView {
         };
 
         let mut card = div()
-            .when(expanded, |c| c.w_full())
+            .when(expanded, |c| c.w_full().flex_shrink_0())
             .when(!expanded, |c| c.flex_1().min_w_0())
             .flex()
             .flex_col()
@@ -6234,7 +6103,7 @@ impl SettingsView {
                 if pending.is_empty() {
                     return;
                 }
-                let mut row = div().w_full().flex().items_start().gap(px(12.0));
+                let mut row = div().w_full().flex_shrink_0().flex().gap(px(12.0));
                 for &w in pending.iter() {
                     row = row.child(this.render_widget_card(w, t, is_dark, cx));
                 }
@@ -6285,11 +6154,47 @@ impl SettingsView {
         })
         .collect();
 
+        let trigger_opts: Vec<DropdownOption> = [
+            (
+                opentaskbar_core::settings::WidgetFlyoutTrigger::Click,
+                loc::t("WidgetFlyoutTriggerClick"),
+            ),
+            (
+                opentaskbar_core::settings::WidgetFlyoutTrigger::Hover,
+                loc::t("WidgetFlyoutTriggerHover"),
+            ),
+        ]
+        .into_iter()
+        .map(|(mode, label)| {
+            let entity = cx.entity().downgrade();
+            DropdownOption {
+                label: SharedString::from(label),
+                flag_path: None,
+                glyph: None,
+                selected: self.settings.widget_flyout_trigger == mode,
+                on_select: std::rc::Rc::new(move |_win, app| {
+                    let _ = entity.update(app, |this, cx| {
+                        this.open_dropdown = None;
+                        this.settings.widget_flyout_trigger = mode;
+                        this.auto_save(cx);
+                    });
+                }),
+            }
+        })
+        .collect();
+
         out.push(
             section_card(
                 t,
                 loc::t("WidgetDensity"),
                 vec![
+                    setting_row(
+                        t,
+                        Some("\u{E8B0}"),
+                        loc::t("WidgetFlyoutTrigger"),
+                        self.make_dropdown("widget-flyout-trigger", t, trigger_opts, cx),
+                    )
+                    .into_any_element(),
                     setting_row(
                         t,
                         Some("\u{E80A}"),
@@ -7246,7 +7151,6 @@ impl Render for SettingsView {
             );
 
         let mut page_content = div().w_full().flex().flex_col().gap(px(20.0));
-        page_content = page_content.children(self.render_search(&t, cx));
         page_content = page_content.children(content_blocks);
 
         let mut scroll_wrap = div().flex_1().min_h_0().w_full().relative().child(

@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn all_catalogs_share_one_identical_key_set() {
         let reference = keys(DEFAULT_LANGUAGE);
-        assert_eq!(reference.len(), 1129);
+        assert_eq!(reference.len(), 1135);
         for (tag, _) in LANGUAGES {
             assert_eq!(key_count(tag), reference.len(), "{tag} key count differs");
             assert_eq!(keys(tag), reference, "{tag} key set differs");

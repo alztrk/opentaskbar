@@ -1127,5 +1127,11 @@
   "WeatherLocation": "Weather location",
   "SettingsSaveError": "Could not save settings. Check that the settings folder is writable and try again.",
   "WidgetPanelHint": "Configure or preview this widget's popup panel.",
-  "WidgetPreviewFlyout": "Preview popup"
+  "WidgetPreviewFlyout": "Preview popup",
+  "WidgetFlyoutTrigger": "Widget flyout trigger",
+  "WidgetFlyoutTriggerClick": "On click",
+  "WidgetFlyoutTriggerHover": "On hover",
+  "StartButtonPlacement": "Start button placement",
+  "StartWidgetIndex": "Start widget index",
+  "DynamicIslandEmpty": "Dynamic Island"
 }

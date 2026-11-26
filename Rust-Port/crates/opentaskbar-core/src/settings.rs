@@ -299,6 +299,13 @@ pub enum WidgetDensityMode {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WidgetFlyoutTrigger {
+    #[default]
+    Click,
+    Hover,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DynamicIslandVisibilityMode {
     #[default]
     Always,
@@ -555,6 +562,8 @@ pub struct DockSettings {
     #[serde(deserialize_with = "deserialize_stats_meters")]
     pub stats_meters: u32,
     pub global_widget_density: WidgetDensityMode,
+    #[serde(default)]
+    pub widget_flyout_trigger: WidgetFlyoutTrigger,
     #[serde(default = "default_true")]
     pub check_updates: bool,
     pub menu_background: SurfaceBackground,
@@ -740,6 +749,7 @@ impl Default for DockSettings {
             clock_date_layout: ClockDateLayout::Beside,
             stats_meters: stats_meters::ALL as u32,
             global_widget_density: WidgetDensityMode::Auto,
+            widget_flyout_trigger: WidgetFlyoutTrigger::Click,
             check_updates: true,
             menu_background: SurfaceBackground::Glass,
             widget_background: SurfaceBackground::Glass,

@@ -61,9 +61,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetTimer, SetWindowLongPtrW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
     WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCHITTEST, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW,
-    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WS_VISIBLE,
+    WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP, WS_VISIBLE,
 };
 
 pub mod dcomp;
@@ -4118,6 +4118,13 @@ impl DockState {
 
     /// `WM_MOUSEMOVE` → `Enter` / `VerifyCursor` / intent arming.
     fn sync_widget_hover(&mut self, mx: f32, my: f32) {
+        if self.settings.widget_flyout_trigger
+            != opentaskbar_core::settings::WidgetFlyoutTrigger::Hover
+        {
+            self.disarm_hover_intent();
+            self.hover_flyout_pending = None;
+            return;
+        }
         let now = Instant::now();
         let cursor = self.hover_cursor_point(mx, my);
         self.widget_runtime.hover.set_cursor(cursor.x, cursor.y);
@@ -4173,8 +4180,12 @@ impl DockState {
 
     /// `WM_TIMER` for the 350 ms hover intent.
     fn tick_widget_hover(&mut self) {
-        if self.hover_flyout_open {
+        if self.hover_flyout_open
+            || self.settings.widget_flyout_trigger
+                != opentaskbar_core::settings::WidgetFlyoutTrigger::Hover
+        {
             self.disarm_hover_intent();
+            self.hover_flyout_pending = None;
             return;
         }
         let now = Instant::now();
@@ -4214,6 +4225,10 @@ impl DockState {
             return;
         };
         let (ax, ay) = self.flyout_anchor_px(rc);
+        let anchor_rect = self
+            .widget_phys_rect(&id)
+            .map(|r| (r.left, r.top, r.right, r.bottom));
+        crate::ui::flyout::set_next_hover_anchor(anchor_rect);
         self.hover_flyout_open = true;
         let changed = self.widget_runtime.open_widget_flyout(
             &id,
@@ -4223,6 +4238,7 @@ impl DockState {
             ay,
             &mut self.settings,
         );
+        crate::ui::flyout::set_next_hover_anchor(None);
         self.hover_flyout_open = false;
         if changed {
             // Disk I/O + full DComp rebuild move to the idle
@@ -4842,6 +4858,7 @@ impl DockState {
                     }
                     widgets::DirectClickOutcome::OpenFlyout => {
                         let (ax, ay) = self.flyout_anchor_px(*rc);
+                        crate::ui::flyout::set_next_hover_anchor(None);
                         self.hover_flyout_open = true;
                         let changed = self.widget_runtime.open_widget_flyout(
                             wid,
@@ -5178,18 +5195,32 @@ impl DockState {
 
     fn handle_rbutton_up(&mut self, mx: f32, my: f32) {
         self.hide_preview_now();
+        // Cancel and suppress any armed widget hover-intent so right-clicking a widget or
+        // keeping its context menu open never pops the widget's flyout behind/after the menu.
+        self.disarm_hover_intent();
+        self.hover_flyout_pending = None;
+        if let Some(wid) = self.hovered_widget {
+            self.widget_runtime.hover.suppress(wid, Instant::now());
+        }
 
         let sm = self.live_scroll_metrics();
         let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
         if let Some(index) = self.hit_tray_pin(tray_rc, mx, my) {
             let path = self.settings.user_pinned_background_apps[index].clone();
-            if tray::show_pinned_app_menu(self.hwnd, self.is_dark, &self.settings, &path) {
+            self.hover_flyout_open = true;
+            let unpin = tray::show_pinned_app_menu(self.hwnd, self.is_dark, &self.settings, &path);
+            self.hover_flyout_open = false;
+            if unpin {
                 self.set_background_pin(&path, false);
             }
             return;
         }
         if Self::hit_rect_in_vp(&sm, bin_rc, mx, my) {
-            match win32::show_recycle_bin_context_menu(self.hwnd, self.is_dark, &self.settings) {
+            self.hover_flyout_open = true;
+            let action =
+                win32::show_recycle_bin_context_menu(self.hwnd, self.is_dark, &self.settings);
+            self.hover_flyout_open = false;
+            match action {
                 RecycleBinAction::Open => pins::launch("shell:RecycleBinFolder".to_owned()),
                 RecycleBinAction::Empty => {
                     widgets::empty_recycle_bin();
@@ -5204,6 +5235,7 @@ impl DockState {
             .iter()
             .find(|(_, rc)| Self::hit_rect_in_vp(&sm, Some(*rc), mx, my))
         {
+            self.widget_runtime.hover.suppress(wid, Instant::now());
             let reset_label = loc::t("Reset");
             let sound_label = loc::t_fmt("RadioSettings", &[&loc::t("LauncherSound")]);
             let focus_label = loc::t("FocusMode");
@@ -5213,7 +5245,8 @@ impl DockState {
                 "quicksettings" => Some(focus_label.as_str()),
                 _ => None,
             };
-            match win32::show_widget_context_menu(
+            self.hover_flyout_open = true;
+            let action = win32::show_widget_context_menu(
                 self.hwnd,
                 self.is_dark,
                 wid,
@@ -5223,7 +5256,12 @@ impl DockState {
                 false,
                 false,
                 &self.settings,
-            ) {
+            );
+            self.hover_flyout_open = false;
+            self.disarm_hover_intent();
+            self.hover_flyout_pending = None;
+            self.widget_runtime.hover.suppress(wid, Instant::now());
+            match action {
                 WidgetContextAction::PlaceAllDisplays => {
                     self.settings.dynamic_island_placements.insert(
                         (*wid).to_owned(),
@@ -6143,6 +6181,14 @@ unsafe extern "system" fn wnd_proc(
         WM_MOUSEHWHEEL => {
             let delta = ((wparam >> 16) & 0xffff) as i16;
             state.handle_mouse_wheel(delta, true);
+            0
+        }
+        WM_RBUTTONDOWN => {
+            state.disarm_hover_intent();
+            state.hover_flyout_pending = None;
+            if let Some(wid) = state.hovered_widget {
+                state.widget_runtime.hover.suppress(wid, Instant::now());
+            }
             0
         }
         WM_RBUTTONUP => {

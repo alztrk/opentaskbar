@@ -34,20 +34,21 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_BACK,
-    VK_ESCAPE, VK_RETURN, VK_SHIFT, VK_SPACE, VK_TAB,
+    GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT,
+    TrackMouseEvent, VK_BACK, VK_ESCAPE, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_RETURN, VK_SHIFT,
+    VK_SPACE, VK_TAB,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GWLP_USERDATA, GetClassNameW, GetClientRect, GetMessageW, GetWindowLongPtrW, HC_ACTION, HHOOK,
-    HWND_TOPMOST, IDC_ARROW, IDC_HAND, KillTimer, LWA_ALPHA, LoadCursorW, MSG, MSLLHOOKSTRUCT,
-    PostMessageW, RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
-    SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
-    UnhookWindowsHookEx, WH_MOUSE_LL, WM_ACTIVATE, WM_CHAR, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
+    GWLP_USERDATA, GetClassNameW, GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW,
+    GetWindowRect, HC_ACTION, HHOOK, HWND_TOPMOST, IDC_ARROW, IDC_HAND, KillTimer, LWA_ALPHA,
+    LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW, RegisterClassExW, SW_SHOW, SWP_NOACTIVATE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
+    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW,
+    ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_ACTIVATE, WM_CHAR,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
 };
 
 use super::menu::{BorderStyle, MenuIcon, draw_menu_icon};
@@ -60,6 +61,9 @@ const DWMWCP_ROUND: u32 = 2;
 const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
 const MAX_FLYOUT_H_DIPS: f32 = 460.0;
 const TIMER_ANIM: usize = 1;
+const TIMER_DISMISS: usize = 2;
+const DISMISS_POLL_MS: u32 = 45;
+const HOVER_LEAVE_GRACE: Duration = Duration::from_millis(240);
 const OPEN_ANIM_MS: f32 = 175.0;
 const CLOSE_ANIM_MS: f32 = 95.0;
 const SLIDE_OFFSET_DIPS: f32 = 7.0;
@@ -418,6 +422,9 @@ struct FlyoutState<'a> {
     keyboard_index: Option<usize>,
     keyboard_navigation: bool,
     tracking: bool,
+    hover_anchor: Option<RECT>,
+    hover_left_since: Option<Instant>,
+    prev_buttons_mask: u8,
     selected: Option<FlyoutAction>,
     done: AtomicBool,
 }
@@ -1252,6 +1259,51 @@ thread_local! {
     /// UI-thread-only cache: the low-level hook never touches this (it only
     /// posts coordinates), so a hung foreign window cannot stall system input.
     static MENU_CLASS_PROBE: RefCell<MenuClassProbe> = const { RefCell::new(MenuClassProbe::empty()) };
+    /// Optional physical-pixel widget rect that opened the next flyout via hover.
+    /// Consumed once by `show_flyout_impl` to arm hover-leave auto-dismiss.
+    static NEXT_HOVER_ANCHOR: RefCell<Option<RECT>> = const { RefCell::new(None) };
+}
+
+/// Arms (or clears) hover-leave auto-dismiss for the next flyout opened on this UI thread.
+pub fn set_next_hover_anchor(rect: Option<(i32, i32, i32, i32)>) {
+    NEXT_HOVER_ANCHOR.with(|slot| {
+        *slot.borrow_mut() = rect.map(|(left, top, right, bottom)| RECT {
+            left,
+            top,
+            right,
+            bottom,
+        });
+    });
+}
+
+/// Returns whether `pt` lies inside the flyout, its originating widget rect, or the corridor
+/// connecting them so moving the cursor from a hovered widget up into its flyout never closes it.
+fn point_in_hover_safe_zone(pt: POINT, flyout: RECT, anchor: RECT, pad: i32) -> bool {
+    let in_rect = |r: RECT, p: i32| {
+        pt.x >= r.left - p && pt.x <= r.right + p && pt.y >= r.top - p && pt.y <= r.bottom + p
+    };
+    if in_rect(flyout, pad) || in_rect(anchor, pad) {
+        return true;
+    }
+    let bridge = RECT {
+        left: flyout.left.min(anchor.left),
+        top: flyout.top.min(anchor.top),
+        right: flyout.right.max(anchor.right),
+        bottom: flyout.bottom.max(anchor.bottom),
+    };
+    pt.x >= anchor.left.min(flyout.left) - pad
+        && pt.x <= anchor.right.max(flyout.right) + pad
+        && pt.y >= bridge.top - pad
+        && pt.y <= bridge.bottom + pad
+}
+
+fn mouse_buttons_mask() -> u8 {
+    unsafe {
+        let l = u8::from((GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000) != 0);
+        let r = u8::from((GetAsyncKeyState(VK_RBUTTON as i32) as u16 & 0x8000) != 0);
+        let m = u8::from((GetAsyncKeyState(VK_MBUTTON as i32) as u16 & 0x8000) != 0);
+        l | (r << 1) | (m << 2)
+    }
 }
 
 /// Returns whether a native `#32768` menu sits under `point`, reusing a probe
@@ -1445,6 +1497,7 @@ fn show_flyout_impl<'a>(
         );
     }
 
+    let hover_anchor = NEXT_HOVER_ANCHOR.with(|slot| slot.borrow_mut().take());
     let mut state = Box::new(FlyoutState {
         hwnd,
         dpi,
@@ -1474,6 +1527,9 @@ fn show_flyout_impl<'a>(
         keyboard_index: None,
         keyboard_navigation: is_tray,
         tracking: false,
+        hover_anchor,
+        hover_left_since: None,
+        prev_buttons_mask: mouse_buttons_mask(),
         selected: None,
         done: AtomicBool::new(false),
     });
@@ -1494,6 +1550,7 @@ fn show_flyout_impl<'a>(
         if animate {
             SetTimer(hwnd, TIMER_ANIM, flyout_anim_interval_ms(), None);
         }
+        SetTimer(hwnd, TIMER_DISMISS, DISMISS_POLL_MS, None);
     }
 
     if options.retain_for_external_context_menu {
@@ -1531,6 +1588,7 @@ fn show_flyout_impl<'a>(
     EXTERNAL_MENU_ACTIVE.store(false, Ordering::Release);
     unsafe {
         KillTimer(hwnd, TIMER_ANIM);
+        KillTimer(hwnd, TIMER_DISMISS);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         DestroyWindow(hwnd);
     }
@@ -3653,6 +3711,54 @@ unsafe extern "system" fn flyout_wnd_proc(
             state.step_animation();
             0
         }
+        WM_TIMER if wparam == TIMER_DISMISS => {
+            if !state.closing
+                && !state.suppress_blur
+                && !state.stays_open
+                && state.dragging_slider.is_none()
+                && !external_context_menu_active()
+            {
+                let mut pt = POINT::default();
+                let mut rc = RECT::default();
+                let have_geom =
+                    unsafe { GetCursorPos(&mut pt) != 0 && GetWindowRect(hwnd, &mut rc) != 0 };
+                let buttons = mouse_buttons_mask();
+                let newly_pressed = buttons & !state.prev_buttons_mask;
+                state.prev_buttons_mask = buttons;
+                if have_geom {
+                    let inside_flyout =
+                        pt.x >= rc.left && pt.x <= rc.right && pt.y >= rc.top && pt.y <= rc.bottom;
+                    // Outside click dismiss works reliably even when Windows foreground lock
+                    // prevented `SetForegroundWindow` from granting focus to the flyout.
+                    if newly_pressed != 0 && !inside_flyout && !external_menu_at(pt) {
+                        state.commit_editing();
+                        state.begin_close();
+                        return 0;
+                    }
+                    // Hover-opened flyouts also dismiss smoothly after the pointer leaves the
+                    // flyout + originating widget corridor for a short grace period.
+                    if let Some(anchor) = state.hover_anchor
+                        && state.editing.is_none()
+                    {
+                        let pad = (8.0 * state.dpi).round() as i32;
+                        if point_in_hover_safe_zone(pt, rc, anchor, pad) {
+                            state.hover_left_since = None;
+                        } else {
+                            let now = Instant::now();
+                            let since = *state.hover_left_since.get_or_insert(now);
+                            if now.duration_since(since) >= HOVER_LEAVE_GRACE {
+                                state.begin_close();
+                                return 0;
+                            }
+                        }
+                    }
+                }
+            } else {
+                state.prev_buttons_mask = mouse_buttons_mask();
+                state.hover_left_since = None;
+            }
+            0
+        }
         // The low-level hook only posts coordinates; the class/identity check
         // runs here on the UI thread, where a hung foreign window cannot block
         // system-wide input. Preserves the #32768 retain/close behavior.
@@ -4013,5 +4119,47 @@ mod tests {
             cell.borrow()
                 .is_fresh(point, now + MENU_CLASS_CACHE_TTL / 2)
         }));
+    }
+
+    #[test]
+    fn hover_safe_zone_covers_flyout_anchor_and_corridor() {
+        let flyout = RECT {
+            left: 400,
+            top: 600,
+            right: 700,
+            bottom: 920,
+        };
+        let anchor = RECT {
+            left: 500,
+            top: 940,
+            right: 600,
+            bottom: 990,
+        };
+        // Inside flyout, inside anchor, and in the vertical corridor between them.
+        assert!(super::point_in_hover_safe_zone(
+            POINT { x: 550, y: 750 },
+            flyout,
+            anchor,
+            8
+        ));
+        assert!(super::point_in_hover_safe_zone(
+            POINT { x: 550, y: 960 },
+            flyout,
+            anchor,
+            8
+        ));
+        assert!(super::point_in_hover_safe_zone(
+            POINT { x: 550, y: 930 },
+            flyout,
+            anchor,
+            8
+        ));
+        // Clearly outside triggers hover-leave dismissal.
+        assert!(!super::point_in_hover_safe_zone(
+            POINT { x: 100, y: 500 },
+            flyout,
+            anchor,
+            8
+        ));
     }
 }
