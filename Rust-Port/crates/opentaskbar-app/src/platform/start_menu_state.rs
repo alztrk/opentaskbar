@@ -1,33 +1,79 @@
 //! Tracks whether the Windows Start menu is open. A closed Start menu often
 //! stays the foreground window but is cloaked by DWM, so the open state follows
 //! its `EVENT_OBJECT_CLOAKED` / `EVENT_OBJECT_UNCLOAKED` events as well as
-//! foreground changes.
+//! `EVENT_SYSTEM_FOREGROUND`.
 //!
-//! C4 API: `is_open()` and `install_hook()`. A Start button press within a
-//! 60–150 ms grace after a cloak counts as dismissing the menu rather than
-//! reopening it (`WasOpenAtPress` in C#).
+//! Windows 10 hosts Start inside `ShellExperienceHost.exe` as a
+//! `Windows.UI.Core.CoreWindow` with a localized "Start" title, while Windows 11
+//! uses `StartMenuExperienceHost.exe`. Both are recognized; the Win10 path is
+//! validated by class + title so other shell flyouts do not latch the state.
+//!
+//! A Start button press within a [-60 ms, +150 ms] grace around the cloak counts
+//! as dismissing the menu rather than reopening it (`WasOpenAtPress` in C#).
+//! The cloak is authoritative: it stamps `closed_at` even if the cached state
+//! was already closed, so repeated cloak events cannot erase the grace window.
 
+use std::panic::catch_unwind;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicIsize, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, HWND, LPARAM, RECT};
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, HMODULE, HWND, LPARAM};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows_sys::Win32::System::Threading::{
     OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
+    EnumWindows, GetClassNameW, GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
+    IsWindowVisible,
 };
 
 use opentaskbar_core::log;
 
 const EVENT_OBJECT_CLOAKED: u32 = 0x8017;
 const EVENT_OBJECT_UNCLOAKED: u32 = 0x8018;
+const EVENT_SYSTEM_FOREGROUND: u32 = 0x0003;
 const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 const WINEVENT_SKIPOWNPROCESS: u32 = 0x0002;
 const OBJID_WINDOW: i32 = 0;
 const START_MENU_EXE: &str = "startmenuexperiencehost.exe";
+const SHELL_HOST_EXE: &str = "shellexperiencehost.exe";
+const CORE_WINDOW_CLASS: &str = "windows.ui.core.corewindow";
+
+/// A press and its click belong to the same gesture for at most this long.
+const PRESS_GESTURE_MAX: Duration = Duration::from_millis(1500);
+const GRACE_BEFORE_MS: i128 = -60;
+const GRACE_AFTER_MS: i128 = 150;
+
+/// Localized Start titles on Windows 10's CoreWindow. Lowercase so a single
+/// `to_lowercase()` comparison covers case-insensitive matches, including the
+/// Turkish `Başlat` and its ASCII-only `Baslat` variant.
+const START_TITLES: [&str; 24] = [
+    "start",
+    "başlat",
+    "baslat",
+    "inicio",
+    "iniciar",
+    "démarrer",
+    "demarrer",
+    "startseite",
+    "início",
+    "avvio",
+    "starta",
+    "käynnistä",
+    "nabídka start",
+    "пуск",
+    "старт",
+    "スタート",
+    "시작",
+    "开始",
+    "開始",
+    "έναρξη",
+    "התחלה",
+    "ابدأ",
+    "mulai",
+    "bắt đầu",
+];
 
 type WinEventProc = unsafe extern "system" fn(HANDLE, u32, HWND, i32, i32, u32, u32);
 
@@ -45,23 +91,144 @@ unsafe extern "system" {
     fn UnhookWinEvent(hook: HANDLE) -> i32;
 }
 
-#[derive(Default)]
+/// Which Start host owns a window. Cached per PID because the executable path
+/// is stable, while the class/title check must stay live for ShellExperienceHost.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum HostKind {
+    #[default]
+    None,
+    StartExperience,
+    ShellExperience,
+}
+
 struct Inner {
     is_open: bool,
     closed_at: Option<Instant>,
+    pressed_at: Option<Instant>,
     start_window: usize,
     cached_pid: u32,
-    cached_is_start_menu: bool,
+    cached_host: HostKind,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        Self {
+            is_open: false,
+            closed_at: None,
+            pressed_at: None,
+            start_window: 0,
+            cached_pid: 0,
+            cached_host: HostKind::None,
+        }
+    }
 }
 
 static STATE: Mutex<Inner> = Mutex::new(Inner {
     is_open: false,
     closed_at: None,
+    pressed_at: None,
     start_window: 0,
     cached_pid: 0,
-    cached_is_start_menu: false,
+    cached_host: HostKind::None,
 });
-static HOOK: AtomicIsize = AtomicIsize::new(0);
+static CLOAK_HOOK: AtomicIsize = AtomicIsize::new(0);
+static FOREGROUND_HOOK: AtomicIsize = AtomicIsize::new(0);
+static INSTALL: Mutex<()> = Mutex::new(());
+static ON_OPENED: Mutex<Option<fn(usize)>> = Mutex::new(None);
+
+// ---------------------------------------------------------------------------
+// Pure helpers (kept side-effect free so the state rules are testable).
+// ---------------------------------------------------------------------------
+
+/// Compares the executable by its file name, never by a bare path suffix.
+fn exe_file_name(path: &str) -> &str {
+    path.rsplit(|c| c == '\\' || c == '/')
+        .next()
+        .unwrap_or(path)
+}
+
+fn host_kind_from_exe(path: &str) -> HostKind {
+    match exe_file_name(path).to_ascii_lowercase().as_str() {
+        START_MENU_EXE => HostKind::StartExperience,
+        SHELL_HOST_EXE => HostKind::ShellExperience,
+        _ => HostKind::None,
+    }
+}
+
+fn class_is_core_window(class: &str) -> bool {
+    class.trim().eq_ignore_ascii_case(CORE_WINDOW_CLASS)
+}
+
+fn title_is_start(title: &str) -> bool {
+    let title = title.trim();
+    if title.is_empty() {
+        return false;
+    }
+    let lower = title.to_lowercase();
+    START_TITLES.iter().any(|candidate| lower == *candidate)
+}
+
+/// Windows 10 fallback: ShellExperienceHost hosts many shell surfaces, so a
+/// window only counts as Start when it is a CoreWindow with a localized title.
+fn is_win10_start_window(class: &str, title: &str) -> bool {
+    class_is_core_window(class) && title_is_start(title)
+}
+
+fn opened_state() -> (bool, Option<Instant>) {
+    (true, None)
+}
+
+fn closed_state(now: Instant) -> (bool, Option<Instant>) {
+    (false, Some(now))
+}
+
+/// Cloak is authoritative, but another genuinely visible Start window on the
+/// same host process means the menu is still open through that window.
+fn cloak_transition(now: Instant, another_visible: bool) -> (bool, Option<Instant>) {
+    if another_visible {
+        opened_state()
+    } else {
+        closed_state(now)
+    }
+}
+
+/// Signed millisecond delta used by the press grace window.
+pub fn closed_delta_ms(closed_at: Instant, press: Instant) -> i128 {
+    if closed_at >= press {
+        (closed_at - press).as_millis() as i128
+    } else {
+        -((press - closed_at).as_millis() as i128)
+    }
+}
+
+fn within_grace(closed_at: Instant, press: Instant) -> bool {
+    (GRACE_BEFORE_MS..=GRACE_AFTER_MS).contains(&closed_delta_ms(closed_at, press))
+}
+
+/// Uses the recorded button-down time while the press/click gesture is fresh;
+/// otherwise treats the supplied instant as the press itself.
+fn resolve_press_at(pressed_at: Option<Instant>, now: Instant) -> Instant {
+    match pressed_at {
+        Some(press) if press <= now && now.duration_since(press) <= PRESS_GESTURE_MAX => press,
+        _ => now,
+    }
+}
+
+fn was_open_at_press_impl(
+    is_open: bool,
+    open_now: bool,
+    closed_at: Option<Instant>,
+    press: Instant,
+) -> bool {
+    if is_open || open_now {
+        return true;
+    }
+    closed_at.is_some_and(|closed| within_grace(closed, press))
+}
+
+// ---------------------------------------------------------------------------
+// Win32 inspection.
+// ---------------------------------------------------------------------------
 
 fn process_exe(pid: u32) -> Option<String> {
     // SAFETY: limited query handle closed before returning.
@@ -78,25 +245,61 @@ fn process_exe(pid: u32) -> Option<String> {
     }
 }
 
+fn host_kind_for_pid(pid: u32) -> HostKind {
+    if let Ok(state) = STATE.lock()
+        && state.cached_pid == pid
+    {
+        return state.cached_host;
+    }
+    let kind = process_exe(pid)
+        .as_deref()
+        .map(host_kind_from_exe)
+        .unwrap_or(HostKind::None);
+    if let Ok(mut state) = STATE.lock() {
+        state.cached_pid = pid;
+        state.cached_host = kind;
+    }
+    kind
+}
+
+fn window_class(hwnd: HWND) -> String {
+    let mut buffer = [0u16; 128];
+    // SAFETY: bounded UTF-16 buffer on a live window handle.
+    let length = unsafe { GetClassNameW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
+    if length <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buffer[..(length as usize).min(buffer.len())])
+}
+
+fn window_title(hwnd: HWND) -> String {
+    let mut buffer = [0u16; 256];
+    // SAFETY: bounded UTF-16 buffer on a live window handle.
+    let length = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
+    if length <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buffer[..(length as usize).min(buffer.len())])
+}
+
 fn is_start_menu_process(hwnd: HWND) -> bool {
+    if hwnd.is_null() {
+        return false;
+    }
     let mut pid = 0u32;
-    // SAFETY: querying the PID of a live window supplied by the hook.
+    // SAFETY: querying the PID of a live window supplied by the OS.
     unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
     if pid == 0 {
         return false;
     }
-    if let Ok(state) = STATE.lock()
-        && state.cached_pid == pid
-    {
-        return state.cached_is_start_menu;
+    match host_kind_for_pid(pid) {
+        HostKind::None => false,
+        HostKind::StartExperience => true,
+        // Win10: the host also owns Action Center and other flyouts.
+        HostKind::ShellExperience => {
+            is_win10_start_window(&window_class(hwnd), &window_title(hwnd))
+        }
     }
-    let is_start_menu =
-        process_exe(pid).is_some_and(|exe| exe.to_ascii_lowercase().ends_with(START_MENU_EXE));
-    if let Ok(mut state) = STATE.lock() {
-        state.cached_pid = pid;
-        state.cached_is_start_menu = is_start_menu;
-    }
-    is_start_menu
 }
 
 fn is_cloaked(hwnd: HWND) -> bool {
@@ -118,19 +321,89 @@ fn is_on_screen(hwnd: HWND) -> bool {
     unsafe { IsWindowVisible(hwnd) != 0 && !is_cloaked(hwnd) }
 }
 
+struct EnumContext {
+    windows: Vec<usize>,
+    pid: Option<u32>,
+}
+
+/// Enumerates on-screen Start windows, optionally limited to one host PID.
+/// No minimum rect is applied: Win10 emits uncloak events with a tiny rect
+/// while the flyout is still animating.
+fn find_visible_start_windows(pid: Option<u32>) -> Vec<usize> {
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> i32 {
+        unsafe {
+            // SAFETY: `lparam` points at a context alive for the synchronous enumeration.
+            let context = &mut *(lparam as *mut EnumContext);
+            if let Some(expected) = context.pid {
+                let mut window_pid = 0u32;
+                GetWindowThreadProcessId(hwnd, &mut window_pid);
+                if window_pid != expected {
+                    return 1;
+                }
+            }
+            if is_start_menu_process(hwnd) && is_on_screen(hwnd) {
+                context.windows.push(hwnd as usize);
+            }
+            1
+        }
+    }
+
+    let mut context = EnumContext {
+        windows: Vec::new(),
+        pid,
+    };
+    // SAFETY: synchronous enumeration with an owned, live context.
+    unsafe {
+        EnumWindows(Some(visit), (&mut context as *mut EnumContext) as LPARAM);
+    }
+    context.windows
+}
+
+/// Enumerates on-screen Start menu windows (all host processes).
+pub fn find_start_menu_windows() -> Vec<usize> {
+    find_visible_start_windows(None)
+}
+
+// ---------------------------------------------------------------------------
+// State transitions and public API.
+// ---------------------------------------------------------------------------
+
 fn mark_open() {
     if let Ok(mut state) = STATE.lock() {
-        state.is_open = true;
-        state.closed_at = None;
+        let (is_open, closed_at) = opened_state();
+        state.is_open = is_open;
+        state.closed_at = closed_at;
     }
 }
 
-fn mark_closed() {
-    if let Ok(mut state) = STATE.lock()
-        && state.is_open
-    {
-        state.is_open = false;
-        state.closed_at = Some(Instant::now());
+/// Cloak is authoritative and always refreshes the dismissal timestamp, even
+/// when the cached state was already closed.
+pub fn mark_closed() {
+    if let Ok(mut state) = STATE.lock() {
+        let (is_open, closed_at) = closed_state(Instant::now());
+        state.is_open = is_open;
+        state.closed_at = closed_at;
+    }
+}
+
+fn remember_start_window(hwnd: HWND) {
+    if let Ok(mut state) = STATE.lock() {
+        state.start_window = hwnd as usize;
+    }
+}
+
+/// Registers the callback fired on UNCLOAKED (used to reposition the flyout).
+pub fn on_opened(cb: fn(usize)) {
+    if let Ok(mut callback) = ON_OPENED.lock() {
+        *callback = Some(cb);
+    }
+}
+
+fn notify_opened(hwnd: usize) {
+    let callback = ON_OPENED.lock().ok().and_then(|slot| *slot);
+    if let Some(callback) = callback {
+        // Never let a managed callback panic across the WinEvent boundary.
+        let _ = catch_unwind(|| callback(hwnd));
     }
 }
 
@@ -143,71 +416,120 @@ unsafe extern "system" fn on_cloak_event(
     _thread: u32,
     _time: u32,
 ) {
-    // A panic must never cross the unmanaged WinEvent boundary.
-    if object_id != OBJID_WINDOW || hwnd.is_null() || !is_start_menu_process(hwnd) {
-        return;
-    }
-    if event_type == EVENT_OBJECT_UNCLOAKED {
-        let mut rect: RECT = unsafe { std::mem::zeroed() };
-        // SAFETY: reading the rect of a live window supplied by the OS.
-        let got_rect = unsafe { GetWindowRect(hwnd, &mut rect) != 0 };
-        if !got_rect || rect.right - rect.left <= 100 || rect.bottom - rect.top <= 100 {
+    unsafe {
+        if object_id != OBJID_WINDOW || hwnd.is_null() || !is_start_menu_process(hwnd) {
             return;
         }
-        if let Ok(mut state) = STATE.lock() {
-            state.start_window = hwnd as usize;
+        if event_type == EVENT_OBJECT_UNCLOAKED {
+            // Win10 animates from a tiny rect: accept the event on PID/class
+            // identity alone instead of discarding it via a rect>100 filter.
+            remember_start_window(hwnd);
+            notify_opened(hwnd as usize);
+            mark_open();
+            return;
         }
-        mark_open();
-        return;
-    }
-    if event_type == EVENT_OBJECT_CLOAKED {
-        let matches_cached = STATE
-            .lock()
-            .is_ok_and(|state| state.start_window == hwnd as usize);
-        if matches_cached || !is_start_menu_open_now() {
+        if event_type == EVENT_OBJECT_CLOAKED {
             mark_closed();
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            let others = find_visible_start_windows(Some(pid));
+            if let Some(&other) = others.iter().find(|&&candidate| candidate != hwnd as usize) {
+                remember_start_window(other as HWND);
+                mark_open();
+            }
         }
     }
 }
 
-/// Starts following the Start menu's cloak events. Call on the UI thread once
-/// its message loop runs. Idempotent.
-pub fn install_hook() {
-    if HOOK.load(Ordering::SeqCst) != 0 {
+unsafe extern "system" fn on_foreground_event(
+    _hook: HANDLE,
+    event_type: u32,
+    hwnd: HWND,
+    object_id: i32,
+    _child_id: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    if event_type != EVENT_SYSTEM_FOREGROUND || object_id != OBJID_WINDOW || hwnd.is_null() {
+        return;
+    }
+    let is_start = is_start_menu_process(hwnd) && is_on_screen(hwnd);
+    if is_start {
+        remember_start_window(hwnd);
+    }
+    on_foreground_changed(is_start);
+}
+
+fn install_hook_handle(min: u32, max: u32, callback: WinEventProc, slot: &AtomicIsize) {
+    if slot.load(Ordering::SeqCst) != 0 {
         return;
     }
     // SAFETY: out-of-context hook with a callback whose body never panics.
     let hook = unsafe {
         SetWinEventHook(
-            EVENT_OBJECT_CLOAKED,
-            EVENT_OBJECT_UNCLOAKED,
+            min,
+            max,
             std::ptr::null_mut(),
-            Some(on_cloak_event),
+            Some(callback),
             0,
             0,
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
         )
     };
     if !hook.is_null() {
-        HOOK.store(hook as isize, Ordering::SeqCst);
-        log::info("Start menu cloak hook installed.");
+        slot.store(hook as isize, Ordering::SeqCst);
     }
 }
 
-pub fn uninstall_hook() {
-    let hook = HOOK.swap(0, Ordering::SeqCst);
+/// Starts following cloak and foreground events. Call on the UI thread once
+/// its message loop runs. Idempotent.
+pub fn install_hook() {
+    let _guard = INSTALL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    install_hook_handle(
+        EVENT_OBJECT_CLOAKED,
+        EVENT_OBJECT_UNCLOAKED,
+        on_cloak_event,
+        &CLOAK_HOOK,
+    );
+    install_hook_handle(
+        EVENT_SYSTEM_FOREGROUND,
+        EVENT_SYSTEM_FOREGROUND,
+        on_foreground_event,
+        &FOREGROUND_HOOK,
+    );
+    log::info("Start menu cloak and foreground hooks installed.");
+}
+
+fn unhook(slot: &AtomicIsize) {
+    let hook = slot.swap(0, Ordering::SeqCst);
     if hook == 0 {
         return;
     }
-    // SAFETY: the hook handle was created by `install_hook` and is removed once.
+    // SAFETY: the handle was created by `install_hook` and is removed once.
     unsafe {
         UnhookWinEvent(hook as HANDLE);
     }
 }
 
-/// True while the dock should treat the Start menu as open.
+/// Removes both hooks. Safe to call even when `install_hook` was never used.
+pub fn uninstall_hook() {
+    let _guard = INSTALL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    unhook(&CLOAK_HOOK);
+    unhook(&FOREGROUND_HOOK);
+}
+
+/// Cached state used by auto-hide and the Start button toggle.
 pub fn is_open() -> bool {
     STATE.lock().is_ok_and(|state| state.is_open)
+}
+
+/// Live query: alias of `is_start_menu_open_now()`.
+pub fn is_open_now() -> bool {
+    is_start_menu_open_now()
 }
 
 pub fn on_foreground_changed(is_start_menu: bool) {
@@ -218,31 +540,33 @@ pub fn on_foreground_changed(is_start_menu: bool) {
     }
 }
 
-/// The window hook skips our own process, so a right-click activating the dock
-/// is the only foreground sign that the Start menu lost focus to us.
+/// The hooks skip our own process, so a right-click activating the dock is the
+/// only foreground sign that the Start menu lost focus to us.
 pub fn on_dock_activated() {
     mark_closed();
 }
 
-pub fn reset() {
+/// Snapshots the Start button press time so a click can attribute a cloak that
+/// happens just before or just after the press to the same gesture.
+pub fn note_press(now: Instant) {
     if let Ok(mut state) = STATE.lock() {
-        state.is_open = false;
-        state.closed_at = None;
-    }
-}
-
-/// Returns the signed millisecond delta used by the press grace window.
-pub fn closed_delta_ms(closed_at: Instant, press: Instant) -> i128 {
-    if closed_at >= press {
-        (closed_at - press).as_millis() as i128
-    } else {
-        -((press - closed_at).as_millis() as i128)
+        state.pressed_at = Some(now);
     }
 }
 
 /// True when a Start button press should close rather than reopen the menu.
-/// Grace is scoped to dismissal within the immediate pointer press gesture.
-pub fn was_open_at_press(open_now: bool, press: Instant) -> bool {
+pub fn was_open_at_press(now: Instant) -> bool {
+    let (is_open, closed_at, pressed_at) = STATE
+        .lock()
+        .map(|state| (state.is_open, state.closed_at, state.pressed_at))
+        .unwrap_or((false, None, None));
+    let press = resolve_press_at(pressed_at, now);
+    was_open_at_press_impl(is_open, is_open_now(), closed_at, press)
+}
+
+/// Back-compatible form of the C# `WasOpenAtPress(openNow, pressTimestamp)`
+/// API, kept for callers that already supply a live open query.
+pub fn was_open_at_press_with(open_now: bool, press: Instant) -> bool {
     let (is_open, closed_at) = STATE
         .lock()
         .map(|state| (state.is_open, state.closed_at))
@@ -250,69 +574,42 @@ pub fn was_open_at_press(open_now: bool, press: Instant) -> bool {
     was_open_at_press_impl(is_open, open_now, closed_at, press)
 }
 
-fn was_open_at_press_impl(
-    is_open: bool,
-    open_now: bool,
-    closed_at: Option<Instant>,
-    press: Instant,
-) -> bool {
-    if is_open || open_now {
-        return true;
+pub fn reset() {
+    if let Ok(mut state) = STATE.lock() {
+        state.is_open = false;
+        state.closed_at = None;
+        state.pressed_at = None;
     }
-    let Some(closed_at) = closed_at else {
-        return false;
-    };
-    let delta = closed_delta_ms(closed_at, press);
-    (-60..=150).contains(&delta)
+}
+
+/// Last known Start window handle (0 when none has been observed).
+pub fn start_window() -> usize {
+    STATE.lock().map(|state| state.start_window).unwrap_or(0)
 }
 
 /// True while the Start menu is actually on screen (visible and not cloaked).
 /// Alt+Tab takes the foreground while the menu stays open beneath the switcher,
-/// so the cached Start window is checked as well.
+/// so the cached Start window and a full enumeration are checked as well.
 pub fn is_start_menu_open_now() -> bool {
     // SAFETY: foreground window query.
     let foreground = unsafe { GetForegroundWindow() };
     if !foreground.is_null() && is_start_menu_process(foreground) && is_on_screen(foreground) {
-        if let Ok(mut state) = STATE.lock() {
-            state.start_window = foreground as usize;
-        }
+        remember_start_window(foreground);
         return true;
     }
-    let cached = STATE.lock().map(|s| s.start_window).unwrap_or(0);
+    let cached = STATE.lock().map(|state| state.start_window).unwrap_or(0);
     if cached != 0 {
         let hwnd = cached as HWND;
-        // SAFETY: cached window is re-validated by process name and visibility.
+        // SAFETY: cached window is re-validated by process and visibility.
         if is_start_menu_process(hwnd) && is_on_screen(hwnd) {
             return true;
         }
     }
-    !find_start_menu_windows().is_empty()
-}
-
-/// Enumerates on-screen Start menu windows owned by StartMenuExperienceHost.
-pub fn find_start_menu_windows() -> Vec<usize> {
-    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> i32 {
-        // SAFETY: `lparam` points at a Vec alive for the synchronous enumeration.
-        unsafe {
-            let output = &mut *(lparam as *mut Vec<usize>);
-            let mut rect: RECT = std::mem::zeroed();
-            if is_start_menu_process(hwnd)
-                && is_on_screen(hwnd)
-                && GetWindowRect(hwnd, &mut rect) != 0
-                && rect.right - rect.left > 100
-                && rect.bottom - rect.top > 100
-            {
-                output.push(hwnd as usize);
-            }
-            1
-        }
+    let windows = find_start_menu_windows();
+    if let Some(&first) = windows.first() {
+        remember_start_window(first as HWND);
     }
-    let mut windows = Vec::new();
-    // SAFETY: synchronous enumeration with an owned, live context.
-    unsafe {
-        EnumWindows(Some(visit), (&mut windows as *mut Vec<usize>) as LPARAM);
-    }
-    windows
+    !windows.is_empty()
 }
 
 #[cfg(test)]
@@ -326,35 +623,126 @@ mod tests {
         assert!(was_open_at_press_impl(true, false, None, press));
         assert!(was_open_at_press_impl(false, true, None, press));
         assert!(!was_open_at_press_impl(false, false, None, press));
-        assert!(was_open_at_press_impl(
-            false,
-            false,
-            Some(press + Duration::from_millis(60)),
-            press
+        assert!(within_grace(press + Duration::from_millis(60), press));
+        assert!(within_grace(press + Duration::from_millis(150), press));
+        assert!(!within_grace(press + Duration::from_millis(151), press));
+        assert!(within_grace(press - Duration::from_millis(60), press));
+        assert!(!within_grace(press - Duration::from_millis(61), press));
+        assert_eq!(
+            closed_delta_ms(press + Duration::from_millis(10), press),
+            10
+        );
+        assert_eq!(
+            closed_delta_ms(press - Duration::from_millis(10), press),
+            -10
+        );
+    }
+
+    #[test]
+    fn press_gesture_uses_note_time_only_while_fresh() {
+        let down = Instant::now();
+        let up = down + Duration::from_millis(120);
+        assert_eq!(resolve_press_at(Some(down), up), down);
+        assert_eq!(resolve_press_at(Some(down), down + PRESS_GESTURE_MAX), down);
+        let stale_now = down + PRESS_GESTURE_MAX + Duration::from_millis(1);
+        assert_eq!(resolve_press_at(Some(down), stale_now), stale_now);
+        assert_eq!(resolve_press_at(None, up), up);
+        // A press recorded after the queried instant cannot belong to it.
+        assert_eq!(resolve_press_at(Some(up), down), down);
+    }
+
+    #[test]
+    fn win10_fallback_requires_core_class_and_localized_title() {
+        for title in [
+            "Start",
+            "START",
+            "Başlat",
+            "baslat",
+            "Inicio",
+            "Démarrer",
+            "开始",
+            "スタート",
+            "Пуск",
+            "시작",
+        ] {
+            assert!(
+                is_win10_start_window("Windows.UI.Core.CoreWindow", title),
+                "expected Start title: {title}"
+            );
+        }
+        assert!(is_win10_start_window(
+            "windows.ui.core.corewindow",
+            "  Başlat  "
         ));
-        assert!(was_open_at_press_impl(
-            false,
-            false,
-            Some(press + Duration::from_millis(150)),
-            press
+        assert!(!is_win10_start_window(
+            "Windows.UI.Core.CoreWindow",
+            "Search"
         ));
-        assert!(!was_open_at_press_impl(
-            false,
-            false,
-            Some(press + Duration::from_millis(151)),
-            press
+        assert!(!is_win10_start_window("Windows.UI.Core.CoreWindow", ""));
+        assert!(!is_win10_start_window("Shell_TrayWnd", "Start"));
+        assert!(!is_win10_start_window(
+            "Windows.UI.Core.CoreWindow",
+            "Restart"
         ));
-        assert!(was_open_at_press_impl(
-            false,
-            false,
-            Some(press - Duration::from_millis(60)),
-            press
-        ));
-        assert!(!was_open_at_press_impl(
-            false,
-            false,
-            Some(press - Duration::from_millis(61)),
-            press
-        ));
+        assert!(class_is_core_window("Windows.UI.Core.CoreWindow"));
+        assert!(title_is_start("Başlat"));
+    }
+
+    #[test]
+    fn start_host_exe_matching_is_path_based() {
+        assert_eq!(
+            host_kind_from_exe(
+                r"C:\Windows\SystemApps\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\StartMenuExperienceHost.exe"
+            ),
+            HostKind::StartExperience
+        );
+        assert_eq!(
+            host_kind_from_exe(
+                r"C:\Windows\SystemApps\ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe"
+            ),
+            HostKind::ShellExperience
+        );
+        assert_eq!(
+            host_kind_from_exe(r"C:\Temp\STARTMENUEXPERIENCEHOST.EXE"),
+            HostKind::StartExperience
+        );
+        assert_eq!(
+            host_kind_from_exe(r"C:\Temp\evilstartmenuexperiencehost.exe"),
+            HostKind::None
+        );
+        assert_eq!(host_kind_from_exe(r"C:\Temp\notepad.exe"), HostKind::None);
+        assert_eq!(exe_file_name(r"C:\a\b\App.exe"), "App.exe");
+    }
+
+    #[test]
+    fn cloak_state_machine_is_authoritative_and_stamps_every_close() {
+        let now = Instant::now();
+
+        // UNCLOAKED accepts a tiny rect and clears any pending grace.
+        let (open, closed_at) = opened_state();
+        assert!(open);
+        assert_eq!(closed_at, None);
+
+        // CLOAKED without another visible window closes and always stamps.
+        let (open, closed_at) = cloak_transition(now, false);
+        assert!(!open);
+        assert_eq!(closed_at, Some(now));
+        assert_eq!(
+            closed_state(now + Duration::from_millis(20)).1,
+            Some(now + Duration::from_millis(20))
+        );
+        assert!(was_open_at_press_impl(false, false, closed_at, now));
+
+        // A repeated cloak on an already closed state must refresh the stamp.
+        let refreshed = now + Duration::from_millis(40);
+        let (open, closed_at) = cloak_transition(refreshed, false);
+        assert!(!open);
+        assert_eq!(closed_at, Some(refreshed));
+
+        // A second visible Start window on the same PID keeps the menu open.
+        let (open, closed_at) = cloak_transition(refreshed + Duration::from_millis(5), true);
+        assert!(open);
+        assert_eq!(closed_at, None);
+        assert!(!was_open_at_press_impl(false, false, closed_at, refreshed));
     }
 }

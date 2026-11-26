@@ -14,10 +14,16 @@ use windows_sys::Win32::System::Registry::{
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW;
 
-const TASK_SWITCHER_CLASSES: [&str; 3] = [
+/// Transient shell surfaces that can take the foreground: Alt+Tab / Task View
+/// plus the Win10/Win11 Start flyout and its light-dismiss helper windows.
+const SHELL_OVERLAY_CLASSES: [&str; 7] = [
     "XamlExplorerHostIslandWindow",
     "MultitaskingViewFrame",
     "TaskSwitcherWnd",
+    "Windows.UI.Core.CoreWindow",
+    "StartMenuSizingFrame",
+    "Shell_LightDismissOverlay",
+    "StartMenuExperienceHost",
 ];
 const MONITORINFOF_PRIMARY: u32 = 1;
 const VIRTUAL_DESKTOPS_KEY: &str =
@@ -34,9 +40,15 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
-/// Recognises transient shell overlays (Alt+Tab / Task View) that take the
-/// foreground without being applications. They span the whole screen, so
-/// auto-hide must look past them to the application beneath.
+fn is_shell_overlay_class(class: &str) -> bool {
+    SHELL_OVERLAY_CLASSES
+        .iter()
+        .any(|known| class.trim().eq_ignore_ascii_case(known))
+}
+
+/// Recognises transient shell overlays (Alt+Tab / Task View / Start) that take
+/// the foreground without being applications. Auto-hide must look past them to
+/// the application beneath.
 pub fn is_shell_overlay(hwnd: usize) -> bool {
     if hwnd == 0 {
         return false;
@@ -47,8 +59,8 @@ pub fn is_shell_overlay(hwnd: usize) -> bool {
     if length <= 0 {
         return false;
     }
-    let class = String::from_utf16_lossy(&buffer[..length as usize]);
-    TASK_SWITCHER_CLASSES.contains(&class.as_str())
+    let class = String::from_utf16_lossy(&buffer[..(length as usize).min(buffer.len())]);
+    is_shell_overlay_class(&class)
 }
 
 /// A display in device-independent pixels with stable 1-based index.
@@ -256,10 +268,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shell_overlay_classes_are_recognized() {
-        assert!(TASK_SWITCHER_CLASSES.contains(&"TaskSwitcherWnd"));
-        assert!(TASK_SWITCHER_CLASSES.contains(&"XamlExplorerHostIslandWindow"));
-        assert!(!TASK_SWITCHER_CLASSES.contains(&"Notepad"));
+    fn shell_overlay_classes_include_switchers_and_start() {
+        for class in [
+            "XamlExplorerHostIslandWindow",
+            "MultitaskingViewFrame",
+            "TaskSwitcherWnd",
+            "windows.ui.core.corewindow",
+            "Windows.UI.Core.CoreWindow",
+            "StartMenuSizingFrame",
+            "shell_lightdismissoverlay",
+            "StartMenuExperienceHost",
+        ] {
+            assert!(is_shell_overlay_class(class), "expected overlay: {class}");
+        }
+        assert!(!is_shell_overlay_class("Notepad"));
+        assert!(!is_shell_overlay_class("Shell_TrayWnd"));
+        assert!(!is_shell_overlay_class(""));
         assert!(!is_shell_overlay(0));
     }
 
