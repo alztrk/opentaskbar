@@ -39,14 +39,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::design::brush::{BrushSpec, GradientSpec, Hsv, MAX_GRADIENT_STOPS};
 use crate::design::fonts;
-use crate::design::theme::{apply_token_overrides, token_overrides_from_json};
+use crate::design::theme::{
+    SurfaceKind, ThemeManager, apply_token_overrides, token_overrides_from_json,
+};
 use crate::dock::dcomp::{SystemStatColumn, WidgetChipSpec};
 use crate::platform::cursor_auth;
 use crate::platform::{country_city, pins, theme_packs, toast, update, win32};
 use crate::ui::components::{
-    ButtonVariant, DropdownOption, UiTheme, badge, button, dim_when, dropdown, icon_glyph,
-    ios_switch, live_slider, section_card, setting_row, setting_row_desc, setting_row_with_id,
-    setting_row_with_id_desc, sidebar_nav_item, stepper,
+    ButtonVariant, DropdownOption, UiTheme, badge, button, dim_when, dropdown, dropdown_labeled,
+    icon_glyph, ios_switch, live_slider, section_card, setting_row, setting_row_desc,
+    setting_row_with_id, setting_row_with_id_desc, sidebar_nav_item, stepper,
 };
 use crate::ui::menu::{self, BorderStyle, MenuEntry, MenuIcon};
 use crate::ui::prompt;
@@ -59,10 +61,10 @@ use crate::widgets;
 pub const SETTINGS_ARG: &str = "--settings";
 pub const RELOAD_MSG_NAME: &str = "OpenTaskBarReloadSettings";
 
+/// The settings window is a fixed-size dialog: both bounds and minimum size use these values,
+/// and `WindowOptions::is_resizable` is false, so no resize handle is rendered.
 const WIN_W: f32 = 1040.0;
 const WIN_H: f32 = 740.0;
-const MIN_WIDTH: f32 = 540.0;
-const MIN_HEIGHT: f32 = 428.0;
 const SIDEBAR_BREAKPOINT: f32 = 680.0;
 const SIDEBAR_WIDTH: f32 = 196.0;
 const WIDGET_COLUMNS_BREAKPOINT: f32 = 520.0;
@@ -253,6 +255,12 @@ fn high_contrast_enabled() -> bool {
     }
 }
 
+/// Applies the acrylic/system backdrop as soon as the settings window opens.
+///
+/// NOTE(WS-D): WS-B owns `design::glass::apply_window_backdrop(hwnd, is_dark)` as the single
+/// source of truth for DWM `DWMWA_SYSTEMBACKDROP_TYPE` + acrylic fallback. That module is not
+/// present in this worktree yet; once `fix-glass` merges, replace the inline DWM block below
+/// with a direct `crate::design::glass::apply_window_backdrop(hwnd as usize, is_dark)` call.
 fn apply_settings_backdrop(window: &Window, is_dark: bool) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
@@ -704,6 +712,79 @@ fn set_extra_number(settings: &mut DockSettings, key: &str, value: i32) {
     settings.extra.insert(key.to_owned(), json!(value));
 }
 
+/// Maps a cell of the 2D saturation/value field to HSV (x = saturation, y = 1 - value).
+fn field_cell_hsv(hue: f64, col: usize, row: usize, cols: usize, rows: usize) -> Hsv {
+    Hsv::new(
+        hue,
+        if cols == 0 {
+            0.0
+        } else {
+            (col as f64 + 0.5) / cols as f64
+        },
+        if rows == 0 {
+            1.0
+        } else {
+            1.0 - (row as f64 + 0.5) / rows as f64
+        },
+    )
+}
+
+/// Reorders a gradient stop and returns its new index (bounded by the stop count).
+fn reorder_gradient_stop(
+    stops: &mut Vec<crate::design::tokens::Rgba>,
+    from: usize,
+    to: usize,
+) -> usize {
+    let len = stops.len();
+    if len == 0 {
+        return 0;
+    }
+    let target = to.min(len - 1);
+    if from < len && from != target {
+        let color = stops.remove(from);
+        stops.insert(target, color);
+    }
+    target
+}
+
+/// Nearest stop index for a normalized position on the gradient strip.
+fn gradient_stop_at(position: f64, len: usize) -> usize {
+    ((position * len as f64).round() as usize).min(len.saturating_sub(1))
+}
+
+/// Translates a persisted dimension option while keeping its stored value untouched.
+fn option_label(value: &str) -> String {
+    match value {
+        "Auto" => loc::t("UnitAuto"),
+        "Pixels" => loc::t("UnitPixels"),
+        "Fixed" => loc::t("UnitFixed"),
+        "Percent" => loc::t("UnitPercent"),
+        other => loc::t(other),
+    }
+}
+
+/// Search results come from a catalogue whose labels are stable keys/literals; translate them
+/// only at display time so the search index and its tests keep using the stable values.
+fn display_catalog_text(value: &str) -> String {
+    match value {
+        "Dock Utilities" => loc::t("SearchSectionDockUtilities"),
+        "Theme & Surfaces" => loc::t("SearchSectionThemeSurfaces"),
+        "Settings Backup" => loc::t("SettingsBackup"),
+        other => loc::t(other),
+    }
+}
+
+/// Fractional per-surface opacity stored in `DockSettings::extra` (theme.rs reads these keys).
+fn extra_f64(settings: &DockSettings, key: &str, fallback: f64) -> f64 {
+    settings
+        .extra
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .unwrap_or(fallback)
+        .clamp(0.2, 1.0)
+}
+
 /// Country/city data now comes from `platform::country_city` (offline fallback
 /// catalogue plus the countriesnow.space API). No static UI-side copy remains.
 fn city_list(country: &str) -> Vec<String> {
@@ -819,61 +900,14 @@ fn weather_country_for(city_label: &str) -> String {
 /// Shared handler shape used by the theme-editor sliders.
 type UiHandler = std::rc::Rc<dyn Fn(&mut Window, &mut App)>;
 
-type ThemeSwatch = (
-    &'static str,
-    &'static str,
-    crate::design::Rgb,
-    crate::design::Rgb,
-    crate::design::Rgb,
-);
-
-const THEME_GALLERY: &[ThemeSwatch] = &[
-    (
-        "catppuccin",
-        "Catppuccin Mocha",
-        (0x1e, 0x1e, 0x2e),
-        (0xcb, 0xa6, 0xf7),
-        (0x94, 0xe2, 0xd5),
-    ),
-    (
-        "gruvbox",
-        "Gruvbox",
-        (0x28, 0x28, 0x28),
-        (0xfa, 0xbd, 0x2f),
-        (0xb8, 0xbb, 0x26),
-    ),
-    (
-        "nord",
-        "Nord",
-        (0x2e, 0x34, 0x40),
-        (0x88, 0xc0, 0xd0),
-        (0xa3, 0xbe, 0x8c),
-    ),
-    (
-        "prism",
-        "Prism",
-        (0x13, 0x13, 0x1c),
-        (0xd9, 0x77, 0xf7),
-        (0x38, 0xbd, 0xf8),
-    ),
-    (
-        "solarized",
-        "Solarized Dark",
-        (0x00, 0x2b, 0x36),
-        (0x2a, 0xa1, 0x98),
-        (0xb5, 0x89, 0x00),
-    ),
-    (
-        "tokyo-night",
-        "Tokyo Night",
-        (0x1a, 0x1b, 0x26),
-        (0xbb, 0x9a, 0xf7),
-        (0x7a, 0xe6, 0xd3),
-    ),
-];
-
 const THEME_TOKEN_CATEGORIES: &[&str] = &[
-    "Surfaces", "Text", "Accents", "Borders", "Widgets", "Effects", "Advanced",
+    "SectionSurfaces",
+    "ThemeCategoryText",
+    "ThemeCategoryAccents",
+    "ThemeCategoryBorders",
+    "Widgets",
+    "ThemeCategoryEffects",
+    "ThemeSectionAdvanced",
 ];
 
 fn notify_docks_reload() {
@@ -944,6 +978,7 @@ struct SettingsView {
     brush_alpha: u8,
     brush_angle: f64,
     brush_stops: Vec<crate::design::tokens::Rgba>,
+    brush_selected_stop: usize,
     brush_hex: String,
     ai_status: String,
 }
@@ -966,6 +1001,8 @@ impl SettingsView {
             AppTheme::Light => false,
             AppTheme::System => win32::read_system_is_dark(),
         };
+        // Window-open backdrop hook: WS-B will expose this as
+        // `design::glass::apply_window_backdrop(hwnd, is_dark)` (see function note).
         apply_settings_backdrop(window, is_dark);
         let weather_city = if settings.weather_city.is_empty() {
             "Istanbul".to_owned()
@@ -1023,19 +1060,20 @@ impl SettingsView {
             theme_category: 0,
             token_name: String::new(),
             token_value: String::new(),
-            token_apply_status: "Tokens apply to the live palette on save.".to_owned(),
+            token_apply_status: loc::t("TokenApplyHint"),
             brush_mode: BrushMode::Solid,
             brush_hsv: Hsv::from(brush_color),
             brush_alpha: brush_color.a,
             brush_angle: 90.0,
             brush_stops: GradientSpec::from_endpoints(brush_color.darken(0.35), brush_color, 90.0)
                 .stops,
+            brush_selected_stop: 0,
             brush_hex: brush_color.hex(),
-            ai_status: if cursor_auth::has_session() {
-                "Signed in".to_owned()
+            ai_status: loc::t(if cursor_auth::has_session() {
+                "AiCursorSignedIn"
             } else {
-                "Not signed in".to_owned()
-            },
+                "AiCursorNotSignedIn"
+            }),
         }
     }
 
@@ -1163,6 +1201,31 @@ impl SettingsView {
         let entity = cx.entity().downgrade();
         let toggle_id = id.clone();
         dropdown(id, t, is_open, options, move |_win, app| {
+            let _ = entity.update(app, |this, cx| {
+                if this.open_dropdown.as_deref() == Some(toggle_id.as_str()) {
+                    this.open_dropdown = None;
+                } else {
+                    this.open_dropdown = Some(toggle_id.clone());
+                }
+                cx.notify();
+            });
+        })
+    }
+
+    /// Compact `...` action menu: one trigger instead of a row of separate buttons.
+    fn make_action_menu(
+        &self,
+        id: impl Into<String>,
+        t: &UiTheme,
+        label: SharedString,
+        options: Vec<DropdownOption>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let id = id.into();
+        let is_open = self.open_dropdown.as_deref() == Some(id.as_str());
+        let entity = cx.entity().downgrade();
+        let toggle_id = id.clone();
+        dropdown_labeled(id, t, is_open, Some(label), options, move |_win, app| {
             let _ = entity.update(app, |this, cx| {
                 if this.open_dropdown.as_deref() == Some(toggle_id.as_str()) {
                     this.open_dropdown = None;
@@ -1457,15 +1520,15 @@ impl SettingsView {
                     .w_full()
                     .text_size(px(11.0))
                     .text_color(rgba(t.text_secondary))
-                    .child(format!("{count} matches"))
+                    .child(loc::t_fmt("SearchMatchesCount", &[&count.to_string()]))
                     .into_any_element(),
             );
             let hover_bg = t.surface_hover;
             for (i, hit) in self.search_hits.iter().take(40).enumerate() {
                 let page = hit.page;
                 let widget_id = hit.widget_id;
-                let label = hit.label.clone();
-                let section = hit.section.to_owned();
+                let label = display_catalog_text(&hit.label);
+                let section = display_catalog_text(hit.section);
                 let field_name = hit.field.to_owned();
                 let row = div()
                     .id(SharedString::from(format!("search-hit-{i}")))
@@ -1520,31 +1583,31 @@ impl SettingsView {
         }
         use crate::ui::flyout::{FlyoutBlock, FlyoutSpec, show_flyout};
         let spec = FlyoutSpec {
-            title: format!("{id} preview"),
-            subtitle: Some("Live C2 flyout blocks".to_owned()),
+            title: loc::t_fmt("FlyoutDemoTitle", &[&id.to_owned()]),
+            subtitle: Some(loc::t("FlyoutDemoSubtitle")),
             width_dips: 320.0,
             blocks: vec![
                 FlyoutBlock::Hero {
-                    value: "Preview".to_owned(),
-                    caption: Some("C2 contract sample".to_owned()),
+                    value: loc::t("UiFontPreview"),
+                    caption: Some(loc::t("FlyoutDemoCaption")),
                     centered: false,
                     large: true,
                     right_meta: None,
                 },
                 FlyoutBlock::SeekSlider {
                     id: 1,
-                    label: "Position".to_owned(),
+                    label: loc::t("Position"),
                     position_secs: 42,
                     duration_secs: 180,
                     ratio: 42.0 / 180.0,
                 },
                 FlyoutBlock::Chart {
-                    label: "Trend".to_owned(),
-                    series: vec![("Live".to_owned(), vec![0.2, 0.5, 0.35, 0.8, 0.6])],
+                    label: loc::t("FlyoutDemoTrend"),
+                    series: vec![(loc::t("FlyoutDemoLive"), vec![0.2, 0.5, 0.35, 0.8, 0.6])],
                     accent: (0x2d, 0xd4, 0xbf),
                 },
                 FlyoutBlock::IconBar {
-                    buttons: vec![(2, "Reset".to_owned(), 0xE72C, false)],
+                    buttons: vec![(2, loc::t("Reset"), 0xE72C, false)],
                 },
             ],
         };
@@ -1645,9 +1708,9 @@ impl SettingsView {
         let modes = ["Auto", "Fixed", "Percent"];
         let mut rows: Vec<AnyElement> = Vec::new();
         for (key, label, options) in [
-            ("DockTopGapUnit", "Top Gap Unit", &units[..]),
-            ("DockWidthMode", "Width Mode", &modes[..]),
-            ("DockHeightMode", "Height Mode", &modes[..]),
+            ("DockTopGapUnit", "TopGapUnitLabel", &units[..]),
+            ("DockWidthMode", "WidthModeLabel", &modes[..]),
+            ("DockHeightMode", "HeightModeLabel", &modes[..]),
         ] {
             let current = extra_string(&self.settings, key, options[0]);
             let dd_opts = options
@@ -1657,7 +1720,7 @@ impl SettingsView {
                     let option: &'static str = option;
                     let entity = cx.entity().downgrade();
                     DropdownOption {
-                        label: SharedString::from(option),
+                        label: SharedString::from(option_label(option)),
                         flag_path: None,
                         glyph: None,
                         selected: current == option,
@@ -1672,26 +1735,26 @@ impl SettingsView {
                 })
                 .collect();
             let dd = self.make_dropdown(format!("dim-{key}"), t, dd_opts, cx);
-            rows.push(setting_row(t, Some("\u{E740}"), label, dd).into_any_element());
+            rows.push(setting_row(t, Some("\u{E740}"), loc::t(label), dd).into_any_element());
         }
         let weak = cx.entity().downgrade();
         for (key, label, max, unit) in [
-            ("DockTopGapPixels", "Top Gap (px)", 64, "px"),
-            ("DockTopGapPercent", "Top Gap (%)", 100, "%"),
-            ("DockWidthPixels", "Dock Width (px)", 600, "px"),
-            ("DockWidthPercent", "Dock Width (%)", 100, "%"),
-            ("DockHeightPixels", "Dock Height (px)", 400, "px"),
-            ("DockHeightPercent", "Dock Height (%)", 100, "%"),
+            ("DockTopGapPixels", "TopGapPixelsLabel", 64, "px"),
+            ("DockTopGapPercent", "TopGapPercentLabel", 100, "%"),
+            ("DockWidthPixels", "DockWidthPixelsLabel", 600, "px"),
+            ("DockWidthPercent", "DockWidthPercentLabel", 100, "%"),
+            ("DockHeightPixels", "DockHeightPixelsLabel", 400, "px"),
+            ("DockHeightPercent", "DockHeightPercentLabel", 100, "%"),
         ] {
             let value = extra_number(&self.settings, key, 0);
-            let text = format!("{value} {unit}");
+            let text = loc::t_fmt("DimensionWithUnit", &[&value.to_string(), unit]);
             let skey: &'static str = key;
             let weak_for_slider = weak.clone();
             rows.push(
                 setting_row(
                     t,
                     Some("\u{E8A3}"),
-                    label,
+                    loc::t(label),
                     live_slider(skey, t, value as f32 / max as f32, 16, text, move |i| {
                         let entity = weak_for_slider.clone();
                         let key = skey;
@@ -1834,11 +1897,11 @@ impl SettingsView {
             setting_row(
                 t,
                 Some("\u{E896}"),
-                "Refresh City List",
+                loc::t("WeatherRefreshCities"),
                 button(
                     "btn-weather-fetch-cities",
                     t,
-                    "Fetch from API",
+                    loc::t("WeatherFetchFromApi"),
                     ButtonVariant::Secondary,
                     cx.listener(|this, _, _, cx| this.refresh_weather_cities(cx)),
                 ),
@@ -1879,8 +1942,8 @@ impl SettingsView {
     fn render_hotkeys(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut rows = Vec::new();
         for (key, label) in [
-            ("LauncherHotkey", "Launcher Hotkey"),
-            ("DockHotkey", "Dock Hotkey"),
+            ("LauncherHotkey", "LauncherHotkey"),
+            ("DockHotkey", "DockHotkey"),
         ] {
             let value = extra_string(&self.settings, key, "Ctrl+Shift+Space");
             let capturing = self.hotkey_capture == Some(key);
@@ -1888,12 +1951,12 @@ impl SettingsView {
                 setting_row(
                     t,
                     Some("\u{E765}"),
-                    label,
+                    loc::t(label),
                     button(
                         SharedString::from(format!("btn-capture-{key}")),
                         t,
                         if capturing {
-                            "Press keys…".to_owned()
+                            loc::t("HotkeyPressKeys")
                         } else {
                             value
                         },
@@ -1917,7 +1980,7 @@ impl SettingsView {
             setting_row(
                 t,
                 Some("\u{E99A}"),
-                "Cursor Account",
+                loc::t("AiUsageCursorAccountLabel"),
                 div()
                     .flex()
                     .items_center()
@@ -1926,19 +1989,23 @@ impl SettingsView {
                     .child(button(
                         "btn-cursor-auth",
                         t,
-                        if signed_in { "Sign Out" } else { "Sign In" },
+                        if signed_in {
+                            loc::t("AiUsageCursorSignOut")
+                        } else {
+                            loc::t("AiUsageCursorSignIn")
+                        },
                         ButtonVariant::Secondary,
                         cx.listener(|this, _, _, cx| {
                             if cursor_auth::has_session() {
                                 let _ = cursor_auth::sign_out();
                                 this.settings.extra.remove("CursorAuthToken");
-                                this.ai_status = "Not signed in".to_owned();
+                                this.ai_status = loc::t("AiCursorNotSignedIn");
                                 this.save_settings(cx);
                                 return;
                             }
                             let start = cursor_auth::sign_in_start();
                             pins::launch(start.login_url);
-                            this.ai_status = "Waiting for browser sign-in…".to_owned();
+                            this.ai_status = loc::t("AiUsageCursorWaiting");
                             cx.notify();
                             // `sign_in_start` stores the pending PKCE challenge;
                             // `sign_in_finish` polls it on the background executor.
@@ -1950,10 +2017,10 @@ impl SettingsView {
                                 let _ = this.update(cx, |view, cx| {
                                     if ok && cursor_auth::has_session() {
                                         view.settings.extra.remove("CursorAuthToken");
-                                        view.ai_status = "Signed in".to_owned();
+                                        view.ai_status = loc::t("AiCursorSignedIn");
                                         view.save_settings(cx);
                                     } else {
-                                        view.ai_status = "Sign-in not completed".to_owned();
+                                        view.ai_status = loc::t("AiUsageCursorSignInTimedOut");
                                         cx.notify();
                                     }
                                 });
@@ -1964,13 +2031,13 @@ impl SettingsView {
                     .child(button(
                         "btn-cursor-status-refresh",
                         t,
-                        "Refresh",
+                        loc::t("AiUsageRefresh"),
                         ButtonVariant::Secondary,
                         cx.listener(|this, _, _, cx| {
                             this.ai_status = if cursor_auth::has_session() {
-                                "Signed in".to_owned()
+                                loc::t("AiCursorSignedIn")
                             } else {
-                                "Not signed in".to_owned()
+                                loc::t("AiCursorNotSignedIn")
                             };
                             cx.notify();
                         }),
@@ -1988,17 +2055,19 @@ impl SettingsView {
                 setting_row(
                     t,
                     Some("\u{E99A}"),
-                    format!("{} CLI", meta.short),
+                    loc::t_fmt("AiCliProvider", &[&meta.short.to_owned()]),
                     button(
                         SharedString::from(format!("btn-ai-cli-{provider_id}")),
                         t,
-                        "Sign in",
+                        loc::t("AiUsageCursorSignIn"),
                         ButtonVariant::Secondary,
                         cx.listener(move |this, _, _, cx| {
                             if launch_ai_cli_sign_in(provider_id) {
-                                this.ai_status = format!("{} sign-in launched", provider_id);
+                                this.ai_status =
+                                    loc::t_fmt("AiCliSignInLaunched", &[&provider_id.to_owned()]);
                             } else {
-                                this.ai_status = format!("{} CLI not found on PATH", provider_id);
+                                this.ai_status =
+                                    loc::t_fmt("AiCliNotFound", &[&provider_id.to_owned()]);
                             }
                             cx.notify();
                         }),
@@ -2012,7 +2081,7 @@ impl SettingsView {
 
     fn render_backup_ui(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let status = if self.backup_status.is_empty() {
-            "No backup operation yet.".to_owned()
+            loc::t("BackupNoOperation")
         } else {
             self.backup_status.clone()
         };
@@ -2020,7 +2089,7 @@ impl SettingsView {
             setting_row(
                 t,
                 Some("\u{EDE1}"),
-                "Full Backup (.otbackup)",
+                loc::t("FullBackupArchive"),
                 div()
                     .flex()
                     .items_center()
@@ -2028,24 +2097,27 @@ impl SettingsView {
                     .child(button(
                         "btn-backup-export",
                         t,
-                        "Export",
+                        loc::t("ThemePackExport"),
                         ButtonVariant::Secondary,
                         cx.listener(|this, _, _, cx| {
                             this.sync_dock_pins();
                             let data = build_backup(&this.settings);
                             if let Some(path) = prompt::save_file(
-                                "Export full backup",
+                                &loc::t("FullBackupExport"),
                                 "opentaskbar-backup.otbackup",
-                                "OpenTaskbar backup",
+                                &loc::t("BackupArchiveName"),
                                 "*.otbackup",
                             ) {
                                 match std::fs::write(&path, data) {
                                     Ok(()) => {
-                                        this.backup_status =
-                                            format!("Exported {}", path.to_string_lossy());
+                                        this.backup_status = loc::t_fmt(
+                                            "BackupExported",
+                                            &[&path.to_string_lossy().to_string()],
+                                        );
                                     }
                                     Err(err) => {
-                                        this.backup_status = format!("Export failed: {err}");
+                                        this.backup_status =
+                                            loc::t_fmt("BackupExportFailed", &[&err.to_string()]);
                                     }
                                 }
                             }
@@ -2055,19 +2127,22 @@ impl SettingsView {
                     .child(button(
                         "btn-backup-inspect",
                         t,
-                        "Inspect",
+                        loc::t("FullBackupInspect"),
                         ButtonVariant::Secondary,
                         cx.listener(|this, _, _, cx| {
                             if let Some(path) = prompt::open_file(
-                                "Inspect full backup",
-                                "OpenTaskbar backup",
+                                &loc::t("FullBackupInspect"),
+                                &loc::t("BackupArchiveName"),
                                 "*.otbackup",
                             ) {
                                 match std::fs::read(&path) {
                                     Ok(data) => {
                                         let preview = inspect_backup(&data);
                                         this.backup_status = if preview.valid {
-                                            format!("{}: valid backup", path.to_string_lossy())
+                                            loc::t_fmt(
+                                                "BackupValid",
+                                                &[&path.to_string_lossy().to_string()],
+                                            )
                                         } else {
                                             format!(
                                                 "{}: {}",
@@ -2078,7 +2153,8 @@ impl SettingsView {
                                         this.backup_preview = Some(preview);
                                     }
                                     Err(err) => {
-                                        this.backup_status = format!("Read failed: {err}");
+                                        this.backup_status =
+                                            loc::t_fmt("BackupReadFailed", &[&err.to_string()]);
                                     }
                                 }
                             }
@@ -2088,12 +2164,12 @@ impl SettingsView {
                     .child(button(
                         "btn-backup-import",
                         t,
-                        "Import",
+                        loc::t("ThemePackImport"),
                         ButtonVariant::Secondary,
                         cx.listener(|this, _, _, cx| {
                             if let Some(path) = prompt::open_file(
-                                "Import full backup",
-                                "OpenTaskbar backup",
+                                &loc::t("FullBackupImport"),
+                                &loc::t("BackupArchiveName"),
                                 "*.otbackup",
                             ) {
                                 match std::fs::read(&path)
@@ -2102,13 +2178,16 @@ impl SettingsView {
                                 {
                                     Ok(settings) => {
                                         this.settings = settings;
-                                        this.backup_status =
-                                            format!("Imported {}", path.to_string_lossy());
+                                        this.backup_status = loc::t_fmt(
+                                            "BackupImported",
+                                            &[&path.to_string_lossy().to_string()],
+                                        );
                                         this.save_settings(cx);
                                         notify_docks_reload();
                                     }
                                     Err(err) => {
-                                        this.backup_status = format!("Import failed: {err}");
+                                        this.backup_status =
+                                            loc::t_fmt("BackupImportFailed", &[&err.to_string()]);
                                     }
                                 }
                             }
@@ -2136,15 +2215,17 @@ impl SettingsView {
                     .pb(px(8.0))
                     .text_size(px(11.0))
                     .text_color(rgba(t.text_primary))
-                    .child(format!(
-                        "Pins: {} · Theme files: {} · Weather: {}",
-                        preview.pinned_apps,
-                        preview.theme_files,
-                        preview
-                            .settings
-                            .as_ref()
-                            .map(|s| s.weather_city.as_str())
-                            .unwrap_or("—")
+                    .child(loc::t_fmt(
+                        "BackupSummary",
+                        &[
+                            &preview.pinned_apps.to_string(),
+                            &preview.theme_files.to_string(),
+                            preview
+                                .settings
+                                .as_ref()
+                                .map(|s| s.weather_city.as_str())
+                                .unwrap_or("—"),
+                        ],
                     ))
                     .into_any_element(),
             );
@@ -2152,143 +2233,18 @@ impl SettingsView {
         rows
     }
 
-    fn render_folder_stacks(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut rows: Vec<AnyElement> = vec![
-            setting_row(
-                t,
-                Some("\u{E8B7}"),
-                "Add Folder Stack",
-                button(
-                    "btn-add-stack",
-                    t,
-                    "Choose folder…",
-                    ButtonVariant::Secondary,
-                    cx.listener(|this, _, _, cx| {
-                        if let Some(path) = prompt::open_folder("Choose a folder stack") {
-                            let path = path.to_string_lossy().into_owned();
-                            if !this.settings.stack_folders.contains(&path) {
-                                this.settings.stack_folders.push(path);
-                                this.auto_save(cx);
-                            }
-                        }
-                        cx.notify();
-                    }),
-                ),
-            )
-            .into_any_element(),
-        ];
-        for (i, folder) in self.settings.stack_folders.iter().enumerate() {
-            let label = std::path::Path::new(folder)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            rows.push(
-                setting_row(
-                    t,
-                    Some("\u{E8B7}"),
-                    label,
-                    button(
-                        SharedString::from(format!("btn-remove-stack-{i}")),
-                        t,
-                        "Remove",
-                        ButtonVariant::Destructive,
-                        cx.listener(move |this, _, _, cx| {
-                            if i < this.settings.stack_folders.len() {
-                                this.settings.stack_folders.remove(i);
-                                this.auto_save(cx);
-                            }
-                        }),
-                    ),
-                )
-                .into_any_element(),
-            );
-        }
-        rows
-    }
-
-    fn render_theme_gallery(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let active = extra_string(&self.settings, "ThemePack", "catppuccin");
-        let mut cards = div().w_full().flex().flex_wrap().gap(px(10.0));
-        for (id, name, bg, primary, secondary) in THEME_GALLERY {
-            let c = |color: (u8, u8, u8)| crate::design::gpui_rgba(color, 0xff);
-            let selected = active == *id;
-            let border = if selected { t.accent } else { t.border };
-            let sid: &'static str = id;
-            let card = div()
-                .id(SharedString::from(format!("theme-{id}")))
-                .w(px(132.0))
-                .p(px(10.0))
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .rounded(px(10.0))
-                .bg(rgba(t.surface))
-                .border_1()
-                .border_color(rgba(border))
-                .cursor_pointer()
-                .hover(move |s| s.bg(rgba(t.surface_hover)))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    set_extra_string(&mut this.settings, "ThemePack", sid);
-                    this.auto_save(cx);
-                }))
-                .child(
-                    div()
-                        .h(px(44.0))
-                        .w_full()
-                        .rounded(px(7.0))
-                        .bg(rgba(c(*bg)))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .w(px(14.0))
-                                .h(px(14.0))
-                                .rounded(px(4.0))
-                                .bg(rgba(c(*primary))),
-                        )
-                        .child(
-                            div()
-                                .w(px(14.0))
-                                .h(px(14.0))
-                                .rounded(px(4.0))
-                                .bg(rgba(c(*secondary))),
-                        ),
-                )
-                .child(
-                    div()
-                        .w_full()
-                        .text_size(px(11.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(rgba(t.text_primary))
-                        .child(*name),
-                );
-            cards = cards.child(card);
-        }
-        vec![
-            section_card(
-                t,
-                "Theme Gallery (bundled swatches)",
-                vec![cards.into_any_element()],
-            )
-            .into_any_element(),
-        ]
-    }
-
     fn render_theme_editor(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let category = THEME_TOKEN_CATEGORIES
             .get(self.theme_category)
             .copied()
-            .unwrap_or("Advanced");
+            .unwrap_or("ThemeSectionAdvanced");
         let cat_opts: Vec<DropdownOption> = THEME_TOKEN_CATEGORIES
             .iter()
             .enumerate()
             .map(|(i, name)| {
                 let entity = cx.entity().downgrade();
                 DropdownOption {
-                    label: SharedString::from(*name),
+                    label: SharedString::from(loc::t(name)),
                     flag_path: None,
                     glyph: None,
                     selected: self.theme_category == i,
@@ -2311,11 +2267,11 @@ impl SettingsView {
             .cloned()
             .unwrap_or_default();
         let mut rows = vec![
-            setting_row(t, Some("\u{E790}"), "Token Category", seg).into_any_element(),
+            setting_row(t, Some("\u{E790}"), loc::t("ThemeTokenCategory"), seg).into_any_element(),
             setting_row(
                 t,
                 Some("\u{E790}"),
-                "Token Name",
+                loc::t("ThemeTokenName"),
                 div()
                     .id("token-name-input")
                     .tab_index(0)
@@ -2344,7 +2300,7 @@ impl SettingsView {
                         div()
                             .text_size(px(12.0))
                             .child(if self.token_name.is_empty() {
-                                "e.g. SurfaceStroke".to_owned()
+                                loc::t("ThemeTokenNamePlaceholder")
                             } else {
                                 self.token_name.clone()
                             }),
@@ -2354,7 +2310,7 @@ impl SettingsView {
             setting_row(
                 t,
                 Some("\u{E790}"),
-                "Token Value (#RRGGBB)",
+                loc::t("ThemeTokenValueHex"),
                 div()
                     .id("token-value-input")
                     .tab_index(0)
@@ -2393,11 +2349,11 @@ impl SettingsView {
             setting_row(
                 t,
                 Some("\u{E74E}"),
-                "Save Token",
+                loc::t("ThemeTokenSave"),
                 button(
                     "btn-save-token",
                     t,
-                    "Save",
+                    loc::t("ThemeTokenSaveAction"),
                     ButtonVariant::Secondary,
                     cx.listener(|this, _, _, cx| {
                         let name = this.token_name.trim().to_owned();
@@ -2418,7 +2374,7 @@ impl SettingsView {
                             map.insert(name.clone(), json!(format!("#{value}")));
                             persist_theme_tokens(&mut this.settings, map);
                             this.token_apply_status =
-                                format!("Applied #{value} to the live palette.");
+                                loc::t_fmt("ThemeTokenApplied", &[&format!("#{value}")]);
                             this.token_name.clear();
                             this.token_value.clear();
                             this.auto_save(cx);
@@ -2432,7 +2388,7 @@ impl SettingsView {
             setting_row(
                 t,
                 Some("\u{E81D}"),
-                "Token Apply Status",
+                loc::t("ThemeTokenStatus"),
                 div()
                     .text_size(px(11.0))
                     .text_color(rgba(t.text_secondary))
@@ -2456,7 +2412,7 @@ impl SettingsView {
                 setting_row(
                     t,
                     Some("\u{E790}"),
-                    format!("{category} · {name}"),
+                    format!("{} · {}", loc::t(category), name),
                     div()
                         .text_size(px(12.0))
                         .text_color(rgba(t.text_secondary))
@@ -2466,9 +2422,9 @@ impl SettingsView {
             );
         }
 
-        // C# `ThemeBrushPicker`: HSV field (S/V sliders + hue), alpha, 16 gradient
-        // stops, angle and hex. Everything is previewed and saved into the same
-        // `ThemeTokens` map, then applied to the real palette.
+        // C# `ThemeBrushPicker`: a real visual HSV field (2D saturation/value + separate hue
+        // and alpha sliders), a hex box and a draggable 16-stop gradient strip. Every edit is
+        // stored in `design::brush` types and saved into the same `ThemeTokens` map.
         let brush = build_brush(
             self.brush_mode,
             self.brush_hsv,
@@ -2480,31 +2436,78 @@ impl SettingsView {
             BrushSpec::Solid(color) => *color,
             BrushSpec::Gradient(gradient) => gradient.stops.first().copied().unwrap_or_default(),
         };
+        let active_color = self.brush_active_color();
+        let active_hsv = Hsv::from(active_color);
+        let stop_label = (self.brush_selected_stop + 1).to_string();
+
+        // 2D saturation/value field. A grid of hit cells gives pixel-accurate clicks/drags
+        // without depending on element bounds from the render callback.
+        const FIELD_COLS: usize = 20;
+        const FIELD_ROWS: usize = 10;
+        const FIELD_W: f32 = 220.0;
+        const FIELD_H: f32 = 110.0;
+        let field_hue = active_hsv.h;
+        let mut field = div()
+            .id("brush-sv-field")
+            .relative()
+            .w(px(FIELD_W))
+            .h(px(FIELD_H))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(rgba(t.border))
+            .overflow_hidden();
+        for row in 0..FIELD_ROWS {
+            let mut line = div().w_full().h(px(FIELD_H / FIELD_ROWS as f32)).flex();
+            for col in 0..FIELD_COLS {
+                let cell = field_cell_hsv(field_hue, col, row, FIELD_COLS, FIELD_ROWS);
+                let cell_color = cell.to_rgba(self.brush_alpha).to_gpui();
+                line = line.child(
+                    div()
+                        .id(SharedString::from(format!("brush-sv-{row}-{col}")))
+                        .flex_1()
+                        .h_full()
+                        .cursor_pointer()
+                        .bg(rgba(cell_color))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.set_brush_hsv(cell, cx);
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(
+                            move |this, ev: &gpui::MouseMoveEvent, _, cx| {
+                                if ev.dragging() {
+                                    this.set_brush_hsv(cell, cx);
+                                }
+                            },
+                        )),
+                );
+            }
+            field = field.child(line);
+        }
+        let marker_x =
+            (active_hsv.s * f64::from(FIELD_W) - 6.0).clamp(0.0, f64::from(FIELD_W) - 12.0) as f32;
+        let marker_y = ((1.0 - active_hsv.v) * f64::from(FIELD_H) - 6.0)
+            .clamp(0.0, f64::from(FIELD_H) - 12.0) as f32;
+        field = field.child(
+            div()
+                .absolute()
+                .left(px(marker_x))
+                .top(px(marker_y))
+                .w(px(12.0))
+                .h(px(12.0))
+                .rounded(px(6.0))
+                .border_2()
+                .border_color(rgba(t.text_primary))
+                .bg(rgba(0x00FF_FFFF)),
+        );
+
         let hue_handler = |i: usize| -> UiHandler {
             let entity = cx.entity().downgrade();
             std::rc::Rc::new(move |_win, app| {
                 let _ = entity.update(app, |this, cx| {
-                    this.brush_hsv.h = (i as f64 * 360.0 / 35.0).min(360.0);
-                    this.brush_hex = this.brush_hsv.to_rgba(this.brush_alpha).hex();
-                    cx.notify();
-                });
-            })
-        };
-        let sat_handler = |i: usize| -> UiHandler {
-            let entity = cx.entity().downgrade();
-            std::rc::Rc::new(move |_win, app| {
-                let _ = entity.update(app, |this, cx| {
-                    this.brush_hsv.s = i as f64 / 20.0;
-                    cx.notify();
-                });
-            })
-        };
-        let val_handler = |i: usize| -> UiHandler {
-            let entity = cx.entity().downgrade();
-            std::rc::Rc::new(move |_win, app| {
-                let _ = entity.update(app, |this, cx| {
-                    this.brush_hsv.v = i as f64 / 20.0;
-                    cx.notify();
+                    let hsv = this.brush_active_hsv();
+                    this.set_brush_hsv(Hsv::new(i as f64 * 359.0 / 35.0, hsv.s, hsv.v), cx);
                 });
             })
         };
@@ -2512,8 +2515,8 @@ impl SettingsView {
             let entity = cx.entity().downgrade();
             std::rc::Rc::new(move |_win, app| {
                 let _ = entity.update(app, |this, cx| {
-                    this.brush_alpha = ((i as i32 * 255) / 16).clamp(0, 255) as u8;
-                    cx.notify();
+                    let alpha = ((i as i32 * 255) / 16).clamp(0, 255) as u8;
+                    this.set_brush_alpha(alpha, cx);
                 });
             })
         };
@@ -2527,42 +2530,19 @@ impl SettingsView {
             })
         };
 
-        let mut swatches = div().flex().flex_wrap().gap(px(3.0));
-        for index in 0..MAX_GRADIENT_STOPS {
-            let color = self.brush_stops.get(index).copied().unwrap_or_default();
-            swatches = swatches.child(
-                div()
-                    .id(SharedString::from(format!("brush-stop-{index}")))
-                    .w(px(14.0))
-                    .h(px(14.0))
-                    .rounded(px(3.0))
-                    .bg(rgba(color.to_gpui()))
-                    .border_1()
-                    .border_color(rgba(t.border))
-                    .cursor_pointer()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let color = this.brush_hsv.to_rgba(this.brush_alpha);
-                        if let Some(stop) = this.brush_stops.get_mut(index) {
-                            *stop = color;
-                        }
-                        cx.notify();
-                    })),
-            );
-        }
-
-        let brush_rows = vec![
+        let mut brush_rows = vec![
             self.target_row(
                 "ThemeBrushPicker",
                 t,
                 Some("\u{E790}"),
-                "Brush Type",
+                loc::t("BrushType"),
                 div()
                     .flex()
                     .gap(px(6.0))
                     .child(button(
                         "btn-brush-solid",
                         t,
-                        "Solid",
+                        loc::t("SurfaceSolid"),
                         if self.brush_mode == BrushMode::Solid {
                             ButtonVariant::Primary
                         } else {
@@ -2576,7 +2556,7 @@ impl SettingsView {
                     .child(button(
                         "btn-brush-gradient",
                         t,
-                        "Gradient",
+                        loc::t("Gradient"),
                         if self.brush_mode == BrushMode::Gradient {
                             ButtonVariant::Primary
                         } else {
@@ -2592,26 +2572,34 @@ impl SettingsView {
             setting_row(
                 t,
                 Some("\u{E790}"),
-                "Brush Preview",
-                div()
-                    .w(px(180.0))
-                    .h(px(22.0))
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(rgba(t.border))
-                    .bg(rgba(preview_color.to_gpui())),
+                loc::t("ColorPalette"),
+                div().flex().items_start().gap(px(10.0)).child(field).child(
+                    div()
+                        .w(px(180.0))
+                        .h(px(22.0))
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(rgba(t.border))
+                        .bg(rgba(preview_color.to_gpui()))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgba(t.text_secondary))
+                                .child(active_color.hex()),
+                        ),
+                ),
             )
             .into_any_element(),
             setting_row(
                 t,
                 Some("\u{E790}"),
-                "HSV · Hue",
+                loc::t("ColorHue"),
                 live_slider(
                     "brush-hue",
                     t,
-                    self.brush_hsv.h as f32 / 360.0,
+                    active_hsv.h as f32 / 359.0,
                     36,
-                    format!("{:.0}°", self.brush_hsv.h),
+                    format!("{:.0}\u{00B0}", active_hsv.h),
                     hue_handler,
                 ),
             )
@@ -2619,35 +2607,7 @@ impl SettingsView {
             setting_row(
                 t,
                 Some("\u{E790}"),
-                "HSV · Saturation",
-                live_slider(
-                    "brush-sat",
-                    t,
-                    self.brush_hsv.s as f32,
-                    21,
-                    format!("{:.0}%", self.brush_hsv.s * 100.0),
-                    sat_handler,
-                ),
-            )
-            .into_any_element(),
-            setting_row(
-                t,
-                Some("\u{E790}"),
-                "HSV · Value",
-                live_slider(
-                    "brush-val",
-                    t,
-                    self.brush_hsv.v as f32,
-                    21,
-                    format!("{:.0}%", self.brush_hsv.v * 100.0),
-                    val_handler,
-                ),
-            )
-            .into_any_element(),
-            setting_row(
-                t,
-                Some("\u{E790}"),
-                "Alpha",
+                loc::t("ColorOpacity"),
                 live_slider(
                     "brush-alpha",
                     t,
@@ -2661,21 +2621,7 @@ impl SettingsView {
             setting_row(
                 t,
                 Some("\u{E790}"),
-                "Gradient Angle",
-                live_slider(
-                    "brush-angle",
-                    t,
-                    self.brush_angle as f32 / 360.0,
-                    37,
-                    format!("{:.0}°", self.brush_angle),
-                    angle_handler,
-                ),
-            )
-            .into_any_element(),
-            setting_row(
-                t,
-                Some("\u{E790}"),
-                "Hex Value",
+                loc::t("ColorHEX"),
                 div()
                     .id("brush-hex-input")
                     .tab_index(0)
@@ -2700,6 +2646,12 @@ impl SettingsView {
                             if let Some(color) = crate::design::brush::parse_hex(&this.brush_hex) {
                                 this.brush_hsv = Hsv::from(color);
                                 this.brush_alpha = color.a;
+                                if this.brush_mode == BrushMode::Gradient
+                                    && let Some(stop) =
+                                        this.brush_stops.get_mut(this.brush_selected_stop)
+                                {
+                                    *stop = color;
+                                }
                             }
                             cx.notify();
                         }
@@ -2707,26 +2659,156 @@ impl SettingsView {
                     .child(div().text_size(px(12.0)).child(self.brush_hex.clone())),
             )
             .into_any_element(),
-            setting_row(
-                t,
-                Some("\u{E790}"),
-                format!("Gradient Stops ({MAX_GRADIENT_STOPS})"),
-                swatches,
-            )
-            .into_any_element(),
+        ];
+
+        if self.brush_mode == BrushMode::Gradient {
+            // Gradient strip with 64 painted segments and one draggable handle per stop
+            // (bounded by `MAX_GRADIENT_STOPS` from `design::brush`).
+            let stop_count = self.brush_stops.len().max(2);
+            let mut strip = div()
+                .id("brush-gradient-strip")
+                .relative()
+                .w(px(FIELD_W))
+                .h(px(24.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(rgba(t.border))
+                .overflow_hidden()
+                .flex();
+            const STRIP_SEGMENTS: usize = 48;
+            for segment in 0..STRIP_SEGMENTS {
+                let pos = (segment as f64 + 0.5) / STRIP_SEGMENTS as f64;
+                let scaled = pos * (stop_count - 1) as f64;
+                let index = scaled.floor() as usize;
+                let frac = scaled - index as f64;
+                let a = self.brush_stops.get(index).copied().unwrap_or_default();
+                let b = self
+                    .brush_stops
+                    .get((index + 1).min(stop_count - 1))
+                    .copied()
+                    .unwrap_or(a);
+                let target = gradient_stop_at(pos, stop_count);
+                let segment_color = a.mix(b, frac).to_gpui();
+                strip = strip.child(
+                    div()
+                        .id(SharedString::from(format!("brush-strip-{segment}")))
+                        .flex_1()
+                        .h_full()
+                        .cursor_pointer()
+                        .bg(rgba(segment_color))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                if let Some(stop) = this.brush_stops.get(target).copied() {
+                                    this.brush_selected_stop = target;
+                                    this.brush_hsv = Hsv::from(stop);
+                                    this.brush_hex = stop.hex();
+                                    cx.notify();
+                                }
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(
+                            move |this, ev: &gpui::MouseMoveEvent, _, cx| {
+                                if ev.dragging() {
+                                    let from = this.brush_selected_stop;
+                                    this.move_brush_stop(from, target, cx);
+                                }
+                            },
+                        )),
+                );
+            }
+            for (index, color) in self.brush_stops.iter().enumerate() {
+                let left = (index as f32 / (stop_count - 1) as f32) * (FIELD_W - 12.0);
+                strip = strip.child(
+                    div()
+                        .absolute()
+                        .left(px(left))
+                        .top(px(0.0))
+                        .w(px(12.0))
+                        .h(px(24.0))
+                        .rounded(px(3.0))
+                        .border_1()
+                        .border_color(rgba(t.text_primary))
+                        .bg(rgba(color.to_gpui())),
+                );
+            }
+            brush_rows.push(
+                setting_row(
+                    t,
+                    Some("\u{E790}"),
+                    loc::t("ColorAngle"),
+                    live_slider(
+                        "brush-angle",
+                        t,
+                        self.brush_angle as f32 / 360.0,
+                        37,
+                        format!("{:.0}\u{00B0}", self.brush_angle),
+                        angle_handler,
+                    ),
+                )
+                .into_any_element(),
+            );
+            brush_rows.push(
+                setting_row(
+                    t,
+                    Some("\u{E790}"),
+                    loc::t_fmt("ColorStopLabel", &[&stop_label]),
+                    strip,
+                )
+                .into_any_element(),
+            );
+            brush_rows.push(
+                setting_row(
+                    t,
+                    Some("\u{E790}"),
+                    loc::t("ColorSelectStop"),
+                    div()
+                        .flex()
+                        .gap(px(6.0))
+                        .child(button(
+                            "btn-brush-stop-add",
+                            t,
+                            loc::t("ColorAddStop"),
+                            ButtonVariant::Secondary,
+                            cx.listener(|this, _, _, cx| this.add_brush_stop(cx)),
+                        ))
+                        .child(button(
+                            "btn-brush-stop-remove",
+                            t,
+                            loc::t("ColorRemove"),
+                            ButtonVariant::Destructive,
+                            cx.listener(|this, _, _, cx| this.remove_brush_stop(cx)),
+                        ))
+                        .child(
+                            div()
+                                .pl(px(4.0))
+                                .text_size(px(11.0))
+                                .text_color(rgba(t.text_secondary))
+                                .child(format!(
+                                    "{}/{}",
+                                    self.brush_stops.len(),
+                                    MAX_GRADIENT_STOPS
+                                )),
+                        ),
+                )
+                .into_any_element(),
+            );
+        }
+
+        brush_rows.push(
             setting_row(
                 t,
                 Some("\u{E74E}"),
-                "Save Brush",
+                loc::t("ThemeBrushPicker"),
                 button(
                     "btn-save-brush",
                     t,
-                    "Save Brush Token",
+                    loc::t("BrushSaveToken"),
                     ButtonVariant::Primary,
                     cx.listener(|this, _, _, cx| {
                         let name = this.token_name.trim().to_owned();
                         if name.is_empty() {
-                            this.token_apply_status = "Enter a token name first.".to_owned();
+                            this.token_apply_status = loc::t("BrushTokenNameRequired");
                             cx.notify();
                             return;
                         }
@@ -2746,18 +2828,22 @@ impl SettingsView {
                             .unwrap_or_default();
                         map.insert(name.clone(), brush_to_json(&brush));
                         persist_theme_tokens(&mut this.settings, map);
-                        this.token_apply_status =
-                            format!("Applied brush '{name}' to the live palette.");
+                        this.token_apply_status = loc::t_fmt("BrushTokenSaved", &[&name]);
                         this.auto_save(cx);
                     }),
                 ),
             )
             .into_any_element(),
-        ];
+        );
 
         vec![
-            section_card(t, format!("Theme Editor · {category}"), rows).into_any_element(),
-            section_card(t, "Theme Brush Picker", brush_rows).into_any_element(),
+            section_card(
+                t,
+                format!("{} · {}", loc::t("ThemeEditorTitle"), loc::t(category)),
+                rows,
+            )
+            .into_any_element(),
+            section_card(t, loc::t("ThemeBrushPicker"), brush_rows).into_any_element(),
         ]
     }
 
@@ -2800,7 +2886,7 @@ impl SettingsView {
                 }
                 if self.settings.stats_meters & 2 != 0 {
                     cols.push(SystemStatColumn {
-                        label: "RAM".to_owned(),
+                        label: loc::t("Memory"),
                         value_text: "58%".to_owned(),
                         ratio: 0.58,
                         bar_color: pal.widget_accent,
@@ -2809,7 +2895,7 @@ impl SettingsView {
                 }
                 if self.settings.stats_meters & 16 != 0 {
                     cols.push(SystemStatColumn {
-                        label: "GPU".to_owned(),
+                        label: loc::t("Gpu"),
                         value_text: "38%".to_owned(),
                         ratio: 0.38,
                         bar_color: pal.success,
@@ -3459,7 +3545,10 @@ impl SettingsView {
                                                 .text_size(px(fonts::scaled_size(13.0)))
                                                 .font_weight(gpui::FontWeight::SEMIBOLD)
                                                 .text_color(rgba(text_col))
-                                                .child(format!("{percent}%")),
+                                                .child(loc::t_fmt(
+                                                    "OpacityPercent",
+                                                    &[&percent.to_string()],
+                                                )),
                                         ),
                                 ),
                         )
@@ -3506,7 +3595,7 @@ impl SettingsView {
                                         .text_size(px(fonts::scaled_size(11.0)))
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .text_color(rgba(val_col))
-                                        .child(format!("{pct}%")),
+                                        .child(loc::t_fmt("OpacityPercent", &[&pct.to_string()])),
                                 )
                         },
                     )),
@@ -3605,9 +3694,9 @@ impl SettingsView {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(rgba(t.dock_preview_fg))
                             .child(if muted {
-                                "Mute".to_owned()
+                                loc::t("MediaMute")
                             } else {
-                                format!("{volume}%")
+                                loc::t_fmt("OpacityPercent", &[&volume.to_string()])
                             }),
                     ),
             ),
@@ -3750,7 +3839,10 @@ impl SettingsView {
                                 div()
                                     .text_size(px(fonts::scaled_size(9.0)))
                                     .text_color(rgba(t.dock_preview_sub))
-                                    .child(format!("{lbl} {val}")),
+                                    .child(loc::t_fmt(
+                                        "MetricValue",
+                                        &[&lbl.to_owned(), &val.to_owned()],
+                                    )),
                             )
                             .child(mini_bar(used, col, 36.0))
                     }),
@@ -4069,6 +4161,76 @@ impl SettingsView {
         .detach();
     }
 
+    // ---- Theme brush picker value helpers -----------------------------------
+    // The visual picker edits HSV directly; these helpers keep the preview hex, the
+    // selected gradient stop and `design::brush` state in sync.
+
+    fn brush_active_color(&self) -> crate::design::tokens::Rgba {
+        if self.brush_mode == BrushMode::Gradient
+            && let Some(stop) = self.brush_stops.get(self.brush_selected_stop)
+        {
+            *stop
+        } else {
+            self.brush_hsv.to_rgba(self.brush_alpha)
+        }
+    }
+
+    fn brush_active_hsv(&self) -> Hsv {
+        Hsv::from(self.brush_active_color())
+    }
+
+    fn set_brush_hsv(&mut self, hsv: Hsv, cx: &mut Context<Self>) {
+        self.brush_hsv = hsv;
+        let color = hsv.to_rgba(self.brush_alpha);
+        if self.brush_mode == BrushMode::Gradient
+            && let Some(stop) = self.brush_stops.get_mut(self.brush_selected_stop)
+        {
+            *stop = color;
+        }
+        self.brush_hex = color.hex();
+        cx.notify();
+    }
+
+    fn set_brush_alpha(&mut self, alpha: u8, cx: &mut Context<Self>) {
+        self.brush_alpha = alpha;
+        self.brush_hex = self.brush_hsv.to_rgba(alpha).hex();
+        cx.notify();
+    }
+
+    fn move_brush_stop(&mut self, from: usize, to: usize, cx: &mut Context<Self>) {
+        let target = reorder_gradient_stop(&mut self.brush_stops, from, to);
+        self.brush_selected_stop = target;
+        if let Some(stop) = self.brush_stops.get(target).copied() {
+            self.brush_hsv = Hsv::from(stop);
+            self.brush_hex = stop.hex();
+        }
+        cx.notify();
+    }
+
+    fn add_brush_stop(&mut self, cx: &mut Context<Self>) {
+        if self.brush_stops.len() >= MAX_GRADIENT_STOPS {
+            return;
+        }
+        let color = self.brush_hsv.to_rgba(self.brush_alpha);
+        let at = (self.brush_selected_stop + 1).min(self.brush_stops.len());
+        self.brush_stops.insert(at, color);
+        self.brush_selected_stop = at;
+        cx.notify();
+    }
+
+    fn remove_brush_stop(&mut self, cx: &mut Context<Self>) {
+        if self.brush_stops.len() <= 2 {
+            return;
+        }
+        let at = self.brush_selected_stop.min(self.brush_stops.len() - 1);
+        self.brush_stops.remove(at);
+        self.brush_selected_stop = at.saturating_sub(1);
+        if let Some(stop) = self.brush_stops.get(self.brush_selected_stop) {
+            self.brush_hsv = Hsv::from(*stop);
+        }
+        cx.notify();
+    }
+
     fn edit_border_color(&mut self, surface: usize, cx: &mut Context<Self>) {
         let current = match surface {
             0 => self.settings.dock_border_color.clone(),
@@ -4135,7 +4297,10 @@ impl SettingsView {
         let start = self.font_page * PAGE_SIZE;
 
         let mut entries = Vec::new();
-        let native_label = format!("{} (Windows)", fonts::native_ui_face());
+        let native_label = loc::t_fmt(
+            "FontNativeWithWindows",
+            &[&fonts::native_ui_face().to_owned()],
+        );
         let mut native = MenuEntry::item(NATIVE_ID, MenuIcon::Settings, native_label.clone());
         if self.settings.ui_font_family.trim().is_empty() {
             native = MenuEntry::with_shortcut(
@@ -4248,6 +4413,76 @@ impl SettingsView {
         };
         let dd = self.make_dropdown(id, t, opts, cx);
         self.target_row(row_id, t, Some(glyph), label, dd)
+    }
+
+    /// One independent opacity row per surface (dock / menu / widget / settings).
+    ///
+    /// NOTE(WS-D): WS-B adds `SurfaceStyle::set_opacity(kind, f64)`. Until that API lands in
+    /// this worktree, the live preview goes through the existing per-surface
+    /// `ThemeManager::set_surface(kind, background, opacity)`; persistence uses the matching
+    /// `DockSettings` field / `extra` key read by `design::theme::style_from_settings`.
+    #[allow(clippy::too_many_arguments)]
+    fn surface_opacity_row(
+        &self,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+        row_id: &'static str,
+        slider_id: &'static str,
+        key: Option<&'static str>,
+        kind: SurfaceKind,
+        label: String,
+        background: SurfaceBackground,
+        current: f64,
+    ) -> AnyElement {
+        let glyph = match kind {
+            SurfaceKind::Dock => "\u{E90E}",
+            SurfaceKind::Menu => "\u{E700}",
+            SurfaceKind::Widget => "\u{F246}",
+            SurfaceKind::Settings => "\u{E713}",
+        };
+        self.target_row(
+            row_id,
+            t,
+            Some(glyph),
+            label,
+            live_slider(
+                slider_id,
+                t,
+                ((current as f32) - 0.2) / 0.8,
+                17,
+                {
+                    let pct = (current * 100.0).round() as i32;
+                    loc::t_fmt("OpacityPercent", &[&pct.to_string()])
+                },
+                move |i| {
+                    let entity = cx.entity().downgrade();
+                    std::rc::Rc::new(move |_win, app| {
+                        let _ = entity.update(app, |this, cx| {
+                            let next = (0.20 + (i as f64) * 0.05).clamp(0.20, 1.0);
+                            let changed = match key {
+                                None => {
+                                    let changed = (this.settings.dock_opacity - next).abs() > 0.001;
+                                    this.settings.dock_opacity = next;
+                                    changed
+                                }
+                                Some(name) => {
+                                    let old = extra_f64(&this.settings, name, next);
+                                    let changed = (old - next).abs() > 0.001;
+                                    this.settings.extra.insert(name.to_owned(), json!(next));
+                                    changed
+                                }
+                            };
+                            let _ = ThemeManager::set_surface(kind, background, next);
+                            if changed {
+                                this.auto_save(cx);
+                            } else {
+                                cx.notify();
+                            }
+                        });
+                    })
+                },
+            ),
+        )
     }
 
     fn new_profile(&mut self, cx: &mut Context<Self>) {
@@ -4512,7 +4747,7 @@ impl SettingsView {
             |w| format!("{} ({:.0}px)", loc::t("DockWidthPixels"), w),
         );
 
-        let mut out = vec![
+        let out = vec![
             section_card(
                 t,
                 format!("{} & {}", loc::t("SectionDockLayout"), loc::t("Dimensions")),
@@ -4564,7 +4799,7 @@ impl SettingsView {
                             t,
                             ((self.settings.dock_scale as f32) - 0.75) / 0.75,
                             16,
-                            format!("{scale_pct}%"),
+                            loc::t_fmt("OpacityPercent", &[&scale_pct.to_string()]),
                             |i| {
                                 let entity = cx.entity().downgrade();
                                 std::rc::Rc::new(move |_win, app| {
@@ -4590,7 +4825,10 @@ impl SettingsView {
                             t,
                             self.settings.dock_bottom_gap_pixels as f32 / 32.0,
                             17,
-                            format!("{} px", self.settings.dock_bottom_gap_pixels),
+                            loc::t_fmt(
+                                "PixelsValue",
+                                &[&self.settings.dock_bottom_gap_pixels.to_string()],
+                            ),
                             |i| {
                                 let entity = cx.entity().downgrade();
                                 std::rc::Rc::new(move |_win, app| {
@@ -4616,7 +4854,10 @@ impl SettingsView {
                             t,
                             self.settings.dock_icon_padding as f32 / 12.0,
                             13,
-                            format!("{} px", self.settings.dock_icon_padding),
+                            loc::t_fmt(
+                                "PixelsValue",
+                                &[&self.settings.dock_icon_padding.to_string()],
+                            ),
                             |i| {
                                 let entity = cx.entity().downgrade();
                                 std::rc::Rc::new(move |_win, app| {
@@ -4893,7 +5134,6 @@ impl SettingsView {
             )
             .into_any_element(),
         ];
-        out.extend(self.render_folder_stacks(t, cx));
         out
     }
 
@@ -4957,10 +5197,10 @@ impl SettingsView {
         );
 
         let opacity_pct = (self.settings.dock_opacity * 100.0).round() as i32;
-        let radius_label = self
-            .settings
-            .dock_corner_radius
-            .map_or_else(|| loc::t("Automatic"), |r| format!("{r} px"));
+        let radius_label = self.settings.dock_corner_radius.map_or_else(
+            || loc::t("Automatic"),
+            |r| loc::t_fmt("PixelsValue", &[&r.to_string()]),
+        );
 
         let mut out = vec![
             section_card(
@@ -4985,7 +5225,7 @@ impl SettingsView {
                             t,
                             ((self.settings.dock_opacity as f32) - 0.2) / 0.8,
                             17,
-                            format!("{opacity_pct}%"),
+                            loc::t_fmt("OpacityPercent", &[&opacity_pct.to_string()]),
                             |i| {
                                 let entity = cx.entity().downgrade();
                                 std::rc::Rc::new(move |_win, app| {
@@ -5117,7 +5357,10 @@ impl SettingsView {
                             None => max_step,
                         };
                         let fps_label = match self.settings.animation_fps {
-                            Some(fps) => format!("{} FPS", fps.clamp(15, max_hz)),
+                            Some(fps) => loc::t_fmt(
+                                "AnimationFpsValue",
+                                &[&fps.clamp(15, max_hz).to_string()],
+                            ),
                             None => format!("{} ({max_hz} Hz)", loc::t("AnimationFpsAuto")),
                         };
                         let fps_entity = cx.entity().downgrade();
@@ -5188,7 +5431,10 @@ impl SettingsView {
                             t,
                             (self.settings.ui_font_size - 9.0) / 15.0,
                             16,
-                            format!("{} px", self.settings.ui_font_size.round() as i32),
+                            loc::t_fmt(
+                                "PixelsValue",
+                                &[&(self.settings.ui_font_size.round() as i32).to_string()],
+                            ),
                             |i| {
                                 let entity = cx.entity().downgrade();
                                 std::rc::Rc::new(move |_win, app| {
@@ -5205,19 +5451,6 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    div()
-                        .w_full()
-                        .font_family(SharedString::from(
-                            if self.settings.ui_font_family.trim().is_empty() {
-                                fonts::native_ui_face().to_owned()
-                            } else {
-                                self.settings.ui_font_family.clone()
-                            },
-                        ))
-                        .text_size(px(fonts::scaled_size(13.0)))
-                        .child(loc::t("UiFontPreview"))
-                        .child(" — AaBbÇğÖşü 0123")
-                        .into_any_element(),
                 ],
             )
             .into_any_element(),
@@ -5229,6 +5462,8 @@ impl SettingsView {
                         .w_full()
                         .flex()
                         .gap(px(6.0))
+                        .px(px(16.0))
+                        .py(px(10.0))
                         .child(button(
                             "btn-theme-import",
                             t,
@@ -5248,10 +5483,13 @@ impl SettingsView {
                         .into_any_element(),
                     {
                         let packs = theme_packs::discover(&Self::themes_root());
-                        let mut rows = div().w_full().flex().flex_col().gap(px(6.0));
+                        let mut rows = div().w_full().flex().flex_col().gap(px(2.0));
                         if packs.is_empty() {
                             rows = rows.child(
                                 div()
+                                    .w_full()
+                                    .px(px(16.0))
+                                    .py(px(10.0))
                                     .text_size(px(fonts::scaled_size(12.0)))
                                     .text_color(rgba(t.text_secondary))
                                     .child(loc::t("NoCustomThemes")),
@@ -5259,59 +5497,102 @@ impl SettingsView {
                         }
                         for pack in packs {
                             let id = pack.id.clone();
-                            let export_id = id.clone();
-                            let delete_id = id.clone();
-                            let use_id = id.clone();
                             let active = self.settings.theme_pack.eq_ignore_ascii_case(&id);
+                            let entity = cx.entity().downgrade();
+                            let use_action = {
+                                let entity = entity.clone();
+                                let id = id.clone();
+                                std::rc::Rc::new(
+                                    move |_win: &mut gpui::Window, app: &mut gpui::App| {
+                                        let _ = entity.update(app, |this, cx| {
+                                            this.open_dropdown = None;
+                                            this.settings.theme_pack = id.clone();
+                                            crate::platform::icon_pack::set_active_pack(Some(
+                                                &Self::themes_root().join(&id),
+                                            ));
+                                            this.auto_save(cx);
+                                        });
+                                    },
+                                )
+                                    as crate::ui::components::DropdownSelectHandler
+                            };
+                            let export_action = {
+                                let entity = entity.clone();
+                                let id = id.clone();
+                                std::rc::Rc::new(
+                                    move |_win: &mut gpui::Window, app: &mut gpui::App| {
+                                        let _ = entity.update(app, |this, cx| {
+                                            this.open_dropdown = None;
+                                            this.export_theme(&id, cx);
+                                        });
+                                    },
+                                )
+                                    as crate::ui::components::DropdownSelectHandler
+                            };
+                            let delete_action = {
+                                let id = id.clone();
+                                std::rc::Rc::new(
+                                    move |_win: &mut gpui::Window, app: &mut gpui::App| {
+                                        let _ = entity.update(app, |this, cx| {
+                                            this.open_dropdown = None;
+                                            this.delete_theme(&id, cx);
+                                        });
+                                    },
+                                )
+                                    as crate::ui::components::DropdownSelectHandler
+                            };
+                            let actions: Vec<DropdownOption> = vec![
+                                DropdownOption {
+                                    label: SharedString::from(loc::t(if active {
+                                        "ThemeCurrent"
+                                    } else {
+                                        "ThemeUse"
+                                    })),
+                                    flag_path: None,
+                                    glyph: Some("\u{E73E}"),
+                                    selected: false,
+                                    on_select: use_action,
+                                },
+                                DropdownOption {
+                                    label: SharedString::from(loc::t("ThemePackExport")),
+                                    flag_path: None,
+                                    glyph: None,
+                                    selected: false,
+                                    on_select: export_action,
+                                },
+                                DropdownOption {
+                                    label: SharedString::from(loc::t("ThemePackDelete")),
+                                    flag_path: None,
+                                    glyph: None,
+                                    selected: false,
+                                    on_select: delete_action,
+                                },
+                            ];
                             rows = rows.child(
                                 div()
+                                    .w_full()
                                     .flex()
                                     .items_center()
                                     .gap(px(6.0))
+                                    .px(px(16.0))
+                                    .py(px(9.0))
                                     .child(
                                         div()
                                             .flex_1()
+                                            .min_w_0()
                                             .text_size(px(fonts::scaled_size(12.0)))
                                             .child(pack.manifest.name.clone()),
                                     )
-                                    .child(button(
-                                        SharedString::from(format!("theme-use-{id}")),
+                                    .child(self.make_action_menu(
+                                        format!("theme-actions-{id}"),
                                         t,
-                                        if active {
-                                            loc::t("WidgetInstalled")
-                                        } else {
-                                            loc::t("ThemePackIcons")
-                                        },
-                                        ButtonVariant::Secondary,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.settings.theme_pack = use_id.clone();
-                                            crate::platform::icon_pack::set_active_pack(Some(
-                                                &Self::themes_root().join(&use_id),
-                                            ));
-                                            this.auto_save(cx);
-                                        }),
-                                    ))
-                                    .child(button(
-                                        SharedString::from(format!("theme-export-{id}")),
-                                        t,
-                                        loc::t("ThemePackExport"),
-                                        ButtonVariant::Secondary,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.export_theme(&export_id, cx)
-                                        }),
-                                    ))
-                                    .child(button(
-                                        SharedString::from(format!("theme-delete-{id}")),
-                                        t,
-                                        loc::t("WidgetRemove"),
-                                        ButtonVariant::Destructive,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.delete_theme(&delete_id, cx)
-                                        }),
+                                        SharedString::from("..."),
+                                        actions,
+                                        cx,
                                     )),
                             );
                         }
-                        rows = rows.child(button(
+                        rows = rows.child(div().px(px(16.0)).py(px(10.0)).child(button(
                             "theme-use-native",
                             t,
                             loc::t("UiFontNative"),
@@ -5321,11 +5602,13 @@ impl SettingsView {
                                 crate::platform::icon_pack::set_active_pack(None);
                                 this.auto_save(cx);
                             }),
-                        ));
+                        )));
                         rows.into_any_element()
                     },
                     div()
                         .w_full()
+                        .px(px(16.0))
+                        .py(px(10.0))
                         .text_size(px(fonts::scaled_size(12.0)))
                         .text_color(rgba(t.text_secondary))
                         .child(self.theme_status.clone())
@@ -5373,35 +5656,68 @@ impl SettingsView {
                         self.settings.settings_background,
                         |settings, value| settings.settings_background = value,
                     ),
-                    self.target_row(
-                        "SurfaceOpacityLabel:Surfaces",
+                    // Distinct opacity control for each surface; the old single
+                    // "SurfaceOpacityLabel:Surfaces" row is intentionally gone.
+                    self.surface_opacity_row(
                         t,
-                        Some("\u{E706}"),
-                        loc::t("SurfaceOpacityLabel"),
-                        live_slider(
-                            "surf-op",
-                            t,
-                            ((self.settings.surface_opacity as f32) - 0.2) / 0.8,
-                            17,
-                            format!(
-                                "{}%",
-                                (self.settings.surface_opacity * 100.0).round() as i32
-                            ),
-                            |i| {
-                                let entity = cx.entity().downgrade();
-                                std::rc::Rc::new(move |_win, app| {
-                                    let _ = entity.update(app, |this, cx| {
-                                        let next = (0.20 + (i as f64) * 0.05).clamp(0.20, 1.0);
-                                        if (this.settings.surface_opacity - next).abs() > 0.001 {
-                                            this.settings.surface_opacity = next;
-                                            this.auto_save(cx);
-                                        }
-                                    });
-                                })
-                            },
+                        cx,
+                        "SurfaceOpacityLabel:Dock",
+                        "surf-op-dock",
+                        None,
+                        SurfaceKind::Dock,
+                        format!(
+                            "{} · {}",
+                            loc::t("SurfaceDock"),
+                            loc::t("SurfaceOpacityLabel")
                         ),
-                    )
-                    .into_any_element(),
+                        self.settings.dock_background,
+                        self.settings.dock_opacity,
+                    ),
+                    self.surface_opacity_row(
+                        t,
+                        cx,
+                        "SurfaceOpacityLabel:Menu",
+                        "surf-op-menu",
+                        Some("MenuOpacity"),
+                        SurfaceKind::Menu,
+                        format!(
+                            "{} · {}",
+                            loc::t("SurfaceMenu"),
+                            loc::t("SurfaceOpacityLabel")
+                        ),
+                        self.settings.menu_background,
+                        extra_f64(&self.settings, "MenuOpacity", 0.9),
+                    ),
+                    self.surface_opacity_row(
+                        t,
+                        cx,
+                        "SurfaceOpacityLabel:Widget",
+                        "surf-op-widget",
+                        Some("WidgetOpacity"),
+                        SurfaceKind::Widget,
+                        format!(
+                            "{} · {}",
+                            loc::t("SurfaceWidget"),
+                            loc::t("SurfaceOpacityLabel")
+                        ),
+                        self.settings.widget_background,
+                        extra_f64(&self.settings, "WidgetOpacity", 0.9),
+                    ),
+                    self.surface_opacity_row(
+                        t,
+                        cx,
+                        "SurfaceOpacityLabel:Settings",
+                        "surf-op-settings",
+                        Some("SettingsOpacity"),
+                        SurfaceKind::Settings,
+                        format!(
+                            "{} · {}",
+                            loc::t("SurfaceSettings"),
+                            loc::t("SurfaceOpacityLabel")
+                        ),
+                        self.settings.settings_background,
+                        extra_f64(&self.settings, "SettingsOpacity", 0.95),
+                    ),
                 ],
             )
             .into_any_element(),
@@ -5436,14 +5752,7 @@ impl SettingsView {
                         3usize,
                     ),
                 ];
-                let mut border_rows: Vec<AnyElement> = vec![
-                    div()
-                        .w_full()
-                        .text_size(px(fonts::scaled_size(12.0)))
-                        .text_color(rgba(t.text_secondary))
-                        .child(loc::t("BorderStyleHelp"))
-                        .into_any_element(),
-                ];
+                let mut border_rows: Vec<AnyElement> = Vec::new();
                 for (id, label, thickness, color, index) in border_surfaces {
                     let step = stepper(
                         SharedString::from(format!("{id}-minus")),
@@ -5498,7 +5807,6 @@ impl SettingsView {
                 section_card(t, loc::t("BorderStyleLabel"), border_rows).into_any_element()
             },
         ];
-        out.extend(self.render_theme_gallery(t, cx));
         out.extend(self.render_theme_editor(t, cx));
         out
     }
@@ -6489,7 +6797,7 @@ impl SettingsView {
                                 t,
                                 ((self.settings.dynamic_island_opacity as f32) - 0.1) / 0.9,
                                 19,
-                                format!("{di_opacity_pct}%"),
+                                loc::t_fmt("OpacityPercent", &[&di_opacity_pct.to_string()]),
                                 |i| {
                                     let entity = cx.entity().downgrade();
                                     std::rc::Rc::new(move |_win, app| {
@@ -6926,8 +7234,13 @@ impl SettingsView {
             .into_any_element(),
         ];
         out.push(section_card(t, "Hotkeys", self.render_hotkeys(t, cx)).into_any_element());
-        out.push(section_card(t, "AI Accounts", self.render_ai_auth(t, cx)).into_any_element());
-        out.push(section_card(t, "Full Backup", self.render_backup_ui(t, cx)).into_any_element());
+        out.push(
+            section_card(t, loc::t("AiAccountsHeading"), self.render_ai_auth(t, cx))
+                .into_any_element(),
+        );
+        out.push(
+            section_card(t, loc::t("FullBackup"), self.render_backup_ui(t, cx)).into_any_element(),
+        );
         out
     }
 
@@ -6953,11 +7266,11 @@ impl SettingsView {
                     setting_row(
                         t,
                         Some("\u{E1D2}"),
-                        "GitHub",
+                        loc::t("GitHubRepository"),
                         button(
                             "btn-github",
                             t,
-                            "Open Repository",
+                            loc::t("OpenRepository"),
                             ButtonVariant::Secondary,
                             |_, _, _| {
                                 pins::launch("https://github.com/alztrk/opentaskbar".to_owned());
@@ -7658,8 +7971,9 @@ impl Render for SettingsView {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrushMode, DockSettings, ai_cli_sign_in_command, brush_to_json, build_backup, build_brush,
-        city_list, civil_from_days, import_backup_into, inspect_backup, persist_theme_tokens,
+        BrushMode, DockSettings, WIN_H, WIN_W, ai_cli_sign_in_command, brush_to_json, build_backup,
+        build_brush, city_list, civil_from_days, field_cell_hsv, gradient_stop_at,
+        import_backup_into, inspect_backup, persist_theme_tokens, reorder_gradient_stop,
         safe_backup_path, weather_country_for, zip_store, zip_unstore,
     };
     use crate::design::brush::Hsv;
@@ -7857,6 +8171,45 @@ mod tests {
         ));
         apply_token_overrides(TokenMap::new());
     }
+
+    #[test]
+    fn settings_window_uses_the_fixed_dialog_size_and_disables_resize() {
+        assert_eq!(WIN_W, 1040.0);
+        assert_eq!(WIN_H, 740.0);
+        let source = include_str!("settings.rs");
+        assert!(source.contains("window_min_size: Some(size(px(WIN_W), px(WIN_H)))"));
+        assert!(source.contains("is_resizable: false"));
+        // Item 5: the dock's folder-stack section must stay gone (including its search entry).
+        assert!(!source.contains(concat!("Add Folder", " Stack")));
+        let search_source = include_str!("settings_search.rs");
+        assert!(!search_source.contains("StackFolders"));
+        // Item 8: bundled swatch gallery and typography preview are gone.
+        assert!(!source.contains(concat!("Theme Gallery", " (bundled swatches)")));
+        assert!(!source.contains(concat!("AaBb", "ÇğÖşü 0123")));
+    }
+
+    #[test]
+    fn color_field_maps_cells_to_saturation_and_value() {
+        let top_left = field_cell_hsv(210.0, 0, 0, 20, 10);
+        let bottom_right = field_cell_hsv(210.0, 19, 9, 20, 10);
+        assert!((top_left.h - 210.0).abs() < f64::EPSILON);
+        assert!(top_left.s < 0.1 && top_left.v > 0.9);
+        assert!(bottom_right.s > 0.9 && bottom_right.v < 0.1);
+        assert_eq!(field_cell_hsv(0.0, 0, 0, 0, 0), Hsv::new(0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn gradient_stop_drag_is_bounded_and_keeps_all_stops() {
+        let mut stops: Vec<Rgba> = (0..16).map(|i| Rgba::from_rgb(i as u8, 0, 0)).collect();
+        let target = reorder_gradient_stop(&mut stops, 2, 9);
+        assert_eq!(target, 9);
+        assert_eq!(stops.len(), 16);
+        assert_eq!(stops[9].r, 2);
+        assert_eq!(reorder_gradient_stop(&mut stops, 4, 99), 15);
+        assert_eq!(gradient_stop_at(0.0, 16), 0);
+        assert_eq!(gradient_stop_at(1.0, 16), 15);
+        assert_eq!(gradient_stop_at(0.5, 16), 8);
+    }
 }
 
 #[allow(clippy::items_after_test_module)]
@@ -7876,7 +8229,9 @@ pub fn run_settings_window() {
             let _ = cx.open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
+                    // Fixed dialog: min == initial size and resizing (edge/corner handle) is off.
+                    window_min_size: Some(size(px(WIN_W), px(WIN_H))),
+                    is_resizable: false,
                     titlebar: Some(TitlebarOptions {
                         title: Some(loc::t("SettingsTitle").into()),
                         appears_transparent: true,
