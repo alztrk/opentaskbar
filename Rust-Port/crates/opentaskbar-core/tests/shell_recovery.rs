@@ -1,7 +1,11 @@
-//! C# `ShellRecoveryChecks` / `TaskbarRecoveryChecks` / flyout journal parity
-//! (pure portion). WS-B owns the journal writer and watchdog process, which are
-//! not in this worktree's baseline; these tests pin the wire format and retry
-//! policy they must honour.
+//! C# `ShellRecoveryChecks` / `TaskbarRecoveryChecks` / flyout journal parity.
+//!
+//! These tests pin the wire format and retry policy. Bridge tests assert the
+//! same contract against the production shell modules that already exist; the
+//! watchdog argument parser belongs to WS-2 and is pinned by an `#[ignore]`d
+//! bridge until that API is reachable from this crate.
+
+mod common;
 
 use std::collections::HashSet;
 
@@ -75,16 +79,33 @@ fn parse_watchdog_args(args: &[&str]) -> Option<WatchdogArgs> {
     Some(parsed)
 }
 
-/// Chord helper: modifiers are pressed, the key fires, then `finally` releases
-/// every modifier even when the action fails.
+/// Chord helper: modifiers are pressed, the key fires, then a drop guard
+/// releases every modifier even when the action fails (`finally` semantics).
+struct ReleaseOnDrop<'a, 'b> {
+    held: &'a mut HashSet<String>,
+    released: &'b mut Vec<String>,
+}
+
+impl Drop for ReleaseOnDrop<'_, '_> {
+    fn drop(&mut self) {
+        self.released.extend(self.held.drain());
+    }
+}
+
 fn release_stuck_modifiers(held: &mut HashSet<String>, chord: &[&str], fails: bool) -> Vec<String> {
     for key in chord {
         held.insert((*key).to_owned());
     }
-    let action_result = if fails { Err("action failed") } else { Ok(()) };
-    let mut released: Vec<String> = held.iter().cloned().collect();
-    held.clear();
-    let _ = action_result; // `finally` block runs regardless
+    let mut released = Vec::new();
+    {
+        let _guard = ReleaseOnDrop {
+            held,
+            released: &mut released,
+        };
+        let result: Result<(), &str> = if fails { Err("action failed") } else { Ok(()) };
+        // The guard drops on every exit path, including `Err`.
+        let _ = result;
+    }
     released.sort();
     released
 }
@@ -193,4 +214,68 @@ fn overlays_are_excluded_from_auto_hide() {
         assert!(is_shell_overlay(class));
     }
     assert!(!is_shell_overlay("Shell_TrayWnd"));
+}
+
+/// Production bridge: the shell modules already implement the watchdog
+/// one-process contract and the atomic journal writer this file mirrors.
+#[test]
+fn production_watchdog_and_journal_contract() {
+    common::assert_source_has(
+        "crates/opentaskbar-shell/src/watchdog.rs",
+        &[
+            "WATCHDOG_BYTES",
+            "HEARTBEAT_PREFIX",
+            "--watchdog={pid}:{token}",
+            "notify_clean_exit",
+            "fs::rename(&tmp, &path)",
+        ],
+    );
+    common::assert_source_has(
+        "crates/opentaskbar-shell/src/flyout_journal.rs",
+        &["fs::rename(&tmp, path)", "MAX_ENTRIES"],
+    );
+    // The WS-2 inline watchdog tests use the same retry policy as the vectors
+    // above; keep the arithmetic anchored even if the production code changes.
+    assert_eq!(retry_backoff(3), 80);
+    assert_eq!(retry_backoff(20), 5000);
+}
+
+/// WS-2 adds the watchdog argument parser/process handle test in its own
+/// crate. This bridge pins the argument form but cannot call the private API
+/// from `opentaskbar-core`; it stays ignored until the orchestrator wires a
+/// dev-dependency or moves the bridge next to the implementation.
+#[test]
+#[ignore = "WS-2: watchdog arg parser and spawned process are private to opentaskbar-shell"]
+fn production_watchdog_accepts_the_reference_arguments() {
+    let args = parse_watchdog_args(&[
+        "--heartbeat-seconds=5",
+        "--journal=C:\\Temp\\journal.txt",
+        "--restore-timeout-ms=3000",
+    ])
+    .expect("WS-2 parser must accept these arguments");
+    assert_eq!(args.heartbeat_seconds, 5);
+    assert_eq!(args.restore_timeout_ms, 3000);
+    common::assert_source_has(
+        "crates/opentaskbar-shell/src/watchdog.rs",
+        &["--watchdog={pid}:{token}"],
+    );
+}
+
+/// The C# flyout journal uses `START generation=… seq=…`, while the current
+/// Rust shell journal uses `handle pid left top` / tag lines. WS-2/WS-3 must
+/// align the wire format before this bridge can run.
+#[test]
+#[ignore = "WS-2/WS-3: Rust flyout journal wire format must match the C# generation/seq format"]
+fn production_flyout_journal_accepts_generation_and_seq() {
+    common::assert_source_has(
+        "crates/opentaskbar-shell/src/flyout_journal.rs",
+        &["generation", "seq"],
+    );
+    for line in [
+        "START generation=42 seq=7",
+        "SEARCH generation=1 seq=2",
+        "CONTROL_CENTER generation=9 seq=3",
+    ] {
+        assert!(parse_journal_line(line).is_some(), "{line} must parse");
+    }
 }

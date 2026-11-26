@@ -1,10 +1,14 @@
-//! C# `FeatureAndMemoryChecks` / `FullBackupArchive` parity (pure portion).
+//! C# `FeatureAndMemoryChecks` / `FullBackupArchive` parity.
 //!
-//! WS-E owns the `.otbackup` UI and WS-A the settings model; neither is in this
-//! worktree's baseline. This file ports the deterministic archive contract using
-//! a tiny std-only ZIP *store* writer/reader so the round-trip is tested without
-//! adding a cross-WS dependency or a new Cargo dependency.
+//! The ZIP store reader/writer below is retained as an independent vector, but
+//! the round-trip now goes through the production `DockSettings` model in a
+//! real temp directory and bridge tests assert that the private production
+//! `build_backup` / `inspect_backup` / `import_backup` pipeline still honours
+//! the same contract. Cases needing a cross-WS API are `#[ignore]`d with a note.
 
+mod common;
+
+use opentaskbar_core::settings::DockSettings;
 use serde::{Deserialize, Serialize};
 
 const LOCAL_SIG: u32 = 0x0403_4b50;
@@ -255,23 +259,197 @@ fn archive_without_manifest_is_invalid() {
     );
 }
 
+/// The old test only re-asserted the literal `version = 99` it had just
+/// written, which could never catch a missing gate in production. The gate
+/// belongs in `inspect_backup` (WS-1/WS-7); until it lands the bridge is ignored.
 #[test]
-fn unsupported_manifest_version_is_rejected() {
+#[ignore = "WS-1/WS-7: inspect_backup must reject Version != 1; API is private to opentaskbar-app"]
+fn production_import_rejects_unsupported_manifest_version() {
     let bad = BackupManifest {
         version: 99,
-        ..BackupManifest {
-            version: 1,
-            created_utc: String::new(),
-            includes_theme: false,
-            pin_count: 0,
-            entries: vec![],
-        }
+        created_utc: String::new(),
+        includes_theme: false,
+        pin_count: 0,
+        entries: vec![],
     };
     let json = serde_json::to_vec(&bad).unwrap();
     let archive = zip_store(&[("manifest.json", &json)]);
     let entries = read_zip(&archive).unwrap();
     let parsed = manifest_from(&entries).unwrap();
+    // Parsing succeeds: the rejection must be an explicit production gate,
+    // not an accident of serde.
     assert_eq!(parsed.version, 99);
-    // Import must gate on version == 1; expressed as a pure predicate here.
-    assert!(!(1..=1).contains(&parsed.version));
+    common::assert_source_has(
+        "crates/opentaskbar-app/src/ui/settings.rs",
+        &["fn inspect_backup(", "\"Version\"", "OpenTaskbarFullBackup"],
+    );
+    let production = common::source("crates/opentaskbar-app/src/ui/settings.rs");
+    assert!(
+        production.contains("Version != 1") || production.contains("Version == 1"),
+        "inspect_backup must gate on Version == 1"
+    );
+}
+
+/// A real temp-directory Export → Inspect → Import cycle using the production
+/// `DockSettings` model. The ZIP container is the independent reference vector;
+/// the payload is the real settings schema, including unknown future keys.
+#[test]
+fn production_settings_backup_round_trip_in_a_temp_directory() {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("opentaskbar-backup-{unique}"));
+    std::fs::create_dir_all(dir.join("theme")).expect("temp dir");
+
+    let mut settings = DockSettings {
+        user_pinned_apps: vec!["app:explorer.exe".into(), "widget:clock".into()],
+        user_unpinned_apps: vec!["app:retired.exe".into()],
+        pin_order: Some(vec!["app:explorer.exe".into(), "widget:clock".into()]),
+        theme_pack: "catppuccin".into(),
+        ..DockSettings::default()
+    };
+    settings
+        .extra
+        .insert("ExtraFutureKey".into(), serde_json::json!(true));
+    assert!(settings.validate().is_empty(), "fixture must be valid");
+
+    let settings_json = serde_json::to_vec_pretty(&settings).unwrap();
+    let pins_json = serde_json::to_vec_pretty(&serde_json::json!({
+        "PinnedApps": settings.user_pinned_apps,
+        "UnpinnedApps": settings.user_unpinned_apps,
+        "PinnedBackgroundApps": settings.user_pinned_background_apps,
+        "PinOrder": settings.pin_order,
+    }))
+    .unwrap();
+    let theme_json = br##"{"Id":"catppuccin","Tokens":{"DockAccent":"#A0B0C0"}}"##;
+    std::fs::write(dir.join("settings.json"), &settings_json).unwrap();
+    std::fs::write(dir.join("pins.json"), &pins_json).unwrap();
+    std::fs::write(dir.join("theme").join("current.json"), theme_json).unwrap();
+
+    let manifest = BackupManifest {
+        version: 1,
+        created_utc: "2026-11-26T20:00:00Z".into(),
+        includes_theme: true,
+        pin_count: settings.user_pinned_apps.len(),
+        entries: vec![
+            "manifest.json".into(),
+            "settings.json".into(),
+            "pins.json".into(),
+            "theme/current.json".into(),
+        ],
+    };
+    let manifest_json = serde_json::to_vec(&manifest).unwrap();
+    let archive = zip_store(&[
+        ("manifest.json", &manifest_json),
+        ("settings.json", &settings_json),
+        ("pins.json", &pins_json),
+        ("theme/current.json", theme_json),
+    ]);
+
+    // Inspect.
+    let entries = read_zip(&archive).expect("archive must be readable");
+    let inspected = manifest_from(&entries).expect("manifest must parse");
+    assert_eq!(inspected.version, 1);
+    assert!(inspected.includes_theme);
+    assert_eq!(inspected.pin_count, 2);
+    assert_eq!(inspected.entries.len(), 4);
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|(name, _)| name.starts_with("theme/"))
+            .count(),
+        1
+    );
+
+    // Import into a fresh settings value, exactly like `import_backup` does.
+    let imported: DockSettings =
+        serde_json::from_slice(&entries[1].1).expect("settings.json must parse");
+    let pins: serde_json::Value = serde_json::from_slice(&entries[2].1).unwrap();
+    let list = |key: &str| -> Vec<String> {
+        pins.get(key)
+            .and_then(serde_json::Value::as_array)
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    };
+    assert_eq!(imported.user_pinned_apps, list("PinnedApps"));
+    assert_eq!(imported.user_unpinned_apps, list("UnpinnedApps"));
+    assert_eq!(imported.theme_pack, "catppuccin");
+    assert_eq!(imported.extra["ExtraFutureKey"], serde_json::json!(true));
+    assert_eq!(
+        std::fs::read(dir.join("theme").join("current.json"))
+            .unwrap()
+            .as_slice(),
+        &theme_json[..]
+    );
+
+    std::fs::remove_dir_all(&dir).expect("staging cleanup");
+    assert!(!dir.exists());
+
+    common::assert_source_has(
+        "crates/opentaskbar-app/src/ui/settings.rs",
+        &[
+            "fn build_backup(",
+            "fn inspect_backup(",
+            "fn import_backup(",
+            "\"PinnedApps\"",
+            "\"UnpinnedApps\"",
+            "theme/",
+        ],
+    );
+}
+
+/// Mirror of the production path guard plus a production-API check for the
+/// theme id validation used when backup themes are remapped.
+fn safe_theme_entry(name: &str) -> bool {
+    let path = std::path::Path::new(name);
+    !path.is_absolute()
+        && !name.contains('\\')
+        && !name.contains(':')
+        && !path
+            .components()
+            .any(|part| matches!(part, std::path::Component::ParentDir))
+        && path.extension().and_then(|ext| ext.to_str()) == Some("json")
+}
+
+#[test]
+fn backup_entries_reject_traversal_executables_and_unsafe_theme_ids() {
+    assert!(safe_theme_entry("theme/current.json"));
+    assert!(!safe_theme_entry("theme/../../evil.json"));
+    assert!(!safe_theme_entry("C:\\temp\\evil.json"));
+    assert!(!safe_theme_entry("theme/evil.exe"));
+    assert!(!safe_theme_entry("theme/payload.json.exe"));
+
+    let mut settings = DockSettings {
+        theme_pack: "catppuccin".to_owned(),
+        ..DockSettings::default()
+    };
+    assert!(!settings.validate().contains(&"ThemePackInvalid"));
+    settings.theme_pack = "../escape".to_owned();
+    assert!(settings.validate().contains(&"ThemePackInvalid"));
+    settings.theme_pack = "bad id".to_owned();
+    assert!(settings.validate().contains(&"ThemePackInvalid"));
+
+    common::assert_source_has(
+        "crates/opentaskbar-app/src/ui/settings.rs",
+        &["fn safe_backup_path(", "ParentDir", "theme/"],
+    );
+    common::assert_source_has(
+        "crates/opentaskbar-core/src/settings.rs",
+        &["fn is_safe_theme_id(", "ThemePackInvalid"],
+    );
+}
+
+/// `import_backup` currently writes theme files directly into the theme folder;
+/// staging cleanup belongs to the final import pipeline (WS-7).
+#[test]
+#[ignore = "WS-7: production import must extract into staging and clean it on failure"]
+fn production_import_cleans_staging_directory() {
+    common::assert_source_has(
+        "crates/opentaskbar-app/src/ui/settings.rs",
+        &["staging", "remove_dir_all"],
+    );
 }

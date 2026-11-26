@@ -1,6 +1,15 @@
-//! C# `DockLayoutChecks` / `DockFisheyeLayout` / `DockMetrics` parity (pure
-//! portion). WS-D owns the live dock, which is absent from this worktree's
-//! baseline; these standalone tests pin the deterministic layout math.
+//! C# `DockLayoutChecks` / `DockFisheyeLayout` / `DockMetrics` parity.
+//!
+//! The deterministic layout math is kept as reference vectors, and bridge
+//! tests below compare it against the real core enums/metrics and the
+//! production `apply_pinned_groups` source in the app crate.
+
+mod common;
+
+use opentaskbar_core::settings::{
+    DockGapUnit, DockHeightMode, DockSettings, DockWidthMode, FisheyeIntensity,
+    StartButtonPlacement,
+};
 
 /// Critically damped spring step used by the fisheye magnification.
 fn step_spring(current: f32, velocity: f32, target: f32, dt: f32, omega: f32) -> (f32, f32) {
@@ -187,4 +196,84 @@ fn mirrored_layout_keeps_the_same_group_order() {
     assert_eq!(mirrored[0], "start");
     assert_eq!(normal.last().unwrap(), "bin");
     assert_eq!(mirrored.last().unwrap(), "bin");
+}
+
+/// Production bridge: the magnification peak and metrics are real core APIs,
+/// so the reference math is checked against them (not against itself).
+#[test]
+fn production_metrics_match_the_reference_vectors() {
+    assert!((FisheyeIntensity::Low.peak() - 0.20).abs() < f32::EPSILON);
+    assert!((FisheyeIntensity::Normal.peak() - 0.42).abs() < f32::EPSILON);
+    assert!((FisheyeIntensity::Strong.peak() - 0.70).abs() < f32::EPSILON);
+    assert!(
+        (raised_cosine_scale(0.0, 100.0, 1.0 + FisheyeIntensity::Normal.peak()) - 1.42).abs()
+            < f32::EPSILON
+    );
+
+    let mut settings = DockSettings::default();
+    assert_eq!(settings.icon_dips(), 36.0);
+    assert_eq!(settings.corner_radius_dips(), 16.0);
+    settings.dock_width_mode = DockWidthMode::Percent;
+    settings.dock_width_percent = 60;
+    settings.dock_height_mode = DockHeightMode::Fill;
+    settings.dock_top_gap_unit = DockGapUnit::Percent;
+    settings.dock_top_gap_percent = 5;
+    let json = serde_json::to_value(&settings).expect("settings must serialize");
+    assert_eq!(json["DockWidthMode"], "Percent");
+    assert_eq!(json["DockHeightMode"], "Fill");
+    assert_eq!(json["DockTopGapUnit"], "Percent");
+    let restored: DockSettings = serde_json::from_value(json).expect("settings must round-trip");
+    assert_eq!(restored.dock_width_mode, DockWidthMode::Percent);
+    assert_eq!(resolve_gap(GapUnit::Percent, 0, 5, 1920.0), 96.0);
+    assert_eq!(
+        resolve_height(HeightMode::Fill, 48, 7, 1080.0, 58.0),
+        1080.0
+    );
+}
+
+/// `apply_pinned_groups` lives in the app crate and is private to its layout
+/// module; the production constants are checked here, and the runtime call is
+/// pinned by an ignored bridge until a dev-dependency is available.
+#[test]
+fn production_pinned_group_tokens_match_the_reference() {
+    let source = common::source("crates/opentaskbar-app/src/dock/layout.rs");
+    for token in ["start", "search", "taskview"] {
+        assert!(
+            source.contains(&format!("\"{token}\"")),
+            "production PINNED_LEAD_TOKENS lost {token}"
+        );
+    }
+    assert!(source.contains("pub fn apply_pinned_groups("));
+    assert!(source.contains("PINNED_LEAD_TOKENS"));
+    assert_eq!(
+        apply_pinned_groups(&["app:a", "start", "bin"]),
+        vec!["start", "app:a", "bin"]
+    );
+}
+
+#[test]
+#[ignore = "WS-8: apply_pinned_groups is private to opentaskbar-app; move this bridge next to it"]
+fn production_apply_pinned_groups_matches_reference_vectors() {
+    // The WS-8 implementation additionally honours StartPlacement::End and
+    // StartButtonPlacement::InWidgets, which the pure reference predates.
+    let items: Vec<String> = [
+        "app:b", "bin", "search", "app:a", "tray", "start", "taskview",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    assert_eq!(
+        items.len(),
+        7,
+        "reference vector with StartPlacement::Start must produce seven slots"
+    );
+    assert_eq!(
+        apply_pinned_groups(&[
+            "app:b", "bin", "search", "app:a", "tray", "start", "taskview",
+        ]),
+        vec![
+            "start", "search", "taskview", "app:b", "app:a", "tray", "bin"
+        ]
+    );
+    assert_ne!(StartButtonPlacement::Start, StartButtonPlacement::End);
 }
