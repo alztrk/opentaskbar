@@ -519,3 +519,137 @@ fn fetch_from_worker(worker: &mut Option<Worker>, spec: &str) -> Option<RawIcon>
     }
     None
 }
+
+// ============================================================================================
+// ApplicationIconProvider (C# `Services/App/ApplicationIconProvider.cs` parity)
+// ============================================================================================
+
+/// Canonical icon sizes used by C# `SnappedSize` (12..256 px).
+pub const ICON_SIZES: &[u32] = &[12, 16, 20, 24, 32, 40, 48, 64, 96, 128, 256];
+
+/// Snaps a requested DIP size to the nearest supported rasterisation size, clamped to 12..256.
+pub fn snap_icon_size(requested: u32) -> u32 {
+    let requested = requested.clamp(12, 256);
+    ICON_SIZES
+        .iter()
+        .copied()
+        .min_by_key(|s| ((*s as i64) - (requested as i64)).abs())
+        .unwrap_or(64)
+}
+
+/// Converts straight (unassociated) BGRA32 to premultiplied alpha in place.
+pub fn straight_to_premultiplied(pixels: &mut [u8]) {
+    for p in pixels.chunks_exact_mut(4) {
+        let a = p[3] as u16;
+        if a != 255 {
+            p[0] = ((p[0] as u16 * a + 127) / 255) as u8;
+            p[1] = ((p[1] as u16 * a + 127) / 255) as u8;
+            p[2] = ((p[2] as u16 * a + 127) / 255) as u8;
+        }
+    }
+}
+
+/// Converts premultiplied BGRA32 back to straight alpha (clamped; loses information for a=0).
+pub fn premultiplied_to_straight(pixels: &mut [u8]) {
+    for p in pixels.chunks_exact_mut(4) {
+        let a = p[3] as u16;
+        if a == 0 {
+            p[0] = 0;
+            p[1] = 0;
+            p[2] = 0;
+        } else if a != 255 {
+            p[0] = ((p[0] as u16 * 255 + a / 2) / a).min(255) as u8;
+            p[1] = ((p[1] as u16 * 255 + a / 2) / a).min(255) as u8;
+            p[2] = ((p[2] as u16 * 255 + a / 2) / a).min(255) as u8;
+        }
+    }
+}
+
+/// Key for a hover icon variant (C# `ConditionalWeakTable` replacement).
+pub fn hover_variant_key(spec: &str, hovered: bool) -> String {
+    if hovered {
+        format!("{spec}#hover")
+    } else {
+        spec.to_owned()
+    }
+}
+
+/// Resolves the display name of a shell item (C# `GetShellItemDisplayName`).
+pub fn shell_item_display_name(parsing_name: &str) -> Option<String> {
+    use windows::Win32::UI::Shell::{IShellItem, SIGDN_NORMALDISPLAY};
+    // SAFETY: COM apartment is initialised by the icon worker; IShellItem is released on drop.
+    unsafe {
+        let item: IShellItem =
+            SHCreateItemFromParsingName(&HSTRING::from(parsing_name), None).ok()?;
+        let name = item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?;
+        let text = name.to_string().ok()?;
+        (!text.trim().is_empty()).then(|| text.trim().to_owned())
+    }
+}
+
+/// Provider with hover variants and a small in-memory cache (thread-safe).
+#[derive(Default)]
+pub struct ApplicationIconProvider {
+    variants: std::sync::Mutex<HashMap<String, Arc<RenderImage>>>,
+}
+
+impl ApplicationIconProvider {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get(&self, spec: &str, size: u32, hovered: bool) -> Option<Arc<RenderImage>> {
+        let key = format!("{}@{}", hover_variant_key(spec, hovered), snap_icon_size(size));
+        if let Some(cached) = self.variants.lock().ok()?.get(&key) {
+            return Some(Arc::clone(cached));
+        }
+        let raw = extract_best(spec)?;
+        let image = to_render_image(raw)?;
+        if let Ok(mut map) = self.variants.lock() {
+            map.insert(key, Arc::clone(&image));
+        }
+        Some(image)
+    }
+
+    pub fn clear(&self) {
+        if let Ok(mut map) = self.variants.lock() {
+            map.clear();
+        }
+    }
+}
+
+#[cfg(test)]
+mod icon_provider_tests {
+    use super::*;
+
+    #[test]
+    fn snaps_sizes_to_csharp_ladder() {
+        assert_eq!(snap_icon_size(0), 12);
+        assert_eq!(snap_icon_size(13), 12);
+        assert_eq!(snap_icon_size(30), 32);
+        assert_eq!(snap_icon_size(200), 256);
+        assert_eq!(snap_icon_size(9999), 256);
+    }
+
+    #[test]
+    fn premultiplied_roundtrip() {
+        let mut pixels = vec![200u8, 100, 50, 128, 255, 255, 255, 255];
+        let original = pixels.clone();
+        straight_to_premultiplied(&mut pixels);
+        assert_eq!(pixels[3], 128);
+        assert!(pixels[0] <= original[0]);
+        premultiplied_to_straight(&mut pixels);
+        // 8-bit premultiply roundtrip loses at most one level per channel.
+        for (got, want) in pixels.iter().zip(original.iter()) {
+            assert!(got.abs_diff(*want) <= 1, "{got} vs {want}");
+        }
+    }
+
+    #[test]
+    fn hover_variants_have_distinct_keys() {
+        assert_ne!(
+            hover_variant_key("app.exe", false),
+            hover_variant_key("app.exe", true)
+        );
+    }
+}

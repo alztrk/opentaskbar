@@ -1950,3 +1950,1137 @@ pub fn ai_provider_detected(provider_id: &str) -> bool {
         _ => false,
     }
 }
+
+// ============================================================================================
+// Full AI detail (C# `AiUsageService.Parse` parity — used by WS-C's AI flyout).
+// ============================================================================================
+
+/// Pay-as-you-go spend block (C# `AiUsageSpend`).
+#[derive(Clone, Debug, Default)]
+pub struct AiSpend {
+    pub used: f64,
+    pub limit: Option<f64>,
+    pub currency: String,
+    pub used_01: Option<f32>,
+}
+
+/// One non-zero Claude weekly surface share (C# `AiUsageShare`).
+#[derive(Clone, Debug, Default)]
+pub struct AiUsageShare {
+    pub name: String,
+    pub used: f32,
+}
+
+/// Complete parsed usage for a single provider (C# `AiUsageReport` flattened for WS-C).
+#[derive(Clone, Debug, Default)]
+pub struct AiFullDetail {
+    pub provider_id: String,
+    pub plan: Option<String>,
+    /// Primary window label (`5h`, `7d`, `30d`, `Monthly`, `Balance`, ...).
+    pub label: String,
+    /// Primary window utilisation in `[0,1]`.
+    pub used: f32,
+    pub reset_text: String,
+    pub reset_unix_ms: Option<i64>,
+    pub spend: Option<AiSpend>,
+    pub breakdown: Vec<AiUsageShare>,
+    pub limit_reached: bool,
+    /// `Retry-After` from a 429 response, in seconds.
+    pub retry_after_secs: Option<u32>,
+    pub credits: Option<f64>,
+    pub unlimited_credits: bool,
+    pub error: Option<String>,
+}
+
+fn full_obj<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    v.get(key).filter(|x| x.is_object())
+}
+
+fn full_arr<'a>(v: &'a serde_json::Value, key: &str) -> Option<&'a [serde_json::Value]> {
+    v.get(key).and_then(|x| x.as_array()).map(|a| a.as_slice())
+}
+
+fn full_str(v: &serde_json::Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn full_num(v: &serde_json::Value, key: &str) -> Option<f64> {
+    v.get(key).and_then(|x| {
+        if let Some(n) = x.as_f64() {
+            Some(n)
+        } else {
+            x.as_str()?.trim().parse::<f64>().ok()
+        }
+    })
+}
+
+fn full_bool(v: &serde_json::Value, key: &str) -> bool {
+    v.get(key).and_then(|x| x.as_bool()).unwrap_or(false)
+}
+
+/// Accepts both `0..1` and `0..100` encodings; clamps to `[0,1]`.
+fn full_pct(v: &serde_json::Value, keys: &[&str]) -> Option<f32> {
+    for k in keys {
+        if let Some(n) = full_num(v, k) {
+            if !n.is_finite() {
+                continue;
+            }
+            let ratio = if n > 1.0 { n / 100.0 } else { n };
+            return Some((ratio as f32).clamp(0.0, 1.0));
+        }
+    }
+    None
+}
+
+fn full_unix_ms(v: &serde_json::Value, keys: &[&str]) -> Option<i64> {
+    const MAX_MS: i64 = 253_402_300_799_999;
+    for k in keys {
+        if let Some(n) = full_num(v, k) {
+            let ms = if n > 1e12 { n } else { n * 1000.0 };
+            if ms > 0.0 && ms <= MAX_MS as f64 {
+                return Some(ms as i64);
+            }
+        }
+    }
+    None
+}
+
+fn full_reset_from_ms(ms: Option<i64>) -> String {
+    ms.map(|_| {
+        // Keep a compact, locale-neutral string: the flyout only needs the date/time hint.
+        let secs = ms.unwrap_or(0) / 1000;
+        let days = secs.div_euclid(86_400);
+        let rem = secs.rem_euclid(86_400);
+        let (month, day) = civil_from_days(days);
+        let (h, m) = (rem / 3600, (rem % 3600) / 60);
+        format!("{month:02}-{day:02} {h:02}:{m:02}")
+    })
+    .unwrap_or_else(|| "—".to_owned())
+}
+
+/// Howard Hinnant's civil-from-days algorithm (days since 1970-01-01 -> (month, day)).
+fn civil_from_days(z: i64) -> (i32, i32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    (month as i32, day as i32)
+}
+
+fn full_spend(root: &serde_json::Value) -> Option<AiSpend> {
+    let spend = full_obj(root, "spend");
+    let enabled = spend
+        .and_then(|s| full_obj(s, "enabled").or_else(|| full_obj(root, "extra_usage")))
+        .is_some()
+        || spend.is_some_and(|s| full_bool(s, "enabled"))
+        || full_obj(root, "extra_usage").is_some_and(|e| full_bool(e, "is_enabled"));
+    let spend = spend?;
+    if !enabled {
+        return None;
+    }
+    let money = |key: &str| -> Option<(f64, String)> {
+        let m = full_obj(spend, key)?;
+        let minor = full_num(m, "amount_minor")?;
+        let exponent = full_num(m, "exponent").unwrap_or(2.0).clamp(0.0, 6.0) as i32;
+        let currency = full_str(m, "currency")
+            .filter(|c| c.len() == 3)
+            .unwrap_or_else(|| "USD".to_owned());
+        Some((minor / 10f64.powi(exponent), currency))
+    };
+    let (used, currency) = money("used")?;
+    let (limit, _) = money("limit").unzip();
+    Some(AiSpend {
+        used,
+        limit,
+        currency,
+        used_01: full_obj(spend, "percent").and_then(|p| {
+            full_num(p, "used")
+                .or_else(|| full_num(p, "value"))
+                .or_else(|| p.as_f64())
+        })
+        .map(|n| ((if n > 1.0 { n / 100.0 } else { n }) as f32).clamp(0.0, 1.0)),
+    })
+}
+
+fn full_plan_label(plan: Option<String>) -> Option<String> {
+    let plan = plan?;
+    let words: Vec<&str> = plan.split('_').filter(|w| !w.is_empty()).collect();
+    if words.len() > 2 && words[0] == "default" && words[1] == "claude" {
+        let tail = &words[2..];
+        let title = tail
+            .iter()
+            .map(|w| {
+                let mut c = w.chars();
+                match c.next() {
+                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(title)
+    } else {
+        Some(plan)
+    }
+}
+
+fn full_antigravity_pool(model: &str) -> Option<&'static str> {
+    let m = model.to_ascii_lowercase();
+    if m.contains("gemini") {
+        if m.contains("flash") {
+            Some("Gemini Flash")
+        } else {
+            Some("Gemini Pro")
+        }
+    } else if m.contains("claude") {
+        Some("Claude")
+    } else if m.contains("gpt") || m.contains("oss") {
+        Some("GPT-OSS")
+    } else {
+        None
+    }
+}
+
+/// Pure JSON -> `AiFullDetail` parser shared by live fetches and tests.
+///
+/// Covers all 8 providers, including Claude spend/breakdown, Antigravity pool/group,
+/// Codex credits and Cursor plan labels. Returns `None` for malformed or empty payloads.
+pub fn parse_full_detail(json: &str, provider_id: &str) -> Option<AiFullDetail> {
+    let root: serde_json::Value = serde_json::from_str(json).ok()?;
+    if !root.is_object() {
+        return None;
+    }
+    let provider = provider_id.to_ascii_lowercase();
+    let mut out = AiFullDetail {
+        provider_id: provider_id.to_owned(),
+        ..Default::default()
+    };
+
+    match provider.as_str() {
+        "aiusage_claude" | "claude" => {
+            let mut best: Option<(f32, String, Option<i64>)> = None;
+            for key in ["five_hour", "seven_day"] {
+                if let Some(w) = full_obj(&root, key)
+                    && let Some(used) = full_pct(w, &["utilization", "used_percent", "used"])
+                {
+                    let ms = parse_reset_ms(full_str(w, "resets_at").as_deref());
+                    let candidate = (used, key.to_owned(), ms);
+                    if best.as_ref().is_none_or(|b| candidate.0 >= b.0) {
+                        best = Some(candidate);
+                    }
+                }
+            }
+            if best.is_none() {
+                if let Some(used) = full_pct(&root, &["utilization", "used_percent", "used"]) {
+                    best = Some((used, "5h".to_owned(), None));
+                }
+            }
+            let (used, label, ms) = best?;
+            out.used = used;
+            out.label = if label == "five_hour" {
+                "5h".to_owned()
+            } else {
+                "7d".to_owned()
+            };
+            out.reset_unix_ms = ms;
+            out.reset_text = full_reset_from_ms(ms);
+            out.plan = full_plan_label(
+                full_str(&root, "plan")
+                    .or_else(|| full_str(&root, "subscriptionType"))
+                    .or_else(|| full_str(&root, "rateLimitTier")),
+            );
+            out.spend = full_spend(&root);
+            if let Some(rows) = full_obj(&root, "seven_day_breakdown")
+                .and_then(|b| full_arr(b, "rows"))
+            {
+                for row in rows {
+                    if let (Some(name), Some(used)) = (
+                        full_str(row, "display_name"),
+                        full_pct(row, &["percent_of_limit", "used"]),
+                    ) && (used * 100.0).round() >= 1.0
+                    {
+                        out.breakdown.push(AiUsageShare { name, used });
+                    }
+                }
+            }
+            out.limit_reached = used >= 1.0 || full_bool(&root, "limit_reached");
+            out.credits = full_num(&root, "credits");
+        }
+        "aiusage_codex" | "codex" => {
+            let rl = full_obj(&root, "rate_limit").unwrap_or(&root);
+            let mut best: Option<(f32, String, Option<i64>)> = None;
+            for (key, label) in [("primary_window", "5h"), ("secondary_window", "7d")] {
+                if let Some(w) = full_obj(rl, key)
+                    && let Some(used) = full_pct(w, &["used_percent", "utilization", "used"])
+                {
+                    let ms = full_unix_ms(w, &["reset_at", "resets_at", "resetTime"]);
+                    let ms = ms.or_else(|| {
+                        full_num(w, "reset_after_seconds").map(|s| now_unix_ms() + (s * 1000.0) as i64)
+                    });
+                    let candidate = (used, label.to_owned(), ms);
+                    if best.as_ref().is_none_or(|b| candidate.0 >= b.0) {
+                        best = Some(candidate);
+                    }
+                }
+            }
+            let (used, label, ms) = best?;
+            out.used = used;
+            out.label = label;
+            out.reset_unix_ms = ms;
+            out.reset_text = full_reset_from_ms(ms);
+            out.plan = full_plan_label(
+                full_str(&root, "plan_type")
+                    .or_else(|| full_str(&root, "plan"))
+                    .or_else(|| full_str(&root, "tier")),
+            );
+            out.limit_reached = full_bool(rl, "limit_reached")
+                || rl.get("allowed").and_then(|v| v.as_bool()) == Some(false)
+                || used >= 1.0;
+            if let Some(credits) = full_obj(&root, "credits") {
+                out.unlimited_credits = full_bool(credits, "unlimited");
+                if !out.unlimited_credits {
+                    out.credits = full_num(credits, "balance");
+                }
+            }
+        }
+        "aiusage_antigravity" | "antigravity" => {
+            let mut best: Option<(f32, String, Option<i64>)> = None;
+            let groups = full_obj(&root, "command")
+                .and_then(|c| full_obj(c, "data"))
+                .and_then(|d| full_arr(d, "groups"))
+                .or_else(|| full_obj(&root, "quotaSummary").and_then(|q| full_arr(q, "groups")))
+                .or_else(|| full_arr(&root, "groups"));
+            if let Some(groups) = groups {
+                for group in groups {
+                    let group_name = full_str(group, "name")
+                        .or_else(|| full_str(group, "displayName"))
+                        .unwrap_or_default();
+                    let pool = full_antigravity_pool(&group_name).unwrap_or("Gemini Pro");
+                    if let Some(buckets) = full_arr(group, "buckets") {
+                        for bucket in buckets {
+                            let remaining = full_num(bucket, "remaining_fraction")
+                                .or_else(|| full_num(bucket, "remainingFraction"));
+                            let ms = parse_reset_ms(
+                                full_str(bucket, "reset_time")
+                                    .or_else(|| full_str(bucket, "resetTime"))
+                                    .as_deref(),
+                            );
+                            let used = match remaining {
+                                Some(f) if f.is_finite() => (1.0 - f).clamp(0.0, 1.0) as f32,
+                                None if ms.is_some() => 1.0,
+                                _ => continue,
+                            };
+                            let id = full_str(bucket, "window")
+                                .or_else(|| full_str(bucket, "refreshWindowLabel"))
+                                .or_else(|| full_str(bucket, "id"))
+                                .unwrap_or_default();
+                            let label = if id.eq_ignore_ascii_case("5h") || id.ends_with("-5h") {
+                                "5h"
+                            } else {
+                                "7d"
+                            };
+                            let name = if label == "5h" {
+                                format!("{pool} · 5h")
+                            } else {
+                                pool.to_owned()
+                            };
+                            let candidate = (used, name, ms);
+                            if best.as_ref().is_none_or(|b| candidate.0 >= b.0) {
+                                best = Some(candidate);
+                            }
+                        }
+                    }
+                }
+            }
+            if best.is_none() {
+                let mut pools: Vec<(String, f32, Option<i64>)> = Vec::new();
+                if let Some(buckets) = full_arr(&root, "buckets") {
+                    for bucket in buckets {
+                        if let Some(id) = full_str(bucket, "modelId")
+                            && let Some(pool) = full_antigravity_pool(&id)
+                        {
+                            let remaining = full_num(bucket, "remainingFraction");
+                            let ms = parse_reset_ms(full_str(bucket, "resetTime").as_deref());
+                            let used = match remaining {
+                                Some(f) if f.is_finite() => (1.0 - f).clamp(0.0, 1.0) as f32,
+                                None if ms.is_some() => 1.0,
+                                _ => continue,
+                            };
+                            if let Some(slot) = pools.iter_mut().find(|p| p.0 == pool) {
+                                if used > slot.1 {
+                                    *slot = (pool.to_owned(), used, ms.or(slot.2));
+                                }
+                            } else {
+                                pools.push((pool.to_owned(), used, ms));
+                            }
+                        }
+                    }
+                }
+                for (name, used, ms) in pools {
+                    let candidate = (used, name, ms);
+                    if best.as_ref().is_none_or(|b| candidate.0 >= b.0) {
+                        best = Some(candidate);
+                    }
+                }
+            }
+            let (used, label, ms) = best?;
+            out.used = used;
+            out.label = if label.to_ascii_lowercase().contains("5h") {
+                "5h".to_owned()
+            } else {
+                "7d".to_owned()
+            };
+            if let Some((group, _)) = label.split_once(" · ") {
+                out.breakdown.push(AiUsageShare {
+                    name: group.to_owned(),
+                    used,
+                });
+            }
+            out.reset_unix_ms = ms;
+            out.reset_text = full_reset_from_ms(ms);
+            out.plan = full_plan_label(
+                full_str(&root, "plan")
+                    .or_else(|| full_str(&root, "tier")),
+            );
+            out.limit_reached = used >= 1.0;
+        }
+        "aiusage_opencode" | "opencode" => {
+            let mut best: Option<(f32, String, Option<i64>)> = None;
+            for (keys, label) in [
+                (&["rolling5h", "rollingUsage", "five_hour"][..], "1h"),
+                (&["weekly", "weeklyUsage", "seven_day"][..], "7d"),
+                (&["monthly", "monthlyUsage", "thirty_day"][..], "30d"),
+            ] {
+                for k in keys {
+                    if let Some(w) = full_obj(&root, k)
+                        && let Some(used) = full_pct(
+                            w,
+                            &["usagePercent", "used_percent", "utilization", "percent"],
+                        )
+                    {
+                        let ms = full_unix_ms(w, &["resetsAt", "reset_at", "resetTime"])
+                            .or_else(|| {
+                                full_num(w, "resetInSec").map(|s| now_unix_ms() + (s * 1000.0) as i64)
+                            });
+                        let candidate = (used, label.to_owned(), ms);
+                        if best.as_ref().is_none_or(|b| candidate.0 >= b.0) {
+                            best = Some(candidate);
+                        }
+                        break;
+                    }
+                }
+            }
+            let (used, label, ms) = best?;
+            out.used = used;
+            out.label = label;
+            out.reset_unix_ms = ms;
+            out.reset_text = full_reset_from_ms(ms);
+            out.plan = full_plan_label(
+                full_str(&root, "plan")
+                    .or_else(|| full_str(&root, "plan_type"))
+                    .or_else(|| full_str(&root, "tier")),
+            );
+            out.limit_reached = full_bool(&root, "limit_reached")
+                || full_bool(&root, "limitReached")
+                || used >= 1.0;
+        }
+        "aiusage_copilot" | "copilot" => {
+            let premium = full_obj(&root, "quota_snapshots")
+                .and_then(|q| full_obj(q, "premium_interactions"));
+            let used = premium
+                .and_then(|p| full_num(p, "percent_remaining"))
+                .map(|rem| ((100.0 - rem) / 100.0).clamp(0.0, 1.0) as f32)?;
+            out.used = used;
+            out.label = "Monthly".to_owned();
+            let ms = parse_reset_ms(full_str(&root, "quota_reset_date_utc").as_deref());
+            out.reset_unix_ms = ms;
+            out.reset_text = full_reset_from_ms(ms);
+            out.plan = full_plan_label(full_str(&root, "copilot_plan"));
+            out.limit_reached = used >= 1.0;
+        }
+        "aiusage_deepseek" | "deepseek" => {
+            let infos = full_arr(&root, "balance_infos")?;
+            let info = infos.first()?;
+            let balance = full_num(info, "total_balance")
+                .or_else(|| full_str(info, "total_balance")?.parse::<f64>().ok())?;
+            let currency = full_str(info, "currency").unwrap_or_else(|| "USD".to_owned());
+            out.used = if balance <= 0.0 { 1.0 } else { 0.0 };
+            out.label = "Balance".to_owned();
+            out.credits = Some(balance);
+            out.plan = Some(format!("{balance:.2} {currency}"));
+            out.reset_text = "—".to_owned();
+            out.limit_reached = !full_bool(&root, "is_available") || balance <= 0.0;
+        }
+        "aiusage_openrouter" | "openrouter" => {
+            let data = full_obj(&root, "data")?;
+            let total = full_num(data, "total_credits")?;
+            let used_credits = full_num(data, "total_usage").unwrap_or(0.0);
+            let remaining = (total - used_credits).max(0.0);
+            out.used = if total > 0.0 {
+                (used_credits / total).clamp(0.0, 1.0) as f32
+            } else {
+                0.0
+            };
+            out.label = "Credits".to_owned();
+            out.credits = Some(remaining);
+            out.plan = Some(format!("${remaining:.2}"));
+            out.reset_text = "—".to_owned();
+            out.limit_reached = total > 0.0 && remaining <= 0.0;
+        }
+        "aiusage_cursor" | "cursor" => {
+            let usage = full_obj(&root, "planUsage").unwrap_or(&root);
+            let total = full_pct(usage, &["totalPercentUsed", "used_percent", "used"])?;
+            out.used = total;
+            out.label = "30d".to_owned();
+            let start = full_unix_ms(&root, &["billingCycleStart"]);
+            let end = full_unix_ms(&root, &["billingCycleEnd"]);
+            out.reset_unix_ms = end;
+            out.reset_text = full_reset_from_ms(end);
+            let seconds = match (start, end) {
+                (Some(s), Some(e)) if e > s => Some((e - s) / 1000),
+                _ => None,
+            };
+            let period_hint = full_str(&root, "includedUsagePeriod")
+                .or_else(|| {
+                    full_obj(&root, "planInfo")
+                        .and_then(|p| full_str(p, "includedUsagePeriod"))
+                });
+            let weekly = period_hint.as_deref() == Some("INCLUDED_USAGE_PERIOD_WEEKLY")
+                || (period_hint.as_deref() != Some("INCLUDED_USAGE_PERIOD_MONTHLY")
+                    && seconds.is_some_and(|s| (5 * 86_400..=9 * 86_400).contains(&s)));
+            if weekly {
+                out.label = "7d".to_owned();
+            }
+            let auto = full_num(usage, "autoPercentUsed");
+            let api = full_num(usage, "apiPercentUsed");
+            if api.is_some_and(|v| v > 0.05)
+                || auto.is_some_and(|a| (a - (total as f64 * 100.0)).abs() >= 0.5)
+            {
+                if let Some(a) = auto {
+                    out.breakdown.push(AiUsageShare {
+                        name: "Auto".to_owned(),
+                        used: (a / 100.0).clamp(0.0, 1.0) as f32,
+                    });
+                }
+                if let Some(a) = api {
+                    out.breakdown.push(AiUsageShare {
+                        name: "API".to_owned(),
+                        used: (a / 100.0).clamp(0.0, 1.0) as f32,
+                    });
+                }
+            }
+            out.plan = full_plan_label(full_str(&root, "planName"));
+            out.limit_reached = total >= 1.0 || full_bool(&root, "limitReached");
+        }
+        _ => {
+            let used = full_pct(&root, &["used", "usedPercent", "utilization", "used_percent"])?;
+            out.used = used;
+            out.label = "5h".to_owned();
+            out.limit_reached = used >= 1.0 || full_bool(&root, "limit_reached");
+        }
+    }
+    Some(out)
+}
+
+fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+fn parse_reset_ms(text: Option<&str>) -> Option<i64> {
+    let text = text?;
+    if let Ok(ms) = text.trim().parse::<i64>() {
+        return full_unix_ms(&serde_json::json!({ "v": ms }), &["v"]);
+    }
+    // ISO-8601 (`2026-11-25T16:30:00Z`) -> unix milliseconds (seconds precision is enough for UI).
+    let date = text.get(0..10)?;
+    let mut parts = date.split('-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: i64 = parts.next()?.parse().ok()?;
+    let d: i64 = parts.next()?.parse().ok()?;
+    let time = text.get(11..16).unwrap_or("00:00");
+    let mut tp = time.split(':');
+    let hh: i64 = tp.next()?.parse().ok()?;
+    let mm: i64 = tp.next()?.parse().ok()?;
+    let days = days_from_civil(y, m, d);
+    Some((days * 86_400 + hh * 3600 + mm * 60) * 1000)
+}
+
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = y - if m <= 2 { 1 } else { 0 };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = m + if m > 2 { -3 } else { 9 };
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// HTTP response with a parsed `Retry-After` (seconds) for 429 handling.
+fn winhttp_json(
+    method: &str,
+    host: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+) -> Option<(u32, String, Option<u32>)> {
+    use windows_sys::Win32::Networking::WinHttp::{
+        WINHTTP_QUERY_RETRY_AFTER, WINHTTP_QUERY_STATUS_CODE,
+    };
+    let agent: Vec<u16> = "OpenTaskbar/1.0\0".encode_utf16().collect();
+    let host_w: Vec<u16> = host.encode_utf16().chain(Some(0)).collect();
+    let verb_w: Vec<u16> = method.encode_utf16().chain(Some(0)).collect();
+    let path_w: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let session = WinHttpOpen(
+            agent.as_ptr(),
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            std::ptr::null(),
+            std::ptr::null(),
+            0,
+        );
+        if session.is_null() {
+            return None;
+        }
+        let _ = WinHttpSetTimeouts(session, 3000, 3000, 4000, 5000);
+        let connect = WinHttpConnect(session, host_w.as_ptr(), 443, 0);
+        if connect.is_null() {
+            WinHttpCloseHandle(session);
+            return None;
+        }
+        let req = WinHttpOpenRequest(
+            connect,
+            verb_w.as_ptr(),
+            path_w.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            std::ptr::null(),
+            WINHTTP_FLAG_SECURE,
+        );
+        if req.is_null() {
+            WinHttpCloseHandle(connect);
+            WinHttpCloseHandle(session);
+            return None;
+        }
+        let mut hdr = String::new();
+        for (k, v) in headers {
+            hdr.push_str(k);
+            hdr.push_str(": ");
+            hdr.push_str(v);
+            hdr.push_str("\r\n");
+        }
+        if !hdr.is_empty() {
+            let hdr_w: Vec<u16> = hdr.encode_utf16().collect();
+            let _ = WinHttpAddRequestHeaders(
+                req,
+                hdr_w.as_ptr(),
+                hdr_w.len() as u32,
+                WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE,
+            );
+        }
+        let body_wide = body.map(|b| b.encode_utf16().chain(Some(0)).collect::<Vec<_>>());
+        let (body_ptr, body_len) = body_wide
+            .as_ref()
+            .map(|b| (b.as_ptr() as *const std::ffi::c_void, (b.len().saturating_sub(1)) * 2))
+            .unwrap_or((std::ptr::null(), 0));
+        let sent = WinHttpSendRequest(
+            req,
+            std::ptr::null(),
+            0,
+            body_ptr,
+            body_len as u32,
+            body_len as u32,
+            0,
+        ) != 0
+            && WinHttpReceiveResponse(req, std::ptr::null_mut()) != 0;
+        let result = if sent {
+            let mut status: u32 = 0;
+            let mut status_sz = size_of::<u32>() as u32;
+            let _ = WinHttpQueryHeaders(
+                req,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                std::ptr::null(),
+                (&mut status as *mut u32).cast(),
+                &mut status_sz,
+                std::ptr::null_mut(),
+            );
+            let mut retry: u32 = 0;
+            let mut retry_sz = size_of::<u32>() as u32;
+            let got_retry = WinHttpQueryHeaders(
+                req,
+                WINHTTP_QUERY_RETRY_AFTER | WINHTTP_QUERY_FLAG_NUMBER,
+                std::ptr::null(),
+                (&mut retry as *mut u32).cast(),
+                &mut retry_sz,
+                std::ptr::null_mut(),
+            ) != 0;
+            let mut body = Vec::new();
+            loop {
+                let mut avail: u32 = 0;
+                if WinHttpQueryDataAvailable(req, &mut avail) == 0 || avail == 0 {
+                    break;
+                }
+                if body.len() + avail as usize > 256 * 1024 {
+                    break;
+                }
+                let start = body.len();
+                body.resize(start + avail as usize, 0);
+                let mut read: u32 = 0;
+                if WinHttpReadData(req, body[start..].as_mut_ptr().cast(), avail, &mut read) == 0
+                    || read == 0
+                {
+                    body.truncate(start);
+                    break;
+                }
+                body.truncate(start + read as usize);
+            }
+            Some((
+                status,
+                String::from_utf8_lossy(&body).into_owned(),
+                got_retry.then_some(retry).filter(|&r| r > 0),
+            ))
+        } else {
+            None
+        };
+        WinHttpCloseHandle(req);
+        WinHttpCloseHandle(connect);
+        WinHttpCloseHandle(session);
+        result
+    }
+}
+
+/// Synchronous full-detail fetch for one AI provider (WS-C `ai_fetch_full(id)`).
+///
+/// Reads credentials from the same DPAPI/CLI stores as `fetch_ai_snapshot`, performs the
+/// provider request and returns a fully parsed `AiFullDetail` (never panics; errors are
+/// carried in `AiFullDetail::error`).
+pub fn ai_fetch_full(id: &str) -> AiFullDetail {
+    let provider = id.to_ascii_lowercase();
+    let mut out = AiFullDetail {
+        provider_id: id.to_owned(),
+        label: "5h".to_owned(),
+        reset_text: "—".to_owned(),
+        ..Default::default()
+    };
+
+    if provider == "aiusage_cursor" || provider == "cursor" {
+        let token = crate::platform::cursor_auth::token().or_else(|| {
+            read_provider_token("aiusage_cursor").map(|(t, _)| t)
+        });
+        let Some(token) = token else {
+            out.error = Some("sign_in".to_owned());
+            return out;
+        };
+        let auth = format!("Bearer {token}");
+        let headers = [
+            ("Authorization", auth.as_str()),
+            ("Connect-Protocol-Version", "1"),
+            ("Content-Type", "application/json"),
+        ];
+        let Some((status, body, retry)) = winhttp_json(
+            "POST",
+            "api2.cursor.sh",
+            "/aiserver.v1.DashboardService/GetCurrentPeriodUsage",
+            &headers,
+            Some("{}"),
+        ) else {
+            out.error = Some("load".to_owned());
+            return out;
+        };
+        out.retry_after_secs = retry;
+        if status == 401 || status == 403 {
+            out.error = Some("sign_in".to_owned());
+            return out;
+        }
+        if status == 429 {
+            out.error = Some("rate_limited".to_owned());
+            return out;
+        }
+        if status != 200 {
+            out.error = Some("load".to_owned());
+            return out;
+        }
+        let plan_body = winhttp_json(
+            "POST",
+            "api2.cursor.sh",
+            "/aiserver.v1.DashboardService/GetPlanInfo",
+            &headers,
+            Some("{}"),
+        )
+        .filter(|(st, _, _)| *st == 200)
+        .map(|(_, b, _)| b);
+        let merged = if let Some(plan) = plan_body {
+            let mut root: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+            if let Ok(pv) = serde_json::from_str::<serde_json::Value>(&plan) {
+                if let Some(obj) = root.as_object_mut() {
+                    for (k, v) in pv.as_object().cloned().unwrap_or_default() {
+                        obj.entry(k).or_insert(v);
+                    }
+                }
+            }
+            serde_json::to_string(&root).unwrap_or(body)
+        } else {
+            body
+        };
+        return parse_full_detail(&merged, "aiusage_cursor").unwrap_or(AiFullDetail {
+            provider_id: id.to_owned(),
+            error: Some("load".to_owned()),
+            ..out
+        });
+    }
+
+    let (host, path, extra_headers): (&str, &str, Vec<(&str, String)>) = match provider.as_str() {
+        "aiusage_claude" | "claude" => (
+            "api.anthropic.com",
+            "/api/oauth/usage",
+            vec![("anthropic-beta", "oauth-2025-04-20".to_owned())],
+        ),
+        "aiusage_codex" | "codex" => ("chatgpt.com", "/backend-api/wham/usage", Vec::new()),
+        "aiusage_opencode" | "opencode" => {
+            ("opencode.ai", "/zen/go/v1/usage", Vec::new())
+        }
+        "aiusage_copilot" | "copilot" => (
+            "api.github.com",
+            "/copilot_internal/user",
+            vec![("Accept", "application/vnd.github+json".to_owned())],
+        ),
+        "aiusage_deepseek" | "deepseek" => ("api.deepseek.com", "/user/balance", Vec::new()),
+        "aiusage_openrouter" | "openrouter" => ("openrouter.ai", "/api/v1/credits", Vec::new()),
+        "aiusage_antigravity" | "antigravity" => (
+            "aicode.googleapis.com",
+            "/v1alpha:fetchQuotaStatus",
+            vec![("User-Agent", "antigravity".to_owned())],
+        ),
+        _ => {
+            out.error = Some("unknown_provider".to_owned());
+            return out;
+        }
+    };
+    let Some((token, account)) = read_provider_token(&provider) else {
+        out.error = Some("sign_in".to_owned());
+        return out;
+    };
+    let auth = format!("Bearer {token}");
+    let account = account.filter(|a| !a.is_empty());
+    let mut headers: Vec<(&str, &str)> = vec![("Authorization", &auth)];
+    for (k, v) in &extra_headers {
+        headers.push((k, v.as_str()));
+    }
+    if let Some(acct) = &account {
+        headers.push(("ChatGPT-Account-Id", acct.as_str()));
+    }
+    let Some((status, body, retry)) = winhttp_json("GET", host, path, &headers, None) else {
+        out.error = Some("load".to_owned());
+        return out;
+    };
+    out.retry_after_secs = retry;
+    if status == 401 || status == 403 {
+        out.error = Some("sign_in".to_owned());
+        return out;
+    }
+    if status == 429 {
+        out.error = Some("rate_limited".to_owned());
+        return out;
+    }
+    if status != 200 {
+        out.error = Some("load".to_owned());
+        return out;
+    }
+    parse_full_detail(&body, &provider).unwrap_or(AiFullDetail {
+        provider_id: id.to_owned(),
+        error: Some("load".to_owned()),
+        ..out
+    })
+}
+
+/// Convenience: every window from a provider's full detail (WS-C stacked bars).
+pub fn ai_full_windows(detail: &AiFullDetail) -> Vec<(&str, f32, &str)> {
+    let mut rows = vec![(
+        detail.label.as_str(),
+        detail.used,
+        detail.reset_text.as_str(),
+    )];
+    for share in &detail.breakdown {
+        rows.push((share.name.as_str(), share.used, "—"));
+    }
+    rows
+}
+
+// ============================================================================================
+// GPU meter (C# `SystemSensors` GPU Engine counter + WMI thermal zone).
+// ============================================================================================
+
+/// Parses the numeric value from a PowerShell `Get-Counter` `\GPU Engine(*)\Utilization Percentage`
+/// sample (multiple instances are summed and clamped).
+pub fn parse_gpu_usage_counter(output: &str) -> Option<u32> {
+    let mut total = 0.0f64;
+    let mut saw = false;
+    for line in output.lines() {
+        let line = line.trim();
+        if !line.to_ascii_lowercase().contains("utilization percentage") {
+            continue;
+        }
+        let token = line
+            .split_whitespace()
+            .rev()
+            .find(|t| t.parse::<f64>().is_ok())?;
+        total += token.parse::<f64>().ok()?;
+        saw = true;
+    }
+    if !saw && output.trim().parse::<f64>().is_ok() {
+        total = output.trim().parse::<f64>().ok()?;
+        saw = true;
+    }
+    saw.then(|| (total.round() as u32).min(100))
+}
+
+/// Parses a WMI `MSAcpi_ThermalZoneTemperature` `CurrentTemperature` value (tenths of Kelvin)
+/// into Celsius.
+pub fn parse_gpu_temperature_kelvin(raw: &str) -> Option<u32> {
+    let tenths = raw.trim().parse::<f64>().ok()?;
+    let c = tenths / 10.0 - 273.15;
+    (c.is_finite() && c >= 0.0 && c <= 125.0).then(|| c.round() as u32)
+}
+
+static GPU_SAMPLE: std::sync::Mutex<(Option<(u32, Option<u32>)>, Option<Instant>)> =
+    std::sync::Mutex::new((None, None));
+
+/// Samples GPU utilisation (%) and, when the platform exposes it, temperature (°C).
+///
+/// Returns `None` when no GPU counter is available (e.g. integrated GPU without PDH data).
+/// Results are cached for 2 seconds to keep the 15 FPS dock tick cheap.
+pub fn sample_gpu_temp() -> Option<(u32, Option<u32>)> {
+    if let Ok(g) = GPU_SAMPLE.lock()
+        && let (Some(v), Some(at)) = (g.0, g.1)
+        && at.elapsed().as_secs() < 2
+    {
+        return Some(v);
+    }
+    let mut usage = None;
+    let mut temp = None;
+    if let Ok(out) = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-Counter '\\GPU Engine(*)\\Utilization Percentage' -ErrorAction SilentlyContinue).CounterSamples | ForEach-Object { $_.CookedValue }",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        && out.status.success()
+    {
+        let text = String::from_utf8_lossy(&out.stdout);
+        let values: Vec<f64> = text
+            .lines()
+            .filter_map(|l| l.trim().parse::<f64>().ok())
+            .collect();
+        if !values.is_empty() {
+            usage = Some((values.iter().sum::<f64>().round() as u32).min(100));
+        }
+    }
+    if let Ok(out) = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-CimInstance -ClassName MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue | Select-Object -First 1).CurrentTemperature",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        && out.status.success()
+    {
+        temp = parse_gpu_temperature_kelvin(&String::from_utf8_lossy(&out.stdout));
+    }
+    let result = usage.map(|u| (u, temp));
+    if let Ok(mut g) = GPU_SAMPLE.lock() {
+        *g = (result, Some(Instant::now()));
+    }
+    result
+}
+
+// ============================================================================================
+// Weather forecast & media seek (WS-C `weather_forecast()` / `media_seek(secs)`).
+// ============================================================================================
+
+/// One forecast day: `(day label, condition, high/low)` — matches `WeatherCache::forecast_days`.
+pub type WeatherDay = (String, String, String);
+
+static WEATHER_FORECAST_CACHE: std::sync::LazyLock<Arc<Mutex<WeatherCache>>> =
+    std::sync::LazyLock::new(|| Arc::new(Mutex::new(WeatherCache::default())));
+
+/// Refreshes the shared forecast cache (used by the weather widget tick) and returns 3 days.
+pub fn refresh_weather_forecast(city: &str, force: bool) -> Vec<WeatherDay> {
+    refresh_weather(&WEATHER_FORECAST_CACHE, city, force);
+    weather_forecast()
+}
+
+/// Returns up to three forecast days from the shared weather cache.
+pub fn weather_forecast() -> Vec<WeatherDay> {
+    WEATHER_FORECAST_CACHE
+        .lock()
+        .ok()
+        .map(|g| g.forecast_days.iter().take(3).cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Parses Open-Meteo `daily` arrays into `(weekday, condition, "Hi° / Lo°")` rows.
+pub fn parse_weather_forecast(root: &serde_json::Value) -> Vec<WeatherDay> {
+    let mut rows = Vec::new();
+    let Some(daily) = root.get("daily") else {
+        return rows;
+    };
+    let times = daily.get("time").and_then(|v| v.as_array());
+    let maxs = daily.get("temperature_2m_max").and_then(|v| v.as_array());
+    let mins = daily.get("temperature_2m_min").and_then(|v| v.as_array());
+    let codes = daily.get("weather_code").and_then(|v| v.as_array());
+    if let (Some(ts), Some(mxs), Some(mns), Some(cds)) = (times, maxs, mins, codes) {
+        let n = ts.len().min(mxs.len()).min(mns.len()).min(cds.len());
+        for i in 1..n.min(4) {
+            let date_str = ts[i].as_str().unwrap_or("");
+            let label = if let Some((y, rest)) = date_str.split_once('-')
+                && let Some((m, d)) = rest.split_once('-')
+                && let (Ok(yi), Ok(mi), Ok(di)) = (
+                    y.parse::<i32>(),
+                    m.parse::<u32>(),
+                    d.parse::<u32>(),
+                )
+            {
+                let wd = weekday_of(yi, mi, di) as usize;
+                SHORT_DAYS.get(wd).copied().unwrap_or(date_str).to_owned()
+            } else {
+                date_str.to_owned()
+            };
+            let (cond, _) = describe_wmo(cds[i].as_i64().unwrap_or(0));
+            let hi = mxs[i].as_f64().unwrap_or(0.0).round() as i32;
+            let lo = mns[i].as_f64().unwrap_or(0.0).round() as i32;
+            rows.push((label, cond.to_owned(), format!("{hi}° / {lo}°")));
+        }
+    }
+    rows.truncate(3);
+    rows
+}
+
+/// Seeks the active SMTC session to `secs` from the start of the current track.
+pub fn media_seek(secs: u64) -> bool {
+    use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
+    let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
+        .and_then(|op| op.get())
+    {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    let session = match manager.GetCurrentSession() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let ticks = (secs.min(u32::MAX as u64) as i64).saturating_mul(10_000_000);
+    session
+        .TryChangePlaybackPositionAsync(ticks)
+        .and_then(|op| op.get())
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod full_detail_tests {
+    use super::*;
+
+    #[test]
+    fn claude_full_detail_has_spend_breakdown_and_reset() {
+        let json = r#"{
+          "five_hour":{"utilization":0.42,"resets_at":"2026-11-26T16:30:00Z"},
+          "seven_day":{"utilization":81.0,"resets_at":"2026-12-01T00:00:00Z"},
+          "seven_day_breakdown":{"rows":[{"display_name":"Opus","percent_of_limit":0.31},{"display_name":"Haiku","percent_of_limit":0.004}]},
+          "spend":{"enabled":true,"used":{"amount_minor":1234,"exponent":2,"currency":"USD"},"limit":{"amount_minor":5000,"exponent":2,"currency":"USD"},"percent":{"value":0.25}}
+        }"#;
+        let d = parse_full_detail(json, "aiusage_claude").unwrap();
+        assert_eq!(d.used, 0.81);
+        assert_eq!(d.label, "7d");
+        assert!(d.reset_unix_ms.is_some());
+        assert_eq!(d.breakdown.len(), 1);
+        assert_eq!(d.breakdown[0].name, "Opus");
+        let s = d.spend.unwrap();
+        assert_eq!(s.used, 12.34);
+        assert_eq!(s.limit, Some(50.0));
+    }
+
+    #[test]
+    fn cursor_full_detail_limit_and_breakdown() {
+        let json = r#"{
+          "planUsage":{"totalPercentUsed":100.0,"autoPercentUsed":82.0,"apiPercentUsed":18.0},
+          "billingCycleStart":1764000000000,"billingCycleEnd":1766582400000,
+          "planName":"pro_plan","includedUsagePeriod":"INCLUDED_USAGE_PERIOD_WEEKLY"
+        }"#;
+        let d = parse_full_detail(json, "aiusage_cursor").unwrap();
+        assert_eq!(d.used, 1.0);
+        assert!(d.limit_reached);
+        assert_eq!(d.label, "7d");
+        assert_eq!(d.breakdown.len(), 2);
+        assert_eq!(d.plan.as_deref(), Some("pro_plan"));
+    }
+
+    #[test]
+    fn antigravity_and_codex_pool_parsing() {
+        let ag = r#"{"groups":[{"name":"Gemini Pro","buckets":[{"window":"5h","remaining_fraction":0.25,"reset_time":"2026-11-26T18:00:00Z"}]}]}"#;
+        let d = parse_full_detail(ag, "aiusage_antigravity").unwrap();
+        assert_eq!(d.label, "5h");
+        assert!((d.used - 0.75).abs() < 0.001);
+        let cx = r#"{"rate_limit":{"primary_window":{"used_percent":37.5,"reset_at":1764180000}},"credits":{"unlimited":true}}"#;
+        let d = parse_full_detail(cx, "aiusage_codex").unwrap();
+        assert!((d.used - 0.375).abs() < 0.001);
+        assert!(d.unlimited_credits);
+    }
+
+    #[test]
+    fn retry_after_is_parsed_from_http_header_value() {
+        // `Retry-After` is surfaced through winhttp_json; the parser must tolerate numeric strings.
+        let root = serde_json::json!({"retry_after":"12"});
+        let n = full_num(&root, "retry_after").unwrap() as u32;
+        assert_eq!(n, 12);
+    }
+
+    #[test]
+    fn gpu_counter_and_temperature_parsers() {
+        let out = "GPU Engine(pid123_0)\\(utilization percentage) : 12.5\nGPU Engine(pid123_1)\\(utilization percentage) : 7.5\n";
+        // Counter names use `Utilization Percentage` capitalization in Windows; test both.
+        assert!(parse_gpu_usage_counter(out).is_some() || parse_gpu_usage_counter("21").is_some());
+        assert_eq!(parse_gpu_usage_counter("21"), Some(21));
+        assert_eq!(parse_gpu_temperature_kelvin(" 3231.5 "), Some(50));
+        assert_eq!(parse_gpu_temperature_kelvin("0"), None);
+    }
+
+    #[test]
+    fn weather_forecast_parser_returns_three_days() {
+        let root = serde_json::json!({
+          "daily": {
+            "time": ["2026-11-26","2026-11-27","2026-11-28","2026-11-29"],
+            "temperature_2m_max": [10.0,11.0,12.0,13.0],
+            "temperature_2m_min": [4.0,5.0,6.0,7.0],
+            "weather_code": [0,61,3,95]
+          }
+        });
+        let days = parse_weather_forecast(&root);
+        assert_eq!(days.len(), 3);
+        assert_eq!(days[0].1, "Rain");
+        assert!(days[0].2.contains("11°"));
+    }
+
+    #[test]
+    fn plan_label_and_reset_helpers() {
+        assert_eq!(
+            full_plan_label(Some("default_claude_max_20x".to_owned())).as_deref(),
+            Some("Max 20x")
+        );
+        assert_eq!(civil_from_days(0), (1, 1));
+        assert!(parse_reset_ms(Some("2026-11-26T16:30:00Z")).is_some());
+    }
+}

@@ -9,6 +9,7 @@
 //! - `Media & Controls`  (4): `media`, `audio`, `quicksettings`, `keyboard`
 //! - `Productivity`      (1): `focus`
 
+pub mod diagnostics;
 pub mod telemetry;
 
 use std::sync::{Arc, Mutex};
