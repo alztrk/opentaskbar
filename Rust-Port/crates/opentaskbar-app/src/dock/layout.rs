@@ -23,7 +23,9 @@
 //!   dock still uses the existing `WM_DROPFILES` inbound path only.
 #![allow(dead_code)]
 
-use opentaskbar_core::settings::{AutoHideMode, DockEdge, DockPosition, DockSettings};
+use opentaskbar_core::settings::{
+    AutoHideMode, DockEdge, DockPosition, DockSettings, StartButtonPlacement,
+};
 
 use crate::platform::win32::MonitorInfo;
 
@@ -45,6 +47,8 @@ pub const REVEAL_MS: u64 = 220;
 pub const HIDE_MS: u64 = 220;
 pub const REVEALED_GUARD_MS: u64 = 200;
 pub const WIN_KEY_GRACE_MS: u64 = 600;
+/// `LLKHF_INJECTED` in the low-level keyboard hook flags (`KBDLLHOOKSTRUCT`).
+pub const LLKHF_INJECTED: u32 = 0x10;
 pub const HOVER_INTENT_MS: u64 = 350;
 pub const DRAG_HOVER_MS: u64 = 450;
 pub const PREVIEW_GRACE_MS: u64 = 250;
@@ -319,6 +323,48 @@ pub fn is_shell_overlay_class(class_name: &str) -> bool {
             | "xamlexplorerhostislandwindow"
             | "multitaskingviewframe"
             | "taskswitcherwnd"
+            // Windows 10/11 Start flyout and its light-dismiss surface. Without these,
+            // smart auto-hide sees Start as an overlapping app window.
+            | "windows.ui.core.corewindow"
+            | "startmenusizingframe"
+            | "shell_lightdismissoverlay"
+    )
+}
+
+/// `WM_APP_WINKEY_REVEAL` posts from the low-level hook must ignore injected
+/// key events (synthetic Win taps from RemoteDesktop, automation, IME, ...).
+pub fn is_injected_key_event(flags: u32) -> bool {
+    flags & LLKHF_INJECTED != 0
+}
+
+/// Single decision table for the Win-key reveal and its grace window: a Win tap
+/// only reveals an auto-hidden dock when the option is on *and* auto-hide is active.
+pub fn win_key_reveal_enabled(reveal_dock_on_win_key: bool, auto_hide: AutoHideMode) -> bool {
+    reveal_dock_on_win_key && auto_hide != AutoHideMode::Disabled
+}
+
+/// Start flyout policy: when Start is open but the shell reposition thread could
+/// not anchor it above the dock, hide the dock instead of leaving an overlap.
+pub fn start_menu_hide_fallback(menu_open: bool, anchored: bool) -> bool {
+    menu_open && !anchored
+}
+
+/// Converts a DIP button rect inside the dock window into a physical screen rect.
+/// `window` is `(left, top, right, bottom)` in physical pixels; `button` is a
+/// DIP rect relative to the window's client origin.
+pub fn anchor_from_window_rect(
+    window: (i32, i32, i32, i32),
+    button: (f32, f32, f32, f32),
+    dpi: f32,
+) -> (i32, i32, i32, i32) {
+    let scale = dpi.max(1.0);
+    let (left, top, _, _) = window;
+    let (bl, bt, br, bb) = button;
+    (
+        left + (bl * scale).round() as i32,
+        top + (bt * scale).round() as i32,
+        left + (br * scale).round() as i32,
+        top + (bb * scale).round() as i32,
     )
 }
 
@@ -674,12 +720,14 @@ pub fn slide_for(item: usize, dragged: usize, insertion_index: usize, dragged_si
 /// Rewrites the persisted order so pinned shell groups lead and trail the strip.
 pub fn apply_pinned_groups(order: &[String], settings: &DockSettings) -> Vec<String> {
     let mut lead = Vec::new();
-    if settings
+    // Typed field first; the legacy `extra["StartPlacement"] = "Hidden"` value is
+    // still honoured for settings files written before the typed field existed.
+    let legacy_hidden = settings
         .extra
         .get("StartPlacement")
         .and_then(|v| v.as_str())
-        != Some("Hidden")
-    {
+        == Some("Hidden");
+    if settings.start_placement != StartButtonPlacement::Hidden && !legacy_hidden {
         lead.push("start".to_owned());
     }
     if settings
@@ -1151,9 +1199,58 @@ mod tests {
         assert!(is_shell_overlay_class("XamlExplorerHostIslandWindow"));
         assert!(is_shell_overlay_class("Shell_TrayWnd"));
         assert!(!is_shell_overlay_class("Notepad"));
+        // Windows 10/11 Start surfaces must never count as overlapping app windows.
+        assert!(is_shell_overlay_class("Windows.UI.Core.CoreWindow"));
+        assert!(is_shell_overlay_class("StartMenuSizingFrame"));
+        assert!(is_shell_overlay_class("Shell_LightDismissOverlay"));
         let m = monitor();
         assert!(is_full_screen_on_monitor((0, 0, 1920, 1080), m.clone(), 2));
         assert!(!is_full_screen_on_monitor((100, 0, 1820, 1080), m, 2));
+    }
+
+    #[test]
+    fn injected_key_events_are_filtered() {
+        assert!(!is_injected_key_event(0));
+        assert!(is_injected_key_event(LLKHF_INJECTED));
+        assert!(is_injected_key_event(LLKHF_INJECTED | 0x01));
+        assert!(!is_injected_key_event(0x08));
+    }
+
+    #[test]
+    fn win_key_reveal_gate_decision_table() {
+        assert!(win_key_reveal_enabled(true, AutoHideMode::Always));
+        assert!(win_key_reveal_enabled(true, AutoHideMode::Smart));
+        assert!(!win_key_reveal_enabled(true, AutoHideMode::Disabled));
+        assert!(!win_key_reveal_enabled(false, AutoHideMode::Always));
+        assert!(!win_key_reveal_enabled(false, AutoHideMode::Smart));
+        assert!(!win_key_reveal_enabled(false, AutoHideMode::Disabled));
+    }
+
+    #[test]
+    fn start_menu_hide_fallback_only_when_unanchored() {
+        assert!(start_menu_hide_fallback(true, false));
+        assert!(!start_menu_hide_fallback(true, true));
+        assert!(!start_menu_hide_fallback(false, false));
+        assert!(!start_menu_hide_fallback(false, true));
+    }
+
+    #[test]
+    fn start_button_anchor_scales_with_dpi() {
+        let window = (100, 900, 800, 1000);
+        let button = (20.0, 4.0, 50.0, 40.0);
+        assert_eq!(
+            anchor_from_window_rect(window, button, 1.0),
+            (120, 904, 150, 940)
+        );
+        assert_eq!(
+            anchor_from_window_rect(window, button, 2.0),
+            (140, 908, 200, 980)
+        );
+        // Negative X monitors are preserved by the window origin.
+        assert_eq!(
+            anchor_from_window_rect((-1920, 900, -1200, 1000), button, 1.0),
+            (-1900, 904, -1870, 940)
+        );
     }
 
     #[test]
@@ -1292,6 +1389,33 @@ mod tests {
             [
                 "start", "search", "taskview", "app:b", "app:a", "tray", "bin"
             ]
+        );
+    }
+
+    #[test]
+    fn typed_start_placement_hides_the_start_button() {
+        let mut settings = DockSettings::default();
+        let order = ["app:a"].map(str::to_owned);
+        assert!(
+            apply_pinned_groups(&order, &settings)
+                .first()
+                .is_some_and(|s| s == "start")
+        );
+        settings.start_placement = StartButtonPlacement::Hidden;
+        assert!(
+            !apply_pinned_groups(&order, &settings)
+                .iter()
+                .any(|s| s == "start")
+        );
+        // Legacy extra key remains a compatible fallback.
+        let mut settings = DockSettings::default();
+        settings
+            .extra
+            .insert("StartPlacement".into(), json!("Hidden"));
+        assert!(
+            !apply_pinned_groups(&order, &settings)
+                .iter()
+                .any(|s| s == "start")
         );
     }
 

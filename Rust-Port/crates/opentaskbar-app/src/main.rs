@@ -134,8 +134,23 @@ fn main() {
         opentaskbar_shell::flyout_writer::set_enabled(Some(extra_flag(
             &settings,
             "NativeFlyoutReposition",
-            false,
+            true,
         )));
+        // UNCLOAKED Start flyout: pin it above the dock Start button. If the
+        // reposition thread cannot anchor it, `evaluate_auto_hide` hides the dock.
+        platform::start_menu_state::on_opened(|hwnd| {
+            let (left, top, right, bottom) = dock::start_button_anchor();
+            if left == right || top == bottom {
+                return;
+            }
+            let anchor = opentaskbar_shell::flyout_reposition::Anchor {
+                left,
+                top,
+                right,
+                bottom,
+            };
+            let _ = opentaskbar_shell::flyout_reposition::reposition_start(anchor, hwnd);
+        });
         platform::start_menu_state::install_hook();
         platform::taskbar_pin_monitor::start_watch();
         platform::radio::install_state_monitor();

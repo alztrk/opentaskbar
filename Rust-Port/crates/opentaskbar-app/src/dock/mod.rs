@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 
 use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::{
-    self, AppTheme, AutoHideMode, DockSettings, MiddleClickAction, SurfaceBackground,
+    self, AppTheme, AutoHideMode, DockSettings, MiddleClickAction, StartButtonAction,
+    StartButtonPlacement, SurfaceBackground,
 };
 use opentaskbar_shell::tracker::{self, RunningWindow};
 use windows::Win32::Graphics::DirectComposition::{
@@ -35,21 +36,23 @@ use windows_sys::Win32::Graphics::Dwm::{
 };
 use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::Threading::AttachThreadInput;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
     UnregisterHotKey, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_RIGHT, VK_RWIN, VK_TAB,
 };
 use windows_sys::Win32::UI::Shell::DragAcceptFiles;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CS_DBLCLKS, CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GWLP_USERDATA, GetClassNameW, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect,
+    ASFW_ANY, AllowSetForegroundWindow, CS_DBLCLKS, CallNextHookEx, CreateWindowExW,
+    DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetClassNameW, GetCursorPos,
+    GetForegroundWindow, GetMessageW, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
     HHOOK, HTCLIENT, HTTRANSPARENT, HWND_BROADCAST, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IsIconic,
-    IsWindowVisible, IsZoomed, KillTimer, LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW,
-    PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetCursor, SetTimer,
-    SetWindowLongPtrW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
-    WH_MOUSE_LL, WM_APP, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW,
+    IsWindow, IsWindowVisible, IsZoomed, KillTimer, LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW,
+    PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetCursor, SetForegroundWindow,
+    SetTimer, SetWindowLongPtrW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCHITTEST, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW,
     WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     WS_VISIBLE, WindowFromPoint,
 };
@@ -64,9 +67,10 @@ pub mod tray;
 use self::dcomp::{DcompEngine, PillNodes, ShellGlyph, VisualNode, WidgetInteraction};
 use self::dynamic_island::{InputDisposition, IslandInput, IslandState};
 use self::layout::{
-    bounce_direction, capture_expansion_budget, drop_targets_recycle_bin, effective_edge,
-    escape_closes_transient, hide_offset, is_full_screen_on_monitor, is_shell_overlay_class,
-    keyboard_next_index, revealed_guard_should_hide, step_spring, wheel_to_axis_delta,
+    anchor_from_window_rect, bounce_direction, capture_expansion_budget, drop_targets_recycle_bin,
+    effective_edge, escape_closes_transient, hide_offset, is_full_screen_on_monitor,
+    is_injected_key_event, is_shell_overlay_class, keyboard_next_index, revealed_guard_should_hide,
+    start_menu_hide_fallback, step_spring, wheel_to_axis_delta, win_key_reveal_enabled,
 };
 use self::preview::{PreviewItem, PreviewPopup};
 use self::show_desktop::ShowDesktopCorner;
@@ -114,7 +118,57 @@ const WM_HOTKEY: u32 = 0x0312;
 const HOTKEY_LAUNCHER_ID: i32 = 0x4F01;
 const HOTKEY_DOCK_ID: i32 = 0x4F02;
 /// How long a standalone Windows-key press keeps an auto-hidden dock revealed.
-const WINKEY_REVEAL_MS: u64 = 1500;
+/// 1500 ms kept the dock pinned across ordinary keyboard shortcuts; 600 ms matches
+/// the Win-key grace window and C# `WinKeyRevealMonitor`.
+const WINKEY_REVEAL_MS: u64 = 600;
+
+/// Last known physical rect of the dock's Start button, in screen coordinates.
+/// `on_opened` (WS-B) reads it from the UI thread to anchor the Start flyout.
+static START_BUTTON_ANCHOR: Mutex<(i32, i32, i32, i32)> = Mutex::new((0, 0, 0, 0));
+/// Gate shared with the global low-level keyboard hook, which has no `DockState`.
+static WIN_KEY_REVEAL_GATE: AtomicBool = AtomicBool::new(true);
+
+/// Screen rect of the Start button most recently laid out by any dock window.
+/// `(0, 0, 0, 0)` means no visible Start button has been laid out yet.
+pub fn start_button_anchor() -> (i32, i32, i32, i32) {
+    START_BUTTON_ANCHOR
+        .lock()
+        .map(|anchor| *anchor)
+        .unwrap_or((0, 0, 0, 0))
+}
+
+fn set_win_key_reveal_gate(settings: &DockSettings) {
+    WIN_KEY_REVEAL_GATE.store(
+        win_key_reveal_enabled(settings.reveal_dock_on_win_key, settings.auto_hide),
+        Ordering::Relaxed,
+    );
+}
+
+/// Restores focus to the app that owned the foreground before Start was opened.
+/// `AllowSetForegroundWindow` + `AttachThreadInput` cover the usual foreground
+/// lock when the shell currently owns the foreground.
+fn restore_app_foreground(hwnd: usize) {
+    if hwnd == 0 {
+        return;
+    }
+    unsafe {
+        let target = hwnd as HWND;
+        if IsWindow(target) == 0 {
+            return;
+        }
+        AllowSetForegroundWindow(ASFW_ANY);
+        if SetForegroundWindow(target) == 0 {
+            let foreground = GetForegroundWindow();
+            let target_thread = GetWindowThreadProcessId(target, std::ptr::null_mut());
+            let foreground_thread = GetWindowThreadProcessId(foreground, std::ptr::null_mut());
+            if target_thread != 0 && foreground_thread != 0 && target_thread != foreground_thread {
+                AttachThreadInput(foreground_thread, target_thread, 1);
+                SetForegroundWindow(target);
+                AttachThreadInput(foreground_thread, target_thread, 0);
+            }
+        }
+    }
+}
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
@@ -130,7 +184,9 @@ fn hiword_i16(v: isize) -> f32 {
 
 fn is_shell_button_visible(settings: &DockSettings, kind: ShellButton) -> bool {
     match kind {
-        ShellButton::Start => settings.show_start_button,
+        ShellButton::Start => {
+            settings.show_start_button && settings.start_placement != StartButtonPlacement::Hidden
+        }
         ShellButton::Search => settings.show_search_button,
         ShellButton::TaskView => settings.show_task_view_button,
     }
@@ -474,6 +530,12 @@ struct DockState {
     hovered_resize: Option<ResizeEdge>,
     pressed_idx: Option<usize>,
     pressed_shell: Option<ShellButton>,
+    /// Start-menu state sampled on pointer down so a press that dismisses the
+    /// menu is not immediately followed by a reopen on pointer up.
+    pressed_shell_start_was_open: bool,
+    /// Foreground app window at the moment Start was pressed; focus is returned
+    /// here when the same press dismisses the menu.
+    start_press_foreground: usize,
     pressed_tray: bool,
     pressed_tray_pin: Option<String>,
     pressed_bin: bool,
@@ -923,6 +985,7 @@ impl DockState {
     ) -> windows::core::Result<Self> {
         let dpi = monitor.dpi_scale;
         let is_dark = resolve_is_dark(settings.theme);
+        set_win_key_reveal_gate(&settings);
         let dcomp = DcompEngine::new(hwnd)?;
         let base = settings.icon_dips();
         let pill_h = pill_height_dips(&settings);
@@ -1220,6 +1283,8 @@ impl DockState {
             hovered_resize: None,
             pressed_idx: None,
             pressed_shell: None,
+            pressed_shell_start_was_open: false,
+            start_press_foreground: 0,
             pressed_tray: false,
             pressed_tray_pin: None,
             pressed_bin: false,
@@ -1577,15 +1642,24 @@ impl DockState {
             || self
                 .win_key_grace_until
                 .is_some_and(|until| Instant::now() < until);
-        let should_hide = revealed_guard_should_hide(
-            self.settings.auto_hide,
-            pointer_busy,
-            at_edge,
-            overlap,
-            crate::platform::start_menu_state::is_open(),
-            self.drag.is_some() || self.resize_drag.is_some() || self.scroll_pan.is_some(),
-            win_key_grace,
-        );
+        let start_menu_open = crate::platform::start_menu_state::is_open()
+            || crate::platform::start_menu_state::is_open_now();
+        let anchored = opentaskbar_shell::flyout_reposition::is_anchored();
+        // If the shell could not reposition the Start flyout, hiding the dock is
+        // the only way to guarantee no visual overlap remains.
+        let should_hide = if start_menu_hide_fallback(start_menu_open, anchored) {
+            true
+        } else {
+            revealed_guard_should_hide(
+                self.settings.auto_hide,
+                pointer_busy,
+                at_edge,
+                overlap,
+                start_menu_open,
+                self.drag.is_some() || self.resize_drag.is_some() || self.scroll_pan.is_some(),
+                win_key_grace,
+            )
+        };
 
         if self.target_hidden != should_hide {
             self.target_hidden = should_hide;
@@ -1894,6 +1968,8 @@ impl DockState {
         let next =
             opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
         self.settings = next;
+        set_win_key_reveal_gate(&self.settings);
+        self.refresh_start_button_anchor();
         // The Settings window runs in a separate process: apply its language change here too.
         loc::set_language(&self.settings.language);
         design::fonts::apply_settings(&self.settings);
@@ -2107,6 +2183,7 @@ impl DockState {
             self.last_window_rect = Some(rect);
             win32::reposition_dock_window(self.hwnd, rect.0, rect.1, rect.2, rect.3);
         }
+        self.refresh_start_button_anchor();
     }
 
     fn mon_w_dips(&self) -> f32 {
@@ -2363,6 +2440,42 @@ impl DockState {
             None
         };
         (tray, bin, widget_rects)
+    }
+
+    /// Publishes the dock Start button's screen rect for the Start-menu `on_opened`
+    /// callback. Uses the same shell-button layout as hit testing, so the flyout
+    /// lands directly above the button that was clicked.
+    fn refresh_start_button_anchor(&self) {
+        if !is_shell_button_visible(&self.settings, ShellButton::Start) {
+            if let Ok(mut anchor) = START_BUTTON_ANCHOR.lock() {
+                *anchor = (0, 0, 0, 0);
+            }
+            return;
+        }
+        let base = self.settings.icon_dips();
+        let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
+        let center_x = self.live_shell_center_x(ShellButton::Start).clamp(
+            pill_left + 1.0,
+            (pill_left + pill_w - 1.0).max(pill_left + 1.0),
+        );
+        let button = (
+            center_x - base * 0.5,
+            pill_top + 4.0,
+            center_x + base * 0.5,
+            pill_top + pill_h - 4.0,
+        );
+        let mut win_rc: RECT = unsafe { std::mem::zeroed() };
+        unsafe {
+            GetWindowRect(self.hwnd as HWND, &mut win_rc);
+        }
+        let anchor = anchor_from_window_rect(
+            (win_rc.left, win_rc.top, win_rc.right, win_rc.bottom),
+            button,
+            self.dpi,
+        );
+        if let Ok(mut cached) = START_BUTTON_ANCHOR.lock() {
+            *cached = anchor;
+        }
     }
 
     fn flyout_anchor_px(&self, rect: DipRect) -> (i32, i32) {
@@ -4037,6 +4150,14 @@ impl DockState {
         }
 
         if let Some(shell) = self.hit_shell_button(mx, my) {
+            if shell == ShellButton::Start {
+                let now = Instant::now();
+                crate::platform::start_menu_state::note_press(now);
+                self.pressed_shell_start_was_open = crate::platform::start_menu_state::is_open()
+                    || crate::platform::start_menu_state::is_open_now();
+                // Remember where focus was so dismissing Start can hand it back.
+                self.start_press_foreground = unsafe { GetForegroundWindow() } as usize;
+            }
             self.pressed_shell = Some(shell);
             self.update_visuals();
             return;
@@ -4053,6 +4174,38 @@ impl DockState {
             });
             self.update_visuals();
         }
+    }
+
+    /// Start button toggle: a press that found Start open dismisses it and
+    /// returns focus to the previously active app; otherwise the Start flyout is
+    /// opened through the shell (`SC_TASKLIST`) and anchored by `on_opened`.
+    fn toggle_start_menu(&mut self) {
+        use crate::platform::start_menu_state;
+        if self.settings.start_action == StartButtonAction::Launcher {
+            opentaskbar_shell::taskbar::open_search();
+            self.pressed_shell_start_was_open = false;
+            return;
+        }
+        let now = Instant::now();
+        let was_open = self.pressed_shell_start_was_open
+            || start_menu_state::was_open_at_press(now)
+            || start_menu_state::is_open()
+            || start_menu_state::is_open_now();
+        if was_open {
+            let hwnd = match start_menu_state::start_window() {
+                0 => opentaskbar_shell::flyout_reposition::find_start_window().unwrap_or(0),
+                hwnd => hwnd,
+            };
+            if hwnd != 0 {
+                let _ = opentaskbar_shell::flyout_reposition::close_start(hwnd);
+            }
+            start_menu_state::reset();
+            restore_app_foreground(self.start_press_foreground);
+        } else if !opentaskbar_shell::flyout_reposition::open_start_via_syscommand(self.hwnd) {
+            // Fallback for shell versions that reject SC_TASKLIST from a tool window.
+            opentaskbar_shell::taskbar::open_start_menu();
+        }
+        self.pressed_shell_start_was_open = false;
     }
 
     fn handle_lbutton_up(&mut self, mx: f32, my: f32) {
@@ -4171,7 +4324,7 @@ impl DockState {
             self.update_visuals();
             if self.hit_shell_button(mx, my) == Some(shell) {
                 match shell {
-                    ShellButton::Start => opentaskbar_shell::taskbar::open_start_menu(),
+                    ShellButton::Start => self.toggle_start_menu(),
                     ShellButton::Search => opentaskbar_shell::taskbar::open_search(),
                     ShellButton::TaskView => opentaskbar_shell::taskbar::open_task_view(),
                 }
@@ -4850,10 +5003,17 @@ impl DockState {
     fn handle_key_down(&mut self, vk: u16) {
         match vk {
             VK_LWIN | VK_RWIN => {
-                self.win_key_grace_until =
-                    Some(Instant::now() + Duration::from_millis(layout::WIN_KEY_GRACE_MS));
-                self.target_hidden = false;
-                self.ensure_animation();
+                // Same gate as the low-level reveal hook: no grace when the
+                // option is off or auto-hide is disabled.
+                if win_key_reveal_enabled(
+                    self.settings.reveal_dock_on_win_key,
+                    self.settings.auto_hide,
+                ) {
+                    self.win_key_grace_until =
+                        Some(Instant::now() + Duration::from_millis(layout::WIN_KEY_GRACE_MS));
+                    self.target_hidden = false;
+                    self.ensure_animation();
+                }
                 self.evaluate_auto_hide();
             }
             VK_ESCAPE => {
@@ -5010,6 +5170,14 @@ unsafe extern "system" fn win_key_hook(code: i32, wparam: WPARAM, lparam: LPARAM
         && matches!(msg, WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP)
     {
         let info = unsafe { &*(lparam as *const KbdLlHookStruct) };
+        // Synthetic Win taps (RDP, automation, IME) must never reveal the dock.
+        if is_injected_key_event(info.flags) {
+            WIN_KEY_ALONE.with(|flag| flag.set(false));
+            return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+        }
+        if !WIN_KEY_REVEAL_GATE.load(Ordering::Relaxed) {
+            return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
+        }
         let is_win = info.vk_code == VK_LWIN as u32 || info.vk_code == VK_RWIN as u32;
         match msg {
             WM_KEYDOWN | WM_SYSKEYDOWN => {
@@ -5290,8 +5458,10 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_APP_WINKEY_REVEAL => {
-            state.win_key_reveal_until =
-                Some(Instant::now() + Duration::from_millis(WINKEY_REVEAL_MS));
+            if WIN_KEY_REVEAL_GATE.load(Ordering::Relaxed) {
+                state.win_key_reveal_until =
+                    Some(Instant::now() + Duration::from_millis(WINKEY_REVEAL_MS));
+            }
             state.evaluate_auto_hide();
             0
         }
