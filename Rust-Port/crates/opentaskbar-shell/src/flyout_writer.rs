@@ -99,10 +99,18 @@ pub fn is_current(captured: u64) -> bool {
     captured == generation()
 }
 
+/// Only a settled flyout (>= 100x100) is journalable; small entrance-animation
+/// rects must never overwrite the original position.
+#[must_use]
+pub fn rect_is_journalable(width: i32, height: i32) -> bool {
+    width >= 100 && height >= 100
+}
+
 /// Records the original position of a single flyout handle and persists the
-/// journal. No-op when `native_flyout_reposition` is off.
-pub fn remember(hwnd: usize, pid: u32, left: i32, top: i32) {
-    if hwnd == 0 || pid == 0 || !flag_enabled() {
+/// journal. No-op when `native_flyout_reposition` is off or the rect is a
+/// transient animation frame.
+pub fn remember(hwnd: usize, pid: u32, left: i32, top: i32, width: i32, height: i32) {
+    if hwnd == 0 || pid == 0 || !rect_is_journalable(width, height) || !flag_enabled() {
         return;
     }
     let Ok(mut registry) = REGISTRY.lock() else {
@@ -288,6 +296,17 @@ fn is_cloaked(hwnd: HWND) -> bool {
     hr == 0 && cloaked != 0
 }
 
+/// Exact executable file name (never a partial `ends_with`).
+#[must_use]
+pub fn exe_file_name(exe: &str) -> &str {
+    exe.rsplit(['\\', '/']).next().unwrap_or(exe)
+}
+
+fn exe_name_matches(exe: &str, names: &[&str]) -> bool {
+    let name = exe_file_name(exe).trim().to_ascii_lowercase();
+    names.iter().any(|candidate| name == *candidate)
+}
+
 /// Finds visible, uncloaked shell flyout windows belonging to one of `exe_names`.
 pub fn find_flyout_windows(exe_names: &[&str]) -> Vec<(usize, u32)> {
     unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> i32 {
@@ -300,13 +319,11 @@ pub fn find_flyout_windows(exe_names: &[&str]) -> Vec<(usize, u32)> {
             let mut rect: RECT = std::mem::zeroed();
             let got_rect =
                 windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd, &mut rect) != 0;
-            if got_rect && rect.right - rect.left > 100 && rect.bottom - rect.top > 100 {
+            if got_rect && rect_is_journalable(rect.right - rect.left, rect.bottom - rect.top) {
                 let mut pid = 0u32;
                 GetWindowThreadProcessId(hwnd, &mut pid);
                 if let Some(exe) = process_exe(pid)
-                    && names
-                        .iter()
-                        .any(|name| exe.to_ascii_lowercase().ends_with(name))
+                    && exe_name_matches(&exe, names)
                 {
                     output.push((hwnd as usize, pid));
                 }
@@ -325,18 +342,18 @@ pub fn find_flyout_windows(exe_names: &[&str]) -> Vec<(usize, u32)> {
 
 /// Records Start's original position (Windows 10/11 `StartMenuExperienceHost`).
 pub fn write_start() {
-    for (hwnd, pid) in find_flyout_windows(&[r"\startmenuexperiencehost.exe"]) {
-        if let Some((left, top)) = window_origin(hwnd) {
-            remember(hwnd, pid, left, top);
+    for (hwnd, pid) in find_flyout_windows(&["startmenuexperiencehost.exe"]) {
+        if let Some((left, top, width, height)) = window_origin(hwnd) {
+            remember(hwnd, pid, left, top, width, height);
         }
     }
 }
 
 /// Records Windows Search's original position (`SearchHost.exe`).
 pub fn write_search() {
-    for (hwnd, pid) in find_flyout_windows(&[r"\searchhost.exe"]) {
-        if let Some((left, top)) = window_origin(hwnd) {
-            remember(hwnd, pid, left, top);
+    for (hwnd, pid) in find_flyout_windows(&["searchhost.exe"]) {
+        if let Some((left, top, width, height)) = window_origin(hwnd) {
+            remember(hwnd, pid, left, top, width, height);
         }
     }
 }
@@ -344,21 +361,26 @@ pub fn write_search() {
 /// Records Control Center / Quick Settings' original position. Windows 11 hosts
 /// it in `ShellExperienceHost.exe`, Windows 10 in `SystemSettings.exe`.
 pub fn write_control_center() {
-    for (hwnd, pid) in find_flyout_windows(&[r"\shellexperiencehost.exe", r"\systemsettings.exe"]) {
-        if let Some((left, top)) = window_origin(hwnd) {
-            remember(hwnd, pid, left, top);
+    for (hwnd, pid) in find_flyout_windows(&["shellexperiencehost.exe", "systemsettings.exe"]) {
+        if let Some((left, top, width, height)) = window_origin(hwnd) {
+            remember(hwnd, pid, left, top, width, height);
         }
     }
 }
 
-fn window_origin(hwnd: usize) -> Option<(i32, i32)> {
+fn window_origin(hwnd: usize) -> Option<(i32, i32, i32, i32)> {
     let mut rect: RECT = unsafe { std::mem::zeroed() };
     // SAFETY: reading the rect of a window discovered in this enumeration pass.
     if unsafe {
         windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(hwnd as HWND, &mut rect)
     } != 0
     {
-        Some((rect.left, rect.top))
+        Some((
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+        ))
     } else {
         None
     }
@@ -382,5 +404,34 @@ mod tests {
             top: 0,
         };
         assert_eq!(position.hwnd, 0);
+    }
+
+    #[test]
+    fn journals_only_settled_rects() {
+        assert!(!rect_is_journalable(99, 100));
+        assert!(!rect_is_journalable(100, 99));
+        assert!(rect_is_journalable(100, 100));
+        assert!(rect_is_journalable(1920, 1080));
+    }
+
+    #[test]
+    fn executable_names_match_whole_file_name() {
+        assert_eq!(
+            exe_file_name(r"C:\Windows\SystemApps\StartMenuExperienceHost.exe"),
+            "StartMenuExperienceHost.exe"
+        );
+        let names = ["startmenuexperiencehost.exe"];
+        assert!(exe_name_matches(
+            r"C:\Windows\SystemApps\StartMenuExperienceHost.exe",
+            &names
+        ));
+        assert!(!exe_name_matches(
+            r"C:\Temp\evil-startmenuexperiencehost.exe",
+            &names
+        ));
+        assert!(!exe_name_matches(
+            r"C:\Temp\startmenuexperiencehost.exe.bak",
+            &names
+        ));
     }
 }

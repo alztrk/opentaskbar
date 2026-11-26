@@ -278,7 +278,7 @@ fn send_key(vk: u16, up: bool) -> bool {
 /// Sends the keys with a ~20 ms down/up separation: a single batched
 /// `SendInput` of all events makes Explorer treat Win-key chords as a single
 /// synthetic press instead of a shell shortcut.
-fn send_chord(keys: &[u16]) -> bool {
+pub(crate) fn send_chord(keys: &[u16]) -> bool {
     if keys.is_empty() {
         return false;
     }
@@ -295,10 +295,12 @@ fn send_chord(keys: &[u16]) -> bool {
 }
 
 /// Preferred Start entry point: `SC_TASKLIST` posted to the dock (owner) HWND.
-/// Falls back to the injected Win-key chord when no valid owner is supplied.
+/// `open_start_via_syscommand` verifies the result with `find_start_window()`
+/// and runs the injected `VK_LWIN` chord fallback itself when the post does
+/// not open Start, so the fallback is used for every real open attempt.
 pub fn open_start_menu_with_owner(owner_hwnd: usize) -> bool {
-    if owner_hwnd != 0 && crate::flyout_reposition::open_start_via_syscommand(owner_hwnd) {
-        return true;
+    if owner_hwnd != 0 {
+        return crate::flyout_reposition::open_start_via_syscommand(owner_hwnd);
     }
     send_chord(&[VK_LWIN])
 }
