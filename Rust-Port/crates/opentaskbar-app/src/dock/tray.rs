@@ -208,10 +208,7 @@ pub(super) fn open_pinned_app(owner_hwnd: usize, path: &str) {
     } else if Path::new(path).is_file() {
         pins::launch_app(path.to_owned(), None, false);
     } else {
-        show_action_error(
-            owner_hwnd,
-            "Could not open the app. Its executable is unavailable.",
-        );
+        show_action_error(owner_hwnd, &loc::t("ErrorOpenBackgroundApp"));
     }
 }
 
@@ -237,7 +234,11 @@ pub(super) fn show_pinned_app_menu(
     path: &str,
 ) -> bool {
     let entries = vec![
-        MenuEntry::item(1, MenuIcon::Play, format!("Open {}", friendly_name(path))),
+        MenuEntry::item(
+            1,
+            MenuIcon::Play,
+            format!("{} · {}", loc::t("Open"), friendly_name(path)),
+        ),
         MenuEntry::item(2, MenuIcon::Pin, loc::t("UnpinTrayIcon")),
     ];
     match menu::show_popup_menu_with_border(
@@ -260,10 +261,7 @@ fn close_background_app(owner_hwnd: usize, app: &BackgroundApp) {
     let same_process = pid == app.pid
         && process_image_path(pid).is_some_and(|path| path.eq_ignore_ascii_case(&app.exe_path));
     if !same_process || unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) } == 0 {
-        show_action_error(
-            owner_hwnd,
-            "Could not close the app window. Reopen Background Apps and try again.",
-        );
+        show_action_error(owner_hwnd, &loc::t("ErrorAppGracefulClose"));
     }
 }
 

@@ -5,9 +5,31 @@
 //! and an `X` close button per card. Uses 0% 3D GPU overhead because DWM composites thumbnails
 //! directly into the desktop pass.
 
-use crate::design::{self, fonts, gdi_rgb};
+use crate::design::{self, Rgb, fonts, gdi_rgb};
 use opentaskbar_shell::tracker;
+use std::cell::RefCell;
 use std::sync::OnceLock;
+use windows::Win32::Foundation::RECT as WinRect;
+use windows::Win32::Graphics::Direct2D::Common::{
+    D2D_RECT_F, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT,
+};
+use windows::Win32::Graphics::Direct2D::{
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_DRAW_TEXT_OPTIONS_CLIP,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory1,
+};
+use windows::Win32::Graphics::DirectWrite::{
+    DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+    DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_MEASURING_MODE_NATURAL,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING,
+    DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWriteCreateFactory, IDWriteFactory,
+};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+use windows::Win32::Graphics::Gdi::HDC as WinHdc;
+use windows::core::HSTRING;
+use windows_numerics::Vector2;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION, DWM_TNP_VISIBLE,
@@ -16,10 +38,9 @@ use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute, DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
-    CreateSolidBrush, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject,
-    DrawTextW, EndPaint, FillRect, InvalidateRect, LineTo, MoveToEx, PAINTSTRUCT, PS_SOLID,
-    RoundRect, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, InvalidateRect, PAINTSTRUCT, SRCCOPY,
+    SelectObject,
 };
 
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -162,6 +183,54 @@ pub struct PreviewPopup {
     hovered_card: Option<usize>,
     hovered_close: Option<usize>,
     on_pointer_leave: Box<dyn FnMut()>,
+}
+
+struct PreviewD2d {
+    _factory: ID2D1Factory1,
+    dwrite: IDWriteFactory,
+    target: ID2D1DCRenderTarget,
+}
+
+thread_local! {
+    static PREVIEW_D2D: RefCell<Option<PreviewD2d>> = const { RefCell::new(None) };
+}
+
+impl PreviewD2d {
+    fn create() -> Option<Self> {
+        unsafe {
+            let factory: ID2D1Factory1 =
+                D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()?;
+            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
+            let props = D2D1_RENDER_TARGET_PROPERTIES {
+                r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                usage: D2D1_RENDER_TARGET_USAGE_NONE,
+                minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
+            };
+            let target = factory.CreateDCRenderTarget(&props).ok()?;
+            target.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            target.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            Some(Self {
+                _factory: factory,
+                dwrite,
+                target,
+            })
+        }
+    }
+}
+
+fn d2d_rgba(c: Rgb, a: f32) -> D2D1_COLOR_F {
+    D2D1_COLOR_F {
+        r: f32::from(c.0) / 255.0,
+        g: f32::from(c.1) / 255.0,
+        b: f32::from(c.2) / 255.0,
+        a: a.clamp(0.0, 1.0),
+    }
 }
 
 fn wide(text: &str) -> Vec<u16> {
@@ -470,9 +539,9 @@ impl PreviewPopup {
             return;
         }
         let dpi = self.dpi;
-        let header_h = (HEADER_H_DIPS * dpi).round() as i32;
-        let inner_pad = (8.0 * dpi).round() as i32;
-        let corner = (8.0 * dpi).round() as i32;
+        let header_h = HEADER_H_DIPS * dpi;
+        let inner_pad = 9.0 * dpi;
+        let corner = 10.0 * dpi;
         let pal = design::palette(self.is_dark);
 
         let mut client = RECT {
@@ -487,177 +556,253 @@ impl PreviewPopup {
         let cw = (client.right - client.left).max(1);
         let ch = (client.bottom - client.top).max(1);
 
-        unsafe {
-            let mem_dc = CreateCompatibleDC(screen_hdc);
-            let mem_bmp = if !mem_dc.is_null() {
-                CreateCompatibleBitmap(screen_hdc, cw, ch)
-            } else {
-                std::ptr::null_mut()
-            };
-            let old_bmp = if !mem_bmp.is_null() {
-                SelectObject(mem_dc, mem_bmp as _)
-            } else {
-                std::ptr::null_mut()
-            };
-            let hdc = if !mem_bmp.is_null() {
-                mem_dc
-            } else {
-                screen_hdc
-            };
+        let mem_dc = unsafe { CreateCompatibleDC(screen_hdc) };
+        if mem_dc.is_null() {
+            unsafe { EndPaint(self.hwnd, &ps) };
+            return;
+        }
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: cw,
+                biHeight: -ch,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB,
+                ..unsafe { std::mem::zeroed() }
+            },
+            ..unsafe { std::mem::zeroed() }
+        };
+        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mem_bmp = unsafe {
+            CreateDIBSection(
+                mem_dc,
+                &bmi,
+                DIB_RGB_COLORS,
+                &mut bits,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if mem_bmp.is_null() {
+            unsafe {
+                DeleteDC(mem_dc);
+                EndPaint(self.hwnd, &ps);
+            }
+            return;
+        }
+        let old_bmp = unsafe { SelectObject(mem_dc, mem_bmp as _) };
 
-            // Fill window background from the shared design palette.
-            let bg_brush = CreateSolidBrush(gdi_rgb(pal.surface));
-            FillRect(hdc, &client, bg_brush);
-            DeleteObject(bg_brush as _);
+        PREVIEW_D2D.with(|slot| {
+            let mut guard = slot.borrow_mut();
+            if guard.is_none() {
+                *guard = PreviewD2d::create();
+            }
+            let Some(d2d) = guard.as_ref() else {
+                return;
+            };
+            let win_rc = WinRect {
+                left: 0,
+                top: 0,
+                right: cw,
+                bottom: ch,
+            };
+            if unsafe { d2d.target.BindDC(WinHdc(mem_dc as _), &win_rc) }.is_err() {
+                *guard = None;
+                return;
+            }
+            unsafe {
+                d2d.target.BeginDraw();
+                d2d.target.Clear(Some(&d2d_rgba(pal.surface, 1.0)));
+            }
 
-            let font_h = -((fonts::scaled_size(12.0) * dpi).round() as i32);
-            let font_name = wide(fonts::native_ui_face());
-            let font = CreateFontW(
-                font_h,
-                0,
-                0,
-                0,
-                500,
-                0,
-                0,
-                0,
-                0,
-                0,
-                0,
-                5, // CLEARTYPE_QUALITY
-                0,
-                font_name.as_ptr(),
-            );
-            let old_font = SelectObject(hdc, font as _);
-            SetBkMode(hdc, TRANSPARENT as i32);
+            // Subtle top specular highlight matching flyouts and menus.
+            if let Ok(spec_brush) = unsafe {
+                d2d.target.CreateSolidColorBrush(
+                    &d2d_rgba(pal.specular_top, if self.is_dark { 0.45 } else { 0.8 }),
+                    None,
+                )
+            } {
+                let inset = 10.0 * dpi;
+                unsafe {
+                    d2d.target.DrawLine(
+                        Vector2 { X: inset, Y: 0.5 },
+                        Vector2 {
+                            X: (cw as f32 - inset).max(inset),
+                            Y: 0.5,
+                        },
+                        &spec_brush,
+                        1.0,
+                        None,
+                    );
+                }
+            }
+
+            let title_fmt = unsafe {
+                d2d.dwrite
+                    .CreateTextFormat(
+                        &HSTRING::from(fonts::ui_family_list().as_str()),
+                        None,
+                        DWRITE_FONT_WEIGHT_MEDIUM,
+                        DWRITE_FONT_STYLE_NORMAL,
+                        DWRITE_FONT_STRETCH_NORMAL,
+                        (fonts::scaled_size(12.0) * dpi).max(9.0),
+                        &HSTRING::from(fonts::ui_locale().as_str()),
+                    )
+                    .ok()
+                    .inspect(|fmt| {
+                        let _ = fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+                        let _ = fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                        let _ = fmt.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                        let trimming = DWRITE_TRIMMING {
+                            granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                            delimiter: 0,
+                            delimiterCount: 0,
+                        };
+                        let sign = d2d.dwrite.CreateEllipsisTrimmingSign(fmt).ok();
+                        let _ = fmt.SetTrimming(&trimming, sign.as_ref());
+                    })
+            };
+            let close_fmt = unsafe {
+                d2d.dwrite
+                    .CreateTextFormat(
+                        &HSTRING::from("Segoe Fluent Icons"),
+                        None,
+                        DWRITE_FONT_WEIGHT_NORMAL,
+                        DWRITE_FONT_STYLE_NORMAL,
+                        DWRITE_FONT_STRETCH_NORMAL,
+                        (10.5 * dpi).max(9.0),
+                        &HSTRING::from("en-US"),
+                    )
+                    .ok()
+                    .inspect(|fmt| {
+                        let _ = fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                        let _ = fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                    })
+            };
 
             for (idx, card) in self.cards.iter().enumerate() {
                 let is_hovered = self.hovered_card == Some(idx);
                 let is_close_hovered = self.hovered_close == Some(idx);
 
-                let card_bg = if is_hovered {
-                    CreateSolidBrush(gdi_rgb(pal.hover))
+                let fill_col = d2d_rgba(if is_hovered { pal.hover } else { pal.elevated }, 1.0);
+                let stroke_col = if is_hovered {
+                    d2d_rgba(pal.selected_stroke, 1.0)
                 } else {
-                    CreateSolidBrush(gdi_rgb(pal.elevated))
+                    d2d_rgba(pal.border_rgb, if self.is_dark { 0.65 } else { 0.9 })
                 };
-                let card_pen = if is_hovered {
-                    CreatePen(PS_SOLID, 1, gdi_rgb(pal.selected_stroke))
-                } else {
-                    CreatePen(PS_SOLID, 1, gdi_rgb(pal.border_rgb))
+                let card_rr = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: card.card_rect.left as f32 + 0.5,
+                        top: card.card_rect.top as f32 + 0.5,
+                        right: card.card_rect.right as f32 - 0.5,
+                        bottom: card.card_rect.bottom as f32 - 0.5,
+                    },
+                    radiusX: corner,
+                    radiusY: corner,
                 };
-                let old_brush = SelectObject(hdc, card_bg as _);
-                let old_pen = SelectObject(hdc, card_pen as _);
-                RoundRect(
-                    hdc,
-                    card.card_rect.left,
-                    card.card_rect.top,
-                    card.card_rect.right,
-                    card.card_rect.bottom,
-                    corner,
-                    corner,
-                );
-                SelectObject(hdc, old_brush);
-                SelectObject(hdc, old_pen);
-                DeleteObject(card_bg as _);
-                DeleteObject(card_pen as _);
+                if let Ok(bg_b) = unsafe { d2d.target.CreateSolidColorBrush(&fill_col, None) } {
+                    unsafe { d2d.target.FillRoundedRectangle(&card_rr, &bg_b) };
+                }
+                if let Ok(bd_b) = unsafe { d2d.target.CreateSolidColorBrush(&stroke_col, None) } {
+                    unsafe { d2d.target.DrawRoundedRectangle(&card_rr, &bd_b, 1.0, None) };
+                }
 
                 // Window title.
-                SetTextColor(hdc, gdi_rgb(pal.text_primary));
-                let mut title_rc = RECT {
-                    left: card.card_rect.left + inner_pad,
-                    top: card.card_rect.top,
-                    right: card.close_rect.left - (4.0 * dpi).round() as i32,
-                    bottom: card.card_rect.top + header_h,
-                };
-                if !card.item.title.is_empty() {
-                    let mut title_w: Vec<u16> =
-                        card.item.title.encode_utf16().chain(Some(0)).collect();
-                    DrawTextW(
-                        hdc,
-                        title_w.as_mut_ptr(),
-                        (title_w.len() - 1) as i32,
-                        &mut title_rc,
-                        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                    );
+                if !card.item.title.is_empty()
+                    && let Some(ref fmt) = title_fmt
+                    && let Ok(fg_b) = unsafe {
+                        d2d.target
+                            .CreateSolidColorBrush(&d2d_rgba(pal.text_primary, 1.0), None)
+                    }
+                {
+                    let wtxt: Vec<u16> = card.item.title.encode_utf16().collect();
+                    let title_rc = D2D_RECT_F {
+                        left: card.card_rect.left as f32 + inner_pad,
+                        top: card.card_rect.top as f32,
+                        right: card.close_rect.left as f32 - 4.0 * dpi,
+                        bottom: card.card_rect.top as f32 + header_h,
+                    };
+                    unsafe {
+                        d2d.target.DrawText(
+                            &wtxt,
+                            fmt,
+                            &title_rc,
+                            &fg_b,
+                            D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                            DWRITE_MEASURING_MODE_NATURAL,
+                        );
+                    }
                 }
 
-                // Close button (`X`).
+                // Anti-aliased Fluent close button (`\u{E711}`).
                 if is_hovered || is_close_hovered {
-                    let btn_col = if is_close_hovered {
-                        gdi_rgb(pal.danger)
+                    let btn_fill = if is_close_hovered {
+                        d2d_rgba(pal.danger, 1.0)
                     } else {
-                        gdi_rgb(pal.hover)
+                        d2d_rgba(pal.elevated, 0.9)
                     };
-                    let btn_border = if is_close_hovered {
-                        gdi_rgb(pal.danger)
+                    let btn_stroke = if is_close_hovered {
+                        d2d_rgba(pal.danger, 1.0)
                     } else {
-                        gdi_rgb(pal.border_rgb)
+                        d2d_rgba(pal.border_rgb, 0.85)
                     };
-                    let btn_bg = CreateSolidBrush(btn_col);
-                    let btn_pen = CreatePen(PS_SOLID, 1, btn_border);
-                    let ob = SelectObject(hdc, btn_bg as _);
-                    let op = SelectObject(hdc, btn_pen as _);
-                    let r = (5.0 * dpi).round() as i32;
-                    RoundRect(
-                        hdc,
-                        card.close_rect.left,
-                        card.close_rect.top,
-                        card.close_rect.right,
-                        card.close_rect.bottom,
-                        r,
-                        r,
-                    );
-                    SelectObject(hdc, ob);
-                    SelectObject(hdc, op);
-                    DeleteObject(btn_bg as _);
-                    DeleteObject(btn_pen as _);
-
+                    let btn_r = 6.0 * dpi;
+                    let btn_rr = D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F {
+                            left: card.close_rect.left as f32 + 0.5,
+                            top: card.close_rect.top as f32 + 0.5,
+                            right: card.close_rect.right as f32 - 0.5,
+                            bottom: card.close_rect.bottom as f32 - 0.5,
+                        },
+                        radiusX: btn_r,
+                        radiusY: btn_r,
+                    };
+                    if let Ok(bb) = unsafe { d2d.target.CreateSolidColorBrush(&btn_fill, None) } {
+                        unsafe { d2d.target.FillRoundedRectangle(&btn_rr, &bb) };
+                    }
+                    if let Ok(bp) = unsafe { d2d.target.CreateSolidColorBrush(&btn_stroke, None) } {
+                        unsafe { d2d.target.DrawRoundedRectangle(&btn_rr, &bp, 1.0, None) };
+                    }
                     let x_col = if is_close_hovered {
-                        rgb(0xff, 0xff, 0xff)
+                        d2d_rgba((0xff, 0xff, 0xff), 1.0)
                     } else {
-                        gdi_rgb(pal.text_primary)
+                        d2d_rgba(pal.text_primary, 1.0)
                     };
-                    let x_pen = CreatePen(PS_SOLID, (1.5 * dpi).round().max(1.0) as i32, x_col);
-                    let ox = SelectObject(hdc, x_pen as _);
-                    let pad_x = (6.0 * dpi).round() as i32;
-                    MoveToEx(
-                        hdc,
-                        card.close_rect.left + pad_x,
-                        card.close_rect.top + pad_x,
-                        std::ptr::null_mut(),
-                    );
-                    LineTo(
-                        hdc,
-                        card.close_rect.right - pad_x,
-                        card.close_rect.bottom - pad_x,
-                    );
-                    MoveToEx(
-                        hdc,
-                        card.close_rect.right - pad_x,
-                        card.close_rect.top + pad_x,
-                        std::ptr::null_mut(),
-                    );
-                    LineTo(
-                        hdc,
-                        card.close_rect.left + pad_x,
-                        card.close_rect.bottom - pad_x,
-                    );
-                    SelectObject(hdc, ox);
-                    DeleteObject(x_pen as _);
+                    if let Some(ref fmt) = close_fmt
+                        && let Ok(xb) = unsafe { d2d.target.CreateSolidColorBrush(&x_col, None) }
+                    {
+                        let glyph = [0xE711u16];
+                        let xrc = D2D_RECT_F {
+                            left: card.close_rect.left as f32,
+                            top: card.close_rect.top as f32,
+                            right: card.close_rect.right as f32,
+                            bottom: card.close_rect.bottom as f32,
+                        };
+                        unsafe {
+                            d2d.target.DrawText(
+                                &glyph,
+                                fmt,
+                                &xrc,
+                                &xb,
+                                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                                DWRITE_MEASURING_MODE_NATURAL,
+                            );
+                        }
+                    }
                 }
             }
 
-            SelectObject(hdc, old_font);
-            DeleteObject(font as _);
+            if unsafe { d2d.target.EndDraw(None, None) }.is_err() {
+                *guard = None;
+            }
+        });
 
-            if !mem_bmp.is_null() {
-                let _ = BitBlt(screen_hdc, 0, 0, cw, ch, mem_dc, 0, 0, SRCCOPY);
-                SelectObject(mem_dc, old_bmp);
-                DeleteObject(mem_bmp as _);
-            }
-            if !mem_dc.is_null() {
-                DeleteDC(mem_dc);
-            }
+        unsafe {
+            let _ = BitBlt(screen_hdc, 0, 0, cw, ch, mem_dc, 0, 0, SRCCOPY);
+            SelectObject(mem_dc, old_bmp);
+            DeleteObject(mem_bmp as _);
+            DeleteDC(mem_dc);
             EndPaint(self.hwnd, &ps);
         }
     }
