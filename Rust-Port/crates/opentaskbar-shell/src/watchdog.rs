@@ -26,6 +26,17 @@ use windows_sys::Win32::System::Threading::{CreateEventW, SetEvent};
 
 use opentaskbar_core::log;
 
+// Test-only event-state inspection (production code only signals/closes).
+#[cfg(test)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn WaitForSingleObject(handle: HANDLE, milliseconds: u32) -> u32;
+    fn ResetEvent(handle: HANDLE) -> i32;
+}
+
+#[cfg(test)]
+const WAIT_OBJECT_0: u32 = 0;
+
 const WATCHDOG_BYTES: &[u8] = include_bytes!("../../../../tools/watchdog/OpenTaskbarWatchdog.exe");
 const EVENT_PREFIX: &str = r"Local\OpenTaskbar.CleanExit.";
 const HEARTBEAT_PREFIX: &str = r"Local\OpenTaskbar.Heartbeat.";
@@ -82,6 +93,28 @@ struct WatchdogState {
 
 static WATCHDOG: Mutex<Option<WatchdogState>> = Mutex::new(None);
 
+/// Builds the single `--watchdog=<pid>:<token>` argument understood by the C
+/// watchdog and by [`parse_watchdog_arg`].
+fn watchdog_arg(pid: u32, token: &str) -> String {
+    format!("--watchdog={pid}:{token}")
+}
+
+/// Parses and validates the watchdog command-line argument. Rejects missing
+/// prefixes, non-numeric/zero PIDs and non-hex tokens before a process is
+/// spawned, so a malformed argument can never silently disable recovery.
+fn parse_watchdog_arg(arg: &str) -> Option<(u32, String)> {
+    let rest = arg.strip_prefix("--watchdog=")?;
+    let (pid, token) = rest.split_once(':')?;
+    let pid = pid.parse::<u32>().ok()?;
+    if pid == 0
+        || token.is_empty()
+        || !token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some((pid, token.to_owned()))
+}
+
 fn create_event(name: &str) -> Option<EventHandle> {
     let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
     // SAFETY: manual-reset, initially unsignalled named event matching `watchdog.c`.
@@ -108,6 +141,36 @@ fn ensure_watchdog_exe() -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+/// Pulses the named heartbeat event until `stop` is set. Factored out of the
+/// process spawn so the thread can be exercised directly in tests.
+fn heartbeat_loop(heartbeat: EventHandle, stop: Arc<AtomicBool>, interval: Duration) {
+    while !stop.load(Ordering::Relaxed) {
+        heartbeat.signal();
+        thread::sleep(interval);
+    }
+}
+
+fn spawn_heartbeat(
+    heartbeat: EventHandle,
+    stop: Arc<AtomicBool>,
+    interval: Duration,
+) -> Option<JoinHandle<()>> {
+    thread::Builder::new()
+        .name("opentaskbar-heartbeat".into())
+        .spawn(move || heartbeat_loop(heartbeat, stop, interval))
+        .ok()
+}
+
+/// Stops the heartbeat before signalling clean exit, so no pulse can keep a
+/// dock that has already restored Explorer's taskbar "alive".
+fn stop_heartbeat_and_signal(state: &mut WatchdogState) -> bool {
+    state.stop.store(true, Ordering::Relaxed);
+    if let Some(thread) = state.pulse_thread.take() {
+        let _ = thread.join();
+    }
+    state.clean_exit.signal()
+}
+
 /// Arms the watchdog and starts the heartbeat pulse. Idempotent.
 pub fn arm() {
     let Ok(mut slot) = WATCHDOG.lock() else {
@@ -128,7 +191,12 @@ pub fn arm() {
     let Some(heartbeat) = create_event(&format!("{HEARTBEAT_PREFIX}{pid}.{token}")) else {
         return;
     };
-    let arg = format!("--watchdog={pid}:{token}");
+    let arg = watchdog_arg(pid, &token);
+    // Defensive: never spawn with an argument the watchdog cannot parse back.
+    if parse_watchdog_arg(&arg).is_none() {
+        log::warn("Invalid watchdog arguments; recovery not armed.");
+        return;
+    }
     let spawned = Command::new(&exe)
         .arg(&arg)
         .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
@@ -142,21 +210,13 @@ pub fn arm() {
     match spawned {
         Ok(_) => {
             let stop = Arc::new(AtomicBool::new(false));
-            let pulse = heartbeat.clone();
-            let pulse_stop = Arc::clone(&stop);
-            let thread = thread::Builder::new()
-                .name("opentaskbar-heartbeat".into())
-                .spawn(move || {
-                    while !pulse_stop.load(Ordering::Relaxed) {
-                        pulse.signal();
-                        thread::sleep(HEARTBEAT_INTERVAL);
-                    }
-                });
+            let pulse_thread =
+                spawn_heartbeat(heartbeat.clone(), Arc::clone(&stop), HEARTBEAT_INTERVAL);
             *slot = Some(WatchdogState {
                 clean_exit,
                 heartbeat,
                 stop,
-                pulse_thread: thread.ok(),
+                pulse_thread,
             });
             log::info("Watchdog armed; heartbeat pulse active.");
         }
@@ -187,10 +247,128 @@ pub fn notify_clean_exit() {
     let Some(mut watchdog) = state.take() else {
         return;
     };
-    watchdog.stop.store(true, Ordering::Relaxed);
-    if let Some(thread) = watchdog.pulse_thread.take() {
-        let _ = thread.join();
+    if stop_heartbeat_and_signal(&mut watchdog) {
+        log::info("Watchdog clean-exit signalled; heartbeat stopped.");
     }
-    watchdog.clean_exit.signal();
-    log::info("Watchdog clean-exit signalled; heartbeat stopped.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    static TEST_ID: AtomicUsize = AtomicUsize::new(0);
+
+    fn test_event(tag: &str) -> EventHandle {
+        let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
+        let name = format!(
+            r"Local\OpenTaskbar.WatchdogTest.{tag}.{}.{id}",
+            std::process::id()
+        );
+        create_event(&name).expect("named test event must be created")
+    }
+
+    fn is_signalled(event: &EventHandle) -> bool {
+        // SAFETY: owned event handle; zero timeout never blocks.
+        unsafe { WaitForSingleObject(event.raw, 0) == WAIT_OBJECT_0 }
+    }
+
+    fn wait_signalled(event: &EventHandle, timeout: Duration) -> bool {
+        // SAFETY: owned event handle; bounded wait.
+        unsafe {
+            WaitForSingleObject(event.raw, timeout.as_millis().min(u32::MAX as u128) as u32)
+                == WAIT_OBJECT_0
+        }
+    }
+
+    fn reset_event(event: &EventHandle) -> bool {
+        // SAFETY: manual-reset event owned for the lifetime of this value.
+        unsafe { ResetEvent(event.raw) != 0 }
+    }
+
+    #[test]
+    fn parses_only_well_formed_watchdog_arguments() {
+        let arg = watchdog_arg(4242, "0f3a9c1122334455");
+        assert_eq!(arg, "--watchdog=4242:0f3a9c1122334455");
+        assert_eq!(
+            parse_watchdog_arg(&arg),
+            Some((4242, "0f3a9c1122334455".to_owned()))
+        );
+        // Accepts upper/lower-case hex, but nothing else.
+        assert!(parse_watchdog_arg("--watchdog=1:ABCDEF").is_some());
+        for bad in [
+            "",
+            "--watchdog=",
+            "watchdog=1:abc",
+            "--watchdog=0:abc",
+            "--watchdog=pid:abc",
+            "--watchdog=1:",
+            "--watchdog=1:zzz",
+            "--watchdog=1:2:3",
+            "--other=1:abc",
+        ] {
+            assert_eq!(parse_watchdog_arg(bad), None, "must reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn named_event_signals_and_resets() {
+        let event = test_event("signal");
+        assert!(!is_signalled(&event));
+        assert!(event.signal());
+        assert!(is_signalled(&event));
+        assert!(reset_event(&event));
+        assert!(!is_signalled(&event));
+        // Manual-reset stays signalled until explicitly reset.
+        assert!(event.signal());
+        assert!(event.signal());
+        assert!(is_signalled(&event));
+    }
+
+    #[test]
+    fn heartbeat_thread_pulses_until_stopped() {
+        let heartbeat = test_event("heartbeat");
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = spawn_heartbeat(
+            heartbeat.clone(),
+            Arc::clone(&stop),
+            Duration::from_millis(20),
+        )
+        .expect("heartbeat thread must spawn");
+
+        assert!(
+            wait_signalled(&heartbeat, Duration::from_secs(5)),
+            "heartbeat must signal the named event"
+        );
+        assert!(reset_event(&heartbeat));
+        stop.store(true, Ordering::Relaxed);
+        thread.join().expect("heartbeat thread must stop cleanly");
+
+        thread::sleep(Duration::from_millis(80));
+        assert!(!is_signalled(&heartbeat), "no pulse after stop");
+    }
+
+    #[test]
+    fn clean_exit_stops_heartbeat_before_signalling() {
+        let heartbeat = test_event("clean-hb");
+        let clean_exit = test_event("clean-exit");
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = spawn_heartbeat(
+            heartbeat.clone(),
+            Arc::clone(&stop),
+            Duration::from_millis(20),
+        );
+        let mut state = WatchdogState {
+            clean_exit: clean_exit.clone(),
+            heartbeat,
+            stop: Arc::clone(&stop),
+            pulse_thread: thread,
+        };
+
+        assert!(!is_signalled(&clean_exit));
+        assert!(stop_heartbeat_and_signal(&mut state));
+        assert!(stop.load(Ordering::Relaxed), "heartbeat stop flag set");
+        assert!(state.pulse_thread.is_none(), "thread joined and taken");
+        assert!(is_signalled(&clean_exit), "clean-exit event signalled");
+    }
 }

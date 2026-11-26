@@ -303,9 +303,30 @@ unsafe extern "system" {
     fn UnhookWinEvent(hook: HANDLE) -> i32;
 }
 
-static SHELL_CHANGE_CALLBACK: std::sync::atomic::AtomicPtr<()> =
-    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+/// Stored as a plain fn pointer in a mutex instead of a `*mut ()` + transmute:
+/// a fn pointer is `Send`/`Copy`, needs no cast, and cannot dangle for the
+/// lifetime of the process-owned hook.
+static SHELL_CHANGE_CALLBACK: std::sync::Mutex<Option<fn()>> = std::sync::Mutex::new(None);
 static HOOKS_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn set_shell_change_callback(callback: Option<fn()>) {
+    if let Ok(mut slot) = SHELL_CHANGE_CALLBACK.lock() {
+        *slot = callback;
+    }
+}
+
+/// Invokes the installed callback, containing any panic: unwinding across an
+/// `extern "system"` WinEvent callback is undefined behaviour and would abort
+/// the process, so the hook must swallow it.
+fn invoke_shell_change_callback() {
+    let callback = SHELL_CHANGE_CALLBACK
+        .lock()
+        .ok()
+        .and_then(|slot| *slot);
+    if let Some(callback) = callback {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
+    }
+}
 
 unsafe extern "system" fn on_shell_event(
     _hook: HANDLE,
@@ -335,30 +356,23 @@ unsafe extern "system" fn on_shell_event(
     {
         return;
     }
-    let callback = SHELL_CHANGE_CALLBACK.load(std::sync::atomic::Ordering::Acquire);
-    if !callback.is_null() {
-        // SAFETY: the pointer was installed by `install_shell_hooks` and stays
-        // valid for the process lifetime.
-        unsafe { std::mem::transmute::<*mut (), fn()>(callback)() };
-    }
+    invoke_shell_change_callback();
 }
 
 /// Installs an out-of-context WinEvent watcher for `Shell_TrayWnd` creation and
 /// show events on a dedicated message-pump thread. The callback must be cheap
 /// and non-blocking: it normally just queues a bounded reconcile pass.
 pub fn install_shell_hooks(on_shell_change: fn()) {
-    SHELL_CHANGE_CALLBACK.store(
-        on_shell_change as *mut (),
-        std::sync::atomic::Ordering::Release,
-    );
+    set_shell_change_callback(Some(on_shell_change));
     if HOOKS_INSTALLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
     let _ = std::thread::Builder::new()
         .name("opentaskbar-shell-events".into())
         .spawn(|| {
-            // SAFETY: out-of-context hook; the callback body never panics and
-            // only invokes the installed fn pointer.
+            // SAFETY: out-of-context hook; `on_shell_event` contains any
+            // callback panic with `catch_unwind` before it can cross the FFI
+            // boundary.
             let hook = unsafe {
                 SetWinEventHook(
                     EVENT_OBJECT_CREATE,
@@ -451,5 +465,43 @@ mod tests {
         assert!(!should_re_register_taskbar(true, 1, 2, 1, 2));
         assert!(should_re_register_taskbar(true, 1, 2, 1, 3));
         assert!(!should_re_register_taskbar(true, 0, 2, 1, 3));
+    }
+
+    static CALLBACK_CALLS: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    fn counting_callback() {
+        CALLBACK_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn panicking_callback() {
+        panic!("shell callback must never unwind across the WinEvent boundary");
+    }
+
+    #[test]
+    fn shell_hook_callback_runs_and_its_panic_is_contained() {
+        CALLBACK_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        set_shell_change_callback(Some(counting_callback));
+        invoke_shell_change_callback();
+        invoke_shell_change_callback();
+        assert_eq!(
+            CALLBACK_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+
+        // The callback is stored as Option<fn()>; None disables it.
+        set_shell_change_callback(None);
+        invoke_shell_change_callback();
+        assert_eq!(
+            CALLBACK_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+
+        // A panicking callback must be swallowed by catch_unwind, not abort.
+        set_shell_change_callback(Some(panicking_callback));
+        let result = std::panic::catch_unwind(invoke_shell_change_callback);
+        assert!(result.is_ok(), "callback panic escaped catch_unwind");
+        set_shell_change_callback(None);
     }
 }
