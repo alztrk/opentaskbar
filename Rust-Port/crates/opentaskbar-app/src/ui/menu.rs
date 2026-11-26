@@ -863,7 +863,7 @@ impl MenuSession {
             root.open_submenu_idx = Some(parent_idx);
             self.submenu_opened_at = Some(Instant::now());
             self.submenu_parent_rect = Some(root.screen_rect);
-            self.submenu_parent_row = row_rects_row(&root, parent_idx);
+            self.submenu_parent_row = row_rects_row(root, parent_idx);
             unsafe {
                 InvalidateRect(root.hwnd, std::ptr::null(), 0);
             }

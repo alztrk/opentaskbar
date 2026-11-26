@@ -1437,7 +1437,7 @@ impl SettingsView {
         }
         use crate::ui::flyout::{FlyoutBlock, FlyoutSpec, show_flyout};
         let spec = FlyoutSpec {
-            title: loc::t_fmt("FlyoutDemoTitle", &[&id.to_owned()]),
+            title: loc::t_fmt("FlyoutDemoTitle", &[id]),
             subtitle: Some(loc::t("FlyoutDemoSubtitle")),
             width_dips: 320.0,
             blocks: vec![
@@ -1909,7 +1909,7 @@ impl SettingsView {
                 setting_row(
                     t,
                     Some("\u{E99A}"),
-                    loc::t_fmt("AiCliProvider", &[&meta.short.to_owned()]),
+                    loc::t_fmt("AiCliProvider", &[meta.short]),
                     button(
                         SharedString::from(format!("btn-ai-cli-{provider_id}")),
                         t,
@@ -1917,11 +1917,9 @@ impl SettingsView {
                         ButtonVariant::Secondary,
                         cx.listener(move |this, _, _, cx| {
                             if launch_ai_cli_sign_in(provider_id) {
-                                this.ai_status =
-                                    loc::t_fmt("AiCliSignInLaunched", &[&provider_id.to_owned()]);
+                                this.ai_status = loc::t_fmt("AiCliSignInLaunched", &[provider_id]);
                             } else {
-                                this.ai_status =
-                                    loc::t_fmt("AiCliNotFound", &[&provider_id.to_owned()]);
+                                this.ai_status = loc::t_fmt("AiCliNotFound", &[provider_id]);
                             }
                             cx.notify();
                         }),
@@ -1966,7 +1964,7 @@ impl SettingsView {
                                     Ok(()) => {
                                         this.backup_status = loc::t_fmt(
                                             "BackupExported",
-                                            &[&path.to_string_lossy().to_string()],
+                                            &[path.to_string_lossy().as_ref()],
                                         );
                                     }
                                     Err(err) => {
@@ -1995,7 +1993,7 @@ impl SettingsView {
                                         this.backup_status = if preview.valid {
                                             loc::t_fmt(
                                                 "BackupValid",
-                                                &[&path.to_string_lossy().to_string()],
+                                                &[path.to_string_lossy().as_ref()],
                                             )
                                         } else {
                                             format!(
@@ -2034,7 +2032,7 @@ impl SettingsView {
                                         this.settings = settings;
                                         this.backup_status = loc::t_fmt(
                                             "BackupImported",
-                                            &[&path.to_string_lossy().to_string()],
+                                            &[path.to_string_lossy().as_ref()],
                                         );
                                         this.save_settings(cx);
                                         notify_docks_reload();
@@ -4151,10 +4149,7 @@ impl SettingsView {
         let start = self.font_page * PAGE_SIZE;
 
         let mut entries = Vec::new();
-        let native_label = loc::t_fmt(
-            "FontNativeWithWindows",
-            &[&fonts::native_ui_face().to_owned()],
-        );
+        let native_label = loc::t_fmt("FontNativeWithWindows", &[fonts::native_ui_face()]);
         let mut native = MenuEntry::item(NATIVE_ID, MenuIcon::Settings, native_label.clone());
         if self.settings.ui_font_family.trim().is_empty() {
             native = MenuEntry::with_shortcut(

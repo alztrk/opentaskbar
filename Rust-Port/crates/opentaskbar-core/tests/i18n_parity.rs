@@ -11,7 +11,7 @@ const LANGS: &[&str] = &[
     "ru-RU", "tr-TR", "uk-UA", "zh-CN",
 ];
 
-const EXPECTED_KEY_COUNT: usize = 1135;
+const EXPECTED_KEY_COUNT: usize = 1336;
 
 const C3_NEW_KEYS: &[&str] = &[
     // The five keys C# has and the pre-port Rust catalogs lacked.

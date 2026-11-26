@@ -81,7 +81,7 @@ fn formatted_labels_keep_their_placeholders_replaceable() {
 #[test]
 fn locale_key_counts_stay_at_the_contract_value() {
     for tag in LANGS {
-        assert_eq!(i18n::key_count(tag), 1135, "{tag} key count drifted");
+        assert_eq!(i18n::key_count(tag), 1336, "{tag} key count drifted");
     }
 }
 

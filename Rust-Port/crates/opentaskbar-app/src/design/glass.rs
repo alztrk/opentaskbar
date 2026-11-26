@@ -152,11 +152,7 @@ pub fn apply_window_backdrop(hwnd: usize, is_dark: bool) -> bool {
 }
 
 /// Same as [`apply_window_backdrop`] with an explicit backend (test seam).
-pub fn apply_window_backdrop_with(
-    hwnd: usize,
-    is_dark: bool,
-    backend: &dyn GlassBackend,
-) -> bool {
+pub fn apply_window_backdrop_with(hwnd: usize, is_dark: bool, backend: &dyn GlassBackend) -> bool {
     if !valid_handle(hwnd) {
         log::warn("Glass backdrop rejected: null HWND.");
         return false;
@@ -206,7 +202,9 @@ pub fn apply_window_backdrop_with(
         BackdropMode::None => false,
     };
     if !applied {
-        log::error(format!("Glass backdrop could not be applied (mode={mode:?})."));
+        log::error(format!(
+            "Glass backdrop could not be applied (mode={mode:?})."
+        ));
         return false;
     }
     ok
@@ -459,8 +457,7 @@ mod win32 {
             return false;
         }
         // SAFETY: `GetProcAddress` accepts a null-terminated ASCII symbol name.
-        let address: FARPROC =
-            unsafe { GetProcAddress(module, function_name.as_ptr().cast()) };
+        let address: FARPROC = unsafe { GetProcAddress(module, function_name.as_ptr().cast()) };
         let Some(address) = address else {
             return false;
         };
@@ -658,9 +655,11 @@ mod tests {
         let backend = MutableBackend::new(RecordingBackend::win10());
         assert!(apply_window_backdrop_with(0x1234, false, &backend));
         let calls = backend.calls.borrow();
-        assert!(!calls
-            .iter()
-            .any(|(attribute, _)| *attribute == DWMWA_SYSTEMBACKDROP_TYPE));
+        assert!(
+            !calls
+                .iter()
+                .any(|(attribute, _)| *attribute == DWMWA_SYSTEMBACKDROP_TYPE)
+        );
         assert!(calls.contains(&(DWMWA_USE_IMMERSIVE_DARK_MODE, 0)));
         assert_eq!(
             backend.policy_calls.borrow().as_slice(),

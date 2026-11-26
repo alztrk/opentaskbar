@@ -12,12 +12,13 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 $langs = @('de-DE','en-US','es-ES','fr-FR','it-IT','ja-JP','ko-KR','nl-NL','pl-PL','pt-BR','ru-RU','tr-TR','uk-UA','zh-CN')
-# 14 C# catalogs x 999 keys are mirrored by 14 Rust catalogs x 1129 keys; the
-# 130 extra Rust keys are the port's feature keys and must stay identical across
-# every language. These numbers are a hard gate, not just a display string.
+# 14 C# catalogs x 999 keys are mirrored by 14 Rust catalogs x 1336 keys; the
+# 337 extra Rust keys are the port's feature keys (including the 207 new UI
+# localization keys) and must stay identical across every language. These numbers
+# are a hard gate, not just a display string.
 $expectedLanguages = 14
 $expectedCsKeys = 999
-$expectedRustKeys = 1129
+$expectedRustKeys = 1336
 $csDir = Join-Path $RepoRoot 'Services\Localization\Languages'
 $rustDir = Join-Path $RepoRoot 'Rust-Port\crates\opentaskbar-core\locales'
 

@@ -935,7 +935,11 @@ fn style_from_settings(
         SurfaceKind::Widget => SurfaceStyle::new(
             background("WidgetBackground", settings.widget_background),
             number("WidgetOpacity", settings.widget_opacity, global),
-            number("WidgetBorderThickness", settings.widget_border_thickness, 1.0),
+            number(
+                "WidgetBorderThickness",
+                settings.widget_border_thickness,
+                1.0,
+            ),
             color("WidgetBorderColor"),
         ),
         SurfaceKind::Settings => SurfaceStyle::new(
@@ -945,7 +949,11 @@ fn style_from_settings(
                 settings.settings_opacity,
                 global.clamp(0.6, 1.0),
             ),
-            number("SettingsBorderThickness", settings.settings_border_thickness, 1.0),
+            number(
+                "SettingsBorderThickness",
+                settings.settings_border_thickness,
+                1.0,
+            ),
             color("SettingsBorderColor"),
         ),
     };
@@ -1145,7 +1153,10 @@ mod tests {
         assert_eq!(opacity(SurfaceKind::Dock), 0.55);
         assert_eq!(opacity(SurfaceKind::Menu), 0.70);
         assert_eq!(ThemeManager::opacity(SurfaceKind::Widget), 0.80);
-        assert_eq!(ThemeManager::get_surface(SurfaceKind::Settings).opacity, 0.65);
+        assert_eq!(
+            ThemeManager::get_surface(SurfaceKind::Settings).opacity,
+            0.65
+        );
         assert!(set_opacity(SurfaceKind::Dock, f64::NAN).is_err());
         assert!(set_opacity(SurfaceKind::Menu, 1.2).is_err());
 
