@@ -1,8 +1,10 @@
 //! Extra Win32 helpers used by auto-hide, target display selection, virtual
 //! desktops and audio device selection.
 //!
-//! C4 API: `is_shell_overlay(hwnd)`, `display_for(name: &str)`,
-//! `set_default_audio_device(id: &str)`.
+//! C4 API: `is_shell_overlay(hwnd)`, `is_shell_overlay_for(hwnd, exe_path)`,
+//! `display_for(name: &str)`, `set_default_audio_device(id: &str)`.
+//! This module is the single source of truth for shell overlay classes; the
+//! dock/layout list is merged here and CoreWindow is validated by host exe/PID.
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -12,11 +14,14 @@ use windows_sys::Win32::System::Registry::{
     HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
 };
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW;
+use windows_sys::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetWindowThreadProcessId};
 
-/// Transient shell surfaces that can take the foreground: Alt+Tab / Task View
-/// plus the Win10/Win11 Start flyout and its light-dismiss helper windows.
-const SHELL_OVERLAY_CLASSES: [&str; 7] = [
+/// Transient shell surfaces that can take the foreground: Alt+Tab / Task View,
+/// the desktop shell plus the Win10/Win11 Start flyout and its light-dismiss
+/// helpers. Union of the former `win32_ex` and `dock::layout` lists so callers
+/// share one source. `Windows.UI.Core.CoreWindow` is gated by host exe/PID:
+/// arbitrary UWP applications use the same class and are *not* overlays.
+const SHELL_OVERLAY_CLASSES: [&str; 11] = [
     "XamlExplorerHostIslandWindow",
     "MultitaskingViewFrame",
     "TaskSwitcherWnd",
@@ -24,7 +29,12 @@ const SHELL_OVERLAY_CLASSES: [&str; 7] = [
     "StartMenuSizingFrame",
     "Shell_LightDismissOverlay",
     "StartMenuExperienceHost",
+    "Progman",
+    "WorkerW",
+    "Shell_TrayWnd",
+    "Shell_SecondaryTrayWnd",
 ];
+const CORE_WINDOW_CLASS: &str = "windows.ui.core.corewindow";
 const MONITORINFOF_PRIMARY: u32 = 1;
 const VIRTUAL_DESKTOPS_KEY: &str =
     r"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops";
@@ -40,27 +50,69 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 
-fn is_shell_overlay_class(class: &str) -> bool {
+/// Pure class-list membership. Callers that may see a `CoreWindow` must use
+/// `is_shell_overlay_for_class` (or `is_shell_overlay*`) with host validation;
+/// this function deliberately does not claim every CoreWindow is an overlay.
+pub fn is_shell_overlay_class(class: &str) -> bool {
     SHELL_OVERLAY_CLASSES
         .iter()
         .any(|known| class.trim().eq_ignore_ascii_case(known))
 }
 
+fn class_is_core_window(class: &str) -> bool {
+    class.trim().eq_ignore_ascii_case(CORE_WINDOW_CLASS)
+}
+
+/// Class-list check with the CoreWindow exception. `start_host` must be true
+/// only for StartMenuExperienceHost.exe / ShellExperienceHost.exe; otherwise a
+/// regular UWP CoreWindow would make auto-hide look past a real app window.
+pub fn is_shell_overlay_for_class(class: &str, start_host: bool) -> bool {
+    is_shell_overlay_class(class) && (!class_is_core_window(class) || start_host)
+}
+
+fn window_class(hwnd: HWND) -> Option<String> {
+    let mut buffer = [0u16; 64];
+    // SAFETY: bounded UTF-16 buffer on a live window handle.
+    let length = unsafe { GetClassNameW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
+    (length > 0).then(|| String::from_utf16_lossy(&buffer[..(length as usize).min(buffer.len())]))
+}
+
 /// Recognises transient shell overlays (Alt+Tab / Task View / Start) that take
 /// the foreground without being applications. Auto-hide must look past them to
-/// the application beneath.
+/// the application beneath. Resolves the executable from the window's PID.
 pub fn is_shell_overlay(hwnd: usize) -> bool {
     if hwnd == 0 {
         return false;
     }
-    let mut buffer = [0u16; 64];
-    // SAFETY: bounded UTF-16 buffer on a live window handle.
-    let length = unsafe { GetClassNameW(hwnd as HWND, buffer.as_mut_ptr(), buffer.len() as i32) };
-    if length <= 0 {
+    let handle = hwnd as HWND;
+    let Some(class) = window_class(handle) else {
+        return false;
+    };
+    if !is_shell_overlay_class(&class) {
         return false;
     }
-    let class = String::from_utf16_lossy(&buffer[..(length as usize).min(buffer.len())]);
-    is_shell_overlay_class(&class)
+    if !class_is_core_window(&class) {
+        return true;
+    }
+    let mut pid = 0u32;
+    // SAFETY: querying the PID of a window supplied by the caller/OS.
+    unsafe { GetWindowThreadProcessId(handle, &mut pid) };
+    crate::platform::start_menu_state::is_start_host_pid(pid)
+}
+
+/// Overlay check for callers that already hold the window's executable path
+/// (e.g. the dock's running-window snapshot). Avoids a second process query.
+pub fn is_shell_overlay_for(hwnd: usize, exe_path: &str) -> bool {
+    if hwnd == 0 {
+        return false;
+    }
+    let Some(class) = window_class(hwnd as HWND) else {
+        return false;
+    };
+    is_shell_overlay_for_class(
+        &class,
+        crate::platform::start_menu_state::is_start_host_exe(exe_path),
+    )
 }
 
 /// A display in device-independent pixels with stable 1-based index.
@@ -268,7 +320,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shell_overlay_classes_include_switchers_and_start() {
+    fn shell_overlay_classes_merge_layout_and_start_lists() {
         for class in [
             "XamlExplorerHostIslandWindow",
             "MultitaskingViewFrame",
@@ -278,13 +330,40 @@ mod tests {
             "StartMenuSizingFrame",
             "shell_lightdismissoverlay",
             "StartMenuExperienceHost",
+            "Progman",
+            "WorkerW",
+            "Shell_TrayWnd",
+            "Shell_SecondaryTrayWnd",
         ] {
             assert!(is_shell_overlay_class(class), "expected overlay: {class}");
         }
         assert!(!is_shell_overlay_class("Notepad"));
-        assert!(!is_shell_overlay_class("Shell_TrayWnd"));
         assert!(!is_shell_overlay_class(""));
         assert!(!is_shell_overlay(0));
+        assert!(!is_shell_overlay_for(0, "notepad.exe"));
+    }
+
+    #[test]
+    fn core_window_is_overlay_only_for_start_shell_hosts() {
+        // A random UWP app shares the CoreWindow class but is a real app window.
+        assert!(is_shell_overlay_for_class(
+            "Windows.UI.Core.CoreWindow",
+            true
+        ));
+        assert!(!is_shell_overlay_for_class(
+            "Windows.UI.Core.CoreWindow",
+            false
+        ));
+        assert!(!is_shell_overlay_for_class(
+            "windows.ui.core.corewindow",
+            false
+        ));
+        assert!(is_shell_overlay_for_class("Shell_TrayWnd", false));
+        assert!(is_shell_overlay_for_class(
+            "XamlExplorerHostIslandWindow",
+            false
+        ));
+        assert!(!is_shell_overlay_for_class("Notepad", true));
     }
 
     #[test]

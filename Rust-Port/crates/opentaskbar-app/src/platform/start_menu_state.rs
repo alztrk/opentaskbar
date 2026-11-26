@@ -12,8 +12,13 @@
 //! as dismissing the menu rather than reopening it (`WasOpenAtPress` in C#).
 //! The cloak is authoritative: it stamps `closed_at` even if the cached state
 //! was already closed, so repeated cloak events cannot erase the grace window.
+//! A genuine cloak also clears the shell's anchored flag instead of relying on
+//! the worker liveness monitor alone. Foreground changes never create the grace
+//! stamp, so Alt+Tab / dock activation cannot fake a "Start just closed" signal.
 
+use std::collections::HashMap;
 use std::panic::catch_unwind;
+use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
@@ -106,8 +111,6 @@ struct Inner {
     closed_at: Option<Instant>,
     pressed_at: Option<Instant>,
     start_window: usize,
-    cached_pid: u32,
-    cached_host: HostKind,
 }
 
 impl Default for Inner {
@@ -117,8 +120,6 @@ impl Default for Inner {
             closed_at: None,
             pressed_at: None,
             start_window: 0,
-            cached_pid: 0,
-            cached_host: HostKind::None,
         }
     }
 }
@@ -128,13 +129,18 @@ static STATE: Mutex<Inner> = Mutex::new(Inner {
     closed_at: None,
     pressed_at: None,
     start_window: 0,
-    cached_pid: 0,
-    cached_host: HostKind::None,
 });
 static CLOAK_HOOK: AtomicIsize = AtomicIsize::new(0);
 static FOREGROUND_HOOK: AtomicIsize = AtomicIsize::new(0);
 static INSTALL: Mutex<()> = Mutex::new(());
 static ON_OPENED: Mutex<Option<fn(usize)>> = Mutex::new(None);
+
+/// Host identity is stable per PID, so the expensive process query is cached.
+/// `is_open_now()` walks host windows from a WinEvent hook, where a repeated
+/// `OpenProcess` / `QueryFullProcessImageNameW` per window would dominate cost.
+static HOST_CACHE: LazyLock<Mutex<HashMap<u32, HostKind>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+const HOST_CACHE_MAX: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Pure helpers (kept side-effect free so the state rules are testable).
@@ -182,12 +188,29 @@ fn closed_state(now: Instant) -> (bool, Option<Instant>) {
 
 /// Cloak is authoritative, but another genuinely visible Start window on the
 /// same host process means the menu is still open through that window.
-fn cloak_transition(now: Instant, another_visible: bool) -> (bool, Option<Instant>) {
+/// `on_closed` runs only for a genuine dismissal: that is where the shell's
+/// anchored flag is cleared, alongside stamping the grace window.
+fn cloak_transition_with(
+    now: Instant,
+    another_visible: bool,
+    on_closed: impl FnOnce(),
+) -> (bool, Option<Instant>) {
     if another_visible {
         opened_state()
     } else {
+        on_closed();
         closed_state(now)
     }
+}
+
+fn cloak_transition(now: Instant, another_visible: bool) -> (bool, Option<Instant>) {
+    cloak_transition_with(now, another_visible, || {})
+}
+
+/// Foreground loss and dock activation are not dismissals: refresh the cached
+/// open flag while preserving (never creating) the cloak grace stamp.
+fn foreground_closed_state(previous: Option<Instant>) -> (bool, Option<Instant>) {
+    (false, previous)
 }
 
 /// Signed millisecond delta used by the press grace window.
@@ -244,20 +267,38 @@ fn process_exe(pid: u32) -> Option<String> {
 }
 
 fn host_kind_for_pid(pid: u32) -> HostKind {
-    if let Ok(state) = STATE.lock()
-        && state.cached_pid == pid
+    if pid == 0 {
+        return HostKind::None;
+    }
+    if let Ok(cache) = HOST_CACHE.lock()
+        && let Some(&cached) = cache.get(&pid)
     {
-        return state.cached_host;
+        return cached;
     }
     let kind = process_exe(pid)
         .as_deref()
         .map(host_kind_from_exe)
         .unwrap_or(HostKind::None);
-    if let Ok(mut state) = STATE.lock() {
-        state.cached_pid = pid;
-        state.cached_host = kind;
+    if let Ok(mut cache) = HOST_CACHE.lock() {
+        // Long sessions recycle PIDs; cap the cache instead of growing forever.
+        if cache.len() >= HOST_CACHE_MAX {
+            cache.clear();
+        }
+        cache.insert(pid, kind);
     }
     kind
+}
+
+/// True when `pid` belongs to a Start / Shell host process. Exposed for
+/// `win32_ex::is_shell_overlay`, which must not treat every CoreWindow as Start.
+pub fn is_start_host_pid(pid: u32) -> bool {
+    host_kind_for_pid(pid) != HostKind::None
+}
+
+/// True when an executable path names a Start / Shell host (exact file name,
+/// not a bare path suffix). Works with the exe path already held by callers.
+pub fn is_start_host_exe(exe_path: &str) -> bool {
+    host_kind_from_exe(exe_path) != HostKind::None
 }
 
 fn window_class(hwnd: HWND) -> String {
@@ -375,10 +416,21 @@ fn mark_open() {
 }
 
 /// Cloak is authoritative and always refreshes the dismissal timestamp, even
-/// when the cached state was already closed.
+/// when the cached state was already closed. The CLOAKED hook uses
+/// `cloak_transition_with` so it can clear the shell anchor in the same step.
 pub fn mark_closed() {
     if let Ok(mut state) = STATE.lock() {
-        let (is_open, closed_at) = closed_state(Instant::now());
+        let (is_open, closed_at) = cloak_transition(Instant::now(), false);
+        state.is_open = is_open;
+        state.closed_at = closed_at;
+    }
+}
+
+/// Foreground moved away from Start: clear the cached flag only. No grace stamp
+/// is created here, so a later press is not mistaken for a reopen.
+fn mark_foreground_inactive() {
+    if let Ok(mut state) = STATE.lock() {
+        let (is_open, closed_at) = foreground_closed_state(state.closed_at);
         state.is_open = is_open;
         state.closed_at = closed_at;
     }
@@ -427,13 +479,26 @@ unsafe extern "system" fn on_cloak_event(
             return;
         }
         if event_type == EVENT_OBJECT_CLOAKED {
-            mark_closed();
             let mut pid = 0u32;
             GetWindowThreadProcessId(hwnd, &mut pid);
             let others = find_visible_start_windows(Some(pid));
-            if let Some(&other) = others.iter().find(|&&candidate| candidate != hwnd as usize) {
-                remember_start_window(other as HWND);
-                mark_open();
+            let other = others
+                .iter()
+                .find(|&&candidate| candidate != hwnd as usize)
+                .copied();
+            // A real cloak clears the shell's anchored flag now; the worker
+            // liveness monitor is only a fallback. A second visible Start
+            // window means the flyout is still open and must stay anchored.
+            let (is_open, closed_at) =
+                cloak_transition_with(Instant::now(), other.is_some(), || {
+                    opentaskbar_shell::flyout_reposition::mark_closed()
+                });
+            if let Some(hwnd) = other {
+                remember_start_window(hwnd as HWND);
+            }
+            if let Ok(mut state) = STATE.lock() {
+                state.is_open = is_open;
+                state.closed_at = closed_at;
             }
         }
     }
@@ -530,18 +595,26 @@ pub fn is_open_now() -> bool {
     is_start_menu_open_now()
 }
 
+/// Refreshes the cached state when the foreground window changes. A Start
+/// foreground means the menu is open; losing focus does *not* mean it closed —
+/// Alt+Tab and Task View leave the flyout open beneath the switcher. Validate
+/// the cached window before flipping the flag, and never stamp `closed_at`
+/// here: only a real CLOAKED event may create the dismissal grace window.
 pub fn on_foreground_changed(is_start_menu: bool) {
     if is_start_menu {
         mark_open();
-    } else {
-        mark_closed();
+    } else if !is_start_menu_open_now() {
+        mark_foreground_inactive();
     }
 }
 
-/// The hooks skip our own process, so a right-click activating the dock is the
-/// only foreground sign that the Start menu lost focus to us.
+/// Hook point for WS-C's dock activation handler (right-click / focus). Like a
+/// foreground change, this is not a dismissal: it refreshes the cached flag
+/// without producing a false "Start just closed" grace signal.
 pub fn on_dock_activated() {
-    mark_closed();
+    if !is_start_menu_open_now() {
+        mark_foreground_inactive();
+    }
 }
 
 /// Snapshots the Start button press time so a click can attribute a cloak that
@@ -572,11 +645,17 @@ pub fn was_open_at_press_with(open_now: bool, press: Instant) -> bool {
     was_open_at_press_impl(is_open, open_now, closed_at, press)
 }
 
+fn reset_inner(state: &mut Inner) {
+    state.is_open = false;
+    state.closed_at = None;
+    state.pressed_at = None;
+    // A stale HWND must not be fed to close_start on the next toggle.
+    state.start_window = 0;
+}
+
 pub fn reset() {
     if let Ok(mut state) = STATE.lock() {
-        state.is_open = false;
-        state.closed_at = None;
-        state.pressed_at = None;
+        reset_inner(&mut state);
     }
 }
 
@@ -742,5 +821,86 @@ mod tests {
         assert!(open);
         assert_eq!(closed_at, None);
         assert!(!was_open_at_press_impl(false, false, closed_at, refreshed));
+    }
+
+    #[test]
+    fn cloak_clears_shell_anchor_only_on_genuine_close() {
+        use std::cell::Cell;
+        let now = Instant::now();
+        let shell_cleanups = Cell::new(0);
+
+        let (open, closed_at) = cloak_transition_with(now, false, || {
+            shell_cleanups.set(shell_cleanups.get() + 1);
+        });
+        assert!(!open);
+        assert_eq!(closed_at, Some(now));
+        assert_eq!(
+            shell_cleanups.get(),
+            1,
+            "real cloak must clear shell anchor"
+        );
+
+        // A second visible Start window keeps the flyout open and anchored.
+        let (open, closed_at) = cloak_transition_with(now, true, || {
+            shell_cleanups.set(shell_cleanups.get() + 1);
+        });
+        assert!(open);
+        assert_eq!(closed_at, None);
+        assert_eq!(
+            shell_cleanups.get(),
+            1,
+            "no anchor clear while Start is still visible"
+        );
+    }
+
+    #[test]
+    fn foreground_change_does_not_stamp_close_grace() {
+        let cloak_at = Instant::now();
+        let (_, cloak_stamp) = cloak_transition(cloak_at, false);
+        let press = cloak_at + Duration::from_millis(40);
+
+        // Losing foreground preserves the real cloak stamp: the press still
+        // belongs to the dismissal instead of a freshly faked close.
+        let (open, closed_at) = foreground_closed_state(cloak_stamp);
+        assert!(!open);
+        assert_eq!(closed_at, Some(cloak_at));
+        assert!(was_open_at_press_impl(false, false, closed_at, press));
+
+        // Without a real cloak there is no grace window at all.
+        let (open, closed_at) = foreground_closed_state(None);
+        assert!(!open);
+        assert_eq!(closed_at, None);
+        assert!(!was_open_at_press_impl(false, false, closed_at, press));
+    }
+
+    #[test]
+    fn reset_clears_cached_start_window() {
+        let now = Instant::now();
+        let mut inner = Inner {
+            is_open: true,
+            closed_at: Some(now),
+            pressed_at: Some(now),
+            start_window: 0x1234,
+        };
+        reset_inner(&mut inner);
+        assert!(!inner.is_open);
+        assert_eq!(inner.closed_at, None);
+        assert_eq!(inner.pressed_at, None);
+        assert_eq!(inner.start_window, 0);
+    }
+
+    #[test]
+    fn start_host_exe_validation_rejects_arbitrary_uwp_apps() {
+        assert!(is_start_host_exe(
+            r"C:\Windows\SystemApps\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\StartMenuExperienceHost.exe"
+        ));
+        assert!(is_start_host_exe(
+            r"C:\Windows\SystemApps\ShellExperienceHost_cw5n1h2txyewy\ShellExperienceHost.exe"
+        ));
+        assert!(!is_start_host_exe(
+            r"C:\Windows\SystemApps\Microsoft.WindowsCalculator_8wekyb3d8bbwe\Calculator.exe"
+        ));
+        assert!(!is_start_host_exe(r"C:\Temp\notepad.exe"));
+        assert_eq!(host_kind_for_pid(0), HostKind::None);
     }
 }
