@@ -5,6 +5,7 @@
 //! dynamic search catalogue and widget panel host (C# `SettingsWindow` parity).
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::time::Instant;
 
 use std::ops::Range;
@@ -25,11 +26,13 @@ use opentaskbar_core::settings::{
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde_json::{Map, Value, json};
+use windows_sys::Win32::Foundation::{HWND, LPARAM};
 use windows_sys::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    HWND_BROADCAST, RegisterWindowMessageW, SendNotifyMessageW,
+    EnumWindows, GetWindowThreadProcessId, HWND_BROADCAST, IsWindowVisible, PostMessageW,
+    RegisterWindowMessageW, SendNotifyMessageW, WM_CLOSE,
 };
 
 use crate::design::brush::{BrushSpec, GradientSpec, Hsv, MAX_GRADIENT_STOPS};
@@ -87,9 +90,75 @@ fn parse_hex_color(value: &str) -> Option<u32> {
     Some(((0xffu32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32)
 }
 
+/// Settings runs in its own `--settings` process so GPUI memory is released when the window
+/// closes. Keep the children so dock shutdown can close them too (C# `CloseForShutdown` parity).
+static SETTINGS_CHILDREN: Mutex<Vec<std::process::Child>> = Mutex::new(Vec::new());
+
 pub fn spawn_settings_window() {
-    if let Ok(exe) = std::env::current_exe() {
-        let _ = std::process::Command::new(exe).arg(SETTINGS_ARG).spawn();
+    let Ok(exe) = std::env::current_exe() else {
+        opentaskbar_core::log::error("Cannot open Settings: current_exe failed.");
+        return;
+    };
+    match std::process::Command::new(exe).arg(SETTINGS_ARG).spawn() {
+        Ok(child) => {
+            if let Ok(mut children) = SETTINGS_CHILDREN.lock() {
+                // Drop exited children: a reused PID must never receive our WM_CLOSE.
+                children.retain_mut(|existing| matches!(existing.try_wait(), Ok(None)));
+                children.push(child);
+            }
+        }
+        Err(error) => opentaskbar_core::log::error(format!("Cannot open Settings: {error}")),
+    }
+}
+
+/// Posts WM_CLOSE to the Settings windows spawned by this dock. Called after the dock message
+/// loop ends, so quitting from the taskbar cannot leave a stray Settings window/process behind.
+pub fn close_spawned_settings_windows() {
+    let Ok(mut children) = SETTINGS_CHILDREN.lock() else {
+        return;
+    };
+    // Keep the Child handles alive through the enumeration: holding them prevents PID reuse.
+    children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+    let pids: Vec<u32> = children.iter().map(|child| child.id()).collect();
+    if pids.is_empty() {
+        return;
+    }
+
+    struct CloseContext {
+        pids: Vec<u32>,
+        closed: Vec<bool>,
+    }
+    unsafe extern "system" fn close_settings_window(hwnd: HWND, lparam: LPARAM) -> i32 {
+        // SAFETY: `lparam` points at a live `CloseContext` for the duration of `EnumWindows`.
+        unsafe {
+            let context = &mut *(lparam as *mut CloseContext);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if let Some(index) = context.pids.iter().position(|candidate| *candidate == pid)
+                && IsWindowVisible(hwnd) != 0
+                && PostMessageW(hwnd, WM_CLOSE, 0, 0) != 0
+            {
+                context.closed[index] = true;
+            }
+        }
+        1
+    }
+
+    let closed = vec![false; pids.len()];
+    let mut context = CloseContext { pids, closed };
+    // SAFETY: the callback only touches `context`, which outlives the enumeration.
+    unsafe {
+        EnumWindows(
+            Some(close_settings_window),
+            &mut context as *mut CloseContext as LPARAM,
+        );
+    }
+    // A Settings process with no window yet (opened just before Exit) would otherwise survive
+    // and show a window after the dock is gone. No window means nothing to save gracefully.
+    for (child, closed) in children.iter_mut().zip(context.closed) {
+        if !closed {
+            let _ = child.kill();
+        }
     }
 }
 
@@ -7897,9 +7966,9 @@ impl Render for SettingsView {
 mod tests {
     use super::{
         BrushMode, DockSettings, WIN_H, WIN_W, ai_cli_sign_in_command, brush_to_json, build_backup,
-        build_brush, city_list, civil_from_days, field_cell_hsv, gradient_stop_at,
-        import_backup_into, inspect_backup, persist_theme_tokens, reorder_gradient_stop,
-        safe_backup_path, weather_country_for, zip_store, zip_unstore,
+        build_brush, city_list, civil_from_days, close_spawned_settings_windows, field_cell_hsv,
+        gradient_stop_at, import_backup_into, inspect_backup, persist_theme_tokens,
+        reorder_gradient_stop, safe_backup_path, weather_country_for, zip_store, zip_unstore,
     };
     use crate::design::brush::Hsv;
     use crate::design::theme::{apply_token_overrides, token_overrides_from_json};
@@ -8111,6 +8180,21 @@ mod tests {
         // Item 8: bundled swatch gallery and typography preview are gone.
         assert!(!source.contains(concat!("Theme Gallery", " (bundled swatches)")));
         assert!(!source.contains(concat!("AaBb", "ÇğÖşü 0123")));
+    }
+
+    #[test]
+    fn settings_window_is_closed_when_the_dock_exits() {
+        let settings_src = include_str!("settings.rs");
+        let dock_src = include_str!("../dock/mod.rs");
+        // Every spawn must be tracked, and dock shutdown must close tracked windows.
+        assert!(settings_src.contains("static SETTINGS_CHILDREN: Mutex<Vec<std::process::Child>>"));
+        assert!(settings_src.contains("children.push(child);"));
+        assert!(settings_src.contains("PostMessageW(hwnd, WM_CLOSE, 0, 0);"));
+        assert!(dock_src.contains("settings_ui::close_spawned_settings_windows();"));
+        // No duplicate spawn path may bypass the registry.
+        assert!(!dock_src.contains("std::process::Command::new(exe)"));
+        // Closing with no Settings spawned yet is a no-op.
+        close_spawned_settings_windows();
     }
 
     #[test]

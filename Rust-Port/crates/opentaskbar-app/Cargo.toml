@@ -27,5 +27,6 @@ smallvec.workspace = true
 [target.'cfg(windows)'.dependencies]
 roxmltree = "0.20"
 windows.workspace = true
+windows-core.workspace = true
 windows-numerics.workspace = true
 windows-sys.workspace = true

@@ -3020,6 +3020,7 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "windows",
+ "windows-core",
  "windows-numerics",
  "windows-sys 0.61.2",
  "zip",

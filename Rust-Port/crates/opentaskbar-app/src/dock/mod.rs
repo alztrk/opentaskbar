@@ -1192,15 +1192,6 @@ fn bounce_offset_dips(started: Option<Instant>) -> Option<f32> {
     Some(y)
 }
 
-fn spawn_settings_window() {
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let _ = std::process::Command::new(exe)
-        .arg(settings_ui::SETTINGS_ARG)
-        .spawn();
-}
-
 impl DockState {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -5655,7 +5646,7 @@ impl DockState {
                 );
                 self.reload_settings_live();
             }
-            ContextAction::Settings => spawn_settings_window(),
+            ContextAction::Settings => settings_ui::spawn_settings_window(),
             ContextAction::TaskManager => pins::launch("taskmgr.exe".to_owned()),
             ContextAction::FileExplorer => pins::launch("explorer.exe".to_owned()),
             ContextAction::Terminal => pins::launch("wt.exe".to_owned()),
@@ -6782,6 +6773,11 @@ pub fn run(settings: DockSettings) {
             DispatchMessageW(&msg);
         }
     }
+
+    // The Settings UI is a separate `--settings` process; quitting the dock from the Exit
+    // menu must close it as C# MainWindow.Window_Closed does with
+    // SettingsWindow.CloseForShutdown(), otherwise its window stays on screen.
+    settings_ui::close_spawned_settings_windows();
 
     if !wheel_hook.is_null() {
         unsafe {
