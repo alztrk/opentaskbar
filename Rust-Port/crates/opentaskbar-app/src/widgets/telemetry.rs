@@ -88,6 +88,8 @@ const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY {
 pub struct MediaSessionSnapshot {
     pub title: String,
     pub artist: String,
+    /// SMTC `SourceAppUserModelId`; used by `media_ext::librewolf_timeline` to gate the UIA scan.
+    pub source_app_id: String,
     pub playing: bool,
     pub position_secs: u64,
     pub duration_secs: u64,
@@ -119,15 +121,26 @@ pub fn refresh_media_session(cache: &Arc<Mutex<MediaSessionSnapshot>>, force: bo
         .spawn(move || {
             let next = query_smtc_session();
             if let Ok(mut guard) = cache_clone.lock() {
-                if let Some((title, artist, playing, pos, dur)) = next {
+                if let Some((title, artist, source_app_id, playing, pos, dur)) = next {
                     guard.title = title;
                     guard.artist = artist;
+                    guard.source_app_id = source_app_id.clone();
                     guard.playing = playing;
                     guard.position_secs = pos;
                     guard.duration_secs = dur;
+                    // LibreWolf often publishes a frozen SMTC timeline. The real UIA reader is
+                    // the authoritative source for its progress bar (WS-6 contract).
+                    if !guard.title.is_empty()
+                        && let Some((uia_pos, uia_dur)) =
+                            super::media_ext::librewolf_timeline(&source_app_id, &guard.title)
+                    {
+                        guard.position_secs = uia_pos.round().max(0.0) as u64;
+                        guard.duration_secs = uia_dur.round().max(0.0) as u64;
+                    }
                 } else {
                     guard.title.clear();
                     guard.artist.clear();
+                    guard.source_app_id.clear();
                     guard.playing = false;
                     guard.position_secs = 0;
                     guard.duration_secs = 0;
@@ -139,7 +152,7 @@ pub fn refresh_media_session(cache: &Arc<Mutex<MediaSessionSnapshot>>, force: bo
         .ok();
 }
 
-fn query_smtc_session() -> Option<(String, String, bool, u64, u64)> {
+fn query_smtc_session() -> Option<(String, String, String, bool, u64, u64)> {
     use windows::Media::Control::{
         GlobalSystemMediaTransportControlsSessionManager,
         GlobalSystemMediaTransportControlsSessionPlaybackStatus,
@@ -155,6 +168,10 @@ fn query_smtc_session() -> Option<(String, String, bool, u64, u64)> {
     if title.is_empty() && artist.is_empty() {
         return None;
     }
+    let source_app_id = session
+        .SourceAppUserModelId()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
     let playing = session
         .GetPlaybackInfo()
         .ok()
@@ -175,7 +192,7 @@ fn query_smtc_session() -> Option<(String, String, bool, u64, u64)> {
             (pos.min(end), end)
         })
         .unwrap_or((0, 0));
-    Some((title, artist, playing, pos_secs, dur_secs))
+    Some((title, artist, source_app_id, playing, pos_secs, dur_secs))
 }
 
 fn ft_to_u64(ft: FILETIME) -> u64 {
@@ -1767,6 +1784,7 @@ pub fn refresh_bluetooth_battery(cache: &Arc<Mutex<BluetoothBatteryCache>>, forc
 
 // --- Storage ---
 
+#[derive(Clone, Debug)]
 pub struct DriveSpace {
     pub letter: char,
     pub free_gb: f64,
