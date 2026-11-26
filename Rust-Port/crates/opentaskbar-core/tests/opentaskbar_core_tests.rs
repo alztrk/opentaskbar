@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 
-use opentaskbar_core::settings::DockSettings;
+use opentaskbar_core::settings::{DockSettings, canonical_widget_setting_id};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -464,4 +464,53 @@ fn validate_accepts_a_well_formed_settings_object() {
     good.insert("DockWidthPercent".into(), json!(60));
     good.insert("WirelessBatteryPollSeconds".into(), json!(30));
     assert!(validate_contract(&good).is_empty());
+}
+
+/// The subset rule itself is still enforced by `validate()`; only `load_from()`/`migrate_legacy()`
+/// repair it before validation. Keeping this contract test prevents a future "fix" from dropping
+/// the C# `IsValid()` rule entirely.
+#[test]
+fn validate_still_rejects_an_unrepaired_subset_violation() {
+    let settings = DockSettings {
+        enabled_widgets: vec!["Clock".to_owned()],
+        ..DockSettings::default()
+    };
+    assert!(settings.validate().contains(&"EnabledWidgetNotInstalled"));
+
+    let mut settings = DockSettings::default();
+    settings.set_widget_enabled("Weather", true);
+    assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+}
+
+#[test]
+fn widget_ids_are_canonicalized_to_the_csharp_catalog() {
+    for (input, expected) in [
+        ("clock", "Clock"),
+        ("CLOCK", "Clock"),
+        ("stats", "SystemStats"),
+        ("keyboard", "KeyboardLayout"),
+        ("aiusage_claude", "AiUsageClaude"),
+        ("AIUSAGE-OPENCODE", "AiUsageOpenCode"),
+        ("showdesktop", "ShowDesktop"),
+        ("date", "Date"),
+    ] {
+        assert_eq!(canonical_widget_setting_id(input), expected, "{input}");
+    }
+}
+
+#[test]
+fn focus_mode_and_widget_flags_keep_effective_state() {
+    let mut settings = DockSettings::default();
+    settings.set_widget_enabled("media", true);
+    settings.set_widget_enabled("focus", true);
+    assert!(settings.is_widget_enabled("media"));
+    assert!(settings.is_widget_enabled("focus"));
+
+    settings.focus_mode = true;
+    assert!(!settings.is_widget_enabled("media"));
+    assert!(settings.is_widget_enabled("focus"));
+    assert!(settings.is_widget_enabled("clock") == settings.show_clock_widget);
+
+    settings.focus_mode = false;
+    assert!(settings.is_widget_enabled("media"));
 }
