@@ -8,8 +8,8 @@
 //!   `stepper`, `button`, `badge`, `sidebar_nav_item`, and `scrollbar_overlay`.
 
 use gpui::{
-    AnyElement, Div, KeyDownEvent, MouseButton, ScrollAnchor, SharedString, deferred, div, img,
-    prelude::*, px, rgba,
+    AnyElement, Div, FocusHandle, KeyDownEvent, MouseButton, ScrollAnchor, SharedString, deferred,
+    div, img, prelude::*, px, rgba,
 };
 
 use crate::design::{self, fonts, gpui_rgba};
@@ -412,7 +412,8 @@ pub fn button(
 /// Callback invoked when a dropdown option is selected.
 pub type DropdownSelectHandler = std::rc::Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>;
 
-/// One selectable entry inside [`dropdown`].
+/// One selectable entry inside [`dropdown`] and [`searchable_dropdown`].
+#[derive(Clone)]
 pub struct DropdownOption {
     pub label: SharedString,
     pub flag_path: Option<SharedString>,
@@ -616,6 +617,400 @@ pub fn dropdown_labeled(
                     .on_mouse_down(MouseButton::Left, move |_, window, cx| {
                         cx.stop_propagation();
                         cb(window, cx);
+                    })
+                    .child(left)
+                    .when(opt.selected, |row| {
+                        row.child(icon_glyph("\u{E73E}", 11.0, accent))
+                    }),
+            );
+        }
+
+        let popover = deferred(
+            div()
+                .occlude()
+                .absolute()
+                .top(px(36.0))
+                .right_0()
+                .child(menu_list),
+        )
+        .with_priority(1);
+        wrap = wrap.child(popover);
+    }
+
+    wrap
+}
+
+/// Case fold used by the searchable pickers.
+///
+/// ASCII `I` folds to plain `i`, dotted `İ` (and the lowercase sequence `i` + combining dot)
+/// folds to the dotted marker `İ`, and dotless `ı` stays `ı`. The three classes never mix:
+/// `istanbul` finds `Istanbul`, `İstanbul` / `i̇stanbul` find `İstanbul`, `ıstanbul` finds
+/// neither — the distinction Turkish users expect.
+pub fn fold_search_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            'I' => out.push('i'),
+            'İ' => out.push('İ'),
+            'i' if chars.peek() == Some(&'\u{307}') => {
+                chars.next();
+                out.push('İ');
+            }
+            _ => out.extend(ch.to_lowercase()),
+        }
+    }
+    out
+}
+
+/// Indices of options matching every whitespace-separated query token.
+pub fn filter_dropdown_options(options: &[DropdownOption], query: &str) -> Vec<usize> {
+    let tokens: Vec<String> = fold_search_text(query.trim())
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    options
+        .iter()
+        .enumerate()
+        .filter(|(_, option)| {
+            let haystack = fold_search_text(&option.label);
+            tokens.iter().all(|token| haystack.contains(token))
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// State of a [`searchable_dropdown`]. Kept outside the component so the owning entity can
+/// update it from GPUI key events and share it with the filter logic in tests.
+#[derive(Clone, Debug, Default)]
+pub struct SearchableDropdownState {
+    pub query: String,
+    /// Row index inside the *filtered* list, not the original option index.
+    pub active: usize,
+}
+
+impl SearchableDropdownState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&mut self) {
+        self.query.clear();
+        self.active = 0;
+    }
+
+    pub fn set_query(&mut self, query: String) {
+        self.query = query;
+        self.active = 0;
+    }
+
+    /// Clamps the highlighted row inside `len`, wrapping neither end.
+    pub fn move_active(&mut self, delta: isize, len: usize) {
+        if len == 0 {
+            self.active = 0;
+            return;
+        }
+        let current = self.active.min(len - 1) as isize;
+        let next = current + delta;
+        self.active = if next < 0 {
+            0
+        } else if next >= len as isize {
+            len - 1
+        } else {
+            next as usize
+        };
+    }
+
+    pub fn filtered_indices(&self, options: &[DropdownOption]) -> Vec<usize> {
+        filter_dropdown_options(options, &self.query)
+    }
+
+    /// Original option index selected by Enter, if any rows survive the filter.
+    pub fn active_option(&self, options: &[DropdownOption]) -> Option<usize> {
+        self.filtered_indices(options).get(self.active).copied()
+    }
+}
+
+/// Key handler forwarded by [`searchable_dropdown`] for text edits and arrow navigation.
+pub type SearchableDropdownKeyHandler =
+    std::rc::Rc<dyn Fn(&KeyDownEvent, &mut gpui::Window, &mut gpui::App)>;
+
+/// Callbacks supplied by the owning entity for a [`searchable_dropdown`].
+pub struct SearchableDropdownHandlers {
+    pub on_toggle: DropdownSelectHandler,
+    /// All keys except Enter/Escape (which the component itself resolves against the
+    /// filtered list) are forwarded here so the owner can update its text buffer.
+    pub on_key_down: SearchableDropdownKeyHandler,
+    pub on_close: DropdownSelectHandler,
+}
+
+/// Dropdown with a text field pinned above the option list. Filtering is pure
+/// ([`filter_dropdown_options`]); keyboard navigation, Enter and Escape are handled here while
+/// text edits are delegated to `handlers.on_key_down`. The plain [`dropdown`] is untouched.
+#[allow(clippy::too_many_arguments)]
+pub fn searchable_dropdown(
+    id: impl Into<SharedString>,
+    theme: &UiTheme,
+    open: bool,
+    state: &SearchableDropdownState,
+    focus: &FocusHandle,
+    options: &[DropdownOption],
+    placeholder: impl Into<SharedString>,
+    empty_message: impl Into<SharedString>,
+    handlers: SearchableDropdownHandlers,
+) -> Div {
+    let id: SharedString = id.into();
+    let placeholder: SharedString = placeholder.into();
+    let empty_message: SharedString = empty_message.into();
+    let SearchableDropdownHandlers {
+        on_toggle,
+        on_key_down,
+        on_close,
+    } = handlers;
+
+    let current = options
+        .iter()
+        .find(|option| option.selected)
+        .or_else(|| options.first());
+    let current_label = current
+        .map(|option| option.label.clone())
+        .unwrap_or_else(|| placeholder.clone());
+    let current_flag = current.and_then(|option| option.flag_path.clone());
+    let current_glyph = current.and_then(|option| option.glyph);
+
+    let trigger_bg = if open {
+        theme.surface_hover
+    } else {
+        theme.surface_muted
+    };
+    let trigger_border = if open { theme.accent } else { theme.border };
+    let hover_bg = theme.surface_hover;
+    let accent = theme.accent;
+
+    let mut trigger_left = div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .min_w_0()
+        .overflow_hidden();
+    if let Some(path) = current_flag {
+        trigger_left = trigger_left.child(
+            img(path)
+                .w(px(18.0))
+                .h(px(13.0))
+                .rounded(px(2.5))
+                .flex_shrink_0(),
+        );
+    } else if let Some(glyph) = current_glyph {
+        trigger_left = trigger_left.child(icon_glyph(glyph, 12.0, theme.text_secondary));
+    }
+    trigger_left = trigger_left.child(
+        div()
+            .text_size(px(fonts::scaled_size(12.0)))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(rgba(theme.text_primary))
+            .overflow_hidden()
+            .child(current_label),
+    );
+
+    let toggle = on_toggle.clone();
+    let trigger = div()
+        .id(SharedString::from(format!("sdd-trig-{id}")))
+        .min_w(px(148.0))
+        .h(px(32.0))
+        .px(px(11.0))
+        .rounded(px(CONTROL_RADIUS))
+        .bg(rgba(trigger_bg))
+        .border_1()
+        .border_color(rgba(trigger_border))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(10.0))
+        .cursor_pointer()
+        .tab_index(0)
+        .focus(move |style| style.border_color(rgba(accent)))
+        .hover(move |s| s.bg(rgba(hover_bg)))
+        .active(|s| s.opacity(0.88))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            toggle(window, cx);
+        })
+        .child(trigger_left)
+        .child(icon_glyph(
+            if open { "\u{E70E}" } else { "\u{E70D}" },
+            10.0,
+            if open {
+                theme.accent
+            } else {
+                theme.text_secondary
+            },
+        ));
+
+    let mut wrap = div().relative().flex_shrink_0().child(trigger);
+
+    if open {
+        let filtered = state.filtered_indices(options);
+        let active_handler = filtered
+            .get(state.active)
+            .and_then(|index| options.get(*index))
+            .map(|option| option.on_select.clone());
+
+        let input_close = on_close.clone();
+        let key_handler = move |event: &KeyDownEvent,
+                                window: &mut gpui::Window,
+                                cx: &mut gpui::App| {
+            match event.keystroke.key.as_str() {
+                "escape" => {
+                    input_close(window, cx);
+                    cx.stop_propagation();
+                }
+                "enter" => {
+                    if let Some(handler) = &active_handler {
+                        handler(window, cx);
+                    }
+                    input_close(window, cx);
+                    cx.stop_propagation();
+                }
+                _ => on_key_down(event, window, cx),
+            }
+        };
+
+        let input_value = if state.query.is_empty() {
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(fonts::scaled_size(12.0)))
+                .text_color(rgba(theme.text_secondary))
+                .child(placeholder)
+        } else {
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_size(px(fonts::scaled_size(12.0)))
+                .text_color(rgba(theme.text_primary))
+                .child(state.query.clone())
+        };
+
+        let mut menu_list = div()
+            .id(SharedString::from(format!("sdd-menu-{id}")))
+            .w(px(240.0))
+            .max_h(px(304.0))
+            .overflow_y_scroll()
+            .p(px(4.0))
+            .rounded(px(10.0))
+            .bg(rgba(theme.surface))
+            .border_1()
+            .border_color(rgba(theme.border))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .id(SharedString::from(format!("sdd-input-{id}")))
+                    .track_focus(focus)
+                    .tab_index(0)
+                    .h(px(28.0))
+                    .mb(px(4.0))
+                    .px(px(8.0))
+                    .rounded(px(6.0))
+                    .bg(rgba(theme.surface_muted))
+                    .border_1()
+                    .border_color(rgba(theme.border))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .cursor_text()
+                    .on_key_down(key_handler)
+                    .child(icon_glyph("\u{E721}", 11.0, theme.text_secondary))
+                    .child(input_value),
+            );
+
+        if filtered.is_empty() {
+            menu_list = menu_list.child(
+                div()
+                    .w_full()
+                    .px(px(9.0))
+                    .py(px(8.0))
+                    .text_size(px(fonts::scaled_size(12.0)))
+                    .text_color(rgba(theme.text_secondary))
+                    .child(empty_message),
+            );
+        }
+
+        for (row, &opt_index) in filtered.iter().enumerate() {
+            let Some(opt) = options.get(opt_index) else {
+                continue;
+            };
+            let is_active = row == state.active;
+            let opt_bg = if is_active {
+                theme.accent_soft
+            } else {
+                0x00000000
+            };
+            let opt_fg = if is_active {
+                theme.accent
+            } else {
+                theme.text_primary
+            };
+            let opt_hover = if is_active {
+                theme.accent_soft
+            } else {
+                theme.surface_hover
+            };
+            let cb = opt.on_select.clone();
+            let close = on_close.clone();
+            let mut left = div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .min_w_0()
+                .overflow_hidden();
+            if let Some(path) = &opt.flag_path {
+                left = left.child(
+                    img(path.clone())
+                        .w(px(18.0))
+                        .h(px(13.0))
+                        .rounded(px(2.5))
+                        .flex_shrink_0(),
+                );
+            } else if let Some(glyph) = opt.glyph {
+                left = left.child(icon_glyph(glyph, 12.0, opt_fg));
+            }
+            left = left.child(
+                div()
+                    .text_size(px(fonts::scaled_size(12.0)))
+                    .font_weight(if is_active {
+                        gpui::FontWeight::SEMIBOLD
+                    } else {
+                        gpui::FontWeight::MEDIUM
+                    })
+                    .text_color(rgba(opt_fg))
+                    .overflow_hidden()
+                    .child(opt.label.clone()),
+            );
+
+            menu_list = menu_list.child(
+                div()
+                    .id(SharedString::from(format!("sdd-opt-{id}-{opt_index}")))
+                    .w_full()
+                    .min_h(px(30.0))
+                    .px(px(9.0))
+                    .py(px(5.0))
+                    .rounded(px(6.0))
+                    .bg(rgba(opt_bg))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(10.0))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(rgba(opt_hover)))
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        cx.stop_propagation();
+                        cb(window, cx);
+                        close(window, cx);
                     })
                     .child(left)
                     .when(opt.selected, |row| {
@@ -983,4 +1378,70 @@ pub fn sidebar_nav_item(
         row = row.child(badge(theme, cnt, active));
     }
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DropdownOption, SearchableDropdownState, SharedString, filter_dropdown_options,
+        fold_search_text,
+    };
+
+    fn options(labels: &[&str]) -> Vec<DropdownOption> {
+        labels
+            .iter()
+            .map(|label| DropdownOption {
+                label: SharedString::from((*label).to_owned()),
+                flag_path: None,
+                glyph: None,
+                selected: false,
+                on_select: std::rc::Rc::new(|_, _| {}),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn filter_is_case_insensitive_and_matches_every_token() {
+        let opts = options(&["Ankara", "İstanbul", "İzmir", "Antalya"]);
+        assert_eq!(filter_dropdown_options(&opts, ""), vec![0, 1, 2, 3]);
+        assert_eq!(filter_dropdown_options(&opts, "ANKARA"), vec![0]);
+        assert_eq!(filter_dropdown_options(&opts, "  an  "), vec![0, 1, 3]);
+        assert_eq!(filter_dropdown_options(&opts, "an ar"), vec![0]);
+        assert!(filter_dropdown_options(&opts, "istanbul").is_empty());
+    }
+
+    #[test]
+    fn turkish_dotless_and_dotted_i_are_distinct() {
+        let opts = options(&["İstanbul", "Istanbul", "Isparta", "Izmir"]);
+        assert_eq!(fold_search_text("İ"), "İ");
+        assert_eq!(fold_search_text("i\u{307}"), "İ");
+        assert_eq!(fold_search_text("ı"), "ı");
+        assert_eq!(filter_dropdown_options(&opts, "İstanbul"), vec![0]);
+        assert_eq!(filter_dropdown_options(&opts, "i̇stanbul"), vec![0]);
+        assert!(filter_dropdown_options(&opts, "ıstanbul").is_empty());
+        assert_eq!(filter_dropdown_options(&opts, "istanbul"), vec![1]);
+        assert!(filter_dropdown_options(&opts, "ısparta").is_empty());
+    }
+
+    #[test]
+    fn dropdown_state_clamps_navigation_and_tracks_active_option() {
+        let opts = options(&["Ankara", "Antalya", "İstanbul"]);
+        let mut state = SearchableDropdownState::new();
+        state.set_query("an".to_owned());
+        assert_eq!(state.filtered_indices(&opts), vec![0, 1, 2]);
+        assert_eq!(state.active_option(&opts), Some(0));
+        state.move_active(1, 3);
+        assert_eq!(state.active_option(&opts), Some(1));
+        state.move_active(5, 3);
+        assert_eq!(state.active, 2);
+        state.move_active(-5, 3);
+        assert_eq!(state.active, 0);
+        state.move_active(-1, 0);
+        assert_eq!(state.active, 0);
+        state.set_query("missing".to_owned());
+        assert_eq!(state.active_option(&opts), None);
+        state.clear();
+        assert_eq!(state.query, "");
+        assert_eq!(state.active, 0);
+    }
 }

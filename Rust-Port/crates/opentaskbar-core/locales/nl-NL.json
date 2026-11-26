@@ -1337,5 +1337,8 @@
   "WirelessBatterySubtitle": "Bluetooth-apparaten",
   "WirelessBatteryThresholdButton": "Lage drempel",
   "GpuEngine": "GPU-engine",
-  "OpenLocation": "Locatie openen"
+  "OpenLocation": "Locatie openen",
+  "DropdownSearchPlaceholder": "Zoeken...",
+  "DropdownNoResults": "Geen resultaten gevonden",
+  "WeatherLocationUsed": "Uw locatie wordt gebruikt"
 }

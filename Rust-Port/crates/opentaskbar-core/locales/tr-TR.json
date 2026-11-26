@@ -1337,5 +1337,8 @@
   "WirelessBatterySubtitle": "Bluetooth cihazları",
   "WirelessBatteryThresholdButton": "Düşük eşik",
   "GpuEngine": "GPU motoru",
-  "OpenLocation": "Konumu aç"
+  "OpenLocation": "Konumu aç",
+  "DropdownSearchPlaceholder": "Ara...",
+  "DropdownNoResults": "Sonuç bulunamadı",
+  "WeatherLocationUsed": "Konumunuz kullanılıyor"
 }

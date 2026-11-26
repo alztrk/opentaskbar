@@ -1337,5 +1337,8 @@
   "WirelessBatterySubtitle": "Bluetooth デバイス",
   "WirelessBatteryThresholdButton": "低下しきい値",
   "GpuEngine": "GPU エンジン",
-  "OpenLocation": "場所を開く"
+  "OpenLocation": "場所を開く",
+  "DropdownSearchPlaceholder": "検索...",
+  "DropdownNoResults": "結果が見つかりません",
+  "WeatherLocationUsed": "現在地を使用しています"
 }

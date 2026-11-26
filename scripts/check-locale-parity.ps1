@@ -12,14 +12,14 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 $langs = @('de-DE','en-US','es-ES','fr-FR','it-IT','ja-JP','ko-KR','nl-NL','pl-PL','pt-BR','ru-RU','tr-TR','uk-UA','zh-CN')
-# 14 C# catalogs x 999 keys are mirrored by 14 Rust catalogs x 1339 keys; the
-# 340 extra Rust keys are the port's feature keys (including the 207 new UI
-# localization keys and the 3 keys replacing the last English literals) and must
-# stay identical across every language. These numbers are a hard gate, not just
-# a display string.
+# 14 C# catalogs x 999 keys are mirrored by 14 Rust catalogs x 1342 keys; the
+# 343 extra Rust keys are the port's feature keys (including the 207 new UI
+# localization keys, the 3 keys replacing the last English literals and the 3
+# searchable-location keys) and must stay identical across every language.
+# These numbers are a hard gate, not just a display string.
 $expectedLanguages = 14
 $expectedCsKeys = 999
-$expectedRustKeys = 1339
+$expectedRustKeys = 1342
 $csDir = Join-Path $RepoRoot 'Services\Localization\Languages'
 $rustDir = Join-Path $RepoRoot 'Rust-Port\crates\opentaskbar-core\locales'
 
@@ -37,7 +37,8 @@ $required = @(
     'HardwareUnavailable',
     'StartMenuOpen','StartMenuClose','StartMenuToggle',
     'ProfileHiddenApps',
-    'PlacementInWidgets','OpenLocation','GpuEngine'
+    'PlacementInWidgets','OpenLocation','GpuEngine',
+    'DropdownSearchPlaceholder','DropdownNoResults','WeatherLocationUsed'
 )
 
 function Get-Catalog([string]$Path) {

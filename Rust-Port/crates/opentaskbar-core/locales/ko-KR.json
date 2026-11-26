@@ -1337,5 +1337,8 @@
   "WirelessBatterySubtitle": "Bluetooth 장치",
   "WirelessBatteryThresholdButton": "낮은 임계값",
   "GpuEngine": "GPU 엔진",
-  "OpenLocation": "위치 열기"
+  "OpenLocation": "위치 열기",
+  "DropdownSearchPlaceholder": "검색...",
+  "DropdownNoResults": "결과가 없습니다",
+  "WeatherLocationUsed": "현재 위치를 사용 중입니다"
 }

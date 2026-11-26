@@ -41,9 +41,10 @@ use crate::dock::dcomp::{SystemStatColumn, WidgetChipSpec};
 use crate::platform::cursor_auth;
 use crate::platform::{country_city, pins, theme_packs, toast, update, win32};
 use crate::ui::components::{
-    ButtonVariant, DropdownOption, UiTheme, badge, button, dim_when, dropdown, dropdown_labeled,
-    icon_glyph, ios_switch, live_slider, section_card, setting_row, setting_row_desc,
-    setting_row_with_id, setting_row_with_id_desc, sidebar_nav_item, stepper,
+    ButtonVariant, DropdownOption, DropdownSelectHandler, SearchableDropdownHandlers,
+    SearchableDropdownState, UiTheme, badge, button, dim_when, dropdown, dropdown_labeled,
+    icon_glyph, ios_switch, live_slider, searchable_dropdown, section_card, setting_row,
+    setting_row_desc, setting_row_with_id, setting_row_with_id_desc, sidebar_nav_item, stepper,
 };
 use crate::ui::menu::{self, BorderStyle, MenuEntry, MenuIcon};
 use crate::ui::prompt;
@@ -756,6 +757,20 @@ fn city_list(country: &str) -> Vec<String> {
     country_city::cities(country)
 }
 
+/// Builds the persisted `"City, Country"` value for an automatic location fix. A saved city
+/// (including one typed while the probe was running) is never overwritten.
+fn location_auto_fill_value(
+    saved_city: &str,
+    detected: &Option<(String, String)>,
+) -> Option<String> {
+    if !country_city::should_auto_geolocate(saved_city, country_city::LocationAccess::Granted) {
+        return None;
+    }
+    detected
+        .as_ref()
+        .map(|(country, city)| format!("{city}, {country}"))
+}
+
 /// Resolves an executable on `PATH` (C# `AiUsageService.FindExecutableOnPath`).
 fn find_executable_on_path(command: &str) -> Option<std::path::PathBuf> {
     let paths = std::env::var_os("PATH")?;
@@ -930,6 +945,13 @@ struct SettingsView {
     /// City list for the selected country, refreshed from `country_city`.
     weather_cities: Vec<String>,
     weather_city_index: usize,
+    /// Filter buffers for the searchable country/city pickers (keyed by dropdown id).
+    country_picker: SearchableDropdownState,
+    city_picker: SearchableDropdownState,
+    country_picker_focus: FocusHandle,
+    city_picker_focus: FocusHandle,
+    /// True while the displayed location came from the automatic geolocation probe.
+    weather_auto_applied: bool,
     theme_category: usize,
     token_name: String,
     token_value: String,
@@ -966,10 +988,11 @@ impl SettingsView {
         // Window-open backdrop hook: WS-B will expose this as
         // `design::glass::apply_window_backdrop(hwnd, is_dark)` (see function note).
         apply_settings_backdrop(window, is_dark);
-        let weather_city = if settings.weather_city.is_empty() {
+        let saved_city = settings.weather_city.clone();
+        let weather_city = if saved_city.trim().is_empty() {
             "Istanbul".to_owned()
         } else {
-            settings.weather_city.clone()
+            saved_city.clone()
         };
         let weather_country = weather_country_for(&weather_city);
         let weather_cities = city_list(&weather_country);
@@ -982,7 +1005,7 @@ impl SettingsView {
         crate::design::theme::apply_saved_token_overrides(&settings);
         let accent = crate::design::palette(is_dark).accent;
         let brush_color = crate::design::tokens::Rgba::from_rgb(accent.0, accent.1, accent.2);
-        Self {
+        let mut view = Self {
             page: SettingsPage::Dock,
             focus,
             search_text: String::new(),
@@ -1016,6 +1039,11 @@ impl SettingsView {
             weather_country,
             weather_cities,
             weather_city_index,
+            country_picker: SearchableDropdownState::new(),
+            city_picker: SearchableDropdownState::new(),
+            country_picker_focus: cx.focus_handle(),
+            city_picker_focus: cx.focus_handle(),
+            weather_auto_applied: false,
             theme_category: 0,
             token_name: String::new(),
             token_value: String::new(),
@@ -1033,7 +1061,11 @@ impl SettingsView {
             } else {
                 "AiCursorNotSignedIn"
             }),
+        };
+        if saved_city.trim().is_empty() {
+            view.auto_detect_location(cx);
         }
+        view
     }
 
     fn search_utf16_len(&self) -> usize {
@@ -1194,6 +1226,164 @@ impl SettingsView {
                 cx.notify();
             });
         })
+    }
+
+    fn picker_state(&self, id: &str) -> &SearchableDropdownState {
+        match id {
+            "weather-city" => &self.city_picker,
+            _ => &self.country_picker,
+        }
+    }
+
+    fn picker_state_mut(&mut self, id: &str) -> &mut SearchableDropdownState {
+        match id {
+            "weather-city" => &mut self.city_picker,
+            _ => &mut self.country_picker,
+        }
+    }
+
+    fn clear_picker_state(&mut self, id: &str) {
+        self.picker_state_mut(id).clear();
+    }
+
+    /// Searchable variant of [`Self::make_dropdown`]: text edits and arrow navigation update the
+    /// shared state; Enter/Escape are resolved by the component against the filtered list.
+    fn make_searchable_dropdown(
+        &self,
+        id: &'static str,
+        t: &UiTheme,
+        focus: &FocusHandle,
+        options: &[DropdownOption],
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let entity = cx.entity().downgrade();
+        let toggle_id = id.to_owned();
+        let toggle_focus = focus.clone();
+        let on_toggle: DropdownSelectHandler = std::rc::Rc::new(move |window, app| {
+            let mut opened = false;
+            let _ = entity.update(app, |this, cx| {
+                opened = this.open_dropdown.as_deref() != Some(toggle_id.as_str());
+                if opened {
+                    this.open_dropdown = Some(toggle_id.clone());
+                } else {
+                    this.open_dropdown = None;
+                    this.clear_picker_state(&toggle_id);
+                }
+                cx.notify();
+            });
+            if opened {
+                toggle_focus.focus(window);
+            }
+        });
+
+        let entity = cx.entity().downgrade();
+        let key_id = id.to_owned();
+        let key_options = options.to_vec();
+        let on_key_down = std::rc::Rc::new(
+            move |event: &KeyDownEvent, _window: &mut gpui::Window, app: &mut gpui::App| {
+                let _ = entity.update(app, |this, cx| {
+                    let key = event.keystroke.key.as_str();
+                    match key {
+                        "up" | "down" => {
+                            let len = this
+                                .picker_state(&key_id)
+                                .filtered_indices(&key_options)
+                                .len();
+                            this.picker_state_mut(&key_id)
+                                .move_active(if key == "up" { -1 } else { 1 }, len);
+                        }
+                        _ => {
+                            let mut buffer = this.picker_state(&key_id).query.clone();
+                            if apply_keystroke(
+                                &mut buffer,
+                                key,
+                                event.keystroke.key_char.as_deref(),
+                                false,
+                            ) {
+                                this.picker_state_mut(&key_id).set_query(buffer);
+                            }
+                        }
+                    }
+                    cx.notify();
+                });
+            },
+        );
+
+        let entity = cx.entity().downgrade();
+        let close_id = id.to_owned();
+        let on_close: DropdownSelectHandler = std::rc::Rc::new(move |_window, app| {
+            let _ = entity.update(app, |this, cx| {
+                this.open_dropdown = None;
+                this.clear_picker_state(&close_id);
+                cx.notify();
+            });
+        });
+
+        searchable_dropdown(
+            id,
+            t,
+            self.open_dropdown.as_deref() == Some(id),
+            self.picker_state(id),
+            focus,
+            options,
+            loc::t("DropdownSearchPlaceholder"),
+            loc::t("DropdownNoResults"),
+            SearchableDropdownHandlers {
+                on_toggle,
+                on_key_down,
+                on_close,
+            },
+        )
+    }
+
+    /// Persists `"City, Country"` as soon as a picker selection changes.
+    fn apply_weather_location(&mut self, cx: &mut Context<Self>) {
+        let Some(city) = self.weather_cities.get(self.weather_city_index).cloned() else {
+            return;
+        };
+        self.settings.weather_city = format!("{city}, {}", self.weather_country);
+        self.auto_save(cx);
+    }
+
+    /// Fills an empty saved location from Windows geolocation. The probe runs off the UI thread;
+    /// if the user types a city before it finishes, the result is discarded.
+    fn auto_detect_location(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let detected = cx
+                .background_executor()
+                .spawn(async { country_city::geolocate() })
+                .await;
+            let summary = detected
+                .as_ref()
+                .map(|(country, city)| format!("{city}, {country}"))
+                .unwrap_or_else(|| "denied or unavailable".to_owned());
+            let _ = this.update(cx, |view, cx| {
+                if let Some(value) =
+                    location_auto_fill_value(&view.settings.weather_city, &detected)
+                {
+                    let (country, city) = detected.expect("auto-fill requires a fix");
+                    view.weather_country = country_city::country_display_name(&country);
+                    view.weather_cities = city_list(&view.weather_country);
+                    view.weather_city_index = view
+                        .weather_cities
+                        .iter()
+                        .position(|candidate| candidate.eq_ignore_ascii_case(&city))
+                        .unwrap_or(0);
+                    view.settings.weather_city = value.clone();
+                    view.weather_auto_applied = true;
+                    view.auto_save(cx);
+                    opentaskbar_core::log::info(format!(
+                        "Automatic weather location applied: {value}"
+                    ));
+                } else {
+                    opentaskbar_core::log::info(format!(
+                        "Automatic weather location skipped (saved city or permission): {summary}"
+                    ));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn open_search_result(&mut self, entry: SettingsSearchEntry, cx: &mut Context<Self>) {
@@ -1629,7 +1819,11 @@ impl SettingsView {
             .get(self.weather_city_index)
             .map(String::as_str)
             .unwrap_or("Istanbul");
-        let label = format!("{city}, {}", self.weather_country);
+        let mut label = format!("{city}, {}", self.weather_country);
+        if self.weather_auto_applied {
+            label.push_str(" · ");
+            label.push_str(&loc::t("WeatherLocationUsed"));
+        }
 
         let country_opts: Vec<DropdownOption> = country_city::countries()
             .into_iter()
@@ -1648,6 +1842,8 @@ impl SettingsView {
                             this.weather_country = country_name.clone();
                             this.weather_cities = city_list(&this.weather_country);
                             this.weather_city_index = 0;
+                            this.weather_auto_applied = false;
+                            this.apply_weather_location(cx);
                             this.refresh_weather_cities(cx);
                             cx.notify();
                         });
@@ -1670,6 +1866,8 @@ impl SettingsView {
                         let _ = entity.update(app, |this, cx| {
                             this.open_dropdown = None;
                             this.weather_city_index = idx;
+                            this.weather_auto_applied = false;
+                            this.apply_weather_location(cx);
                             cx.notify();
                         });
                     }),
@@ -1705,14 +1903,26 @@ impl SettingsView {
                 t,
                 Some("\u{E774}"),
                 loc::t("WeatherCountry"),
-                self.make_dropdown("weather-country", t, country_opts, cx),
+                self.make_searchable_dropdown(
+                    "weather-country",
+                    t,
+                    &self.country_picker_focus,
+                    &country_opts,
+                    cx,
+                ),
             )
             .into_any_element(),
             setting_row(
                 t,
                 Some("\u{E707}"),
                 loc::t("WeatherCityProvince"),
-                self.make_dropdown("weather-city", t, city_opts, cx),
+                self.make_searchable_dropdown(
+                    "weather-city",
+                    t,
+                    &self.city_picker_focus,
+                    &city_opts,
+                    cx,
+                ),
             )
             .into_any_element(),
             setting_row(
@@ -1746,13 +1956,8 @@ impl SettingsView {
                     loc::t("Apply"),
                     ButtonVariant::Primary,
                     cx.listener(|this, _, _, cx| {
-                        let city = this
-                            .weather_cities
-                            .get(this.weather_city_index)
-                            .cloned()
-                            .unwrap_or_else(|| "Istanbul".to_owned());
-                        this.settings.weather_city = format!("{city}, {}", this.weather_country);
-                        this.auto_save(cx);
+                        this.weather_auto_applied = false;
+                        this.apply_weather_location(cx);
                     }),
                 ),
             )
@@ -7898,8 +8103,8 @@ mod tests {
     use super::{
         BrushMode, DockSettings, WIN_H, WIN_W, ai_cli_sign_in_command, brush_to_json, build_backup,
         build_brush, city_list, civil_from_days, field_cell_hsv, gradient_stop_at,
-        import_backup_into, inspect_backup, persist_theme_tokens, reorder_gradient_stop,
-        safe_backup_path, weather_country_for, zip_store, zip_unstore,
+        import_backup_into, inspect_backup, location_auto_fill_value, persist_theme_tokens,
+        reorder_gradient_stop, safe_backup_path, weather_country_for, zip_store, zip_unstore,
     };
     use crate::design::brush::Hsv;
     use crate::design::theme::{apply_token_overrides, token_overrides_from_json};
@@ -8046,6 +8251,21 @@ mod tests {
         assert!(city_list("Turkey").iter().any(|c| c == "İstanbul"));
         assert_eq!(weather_country_for("İzmir, Turkey"), "Turkey");
         assert_eq!(weather_country_for("Istanbul"), "Turkey");
+    }
+
+    #[test]
+    fn automatic_location_only_fills_an_empty_saved_city() {
+        let detected = Some(("Turkey".to_owned(), "İstanbul".to_owned()));
+        assert_eq!(
+            location_auto_fill_value("", &detected),
+            Some("İstanbul, Turkey".to_owned())
+        );
+        assert_eq!(
+            location_auto_fill_value("  ", &detected),
+            Some("İstanbul, Turkey".to_owned())
+        );
+        assert_eq!(location_auto_fill_value("Izmir, Turkey", &detected), None);
+        assert_eq!(location_auto_fill_value("", &None), None);
     }
 
     #[test]

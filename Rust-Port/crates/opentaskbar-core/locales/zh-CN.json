@@ -1337,5 +1337,8 @@
   "WirelessBatterySubtitle": "蓝牙设备",
   "WirelessBatteryThresholdButton": "低阈值",
   "GpuEngine": "GPU 引擎",
-  "OpenLocation": "打开位置"
+  "OpenLocation": "打开位置",
+  "DropdownSearchPlaceholder": "搜索...",
+  "DropdownNoResults": "未找到结果",
+  "WeatherLocationUsed": "正在使用您的位置"
 }

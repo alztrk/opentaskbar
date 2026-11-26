@@ -1337,5 +1337,8 @@
   "WirelessBatterySubtitle": "Dispositivi Bluetooth",
   "WirelessBatteryThresholdButton": "Soglia bassa",
   "GpuEngine": "Motore GPU",
-  "OpenLocation": "Apri posizione"
+  "OpenLocation": "Apri posizione",
+  "DropdownSearchPlaceholder": "Cerca...",
+  "DropdownNoResults": "Nessun risultato trovato",
+  "WeatherLocationUsed": "Viene usata la tua posizione"
 }

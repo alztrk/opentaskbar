@@ -2463,6 +2463,60 @@ pub fn search_weather_locations(
     Ok(out)
 }
 
+/// Pure parser for BigDataCloud reverse-geocode payloads. City falls back through locality
+/// and principal subdivision so a coordinate fix still yields a usable picker label.
+pub fn parse_reverse_geocode(
+    body: &str,
+    latitude: f64,
+    longitude: f64,
+) -> Option<GeoLocationMatch> {
+    let root: serde_json::Value = serde_json::from_str(body).ok()?;
+    let text = |key: &str| {
+        root.get(key)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let name = text("city")
+        .or_else(|| text("locality"))
+        .or_else(|| text("principalSubdivision"))?;
+    Some(GeoLocationMatch {
+        name,
+        admin1: text("principalSubdivision").unwrap_or_default(),
+        country: text("countryName").unwrap_or_default(),
+        country_code: text("countryCode").unwrap_or_default(),
+        latitude,
+        longitude,
+    })
+}
+
+/// Resolves Windows Geolocation coordinates into a city/country pair (no API key required).
+/// Used by the settings location auto-fill when `CivicAddress` is empty, which is common on
+/// desktop Windows.
+pub fn reverse_geocode(latitude: f64, longitude: f64, language: &str) -> Option<GeoLocationMatch> {
+    if !latitude.is_finite()
+        || !longitude.is_finite()
+        || latitude.abs() > 90.0
+        || longitude.abs() > 180.0
+    {
+        return None;
+    }
+    let lang = language
+        .split(['-', '_'])
+        .next()
+        .filter(|part| part.len() == 2)
+        .unwrap_or("en");
+    let path = format!(
+        "/data/reverse-geocode-client?latitude={latitude:.5}&longitude={longitude:.5}&localityLanguage={lang}"
+    );
+    let (status, body) = winhttp_get("api.bigdatacloud.net", &path, &[])?;
+    if status != 200 {
+        return None;
+    }
+    parse_reverse_geocode(&body, latitude, longitude)
+}
+
 pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool) {
     let city = if city.trim().is_empty() {
         "Istanbul"
@@ -3246,6 +3300,22 @@ mod tests {
         assert_eq!(gpu_engine_name(instance), Some("3D"));
         assert_eq!(gpu_engine_name("NVIDIA GeForce RTX 4070"), None);
         assert_eq!(gpu_engine_name("pid_1_luid_0x0_0x1_eng_0_engtype_"), None);
+    }
+
+    #[test]
+    fn reverse_geocode_payload_yields_geo_match() {
+        let body = r#"{"city":"İstanbul","principalSubdivision":"İstanbul","countryName":"Turkey","countryCode":"TR","latitude":41.0,"longitude":29.0}"#;
+        let geo = parse_reverse_geocode(body, 41.008, 28.978).expect("city must parse");
+        assert_eq!(geo.name, "İstanbul");
+        assert_eq!(geo.setting_value(), "İstanbul, Turkey");
+        assert_eq!(geo.latitude, 41.008);
+        // Locality / subdivision fallback keeps a usable label when `city` is absent.
+        let body = r#"{"locality":"","principalSubdivision":"Ankara","countryName":"Turkey"}"#;
+        assert_eq!(
+            parse_reverse_geocode(body, 39.9, 32.8).map(|g| g.name),
+            Some("Ankara".to_owned())
+        );
+        assert!(parse_reverse_geocode("{}", 0.0, 0.0).is_none());
     }
 }
 
