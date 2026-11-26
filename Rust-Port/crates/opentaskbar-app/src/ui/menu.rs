@@ -4,6 +4,7 @@
 //! with hardware-accelerated Direct2D rounded hover pills, DirectWrite grayscale anti-aliasing,
 //! `Segoe UI Variable Text`, and `Segoe Fluent Icons`.
 
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Foundation::HWND as WinHwnd;
@@ -512,24 +513,51 @@ fn measure_entries(
     (menu_w, menu_h, row_rects)
 }
 
-fn create_pane_window(
+/// Snapshot of immutable session data needed to create a pane.
+///
+/// Passed by value so `open_submenu` never has to borrow the `MenuSession` it
+/// already holds mutably while Win32 synchronously dispatches messages.
+#[derive(Clone, Copy)]
+struct SessionInfo {
+    /// Raw pointer only: never dereferenced by `create_pane_window`, so no borrow
+    /// of the (possibly mutably borrowed) `MenuSession` is created there.
     session: *mut MenuSession,
+    hinstance: windows_sys::Win32::Foundation::HINSTANCE,
+    class_name: *const u16,
+    dpi: f32,
+    is_dark: bool,
+    border: BorderStyle,
+}
+
+impl MenuSession {
+    fn info(&mut self) -> SessionInfo {
+        SessionInfo {
+            session: self as *mut MenuSession,
+            hinstance: self.hinstance,
+            class_name: self.class_name.as_ptr(),
+            dpi: self.dpi,
+            is_dark: self.is_dark,
+            border: self.border,
+        }
+    }
+}
+
+fn create_pane_window(
+    info: SessionInfo,
     entries: Vec<MenuEntry>,
     width_dips: f32,
     x: i32,
     y: i32,
     is_submenu: bool,
 ) -> Option<Box<MenuPane>> {
-    let (hinstance, class_ptr, dpi, is_dark, border) = unsafe {
-        let s = &*session;
-        (
-            s.hinstance,
-            s.class_name.as_ptr(),
-            s.dpi,
-            s.is_dark,
-            s.border,
-        )
-    };
+    let SessionInfo {
+        session,
+        hinstance,
+        class_name: class_ptr,
+        dpi,
+        is_dark,
+        border,
+    } = info;
     let (menu_w, menu_h, row_rects) = measure_entries(&entries, width_dips, dpi);
     let ex_style = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | if is_submenu { WS_EX_NOACTIVATE } else { 0 };
     let hwnd = unsafe {
@@ -690,8 +718,8 @@ pub fn show_popup_menu_with_border(
         selected_id: None,
         done: AtomicBool::new(false),
     });
-    let session_ptr = (&mut *session) as *mut MenuSession;
-    let mut root = create_pane_window(session_ptr, entries, MENU_W_DIPS, x, y, false)?;
+    let session_info = session.info();
+    let mut root = create_pane_window(session_info, entries, MENU_W_DIPS, x, y, false)?;
     session.root = (&mut *root) as *mut MenuPane;
 
     let mut msg: MSG = unsafe { std::mem::zeroed() };
@@ -733,6 +761,9 @@ impl MenuSession {
         if self.root.is_null() || items.is_empty() {
             return;
         }
+        // Snapshot before borrowing the root pane: `create_pane_window` can
+        // synchronously dispatch messages, so it must not borrow `self`.
+        let info = self.info();
         let root = unsafe { &mut *self.root };
         if root.open_submenu_idx == Some(parent_idx) && self.submenu.is_some() {
             return;
@@ -759,9 +790,7 @@ impl MenuSession {
             (monitor.bottom - sub_h - margin).max(monitor.top + margin),
         );
 
-        let session_ptr = self as *mut MenuSession;
-        if let Some(sub_pane) =
-            create_pane_window(session_ptr, items, SUBMENU_W_DIPS, sub_x, sub_y, true)
+        if let Some(sub_pane) = create_pane_window(info, items, SUBMENU_W_DIPS, sub_x, sub_y, true)
         {
             self.submenu = Some(sub_pane);
             root.open_submenu_idx = Some(parent_idx);
@@ -1044,6 +1073,41 @@ impl MenuPane {
     }
 }
 
+thread_local! {
+    /// Menu `WndProc` frames currently active on this UI thread. Synchronous
+    /// Win32 calls (`SetWindowPos`, `ShowWindow`, `DestroyWindow`) can dispatch
+    /// messages back into the same window; a re-entrant call must not create a
+    /// second `&mut` to the same `MenuPane` / `MenuSession`.
+    static MENU_WNDPROC_ACTIVE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// HWND-based re-entrancy guard, mirroring the dock's `DockWndProcGuard`.
+struct MenuWndProcGuard {
+    hwnd: usize,
+}
+
+impl MenuWndProcGuard {
+    fn try_enter(hwnd: usize) -> Option<Self> {
+        MENU_WNDPROC_ACTIVE.with(|active| {
+            let mut active = active.borrow_mut();
+            if active.contains(&hwnd) {
+                None
+            } else {
+                active.push(hwnd);
+                Some(Self { hwnd })
+            }
+        })
+    }
+}
+
+impl Drop for MenuWndProcGuard {
+    fn drop(&mut self) {
+        MENU_WNDPROC_ACTIVE.with(|active| {
+            active.borrow_mut().retain(|&h| h != self.hwnd);
+        });
+    }
+}
+
 unsafe extern "system" fn menu_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -1053,20 +1117,31 @@ unsafe extern "system" fn menu_wnd_proc(
     if msg == WM_ERASEBKGND {
         return 1;
     }
-    let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut MenuPane };
-    if ptr.is_null() {
+    let Some(_guard) = MenuWndProcGuard::try_enter(hwnd as usize) else {
+        // Re-entrant call on this HWND: fall through to the default procedure.
+        // No `&mut` to the pane or session is created here.
+        return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+    };
+    let pane_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut MenuPane };
+    if pane_ptr.is_null() {
         return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
     }
-    let pane = unsafe { &mut *ptr };
-    let session = unsafe { &mut *pane.session };
+    // `session.root` aliases the root `MenuPane`, so `&mut *pane_ptr` and
+    // `&mut *session_ptr` must never be alive at the same time. Keep raw
+    // pointers and create short-lived borrows only inside the match arms;
+    // clone any pane data into owned locals before calling into the session
+    // (those calls can synchronously re-enter this WndProc).
+    let session_ptr = unsafe { (*pane_ptr).session };
 
     match msg {
         WM_PAINT => {
-            pane.paint();
+            unsafe {
+                (&*pane_ptr).paint();
+            }
             0
         }
         WM_SETCURSOR => {
-            let cur = if pane.hovered.is_some() {
+            let cur = if unsafe { (*pane_ptr).hovered.is_some() } {
                 IDC_HAND
             } else {
                 IDC_ARROW
@@ -1077,7 +1152,7 @@ unsafe extern "system" fn menu_wnd_proc(
             1
         }
         WM_MOUSEMOVE => {
-            if !pane.tracking {
+            if !unsafe { (*pane_ptr).tracking } {
                 let mut tme = TRACKMOUSEEVENT {
                     cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
                     dwFlags: TME_LEAVE,
@@ -1086,26 +1161,43 @@ unsafe extern "system" fn menu_wnd_proc(
                 };
                 unsafe {
                     TrackMouseEvent(&mut tme);
+                    (*pane_ptr).tracking = true;
                 }
-                pane.tracking = true;
             }
             let x = (lparam as u32 & 0xffff) as i16 as i32;
             let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
-            let next = pane
-                .row_rects
-                .iter()
-                .position(|r| r.as_ref().is_some_and(|rc| pt_in_rect(rc, x, y)));
-            if next != pane.hovered {
-                pane.hovered = next;
-                if !pane.is_submenu
-                    && let Some(idx) = next
-                {
-                    if let MenuEntry::Submenu { items, .. } = &pane.entries[idx]
-                        && let Some(rc) = pane.row_rects[idx]
-                    {
-                        session.open_submenu(idx, items.clone(), rc);
-                    } else {
-                        session.close_submenu();
+            let next = unsafe {
+                (*pane_ptr)
+                    .row_rects
+                    .iter()
+                    .position(|r| r.as_ref().is_some_and(|rc| pt_in_rect(rc, x, y)))
+            };
+            if next != unsafe { (*pane_ptr).hovered } {
+                unsafe {
+                    (*pane_ptr).hovered = next;
+                }
+                if !unsafe { (*pane_ptr).is_submenu } && !session_ptr.is_null() {
+                    // Clone before touching the session: `open_submenu` borrows
+                    // `session.root`, which aliases `pane_ptr` for the root menu.
+                    let sub_items: Option<Vec<MenuEntry>> = match next {
+                        Some(idx) => unsafe {
+                            match (&(*pane_ptr).entries).get(idx) {
+                                Some(MenuEntry::Submenu { items, .. }) => Some(items.clone()),
+                                _ => None,
+                            }
+                        },
+                        None => None,
+                    };
+                    let row_rect: Option<RECT> = next.and_then(|idx| unsafe {
+                        (&(*pane_ptr).row_rects).get(idx).copied().flatten()
+                    });
+                    unsafe {
+                        let session = &mut *session_ptr;
+                        if let (Some(idx), Some(items), Some(rc)) = (next, sub_items, row_rect) {
+                            session.open_submenu(idx, items, rc);
+                        } else {
+                            session.close_submenu();
+                        }
                     }
                 }
                 unsafe {
@@ -1115,9 +1207,9 @@ unsafe extern "system" fn menu_wnd_proc(
             0
         }
         WM_MOUSELEAVE => {
-            pane.tracking = false;
-            if pane.hovered.take().is_some() {
-                unsafe {
+            unsafe {
+                (*pane_ptr).tracking = false;
+                if (*pane_ptr).hovered.take().is_some() {
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                 }
             }
@@ -1126,51 +1218,88 @@ unsafe extern "system" fn menu_wnd_proc(
         WM_LBUTTONUP => {
             let x = (lparam as u32 & 0xffff) as i16 as i32;
             let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
-            if let Some(idx) = pane
-                .row_rects
-                .iter()
-                .position(|r| r.as_ref().is_some_and(|rc| pt_in_rect(rc, x, y)))
-            {
-                match &pane.entries[idx] {
-                    MenuEntry::Item { id, .. } => {
-                        session.selected_id = Some(*id);
-                        session.done.store(true, Ordering::Release);
+            let idx = unsafe {
+                (*pane_ptr)
+                    .row_rects
+                    .iter()
+                    .position(|r| r.as_ref().is_some_and(|rc| pt_in_rect(rc, x, y)))
+            };
+            if let Some(idx) = idx {
+                enum ClickAction {
+                    Select(u32),
+                    Submenu(Vec<MenuEntry>, RECT),
+                }
+                let action = unsafe {
+                    match &(&(*pane_ptr).entries)[idx] {
+                        MenuEntry::Item { id, .. } => Some(ClickAction::Select(*id)),
+                        MenuEntry::Submenu { items, .. } if !(*pane_ptr).is_submenu => {
+                            (&(*pane_ptr).row_rects)[idx]
+                                .map(|rc| ClickAction::Submenu(items.clone(), rc))
+                        }
+                        _ => None,
                     }
-                    MenuEntry::Submenu { items, .. } if !pane.is_submenu => {
-                        if let Some(rc) = pane.row_rects[idx] {
-                            session.open_submenu(idx, items.clone(), rc);
+                };
+                if !session_ptr.is_null() {
+                    unsafe {
+                        let session = &mut *session_ptr;
+                        match action {
+                            Some(ClickAction::Select(id)) => {
+                                session.selected_id = Some(id);
+                                session.done.store(true, Ordering::Release);
+                            }
+                            Some(ClickAction::Submenu(items, rc)) => {
+                                session.open_submenu(idx, items, rc);
+                            }
+                            None => {}
                         }
                     }
-                    _ => {}
                 }
-            } else {
-                session.done.store(true, Ordering::Release);
+            } else if !session_ptr.is_null() {
+                unsafe {
+                    (*session_ptr).done.store(true, Ordering::Release);
+                }
             }
             0
         }
         WM_KEYDOWN if wparam as u16 == VK_ESCAPE => {
-            session.done.store(true, Ordering::Release);
-            0
-        }
-        WM_ACTIVATE if !pane.is_submenu && (wparam & 0xffff) == 0 => {
-            let other = lparam as HWND;
-            let is_own_sub = session
-                .submenu
-                .as_ref()
-                .is_some_and(|sub| sub.hwnd == other);
-            if !is_own_sub {
-                session.done.store(true, Ordering::Release);
+            if !session_ptr.is_null() {
+                unsafe {
+                    (*session_ptr).done.store(true, Ordering::Release);
+                }
             }
             0
         }
-        WM_KILLFOCUS if !pane.is_submenu => {
+        WM_ACTIVATE if (wparam & 0xffff) == 0 && unsafe { !(*pane_ptr).is_submenu } => {
+            let other = lparam as HWND;
+            if !session_ptr.is_null() {
+                let is_own_sub = unsafe {
+                    (*session_ptr)
+                        .submenu
+                        .as_ref()
+                        .is_some_and(|sub| sub.hwnd == other)
+                };
+                if !is_own_sub {
+                    unsafe {
+                        (*session_ptr).done.store(true, Ordering::Release);
+                    }
+                }
+            }
+            0
+        }
+        WM_KILLFOCUS if unsafe { !(*pane_ptr).is_submenu } => {
             let other = wparam as HWND;
-            let is_own_sub = session
-                .submenu
-                .as_ref()
-                .is_some_and(|sub| sub.hwnd == other);
-            if !is_own_sub {
-                session.done.store(true, Ordering::Release);
+            if !session_ptr.is_null() {
+                let is_own_sub = unsafe {
+                    (*session_ptr)
+                        .submenu
+                        .as_ref()
+                        .is_some_and(|sub| sub.hwnd == other)
+                };
+                if !is_own_sub {
+                    unsafe {
+                        (*session_ptr).done.store(true, Ordering::Release);
+                    }
+                }
             }
             0
         }
@@ -1180,7 +1309,43 @@ unsafe extern "system" fn menu_wnd_proc(
 
 #[cfg(test)]
 mod tests {
-    use super::{NATIVE_SYS_COMMAND_FLAG, encode_native_command};
+    use super::{
+        MenuWndProcGuard, NATIVE_SYS_COMMAND_FLAG, encode_native_command, measure_entries,
+        pt_in_rect,
+    };
+
+    #[test]
+    fn wndproc_guard_rejects_same_hwnd_reentry_and_allows_others() {
+        let first = MenuWndProcGuard::try_enter(0x1234).expect("first entry");
+        assert!(MenuWndProcGuard::try_enter(0x1234).is_none());
+        let other = MenuWndProcGuard::try_enter(0x5678).expect("different HWND");
+        drop(first);
+        let again = MenuWndProcGuard::try_enter(0x1234).expect("released HWND");
+        drop(other);
+        drop(again);
+    }
+
+    #[test]
+    fn measure_entries_marks_separators_and_hit_testing_is_half_open() {
+        use super::MenuEntry;
+        let (w, h, rects) = measure_entries(
+            &[
+                MenuEntry::item(1, super::MenuIcon::Search, "a"),
+                MenuEntry::Separator,
+            ],
+            256.0,
+            1.0,
+        );
+        assert_eq!(w, 256);
+        assert!(h > 32);
+        assert_eq!(rects.len(), 2);
+        assert!(rects[0].is_some());
+        assert!(rects[1].is_none());
+        let rc = rects[0].unwrap();
+        assert!(pt_in_rect(&rc, rc.left, rc.top));
+        assert!(!pt_in_rect(&rc, rc.right, rc.top));
+        assert!(!pt_in_rect(&rc, rc.left, rc.bottom));
+    }
 
     #[test]
     fn native_commands_encode_system_flag_without_losing_the_id() {

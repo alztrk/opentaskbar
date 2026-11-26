@@ -9,7 +9,9 @@ use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use opentaskbar_core::settings::{AppTheme, DockSettings, SurfaceBackground};
+use serde_json::Value;
 
+use super::brush::GradientSpec;
 use super::palette;
 use super::tokens::{Gradient, Rgba, TokenKind, TokenMap, TokenValue};
 use super::windows_palette;
@@ -110,6 +112,9 @@ struct ThemeState {
     base: TokenMap,
     windows: TokenMap,
     pack: TokenMap,
+    /// Theme-editor tokens saved by the user. Highest layer so the real palette
+    /// (and not just a preview swatch) reflects the editor's values.
+    overrides: TokenMap,
     generated: BTreeMap<SurfaceKind, SurfaceMaterials>,
     generation: u64,
     legacy_opacity: f64,
@@ -135,6 +140,7 @@ impl Default for ThemeState {
             base: default_palette(effective),
             windows: TokenMap::new(),
             pack: TokenMap::new(),
+            overrides: TokenMap::new(),
             generated: BTreeMap::new(),
             generation: 0,
             legacy_opacity: 0.9,
@@ -147,7 +153,7 @@ impl Default for ThemeState {
 
 impl ThemeState {
     fn layers(&self) -> Vec<&TokenMap> {
-        vec![&self.base, &self.windows, &self.pack]
+        vec![&self.base, &self.windows, &self.pack, &self.overrides]
     }
 
     fn resolve(&self, key: &str) -> Option<&TokenValue> {
@@ -164,9 +170,11 @@ impl ThemeState {
     }
 
     fn material_source(&self, key: &str) -> TokenValue {
-        // Material keys can be overridden by packs via widgets/pack.json; fall back to palette.
-        self.pack
+        // Material keys can be overridden by packs via widgets/pack.json or by the
+        // theme editor; the editor is the highest layer and wins for its keys.
+        self.overrides
             .get(key)
+            .or_else(|| self.pack.get(key))
             .or_else(|| self.windows.get(key))
             .or_else(|| self.base.get(key))
             .cloned()
@@ -238,15 +246,17 @@ impl ThemeState {
         }
 
         let hover_source = self
-            .pack
+            .overrides
             .get("WidgetCardHover")
+            .or_else(|| self.pack.get("WidgetCardHover"))
             .or_else(|| self.pack.get("SurfaceHover"))
             .or_else(|| self.windows.get("WidgetCardHover"))
             .cloned()
             .unwrap_or_else(|| self.brush("WidgetCardHover"));
         let pressed_source = if let Some(value) = self
-            .pack
+            .overrides
             .get("WidgetCardPressed")
+            .or_else(|| self.pack.get("WidgetCardPressed"))
             .or_else(|| self.pack.get("SurfacePressed"))
         {
             value.clone()
@@ -677,6 +687,84 @@ impl ThemeManager {
     }
 }
 
+/// Applies the theme editor's saved tokens to the **real** palette.
+///
+/// Editor tokens live above the theme-pack layer, so every surface rebuilt from
+/// `ThemeManager` (dock / menu / widget / settings) observes them. An empty map
+/// clears the editor layer and restores the previous palette + pack values.
+pub fn apply_token_overrides(values: TokenMap) {
+    {
+        let mut state = lock();
+        state.overrides = values;
+        state.generation = state.generation.wrapping_add(1);
+        state.rebuild_all();
+    }
+    ThemeManager::notify_all();
+}
+
+/// Startup hook: applies the tokens persisted in `settings.extra["ThemeTokens"]`.
+/// Call this right after `ThemeManager::apply` so the real palette is themed
+/// before any window opens (the settings window also calls it on load).
+pub fn apply_saved_token_overrides(settings: &DockSettings) {
+    if let Some(tokens) = settings.extra.get("ThemeTokens").and_then(Value::as_object) {
+        apply_token_overrides(token_overrides_from_json(tokens));
+    }
+}
+
+/// Convenience: parses the JSON object persisted under `extra["ThemeTokens"]`.
+///
+/// Strings are hex colours (`#RRGGBB` / `#AARRGGBB`), numbers are doubles, and
+/// objects of the form `{"stops":["#..",…],"angle":90}` become gradients.
+pub fn token_overrides_from_json(map: &serde_json::Map<String, Value>) -> TokenMap {
+    let mut out = TokenMap::new();
+    for (key, value) in map {
+        let token = match value {
+            Value::String(text) => {
+                let text = text.trim();
+                if let Some(color) = Rgba::from_hex(text) {
+                    match TokenKind::for_key(key) {
+                        TokenKind::Color => Some(TokenValue::Color(color)),
+                        TokenKind::Double => Some(TokenValue::Double(color.luminance())),
+                        _ => Some(TokenValue::Solid(color)),
+                    }
+                } else {
+                    match TokenKind::for_key(key) {
+                        TokenKind::Double => text.parse::<f64>().ok().map(TokenValue::Double),
+                        TokenKind::FontFamily => Some(TokenValue::FontFamily(text.to_owned())),
+                        _ => Some(TokenValue::Mode(text.to_owned())),
+                    }
+                }
+            }
+            Value::Number(number) => number.as_f64().map(TokenValue::Double),
+            Value::Object(object) => {
+                let stops: Vec<Rgba> = object
+                    .get("stops")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().and_then(Rgba::from_hex))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if stops.is_empty() {
+                    None
+                } else {
+                    let angle = object.get("angle").and_then(Value::as_f64).unwrap_or(90.0);
+                    Some(TokenValue::Gradient(
+                        GradientSpec::new(stops, angle).to_gradient(),
+                    ))
+                }
+            }
+            _ => None,
+        };
+        if let Some(token) = token {
+            out.insert(key.clone(), token);
+        }
+    }
+    out
+}
+
 fn style_from_settings(settings: &DockSettings, kind: SurfaceKind) -> SurfaceStyle {
     let background = |name: &str| -> SurfaceBackground {
         match settings.extra.get(name).and_then(|v| v.as_str()) {
@@ -757,6 +845,7 @@ impl ThemeState {
             base: self.base.clone(),
             windows: self.windows.clone(),
             pack: self.pack.clone(),
+            overrides: self.overrides.clone(),
             generated: self.generated.clone(),
             generation: self.generation,
             legacy_opacity: self.legacy_opacity,
@@ -807,6 +896,52 @@ mod tests {
             TokenValue::Solid(Rgba::from_rgb(9, 8, 7))
         );
         assert_eq!(m.border_thickness, 3.0);
+    }
+
+    #[test]
+    fn editor_token_overrides_reach_the_real_palette_and_clear() {
+        ThemeManager::apply(AppTheme::Dark, None);
+        apply_token_overrides(TokenMap::new());
+        let baseline = ThemeManager::resolve("AccentBrush");
+        let mut values = TokenMap::new();
+        values.insert(
+            "AccentBrush".to_owned(),
+            TokenValue::Solid(Rgba::from_rgb(1, 2, 3)),
+        );
+        apply_token_overrides(values);
+        assert_eq!(
+            ThemeManager::resolve("AccentBrush"),
+            Some(TokenValue::Solid(Rgba::from_rgb(1, 2, 3)))
+        );
+        let generation = ThemeManager::generation();
+        apply_token_overrides(TokenMap::new());
+        assert_eq!(ThemeManager::resolve("AccentBrush"), baseline);
+        // Other tests share the global generation counter; only monotonicity is stable.
+        assert!(ThemeManager::generation() >= generation);
+    }
+
+    #[test]
+    fn saved_json_tokens_parse_to_solids_doubles_and_gradients() {
+        use serde_json::{Map, json};
+        let mut map = Map::new();
+        map.insert("AccentBrush".to_owned(), json!("#102030"));
+        map.insert("MenuOpacity".to_owned(), json!(0.75));
+        map.insert(
+            "DockMaterial".to_owned(),
+            json!({"stops": ["#000000", "#FFFFFF"], "angle": 90}),
+        );
+        let tokens = token_overrides_from_json(&map);
+        assert_eq!(
+            tokens.get("AccentBrush"),
+            Some(&TokenValue::Solid(Rgba::from_rgb(0x10, 0x20, 0x30)))
+        );
+        assert_eq!(tokens.get("MenuOpacity"), Some(&TokenValue::Double(0.75)));
+        let Some(TokenValue::Gradient(g)) = tokens.get("DockMaterial") else {
+            panic!("expected gradient")
+        };
+        assert_eq!(g.stops.len(), 2);
+        assert_eq!(g.stops[0].position, 0.0);
+        assert_eq!(g.stops[1].position, 1.0);
     }
 
     #[test]

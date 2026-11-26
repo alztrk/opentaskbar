@@ -92,6 +92,18 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
         ),
         SettingsSearchEntry::new(
             SettingsPage::Dock,
+            "StartPlacement",
+            &dock_layout,
+            "start button placement end hidden in widgets trailing",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Dock,
+            "StartWidgetIndex",
+            &dock_layout,
+            "start widget index position order",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Dock,
             "DockScale",
             &dock_layout,
             "zoom scale percentage",
@@ -360,6 +372,13 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             "surface transparent opacity",
             "SurfaceOpacityLabel:Surfaces",
         ),
+        SettingsSearchEntry::with_row_id(
+            SettingsPage::Themes,
+            "ThemeBrushPicker",
+            &loc::t("SectionTheme"),
+            "hsv gradient alpha hex stops angle brush picker",
+            "ThemeBrushPicker",
+        ),
         // Preferences
         SettingsSearchEntry::new(
             SettingsPage::Preferences,
@@ -560,6 +579,21 @@ mod tests {
                 .row_id,
             "DockAlignment"
         );
+    }
+
+    #[test]
+    fn new_start_placement_and_brush_picker_rows_are_searchable() {
+        let catalog = catalog();
+        for row_id in ["StartPlacement", "StartWidgetIndex", "ThemeBrushPicker"] {
+            assert!(
+                catalog.iter().any(|entry| entry.row_id == row_id),
+                "missing search entry {row_id}"
+            );
+        }
+        let hits = search(&catalog, "start placement");
+        assert!(hits.iter().any(|entry| entry.row_id == "StartPlacement"));
+        let hits = search(&catalog, "gradient stops alpha");
+        assert!(hits.iter().any(|entry| entry.row_id == "ThemeBrushPicker"));
     }
 
     #[test]
@@ -831,6 +865,13 @@ pub const SETTINGS_ROWS: &[RowDef] = &[
         "Theme Editor",
         "ThemeTokens",
         &["token", "brush", "color", "editor"],
+    ),
+    (
+        "Themes",
+        "Theme & Surfaces",
+        "Theme Brush Picker",
+        "ThemeBrushPicker",
+        &["hsv", "gradient", "alpha", "hex", "stops", "angle"],
     ),
     (
         "Themes",

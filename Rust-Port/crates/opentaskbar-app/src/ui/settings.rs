@@ -22,7 +22,7 @@ use opentaskbar_core::i18n::{self as loc, LANGUAGES};
 use opentaskbar_core::settings::{
     self, AppTheme, AutoHideMode, ClockDateFormat, ClockDateLayout, ClockDateStyle, DockPosition,
     DockSettings, DockSize, DynamicIslandVisibilityMode, FisheyeIntensity, MiddleClickAction,
-    SurfaceBackground, TemperatureUnit, WidgetDensityMode,
+    StartButtonPlacement, SurfaceBackground, TemperatureUnit, WidgetDensityMode,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde_json::{Map, Value, json};
@@ -38,9 +38,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, RegisterWindowMessageW, SendNotifyMessageW,
 };
 
+use crate::design::brush::{BrushSpec, GradientSpec, Hsv, MAX_GRADIENT_STOPS};
 use crate::design::fonts;
+use crate::design::theme::{apply_token_overrides, token_overrides_from_json};
 use crate::dock::dcomp::{SystemStatColumn, WidgetChipSpec};
-use crate::platform::{pins, theme_packs, toast, update, win32};
+use crate::platform::cursor_auth;
+use crate::platform::{country_city, pins, theme_packs, toast, update, win32};
 use crate::ui::components::{
     ButtonVariant, DropdownOption, UiTheme, badge, button, dim_when, dropdown, icon_glyph,
     ios_switch, live_slider, section_card, setting_row, setting_row_desc, setting_row_with_id,
@@ -645,117 +648,116 @@ fn set_extra_number(settings: &mut DockSettings, key: &str, value: i32) {
     settings.extra.insert(key.to_owned(), json!(value));
 }
 
-/// Static 21-country / province picker until WS-G `country_city` ships the API.
-const COUNTRIES: &[&str] = &[
-    "Turkey",
-    "Germany",
-    "United States",
-    "United Kingdom",
-    "France",
-    "Netherlands",
-    "Spain",
-    "Italy",
-    "Poland",
-    "Sweden",
-    "Norway",
-    "Finland",
-    "Japan",
-    "South Korea",
-    "China",
-    "India",
-    "Canada",
-    "Australia",
-    "Brazil",
-    "Mexico",
-    "South Africa",
-];
+/// Country/city data now comes from `platform::country_city` (offline fallback
+/// catalogue plus the countriesnow.space API). No static UI-side copy remains.
+fn city_list(country: &str) -> Vec<String> {
+    country_city::cities(country)
+}
 
-const TURKEY_CITIES: &[&str] = &[
-    "Adana",
-    "Ankara",
-    "Antalya",
-    "Aydın",
-    "Balıkesir",
-    "Bursa",
-    "Denizli",
-    "Diyarbakır",
-    "Erzurum",
-    "Eskişehir",
-    "Gaziantep",
-    "Hatay",
-    "Isparta",
-    "İstanbul",
-    "İzmir",
-    "Kayseri",
-    "Kocaeli",
-    "Konya",
-    "Malatya",
-    "Manisa",
-    "Mersin",
-    "Muğla",
-    "Ordu",
-    "Rize",
-    "Sakarya",
-    "Samsun",
-    "Şanlıurfa",
-    "Siirt",
-    "Sinop",
-    "Sivas",
-    "Tekirdağ",
-    "Tokat",
-    "Trabzon",
-    "Van",
-    "Zonguldak",
-    "Afyonkarahisar",
-    "Ağrı",
-    "Amasya",
-    "Ardahan",
-    "Artvin",
-    "Batman",
-    "Bayburt",
-    "Bilecik",
-    "Bitlis",
-    "Bolu",
-    "Burdur",
-    "Çanakkale",
-    "Çankırı",
-    "Çorum",
-    "Düzce",
-    "Edirne",
-    "Elazığ",
-    "Erzincan",
-    "Giresun",
-    "Gümüşhane",
-    "Hakkâri",
-    "Iğdır",
-    "Kahramanmaraş",
-    "Karabük",
-    "Karaman",
-    "Kastamonu",
-    "Kırıkkale",
-    "Kırklareli",
-    "Kırşehir",
-    "Kütahya",
-    "Niğde",
-    "Osmaniye",
-    "Seyhan",
-    "Uşak",
-    "Yalova",
-    "Yozgat",
-    "Bartın",
-    "Kilis",
-    "Nevşehir",
-    "Sırnak",
-    "Tunceli",
-    "Bingöl",
-];
-
-fn cities_for(country: &str) -> &'static [&'static str] {
-    if country == "Turkey" {
-        TURKEY_CITIES
-    } else {
-        &["Capital", "Largest City", "North", "South", "East", "West"]
+/// Resolves an executable on `PATH` (C# `AiUsageService.FindExecutableOnPath`).
+fn find_executable_on_path(command: &str) -> Option<std::path::PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&paths) {
+        for extension in [".exe", ".cmd", ".bat"] {
+            let candidate = dir.join(format!("{command}{extension}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
     }
+    None
+}
+
+/// CLI sign-in command per provider (C# `AiUsageService.CliSignInArguments`).
+fn ai_cli_sign_in_command(provider_id: &str) -> Option<(&'static str, Vec<&'static str>)> {
+    match provider_id {
+        "aiusage_claude" => Some(("claude", vec!["claude", "auth", "login"])),
+        "aiusage_codex" => Some(("codex", vec!["codex", "login"])),
+        "aiusage_copilot" => Some(("gh", vec!["gh", "auth", "login"])),
+        "aiusage_opencode" => Some(("opencode", vec!["opencode", "auth", "login"])),
+        "aiusage_antigravity" => Some(("agy", vec!["agy"])),
+        _ => None,
+    }
+}
+
+/// Launches the provider's CLI sign-in in Windows Terminal when available,
+/// otherwise in a visible `cmd.exe`. Returns `false` when the CLI is missing.
+fn launch_ai_cli_sign_in(provider_id: &str) -> bool {
+    let Some((executable, args)) = ai_cli_sign_in_command(provider_id) else {
+        return false;
+    };
+    if find_executable_on_path(executable).is_none() {
+        return false;
+    }
+    let mut command = if find_executable_on_path("wt").is_some() {
+        let mut terminal = std::process::Command::new("wt");
+        terminal.args(["-w", "new", "--", "cmd.exe", "/c"]);
+        terminal
+    } else {
+        let mut shell = std::process::Command::new("cmd.exe");
+        shell.arg("/c");
+        shell
+    };
+    command.args(args.iter().copied()).arg("& pause");
+    command.spawn().is_ok()
+}
+
+/// Builds the brush currently edited by the picker widgets.
+fn build_brush(
+    mode: BrushMode,
+    hsv: Hsv,
+    alpha: u8,
+    angle: f64,
+    stops: &[crate::design::tokens::Rgba],
+) -> BrushSpec {
+    match mode {
+        BrushMode::Solid => BrushSpec::Solid(hsv.to_rgba(alpha)),
+        BrushMode::Gradient => {
+            let mut list = stops.to_vec();
+            if list.is_empty() {
+                list.push(hsv.to_rgba(alpha));
+            }
+            BrushSpec::Gradient(GradientSpec::new(list, angle)).with_alpha(alpha)
+        }
+    }
+}
+
+/// Serializes a brush into the JSON shape understood by `token_overrides_from_json`.
+fn brush_to_json(spec: &BrushSpec) -> Value {
+    match spec {
+        BrushSpec::Solid(color) => json!(color.hex()),
+        BrushSpec::Gradient(gradient) => json!({
+            "stops": gradient
+                .stops
+                .iter()
+                .map(|color| color.hex())
+                .collect::<Vec<_>>(),
+            "angle": gradient.angle_deg,
+        }),
+    }
+}
+
+/// Persists tokens under `ThemeTokens` **and** applies them to the live palette.
+fn persist_theme_tokens(settings: &mut DockSettings, map: Map<String, Value>) {
+    apply_token_overrides(token_overrides_from_json(&map));
+    settings
+        .extra
+        .insert("ThemeTokens".to_owned(), Value::Object(map));
+}
+
+/// Resolves the country for a persisted `"City, Country"` string, falling back
+/// to the offline reverse lookup when the suffix is not in the catalogue.
+fn weather_country_for(city_label: &str) -> String {
+    if let Some((_, country)) = city_label.rsplit_once(", ") {
+        return country.to_owned();
+    }
+    let name = city_label.split(", ").next().unwrap_or(city_label);
+    let code = country_city::find_cached_country_for_city(name).unwrap_or("TR");
+    country_city::countries()
+        .into_iter()
+        .find(|(iso, _)| iso == code)
+        .map(|(_, display)| display)
+        .unwrap_or_else(|| "Turkey".to_owned())
 }
 
 type ThemeSwatch = (
@@ -870,11 +872,27 @@ struct SettingsView {
     backup_preview: Option<BackupPreview>,
     hotkey_capture: Option<&'static str>,
     weather_country: String,
+    /// City list for the selected country, refreshed from `country_city`.
+    weather_cities: Vec<String>,
     weather_city_index: usize,
     theme_category: usize,
     token_name: String,
     token_value: String,
+    token_apply_status: String,
+    // Theme brush picker (C# `ThemeBrushPicker`).
+    brush_mode: BrushMode,
+    brush_hsv: Hsv,
+    brush_alpha: u8,
+    brush_angle: f64,
+    brush_stops: Vec<crate::design::tokens::Rgba>,
+    brush_hex: String,
     ai_status: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrushMode {
+    Solid,
+    Gradient,
 }
 
 impl SettingsView {
@@ -895,20 +913,17 @@ impl SettingsView {
         } else {
             settings.weather_city.clone()
         };
-        let weather_country = if weather_city.contains(", ") {
-            weather_city
-                .rsplit(", ")
-                .next()
-                .unwrap_or("Turkey")
-                .to_owned()
-        } else {
-            "Turkey".to_owned()
-        };
+        let weather_country = weather_country_for(&weather_city);
+        let weather_cities = city_list(&weather_country);
         let city_name = weather_city.split(", ").next().unwrap_or(&weather_city);
-        let weather_city_index = cities_for(&weather_country)
+        let weather_city_index = weather_cities
             .iter()
             .position(|c| c.eq_ignore_ascii_case(city_name))
             .unwrap_or(0);
+        // Apply saved editor tokens to the live palette on startup.
+        crate::design::theme::apply_saved_token_overrides(&settings);
+        let accent = crate::design::palette(is_dark).accent;
+        let brush_color = crate::design::tokens::Rgba::from_rgb(accent.0, accent.1, accent.2);
         Self {
             page: SettingsPage::Dock,
             focus,
@@ -944,11 +959,24 @@ impl SettingsView {
             backup_preview: None,
             hotkey_capture: None,
             weather_country,
+            weather_cities,
             weather_city_index,
             theme_category: 0,
             token_name: String::new(),
             token_value: String::new(),
-            ai_status: "Not signed in".to_owned(),
+            token_apply_status: "Tokens apply to the live palette on save.".to_owned(),
+            brush_mode: BrushMode::Solid,
+            brush_hsv: Hsv::from(brush_color),
+            brush_alpha: brush_color.a,
+            brush_angle: 90.0,
+            brush_stops: GradientSpec::from_endpoints(brush_color.darken(0.35), brush_color, 90.0)
+                .stops,
+            brush_hex: brush_color.hex(),
+            ai_status: if cursor_auth::has_session() {
+                "Signed in".to_owned()
+            } else {
+                "Not signed in".to_owned()
+            },
         }
     }
 
@@ -1625,28 +1653,59 @@ impl SettingsView {
         rows
     }
 
+    /// Refreshes the city list from `country_city::fetch_cities` off the UI thread.
+    /// The offline catalogue is shown immediately; the live list replaces it on arrival.
+    fn refresh_weather_cities(&mut self, cx: &mut Context<Self>) {
+        let country = self.weather_country.clone();
+        cx.spawn(async move |this, cx| {
+            let fetched = cx
+                .background_executor()
+                .spawn(async move { country_city::fetch_cities(&country) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                if !fetched.is_empty() {
+                    let selected = view.weather_cities.get(view.weather_city_index).cloned();
+                    view.weather_cities = fetched;
+                    view.weather_city_index = selected
+                        .and_then(|name| {
+                            view.weather_cities
+                                .iter()
+                                .position(|c| c.eq_ignore_ascii_case(&name))
+                        })
+                        .unwrap_or(0);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn render_weather_picker(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let cities = cities_for(&self.weather_country);
+        let cities = &self.weather_cities;
         let city = cities
             .get(self.weather_city_index)
-            .copied()
+            .map(String::as_str)
             .unwrap_or("Istanbul");
         let label = format!("{city}, {}", self.weather_country);
 
-        let country_opts: Vec<DropdownOption> = COUNTRIES
-            .iter()
-            .map(|&c| {
+        let country_opts: Vec<DropdownOption> = country_city::countries()
+            .into_iter()
+            .map(|(code, name)| {
                 let entity = cx.entity().downgrade();
+                let flag_name = name.clone();
+                let country_name = name.clone();
                 DropdownOption {
-                    label: SharedString::from(c),
-                    flag_path: country_flag_path(c),
+                    label: SharedString::from(name),
+                    flag_path: country_flag_path(&flag_name).or_else(|| country_flag_path(&code)),
                     glyph: None,
-                    selected: self.weather_country.eq_ignore_ascii_case(c),
+                    selected: self.weather_country.eq_ignore_ascii_case(&country_name),
                     on_select: std::rc::Rc::new(move |_win, app| {
                         let _ = entity.update(app, |this, cx| {
                             this.open_dropdown = None;
-                            this.weather_country = c.to_owned();
+                            this.weather_country = country_name.clone();
+                            this.weather_cities = city_list(&this.weather_country);
                             this.weather_city_index = 0;
+                            this.refresh_weather_cities(cx);
                             cx.notify();
                         });
                     }),
@@ -1657,10 +1716,10 @@ impl SettingsView {
         let city_opts: Vec<DropdownOption> = cities
             .iter()
             .enumerate()
-            .map(|(idx, &c)| {
+            .map(|(idx, c)| {
                 let entity = cx.entity().downgrade();
                 DropdownOption {
-                    label: SharedString::from(c),
+                    label: SharedString::from(c.clone()),
                     flag_path: None,
                     glyph: None,
                     selected: self.weather_city_index == idx,
@@ -1713,6 +1772,19 @@ impl SettingsView {
                 self.make_dropdown("weather-city", t, city_opts, cx),
             )
             .into_any_element(),
+            setting_row(
+                t,
+                Some("\u{E896}"),
+                "Refresh City List",
+                button(
+                    "btn-weather-fetch-cities",
+                    t,
+                    "Fetch from API",
+                    ButtonVariant::Secondary,
+                    cx.listener(|this, _, _, cx| this.refresh_weather_cities(cx)),
+                ),
+            )
+            .into_any_element(),
             self.target_row(
                 "WeatherUnit",
                 t,
@@ -1731,11 +1803,11 @@ impl SettingsView {
                     loc::t("Apply"),
                     ButtonVariant::Primary,
                     cx.listener(|this, _, _, cx| {
-                        let cities = cities_for(&this.weather_country);
-                        let city = cities
+                        let city = this
+                            .weather_cities
                             .get(this.weather_city_index)
-                            .copied()
-                            .unwrap_or("Istanbul");
+                            .cloned()
+                            .unwrap_or_else(|| "Istanbul".to_owned());
                         this.settings.weather_city = format!("{city}, {}", this.weather_country);
                         this.auto_save(cx);
                     }),
@@ -1780,8 +1852,9 @@ impl SettingsView {
     }
 
     fn render_ai_auth(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let signed_in = self.settings.extra.contains_key("CursorAuthToken");
-        vec![
+        // The badge reflects the encrypted token file, not a stale settings slot.
+        let signed_in = cursor_auth::has_session();
+        let mut rows = vec![
             setting_row(
                 t,
                 Some("\u{E99A}"),
@@ -1797,21 +1870,85 @@ impl SettingsView {
                         if signed_in { "Sign Out" } else { "Sign In" },
                         ButtonVariant::Secondary,
                         cx.listener(|this, _, _, cx| {
-                            // WS-G `platform::cursor_auth` is not present in this worktree yet.
-                            // Keep the UI state + token slot; the provider call is wired at merge.
-                            if this.settings.extra.contains_key("CursorAuthToken") {
+                            if cursor_auth::has_session() {
+                                let _ = cursor_auth::sign_out();
                                 this.settings.extra.remove("CursorAuthToken");
                                 this.ai_status = "Not signed in".to_owned();
-                            } else {
-                                pins::launch("https://www.cursor.com/settings".to_owned());
-                                this.ai_status = "Sign-in required (provider pending)".to_owned();
+                                this.save_settings(cx);
+                                return;
                             }
-                            this.save_settings(cx);
+                            let start = cursor_auth::sign_in_start();
+                            let _ = pins::launch(start.login_url);
+                            this.ai_status = "Waiting for browser sign-in…".to_owned();
+                            cx.notify();
+                            // `sign_in_start` stores the pending PKCE challenge;
+                            // `sign_in_finish` polls it on the background executor.
+                            cx.spawn(async move |this, cx| {
+                                let ok = cx
+                                    .background_executor()
+                                    .spawn(async { cursor_auth::sign_in_finish() })
+                                    .await;
+                                let _ = this.update(cx, |view, cx| {
+                                    if ok && cursor_auth::has_session() {
+                                        view.settings.extra.remove("CursorAuthToken");
+                                        view.ai_status = "Signed in".to_owned();
+                                        view.save_settings(cx);
+                                    } else {
+                                        view.ai_status = "Sign-in not completed".to_owned();
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                            .detach();
+                        }),
+                    ))
+                    .child(button(
+                        "btn-cursor-status-refresh",
+                        t,
+                        "Refresh",
+                        ButtonVariant::Secondary,
+                        cx.listener(|this, _, _, cx| {
+                            this.ai_status = if cursor_auth::has_session() {
+                                "Signed in".to_owned()
+                            } else {
+                                "Not signed in".to_owned()
+                            };
+                            cx.notify();
                         }),
                     )),
             )
             .into_any_element(),
-        ]
+        ];
+        // C# `TryLaunchSignIn`: one button per CLI-backed AI provider.
+        for meta in widgets::telemetry::AI_PROVIDERS
+            .iter()
+            .filter(|provider| ai_cli_sign_in_command(provider.id).is_some())
+        {
+            let provider_id = meta.id;
+            rows.push(
+                setting_row(
+                    t,
+                    Some("\u{E99A}"),
+                    format!("{} CLI", meta.short),
+                    button(
+                        SharedString::from(format!("btn-ai-cli-{provider_id}")),
+                        t,
+                        "Sign in",
+                        ButtonVariant::Secondary,
+                        cx.listener(move |this, _, _, cx| {
+                            if launch_ai_cli_sign_in(provider_id) {
+                                this.ai_status = format!("{} sign-in launched", provider_id);
+                            } else {
+                                this.ai_status = format!("{} CLI not found on PATH", provider_id);
+                            }
+                            cx.notify();
+                        }),
+                    ),
+                )
+                .into_any_element(),
+            );
+        }
+        rows
     }
 
     fn render_backup_ui(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -2220,9 +2357,9 @@ impl SettingsView {
                                 .cloned()
                                 .unwrap_or_default();
                             map.insert(name.clone(), json!(format!("#{value}")));
-                            this.settings
-                                .extra
-                                .insert("ThemeTokens".to_owned(), Value::Object(map));
+                            persist_theme_tokens(&mut this.settings, map);
+                            this.token_apply_status =
+                                format!("Applied #{value} to the live palette.");
                             this.token_name.clear();
                             this.token_value.clear();
                             this.auto_save(cx);
@@ -2232,9 +2369,27 @@ impl SettingsView {
             )
             .into_any_element(),
         ];
+        rows.push(
+            setting_row(
+                t,
+                Some("\u{E81D}"),
+                "Token Apply Status",
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgba(t.text_secondary))
+                    .child(self.token_apply_status.clone()),
+            )
+            .into_any_element(),
+        );
         let mut saved: Vec<(String, String)> = tokens
             .iter()
-            .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_owned())))
+            .map(|(k, v)| {
+                let text = match v {
+                    Value::String(s) => s.clone(),
+                    _ => v.to_string(),
+                };
+                (k.clone(), text)
+            })
             .collect();
         saved.sort_by(|a, b| a.0.cmp(&b.0));
         for (name, value) in saved.into_iter().take(24) {
@@ -2251,7 +2406,300 @@ impl SettingsView {
                 .into_any_element(),
             );
         }
-        vec![section_card(t, format!("Theme Editor · {category}"), rows).into_any_element()]
+
+        // C# `ThemeBrushPicker`: HSV field (S/V sliders + hue), alpha, 16 gradient
+        // stops, angle and hex. Everything is previewed and saved into the same
+        // `ThemeTokens` map, then applied to the real palette.
+        let brush = build_brush(
+            self.brush_mode,
+            self.brush_hsv,
+            self.brush_alpha,
+            self.brush_angle,
+            &self.brush_stops,
+        );
+        let preview_color = match &brush {
+            BrushSpec::Solid(color) => *color,
+            BrushSpec::Gradient(gradient) => gradient.stops.first().copied().unwrap_or_default(),
+        };
+        let hue_handler = |i: usize| -> std::rc::Rc<dyn Fn(&mut Window, &mut App)> {
+            let entity = cx.entity().downgrade();
+            std::rc::Rc::new(move |_win, app| {
+                let _ = entity.update(app, |this, cx| {
+                    this.brush_hsv.h = (i as f64 * 360.0 / 35.0).min(360.0);
+                    this.brush_hex = this.brush_hsv.to_rgba(this.brush_alpha).hex();
+                    cx.notify();
+                });
+            })
+        };
+        let sat_handler = |i: usize| -> std::rc::Rc<dyn Fn(&mut Window, &mut App)> {
+            let entity = cx.entity().downgrade();
+            std::rc::Rc::new(move |_win, app| {
+                let _ = entity.update(app, |this, cx| {
+                    this.brush_hsv.s = i as f64 / 20.0;
+                    cx.notify();
+                });
+            })
+        };
+        let val_handler = |i: usize| -> std::rc::Rc<dyn Fn(&mut Window, &mut App)> {
+            let entity = cx.entity().downgrade();
+            std::rc::Rc::new(move |_win, app| {
+                let _ = entity.update(app, |this, cx| {
+                    this.brush_hsv.v = i as f64 / 20.0;
+                    cx.notify();
+                });
+            })
+        };
+        let alpha_handler = |i: usize| -> std::rc::Rc<dyn Fn(&mut Window, &mut App)> {
+            let entity = cx.entity().downgrade();
+            std::rc::Rc::new(move |_win, app| {
+                let _ = entity.update(app, |this, cx| {
+                    this.brush_alpha = ((i as i32 * 255) / 16).clamp(0, 255) as u8;
+                    cx.notify();
+                });
+            })
+        };
+        let angle_handler = |i: usize| -> std::rc::Rc<dyn Fn(&mut Window, &mut App)> {
+            let entity = cx.entity().downgrade();
+            std::rc::Rc::new(move |_win, app| {
+                let _ = entity.update(app, |this, cx| {
+                    this.brush_angle = (i as f64 * 360.0 / 36.0).min(360.0);
+                    cx.notify();
+                });
+            })
+        };
+
+        let mut swatches = div().flex().flex_wrap().gap(px(3.0));
+        for index in 0..MAX_GRADIENT_STOPS {
+            let color = self.brush_stops.get(index).copied().unwrap_or_default();
+            swatches = swatches.child(
+                div()
+                    .id(SharedString::from(format!("brush-stop-{index}")))
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .rounded(px(3.0))
+                    .bg(rgba(color.to_gpui()))
+                    .border_1()
+                    .border_color(rgba(t.border))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let color = this.brush_hsv.to_rgba(this.brush_alpha);
+                        if let Some(stop) = this.brush_stops.get_mut(index) {
+                            *stop = color;
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+
+        let brush_rows = vec![
+            self.target_row(
+                "ThemeBrushPicker",
+                t,
+                Some("\u{E790}"),
+                "Brush Type",
+                div()
+                    .flex()
+                    .gap(px(6.0))
+                    .child(button(
+                        "btn-brush-solid",
+                        t,
+                        "Solid",
+                        if self.brush_mode == BrushMode::Solid {
+                            ButtonVariant::Primary
+                        } else {
+                            ButtonVariant::Secondary
+                        },
+                        cx.listener(|this, _, _, cx| {
+                            this.brush_mode = BrushMode::Solid;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(button(
+                        "btn-brush-gradient",
+                        t,
+                        "Gradient",
+                        if self.brush_mode == BrushMode::Gradient {
+                            ButtonVariant::Primary
+                        } else {
+                            ButtonVariant::Secondary
+                        },
+                        cx.listener(|this, _, _, cx| {
+                            this.brush_mode = BrushMode::Gradient;
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .into_any_element(),
+            setting_row(
+                t,
+                Some("\u{E790}"),
+                "Brush Preview",
+                div()
+                    .w(px(180.0))
+                    .h(px(22.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgba(t.border))
+                    .bg(rgba(preview_color.to_gpui())),
+            )
+            .into_any_element(),
+            setting_row(
+                t,
+                Some("\u{E790}"),
+                "HSV · Hue",
+                live_slider(
+                    "brush-hue",
+                    t,
+                    self.brush_hsv.h as f32 / 360.0,
+                    36,
+                    format!("{:.0}°", self.brush_hsv.h),
+                    hue_handler,
+                ),
+            )
+            .into_any_element(),
+            setting_row(
+                t,
+                Some("\u{E790}"),
+                "HSV · Saturation",
+                live_slider(
+                    "brush-sat",
+                    t,
+                    self.brush_hsv.s as f32,
+                    21,
+                    format!("{:.0}%", self.brush_hsv.s * 100.0),
+                    sat_handler,
+                ),
+            )
+            .into_any_element(),
+            setting_row(
+                t,
+                Some("\u{E790}"),
+                "HSV · Value",
+                live_slider(
+                    "brush-val",
+                    t,
+                    self.brush_hsv.v as f32,
+                    21,
+                    format!("{:.0}%", self.brush_hsv.v * 100.0),
+                    val_handler,
+                ),
+            )
+            .into_any_element(),
+            setting_row(
+                t,
+                Some("\u{E790}"),
+                "Alpha",
+                live_slider(
+                    "brush-alpha",
+                    t,
+                    self.brush_alpha as f32 / 255.0,
+                    17,
+                    format!("{}", self.brush_alpha),
+                    alpha_handler,
+                ),
+            )
+            .into_any_element(),
+            setting_row(
+                t,
+                Some("\u{E790}"),
+                "Gradient Angle",
+                live_slider(
+                    "brush-angle",
+                    t,
+                    self.brush_angle as f32 / 360.0,
+                    37,
+                    format!("{:.0}°", self.brush_angle),
+                    angle_handler,
+                ),
+            )
+            .into_any_element(),
+            setting_row(
+                t,
+                Some("\u{E790}"),
+                "Hex Value",
+                div()
+                    .id("brush-hex-input")
+                    .tab_index(0)
+                    .w(px(180.0))
+                    .h(px(28.0))
+                    .px(px(8.0))
+                    .rounded(px(7.0))
+                    .bg(rgba(t.surface_muted))
+                    .border_1()
+                    .border_color(rgba(t.border))
+                    .flex()
+                    .items_center()
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        let mut buffer = this.brush_hex.clone();
+                        if apply_keystroke(
+                            &mut buffer,
+                            &event.keystroke.key,
+                            event.keystroke.key_char.as_deref(),
+                            false,
+                        ) {
+                            this.brush_hex = buffer;
+                            if let Some(color) = crate::design::brush::parse_hex(&this.brush_hex) {
+                                this.brush_hsv = Hsv::from(color);
+                                this.brush_alpha = color.a;
+                            }
+                            cx.notify();
+                        }
+                    }))
+                    .child(div().text_size(px(12.0)).child(self.brush_hex.clone())),
+            )
+            .into_any_element(),
+            setting_row(
+                t,
+                Some("\u{E790}"),
+                format!("Gradient Stops ({MAX_GRADIENT_STOPS})"),
+                swatches,
+            )
+            .into_any_element(),
+            setting_row(
+                t,
+                Some("\u{E74E}"),
+                "Save Brush",
+                button(
+                    "btn-save-brush",
+                    t,
+                    "Save Brush Token",
+                    ButtonVariant::Primary,
+                    cx.listener(|this, _, _, cx| {
+                        let name = this.token_name.trim().to_owned();
+                        if name.is_empty() {
+                            this.token_apply_status = "Enter a token name first.".to_owned();
+                            cx.notify();
+                            return;
+                        }
+                        let brush = build_brush(
+                            this.brush_mode,
+                            this.brush_hsv,
+                            this.brush_alpha,
+                            this.brush_angle,
+                            &this.brush_stops,
+                        );
+                        let mut map = this
+                            .settings
+                            .extra
+                            .get("ThemeTokens")
+                            .and_then(Value::as_object)
+                            .cloned()
+                            .unwrap_or_default();
+                        map.insert(name.clone(), brush_to_json(&brush));
+                        persist_theme_tokens(&mut this.settings, map);
+                        this.token_apply_status =
+                            format!("Applied brush '{name}' to the live palette.");
+                        this.auto_save(cx);
+                    }),
+                ),
+            )
+            .into_any_element(),
+        ];
+
+        vec![
+            section_card(t, format!("Theme Editor · {category}"), rows).into_any_element(),
+            section_card(t, "Theme Brush Picker", brush_rows).into_any_element(),
+        ]
     }
 
     fn render_widget_preview(&self, id: &str, t: &UiTheme, is_dark: bool) -> AnyElement {
@@ -3969,6 +4417,36 @@ impl SettingsView {
             cx,
         );
 
+        let start_placement_dd = self.make_dropdown(
+            "start-placement",
+            t,
+            [
+                ("Start", StartButtonPlacement::Start),
+                ("End", StartButtonPlacement::End),
+                ("Hidden", StartButtonPlacement::Hidden),
+                ("In Widgets", StartButtonPlacement::InWidgets),
+            ]
+            .into_iter()
+            .map(|(label, placement)| {
+                let entity = cx.entity().downgrade();
+                DropdownOption {
+                    label: SharedString::from(label),
+                    flag_path: None,
+                    glyph: None,
+                    selected: self.settings.start_placement == placement,
+                    on_select: std::rc::Rc::new(move |_win, app| {
+                        let _ = entity.update(app, |this, cx| {
+                            this.open_dropdown = None;
+                            this.settings.start_placement = placement;
+                            this.auto_save(cx);
+                        });
+                    }),
+                }
+            })
+            .collect(),
+            cx,
+        );
+
         let scale_pct = (self.settings.dock_scale * 100.0).round() as i32;
         let width_label = self.settings.dock_custom_width_dips.map_or_else(
             || loc::t("DockWidthAuto"),
@@ -3988,6 +4466,35 @@ impl SettingsView {
                         align_dd,
                     ),
                     self.target_row("DockSize", t, Some("\u{E9A6}"), loc::t("DockSize"), size_dd),
+                    self.target_row(
+                        "StartPlacement",
+                        t,
+                        Some("\u{E7C5}"),
+                        "Start Button Placement",
+                        start_placement_dd,
+                    ),
+                    self.target_row(
+                        "StartWidgetIndex",
+                        t,
+                        Some("\u{E9A6}"),
+                        "Start Widget Index",
+                        stepper(
+                            "start-widget-index-minus",
+                            "start-widget-index-plus",
+                            t,
+                            self.settings.start_widget_index.to_string(),
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.start_widget_index =
+                                    (this.settings.start_widget_index - 1).max(0);
+                                this.auto_save(cx);
+                            }),
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.start_widget_index =
+                                    (this.settings.start_widget_index + 1).min(32);
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
                     self.target_row(
                         "DockScale",
                         t,
@@ -7092,9 +7599,14 @@ impl Render for SettingsView {
 #[cfg(test)]
 mod tests {
     use super::{
-        DockSettings, build_backup, civil_from_days, inspect_backup, safe_backup_path, zip_store,
-        zip_unstore,
+        BrushMode, DockSettings, ai_cli_sign_in_command, brush_to_json, build_backup, build_brush,
+        city_list, civil_from_days, inspect_backup, persist_theme_tokens, safe_backup_path,
+        weather_country_for, zip_store, zip_unstore,
     };
+    use crate::design::brush::Hsv;
+    use crate::design::theme::{apply_token_overrides, token_overrides_from_json};
+    use crate::design::tokens::{Rgba, TokenMap, TokenValue};
+    use serde_json::{Map, Value};
 
     #[test]
     fn stored_zip_round_trips_entries() {
@@ -7136,6 +7648,63 @@ mod tests {
     fn utc_stamp_day_conversion_matches_unix_epoch() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(10_957), (2000, 1, 1));
+    }
+
+    #[test]
+    fn city_picker_uses_platform_country_city_api() {
+        assert_eq!(city_list("Turkey").len(), 81);
+        assert!(city_list("Turkey").iter().any(|c| c == "İstanbul"));
+        assert_eq!(weather_country_for("İzmir, Turkey"), "Turkey");
+        assert_eq!(weather_country_for("Istanbul"), "Turkey");
+    }
+
+    #[test]
+    fn ai_cli_sign_in_wiring_maps_cli_providers_only() {
+        assert_eq!(
+            ai_cli_sign_in_command("aiusage_claude"),
+            Some(("claude", vec!["claude", "auth", "login"]))
+        );
+        assert_eq!(
+            ai_cli_sign_in_command("aiusage_opencode"),
+            Some(("opencode", vec!["opencode", "auth", "login"]))
+        );
+        assert_eq!(
+            ai_cli_sign_in_command("aiusage_antigravity"),
+            Some(("agy", vec!["agy"]))
+        );
+        // API-key providers have no CLI sign-in command.
+        assert!(ai_cli_sign_in_command("aiusage_deepseek").is_none());
+        assert!(ai_cli_sign_in_command("aiusage_cursor").is_none());
+    }
+
+    #[test]
+    fn saved_brush_token_reaches_live_palette() {
+        apply_token_overrides(TokenMap::new());
+        let color = Rgba::from_rgb(7, 8, 9);
+        let brush = build_brush(BrushMode::Solid, Hsv::from(color), color.a, 90.0, &[color]);
+        let mut map = Map::new();
+        map.insert("AccentBrush".to_owned(), brush_to_json(&brush));
+        let mut settings = DockSettings::default();
+        persist_theme_tokens(&mut settings, map.clone());
+        assert_eq!(
+            crate::design::theme::ThemeManager::resolve("AccentBrush"),
+            Some(TokenValue::Solid(color))
+        );
+        // The gradient shape round-trips through the JSON parser used at startup.
+        let gradient = build_brush(
+            BrushMode::Gradient,
+            Hsv::from(color),
+            0x80,
+            45.0,
+            &[color, Rgba::from_rgb(40, 50, 60)],
+        );
+        map.insert("DockMaterial".to_owned(), brush_to_json(&gradient));
+        let parsed = token_overrides_from_json(&map);
+        assert!(matches!(
+            parsed.get("DockMaterial"),
+            Some(TokenValue::Gradient(_))
+        ));
+        apply_token_overrides(TokenMap::new());
     }
 }
 
