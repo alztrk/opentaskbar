@@ -11,10 +11,11 @@
 
 use opentaskbar_core::i18n as loc;
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::design::fonts;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -1216,6 +1217,62 @@ fn post_menu_candidate(
 #[must_use]
 fn is_native_menu_class(class: &[u16]) -> bool {
     String::from_utf16_lossy(class).starts_with("#32768")
+}
+
+/// How long a `WindowFromPoint` + `GetClassNameW` result is reused. One animation
+/// frame (~16 ms) is enough: a click posts several candidates in that window,
+/// but a genuinely new menu opened later is still detected.
+const MENU_CLASS_CACHE_TTL: Duration = Duration::from_millis(16);
+
+#[derive(Clone, Copy)]
+struct MenuClassProbe {
+    point: POINT,
+    is_menu: bool,
+    at: Option<Instant>,
+}
+
+impl MenuClassProbe {
+    const fn empty() -> Self {
+        Self {
+            point: POINT { x: 0, y: 0 },
+            is_menu: false,
+            at: None,
+        }
+    }
+
+    fn is_fresh(self, point: POINT, now: Instant) -> bool {
+        self.at
+            .is_some_and(|at| now.duration_since(at) < MENU_CLASS_CACHE_TTL)
+            && self.point.x == point.x
+            && self.point.y == point.y
+    }
+}
+
+thread_local! {
+    /// UI-thread-only cache: the low-level hook never touches this (it only
+    /// posts coordinates), so a hung foreign window cannot stall system input.
+    static MENU_CLASS_PROBE: RefCell<MenuClassProbe> = const { RefCell::new(MenuClassProbe::empty()) };
+}
+
+/// Returns whether a native `#32768` menu sits under `point`, reusing a probe
+/// from the same animation frame. `unsafe` because Win32 window lookup is involved.
+fn external_menu_at(point: POINT) -> bool {
+    let now = Instant::now();
+    if MENU_CLASS_PROBE.with(|cache| cache.borrow().is_fresh(point, now)) {
+        return MENU_CLASS_PROBE.with(|cache| cache.borrow().is_menu);
+    }
+    let under_cursor = unsafe { WindowFromPoint(point) };
+    let mut class = [0u16; 64];
+    let len = unsafe { GetClassNameW(under_cursor, class.as_mut_ptr(), class.len() as i32) };
+    let is_menu = len > 0 && is_native_menu_class(&class[..len as usize]);
+    MENU_CLASS_PROBE.with(|cache| {
+        *cache.borrow_mut() = MenuClassProbe {
+            point,
+            is_menu,
+            at: Some(now),
+        };
+    });
+    is_menu
 }
 
 /// WH_MOUSE_LL observer for clicks (C# `DockFlyout` + `RetainForExternalContextMenu`).
@@ -3602,13 +3659,10 @@ unsafe extern "system" fn flyout_wnd_proc(
         WM_APP_MENU_CANDIDATE => {
             let (x, y) = unpack_point(wparam, lparam);
             let point = POINT { x, y };
-            // SAFETY: a window lookup and class read on the UI thread; a null
-            // point hit yields an empty class and is treated as an ordinary click.
-            let under_cursor = unsafe { WindowFromPoint(point) };
-            let mut class = [0u16; 64];
-            let len =
-                unsafe { GetClassNameW(under_cursor, class.as_mut_ptr(), class.len() as i32) };
-            if len > 0 && is_native_menu_class(&class[..len as usize]) {
+            // SAFETY: the lookup/class read runs on the UI thread and is cached
+            // for one animation frame; a null point hit yields an empty class
+            // and is treated as an ordinary click.
+            if external_menu_at(point) {
                 EXTERNAL_MENU_ACTIVE.store(true, Ordering::Release);
             } else if EXTERNAL_MENU_ACTIVE.swap(false, Ordering::AcqRel) {
                 state.begin_close();
@@ -3765,10 +3819,10 @@ unsafe extern "system" fn flyout_wnd_proc(
 mod tests {
     use super::{
         DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, FlyoutBlock, FlyoutEdge,
-        FlyoutOptions, FlyoutSpec, LiveEvent, POINT, RECT, WM_APP_MENU_CANDIDATE,
-        anim_interval_for_fps, app_row_targets, blend_rgb, draw_gdi_text, format_clock,
-        is_native_menu_class, layout_flyout, pack_point, post_menu_candidate, pt_in_rect,
-        unpack_point,
+        FlyoutOptions, FlyoutSpec, LiveEvent, MENU_CLASS_CACHE_TTL, MENU_CLASS_PROBE,
+        MenuClassProbe, POINT, RECT, WM_APP_MENU_CANDIDATE, anim_interval_for_fps, app_row_targets,
+        blend_rgb, draw_gdi_text, format_clock, is_native_menu_class, layout_flyout, pack_point,
+        post_menu_candidate, pt_in_rect, unpack_point,
     };
     use windows_sys::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC};
 
@@ -3939,5 +3993,25 @@ mod tests {
         assert!(!is_native_menu_class(&tray));
         assert!(!is_native_menu_class(&flyout));
         assert!(!is_native_menu_class(&[]));
+    }
+
+    #[test]
+    fn menu_class_probe_expires_after_one_animation_frame() {
+        let point = POINT { x: 42, y: 84 };
+        let now = std::time::Instant::now();
+        let fresh = MenuClassProbe {
+            point,
+            is_menu: true,
+            at: Some(now),
+        };
+        assert!(fresh.is_fresh(point, now + MENU_CLASS_CACHE_TTL / 2));
+        assert!(!fresh.is_fresh(point, now + MENU_CLASS_CACHE_TTL * 2));
+        assert!(!fresh.is_fresh(POINT { x: 43, y: 84 }, now + MENU_CLASS_CACHE_TTL / 2));
+        assert!(!MenuClassProbe::empty().is_fresh(point, now));
+        MENU_CLASS_PROBE.with(|cell| *cell.borrow_mut() = fresh);
+        assert!(MENU_CLASS_PROBE.with(|cell| {
+            cell.borrow()
+                .is_fresh(point, now + MENU_CLASS_CACHE_TTL / 2)
+        }));
     }
 }

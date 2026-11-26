@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 pub mod brand_paths;
+pub mod brush;
 pub mod fonts;
 pub mod icons;
 pub mod radius;
