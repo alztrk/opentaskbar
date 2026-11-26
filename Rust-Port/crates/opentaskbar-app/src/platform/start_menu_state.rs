@@ -142,9 +142,7 @@ static ON_OPENED: Mutex<Option<fn(usize)>> = Mutex::new(None);
 
 /// Compares the executable by its file name, never by a bare path suffix.
 fn exe_file_name(path: &str) -> &str {
-    path.rsplit(|c| c == '\\' || c == '/')
-        .next()
-        .unwrap_or(path)
+    path.rsplit(['\\', '/']).next().unwrap_or(path)
 }
 
 fn host_kind_from_exe(path: &str) -> HostKind {

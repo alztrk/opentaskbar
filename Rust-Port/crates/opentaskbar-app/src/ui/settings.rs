@@ -2775,8 +2775,10 @@ impl SettingsView {
                 up_history: _,
             } => {
                 let split_speed = |s: &str| -> (String, String) {
-                    s.rsplit_once(' ')
-                        .map_or_else(|| (s.to_owned(), String::new()), |(n, u)| (n.to_owned(), u.to_owned()))
+                    s.rsplit_once(' ').map_or_else(
+                        || (s.to_owned(), String::new()),
+                        |(n, u)| (n.to_owned(), u.to_owned()),
+                    )
                 };
                 let (d_num, d_unit) = split_speed(&down);
                 let (u_num, u_unit) = split_speed(&up);
@@ -3102,12 +3104,9 @@ impl SettingsView {
                             }),
                     ),
             ),
-            WidgetChipSpec::QuickSettings { pills } => chip(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.0))
-                    .children(pills.into_iter().enumerate().map(|(i, (glyph, active))| {
+            WidgetChipSpec::QuickSettings { pills } => {
+                chip(div().flex().items_center().gap(px(4.0)).children(
+                    pills.into_iter().enumerate().map(|(i, (glyph, active))| {
                         let is_night = i == 2;
                         let bg = if active {
                             if is_night {
@@ -3145,8 +3144,9 @@ impl SettingsView {
                                     .text_color(rgba(fg))
                                     .child(glyph),
                             )
-                    })),
-            ),
+                    }),
+                ))
+            }
             WidgetChipSpec::Keyboard { code } => chip(
                 div()
                     .px(px(6.0))
@@ -3987,13 +3987,7 @@ impl SettingsView {
                         loc::t("DockAlignment"),
                         align_dd,
                     ),
-                    self.target_row(
-                        "DockSize",
-                        t,
-                        Some("\u{E9A6}"),
-                        loc::t("DockSize"),
-                        size_dd,
-                    ),
+                    self.target_row("DockSize", t, Some("\u{E9A6}"), loc::t("DockSize"), size_dd),
                     self.target_row(
                         "DockScale",
                         t,
@@ -4947,7 +4941,11 @@ impl SettingsView {
         match id {
             "clock" => Some(format!(
                 "{} · {}",
-                if self.settings.clock_24_hour { "24h" } else { "12h" },
+                if self.settings.clock_24_hour {
+                    "24h"
+                } else {
+                    "12h"
+                },
                 match self.settings.clock_date_layout {
                     ClockDateLayout::Beside => loc::t("ClockDateLayoutBeside"),
                     ClockDateLayout::Below => loc::t("ClockDateLayoutBelow"),
@@ -5055,13 +5053,12 @@ impl SettingsView {
                         t,
                         self.settings.date_style == ClockDateStyle::DayAndShortDate,
                         cx.listener(|this, _, _, cx| {
-                            this.settings.date_style = if this.settings.date_style
-                                == ClockDateStyle::DayAndShortDate
-                            {
-                                ClockDateStyle::ShortDateOnly
-                            } else {
-                                ClockDateStyle::DayAndShortDate
-                            };
+                            this.settings.date_style =
+                                if this.settings.date_style == ClockDateStyle::DayAndShortDate {
+                                    ClockDateStyle::ShortDateOnly
+                                } else {
+                                    ClockDateStyle::DayAndShortDate
+                                };
                             this.auto_save(cx);
                         }),
                     ),
@@ -5198,41 +5195,43 @@ impl SettingsView {
                     ),
                 ),
             ],
-            "bluetoothbattery" => vec![self.target_row(
-                "WirelessBatteryLowThreshold",
-                t,
-                Some("\u{E850}"),
-                loc::t("WirelessBatteryAlertLabel"),
-                self.make_dropdown(
-                    "bt-low-threshold",
+            "bluetoothbattery" => vec![
+                self.target_row(
+                    "WirelessBatteryLowThreshold",
                     t,
-                    [
-                        (0, loc::t("WirelessBatteryAlertOff")),
-                        (10, "10%".to_owned()),
-                        (20, "20%".to_owned()),
-                        (30, "30%".to_owned()),
-                    ]
-                    .into_iter()
-                    .map(|(threshold, label)| {
-                        let entity = cx.entity().downgrade();
-                        DropdownOption {
-                            label: SharedString::from(label),
-                            flag_path: None,
-                            glyph: None,
-                            selected: self.settings.wireless_battery_low_threshold == threshold,
-                            on_select: std::rc::Rc::new(move |_win, app| {
-                                let _ = entity.update(app, |this, cx| {
-                                    this.open_dropdown = None;
-                                    this.settings.wireless_battery_low_threshold = threshold;
-                                    this.auto_save(cx);
-                                });
-                            }),
-                        }
-                    })
-                    .collect(),
-                    cx,
+                    Some("\u{E850}"),
+                    loc::t("WirelessBatteryAlertLabel"),
+                    self.make_dropdown(
+                        "bt-low-threshold",
+                        t,
+                        [
+                            (0, loc::t("WirelessBatteryAlertOff")),
+                            (10, "10%".to_owned()),
+                            (20, "20%".to_owned()),
+                            (30, "30%".to_owned()),
+                        ]
+                        .into_iter()
+                        .map(|(threshold, label)| {
+                            let entity = cx.entity().downgrade();
+                            DropdownOption {
+                                label: SharedString::from(label),
+                                flag_path: None,
+                                glyph: None,
+                                selected: self.settings.wireless_battery_low_threshold == threshold,
+                                on_select: std::rc::Rc::new(move |_win, app| {
+                                    let _ = entity.update(app, |this, cx| {
+                                        this.open_dropdown = None;
+                                        this.settings.wireless_battery_low_threshold = threshold;
+                                        this.auto_save(cx);
+                                    });
+                                }),
+                            }
+                        })
+                        .collect(),
+                        cx,
+                    ),
                 ),
-            )],
+            ],
             other if other.starts_with("aiusage_") => {
                 let mut rows = Vec::new();
                 if let Some(provider) = widgets::telemetry::AI_PROVIDERS
@@ -5344,11 +5343,7 @@ impl SettingsView {
         } else {
             t.border
         };
-        let card_hover = if expanded {
-            t.surface
-        } else {
-            t.surface_hover
-        };
+        let card_hover = if expanded { t.surface } else { t.surface_hover };
         let target_id = format!("widget-{wid}");
         let highlighted = self.highlight_row.as_deref() == Some(target_id.as_str());
         let anchor = if highlighted {
@@ -5366,11 +5361,7 @@ impl SettingsView {
                 t.surface_muted
             };
             let btn_bd = if expanded { t.accent } else { t.border };
-            let btn_fg = if expanded {
-                t.accent
-            } else {
-                t.text_secondary
-            };
+            let btn_fg = if expanded { t.accent } else { t.text_secondary };
             let btn_hov = if expanded {
                 t.accent_soft
             } else {
@@ -6060,8 +6051,8 @@ impl SettingsView {
             .map(|(tag, _name)| {
                 let chosen = *tag;
                 let entity = cx.entity().downgrade();
-                let flag = fonts::flag_bytes(chosen)
-                    .map(|_| SharedString::from(fonts::flag_path(chosen)));
+                let flag =
+                    fonts::flag_bytes(chosen).map(|_| SharedString::from(fonts::flag_path(chosen)));
                 DropdownOption {
                     label: SharedString::from(loc::display_name(chosen)),
                     flag_path: flag,
@@ -7154,27 +7145,27 @@ pub fn run_settings_window() {
     Application::new()
         .with_assets(fonts::EmbeddedAssets)
         .run(move |cx: &mut App| {
-        let _ = fonts::load_bundled_fonts(cx);
-        cx.bind_keys([
-            KeyBinding::new("tab", TabNext, None),
-            KeyBinding::new("shift-tab", TabPrevious, None),
-            KeyBinding::new("escape", CloseWidgetPanel, None),
-            KeyBinding::new("f9", ToggleFlyoutPreview, None),
-        ]);
-        let bounds = Bounds::centered(None, size(px(WIN_W), px(WIN_H)), cx);
-        let _ = cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(loc::t("SettingsTitle").into()),
-                    appears_transparent: true,
-                    traffic_light_position: None,
-                }),
-                ..Default::default()
-            },
-            |window, cx| cx.new(|cx| SettingsView::new(loaded.clone(), window, cx)),
-        );
-        cx.activate(true);
-    });
+            let _ = fonts::load_bundled_fonts(cx);
+            cx.bind_keys([
+                KeyBinding::new("tab", TabNext, None),
+                KeyBinding::new("shift-tab", TabPrevious, None),
+                KeyBinding::new("escape", CloseWidgetPanel, None),
+                KeyBinding::new("f9", ToggleFlyoutPreview, None),
+            ]);
+            let bounds = Bounds::centered(None, size(px(WIN_W), px(WIN_H)), cx);
+            let _ = cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(loc::t("SettingsTitle").into()),
+                        appears_transparent: true,
+                        traffic_light_position: None,
+                    }),
+                    ..Default::default()
+                },
+                |window, cx| cx.new(|cx| SettingsView::new(loaded.clone(), window, cx)),
+            );
+            cx.activate(true);
+        });
 }

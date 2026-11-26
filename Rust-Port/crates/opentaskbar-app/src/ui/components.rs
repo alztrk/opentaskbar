@@ -409,13 +409,16 @@ pub fn button(
         .child(label.into())
 }
 
+/// Callback invoked when a dropdown option is selected.
+pub type DropdownSelectHandler = std::rc::Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>;
+
 /// One selectable entry inside [`dropdown`].
 pub struct DropdownOption {
     pub label: SharedString,
     pub flag_path: Option<SharedString>,
     pub glyph: Option<&'static str>,
     pub selected: bool,
-    pub on_select: std::rc::Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>,
+    pub on_select: DropdownSelectHandler,
 }
 
 /// Custom desktop dropdown replacing `segmented_track` with optional country flag images
