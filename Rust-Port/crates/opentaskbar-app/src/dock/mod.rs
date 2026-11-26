@@ -11,13 +11,13 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::{
-    self, AppTheme, AutoHideMode, DockPosition, DockSettings, SurfaceBackground,
+    self, AppTheme, AutoHideMode, DockPosition, DockSettings, MiddleClickAction, SurfaceBackground,
 };
 use opentaskbar_shell::tracker::{self, RunningWindow};
 use windows::Win32::Graphics::DirectComposition::{
@@ -70,7 +70,6 @@ use crate::widgets::{self, WidgetRuntime};
 const VERTICAL_EDGE_GAP: f32 = 5.0;
 const TOOLTIP_HEADROOM: f32 = 36.0;
 const MAG_HEADROOM: f32 = 26.0;
-const FISHEYE_PEAK: f32 = 0.42;
 const FISHEYE_RADIUS_SLOTS: f32 = 2.4;
 const BOUNCE_DURATION_SECS: f32 = 0.42;
 const CLOSE_DURATION: Duration = Duration::from_millis(240);
@@ -110,8 +109,25 @@ fn hiword_i16(v: isize) -> f32 {
     ((v as u32 >> 16) & 0xffff) as i16 as f32
 }
 
-fn shell_section_width(base: f32) -> f32 {
-    base * 3.0 + 4.0 * 2.0 + 17.0
+fn is_shell_button_visible(settings: &DockSettings, kind: ShellButton) -> bool {
+    match kind {
+        ShellButton::Start => settings.show_start_button,
+        ShellButton::Search => settings.show_search_button,
+        ShellButton::TaskView => settings.show_task_view_button,
+    }
+}
+
+fn shell_section_width(settings: &DockSettings) -> f32 {
+    let base = settings.icon_dips();
+    let count = ShellButton::ALL
+        .iter()
+        .filter(|&&k| is_shell_button_visible(settings, k))
+        .count();
+    if count == 0 {
+        0.0
+    } else {
+        base * (count as f32) + 4.0 * ((count - 1) as f32) + 17.0
+    }
 }
 
 fn widgets_strip_width(settings: &DockSettings, has_apps: bool) -> f32 {
@@ -151,13 +167,13 @@ fn visible_tray_pin_count(settings: &DockSettings, slot_count: usize, mon_w_dips
     let apps = slot_count as f32 * base + slot_count.saturating_sub(1) as f32 * slot_gap(settings);
     let magnification =
         if slot_count > 0 && settings.magnification_enabled && settings.animations_enabled {
-            base * 1.4
+            base * (1.0 + settings.fisheye_intensity.peak())
         } else {
             0.0
         };
     let available = mon_w_dips
         - 16.0
-        - shell_section_width(base)
+        - shell_section_width(settings)
         - widgets_strip_width(settings, slot_count > 0)
         - base_trail_width(settings)
         - apps
@@ -443,6 +459,7 @@ struct DockState {
     anim_signal: Arc<(Mutex<bool>, Condvar)>,
     tick_pending: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
+    target_fps: Arc<AtomicU32>,
 }
 
 fn exe_display_name(exe_path: &str, fallback_title: &str) -> String {
@@ -726,7 +743,7 @@ fn content_min_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips
     let base = settings.icon_dips();
     let gap = slot_gap(settings);
     let icons_w = (slot_count as f32) * base + gap * (slot_count.saturating_sub(1) as f32);
-    (shell_section_width(base)
+    (shell_section_width(settings)
         + icons_w
         + widgets_section_width(settings, slot_count, mon_w_dips)
         + 30.0)
@@ -749,14 +766,20 @@ fn resting_pill_width(settings: &DockSettings, slot_count: usize, mon_w_dips: f3
 fn compute_window_dips(settings: &DockSettings, slot_count: usize, mon_w_dips: f32) -> (f32, f32) {
     let base = settings.icon_dips();
     let resting_w = resting_pill_width(settings, slot_count, mon_w_dips);
+    let peak = settings.fisheye_intensity.peak();
     let mag_extra = if settings.magnification_enabled && !settings.full_width {
-        base * 1.4
+        base * (1.0 + peak)
     } else {
         0.0
     };
+    let mag_headroom = if settings.magnification_enabled {
+        (base * peak + 14.0).max(MAG_HEADROOM)
+    } else {
+        MAG_HEADROOM
+    };
     let width_dips = (resting_w + mag_extra + 24.0).min(mon_w_dips).ceil();
     let pill_h = pill_height_dips(settings);
-    let height_dips = (pill_h + TOOLTIP_HEADROOM + MAG_HEADROOM + VERTICAL_EDGE_GAP).ceil();
+    let height_dips = (pill_h + TOOLTIP_HEADROOM + mag_headroom + VERTICAL_EDGE_GAP).ceil();
     (width_dips, height_dips)
 }
 
@@ -1044,6 +1067,10 @@ impl DockState {
         let tick_pending = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(AtomicBool::new(false));
 
+        let target_fps = Arc::new(AtomicU32::new(Self::compute_target_fps(
+            &settings,
+            &monitor.device_name,
+        )));
         let mut state = Self {
             hwnd,
             monitor,
@@ -1128,6 +1155,7 @@ impl DockState {
             anim_signal,
             tick_pending,
             shutdown,
+            target_fps,
         };
         state.rebuild_visual_tree();
         state.refresh_widgets();
@@ -1137,11 +1165,30 @@ impl DockState {
         Ok(state)
     }
 
+    fn compute_target_fps(settings: &DockSettings, device_name: &str) -> u32 {
+        let hz = win32::monitor_refresh_hz(device_name);
+        match settings.animation_fps {
+            Some(fps) if fps < hz => fps.clamp(15, hz),
+            _ => 0,
+        }
+    }
+
+    fn widget_anim_interval_ms(&self) -> u32 {
+        let hz = win32::monitor_refresh_hz(&self.monitor.device_name);
+        let fps = self
+            .settings
+            .animation_fps
+            .map(|f| f.clamp(15, hz))
+            .unwrap_or(hz);
+        (1000 / fps.max(15)).max(4)
+    }
+
     fn spawn_vsync_thread(&self) {
         let hwnd_val = self.hwnd;
         let signal = self.anim_signal.clone();
         let tick_pending = self.tick_pending.clone();
         let shutdown = self.shutdown.clone();
+        let target_fps = self.target_fps.clone();
         std::thread::Builder::new()
             .name("dock-vsync".to_owned())
             .spawn(move || {
@@ -1156,8 +1203,15 @@ impl DockState {
                     if shutdown.load(Ordering::Relaxed) {
                         break;
                     }
-                    unsafe {
-                        let _ = DwmFlush();
+                    let fps = target_fps.load(Ordering::Relaxed);
+                    if fps == 0 {
+                        unsafe {
+                            let _ = DwmFlush();
+                        }
+                    } else {
+                        std::thread::sleep(Duration::from_nanos(
+                            1_000_000_000u64 / u64::from(fps.max(15)),
+                        ));
                     }
                     if shutdown.load(Ordering::Relaxed) {
                         break;
@@ -1688,6 +1742,10 @@ impl DockState {
         self.hovered_tray_pin = None;
         self.pressed_tray_pin = None;
         self.all_monitors = win32::enumerate_monitors();
+        self.target_fps.store(
+            Self::compute_target_fps(&self.settings, &self.monitor.device_name),
+            Ordering::Relaxed,
+        );
         self.is_dark = resolve_is_dark(self.settings.theme);
         if let Some(ref mut island) = self.dynamic_island {
             island.apply(&self.settings, &self.all_monitors, self.is_dark);
@@ -1912,7 +1970,7 @@ impl DockState {
             }
             icons_w -= gap * largest_fraction;
             let live_content =
-                (shell_section_width(base) + icons_w + self.live_widgets_section_width() + 30.0)
+                (shell_section_width(&self.settings) + icons_w + self.live_widgets_section_width() + 30.0)
                     .max(160.0);
             let max_w = (mon_w - 16.0).max(200.0);
             let floor_w = scroll_min_pill_width(&self.settings).min(live_content);
@@ -1947,7 +2005,6 @@ impl DockState {
 
     /// Same as `live_scroll_metrics`, but reuses pill geometry the caller has already computed.
     fn scroll_metrics_for_pill(&self, pill_left: f32, pill_w: f32) -> ScrollMetrics {
-        let base = self.settings.icon_dips();
         // Flush with the outer rounded edges of the dock pill (matching C# `MainWindow.xaml`).
         let vp_left = pill_left + 1.0;
         let vp_right = (pill_left + pill_w - 1.0).max(vp_left + 1.0);
@@ -1959,7 +2016,7 @@ impl DockState {
             vp_right,
             apps_w + widgets_w,
             trail_w,
-            shell_section_width(base),
+            shell_section_width(&self.settings),
             self.scroll_offset,
         )
     }
@@ -2053,7 +2110,12 @@ impl DockState {
     fn live_shell_center_x(&self, kind: ShellButton) -> f32 {
         let base = self.settings.icon_dips();
         let sm = self.live_scroll_metrics();
-        sm.shell_start_x + (kind.index() as f32) * (base + 4.0) + base * 0.5
+        let slot = ShellButton::ALL
+            .iter()
+            .take_while(|&&k| k != kind)
+            .filter(|&&k| is_shell_button_visible(&self.settings, k))
+            .count();
+        sm.shell_start_x + (slot as f32) * (base + 4.0) + base * 0.5
     }
 
     fn right_widget_rects_dips(
@@ -2179,11 +2241,16 @@ impl DockState {
         if my < pill_top || my > pill_top + pill_h {
             return None;
         }
+        let mut slot = 0usize;
         for kind in ShellButton::ALL {
-            let x = sm.shell_start_x + (kind.index() as f32) * (base + 4.0);
+            if !is_shell_button_visible(&self.settings, kind) {
+                continue;
+            }
+            let x = sm.shell_start_x + (slot as f32) * (base + 4.0);
             if mx >= sm.vp_left.max(x) && mx <= sm.vp_right.min(x + base) {
                 return Some(kind);
             }
+            slot += 1;
         }
         None
     }
@@ -2235,7 +2302,7 @@ impl DockState {
             return 1.0;
         }
         let c = (dist / radius * std::f32::consts::FRAC_PI_2).cos();
-        1.0 + FISHEYE_PEAK * c * c
+        1.0 + self.settings.fisheye_intensity.peak() * c * c
     }
 
     fn step_animations(&mut self, now: Instant) -> bool {
@@ -2512,9 +2579,16 @@ impl DockState {
         let box_sz_px = (base * dpi).ceil();
         let glyph_dips = (base * 0.68).max(22.0);
         let glyph_surf_px = (glyph_dips * dpi).ceil();
+        let mut visible_shell_count = 0usize;
         for kind in ShellButton::ALL {
             let i = kind.index();
-            let x = sm.shell_start_x + (i as f32) * (base + 4.0);
+            if !is_shell_button_visible(&self.settings, kind) {
+                self.shell_bgs[i].hide();
+                self.shell_icons[i].hide();
+                continue;
+            }
+            let x = sm.shell_start_x + (visible_shell_count as f32) * (base + 4.0);
+            visible_shell_count += 1;
             let box_x_px = (x * dpi).round();
             let box_y_px = (shell_top * dpi).round();
             let hovered = self.hovered_shell == Some(kind);
@@ -2536,10 +2610,17 @@ impl DockState {
             self.shell_icons[i].set_transform(scale, scale, gx_px, gy_px);
         }
 
-        let div_x = sm.shell_start_x + base * 3.0 + 4.0 * 2.0 + 8.0;
         let div_y = pill_top + (pill_h - 26.0) * 0.5;
-        self.divider
-            .set_transform(1.0, 1.0, (div_x * dpi).round(), (div_y * dpi).round());
+        if visible_shell_count == 0 {
+            self.divider.hide();
+        } else {
+            let div_x = sm.shell_start_x
+                + base * (visible_shell_count as f32)
+                + 4.0 * ((visible_shell_count - 1) as f32)
+                + 8.0;
+            self.divider
+                .set_transform(1.0, 1.0, (div_x * dpi).round(), (div_y * dpi).round());
+        }
 
         // Hardware-clip scrollable content horizontally to the dock viewport while keeping
         // full vertical headroom (`0.0 .. win_h`) so magnified app icons are never clipped above.
@@ -3041,8 +3122,12 @@ impl DockState {
         });
         let (_, pill_top, _, _) = self.live_pill_geometry();
         let base = self.settings.icon_dips();
-        let max_icon_top =
-            pill_top + 7.5 + base - (FISHEYE_PEAK * 14.0) - base * (1.0 + FISHEYE_PEAK);
+        let peak = if self.settings.magnification_enabled && self.settings.animations_enabled {
+            self.settings.fisheye_intensity.peak()
+        } else {
+            0.0
+        };
+        let max_icon_top = pill_top + 7.5 + base - (peak * 14.0) - base * (1.0 + peak);
         let top_edge = max_icon_top.min(pill_top);
         let anchor_x = win_x + (self.live_slot_center_x(idx) * self.dpi).round() as i32;
         let anchor_bottom_y = win_y + ((top_edge - 10.0) * self.dpi).round() as i32;
@@ -3587,11 +3672,23 @@ impl DockState {
         if let Some(idx) = self.hovered_idx
             && let Some(slot) = self.slots.get_mut(idx)
         {
-            slot.bounce_started = Some(Instant::now());
-            let launch_path = slot.launch_path.clone();
-            let window = slot.windows.first().map(|window| window.hwnd);
-            self.ensure_animation();
-            pins::launch_app(launch_path, window, false);
+            match self.settings.middle_click_action {
+                MiddleClickAction::NewWindow => {
+                    slot.bounce_started = Some(Instant::now());
+                    let launch_path = slot.launch_path.clone();
+                    let window = slot.windows.first().map(|window| window.hwnd);
+                    self.ensure_animation();
+                    pins::launch_app(launch_path, window, false);
+                }
+                MiddleClickAction::CloseWindow => {
+                    let windows: Vec<(usize, u32)> =
+                        slot.windows.iter().map(|w| (w.hwnd, w.pid)).collect();
+                    for (hwnd, pid) in windows {
+                        tracker::close_window_verified(hwnd, pid);
+                    }
+                }
+                MiddleClickAction::Nothing => {}
+            }
         }
     }
 
@@ -4528,8 +4625,9 @@ unsafe extern "system" fn wnd_proc(
                 state.update_visuals();
             }
             if state.widget_runtime.needs_animation_tick(&state.settings) {
+                let interval = state.widget_anim_interval_ms();
                 unsafe {
-                    SetTimer(hwnd, TIMER_WIDGET_ANIM, 66, None);
+                    SetTimer(hwnd, TIMER_WIDGET_ANIM, interval, None);
                 }
             } else {
                 unsafe {
@@ -5009,7 +5107,7 @@ mod tests {
         settings.show_recycle_bin = true;
 
         let base = settings.icon_dips();
-        let shell_w = shell_section_width(base);
+        let shell_w = shell_section_width(&settings);
         let apps_w = 3.0 * base + 2.0 * slot_gap(&settings);
         let widgets_w = widgets_strip_width(&settings, true);
         let trail_w = base_trail_width(&settings);

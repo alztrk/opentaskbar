@@ -16,8 +16,8 @@ use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW,
-    MonitorFromWindow,
+    DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW,
+    HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, MonitorFromWindow,
 };
 use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
 use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
@@ -420,6 +420,30 @@ pub fn enumerate_monitors() -> Vec<MonitorInfo> {
         monitors.sort_by_key(|m| !m.is_primary);
     }
     monitors
+}
+
+pub fn monitor_refresh_hz(device_name: &str) -> u32 {
+    if device_name.is_empty() {
+        return 60;
+    }
+    let name_w = wide(device_name);
+    let mut dm: DEVMODEW = unsafe { std::mem::zeroed() };
+    dm.dmSize = size_of::<DEVMODEW>() as u16;
+    let ok = unsafe { EnumDisplaySettingsW(name_w.as_ptr(), ENUM_CURRENT_SETTINGS, &mut dm) };
+    if ok != 0 && dm.dmDisplayFrequency > 1 {
+        dm.dmDisplayFrequency.max(15)
+    } else {
+        60
+    }
+}
+
+pub fn max_connected_refresh_hz() -> u32 {
+    enumerate_monitors()
+        .iter()
+        .map(|m| monitor_refresh_hz(&m.device_name))
+        .max()
+        .unwrap_or(60)
+        .max(15)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

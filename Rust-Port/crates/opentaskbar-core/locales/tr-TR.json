@@ -67,6 +67,11 @@
   "Startup": "Windows ile ba┼ƒlat",
   "StartupDescription": "Oturum a├ºt─▒─ƒ─▒nda OpenTaskbar otomatik ba┼ƒlas─▒n.",
   "Animations": "Animasyonlar",
+  "AnimationFps": "Animasyon kare hızı",
+  "AnimationFpsAuto": "Otomatik",
+  "ShowStartButton": "Başlat düğmesi",
+  "ShowSearchButton": "Arama düğmesi",
+  "ShowTaskViewButton": "Görev Görünümü düğmesi",
   "AnimationsDescription": "A├º─▒l─▒┼ƒ, gizlenme ve ge├ºi┼ƒ hareketleri.",
   "Previews": "Pencere ├╢nizlemeleri",
   "PreviewsDescription": "Simgenin ├╝zerine geldi─ƒinde a├º─▒k pencereleri g├╢ster.",
@@ -1070,5 +1075,15 @@
   "UiFontPreview": "Önizleme",
   "UiFontFamily": "Yazı tipi",
   "UiFontSize": "Yazı boyutu",
-  "UiFontNative": "Windows varsayılanı"
+  "UiFontNative": "Windows varsayılanı",
+  "MiddleClickAction": "Orta tık davranışı",
+  "MiddleClickNewWindow": "Yeni pencere",
+  "MiddleClickClose": "Kapat",
+  "MiddleClickNothing": "Yok",
+  "FisheyeIntensity": "Büyüteç şiddeti",
+  "FisheyeLow": "Az",
+  "FisheyeNormal": "Normal",
+  "FisheyeStrong": "Güçlü",
+  "WeatherUnit": "Sıcaklık birimi",
+  "WirelessBatteryAlertLabel": "Düşük pil uyarısı"
 }

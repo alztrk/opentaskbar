@@ -71,6 +71,11 @@
   "StartupDescription": "Launch OpenTaskbar when you sign in.",
   "Animations": "Animations",
   "AnimationsDescription": "Launch, hide, and transition motion.",
+  "AnimationFps": "Animation frame rate",
+  "AnimationFpsAuto": "Auto",
+  "ShowStartButton": "Start button",
+  "ShowSearchButton": "Search button",
+  "ShowTaskViewButton": "Task View button",
   "Previews": "Window previews",
   "PreviewsDescription": "Show open windows when you hover over an icon.",
   "HardwareAcceleration": "Hardware acceleration",
@@ -1070,5 +1075,15 @@
   "UiFontPreview": "Preview",
   "UiFontFamily": "Font family",
   "UiFontSize": "Font size",
-  "UiFontNative": "Windows default"
+  "UiFontNative": "Windows default",
+  "MiddleClickAction": "Middle-click action",
+  "MiddleClickNewWindow": "New window",
+  "MiddleClickClose": "Close",
+  "MiddleClickNothing": "Nothing",
+  "FisheyeIntensity": "Magnification strength",
+  "FisheyeLow": "Subtle",
+  "FisheyeNormal": "Normal",
+  "FisheyeStrong": "Strong",
+  "WeatherUnit": "Temperature unit",
+  "WirelessBatteryAlertLabel": "Low battery alert"
 }

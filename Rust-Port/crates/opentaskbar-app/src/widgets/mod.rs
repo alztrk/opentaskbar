@@ -12,6 +12,7 @@
 pub mod diagnostics;
 pub mod telemetry;
 
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -23,7 +24,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 
 use crate::design::{self, Rgb};
 use crate::dock::dcomp::{ChipIcon, WidgetChipSpec};
-use crate::platform::{pins, wireless_battery};
+use crate::platform::{pins, toast, wireless_battery};
 use crate::ui::flyout::{self, BarTone, FlyoutBlock, FlyoutSpec, LiveEvent, LiveOutcome};
 use crate::ui::menu::BorderStyle;
 use telemetry::{BluetoothBatteryDevice, BluetoothDeviceKind};
@@ -208,6 +209,7 @@ pub struct WidgetRuntime {
     focus_completed: u32,
     weather: Arc<Mutex<telemetry::WeatherCache>>,
     bt_battery: Arc<Mutex<telemetry::BluetoothBatteryCache>>,
+    notified_low_bt: HashSet<String>,
     ai_usage: Arc<Mutex<telemetry::AiUsageCache>>,
     media_session: Arc<Mutex<telemetry::MediaSessionSnapshot>>,
     night_light_on: bool,
@@ -245,6 +247,7 @@ impl Default for WidgetRuntime {
             focus_completed: 0,
             weather: Arc::new(Mutex::new(telemetry::WeatherCache::default())),
             bt_battery: Arc::new(Mutex::new(telemetry::BluetoothBatteryCache::default())),
+            notified_low_bt: HashSet::new(),
             ai_usage: Arc::new(Mutex::new(telemetry::AiUsageCache::default())),
             media_session: Arc::new(Mutex::new(telemetry::MediaSessionSnapshot::default())),
             night_light_on: telemetry::read_night_light().unwrap_or(false),
@@ -381,6 +384,24 @@ impl WidgetRuntime {
                     .collect();
                 cache.last_fetch = Some(now);
                 cache.loading = false;
+            }
+            let threshold = settings.wireless_battery_low_threshold.max(0) as u32;
+            if threshold == 0 {
+                self.notified_low_bt.clear();
+            } else if let Ok(cache) = self.bt_battery.lock() {
+                for dev in &cache.devices {
+                    if dev.percent <= threshold {
+                        if self.notified_low_bt.insert(dev.name.clone()) {
+                            let msg = loc::t_fmt(
+                                "WirelessBatteryLowToast",
+                                &[&dev.name, &dev.percent.to_string()],
+                            );
+                            let _ = toast::show_info_toast(&msg);
+                        }
+                    } else if dev.percent > threshold.saturating_add(5) {
+                        self.notified_low_bt.remove(&dev.name);
+                    }
+                }
             }
         }
         if settings.is_widget_enabled("quicksettings")
@@ -597,6 +618,8 @@ impl WidgetRuntime {
                     .map(|g| g.clone())
                     .unwrap_or_default();
                 let available = !snap.temp_c.is_empty();
+                let formatted_temp = snap.formatted_temp(settings.weather_unit);
+                let formatted_range = snap.formatted_today_range(settings.weather_unit);
                 let place = if snap.city.is_empty() {
                     settings.weather_city.clone()
                 } else {
@@ -619,10 +642,10 @@ impl WidgetRuntime {
                     available,
                     icon_color,
                     is_rain: snap.is_rain,
-                    temp: snap.temp_c,
+                    temp: formatted_temp,
                     place,
                     condition,
-                    today_range: (!snap.today_range.is_empty()).then_some(snap.today_range),
+                    today_range: (!formatted_range.is_empty()).then_some(formatted_range),
                 }
             }
             "dayprogress" => {
@@ -694,6 +717,7 @@ impl WidgetRuntime {
                 }
             }
             "bluetoothbattery" => {
+                let low_threshold = settings.wireless_battery_low_threshold.max(0) as u32;
                 let devices: Vec<(telemetry::BluetoothDeviceKind, u32, bool, bool)> = self
                     .bt_battery
                     .lock()
@@ -702,7 +726,14 @@ impl WidgetRuntime {
                         g.devices
                             .iter()
                             .take(3)
-                            .map(|d| (d.kind, d.percent, d.percent <= 20, d.percent >= 100))
+                            .map(|d| {
+                                (
+                                    d.kind,
+                                    d.percent,
+                                    low_threshold > 0 && d.percent <= low_threshold,
+                                    d.percent >= 100,
+                                )
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
@@ -878,7 +909,12 @@ impl WidgetRuntime {
                     .map(|g| g.clone())
                     .unwrap_or_default();
                 if !snap.temp_c.is_empty() {
-                    format!("{} · {} · {}", snap.city, snap.temp_c, snap.condition)
+                    format!(
+                        "{} · {} · {}",
+                        snap.city,
+                        snap.formatted_temp(settings.weather_unit),
+                        snap.condition
+                    )
                 } else {
                     format!("Weather · {}", settings.weather_city)
                 }
@@ -1664,20 +1700,20 @@ impl WidgetRuntime {
             // Exact C# `WeatherWidget.BuildFlyoutContent`
             "weather" => {
                 let snap = self.weather.lock().map(|g| g.clone()).unwrap_or_default();
-                let city = if snap.city.is_empty() {
-                    settings.weather_city.clone()
-                } else {
-                    snap.city
-                };
                 let temp = if snap.temp_c.is_empty() {
                     "—".to_owned()
                 } else {
-                    snap.temp_c
+                    snap.formatted_temp(settings.weather_unit)
                 };
                 let feels = if snap.feels_like.is_empty() {
                     "—".to_owned()
                 } else {
-                    snap.feels_like
+                    snap.formatted_feels_like(settings.weather_unit)
+                };
+                let city = if snap.city.is_empty() {
+                    settings.weather_city.clone()
+                } else {
+                    snap.city
                 };
                 let hum = if snap.humidity.is_empty() {
                     "—".to_owned()

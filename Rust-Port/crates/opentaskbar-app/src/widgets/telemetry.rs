@@ -2226,16 +2226,62 @@ pub struct WeatherCache {
     pub requested_city: String,
     pub city: String,
     pub temp_c: String,
+    pub temp_c_val: Option<f64>,
     pub condition: String,
     pub is_rain: bool,
     pub feels_like: String,
+    pub feels_like_c_val: Option<f64>,
     pub humidity: String,
     pub wind: String,
     pub today_range: String,
+    pub today_hi_c: Option<f64>,
+    pub today_lo_c: Option<f64>,
     /// 3-day forecast `(day_label, condition, high_low)`.
     pub forecast_days: Vec<(String, String, String)>,
     pub last_fetch: Option<Instant>,
     pub loading: bool,
+}
+
+pub fn format_temperature(celsius: f64, unit: opentaskbar_core::settings::TemperatureUnit) -> String {
+    match unit {
+        opentaskbar_core::settings::TemperatureUnit::Celsius => {
+            format!("{}°C", celsius.round() as i32)
+        }
+        opentaskbar_core::settings::TemperatureUnit::Fahrenheit => {
+            let f = celsius * 9.0 / 5.0 + 32.0;
+            format!("{}°F", f.round() as i32)
+        }
+    }
+}
+
+impl WeatherCache {
+    pub fn formatted_temp(&self, unit: opentaskbar_core::settings::TemperatureUnit) -> String {
+        if let Some(c) = self.temp_c_val {
+            format_temperature(c, unit)
+        } else {
+            self.temp_c.clone()
+        }
+    }
+
+    pub fn formatted_feels_like(&self, unit: opentaskbar_core::settings::TemperatureUnit) -> String {
+        if let Some(c) = self.feels_like_c_val {
+            format_temperature(c, unit)
+        } else {
+            self.feels_like.clone()
+        }
+    }
+
+    pub fn formatted_today_range(&self, unit: opentaskbar_core::settings::TemperatureUnit) -> String {
+        if let (Some(hi), Some(lo)) = (self.today_hi_c, self.today_lo_c) {
+            format!(
+                "{} / {}",
+                format_temperature(hi, unit),
+                format_temperature(lo, unit)
+            )
+        } else {
+            self.today_range.clone()
+        }
+    }
 }
 
 fn describe_wmo(code: i64) -> (String, bool) {
@@ -2458,10 +2504,9 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
                     .and_then(|d| d.get("weather_code"))
                     .and_then(|v| v.as_array());
 
-                let today_range = match (
-                    maxs.and_then(|a| a.first()).and_then(|v| v.as_f64()),
-                    mins.and_then(|a| a.first()).and_then(|v| v.as_f64()),
-                ) {
+                let today_hi_c = maxs.and_then(|a| a.first()).and_then(|v| v.as_f64());
+                let today_lo_c = mins.and_then(|a| a.first()).and_then(|v| v.as_f64());
+                let today_range = match (today_hi_c, today_lo_c) {
                     (Some(hi), Some(lo)) => format!("{}° / {}°", hi.round() as i32, lo.round() as i32),
                     _ => String::new(),
                 };
@@ -2491,12 +2536,16 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
                 Some((
                     place_name,
                     format!("{}°", temp.round() as i32),
+                    temp,
                     cond,
                     is_rain,
                     format!("{}°", feels.round() as i32),
+                    feels,
                     format!("{}%", hum.round() as i32),
                     format!("{} km/h", wind.round() as i32),
                     today_range,
+                    today_hi_c,
+                    today_lo_c,
                     forecast,
                 ))
             });
@@ -2504,16 +2553,35 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
             if let Ok(mut g) = cache.lock() {
                 g.loading = false;
                 // A failed fetch must stay retryable and must not relabel stale data with a new city.
-                if let Some((place, temp, cond, is_rain, feels, hum, wind, range, fc)) = parsed {
+                if let Some((
+                    place,
+                    temp,
+                    temp_val,
+                    cond,
+                    is_rain,
+                    feels,
+                    feels_val,
+                    hum,
+                    wind,
+                    range,
+                    hi_c,
+                    lo_c,
+                    fc,
+                )) = parsed
+                {
                     g.last_fetch = Some(Instant::now());
                     g.city = place;
                     g.temp_c = temp;
+                    g.temp_c_val = Some(temp_val);
                     g.condition = cond;
                     g.is_rain = is_rain;
                     g.feels_like = feels;
+                    g.feels_like_c_val = Some(feels_val);
                     g.humidity = hum;
                     g.wind = wind;
                     g.today_range = range;
+                    g.today_hi_c = hi_c;
+                    g.today_lo_c = lo_c;
                     g.forecast_days = fc;
                 }
             }

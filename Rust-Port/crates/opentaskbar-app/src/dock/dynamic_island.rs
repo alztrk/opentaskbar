@@ -13,19 +13,19 @@ use opentaskbar_core::dynamic_island as policy;
 use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::{self, DockSettings};
 use windows::Win32::Graphics::DirectComposition::IDCompositionRectangleClip;
-use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_LEFT, VK_RIGHT,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HTCLIENT,
-    HWND_TOPMOST, IDC_ARROW, IDC_HAND, KillTimer, LoadCursorW, MA_NOACTIVATE, RegisterClassExW,
-    RegisterWindowMessageW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
-    SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_DESTROY, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW,
+    HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_HAND, KillTimer, LoadCursorW, MA_NOACTIVATE,
+    RegisterClassExW, RegisterWindowMessageW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+    SWP_NOMOVE, SWP_NOZORDER, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
+    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::dcomp::{DcompEngine, IslandButton, VisualNode, WidgetInteraction};
@@ -387,6 +387,14 @@ impl DynamicIslandWindow {
         self.width_dips = self.width_for_current_page();
         self.position_window();
         self.render_all();
+        let vis_interval_ms = if settings.dynamic_island_auto_hide {
+            120
+        } else {
+            400
+        };
+        unsafe {
+            SetTimer(self.hwnd as HWND, TIMER_VISIBILITY, vis_interval_ms, None);
+        }
         self.refresh_visibility();
     }
 
@@ -581,8 +589,15 @@ impl DynamicIslandWindow {
                 to_px: target_offset,
                 start: Instant::now(),
             });
+            let hz = win32::monitor_refresh_hz(&self.monitor.device_name);
+            let fps = self
+                .settings
+                .animation_fps
+                .map(|f| f.clamp(15, hz))
+                .unwrap_or(hz);
+            let interval_ms = (1000 / fps.max(15)).max(4);
             unsafe {
-                SetTimer(self.hwnd as HWND, TIMER_ANIM, 16, None);
+                SetTimer(self.hwnd as HWND, TIMER_ANIM, interval_ms, None);
             }
         } else {
             self.slide_anim = None;
@@ -623,9 +638,37 @@ impl DynamicIslandWindow {
             || self.settings.dynamic_island_auto_hide;
         let fullscreen = suppress_fullscreen && win32::is_any_fullscreen_on_monitor(&self.monitor);
 
+        let auto_hide_allows = if self.settings.dynamic_island_auto_hide {
+            if self.is_dragging || self.pressed_widget || self.pressed_btn.is_some() {
+                true
+            } else {
+                let mut pt = POINT { x: 0, y: 0 };
+                if unsafe { GetCursorPos(&mut pt) } != 0 {
+                    let dpi = self.monitor.dpi_scale.max(0.5);
+                    let w_px = (self.width_dips * dpi).ceil() as i32;
+                    let h_px = (COMPACT_HEIGHT_DIPS * dpi).ceil() as i32;
+                    let left = self.monitor.left + (self.monitor.width() - w_px) / 2;
+                    let pad_x = (24.0 * dpi).round() as i32;
+                    let in_x = pt.x >= left - pad_x && pt.x <= left + w_px + pad_x;
+                    let top_trigger = self.monitor.top + (6.0 * dpi).round().max(4.0) as i32;
+                    let keep_bottom = self.monitor.top + h_px + (8.0 * dpi).round() as i32;
+                    in_x && pt.y >= self.monitor.top && if self.is_visible {
+                        pt.y <= keep_bottom
+                    } else {
+                        pt.y <= top_trigger
+                    }
+                } else {
+                    false
+                }
+            }
+        } else {
+            true
+        };
+
         let should_show = self.settings.dynamic_island_enable
             && !self.page_ids.is_empty()
             && !self.settings.focus_mode
+            && auto_hide_allows
             && policy::should_show(
                 self.settings.dynamic_island_visibility,
                 !fg_on_display,
@@ -1011,6 +1054,9 @@ unsafe extern "system" fn island_wnd_proc(
             if state.hovered_btn.is_some() {
                 state.hovered_btn = None;
                 state.render_all();
+            }
+            if state.settings.dynamic_island_auto_hide {
+                state.refresh_visibility();
             }
             0
         }

@@ -223,6 +223,33 @@ pub enum TemperatureUnit {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MiddleClickAction {
+    #[default]
+    NewWindow,
+    CloseWindow,
+    Nothing,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FisheyeIntensity {
+    Low,
+    #[default]
+    Normal,
+    Strong,
+}
+
+impl FisheyeIntensity {
+    /// Additional scale factor at the cursor center (`1.0 + peak`).
+    pub fn peak(self) -> f32 {
+        match self {
+            Self::Low => 0.20,
+            Self::Normal => 0.42,
+            Self::Strong => 0.70,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SecondaryAppScope {
     #[default]
     CurrentMonitorOnly,
@@ -451,7 +478,14 @@ pub struct DockSettings {
     pub dock_icon_padding: i32,
     pub dock_scale: f64,
     pub animations_enabled: bool,
+    /// Target animation frame rate (`None` = monitor VSync/Hz, `Some(fps)` = `15..=monitor_hz`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_fps: Option<u32>,
     pub magnification_enabled: bool,
+    #[serde(default)]
+    pub fisheye_intensity: FisheyeIntensity,
+    #[serde(default)]
+    pub middle_click_action: MiddleClickAction,
     #[serde(alias = "FocusModeEnabled")]
     pub focus_mode: bool,
     pub show_recycle_bin: bool,
@@ -595,6 +629,8 @@ pub struct DockSettings {
         serialize_with = "serialize_antigravity_groups"
     )]
     pub antigravity_groups: u32,
+    #[serde(default = "default_true")]
+    pub show_start_button: bool,
     pub show_search_button: bool,
     pub show_task_view_button: bool,
     pub dock_width_mode: DockWidthMode,
@@ -645,7 +681,10 @@ impl Default for DockSettings {
             dock_icon_padding: 0,
             dock_scale: 1.0,
             animations_enabled: true,
+            animation_fps: None,
             magnification_enabled: true,
+            fisheye_intensity: FisheyeIntensity::Normal,
+            middle_click_action: MiddleClickAction::NewWindow,
             focus_mode: false,
             show_recycle_bin: true,
             show_tray_button: true,
@@ -731,6 +770,7 @@ impl Default for DockSettings {
             ai_usage_providers: 0,
             ai_usage_ring: AiUsageRing::Highest,
             antigravity_groups: antigravity_groups::ALL,
+            show_start_button: true,
             show_search_button: true,
             show_task_view_button: true,
             dock_width_mode: DockWidthMode::Auto,
@@ -2620,6 +2660,37 @@ mod tests {
         ] {
             assert!(raw.contains(key), "missing {key} in {raw}");
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn middle_click_and_fisheye_intensity_round_trip() {
+        let dir = std::env::temp_dir().join(format!(
+            "opentaskbar-mclick-fisheye-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+
+        let mut cfg = DockSettings::default();
+        assert_eq!(cfg.middle_click_action, MiddleClickAction::NewWindow);
+        assert_eq!(cfg.fisheye_intensity, FisheyeIntensity::Normal);
+        assert!((FisheyeIntensity::Low.peak() - 0.20).abs() < f32::EPSILON);
+        assert!((FisheyeIntensity::Normal.peak() - 0.42).abs() < f32::EPSILON);
+        assert!((FisheyeIntensity::Strong.peak() - 0.70).abs() < f32::EPSILON);
+
+        cfg.middle_click_action = MiddleClickAction::CloseWindow;
+        cfg.fisheye_intensity = FisheyeIntensity::Strong;
+        save_to(&path, &cfg).unwrap();
+
+        let loaded = load_from(&path);
+        assert_eq!(loaded.middle_click_action, MiddleClickAction::CloseWindow);
+        assert_eq!(loaded.fisheye_intensity, FisheyeIntensity::Strong);
+
         let _ = fs::remove_dir_all(&dir);
     }
 }
