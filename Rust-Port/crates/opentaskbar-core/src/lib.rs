@@ -1,5 +1,6 @@
 //! Core settings, logging, and single-instance coordination for OpenTaskbar.
 
+pub mod i18n;
 pub mod log;
 pub mod settings;
 #[cfg(windows)]

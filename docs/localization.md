@@ -14,3 +14,28 @@ On first launch, the app selects a translation matching the Windows UI language.
 ## Existing fixed text
 
 User-facing labels and errors belong in the locale JSON files. Product names, keyboard shortcuts, file formats, protocol values, operating-system identifiers, and source data such as city names are not translated UI copy.
+
+## Rust port catalogs
+
+The Rust port embeds its own copies of the 14 catalogs at `Rust-Port/crates/opentaskbar-core/locales/*.json` and exposes them through `opentaskbar_core::i18n` (`t`, `tr`, `t_fmt`, `keys`, `key_count`). Lookup order is exact culture → another culture with the same two-letter language → `en-US` → the key name itself. A missing key returns the key name and is **not** a build error, so a widget added ahead of its translations still renders.
+
+Each Rust catalog currently contains **1108 keys**: the 999 C# keys plus 109 Rust-port additions (dynamic island, calendar, fonts, widget features and the five Antigravity keys). The five C#-surplus keys that were previously missing are now present in every language:
+
+- `WidgetAiUsageAntigravity`, `WidgetAiUsageAntigravityDescription`
+- `AiUsageGroupGemini`, `AiUsageGroupClaudeGpt`, `AiUsageAntigravityGroupsLabel`
+
+The 32 additional feature keys cover `SpeedTest*`, `FocusBreak*`, `Radio*`, `FullBackup*`, `ThemeEditor*`, `Seek*`, `HardwareUnavailable`, `StartMenu*` and `ProfileHiddenApps`. Their values are English fallbacks until per-language translations land; **key-set parity is mandatory** regardless of value language.
+
+### Checking parity
+
+```powershell
+# Source-level check (no toolchain needed):
+.\scripts\check-locale-parity.ps1
+
+# Embedded-catalog check as part of the Rust test suite:
+cd Rust-Port; cargo test --workspace
+```
+
+`check-locale-parity.ps1` asserts that all 14 C# catalogs and all 14 Rust catalogs each have an identical key set, that no C# key is missing from Rust, and that every required new key exists in every language. `tests/i18n_parity.rs` repeats the embedded-catalog assertions inside `cargo test`, so the contract is enforced in CI on every branch.
+
+When adding a key: add it to all 14 Rust files with the same spelling, keep `{0}`/`{1}` placeholders intact, and add it to the `C3_NEW_KEYS` list in `tests/i18n_parity.rs` and the `$required` list in the parity script.

@@ -57,6 +57,14 @@ jobs:
           & "scripts/publish-portable.ps1" -Runtime win-x86 -OutputDir release
           & "scripts/check-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-x86.exe
 
+      - name: Build and verify Rust portable executables
+        shell: pwsh
+        run: |
+          & "scripts/publish-rust-portable.ps1" -Runtime win-x64 -OutputDir release
+          & "scripts/check-rust-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-Rust-x64.exe
+          & "scripts/publish-rust-portable.ps1" -Runtime win-x86 -OutputDir release
+          & "scripts/check-rust-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-Rust-x86.exe
+
       - name: Determine release tag
         id: release_info
         shell: pwsh
@@ -94,13 +102,24 @@ jobs:
               -Commit '${{ github.sha }}' `
               -Prerelease:$pre
 
+      - name: Package Rust release artifacts and refresh checksums
+        shell: pwsh
+        run: |
+          & "scripts/package-rust-release.ps1" `
+              -Tag '${{ steps.release_info.outputs.tag_name }}' `
+              -Commit '${{ github.sha }}' `
+              -Prerelease:('${{ steps.release_info.outputs.is_prerelease }}' -eq 'true') `
+              -OutputDir release
+
       - name: Upload release assets
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: release-assets
           path: |
             release/OpenTaskbar-*-win-*.exe
+            release/OpenTaskbar-Rust-*.exe
             release/OpenTaskbar-*.zip
+            release/OpenTaskbar-Rust-*.zip
             release/checksums.txt
             release/release-manifest.json
             release/release-notes.md
@@ -196,6 +215,10 @@ jobs:
             "OpenTaskbar-$env:RELEASE_TAG-win-x64.zip",
             "OpenTaskbar-$env:RELEASE_TAG-win-x86.exe",
             "OpenTaskbar-$env:RELEASE_TAG-win-x86.zip",
+            "OpenTaskbar-Rust-$env:RELEASE_TAG-win-x64.exe",
+            "OpenTaskbar-Rust-$env:RELEASE_TAG-win-x64.zip",
+            "OpenTaskbar-Rust-$env:RELEASE_TAG-win-x86.exe",
+            "OpenTaskbar-Rust-$env:RELEASE_TAG-win-x86.zip",
             'checksums.txt',
             'release-manifest.json'
           )
