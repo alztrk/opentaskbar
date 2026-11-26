@@ -8,10 +8,11 @@
 //!   `stepper`, `button`, `badge`, `sidebar_nav_item`, and `scrollbar_overlay`.
 
 use gpui::{
-    AnyElement, Div, MouseButton, ScrollAnchor, SharedString, div, prelude::*, px, rgba,
+    AnyElement, Div, KeyDownEvent, MouseButton, ScrollAnchor, SharedString, div, prelude::*, px,
+    rgba,
 };
 
-use crate::design::{self, gpui_rgba};
+use crate::design::{self, fonts, gpui_rgba};
 
 const PANEL_RADIUS: f32 = 14.0;
 const CONTROL_RADIUS: f32 = 8.0;
@@ -34,6 +35,7 @@ pub struct UiTheme {
     pub text_primary: u32,
     pub text_secondary: u32,
     pub accent: u32,
+    pub accent_hover: u32,
     pub accent_soft: u32,
     pub accent_fg: u32,
     pub switch_off: u32,
@@ -41,6 +43,7 @@ pub struct UiTheme {
     pub switch_thumb: u32,
     pub destructive: u32,
     pub destructive_soft: u32,
+    pub destructive_hover: u32,
     pub scrollbar_thumb: u32,
 }
 
@@ -62,13 +65,15 @@ impl UiTheme {
             text_primary: gpui_rgba(p.text_primary, 0xff),
             text_secondary: gpui_rgba(p.text_secondary, 0xff),
             accent: gpui_rgba(p.accent, 0xff),
+            accent_hover: gpui_rgba(p.accent, 0xd8),
             accent_soft: gpui_rgba(p.accent, 0x22),
             accent_fg: 0xffffffff,
             switch_off: gpui_rgba(p.switch_off, 0xff),
             switch_on: gpui_rgba(p.accent, 0xff),
             switch_thumb: 0xffffffff,
             destructive: gpui_rgba(p.danger, 0xff),
-            destructive_soft: gpui_rgba(p.danger, 0x22),
+            destructive_soft: gpui_rgba(p.danger, 0x20),
+            destructive_hover: gpui_rgba(p.danger, 0x38),
             scrollbar_thumb: if is_dark { 0xffffff38 } else { 0x00000038 },
         }
     }
@@ -115,7 +120,7 @@ pub fn section_card(theme: &UiTheme, title: impl Into<SharedString>, rows: Vec<A
         .child(
             div()
                 .px(px(4.0))
-                .text_size(px(13.0))
+                .text_size(px(fonts::scaled_size(13.0)))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgba(theme.text_secondary))
                 .child(title.into()),
@@ -133,7 +138,19 @@ pub fn setting_row(
     title: impl Into<SharedString>,
     control: impl IntoElement,
 ) -> Div {
-    setting_row_inner(theme, false, icon, title, control)
+    setting_row_inner(theme, false, icon, title, None, control)
+}
+
+/// Setting row with an inline subtitle description kept inside the same card cell so section
+/// hairline dividers never split a control from its explanation.
+pub fn setting_row_desc(
+    theme: &UiTheme,
+    icon: Option<&'static str>,
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    control: impl IntoElement,
+) -> Div {
+    setting_row_inner(theme, false, icon, title, Some(description.into()), control)
 }
 
 /// Searchable variant of [`setting_row`].
@@ -153,9 +170,44 @@ pub fn setting_row_with_id(
 ) -> gpui::Stateful<Div> {
     let id: SharedString = id.into();
     // `anchor_scroll` lives on `StatefulInteractiveElement`, so the element id comes first.
-    setting_row_inner(theme, highlighted, icon, title, control)
+    setting_row_inner(theme, highlighted, icon, title, None, control)
         .id(id)
         .anchor_scroll(anchor)
+}
+
+/// Searchable setting row with an inline subtitle description.
+#[allow(clippy::too_many_arguments)]
+pub fn setting_row_with_id_desc(
+    id: impl Into<SharedString>,
+    theme: &UiTheme,
+    anchor: Option<ScrollAnchor>,
+    highlighted: bool,
+    icon: Option<&'static str>,
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    control: impl IntoElement,
+) -> gpui::Stateful<Div> {
+    let id: SharedString = id.into();
+    setting_row_inner(
+        theme,
+        highlighted,
+        icon,
+        title,
+        Some(description.into()),
+        control,
+    )
+    .id(id)
+    .anchor_scroll(anchor)
+}
+
+/// Wraps a dependent control row to visually dim it when its parent toggle is turned off.
+pub fn dim_when(disabled: bool, element: impl IntoElement) -> Div {
+    let wrap = div().w_full();
+    if disabled {
+        wrap.opacity(0.46).child(element)
+    } else {
+        wrap.child(element)
+    }
 }
 
 fn setting_row_inner(
@@ -163,6 +215,7 @@ fn setting_row_inner(
     highlighted: bool,
     icon: Option<&'static str>,
     title: impl Into<SharedString>,
+    description: Option<SharedString>,
     control: impl IntoElement,
 ) -> Div {
     let mut left = div()
@@ -177,16 +230,34 @@ fn setting_row_inner(
         left = left.child(icon_glyph(g, 14.0, theme.text_secondary));
     }
 
-    left = left.child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .text_size(px(13.0))
-            .font_weight(gpui::FontWeight::MEDIUM)
-            .text_color(rgba(theme.text_primary))
-            .overflow_hidden()
-            .child(title.into()),
-    );
+    let mut labels = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .overflow_hidden()
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .text_size(px(fonts::scaled_size(13.0)))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(rgba(theme.text_primary))
+                .overflow_hidden()
+                .child(title.into()),
+        );
+    if let Some(desc) = description {
+        labels = labels.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .text_size(px(fonts::scaled_size(11.0)))
+                .text_color(rgba(theme.text_secondary))
+                .child(desc),
+        );
+    }
+    left = left.child(labels);
 
     let mut row = div()
         .w_full()
@@ -200,16 +271,14 @@ fn setting_row_inner(
         .py(px(12.0));
 
     if highlighted {
-        row = row
-            .bg(rgba(theme.accent_soft))
-            .child(
-                div()
-                    .w(px(3.0))
-                    .h(px(18.0))
-                    .rounded(px(2.0))
-                    .bg(rgba(theme.accent))
-                    .flex_shrink_0(),
-            );
+        row = row.bg(rgba(theme.accent_soft)).child(
+            div()
+                .w(px(3.0))
+                .h(px(18.0))
+                .rounded(px(2.0))
+                .bg(rgba(theme.accent))
+                .flex_shrink_0(),
+        );
     }
 
     row.child(left).child(div().flex_shrink_0().child(control))
@@ -228,6 +297,13 @@ pub fn ios_switch(
         theme.switch_off
     };
     let thumb_left = if checked { px(18.0) } else { px(2.0) };
+    // Checked switches already use `theme.accent` as their fill, so keyboard focus uses a
+    // high-contrast outline (`text_primary`) to stay visible in both checked and unchecked states.
+    let focus_border = if checked {
+        theme.text_primary
+    } else {
+        theme.accent
+    };
 
     div()
         .id(id)
@@ -238,10 +314,9 @@ pub fn ios_switch(
         .border_color(rgba(track_bg))
         .bg(rgba(track_bg))
         .tab_index(0)
-        .focus({
-            let accent = theme.accent;
-            move |style| style.border_color(rgba(accent))
-        })
+        .focus(move |style| style.border_color(rgba(focus_border)))
+        .hover(|style| style.opacity(0.92))
+        .active(|style| style.opacity(0.82))
         .cursor_pointer()
         .flex()
         .items_center()
@@ -268,7 +343,7 @@ pub fn badge(theme: &UiTheme, text: impl Into<SharedString>, accent: bool) -> Di
         .py(px(2.0))
         .rounded(px(999.0))
         .bg(rgba(bg))
-        .text_size(px(11.0))
+        .text_size(px(fonts::scaled_size(11.0)))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(rgba(fg))
         .flex_shrink_0()
@@ -277,6 +352,8 @@ pub fn badge(theme: &UiTheme, text: impl Into<SharedString>, accent: bool) -> Di
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ButtonVariant {
+    #[allow(dead_code)]
+    Primary,
     Secondary,
     Destructive,
 }
@@ -289,6 +366,12 @@ pub fn button(
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
     let (bg, hover_bg, fg, border) = match variant {
+        ButtonVariant::Primary => (
+            theme.accent,
+            theme.accent_hover,
+            theme.accent_fg,
+            theme.accent,
+        ),
         ButtonVariant::Secondary => (
             theme.surface_muted,
             theme.surface_hover,
@@ -297,9 +380,9 @@ pub fn button(
         ),
         ButtonVariant::Destructive => (
             theme.destructive_soft,
-            theme.destructive_soft,
+            theme.destructive_hover,
             theme.destructive,
-            theme.destructive_soft,
+            theme.destructive,
         ),
     };
 
@@ -311,7 +394,7 @@ pub fn button(
         .bg(rgba(bg))
         .border_1()
         .border_color(rgba(border))
-        .text_size(px(12.0))
+        .text_size(px(fonts::scaled_size(12.0)))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(rgba(fg))
         .cursor_pointer()
@@ -322,6 +405,7 @@ pub fn button(
             move |style| style.border_color(rgba(focus))
         })
         .hover(move |s| s.bg(rgba(hover_bg)))
+        .active(|s| s.opacity(0.84))
         .on_click(on_click)
         .child(label.into())
 }
@@ -369,7 +453,7 @@ pub fn segmented_item(
         .border_1()
         .border_color(rgba(if active { theme.border } else { 0 }))
         .bg(rgba(bg))
-        .text_size(px(12.0))
+        .text_size(px(fonts::scaled_size(12.0)))
         .font_weight(if active {
             gpui::FontWeight::SEMIBOLD
         } else {
@@ -383,12 +467,13 @@ pub fn segmented_item(
             move |style| style.border_color(rgba(accent))
         })
         .hover(move |s| s.bg(rgba(hover_bg)))
+        .active(|s| s.opacity(0.84))
         .on_click(on_click)
         .child(label.into())
         .into_any_element()
 }
 
-/// Interactive live slider supporting both click and continuous left-button pointer drag.
+/// Interactive live slider supporting click, continuous drag, and keyboard arrow adjustments.
 pub fn live_slider<F>(
     id_prefix: &'static str,
     theme: &UiTheme,
@@ -405,14 +490,25 @@ where
     let fill_w = (track_w * clamped).round().clamp(0.0, track_w);
     let thumb_x = (fill_w - 7.0).clamp(0.0, track_w - 14.0);
     let count = steps.max(2);
+    let max_idx = count - 1;
+    let cur_idx = ((clamped * max_idx as f32).round() as usize).min(max_idx);
 
+    // Cap pointer hit-slices to 40 cells (~3.3px each on the 132px track) so high-step sliders
+    // like 15..240 Hz do not build hundreds of DOM nodes while keyboard arrows still step by 1.
+    let slices = count.min(40);
     let mut stops = div().absolute().inset_0().flex().items_center();
-    for i in 0..count {
-        let cb_down = make_handler(i);
+    for s in 0..slices {
+        let mapped_idx = if slices == count {
+            s
+        } else {
+            ((s as f32 / (slices - 1) as f32) * max_idx as f32).round() as usize
+        }
+        .min(max_idx);
+        let cb_down = make_handler(mapped_idx);
         let cb_move = cb_down.clone();
         stops = stops.child(
             div()
-                .id(SharedString::from(format!("{id_prefix}-{i}")))
+                .id(SharedString::from(format!("{id_prefix}-{s}")))
                 .flex_1()
                 .h_full()
                 .cursor_pointer()
@@ -425,6 +521,11 @@ where
         );
     }
 
+    let cb_dec = make_handler(cur_idx.saturating_sub(1));
+    let cb_inc = make_handler((cur_idx + 1).min(max_idx));
+    let cb_min = make_handler(0);
+    let cb_max = make_handler(max_idx);
+
     div()
         .flex()
         .items_center()
@@ -432,9 +533,27 @@ where
         .flex_shrink_0()
         .child(
             div()
+                .id(SharedString::from(format!("{id_prefix}-track")))
                 .relative()
                 .w(px(track_w))
                 .h(px(22.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(rgba(0))
+                .tab_index(0)
+                .focus({
+                    let accent = theme.accent;
+                    move |style| style.border_color(rgba(accent))
+                })
+                .on_key_down(
+                    move |ev: &KeyDownEvent, win, cx| match ev.keystroke.key.as_str() {
+                        "left" | "down" => cb_dec(win, cx),
+                        "right" | "up" => cb_inc(win, cx),
+                        "home" => cb_min(win, cx),
+                        "end" => cb_max(win, cx),
+                        _ => {}
+                    },
+                )
                 .flex()
                 .items_center()
                 .child(
@@ -471,7 +590,7 @@ where
                 .flex()
                 .items_center()
                 .justify_end()
-                .text_size(px(12.0))
+                .text_size(px(fonts::scaled_size(12.0)))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgba(theme.text_primary))
                 .child(value_text.into()),
@@ -513,10 +632,11 @@ pub fn stepper(
                     let accent = theme.accent;
                     move |style| style.border_color(rgba(accent))
                 })
-                .text_size(px(13.0))
+                .text_size(px(fonts::scaled_size(13.0)))
                 .text_color(rgba(theme.text_primary))
                 .cursor_pointer()
                 .hover(move |s| s.bg(rgba(hover)))
+                .active(|s| s.opacity(0.82))
                 .on_click(on_minus)
                 .child("-"),
         )
@@ -526,7 +646,7 @@ pub fn stepper(
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(11.5))
+                .text_size(px(fonts::scaled_size(11.5)))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgba(theme.text_primary))
                 .child(value_text.into()),
@@ -547,10 +667,11 @@ pub fn stepper(
                     let accent = theme.accent;
                     move |style| style.border_color(rgba(accent))
                 })
-                .text_size(px(13.0))
+                .text_size(px(fonts::scaled_size(13.0)))
                 .text_color(rgba(theme.text_primary))
                 .cursor_pointer()
                 .hover(move |s| s.bg(rgba(hover)))
+                .active(|s| s.opacity(0.82))
                 .on_click(on_plus)
                 .child("+"),
         )
@@ -605,6 +726,7 @@ pub fn sidebar_nav_item(
         })
         .cursor_pointer()
         .hover(move |s| s.bg(rgba(hover)))
+        .active(|s| s.opacity(0.86))
         .on_click(on_click)
         .child(
             div()
@@ -615,7 +737,7 @@ pub fn sidebar_nav_item(
                 .child(icon_glyph(glyph, 14.0, icon_col))
                 .child(
                     div()
-                        .text_size(px(13.0))
+                        .text_size(px(fonts::scaled_size(13.0)))
                         .font_weight(if active {
                             gpui::FontWeight::SEMIBOLD
                         } else {

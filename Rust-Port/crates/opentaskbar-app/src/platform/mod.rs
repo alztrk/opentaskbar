@@ -16,9 +16,9 @@ pub mod pins;
 pub mod radio;
 #[allow(dead_code)]
 pub mod render_mode;
+pub mod shell_files;
 #[allow(dead_code)]
 pub mod shell_shortcuts_ex;
-pub mod shell_files;
 #[allow(dead_code)]
 pub mod start_menu_state;
 #[allow(dead_code)]
@@ -37,10 +37,10 @@ pub mod wireless_battery;
 
 // WS-G provider modules (kept with the same dead-code allowance).
 #[allow(dead_code)]
+pub mod app_shortcut_resolver;
+#[allow(dead_code)]
 pub mod core_audio;
 #[allow(dead_code)]
 pub mod country_city;
 #[allow(dead_code)]
 pub mod cursor_auth;
-#[allow(dead_code)]
-pub mod app_shortcut_resolver;

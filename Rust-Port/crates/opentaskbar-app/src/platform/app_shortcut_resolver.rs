@@ -56,10 +56,12 @@ pub fn is_webhelper(name_or_args: &str) -> bool {
 pub fn extract_app_argument_index(args: &str) -> Option<usize> {
     for token in args.split_whitespace() {
         let lower = token.to_ascii_lowercase();
-        if let Some(rest) = lower.strip_prefix("--app-id=").or_else(|| lower.strip_prefix("--app=")) {
-            if let Ok(v) = rest.trim_matches('"').parse::<usize>() {
-                return Some(v);
-            }
+        if let Some(rest) = lower
+            .strip_prefix("--app-id=")
+            .or_else(|| lower.strip_prefix("--app="))
+            && let Ok(v) = rest.trim_matches('"').parse::<usize>()
+        {
+            return Some(v);
         }
     }
     None
@@ -146,10 +148,7 @@ pub fn resolve_display_name(path: &str, cache: &NameCache) -> String {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.to_owned());
-    cache
-        .display_for(&stem)
-        .map(str::to_owned)
-        .unwrap_or(stem)
+    cache.display_for(&stem).map(str::to_owned).unwrap_or(stem)
 }
 
 #[cfg(test)]
@@ -162,7 +161,10 @@ mod tests {
         cache.insert("Google Chrome", "chrome");
         assert_eq!(cache.stem_for("  GOOGLE CHROME "), Some("chrome"));
         assert_eq!(cache.display_for("CHROME"), Some("google chrome"));
-        assert_eq!(resolve_display_name(r"C:\App\chrome.exe", &cache), "google chrome");
+        assert_eq!(
+            resolve_display_name(r"C:\App\chrome.exe", &cache),
+            "google chrome"
+        );
     }
 
     #[test]
@@ -177,16 +179,18 @@ mod tests {
         assert_eq!(extract_app_argument_index("--app-id=42 --flag"), Some(42));
         assert_eq!(extract_app_argument_index("plain"), None);
         assert!(is_explorer_special_case("C:\\Windows\\explorer.exe", ""));
-        assert!(is_explorer_special_case("explorer.exe", "/select,C:\\a.txt"));
+        assert!(is_explorer_special_case(
+            "explorer.exe",
+            "/select,C:\\a.txt"
+        ));
         assert!(!is_explorer_special_case("explorer.exe", r"C:\folder"));
     }
 
     #[test]
     fn shortcut_target_parsing() {
-        let target = parse_shortcut_target(
-            r"C:\Program Files\App\app.exe|--app-id=7|D:\work|My App",
-        )
-        .unwrap();
+        let target =
+            parse_shortcut_target(r"C:\Program Files\App\app.exe|--app-id=7|D:\work|My App")
+                .unwrap();
         assert_eq!(target.arguments, "--app-id=7");
         assert_eq!(target.working_directory, r"D:\work");
         assert_eq!(target.display_name, "My App");
@@ -197,8 +201,14 @@ mod tests {
 
     #[test]
     fn ancestor_match_is_componentwise() {
-        assert!(is_ancestor(r"C:\Program Files\App", r"C:\Program Files\App\a.exe"));
-        assert!(!is_ancestor(r"C:\Program Files\App", r"C:\Program Files\AppOther\a.exe"));
+        assert!(is_ancestor(
+            r"C:\Program Files\App",
+            r"C:\Program Files\App\a.exe"
+        ));
+        assert!(!is_ancestor(
+            r"C:\Program Files\App",
+            r"C:\Program Files\AppOther\a.exe"
+        ));
         assert!(!is_ancestor("", r"C:\a.exe"));
     }
 }

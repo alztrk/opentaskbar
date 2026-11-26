@@ -46,22 +46,99 @@ pub const COUNTRIES: &[(&str, &str)] = &[
 
 /// All 81 Turkish provinces (C# `CountryCityService.TurkeyFallback`).
 pub const TURKEY_CITIES: &[&str] = &[
-    "Adana", "Adıyaman", "Afyonkarahisar", "Ağrı", "Amasya", "Ankara", "Antalya", "Ardahan",
-    "Artvin", "Aydın", "Balıkesir", "Bartın", "Batman", "Bayburt", "Bilecik", "Bingöl",
-    "Bitlis", "Bolu", "Burdur", "Bursa", "Çanakkale", "Çankırı", "Çorum", "Denizli", "Diyarbakır",
-    "Düzce", "Edirne", "Elazığ", "Erzincan", "Erzurum", "Eskişehir", "Gaziantep", "Giresun",
-    "Gümüşhane", "Hakkâri", "Hatay", "Iğdır", "Isparta", "İstanbul", "İzmir", "Kars", "Kastamonu",
-    "Kayseri", "Kırklareli", "Kırıkkale", "Kırşehir", "Kilis", "Kocaeli", "Konya", "Kütahya",
-    "Malatya", "Manisa", "Kahramanmaraş", "Mardin", "Mersin", "Muğla", "Muş", "Nevşehir", "Niğde", "Ordu",
-    "Osmaniye", "Rize", "Sakarya", "Samsun", "Şanlıurfa", "Siirt", "Sinop", "Sivas",
-    "Şırnak", "Tekirdağ", "Tokat", "Trabzon", "Tunceli", "Uşak", "Van", "Yalova", "Yozgat",
-    "Zonguldak", "Aksaray", "Karaman", "Karabük",
+    "Adana",
+    "Adıyaman",
+    "Afyonkarahisar",
+    "Ağrı",
+    "Amasya",
+    "Ankara",
+    "Antalya",
+    "Ardahan",
+    "Artvin",
+    "Aydın",
+    "Balıkesir",
+    "Bartın",
+    "Batman",
+    "Bayburt",
+    "Bilecik",
+    "Bingöl",
+    "Bitlis",
+    "Bolu",
+    "Burdur",
+    "Bursa",
+    "Çanakkale",
+    "Çankırı",
+    "Çorum",
+    "Denizli",
+    "Diyarbakır",
+    "Düzce",
+    "Edirne",
+    "Elazığ",
+    "Erzincan",
+    "Erzurum",
+    "Eskişehir",
+    "Gaziantep",
+    "Giresun",
+    "Gümüşhane",
+    "Hakkâri",
+    "Hatay",
+    "Iğdır",
+    "Isparta",
+    "İstanbul",
+    "İzmir",
+    "Kars",
+    "Kastamonu",
+    "Kayseri",
+    "Kırklareli",
+    "Kırıkkale",
+    "Kırşehir",
+    "Kilis",
+    "Kocaeli",
+    "Konya",
+    "Kütahya",
+    "Malatya",
+    "Manisa",
+    "Kahramanmaraş",
+    "Mardin",
+    "Mersin",
+    "Muğla",
+    "Muş",
+    "Nevşehir",
+    "Niğde",
+    "Ordu",
+    "Osmaniye",
+    "Rize",
+    "Sakarya",
+    "Samsun",
+    "Şanlıurfa",
+    "Siirt",
+    "Sinop",
+    "Sivas",
+    "Şırnak",
+    "Tekirdağ",
+    "Tokat",
+    "Trabzon",
+    "Tunceli",
+    "Uşak",
+    "Van",
+    "Yalova",
+    "Yozgat",
+    "Zonguldak",
+    "Aksaray",
+    "Karaman",
+    "Karabük",
 ];
 
 /// Offline fallback for other countries (small, deterministic).
 const GENERIC_CITIES: &[&str] = &[
-    "Capital City", "North District", "South District", "East District", "West District",
-    "Central", "Coastal", "Highland",
+    "Capital City",
+    "North District",
+    "South District",
+    "East District",
+    "West District",
+    "Central",
+    "Coastal",
+    "Highland",
 ];
 
 static CACHE: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
@@ -96,8 +173,9 @@ fn code_for(country: &str) -> Option<&'static str> {
     COUNTRIES
         .iter()
         .find(|(code, name)| {
-            code.eq_ignore_ascii_case(&c) || name.to_ascii_lowercase() == c || is_turkey(name)
-                && is_turkey(country)
+            code.eq_ignore_ascii_case(&c)
+                || name.to_ascii_lowercase() == c
+                || is_turkey(name) && is_turkey(country)
         })
         .map(|(code, _)| *code)
 }
@@ -128,14 +206,8 @@ pub fn find_cached_country_for_city(city: &str) -> Option<&'static str> {
     }
     if let Ok(map) = CACHE.lock() {
         for (code, list) in map.iter() {
-            if list
-                .iter()
-                .any(|c| c.to_ascii_lowercase() == needle)
-            {
-                return COUNTRIES
-                    .iter()
-                    .find(|(c, _)| *c == code)
-                    .map(|(c, _)| *c);
+            if list.iter().any(|c| c.to_ascii_lowercase() == needle) {
+                return COUNTRIES.iter().find(|(c, _)| *c == code).map(|(c, _)| *c);
             }
         }
     }

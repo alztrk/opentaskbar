@@ -26,8 +26,8 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::platform::core_audio::{
-    AppAudioSession as CoreAppAudioSession, AppAudioSessionState, AudioEvent,
-    AudioEventKind, find_app_session,
+    AppAudioSession as CoreAppAudioSession, AppAudioSessionState, AudioEvent, AudioEventKind,
+    find_app_session,
 };
 
 use super::telemetry;
@@ -404,7 +404,12 @@ pub struct VolumeRollback {
 }
 
 impl VolumeRollback {
-    pub fn begin(session_key: &str, previous_volume: f32, previous_mute: bool, requested: f32) -> Self {
+    pub fn begin(
+        session_key: &str,
+        previous_volume: f32,
+        previous_mute: bool,
+        requested: f32,
+    ) -> Self {
         Self {
             session_key: session_key.to_owned(),
             previous_volume,
@@ -463,14 +468,14 @@ impl SessionRegistry {
     }
 
     /// Starts an optimistic volume change for a session.
-    pub fn begin_volume_change(&mut self, slider_id: u32, requested: f32) -> Option<VolumeRollback> {
+    pub fn begin_volume_change(
+        &mut self,
+        slider_id: u32,
+        requested: f32,
+    ) -> Option<VolumeRollback> {
         let session = self.sessions.get(&slider_id)?;
-        let rollback = VolumeRollback::begin(
-            &session.name,
-            session.volume,
-            session.muted,
-            requested,
-        );
+        let rollback =
+            VolumeRollback::begin(&session.name, session.volume, session.muted, requested);
         self.rollbacks.insert(slider_id, rollback.clone());
         Some(rollback)
     }

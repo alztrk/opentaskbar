@@ -149,45 +149,45 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             &loc::t("SectionInteractions"),
             "middle click close new window mouse wheel",
         ),
-        // Dock — clock & stats
+        // Widgets — clock & stats
         SettingsSearchEntry::new(
-            SettingsPage::Dock,
+            SettingsPage::Widgets,
             "ClockFormat24Hour",
             &loc::t("WidgetClock"),
             "time 24 hour am pm clock",
         ),
         SettingsSearchEntry::new(
-            SettingsPage::Dock,
+            SettingsPage::Widgets,
             "ClockShowSeconds",
             &loc::t("WidgetClock"),
             "clock seconds time",
         ),
         SettingsSearchEntry::new(
-            SettingsPage::Dock,
+            SettingsPage::Widgets,
             "DateStyleDayShort",
             &loc::t("WidgetClock"),
             "weekday date day",
         ),
         SettingsSearchEntry::new(
-            SettingsPage::Dock,
+            SettingsPage::Widgets,
             "ClockDateLayout",
             &loc::t("WidgetClock"),
             "date beside below layout",
         ),
         SettingsSearchEntry::new(
-            SettingsPage::Dock,
+            SettingsPage::Widgets,
             "ClockDateFormat",
             &loc::t("WidgetClock"),
             "date format yyyy mm dd",
         ),
         SettingsSearchEntry::new(
-            SettingsPage::Dock,
+            SettingsPage::Widgets,
             "Cpu",
             &loc::t("StatsSettingsHeading"),
             "cpu processor meter percentage",
         ),
         SettingsSearchEntry::new(
-            SettingsPage::Dock,
+            SettingsPage::Widgets,
             "Memory",
             &loc::t("StatsSettingsHeading"),
             "ram memory meter percentage",
@@ -494,9 +494,11 @@ mod tests {
         assert!(opacity.contains(&"SurfaceOpacityLabel:Dock"));
         assert!(opacity.contains(&"SurfaceOpacityLabel:Surfaces"));
         // Widget results point at their card, not at a locale key.
-        assert!(catalog
-            .iter()
-            .any(|entry| entry.widget_filter.is_some() && entry.row_id.starts_with("widget-")));
+        assert!(
+            catalog
+                .iter()
+                .any(|entry| entry.widget_filter.is_some() && entry.row_id.starts_with("widget-"))
+        );
     }
 
     #[test]
@@ -509,13 +511,11 @@ mod tests {
             "SurfaceOpacityLabel:Dock",
         );
         assert_eq!(entry.row_id, "SurfaceOpacityLabel:Dock");
-        assert_eq!(SettingsSearchEntry::new(
-            SettingsPage::Dock,
-            "DockAlignment",
-            "Layout",
-            "alignment"
-        )
-        .row_id, "DockAlignment");
+        assert_eq!(
+            SettingsSearchEntry::new(SettingsPage::Dock, "DockAlignment", "Layout", "alignment")
+                .row_id,
+            "DockAlignment"
+        );
     }
 
     #[test]

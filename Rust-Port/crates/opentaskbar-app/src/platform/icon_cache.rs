@@ -594,6 +594,64 @@ pub fn shell_item_display_name(parsing_name: &str) -> Option<String> {
     }
 }
 
+/// Decoded icon image handed to the GPUI / dcomp chip renderers.
+///
+/// Backed by the same straight BGRA32 buffer as [`RawIcon`], so the raw disk cache,
+/// hover-variant cache and renderer adapter never copy or re-encode pixels.
+/// `to_bgra()` / `dimensions()` are the bridge used by the D2D bitmap upload path;
+/// GPUI callers can wrap `to_bgra()` in their own `ImageSource`.
+#[derive(Clone, Debug)]
+pub struct RenderImage {
+    raw: RawIcon,
+}
+
+impl RenderImage {
+    /// Adapts a cached/extracted raw icon without touching its pixel buffer.
+    pub fn from_raw(raw: RawIcon) -> Self {
+        Self { raw }
+    }
+
+    pub fn width(&self) -> u32 {
+        self.raw.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.raw.height
+    }
+
+    pub fn dimensions(&self) -> (u32, u32) {
+        (self.raw.width, self.raw.height)
+    }
+
+    /// Straight (unassociated) BGRA32 pixels, top-down, 4 bytes per pixel.
+    pub fn to_bgra(&self) -> &[u8] {
+        &self.raw.pixels
+    }
+
+    /// Returns a premultiplied copy for D2D upload (`D2D1_ALPHA_MODE_PREMULTIPLIED`).
+    pub fn to_premultiplied_bgra(&self) -> Vec<u8> {
+        let mut pixels = self.raw.pixels.to_vec();
+        straight_to_premultiplied(&mut pixels);
+        pixels
+    }
+
+    pub fn into_raw(self) -> RawIcon {
+        self.raw
+    }
+}
+
+/// Renderer adapter for [`ApplicationIconProvider::get`]: keeps the extracted buffer
+/// in a shared handle so cache hits stay allocation-free.
+fn to_render_image(raw: RawIcon) -> Option<Arc<RenderImage>> {
+    if raw.width == 0
+        || raw.height == 0
+        || raw.pixels.len() != raw.width as usize * raw.height as usize * 4
+    {
+        return None;
+    }
+    Some(Arc::new(RenderImage::from_raw(raw)))
+}
+
 /// Provider with hover variants and a small in-memory cache (thread-safe).
 #[derive(Default)]
 pub struct ApplicationIconProvider {
@@ -606,7 +664,11 @@ impl ApplicationIconProvider {
     }
 
     pub fn get(&self, spec: &str, size: u32, hovered: bool) -> Option<Arc<RenderImage>> {
-        let key = format!("{}@{}", hover_variant_key(spec, hovered), snap_icon_size(size));
+        let key = format!(
+            "{}@{}",
+            hover_variant_key(spec, hovered),
+            snap_icon_size(size)
+        );
         if let Some(cached) = self.variants.lock().ok()?.get(&key) {
             return Some(Arc::clone(cached));
         }

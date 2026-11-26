@@ -1085,5 +1085,13 @@
   "FisheyeNormal": "Normal",
   "FisheyeStrong": "Güçlü",
   "WeatherUnit": "Sıcaklık birimi",
-  "WirelessBatteryAlertLabel": "Düşük pil uyarısı"
+  "WirelessBatteryAlertLabel": "Düşük pil uyarısı",
+  "WeatherCountry": "Ülke",
+  "WeatherCityProvince": "Şehir / İl",
+  "WeatherLocation": "Hava durumu konumu",
+  "Apply": "Uygula",
+  "Close": "Kapat",
+  "SettingsSaveError": "Ayarlar kaydedilemedi. Ayar klasörünün yazılabilir olduğunu kontrol edip tekrar deneyin.",
+  "WidgetPanelHint": "Bu widget'ın açılır panelini yapılandırın veya önizleyin.",
+  "WidgetPreviewFlyout": "Açılır paneli önizle"
 }

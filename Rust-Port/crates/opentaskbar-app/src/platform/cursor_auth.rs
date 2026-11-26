@@ -14,10 +14,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use windows_sys::Win32::Security::Cryptography::{
-    CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB, CryptProtectData, CryptUnprotectData,
-};
 use windows_sys::Win32::Foundation::LocalFree;
+use windows_sys::Win32::Security::Cryptography::{
+    CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
+};
 
 const CLIENT_ID: &str = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
 const API_BASE: &str = "https://api2.cursor.sh";
@@ -67,8 +67,7 @@ pub fn set_token_path(path: PathBuf) {
 // ---------------------------------------------------------------------------------------------
 
 pub fn base64url(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((bytes.len() * 4).div_ceil(3));
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0];
@@ -133,7 +132,13 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
         0xc67178f2,
     ];
     let mut h = [
-        0x6a09e667u32, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x6a09e667u32,
+        0xbb67ae85,
+        0x3c6ef372,
+        0xa54ff53a,
+        0x510e527f,
+        0x9b05688c,
+        0x1f83d9ab,
         0x5be0cd19,
     ];
     let bit_len = (data.len() as u64).wrapping_mul(8);
@@ -208,11 +213,11 @@ fn protect(plain: &[u8]) -> Option<Vec<u8>> {
     if plain.is_empty() {
         return Some(Vec::new());
     }
-    let mut input = CRYPT_INTEGER_BLOB {
+    let input = CRYPT_INTEGER_BLOB {
         cbData: plain.len() as u32,
         pbData: plain.as_ptr() as *mut u8,
     };
-    let mut entropy = CRYPT_INTEGER_BLOB {
+    let entropy = CRYPT_INTEGER_BLOB {
         cbData: ENTROPY.len() as u32,
         pbData: ENTROPY.as_ptr() as *mut u8,
     };
@@ -222,9 +227,9 @@ fn protect(plain: &[u8]) -> Option<Vec<u8>> {
     };
     let ok = unsafe {
         CryptProtectData(
-            &mut input,
+            &input,
             std::ptr::null(),
-            &mut entropy,
+            &entropy,
             std::ptr::null(),
             std::ptr::null(),
             CRYPTPROTECT_UI_FORBIDDEN,
@@ -234,7 +239,8 @@ fn protect(plain: &[u8]) -> Option<Vec<u8>> {
     if ok == 0 || output.pbData.is_null() || output.cbData == 0 {
         return None;
     }
-    let bytes = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
+    let bytes =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
     unsafe {
         std::ptr::write_bytes(output.pbData, 0, output.cbData as usize);
         LocalFree(output.pbData.cast());
@@ -246,11 +252,11 @@ fn unprotect(encrypted: &[u8]) -> Option<Vec<u8>> {
     if encrypted.is_empty() {
         return Some(Vec::new());
     }
-    let mut input = CRYPT_INTEGER_BLOB {
+    let input = CRYPT_INTEGER_BLOB {
         cbData: encrypted.len() as u32,
         pbData: encrypted.as_ptr() as *mut u8,
     };
-    let mut entropy = CRYPT_INTEGER_BLOB {
+    let entropy = CRYPT_INTEGER_BLOB {
         cbData: ENTROPY.len() as u32,
         pbData: ENTROPY.as_ptr() as *mut u8,
     };
@@ -260,9 +266,9 @@ fn unprotect(encrypted: &[u8]) -> Option<Vec<u8>> {
     };
     let ok = unsafe {
         CryptUnprotectData(
-            &mut input,
+            &input,
             std::ptr::null_mut(),
-            &mut entropy,
+            &entropy,
             std::ptr::null(),
             std::ptr::null(),
             CRYPTPROTECT_UI_FORBIDDEN,
@@ -272,7 +278,8 @@ fn unprotect(encrypted: &[u8]) -> Option<Vec<u8>> {
     if ok == 0 || output.pbData.is_null() || output.cbData == 0 {
         return None;
     }
-    let bytes = unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
+    let bytes =
+        unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
     unsafe {
         std::ptr::write_bytes(output.pbData, 0, output.cbData as usize);
         LocalFree(output.pbData.cast());
@@ -325,7 +332,10 @@ pub fn parse_token_payload(raw: &str) -> (Option<String>, Option<String>) {
         (None, None)
     } else {
         let t = trimmed.to_owned();
-        (!t.is_empty()).then_some(t).map(|t| (Some(t), None)).unwrap_or((None, None))
+        (!t.is_empty())
+            .then_some(t)
+            .map(|t| (Some(t), None))
+            .unwrap_or((None, None))
     }
 }
 
@@ -400,7 +410,7 @@ pub fn is_expiringSoon(jwt: &str) -> bool {
     }) else {
         return false;
     };
-    if !exp.is_finite() || exp < -62_135_596_800.0 || exp > 253_402_300_799.0 {
+    if !exp.is_finite() || !(-62_135_596_800.0..=253_402_300_799.0).contains(&exp) {
         return false;
     }
     let now = std::time::SystemTime::now()
@@ -440,9 +450,8 @@ pub fn sign_in_start() -> SignInStart {
         (now >> 16) as u16,
         now
     );
-    let login_url = format!(
-        "https://cursor.com/loginDeepControl?challenge={challenge}&uuid={uuid}&mode=login"
-    );
+    let login_url =
+        format!("https://cursor.com/loginDeepControl?challenge={challenge}&uuid={uuid}&mode=login");
     let start = SignInStart {
         verifier,
         challenge,
@@ -490,8 +499,7 @@ pub fn sign_in_finish_with(start: &SignInStart) -> bool {
             ])
             .creation_flags(0x0800_0000)
             .output();
-        let Ok(out) = output
-            else {
+        let Ok(out) = output else {
             continue;
         };
         if !out.status.success() {
@@ -575,8 +583,7 @@ pub fn refresh(refresh_token: &str) -> RefreshResult {
         .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
         .creation_flags(0x0800_0000)
         .output();
-    let Ok(out) = out
-        else {
+    let Ok(out) = out else {
         return RefreshResult {
             refresh_token: Some(refresh_token.to_owned()),
             ..Default::default()
@@ -643,7 +650,8 @@ mod tests {
 
     #[test]
     fn refresh_response_rotation_and_logout() {
-        let r = parse_refresh_response(r#"{"access_token":"new","refresh_token":"rotated"}"#, "old");
+        let r =
+            parse_refresh_response(r#"{"access_token":"new","refresh_token":"rotated"}"#, "old");
         assert_eq!(r.access_token.as_deref(), Some("new"));
         assert_eq!(r.refresh_token.as_deref(), Some("rotated"));
         assert!(!r.session_expired);

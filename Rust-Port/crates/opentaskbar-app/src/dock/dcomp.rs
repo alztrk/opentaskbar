@@ -41,8 +41,8 @@ use windows::Win32::Graphics::DirectComposition::{
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
     DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_PARAGRAPH_ALIGNMENT_CENTER,
-    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_METRICS, DWriteCreateFactory, IDWriteFactory,
-    IDWriteTextFormat,
+    DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_TEXT_METRICS, DWRITE_TRIMMING,
+    DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM,
@@ -675,25 +675,25 @@ impl DcompEngine {
         // Secondary captions sit at 11 DIP (not 10) so the second line of two-line cards stays readable.
         // Formats come from the engine cache; a redraw only AddRefs them.
         let fmt_18_b_l = self.cached_text_format(design::fonts::scaled_size(18.0), true, 1)?;
-        let fmt_15_b_l = self.cached_text_format(15.0, true, 1)?;
-        let fmt_13_b_c = self.cached_text_format(13.0, true, 0)?;
-        let fmt_13_b_l = self.cached_text_format(13.0, true, 1)?;
+        let fmt_15_b_l = self.cached_text_format(design::fonts::scaled_size(15.0), true, 1)?;
+        let fmt_13_b_c = self.cached_text_format(design::fonts::scaled_size(13.0), true, 0)?;
+        let fmt_13_b_l = self.cached_text_format(design::fonts::scaled_size(13.0), true, 1)?;
         let fmt_125_b_l = self.cached_text_format(design::fonts::scaled_size(12.0), true, 1)?;
         let fmt_12_b_l = self.cached_text_format(design::fonts::scaled_size(12.0), true, 1)?;
         let fmt_12_c = self.cached_text_format(design::fonts::scaled_size(12.0), false, 0)?;
-        let fmt_115_b_l = self.cached_text_format(11.0, true, 1)?;
-        let fmt_115_b_c = self.cached_text_format(11.0, true, 0)?;
-        let fmt_115_l = self.cached_text_format(11.0, false, 1)?;
-        let fmt_11_b_l = self.cached_text_format(11.0, true, 1)?;
-        let fmt_105_b_r = self.cached_text_format(11.0, true, 2)?;
-        let fmt_105_l = self.cached_text_format(11.0, false, 1)?;
-        let fmt_10_l = self.cached_text_format(11.0, false, 1)?;
-        let fmt_95_b_l = self.cached_text_format(10.0, true, 1)?;
-        let fmt_95_l = self.cached_text_format(10.0, false, 1)?;
-        let fmt_9_l = self.cached_text_format(10.0, false, 1)?;
-        let _fmt_9_b_l = self.cached_text_format(9.0, true, 1)?;
-        let fmt_85_l = self.cached_text_format(9.0, false, 1)?;
-        let _fmt_85_b_l = self.cached_text_format(9.0, true, 1)?;
+        let fmt_115_b_l = self.cached_text_format(design::fonts::scaled_size(11.0), true, 1)?;
+        let fmt_115_b_c = self.cached_text_format(design::fonts::scaled_size(11.0), true, 0)?;
+        let fmt_115_l = self.cached_text_format(design::fonts::scaled_size(11.0), false, 1)?;
+        let fmt_11_b_l = self.cached_text_format(design::fonts::scaled_size(11.0), true, 1)?;
+        let fmt_105_b_r = self.cached_text_format(design::fonts::scaled_size(11.0), true, 2)?;
+        let fmt_105_l = self.cached_text_format(design::fonts::scaled_size(11.0), false, 1)?;
+        let fmt_10_l = self.cached_text_format(design::fonts::scaled_size(11.0), false, 1)?;
+        let fmt_95_b_l = self.cached_text_format(design::fonts::scaled_size(10.0), true, 1)?;
+        let fmt_95_l = self.cached_text_format(design::fonts::scaled_size(10.0), false, 1)?;
+        let fmt_9_l = self.cached_text_format(design::fonts::scaled_size(10.0), false, 1)?;
+        let _fmt_9_b_l = self.cached_text_format(design::fonts::scaled_size(9.0), true, 1)?;
+        let fmt_85_l = self.cached_text_format(design::fonts::scaled_size(9.0), false, 1)?;
+        let _fmt_85_b_l = self.cached_text_format(design::fonts::scaled_size(9.0), true, 1)?;
 
         // OpenType `tnum` (tabular lining figures) so clocks, timers, and metrics never jitter horizontally.
         let tnum_typo = unsafe {
@@ -776,6 +776,14 @@ impl DcompEngine {
                         .dwrite_factory
                         .CreateTextLayout(&wtxt, fmt, max_w, max_h)
                     {
+                        let trimming = DWRITE_TRIMMING {
+                            granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                            delimiter: 0,
+                            delimiterCount: 0,
+                        };
+                        if let Ok(sign) = self.dwrite_factory.CreateEllipsisTrimmingSign(fmt) {
+                            let _ = layout.SetTrimming(&trimming, Some(&sign));
+                        }
                         let _ = layout.SetTypography(
                             &tnum_typo,
                             windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_RANGE {

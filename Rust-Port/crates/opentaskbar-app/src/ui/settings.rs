@@ -42,12 +42,15 @@ use crate::design::fonts;
 use crate::dock::dcomp::WidgetChipSpec;
 use crate::platform::{pins, theme_packs, toast, update, win32};
 use crate::ui::components::{
-    ButtonVariant, UiTheme, badge, button, icon_glyph, ios_switch, live_slider, section_card,
-    segmented_item, segmented_track, setting_row, setting_row_with_id, sidebar_nav_item, stepper,
+    ButtonVariant, UiTheme, badge, button, dim_when, icon_glyph, ios_switch, live_slider,
+    section_card, segmented_item, segmented_track, setting_row, setting_row_desc,
+    setting_row_with_id, setting_row_with_id_desc, sidebar_nav_item, stepper,
 };
 use crate::ui::menu::{self, BorderStyle, MenuEntry, MenuIcon};
 use crate::ui::prompt;
-use crate::ui::settings_search::{self, SearchCatalog, SearchEntry, SettingsSearchEntry, widget_has_settings};
+use crate::ui::settings_search::{
+    self, SearchCatalog, SearchEntry, SettingsSearchEntry, widget_has_settings,
+};
 use crate::ui::text_input::{TextInput, apply_keystroke, clamp_numeric};
 use crate::widgets;
 
@@ -981,6 +984,35 @@ impl SettingsView {
         setting_row_with_id(id, t, anchor, highlighted, icon, title, control).into_any_element()
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn target_row_desc(
+        &self,
+        id: &'static str,
+        t: &UiTheme,
+        icon: Option<&'static str>,
+        title: impl Into<SharedString>,
+        description: impl Into<SharedString>,
+        control: impl IntoElement,
+    ) -> AnyElement {
+        let highlighted = self.highlight_row.as_deref() == Some(id);
+        let anchor = if highlighted {
+            self.scroll_anchor.clone()
+        } else {
+            None
+        };
+        setting_row_with_id_desc(
+            id,
+            t,
+            anchor,
+            highlighted,
+            icon,
+            title,
+            description,
+            control,
+        )
+        .into_any_element()
+    }
+
     /// Same treatment as [`Self::target_row`] for blocks that aren't setting rows
     /// (section descriptions, filter pills, widget placement rows when empty).
     fn mark_target(
@@ -1415,14 +1447,14 @@ impl SettingsView {
                                 .justify_between()
                                 .child(
                                     div()
-                                        .text_size(px(16.0))
+                                        .text_size(px(fonts::scaled_size(16.0)))
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .child(format!("{id} options")),
+                                        .child(widgets::widget_name(id)),
                                 )
                                 .child(button(
                                     "btn-panel-close",
                                     t,
-                                    "Close",
+                                    loc::t("Close"),
                                     ButtonVariant::Secondary,
                                     cx.listener(|this, _, window, cx| {
                                         this.close_widget_panel(window);
@@ -1432,25 +1464,9 @@ impl SettingsView {
                         )
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_size(px(fonts::scaled_size(12.0)))
                                 .text_color(rgba(t.text_secondary))
-                                .child("C# WidgetPanelHost parity: Escape closes, focus returns, re-open suppressed for 300 ms."),
-                        )
-                        .child(
-                            button(
-                                "btn-panel-preview",
-                                t,
-                                if self.flyout_preview {
-                                    "Preview: On"
-                                } else {
-                                    "Preview: Off"
-                                },
-                                ButtonVariant::Secondary,
-                                cx.listener(|this, _, _, cx| {
-                                    this.flyout_preview = !this.flyout_preview;
-                                    cx.notify();
-                                }),
-                            ),
+                                .child(loc::t("WidgetPanelHint")),
                         )
                         .child(
                             div()
@@ -1462,14 +1478,15 @@ impl SettingsView {
                                 .flex()
                                 .items_center()
                                 .justify_center()
+                                .cursor_pointer()
                                 .on_click(cx.listener(|this, _, _, _| {
                                     this.preview_flyout(this.widget_panel.unwrap_or("widget"));
                                 }))
                                 .child(
                                     div()
-                                        .text_size(px(12.0))
-                                        .text_color(rgba(t.text_secondary))
-                                        .child("Click to preview C2 flyout blocks"),
+                                        .text_size(px(fonts::scaled_size(12.0)))
+                                        .text_color(rgba(t.text_primary))
+                                        .child(loc::t("WidgetPreviewFlyout")),
                                 ),
                         ),
                 )
@@ -1564,7 +1581,7 @@ impl SettingsView {
             setting_row(
                 t,
                 Some("\u{E7B0}"),
-                "Country",
+                loc::t("WeatherCountry"),
                 div()
                     .flex()
                     .items_center()
@@ -1589,6 +1606,7 @@ impl SettingsView {
                         div()
                             .w(px(120.0))
                             .text_align(gpui::TextAlign::Center)
+                            .text_size(px(fonts::scaled_size(12.0)))
                             .child(self.weather_country.clone()),
                     )
                     .child(button(
@@ -1612,7 +1630,7 @@ impl SettingsView {
             setting_row(
                 t,
                 Some("\u{E1C9}"),
-                "City / Province",
+                loc::t("WeatherCityProvince"),
                 div()
                     .flex()
                     .items_center()
@@ -1633,6 +1651,7 @@ impl SettingsView {
                         div()
                             .w(px(120.0))
                             .text_align(gpui::TextAlign::Center)
+                            .text_size(px(fonts::scaled_size(12.0)))
                             .child(city.to_owned()),
                     )
                     .child(button(
@@ -1652,17 +1671,17 @@ impl SettingsView {
             setting_row(
                 t,
                 Some("\u{E753}"),
-                "Weather Location",
+                loc::t("WeatherLocation"),
                 div()
                     .flex()
                     .items_center()
                     .gap(px(6.0))
-                    .child(div().text_size(px(12.0)).child(label))
+                    .child(div().text_size(px(fonts::scaled_size(12.0))).child(label))
                     .child(button(
                         "btn-weather-apply",
                         t,
-                        "Apply",
-                        ButtonVariant::Secondary,
+                        loc::t("Apply"),
+                        ButtonVariant::Primary,
                         cx.listener(|this, _, _, cx| {
                             let cities = cities_for(&this.weather_country);
                             let city = cities
@@ -3301,31 +3320,31 @@ impl SettingsView {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { widgets::telemetry::search_weather_locations(&query, &lang, 6) })
+                .spawn(
+                    async move { widgets::telemetry::search_weather_locations(&query, &lang, 6) },
+                )
                 .await;
-            let _ = this.update(cx, |view, cx| {
-                match result {
-                    Ok(list) if list.len() == 1 => {
-                        view.settings.weather_city = list[0].setting_value();
-                        view.weather_suggestions.clear();
-                        view.weather_search_status.clear();
-                        view.auto_save(cx);
-                    }
-                    Ok(list) if !list.is_empty() => {
-                        view.weather_suggestions = list;
-                        view.weather_search_status.clear();
-                        cx.notify();
-                    }
-                    Ok(_) => {
-                        view.weather_suggestions.clear();
-                        view.weather_search_status = loc::t("SettingsSearchEmpty");
-                        cx.notify();
-                    }
-                    Err(err) => {
-                        view.weather_suggestions.clear();
-                        view.weather_search_status = err;
-                        cx.notify();
-                    }
+            let _ = this.update(cx, |view, cx| match result {
+                Ok(list) if list.len() == 1 => {
+                    view.settings.weather_city = list[0].setting_value();
+                    view.weather_suggestions.clear();
+                    view.weather_search_status.clear();
+                    view.auto_save(cx);
+                }
+                Ok(list) if !list.is_empty() => {
+                    view.weather_suggestions = list;
+                    view.weather_search_status.clear();
+                    cx.notify();
+                }
+                Ok(_) => {
+                    view.weather_suggestions.clear();
+                    view.weather_search_status = loc::t("SettingsSearchEmpty");
+                    cx.notify();
+                }
+                Err(err) => {
+                    view.weather_suggestions.clear();
+                    view.weather_search_status = err;
+                    cx.notify();
                 }
             });
         })
@@ -3468,6 +3487,7 @@ impl SettingsView {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // merged WS-E settings row helper signature
     fn surface_row(
         &self,
         t: &UiTheme,
@@ -3722,11 +3742,27 @@ impl SettingsView {
                 t,
                 format!("{} & {}", loc::t("SectionDockLayout"), loc::t("Dimensions")),
                 vec![
-                    self.target_row("DockAlignment", t, Some("\u{E8E3}"), loc::t("DockAlignment"), align_seg)
-                        .into_any_element(),
-                    self.target_row("DockSize", t, Some("\u{E740}"), loc::t("DockSize"), size_seg)
-                        .into_any_element(),
-                    self.target_row("DockScale", t, Some("\u{E8A3}"), loc::t("DockScale"),
+                    self.target_row(
+                        "DockAlignment",
+                        t,
+                        Some("\u{E8E3}"),
+                        loc::t("DockAlignment"),
+                        align_seg,
+                    )
+                    .into_any_element(),
+                    self.target_row(
+                        "DockSize",
+                        t,
+                        Some("\u{E740}"),
+                        loc::t("DockSize"),
+                        size_seg,
+                    )
+                    .into_any_element(),
+                    self.target_row(
+                        "DockScale",
+                        t,
+                        Some("\u{E8A3}"),
+                        loc::t("DockScale"),
                         live_slider(
                             "sc",
                             t,
@@ -3748,7 +3784,11 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("DockBottomGap", t, Some("\u{E74A}"), loc::t("DockBottomGap"),
+                    self.target_row(
+                        "DockBottomGap",
+                        t,
+                        Some("\u{E74A}"),
+                        loc::t("DockBottomGap"),
                         live_slider(
                             "gap",
                             t,
@@ -3770,7 +3810,11 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("DockIconPadding", t, Some("\u{E9A9}"), loc::t("DockIconPadding"),
+                    self.target_row(
+                        "DockIconPadding",
+                        t,
+                        Some("\u{E9A9}"),
+                        loc::t("DockIconPadding"),
                         live_slider(
                             "pad",
                             t,
@@ -3792,7 +3836,11 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("LayoutFullWidth", t, Some("\u{E740}"), loc::t("LayoutFullWidth"),
+                    self.target_row(
+                        "LayoutFullWidth",
+                        t,
+                        Some("\u{E740}"),
+                        loc::t("LayoutFullWidth"),
                         ios_switch(
                             "sw-fullw",
                             t,
@@ -3831,9 +3879,19 @@ impl SettingsView {
                     loc::t("SectionDisplays")
                 ),
                 vec![
-                    self.target_row("AutoHide", t, Some("\u{E740}"), loc::t("AutoHide"), autohide_seg)
-                        .into_any_element(),
-                    self.target_row("AllMonitors", t, Some("\u{E7F4}"), loc::t("AllMonitors"),
+                    self.target_row(
+                        "AutoHide",
+                        t,
+                        Some("\u{E740}"),
+                        loc::t("AutoHide"),
+                        autohide_seg,
+                    )
+                    .into_any_element(),
+                    self.target_row(
+                        "AllMonitors",
+                        t,
+                        Some("\u{E7F4}"),
+                        loc::t("AllMonitors"),
                         ios_switch(
                             "sw-allmon",
                             t,
@@ -3846,7 +3904,11 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("FocusMode", t, Some("\u{E708}"), loc::t("FocusMode"),
+                    self.target_row(
+                        "FocusMode",
+                        t,
+                        Some("\u{E708}"),
+                        loc::t("FocusMode"),
                         ios_switch(
                             "sw-focus",
                             t,
@@ -3858,7 +3920,11 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("RevealDockOnWinKey", t, Some("\u{E765}"), loc::t("RevealDockOnWinKey"),
+                    self.target_row(
+                        "RevealDockOnWinKey",
+                        t,
+                        Some("\u{E765}"),
+                        loc::t("RevealDockOnWinKey"),
                         ios_switch(
                             "sw-winkey",
                             t,
@@ -3871,7 +3937,11 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("CurrentDesktopOnly", t, Some("\u{E7F4}"), loc::t("CurrentDesktopOnly"),
+                    self.target_row(
+                        "CurrentDesktopOnly",
+                        t,
+                        Some("\u{E7F4}"),
+                        loc::t("CurrentDesktopOnly"),
                         ios_switch(
                             "sw-vdesk",
                             t,
@@ -3891,7 +3961,11 @@ impl SettingsView {
                 t,
                 loc::t("SectionInteractions"),
                 vec![
-                    self.target_row("ShowStartButton", t, Some("\u{E700}"), loc::t("ShowStartButton"),
+                    self.target_row(
+                        "ShowStartButton",
+                        t,
+                        Some("\u{E700}"),
+                        loc::t("ShowStartButton"),
                         ios_switch(
                             "sw-start-btn",
                             t,
@@ -3903,19 +3977,28 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("ShowSearchButton", t, Some("\u{E721}"), loc::t("ShowSearchButton"),
+                    self.target_row(
+                        "ShowSearchButton",
+                        t,
+                        Some("\u{E721}"),
+                        loc::t("ShowSearchButton"),
                         ios_switch(
                             "sw-search-btn",
                             t,
                             self.settings.show_search_button,
                             cx.listener(|this, _, _, cx| {
-                                this.settings.show_search_button = !this.settings.show_search_button;
+                                this.settings.show_search_button =
+                                    !this.settings.show_search_button;
                                 this.auto_save(cx);
                             }),
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("ShowTaskViewButton", t, Some("\u{E7C4}"), loc::t("ShowTaskViewButton"),
+                    self.target_row(
+                        "ShowTaskViewButton",
+                        t,
+                        Some("\u{E7C4}"),
+                        loc::t("ShowTaskViewButton"),
                         ios_switch(
                             "sw-taskview-btn",
                             t,
@@ -3928,7 +4011,11 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("TrayApps", t, Some("\u{E70E}"), loc::t("TrayApps"),
+                    self.target_row(
+                        "TrayApps",
+                        t,
+                        Some("\u{E70E}"),
+                        loc::t("TrayApps"),
                         ios_switch(
                             "sw-tray",
                             t,
@@ -3940,7 +4027,11 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("RecycleBin", t, Some("\u{E74D}"), loc::t("RecycleBin"),
+                    self.target_row(
+                        "RecycleBin",
+                        t,
+                        Some("\u{E74D}"),
+                        loc::t("RecycleBin"),
                         ios_switch(
                             "sw-bin",
                             t,
@@ -3952,7 +4043,11 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("WidgetShowDesktop", t, Some("\u{E7F8}"), loc::t("WidgetShowDesktop"),
+                    self.target_row(
+                        "WidgetShowDesktop",
+                        t,
+                        Some("\u{E7F8}"),
+                        loc::t("WidgetShowDesktop"),
                         ios_switch(
                             "sw-sd",
                             t,
@@ -3997,154 +4092,8 @@ impl SettingsView {
                 ],
             )
             .into_any_element(),
-            section_card(
-                t,
-                loc::t("WidgetClock"),
-                vec![
-                    self.target_row("ClockFormat24Hour", t, Some("\u{E823}"), loc::t("ClockFormat24Hour"),
-                        ios_switch(
-                            "sw-24h",
-                            t,
-                            self.settings.clock_24_hour,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.clock_24_hour = !this.settings.clock_24_hour;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    self.target_row("ClockShowSeconds", t, Some("\u{E823}"), loc::t("ClockShowSeconds"),
-                        ios_switch(
-                            "sw-seconds",
-                            t,
-                            self.settings.clock_show_seconds,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.clock_show_seconds =
-                                    !this.settings.clock_show_seconds;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    self.target_row("DateStyleDayShort", t, Some("\u{E823}"), loc::t("DateStyleDayShort"),
-                        ios_switch(
-                            "sw-weekday",
-                            t,
-                            self.settings.date_style == ClockDateStyle::DayAndShortDate,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.date_style = if this.settings.date_style
-                                    == ClockDateStyle::DayAndShortDate
-                                {
-                                    ClockDateStyle::ShortDateOnly
-                                } else {
-                                    ClockDateStyle::DayAndShortDate
-                                };
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    self.target_row("ClockDateLayout", t, Some("\u{E823}"), loc::t("ClockDateLayout"),
-                        segmented_track(
-                            t,
-                            [
-                                (loc::t("ClockDateLayoutBeside"), ClockDateLayout::Beside),
-                                (loc::t("ClockDateLayoutBelow"), ClockDateLayout::Below),
-                            ]
-                            .into_iter()
-                            .map(|(label, layout)| {
-                                segmented_item(
-                                    SharedString::from(format!("date-layout-{label}")),
-                                    t,
-                                    label,
-                                    self.settings.clock_date_layout == layout,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.settings.clock_date_layout = layout;
-                                        this.auto_save(cx);
-                                    }),
-                                )
-                            })
-                            .collect(),
-                        ),
-                    )
-                    .into_any_element(),
-                    self.target_row("ClockDateFormat", t, Some("\u{E823}"), loc::t("ClockDateFormat"),
-                        segmented_track(
-                            t,
-                            [
-                                (loc::t("DateFormatSystem"), ClockDateFormat::System),
-                                (loc::t("DateFormatDdMmYyyy"), ClockDateFormat::DdMmYyyy),
-                                (loc::t("DateFormatYyyyMmDd"), ClockDateFormat::YyyyMmDd),
-                            ]
-                            .into_iter()
-                            .map(|(label, format)| {
-                                segmented_item(
-                                    SharedString::from(format!("date-format-{label}")),
-                                    t,
-                                    label,
-                                    self.settings.date_format == format,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.settings.date_format = format;
-                                        this.auto_save(cx);
-                                    }),
-                                )
-                            })
-                            .collect(),
-                        ),
-                    )
-                    .into_any_element(),
-                ],
-            )
-            .into_any_element(),
-            section_card(
-                t,
-                loc::t("StatsSettingsHeading"),
-                vec![
-                    self.target_row("Cpu", t, Some("\u{E9D9}"), loc::t("Cpu"),
-                        ios_switch(
-                            "sw-meter-cpu",
-                            t,
-                            self.settings.stats_meters & 1 != 0,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.stats_meters ^= 1;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    self.target_row("Memory", t, Some("\u{E8B2}"), loc::t("Memory"),
-                        ios_switch(
-                            "sw-meter-mem",
-                            t,
-                            self.settings.stats_meters & 2 != 0,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.stats_meters ^= 2;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                ],
-            )
-            .into_any_element(),
         ];
-        out.extend(self.render_dimension_controls(t, cx));
         out.extend(self.render_folder_stacks(t, cx));
-        out.push(
-            section_card(
-                t,
-                "Settings Search Catalog",
-                vec![
-                    div()
-                        .w_full()
-                        .text_size(px(12.0))
-                        .text_color(rgba(t.text_secondary))
-                        .child("Use the search box above to find any row by label or WS-A field name. Widget panels open from search results.")
-                        .into_any_element(),
-                ],
-            )
-            .into_any_element(),
-        );
         out
     }
 
@@ -4206,9 +4155,16 @@ impl SettingsView {
                 t,
                 loc::t("SectionTheme"),
                 vec![
-                    self.target_row("Theme", t, Some("\u{E790}"), loc::t("Theme"), theme_seg).into_any_element(),
-                    self.target_row("DockBackground", t, Some("\u{E790}"), loc::t("DockBackground"), bg_seg)
+                    self.target_row("Theme", t, Some("\u{E790}"), loc::t("Theme"), theme_seg)
                         .into_any_element(),
+                    self.target_row(
+                        "DockBackground",
+                        t,
+                        Some("\u{E790}"),
+                        loc::t("DockBackground"),
+                        bg_seg,
+                    )
+                    .into_any_element(),
                     self.target_row(
                         "SurfaceOpacityLabel:Dock",
                         t,
@@ -4235,7 +4191,11 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("DockCornerRadius", t, Some("\u{F158}"), loc::t("DockCornerRadius"),
+                    self.target_row(
+                        "DockCornerRadius",
+                        t,
+                        Some("\u{F158}"),
+                        loc::t("DockCornerRadius"),
                         live_slider(
                             "rad",
                             t,
@@ -4264,7 +4224,11 @@ impl SettingsView {
                 t,
                 loc::t("Animations"),
                 vec![
-                    self.target_row("Animations", t, Some("\u{E945}"), loc::t("Animations"),
+                    self.target_row(
+                        "Animations",
+                        t,
+                        Some("\u{E945}"),
+                        loc::t("Animations"),
                         ios_switch(
                             "sw-anim",
                             t,
@@ -4277,45 +4241,55 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("Magnification", t, Some("\u{E71E}"), loc::t("Magnification"),
-                        ios_switch(
-                            "sw-mag",
+                    dim_when(
+                        !self.settings.animations_enabled,
+                        self.target_row(
+                            "Magnification",
                             t,
-                            self.settings.magnification_enabled,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.magnification_enabled =
-                                    !this.settings.magnification_enabled;
-                                this.auto_save(cx);
-                            }),
+                            Some("\u{E71E}"),
+                            loc::t("Magnification"),
+                            ios_switch(
+                                "sw-mag",
+                                t,
+                                self.settings.magnification_enabled,
+                                cx.listener(|this, _, _, cx| {
+                                    this.settings.magnification_enabled =
+                                        !this.settings.magnification_enabled;
+                                    this.auto_save(cx);
+                                }),
+                            ),
                         ),
                     )
                     .into_any_element(),
-                    self.target_row(
-                        "FisheyeIntensity",
-                        t,
-                        Some("\u{E71E}"),
-                        loc::t("FisheyeIntensity"),
-                        segmented_track(
+                    dim_when(
+                        !self.settings.animations_enabled || !self.settings.magnification_enabled,
+                        self.target_row(
+                            "FisheyeIntensity",
                             t,
-                            [
-                                (FisheyeIntensity::Low, loc::t("FisheyeLow")),
-                                (FisheyeIntensity::Normal, loc::t("FisheyeNormal")),
-                                (FisheyeIntensity::Strong, loc::t("FisheyeStrong")),
-                            ]
-                            .into_iter()
-                            .map(|(level, label)| {
-                                segmented_item(
-                                    SharedString::from(format!("fisheye-{level:?}")),
-                                    t,
-                                    label,
-                                    self.settings.fisheye_intensity == level,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.settings.fisheye_intensity = level;
-                                        this.auto_save(cx);
-                                    }),
-                                )
-                            })
-                            .collect(),
+                            Some("\u{E71E}"),
+                            loc::t("FisheyeIntensity"),
+                            segmented_track(
+                                t,
+                                [
+                                    (FisheyeIntensity::Low, loc::t("FisheyeLow")),
+                                    (FisheyeIntensity::Normal, loc::t("FisheyeNormal")),
+                                    (FisheyeIntensity::Strong, loc::t("FisheyeStrong")),
+                                ]
+                                .into_iter()
+                                .map(|(level, label)| {
+                                    segmented_item(
+                                        SharedString::from(format!("fisheye-{level:?}")),
+                                        t,
+                                        label,
+                                        self.settings.fisheye_intensity == level,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.settings.fisheye_intensity = level;
+                                            this.auto_save(cx);
+                                        }),
+                                    )
+                                })
+                                .collect(),
+                            ),
                         ),
                     )
                     .into_any_element(),
@@ -4331,33 +4305,36 @@ impl SettingsView {
                             None => format!("{} ({max_hz} Hz)", loc::t("AnimationFpsAuto")),
                         };
                         let fps_entity = cx.entity().downgrade();
-                        self.target_row(
-                            "AnimationFps",
-                            t,
-                            Some("\u{EC4A}"),
-                            loc::t("AnimationFps"),
-                            live_slider(
-                                "anim-fps",
+                        dim_when(
+                            !self.settings.animations_enabled,
+                            self.target_row(
+                                "AnimationFps",
                                 t,
-                                current_step as f32 / max_step.max(1) as f32,
-                                max_step + 1,
-                                fps_label,
-                                move |i| {
-                                    let entity = fps_entity.clone();
-                                    std::rc::Rc::new(move |_win, app| {
-                                        let _ = entity.update(app, |this, cx| {
-                                            let next = if i >= max_step {
-                                                None
-                                            } else {
-                                                Some((15 + i as u32).min(max_hz))
-                                            };
-                                            if this.settings.animation_fps != next {
-                                                this.settings.animation_fps = next;
-                                                this.auto_save(cx);
-                                            }
-                                        });
-                                    })
-                                },
+                                Some("\u{EC4A}"),
+                                loc::t("AnimationFps"),
+                                live_slider(
+                                    "anim-fps",
+                                    t,
+                                    current_step as f32 / max_step.max(1) as f32,
+                                    max_step + 1,
+                                    fps_label,
+                                    move |i| {
+                                        let entity = fps_entity.clone();
+                                        std::rc::Rc::new(move |_win, app| {
+                                            let _ = entity.update(app, |this, cx| {
+                                                let next = if i >= max_step {
+                                                    None
+                                                } else {
+                                                    Some((15 + i as u32).min(max_hz))
+                                                };
+                                                if this.settings.animation_fps != next {
+                                                    this.settings.animation_fps = next;
+                                                    this.auto_save(cx);
+                                                }
+                                            });
+                                        })
+                                    },
+                                ),
                             ),
                         )
                         .into_any_element()
@@ -4484,7 +4461,11 @@ impl SettingsView {
                                     .child(button(
                                         SharedString::from(format!("theme-use-{id}")),
                                         t,
-                                        if active { loc::t("WidgetInstalled") } else { loc::t("ThemePackIcons") },
+                                        if active {
+                                            loc::t("WidgetInstalled")
+                                        } else {
+                                            loc::t("ThemePackIcons")
+                                        },
                                         ButtonVariant::Secondary,
                                         cx.listener(move |this, _, _, cx| {
                                             this.settings.theme_pack = use_id.clone();
@@ -4832,10 +4813,6 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut out: Vec<AnyElement> = Vec::new();
-        out.push(
-            section_card(t, "Weather Location", self.render_weather_picker(t, cx))
-                .into_any_element(),
-        );
         let active_count = widgets::ALL_WIDGETS
             .iter()
             .filter(|w| self.settings.is_widget_enabled(w.id))
@@ -4994,6 +4971,179 @@ impl SettingsView {
                         None,
                         loc::t("WidgetDensity"),
                         segmented_track(t, density_segments),
+                    )
+                    .into_any_element(),
+                ],
+            )
+            .into_any_element(),
+        );
+
+        out.push(
+            section_card(
+                t,
+                loc::t("WidgetWeather"),
+                self.render_weather_picker(t, cx),
+            )
+            .into_any_element(),
+        );
+
+        out.push(
+            section_card(
+                t,
+                loc::t("WidgetClock"),
+                vec![
+                    self.target_row(
+                        "ClockFormat24Hour",
+                        t,
+                        Some("\u{E823}"),
+                        loc::t("ClockFormat24Hour"),
+                        ios_switch(
+                            "sw-24h",
+                            t,
+                            self.settings.clock_24_hour,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.clock_24_hour = !this.settings.clock_24_hour;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    self.target_row(
+                        "ClockShowSeconds",
+                        t,
+                        Some("\u{E823}"),
+                        loc::t("ClockShowSeconds"),
+                        ios_switch(
+                            "sw-seconds",
+                            t,
+                            self.settings.clock_show_seconds,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.clock_show_seconds =
+                                    !this.settings.clock_show_seconds;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    self.target_row(
+                        "DateStyleDayShort",
+                        t,
+                        Some("\u{E823}"),
+                        loc::t("DateStyleDayShort"),
+                        ios_switch(
+                            "sw-weekday",
+                            t,
+                            self.settings.date_style == ClockDateStyle::DayAndShortDate,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.date_style = if this.settings.date_style
+                                    == ClockDateStyle::DayAndShortDate
+                                {
+                                    ClockDateStyle::ShortDateOnly
+                                } else {
+                                    ClockDateStyle::DayAndShortDate
+                                };
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    self.target_row(
+                        "ClockDateLayout",
+                        t,
+                        Some("\u{E823}"),
+                        loc::t("ClockDateLayout"),
+                        segmented_track(
+                            t,
+                            [
+                                (loc::t("ClockDateLayoutBeside"), ClockDateLayout::Beside),
+                                (loc::t("ClockDateLayoutBelow"), ClockDateLayout::Below),
+                            ]
+                            .into_iter()
+                            .map(|(label, layout)| {
+                                segmented_item(
+                                    SharedString::from(format!("date-layout-{label}")),
+                                    t,
+                                    label,
+                                    self.settings.clock_date_layout == layout,
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.settings.clock_date_layout = layout;
+                                        this.auto_save(cx);
+                                    }),
+                                )
+                            })
+                            .collect(),
+                        ),
+                    )
+                    .into_any_element(),
+                    self.target_row(
+                        "ClockDateFormat",
+                        t,
+                        Some("\u{E823}"),
+                        loc::t("ClockDateFormat"),
+                        segmented_track(
+                            t,
+                            [
+                                (loc::t("DateFormatSystem"), ClockDateFormat::System),
+                                (loc::t("DateFormatDdMmYyyy"), ClockDateFormat::DdMmYyyy),
+                                (loc::t("DateFormatYyyyMmDd"), ClockDateFormat::YyyyMmDd),
+                            ]
+                            .into_iter()
+                            .map(|(label, format)| {
+                                segmented_item(
+                                    SharedString::from(format!("date-format-{label}")),
+                                    t,
+                                    label,
+                                    self.settings.date_format == format,
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.settings.date_format = format;
+                                        this.auto_save(cx);
+                                    }),
+                                )
+                            })
+                            .collect(),
+                        ),
+                    )
+                    .into_any_element(),
+                ],
+            )
+            .into_any_element(),
+        );
+
+        out.push(
+            section_card(
+                t,
+                loc::t("StatsSettingsHeading"),
+                vec![
+                    self.target_row(
+                        "Cpu",
+                        t,
+                        Some("\u{E9D9}"),
+                        loc::t("Cpu"),
+                        ios_switch(
+                            "sw-meter-cpu",
+                            t,
+                            self.settings.stats_meters & 1 != 0,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.stats_meters ^= 1;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    self.target_row(
+                        "Memory",
+                        t,
+                        Some("\u{E8B2}"),
+                        loc::t("Memory"),
+                        ios_switch(
+                            "sw-meter-mem",
+                            t,
+                            self.settings.stats_meters & 2 != 0,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.stats_meters ^= 2;
+                                this.auto_save(cx);
+                            }),
+                        ),
                     )
                     .into_any_element(),
                 ],
@@ -5168,15 +5318,17 @@ impl SettingsView {
         let active = widgets::active_widgets(&self.settings);
         let di_opacity_pct = (self.settings.dynamic_island_opacity * 100.0).round() as i32;
 
+        let di_disabled = !self.settings.dynamic_island_enable;
         let mut cards = vec![
             section_card(
                 t,
                 loc::t("DynamicIslandTitle"),
                 vec![
-                    setting_row(
+                    setting_row_desc(
                         t,
                         Some("\u{E7F4}"),
                         loc::t("DynamicIslandEnable"),
+                        loc::t("DynamicIslandEnableDescription"),
                         ios_switch(
                             "di-enable",
                             t,
@@ -5189,181 +5341,170 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    div()
-                        .w_full()
-                        .pl(px(34.0))
-                        .text_size(px(fonts::scaled_size(11.0)))
-                        .text_color(rgba(t.text_secondary))
-                        .child(loc::t("DynamicIslandEnableDescription"))
-                        .into_any_element(),
-                    self.target_row("DynamicIslandVisibility", t, Some("\u{E7F4}"), loc::t("DynamicIslandVisibility"),
-                        segmented_track(
+                    dim_when(
+                        di_disabled,
+                        self.target_row_desc(
+                            "DynamicIslandVisibility",
                             t,
-                            [
-                                (
-                                    DynamicIslandVisibilityMode::Always,
-                                    loc::t("DynamicIslandVisibilityAlways"),
-                                ),
-                                (
-                                    DynamicIslandVisibilityMode::DesktopOnly,
-                                    loc::t("DynamicIslandVisibilityDesktopOnly"),
-                                ),
-                            ]
-                            .into_iter()
-                            .map(|(mode, label)| {
-                                segmented_item(
-                                    SharedString::from(format!("di-vis-{mode:?}")),
-                                    t,
-                                    label,
-                                    self.settings.dynamic_island_visibility == mode,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.settings.dynamic_island_visibility = mode;
-                                        this.auto_save(cx);
-                                    }),
-                                )
-                            })
-                            .collect(),
-                        ),
-                    )
-                    .into_any_element(),
-                    div()
-                        .w_full()
-                        .pl(px(34.0))
-                        .text_size(px(fonts::scaled_size(11.0)))
-                        .text_color(rgba(t.text_secondary))
-                        .child(loc::t("DynamicIslandVisibilityDescription"))
-                        .into_any_element(),
-                    self.target_row("DynamicIslandHideFullscreen", t, Some("\u{E740}"), loc::t("DynamicIslandHideFullscreen"),
-                        ios_switch(
-                            "di-hide-fs",
-                            t,
-                            self.settings.dynamic_island_hide_in_fullscreen,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dynamic_island_hide_in_fullscreen =
-                                    !this.settings.dynamic_island_hide_in_fullscreen;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    div()
-                        .w_full()
-                        .pl(px(34.0))
-                        .text_size(px(fonts::scaled_size(11.0)))
-                        .text_color(rgba(t.text_secondary))
-                        .child(loc::t("DynamicIslandHideFullscreenDescription"))
-                        .into_any_element(),
-                    self.target_row(
-                        "DynamicIslandAutoHide",
-                        t,
-                        Some("\u{E740}"),
-                        loc::t("DynamicIslandAutoHide"),
-                        ios_switch(
-                            "di-auto-hide",
-                            t,
-                            self.settings.dynamic_island_auto_hide,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dynamic_island_auto_hide =
-                                    !this.settings.dynamic_island_auto_hide;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    div()
-                        .w_full()
-                        .pl(px(34.0))
-                        .text_size(px(fonts::scaled_size(11.0)))
-                        .text_color(rgba(t.text_secondary))
-                        .child(loc::t("DynamicIslandAutoHideDescription"))
-                        .into_any_element(),
-                    setting_row(
-                        t,
-                        Some("\u{E790}"),
-                        loc::t("DynamicIslandBackground"),
-                        segmented_track(
-                            t,
-                            [
-                                (loc::t("SurfaceGlass"), SurfaceBackground::Glass),
-                                (loc::t("SurfaceSolid"), SurfaceBackground::Solid),
-                                (loc::t("SurfaceNone"), SurfaceBackground::None),
-                            ]
-                            .into_iter()
-                            .map(|(label, bg)| {
-                                segmented_item(
-                                    SharedString::from(format!("di-bg-{bg:?}")),
-                                    t,
-                                    label,
-                                    self.settings.dynamic_island_background == bg,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.settings.dynamic_island_background = bg;
-                                        this.auto_save(cx);
-                                    }),
-                                )
-                            })
-                            .collect(),
-                        ),
-                    )
-                    .into_any_element(),
-                    div()
-                        .w_full()
-                        .pl(px(34.0))
-                        .text_size(px(fonts::scaled_size(11.0)))
-                        .text_color(rgba(t.text_secondary))
-                        .child(loc::t("DynamicIslandBackgroundDescription"))
-                        .into_any_element(),
-                    setting_row(
-                        t,
-                        Some("\u{E790}"),
-                        loc::t("DynamicIslandUseTheme"),
-                        ios_switch(
-                            "di-use-theme",
-                            t,
-                            self.settings.dynamic_island_use_theme,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dynamic_island_use_theme =
-                                    !this.settings.dynamic_island_use_theme;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    self.target_row(
-                        "DynamicIslandOpacity",
-                        t,
-                        Some("\u{E706}"),
-                        // No `DynamicIslandOpacity` locale key exists; reuse the generic Opacity label.
-                        loc::t("SurfaceOpacityLabel"),
-                        live_slider(
-                            "di-opacity",
-                            t,
-                            ((self.settings.dynamic_island_opacity as f32) - 0.1) / 0.9,
-                            19,
-                            format!("{di_opacity_pct}%"),
-                            |i| {
-                                let entity = cx.entity().downgrade();
-                                std::rc::Rc::new(move |_win, app| {
-                                    let _ = entity.update(app, |this, cx| {
-                                        let next = (0.10 + (i as f64) * 0.05).clamp(0.10, 1.0);
-                                        if (this.settings.dynamic_island_opacity - next).abs()
-                                            > 0.001
-                                        {
-                                            this.settings.dynamic_island_opacity = next;
+                            Some("\u{E7F4}"),
+                            loc::t("DynamicIslandVisibility"),
+                            loc::t("DynamicIslandVisibilityDescription"),
+                            segmented_track(
+                                t,
+                                [
+                                    (
+                                        DynamicIslandVisibilityMode::Always,
+                                        loc::t("DynamicIslandVisibilityAlways"),
+                                    ),
+                                    (
+                                        DynamicIslandVisibilityMode::DesktopOnly,
+                                        loc::t("DynamicIslandVisibilityDesktopOnly"),
+                                    ),
+                                ]
+                                .into_iter()
+                                .map(|(mode, label)| {
+                                    segmented_item(
+                                        SharedString::from(format!("di-vis-{mode:?}")),
+                                        t,
+                                        label,
+                                        self.settings.dynamic_island_visibility == mode,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.settings.dynamic_island_visibility = mode;
                                             this.auto_save(cx);
-                                        }
-                                    });
+                                        }),
+                                    )
                                 })
-                            },
+                                .collect(),
+                            ),
                         ),
                     )
                     .into_any_element(),
-                    div()
-                        .w_full()
-                        .pl(px(34.0))
-                        .text_size(px(fonts::scaled_size(11.0)))
-                        .text_color(rgba(t.text_secondary))
-                        .child(loc::t("DynamicIslandOpacityDescription"))
-                        .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row_desc(
+                            "DynamicIslandHideFullscreen",
+                            t,
+                            Some("\u{E740}"),
+                            loc::t("DynamicIslandHideFullscreen"),
+                            loc::t("DynamicIslandHideFullscreenDescription"),
+                            ios_switch(
+                                "di-hide-fs",
+                                t,
+                                self.settings.dynamic_island_hide_in_fullscreen,
+                                cx.listener(|this, _, _, cx| {
+                                    this.settings.dynamic_island_hide_in_fullscreen =
+                                        !this.settings.dynamic_island_hide_in_fullscreen;
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row_desc(
+                            "DynamicIslandAutoHide",
+                            t,
+                            Some("\u{E740}"),
+                            loc::t("DynamicIslandAutoHide"),
+                            loc::t("DynamicIslandAutoHideDescription"),
+                            ios_switch(
+                                "di-auto-hide",
+                                t,
+                                self.settings.dynamic_island_auto_hide,
+                                cx.listener(|this, _, _, cx| {
+                                    this.settings.dynamic_island_auto_hide =
+                                        !this.settings.dynamic_island_auto_hide;
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        setting_row_desc(
+                            t,
+                            Some("\u{E790}"),
+                            loc::t("DynamicIslandBackground"),
+                            loc::t("DynamicIslandBackgroundDescription"),
+                            segmented_track(
+                                t,
+                                [
+                                    (loc::t("SurfaceGlass"), SurfaceBackground::Glass),
+                                    (loc::t("SurfaceSolid"), SurfaceBackground::Solid),
+                                    (loc::t("SurfaceNone"), SurfaceBackground::None),
+                                ]
+                                .into_iter()
+                                .map(|(label, bg)| {
+                                    segmented_item(
+                                        SharedString::from(format!("di-bg-{bg:?}")),
+                                        t,
+                                        label,
+                                        self.settings.dynamic_island_background == bg,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.settings.dynamic_island_background = bg;
+                                            this.auto_save(cx);
+                                        }),
+                                    )
+                                })
+                                .collect(),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        setting_row(
+                            t,
+                            Some("\u{E790}"),
+                            loc::t("DynamicIslandUseTheme"),
+                            ios_switch(
+                                "di-use-theme",
+                                t,
+                                self.settings.dynamic_island_use_theme,
+                                cx.listener(|this, _, _, cx| {
+                                    this.settings.dynamic_island_use_theme =
+                                        !this.settings.dynamic_island_use_theme;
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        di_disabled,
+                        self.target_row_desc(
+                            "DynamicIslandOpacity",
+                            t,
+                            Some("\u{E706}"),
+                            // No `DynamicIslandOpacity` locale key exists; reuse the generic Opacity label.
+                            loc::t("SurfaceOpacityLabel"),
+                            loc::t("DynamicIslandOpacityDescription"),
+                            live_slider(
+                                "di-opacity",
+                                t,
+                                ((self.settings.dynamic_island_opacity as f32) - 0.1) / 0.9,
+                                19,
+                                format!("{di_opacity_pct}%"),
+                                |i| {
+                                    let entity = cx.entity().downgrade();
+                                    std::rc::Rc::new(move |_win, app| {
+                                        let _ = entity.update(app, |this, cx| {
+                                            let next = (0.10 + (i as f64) * 0.05).clamp(0.10, 1.0);
+                                            if (this.settings.dynamic_island_opacity - next).abs()
+                                                > 0.001
+                                            {
+                                                this.settings.dynamic_island_opacity = next;
+                                                this.auto_save(cx);
+                                            }
+                                        });
+                                    })
+                                },
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
                 ],
             )
             .into_any_element(),
@@ -5446,8 +5587,13 @@ impl SettingsView {
                         control,
                     )
                 } else {
-                    setting_row(t, Some(widget_glyph(wid)), widgets::widget_name(wid), control)
-                        .into_any_element()
+                    setting_row(
+                        t,
+                        Some(widget_glyph(wid)),
+                        widgets::widget_name(wid),
+                        control,
+                    )
+                    .into_any_element()
                 });
             }
         }
@@ -5560,22 +5706,24 @@ impl SettingsView {
                             .flex()
                             .flex_wrap()
                             .gap(px(6.0))
-                            .children(self.weather_suggestions.iter().enumerate().map(|(idx, loc_match)| {
-                                let label = loc_match.display_label();
-                                let value = loc_match.setting_value();
-                                button(
-                                    SharedString::from(format!("btn-weather-loc-{idx}")),
-                                    t,
-                                    label,
-                                    ButtonVariant::Secondary,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.settings.weather_city = value.clone();
-                                        this.weather_suggestions.clear();
-                                        this.weather_search_status.clear();
-                                        this.auto_save(cx);
-                                    }),
-                                )
-                            }))
+                            .children(self.weather_suggestions.iter().enumerate().map(
+                                |(idx, loc_match)| {
+                                    let label = loc_match.display_label();
+                                    let value = loc_match.setting_value();
+                                    button(
+                                        SharedString::from(format!("btn-weather-loc-{idx}")),
+                                        t,
+                                        label,
+                                        ButtonVariant::Secondary,
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.settings.weather_city = value.clone();
+                                            this.weather_suggestions.clear();
+                                            this.weather_search_status.clear();
+                                            this.auto_save(cx);
+                                        }),
+                                    )
+                                },
+                            ))
                             .into_any_element()
                     } else {
                         div().into_any_element()
@@ -5635,45 +5783,45 @@ impl SettingsView {
                     self.mark_target(
                         "Profiles",
                         t,
-                        div()
-                            .w_full()
-                            .flex()
-                            .flex_wrap()
-                            .gap(px(6.0))
-                            .children(self.settings.profiles.iter().enumerate().map(
-                            |(index, profile)| {
-                                let profile_name = profile.name.clone();
-                                let active = self
-                                    .settings
-                                    .active_profile
-                                    .as_deref()
-                                    .is_some_and(|name| name == profile.name);
-                                let label = format!(
-                                    "{} {}{}",
-                                    profile.name,
-                                    if active { "•" } else { "" },
-                                    ""
-                                );
-                                div()
-                                    .id(SharedString::from(format!("profile-{index}")))
-                                    .px(px(10.0))
-                                    .py(px(5.0))
-                                    .rounded(px(8.0))
-                                    .bg(rgba(if active { t.accent } else { t.surface_muted }))
-                                    .text_color(rgba(if active {
-                                        t.accent_fg
-                                    } else {
-                                        t.text_primary
-                                    }))
-                                    .text_size(px(fonts::scaled_size(12.0)))
-                                    .cursor_pointer()
-                                    .child(label)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.settings.active_profile = Some(profile_name.clone());
-                                        this.auto_save(cx);
-                                    }))
-                            },
-                        )),
+                        div().w_full().flex().flex_wrap().gap(px(6.0)).children(
+                            self.settings
+                                .profiles
+                                .iter()
+                                .enumerate()
+                                .map(|(index, profile)| {
+                                    let profile_name = profile.name.clone();
+                                    let active = self
+                                        .settings
+                                        .active_profile
+                                        .as_deref()
+                                        .is_some_and(|name| name == profile.name);
+                                    let label = format!(
+                                        "{} {}{}",
+                                        profile.name,
+                                        if active { "•" } else { "" },
+                                        ""
+                                    );
+                                    div()
+                                        .id(SharedString::from(format!("profile-{index}")))
+                                        .px(px(10.0))
+                                        .py(px(5.0))
+                                        .rounded(px(8.0))
+                                        .bg(rgba(if active { t.accent } else { t.surface_muted }))
+                                        .text_color(rgba(if active {
+                                            t.accent_fg
+                                        } else {
+                                            t.text_primary
+                                        }))
+                                        .text_size(px(fonts::scaled_size(12.0)))
+                                        .cursor_pointer()
+                                        .child(label)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.settings.active_profile =
+                                                Some(profile_name.clone());
+                                            this.auto_save(cx);
+                                        }))
+                                }),
+                        ),
                     )
                     .into_any_element(),
                     div()
@@ -5722,7 +5870,11 @@ impl SettingsView {
                 t,
                 loc::t("CheckForUpdates"),
                 vec![
-                    self.target_row("CheckUpdatesSetting", t, Some("\u{E9C5}"), loc::t("CheckUpdatesSetting"),
+                    self.target_row(
+                        "CheckUpdatesSetting",
+                        t,
+                        Some("\u{E9C5}"),
+                        loc::t("CheckUpdatesSetting"),
                         ios_switch(
                             "sw-check-updates",
                             t,
@@ -5766,7 +5918,11 @@ impl SettingsView {
                 t,
                 loc::t("SectionSystem"),
                 vec![
-                    self.target_row("Startup", t, Some("\u{E7E8}"), loc::t("Startup"),
+                    self.target_row(
+                        "Startup",
+                        t,
+                        Some("\u{E7E8}"),
+                        loc::t("Startup"),
                         ios_switch(
                             "sw-startup",
                             t,
@@ -5787,7 +5943,11 @@ impl SettingsView {
                 t,
                 loc::t("Backup"),
                 vec![
-                    self.target_row("SettingsBackup", t, Some("\u{EDE1}"), loc::t("SettingsBackup"),
+                    self.target_row(
+                        "SettingsBackup",
+                        t,
+                        Some("\u{EDE1}"),
+                        loc::t("SettingsBackup"),
                         div()
                             .flex()
                             .items_center()
@@ -5822,7 +5982,11 @@ impl SettingsView {
                             )),
                     )
                     .into_any_element(),
-                    self.target_row("ResetDefaults", t, Some("\u{E777}"), loc::t("ResetDefaults"),
+                    self.target_row(
+                        "ResetDefaults",
+                        t,
+                        Some("\u{E777}"),
+                        loc::t("ResetDefaults"),
                         button(
                             "btn-reset-all",
                             t,
@@ -5859,7 +6023,11 @@ impl SettingsView {
                 t,
                 loc::t("Application"),
                 vec![
-                    self.target_row("Version", t, Some("\u{E946}"), loc::t("Version"),
+                    self.target_row(
+                        "Version",
+                        t,
+                        Some("\u{E946}"),
+                        loc::t("Version"),
                         badge(t, concat!("v", env!("CARGO_PKG_VERSION")), true),
                     )
                     .into_any_element(),
@@ -5885,7 +6053,11 @@ impl SettingsView {
                 t,
                 loc::t("Diagnostics"),
                 vec![
-                    self.target_row("DataFolder", t, Some("\u{E8B7}"), loc::t("DataFolder"),
+                    self.target_row(
+                        "DataFolder",
+                        t,
+                        Some("\u{E8B7}"),
+                        loc::t("DataFolder"),
                         button(
                             "btn-open-data",
                             t,
@@ -5895,7 +6067,11 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("OpenLogFile", t, Some("\u{E9F5}"), loc::t("OpenLogFile"),
+                    self.target_row(
+                        "OpenLogFile",
+                        t,
+                        Some("\u{E9F5}"),
+                        loc::t("OpenLogFile"),
                         button(
                             "btn-open-log",
                             t,
@@ -5905,7 +6081,11 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
-                    self.target_row("WindowsTaskbar", t, Some("\u{E777}"), loc::t("WindowsTaskbar"),
+                    self.target_row(
+                        "WindowsTaskbar",
+                        t,
+                        Some("\u{E777}"),
+                        loc::t("WindowsTaskbar"),
                         button(
                             "btn-restore-tb",
                             t,
@@ -6213,11 +6393,17 @@ impl Render for SettingsView {
                             .child(header_subtitle),
                     ),
             )
-            .when(self.save_failed, |panel| panel.child(
-                div().px(inset).py(px(8.0)).bg(rgba(t.destructive_soft))
-                    .text_color(rgba(t.destructive)).text_size(px(fonts::scaled_size(13.0)))
-                    .child("Could not save settings. Check that the settings folder is writable and try again."),
-            ))
+            .when(self.save_failed, |panel| {
+                panel.child(
+                    div()
+                        .px(inset)
+                        .py(px(8.0))
+                        .bg(rgba(t.destructive_soft))
+                        .text_color(rgba(t.destructive))
+                        .text_size(px(fonts::scaled_size(13.0)))
+                        .child(loc::t("SettingsSaveError")),
+                )
+            })
             .child(scroll_wrap);
 
         // Header search: icon on the left, a native text input in the middle and a clear

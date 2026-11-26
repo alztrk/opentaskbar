@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
-    DEVICE_STATE_ACTIVE, EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture,
-    eMultimedia, eRender,
+    DEVICE_STATE_ACTIVE, EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eMultimedia,
+    eRender,
 };
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, STGM_READ};
 use windows::core::{GUID, Interface, PCWSTR};
@@ -73,7 +73,8 @@ struct NotifyVtbl {
     on_device_added: unsafe extern "system" fn(*mut c_void, PCWSTR) -> i32,
     on_device_removed: unsafe extern "system" fn(*mut c_void, PCWSTR) -> i32,
     on_default_device_changed: unsafe extern "system" fn(*mut c_void, i32, i32, PCWSTR) -> i32,
-    on_property_value_changed: unsafe extern "system" fn(*mut c_void, PCWSTR, *const PROPERTYKEY) -> i32,
+    on_property_value_changed:
+        unsafe extern "system" fn(*mut c_void, PCWSTR, *const PROPERTYKEY) -> i32,
 }
 
 #[repr(C)]
@@ -198,31 +199,17 @@ struct PolicyConfigVtbl {
     get_mix_format: unsafe extern "system" fn(*mut c_void, PCWSTR, *mut *mut c_void) -> i32,
     get_device_format: unsafe extern "system" fn(*mut c_void, PCWSTR, i32, *mut *mut c_void) -> i32,
     reset_device_format: unsafe extern "system" fn(*mut c_void, PCWSTR) -> i32,
-    set_device_format: unsafe extern "system" fn(*mut c_void, PCWSTR, *mut c_void, *mut c_void) -> i32,
-    get_processing_period: unsafe extern "system" fn(
-        *mut c_void,
-        PCWSTR,
-        i32,
-        *mut i64,
-        *mut i64,
-    ) -> i32,
+    set_device_format:
+        unsafe extern "system" fn(*mut c_void, PCWSTR, *mut c_void, *mut c_void) -> i32,
+    get_processing_period:
+        unsafe extern "system" fn(*mut c_void, PCWSTR, i32, *mut i64, *mut i64) -> i32,
     set_processing_period: unsafe extern "system" fn(*mut c_void, *mut i64) -> i32,
     get_share_mode: unsafe extern "system" fn(*mut c_void, PCWSTR, *mut *mut c_void) -> i32,
     set_share_mode: unsafe extern "system" fn(*mut c_void, PCWSTR, *mut c_void) -> i32,
-    get_property_value: unsafe extern "system" fn(
-        *mut c_void,
-        PCWSTR,
-        i32,
-        *mut c_void,
-        *mut *mut c_void,
-    ) -> i32,
-    set_property_value: unsafe extern "system" fn(
-        *mut c_void,
-        PCWSTR,
-        i32,
-        *mut c_void,
-        *mut c_void,
-    ) -> i32,
+    get_property_value:
+        unsafe extern "system" fn(*mut c_void, PCWSTR, i32, *mut c_void, *mut *mut c_void) -> i32,
+    set_property_value:
+        unsafe extern "system" fn(*mut c_void, PCWSTR, i32, *mut c_void, *mut c_void) -> i32,
     set_default_endpoint: unsafe extern "system" fn(*mut c_void, PCWSTR, i32) -> i32,
     set_endpoint_visibility: unsafe extern "system" fn(*mut c_void, PCWSTR, i32) -> i32,
 }
@@ -240,7 +227,11 @@ impl PolicyConfig {
     unsafe fn set_default_endpoint(&self, id: &windows::core::HSTRING, role: i32) -> bool {
         unsafe {
             let vtbl = Interface::vtable(self);
-            let hr = (vtbl.set_default_endpoint)(Interface::as_raw(self), PCWSTR::from_raw(id.as_ptr()), role);
+            let hr = (vtbl.set_default_endpoint)(
+                Interface::as_raw(self),
+                PCWSTR::from_raw(id.as_ptr()),
+                role,
+            );
             hr >= 0
         }
     }
@@ -253,7 +244,8 @@ pub fn set_default_device(id: &str) -> bool {
     }
     let wide = windows::core::HSTRING::from(id);
     unsafe {
-        let Ok(policy) = CoCreateInstance::<_, PolicyConfig>(&POLICY_CONFIG_CLSID, None, CLSCTX_ALL)
+        let Ok(policy) =
+            CoCreateInstance::<_, PolicyConfig>(&POLICY_CONFIG_CLSID, None, CLSCTX_ALL)
         else {
             return false;
         };
@@ -331,7 +323,9 @@ pub fn list_devices(is_recording: bool) -> Vec<AudioDevice> {
             out.sort_by(|a, b| {
                 let a_def = a.0.eq_ignore_ascii_case(&default_id);
                 let b_def = b.0.eq_ignore_ascii_case(&default_id);
-                b_def.cmp(&a_def).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+                b_def
+                    .cmp(&a_def)
+                    .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
             });
             out
         }
@@ -371,16 +365,15 @@ impl AudioEndpointMonitor {
         if let Some(existing) = guard.upgrade() {
             return Some(existing);
         }
-        if NOTIFY_REGISTERED.get().is_none() {
-            if let Some(en) = enumerator()
-                && let Some(client) = create_notification_client()
-                && unsafe { en.RegisterEndpointNotificationCallback(&client) }.is_ok()
-            {
-                // Keep both COM objects alive for the lifetime of the process.
-                std::mem::forget(en);
-                std::mem::forget(client);
-                let _ = NOTIFY_REGISTERED.set(());
-            }
+        if NOTIFY_REGISTERED.get().is_none()
+            && let Some(en) = enumerator()
+            && let Some(client) = create_notification_client()
+            && unsafe { en.RegisterEndpointNotificationCallback(&client) }.is_ok()
+        {
+            // Keep both COM objects alive for the lifetime of the process.
+            std::mem::forget(en);
+            std::mem::forget(client);
+            let _ = NOTIFY_REGISTERED.set(());
         }
         let monitor = Arc::new(AudioEndpointMonitor { generation: 1 });
         *guard = Arc::downgrade(&monitor);
@@ -399,7 +392,10 @@ pub fn subscribe() -> Option<Arc<AudioEndpointMonitor>> {
 
 /// Drains queued `IMMNotificationClient` events.
 pub fn take_events() -> Vec<AudioEvent> {
-    EVENTS.lock().map(|mut q| q.drain(..).collect()).unwrap_or_default()
+    EVENTS
+        .lock()
+        .map(|mut q| q.drain(..).collect())
+        .unwrap_or_default()
 }
 
 /// True when any endpoint notification was received (used by the widget to re-query).
@@ -493,14 +489,21 @@ pub fn find_app_session(sessions: &[AppAudioSession], source_id: &str) -> Option
             source_id,
             session.window_app_user_model_id.as_deref(),
         ) as i32;
-        if session.process_id == 0 || score == 0 || session.state == AppAudioSessionState::Unavailable {
+        if session.process_id == 0
+            || score == 0
+            || session.state == AppAudioSessionState::Unavailable
+        {
             continue;
         }
         let rank = score * 2 + i32::from(session.state == AppAudioSessionState::Active);
         if rank < best_rank {
             continue;
         }
-        best = if rank == best_rank { None } else { Some(session) };
+        best = if rank == best_rank {
+            None
+        } else {
+            Some(session)
+        };
         best_rank = rank;
     }
     best.cloned()

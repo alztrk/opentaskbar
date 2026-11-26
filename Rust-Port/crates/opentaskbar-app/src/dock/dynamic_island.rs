@@ -45,6 +45,7 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const TIMER_VISIBILITY: usize = 1;
 const TIMER_WIDGETS: usize = 2;
 const TIMER_ANIM: usize = 3;
+const TIMER_HIDE_ANIM: usize = 4;
 
 const DEFAULT_WIDGET_ORDER: &[&str] = &[
     "clock",
@@ -231,6 +232,9 @@ struct DynamicIslandWindow {
     pressed_widget: bool,
     tracking_mouse: bool,
     is_visible: bool,
+    target_hidden: bool,
+    hide_progress: f32,
+    hide_last_tick: Option<Instant>,
     widget_runtime: WidgetRuntime,
 }
 
@@ -326,6 +330,9 @@ impl DynamicIslandWindow {
             pressed_widget: false,
             tracking_mouse: false,
             is_visible: false,
+            target_hidden: true,
+            hide_progress: 1.0,
+            hide_last_tick: None,
             widget_runtime,
         });
 
@@ -576,6 +583,52 @@ impl DynamicIslandWindow {
         self.dcomp.commit();
     }
 
+    fn anim_interval_ms(&self) -> u32 {
+        let hz = win32::monitor_refresh_hz(&self.monitor.device_name);
+        let fps = self
+            .settings
+            .animation_fps
+            .map(|f| f.clamp(15, hz))
+            .unwrap_or(hz);
+        (1000 / fps.max(15)).max(4)
+    }
+
+    fn apply_hide_offset(&self) {
+        let slide_h = (COMPACT_HEIGHT_DIPS + 6.0) * self.monitor.dpi_scale.max(0.5);
+        let offset_y = -(self.hide_progress * slide_h).round();
+        self.dcomp.set_root_offset_y(offset_y);
+        self.dcomp.commit();
+    }
+
+    fn step_hide_animation(&mut self) {
+        let now = Instant::now();
+        let dt = self
+            .hide_last_tick
+            .map_or(1.0 / 60.0, |prev| now.duration_since(prev).as_secs_f32())
+            .clamp(0.001, 0.05);
+        self.hide_last_tick = Some(now);
+        let target = if self.target_hidden { 1.0 } else { 0.0 };
+        let k = 1.0 - (-18.0 * dt).exp();
+        let diff = target - self.hide_progress;
+        if diff.abs() <= 0.005 {
+            self.hide_progress = target;
+            self.hide_last_tick = None;
+            self.apply_hide_offset();
+            unsafe {
+                KillTimer(self.hwnd as HWND, TIMER_HIDE_ANIM);
+            }
+            if self.target_hidden && self.is_visible {
+                unsafe {
+                    ShowWindow(self.hwnd as HWND, SW_HIDE);
+                }
+                self.is_visible = false;
+            }
+        } else {
+            self.hide_progress = (self.hide_progress + diff * k).clamp(0.0, 1.0);
+            self.apply_hide_offset();
+        }
+    }
+
     fn set_current_page(&mut self, index: usize, animate: bool) {
         if self.page_ids.is_empty() {
             return;
@@ -589,13 +642,7 @@ impl DynamicIslandWindow {
                 to_px: target_offset,
                 start: Instant::now(),
             });
-            let hz = win32::monitor_refresh_hz(&self.monitor.device_name);
-            let fps = self
-                .settings
-                .animation_fps
-                .map(|f| f.clamp(15, hz))
-                .unwrap_or(hz);
-            let interval_ms = (1000 / fps.max(15)).max(4);
+            let interval_ms = self.anim_interval_ms();
             unsafe {
                 SetTimer(self.hwnd as HWND, TIMER_ANIM, interval_ms, None);
             }
@@ -652,11 +699,12 @@ impl DynamicIslandWindow {
                     let in_x = pt.x >= left - pad_x && pt.x <= left + w_px + pad_x;
                     let top_trigger = self.monitor.top + (6.0 * dpi).round().max(4.0) as i32;
                     let keep_bottom = self.monitor.top + h_px + (8.0 * dpi).round() as i32;
-                    in_x && pt.y >= self.monitor.top && if self.is_visible {
-                        pt.y <= keep_bottom
-                    } else {
-                        pt.y <= top_trigger
-                    }
+                    in_x && pt.y >= self.monitor.top
+                        && if self.is_visible {
+                            pt.y <= keep_bottom
+                        } else {
+                            pt.y <= top_trigger
+                        }
                 } else {
                     false
                 }
@@ -676,7 +724,45 @@ impl DynamicIslandWindow {
                 fullscreen,
             );
 
+        let next_hidden = !should_show;
+        let animate = self.settings.animations_enabled && !self.settings.focus_mode;
+        self.target_hidden = next_hidden;
+
+        if !animate {
+            unsafe {
+                KillTimer(self.hwnd as HWND, TIMER_HIDE_ANIM);
+            }
+            self.hide_last_tick = None;
+            self.hide_progress = if next_hidden { 1.0 } else { 0.0 };
+            self.apply_hide_offset();
+            if should_show && !self.is_visible {
+                unsafe {
+                    ShowWindow(self.hwnd as HWND, SW_SHOWNOACTIVATE);
+                    SetWindowPos(
+                        self.hwnd as HWND,
+                        HWND_TOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOACTIVATE
+                            | SWP_NOMOVE
+                            | windows_sys::Win32::UI::WindowsAndMessaging::SWP_NOSIZE,
+                    );
+                }
+                self.is_visible = true;
+            } else if !should_show && self.is_visible {
+                unsafe {
+                    ShowWindow(self.hwnd as HWND, SW_HIDE);
+                }
+                self.is_visible = false;
+            }
+            return;
+        }
+
         if should_show && !self.is_visible {
+            self.hide_progress = 1.0;
+            self.apply_hide_offset();
             unsafe {
                 ShowWindow(self.hwnd as HWND, SW_SHOWNOACTIVATE);
                 SetWindowPos(
@@ -692,11 +778,17 @@ impl DynamicIslandWindow {
                 );
             }
             self.is_visible = true;
-        } else if !should_show && self.is_visible {
-            unsafe {
-                ShowWindow(self.hwnd as HWND, SW_HIDE);
+        }
+
+        let target = if next_hidden { 1.0 } else { 0.0 };
+        if self.is_visible && (self.hide_progress - target).abs() > 0.005 {
+            if self.hide_last_tick.is_none() {
+                self.hide_last_tick = Some(Instant::now());
             }
-            self.is_visible = false;
+            let interval_ms = self.anim_interval_ms();
+            unsafe {
+                SetTimer(self.hwnd as HWND, TIMER_HIDE_ANIM, interval_ms, None);
+            }
         }
     }
 
@@ -1000,6 +1092,7 @@ impl DynamicIslandWindow {
             KillTimer(self.hwnd as HWND, TIMER_VISIBILITY);
             KillTimer(self.hwnd as HWND, TIMER_WIDGETS);
             KillTimer(self.hwnd as HWND, TIMER_ANIM);
+            KillTimer(self.hwnd as HWND, TIMER_HIDE_ANIM);
             SetWindowLongPtrW(self.hwnd as HWND, GWLP_USERDATA, 0);
             DestroyWindow(self.hwnd as HWND);
         }
@@ -1096,6 +1189,7 @@ unsafe extern "system" fn island_wnd_proc(
             match wparam {
                 TIMER_VISIBILITY => state.refresh_visibility(),
                 TIMER_WIDGETS => state.tick(),
+                TIMER_HIDE_ANIM => state.step_hide_animation(),
                 TIMER_ANIM => {
                     if let Some(anim) = &state.slide_anim {
                         let t = anim.start.elapsed().as_secs_f32() / SLIDE_DURATION_SECS;

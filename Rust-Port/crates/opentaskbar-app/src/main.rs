@@ -6,6 +6,9 @@
 //! - `--restore`: restores Explorer's taskbar from the recovery journal and exits.
 //! - default: acquires single-instance lock, loads settings, and runs the native dock.
 #![cfg_attr(windows, windows_subsystem = "windows")]
+// WS-E/F/G/H modules merged ahead of their WS-D call sites and WS-H tests/docs. Keep the
+// intermediate integration tree warning-clean without deleting the staged public API.
+#![allow(dead_code)]
 
 #[cfg(windows)]
 mod design;
@@ -47,19 +50,19 @@ fn main() {
                 opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
             opentaskbar_core::i18n::init(Some(&settings.language));
             design::fonts::apply_settings(&settings);
-        let theme_dir = if settings.theme_pack.trim().is_empty() {
-            None
-        } else {
-            Some(
-                std::env::var_os("LOCALAPPDATA")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(std::env::temp_dir)
-                    .join("OpenTaskbar")
-                    .join("Themes")
-                    .join(&settings.theme_pack),
-            )
-        };
-        platform::icon_pack::set_active_pack(theme_dir.as_deref());
+            let theme_dir = if settings.theme_pack.trim().is_empty() {
+                None
+            } else {
+                Some(
+                    std::env::var_os("LOCALAPPDATA")
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(std::env::temp_dir)
+                        .join("OpenTaskbar")
+                        .join("Themes")
+                        .join(&settings.theme_pack),
+                )
+            };
+            platform::icon_pack::set_active_pack(theme_dir.as_deref());
             ui::settings::run_settings_window();
             return;
         }

@@ -1770,9 +1770,18 @@ impl DockSettings {
             }
         }
         for (thickness, color) in [
-            (self.dock_border_thickness, self.dock_border_color.as_deref()),
-            (self.menu_border_thickness, self.menu_border_color.as_deref()),
-            (self.widget_border_thickness, self.widget_border_color.as_deref()),
+            (
+                self.dock_border_thickness,
+                self.dock_border_color.as_deref(),
+            ),
+            (
+                self.menu_border_thickness,
+                self.menu_border_color.as_deref(),
+            ),
+            (
+                self.widget_border_thickness,
+                self.widget_border_color.as_deref(),
+            ),
             (
                 self.settings_border_thickness,
                 self.settings_border_color.as_deref(),
@@ -2035,16 +2044,13 @@ impl DockSettings {
         }
 
         let typed_orders_invalid = self.dynamic_island_widget_orders.len() > 32
-            || self
-                .dynamic_island_widget_orders
-                .iter()
-                .any(|(key, ids)| {
-                    key.trim().is_empty()
-                        || key.len() > 32
-                        || ids.len() > CATALOG_WIDGET_COUNT
-                        || ids.iter().any(|id| !is_supported_widget_id(id))
-                        || has_duplicates_ignore_case(ids)
-                });
+            || self.dynamic_island_widget_orders.iter().any(|(key, ids)| {
+                key.trim().is_empty()
+                    || key.len() > 32
+                    || ids.len() > CATALOG_WIDGET_COUNT
+                    || ids.iter().any(|id| !is_supported_widget_id(id))
+                    || has_duplicates_ignore_case(ids)
+            });
         let extra_orders_invalid = match self.extra.get("DynamicIslandWidgetOrders") {
             Some(Value::Object(orders)) => {
                 orders.len() > 32
@@ -2634,7 +2640,10 @@ mod tests {
         assert!((loaded.dynamic_island_opacity - 0.65).abs() < f64::EPSILON);
         assert!(!loaded.dynamic_island_use_theme);
         assert_eq!(
-            loaded.dynamic_island_placements.get("clock").map(String::as_str),
+            loaded
+                .dynamic_island_placements
+                .get("clock")
+                .map(String::as_str),
             Some("*")
         );
         assert_eq!(

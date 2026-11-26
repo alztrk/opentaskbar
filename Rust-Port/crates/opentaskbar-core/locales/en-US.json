@@ -1085,5 +1085,13 @@
   "FisheyeNormal": "Normal",
   "FisheyeStrong": "Strong",
   "WeatherUnit": "Temperature unit",
-  "WirelessBatteryAlertLabel": "Low battery alert"
+  "WirelessBatteryAlertLabel": "Low battery alert",
+  "WeatherCountry": "Country",
+  "WeatherCityProvince": "City / Province",
+  "WeatherLocation": "Weather location",
+  "Apply": "Apply",
+  "Close": "Close",
+  "SettingsSaveError": "Could not save settings. Check that the settings folder is writable and try again.",
+  "WidgetPanelHint": "Configure or preview this widget's popup panel.",
+  "WidgetPreviewFlyout": "Preview popup"
 }

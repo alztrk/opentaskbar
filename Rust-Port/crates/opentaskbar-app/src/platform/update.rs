@@ -564,7 +564,6 @@ impl From<DetailedRelease> for Release {
     }
 }
 
-
 /// Detects an MSIX/Store install via `GetCurrentPackageFullName` (kernel32, dynamically loaded).
 pub fn is_packaged() -> bool {
     #[cfg(windows)]
@@ -602,7 +601,11 @@ pub fn supports_in_app_updates() -> bool {
 }
 
 fn architecture() -> &'static str {
-    if cfg!(target_pointer_width = "64") { "x64" } else { "x86" }
+    if cfg!(target_pointer_width = "64") {
+        "x64"
+    } else {
+        "x86"
+    }
 }
 
 /// Parses a GitHub `releases/latest` response; returns `None` when not newer.

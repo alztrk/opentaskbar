@@ -16,22 +16,24 @@ use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateFontW, CreateSolidBrush, DeleteObject, FillRect, GetMonitorInfoW, HBRUSH, HDC, HFONT,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, SetBkColor, SetTextColor,
+    BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
+    DeleteObject, DrawTextW, EndPaint, FillRect, GetMonitorInfoW, HBRUSH, HDC, HFONT,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT, PS_SOLID, RoundRect,
+    SelectObject, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, SetFocus, VK_ESCAPE, VK_RETURN,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW,
-    DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL, GWLP_USERDATA, GetCursorPos, GetMessageW,
-    GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IDC_ARROW, IsDialogMessageW,
-    LoadCursorW, MSG, RegisterClassExW, SW_SHOW, SendMessageW, SetForegroundWindow,
-    SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN,
-    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_ERASEBKGND, WM_KEYDOWN, WM_SETFONT, WNDCLASSEXW,
-    WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_DLGMODALFRAME, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE,
+    BS_OWNERDRAW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
+    DispatchMessageW, ES_AUTOHSCROLL, GWLP_USERDATA, GetCursorPos, GetMessageW, GetWindowLongPtrW,
+    GetWindowTextLengthW, GetWindowTextW, IDC_ARROW, IsDialogMessageW, LoadCursorW, MSG,
+    RegisterClassExW, SW_SHOW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow,
+    TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
+    WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_PAINT, WM_SETFONT, WNDCLASSEXW, WS_CAPTION,
+    WS_CHILD, WS_EX_DLGMODALFRAME, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::design::{self, Rgb};
@@ -53,6 +55,9 @@ fn colorref(c: Rgb) -> COLORREF {
 
 struct PromptState {
     edit_hwnd: HWND,
+    is_dark: bool,
+    dpi: f32,
+    edit_frame_rect: RECT,
     bg_brush: HBRUSH,
     edit_brush: HBRUSH,
     bg_color: COLORREF,
@@ -90,12 +95,103 @@ unsafe extern "system" fn prompt_wnd_proc(
     let state = unsafe { &mut *ptr };
 
     match msg {
-        WM_ERASEBKGND => {
-            let hdc = wparam as HDC;
-            let mut rc: RECT = unsafe { std::mem::zeroed() };
+        WM_ERASEBKGND => 1,
+        WM_PAINT => {
+            let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
+            let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
+            if !hdc.is_null() {
+                let pal = design::palette(state.is_dark);
+                let mut rc: RECT = unsafe { std::mem::zeroed() };
+                unsafe {
+                    windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc);
+                    FillRect(hdc, &rc, state.bg_brush);
+                    let pen = CreatePen(PS_SOLID, 1, colorref(pal.border_rgb));
+                    let old_pen = SelectObject(hdc, pen as _);
+                    let old_brush = SelectObject(hdc, state.edit_brush as _);
+                    let r = (7.0 * state.dpi).round() as i32;
+                    RoundRect(
+                        hdc,
+                        state.edit_frame_rect.left,
+                        state.edit_frame_rect.top,
+                        state.edit_frame_rect.right,
+                        state.edit_frame_rect.bottom,
+                        r,
+                        r,
+                    );
+                    SelectObject(hdc, old_brush);
+                    SelectObject(hdc, old_pen);
+                    DeleteObject(pen as _);
+                    EndPaint(hwnd, &ps);
+                }
+            }
+            0
+        }
+        WM_DRAWITEM => {
+            let dis = unsafe { &*(lparam as *const DRAWITEMSTRUCT) };
+            let pal = design::palette(state.is_dark);
+            let is_ok = dis.CtlID == ID_OK as u32;
+            let pressed = (dis.itemState & ODS_SELECTED) != 0;
+            let focused = (dis.itemState & ODS_FOCUS) != 0;
+            let fill_rgb = if is_ok {
+                if pressed {
+                    (
+                        pal.accent.0.saturating_sub(24),
+                        pal.accent.1.saturating_sub(24),
+                        pal.accent.2.saturating_sub(24),
+                    )
+                } else {
+                    pal.accent
+                }
+            } else if pressed {
+                pal.hover
+            } else {
+                pal.elevated
+            };
+            let border_rgb = if focused {
+                pal.text_primary
+            } else if is_ok {
+                pal.accent
+            } else {
+                pal.border_rgb
+            };
+            let fg_rgb = if is_ok {
+                (0xff, 0xff, 0xff)
+            } else {
+                pal.text_primary
+            };
             unsafe {
-                windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut rc);
-                FillRect(hdc, &rc, state.bg_brush);
+                FillRect(dis.hDC, &dis.rcItem, state.bg_brush);
+                let fill_brush = CreateSolidBrush(colorref(fill_rgb));
+                let border_pen = CreatePen(PS_SOLID, 1, colorref(border_rgb));
+                let old_brush = SelectObject(dis.hDC, fill_brush as _);
+                let old_pen = SelectObject(dis.hDC, border_pen as _);
+                let r = (7.0 * state.dpi).round() as i32;
+                RoundRect(
+                    dis.hDC,
+                    dis.rcItem.left,
+                    dis.rcItem.top,
+                    dis.rcItem.right,
+                    dis.rcItem.bottom,
+                    r,
+                    r,
+                );
+                SelectObject(dis.hDC, old_brush);
+                SelectObject(dis.hDC, old_pen);
+                DeleteObject(fill_brush as _);
+                DeleteObject(border_pen as _);
+
+                let text = read_edit_text(dis.hwndItem);
+                let mut wtxt: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+                let mut trc = dis.rcItem;
+                SetBkMode(dis.hDC, TRANSPARENT as i32);
+                SetTextColor(dis.hDC, colorref(fg_rgb));
+                DrawTextW(
+                    dis.hDC,
+                    wtxt.as_mut_ptr(),
+                    (wtxt.len() - 1) as i32,
+                    &mut trc,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                );
             }
             1
         }
@@ -239,11 +335,7 @@ pub fn ask_name(
 
     let pal = design::palette(is_dark);
     let bg_rgb = pal.surface;
-    let edit_rgb = if is_dark {
-        (0x23, 0x26, 0x2c)
-    } else {
-        (0xff, 0xff, 0xff)
-    };
+    let edit_rgb = pal.elevated;
     let bg_color = colorref(bg_rgb);
     let edit_bg_color = colorref(edit_rgb);
     let text_color = colorref(pal.text_primary);
@@ -312,16 +404,24 @@ pub fn ask_name(
         )
     };
 
+    let edit_frame_rect = RECT {
+        left: pad,
+        top: s(34.0),
+        right: cw - pad,
+        bottom: s(64.0),
+    };
+    let edit_pad_x = s(8.0);
+    let edit_pad_y = s(5.0);
     let edit_hwnd = unsafe {
         CreateWindowExW(
             0,
             wide("EDIT").as_ptr(),
             wide(initial).as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL as u32,
-            pad,
-            s(34.0),
-            cw - pad * 2,
-            s(28.0),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL as u32,
+            edit_frame_rect.left + edit_pad_x,
+            edit_frame_rect.top + edit_pad_y,
+            (edit_frame_rect.right - edit_frame_rect.left - edit_pad_x * 2).max(s(60.0)),
+            (edit_frame_rect.bottom - edit_frame_rect.top - edit_pad_y * 2).max(s(16.0)),
             hwnd,
             ID_EDIT as _,
             hinstance,
@@ -329,15 +429,15 @@ pub fn ask_name(
         )
     };
 
-    let btn_w = s(84.0);
-    let btn_h = s(28.0);
+    let btn_w = s(88.0);
+    let btn_h = s(30.0);
     let btn_y = s(76.0);
     let save_hwnd = unsafe {
         CreateWindowExW(
             0,
             wide("BUTTON").as_ptr(),
             wide(&loc::t("ThemeSaveChanges")).as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON as u32,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
             cw - pad - btn_w,
             btn_y,
             btn_w,
@@ -353,7 +453,7 @@ pub fn ask_name(
             0,
             wide("BUTTON").as_ptr(),
             wide(&loc::t("Cancel")).as_ptr(),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON as u32,
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW as u32,
             cw - pad - btn_w * 2 - s(8.0),
             btn_y,
             btn_w,
@@ -376,6 +476,9 @@ pub fn ask_name(
     let done = Rc::new(Cell::new(false));
     let mut state = Box::new(PromptState {
         edit_hwnd,
+        is_dark,
+        dpi,
+        edit_frame_rect,
         bg_brush,
         edit_brush,
         bg_color,

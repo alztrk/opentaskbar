@@ -961,7 +961,12 @@ impl ThemePack {
         // case-insensitive keys, so fall back to the lenient reader when needed.
         let manifest = ThemePackManifest::from_str(&text)
             .ok()
-            .filter(|parsed| parsed.name.as_ref().is_some_and(|name| !name.trim().is_empty()))
+            .filter(|parsed| {
+                parsed
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| !name.trim().is_empty())
+            })
             .or_else(|| {
                 load_manifest(directory).map(|legacy| ThemePackManifest {
                     name: Some(legacy.name).filter(|name| !name.is_empty()),
@@ -1008,7 +1013,11 @@ impl ThemePack {
 
     pub fn display_name(&self) -> &str {
         let name = self.manifest.name.as_str();
-        if name.trim().is_empty() { &self.id } else { name }
+        if name.trim().is_empty() {
+            &self.id
+        } else {
+            name
+        }
     }
 
     /// Resolves this pack's widget tokens for a theme, using key-based type inference.

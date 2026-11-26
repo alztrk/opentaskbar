@@ -17,9 +17,9 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -268,7 +268,11 @@ unsafe extern "system" {
         lp_overlapped: *mut Overlapped,
     ) -> i32;
     fn GetLastError() -> u32;
+    // Local kernel32 aliases for the dynamic XInput loader. These intentionally coexist with
+    // the windows_sys declarations in `platform::radio` (different signatures at each call site).
+    #[allow(clashing_extern_declarations)]
     fn LoadLibraryW(lp_lib_file_name: *const u16) -> Handle;
+    #[allow(clashing_extern_declarations)]
     #[link_name = "GetProcAddress"]
     fn GetProcAddressWb(h_module: Handle, lp_proc_name: *const u8) -> *const c_void;
     fn FreeLibrary(h_module: Handle) -> i32;
@@ -2674,8 +2678,12 @@ impl BatterySource {
             Self::SteelSeriesHid => 0,
             Self::CompxAtkVxe => 1,
             Self::LogitechHidPlusPlus => 2,
-            Self::RazerHid | Self::HyperXHid | Self::CorsairHid | Self::AsusRogHid
-            | Self::Keyboard24gHid | Self::GamepadHid => 3,
+            Self::RazerHid
+            | Self::HyperXHid
+            | Self::CorsairHid
+            | Self::AsusRogHid
+            | Self::Keyboard24gHid
+            | Self::GamepadHid => 3,
             Self::StandardHid => 4,
             Self::Bluetooth => 5,
             Self::BluetoothGatt => 6,
@@ -2763,7 +2771,11 @@ pub fn build_asus_request(report_len: usize) -> Vec<u8> {
 }
 
 fn normalize_framing(reply: &[u8]) -> &[u8] {
-    if reply.len() >= 7 && reply[0] == 0 && reply[1] == ASUS_CMD_CATEGORY && reply[2] == ASUS_CMD_GET_BATTERY {
+    if reply.len() >= 7
+        && reply[0] == 0
+        && reply[1] == ASUS_CMD_CATEGORY
+        && reply[2] == ASUS_CMD_GET_BATTERY
+    {
         &reply[1..]
     } else {
         reply
@@ -2783,7 +2795,11 @@ pub fn parse_asus_rog(reply: &[u8], id: &str, name: &str) -> Option<BatteryReadi
     }
     Some(BatteryReading::new(
         id,
-        if name.trim().is_empty() { "ASUS ROG Wireless" } else { name },
+        if name.trim().is_empty() {
+            "ASUS ROG Wireless"
+        } else {
+            name
+        },
         level as u32,
         state == 1 || state == 2,
         BatterySource::AsusRogHid,
@@ -2868,7 +2884,11 @@ pub fn parse_corsair_legacy(reply: &[u8], id: &str, name: &str) -> Option<Batter
     }
     Some(BatteryReading::new(
         id,
-        if name.trim().is_empty() { "Corsair Wireless Headset" } else { name },
+        if name.trim().is_empty() {
+            "Corsair Wireless Headset"
+        } else {
+            name
+        },
         level as u32,
         charging,
         BatterySource::CorsairHid,
@@ -2950,7 +2970,11 @@ pub fn parse_hyperx(
     }
     Some(BatteryReading::new(
         id,
-        if name.trim().is_empty() { "HyperX Wireless" } else { name },
+        if name.trim().is_empty() {
+            "HyperX Wireless"
+        } else {
+            name
+        },
         level as u32,
         charging,
         BatterySource::HyperXHid,
@@ -2962,8 +2986,8 @@ pub fn parse_hyperx(
 // ---------------------------------------------------------------------------------------------
 
 pub const COMPX_VENDORS: &[u16] = &[
-    0x3554, 0x373B, 0x36A7, 0x36B0, 0x3710, 0x372E, 0x359B, 0x248A, 0x3151, 0x373E, 0x3434,
-    0x260D, 0x24AE,
+    0x3554, 0x373B, 0x36A7, 0x36B0, 0x3710, 0x372E, 0x359B, 0x248A, 0x3151, 0x373E, 0x3434, 0x260D,
+    0x24AE,
 ];
 pub const COMPX_REPORT_LEN: usize = 17;
 pub const COMPX_QUERY_CMD: u8 = 0x04;
@@ -3009,7 +3033,11 @@ pub fn parse_compx17(reply: &[u8], id: &str, name: &str) -> Option<BatteryReadin
     }
     let mut reading = BatteryReading::new(
         id,
-        if name.trim().is_empty() { "ATK Wireless Mouse" } else { name },
+        if name.trim().is_empty() {
+            "ATK Wireless Mouse"
+        } else {
+            name
+        },
         level as u32,
         charging == 1,
         BatterySource::CompxAtkVxe,
@@ -3045,7 +3073,11 @@ pub fn parse_compx_nordic(reply: &[u8], id: &str, name: &str) -> Option<BatteryR
     }
     let mut reading = BatteryReading::new(
         id,
-        if name.trim().is_empty() { "Wireless Gaming Mouse" } else { name },
+        if name.trim().is_empty() {
+            "Wireless Gaming Mouse"
+        } else {
+            name
+        },
         level as u32,
         charging == 1,
         BatterySource::CompxAtkVxe,
@@ -3063,9 +3095,7 @@ pub fn parse_atk1k(reply: &[u8], id: &str, name: &str) -> Option<BatteryReading>
     } else {
         reply
     };
-    if r.len() < 9
-        || r[..6] != [0x82, 0x08, 0x02, 0x00, 0xFF, 0x03]
-    {
+    if r.len() < 9 || r[..6] != [0x82, 0x08, 0x02, 0x00, 0xFF, 0x03] {
         return None;
     }
     let packed = r[8];
@@ -3076,7 +3106,11 @@ pub fn parse_atk1k(reply: &[u8], id: &str, name: &str) -> Option<BatteryReading>
     }
     Some(BatteryReading::new(
         id,
-        if name.trim().is_empty() { "ATK 1K Wireless Mouse" } else { name },
+        if name.trim().is_empty() {
+            "ATK 1K Wireless Mouse"
+        } else {
+            name
+        },
         level as u32,
         charging,
         BatterySource::CompxAtkVxe,
@@ -3118,7 +3152,11 @@ pub fn parse_keyboard_24g(
     }
     Some(BatteryReading::new(
         id,
-        if name.trim().is_empty() { "2.4G Wireless Keyboard" } else { name },
+        if name.trim().is_empty() {
+            "2.4G Wireless Keyboard"
+        } else {
+            name
+        },
         level as u32,
         charging,
         BatterySource::Keyboard24gHid,
@@ -3149,7 +3187,11 @@ pub fn parse_dualsense(report: &[u8], id: &str, name: &str) -> Option<BatteryRea
     }
     Some(BatteryReading::new(
         id,
-        if name.trim().is_empty() { "DualSense" } else { name },
+        if name.trim().is_empty() {
+            "DualSense"
+        } else {
+            name
+        },
         if power == 2 { 100 } else { step as u32 * 10 },
         power == 1,
         BatterySource::GamepadHid,
@@ -3170,7 +3212,11 @@ pub fn parse_dualshock4(report: &[u8], id: &str, name: &str) -> Option<BatteryRe
     }
     Some(BatteryReading::new(
         id,
-        if name.trim().is_empty() { "DualShock 4" } else { name },
+        if name.trim().is_empty() {
+            "DualShock 4"
+        } else {
+            name
+        },
         step as u32 * 10,
         cable && step < 11,
         BatterySource::GamepadHid,
@@ -3192,14 +3238,24 @@ pub fn parse_switch_pro(report: &[u8], id: &str, name: &str) -> Option<BatteryRe
     };
     Some(BatteryReading::new(
         id,
-        if name.trim().is_empty() { "Nintendo Switch Pro" } else { name },
+        if name.trim().is_empty() {
+            "Nintendo Switch Pro"
+        } else {
+            name
+        },
         level,
         charging,
         BatterySource::GamepadHid,
     ))
 }
 
-pub fn parse_gamepad(vendor: u16, product: u16, report: &[u8], id: &str, name: &str) -> Option<BatteryReading> {
+pub fn parse_gamepad(
+    vendor: u16,
+    product: u16,
+    report: &[u8],
+    id: &str,
+    name: &str,
+) -> Option<BatteryReading> {
     match (vendor, product) {
         (0x054C, 0x0CE6 | 0x0DF2) => parse_dualsense(report, id, name),
         (0x054C, 0x05C4 | 0x09CC) => parse_dualshock4(report, id, name),
@@ -3214,9 +3270,7 @@ pub fn parse_gamepad(vendor: u16, product: u16, report: &[u8], id: &str, name: &
 
 pub fn is_valid_ghub_uri(uri: &str) -> bool {
     let lower = uri.to_ascii_lowercase();
-    lower.contains("127.0.0.1")
-        || lower.contains("localhost")
-        || lower.starts_with("http://[::1]")
+    lower.contains("127.0.0.1") || lower.contains("localhost") || lower.starts_with("http://[::1]")
 }
 
 /// Parses G-Hub loopback JSON into readings (C# `ParseGHubJson` / `ExtractGHubDevices`).
@@ -3247,7 +3301,11 @@ fn json_num(v: &serde_json::Value, keys: &[&str]) -> Option<f64> {
     None
 }
 
-fn extract_loopback_devices(node: &serde_json::Value, source: BatterySource, out: &mut Vec<BatteryReading>) {
+fn extract_loopback_devices(
+    node: &serde_json::Value,
+    source: BatterySource,
+    out: &mut Vec<BatteryReading>,
+) {
     match node {
         serde_json::Value::Array(items) => {
             for item in items {
@@ -3315,10 +3373,11 @@ pub fn parse_coreprops_endpoint(json: &str) -> Option<String> {
             serde_json::Value::Object(map) => {
                 for (k, v) in map {
                     let lower = k.to_ascii_lowercase();
-                    if lower.contains("endpoint") && lower.contains("gc") {
-                        if let Some(url) = v.as_str() {
-                            return Some(url.to_owned());
-                        }
+                    if lower.contains("endpoint")
+                        && lower.contains("gc")
+                        && let Some(url) = v.as_str()
+                    {
+                        return Some(url.to_owned());
                     }
                 }
                 for v in map.values() {
@@ -3363,7 +3422,11 @@ pub fn parse_steelseries_hid(reply: &[u8], id: &str, name: &str) -> Option<Batte
     }
     Some(BatteryReading::new(
         id,
-        if name.trim().is_empty() { "SteelSeries Wireless" } else { name },
+        if name.trim().is_empty() {
+            "SteelSeries Wireless"
+        } else {
+            name
+        },
         level as u32,
         status == 0x02,
         BatterySource::SteelSeriesHid,
@@ -3393,7 +3456,11 @@ pub fn parse_ble_gatt(payload: &[u8], id: &str, name: &str) -> Option<BatteryRea
     }
     Some(BatteryReading::new(
         id,
-        if name.trim().is_empty() { "BLE Device" } else { name },
+        if name.trim().is_empty() {
+            "BLE Device"
+        } else {
+            name
+        },
         level as u32,
         false,
         BatterySource::BluetoothGatt,
@@ -3443,7 +3510,10 @@ pub fn privacy_diagnostic_summary(descriptors: &[HidInterfaceDescriptor]) -> Str
 }
 
 fn ws_g_normalize_name(name: &str) -> String {
-    name.trim().split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase()
+    name.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
 }
 
 /// Dedup by name (canonical, shared across providers), falling back to `source:id`.
@@ -3458,11 +3528,16 @@ pub fn deduplicate(readings: Vec<BatteryReading>) -> Vec<BatteryReading> {
     }
     for r in readings {
         let n = ws_g_normalize_name(&r.name);
-        let collision = !n.is_empty() && counts.get(&(r.source, n.clone())).copied().unwrap_or(0) > 1;
+        let collision =
+            !n.is_empty() && counts.get(&(r.source, n.clone())).copied().unwrap_or(0) > 1;
         let key = if !n.is_empty() && !collision {
             format!("name:{n}")
         } else if !r.id.trim().is_empty() {
-            format!("src:{}:id:{}", r.source as u8, r.id.trim().to_ascii_lowercase())
+            format!(
+                "src:{}:id:{}",
+                r.source as u8,
+                r.id.trim().to_ascii_lowercase()
+            )
         } else {
             format!("name:{n}")
         };
@@ -3562,9 +3637,10 @@ impl AggregatorSettings {
     pub fn is_ignored(&self, reading: &BatteryReading) -> bool {
         let name = reading.name.to_ascii_lowercase();
         let id = reading.id.to_ascii_lowercase();
-        self.ignored_devices
-            .iter()
-            .any(|x| !x.is_empty() && (name.contains(&x.to_ascii_lowercase()) || id == x.to_ascii_lowercase()))
+        self.ignored_devices.iter().any(|x| {
+            !x.is_empty()
+                && (name.contains(&x.to_ascii_lowercase()) || id == x.to_ascii_lowercase())
+        })
     }
 
     pub fn display_name(&self, reading: &BatteryReading) -> String {
@@ -3635,7 +3711,7 @@ impl WirelessBatteryAggregator {
                 break;
             }
             let level = value.get("level").and_then(|x| x.as_i64()).unwrap_or(-1) as i32;
-            if level < -1 || level > 100 {
+            if !(-1..=100).contains(&level) {
                 continue;
             }
             let source_id = value.get("source").and_then(|x| x.as_u64()).unwrap_or(0) as u8;
@@ -3647,7 +3723,10 @@ impl WirelessBatteryAggregator {
                 value.get("id").and_then(|x| x.as_str()).unwrap_or(key),
                 value.get("name").and_then(|x| x.as_str()).unwrap_or(""),
                 level.max(0) as u32,
-                value.get("charging").and_then(|x| x.as_bool()).unwrap_or(false),
+                value
+                    .get("charging")
+                    .and_then(|x| x.as_bool())
+                    .unwrap_or(false),
                 source_from_id(source_id),
             );
             reading.stale = true;
@@ -3677,7 +3756,10 @@ impl WirelessBatteryAggregator {
                 }),
             );
         }
-        let _ = std::fs::write(path, serde_json::to_string(&serde_json::Value::Object(root)).unwrap_or_default());
+        let _ = std::fs::write(
+            path,
+            serde_json::to_string(&serde_json::Value::Object(root)).unwrap_or_default(),
+        );
     }
 
     /// Merges fresh readings with the cache: outlier protection, stale retention (30 min),
@@ -3693,7 +3775,11 @@ impl WirelessBatteryAggregator {
         let mut output = Vec::new();
         let mut active = HashSet::new();
         for mut reading in fresh {
-            let key = format!("src:{}:id:{}", reading.source as u8, reading.id.to_ascii_lowercase());
+            let key = format!(
+                "src:{}:id:{}",
+                reading.source as u8,
+                reading.id.to_ascii_lowercase()
+            );
             active.insert(key.clone());
             reading.name = self.settings.display_name(&reading);
             if reading.connected && reading.level >= 0 {
@@ -3766,10 +3852,7 @@ fn source_from_id(id: u8) -> BatterySource {
 }
 
 /// Routes one raw HID report to the right vendor parser based on its descriptor.
-pub fn probe_report(
-    descriptor: &HidInterfaceDescriptor,
-    report: &[u8],
-) -> Option<BatteryReading> {
+pub fn probe_report(descriptor: &HidInterfaceDescriptor, report: &[u8]) -> Option<BatteryReading> {
     let id = format!(
         "hid:{:04X}:{:04X}",
         descriptor.vendor_id, descriptor.product_id
@@ -3798,7 +3881,13 @@ pub fn probe_report(
         return parse_keyboard_24g(report, descriptor.input_report_length as usize, &id, name);
     }
     if matches!(descriptor.vendor_id, 0x054C | 0x057E) {
-        return parse_gamepad(descriptor.vendor_id, descriptor.product_id, report, &id, name);
+        return parse_gamepad(
+            descriptor.vendor_id,
+            descriptor.product_id,
+            report,
+            &id,
+            name,
+        );
     }
     if descriptor.vendor_id == 0x1038 {
         return parse_steelseries_hid(report, &id, name);
@@ -3863,7 +3952,12 @@ mod ws_g_tests {
 
     #[test]
     fn hyperx_four_families() {
-        for (page, _prefix) in [(0xFF00, 0x03), (0xFF13, 0x05), (0xFF90, 0x06), (0xFFC0, 0xC0)] {
+        for (page, _prefix) in [
+            (0xFF00, 0x03),
+            (0xFF13, 0x05),
+            (0xFF90, 0x06),
+            (0xFFC0, 0xC0),
+        ] {
             let family = hyperx_family(page, 0x03F0).unwrap();
             let mut report = build_hyperx_request(family, 64);
             report[3] = 77;
@@ -3879,7 +3973,7 @@ mod ws_g_tests {
     fn compx_checksum_and_reports() {
         let request = build_compx_request();
         assert_eq!(compx_checksum(&request), 0x49);
-        let mut reply = request.clone();
+        let mut reply = request;
         reply[6] = 55;
         reply[7] = 1;
         reply[8] = 0x0E;
@@ -3938,7 +4032,8 @@ mod ws_g_tests {
     fn logitech_ghub_loopback_json() {
         assert!(is_valid_ghub_uri("http://127.0.0.1:9010"));
         assert!(!is_valid_ghub_uri("https://evil.example.com"));
-        let json = r#"{"devices":[{"name":"G Pro X","batteryLevel":73,"charging":false,"id":"1"}]}"#;
+        let json =
+            r#"{"devices":[{"name":"G Pro X","batteryLevel":73,"charging":false,"id":"1"}]}"#;
         let readings = parse_ghub_json(json);
         assert_eq!(readings.len(), 1);
         assert_eq!(readings[0].level, 73);
@@ -3995,17 +4090,23 @@ mod ws_g_tests {
 
     #[test]
     fn aggregator_settings_privacy_and_merge() {
-        let mut settings = AggregatorSettings::default();
-        settings.poll_seconds = 999;
+        let mut settings = AggregatorSettings {
+            poll_seconds: 999,
+            ..Default::default()
+        };
         settings.aliases.insert("id1".into(), "My Mouse".into());
         settings.ignored_devices.push("hidden".into());
         assert_eq!(settings.poll_seconds_clamped(), 300);
-        let mut hidden = BatteryReading::new("hidden", "Hidden", 50, false, BatterySource::Bluetooth);
+        let mut hidden =
+            BatteryReading::new("hidden", "Hidden", 50, false, BatterySource::Bluetooth);
         let mut good = BatteryReading::new("id1", "Mouse", 80, false, BatterySource::AsusRogHid);
         assert!(settings.is_ignored(&hidden));
         assert_eq!(settings.display_name(&good), "My Mouse");
         hidden.name = "Hidden".into();
-        let desc = [desc(0x2E3C, 0xC368, 0xFF00, 64), desc(0x0B05, 1, 0xFF00, 64)];
+        let desc = [
+            desc(0x2E3C, 0xC368, 0xFF00, 64),
+            desc(0x0B05, 1, 0xFF00, 64),
+        ];
         let summary = privacy_diagnostic_summary(&desc);
         assert!(!summary.contains("2E3C"));
         assert!(summary.contains("0B05"));

@@ -401,7 +401,10 @@ pub enum UIOption {
 /// True for `\\.\` (device) and `\\?\` (extended NT) paths, which must be rejected.
 pub fn is_device_path(path: &str) -> bool {
     let p = path.trim_start_matches('"');
-    p.starts_with(r"\\.\") || p.starts_with(r"\\?\") || p.starts_with("//./") || p.starts_with("//?/")
+    p.starts_with(r"\\.\")
+        || p.starts_with(r"\\?\")
+        || p.starts_with("//./")
+        || p.starts_with("//?/")
 }
 
 /// Validates a source/destination list: no device paths, no empty entries.
@@ -453,13 +456,17 @@ fn shell_operation(
     if let Err(_reason) = validate_paths(from) {
         return FileOperationOutcome::Failed(-1);
     }
-    if operation == FO_COPY || operation == FO_MOVE {
-        if let Err(_reason) = validate_paths(to) {
-            return FileOperationOutcome::Failed(-1);
-        }
+    if (operation == FO_COPY || operation == FO_MOVE)
+        && let Err(_reason) = validate_paths(to)
+    {
+        return FileOperationOutcome::Failed(-1);
     }
     let from_w = double_nul(from);
-    let to_w = if to.is_empty() { Vec::new() } else { double_nul(to) };
+    let to_w = if to.is_empty() {
+        Vec::new()
+    } else {
+        double_nul(to)
+    };
     let mut flags = FOF_ALLOWUNDO
         | windows_sys::Win32::UI::Shell::FOF_NOCONFIRMATION as u16
         | windows_sys::Win32::UI::Shell::FOF_NOCONFIRMMKDIR as u16;
@@ -476,7 +483,7 @@ fn shell_operation(
     } else {
         to_w.as_ptr()
     };
-    op.fFlags = flags as u16;
+    op.fFlags = flags;
     let hr = unsafe { windows_sys::Win32::UI::Shell::SHFileOperationW(&mut op) };
     classify_result(hr, op.fAnyOperationsAborted != 0)
 }
@@ -528,7 +535,10 @@ mod ws_g_tests {
     fn cancellation_is_not_an_error() {
         assert_eq!(classify_result(0, false), FileOperationOutcome::Success);
         assert_eq!(classify_result(0, true), FileOperationOutcome::Cancelled);
-        assert_eq!(classify_result(0x4C, false), FileOperationOutcome::Cancelled);
+        assert_eq!(
+            classify_result(0x4C, false),
+            FileOperationOutcome::Cancelled
+        );
         assert_eq!(classify_result(5, false), FileOperationOutcome::Failed(5));
     }
 

@@ -7,7 +7,6 @@
 
 #![cfg(windows)]
 
-use std::ffi::c_void;
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -16,9 +15,8 @@ use std::thread::JoinHandle;
 use windows_sys::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GetCursorPos,
-    GetMessageW,
-    HWND_MESSAGE, MSG, PostMessageW, PostQuitMessage, RegisterClassExW, TranslateMessage, WM_APP,
-    WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_USER, WNDCLASSEXW,
+    GetMessageW, HWND_MESSAGE, MSG, PostMessageW, PostQuitMessage, RegisterClassExW,
+    TranslateMessage, WM_APP, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_USER, WNDCLASSEXW,
 };
 
 const NIM_ADD: u32 = 0;
@@ -114,10 +112,12 @@ unsafe extern "system" fn host_wnd_proc(
             unsafe {
                 let icons = ICONS.with(|icons| icons.borrow().clone());
                 for icon in icons {
-                    let mut data = NotifyIconDataW::default();
-                    data.cb_size = size_of::<NotifyIconDataW>() as u32;
-                    data.hwnd = hwnd;
-                    data.u_id = icon.id;
+                    let data = NotifyIconDataW {
+                        cb_size: size_of::<NotifyIconDataW>() as u32,
+                        hwnd,
+                        u_id: icon.id,
+                        ..Default::default()
+                    };
                     Shell_NotifyIconW(NIM_DELETE, &data);
                     if !icon.icon.is_null() {
                         DestroyIcon(icon.icon);
@@ -148,11 +148,7 @@ pub fn start(icons: &[String]) -> bool {
     else {
         return false;
     };
-    let Some(mut slot) = HOST_JOIN
-        .get_or_init(|| Mutex::new(None))
-        .lock()
-        .ok()
-    else {
+    let Some(mut slot) = HOST_JOIN.get_or_init(|| Mutex::new(None)).lock().ok() else {
         return false;
     };
     *slot = Some(handle);
@@ -205,13 +201,15 @@ fn run(icons: Vec<String>) {
                     .and_then(|s| s.to_str())
                     .unwrap_or(path)
                     .to_owned();
-                let mut data = NotifyIconDataW::default();
-                data.cb_size = size_of::<NotifyIconDataW>() as u32;
-                data.hwnd = hwnd;
-                data.u_id = index as u32 + 1;
-                data.u_flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
-                data.u_callback_message = TRAY_MESSAGE;
-                data.h_icon = icon;
+                let mut data = NotifyIconDataW {
+                    cb_size: size_of::<NotifyIconDataW>() as u32,
+                    hwnd,
+                    u_id: index as u32 + 1,
+                    u_flags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
+                    u_callback_message: TRAY_MESSAGE,
+                    h_icon: icon,
+                    ..Default::default()
+                };
                 let tip = wide(&name);
                 let copy = tip.len().min(data.sz_tip.len());
                 data.sz_tip[..copy].copy_from_slice(&tip[..copy]);

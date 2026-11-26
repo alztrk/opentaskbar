@@ -1067,10 +1067,12 @@ impl DockState {
         let tick_pending = Arc::new(AtomicBool::new(false));
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let target_fps = Arc::new(AtomicU32::new(Self::compute_target_fps(
-            &settings,
-            &monitor.device_name,
-        )));
+        let initial_fps = Self::compute_target_fps(&settings, &monitor.device_name);
+        crate::ui::flyout::set_motion_prefs(
+            settings.animations_enabled && !settings.focus_mode,
+            initial_fps,
+        );
+        let target_fps = Arc::new(AtomicU32::new(initial_fps));
         let mut state = Self {
             hwnd,
             monitor,
@@ -1742,9 +1744,11 @@ impl DockState {
         self.hovered_tray_pin = None;
         self.pressed_tray_pin = None;
         self.all_monitors = win32::enumerate_monitors();
-        self.target_fps.store(
-            Self::compute_target_fps(&self.settings, &self.monitor.device_name),
-            Ordering::Relaxed,
+        let updated_fps = Self::compute_target_fps(&self.settings, &self.monitor.device_name);
+        self.target_fps.store(updated_fps, Ordering::Relaxed);
+        crate::ui::flyout::set_motion_prefs(
+            self.settings.animations_enabled && !self.settings.focus_mode,
+            updated_fps,
         );
         self.is_dark = resolve_is_dark(self.settings.theme);
         if let Some(ref mut island) = self.dynamic_island {
@@ -1969,9 +1973,11 @@ impl DockState {
                 largest_fraction = largest_fraction.max(fraction);
             }
             icons_w -= gap * largest_fraction;
-            let live_content =
-                (shell_section_width(&self.settings) + icons_w + self.live_widgets_section_width() + 30.0)
-                    .max(160.0);
+            let live_content = (shell_section_width(&self.settings)
+                + icons_w
+                + self.live_widgets_section_width()
+                + 30.0)
+                .max(160.0);
             let max_w = (mon_w - 16.0).max(200.0);
             let floor_w = scroll_min_pill_width(&self.settings).min(live_content);
             let target = self
@@ -3133,7 +3139,7 @@ impl DockState {
         let anchor_bottom_y = win_y + ((top_edge - 10.0) * self.dpi).round() as i32;
 
         if let Some(ref mut preview) = self.preview {
-            preview.show(&key, &items, anchor_x, anchor_bottom_y);
+            preview.show(&key, &items, anchor_x, anchor_bottom_y, self.is_dark);
             unsafe {
                 SetTimer(self.hwnd as HWND, TIMER_PREVIEW_WATCH, 140, None);
             }
@@ -4015,8 +4021,7 @@ impl DockState {
         }
 
         if self.hit_shell_button(mx, my) == Some(ShellButton::Start) {
-            let act =
-                win32::show_start_context_menu(self.hwnd, self.is_dark, &self.settings);
+            let act = win32::show_start_context_menu(self.hwnd, self.is_dark, &self.settings);
             self.execute_context_action(act);
             return;
         }
@@ -4165,6 +4170,7 @@ impl DockState {
                         size: self.settings.size,
                         auto_hide: self.settings.auto_hide,
                         enabled_widgets: self.settings.enabled_widgets.clone(),
+                        ..Default::default()
                     };
                     self.settings
                         .profiles

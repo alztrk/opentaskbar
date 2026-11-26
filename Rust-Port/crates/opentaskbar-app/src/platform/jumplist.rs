@@ -28,9 +28,9 @@
 //! tolerating a thread that is already initialized (`RPC_E_CHANGED_MODE`).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -1251,7 +1251,11 @@ impl BuildLaunchInfo {
         }
         let wide_path: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
         let wide_args: Vec<u16> = self.arguments.encode_utf16().chain(Some(0)).collect();
-        let wide_dir: Vec<u16> = self.working_directory.encode_utf16().chain(Some(0)).collect();
+        let wide_dir: Vec<u16> = self
+            .working_directory
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
         let dir_ptr = if self.working_directory.is_empty() {
             std::ptr::null()
         } else {
@@ -1326,9 +1330,7 @@ pub fn split_arguments(args: &str) -> Vec<String> {
 
 /// Quotes an argument for a jump-list command line (C# `BuildQuotedArguments`).
 pub fn quote_argument(arg: &str) -> String {
-    if !arg.is_empty()
-        && !arg.chars().any(|c| c.is_whitespace() || c == '"')
-    {
+    if !arg.is_empty() && !arg.chars().any(|c| c.is_whitespace() || c == '"') {
         return arg.to_owned();
     }
     let mut out = String::with_capacity(arg.len() + 2);
@@ -1406,7 +1408,10 @@ mod ws_g_tests {
         );
         assert_eq!(split_arguments(r#"a\"b c"#), vec![r#"a"b"#, "c"]);
         assert_eq!(quote_argument("plain"), "plain");
-        assert_eq!(quote_argument(r#"a "quoted" path"#), r#""a \"quoted\" path""#);
+        assert_eq!(
+            quote_argument(r#"a "quoted" path"#),
+            r#""a \"quoted\" path""#
+        );
     }
 
     #[test]

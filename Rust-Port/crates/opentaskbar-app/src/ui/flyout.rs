@@ -12,7 +12,7 @@
 use opentaskbar_core::i18n as loc;
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -23,12 +23,13 @@ use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CreateFontW, CreatePen, CreateSolidBrush,
-    DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, GetMonitorInfoW, HBRUSH, HDC,
-    HFONT, HPEN, IntersectClipRect, InvalidateRect, LineTo, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromPoint, MoveToEx, PAINTSTRUCT, PS_NULL, PS_SOLID, RestoreDC, RoundRect, SaveDC,
-    SelectObject, SetBkMode, SetTextColor, StretchDIBits, TRANSPARENT,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleBitmap,
+    CreateCompatibleDC, CreateFontW, CreatePen, CreateSolidBrush, DIB_RGB_COLORS, DT_CENTER,
+    DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, DeleteDC,
+    DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, GetMonitorInfoW, HBRUSH, HDC, HFONT,
+    HPEN, IntersectClipRect, InvalidateRect, LineTo, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromPoint, MoveToEx, PAINTSTRUCT, PS_NULL, PS_SOLID, RestoreDC, RoundRect, SRCCOPY,
+    SaveDC, SelectObject, SetBkMode, SetTextColor, StretchDIBits, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -42,10 +43,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     PostMessageW, RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER,
     SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer,
     SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage,
-    UnhookWindowsHookEx, WH_MOUSE_LL, WM_ACTIVATE, WM_CHAR, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
+    UnhookWindowsHookEx, WH_MOUSE_LL, WM_ACTIVATE, WM_CHAR, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
 };
 
 use super::menu::{BorderStyle, MenuIcon, draw_menu_icon};
@@ -67,6 +68,24 @@ const WM_APP_MENU_DONE: u32 = 0x8001;
 /// Tracks the native `WM_COMMAND`/`#32768` context menu opened from a flyout.
 static EXTERNAL_MENU_ACTIVE: AtomicBool = AtomicBool::new(false);
 static HOOK_TARGET: AtomicUsize = AtomicUsize::new(0);
+static FLYOUT_ANIMATIONS_ENABLED: AtomicBool = AtomicBool::new(true);
+/// Target FPS (`0` = auto / monitor refresh rate).
+static FLYOUT_TARGET_FPS: AtomicU32 = AtomicU32::new(0);
+
+/// Synchronizes flyout open/close motion with `DockSettings.animations_enabled` and `animation_fps`.
+pub fn set_motion_prefs(animations_enabled: bool, target_fps: u32) {
+    FLYOUT_ANIMATIONS_ENABLED.store(animations_enabled, Ordering::Relaxed);
+    FLYOUT_TARGET_FPS.store(target_fps, Ordering::Relaxed);
+}
+
+fn flyout_anim_interval_ms() -> u32 {
+    let fps = FLYOUT_TARGET_FPS.load(Ordering::Relaxed);
+    if fps == 0 {
+        8
+    } else {
+        (1000 / fps.max(15)).max(4)
+    }
+}
 
 /// C# `DockFlyout.RetainForExternalContextMenu`: keep the flyout alive while the target
 /// application's own native context menu (#32768) is on screen.
@@ -452,7 +471,7 @@ impl FlyoutGdi {
                 0,
                 0,
                 0,
-                4,
+                5, // CLEARTYPE_QUALITY
                 0,
                 wide(fonts::native_ui_face()).as_ptr(),
             )
@@ -1057,6 +1076,7 @@ pub fn show_flyout_live(
 }
 
 /// Same as [`show_flyout_live`] with an explicit border stroke color/width.
+#[allow(clippy::too_many_arguments)] // shared WIP flyout signature; callers rely on the ordering
 pub fn show_flyout_live_with_border(
     tag: &str,
     owner_hwnd: usize,
@@ -1104,6 +1124,7 @@ pub fn show_flyout_interactive(
 }
 
 /// Same as [`show_flyout_interactive`] with an explicit border stroke color/width.
+#[allow(clippy::too_many_arguments)] // shared WIP flyout signature; callers rely on the ordering
 pub fn show_flyout_interactive_with_border(
     tag: &str,
     owner_hwnd: usize,
@@ -1273,7 +1294,8 @@ fn show_flyout_impl<'a>(
     }
     opentaskbar_shell::flyout_journal::write_tag(tag, x, top_y);
 
-    let animate = win32::client_area_animations_enabled();
+    let animate = win32::client_area_animations_enabled()
+        && FLYOUT_ANIMATIONS_ENABLED.load(Ordering::Relaxed);
     let slide_px = if animate { s(SLIDE_OFFSET_DIPS) } else { 0 };
     let hwnd = unsafe {
         CreateWindowExW(
@@ -1371,7 +1393,7 @@ fn show_flyout_impl<'a>(
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
         if animate {
-            SetTimer(hwnd, TIMER_ANIM, 8, None);
+            SetTimer(hwnd, TIMER_ANIM, flyout_anim_interval_ms(), None);
         }
     }
 
@@ -1657,7 +1679,7 @@ impl FlyoutState<'_> {
         self.animating = true;
         self.anim_start = Instant::now();
         unsafe {
-            SetTimer(self.hwnd, TIMER_ANIM, 8, None);
+            SetTimer(self.hwnd, TIMER_ANIM, flyout_anim_interval_ms(), None);
         }
     }
 
@@ -1756,8 +1778,8 @@ impl FlyoutState<'_> {
 
     fn paint(&self) {
         let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
-        let hdc = unsafe { BeginPaint(self.hwnd, &mut ps) };
-        if hdc.is_null() {
+        let screen_hdc = unsafe { BeginPaint(self.hwnd, &mut ps) };
+        if screen_hdc.is_null() {
             return;
         }
         let dpi = self.dpi;
@@ -1767,7 +1789,8 @@ impl FlyoutState<'_> {
         let radius = s(8.0);
         let mut client = RECT::default();
         unsafe { GetClientRect(self.hwnd, &mut client) };
-        let w = client.right;
+        let w = client.right.max(1);
+        let h = client.bottom.max(1);
         let content_w = (w - pad - right_pad).max(s(120.0));
         let focused_id = self.keyboard_index.map(|index| self.targets[index].id);
 
@@ -1796,39 +1819,35 @@ impl FlyoutState<'_> {
         let mut gdi = FlyoutGdi::default();
 
         unsafe {
-            FillRect(hdc, &ps.rcPaint, gdi.brush(bg));
+            let mem_dc = CreateCompatibleDC(screen_hdc);
+            let mem_bmp = if !mem_dc.is_null() {
+                CreateCompatibleBitmap(screen_hdc, w, h)
+            } else {
+                std::ptr::null_mut()
+            };
+            let old_bmp = if !mem_bmp.is_null() {
+                SelectObject(mem_dc, mem_bmp as _)
+            } else {
+                std::ptr::null_mut()
+            };
+            let hdc = if !mem_bmp.is_null() {
+                mem_dc
+            } else {
+                screen_hdc
+            };
 
-            // Four concentric soft-shadow rings along the popup edge (C# DockFlyout shadow).
-            let rings = self.shadow_rings.max(1);
-            for ring in 0..rings {
-                let inset = ring as i32;
-                let rc = RECT {
-                    left: ps.rcPaint.left + inset,
-                    top: ps.rcPaint.top + inset,
-                    right: ps.rcPaint.right - inset,
-                    bottom: ps.rcPaint.bottom - inset,
-                };
-                if rc.left >= rc.right || rc.top >= rc.bottom {
-                    break;
-                }
-                let shade = blend_rgb(
-                    gdi_rgb(pal.canvas),
-                    bg,
-                    (ring + 1) as f32 / (rings + 1) as f32,
-                );
-                let ring_brush = CreateSolidBrush(shade);
-                windows_sys::Win32::Graphics::Gdi::FrameRect(hdc, &rc, ring_brush);
-                DeleteObject(ring_brush as _);
-            }
+            FillRect(hdc, &client, gdi.brush(bg));
 
-            // Top specular hairline for crisp Apple/Raycast surface elevation.
+            // Top specular hairline for clean surface elevation; DWM handles the rounded outer
+            // shadow and border (`DWMWCP_ROUND` + `DWMWA_BORDER_COLOR`) without square corner clipping.
+            let _ = self.shadow_rings;
             let spec_pen = gdi.pen(gdi_rgb(pal.specular_top), 1);
             let prev_pen = SelectObject(hdc, spec_pen as _);
-            MoveToEx(hdc, s(8.0), 0, std::ptr::null_mut());
-            LineTo(hdc, (w - s(8.0)).max(s(8.0)), 0);
+            MoveToEx(hdc, s(10.0), 0, std::ptr::null_mut());
+            LineTo(hdc, (w - s(10.0)).max(s(10.0)), 0);
             SelectObject(hdc, prev_pen);
 
-            let title_font = gdi.font(-s(if self.keyboard_navigation { 16.0 } else { 14.0 }), 600);
+            let title_font = gdi.font(-s(14.0), 600);
             let body_font = gdi.font(-s(12.0), 500);
             let bold_font = gdi.font(-s(12.0), 600);
             let small_font = gdi.font(-s(11.0), 400);
@@ -2362,10 +2381,8 @@ impl FlyoutState<'_> {
                         SelectObject(hdc, op);
 
                         if !samples.is_empty() {
-                            let line_pen = gdi.pen(
-                                gdi_rgb(*color),
-                                (1.5 * dpi).round().max(1.0) as i32,
-                            );
+                            let line_pen =
+                                gdi.pen(gdi_rgb(*color), (1.5 * dpi).round().max(1.0) as i32);
                             let op = SelectObject(hdc, line_pen as _);
                             let n = samples.len();
                             let py = |v: f32| {
@@ -3430,6 +3447,14 @@ impl FlyoutState<'_> {
             }
 
             SelectObject(hdc, old_f);
+            if !mem_bmp.is_null() {
+                let _ = BitBlt(screen_hdc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
+                SelectObject(mem_dc, old_bmp);
+                DeleteObject(mem_bmp as _);
+            }
+            if !mem_dc.is_null() {
+                DeleteDC(mem_dc);
+            }
             EndPaint(self.hwnd, &ps);
         }
     }
@@ -3447,6 +3472,7 @@ unsafe extern "system" fn flyout_wnd_proc(
     }
     let state = unsafe { &mut *ptr };
     match msg {
+        WM_ERASEBKGND => 1,
         WM_PAINT => {
             state.paint();
             0

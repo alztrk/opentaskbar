@@ -7,8 +7,8 @@
 //! No COM/GDI is used; this module only resolves paths.
 
 use std::collections::BTreeMap;
-use std::path::Component;
 use std::fs;
+use std::path::Component;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
@@ -739,7 +739,10 @@ impl IconPackManifest {
         let mut object = Map::new();
         object.insert("name".into(), Value::String(self.name.clone()));
         object.insert("author".into(), Value::String(self.author.clone()));
-        object.insert("description".into(), Value::String(self.description.clone()));
+        object.insert(
+            "description".into(),
+            Value::String(self.description.clone()),
+        );
         object.insert(
             "icons".into(),
             Value::Object(
@@ -792,7 +795,11 @@ impl IconPack {
 
     pub fn display_name(&self) -> &str {
         let name = self.manifest.name.as_str();
-        if name.trim().is_empty() { &self.id } else { name }
+        if name.trim().is_empty() {
+            &self.id
+        } else {
+            name
+        }
     }
 
     pub fn fallback(&self) -> IconPackFallback {

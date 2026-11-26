@@ -524,9 +524,7 @@ impl PdhGpu {
                             .unwrap_or_else(|| "GPU Engine".to_owned());
                     }
                     if let (Some(key), Some(engine)) = (gpu_engine_key(&name), engine) {
-                        let entry = by_engine
-                            .entry(key)
-                            .or_insert((0.0, engine.to_owned()));
+                        let entry = by_engine.entry(key).or_insert((0.0, engine.to_owned()));
                         entry.0 += value;
                     }
                 }
@@ -600,9 +598,7 @@ fn sample_gpu_pdh() -> Option<(f32, String)> {
         return None;
     }
     let ratio = (best.0 / 100.0) as f32;
-    ratio
-        .is_finite()
-        .then(|| (ratio.clamp(0.0, 1.0), best.1))
+    ratio.is_finite().then(|| (ratio.clamp(0.0, 1.0), best.1))
 }
 
 /// Busiest GPU engine load in `[0.0, 1.0]`, matching C# `SystemSensors.SampleGpuUsage`.
@@ -671,11 +667,7 @@ fn nvml_lib() -> Option<&'static NvmlLib> {
                 .join("NVIDIA Corporation")
                 .join("NVSMI")
                 .join("nvml.dll");
-            let wide: Vec<u16> = path
-                .as_os_str()
-                .encode_wide()
-                .chain(Some(0))
-                .collect();
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
             module = LoadLibraryW(wide.as_ptr());
         }
         if module.is_null() {
@@ -1009,10 +1001,7 @@ fn adl_lib() -> Option<&'static AdlLib> {
         let symbols = (
             nvml_symbol::<AdlMainControlCreateFn>(module, b"ADL_Main_Control_Create\0"),
             nvml_symbol::<AdlMainControlDestroyFn>(module, b"ADL_Main_Control_Destroy\0"),
-            nvml_symbol::<AdlThermalDevicesEnumFn>(
-                module,
-                b"ADL_Overdrive5_ThermalDevices_Enum\0",
-            ),
+            nvml_symbol::<AdlThermalDevicesEnumFn>(module, b"ADL_Overdrive5_ThermalDevices_Enum\0"),
             nvml_symbol::<AdlTemperatureGetFn>(module, b"ADL_Overdrive5_Temperature_Get\0"),
         );
         let (create, destroy, enum_thermal, get_temp) = match symbols {
@@ -2242,7 +2231,10 @@ pub struct WeatherCache {
     pub loading: bool,
 }
 
-pub fn format_temperature(celsius: f64, unit: opentaskbar_core::settings::TemperatureUnit) -> String {
+pub fn format_temperature(
+    celsius: f64,
+    unit: opentaskbar_core::settings::TemperatureUnit,
+) -> String {
     match unit {
         opentaskbar_core::settings::TemperatureUnit::Celsius => {
             format!("{}°C", celsius.round() as i32)
@@ -2263,7 +2255,10 @@ impl WeatherCache {
         }
     }
 
-    pub fn formatted_feels_like(&self, unit: opentaskbar_core::settings::TemperatureUnit) -> String {
+    pub fn formatted_feels_like(
+        &self,
+        unit: opentaskbar_core::settings::TemperatureUnit,
+    ) -> String {
         if let Some(c) = self.feels_like_c_val {
             format_temperature(c, unit)
         } else {
@@ -2271,7 +2266,10 @@ impl WeatherCache {
         }
     }
 
-    pub fn formatted_today_range(&self, unit: opentaskbar_core::settings::TemperatureUnit) -> String {
+    pub fn formatted_today_range(
+        &self,
+        unit: opentaskbar_core::settings::TemperatureUnit,
+    ) -> String {
         if let (Some(hi), Some(lo)) = (self.today_hi_c, self.today_lo_c) {
             format!(
                 "{} / {}",
@@ -2612,6 +2610,13 @@ pub const AI_PROVIDERS: &[AiProviderMeta] = &[
         short: "Codex",
         dashboard_url: "https://chatgpt.com/codex/settings/usage",
         signin_hint: "codex login",
+    },
+    AiProviderMeta {
+        id: "aiusage_antigravity",
+        name: "Antigravity",
+        short: "Antigravity",
+        dashboard_url: "https://antigravity.google/docs",
+        signin_hint: "Sign in to Antigravity",
     },
     AiProviderMeta {
         id: "aiusage_opencode",
@@ -3367,12 +3372,13 @@ fn full_spend(root: &serde_json::Value) -> Option<AiSpend> {
         used,
         limit,
         currency,
-        used_01: full_obj(spend, "percent").and_then(|p| {
-            full_num(p, "used")
-                .or_else(|| full_num(p, "value"))
-                .or_else(|| p.as_f64())
-        })
-        .map(|n| ((if n > 1.0 { n / 100.0 } else { n }) as f32).clamp(0.0, 1.0)),
+        used_01: full_obj(spend, "percent")
+            .and_then(|p| {
+                full_num(p, "used")
+                    .or_else(|| full_num(p, "value"))
+                    .or_else(|| p.as_f64())
+            })
+            .map(|n| ((if n > 1.0 { n / 100.0 } else { n }) as f32).clamp(0.0, 1.0)),
     })
 }
 
@@ -3444,10 +3450,10 @@ pub fn parse_full_detail(json: &str, provider_id: &str) -> Option<AiFullDetail> 
                     }
                 }
             }
-            if best.is_none() {
-                if let Some(used) = full_pct(&root, &["utilization", "used_percent", "used"]) {
-                    best = Some((used, "5h".to_owned(), None));
-                }
+            if best.is_none()
+                && let Some(used) = full_pct(&root, &["utilization", "used_percent", "used"])
+            {
+                best = Some((used, "5h".to_owned(), None));
             }
             let (used, label, ms) = best?;
             out.used = used;
@@ -3464,8 +3470,8 @@ pub fn parse_full_detail(json: &str, provider_id: &str) -> Option<AiFullDetail> 
                     .or_else(|| full_str(&root, "rateLimitTier")),
             );
             out.spend = full_spend(&root);
-            if let Some(rows) = full_obj(&root, "seven_day_breakdown")
-                .and_then(|b| full_arr(b, "rows"))
+            if let Some(rows) =
+                full_obj(&root, "seven_day_breakdown").and_then(|b| full_arr(b, "rows"))
             {
                 for row in rows {
                     if let (Some(name), Some(used)) = (
@@ -3489,7 +3495,8 @@ pub fn parse_full_detail(json: &str, provider_id: &str) -> Option<AiFullDetail> 
                 {
                     let ms = full_unix_ms(w, &["reset_at", "resets_at", "resetTime"]);
                     let ms = ms.or_else(|| {
-                        full_num(w, "reset_after_seconds").map(|s| now_unix_ms() + (s * 1000.0) as i64)
+                        full_num(w, "reset_after_seconds")
+                            .map(|s| now_unix_ms() + (s * 1000.0) as i64)
                     });
                     let candidate = (used, label.to_owned(), ms);
                     if best.as_ref().is_none_or(|b| candidate.0 >= b.0) {
@@ -3612,10 +3619,7 @@ pub fn parse_full_detail(json: &str, provider_id: &str) -> Option<AiFullDetail> 
             }
             out.reset_unix_ms = ms;
             out.reset_text = full_reset_from_ms(ms);
-            out.plan = full_plan_label(
-                full_str(&root, "plan")
-                    .or_else(|| full_str(&root, "tier")),
-            );
+            out.plan = full_plan_label(full_str(&root, "plan").or_else(|| full_str(&root, "tier")));
             out.limit_reached = used >= 1.0;
         }
         "aiusage_opencode" | "opencode" => {
@@ -3632,9 +3636,10 @@ pub fn parse_full_detail(json: &str, provider_id: &str) -> Option<AiFullDetail> 
                             &["usagePercent", "used_percent", "utilization", "percent"],
                         )
                     {
-                        let ms = full_unix_ms(w, &["resetsAt", "reset_at", "resetTime"])
-                            .or_else(|| {
-                                full_num(w, "resetInSec").map(|s| now_unix_ms() + (s * 1000.0) as i64)
+                        let ms =
+                            full_unix_ms(w, &["resetsAt", "reset_at", "resetTime"]).or_else(|| {
+                                full_num(w, "resetInSec")
+                                    .map(|s| now_unix_ms() + (s * 1000.0) as i64)
                             });
                         let candidate = (used, label.to_owned(), ms);
                         if best.as_ref().is_none_or(|b| candidate.0 >= b.0) {
@@ -3714,11 +3719,9 @@ pub fn parse_full_detail(json: &str, provider_id: &str) -> Option<AiFullDetail> 
                 (Some(s), Some(e)) if e > s => Some((e - s) / 1000),
                 _ => None,
             };
-            let period_hint = full_str(&root, "includedUsagePeriod")
-                .or_else(|| {
-                    full_obj(&root, "planInfo")
-                        .and_then(|p| full_str(p, "includedUsagePeriod"))
-                });
+            let period_hint = full_str(&root, "includedUsagePeriod").or_else(|| {
+                full_obj(&root, "planInfo").and_then(|p| full_str(p, "includedUsagePeriod"))
+            });
             let weekly = period_hint.as_deref() == Some("INCLUDED_USAGE_PERIOD_WEEKLY")
                 || (period_hint.as_deref() != Some("INCLUDED_USAGE_PERIOD_MONTHLY")
                     && seconds.is_some_and(|s| (5 * 86_400..=9 * 86_400).contains(&s)));
@@ -3747,7 +3750,10 @@ pub fn parse_full_detail(json: &str, provider_id: &str) -> Option<AiFullDetail> 
             out.limit_reached = total >= 1.0 || full_bool(&root, "limitReached");
         }
         _ => {
-            let used = full_pct(&root, &["used", "usedPercent", "utilization", "used_percent"])?;
+            let used = full_pct(
+                &root,
+                &["used", "usedPercent", "utilization", "used_percent"],
+            )?;
             out.used = used;
             out.label = "5h".to_owned();
             out.limit_reached = used >= 1.0 || full_bool(&root, "limit_reached");
@@ -3857,7 +3863,12 @@ fn winhttp_json(
         let body_wide = body.map(|b| b.encode_utf16().chain(Some(0)).collect::<Vec<_>>());
         let (body_ptr, body_len) = body_wide
             .as_ref()
-            .map(|b| (b.as_ptr() as *const std::ffi::c_void, (b.len().saturating_sub(1)) * 2))
+            .map(|b| {
+                (
+                    b.as_ptr() as *const std::ffi::c_void,
+                    (b.len().saturating_sub(1)) * 2,
+                )
+            })
             .unwrap_or((std::ptr::null(), 0));
         let sent = WinHttpSendRequest(
             req,
@@ -3940,9 +3951,8 @@ pub fn ai_fetch_full(id: &str) -> AiFullDetail {
     };
 
     if provider == "aiusage_cursor" || provider == "cursor" {
-        let token = crate::platform::cursor_auth::token().or_else(|| {
-            read_provider_token("aiusage_cursor").map(|(t, _)| t)
-        });
+        let token = crate::platform::cursor_auth::token()
+            .or_else(|| read_provider_token("aiusage_cursor").map(|(t, _)| t));
         let Some(token) = token else {
             out.error = Some("sign_in".to_owned());
             return out;
@@ -3987,11 +3997,11 @@ pub fn ai_fetch_full(id: &str) -> AiFullDetail {
         .map(|(_, b, _)| b);
         let merged = if let Some(plan) = plan_body {
             let mut root: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
-            if let Ok(pv) = serde_json::from_str::<serde_json::Value>(&plan) {
-                if let Some(obj) = root.as_object_mut() {
-                    for (k, v) in pv.as_object().cloned().unwrap_or_default() {
-                        obj.entry(k).or_insert(v);
-                    }
+            if let Ok(pv) = serde_json::from_str::<serde_json::Value>(&plan)
+                && let Some(obj) = root.as_object_mut()
+            {
+                for (k, v) in pv.as_object().cloned().unwrap_or_default() {
+                    obj.entry(k).or_insert(v);
                 }
             }
             serde_json::to_string(&root).unwrap_or(body)
@@ -4012,9 +4022,7 @@ pub fn ai_fetch_full(id: &str) -> AiFullDetail {
             vec![("anthropic-beta", "oauth-2025-04-20".to_owned())],
         ),
         "aiusage_codex" | "codex" => ("chatgpt.com", "/backend-api/wham/usage", Vec::new()),
-        "aiusage_opencode" | "opencode" => {
-            ("opencode.ai", "/zen/go/v1/usage", Vec::new())
-        }
+        "aiusage_opencode" | "opencode" => ("opencode.ai", "/zen/go/v1/usage", Vec::new()),
         "aiusage_copilot" | "copilot" => (
             "api.github.com",
             "/copilot_internal/user",
@@ -4115,11 +4123,13 @@ pub fn parse_gpu_usage_counter(output: &str) -> Option<u32> {
 pub fn parse_gpu_temperature_kelvin(raw: &str) -> Option<u32> {
     let tenths = raw.trim().parse::<f64>().ok()?;
     let c = tenths / 10.0 - 273.15;
-    (c.is_finite() && c >= 0.0 && c <= 125.0).then(|| c.round() as u32)
+    (c.is_finite() && (0.0..=125.0).contains(&c)).then(|| c.round() as u32)
 }
 
-static GPU_SAMPLE: std::sync::Mutex<(Option<(u32, Option<u32>)>, Option<Instant>)> =
-    std::sync::Mutex::new((None, None));
+/// Cached `(utilisation %, optional temperature °C)` sample and its timestamp.
+type GpuSample = (Option<(u32, Option<u32>)>, Option<Instant>);
+
+static GPU_SAMPLE: std::sync::Mutex<GpuSample> = std::sync::Mutex::new((None, None));
 
 /// Samples GPU utilisation (%) and, when the platform exposes it, temperature (°C).
 ///
@@ -4215,11 +4225,8 @@ pub fn parse_weather_forecast(root: &serde_json::Value) -> Vec<WeatherDay> {
             let date_str = ts[i].as_str().unwrap_or("");
             let label = if let Some((y, rest)) = date_str.split_once('-')
                 && let Some((m, d)) = rest.split_once('-')
-                && let (Ok(yi), Ok(mi), Ok(di)) = (
-                    y.parse::<i32>(),
-                    m.parse::<u32>(),
-                    d.parse::<u32>(),
-                )
+                && let (Ok(yi), Ok(mi), Ok(di)) =
+                    (y.parse::<i32>(), m.parse::<u32>(), d.parse::<u32>())
             {
                 let wd = weekday_of(yi, mi, di) as usize;
                 SHORT_DAYS.get(wd).copied().unwrap_or(date_str).to_owned()

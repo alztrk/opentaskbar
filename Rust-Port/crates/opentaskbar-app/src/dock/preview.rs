@@ -5,30 +5,31 @@
 //! and an `X` close button per card. Uses 0% 3D GPU overhead because DWM composites thumbnails
 //! directly into the desktop pass.
 
-use crate::design::fonts;
+use crate::design::{self, fonts, gdi_rgb};
 use opentaskbar_shell::tracker;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION, DWM_TNP_VISIBLE,
-    DWMWA_BORDER_COLOR, DWMWA_EXCLUDED_FROM_PEEK, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DwmQueryThumbnailSourceSize, DwmRegisterThumbnail, DwmSetWindowAttribute,
-    DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
+    DWMWA_BORDER_COLOR, DWMWA_EXCLUDED_FROM_PEEK, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DwmQueryThumbnailSourceSize, DwmRegisterThumbnail,
+    DwmSetWindowAttribute, DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE,
-    DT_VCENTER, DeleteObject, DrawTextW, EndPaint, FillRect, InvalidateRect, LineTo, MoveToEx,
-    PAINTSTRUCT, PS_SOLID, RoundRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
+    CreateSolidBrush, DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject,
+    DrawTextW, EndPaint, FillRect, InvalidateRect, LineTo, MoveToEx, PAINTSTRUCT, PS_SOLID,
+    RoundRect, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST,
-    IDC_ARROW, IDC_HAND, LoadCursorW, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SetCursor, SetWindowLongPtrW, SetWindowPos, ShowWindow, WM_LBUTTONUP,
-    WM_MBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
+    GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LoadCursorW, RegisterClassExW, SW_HIDE,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, WM_ERASEBKGND, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR,
+    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::platform::win32;
@@ -61,6 +62,7 @@ struct RegisteredCard {
 pub struct PreviewPopup {
     hwnd: HWND,
     dpi: f32,
+    is_dark: bool,
     visible: bool,
     pointer_inside: bool,
     tracking_mouse: bool,
@@ -147,6 +149,7 @@ impl PreviewPopup {
         let mut popup = Box::new(Self {
             hwnd,
             dpi,
+            is_dark: true,
             visible: false,
             pointer_inside: false,
             tracking_mouse: false,
@@ -220,6 +223,7 @@ impl PreviewPopup {
         items: &[PreviewItem],
         anchor_center_x_px: i32,
         anchor_bottom_y_px: i32,
+        is_dark: bool,
     ) {
         let count = items.len().min(MAX_CARDS);
         if count == 0 {
@@ -228,6 +232,24 @@ impl PreviewPopup {
         }
 
         self.clear_thumbnails();
+        self.is_dark = is_dark;
+        let pal = design::palette(is_dark);
+        unsafe {
+            let dark_val: u32 = u32::from(is_dark);
+            let _ = DwmSetWindowAttribute(
+                self.hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+                (&dark_val as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+            let border = gdi_rgb(pal.border_rgb);
+            let _ = DwmSetWindowAttribute(
+                self.hwnd,
+                DWMWA_BORDER_COLOR as u32,
+                (&border as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+        }
         self.dpi = win32::dpi_scale(self.hwnd as usize);
         let dpi = self.dpi;
 
@@ -348,22 +370,52 @@ impl PreviewPopup {
 
     fn paint(&self) {
         let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
-        let hdc = unsafe { BeginPaint(self.hwnd, &mut ps) };
-        if hdc.is_null() {
+        let screen_hdc = unsafe { BeginPaint(self.hwnd, &mut ps) };
+        if screen_hdc.is_null() {
             return;
         }
         let dpi = self.dpi;
         let header_h = (HEADER_H_DIPS * dpi).round() as i32;
         let inner_pad = (8.0 * dpi).round() as i32;
         let corner = (8.0 * dpi).round() as i32;
+        let pal = design::palette(self.is_dark);
+
+        let mut client = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        unsafe {
+            GetClientRect(self.hwnd, &mut client);
+        }
+        let cw = (client.right - client.left).max(1);
+        let ch = (client.bottom - client.top).max(1);
 
         unsafe {
-            // Fill window background.
-            let bg_brush = CreateSolidBrush(rgb(0x14, 0x17, 0x1f));
-            FillRect(hdc, &ps.rcPaint, bg_brush);
+            let mem_dc = CreateCompatibleDC(screen_hdc);
+            let mem_bmp = if !mem_dc.is_null() {
+                CreateCompatibleBitmap(screen_hdc, cw, ch)
+            } else {
+                std::ptr::null_mut()
+            };
+            let old_bmp = if !mem_bmp.is_null() {
+                SelectObject(mem_dc, mem_bmp as _)
+            } else {
+                std::ptr::null_mut()
+            };
+            let hdc = if !mem_bmp.is_null() {
+                mem_dc
+            } else {
+                screen_hdc
+            };
+
+            // Fill window background from the shared design palette.
+            let bg_brush = CreateSolidBrush(gdi_rgb(pal.surface));
+            FillRect(hdc, &client, bg_brush);
             DeleteObject(bg_brush as _);
 
-            let font_h = -((12.0 * dpi).round() as i32);
+            let font_h = -((fonts::scaled_size(12.0) * dpi).round() as i32);
             let font_name = wide(fonts::native_ui_face());
             let font = CreateFontW(
                 font_h,
@@ -389,14 +441,14 @@ impl PreviewPopup {
                 let is_close_hovered = self.hovered_close == Some(idx);
 
                 let card_bg = if is_hovered {
-                    CreateSolidBrush(rgb(0x22, 0x27, 0x34))
+                    CreateSolidBrush(gdi_rgb(pal.hover))
                 } else {
-                    CreateSolidBrush(rgb(0x1b, 0x1f, 0x2a))
+                    CreateSolidBrush(gdi_rgb(pal.elevated))
                 };
                 let card_pen = if is_hovered {
-                    CreatePen(PS_SOLID, 1, rgb(0x4b, 0x55, 0x6b))
+                    CreatePen(PS_SOLID, 1, gdi_rgb(pal.selected_stroke))
                 } else {
-                    CreatePen(PS_SOLID, 1, rgb(0x2b, 0x30, 0x3e))
+                    CreatePen(PS_SOLID, 1, gdi_rgb(pal.border_rgb))
                 };
                 let old_brush = SelectObject(hdc, card_bg as _);
                 let old_pen = SelectObject(hdc, card_pen as _);
@@ -415,7 +467,7 @@ impl PreviewPopup {
                 DeleteObject(card_pen as _);
 
                 // Window title.
-                SetTextColor(hdc, rgb(0xf1, 0xf5, 0xf9));
+                SetTextColor(hdc, gdi_rgb(pal.text_primary));
                 let mut title_rc = RECT {
                     left: card.card_rect.left + inner_pad,
                     top: card.card_rect.top,
@@ -436,20 +488,18 @@ impl PreviewPopup {
 
                 // Close button (`X`).
                 if is_hovered || is_close_hovered {
-                    let btn_bg = if is_close_hovered {
-                        CreateSolidBrush(rgb(0xdc, 0x26, 0x26))
+                    let btn_col = if is_close_hovered {
+                        gdi_rgb(pal.danger)
                     } else {
-                        CreateSolidBrush(rgb(0x2e, 0x34, 0x44))
+                        gdi_rgb(pal.hover)
                     };
-                    let btn_pen = CreatePen(
-                        PS_SOLID,
-                        1,
-                        if is_close_hovered {
-                            rgb(0xdc, 0x26, 0x26)
-                        } else {
-                            rgb(0x2e, 0x34, 0x44)
-                        },
-                    );
+                    let btn_border = if is_close_hovered {
+                        gdi_rgb(pal.danger)
+                    } else {
+                        gdi_rgb(pal.border_rgb)
+                    };
+                    let btn_bg = CreateSolidBrush(btn_col);
+                    let btn_pen = CreatePen(PS_SOLID, 1, btn_border);
                     let ob = SelectObject(hdc, btn_bg as _);
                     let op = SelectObject(hdc, btn_pen as _);
                     let r = (5.0 * dpi).round() as i32;
@@ -467,11 +517,12 @@ impl PreviewPopup {
                     DeleteObject(btn_bg as _);
                     DeleteObject(btn_pen as _);
 
-                    let x_pen = CreatePen(
-                        PS_SOLID,
-                        (1.5 * dpi).round().max(1.0) as i32,
-                        rgb(0xf8, 0xfa, 0xfc),
-                    );
+                    let x_col = if is_close_hovered {
+                        rgb(0xff, 0xff, 0xff)
+                    } else {
+                        gdi_rgb(pal.text_primary)
+                    };
+                    let x_pen = CreatePen(PS_SOLID, (1.5 * dpi).round().max(1.0) as i32, x_col);
                     let ox = SelectObject(hdc, x_pen as _);
                     let pad_x = (6.0 * dpi).round() as i32;
                     MoveToEx(
@@ -503,6 +554,15 @@ impl PreviewPopup {
 
             SelectObject(hdc, old_font);
             DeleteObject(font as _);
+
+            if !mem_bmp.is_null() {
+                let _ = BitBlt(screen_hdc, 0, 0, cw, ch, mem_dc, 0, 0, SRCCOPY);
+                SelectObject(mem_dc, old_bmp);
+                DeleteObject(mem_bmp as _);
+            }
+            if !mem_dc.is_null() {
+                DeleteDC(mem_dc);
+            }
             EndPaint(self.hwnd, &ps);
         }
     }
@@ -574,7 +634,7 @@ impl PreviewPopup {
                 }
                 let center_x = (rc.left + rc.right) / 2;
                 let bottom_y = rc.bottom;
-                self.show(&key, &remaining, center_x, bottom_y);
+                self.show(&key, &remaining, center_x, bottom_y, self.is_dark);
             }
         } else {
             self.hide();
@@ -622,6 +682,7 @@ unsafe extern "system" fn preview_wnd_proc(
     }
     let popup = unsafe { &mut *ptr };
     match msg {
+        WM_ERASEBKGND => 1,
         WM_PAINT => {
             popup.paint();
             0
