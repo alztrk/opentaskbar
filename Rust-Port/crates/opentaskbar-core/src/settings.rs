@@ -1,13 +1,20 @@
 //! Persisted settings compatible with OpenTaskbar's C# `settings.json`.
-//! Unknown fields are preserved via `extra` so switching between builds never drops data.
+//!
+//! Every C# `DockSettings` property has either a typed field here or a serde alias that feeds one.
+//! Unknown fields (and all C# profile properties that the port does not consume) are preserved in
+//! `extra`/`DockProfile::extra` so switching between the C# and Rust builds never drops data.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Deserializer, Serialize};
+use crate::hotkey::{HotkeyBinding, HotkeyChoice};
+use serde::de::{Deserializer, Error as DeError, Visitor};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Map, Value};
+
+// ---- WIP helpers kept from the pre-integration port ----
 
 fn default_language() -> String {
     crate::i18n::system_language()
@@ -26,9 +33,16 @@ fn is_disabled_hotkey(value: &str) -> bool {
         || value.eq_ignore_ascii_case("Escape")
 }
 
-/// C# persists `SystemMeters` as a JSON string (`"Cpu, Memory, Gpu"`) through
-/// `JsonStringEnumConverter`, while older builds used the numeric bitmask. Accept both so a
-/// C# settings file is never rejected for a single field.
+fn default_true() -> bool {
+    true
+}
+
+fn default_dynamic_island_opacity() -> f64 {
+    0.9
+}
+
+/// C# `SystemMeters` is written as `"Cpu, Memory, Gpu"` by `JsonStringEnumConverter`, while older
+/// builds used a numeric bitmask. Accept both; keep the retired CPU-temperature bit slot unused.
 fn deserialize_stats_meters<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
     #[derive(Deserialize)]
     #[serde(untagged)]
@@ -42,7 +56,6 @@ fn deserialize_stats_meters<'de, D: Deserializer<'de>>(deserializer: D) -> Resul
             "cpu" => 1,
             "memory" => 2,
             "battery" => 4,
-            // Retired flag: keep the numeric slot (8) unused for compatibility.
             "cputemperature" | "cpu temperature" => 0,
             "gpu" => 16,
             "gputemperature" | "gpu temperature" => 32,
@@ -62,8 +75,7 @@ fn deserialize_stats_meters<'de, D: Deserializer<'de>>(deserializer: D) -> Resul
     })
 }
 
-/// Accepts C# `AppLanguageConverter` values: BCP 47 strings, legacy English
-/// names and legacy numeric codes. Unknown values fall back to the system UI language.
+/// Accepts C# `AppLanguageConverter` values: BCP 47 strings, legacy English names and numeric codes.
 fn deserialize_language<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
     let value = Value::deserialize(deserializer)?;
     let candidate = match value {
@@ -86,6 +98,16 @@ fn deserialize_language<'de, D: Deserializer<'de>>(deserializer: D) -> Result<St
         default_language()
     })
 }
+
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    T: Default + Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+pub const DYNAMIC_ISLAND_ALL_DISPLAYS: &str = "*";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DockPosition {
@@ -136,6 +158,37 @@ pub enum SurfaceBackground {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DockLayout {
+    #[default]
+    Floating,
+    FullWidth,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DockContentAlignment {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StartButtonAction {
+    #[default]
+    WindowsStart,
+    Launcher,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StartButtonPlacement {
+    #[default]
+    Start,
+    End,
+    Hidden,
+    InWidgets,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ClockDateStyle {
     #[default]
     DayAndShortDate,
@@ -163,6 +216,20 @@ pub enum ClockDateLayout {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TemperatureUnit {
+    #[default]
+    Celsius,
+    Fahrenheit,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SecondaryAppScope {
+    #[default]
+    CurrentMonitorOnly,
+    AllMonitors,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WidgetDensityMode {
     #[default]
     Auto,
@@ -177,22 +244,124 @@ pub enum DynamicIslandVisibilityMode {
     DesktopOnly,
 }
 
-pub const DYNAMIC_ISLAND_ALL_DISPLAYS: &str = "*";
-
-fn default_true() -> bool {
-    true
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DockWidthMode {
+    #[default]
+    Auto,
+    Pixels,
+    Percent,
+    Fill,
 }
 
-fn default_dynamic_island_opacity() -> f64 {
-    0.9
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DockHeightMode {
+    #[default]
+    Auto,
+    Pixels,
+    Percent,
+    Fill,
 }
 
-fn deserialize_null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    T: Default + Deserialize<'de>,
-    D: Deserializer<'de>,
-{
-    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DockGapUnit {
+    #[default]
+    Pixels,
+    Percent,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AiUsageRing {
+    #[default]
+    Highest,
+    Session,
+    Weekly,
+}
+
+/// C# `SystemMeters` flags. Bit 8 (CpuTemperature) and bit 4 (Battery) are retired but their
+/// numeric values must stay stable in existing settings files.
+pub mod stats_meters {
+    pub const NONE: u64 = 0;
+    pub const CPU: u64 = 1;
+    pub const MEMORY: u64 = 2;
+    pub const GPU: u64 = 16;
+    pub const GPU_TEMPERATURE: u64 = 32;
+    pub const ALL: u64 = CPU | MEMORY | GPU | GPU_TEMPERATURE;
+}
+
+/// C# `AiProviders` flags; the retired single "AiUsage" widget is split by these bits.
+pub mod ai_providers {
+    pub const CLAUDE: u32 = 1;
+    pub const CODEX: u32 = 2;
+    pub const ANTIGRAVITY: u32 = 4;
+    pub const OPEN_CODE: u32 = 8;
+    pub const COPILOT: u32 = 16;
+    pub const DEEP_SEEK: u32 = 32;
+    pub const OPEN_ROUTER: u32 = 64;
+    pub const CURSOR: u32 = 128;
+    pub const ALL: u32 =
+        CLAUDE | CODEX | ANTIGRAVITY | OPEN_CODE | COPILOT | DEEP_SEEK | OPEN_ROUTER | CURSOR;
+
+    /// Widget IDs in the same order as C# `DockWidgetService.AiUsageWidgets`.
+    pub const WIDGETS: [(u32, &str); 8] = [
+        (CLAUDE, "AiUsageClaude"),
+        (CODEX, "AiUsageCodex"),
+        (ANTIGRAVITY, "AiUsageAntigravity"),
+        (OPEN_CODE, "AiUsageOpenCode"),
+        (COPILOT, "AiUsageCopilot"),
+        (DEEP_SEEK, "AiUsageDeepSeek"),
+        (OPEN_ROUTER, "AiUsageOpenRouter"),
+        (CURSOR, "AiUsageCursor"),
+    ];
+}
+
+pub mod antigravity_groups {
+    pub const GEMINI: u32 = 1;
+    pub const CLAUDE: u32 = 2;
+    pub const ARGON: u32 = 4;
+    pub const ALL: u32 = GEMINI | CLAUDE | ARGON;
+}
+
+/// All C# `DockWidgetService` IDs, including the hidden legacy aliases `Date` and `ShowDesktop`.
+pub const SUPPORTED_WIDGET_IDS: [&str; 25] = [
+    "Clock",
+    "Weather",
+    "DayProgress",
+    "Stopwatch",
+    "Countdown",
+    "SystemStats",
+    "NetSpeed",
+    "Battery",
+    "BluetoothBattery",
+    "Storage",
+    "AiUsageClaude",
+    "AiUsageCodex",
+    "AiUsageAntigravity",
+    "AiUsageOpenCode",
+    "AiUsageCopilot",
+    "AiUsageDeepSeek",
+    "AiUsageOpenRouter",
+    "AiUsageCursor",
+    "Media",
+    "Audio",
+    "QuickSettings",
+    "KeyboardLayout",
+    "Focus",
+    "Date",
+    "ShowDesktop",
+];
+
+/// Catalog cards only (C# `CatalogDescriptors`): used by island placement limits.
+pub const CATALOG_WIDGET_COUNT: usize = 23;
+
+const RETIRED_WIDGET_IDS: [&str; 4] = ["Memory", "Search", "Desktops", "Tray"];
+const MAX_PINNED_TRAY_ICONS: usize = 64;
+const MAX_PINNED_TRAY_KEY_LEN: usize = 512;
+const MAX_ICON_PADDING: i32 = 12;
+
+pub fn is_supported_widget_id(id: &str) -> bool {
+    SUPPORTED_WIDGET_IDS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(id))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -203,37 +372,71 @@ pub struct DockAppGroup {
     pub executable_paths: Vec<String>,
 }
 
-/// C# `DockProfileService.Capture` only writes `Name`, `HiddenApps` and a handful of optional
-/// profile-scoped fields. Missing fields must fall back instead of rejecting the whole settings file.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// A C# `DockProfile` snapshot. All C# properties are typed with defaults, and any future
+/// property is preserved in `extra` for a lossless round-trip.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct DockProfile {
     pub name: String,
     pub position: DockPosition,
     pub size: DockSize,
     pub auto_hide: AutoHideMode,
-    #[serde(alias = "Widgets")]
+    /// C# calls this `Widgets`; the port's historic name is `EnabledWidgets`.
+    #[serde(alias = "Widgets", deserialize_with = "null_as_empty")]
     pub enabled_widgets: Vec<String>,
+    #[serde(deserialize_with = "null_as_empty")]
+    pub hidden_apps: Vec<String>,
+    #[serde(deserialize_with = "null_as_empty")]
+    pub installed_widgets: Vec<String>,
+    #[serde(deserialize_with = "null_as_empty")]
+    pub widget_order: Vec<String>,
+    #[serde(deserialize_with = "null_as_empty")]
+    pub dock_item_order: Vec<String>,
+    pub dock_width_mode: Option<DockWidthMode>,
+    pub dock_width_pixels: Option<i32>,
+    pub dock_width_percent: Option<i32>,
+    pub theme: Option<AppTheme>,
+    pub theme_pack: Option<String>,
+    pub theme_application_icons: Option<bool>,
+    pub launcher_hotkey: Option<HotkeyChoice>,
+    pub dock_hotkey: Option<HotkeyChoice>,
+    pub custom_launcher_hotkey: Option<String>,
+    pub custom_dock_hotkey: Option<String>,
+    /// Unknown keys from newer/older builds preserved on round-trip save.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl Default for DockProfile {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            position: DockPosition::default(),
+            size: DockSize::default(),
+            auto_hide: AutoHideMode::default(),
+            enabled_widgets: Vec::new(),
+            hidden_apps: Vec::new(),
+            installed_widgets: Vec::new(),
+            widget_order: Vec::new(),
+            dock_item_order: Vec::new(),
+            dock_width_mode: None,
+            dock_width_pixels: None,
+            dock_width_percent: None,
+            theme: None,
+            theme_pack: None,
+            theme_application_icons: None,
+            launcher_hotkey: None,
+            dock_hotkey: None,
+            custom_launcher_hotkey: None,
+            custom_dock_hotkey: None,
+            extra: Map::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct DockSettings {
-    /// BCP 47 UI culture, e.g. `"tr-TR"`. Same JSON key as C# `DockSettings.Language`.
-    #[serde(
-        default = "default_language",
-        deserialize_with = "deserialize_language"
-    )]
-    pub language: String,
-    /// User-selected Windows font family. Empty means "use the Windows native UI font".
-    #[serde(default)]
-    pub ui_font_family: String,
-    /// Base UI font size in pixels (9..24). Scales menus, flyouts, tooltips and dialogs.
-    #[serde(default = "default_font_size")]
-    pub ui_font_size: f32,
-    /// Active theme pack id (C# `ThemePack`). Empty means the built-in palette.
-    #[serde(default)]
-    pub theme_pack: String,
     pub position: DockPosition,
     pub edge: DockEdge,
     pub size: DockSize,
@@ -243,21 +446,38 @@ pub struct DockSettings {
     pub dock_opacity: f64,
     pub dock_border_thickness: f64,
     pub dock_corner_radius: Option<i32>,
+    #[serde(deserialize_with = "null_as_i32")]
     pub dock_bottom_gap_pixels: i32,
     pub dock_icon_padding: i32,
     pub dock_scale: f64,
     pub animations_enabled: bool,
     pub magnification_enabled: bool,
+    #[serde(alias = "FocusModeEnabled")]
     pub focus_mode: bool,
     pub show_recycle_bin: bool,
     pub show_tray_button: bool,
     pub show_on_all_monitors: bool,
     pub show_desktop_button: bool,
+    /// C# persists `Layout` as the `DockLayout` enum string; the port stores a bool.
+    #[serde(alias = "Layout", deserialize_with = "deserialize_layout_bool")]
     pub full_width: bool,
     pub dock_custom_width_dips: Option<f32>,
     pub reveal_dock_on_win_key: bool,
     pub current_desktop_only: bool,
-    /// C# `Clock24Hour` / `ClockShowSeconds` / `DateStyle` / `DateFormat` / `ClockDateLayout`.
+
+    // ---- WIP settings kept from the pre-integration port ----
+    /// BCP 47 UI culture. C# `AppLanguageConverter` values are normalized on load.
+    #[serde(
+        default = "default_language",
+        deserialize_with = "deserialize_language"
+    )]
+    pub language: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub ui_font_family: String,
+    #[serde(default = "default_font_size")]
+    pub ui_font_size: f32,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub theme_pack: String,
     pub clock_24_hour: bool,
     pub clock_show_seconds: bool,
     pub date_style: ClockDateStyle,
@@ -267,7 +487,8 @@ pub struct DockSettings {
     #[serde(deserialize_with = "deserialize_stats_meters")]
     pub stats_meters: u32,
     pub global_widget_density: WidgetDensityMode,
-    /// Independent materials for the four UI surfaces (C# `SurfaceKind`).
+    #[serde(default = "default_true")]
+    pub check_updates: bool,
     pub menu_background: SurfaceBackground,
     pub widget_background: SurfaceBackground,
     pub settings_background: SurfaceBackground,
@@ -279,32 +500,7 @@ pub struct DockSettings {
     pub widget_border_color: Option<String>,
     pub settings_border_thickness: f64,
     pub settings_border_color: Option<String>,
-    /// Persisted C# `HotkeyChoice` names; global registration happens in the dock process.
-    pub launcher_hotkey: String,
-    pub dock_hotkey: String,
-    /// Custom hotkey text (C# `CustomLauncherHotkey` / `CustomDockHotkey`).
-    #[serde(default)]
-    pub custom_launcher_hotkey: Option<String>,
-    #[serde(default)]
-    pub custom_dock_hotkey: Option<String>,
-    pub check_updates: bool,
-    pub show_clock_widget: bool,
-    pub show_system_stats_widget: bool,
-    /// Explicitly user-enabled widget IDs (e.g. `"clock"`, `"stats"`, `"audio"`, `"media"`,
-    /// `"netspeed"`, `"battery"`, `"storage"`, `"keyboard"`, `"dayprogress"`, `"stopwatch"`,
-    /// `"countdown"`, `"focus"`, `"weather"`, `"quicksettings"`). Empty by default.
-    pub enabled_widgets: Vec<String>,
-    pub weather_city: String,
-    pub stack_folders: Vec<String>,
-    pub app_groups: Vec<DockAppGroup>,
-    pub profiles: Vec<DockProfile>,
-    pub active_profile: Option<String>,
-    pub pin_order: Option<Vec<String>>,
-    pub user_pinned_apps: Vec<String>,
-    pub user_unpinned_apps: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub user_pinned_background_apps: Vec<String>,
-    /// Dynamic Island widget placements keyed by widget ID -> display device name (`"*"` = all displays).
+    /// Island widget placements: widget id -> display name (`"*"` = all displays).
     #[serde(
         default,
         deserialize_with = "deserialize_null_default",
@@ -314,28 +510,120 @@ pub struct DockSettings {
     pub dynamic_island_visibility: DynamicIslandVisibilityMode,
     #[serde(default = "default_true")]
     pub dynamic_island_hide_in_fullscreen: bool,
-    /// Master switch for the floating island windows (C# `DynamicIslandEnable`).
     #[serde(default = "default_true")]
     pub dynamic_island_enable: bool,
-    /// Hide the island while a full-screen app occupies its display (C# `DynamicIslandAutoHide`).
-    #[serde(default)]
     pub dynamic_island_auto_hide: bool,
-    /// Island material (C# `DynamicIslandBackground`).
-    #[serde(default)]
     pub dynamic_island_background: SurfaceBackground,
-    /// Island chrome opacity (C# `DynamicIslandOpacity`).
     #[serde(default = "default_dynamic_island_opacity")]
     pub dynamic_island_opacity: f64,
-    /// Use theme-derived colors for the island material (C# `DynamicIslandUseTheme`).
     #[serde(default = "default_true")]
     pub dynamic_island_use_theme: bool,
-    /// Per-display Dynamic Island widget ordering keyed by display device name.
     #[serde(
         default,
         deserialize_with = "deserialize_null_default",
         skip_serializing_if = "HashMap::is_empty"
     )]
     pub dynamic_island_widget_orders: HashMap<String, Vec<String>>,
+
+    #[serde(alias = "ShowClock")]
+    pub show_clock_widget: bool,
+    #[serde(alias = "ShowSystemStats")]
+    pub show_system_stats_widget: bool,
+    /// Explicitly enabled widget IDs. C# writes this key as `Widgets`.
+    #[serde(alias = "Widgets", deserialize_with = "null_as_empty")]
+    pub enabled_widgets: Vec<String>,
+    pub weather_city: String,
+    #[serde(deserialize_with = "null_as_empty")]
+    pub stack_folders: Vec<String>,
+    #[serde(deserialize_with = "null_as_empty_groups")]
+    pub app_groups: Vec<DockAppGroup>,
+    #[serde(deserialize_with = "null_as_empty_profiles")]
+    pub profiles: Vec<DockProfile>,
+    pub active_profile: Option<String>,
+    pub pin_order: Option<Vec<String>>,
+    #[serde(deserialize_with = "null_as_empty")]
+    pub user_pinned_apps: Vec<String>,
+    #[serde(deserialize_with = "null_as_empty")]
+    pub user_unpinned_apps: Vec<String>,
+    /// C# persistent tray pins (`PinnedTrayIcons`) map onto this historic port field.
+    #[serde(
+        alias = "PinnedTrayIcons",
+        deserialize_with = "null_as_empty",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub user_pinned_background_apps: Vec<String>,
+
+    // ---- 49 C# properties added for full settings parity ----
+    pub previews_enabled: bool,
+    pub notification_badges_enabled: bool,
+    pub menu_opacity: f64,
+    pub widget_opacity: f64,
+    pub settings_opacity: f64,
+    #[serde(deserialize_with = "null_as_empty")]
+    pub installed_widgets: Vec<String>,
+    pub content_alignment: DockContentAlignment,
+    pub show_media: bool,
+    pub show_focus: bool,
+    pub show_audio: bool,
+    pub show_quick_settings: bool,
+    pub focus_minutes: i32,
+    pub focus_break_minutes: i32,
+    pub focus_sessions: i32,
+    pub start_action: StartButtonAction,
+    pub start_placement: StartButtonPlacement,
+    pub start_widget_index: i32,
+    pub wheel_volume_enabled: bool,
+    pub show_weather: bool,
+    pub target_display: Option<String>,
+    pub secondary_apps: SecondaryAppScope,
+    pub secondary_widgets: bool,
+    #[serde(deserialize_with = "null_as_empty")]
+    pub widget_order: Vec<String>,
+    pub theme_application_icons: bool,
+    #[serde(deserialize_with = "null_as_density_map")]
+    pub widget_density_overrides: BTreeMap<String, WidgetDensityMode>,
+    #[serde(deserialize_with = "null_as_empty")]
+    pub dock_item_order: Vec<String>,
+    #[serde(
+        deserialize_with = "deserialize_ai_providers",
+        serialize_with = "serialize_ai_providers"
+    )]
+    pub ai_usage_providers: u32,
+    pub ai_usage_ring: AiUsageRing,
+    #[serde(
+        deserialize_with = "deserialize_antigravity_groups",
+        serialize_with = "serialize_antigravity_groups"
+    )]
+    pub antigravity_groups: u32,
+    pub show_search_button: bool,
+    pub show_task_view_button: bool,
+    pub dock_width_mode: DockWidthMode,
+    pub dock_width_pixels: i32,
+    pub dock_width_percent: i32,
+    pub dock_top_gap_unit: DockGapUnit,
+    pub dock_top_gap_pixels: i32,
+    pub dock_top_gap_percent: i32,
+    pub dock_bottom_gap_unit: DockGapUnit,
+    pub dock_bottom_gap_percent: i32,
+    pub dock_height_mode: DockHeightMode,
+    pub dock_height_pixels: i32,
+    pub dock_height_percent: i32,
+    pub wireless_battery_poll_seconds: i32,
+    pub wireless_battery_low_threshold: i32,
+    #[serde(deserialize_with = "null_as_empty")]
+    pub ignored_wireless_devices: Vec<String>,
+    #[serde(deserialize_with = "null_as_alias_map")]
+    pub wireless_device_aliases: BTreeMap<String, String>,
+    pub wireless_battery_listen_only: bool,
+    pub weather_unit: TemperatureUnit,
+    pub mirror_main_dock: bool,
+
+    // Hotkeys are needed by `validate()` (C# `IsValid` rejects launcher/dock conflicts).
+    pub launcher_hotkey: HotkeyChoice,
+    pub dock_hotkey: HotkeyChoice,
+    pub custom_launcher_hotkey: Option<String>,
+    pub custom_dock_hotkey: Option<String>,
+
     /// Unknown keys from other OpenTaskbar builds preserved on round-trip save.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -344,20 +632,16 @@ pub struct DockSettings {
 impl Default for DockSettings {
     fn default() -> Self {
         Self {
-            language: default_language(),
-            ui_font_family: String::new(),
-            ui_font_size: default_font_size(),
-            theme_pack: String::new(),
             position: DockPosition::Center,
             edge: DockEdge::Bottom,
             size: DockSize::Compact,
             theme: AppTheme::System,
             auto_hide: AutoHideMode::Disabled,
             dock_background: SurfaceBackground::Glass,
-            dock_opacity: 0.88,
+            dock_opacity: 0.9,
             dock_border_thickness: 1.0,
             dock_corner_radius: None,
-            dock_bottom_gap_pixels: 8,
+            dock_bottom_gap_pixels: 6,
             dock_icon_padding: 0,
             dock_scale: 1.0,
             animations_enabled: true,
@@ -371,13 +655,19 @@ impl Default for DockSettings {
             dock_custom_width_dips: None,
             reveal_dock_on_win_key: true,
             current_desktop_only: false,
+
+            language: default_language(),
+            ui_font_family: String::new(),
+            ui_font_size: default_font_size(),
+            theme_pack: String::new(),
             clock_24_hour: true,
             clock_show_seconds: false,
             date_style: ClockDateStyle::DayAndShortDate,
             date_format: ClockDateFormat::System,
             clock_date_layout: ClockDateLayout::Beside,
-            stats_meters: 1 | 2 | 16 | 32,
+            stats_meters: stats_meters::ALL as u32,
             global_widget_density: WidgetDensityMode::Auto,
+            check_updates: true,
             menu_background: SurfaceBackground::Glass,
             widget_background: SurfaceBackground::Glass,
             settings_background: SurfaceBackground::Glass,
@@ -389,15 +679,20 @@ impl Default for DockSettings {
             widget_border_color: None,
             settings_border_thickness: 1.0,
             settings_border_color: None,
-            launcher_hotkey: "AltSpace".to_owned(),
-            dock_hotkey: "CtrlAltD".to_owned(),
-            custom_launcher_hotkey: None,
-            custom_dock_hotkey: None,
-            check_updates: true,
+            dynamic_island_placements: HashMap::new(),
+            dynamic_island_visibility: DynamicIslandVisibilityMode::Always,
+            dynamic_island_hide_in_fullscreen: true,
+            dynamic_island_enable: true,
+            dynamic_island_auto_hide: false,
+            dynamic_island_background: SurfaceBackground::Glass,
+            dynamic_island_opacity: default_dynamic_island_opacity(),
+            dynamic_island_use_theme: true,
+            dynamic_island_widget_orders: HashMap::new(),
+
             show_clock_widget: false,
             show_system_stats_widget: false,
             enabled_widgets: Vec::new(),
-            weather_city: "Istanbul".to_owned(),
+            weather_city: String::new(),
             stack_folders: Vec::new(),
             app_groups: Vec::new(),
             profiles: Vec::new(),
@@ -406,23 +701,267 @@ impl Default for DockSettings {
             user_pinned_apps: Vec::new(),
             user_unpinned_apps: Vec::new(),
             user_pinned_background_apps: Vec::new(),
-            dynamic_island_placements: HashMap::new(),
-            dynamic_island_visibility: DynamicIslandVisibilityMode::Always,
-            dynamic_island_hide_in_fullscreen: true,
-            dynamic_island_enable: true,
-            dynamic_island_auto_hide: false,
-            dynamic_island_background: SurfaceBackground::Glass,
-            dynamic_island_opacity: 0.9,
-            dynamic_island_use_theme: true,
-            dynamic_island_widget_orders: HashMap::new(),
+
+            previews_enabled: true,
+            notification_badges_enabled: true,
+            menu_opacity: 0.9,
+            widget_opacity: 0.9,
+            settings_opacity: 0.9,
+            installed_widgets: Vec::new(),
+            content_alignment: DockContentAlignment::Center,
+            show_media: false,
+            show_focus: false,
+            show_audio: false,
+            show_quick_settings: false,
+            focus_minutes: 25,
+            focus_break_minutes: 5,
+            focus_sessions: 4,
+            start_action: StartButtonAction::WindowsStart,
+            start_placement: StartButtonPlacement::Start,
+            start_widget_index: 0,
+            wheel_volume_enabled: false,
+            show_weather: false,
+            target_display: None,
+            secondary_apps: SecondaryAppScope::CurrentMonitorOnly,
+            secondary_widgets: true,
+            widget_order: Vec::new(),
+            theme_application_icons: true,
+            widget_density_overrides: BTreeMap::new(),
+            dock_item_order: Vec::new(),
+            ai_usage_providers: 0,
+            ai_usage_ring: AiUsageRing::Highest,
+            antigravity_groups: antigravity_groups::ALL,
+            show_search_button: true,
+            show_task_view_button: true,
+            dock_width_mode: DockWidthMode::Auto,
+            dock_width_pixels: 900,
+            dock_width_percent: 60,
+            dock_top_gap_unit: DockGapUnit::Pixels,
+            dock_top_gap_pixels: 0,
+            dock_top_gap_percent: 0,
+            dock_bottom_gap_unit: DockGapUnit::Pixels,
+            dock_bottom_gap_percent: 0,
+            dock_height_mode: DockHeightMode::Auto,
+            dock_height_pixels: 48,
+            dock_height_percent: 7,
+            wireless_battery_poll_seconds: 30,
+            wireless_battery_low_threshold: 0,
+            ignored_wireless_devices: Vec::new(),
+            wireless_device_aliases: BTreeMap::new(),
+            wireless_battery_listen_only: false,
+            weather_unit: TemperatureUnit::Celsius,
+            mirror_main_dock: false,
+
+            launcher_hotkey: HotkeyChoice::AltSpace,
+            dock_hotkey: HotkeyChoice::CtrlAltD,
+            custom_launcher_hotkey: None,
+            custom_dock_hotkey: None,
             extra: Map::new(),
         }
     }
 }
 
+// ---- serde helpers: C# writes `null` for unset lists/maps and `Layout` as an enum string ----
+
+fn null_as_empty<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<Vec<String>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn null_as_empty_groups<'de, D>(deserializer: D) -> Result<Vec<DockAppGroup>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<Vec<DockAppGroup>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn null_as_empty_profiles<'de, D>(deserializer: D) -> Result<Vec<DockProfile>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<Vec<DockProfile>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn null_as_i32<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<i32>::deserialize(deserializer)?.unwrap_or(6))
+}
+
+fn null_as_density_map<'de, D>(
+    deserializer: D,
+) -> Result<BTreeMap<String, WidgetDensityMode>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(
+        Option::<BTreeMap<String, WidgetDensityMode>>::deserialize(deserializer)?
+            .unwrap_or_default(),
+    )
+}
+
+fn null_as_alias_map<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<BTreeMap<String, String>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn deserialize_layout_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct LayoutVisitor;
+    impl<'de> Visitor<'de> for LayoutVisitor {
+        type Value = bool;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("a bool or C# DockLayout string (Floating/FullWidth)")
+        }
+        fn visit_bool<E: DeError>(self, value: bool) -> Result<bool, E> {
+            Ok(value)
+        }
+        fn visit_str<E: DeError>(self, value: &str) -> Result<bool, E> {
+            if value.eq_ignore_ascii_case("FullWidth") {
+                Ok(true)
+            } else if value.eq_ignore_ascii_case("Floating") {
+                Ok(false)
+            } else {
+                Err(E::custom("unknown DockLayout value"))
+            }
+        }
+        fn visit_unit<E: DeError>(self) -> Result<bool, E> {
+            Ok(false)
+        }
+    }
+    deserializer.deserialize_any(LayoutVisitor)
+}
+
+// C# `JsonStringEnumConverter` writes `[Flags]` enums as "None", "All" or "A, B"; older files
+// sometimes carry raw integers. Both representations must round-trip.
+fn parse_flag_names<'de, D>(
+    deserializer: D,
+    names: &[(u32, &str)],
+    all: u32,
+) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Value::deserialize(deserializer)? {
+        Value::Number(number) => Ok(number.as_u64().unwrap_or(0) as u32),
+        Value::Null => Ok(0),
+        Value::String(text) => {
+            let mut bits = 0u32;
+            for token in text.split(',').map(str::trim) {
+                if token.is_empty() || token.eq_ignore_ascii_case("None") {
+                    continue;
+                }
+                if token.eq_ignore_ascii_case("All") {
+                    bits |= all;
+                    continue;
+                }
+                match names
+                    .iter()
+                    .find(|(_, name)| name.eq_ignore_ascii_case(token))
+                {
+                    Some((bit, _)) => bits |= *bit,
+                    None => return Err(D::Error::custom("unknown flag name in settings")),
+                }
+            }
+            Ok(bits)
+        }
+        _ => Err(D::Error::custom("flags must be a number or enum string")),
+    }
+}
+
+fn write_flag_names<S>(
+    value: &u32,
+    serializer: S,
+    names: &[(u32, &str)],
+    all: u32,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let text = if *value == 0 {
+        "None".to_owned()
+    } else if *value == all {
+        "All".to_owned()
+    } else {
+        names
+            .iter()
+            .filter(|(bit, _)| value & *bit != 0)
+            .map(|(_, name)| *name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    serializer.serialize_str(&text)
+}
+
+fn deserialize_ai_providers<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    const NAMES: [(u32, &str); 8] = [
+        (ai_providers::CLAUDE, "Claude"),
+        (ai_providers::CODEX, "Codex"),
+        (ai_providers::ANTIGRAVITY, "Antigravity"),
+        (ai_providers::OPEN_CODE, "OpenCode"),
+        (ai_providers::COPILOT, "Copilot"),
+        (ai_providers::DEEP_SEEK, "DeepSeek"),
+        (ai_providers::OPEN_ROUTER, "OpenRouter"),
+        (ai_providers::CURSOR, "Cursor"),
+    ];
+    parse_flag_names(deserializer, &NAMES, ai_providers::ALL)
+}
+
+fn serialize_ai_providers<S>(value: &u32, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    const NAMES: [(u32, &str); 8] = [
+        (ai_providers::CLAUDE, "Claude"),
+        (ai_providers::CODEX, "Codex"),
+        (ai_providers::ANTIGRAVITY, "Antigravity"),
+        (ai_providers::OPEN_CODE, "OpenCode"),
+        (ai_providers::COPILOT, "Copilot"),
+        (ai_providers::DEEP_SEEK, "DeepSeek"),
+        (ai_providers::OPEN_ROUTER, "OpenRouter"),
+        (ai_providers::CURSOR, "Cursor"),
+    ];
+    write_flag_names(value, serializer, &NAMES, ai_providers::ALL)
+}
+
+fn deserialize_antigravity_groups<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    const NAMES: [(u32, &str); 3] = [
+        (antigravity_groups::GEMINI, "Gemini"),
+        (antigravity_groups::CLAUDE, "Claude"),
+        (antigravity_groups::ARGON, "Argon"),
+    ];
+    parse_flag_names(deserializer, &NAMES, antigravity_groups::ALL)
+}
+
+fn serialize_antigravity_groups<S>(value: &u32, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    const NAMES: [(u32, &str); 3] = [
+        (antigravity_groups::GEMINI, "Gemini"),
+        (antigravity_groups::CLAUDE, "Claude"),
+        (antigravity_groups::ARGON, "Argon"),
+    ];
+    write_flag_names(value, serializer, &NAMES, antigravity_groups::ALL)
+}
+
 impl DockSettings {
-    /// Effective launcher hotkey: custom text wins over the persisted enum name.
-    /// `"Disabled"` is an explicit opt-out, not an invalid value that falls back to the legacy binding.
+    /// Effective launcher hotkey: custom text wins over the persisted enum choice.
+    /// `"Disabled"`, `"Backspace"`, `"Esc"` and `"Escape"` are explicit opt-outs and never
+    /// fall back to the legacy binding (WIP behavior).
     pub fn launcher_binding(&self) -> Option<crate::hotkey::HotkeyBinding> {
         if self
             .custom_launcher_hotkey
@@ -433,11 +972,12 @@ impl DockSettings {
         }
         self.custom_launcher_hotkey
             .as_deref()
+            .filter(|text| !text.trim().is_empty())
             .and_then(crate::hotkey::parse)
-            .or_else(|| crate::hotkey::parse(&self.launcher_hotkey))
+            .or_else(|| HotkeyBinding::from_choice(self.launcher_hotkey))
     }
 
-    /// Effective dock hotkey: custom text wins over the persisted enum name.
+    /// Effective dock hotkey: custom text wins over the persisted enum choice.
     pub fn dock_binding(&self) -> Option<crate::hotkey::HotkeyBinding> {
         if self
             .custom_dock_hotkey
@@ -448,18 +988,20 @@ impl DockSettings {
         }
         self.custom_dock_hotkey
             .as_deref()
+            .filter(|text| !text.trim().is_empty())
             .and_then(crate::hotkey::parse)
-            .or_else(|| crate::hotkey::parse(&self.dock_hotkey))
+            .or_else(|| HotkeyBinding::from_choice(self.dock_hotkey))
     }
 
     pub fn is_widget_enabled(&self, id: &str) -> bool {
-        if self.focus_mode && id != "focus" && id != "clock" {
+        if self.focus_mode && !id.eq_ignore_ascii_case("focus") && !id.eq_ignore_ascii_case("clock")
+        {
             return false;
         }
-        if id == "clock" && self.show_clock_widget {
+        if id.eq_ignore_ascii_case("clock") && self.show_clock_widget {
             return true;
         }
-        if id == "stats" && self.show_system_stats_widget {
+        if id.eq_ignore_ascii_case("stats") && self.show_system_stats_widget {
             return true;
         }
         self.enabled_widgets
@@ -468,10 +1010,10 @@ impl DockSettings {
     }
 
     pub fn set_widget_enabled(&mut self, id: &str, enabled: bool) {
-        if id == "clock" {
+        if id.eq_ignore_ascii_case("clock") {
             self.show_clock_widget = enabled;
         }
-        if id == "stats" {
+        if id.eq_ignore_ascii_case("stats") {
             self.show_system_stats_widget = enabled;
         }
         if enabled {
@@ -512,6 +1054,996 @@ impl DockSettings {
     }
 }
 
+// ---- Legacy migration (C# DockSettingsStore.NormalizeLegacyJson + Migrate*) ----
+
+fn is_retired_widget(id: &str) -> bool {
+    RETIRED_WIDGET_IDS
+        .iter()
+        .any(|retired| id.eq_ignore_ascii_case(retired))
+}
+
+fn map_string_array(value: &mut Value, mut convert: impl FnMut(&str) -> Vec<String>) {
+    let Some(items) = value.as_array_mut() else {
+        return;
+    };
+    let mut next = Vec::with_capacity(items.len());
+    for item in items.iter() {
+        match item.as_str() {
+            Some(text) => next.extend(convert(text).into_iter().map(Value::String)),
+            None => next.push(item.clone()),
+        }
+    }
+    *items = next;
+}
+
+fn filter_object_keys(value: &mut Value, mut keep: impl FnMut(&str) -> bool) {
+    let Some(map) = value.as_object_mut() else {
+        return;
+    };
+    map.retain(|key, _| keep(key));
+}
+
+fn array_mentions(value: Option<&Value>, needle: &str) -> bool {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items.iter().any(|item| {
+                item.as_str().is_some_and(|s| {
+                    s.eq_ignore_ascii_case(needle)
+                        || s.eq_ignore_ascii_case(&format!("widget:{needle}"))
+                })
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn ai_bits(root: &Map<String, Value>) -> u32 {
+    match root.get("AiUsageProviders") {
+        Some(Value::Number(number)) => number.as_u64().unwrap_or(0) as u32,
+        Some(Value::String(text)) => ai_providers::WIDGETS
+            .iter()
+            .filter(|(_, id)| text.eq_ignore_ascii_case(id))
+            .map(|(bit, _)| *bit)
+            .fold(0, |a, b| a | b),
+        _ => 0,
+    }
+}
+
+fn ai_replacement(id: &str, enabled: &[String]) -> Vec<String> {
+    if !id.eq_ignore_ascii_case("AiUsage") {
+        return vec![id.to_owned()];
+    }
+    enabled.to_vec()
+}
+
+fn migrate_widget_lists(map: &mut Map<String, Value>) {
+    // Remember what the legacy widget meant before removing it (C# mirrors these into buttons).
+    let mentioned = |id: &str| {
+        [
+            "Widgets",
+            "EnabledWidgets",
+            "InstalledWidgets",
+            "WidgetOrder",
+            "DockItemOrder",
+        ]
+        .iter()
+        .any(|key| array_mentions(map.get(*key), id))
+    };
+    let mentioned_search = mentioned("Search");
+    let mentioned_desktops = mentioned("Desktops");
+    let mentioned_tray = mentioned("Tray");
+    let enabled_search = array_mentions(map.get("Widgets"), "Search")
+        || array_mentions(map.get("EnabledWidgets"), "Search");
+    let enabled_desktops = array_mentions(map.get("Widgets"), "Desktops")
+        || array_mentions(map.get("EnabledWidgets"), "Desktops");
+    let enabled_tray = array_mentions(map.get("Widgets"), "Tray")
+        || array_mentions(map.get("EnabledWidgets"), "Tray");
+
+    for key in [
+        "Widgets",
+        "EnabledWidgets",
+        "InstalledWidgets",
+        "WidgetOrder",
+    ] {
+        if let Some(value) = map.get_mut(key) {
+            map_string_array(value, |id| {
+                if is_retired_widget(id) {
+                    Vec::new()
+                } else {
+                    vec![id.to_owned()]
+                }
+            });
+        }
+    }
+    if let Some(value) = map.get_mut("DockItemOrder") {
+        map_string_array(value, |id| {
+            if RETIRED_WIDGET_IDS
+                .iter()
+                .any(|r| id.eq_ignore_ascii_case(&format!("widget:{r}")))
+            {
+                Vec::new()
+            } else {
+                vec![id.to_owned()]
+            }
+        });
+    }
+    if let Some(value) = map.get_mut("WidgetDensityOverrides") {
+        filter_object_keys(value, |key| !is_retired_widget(key));
+    }
+    if let Some(profiles) = map.get_mut("Profiles").and_then(Value::as_array_mut) {
+        for profile in profiles.iter_mut() {
+            if let Some(p) = profile.as_object_mut() {
+                for key in [
+                    "Widgets",
+                    "EnabledWidgets",
+                    "InstalledWidgets",
+                    "WidgetOrder",
+                ] {
+                    if let Some(value) = p.get_mut(key) {
+                        map_string_array(value, |id| {
+                            if is_retired_widget(id) {
+                                Vec::new()
+                            } else {
+                                vec![id.to_owned()]
+                            }
+                        });
+                    }
+                }
+                if let Some(value) = p.get_mut("DockItemOrder") {
+                    map_string_array(value, |id| {
+                        if RETIRED_WIDGET_IDS
+                            .iter()
+                            .any(|r| id.eq_ignore_ascii_case(&format!("widget:{r}")))
+                        {
+                            Vec::new()
+                        } else {
+                            vec![id.to_owned()]
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    if mentioned_search {
+        map.insert("ShowSearchButton".to_owned(), Value::Bool(enabled_search));
+    }
+    if mentioned_desktops {
+        map.insert(
+            "ShowTaskViewButton".to_owned(),
+            Value::Bool(enabled_desktops),
+        );
+    }
+    if mentioned_tray {
+        map.insert("ShowTrayButton".to_owned(), Value::Bool(enabled_tray));
+    }
+}
+
+fn migrate_ai_usage(map: &mut Map<String, Value>) {
+    let mentioned = [
+        "Widgets",
+        "EnabledWidgets",
+        "InstalledWidgets",
+        "WidgetOrder",
+        "DockItemOrder",
+    ]
+    .iter()
+    .any(|key| array_mentions(map.get(*key), "AiUsage"))
+        || map
+            .get("WidgetDensityOverrides")
+            .and_then(Value::as_object)
+            .is_some_and(|o| o.contains_key("AiUsage"));
+
+    let bits = ai_bits(map);
+    let enabled: Vec<String> = ai_providers::WIDGETS
+        .iter()
+        .filter(|(bit, _)| bits & *bit != 0)
+        .map(|(_, id)| (*id).to_owned())
+        .collect();
+    let all: Vec<String> = ai_providers::WIDGETS
+        .iter()
+        .map(|(_, id)| (*id).to_owned())
+        .collect();
+
+    for key in ["Widgets", "EnabledWidgets"] {
+        if let Some(value) = map.get_mut(key) {
+            map_string_array(value, |id| ai_replacement(id, &enabled));
+        }
+    }
+    for key in ["InstalledWidgets", "WidgetOrder"] {
+        if let Some(value) = map.get_mut(key) {
+            map_string_array(value, |id| ai_replacement(id, &all));
+        }
+    }
+    if let Some(value) = map.get_mut("DockItemOrder") {
+        map_string_array(value, |id| {
+            if id.eq_ignore_ascii_case("widget:AiUsage") {
+                all.iter().map(|id| format!("widget:{id}")).collect()
+            } else {
+                vec![id.to_owned()]
+            }
+        });
+    }
+    if let Some(densities) = map
+        .get_mut("WidgetDensityOverrides")
+        .and_then(Value::as_object_mut)
+        && let Some(density) = densities.remove("AiUsage")
+    {
+        for (_, id) in ai_providers::WIDGETS {
+            densities.insert(id.to_owned(), density.clone());
+        }
+    }
+    if let Some(profiles) = map.get_mut("Profiles").and_then(Value::as_array_mut) {
+        for profile in profiles.iter_mut() {
+            if let Some(p) = profile.as_object_mut() {
+                for key in ["Widgets", "EnabledWidgets"] {
+                    if let Some(value) = p.get_mut(key) {
+                        map_string_array(value, |id| ai_replacement(id, &enabled));
+                    }
+                }
+                for key in ["InstalledWidgets", "WidgetOrder"] {
+                    if let Some(value) = p.get_mut(key) {
+                        map_string_array(value, |id| ai_replacement(id, &all));
+                    }
+                }
+                if let Some(value) = p.get_mut("DockItemOrder") {
+                    map_string_array(value, |id| {
+                        if id.eq_ignore_ascii_case("widget:AiUsage") {
+                            all.iter().map(|id| format!("widget:{id}")).collect()
+                        } else {
+                            vec![id.to_owned()]
+                        }
+                    });
+                }
+            }
+        }
+    }
+    if mentioned {
+        map.insert("AiUsageProviders".to_owned(), Value::from(0));
+    }
+}
+
+fn migrate_stats_meters(map: &mut Map<String, Value>) {
+    let replaced = match map.get("StatsMeters") {
+        Some(Value::Number(number)) => number
+            .as_u64()
+            .filter(|bits| bits & !stats_meters::ALL != 0)
+            .map(|bits| Value::from(bits & stats_meters::ALL)),
+        Some(Value::String(text)) => {
+            let kept: Vec<&str> = text
+                .split(',')
+                .map(str::trim)
+                .filter(|token| {
+                    !token.eq_ignore_ascii_case("CpuTemperature")
+                        && !token.eq_ignore_ascii_case("Battery")
+                })
+                .collect();
+            let replacement = if kept.is_empty() {
+                "None".to_owned()
+            } else {
+                kept.join(", ")
+            };
+            (replacement != *text).then(|| Value::String(replacement))
+        }
+        _ => None,
+    };
+    if let Some(value) = replaced {
+        map.insert("StatsMeters".to_owned(), value);
+    }
+}
+
+fn migrate_pinned_tray_icons(map: &mut Map<String, Value>) {
+    let Some(items) = map.get_mut("PinnedTrayIcons").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut result = Vec::with_capacity(items.len());
+    let mut seen = BTreeSet::new();
+    for item in items.iter() {
+        let key = match item {
+            Value::String(text) => Some(text.trim()),
+            Value::Object(object) => object.get("Key").and_then(Value::as_str).map(str::trim),
+            _ => None,
+        };
+        let Some(key) = key else { continue };
+        if key.is_empty() || key.len() > MAX_PINNED_TRAY_KEY_LEN {
+            continue;
+        }
+        if !seen.insert(key.to_ascii_lowercase()) || result.len() >= MAX_PINNED_TRAY_ICONS {
+            continue;
+        }
+        result.push(Value::String(key.to_owned()));
+    }
+    *items = result;
+}
+
+/// Applies C# `DockSettingsStore` legacy rewrites to raw JSON before deserialization.
+/// Unknown future keys are left untouched.
+pub fn normalize_legacy_json(raw: &str) -> String {
+    let Ok(Value::Object(mut root)) = serde_json::from_str::<Value>(raw) else {
+        return raw.to_owned();
+    };
+
+    // v0.2.x bottom gap: DockBottomGap -> DockBottomGapPixels.
+    if !root.contains_key("DockBottomGapPixels")
+        && let Some(gap) = root
+            .get("DockBottomGap")
+            .and_then(Value::as_i64)
+            .filter(|gap| (0..=200).contains(gap))
+    {
+        root.insert("DockBottomGapPixels".to_owned(), Value::from(gap));
+        root.remove("DockBottomGap");
+    }
+
+    migrate_widget_lists(&mut root);
+    migrate_ai_usage(&mut root);
+    migrate_stats_meters(&mut root);
+
+    // Retired SurfaceOpacity fed all four surfaces exactly once.
+    if !root.contains_key("DockBackground")
+        && let Some(opacity) = root
+            .get("SurfaceOpacity")
+            .and_then(Value::as_f64)
+            .filter(|value| value.is_finite() && (0.6..=1.0).contains(value))
+    {
+        for key in [
+            "DockOpacity",
+            "MenuOpacity",
+            "WidgetOpacity",
+            "SettingsOpacity",
+        ] {
+            root.insert(key.to_owned(), Value::from(opacity));
+        }
+    }
+
+    // DockIconPaddingX/Y briefly replaced the single horizontal-only padding.
+    if let Some(padding) = root
+        .get("DockIconPaddingX")
+        .and_then(Value::as_i64)
+        .map(|value| value.clamp(0, MAX_ICON_PADDING as i64) as i32)
+    {
+        root.insert("DockIconPadding".to_owned(), Value::from(padding));
+        root.remove("DockIconPaddingX");
+    }
+    root.remove("DockIconPaddingY");
+
+    migrate_pinned_tray_icons(&mut root);
+
+    serde_json::Value::Object(root).to_string()
+}
+
+fn replace_ai_usage_in(list: &mut Vec<String>, replacement: &[String]) {
+    if !list.iter().any(|id| id.eq_ignore_ascii_case("AiUsage")) {
+        return;
+    }
+    let mut next = Vec::new();
+    for id in list.iter() {
+        if id.eq_ignore_ascii_case("AiUsage") {
+            next.extend(replacement.iter().cloned());
+        } else {
+            next.push(id.clone());
+        }
+    }
+    *list = next;
+}
+
+impl DockSettings {
+    /// Re-applies the legacy migrations to already-deserialized settings (no raw JSON needed).
+    pub fn migrate_legacy(&mut self) {
+        let mentioned_search = self
+            .enabled_widgets
+            .iter()
+            .chain(self.installed_widgets.iter())
+            .chain(self.widget_order.iter())
+            .chain(self.dock_item_order.iter())
+            .any(|id| id.eq_ignore_ascii_case("Search"));
+        let mentioned_desktops = self
+            .enabled_widgets
+            .iter()
+            .chain(self.installed_widgets.iter())
+            .chain(self.widget_order.iter())
+            .chain(self.dock_item_order.iter())
+            .any(|id| id.eq_ignore_ascii_case("Desktops"));
+        let mentioned_tray = self
+            .enabled_widgets
+            .iter()
+            .chain(self.installed_widgets.iter())
+            .chain(self.widget_order.iter())
+            .chain(self.dock_item_order.iter())
+            .any(|id| id.eq_ignore_ascii_case("Tray"));
+        let enabled_search = self
+            .enabled_widgets
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case("Search"));
+        let enabled_desktops = self
+            .enabled_widgets
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case("Desktops"));
+        let enabled_tray = self
+            .enabled_widgets
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case("Tray"));
+
+        self.enabled_widgets.retain(|id| !is_retired_widget(id));
+        self.installed_widgets.retain(|id| !is_retired_widget(id));
+        self.widget_order.retain(|id| !is_retired_widget(id));
+        self.dock_item_order.retain(|id| {
+            !RETIRED_WIDGET_IDS
+                .iter()
+                .any(|retired| id.eq_ignore_ascii_case(&format!("widget:{retired}")))
+        });
+        self.widget_density_overrides
+            .retain(|id, _| !is_retired_widget(id));
+        for profile in &mut self.profiles {
+            profile.enabled_widgets.retain(|id| !is_retired_widget(id));
+            profile
+                .installed_widgets
+                .retain(|id| !is_retired_widget(id));
+            profile.widget_order.retain(|id| !is_retired_widget(id));
+            profile.dock_item_order.retain(|id| {
+                !RETIRED_WIDGET_IDS
+                    .iter()
+                    .any(|retired| id.eq_ignore_ascii_case(&format!("widget:{retired}")))
+            });
+        }
+        if mentioned_search {
+            self.show_search_button = enabled_search;
+        }
+        if mentioned_desktops {
+            self.show_task_view_button = enabled_desktops;
+        }
+        if mentioned_tray {
+            self.show_tray_button = enabled_tray;
+        }
+
+        // AiUsage -> one widget per provider.
+        let has_ai_usage = self
+            .enabled_widgets
+            .iter()
+            .chain(self.installed_widgets.iter())
+            .chain(self.widget_order.iter())
+            .chain(self.dock_item_order.iter())
+            .any(|id| {
+                id.eq_ignore_ascii_case("AiUsage") || id.eq_ignore_ascii_case("widget:AiUsage")
+            })
+            || self.widget_density_overrides.contains_key("AiUsage");
+        if has_ai_usage {
+            let bits = self.ai_usage_providers;
+            let enabled: Vec<String> = ai_providers::WIDGETS
+                .iter()
+                .filter(|(bit, _)| bits & *bit != 0)
+                .map(|(_, id)| (*id).to_owned())
+                .collect();
+            let all_ids: Vec<String> = ai_providers::WIDGETS
+                .iter()
+                .map(|(_, id)| (*id).to_owned())
+                .collect();
+            replace_ai_usage_in(&mut self.enabled_widgets, &enabled);
+            replace_ai_usage_in(&mut self.installed_widgets, &all_ids);
+            replace_ai_usage_in(&mut self.widget_order, &all_ids);
+            let mut next = Vec::new();
+            for id in &self.dock_item_order {
+                if id.eq_ignore_ascii_case("widget:AiUsage") {
+                    next.extend(all_ids.iter().map(|id| format!("widget:{id}")));
+                } else {
+                    next.push(id.clone());
+                }
+            }
+            self.dock_item_order = next;
+            if let Some(density) = self.widget_density_overrides.remove("AiUsage") {
+                for (_, id) in ai_providers::WIDGETS {
+                    self.widget_density_overrides.insert(id.to_owned(), density);
+                }
+            }
+            for profile in &mut self.profiles {
+                replace_ai_usage_in(&mut profile.enabled_widgets, &enabled);
+                replace_ai_usage_in(&mut profile.installed_widgets, &all_ids);
+                replace_ai_usage_in(&mut profile.widget_order, &all_ids);
+                let mut next = Vec::new();
+                for id in &profile.dock_item_order {
+                    if id.eq_ignore_ascii_case("widget:AiUsage") {
+                        next.extend(all_ids.iter().map(|id| format!("widget:{id}")));
+                    } else {
+                        next.push(id.clone());
+                    }
+                }
+                profile.dock_item_order = next;
+            }
+            self.ai_usage_providers = 0;
+        }
+
+        // C# treats an absent InstalledWidgets list as "exactly the enabled widgets".
+        if self.installed_widgets.is_empty() && !self.enabled_widgets.is_empty() {
+            self.installed_widgets = self.enabled_widgets.clone();
+        }
+
+        // Tray pins: trim, drop invalid/duplicate keys, cap at the C# limit.
+        let mut seen = BTreeSet::new();
+        self.user_pinned_background_apps.retain(|key| {
+            let trimmed = key.trim();
+            !trimmed.is_empty()
+                && trimmed.len() <= MAX_PINNED_TRAY_KEY_LEN
+                && seen.insert(trimmed.to_ascii_lowercase())
+        });
+        self.user_pinned_background_apps
+            .truncate(MAX_PINNED_TRAY_ICONS);
+    }
+}
+
+// ---- C# DockSettingsStore.IsValid() parity ----
+
+fn is_finite(value: f64) -> bool {
+    value.is_finite()
+}
+
+fn clock_date_style_name(style: ClockDateStyle) -> &'static str {
+    match style {
+        ClockDateStyle::DayAndShortDate => "DayAndShortDate",
+        ClockDateStyle::ShortDateOnly => "ShortDateOnly",
+        ClockDateStyle::NumericDate => "NumericDate",
+        ClockDateStyle::Hidden => "Hidden",
+    }
+}
+
+fn clock_date_format_name(format: ClockDateFormat) -> &'static str {
+    match format {
+        ClockDateFormat::System => "System",
+        ClockDateFormat::DdMmYyyy => "DdMmYyyy",
+        ClockDateFormat::DdMmYy => "DdMmYy",
+        ClockDateFormat::MmDdYyyy => "MmDdYyyy",
+        ClockDateFormat::YyyyMmDd => "YyyyMmDd",
+        ClockDateFormat::DdMmYyyyDots => "DdMmYyyyDots",
+    }
+}
+
+fn island_visibility_name(mode: DynamicIslandVisibilityMode) -> &'static str {
+    match mode {
+        DynamicIslandVisibilityMode::Always => "Always",
+        DynamicIslandVisibilityMode::DesktopOnly => "DesktopOnly",
+    }
+}
+
+fn is_safe_theme_id(id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty()
+        && id.len() <= 120
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && !id.contains("..")
+}
+
+fn is_border_valid(thickness: f64, color: Option<&str>) -> bool {
+    is_finite(thickness)
+        && (0.0..=12.0).contains(&thickness)
+        && color.is_none_or(|value| {
+            value.trim().is_empty()
+                || (value.starts_with('#')
+                    && value.len() == 9
+                    && value[1..].bytes().all(|byte| byte.is_ascii_hexdigit()))
+        })
+}
+
+fn has_duplicates_ignore_case(values: &[String]) -> bool {
+    let mut seen = BTreeSet::new();
+    values
+        .iter()
+        .any(|value| !seen.insert(value.to_ascii_lowercase()))
+}
+
+fn contains_blank(values: &[String]) -> bool {
+    values.iter().any(|value| value.trim().is_empty())
+}
+
+impl DockSettings {
+    fn extra_f64(&self, key: &str, default: f64) -> f64 {
+        self.extra
+            .get(key)
+            .and_then(Value::as_f64)
+            .unwrap_or(default)
+    }
+
+    fn extra_str(&self, key: &str) -> Option<&str> {
+        self.extra.get(key).and_then(Value::as_str)
+    }
+
+    fn stats_meter_bits(&self) -> u64 {
+        match self.extra.get("StatsMeters") {
+            Some(Value::Number(number)) => number.as_u64().unwrap_or(0),
+            Some(Value::String(text)) => text.split(',').fold(0u64, |bits, token| {
+                bits | match token.trim() {
+                    "Cpu" => stats_meters::CPU,
+                    "Memory" => stats_meters::MEMORY,
+                    "Gpu" => stats_meters::GPU,
+                    "GpuTemperature" => stats_meters::GPU_TEMPERATURE,
+                    _ => 0,
+                }
+            }),
+            None => self.stats_meters as u64,
+            _ => 0,
+        }
+    }
+
+    /// Returns one stable code per violated C# validation rule; empty means valid.
+    pub fn validate(&self) -> Vec<&'static str> {
+        let mut errors: Vec<&'static str> = Vec::new();
+
+        // Width / height / spacing ranges (C# sliders).
+        if !(100..=5000).contains(&self.dock_width_pixels) {
+            errors.push("DockWidthPixelsOutOfRange");
+        }
+        if !(10..=100).contains(&self.dock_width_percent) {
+            errors.push("DockWidthPercentOutOfRange");
+        }
+        if !(24..=400).contains(&self.dock_height_pixels) {
+            errors.push("DockHeightPixelsOutOfRange");
+        }
+        if !(2..=25).contains(&self.dock_height_percent) {
+            errors.push("DockHeightPercentOutOfRange");
+        }
+        if !(0..=200).contains(&self.dock_top_gap_pixels) {
+            errors.push("DockTopGapPixelsOutOfRange");
+        }
+        if !(0..=100).contains(&self.dock_top_gap_percent) {
+            errors.push("DockTopGapPercentOutOfRange");
+        }
+        if !(0..=200).contains(&self.dock_bottom_gap_pixels) {
+            errors.push("DockBottomGapPixelsOutOfRange");
+        }
+        if !(0..=100).contains(&self.dock_bottom_gap_percent) {
+            errors.push("DockBottomGapPercentOutOfRange");
+        }
+
+        // Focus timer ranges.
+        if !(1..=90).contains(&self.focus_minutes) {
+            errors.push("FocusMinutesOutOfRange");
+        }
+        if !(1..=30).contains(&self.focus_break_minutes) {
+            errors.push("FocusBreakMinutesOutOfRange");
+        }
+        if !(1..=8).contains(&self.focus_sessions) {
+            errors.push("FocusSessionsOutOfRange");
+        }
+
+        // Surface opacity/border rules. The WIP port has typed fields; C# JSON values that were
+        // not claimed by a typed field remain in `extra` and are checked there as well.
+        let surface_opacity = if self.extra.contains_key("SurfaceOpacity") {
+            self.extra_f64("SurfaceOpacity", 0.9)
+        } else {
+            self.surface_opacity
+        };
+        if !is_finite(surface_opacity) || !(0.6..=1.0).contains(&surface_opacity) {
+            errors.push("SurfaceOpacityOutOfRange");
+        }
+        for (key, value) in [
+            ("DockOpacity", self.dock_opacity),
+            ("MenuOpacity", self.menu_opacity),
+            ("WidgetOpacity", self.widget_opacity),
+            ("SettingsOpacity", self.settings_opacity),
+        ] {
+            if !is_finite(value) || !(0.0..=1.0).contains(&value) {
+                match key {
+                    "DockOpacity" => errors.push("DockOpacityOutOfRange"),
+                    "MenuOpacity" => errors.push("MenuOpacityOutOfRange"),
+                    "WidgetOpacity" => errors.push("WidgetOpacityOutOfRange"),
+                    _ => errors.push("SettingsOpacityOutOfRange"),
+                }
+            }
+        }
+        for (thickness, color) in [
+            (self.dock_border_thickness, self.dock_border_color.as_deref()),
+            (self.menu_border_thickness, self.menu_border_color.as_deref()),
+            (self.widget_border_thickness, self.widget_border_color.as_deref()),
+            (
+                self.settings_border_thickness,
+                self.settings_border_color.as_deref(),
+            ),
+        ] {
+            if !is_border_valid(thickness, color) {
+                errors.push("BorderStyleInvalid");
+                break;
+            }
+        }
+        if !is_finite(self.dock_scale) || !(0.75..=1.5).contains(&self.dock_scale) {
+            errors.push("DockScaleOutOfRange");
+        }
+
+        // Pin order.
+        if let Some(order) = &self.pin_order
+            && (contains_blank(order) || has_duplicates_ignore_case(order))
+        {
+            errors.push("PinOrderInvalid");
+        }
+
+        // Widget subset invariant: enabled Γèå installed, both from the C# supported catalog.
+        if self
+            .enabled_widgets
+            .iter()
+            .any(|id| !is_supported_widget_id(id))
+            || self
+                .installed_widgets
+                .iter()
+                .any(|id| !is_supported_widget_id(id))
+        {
+            errors.push("UnsupportedWidgetId");
+        }
+        if has_duplicates_ignore_case(&self.enabled_widgets)
+            || has_duplicates_ignore_case(&self.installed_widgets)
+        {
+            errors.push("DuplicateWidgetId");
+        }
+        if self.enabled_widgets.iter().any(|id| {
+            !self
+                .installed_widgets
+                .iter()
+                .any(|installed| installed.eq_ignore_ascii_case(id))
+        }) {
+            errors.push("EnabledWidgetNotInstalled");
+        }
+        if contains_blank(&self.widget_order) || has_duplicates_ignore_case(&self.widget_order) {
+            errors.push("WidgetOrderInvalid");
+        }
+        if contains_blank(&self.stack_folders) {
+            errors.push("StackFoldersInvalid");
+        }
+
+        // Hotkeys: presets/custom strings and the launcher-vs-dock conflict.
+        if !HotkeyBinding::is_valid_custom_string(self.custom_launcher_hotkey.as_deref()) {
+            errors.push("CustomLauncherHotkeyInvalid");
+        }
+        if !HotkeyBinding::is_valid_custom_string(self.custom_dock_hotkey.as_deref()) {
+            errors.push("CustomDockHotkeyInvalid");
+        }
+        let launcher =
+            HotkeyBinding::resolve(self.launcher_hotkey, self.custom_launcher_hotkey.as_deref());
+        let dock = HotkeyBinding::resolve(self.dock_hotkey, self.custom_dock_hotkey.as_deref());
+        if HotkeyBinding::equals_binding(launcher.as_ref(), dock.as_ref()) {
+            errors.push("HotkeysConflict");
+        }
+
+        // Profiles: unique names, valid widgets/ranges/hotkeys.
+        let mut profile_names = BTreeSet::new();
+        for profile in &self.profiles {
+            if profile.name.trim().is_empty()
+                || !profile_names.insert(profile.name.to_ascii_lowercase())
+            {
+                errors.push("ProfileInvalid");
+                break;
+            }
+            if profile
+                .enabled_widgets
+                .iter()
+                .any(|id| !is_supported_widget_id(id))
+                || profile
+                    .installed_widgets
+                    .iter()
+                    .any(|id| !is_supported_widget_id(id))
+            {
+                errors.push("ProfileWidgetUnsupported");
+                break;
+            }
+            if has_duplicates_ignore_case(&profile.enabled_widgets)
+                || has_duplicates_ignore_case(&profile.installed_widgets)
+                || contains_blank(&profile.widget_order)
+                || has_duplicates_ignore_case(&profile.widget_order)
+                || profile.enabled_widgets.iter().any(|id| {
+                    !profile
+                        .installed_widgets
+                        .iter()
+                        .any(|installed| installed.eq_ignore_ascii_case(id))
+                })
+            {
+                errors.push("ProfileWidgetInvalid");
+                break;
+            }
+            if profile
+                .dock_width_pixels
+                .is_some_and(|v| !(100..=5000).contains(&v))
+                || profile
+                    .dock_width_percent
+                    .is_some_and(|v| !(10..=100).contains(&v))
+            {
+                errors.push("ProfileWidthOutOfRange");
+                break;
+            }
+            if !HotkeyBinding::is_valid_custom_string(profile.custom_launcher_hotkey.as_deref())
+                || !HotkeyBinding::is_valid_custom_string(profile.custom_dock_hotkey.as_deref())
+            {
+                errors.push("ProfileHotkeyInvalid");
+                break;
+            }
+            let profile_launcher = HotkeyBinding::resolve(
+                profile.launcher_hotkey.unwrap_or(HotkeyChoice::Disabled),
+                profile.custom_launcher_hotkey.as_deref(),
+            );
+            let profile_dock = HotkeyBinding::resolve(
+                profile.dock_hotkey.unwrap_or(HotkeyChoice::Disabled),
+                profile.custom_dock_hotkey.as_deref(),
+            );
+            if HotkeyBinding::equals_binding(profile_launcher.as_ref(), profile_dock.as_ref()) {
+                errors.push("ProfileHotkeyConflict");
+                break;
+            }
+        }
+
+        // Groups: unique ids/names and no executable shared between groups.
+        let mut group_ids = BTreeSet::new();
+        let mut group_names = BTreeSet::new();
+        let mut group_paths = BTreeSet::new();
+        for group in &self.app_groups {
+            if group.id.trim().is_empty()
+                || group.name.trim().is_empty()
+                || !group_ids.insert(group.id.to_ascii_lowercase())
+                || !group_names.insert(group.name.to_ascii_lowercase())
+                || group
+                    .executable_paths
+                    .iter()
+                    .any(|path| !group_paths.insert(path.to_ascii_lowercase()))
+            {
+                errors.push("AppGroupsInvalid");
+                break;
+            }
+        }
+
+        // Flags, enum-like extras and misc lengths.
+        if self.stats_meter_bits() & !stats_meters::ALL != 0 {
+            errors.push("StatsMetersInvalid");
+        }
+        if self.ai_usage_providers & !ai_providers::ALL != 0 {
+            errors.push("AiUsageProvidersInvalid");
+        }
+        if self.antigravity_groups == 0 || self.antigravity_groups & !antigravity_groups::ALL != 0 {
+            errors.push("AntigravityGroupsInvalid");
+        }
+        if self
+            .dock_corner_radius
+            .is_some_and(|radius| !(0..=48).contains(&radius))
+        {
+            errors.push("DockCornerRadiusOutOfRange");
+        }
+        if self.weather_city.len() > 80 {
+            errors.push("WeatherCityTooLong");
+        }
+        if !(15..=300).contains(&self.wireless_battery_poll_seconds) {
+            errors.push("WirelessPollOutOfRange");
+        }
+        if ![0, 10, 20, 30].contains(&self.wireless_battery_low_threshold) {
+            errors.push("WirelessThresholdInvalid");
+        }
+        if self.ignored_wireless_devices.len() > 128
+            || contains_blank(&self.ignored_wireless_devices)
+            || self
+                .ignored_wireless_devices
+                .iter()
+                .any(|id| id.len() > 256)
+        {
+            errors.push("IgnoredWirelessDevicesInvalid");
+        }
+        if self.wireless_device_aliases.len() > 128
+            || self.wireless_device_aliases.iter().any(|(key, value)| {
+                key.trim().is_empty()
+                    || key.len() > 256
+                    || value.trim().is_empty()
+                    || value.len() > 120
+            })
+        {
+            errors.push("WirelessDeviceAliasesInvalid");
+        }
+        let theme_pack = if self.theme_pack.trim().is_empty() {
+            self.extra_str("ThemePack").unwrap_or("")
+        } else {
+            self.theme_pack.trim()
+        };
+        if !is_safe_theme_id(theme_pack) && !theme_pack.trim().is_empty() {
+            errors.push("ThemePackInvalid");
+        }
+        if !is_finite(surface_opacity) {
+            errors.push("SurfaceOpacityInvalid");
+        }
+        let island_visibility = self
+            .extra_str("DynamicIslandVisibility")
+            .unwrap_or_else(|| island_visibility_name(self.dynamic_island_visibility));
+        if !island_visibility.eq_ignore_ascii_case("Always")
+            && !island_visibility.eq_ignore_ascii_case("DesktopOnly")
+        {
+            errors.push("IslandVisibilityInvalid");
+        }
+        let date_style = self
+            .extra_str("DateStyle")
+            .unwrap_or_else(|| clock_date_style_name(self.date_style));
+        if !["DayAndShortDate", "ShortDateOnly", "NumericDate", "Hidden"]
+            .iter()
+            .any(|valid| date_style.eq_ignore_ascii_case(valid))
+        {
+            errors.push("DateStyleInvalid");
+        }
+        let date_format = self
+            .extra_str("DateFormat")
+            .unwrap_or_else(|| clock_date_format_name(self.date_format));
+        if ![
+            "System",
+            "DdMmYyyy",
+            "DdMmYy",
+            "MmDdYyyy",
+            "YyyyMmDd",
+            "DdMmYyyyDots",
+        ]
+        .iter()
+        .any(|valid| date_format.eq_ignore_ascii_case(valid))
+        {
+            errors.push("DateFormatInvalid");
+        }
+
+        // Dynamic Island order/placement maps (keys must be catalog widgets).
+        let typed_placements_invalid = self.dynamic_island_placements.len() > CATALOG_WIDGET_COUNT
+            || self.dynamic_island_placements.iter().any(|(id, display)| {
+                !is_supported_widget_id(id) || display.trim().is_empty() || display.len() > 32
+            });
+        let extra_placements_invalid = match self.extra.get("DynamicIslandPlacements") {
+            Some(Value::Object(placements)) => {
+                placements.len() > CATALOG_WIDGET_COUNT
+                    || placements.iter().any(|(id, display)| {
+                        !is_supported_widget_id(id)
+                            || !display
+                                .as_str()
+                                .is_some_and(|value| !value.trim().is_empty() && value.len() <= 32)
+                    })
+            }
+            _ => false,
+        };
+        if typed_placements_invalid || extra_placements_invalid {
+            errors.push("IslandPlacementInvalid");
+        }
+
+        let typed_orders_invalid = self.dynamic_island_widget_orders.len() > 32
+            || self
+                .dynamic_island_widget_orders
+                .iter()
+                .any(|(key, ids)| {
+                    key.trim().is_empty()
+                        || key.len() > 32
+                        || ids.len() > CATALOG_WIDGET_COUNT
+                        || ids.iter().any(|id| !is_supported_widget_id(id))
+                        || has_duplicates_ignore_case(ids)
+                });
+        let extra_orders_invalid = match self.extra.get("DynamicIslandWidgetOrders") {
+            Some(Value::Object(orders)) => {
+                orders.len() > 32
+                    || orders.iter().any(|(key, value)| {
+                        key.trim().is_empty()
+                            || key.len() > 32
+                            || !value.as_array().is_some_and(|ids| {
+                                ids.len() <= CATALOG_WIDGET_COUNT
+                                    && ids
+                                        .iter()
+                                        .all(|id| id.as_str().is_some_and(is_supported_widget_id))
+                                    && !has_duplicates_ignore_case(
+                                        &ids.iter()
+                                            .filter_map(Value::as_str)
+                                            .map(str::to_owned)
+                                            .collect::<Vec<_>>(),
+                                    )
+                            })
+                    })
+            }
+            _ => false,
+        };
+        if typed_orders_invalid || extra_orders_invalid {
+            errors.push("IslandOrderInvalid");
+        }
+        if self.user_pinned_background_apps.len() > MAX_PINNED_TRAY_ICONS
+            || contains_blank(&self.user_pinned_background_apps)
+            || self
+                .user_pinned_background_apps
+                .iter()
+                .any(|key| key.len() > MAX_PINNED_TRAY_KEY_LEN)
+        {
+            errors.push("PinnedTrayIconsInvalid");
+        }
+
+        errors
+    }
+}
+
 /// Application data directory: `%LOCALAPPDATA%\OpenTaskBar-Rust`.
 pub fn app_data_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
@@ -524,21 +2056,21 @@ pub fn settings_path() -> PathBuf {
     app_data_dir().join("settings.json")
 }
 
-/// Loads settings from `path`; copies corrupt JSON to a timestamped backup before returning defaults.
-/// The original is deliberately left in place: a single malformed field must not destroy the only copy,
-/// and the next successful save replaces it atomically while the backup survives.
+/// Loads settings from `path`; backs up corrupt JSON before returning defaults.
 pub fn load_from(path: &Path) -> DockSettings {
     let Ok(raw) = fs::read_to_string(path) else {
         return DockSettings::default();
     };
     let clean = raw.trim_start_matches('\u{feff}');
-    match serde_json::from_str::<DockSettings>(clean) {
+    let normalized = normalize_legacy_json(clean);
+    match serde_json::from_str::<DockSettings>(&normalized) {
         Ok(mut settings) => {
-            settings.dock_opacity = settings.dock_opacity.clamp(0.1, 1.0);
+            settings.migrate_legacy();
+            settings.dock_opacity = settings.dock_opacity.clamp(0.0, 1.0);
+            settings.dock_scale = settings.dock_scale.clamp(0.75, 1.5);
             settings.dynamic_island_opacity = settings.dynamic_island_opacity.clamp(0.1, 1.0);
             settings.surface_opacity = settings.surface_opacity.clamp(0.1, 1.0);
             settings.ui_font_size = settings.ui_font_size.clamp(9.0, 24.0);
-            settings.dock_scale = settings.dock_scale.clamp(0.75, 1.5);
             settings
         }
         Err(_) => {
@@ -546,6 +2078,7 @@ pub fn load_from(path: &Path) -> DockSettings {
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs());
             let backup = path.with_file_name(format!("settings.json.invalid-{stamp}"));
+            // Keep the original in place: one malformed field must not destroy the only copy.
             let _ = fs::copy(path, backup);
             DockSettings::default()
         }
@@ -568,9 +2101,16 @@ pub fn save_to(path: &Path, settings: &DockSettings) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("ot-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
     fn round_trip_preserves_unknown_fields() {
-        let dir = std::env::temp_dir().join(format!("ot-test-{}", std::process::id()));
+        let dir = temp_dir("cfg-unknown");
         let path = dir.join("settings.json");
         let raw = r#"{
             "Position": "Left",
@@ -580,7 +2120,6 @@ mod tests {
             "DockOpacity": 0.75,
             "CustomCSharpField": "keep-me"
         }"#;
-        fs::create_dir_all(&dir).unwrap();
         fs::write(&path, raw).unwrap();
 
         let loaded = load_from(&path);
@@ -592,7 +2131,7 @@ mod tests {
             loaded
                 .extra
                 .get("CustomCSharpField")
-                .and_then(|v| v.as_str()),
+                .and_then(Value::as_str),
             Some("keep-me")
         );
 
@@ -602,7 +2141,7 @@ mod tests {
             reloaded
                 .extra
                 .get("CustomCSharpField")
-                .and_then(|v| v.as_str()),
+                .and_then(Value::as_str),
             Some("keep-me")
         );
         let _ = fs::remove_dir_all(&dir);
@@ -610,14 +2149,13 @@ mod tests {
 
     #[test]
     fn corrupt_json_returns_defaults_and_creates_backup() {
-        let dir = std::env::temp_dir().join(format!("ot-corrupt-{}", std::process::id()));
+        let dir = temp_dir("cfg-corrupt");
         let path = dir.join("settings.json");
-        fs::create_dir_all(&dir).unwrap();
         fs::write(&path, "{not valid json").unwrap();
 
         let loaded = load_from(&path);
         assert_eq!(loaded.position, DockPosition::Center);
-        // The original is kept so a single bad field cannot destroy the user's only copy.
+        // WIP behavior: keep the original file and write a timestamped backup alongside it.
         assert!(path.exists());
         let has_backup = fs::read_dir(&dir).unwrap().flatten().any(|e| {
             e.file_name()
@@ -629,47 +2167,268 @@ mod tests {
     }
 
     #[test]
-    fn csharp_profile_and_string_flags_do_not_reset_settings() {
-        let dir = std::env::temp_dir().join(format!("ot-csharp-migrate-{}", std::process::id()));
-        let path = dir.join("settings.json");
-        // Exactly the shape C# DockProfileService.Capture + JsonStringEnumConverter write.
-        let raw = r#"{
-            "Position": "Left",
-            "StatsMeters": "Cpu, Memory, Gpu, GpuTemperature",
-            "Profiles": [{
-                "Name": "Default",
-                "HiddenApps": [],
-                "Widgets": ["Clock", "SystemStats"],
-                "InstalledWidgets": ["Clock", "SystemStats"],
-                "Theme": "Dark",
-                "AutoHide": "Smart"
-            }],
-            "ActiveProfile": "Default"
-        }"#;
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(&path, raw).unwrap();
+    fn widgets_are_opt_in_by_default_and_respect_focus_mode() {
+        let mut s = DockSettings::default();
+        assert!(s.enabled_widgets.is_empty());
+        assert!(!s.is_widget_enabled("clock"));
+        assert!(!s.is_widget_enabled("stats"));
+        assert!(!s.is_widget_enabled("audio"));
 
-        let loaded = load_from(&path);
-        assert_eq!(
-            loaded.position,
-            DockPosition::Left,
-            "C# settings must still load"
-        );
-        assert_eq!(loaded.stats_meters, 1 | 2 | 16 | 32);
-        assert_eq!(loaded.profiles.len(), 1);
-        assert_eq!(loaded.profiles[0].name, "Default");
-        assert_eq!(loaded.profiles[0].enabled_widgets, ["Clock", "SystemStats"]);
-        assert_eq!(loaded.profiles[0].auto_hide, AutoHideMode::Smart);
-        assert_eq!(loaded.profiles[0].position, DockPosition::Center);
+        s.set_widget_enabled("clock", true);
+        s.set_widget_enabled("audio", true);
+        s.set_widget_enabled("focus", true);
+        assert!(s.is_widget_enabled("clock"));
+        assert!(s.is_widget_enabled("audio"));
+        assert!(s.is_widget_enabled("focus"));
+
+        s.focus_mode = true;
+        assert!(s.is_widget_enabled("clock"));
+        assert!(s.is_widget_enabled("focus"));
+        assert!(!s.is_widget_enabled("audio"));
+
+        s.focus_mode = false;
+        s.set_widget_enabled("clock", false);
+        assert!(!s.is_widget_enabled("clock"));
+        assert!(!s.show_clock_widget);
+    }
+
+    #[test]
+    fn defaults_match_csharp() {
+        let s = DockSettings::default();
+        assert_eq!(s.dock_opacity, 0.9);
+        assert_eq!(s.dock_bottom_gap_pixels, 6);
+        assert_eq!(s.weather_city, "");
+        assert_eq!(s.menu_opacity, 0.9);
+        assert_eq!(s.focus_minutes, 25);
+        assert_eq!(s.dock_width_pixels, 900);
+        assert_eq!(s.dock_height_percent, 7);
+        assert_eq!(s.antigravity_groups, antigravity_groups::ALL);
+        assert!(s.validate().is_empty(), "{:?}", s.validate());
+    }
+
+    #[test]
+    fn csharp_aliases_are_read() {
+        let dir = temp_dir("cfg-aliases");
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "Widgets": ["Clock", "Media"],
+                "ShowClock": true,
+                "ShowSystemStats": true,
+                "Layout": "FullWidth",
+                "FocusModeEnabled": true,
+                "PinnedTrayIcons": ["path:app.exe"]
+            }"#,
+        )
+        .unwrap();
+        let s = load_from(&path);
+        assert_eq!(s.enabled_widgets, ["Clock", "Media"]);
+        assert!(s.show_clock_widget);
+        assert!(s.show_system_stats_widget);
+        assert!(s.full_width);
+        assert!(s.focus_mode);
+        assert_eq!(s.user_pinned_background_apps, ["path:app.exe"]);
+
+        fs::write(&path, r#"{"Layout": "Floating", "Widgets": null}"#).unwrap();
+        let s = load_from(&path);
+        assert!(!s.full_width);
+        assert!(s.enabled_widgets.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
+    fn csharp_profile_fields_survive_round_trip() {
+        let dir = temp_dir("cfg-profile");
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "Profiles": [{
+                    "Name": "Focus",
+                    "HiddenApps": ["app.exe"],
+                    "Widgets": ["Clock"],
+                    "InstalledWidgets": ["Clock", "Media"],
+                    "WidgetOrder": ["Clock", "Media"],
+                    "DockItemOrder": ["start", "widget:Clock"],
+                    "DockWidthMode": "Pixels",
+                    "DockWidthPixels": 640,
+                    "DockWidthPercent": 42,
+                    "Theme": "Dark",
+                    "ThemePack": "nord",
+                    "ThemeApplicationIcons": false,
+                    "LauncherHotkey": "AltSpace",
+                    "DockHotkey": "CtrlAltD",
+                    "CustomLauncherHotkey": "Ctrl+Alt+L",
+                    "CustomDockHotkey": "Ctrl+Alt+K",
+                    "FutureCSharpProfileKey": {"keep": true}
+                }]
+            }"#,
+        )
+        .unwrap();
+        let loaded = load_from(&path);
+        let profile = &loaded.profiles[0];
+        assert_eq!(profile.name, "Focus");
+        assert_eq!(profile.hidden_apps, ["app.exe"]);
+        assert_eq!(profile.enabled_widgets, ["Clock"]);
+        assert_eq!(profile.installed_widgets, ["Clock", "Media"]);
+        assert_eq!(profile.widget_order, ["Clock", "Media"]);
+        assert_eq!(profile.dock_item_order, ["start", "widget:Clock"]);
+        assert_eq!(profile.dock_width_mode, Some(DockWidthMode::Pixels));
+        assert_eq!(profile.dock_width_pixels, Some(640));
+        assert_eq!(profile.theme, Some(AppTheme::Dark));
+        assert_eq!(profile.theme_pack.as_deref(), Some("nord"));
+        assert_eq!(profile.theme_application_icons, Some(false));
+        assert_eq!(profile.launcher_hotkey, Some(HotkeyChoice::AltSpace));
+        assert_eq!(
+            profile.custom_launcher_hotkey.as_deref(),
+            Some("Ctrl+Alt+L")
+        );
+        assert_eq!(
+            profile
+                .extra
+                .get("FutureCSharpProfileKey")
+                .and_then(Value::as_object)
+                .and_then(|o| o.get("keep")),
+            Some(&Value::Bool(true))
+        );
+
+        save_to(&path, &loaded).unwrap();
+        let again = load_from(&path);
+        assert_eq!(again.profiles[0], *profile);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_reports_csharp_rules() {
+        let mut s = DockSettings {
+            dock_width_pixels: 10,
+            dock_width_percent: 200,
+            dock_height_pixels: 10,
+            dock_height_percent: 99,
+            dock_top_gap_pixels: 400,
+            dock_top_gap_percent: 200,
+            dock_bottom_gap_pixels: 400,
+            dock_bottom_gap_percent: 200,
+            focus_minutes: 0,
+            focus_break_minutes: 99,
+            focus_sessions: 99,
+            wireless_battery_poll_seconds: 5,
+            wireless_battery_low_threshold: 15,
+            antigravity_groups: 0,
+            dock_scale: 2.0,
+            widget_order: vec!["Clock".to_owned(), "Clock".to_owned()],
+            weather_city: "x".repeat(81),
+            ..DockSettings::default()
+        };
+        s.extra.insert("StatsMeters".to_owned(), Value::from(0xFF));
+        let errors = s.validate();
+        for rule in [
+            "DockWidthPixelsOutOfRange",
+            "DockWidthPercentOutOfRange",
+            "DockHeightPixelsOutOfRange",
+            "DockHeightPercentOutOfRange",
+            "DockTopGapPixelsOutOfRange",
+            "DockTopGapPercentOutOfRange",
+            "DockBottomGapPixelsOutOfRange",
+            "DockBottomGapPercentOutOfRange",
+            "FocusMinutesOutOfRange",
+            "FocusBreakMinutesOutOfRange",
+            "FocusSessionsOutOfRange",
+            "WirelessPollOutOfRange",
+            "WirelessThresholdInvalid",
+            "AntigravityGroupsInvalid",
+            "DockScaleOutOfRange",
+            "StatsMetersInvalid",
+            "WidgetOrderInvalid",
+            "WeatherCityTooLong",
+        ] {
+            assert!(errors.contains(&rule), "missing {rule}: {errors:?}");
+        }
+        assert!(errors.len() >= 10);
+    }
+
+    #[test]
+    fn validate_rejects_hotkey_conflict_and_widget_subset() {
+        let mut s = DockSettings {
+            custom_launcher_hotkey: Some("Ctrl+Alt+D".to_owned()),
+            ..DockSettings::default()
+        };
+        assert!(s.validate().contains(&"HotkeysConflict"));
+        s.custom_launcher_hotkey = Some("Ctrl+Alt+L".to_owned());
+        s.custom_dock_hotkey = Some("not a hotkey".to_owned());
+        assert!(s.validate().contains(&"CustomDockHotkeyInvalid"));
+        s.custom_dock_hotkey = None;
+
+        s.enabled_widgets = vec!["Clock".to_owned(), "RetiredWidget".to_owned()];
+        let errors = s.validate();
+        assert!(errors.contains(&"UnsupportedWidgetId"));
+        assert!(errors.contains(&"EnabledWidgetNotInstalled"));
+    }
+
+    #[test]
+    fn legacy_json_migrations_are_applied() {
+        let raw = r#"{
+            "DockBottomGap": 12,
+            "SurfaceOpacity": 0.7,
+            "DockIconPaddingX": 99,
+            "Widgets": ["Memory", "Search", "AiUsage"],
+            "InstalledWidgets": ["AiUsage"],
+            "WidgetDensityOverrides": {"AiUsage": "Compact", "Memory": "Auto"},
+            "AiUsageProviders": 1,
+            "StatsMeters": "Cpu, Battery, Memory",
+            "PinnedTrayIcons": [" path:a.exe ", "path:a.exe", "   "]
+        }"#;
+        let normalized = normalize_legacy_json(raw);
+        let s: DockSettings = serde_json::from_str(&normalized).unwrap();
+        assert_eq!(s.dock_bottom_gap_pixels, 12);
+        assert_eq!(s.dock_opacity, 0.7);
+        assert_eq!(s.menu_opacity, 0.7);
+        assert_eq!(s.dock_icon_padding, MAX_ICON_PADDING);
+        assert!(
+            !s.enabled_widgets
+                .iter()
+                .any(|id| id == "Memory" || id == "Search")
+        );
+        assert!(s.enabled_widgets.iter().any(|id| id == "AiUsageClaude"));
+        assert!(s.installed_widgets.iter().any(|id| id == "AiUsageCursor"));
+        assert_eq!(s.ai_usage_providers, 0);
+        assert_eq!(
+            s.widget_density_overrides.get("AiUsageClaude"),
+            Some(&WidgetDensityMode::Compact)
+        );
+        assert!(!s.widget_density_overrides.contains_key("Memory"));
+        // The WIP port has a typed `stats_meters` field, so the C# string is decoded there
+        // instead of being left in `extra` (the raw normalization above still drops the
+        // retired flags).
+        assert_eq!(s.stats_meters, 1 | 2);
+        assert_eq!(s.user_pinned_background_apps, ["path:a.exe"]);
+    }
+
+    #[test]
+    fn legacy_struct_migration_is_idempotent() {
+        let mut s = DockSettings {
+            enabled_widgets: vec!["AiUsage".to_owned(), "Tray".to_owned()],
+            installed_widgets: vec!["AiUsage".to_owned()],
+            ai_usage_providers: ai_providers::CODEX,
+            ..DockSettings::default()
+        };
+        s.migrate_legacy();
+        assert!(s.enabled_widgets.iter().any(|id| id == "AiUsageCodex"));
+        assert!(!s.enabled_widgets.iter().any(|id| id == "Tray"));
+        let once = s.clone();
+        s.migrate_legacy();
+        assert_eq!(s, once);
+    }
+
+    // ---- WIP behaviors preserved from the pre-integration port ----
+
+    #[test]
     fn explicit_disabled_hotkey_does_not_fall_back_to_legacy_binding() {
         let settings = DockSettings {
-            launcher_hotkey: "AltSpace".into(),
+            launcher_hotkey: HotkeyChoice::AltSpace,
             custom_launcher_hotkey: Some("Disabled".into()),
-            dock_hotkey: "CtrlSpace".into(),
+            dock_hotkey: HotkeyChoice::CtrlSpace,
             custom_dock_hotkey: Some("Backspace".into()),
             ..Default::default()
         };
@@ -691,14 +2450,12 @@ mod tests {
 
     #[test]
     fn language_round_trips_with_the_csharp_json_key() {
-        let dir = std::env::temp_dir().join(format!("ot-lang-{}", std::process::id()));
+        let dir = temp_dir("cfg-language");
         let path = dir.join("settings.json");
-        fs::create_dir_all(&dir).unwrap();
 
         fs::write(&path, r#"{"Language":"tr-TR"}"#).unwrap();
         assert_eq!(load_from(&path).language, "tr-TR");
 
-        // Legacy C# AppLanguageConverter values remain readable.
         fs::write(&path, r#"{"Language":"Turkish"}"#).unwrap();
         assert_eq!(load_from(&path).language, "tr-TR");
         fs::write(&path, r#"{"Language":2}"#).unwrap();
@@ -716,9 +2473,8 @@ mod tests {
 
     #[test]
     fn csharp_settings_fields_round_trip() {
-        let dir = std::env::temp_dir().join(format!("ot-deep-{}", std::process::id()));
+        let dir = temp_dir("cfg-deep");
         let path = dir.join("settings.json");
-        fs::create_dir_all(&dir).unwrap();
         fs::write(
             &path,
             r#"{
@@ -749,7 +2505,7 @@ mod tests {
         assert_eq!(settings.menu_background, SurfaceBackground::Solid);
         assert_eq!(settings.widget_background, SurfaceBackground::None);
         assert!((settings.surface_opacity - 0.75).abs() < f64::EPSILON);
-        assert_eq!(settings.launcher_hotkey, "CtrlSpace");
+        assert_eq!(settings.launcher_hotkey, HotkeyChoice::CtrlSpace);
         assert!(!settings.check_updates);
 
         save_to(&path, &settings).unwrap();
@@ -773,37 +2529,43 @@ mod tests {
     }
 
     #[test]
-    fn widgets_are_opt_in_by_default_and_respect_focus_mode() {
-        let mut s = DockSettings::default();
-        assert!(s.enabled_widgets.is_empty());
-        assert!(!s.is_widget_enabled("clock"));
-        assert!(!s.is_widget_enabled("stats"));
-        assert!(!s.is_widget_enabled("audio"));
+    fn csharp_profile_and_string_flags_do_not_reset_settings() {
+        let dir = temp_dir("cfg-csharp-migrate");
+        let path = dir.join("settings.json");
+        let raw = r#"{
+            "Position": "Left",
+            "StatsMeters": "Cpu, Memory, Gpu, GpuTemperature",
+            "Profiles": [{
+                "Name": "Default",
+                "HiddenApps": [],
+                "Widgets": ["Clock", "SystemStats"],
+                "InstalledWidgets": ["Clock", "SystemStats"],
+                "Theme": "Dark",
+                "AutoHide": "Smart"
+            }],
+            "ActiveProfile": "Default"
+        }"#;
+        fs::write(&path, raw).unwrap();
 
-        s.set_widget_enabled("clock", true);
-        s.set_widget_enabled("audio", true);
-        s.set_widget_enabled("focus", true);
-        assert!(s.is_widget_enabled("clock"));
-        assert!(s.is_widget_enabled("audio"));
-        assert!(s.is_widget_enabled("focus"));
-
-        // Focus mode keeps only clock and focus visible.
-        s.focus_mode = true;
-        assert!(s.is_widget_enabled("clock"));
-        assert!(s.is_widget_enabled("focus"));
-        assert!(!s.is_widget_enabled("audio"));
-
-        s.focus_mode = false;
-        s.set_widget_enabled("clock", false);
-        assert!(!s.is_widget_enabled("clock"));
-        assert!(!s.show_clock_widget);
+        let loaded = load_from(&path);
+        assert_eq!(
+            loaded.position,
+            DockPosition::Left,
+            "C# settings must still load"
+        );
+        assert_eq!(loaded.stats_meters, 1 | 2 | 16 | 32);
+        assert_eq!(loaded.profiles.len(), 1);
+        assert_eq!(loaded.profiles[0].name, "Default");
+        assert_eq!(loaded.profiles[0].enabled_widgets, ["Clock", "SystemStats"]);
+        assert_eq!(loaded.profiles[0].auto_hide, AutoHideMode::Smart);
+        assert_eq!(loaded.profiles[0].position, DockPosition::Center);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn dynamic_island_settings_round_trip_with_csharp_keys() {
-        let dir = std::env::temp_dir().join(format!("ot-island-{}", std::process::id()));
+        let dir = temp_dir("cfg-island");
         let path = dir.join("settings.json");
-        fs::create_dir_all(&dir).unwrap();
         fs::write(
             &path,
             r#"{
@@ -832,10 +2594,7 @@ mod tests {
         assert!((loaded.dynamic_island_opacity - 0.65).abs() < f64::EPSILON);
         assert!(!loaded.dynamic_island_use_theme);
         assert_eq!(
-            loaded
-                .dynamic_island_placements
-                .get("clock")
-                .map(String::as_str),
+            loaded.dynamic_island_placements.get("clock").map(String::as_str),
             Some("*")
         );
         assert_eq!(
@@ -861,15 +2620,6 @@ mod tests {
         ] {
             assert!(raw.contains(key), "missing {key} in {raw}");
         }
-
-        // Absent keys fall back to the C#-compatible defaults.
-        fs::write(&path, r#"{}"#).unwrap();
-        let defaults = load_from(&path);
-        assert!(defaults.dynamic_island_enable);
-        assert!(!defaults.dynamic_island_auto_hide);
-        assert_eq!(defaults.dynamic_island_background, SurfaceBackground::Glass);
-        assert!((defaults.dynamic_island_opacity - 0.9).abs() < f64::EPSILON);
-        assert!(defaults.dynamic_island_use_theme);
         let _ = fs::remove_dir_all(&dir);
     }
 }
