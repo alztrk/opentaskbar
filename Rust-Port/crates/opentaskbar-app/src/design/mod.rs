@@ -5,8 +5,17 @@
 //! `ui/menu.rs`), and GPUI (`ui/components.rs`, `ui/settings.rs`) so every surface speaks
 //! one cohesive visual language.
 
+// New C5 modules expose APIs consumed by other workstreams after merge.
+#![allow(dead_code)]
+
 pub mod brand_paths;
+pub mod fonts;
 pub mod icons;
+pub mod radius;
+pub mod theme;
+pub mod tokens;
+pub mod widget_pack;
+pub mod windows_palette;
 
 /// RGB color tuple `(r, g, b)`.
 pub type Rgb = (u8, u8, u8);

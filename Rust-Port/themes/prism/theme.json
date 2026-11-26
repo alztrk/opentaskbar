@@ -1,0 +1,6 @@
+{
+  "name": "Prism",
+  "author": "OpenTaskbar contributors",
+  "description": "Graphite and violet-accented widget styling that keeps original Windows and application icons.",
+  "preserveOriginalIcons": true
+}
