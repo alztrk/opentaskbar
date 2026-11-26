@@ -20,6 +20,8 @@ pub mod hover;
 pub mod media_ext;
 pub mod speedtest;
 pub mod telemetry;
+pub mod uia_raw;
+pub mod widget_snapshot;
 
 use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -50,11 +52,15 @@ pub use focus_break::{FocusEvent, FocusPhase, FocusSession, SharedFocusSession, 
 pub use hover::{HOVER_INTENT_MS, HoverChange, HoverPhase, SUPPRESS_MS, WidgetHoverCoordinator};
 #[allow(unused_imports)]
 pub use media_ext::{
-    AudioAppSession, MediaDetails, format_time as format_media_time,
-    get_details as get_media_details, playing_glyph, seek_ratio, volume_from_wheel,
+    AudioAppSession, MediaDetails, MediaTimeline, TimelineSample,
+    confirm_seek, format_time as format_media_time, get_details as get_media_details,
+    playing_glyph, seek_ratio, volume_from_wheel,
 };
 #[allow(unused_imports)]
 pub use speedtest::{STREAM_COUNT, SpeedTestController, SpeedTestResult, SpeedTestState};
+#[allow(unused_imports)]
+pub use widget_snapshot::{POLL_TTL, WidgetPollSnapshot};
+#[allow(unused_imports)]
 pub use telemetry::{
     active_keyboard_code, adjust_audio_volume, day_progress_metrics, empty_recycle_bin,
     get_audio_state, is_recycle_bin_non_empty, sample_battery, sample_drives, set_audio_volume,
@@ -267,6 +273,12 @@ pub struct WidgetRuntime {
     notified_low_bt: HashSet<String>,
     ai_usage: Arc<Mutex<telemetry::AiUsageCache>>,
     media_session: Arc<Mutex<telemetry::MediaSessionSnapshot>>,
+    /// Seek-anchored media clock; rejects stale SMTC echoes after a confirmed seek.
+    media_timeline: MediaTimeline,
+    /// Monotonic epoch backing every `MediaTimeline` timestamp.
+    timeline_epoch: Instant,
+    /// 1 s TTL cache for disk / keyboard reads made by chip renderers on every VSync.
+    poll_snapshot: WidgetPollSnapshot,
     /// Multi-stream NetSpeed test controller.
     speedtest: SpeedTestController,
     speedtest_started_at: Option<Instant>,
@@ -329,6 +341,9 @@ impl Default for WidgetRuntime {
             notified_low_bt: HashSet::new(),
             ai_usage: Arc::new(Mutex::new(telemetry::AiUsageCache::default())),
             media_session: Arc::new(Mutex::new(telemetry::MediaSessionSnapshot::default())),
+            media_timeline: MediaTimeline::default(),
+            timeline_epoch: Instant::now(),
+            poll_snapshot: WidgetPollSnapshot::default(),
             speedtest: SpeedTestController::new(),
             speedtest_started_at: None,
             hover: WidgetHoverCoordinator::new(),
@@ -386,21 +401,6 @@ fn format_mm_ss_cs(total_secs: u64, centis: u32) -> String {
 /// and 2 consecutive samples bring them back. Returns `None` while the meters must stay hidden.
 fn gpu_metrics_visible(samples: u32, misses: u32) -> bool {
     misses < 5 && samples >= 2
-}
-
-/// C# `StorageWidget`: `DriveType.Fixed && IsReady` filter (excludes CD/DVD, USB and network
-/// drives). `GetDiskFreeSpaceExW` already implies readiness, so only the drive-type check is
-/// needed on top of the telemetry sampler.
-fn fixed_ready_drives() -> Vec<telemetry::DriveSpace> {
-    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
-    const DRIVE_FIXED: u32 = 3;
-    sample_drives()
-        .into_iter()
-        .filter(|d| {
-            let root: Vec<u16> = format!("{}:\\\0", d.letter).encode_utf16().collect();
-            unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_FIXED }
-        })
-        .collect()
 }
 
 /// C# `QuickSettingsWidget` radio state labels: `Loading`, `Unavailable`, `On`, `Off`.
@@ -516,6 +516,36 @@ fn weather_icon_glyph_text(condition: &str) -> &'static str {
 }
 
 impl WidgetRuntime {
+    /// Monotonic seconds on the media timeline clock.
+    fn now_secs(&self) -> f64 {
+        self.timeline_epoch.elapsed().as_secs_f64()
+    }
+
+    /// Disk data for chip renderers. Never samples a disk here: `tick` refreshes the 1 s snapshot.
+    fn poll_drives(&self) -> &[telemetry::DriveSpace] {
+        &self.poll_snapshot.drives
+    }
+
+    /// SMTC snapshot with the extrapolated playback position applied.
+    fn media_snapshot(&self) -> telemetry::MediaSessionSnapshot {
+        let mut snap = self
+            .media_session
+            .lock()
+            .ok()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        snap.position_secs = media_ext::displayed_position(&self.media_timeline, &snap, self.now_secs());
+        snap
+    }
+
+    /// Animation-only tick. The battery wave phase is derived from `battery_anim_start` inside
+    /// `chip_spec`, so this advances no sensor and leaves the snapshot untouched. WS-8 can call
+    /// this from `TIMER_WIDGET_ANIM` instead of a full `refresh_widgets` / chip surface rebuild.
+    pub fn animation_tick(&mut self, _settings: &DockSettings) -> bool {
+        // No sensor work: DComp transforms are driven by dock::dcomp from the wave phase alone.
+        false
+    }
+
     pub fn tick(&mut self, settings: &DockSettings) {
         let now = Instant::now();
         let dt_ms = now.duration_since(self.last_tick).as_millis() as u64;
@@ -561,6 +591,9 @@ impl WidgetRuntime {
             return;
         }
         self.last_poll = Some(now);
+        // Single cached read of the expensive chip inputs. Every renderer below (including the
+        // 144 Hz animation path) reads this snapshot instead of touching the disk / locale APIs.
+        self.poll_snapshot.refresh();
 
         if settings.is_widget_enabled("stats") {
             let show_cpu = settings.stats_meters & 1 != 0;
@@ -614,6 +647,14 @@ impl WidgetRuntime {
         }
         if settings.is_widget_enabled("media") {
             telemetry::refresh_media_session(&self.media_session, false);
+            // Re-anchor the extrapolated clock from the latest SMTC fetch. A repeated sample
+            // leaves the anchor alone; a confirmed seek survives stale echoes (WS-6 contract).
+            if let Ok(guard) = self.media_session.lock() {
+                let now = self.now_secs();
+                let sample = media_ext::timeline_from_snapshot(&guard, self.timeline_epoch);
+                let rate = if guard.playing { 1.0 } else { 0.0 };
+                self.media_timeline.update(sample, rate, now, now);
+            }
         }
         if settings.is_widget_enabled("netspeed") {
             let (rx, tx) = self.net.sample();
@@ -768,7 +809,13 @@ impl WidgetRuntime {
         {
             return code.clone();
         }
-        active_keyboard_code()
+        // Cached by `tick` behind the 1 s poll gate; a freshly booted runtime falls back once.
+        let cached = self.poll_snapshot.keyboard_code.clone();
+        if cached.is_empty() {
+            active_keyboard_code()
+        } else {
+            cached
+        }
     }
 
     /// Returns the live dynamic width for a dock widget (matching C# `StorageWidget` multi-drive
@@ -782,7 +829,7 @@ impl WidgetRuntime {
                 _ => 226.0,
             },
             "storage" => {
-                let n = sample_drives().len().clamp(1, 3);
+                let n = self.poll_drives().len().clamp(1, 3);
                 (n as f32 * 116.0).max(124.0)
             }
             "bluetoothbattery" => {
@@ -857,12 +904,7 @@ impl WidgetRuntime {
 
     /// Builds the dynamic-island expanded details payload for the media widget.
     pub fn island_media_details(&self) -> MediaDetails {
-        let snap = self
-            .media_session
-            .lock()
-            .ok()
-            .map(|g| g.clone())
-            .unwrap_or_default();
+        let snap = self.media_snapshot();
         media_ext::get_details(&snap, self.audio_vol, self.audio_muted)
     }
 
@@ -1258,8 +1300,10 @@ impl WidgetRuntime {
             }
             "storage" => {
                 let compact = setting_bool(settings, "StorageCompactMode", false);
-                let drives: Vec<(String, String)> = fixed_ready_drives()
-                    .into_iter()
+                let drives: Vec<(String, String)> = self
+                    .poll_snapshot
+                    .fixed_drives()
+                    .iter()
                     .take(if compact { 1 } else { 3 })
                     .map(|d| {
                         let pair = d.format_capacity_pair();
@@ -1276,12 +1320,7 @@ impl WidgetRuntime {
                 WidgetChipSpec::Storage { drives }
             }
             "media" => {
-                let snap = self
-                    .media_session
-                    .lock()
-                    .ok()
-                    .map(|g| g.clone())
-                    .unwrap_or_default();
+                let snap = self.media_snapshot();
                 let title = if snap.title.is_empty() {
                     loc::t("WidgetMediaDescription").to_owned()
                 } else {
@@ -1536,8 +1575,9 @@ impl WidgetRuntime {
                 }
             }
             "keyboard" => format!("Keyboard Layout · {}", self.current_keyboard_code()),
-            "storage" => sample_drives()
-                .into_iter()
+            "storage" => self
+                .poll_drives()
+                .iter()
                 .take(3)
                 .map(|d| format!("{}: {}", d.letter, d.format_capacity_pair()))
                 .collect::<Vec<_>>()
@@ -2895,7 +2935,7 @@ impl WidgetRuntime {
             }
             // C# `StorageWidget` expanded drives flyout (DriveType.Fixed && IsReady).
             "storage" => {
-                let drives = fixed_ready_drives();
+                let drives = self.poll_snapshot.fixed_drives();
                 let mut blocks: Vec<FlyoutBlock> = drives
                     .iter()
                     .take(6)
@@ -3133,12 +3173,7 @@ impl WidgetRuntime {
             "media" => {
                 telemetry::refresh_media_session(&self.media_session, true);
                 let build = |runtime: &Self| {
-                    let snap = runtime
-                        .media_session
-                        .lock()
-                        .ok()
-                        .map(|g| g.clone())
-                        .unwrap_or_default();
+                    let snap = runtime.media_snapshot();
                     let details =
                         media_ext::get_details(&snap, runtime.audio_vol, runtime.audio_muted);
                     let sessions = media_ext::list_app_sessions();
@@ -3191,14 +3226,40 @@ impl WidgetRuntime {
                                 .media_session
                                 .lock()
                                 .ok()
-                                .map_or(0, |g| g.duration_secs as u32);
-                            telemetry::media_seek((ratio * dur as f32).round() as u64);
+                                .map_or(0, |g| g.duration_secs as u64);
+                            let target = media_ext::seek_position(ratio, dur);
+                            if telemetry::media_seek(target) {
+                                // Anchor locally at once; a stale SMTC echo of the old position
+                                // must not rewind the slider until the provider catches up.
+                                let now = self.now_secs();
+                                confirm_seek(&mut self.media_timeline, target as f64, now);
+                            }
                             telemetry::refresh_media_session(&self.media_session, true);
                             LiveOutcome::Update(build(self))
                         }
                         LiveEvent::Slider { id: 51, ratio } => {
                             set_audio_volume((ratio * 100.0).round() as u32);
                             (self.audio_vol, self.audio_muted) = get_audio_state();
+                            LiveOutcome::Update(build(self))
+                        }
+                        // Per-app mixer rows (ids 120..=131) from `media_ext::list_app_sessions`.
+                        LiveEvent::Click(id) if (120..132).contains(&id) && id % 2 == 0 => {
+                            let sessions = media_ext::list_app_sessions();
+                            if let Some(session) = sessions.get(((id - 120) / 2) as usize) {
+                                media_ext::set_app_mute(&session.session_id, !session.muted);
+                            }
+                            LiveOutcome::Update(build(self))
+                        }
+                        LiveEvent::Slider { id, ratio }
+                            if (121..132).contains(&id) && id % 2 == 1 =>
+                        {
+                            let sessions = media_ext::list_app_sessions();
+                            if let Some(session) = sessions.get(((id - 121) / 2) as usize) {
+                                media_ext::set_app_volume(
+                                    &session.session_id,
+                                    (ratio * 100.0).round() as u32,
+                                );
+                            }
                             LiveOutcome::Update(build(self))
                         }
                         _ => LiveOutcome::Close,
@@ -3613,5 +3674,55 @@ mod tests {
         ));
         // Widgets without a click-driven settings mutation never request a reload.
         assert!(!WidgetRuntime::flyout_settings_changed("stats", true));
+    }
+
+    #[test]
+    fn widget_poll_snapshot_has_one_second_ttl() {
+        assert_eq!(POLL_TTL, std::time::Duration::from_secs(1));
+        let now = Instant::now();
+        let mut snap = WidgetPollSnapshot::with_samples(Vec::new(), "EN".to_owned(), now);
+        assert!(snap.is_fresh(now + std::time::Duration::from_millis(900)));
+        assert!(!snap.is_fresh(now + POLL_TTL));
+        // A subsequent refresh produces an empty drive list without touching the cache timestamp.
+        snap.drives.clear();
+        assert!(snap.keyboard_code == "EN");
+    }
+
+    #[test]
+    fn animation_tick_does_not_change_poll_snapshot() {
+        let mut runtime = WidgetRuntime::default();
+        let settings = DockSettings::default();
+        let before = runtime.poll_snapshot.sampled_at();
+        runtime.poll_snapshot.refresh();
+        let after = runtime.poll_snapshot.sampled_at();
+        assert!(!runtime.animation_tick(&settings));
+        assert_eq!(runtime.poll_snapshot.sampled_at(), after);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn media_runtime_exposes_timeline_position_without_rebuilding_state() {
+        let mut runtime = WidgetRuntime::default();
+        let snapshot = telemetry::MediaSessionSnapshot {
+            title: "Song".into(),
+            artist: "Artist".into(),
+            playing: true,
+            position_secs: 10,
+            duration_secs: 100,
+            ..Default::default()
+        };
+        {
+            let mut guard = runtime.media_session.lock().unwrap();
+            *guard = snapshot;
+        }
+        let sample = media_ext::timeline_from_snapshot(
+            &runtime.media_session.lock().unwrap(),
+            runtime.timeline_epoch,
+        );
+        runtime
+            .media_timeline
+            .update(sample, 1.0, runtime.now_secs(), runtime.now_secs());
+        let shown = runtime.media_snapshot().position_secs;
+        assert!(shown >= 10, "extrapolated position must not rewind the SMTC sample");
     }
 }
