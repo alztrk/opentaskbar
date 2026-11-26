@@ -34,6 +34,40 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::platform::win32;
 
+// `DwmActivateLivePreview` starts Aero Peek for a window; `DwmDeactivateLivePreview`
+// ends it. Missing/older DWM versions simply no-op.
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    fn DwmActivateLivePreview(hwnd: HWND, color: u32, kind: i32, flags: u32) -> i32;
+    fn DwmDeactivateLivePreview() -> i32;
+}
+
+/// Activates Aero Peek on the first thumbnail's source window.
+pub fn activate_live_preview(hwnd: usize) -> bool {
+    // SAFETY: DWM validates the window handle; kind 0 == DWM_LIVE_PREVIEW_KIND_PEEK.
+    unsafe { DwmActivateLivePreview(hwnd as HWND, 0, 0, 0) == 0 }
+}
+
+pub fn deactivate_live_preview() {
+    unsafe {
+        let _ = DwmDeactivateLivePreview();
+    }
+}
+
+/// Clamps an overlay window to the primary screen (C# `PositionOverlayWindow`).
+pub fn position_overlay_window(
+    width: i32,
+    height: i32,
+    center_x: i32,
+    bottom_y: i32,
+    screen: (i32, i32),
+    margin: i32,
+) -> (i32, i32) {
+    let x = (center_x - width / 2).clamp(margin, (screen.0 - width - margin).max(margin));
+    let y = (bottom_y - height).clamp(margin, (screen.1 - height - margin).max(margin));
+    (x, y)
+}
+
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
 const MAX_CARDS: usize = 6;
@@ -266,12 +300,16 @@ impl PreviewPopup {
 
         let monitor = win32::monitor_for_point_px(anchor_center_x_px, anchor_bottom_y_px);
         let margin = (8.0 * monitor.dpi_scale).round() as i32;
-        let min_x = monitor.left + margin;
-        let max_x = (monitor.right - total_w - margin).max(min_x);
-        let min_y = monitor.top + margin;
-        let max_y = (monitor.bottom - total_h - margin).max(min_y);
-        let x = (anchor_center_x_px - total_w / 2).clamp(min_x, max_x);
-        let y = (anchor_bottom_y_px - total_h).clamp(min_y, max_y);
+        let (rel_x, rel_y) = position_overlay_window(
+            total_w,
+            total_h,
+            anchor_center_x_px - monitor.left,
+            anchor_bottom_y_px - monitor.top,
+            (monitor.right - monitor.left, monitor.bottom - monitor.top),
+            margin,
+        );
+        let x = monitor.left + rel_x;
+        let y = monitor.top + rel_y;
 
         unsafe {
             SetWindowPos(
@@ -721,5 +759,33 @@ unsafe extern "system" fn preview_wnd_proc(
             0
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_window_stays_inside_screen() {
+        assert_eq!(
+            position_overlay_window(400, 200, 500, 300, (1920, 1080), 8),
+            (300, 100)
+        );
+        assert_eq!(
+            position_overlay_window(400, 200, -100, -50, (1920, 1080), 8),
+            (8, 8)
+        );
+        assert_eq!(
+            position_overlay_window(400, 200, 5000, 5000, (1920, 1080), 8),
+            (1512, 872)
+        );
+    }
+
+    #[test]
+    fn peek_timing_matches_csharp() {
+        assert_eq!(super::super::layout::PREVIEW_GRACE_MS, 250);
+        assert_eq!(super::super::layout::PREVIEW_DELAY_MS, 500);
+        assert_eq!(super::super::layout::PREVIEW_FADE_MS, 140);
     }
 }

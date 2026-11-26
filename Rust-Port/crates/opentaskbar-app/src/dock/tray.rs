@@ -215,6 +215,21 @@ pub(super) fn open_pinned_app(owner_hwnd: usize, path: &str) {
     }
 }
 
+/// Middle-click on a pinned tray icon closes that app (C# `PinnedTrayStrip` orientation/middle click).
+pub(super) fn close_pinned_app(owner_hwnd: usize, path: &str) {
+    if let Some(app) = enumerate_background_apps()
+        .into_iter()
+        .find(|app| app.exe_path.eq_ignore_ascii_case(path))
+    {
+        close_background_app(owner_hwnd, &app);
+    } else if let Some(window) = tracker::enumerate_windows()
+        .into_iter()
+        .find(|window| window.exe_path.eq_ignore_ascii_case(path))
+    {
+        tracker::close_window(window.hwnd);
+    }
+}
+
 pub(super) fn show_pinned_app_menu(
     owner_hwnd: usize,
     is_dark: bool,

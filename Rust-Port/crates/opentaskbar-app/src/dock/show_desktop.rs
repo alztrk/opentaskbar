@@ -21,10 +21,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOPMOST, WS_POPUP,
 };
 
+use opentaskbar_core::settings::DockEdge;
+
+use super::layout;
 use crate::platform::win32::MonitorInfo;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const STRIP_W_DIPS: f32 = 10.0;
+const SIDE_STRIP_LENGTH_DIPS: f32 = 40.0;
 
 struct CornerState {
     hwnd: HWND,
@@ -34,6 +38,7 @@ struct CornerState {
     is_dark: bool,
     hovered: bool,
     tracking: bool,
+    vertical_edge: bool,
 }
 
 impl CornerState {
@@ -78,14 +83,23 @@ impl CornerState {
 
             // On hover, draw only a subtle Windows 11-style 1.5px vertical hairline scaled to dock height.
             if self.hovered {
-                let line_w = (1.5 * self.dpi).round().max(1.0) as usize;
-                let line_h = ((h as f32) * 0.45)
+                let thin = (1.5 * self.dpi).round().max(1.0) as usize;
+                let long = ((if self.vertical_edge { w } else { h }) as f32 * 0.45)
                     .round()
                     .clamp(16.0 * self.dpi, 34.0 * self.dpi) as usize;
-                let x0 = (w.saturating_sub(line_w + (3.0 * self.dpi).round() as usize)).min(w);
-                let x1 = (x0 + line_w).min(w);
-                let y0 = h.saturating_sub(line_h) / 2;
-                let y1 = (y0 + line_h).min(h);
+                let (x0, x1, y0, y1) = if self.vertical_edge {
+                    let x0 = w.saturating_sub(long) / 2;
+                    (
+                        x0,
+                        (x0 + long).min(w),
+                        h.saturating_sub(thin + (3.0 * self.dpi).round() as usize),
+                        h.saturating_sub((3.0 * self.dpi).round() as usize),
+                    )
+                } else {
+                    let x0 = w.saturating_sub(thin + (3.0 * self.dpi).round() as usize);
+                    let y0 = h.saturating_sub(long);
+                    (x0, (x0 + thin).min(w), y0, h)
+                };
                 let (r, g, b, a): (u8, u8, u8, u8) = if self.is_dark {
                     (226, 232, 240, 200)
                 } else {
@@ -146,7 +160,20 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 impl ShowDesktopCorner {
+    #[allow(dead_code)]
     pub fn new(
+        monitor: MonitorInfo,
+        height_dips: f32,
+        is_dark: bool,
+        visible: bool,
+    ) -> Option<Self> {
+        Self::new_for_edge(DockEdge::Bottom, monitor, height_dips, is_dark, visible)
+    }
+
+    /// Edge-aware strip: bottom-right hairline on the bottom dock, a horizontal
+    /// strip at the foot of left/right docks.
+    pub fn new_for_edge(
+        edge: DockEdge,
         monitor: MonitorInfo,
         height_dips: f32,
         is_dark: bool,
@@ -166,10 +193,7 @@ impl ShowDesktopCorner {
             RegisterClassExW(&wc);
         }
 
-        let w = (STRIP_W_DIPS * monitor.dpi_scale).round() as i32;
-        let h = (height_dips.clamp(32.0, 96.0) * monitor.dpi_scale).round() as i32;
-        let x = monitor.right - w;
-        let y = monitor.bottom - h;
+        let (x, y, w, h) = Self::strip_rect(edge, monitor.clone(), height_dips);
 
         let hwnd = unsafe {
             CreateWindowExW(
@@ -199,6 +223,7 @@ impl ShowDesktopCorner {
             is_dark,
             hovered: false,
             tracking: false,
+            vertical_edge: edge != DockEdge::Bottom,
         }));
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
@@ -209,22 +234,43 @@ impl ShowDesktopCorner {
         Some(Self { hwnd, state })
     }
 
+    #[allow(dead_code)]
     pub fn update(&self, monitor: MonitorInfo, height_dips: f32, is_dark: bool, visible: bool) {
-        let w = (STRIP_W_DIPS * monitor.dpi_scale).round() as i32;
-        let h = (height_dips.clamp(32.0, 96.0) * monitor.dpi_scale).round() as i32;
-        let x = monitor.right - w;
-        let y = monitor.bottom - h;
+        self.update_for_edge(DockEdge::Bottom, monitor, height_dips, is_dark, visible);
+    }
+
+    pub fn update_for_edge(
+        &self,
+        edge: DockEdge,
+        monitor: MonitorInfo,
+        height_dips: f32,
+        is_dark: bool,
+        visible: bool,
+    ) {
+        let (x, y, w, h) = Self::strip_rect(edge, monitor.clone(), height_dips);
         unsafe {
             if !self.state.is_null() {
                 (*self.state).w_px = w;
                 (*self.state).h_px = h;
                 (*self.state).dpi = monitor.dpi_scale;
                 (*self.state).is_dark = is_dark;
+                (*self.state).vertical_edge = edge != DockEdge::Bottom;
                 (*self.state).render();
             }
             SetWindowPos(self.hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
             ShowWindow(self.hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
         }
+    }
+
+    fn strip_rect(edge: DockEdge, monitor: MonitorInfo, height_dips: f32) -> (i32, i32, i32, i32) {
+        let dpi = monitor.dpi_scale;
+        let (thick, length) = if edge == DockEdge::Bottom {
+            (STRIP_W_DIPS, height_dips.clamp(32.0, 96.0))
+        } else {
+            (STRIP_W_DIPS, SIDE_STRIP_LENGTH_DIPS)
+        };
+        let (x, y, w, h) = layout::show_desktop_strip_rect(edge, monitor, thick, length, dpi);
+        (x, y, w.max(1), h.max(1))
     }
 }
 

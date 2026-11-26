@@ -6,6 +6,11 @@
 //! - Native live DWM window thumbnail previews (`DwmRegisterThumbnail`)
 //! - Per-app / Task View / Dock context menus, Shift+Click / Ctrl+Shift+Click / Middle-click / Wheel
 //! - File drag-and-drop (`WM_DROPFILES`), Dark/Light/System theme, Clock & CPU/RAM widgets, Show Desktop
+//!
+//! Edge parity (WS-D): `layout::window_rect_for_edge` places Left/Right docks along the
+//! monitor's Y axis, and scroll, magnification, auto-hide, resize, show-desktop strip and
+//! edge trigger all follow `DockEdge`. The DirectComposition visual tree is still laid out
+//! along X, so a full 90-degree visual rotation of the pill contents remains a follow-up.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -17,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::{
-    self, AppTheme, AutoHideMode, DockPosition, DockSettings, MiddleClickAction, SurfaceBackground,
+    self, AppTheme, AutoHideMode, DockSettings, MiddleClickAction, SurfaceBackground,
 };
 use opentaskbar_shell::tracker::{self, RunningWindow};
 use windows::Win32::Graphics::DirectComposition::{
@@ -25,34 +30,44 @@ use windows::Win32::Graphics::DirectComposition::{
 };
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows_sys::Win32::Graphics::Dwm::DwmFlush;
+use windows_sys::Win32::Graphics::Dwm::{
+    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmFlush, DwmGetWindowAttribute,
+};
 use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    UnregisterHotKey, VK_LWIN, VK_RWIN,
+    UnregisterHotKey, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_RIGHT, VK_RWIN, VK_TAB,
 };
 use windows_sys::Win32::UI::Shell::DragAcceptFiles;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GWLP_USERDATA, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect, HHOOK, HTCLIENT,
-    HTTRANSPARENT, HWND_BROADCAST, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IsIconic, IsWindowVisible,
-    KillTimer, LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage, RegisterClassExW,
-    RegisterWindowMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_DESTROY,
-    WM_DROPFILES, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONUP, WM_SETCURSOR,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, WindowFromPoint,
+    GWLP_USERDATA, GetClassNameW, GetCursorPos, GetMessageW, GetWindowLongPtrW, GetWindowRect,
+    HHOOK, HTCLIENT, HTTRANSPARENT, HWND_BROADCAST, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IsIconic,
+    IsWindowVisible, IsZoomed, KillTimer, LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW,
+    PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetCursor, SetTimer,
+    SetWindowLongPtrW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_APP, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW,
+    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_VISIBLE, WindowFromPoint,
 };
 
 pub mod dcomp;
 pub mod dynamic_island;
+pub mod layout;
 pub mod preview;
 pub mod show_desktop;
 pub mod tray;
 
 use self::dcomp::{DcompEngine, PillNodes, ShellGlyph, VisualNode, WidgetInteraction};
+use self::dynamic_island::{InputDisposition, IslandInput, IslandState};
+use self::layout::{
+    bounce_direction, capture_expansion_budget, drop_targets_recycle_bin, effective_edge,
+    escape_closes_transient, hide_offset, is_full_screen_on_monitor, is_shell_overlay_class,
+    keyboard_next_index, revealed_guard_should_hide, step_spring, wheel_to_axis_delta,
+};
 use self::preview::{PreviewItem, PreviewPopup};
 use self::show_desktop::ShowDesktopCorner;
 use crate::design;
@@ -70,7 +85,8 @@ use crate::widgets::{self, WidgetRuntime};
 const VERTICAL_EDGE_GAP: f32 = 5.0;
 const TOOLTIP_HEADROOM: f32 = 36.0;
 const MAG_HEADROOM: f32 = 26.0;
-const FISHEYE_RADIUS_SLOTS: f32 = 2.4;
+// The magnification peak is read from `settings.fisheye_intensity.peak()`;
+// WS-D's expansion budget trims it to the free pill space at runtime.
 const BOUNCE_DURATION_SECS: f32 = 0.42;
 const CLOSE_DURATION: Duration = Duration::from_millis(240);
 const DRAG_THRESHOLD_PX: f32 = 6.0;
@@ -82,6 +98,8 @@ const TIMER_WIDGETS: usize = 4;
 const TIMER_PREVIEW_WATCH: usize = 5;
 const TIMER_WINDOW_CLOSE: usize = 6;
 const TIMER_WIDGET_ANIM: usize = 7;
+const TIMER_REVEALED_GUARD: usize = 8;
+const TIMER_DRAG_HOVER: usize = 9;
 const RESIZE_EDGE_DIPS: f32 = 8.0;
 const SCROLL_EDGE_W_DIPS: f32 = 28.0;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -207,6 +225,9 @@ struct WidgetVisual {
 enum ResizeEdge {
     Left,
     Right,
+    /// Side docks resize vertically by dragging their top/bottom edge.
+    Top,
+    Bottom,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -266,6 +287,7 @@ fn scroll_min_pill_width(settings: &DockSettings) -> f32 {
 struct ResizeDragState {
     edge: ResizeEdge,
     start_screen_x: i32,
+    start_screen_y: i32,
     start_width_dips: f32,
 }
 
@@ -314,9 +336,12 @@ struct DockSlot {
     windows: Vec<PreviewItem>,
     is_foreground: bool,
     scale: f32,
+    scale_velocity: f32,
     slide_x: f32,
     bounce_started: Option<Instant>,
     close_started: Option<Instant>,
+    /// Notification badge count painted on the icon (settings gate: `NotificationBadgesEnabled`).
+    badge: u32,
 }
 
 impl DockSlot {
@@ -349,6 +374,8 @@ struct DragState {
 struct SlotVisuals {
     icon: VisualNode,
     dot: VisualNode,
+    badge: Option<VisualNode>,
+    badge_count: u32,
     bound_source: String,
     bound_has_icon: bool,
     bound_dot_state: u8,
@@ -445,6 +472,20 @@ struct DockState {
     pressed_scroll: Option<bool>,
     drag: Option<DragState>,
     resize_drag: Option<ResizeDragState>,
+    /// Keyboard navigation cursor over dock slots.
+    keyboard_idx: Option<usize>,
+    /// Cached peak magnification scale for the current hover session.
+    session_max_scale: f32,
+    /// 450 ms drag-hover bring-to-front gesture.
+    drag_hover_started: Option<Instant>,
+    /// Smart auto-hide rescans when the window set changes or once per second.
+    overlap_dirty: bool,
+    /// Standalone Win-key press keeps the dock revealed for a short grace window.
+    win_key_grace_until: Option<Instant>,
+    last_overlap_scan: Option<Instant>,
+    cached_overlap: bool,
+    /// Dynamic Island page/expanded state (headless policy, shared with the dock host).
+    island: IslandState,
     scroll_offset: f32,
     scroll_target: f32,
     scroll_pan: Option<(f32, f32, bool)>,
@@ -594,9 +635,11 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                     windows,
                     is_foreground,
                     scale: old.scale,
+                    scale_velocity: old.scale_velocity,
                     slide_x: old.slide_x,
                     bounce_started: old.bounce_started,
                     close_started: None,
+                    badge: old.badge,
                 });
             }
         } else if !claimed_exes.contains_key(&old.key)
@@ -619,9 +662,11 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                     .collect(),
                 is_foreground: list.iter().any(|w| w.is_foreground),
                 scale: old.scale,
+                scale_velocity: old.scale_velocity,
                 slide_x: old.slide_x,
                 bounce_started: old.bounce_started,
                 close_started: None,
+                badge: old.badge,
             });
         }
     }
@@ -642,9 +687,11 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
             windows,
             is_foreground,
             scale: 1.0,
+            scale_velocity: 0.0,
             slide_x: 0.0,
             bounce_started: None,
             close_started: None,
+            badge: 0,
         });
     }
 
@@ -675,9 +722,11 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                 .collect(),
             is_foreground: list.iter().any(|w| w.is_foreground),
             scale: 1.0,
+            scale_velocity: 0.0,
             slide_x: 0.0,
             bounce_started: None,
             close_started: None,
+            badge: 0,
         });
     }
 
@@ -792,20 +841,39 @@ fn compute_window_rect(
     let dpi = monitor.dpi_scale;
     let mon_w_dips = monitor.width() as f32 / dpi;
     let (width_dips, height_dips) = compute_window_dips(settings, slot_count, mon_w_dips);
-    let w_px = ((width_dips * dpi).ceil() as i32).min(monitor.width());
-    let h_px = ((height_dips * dpi).ceil() as i32).min(monitor.height());
     let margin_px = (12.0 * dpi).round() as i32;
-    let x_px = if settings.full_width {
-        monitor.left + (monitor.width() - w_px) / 2
-    } else {
-        match settings.position {
-            DockPosition::Left => monitor.left + margin_px,
-            DockPosition::Center => monitor.left + (monitor.width() - w_px) / 2,
-            DockPosition::Right => monitor.right - w_px - margin_px,
-        }
-    };
-    let y_px = monitor.bottom - h_px;
-    (x_px, y_px, w_px, h_px)
+    let edge = effective_edge(settings);
+    if layout::is_vertical(edge) {
+        // Side docks: the strip length runs along Y, thickness along X. Height is content
+        // driven (`ResizeSideDockToContent`); width keeps the magnification headroom.
+        let side_h = settings.dock_custom_width_dips.unwrap_or_else(|| {
+            layout::side_dock_height_dips(
+                slot_count + 3,
+                settings.icon_dips() + 9.0,
+                22.0,
+                settings.show_desktop_button,
+                monitor.height() as f32 / dpi - 24.0,
+            )
+        });
+        return layout::window_rect_for_edge(
+            edge,
+            monitor,
+            settings.position,
+            side_h,
+            settings.icon_dips() + 22.0 + layout::HEADROOM_DIPS,
+            margin_px,
+            settings.full_width,
+        );
+    }
+    layout::window_rect_for_edge(
+        edge,
+        monitor,
+        settings.position,
+        width_dips,
+        height_dips,
+        margin_px,
+        false,
+    )
 }
 
 fn bounce_offset_dips(started: Option<Instant>) -> Option<f32> {
@@ -1033,7 +1101,8 @@ impl DockState {
         } else {
             None
         };
-        let show_desktop_corner = ShowDesktopCorner::new(
+        let show_desktop_corner = ShowDesktopCorner::new_for_edge(
+            effective_edge(&settings),
             monitor.clone(),
             corner_h,
             is_dark,
@@ -1145,6 +1214,14 @@ impl DockState {
             pressed_scroll: None,
             drag: None,
             resize_drag: None,
+            keyboard_idx: None,
+            session_max_scale: layout::HOVER_SCALE,
+            drag_hover_started: None,
+            overlap_dirty: true,
+            win_key_grace_until: None,
+            last_overlap_scan: None,
+            cached_overlap: false,
+            island: IslandState::new(Vec::new()),
             scroll_offset: 0.0,
             scroll_target: 0.0,
             scroll_pan: None,
@@ -1265,12 +1342,19 @@ impl DockState {
         self.scroll_container.add_child(&self.divider);
 
         while self.slot_visuals.len() < self.slots.len() {
-            if let (Ok(icon), Ok(dot)) = (self.dcomp.create_node(), self.dcomp.create_node()) {
+            if let (Ok(icon), Ok(dot), Ok(badge)) = (
+                self.dcomp.create_node(),
+                self.dcomp.create_node(),
+                self.dcomp.create_node(),
+            ) {
                 icon.hide();
                 dot.hide();
+                badge.hide();
                 self.slot_visuals.push(SlotVisuals {
                     icon,
                     dot,
+                    badge: Some(badge),
+                    badge_count: 0,
                     bound_source: String::new(),
                     bound_has_icon: false,
                     bound_dot_state: 0,
@@ -1285,6 +1369,9 @@ impl DockState {
         for sv in &self.slot_visuals {
             self.scroll_container.add_child(&sv.icon);
             self.scroll_container.add_child(&sv.dot);
+            if let Some(badge) = &sv.badge {
+                self.scroll_container.add_child(badge);
+            }
         }
         for wv in &self.widget_visuals {
             self.scroll_container.add_child(&wv.bg);
@@ -1453,49 +1540,136 @@ impl DockState {
             && self
                 .win_key_reveal_until
                 .is_some_and(|until| Instant::now() < until);
-        let should_hide = if win_key_hold {
-            false
-        } else {
-            match self.settings.auto_hide {
-                AutoHideMode::Disabled => false,
-                AutoHideMode::Always => !pointer_busy,
-                AutoHideMode::Smart => {
-                    if pointer_busy {
-                        false
-                    } else {
-                        self.is_overlapped_by_window()
-                    }
-                }
+        let edge = effective_edge(&self.settings);
+        let mut pt = POINT { x: 0, y: 0 };
+        let at_edge = unsafe { GetCursorPos(&mut pt) != 0 }
+            && layout::is_at_edge_trigger(edge, self.monitor.clone(), pt.x, pt.y, self.dpi);
+        let overlap = if self.settings.auto_hide == AutoHideMode::Smart {
+            // RevealedGuardTimer marks the scan dirty on window changes; re-scan at most once/second otherwise.
+            let now = Instant::now();
+            let due = self.overlap_dirty
+                || self
+                    .last_overlap_scan
+                    .is_none_or(|t| now.saturating_duration_since(t) >= Duration::from_secs(1));
+            if due {
+                self.overlap_dirty = false;
+                self.last_overlap_scan = Some(now);
+                self.cached_overlap = self.is_overlapped_by_window();
             }
+            self.cached_overlap
+        } else {
+            false
         };
+        let win_key_grace = win_key_hold
+            || self
+                .win_key_grace_until
+                .is_some_and(|until| Instant::now() < until);
+        let should_hide = revealed_guard_should_hide(
+            self.settings.auto_hide,
+            pointer_busy,
+            at_edge,
+            overlap,
+            false, // shell menu state is exposed by WS-B `platform::start_menu_state`; not wired here
+            self.drag.is_some() || self.resize_drag.is_some() || self.scroll_pan.is_some(),
+            win_key_grace,
+        );
 
         if self.target_hidden != should_hide {
             self.target_hidden = should_hide;
             self.ensure_animation();
         }
+        // 200 ms revealed guard: catches missed WM_MOUSELEAVE and foreground shifts.
+        unsafe {
+            if self.settings.auto_hide != AutoHideMode::Disabled && !self.target_hidden {
+                SetTimer(
+                    self.hwnd as HWND,
+                    TIMER_REVEALED_GUARD,
+                    layout::REVEALED_GUARD_MS as u32,
+                    None,
+                );
+            } else {
+                KillTimer(self.hwnd as HWND, TIMER_REVEALED_GUARD);
+            }
+        }
     }
 
-    /// Checks whether any visible non-minimized window overlaps this monitor's dock shelf
-    /// (Issue #85: re-evaluated on poll so moving/restoring windows immediately reveals dock).
+    /// Checks whether any visible non-minimized, non-cloaked application window overlaps
+    /// this monitor's dock shelf (C# `DockAutoHideController.EvaluateWindowOverlap`).
+    /// Uses `DWMWA_EXTENDED_FRAME_BOUNDS` for the true visible frame and filters shell
+    /// overlays (Start/Alt+Tab/Task View) via `platform::win32_ex::is_shell_overlay` parity.
     fn is_overlapped_by_window(&self) -> bool {
-        let pill_h_px =
-            ((pill_height_dips(&self.settings) + VERTICAL_EDGE_GAP) * self.dpi).ceil() as i32;
-        let shelf_top = self.monitor.bottom - pill_h_px;
+        let rect = compute_window_rect(&self.settings, self.slots.len(), self.monitor.clone());
+        let edge = effective_edge(&self.settings);
+        let headroom_px = (layout::HEADROOM_DIPS * self.dpi).round() as i32;
+        let (dl, dt, dr, db) = match edge {
+            opentaskbar_core::settings::DockEdge::Bottom => (
+                rect.0,
+                rect.1 + headroom_px,
+                rect.0 + rect.2,
+                rect.1 + rect.3,
+            ),
+            opentaskbar_core::settings::DockEdge::Left => (
+                rect.0,
+                rect.1,
+                rect.0 + rect.2 - headroom_px,
+                rect.1 + rect.3,
+            ),
+            opentaskbar_core::settings::DockEdge::Right => (
+                rect.0 + headroom_px,
+                rect.1,
+                rect.0 + rect.2,
+                rect.1 + rect.3,
+            ),
+        };
         // Reuse the snapshot taken by `sync_slots`; a second full EnumWindows + OpenProcess pass
         // per 800 ms poll was the single most expensive part of idle auto-hide evaluation.
         for win in &self.running_windows {
             let hwnd = win.hwnd as HWND;
             unsafe {
-                if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
+                if hwnd as usize == self.hwnd
+                    || IsWindowVisible(hwnd) == 0
+                    || IsIconic(hwnd) != 0
+                    || win.pid == std::process::id()
+                {
+                    continue;
+                }
+                let mut cloaked: i32 = 0;
+                if DwmGetWindowAttribute(
+                    hwnd,
+                    DWMWA_CLOAKED as u32,
+                    (&mut cloaked as *mut i32).cast(),
+                    size_of::<i32>() as u32,
+                ) == 0
+                    && cloaked != 0
+                {
+                    continue;
+                }
+                let mut class_buf = [0u16; 64];
+                let len = GetClassNameW(hwnd, class_buf.as_mut_ptr(), class_buf.len() as i32);
+                if len > 0
+                    && is_shell_overlay_class(&String::from_utf16_lossy(&class_buf[..len as usize]))
+                {
                     continue;
                 }
                 let mut rc: RECT = std::mem::zeroed();
-                if GetWindowRect(hwnd, &mut rc) == 0 {
+                let hr = DwmGetWindowAttribute(
+                    hwnd,
+                    DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+                    (&mut rc as *mut RECT).cast(),
+                    size_of::<RECT>() as u32,
+                );
+                if hr != 0 && GetWindowRect(hwnd, &mut rc) == 0 {
                     continue;
                 }
-                let horiz_overlap = rc.right > self.monitor.left && rc.left < self.monitor.right;
-                let vert_overlap = rc.bottom > shelf_top && rc.top < self.monitor.bottom;
-                if horiz_overlap && vert_overlap {
+                if is_full_screen_on_monitor(
+                    (rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top),
+                    self.monitor.clone(),
+                    2,
+                ) || IsZoomed(hwnd) != 0
+                {
+                    return true;
+                }
+                if rc.right > dl && rc.left < dr && rc.bottom > dt && rc.top < db {
                     return true;
                 }
             }
@@ -1763,7 +1937,8 @@ impl DockState {
         if let Some(ref corner) = self.show_desktop_corner {
             let corner_h = pill_height_dips(&self.settings)
                 + self.settings.dock_bottom_gap_pixels.max(0) as f32;
-            corner.update(
+            corner.update_for_edge(
+                effective_edge(&self.settings),
                 self.monitor.clone(),
                 corner_h,
                 self.is_dark,
@@ -2087,6 +2262,18 @@ impl DockState {
             return None;
         }
         let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
+        if layout::is_vertical(effective_edge(&self.settings)) {
+            if mx < pill_left || mx > pill_left + pill_w {
+                return None;
+            }
+            if my >= pill_top - 2.0 && my <= pill_top + RESIZE_EDGE_DIPS {
+                return Some(ResizeEdge::Top);
+            }
+            if my >= pill_top + pill_h - RESIZE_EDGE_DIPS && my <= pill_top + pill_h + 2.0 {
+                return Some(ResizeEdge::Bottom);
+            }
+            return None;
+        }
         if my < pill_top || my > pill_top + pill_h {
             return None;
         }
@@ -2204,10 +2391,17 @@ impl DockState {
     }
 
     fn hit_test_dips(&self, mx: f32, my: f32) -> bool {
-        let (_, win_h) = compute_window_dips(&self.settings, self.slots.len(), self.mon_w_dips());
         if self.hide_progress > 0.5 {
-            // Keep a 4px bottom edge trigger strip active so touching the edge reveals the dock.
-            return my >= win_h - 4.0;
+            // Keep a 5 DIP edge trigger strip active so touching the screen edge reveals the dock.
+            let mut pt = POINT { x: 0, y: 0 };
+            return unsafe { GetCursorPos(&mut pt) != 0 }
+                && layout::is_at_edge_trigger(
+                    effective_edge(&self.settings),
+                    self.monitor.clone(),
+                    pt.x,
+                    pt.y,
+                    self.dpi,
+                );
         }
         if self.drag.is_some() {
             return true;
@@ -2301,14 +2495,25 @@ impl DockState {
             return 1.0;
         };
         let base = self.settings.icon_dips();
-        let gap = slot_gap(&self.settings);
-        let radius = (base + gap) * FISHEYE_RADIUS_SLOTS;
+        let cell = base + slot_gap(&self.settings);
+        // The configured fisheye peak is the ceiling; the WS-D budget trims it to the
+        // available pill space so neighbouring icons never overlap.
+        let configured_max = 1.0 + self.settings.fisheye_intensity.peak();
+        let budget = capture_expansion_budget(
+            cell,
+            base,
+            configured_max,
+            self.mon_w_dips(),
+            self.live_apps_width_dips(),
+            self.live_scroll_metrics().max_scroll,
+            self.session_max_scale,
+        );
+        let radius = layout::influence_radius_for_expansion(cell, budget.fraction);
         let dist = (mx - center_x).abs();
         if dist >= radius {
             return 1.0;
         }
-        let c = (dist / radius * std::f32::consts::FRAC_PI_2).cos();
-        1.0 + self.settings.fisheye_intensity.peak() * c * c
+        layout::compute_target_scale(dist, radius, budget.effective_max_scale)
     }
 
     fn step_animations(&mut self, now: Instant) -> bool {
@@ -2330,7 +2535,6 @@ impl DockState {
             .clamp(0.001, 0.05);
         self.last_frame = Some(now);
 
-        let scale_k = 1.0 - (-22.0 * dt).exp();
         let slide_k = 1.0 - (-24.0 * dt).exp();
         let hide_k = 1.0 - (-16.0 * dt).exp();
         // Continuous inertial scrolling matching C# DockScrollViewer (`tau = 0.045s`).
@@ -2378,13 +2582,17 @@ impl DockState {
                 continue;
             }
             let target = scale_targets[idx];
-            let cur = slot.scale;
-            let diff = target - cur;
-            if diff.abs() > 0.004 {
-                slot.scale = cur + diff * scale_k;
+            let (scale, velocity, settled) = step_spring(
+                slot.scale,
+                target,
+                slot.scale_velocity,
+                dt,
+                self.session_max_scale,
+            );
+            slot.scale = scale;
+            slot.scale_velocity = velocity;
+            if !settled {
                 moving = true;
-            } else if (cur - target).abs() > 0.0 {
-                slot.scale = target;
             }
 
             let sx = slot.slide_x;
@@ -2420,6 +2628,16 @@ impl DockState {
             self.hover_mouse_x = None;
             self.hovered_idx = None;
             self.hovered_shell = None;
+            // C# `MainWindow.DragDrop`: after 450 ms of hovering a running app, bring it forward.
+            self.drag_hover_started = Some(Instant::now());
+            unsafe {
+                SetTimer(
+                    self.hwnd as HWND,
+                    TIMER_DRAG_HOVER,
+                    layout::DRAG_HOVER_MS as u32,
+                    None,
+                );
+            }
         }
         if drag.active && !self.slots.is_empty() {
             let center_x = mx - drag.grab_offset_x;
@@ -2474,9 +2692,12 @@ impl DockState {
         };
         if drag.active {
             self.persist_pin_order();
-            return true;
         }
-        false
+        self.drag_hover_started = None;
+        unsafe {
+            KillTimer(self.hwnd as HWND, TIMER_DRAG_HOVER);
+        }
+        drag.active
     }
 
     fn fallback_surface_for(&mut self, label: &str) -> Option<IDCompositionSurface> {
@@ -2555,9 +2776,18 @@ impl DockState {
         let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
 
         // Auto-hide slide translation on root visual (zero child recalculation).
+        let edge = effective_edge(&self.settings);
+        let vertical = layout::is_vertical(edge);
         let hide_shift_px =
-            (self.hide_progress * (pill_h + VERTICAL_EDGE_GAP + 10.0) * dpi).round();
-        self.dcomp.set_root_offset_y(hide_shift_px);
+            (self.hide_progress * hide_offset(edge, pill_h + VERTICAL_EDGE_GAP + 10.0) * dpi)
+                .round();
+        if vertical {
+            self.dcomp.set_root_offset_x(hide_shift_px);
+            self.dcomp.set_root_offset_y(0.0);
+        } else {
+            self.dcomp.set_root_offset_y(hide_shift_px);
+            self.dcomp.set_root_offset_x(0.0);
+        }
 
         // 1. 3-piece pill transform.
         let cap_w_px = self.pill.cap_w_px;
@@ -2707,7 +2937,13 @@ impl DockState {
                     )
                 };
                 let slot_center = cursor_x + slot_w * self.slots[idx].layout_fraction(now) * 0.5;
-                let ix = slot_center + slide_x - width * 0.5;
+                // Side docks bounce away from their screen edge, bottom docks bounce upward.
+                let bounce_dx = if vertical {
+                    bounce_direction(edge) * bounce
+                } else {
+                    0.0
+                };
+                let ix = slot_center + slide_x + bounce_dx - width * 0.5;
                 let iy =
                     icon_base_bottom - lift * self.slots[idx].layout_fraction(now) + sink - height;
                 self.slot_visuals[idx].icon.set_transform(
@@ -2748,6 +2984,37 @@ impl DockState {
                         (dot_top * dpi).round(),
                     );
                 }
+
+                let badge_count = if layout::notification_badges_enabled(&self.settings) {
+                    self.slots[idx].badge
+                } else {
+                    0
+                };
+                let badge_surface =
+                    if badge_count > 0 && self.slot_visuals[idx].badge_count != badge_count {
+                        self.dcomp
+                            .create_notification_badge_surface(badge_count, self.is_dark, dpi)
+                            .ok()
+                    } else {
+                        None
+                    };
+                if let Some(badge) = &self.slot_visuals[idx].badge {
+                    if badge_count == 0 {
+                        badge.hide();
+                    } else {
+                        if let Some(ref surface) = badge_surface {
+                            badge.set_content(Some(surface));
+                        }
+                        let badge_px = if badge_count > 99 { 22.0 } else { 18.0 };
+                        let bx = slot_center + slide_x + width * 0.5 - badge_px * 0.6;
+                        let by = icon_base_bottom
+                            - lift * self.slots[idx].layout_fraction(now)
+                            - height
+                            - 4.0;
+                        badge.set_transform(1.0, 1.0, (bx * dpi).round(), (by * dpi).round());
+                    }
+                }
+                self.slot_visuals[idx].badge_count = badge_count;
             }
 
             cursor_x += (slot_w + gap) * self.slots[idx].layout_fraction(now);
@@ -3064,6 +3331,7 @@ impl DockState {
     fn hide_preview_now(&mut self) {
         self.cancel_preview_timers();
         self.preview_pending_idx = None;
+        preview::deactivate_live_preview();
         if let Some(ref mut preview) = self.preview {
             preview.hide();
         }
@@ -3073,7 +3341,12 @@ impl DockState {
         self.preview_pending_idx = None;
         unsafe {
             let _ = KillTimer(self.hwnd as HWND, TIMER_PREVIEW_SHOW);
-            SetTimer(self.hwnd as HWND, TIMER_PREVIEW_HIDE, 220, None);
+            SetTimer(
+                self.hwnd as HWND,
+                TIMER_PREVIEW_HIDE,
+                layout::PREVIEW_DELAY_MS as u32,
+                None,
+            );
         }
     }
 
@@ -3101,7 +3374,12 @@ impl DockState {
                 self.show_preview_for_slot(idx);
             } else {
                 unsafe {
-                    SetTimer(self.hwnd as HWND, TIMER_PREVIEW_SHOW, 180, None);
+                    SetTimer(
+                        self.hwnd as HWND,
+                        TIMER_PREVIEW_SHOW,
+                        layout::PREVIEW_GRACE_MS as u32,
+                        None,
+                    );
                 }
             }
         } else if self.preview.as_deref().is_some_and(|p| p.is_visible()) {
@@ -3140,8 +3418,16 @@ impl DockState {
 
         if let Some(ref mut preview) = self.preview {
             preview.show(&key, &items, anchor_x, anchor_bottom_y, self.is_dark);
+            if let Some(first) = items.first() {
+                preview::activate_live_preview(first.hwnd);
+            }
             unsafe {
-                SetTimer(self.hwnd as HWND, TIMER_PREVIEW_WATCH, 140, None);
+                SetTimer(
+                    self.hwnd as HWND,
+                    TIMER_PREVIEW_WATCH,
+                    layout::PREVIEW_FADE_MS as u32,
+                    None,
+                );
             }
         }
         self.update_visuals();
@@ -3180,15 +3466,38 @@ impl DockState {
             unsafe {
                 GetCursorPos(&mut pt);
             }
-            let delta_dips = (pt.x - rdrag.start_screen_x) as f32 / self.dpi;
-            let signed = match rdrag.edge {
-                ResizeEdge::Right => delta_dips * 2.0,
-                ResizeEdge::Left => -delta_dips * 2.0,
+            let vertical = layout::is_vertical(effective_edge(&self.settings));
+            let delta_px = if vertical {
+                pt.y - rdrag.start_screen_y
+            } else {
+                pt.x - rdrag.start_screen_x
             };
-            let natural_w =
-                content_min_pill_width(&self.settings, self.slots.len(), self.mon_w_dips());
-            let min_w = scroll_min_pill_width(&self.settings).min(natural_w);
-            let max_w = (self.mon_w_dips() - 16.0).max(min_w);
+            let delta_dips = delta_px as f32 / self.dpi;
+            let signed = match rdrag.edge {
+                ResizeEdge::Right | ResizeEdge::Bottom => delta_dips * 2.0,
+                ResizeEdge::Left | ResizeEdge::Top => -delta_dips * 2.0,
+            };
+            let natural_w = if vertical {
+                layout::side_dock_height_dips(
+                    self.slots.len() + 3,
+                    self.settings.icon_dips() + 9.0,
+                    22.0,
+                    self.settings.show_desktop_button,
+                    self.monitor.height() as f32 / self.dpi - 24.0,
+                )
+            } else {
+                content_min_pill_width(&self.settings, self.slots.len(), self.mon_w_dips())
+            };
+            let min_w = if vertical {
+                layout::MIN_CELL_SIZE_DIPS * 2.0
+            } else {
+                scroll_min_pill_width(&self.settings).min(natural_w)
+            };
+            let max_w = if vertical {
+                self.monitor.height() as f32 / self.dpi - 24.0
+            } else {
+                (self.mon_w_dips() - 16.0).max(min_w)
+            };
             let next_w = (rdrag.start_width_dips + signed)
                 .clamp(min_w, max_w)
                 .round();
@@ -3445,11 +3754,13 @@ impl DockState {
             unsafe {
                 GetCursorPos(&mut pt);
             }
-            let (_, _, pill_w, _) = self.live_pill_geometry();
+            let (_, _, pill_w, pill_h) = self.live_pill_geometry();
+            let vertical = layout::is_vertical(effective_edge(&self.settings));
             self.resize_drag = Some(ResizeDragState {
                 edge,
                 start_screen_x: pt.x,
-                start_width_dips: pill_w,
+                start_screen_y: pt.y,
+                start_width_dips: if vertical { pill_h } else { pill_w },
             });
             return;
         }
@@ -3667,6 +3978,16 @@ impl DockState {
 
     fn handle_mbutton_up(&mut self) {
         self.hide_preview_now();
+        if let Some(index) = self.hovered_tray_pin
+            && let Some(path) = self
+                .settings
+                .user_pinned_background_apps
+                .get(index)
+                .cloned()
+        {
+            tray::close_pinned_app(self.hwnd, &path);
+            return;
+        }
         if let Some((_, _, moved)) = self.scroll_pan.take() {
             unsafe {
                 let _ = ReleaseCapture();
@@ -3714,8 +4035,8 @@ impl DockState {
         let sm = self.live_scroll_metrics();
         if sm.max_scroll > 0.5 && delta != 0 {
             let step = (self.settings.icon_dips() + slot_gap(&self.settings)) * 2.2;
-            let dist = (f32::from(delta) / 120.0) * step;
-            let signed = if horizontal { dist } else { -dist };
+            let signed =
+                wheel_to_axis_delta(delta, horizontal, effective_edge(&self.settings), step);
             let base = if (self.scroll_offset - self.scroll_target).abs() > 1.0
                 && signed.signum() == (self.scroll_target - self.scroll_offset).signum()
             {
@@ -3743,6 +4064,19 @@ impl DockState {
             return;
         };
         self.set_dock_pin(&slot.launch_path, !slot.pinned);
+    }
+
+    /// Entry point for notification aggregation (`RunningAppProjection.HasNotification`).
+    #[allow(dead_code)]
+    fn set_notification_badge(&mut self, launch_path: &str, count: u32) {
+        if let Some(slot) = self
+            .slots
+            .iter_mut()
+            .find(|s| s.launch_path.eq_ignore_ascii_case(launch_path))
+        {
+            slot.badge = count;
+        }
+        self.update_visuals();
     }
 
     fn set_dock_pin(&mut self, path: &str, pinned: bool) {
@@ -3825,19 +4159,28 @@ impl DockState {
             ScreenToClient(self.hwnd as HWND, &mut pt);
         }
         let mx = pt.x as f32 / self.dpi;
+        let my = pt.y as f32 / self.dpi;
         self.hover_mouse_x = Some(mx);
         self.update_hovered_index_from_mouse();
+
+        // Dropping files onto the Recycle Bin deletes them (move to bin, not permanent).
+        let sm = self.live_scroll_metrics();
+        let (_, bin_rc, _) = self.right_widget_rects_dips();
+        if drop_targets_recycle_bin(Self::hit_rect_in_vp(&sm, bin_rc, mx, my), &files)
+            && delete_files_to_recycle_bin(self.hwnd, &files)
+        {
+            self.bin_is_full = widgets::is_recycle_bin_non_empty();
+            self.refresh_widgets();
+            self.update_visuals();
+            return;
+        }
 
         // If dropped directly onto an app icon, open the dropped files with that app.
         if let Some(idx) = self.hovered_idx
             && let Some(slot) = self.slots.get(idx)
         {
             let target = slot.launch_path.clone();
-            let args = files
-                .iter()
-                .map(|f| format!("\"{f}\""))
-                .collect::<Vec<_>>()
-                .join(" ");
+            let args = layout::build_quoted_arguments(&files);
             pins::launch_with_args(target, args);
             return;
         }
@@ -4258,6 +4601,86 @@ impl DockState {
     }
 }
 
+impl DockState {
+    /// Keyboard navigation over dock items: Tab/arrows move focus, Escape closes any
+    /// transient island/flyout/stack and returns focus to the originating dock item.
+    fn handle_key_down(&mut self, vk: u16) {
+        match vk {
+            VK_LWIN | VK_RWIN => {
+                self.win_key_grace_until =
+                    Some(Instant::now() + Duration::from_millis(layout::WIN_KEY_GRACE_MS));
+                self.target_hidden = false;
+                self.ensure_animation();
+                self.evaluate_auto_hide();
+            }
+            VK_ESCAPE => {
+                if escape_closes_transient(false, false, self.island.expanded) {
+                    self.island.pre_process_input(IslandInput::Escape);
+                } else if self.island.pre_process_input(IslandInput::Escape)
+                    == InputDisposition::PassThrough
+                {
+                    self.hide_preview_now();
+                    self.keyboard_idx = None;
+                }
+                self.evaluate_auto_hide();
+                self.update_visuals();
+            }
+            VK_TAB | VK_LEFT | VK_RIGHT => {
+                let reverse = vk == VK_LEFT || (vk == VK_TAB && win32::is_shift_down());
+                if self.island.expanded
+                    && self.island.pre_process_input(if reverse {
+                        IslandInput::Left
+                    } else {
+                        IslandInput::Right
+                    }) == InputDisposition::Consumed
+                {
+                    return;
+                }
+                let len = self.slots.len();
+                let next = keyboard_next_index(self.keyboard_idx, len, reverse);
+                self.keyboard_idx = next;
+                if let Some(idx) = next {
+                    let mx = self.live_slot_center_x(idx);
+                    self.hover_mouse_x = Some(mx);
+                    self.update_hovered_index_from_mouse();
+                    self.sync_preview_hover();
+                    self.ensure_animation();
+                    self.session_max_scale = layout::HOVER_SCALE;
+                }
+                self.update_visuals();
+            }
+            _ => {}
+        }
+    }
+
+    /// Session switch / lock resets all transient UI (C# `App.xaml.cs` SessionSwitch).
+    fn reset_transient_ui(&mut self) {
+        self.island.reset_transient();
+        self.keyboard_idx = None;
+        self.drag = None;
+        self.resize_drag = None;
+        self.scroll_pan = None;
+        self.drag_hover_started = None;
+        self.session_max_scale = layout::HOVER_SCALE;
+        self.hide_preview_now();
+        self.hovered_shell = None;
+        self.hovered_tray = false;
+        self.hovered_tray_pin = None;
+        self.hovered_bin = false;
+        self.hovered_widget = None;
+        self.hovered_widget_sub = None;
+        self.hovered_scroll = None;
+        self.hovered_resize = None;
+        self.hover_mouse_x = None;
+        self.hovered_idx = None;
+        self.win_key_grace_until = None;
+        self.overlap_dirty = true;
+        self.evaluate_auto_hide();
+        self.ensure_animation();
+        self.update_visuals();
+    }
+}
+
 impl Drop for DockState {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
@@ -4413,6 +4836,61 @@ impl Drop for DockWndProcGuard {
     fn drop(&mut self) {
         DOCK_WNDPROC_ACTIVE.with(|flag| flag.set(false));
     }
+}
+
+const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+const WTS_SESSION_LOGOFF: u32 = 2;
+const WTS_SESSION_LOCK: u32 = 7;
+const WTS_SESSION_UNLOCK: u32 = 8;
+
+#[link(name = "wtsapi32")]
+unsafe extern "system" {
+    fn WTSRegisterSessionNotification(hWnd: HWND, dwFlags: u32) -> bool;
+    fn WTSUnRegisterSessionNotification(hWnd: HWND) -> bool;
+}
+
+const FO_DELETE: u32 = 3;
+const FOF_SILENT: u16 = 0x0004;
+const FOF_NOCONFIRMATION: u16 = 0x0010;
+const FOF_ALLOWUNDO: u16 = 0x0040;
+const FOF_NOERRORUI: u16 = 0x0400;
+
+#[repr(C)]
+struct ShFileOpStructW {
+    hwnd: HWND,
+    w_func: u32,
+    p_from: *const u16,
+    p_to: *const u16,
+    f_flags: u16,
+    f_any_operations_aborted: i32,
+    h_name_mappings: *mut std::ffi::c_void,
+    lpsz_progress_title: *const u16,
+}
+
+#[link(name = "shell32")]
+unsafe extern "system" {
+    fn SHFileOperationW(op: *mut ShFileOpStructW) -> i32;
+}
+
+/// Moves dropped files to the Recycle Bin (C# `DesktopFileTransfer/Drop.cs`).
+fn delete_files_to_recycle_bin(owner_hwnd: usize, paths: &[String]) -> bool {
+    let mut from: Vec<u16> = Vec::new();
+    for path in paths {
+        from.extend(path.encode_utf16());
+        from.push(0);
+    }
+    from.push(0); // SHFileOperationW requires a second NUL terminator.
+    let mut op = ShFileOpStructW {
+        hwnd: owner_hwnd as HWND,
+        w_func: FO_DELETE,
+        p_from: from.as_ptr(),
+        p_to: std::ptr::null(),
+        f_flags: FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI,
+        f_any_operations_aborted: 0,
+        h_name_mappings: std::ptr::null_mut(),
+        lpsz_progress_title: std::ptr::null(),
+    };
+    unsafe { SHFileOperationW(&mut op) == 0 && op.f_any_operations_aborted == 0 }
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -4584,6 +5062,39 @@ unsafe extern "system" fn wnd_proc(
             }
             0
         }
+        WM_KEYDOWN => {
+            state.handle_key_down(wparam as u16);
+            0
+        }
+        WM_WTSSESSION_CHANGE => {
+            let event = wparam as u32;
+            if matches!(
+                event,
+                WTS_SESSION_LOGOFF | WTS_SESSION_LOCK | WTS_SESSION_UNLOCK
+            ) {
+                state.reset_transient_ui();
+            }
+            0
+        }
+        WM_TIMER if wparam == TIMER_REVEALED_GUARD => {
+            state.overlap_dirty = true;
+            state.evaluate_auto_hide();
+            0
+        }
+        WM_TIMER if wparam == TIMER_DRAG_HOVER => {
+            unsafe {
+                KillTimer(hwnd, TIMER_DRAG_HOVER);
+            }
+            if let Some(drag) = state.drag
+                && drag.active
+                && let Some(slot) = state.slots.get(drag.idx)
+                && let Some(hwnd_target) = slot.windows.first().map(|w| w.hwnd)
+            {
+                tracker::activate_window(hwnd_target);
+            }
+            state.drag_hover_started = None;
+            0
+        }
         WM_TIMER if wparam == TIMER_PREVIEW_SHOW => {
             unsafe {
                 let _ = KillTimer(hwnd, TIMER_PREVIEW_SHOW);
@@ -4687,6 +5198,9 @@ unsafe extern "system" fn wnd_proc(
                 KillTimer(hwnd, TIMER_PREVIEW_WATCH);
                 KillTimer(hwnd, TIMER_WIDGETS);
                 KillTimer(hwnd, TIMER_WIDGET_ANIM);
+                KillTimer(hwnd, TIMER_REVEALED_GUARD);
+                KillTimer(hwnd, TIMER_DRAG_HOVER);
+                WTSUnRegisterSessionNotification(hwnd);
             }
             0
         }
@@ -4764,6 +5278,7 @@ pub fn run(settings: DockSettings) {
         win32::configure_native_dock_hwnd(hwnd_val);
         unsafe {
             DragAcceptFiles(hwnd, 1);
+            let _ = WTSRegisterSessionNotification(hwnd, 0);
         }
 
         // Paint and commit the first DirectComposition frame immediately BEFORE synchronous

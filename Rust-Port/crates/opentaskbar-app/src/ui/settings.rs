@@ -2342,6 +2342,25 @@ impl SettingsView {
                 brand_color: None,
                 rows: vec![("30d".to_owned(), 0.61, pal.widget_accent, "12d".to_owned())],
             },
+            "aiusage_antigravity" => WidgetChipSpec::AiAntigravity {
+                columns: vec![
+                    (
+                        "Gemini".to_owned(),
+                        vec![
+                            ("5h".to_owned(), 0.42, pal.widget_accent, "2h".to_owned()),
+                            ("7d".to_owned(), 0.68, pal.widget_accent, "4d".to_owned()),
+                        ],
+                    ),
+                    (
+                        "Claude".to_owned(),
+                        vec![("7d".to_owned(), 0.54, pal.widget_blue, "3d".to_owned())],
+                    ),
+                    (
+                        "Argon".to_owned(),
+                        vec![("7d".to_owned(), 0.31, pal.success, "6d".to_owned())],
+                    ),
+                ],
+            },
             "aiusage_opencode" => WidgetChipSpec::AiOpenCode {
                 columns: vec![
                     (
@@ -3020,6 +3039,36 @@ impl SettingsView {
                             }),
                         )),
                 )
+            }
+            WidgetChipSpec::AiAntigravity { columns } => {
+                chip(div().flex().items_center().gap(px(7.0)).children(
+                    columns.into_iter().take(3).map(|(header, rows)| {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .text_size(px(fonts::scaled_size(9.0)))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(rgba(t.dock_preview_sub))
+                                    .child(header),
+                            )
+                            .children(rows.into_iter().take(2).map(|(lbl, used, col, _)| {
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(3.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(fonts::scaled_size(9.0)))
+                                            .text_color(rgba(t.dock_preview_fg))
+                                            .child(lbl),
+                                    )
+                                    .child(mini_bar(used, col, 28.0))
+                            }))
+                    }),
+                ))
             }
             WidgetChipSpec::AiOpenCode { columns } => {
                 chip(div().flex().items_center().gap(px(7.0)).children(

@@ -897,29 +897,8 @@ impl WidgetRuntime {
                             (name, rows)
                         })
                         .collect();
-                    // NOTE(WS-D): a dedicated `WidgetChipSpec::AiAntigravity` chip is not part of
-                    // the merged dock renderer yet. Render the same group/pool data through the
-                    // existing three-column AI chip so the Antigravity catalog entry stays visible.
-                    let columns = columns
-                        .into_iter()
-                        .take(3)
-                        .map(|(name, rows)| {
-                            let (label, used, color, reset) = rows
-                                .into_iter()
-                                .max_by(|a, b| a.1.total_cmp(&b.1))
-                                .unwrap_or_else(|| {
-                                    (name.clone(), 0.0, pal.widget_accent, "—".to_owned())
-                                });
-                            (
-                                name,
-                                format!("{label} {:.0}%", used * 100.0),
-                                used,
-                                color,
-                                reset,
-                            )
-                        })
-                        .collect();
-                    WidgetChipSpec::AiOpenCode { columns }
+                    // Native 3-column Gemini | Claude | Argon renderer in `dock::dcomp`.
+                    WidgetChipSpec::AiAntigravity { columns }
                 }
                 "aiusage_opencode" => {
                     let cols = ["1h", "7d", "30d"]
