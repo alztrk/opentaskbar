@@ -8,18 +8,15 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VK_CONTROL, VK_LEFT,
     VK_LWIN, VK_RIGHT, VK_TAB,
 };
-use windows_sys::Win32::UI::Shell::{
-    ABE_BOTTOM, ABM_GETSTATE, ABM_GETTASKBARPOS, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS,
-    ABM_SETSTATE, ABS_AUTOHIDE, APPBARDATA, SHAppBarMessage,
-};
+use windows_sys::Win32::UI::Shell::{ABE_BOTTOM, ABS_AUTOHIDE};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, FindWindowW, GetSystemMetrics, HWND_BROADCAST, IsWindowVisible,
-    RegisterWindowMessageW, SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SendNotifyMessageW, SetWindowPos, ShowWindow, WM_APP,
+    FindWindowW, GetSystemMetrics, HWND_BROADCAST, IsWindowVisible, RegisterWindowMessageW,
+    SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendNotifyMessageW,
+    SetWindowPos, ShowWindow, WM_APP,
 };
 
-use crate::{journal, watchdog};
+use crate::{appbar, flyout_writer, journal, native_tray, session, watchdog};
 
 const APPBAR_CALLBACK_MSG: u32 = WM_APP + 0x52;
 
@@ -30,42 +27,29 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 fn find_primary_tray() -> HWND {
-    let class = wide("Shell_TrayWnd");
-    // SAFETY: null-terminated class name.
-    unsafe { FindWindowW(class.as_ptr(), std::ptr::null()) }
+    // Never act on a fake Shell_TrayWnd owned by OpenTaskbar itself.
+    native_tray::find().map_or(std::ptr::null_mut(), |lease| lease.hwnd as HWND)
 }
 
 fn set_secondary_trays_visible(visible: bool) {
-    let class = wide("Shell_SecondaryTrayWnd");
     let cmd = if visible { SW_SHOWNOACTIVATE } else { SW_HIDE };
-    let mut current: HWND = std::ptr::null_mut();
-    // SAFETY: iterating top-level secondary taskbar windows owned by Explorer.
-    unsafe {
-        loop {
-            current = FindWindowExW(
-                std::ptr::null_mut(),
-                current,
-                class.as_ptr(),
-                std::ptr::null(),
-            );
-            if current.is_null() {
-                break;
-            }
-            if (!visible && IsWindowVisible(current) != 0)
-                || (visible && IsWindowVisible(current) == 0)
+    for lease in native_tray::find_secondary_leases() {
+        if !lease.is_valid() {
+            continue;
+        }
+        // SAFETY: lease-validated Explorer-owned secondary taskbar.
+        unsafe {
+            if (!visible && IsWindowVisible(lease.hwnd as HWND) != 0)
+                || (visible && IsWindowVisible(lease.hwnd as HWND) == 0)
             {
-                ShowWindow(current, cmd);
+                ShowWindow(lease.hwnd as HWND, cmd);
             }
         }
     }
 }
 
 pub fn get_taskbar_state() -> u32 {
-    let mut data: APPBARDATA = unsafe { std::mem::zeroed() };
-    data.cbSize = size_of::<APPBARDATA>() as u32;
-    data.hWnd = find_primary_tray();
-    // SAFETY: properly sized APPBARDATA.
-    unsafe { SHAppBarMessage(ABM_GETSTATE, &mut data) as u32 }
+    appbar::get_state("GetState")
 }
 
 pub fn set_taskbar_state(state: u32) {
@@ -73,22 +57,17 @@ pub fn set_taskbar_state(state: u32) {
     if tray.is_null() {
         return;
     }
-    let mut data: APPBARDATA = unsafe { std::mem::zeroed() };
-    data.cbSize = size_of::<APPBARDATA>() as u32;
-    data.hWnd = tray;
+    let mut data = appbar::create_data(tray as usize);
     data.lParam = state as isize;
-    // SAFETY: properly sized APPBARDATA.
-    unsafe {
-        SHAppBarMessage(ABM_SETSTATE, &mut data);
-    }
+    appbar::send(appbar::ABM_SETSTATE, &mut data, "SetState");
 }
 
 /// Returns Explorer's currently reserved bottom taskbar strip height in physical pixels.
 fn native_bottom_taskbar_height_px() -> i32 {
-    let mut data: APPBARDATA = unsafe { std::mem::zeroed() };
-    data.cbSize = size_of::<APPBARDATA>() as u32;
-    // SAFETY: properly sized APPBARDATA for ABM_GETTASKBARPOS.
-    let ok = unsafe { SHAppBarMessage(ABM_GETTASKBARPOS, &mut data) };
+    let mut data = appbar::create_data(0);
+    // SAFETY: properly sized APPBARDATA for ABM_GETTASKBARPOS through the
+    // hung-probe choke point.
+    let ok = appbar::send(appbar::ABM_GETTASKBARPOS, &mut data, "GetTaskbarPos");
     if ok == 0 || data.uEdge != ABE_BOTTOM {
         return 0;
     }
@@ -115,30 +94,25 @@ pub fn register_bottom_appbar(dock_hwnd: usize, desired_total_px: i32, prev_stat
         return;
     }
 
-    // SAFETY: standard Win32 AppBar registration on the window's owning UI thread.
-    unsafe {
-        let mut abd: APPBARDATA = std::mem::zeroed();
-        abd.cbSize = size_of::<APPBARDATA>() as u32;
-        abd.hWnd = dock_hwnd as HWND;
-        abd.uCallbackMessage = APPBAR_CALLBACK_MSG;
-        if SHAppBarMessage(ABM_NEW, &mut abd) == 0 {
-            return;
-        }
-        REGISTERED_APPBAR.store(dock_hwnd, Ordering::SeqCst);
-
-        let scr_w = GetSystemMetrics(SM_CXSCREEN);
-        let scr_h = GetSystemMetrics(SM_CYSCREEN);
-        abd.uEdge = ABE_BOTTOM;
-        abd.rc = RECT {
-            left: 0,
-            top: (scr_h - extra_px).max(0),
-            right: scr_w,
-            bottom: scr_h,
-        };
-        SHAppBarMessage(ABM_QUERYPOS, &mut abd);
-        abd.rc.top = (abd.rc.bottom - extra_px).max(0);
-        SHAppBarMessage(ABM_SETPOS, &mut abd);
+    let mut abd = appbar::create_data(dock_hwnd);
+    abd.uCallbackMessage = APPBAR_CALLBACK_MSG;
+    if appbar::send(appbar::ABM_NEW, &mut abd, "Register") == 0 {
+        return;
     }
+    REGISTERED_APPBAR.store(dock_hwnd, Ordering::SeqCst);
+
+    // SAFETY: querying primary screen dimensions.
+    let (scr_w, scr_h) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+    abd.uEdge = ABE_BOTTOM;
+    abd.rc = RECT {
+        left: 0,
+        top: (scr_h - extra_px).max(0),
+        right: scr_w,
+        bottom: scr_h,
+    };
+    appbar::send(appbar::ABM_QUERYPOS, &mut abd, "Register/QUERYPOS");
+    abd.rc.top = (abd.rc.bottom - extra_px).max(0);
+    appbar::send(appbar::ABM_SETPOS, &mut abd, "Register/SETPOS");
 }
 
 fn unregister_appbar() {
@@ -146,13 +120,8 @@ fn unregister_appbar() {
     if hwnd == 0 {
         return;
     }
-    // SAFETY: removing our previously registered AppBar.
-    unsafe {
-        let mut abd: APPBARDATA = std::mem::zeroed();
-        abd.cbSize = size_of::<APPBARDATA>() as u32;
-        abd.hWnd = hwnd as HWND;
-        SHAppBarMessage(ABM_REMOVE, &mut abd);
-    }
+    let mut abd = appbar::create_data(hwnd);
+    appbar::send(appbar::ABM_REMOVE, &mut abd, "Unregister");
 }
 
 pub fn ensure_hidden() -> bool {
@@ -176,6 +145,11 @@ pub fn begin_replacement(dock_hwnd: usize, auto_hide: bool, desired_total_px: i3
     if !journal::has_pending() {
         let _ = journal::write_state(prev);
     }
+    // Record where Windows put its own flyouts *before* we anchor them. The
+    // writer is a no-op unless `native_flyout_reposition` is enabled.
+    flyout_writer::write_start();
+    flyout_writer::write_search();
+    flyout_writer::write_control_center();
     watchdog::arm();
     ensure_hidden();
 
@@ -193,13 +167,16 @@ pub fn begin_replacement(dock_hwnd: usize, auto_hide: bool, desired_total_px: i3
 
 pub fn restore_from_journal() {
     unregister_appbar();
+    // Flyouts are hosted by long-lived shell processes, so put them back first.
+    flyout_writer::restore_from_journal();
     let prev = journal::read_state().unwrap_or(2); // ABS_ALWAYSONTOP default
     let tray = find_primary_tray();
     if tray.is_null() {
         return;
     }
-    // Mirror `watchdog.c` RestoreNativeTaskbars: 3 retries of ABM_SETSTATE + SW_SHOW + SetWindowPos.
-    for attempt in 0..3 {
+    // Mirror `watchdog.c` RestoreNativeTaskbars: 3 retries of ABM_SETSTATE +
+    // SW_SHOW + SetWindowPos, then verify visibility before ever clearing the journal.
+    for _ in 0..session::RESTORE_ATTEMPTS {
         set_taskbar_state(prev);
         // SAFETY: restoring Explorer's primary taskbar window with SWP_SHOWWINDOW | SWP_FRAMECHANGED.
         unsafe {
@@ -220,27 +197,48 @@ pub fn restore_from_journal() {
             );
         }
         set_secondary_trays_visible(true);
-        if attempt < 2 {
-            std::thread::sleep(std::time::Duration::from_millis(60));
-        }
+        std::thread::sleep(std::time::Duration::from_millis(60));
     }
-    // Only clear journal if the native taskbar is confirmed visible.
-    let visible = unsafe { IsWindowVisible(tray) != 0 };
-    if visible {
-        journal::clear();
-        let msg_name = wide("TaskbarCreated");
-        // SAFETY: notifying apps to re-register tray icons with Explorer.
-        unsafe {
-            let msg = RegisterWindowMessageW(msg_name.as_ptr());
-            if msg != 0 {
-                SendNotifyMessageW(HWND_BROADCAST, msg, 0, 0);
-            }
+    let verified = session::verify_restored(tray as usize, session::RESTORE_ATTEMPTS);
+    opentaskbar_core::shell_result!("Restore", "Journal", true, verified, ms = 0);
+    // Never drop the only recovery clue while Explorer is still re-hiding the tray.
+    if !verified {
+        return;
+    }
+    journal::clear();
+    // A clean restore is the point where the watchdog must stop watching us.
+    // `end_replacement` also calls this, but it is idempotent.
+    watchdog::notify_clean_exit();
+    broadcast_taskbar_created();
+}
+
+fn broadcast_taskbar_created() {
+    let msg_name = wide("TaskbarCreated");
+    // SAFETY: notifying apps to re-register tray icons with Explorer.
+    unsafe {
+        let msg = RegisterWindowMessageW(msg_name.as_ptr());
+        if msg != 0 {
+            SendNotifyMessageW(HWND_BROADCAST, msg, 0, 0);
         }
     }
 }
 
+/// Called when Explorer broadcasts `TaskbarCreated`: re-assert the reservation
+/// and hide state through the same bounded reconcile path used by recovery.
+pub fn handle_taskbar_created(dock_hwnd: usize, auto_hide: bool, desired_total_px: i32) {
+    opentaskbar_core::log::event(
+        "TaskbarCreated",
+        &[
+            ("seq", opentaskbar_core::log::next_sequence().to_string()),
+            ("state", "reconcile".to_owned()),
+        ],
+    );
+    session::reconcile_once(dock_hwnd, auto_hide, desired_total_px, "TaskbarCreated");
+}
+
 pub fn end_replacement() {
     restore_from_journal();
+    flyout_writer::restore();
     watchdog::notify_clean_exit();
 }
 
@@ -330,23 +328,19 @@ pub fn update_appbar_height(dock_hwnd: usize, auto_hide: bool, desired_total_px:
         register_bottom_appbar(dock_hwnd, desired_total_px, prev);
         return;
     }
-    unsafe {
-        let mut abd: APPBARDATA = std::mem::zeroed();
-        abd.cbSize = size_of::<APPBARDATA>() as u32;
-        abd.hWnd = dock_hwnd as HWND;
-        let scr_w = GetSystemMetrics(SM_CXSCREEN);
-        let scr_h = GetSystemMetrics(SM_CYSCREEN);
-        abd.uEdge = ABE_BOTTOM;
-        abd.rc = RECT {
-            left: 0,
-            top: (scr_h - extra_px).max(0),
-            right: scr_w,
-            bottom: scr_h,
-        };
-        SHAppBarMessage(ABM_QUERYPOS, &mut abd);
-        abd.rc.top = (abd.rc.bottom - extra_px).max(0);
-        SHAppBarMessage(ABM_SETPOS, &mut abd);
-    }
+    let mut abd = appbar::create_data(dock_hwnd);
+    // SAFETY: querying primary screen dimensions.
+    let (scr_w, scr_h) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+    abd.uEdge = ABE_BOTTOM;
+    abd.rc = RECT {
+        left: 0,
+        top: (scr_h - extra_px).max(0),
+        right: scr_w,
+        bottom: scr_h,
+    };
+    appbar::send(appbar::ABM_QUERYPOS, &mut abd, "UpdateHeight/QUERYPOS");
+    abd.rc.top = (abd.rc.bottom - extra_px).max(0);
+    appbar::send(appbar::ABM_SETPOS, &mut abd, "UpdateHeight/SETPOS");
 }
 
 pub fn new_desktop() {
