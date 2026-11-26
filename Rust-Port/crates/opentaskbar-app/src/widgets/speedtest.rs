@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use opentaskbar_core::i18n as loc;
+
 use crate::design;
 use crate::ui::flyout::{BarTone, FlyoutBlock, FlyoutSpec};
 
@@ -35,14 +37,14 @@ pub enum SpeedTestState {
 }
 
 impl SpeedTestState {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Idle => "Idle",
-            Self::MeasuringPing => "Measuring ping…",
-            Self::Downloading => "Testing 6 streams…",
-            Self::Finished => "Complete",
-            Self::Cancelled => "Cancelled",
-            Self::Failed => "Unavailable",
+            Self::Idle => loc::t("Idle"),
+            Self::MeasuringPing => loc::t("SpeedTestTestingPing"),
+            Self::Downloading => loc::t("SpeedTestTestingDownload"),
+            Self::Finished => loc::t("SpeedTestComplete"),
+            Self::Cancelled => loc::t("Cancelled"),
+            Self::Failed => loc::t("QuickUnavailable"),
         }
     }
 }
@@ -281,31 +283,34 @@ pub fn build_speedtest_flyout(
     let pal = design::palette(true);
     let mut blocks = vec![
         FlyoutBlock::StatRow {
-            label: "Status".to_owned(),
-            value: state.label().to_owned(),
+            label: loc::t("SpeedTestStatus"),
+            value: state.label(),
         },
         FlyoutBlock::Hero {
             value: result.map_or_else(|| "—".to_owned(), |r| format_throughput(r.aggregate_bps())),
-            caption: Some("Aggregate download".to_owned()),
+            caption: Some(loc::t("SpeedTestAggregateDownload")),
             centered: false,
             large: true,
             right_meta: None,
         },
         FlyoutBlock::MetricTiles(vec![
             (
-                "Ping".to_owned(),
+                loc::t("SpeedTestPing"),
                 result.map_or_else(|| "—".to_owned(), |r| format_ping(r.ping_ms)),
             ),
-            ("Streams".to_owned(), format!("{} active", STREAM_COUNT)),
             (
-                "Duration".to_owned(),
+                loc::t("SpeedTestStreams"),
+                loc::t_fmt("SpeedTestStreamsActive", &[&STREAM_COUNT.to_string()]),
+            ),
+            (
+                loc::t("SeekDuration"),
                 result.map_or_else(
                     || "—".to_owned(),
                     |r| format!("{:.1}s", r.elapsed_ms as f64 / 1000.0),
                 ),
             ),
             (
-                "Server".to_owned(),
+                loc::t("SpeedTestServer"),
                 result.map_or_else(|| "Cloudflare".to_owned(), |r| r.server.clone()),
             ),
         ]),
@@ -315,7 +320,7 @@ pub fn build_speedtest_flyout(
         for (idx, bps) in result.per_stream_bps.iter().enumerate() {
             let ratio = (*bps as f32 / result.aggregate_bps().max(1) as f32) * STREAM_COUNT as f32;
             blocks.push(FlyoutBlock::ProgressBar {
-                label: format!("Stream {}", idx + 1),
+                label: loc::t_fmt("SpeedTestStream", &[&(idx + 1).to_string()]),
                 value_text: format_throughput(*bps),
                 ratio: ratio.clamp(0.0, 1.0),
                 tone: BarTone::Accent,
@@ -325,14 +330,17 @@ pub fn build_speedtest_flyout(
     let _ = pal;
     blocks.push(FlyoutBlock::Separator);
     blocks.push(FlyoutBlock::ButtonBar(vec![
-        (1, "Start".to_owned(), state == SpeedTestState::Idle),
-        (2, "Cancel".to_owned(), false),
-        (3, "Retry".to_owned(), false),
-        (4, "Restart".to_owned(), false),
+        (1, loc::t("Start"), state == SpeedTestState::Idle),
+        (2, loc::t("SpeedTestCancel"), false),
+        (3, loc::t("SpeedTestRetry"), false),
+        (4, loc::t("SpeedTestRestartButton"), false),
     ]));
     FlyoutSpec {
-        title: "Network Speed Test".to_owned(),
-        subtitle: Some(format!("{STREAM_COUNT} parallel streams")),
+        title: loc::t("SpeedTestTitle"),
+        subtitle: Some(loc::t_fmt(
+            "SpeedTestParallelStreams",
+            &[&STREAM_COUNT.to_string()],
+        )),
         width_dips: 300.0,
         blocks,
     }

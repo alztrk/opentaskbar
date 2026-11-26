@@ -23,10 +23,10 @@ pub enum FocusPhase {
 }
 
 impl FocusPhase {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Focus => "Focus",
-            Self::Break => "Break",
+            Self::Focus => loc::t("Focus"),
+            Self::Break => loc::t("Break"),
         }
     }
 }
@@ -186,7 +186,13 @@ impl FocusSession {
     }
 
     pub fn session_label(&self) -> String {
-        format!("Session {}/{}", self.session_number, self.sessions_target)
+        loc::t_fmt(
+            "FocusSessionProgress",
+            &[
+                &self.session_number.to_string(),
+                &self.sessions_target.to_string(),
+            ],
+        )
     }
 
     pub fn status_text(&self) -> String {
@@ -257,6 +263,15 @@ pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
     } else {
         session.focus_minutes
     };
+    // WS-E: keep the localized per-phase summary keys alongside the redesigned glyph row.
+    let total_label = match session.phase {
+        FocusPhase::Focus => {
+            loc::t_fmt("FocusMinutesSummary", &[&session.focus_minutes.to_string()])
+        }
+        FocusPhase::Break => {
+            loc::t_fmt("BreakMinutesSummary", &[&session.break_minutes.to_string()])
+        }
+    };
     let duration_label = loc::t_fmt("MinutesShort", &[&phase_mins.to_string()]);
     let session_progress = format!("{}/{}", session.session_number, session.sessions_target);
     let session_badge = loc::t_fmt("FocusSession", &[&session_progress]);
@@ -285,10 +300,15 @@ pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
                 detail: Some(duration_label),
                 value: session_badge,
             },
+            // WS-E: `FocusSessionProgress` via `session_label()`.
+            FlyoutBlock::StatRow {
+                label: loc::t("Focus"),
+                value: session.session_label(),
+            },
             FlyoutBlock::Hero {
                 value: format_mm_ss(session.remaining_secs),
-                caption: None,
-                centered: true,
+                caption: Some(format!("{} · {}", session.phase.label(), total_label)),
+                centered: false,
                 large: true,
                 right_meta: None,
             },
@@ -305,6 +325,17 @@ pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
             FlyoutBlock::StatRow {
                 label: loc::t("FocusSessionCount"),
                 value: format!("{completed_sessions} · {completed_mins}"),
+            },
+            // WS-E: combined completion summary keys.
+            FlyoutBlock::StatRow {
+                label: loc::t("FocusCompleted"),
+                value: loc::t_fmt(
+                    "FocusCompletedSummary",
+                    &[
+                        &session.sessions_completed.to_string(),
+                        &session.focus_minutes_total.to_string(),
+                    ],
+                ),
             },
             FlyoutBlock::Separator,
             FlyoutBlock::ButtonBar(vec![
