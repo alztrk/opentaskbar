@@ -618,7 +618,7 @@ impl WidgetRuntime {
             }
         }
         if settings.is_widget_enabled("bluetoothbattery") {
-            let readings = wireless_battery::read_all();
+            let readings = wireless_battery::read_all_with_settings(settings);
             if readings.is_empty() {
                 telemetry::refresh_bluetooth_battery(&self.bt_battery, false);
             } else if let Ok(mut cache) = self.bt_battery.lock() {
@@ -648,8 +648,8 @@ impl WidgetRuntime {
                 cache.last_fetch = Some(now);
                 cache.loading = false;
             }
-            // Poll interval / ignored devices / listen-only are applied in the flyout builder via
-            // `catalog_ops::setting_*`; WS-G owns the low-level provider refresh cadence.
+            // Ignored devices, aliases and listen-only were applied by `read_all_with_settings`;
+            // the low-level provider cadence and flyout remain WS-G owned.
             let threshold = settings.wireless_battery_low_threshold.max(0) as u32;
             if threshold == 0 {
                 self.notified_low_bt.clear();

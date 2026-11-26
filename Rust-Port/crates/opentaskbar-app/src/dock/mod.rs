@@ -80,7 +80,7 @@ use crate::platform::win32::{
     WidgetContextAction,
 };
 use crate::ui::settings as settings_ui;
-use crate::widgets::{self, WidgetRuntime};
+use crate::widgets::{self, HOVER_INTENT_MS, HoverChange, HoverPhase, WidgetRuntime};
 
 const VERTICAL_EDGE_GAP: f32 = 5.0;
 const TOOLTIP_HEADROOM: f32 = 36.0;
@@ -100,6 +100,7 @@ const TIMER_WINDOW_CLOSE: usize = 6;
 const TIMER_WIDGET_ANIM: usize = 7;
 const TIMER_REVEALED_GUARD: usize = 8;
 const TIMER_DRAG_HOVER: usize = 9;
+const TIMER_HOVER_INTENT: usize = 10;
 const RESIZE_EDGE_DIPS: f32 = 8.0;
 const SCROLL_EDGE_W_DIPS: f32 = 28.0;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -461,6 +462,14 @@ struct DockState {
     hovered_bin: bool,
     hovered_widget: Option<&'static str>,
     hovered_widget_sub: Option<u8>,
+    /// Widget whose 350 ms hover-intent timer is currently armed.
+    hover_intent_armed_for: Option<&'static str>,
+    /// Hover intent fired; the rich flyout is opened on the next message-loop step.
+    hover_flyout_pending: Option<String>,
+    /// A flyout owns the UI thread; hover must not arm/open a second one.
+    hover_flyout_open: bool,
+    /// Widget whose pointer capture must be released on `WM_LBUTTONUP`.
+    hover_capture_id: Option<String>,
     hovered_scroll: Option<bool>,
     hovered_resize: Option<ResizeEdge>,
     pressed_idx: Option<usize>,
@@ -1203,6 +1212,10 @@ impl DockState {
             hovered_bin: false,
             hovered_widget: None,
             hovered_widget_sub: None,
+            hover_intent_armed_for: None,
+            hover_flyout_pending: None,
+            hover_flyout_open: false,
+            hover_capture_id: None,
             hovered_scroll: None,
             hovered_resize: None,
             pressed_idx: None,
@@ -1569,7 +1582,7 @@ impl DockState {
             pointer_busy,
             at_edge,
             overlap,
-            false, // shell menu state is exposed by WS-B `platform::start_menu_state`; not wired here
+            crate::platform::start_menu_state::is_open(),
             self.drag.is_some() || self.resize_drag.is_some() || self.scroll_pan.is_some(),
             win_key_grace,
         );
@@ -3433,6 +3446,212 @@ impl DockState {
         self.update_visuals();
     }
 
+    // ---------------------------------------------------------------------
+    // WidgetHoverCoordinator wiring (WS-D message loop ↔ WS-C hover policy).
+    // ---------------------------------------------------------------------
+
+    fn screen_cursor(&self) -> Option<POINT> {
+        let mut pt = POINT { x: 0, y: 0 };
+        (unsafe { GetCursorPos(&mut pt) } != 0).then_some(pt)
+    }
+
+    fn hover_cursor_point(&self, mx: f32, my: f32) -> POINT {
+        self.screen_cursor().unwrap_or_else(|| {
+            let (x, y, _, _) = self.last_window_rect.unwrap_or((0, 0, 0, 0));
+            POINT {
+                x: x + (mx * self.dpi).round() as i32,
+                y: y + (my * self.dpi).round() as i32,
+            }
+        })
+    }
+
+    fn widget_phys_rect(&self, id: &str) -> Option<RECT> {
+        let (_, _, rects) = self.right_widget_rects_dips();
+        let (_, rc) = rects.into_iter().find(|(wid, _)| *wid == id)?;
+        let mut win: RECT = unsafe { std::mem::zeroed() };
+        unsafe {
+            GetWindowRect(self.hwnd as HWND, &mut win);
+        }
+        let d = self.dpi;
+        Some(RECT {
+            left: win.left + (rc.0 * d).round() as i32,
+            top: win.top + (rc.1 * d).round() as i32,
+            right: win.left + (rc.2 * d).round() as i32,
+            bottom: win.top + (rc.3 * d).round() as i32,
+        })
+    }
+
+    fn arm_hover_intent(&mut self, id: &'static str) {
+        if self.hover_intent_armed_for == Some(id) {
+            return;
+        }
+        unsafe {
+            SetTimer(
+                self.hwnd as HWND,
+                TIMER_HOVER_INTENT,
+                HOVER_INTENT_MS as u32,
+                None,
+            );
+        }
+        self.hover_intent_armed_for = Some(id);
+    }
+
+    fn disarm_hover_intent(&mut self) {
+        if self.hover_intent_armed_for.take().is_some() {
+            unsafe {
+                KillTimer(self.hwnd as HWND, TIMER_HOVER_INTENT);
+            }
+        }
+    }
+
+    /// `WM_MOUSEMOVE` → `Enter` / `VerifyCursor` / intent arming.
+    fn sync_widget_hover(&mut self, mx: f32, my: f32) {
+        let now = Instant::now();
+        let cursor = self.hover_cursor_point(mx, my);
+        self.widget_runtime.hover.set_cursor(cursor.x, cursor.y);
+        if self.hover_flyout_open {
+            return;
+        }
+        let Some(id) = self.hovered_widget else {
+            self.cancel_widget_hover();
+            return;
+        };
+        if let Some(rect) = self.widget_phys_rect(id) {
+            self.widget_runtime.hover.set_expanded_rect(rect);
+        }
+        if let Some(previous) = self.widget_runtime.hover.expanded_id().map(str::to_owned)
+            && previous != id
+        {
+            let _ = self.widget_runtime.hover.on_leave(&previous, now);
+        }
+        self.widget_runtime.hover.on_enter(id, now);
+        if self.widget_runtime.hover.expanded_id().is_some()
+            && !self.widget_runtime.hover.is_captured()
+            && !self.widget_runtime.hover.verify_cursor_stored(cursor)
+        {
+            self.disarm_hover_intent();
+        }
+        if self.widget_runtime.hover.phase() == HoverPhase::Pending {
+            self.arm_hover_intent(id);
+        } else {
+            self.disarm_hover_intent();
+        }
+    }
+
+    /// Cancels pending intent and collapses any expanded inline widget (drag/scroll/leave paths).
+    fn cancel_widget_hover(&mut self) {
+        let hovered = self.hovered_widget.or(self.hover_intent_armed_for);
+        let expanded = self.widget_runtime.hover.expanded_id().map(str::to_owned);
+        self.disarm_hover_intent();
+        let now = Instant::now();
+        let mut changed = false;
+        if let Some(id) = hovered {
+            changed |= self.widget_runtime.hover.on_leave(id, now) == HoverChange::Collapse;
+        }
+        if let Some(expanded) = expanded
+            && Some(expanded.as_str()) != hovered
+        {
+            changed |= self.widget_runtime.hover.on_leave(&expanded, now) == HoverChange::Collapse;
+        }
+        if changed {
+            self.refresh_widgets();
+            self.update_visuals();
+        }
+    }
+
+    /// `WM_TIMER` for the 350 ms hover intent.
+    fn tick_widget_hover(&mut self) {
+        if self.hover_flyout_open {
+            self.disarm_hover_intent();
+            return;
+        }
+        let now = Instant::now();
+        if self.widget_runtime.hover.tick(now) != HoverChange::Expand {
+            if self.widget_runtime.hover.phase() != HoverPhase::Pending {
+                self.disarm_hover_intent();
+            }
+            return;
+        }
+        self.disarm_hover_intent();
+        let Some(id) = self.widget_runtime.hover.expanded_id().map(str::to_owned) else {
+            return;
+        };
+        if let (Some(rect), Some(cursor)) = (self.widget_phys_rect(&id), self.screen_cursor())
+            && !self.widget_runtime.hover.verify_cursor(rect, cursor)
+        {
+            return;
+        }
+        self.hover_flyout_pending = Some(id);
+    }
+
+    /// Opens the rich flyout after hover intent, then suppresses the immediate re-open that would
+    /// otherwise be caused by the pointer landing back on the card when the flyout dismisses.
+    fn open_pending_hover_flyout(&mut self) {
+        if self.hover_flyout_open {
+            return;
+        }
+        let Some(id) = self.hover_flyout_pending.take() else {
+            return;
+        };
+        if self.widget_runtime.hover.is_suppressed(&id, Instant::now()) {
+            self.widget_runtime.hover.clear_suppression();
+            return;
+        }
+        let (_, _, rects) = self.right_widget_rects_dips();
+        let Some((_, rc)) = rects.into_iter().find(|(wid, _)| wid == &id) else {
+            return;
+        };
+        let (ax, ay) = self.flyout_anchor_px(rc);
+        self.hover_flyout_open = true;
+        let changed = self.widget_runtime.open_widget_flyout(
+            &id,
+            self.hwnd,
+            self.is_dark,
+            ax,
+            ay,
+            &mut self.settings,
+        );
+        self.hover_flyout_open = false;
+        if changed {
+            let _ = opentaskbar_core::settings::save_to(
+                &opentaskbar_core::settings::settings_path(),
+                &self.settings,
+            );
+            self.reload_settings_live();
+        } else {
+            self.refresh_widgets();
+        }
+        self.finish_widget_hover_flyout(&id);
+    }
+
+    fn finish_widget_hover_flyout(&mut self, id: &str) {
+        let now = Instant::now();
+        self.disarm_hover_intent();
+        if self.widget_runtime.hover.expanded_id() == Some(id) {
+            let _ = self.widget_runtime.hover.on_leave(id, now);
+        }
+        self.widget_runtime.hover.suppress(id, now);
+        self.reconcile_pointer_after_interaction();
+        self.refresh_widgets();
+        self.update_visuals();
+    }
+
+    /// Releases the slider-style pointer capture held while a widget is pressed.
+    fn finish_widget_pointer_capture(&mut self) {
+        let Some(id) = self.hover_capture_id.take() else {
+            return;
+        };
+        let now = Instant::now();
+        let ended = self.widget_runtime.hover.end_slider_capture(now);
+        let _ = self.widget_runtime.hover.on_leave(&id, now);
+        self.widget_runtime.hover.suppress(&id, now);
+        self.disarm_hover_intent();
+        if ended == HoverChange::Collapse {
+            self.refresh_widgets();
+        }
+        self.update_visuals();
+    }
+
     fn handle_mouse_move(&mut self, mx: f32, my: f32) {
         if !self.tracking_mouse {
             let mut tme = TRACKMOUSEEVENT {
@@ -3456,6 +3675,7 @@ impl DockState {
             let max_s = self.live_scroll_metrics().max_scroll;
             self.scroll_offset = (start_off + delta).clamp(0.0, max_s);
             self.scroll_target = self.scroll_offset;
+            self.cancel_widget_hover();
             self.update_visuals();
             return;
         }
@@ -3503,6 +3723,7 @@ impl DockState {
                 .round();
             self.settings.dock_custom_width_dips = Some(next_w);
             self.sync_window_bounds();
+            self.cancel_widget_hover();
             self.update_visuals();
             return;
         }
@@ -3510,6 +3731,7 @@ impl DockState {
         if self.drag.is_some() {
             self.hide_preview_now();
             self.update_drag(mx);
+            self.cancel_widget_hover();
             self.ensure_animation();
             return;
         }
@@ -3531,6 +3753,7 @@ impl DockState {
             }
         }
         if resize_edge.is_some() {
+            self.cancel_widget_hover();
             return;
         }
 
@@ -3556,6 +3779,7 @@ impl DockState {
             self.update_visuals();
         }
         if over_scroll.is_some() {
+            self.cancel_widget_hover();
             return;
         }
 
@@ -3617,6 +3841,7 @@ impl DockState {
             self.ensure_animation();
             self.update_visuals();
         }
+        self.sync_widget_hover(mx, my);
         if over_tray || over_tray_pin.is_some() || over_bin || over_widget.is_some() {
             return;
         }
@@ -3713,6 +3938,8 @@ impl DockState {
 
     fn handle_mouse_leave(&mut self) {
         self.tracking_mouse = false;
+        // A slider capture keeps the panel open; `on_leave` is a no-op while captured.
+        self.cancel_widget_hover();
         if self.drag.is_some() || self.resize_drag.is_some() || self.scroll_pan.is_some() {
             return;
         }
@@ -3795,6 +4022,15 @@ impl DockState {
             .find(|(_, rc)| Self::hit_rect_in_vp(&sm, Some(*rc), mx, my))
         {
             self.pressed_widget = Some(*wid);
+            // Explicit click wins over the post-flyout suppression window.
+            self.widget_runtime.hover.clear_suppression();
+            // Hold the coordinator in `Captured` for the duration of the press so a
+            // WM_MOUSELEAVE or gap-crossing cannot collapse the panel mid-interaction.
+            let slider_id = u32::from(self.hovered_widget_sub.unwrap_or(0)) + 1;
+            self.widget_runtime
+                .hover
+                .begin_slider_capture(wid, slider_id);
+            self.hover_capture_id = Some((*wid).to_owned());
             self.refresh_widgets();
             self.update_visuals();
             return;
@@ -3878,6 +4114,11 @@ impl DockState {
         }
         if let Some(wid) = self.pressed_widget.take() {
             self.update_visuals();
+            // The click that merely dismisses a flyout must not re-open it.
+            if self.widget_runtime.hover.is_suppressed(wid, Instant::now()) {
+                self.widget_runtime.hover.clear_suppression();
+                return;
+            }
             if let Some((_, rc)) = wrects
                 .iter()
                 .find(|(id, rc)| *id == wid && Self::hit_rect_in_vp(&sm, Some(*rc), mx, my))
@@ -3901,6 +4142,7 @@ impl DockState {
                     }
                     widgets::DirectClickOutcome::OpenFlyout => {
                         let (ax, ay) = self.flyout_anchor_px(*rc);
+                        self.hover_flyout_open = true;
                         let changed = self.widget_runtime.open_widget_flyout(
                             wid,
                             self.hwnd,
@@ -3909,6 +4151,7 @@ impl DockState {
                             ay,
                             &mut self.settings,
                         );
+                        self.hover_flyout_open = false;
                         if changed {
                             let _ = opentaskbar_core::settings::save_to(
                                 &opentaskbar_core::settings::settings_path(),
@@ -4669,6 +4912,11 @@ impl DockState {
         self.hovered_bin = false;
         self.hovered_widget = None;
         self.hovered_widget_sub = None;
+        self.disarm_hover_intent();
+        self.widget_runtime.hover.reset();
+        self.hover_flyout_pending = None;
+        self.hover_flyout_open = false;
+        self.hover_capture_id = None;
         self.hovered_scroll = None;
         self.hovered_resize = None;
         self.hover_mouse_x = None;
@@ -4970,6 +5218,7 @@ unsafe extern "system" fn wnd_proc(
             let mx = loword_i16(lparam) / state.dpi;
             let my = hiword_i16(lparam) / state.dpi;
             state.handle_mouse_move(mx, my);
+            state.open_pending_hover_flyout();
             0
         }
         WM_MOUSELEAVE => {
@@ -4986,6 +5235,7 @@ unsafe extern "system" fn wnd_proc(
             let mx = loword_i16(lparam) / state.dpi;
             let my = hiword_i16(lparam) / state.dpi;
             state.handle_lbutton_up(mx, my);
+            state.finish_widget_pointer_capture();
             state.reconcile_pointer_after_interaction();
             0
         }
@@ -5079,6 +5329,11 @@ unsafe extern "system" fn wnd_proc(
         WM_TIMER if wparam == TIMER_REVEALED_GUARD => {
             state.overlap_dirty = true;
             state.evaluate_auto_hide();
+            0
+        }
+        WM_TIMER if wparam == TIMER_HOVER_INTENT => {
+            state.tick_widget_hover();
+            state.open_pending_hover_flyout();
             0
         }
         WM_TIMER if wparam == TIMER_DRAG_HOVER => {
@@ -5200,6 +5455,7 @@ unsafe extern "system" fn wnd_proc(
                 KillTimer(hwnd, TIMER_WIDGET_ANIM);
                 KillTimer(hwnd, TIMER_REVEALED_GUARD);
                 KillTimer(hwnd, TIMER_DRAG_HOVER);
+                KillTimer(hwnd, TIMER_HOVER_INTENT);
                 WTSUnRegisterSessionNotification(hwnd);
             }
             0

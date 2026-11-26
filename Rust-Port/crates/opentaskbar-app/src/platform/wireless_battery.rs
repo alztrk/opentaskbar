@@ -22,6 +22,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
+use opentaskbar_core::settings::DockSettings;
+
 // ---------------------------------------------------------------------------
 // Ortak API tipleri
 // ---------------------------------------------------------------------------
@@ -3635,25 +3637,71 @@ impl AggregatorSettings {
     }
 
     pub fn is_ignored(&self, reading: &BatteryReading) -> bool {
-        let name = reading.name.to_ascii_lowercase();
-        let id = reading.id.to_ascii_lowercase();
-        self.ignored_devices.iter().any(|x| {
-            !x.is_empty()
-                && (name.contains(&x.to_ascii_lowercase()) || id == x.to_ascii_lowercase())
-        })
+        Self::is_ignored_fields(&self.ignored_devices, &reading.id, &reading.name)
     }
 
     pub fn display_name(&self, reading: &BatteryReading) -> String {
-        let key = reading.id.to_ascii_lowercase();
-        self.aliases
-            .get(&key)
-            .cloned()
-            .unwrap_or_else(|| reading.name.clone())
+        Self::display_name_fields(&self.aliases, &reading.id, &reading.name)
     }
 
     pub fn allows(&self, source: BatterySource) -> bool {
         !self.listen_only || source.is_passive()
     }
+
+    /// Applies the same ignore / alias / listen-only policy to the live transport readings.
+    pub fn allows_reading(&self, reading: &WirelessReading) -> bool {
+        !Self::is_ignored_fields(&self.ignored_devices, &reading.id, &reading.name)
+            && self.allows(reading.source)
+    }
+
+    pub fn display_name_of(&self, reading: &WirelessReading) -> String {
+        Self::display_name_fields(&self.aliases, &reading.id, &reading.name)
+    }
+
+    fn is_ignored_fields(ignored: &[String], id: &str, name: &str) -> bool {
+        let name = name.to_ascii_lowercase();
+        let id = id.to_ascii_lowercase();
+        ignored.iter().any(|x| {
+            !x.is_empty()
+                && (name.contains(&x.to_ascii_lowercase()) || id == x.to_ascii_lowercase())
+        })
+    }
+
+    fn display_name_fields(aliases: &HashMap<String, String>, id: &str, name: &str) -> String {
+        aliases
+            .get(&id.to_ascii_lowercase())
+            .cloned()
+            .unwrap_or_else(|| name.to_owned())
+    }
+}
+
+impl From<&DockSettings> for AggregatorSettings {
+    fn from(settings: &DockSettings) -> Self {
+        Self {
+            poll_seconds: settings.wireless_battery_poll_seconds.max(0) as u32,
+            low_threshold: settings.wireless_battery_low_threshold.max(0) as u32,
+            ignored_devices: settings.ignored_wireless_devices.clone(),
+            aliases: settings
+                .wireless_device_aliases
+                .iter()
+                .map(|(id, alias)| (id.to_ascii_lowercase(), alias.clone()))
+                .collect(),
+            listen_only: settings.wireless_battery_listen_only,
+        }
+    }
+}
+
+/// Live transport readings with the persisted dock settings applied.
+pub fn read_all_with_settings(settings: &DockSettings) -> Vec<WirelessReading> {
+    let agg = AggregatorSettings::from(settings);
+    read_all()
+        .into_iter()
+        .filter(|reading| agg.allows_reading(reading))
+        .map(|mut reading| {
+            reading.name = agg.display_name_of(&reading);
+            reading
+        })
+        .collect()
 }
 
 pub struct WirelessBatteryAggregator {
@@ -4118,5 +4166,45 @@ mod ws_g_tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "My Mouse");
         let _ = std::fs::remove_file(cache_path);
+    }
+
+    #[test]
+    fn aggregator_settings_from_dock_settings() {
+        let mut dock = opentaskbar_core::settings::DockSettings {
+            wireless_battery_poll_seconds: 45,
+            wireless_battery_low_threshold: 30,
+            ..Default::default()
+        };
+        dock.ignored_wireless_devices.push("hidden".into());
+        dock.wireless_device_aliases
+            .insert("ID1".into(), "My Headset".into());
+        dock.wireless_battery_listen_only = true;
+
+        let agg = super::AggregatorSettings::from(&dock);
+        assert_eq!(agg.poll_seconds, 45);
+        assert_eq!(agg.poll_seconds_clamped(), 45);
+        assert_eq!(agg.low_threshold, 30);
+        assert!(agg.listen_only);
+        let active = super::WirelessReading {
+            id: "id1".into(),
+            name: "Headset".into(),
+            level_01: 0.5,
+            is_connected: true,
+            is_charging: false,
+            source: BatterySource::AsusRogHid,
+            stale: false,
+        };
+        assert!(!agg.allows_reading(&active)); // listen-only excludes active HID probes
+        assert_eq!(agg.display_name_of(&active), "My Headset");
+        let hidden = super::WirelessReading {
+            name: "Hidden Device".into(),
+            ..active.clone()
+        };
+        assert!(!agg.allows_reading(&hidden));
+        let passive = super::WirelessReading {
+            source: BatterySource::Bluetooth,
+            ..active
+        };
+        assert!(agg.allows_reading(&passive));
     }
 }

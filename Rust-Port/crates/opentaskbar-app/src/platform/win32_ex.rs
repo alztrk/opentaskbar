@@ -14,8 +14,6 @@ use windows_sys::Win32::System::Registry::{
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::WindowsAndMessaging::GetClassNameW;
 
-use opentaskbar_core::log;
-
 const TASK_SWITCHER_CLASSES: [&str; 3] = [
     "XamlExplorerHostIslandWindow",
     "MultitaskingViewFrame",
@@ -246,24 +244,11 @@ pub fn virtual_desktops() -> (u32, u32) {
     (1, count)
 }
 
-/// Sets the default audio endpoint. The documented C4 bridge is
-/// `platform::core_audio::set_default_device(id)` (WS-G ownership); this helper
-/// is the Win32-facing entry point kept for callers that only link the shell
-/// layer. It validates the id and records telemetry; without the CoreAudio
-/// bridge linked it returns false instead of touching undocumented COM
-/// interfaces (`IPolicyConfig`) that can crash consumers on driver updates.
+/// Sets the default audio endpoint. The Win32-facing alias delegates to the
+/// C4 `platform::core_audio::set_default_device(id)` bridge (WS-G ownership),
+/// which applies the endpoint to all three roles via `IPolicyConfig`.
 pub fn set_default_audio_device(id: &str) -> bool {
-    if id.trim().is_empty() {
-        return false;
-    }
-    log::event(
-        "SetDefaultAudioDevice",
-        &[
-            ("reason", "policy-config-unavailable".to_owned()),
-            ("id", id.to_owned()),
-        ],
-    );
-    false
+    crate::platform::core_audio::set_default_device(id)
 }
 
 #[cfg(test)]

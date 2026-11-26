@@ -37,6 +37,9 @@ pub fn brand_path_data(provider_id: &str) -> Option<&'static str> {
         "aiusage_cursor" => Some(
             "F1 M11.503 .131 1.891 5.678a .84 .84 0 0 0 -.42 .726v11.188c 0 .3 .162 .575 .42 .724l9.609 5.55a 1 1 0 0 0 .998 0l9.61 -5.55a .84 .84 0 0 0 .42 -.724V6.404a .84 .84 0 0 0 -.42 -.726L12.497 .131a 1.01 1.01 0 0 0 -.996 0M2.657 6.338h18.55c .263 0 .43 .287 .297 .515L12.23 22.918c -.062 .107 -.229 .064 -.229 -.06V12.335a .59 .59 0 0 0 -.295 -.51l-9.11 -5.257c -.109 -.063 -.064 -.23 .061 -.23",
         ),
+        "aiusage_antigravity" => Some(
+            "F1 M21.751 22.607c1.34 1.005 3.35.335 1.508-1.508C17.73 15.74 18.904 1 12.037 1 5.17 1 6.342 15.74.815 21.1c-2.01 2.009.167 2.511 1.507 1.506 5.192-3.517 4.857-9.714 9.715-9.714 4.857 0 4.522 6.197 9.714 9.715z",
+        ),
         _ => None,
     }
 }
@@ -469,7 +472,7 @@ mod tests {
     use super::{brand_path_data, parse_stream_geometry};
 
     #[test]
-    fn all_seven_csharp_brand_logos_parse_cleanly() {
+    fn all_eight_csharp_brand_logos_parse_cleanly() {
         let ids = [
             "aiusage_claude",
             "aiusage_codex",
@@ -478,6 +481,7 @@ mod tests {
             "aiusage_deepseek",
             "aiusage_openrouter",
             "aiusage_cursor",
+            "aiusage_antigravity",
         ];
         for id in ids {
             let raw = brand_path_data(id).expect("missing brand path");
