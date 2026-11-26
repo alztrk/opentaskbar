@@ -189,6 +189,7 @@ pub fn widget_name(id: &str) -> String {
         "quicksettings" => loc::t("WidgetQuickSettings"),
         "keyboard" => loc::t("WidgetKeyboardLayout"),
         "focus" => loc::t("WidgetFocus"),
+        "showdesktop" => loc::t("WidgetShowDesktop"),
         _ => widget_descriptor(id).map_or_else(|| id.to_owned(), |d| d.name.to_owned()),
     }
 }
@@ -404,11 +405,13 @@ fn gpu_metrics_visible(samples: u32, misses: u32) -> bool {
 }
 
 /// C# `QuickSettingsWidget` radio state labels: `Loading`, `Unavailable`, `On`, `Off`.
-fn radio_label(on: bool, loading: bool) -> &'static str {
+fn radio_label(on: bool, loading: bool) -> String {
     if loading {
-        "Loading"
+        loc::t("AiUsageStatusLoading")
+    } else if on {
+        loc::t("QuickOn")
     } else {
-        if on { "On" } else { "Off" }
+        loc::t("QuickOff")
     }
 }
 
@@ -1101,7 +1104,7 @@ impl WidgetRuntime {
                 let condition = if available {
                     snap.condition
                 } else if snap.loading {
-                    "Loading weather…".to_owned()
+                    loc::t("WeatherLoading").to_owned()
                 } else {
                     loc::t("WeatherUnavailable").to_owned()
                 };
@@ -1126,7 +1129,7 @@ impl WidgetRuntime {
                 WidgetChipSpec::DayProgress {
                     ratio: day,
                     percent: format!("{:.0}%", day * 100.0),
-                    unit: "day".to_owned(),
+                    unit: loc::t("DayProgressUnit"),
                 }
             }
             "stopwatch" => WidgetChipSpec::Timed {
@@ -1142,7 +1145,7 @@ impl WidgetRuntime {
             "focus" => {
                 let snapshot = self.focus.snapshot();
                 let label = if snapshot.phase == FocusPhase::Break {
-                    "Break".to_owned()
+                    loc::t("Break").to_owned()
                 } else {
                     snapshot.session_label()
                 };
@@ -1197,8 +1200,12 @@ impl WidgetRuntime {
                 }
                 if show_gpu_temp {
                     let unit_lbl = match settings.weather_unit {
-                        opentaskbar_core::settings::TemperatureUnit::Celsius => "GPU °C",
-                        opentaskbar_core::settings::TemperatureUnit::Fahrenheit => "GPU °F",
+                        opentaskbar_core::settings::TemperatureUnit::Celsius => {
+                            loc::t("GpuCelsius")
+                        }
+                        opentaskbar_core::settings::TemperatureUnit::Fahrenheit => {
+                            loc::t("GpuFahrenheit")
+                        }
                     };
                     let (val_txt, ratio, warm) = match self.gpu_temp_c {
                         Some(c) => (
@@ -1209,7 +1216,7 @@ impl WidgetRuntime {
                         None => ("—".to_owned(), 0.0, false),
                     };
                     columns.push(SystemStatColumn {
-                        label: unit_lbl.to_owned(),
+                        label: unit_lbl,
                         value_text: val_txt,
                         ratio,
                         bar_color: pal.warning,
@@ -1387,26 +1394,32 @@ impl WidgetRuntime {
                     }
                 }
                 let bottom = peak_label.map(|(_, s)| s).or(first_bal).unwrap_or_else(|| {
-                    format!("{active_count}/{} ready", telemetry::AI_PROVIDERS.len())
+                    loc::t_fmt(
+                        "AiUsageReadyCount",
+                        &[
+                            &active_count.to_string(),
+                            &telemetry::AI_PROVIDERS.len().to_string(),
+                        ],
+                    )
                 });
                 WidgetChipSpec::Simple {
                     icon: ChipIcon::Sparkle,
                     icon_color: pal.widget_accent,
-                    top: format!("AI · {active_count}"),
+                    top: loc::t_fmt("AiUsageActiveCount", &[&active_count.to_string()]),
                     bottom,
                 }
             }
             "stacks" => WidgetChipSpec::Simple {
                 icon: ChipIcon::Folder,
                 icon_color: pal.warning,
-                top: "Stacks".to_owned(),
-                bottom: format!("{} folders", settings.stack_folders.len()),
+                top: loc::t("StacksShort"),
+                bottom: loc::t_fmt("FolderCount", &[&settings.stack_folders.len().to_string()]),
             },
             "groups" => WidgetChipSpec::Simple {
                 icon: ChipIcon::Grid,
                 icon_color: pal.accent,
-                top: "Groups".to_owned(),
-                bottom: format!("{} groups", settings.app_groups.len()),
+                top: loc::t("GroupsShort"),
+                bottom: loc::t_fmt("GroupCount", &[&settings.app_groups.len().to_string()]),
             },
             _ => WidgetChipSpec::Keyboard {
                 code: id.chars().take(3).collect::<String>().to_uppercase(),
@@ -1452,32 +1465,42 @@ impl WidgetRuntime {
             "clock" => telemetry::local_clock_info().full_date,
             "media" => match sub {
                 Some(0) => loc::t("MediaPrevious").to_owned(),
-                Some(1) => "Play / Pause".to_owned(),
+                Some(1) => loc::t("MediaPlayPause").to_owned(),
                 Some(2) => loc::t("MediaNext").to_owned(),
-                Some(3) => if self.audio_muted { "Unmute" } else { "Mute" }.to_owned(),
-                _ => "Media".to_owned(),
-            },
-            "quicksettings" => match sub {
-                Some(0) => format!("Wi-Fi · {}", radio_label(self.wifi_on, self.radio_loading)),
-                Some(1) => format!(
-                    "Bluetooth · {}",
-                    radio_label(self.bluetooth_on, self.radio_loading)
-                ),
-                Some(2) => if self.night_light_on {
-                    "Night Light · On"
+                Some(3) => if self.audio_muted {
+                    loc::t("AudioUnmute")
                 } else {
-                    "Night Light · Off"
+                    loc::t("AudioMute")
                 }
                 .to_owned(),
+                _ => loc::t("DynamicIslandShortMedia").to_owned(),
+            },
+            "quicksettings" => match sub {
+                Some(0) => loc::t_fmt(
+                    "RadioWifiStatus",
+                    &[&radio_label(self.wifi_on, self.radio_loading)],
+                ),
+                Some(1) => loc::t_fmt(
+                    "RadioBluetoothStatus",
+                    &[&radio_label(self.bluetooth_on, self.radio_loading)],
+                ),
+                Some(2) => loc::t_fmt(
+                    "NightLightStatus",
+                    &[&if self.night_light_on {
+                        loc::t("QuickOn")
+                    } else {
+                        loc::t("QuickOff")
+                    }],
+                ),
                 _ => loc::t("WidgetQuickSettings").to_owned(),
             },
             "audio" => {
                 let dev = telemetry::default_audio_device_name(false)
                     .unwrap_or_else(|| loc::t("AudioOutput").to_owned());
                 if self.audio_muted {
-                    format!("{dev} · Muted")
+                    loc::t_fmt("AudioDeviceMuted", &[&dev])
                 } else {
-                    format!("{dev} · {}%", self.audio_vol)
+                    loc::t_fmt("AudioDeviceVolume", &[&dev, &self.audio_vol.to_string()])
                 }
             }
             "weather" => {
@@ -1495,7 +1518,7 @@ impl WidgetRuntime {
                         snap.condition
                     )
                 } else {
-                    format!("Weather · {}", settings.weather_city)
+                    loc::t_fmt("WeatherTooltip", &[&settings.weather_city])
                 }
             }
             "stats" => {
@@ -1507,25 +1530,33 @@ impl WidgetRuntime {
                 };
                 let gpu = if gpu_metrics_visible(self.gpu_samples, self.gpu_misses) {
                     match self.gpu_temp_c {
-                        Some(t) => format!(" · GPU {}% {t}°C", self.gpu_pct),
-                        None => format!(" · GPU {}%", self.gpu_pct),
+                        Some(t) => loc::t_fmt(
+                            "StatsGpuTooltipWithTemp",
+                            &[&self.gpu_pct.to_string(), &t.to_string()],
+                        ),
+                        None => loc::t_fmt("StatsGpuTooltip", &[&self.gpu_pct.to_string()]),
                     }
                 } else {
                     String::new()
                 };
-                format!(
-                    "CPU {}% (avg {:.0}%) · RAM {}%{} · {} {}",
-                    self.cpu_pct,
-                    avg,
-                    self.ram_pct,
-                    gpu,
-                    loc::t("StatsUptime"),
-                    self.stats_uptime
+                loc::t_fmt(
+                    "StatsTooltip",
+                    &[
+                        &self.cpu_pct.to_string(),
+                        &format!("{avg:.0}"),
+                        &self.ram_pct.to_string(),
+                        &gpu,
+                        &loc::t("StatsUptime"),
+                        &self.stats_uptime,
+                    ],
                 )
             }
             "dayprogress" => {
                 let (day, _, _, left) = day_progress_metrics();
-                format!("Day Progress: {:.0}% ({left}h left)", day * 100.0)
+                loc::t_fmt(
+                    "WidgetDayProgressTooltip",
+                    &[&format!("{:.0}", day * 100.0), &left.to_string()],
+                )
             }
             "stopwatch" => {
                 if sub == Some(1) {
@@ -1575,7 +1606,7 @@ impl WidgetRuntime {
                     )
                 }
             }
-            "keyboard" => format!("Keyboard Layout · {}", self.current_keyboard_code()),
+            "keyboard" => loc::t_fmt("KeyboardLayoutTooltip", &[&self.current_keyboard_code()]),
             "storage" => self
                 .poll_drives()
                 .iter()
@@ -1591,24 +1622,30 @@ impl WidgetRuntime {
             "battery" => {
                 let b = sample_battery();
                 if !b.has_battery {
-                    "Battery: Unavailable".to_owned()
+                    loc::t("BatteryUnavailable").to_owned()
                 } else if b.charging {
-                    format!("Charging: {}%", b.percent)
+                    loc::t_fmt("BatteryChargingPercent", &[&b.percent.to_string()])
                 } else if b.on_ac {
-                    format!("Plugged in: {}%", b.percent)
+                    loc::t_fmt("BatteryPluggedIn", &[&b.percent.to_string()])
                 } else if let Some(secs) = b.life_secs.filter(|&s| s >= 60) {
                     let h = secs / 3600;
                     let m = (secs % 3600) / 60;
                     if h > 0 {
-                        format!("Battery: {}% · {h}h {m}m remaining", b.percent)
+                        loc::t_fmt(
+                            "BatteryRemainingHours",
+                            &[&b.percent.to_string(), &h.to_string(), &m.to_string()],
+                        )
                     } else {
-                        format!("Battery: {}% · {m}m remaining", b.percent)
+                        loc::t_fmt(
+                            "BatteryRemainingMinutes",
+                            &[&b.percent.to_string(), &m.to_string()],
+                        )
                     }
                 } else {
-                    format!("Battery: {}%", b.percent)
+                    loc::t_fmt("BatteryPercent", &[&b.percent.to_string()])
                 }
             }
-            "bluetoothbattery" => "Bluetooth Battery".to_owned(),
+            "bluetoothbattery" => loc::t("BluetoothBattery").to_owned(),
             _ => widget_descriptor(id).map_or(id, |d| d.name).to_owned(),
         }
     }
@@ -1786,12 +1823,12 @@ impl WidgetRuntime {
                 },
                 FlyoutBlock::Separator,
                 FlyoutBlock::StatRow {
-                    label: format!("Today · {}", info.full_date),
+                    label: loc::t_fmt("TodayDate", &[&info.full_date]),
                     value: String::new(),
                 },
                 FlyoutBlock::ButtonBar(vec![
                     (10, loc::t("GoToToday").to_owned(), false),
-                    (11, "Date & Time".to_owned(), false),
+                    (11, loc::t("LauncherDateTime"), false),
                 ]),
             ],
         }
@@ -1800,7 +1837,7 @@ impl WidgetRuntime {
     fn build_audio_mixer_spec(&self) -> FlyoutSpec {
         let (out_vol, out_muted) = get_audio_state();
         let out_name =
-            telemetry::default_audio_device_name(false).unwrap_or_else(|| "Speakers".to_owned());
+            telemetry::default_audio_device_name(false).unwrap_or_else(|| loc::t("Speakers"));
         let mic = telemetry::get_mic_state();
         let (in_vol, in_muted) = mic.unwrap_or((0, true));
         let in_name = telemetry::default_audio_device_name(true)
@@ -1808,7 +1845,7 @@ impl WidgetRuntime {
 
         let mut blocks = vec![
             FlyoutBlock::AudioSliderSection {
-                label: "Output".to_owned(),
+                label: loc::t("AudioOutput"),
                 device_name: out_name.clone(),
                 value_text: if out_muted {
                     "0%".to_owned()
@@ -1822,7 +1859,7 @@ impl WidgetRuntime {
             },
             FlyoutBlock::Separator,
             FlyoutBlock::AudioSliderSection {
-                label: "Input".to_owned(),
+                label: loc::t("AudioInput"),
                 device_name: in_name,
                 value_text: if mic.is_none() {
                     "—".to_owned()
@@ -1874,7 +1911,7 @@ impl WidgetRuntime {
             device_blocks.insert(
                 0,
                 FlyoutBlock::StatRow {
-                    label: "Output device".to_owned(),
+                    label: loc::t("AudioOutputDevices"),
                     value: String::new(),
                 },
             );
@@ -1905,8 +1942,8 @@ impl WidgetRuntime {
             width_dips: 316.0,
             blocks: vec![
                 FlyoutBlock::StatRow {
-                    label: "Focus".to_owned(),
-                    value: format!("{} sessions", self.focus_completed),
+                    label: loc::t("Focus"),
+                    value: loc::t_fmt("FocusSessionsCount", &[&self.focus_completed.to_string()]),
                 },
                 FlyoutBlock::Hero {
                     value: format_mm_ss(self.focus_remaining_secs),
@@ -1947,12 +1984,12 @@ impl WidgetRuntime {
         let mut blocks = vec![
             FlyoutBlock::Hero {
                 value: format_mm_ss_cs(self.stopwatch_secs, self.stopwatch_cs),
-                caption: Some("Quick action: click the tile play/pause button".to_owned()),
+                caption: Some(loc::t("StopwatchQuickAction")),
                 centered: true,
                 large: true,
                 right_meta: None,
             },
-            FlyoutBlock::ButtonBar(vec![(3, "Lap".to_owned(), false)]),
+            FlyoutBlock::ButtonBar(vec![(3, loc::t("StopwatchLap"), false)]),
         ];
         if self.stopwatch_laps.is_empty() {
             blocks.push(FlyoutBlock::Note(loc::t("StopwatchNoLaps").to_owned()));
@@ -2014,17 +2051,17 @@ impl WidgetRuntime {
                     tone: BarTone::Accent,
                 },
                 FlyoutBlock::ButtonBar(vec![
-                    (5, "5 min".to_owned(), mins == 5),
-                    (10, "10 min".to_owned(), mins == 10),
+                    (5, loc::t_fmt("CountdownMinutesShort", &["5"]), mins == 5),
+                    (10, loc::t_fmt("CountdownMinutesShort", &["10"]), mins == 10),
                 ]),
                 FlyoutBlock::ButtonBar(vec![
-                    (15, "15 min".to_owned(), mins == 15),
-                    (30, "30 min".to_owned(), mins == 30),
+                    (15, loc::t_fmt("CountdownMinutesShort", &["15"]), mins == 15),
+                    (30, loc::t_fmt("CountdownMinutesShort", &["30"]), mins == 30),
                 ]),
                 // C# `TimedWidgetPanel` custom duration (C2 TextInput, validated 1-1440 minutes).
                 FlyoutBlock::TextInput {
                     id: 50,
-                    label: "Custom minutes (1-1440)".to_owned(),
+                    label: loc::t("CountdownCustomMinutes"),
                     value: format!("{mins}"),
                     numeric: true,
                     min: 1.0,
@@ -2117,12 +2154,15 @@ impl WidgetRuntime {
                 accent: cpu_col,
             },
             FlyoutBlock::Chart {
-                label: format!("Memory · {used_gib:.1} / {total_gib:.0} GB"),
+                label: loc::t_fmt(
+                    "StatsMemoryChart",
+                    &[&format!("{used_gib:.1}"), &format!("{total_gib:.0}")],
+                ),
                 series: vec![("RAM".to_owned(), self.stats.ram_history.as_vec())],
                 accent: ram_col,
             },
             FlyoutBlock::Sparkline {
-                label: "CPU trend".to_owned(),
+                label: loc::t("StatsCpuTrend"),
                 value_text: format!("{}%", self.cpu_pct),
                 detail_text: None,
                 samples: self.stats.cpu_history.as_vec(),
@@ -2136,14 +2176,14 @@ impl WidgetRuntime {
                 accent: pal.widget_blue,
             });
             blocks.push(FlyoutBlock::ProgressBar {
-                label: "GPU Load".to_owned(),
+                label: loc::t("StatsGpuLoad"),
                 value_text: format!("{}%", self.gpu_pct),
                 ratio: self.gpu_pct as f32 / 100.0,
                 tone: BarTone::Usage,
             });
             if let Some(temp) = self.gpu_temp_c {
                 blocks.push(FlyoutBlock::ProgressBar {
-                    label: "GPU Temperature".to_owned(),
+                    label: loc::t("GpuTemperature"),
                     value_text: format!("{temp}°C"),
                     ratio: (temp as f32 / 100.0).clamp(0.0, 1.0),
                     tone: if temp >= 85 {
@@ -2228,7 +2268,7 @@ impl WidgetRuntime {
         blocks.push(FlyoutBlock::Separator);
         blocks.push(FlyoutBlock::ButtonBar(vec![
             (1, loc::t("TaskManager"), false),
-            (2, "Resource Monitor".to_owned(), false),
+            (2, loc::t("ResourceMonitor"), false),
             (3, loc::t("AiUsageRefresh"), false),
         ]));
         blocks.push(FlyoutBlock::Note(loc::t("StatsAvailabilityNote")));
@@ -2285,21 +2325,21 @@ impl WidgetRuntime {
                     blocks.push(FlyoutBlock::StatRow {
                         label: ai.name.to_owned(),
                         value: if snap.has_cred {
-                            "Configured".to_owned()
+                            loc::t("AiUsageConfigured")
                         } else {
-                            "Sign in".to_owned()
+                            loc::t("AiUsageStatusSignIn")
                         },
                     });
                 }
             }
             blocks.push(FlyoutBlock::Separator);
             blocks.push(FlyoutBlock::ButtonBar(vec![
-                (1, "Refresh All".to_owned(), true),
-                (2, "Full Refresh (all providers)".to_owned(), false),
+                (1, loc::t("AiUsageRefreshAll"), true),
+                (2, loc::t("AiUsageFullRefreshAll"), false),
             ]));
             let spec = FlyoutSpec {
-                title: "AI Quotas".to_owned(),
-                subtitle: Some("Live usage across all configured providers".to_owned()),
+                title: loc::t("WidgetCategoryAi"),
+                subtitle: Some(loc::t("AiUsageLiveUsageNote")),
                 width_dips: 316.0,
                 blocks,
             };
@@ -2589,16 +2629,16 @@ impl WidgetRuntime {
                     },
                     FlyoutBlock::MetricTiles(vec![
                         (loc::t("FeelsLikeLabel").to_owned(), feels),
-                        ("Humidity".to_owned(), hum),
-                        ("Wind".to_owned(), wind),
-                        ("Source".to_owned(), "wttr.in".to_owned()),
+                        (loc::t("WeatherHumidity"), hum),
+                        (loc::t("WeatherWind"), wind),
+                        (loc::t("WeatherSource"), "wttr.in".to_owned()),
                     ]),
                 ];
                 // C# `WeatherWidget` 3-day forecast (data already collected in telemetry).
                 if !snap.forecast_days.is_empty() {
                     blocks.push(FlyoutBlock::Separator);
                     blocks.push(FlyoutBlock::StatRow {
-                        label: "3-Day Forecast".to_owned(),
+                        label: loc::t("WeatherForecast3Days"),
                         value: String::new(),
                     });
                     for (day, condition, high_low) in snap.forecast_days.iter().take(3) {
@@ -2639,7 +2679,7 @@ impl WidgetRuntime {
                 let adapter = if self.net.adapter_name.is_empty() {
                     None
                 } else {
-                    Some(format!("Adapter: {}", self.net.adapter_name))
+                    Some(loc::t_fmt("NetworkAdapterLabel", &[&self.net.adapter_name]))
                 };
                 let build = |runtime: &Self| {
                     let mut spec = speedtest::build_speedtest_flyout(
@@ -2651,19 +2691,19 @@ impl WidgetRuntime {
                     let mut blocks = vec![
                         FlyoutBlock::MetricTiles(vec![
                             (
-                                "↓ Download".to_owned(),
+                                loc::t_fmt("NetworkDirectionDown", &[&loc::t("NetworkDownload")]),
                                 telemetry::format_speed(runtime.net.rx_bps),
                             ),
                             (
-                                "↑ Upload".to_owned(),
+                                loc::t_fmt("NetworkDirectionUp", &[&loc::t("NetworkUpload")]),
                                 telemetry::format_speed(runtime.net.tx_bps),
                             ),
                             (
-                                "Session received".to_owned(),
+                                loc::t("NetworkSessionReceived"),
                                 telemetry::format_bytes(runtime.net.session_rx),
                             ),
                             (
-                                "Session sent".to_owned(),
+                                loc::t("NetworkSessionSent"),
                                 telemetry::format_bytes(runtime.net.session_tx),
                             ),
                         ]),
@@ -2672,7 +2712,7 @@ impl WidgetRuntime {
                     blocks.append(&mut spec.blocks);
                     blocks.push(FlyoutBlock::ButtonBar(vec![(
                         5,
-                        "Network Settings".to_owned(),
+                        loc::t("NetworkSettings"),
                         false,
                     )]));
                     spec.blocks = blocks;
@@ -2758,7 +2798,7 @@ impl WidgetRuntime {
                                 id: 100 + i as u32,
                                 title: format!("{shown}{bolt}"),
                                 subtitle: Some(if stale {
-                                    format!("{}% · stale", d.percent)
+                                    loc::t_fmt("WirelessBatteryStale", &[&d.percent.to_string()])
                                 } else {
                                     format!("{}%", d.percent)
                                 }),
@@ -2769,48 +2809,53 @@ impl WidgetRuntime {
                         })
                         .collect();
                     if blocks.is_empty() {
-                        blocks.push(FlyoutBlock::Note(
-                            "No connected Bluetooth battery devices detected.".to_owned(),
-                        ));
+                        blocks.push(FlyoutBlock::Note(loc::t("WirelessBatteryNoDevices")));
                     }
                     let _ = selected;
                     // C2 TextInput — device rename (1-64 chars).
                     blocks.push(FlyoutBlock::TextInput {
                         id: 50,
-                        label: "Rename selected device".to_owned(),
+                        label: loc::t("WirelessBatteryRename"),
                         value: rename_value,
                         numeric: false,
                         min: 0.0,
                         max: 0.0,
                     });
                     blocks.push(FlyoutBlock::StatRow {
-                        label: "Poll interval".to_owned(),
+                        label: loc::t("WirelessBatteryPollIntervalLabel"),
                         value: format!("{interval}s"),
                     });
                     blocks.push(FlyoutBlock::StatRow {
-                        label: "Low threshold".to_owned(),
+                        label: loc::t("WirelessBatteryLowThresholdLabel"),
                         value: format!("{low}%"),
                     });
                     blocks.push(FlyoutBlock::ToggleGrid(vec![(
                         7,
-                        "Listen only".to_owned(),
-                        if listen_only { "On" } else { "Off" }.to_owned(),
+                        loc::t("WirelessBatteryListenOnlyLabel"),
+                        if listen_only {
+                            loc::t("WirelessBatteryListenOnlyOn")
+                        } else {
+                            loc::t("WirelessBatteryListenOnlyOff")
+                        },
                         listen_only,
                     )]));
                     blocks.push(FlyoutBlock::ButtonBar(vec![
-                        (1, "Refresh".to_owned(), false),
-                        (2, "Hide".to_owned(), false),
-                        (3, "Restore ignored".to_owned(), false),
-                        (4, "Interval".to_owned(), false),
-                        (5, "Threshold".to_owned(), false),
+                        (1, loc::t("WirelessBatteryRefresh"), false),
+                        (2, loc::t("WirelessBatteryHideDevice"), false),
+                        (3, loc::t("WirelessBatteryRestoreIgnored"), false),
+                        (4, loc::t("WirelessBatteryIntervalButton"), false),
+                        (5, loc::t("WirelessBatteryThresholdButton"), false),
                     ]));
                     blocks.push(FlyoutBlock::ButtonBar(vec![
-                        (6, "Copy Diagnostics".to_owned(), false),
-                        (8, "Bluetooth Settings".to_owned(), false),
+                        (6, loc::t("WirelessBatteryCopyDiagnostics"), false),
+                        (8, loc::t("QuickBluetoothSettings"), false),
                     ]));
                     FlyoutSpec {
-                        title: "Bluetooth Battery".to_owned(),
-                        subtitle: Some(format!("{interval}s · low {low}%")),
+                        title: loc::t("BluetoothBattery"),
+                        subtitle: Some(loc::t_fmt(
+                            "WirelessBatterySubtitle",
+                            &[&interval.to_string(), &low.to_string()],
+                        )),
                         width_dips: 296.0,
                         blocks,
                     }
@@ -2951,7 +2996,7 @@ impl WidgetRuntime {
                     })
                     .collect();
                 if blocks.is_empty() {
-                    blocks.push(FlyoutBlock::Note("No fixed drives found.".to_owned()));
+                    blocks.push(FlyoutBlock::Note(loc::t("StorageNoFixedDrives")));
                 }
                 blocks.push(FlyoutBlock::Separator);
                 blocks.push(FlyoutBlock::ButtonBar(vec![(
@@ -3019,25 +3064,25 @@ impl WidgetRuntime {
                     blocks: vec![
                         FlyoutBlock::Hero {
                             value: format!("{:.0}%", day * 100.0),
-                            caption: Some(format!("{left}h remaining today")),
+                            caption: Some(loc::t_fmt("DayProgressRemaining", &[&left.to_string()])),
                             centered: false,
                             large: false,
                             right_meta: None,
                         },
                         FlyoutBlock::ProgressBar {
-                            label: "Day".to_owned(),
+                            label: loc::t("DayProgressDay"),
                             value_text: format!("{:.0}%", day * 100.0),
                             ratio: day,
                             tone: BarTone::Accent,
                         },
                         FlyoutBlock::ProgressBar {
-                            label: "Week".to_owned(),
+                            label: loc::t("DayProgressWeek"),
                             value_text: format!("{:.0}%", week * 100.0),
                             ratio: week,
                             tone: BarTone::Accent,
                         },
                         FlyoutBlock::ProgressBar {
-                            label: "Year".to_owned(),
+                            label: loc::t("DayProgressYear"),
                             value_text: format!("{:.0}%", year * 100.0),
                             ratio: year,
                             tone: BarTone::Accent,
@@ -3280,16 +3325,16 @@ impl WidgetRuntime {
                                      bt_on: bool| {
                     let (vol, muted) = get_audio_state();
                     let out_name = telemetry::default_audio_device_name(false)
-                        .unwrap_or_else(|| "Speakers".to_owned());
+                        .unwrap_or_else(|| loc::t("Speakers"));
                     let hide_label = match settings.auto_hide {
                         AutoHideMode::Disabled => loc::t("QuickOff"),
-                        AutoHideMode::Smart => "Smart".to_owned(),
-                        AutoHideMode::Always => "Always".to_owned(),
+                        AutoHideMode::Smart => loc::t("AutoHideSmart"),
+                        AutoHideMode::Always => loc::t("AutoHideAlways"),
                     };
                     let theme_label = match settings.theme {
-                        AppTheme::System => "System",
-                        AppTheme::Dark => "Dark",
-                        AppTheme::Light => "Light",
+                        AppTheme::System => loc::t("ThemeSystem"),
+                        AppTheme::Dark => loc::t("Dark"),
+                        AppTheme::Light => loc::t("Light"),
                     };
                     FlyoutSpec {
                         title: loc::t("WidgetQuickSettings"),
@@ -3297,8 +3342,8 @@ impl WidgetRuntime {
                         width_dips: 312.0,
                         blocks: vec![
                             FlyoutBlock::ToggleGrid(vec![
-                                (5, "Wi-Fi".to_owned(), wifi_state.to_owned(), wifi_on),
-                                (6, "Bluetooth".to_owned(), bt_state.to_owned(), bt_on),
+                                (5, loc::t("WiFi"), wifi_state.to_owned(), wifi_on),
+                                (6, loc::t("Bluetooth"), bt_state.to_owned(), bt_on),
                                 (
                                     1,
                                     loc::t("FocusMode").to_owned(),
@@ -3312,13 +3357,13 @@ impl WidgetRuntime {
                                 ),
                                 (
                                     2,
-                                    "Auto-Hide".to_owned(),
+                                    loc::t("AutoHide"),
                                     hide_label.to_owned(),
                                     settings.auto_hide != AutoHideMode::Disabled,
                                 ),
                                 (
                                     3,
-                                    "Theme".to_owned(),
+                                    loc::t("Theme"),
                                     theme_label.to_owned(),
                                     settings.theme != AppTheme::System,
                                 ),
@@ -3336,10 +3381,10 @@ impl WidgetRuntime {
                             ]),
                             FlyoutBlock::Separator,
                             FlyoutBlock::AudioSliderSection {
-                                label: "Volume".to_owned(),
+                                label: loc::t("Volume"),
                                 device_name: out_name,
                                 value_text: if muted {
-                                    "Muted".to_owned()
+                                    loc::t("AudioMuted")
                                 } else {
                                     format!("{vol}%")
                                 },
@@ -3352,27 +3397,27 @@ impl WidgetRuntime {
                             // C2 `IconBar` — 16 C# Control Center shortcuts (ms-settings URIs).
                             FlyoutBlock::IconBar {
                                 buttons: vec![
-                                    (100, "Wi-Fi".to_owned(), 0xE701, wifi_on),
-                                    (101, "Bluetooth".to_owned(), 0xE702, bt_on),
-                                    (102, "Airplane mode".to_owned(), 0xF71D, true),
-                                    (103, "Night Light".to_owned(), 0xE708, night_light),
-                                    (104, "Battery saver".to_owned(), 0xE7EF, true),
-                                    (105, "Focus assist".to_owned(), 0xF4B9, settings.focus_mode),
-                                    (106, "Display".to_owned(), 0xE7F3, true),
-                                    (107, "Sound".to_owned(), 0xE7F5, true),
-                                    (108, "Network".to_owned(), 0xE705, true),
-                                    (109, "VPN".to_owned(), 0xE7A2, true),
-                                    (110, "Nearby sharing".to_owned(), 0xE8D2, true),
-                                    (111, "Project".to_owned(), 0xE7F6, true),
-                                    (112, "Tablet mode".to_owned(), 0xE7F9, true),
-                                    (113, "Mobile hotspot".to_owned(), 0xE7B7, true),
-                                    (114, "Date & time".to_owned(), 0xE7F2, true),
-                                    (115, "Taskbar".to_owned(), 0xE7F7, true),
+                                    (100, loc::t("WiFi"), 0xE701, wifi_on),
+                                    (101, loc::t("Bluetooth"), 0xE702, bt_on),
+                                    (102, loc::t("QuickAirplaneMode"), 0xF71D, true),
+                                    (103, loc::t("NightLight"), 0xE708, night_light),
+                                    (104, loc::t("BatterySaver"), 0xE7EF, true),
+                                    (105, loc::t("FocusAssist"), 0xF4B9, settings.focus_mode),
+                                    (106, loc::t("LauncherDisplay"), 0xE7F3, true),
+                                    (107, loc::t("LauncherSound"), 0xE7F5, true),
+                                    (108, loc::t("DynamicIslandShortNetwork"), 0xE705, true),
+                                    (109, loc::t("LauncherVpn"), 0xE7A2, true),
+                                    (110, loc::t("QuickNearbySharing"), 0xE8D2, true),
+                                    (111, loc::t("QuickProject"), 0xE7F6, true),
+                                    (112, loc::t("QuickTabletMode"), 0xE7F9, true),
+                                    (113, loc::t("QuickMobileHotspot"), 0xE7B7, true),
+                                    (114, loc::t("LauncherDateTime"), 0xE7F2, true),
+                                    (115, loc::t("LauncherTaskbar"), 0xE7F7, true),
                                 ],
                             },
                             FlyoutBlock::ButtonBar(vec![
                                 (8, loc::t("Settings").to_owned(), true),
-                                (9, "Show Desktop".to_owned(), false),
+                                (9, loc::t("WidgetShowDesktop"), false),
                             ]),
                         ],
                     }
@@ -3472,7 +3517,7 @@ impl WidgetRuntime {
                                 pins::launch("ms-settings:network-wifi".to_owned());
                             }
                             let cur_wifi = if self.radio_unavailable {
-                                "Unavailable".to_owned()
+                                loc::t("QuickUnavailable")
                             } else {
                                 radio_label(self.wifi_on, false).to_owned()
                             };
@@ -3495,7 +3540,7 @@ impl WidgetRuntime {
                                 pins::launch("ms-settings:bluetooth".to_owned());
                             }
                             let cur_bt = if self.radio_unavailable {
-                                "Unavailable".to_owned()
+                                loc::t("QuickUnavailable")
                             } else {
                                 radio_label(self.bluetooth_on, false).to_owned()
                             };
@@ -3551,13 +3596,11 @@ impl WidgetRuntime {
                             .file_name()
                             .and_then(|s| s.to_str())
                             .unwrap_or(path);
-                        action_row(100 + i as u32, name, Some("Folder".to_owned()))
+                        action_row(100 + i as u32, name, Some(loc::t("FolderLabel")))
                     })
                     .collect();
                 if blocks.is_empty() {
-                    blocks.push(FlyoutBlock::Note(
-                        "Add folder stacks in Settings -> Extras.".to_owned(),
-                    ));
+                    blocks.push(FlyoutBlock::Note(loc::t("WidgetStacksHint")));
                 }
                 let spec = FlyoutSpec {
                     title: loc::t("FolderStacks"),
@@ -3587,14 +3630,15 @@ impl WidgetRuntime {
                         action_row(
                             100 + i as u32,
                             g.name.clone(),
-                            Some(format!("{} apps", g.executable_paths.len())),
+                            Some(loc::t_fmt(
+                                "AppGroupAppsCount",
+                                &[&g.executable_paths.len().to_string()],
+                            )),
                         )
                     })
                     .collect();
                 if blocks.is_empty() {
-                    blocks.push(FlyoutBlock::Note(
-                        "Create app groups in Settings -> Extras.".to_owned(),
-                    ));
+                    blocks.push(FlyoutBlock::Note(loc::t("WidgetGroupsHint")));
                 }
                 let spec = FlyoutSpec {
                     title: loc::t("AppGroups"),

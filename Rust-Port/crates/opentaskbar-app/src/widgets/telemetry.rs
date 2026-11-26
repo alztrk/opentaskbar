@@ -2421,12 +2421,12 @@ pub fn search_weather_locations(
         urlencode_query(trimmed)
     );
     let (status, body) = winhttp_get("geocoding-api.open-meteo.com", &path, &[])
-        .ok_or_else(|| "Geocoding request failed".to_owned())?;
+        .ok_or_else(|| loc::t("WeatherGeocodeFailed"))?;
     if status != 200 {
-        return Err(format!("Geocoding HTTP {status}"));
+        return Err(loc::t_fmt("WeatherGeocodeHttp", &[&status.to_string()]));
     }
-    let root: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| format!("Invalid geocoding JSON: {e}"))?;
+    let root: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| loc::t_fmt("WeatherGeocodeInvalidJson", &[&e.to_string()]))?;
     let Some(results) = root.get("results").and_then(|v| v.as_array()) else {
         return Ok(Vec::new());
     };
@@ -3047,7 +3047,7 @@ fn fetch_ai_snapshot(provider_id: &str) -> AiUsageSnapshot {
             {
                 let rem = (total - usage).max(0.0);
                 snap.balance_text = Some(format!("${rem:.2}"));
-                snap.plan = Some(format!("${rem:.2} left"));
+                snap.plan = Some(loc::t_fmt("AiUsageBalanceLeft", &[&format!("${rem:.2}")]));
             }
         }
         "aiusage_claude" => {
@@ -3722,7 +3722,7 @@ pub fn parse_full_detail(json: &str, provider_id: &str) -> Option<AiFullDetail> 
                 .and_then(|p| full_num(p, "percent_remaining"))
                 .map(|rem| ((100.0 - rem) / 100.0).clamp(0.0, 1.0) as f32)?;
             out.used = used;
-            out.label = "Monthly".to_owned();
+            out.label = loc::t("AiUsageMonthly");
             let ms = parse_reset_ms(full_str(&root, "quota_reset_date_utc").as_deref());
             out.reset_unix_ms = ms;
             out.reset_text = full_reset_from_ms(ms);
@@ -3736,7 +3736,7 @@ pub fn parse_full_detail(json: &str, provider_id: &str) -> Option<AiFullDetail> 
                 .or_else(|| full_str(info, "total_balance")?.parse::<f64>().ok())?;
             let currency = full_str(info, "currency").unwrap_or_else(|| "USD".to_owned());
             out.used = if balance <= 0.0 { 1.0 } else { 0.0 };
-            out.label = "Balance".to_owned();
+            out.label = loc::t("AiUsageBalance");
             out.credits = Some(balance);
             out.plan = Some(format!("{balance:.2} {currency}"));
             out.reset_text = "—".to_owned();
@@ -3752,7 +3752,7 @@ pub fn parse_full_detail(json: &str, provider_id: &str) -> Option<AiFullDetail> 
             } else {
                 0.0
             };
-            out.label = "Credits".to_owned();
+            out.label = loc::t("AiUsageCreditsLabel");
             out.credits = Some(remaining);
             out.plan = Some(format!("${remaining:.2}"));
             out.reset_text = "—".to_owned();

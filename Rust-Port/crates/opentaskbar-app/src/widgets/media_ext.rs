@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::DockSettings;
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
@@ -700,12 +701,12 @@ pub fn build_media_flyout(
     }
     blocks.push(FlyoutBlock::Hero {
         value: if details.title.is_empty() {
-            "Nothing Playing".to_owned()
+            loc::t("MediaNothingPlaying")
         } else {
             details.title.clone()
         },
         caption: if details.artist.is_empty() {
-            Some("Start playback in any media app".to_owned())
+            Some(loc::t("MediaStartPlaybackHint"))
         } else {
             Some(details.artist.clone())
         },
@@ -732,22 +733,26 @@ pub fn build_media_flyout(
         });
     }
     blocks.push(FlyoutBlock::ButtonBar(vec![
-        (1, "Previous".to_owned(), false),
+        (1, loc::t("MediaPrevious"), false),
         (
             2,
-            if details.playing { "Pause" } else { "Play" }.to_owned(),
+            if details.playing {
+                loc::t("FocusPause")
+            } else {
+                loc::t("MediaPlay")
+            },
             true,
         ),
-        (3, "Next".to_owned(), false),
+        (3, loc::t("MediaNext"), false),
     ]));
 
     // Vertical volume popover (C# `MediaWidget.VolumeFlyout`), stacked as an AudioSliderSection.
     blocks.push(FlyoutBlock::Separator);
     blocks.push(FlyoutBlock::AudioSliderSection {
-        label: "Volume".to_owned(),
+        label: loc::t("Volume"),
         device_name: details.app_name.clone(),
         value_text: if details.muted {
-            "Muted".to_owned()
+            loc::t("AudioMuted")
         } else {
             format!("{}%", details.volume)
         },
@@ -762,7 +767,7 @@ pub fn build_media_flyout(
     if !sessions.is_empty() {
         blocks.push(FlyoutBlock::Separator);
         blocks.push(FlyoutBlock::StatRow {
-            label: "App volumes".to_owned(),
+            label: loc::t("MediaAppVolumes"),
             value: String::new(),
         });
         for (i, session) in sessions.iter().take(6).enumerate() {
@@ -771,7 +776,7 @@ pub fn build_media_flyout(
                 label: session.app_name.clone(),
                 device_name: String::new(),
                 value_text: if session.muted {
-                    "Muted".to_owned()
+                    loc::t("AudioMuted")
                 } else {
                     format!("{}%", session.volume)
                 },
@@ -784,7 +789,7 @@ pub fn build_media_flyout(
     }
     let _ = settings;
     FlyoutSpec {
-        title: "Media".to_owned(),
+        title: loc::t("DynamicIslandShortMedia"),
         subtitle: None,
         width_dips: 312.0,
         blocks,
@@ -794,14 +799,14 @@ pub fn build_media_flyout(
 /// Builds the standalone vertical volume popover (wheel/tap on the chip's volume glyph).
 pub fn build_volume_popover(volume: u32, muted: bool, device_name: &str) -> FlyoutSpec {
     FlyoutSpec {
-        title: "Volume".to_owned(),
+        title: loc::t("Volume"),
         subtitle: Some(device_name.to_owned()),
         width_dips: 260.0,
         blocks: vec![FlyoutBlock::AudioSliderSection {
-            label: "Output".to_owned(),
+            label: loc::t("AudioOutput"),
             device_name: device_name.to_owned(),
             value_text: if muted {
-                "Muted".to_owned()
+                loc::t("AudioMuted")
             } else {
                 format!("{volume}%")
             },

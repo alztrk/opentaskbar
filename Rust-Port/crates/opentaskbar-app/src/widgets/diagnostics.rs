@@ -11,6 +11,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use opentaskbar_core::i18n as loc;
+
 use windows::Win32::Media::Audio::{
     DEVICE_STATE_ACTIVE, IAudioSessionControl, IAudioSessionControl2, IAudioSessionManager2,
     IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator, eRender,
@@ -212,7 +214,7 @@ unsafe fn session_from_control(
         let muted = volume_interface.GetMute().ok()?.as_bool();
         let stem = session_stem(control, &ctl2, pid).unwrap_or_else(|| format!("pid-{pid}"));
         let label = if stem == "SystemSounds" {
-            "System Sounds".to_owned()
+            loc::t("SystemSounds")
         } else {
             stem.clone()
         };

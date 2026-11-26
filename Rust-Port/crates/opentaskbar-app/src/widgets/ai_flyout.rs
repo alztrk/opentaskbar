@@ -8,6 +8,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::DockSettings;
 
 use crate::design::{self, Rgb};
@@ -106,7 +107,7 @@ pub fn parse_reset_countdown(iso: &str, now_epoch: u64) -> Option<String> {
     }
     let remaining = ts.saturating_sub(now_epoch as i64);
     if remaining <= 0 {
-        return Some("Expired".to_owned());
+        return Some(loc::t("Expired"));
     }
     let (days_left, rem) = (remaining / 86_400, remaining % 86_400);
     let (hours, rem) = (rem / 3600, rem % 3600);
@@ -268,18 +269,18 @@ pub fn build_ai_flyout(
     } else if let Some(ref plan) = snap.plan {
         plan.clone()
     } else if has_data {
-        "Connected".to_owned()
+        loc::t("AiUsageAccountConnected")
     } else if snap.has_cred {
-        "Configured".to_owned()
+        loc::t("AiUsageConfigured")
     } else {
-        "Sign in".to_owned()
+        loc::t("AiUsageStatusSignIn")
     };
     blocks.push(FlyoutBlock::StatusHeader {
         title: name.clone(),
         status_label,
         status_color: detail.severity.color(&pal),
         action_id: Some(1),
-        action_label: Some("Open".to_owned()),
+        action_label: Some(loc::t("Open")),
     });
 
     // Plan chip (BadgeRow gives the rounded pill C# uses for subscription tier).
@@ -289,7 +290,7 @@ pub fn build_ai_flyout(
             code: if detail.unlimited_credits {
                 "∞".to_owned()
             } else {
-                "Plan".to_owned()
+                loc::t("AiUsagePlan")
             },
             title: plan.clone(),
             active: false,
@@ -301,9 +302,9 @@ pub fn build_ai_flyout(
         blocks.push(FlyoutBlock::Hero {
             value: bal.clone(),
             caption: Some(if id.eq_ignore_ascii_case("aiusage_openrouter") {
-                "Remaining credits".to_owned()
+                loc::t("AiUsageRemainingCredits")
             } else {
-                "Available balance".to_owned()
+                loc::t("AiUsageAvailableBalance")
             }),
             centered: false,
             large: false,
@@ -320,12 +321,15 @@ pub fn build_ai_flyout(
     // Reset countdown chip.
     if let Some(ref countdown) = detail.reset_countdown {
         blocks.push(FlyoutBlock::StatRow {
-            label: "Resets in".to_owned(),
+            label: loc::t("AiUsageResetsInLabel"),
             value: countdown.clone(),
         });
     }
     if let Some(retry) = detail.retry_after_secs {
-        blocks.push(FlyoutBlock::Note(format!("Retry after {retry}s")));
+        blocks.push(FlyoutBlock::Note(loc::t_fmt(
+            "AiUsageRetryAfter",
+            &[&retry.to_string()],
+        )));
     }
 
     // Usage window bars from the cached chip snapshot.
@@ -342,7 +346,7 @@ pub fn build_ai_flyout(
     if !detail.breakdown.is_empty() {
         blocks.push(FlyoutBlock::Separator);
         blocks.push(FlyoutBlock::StatRow {
-            label: "Breakdown".to_owned(),
+            label: loc::t("AiUsageBreakdown"),
             value: String::new(),
         });
         for (label, value) in &detail.breakdown {
@@ -377,19 +381,17 @@ pub fn build_ai_flyout(
     }
 
     if detail.limit_reached {
-        blocks.push(FlyoutBlock::Note("Limit reached".to_owned()));
+        blocks.push(FlyoutBlock::Note(loc::t("AiUsageLimitReached")));
     }
     if !has_data {
         let hint = ai.map_or("provider CLI", |m| m.signin_hint);
-        blocks.push(FlyoutBlock::Note(format!(
-            "Sign in via `{hint}` or save an API key to load live usage."
-        )));
+        blocks.push(FlyoutBlock::Note(loc::t_fmt("AiUsageSignInHint", &[hint])));
     }
     blocks.push(FlyoutBlock::Separator);
     blocks.push(FlyoutBlock::ButtonBar(vec![
-        (2, "Refresh".to_owned(), false),
-        (3, "Full Refresh".to_owned(), false),
-        (1, "Open Dashboard".to_owned(), true),
+        (2, loc::t("AiUsageRefresh"), false),
+        (3, loc::t("AiUsageFullRefresh"), false),
+        (1, loc::t("AiUsageOpenDashboard"), true),
     ]));
     let _ = &dashboard; // dashboard URL is consumed by the caller's Click(1) handler.
     FlyoutSpec {

@@ -7,6 +7,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::DockSettings;
 
 use crate::ui::flyout::{BarTone, FlyoutBlock, FlyoutSpec};
@@ -21,10 +22,10 @@ pub enum FocusPhase {
 }
 
 impl FocusPhase {
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Self::Focus => "Focus",
-            Self::Break => "Break",
+            Self::Focus => loc::t("Focus"),
+            Self::Break => loc::t("Break"),
         }
     }
 }
@@ -184,7 +185,13 @@ impl FocusSession {
     }
 
     pub fn session_label(&self) -> String {
-        format!("Session {}/{}", self.session_number, self.sessions_target)
+        loc::t_fmt(
+            "FocusSessionProgress",
+            &[
+                &self.session_number.to_string(),
+                &self.sessions_target.to_string(),
+            ],
+        )
     }
 
     pub fn status_text(&self) -> String {
@@ -249,8 +256,12 @@ pub fn play_break_chime() {
 pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
     let ratio = session.progress_ratio();
     let total_label = match session.phase {
-        FocusPhase::Focus => format!("{}m focus", session.focus_minutes),
-        FocusPhase::Break => format!("{}m break", session.break_minutes),
+        FocusPhase::Focus => {
+            loc::t_fmt("FocusMinutesSummary", &[&session.focus_minutes.to_string()])
+        }
+        FocusPhase::Break => {
+            loc::t_fmt("BreakMinutesSummary", &[&session.break_minutes.to_string()])
+        }
     };
     FlyoutSpec {
         title: String::new(),
@@ -258,7 +269,7 @@ pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
         width_dips: 316.0,
         blocks: vec![
             FlyoutBlock::StatRow {
-                label: "Focus".to_owned(),
+                label: loc::t("Focus"),
                 value: session.session_label(),
             },
             FlyoutBlock::Hero {
@@ -269,7 +280,7 @@ pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
                 right_meta: None,
             },
             FlyoutBlock::ProgressBar {
-                label: session.phase.label().to_owned(),
+                label: session.phase.label(),
                 value_text: format!("{:.0}%", ratio * 100.0),
                 ratio,
                 tone: if session.phase == FocusPhase::Break {
@@ -279,10 +290,13 @@ pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
                 },
             },
             FlyoutBlock::StatRow {
-                label: "Completed".to_owned(),
-                value: format!(
-                    "{} sessions · {}m",
-                    session.sessions_completed, session.focus_minutes_total
+                label: loc::t("FocusCompleted"),
+                value: loc::t_fmt(
+                    "FocusCompletedSummary",
+                    &[
+                        &session.sessions_completed.to_string(),
+                        &session.focus_minutes_total.to_string(),
+                    ],
                 ),
             },
             FlyoutBlock::ButtonBar(vec![
@@ -291,11 +305,15 @@ pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
                 (50, "50m".to_owned(), session.focus_minutes == 50),
             ]),
             FlyoutBlock::ButtonBar(vec![
-                (4, "Skip".to_owned(), false),
-                (2, "Reset".to_owned(), false),
+                (4, loc::t("FocusSkip"), false),
+                (2, loc::t("FocusReset"), false),
                 (
                     1,
-                    if session.running { "Pause" } else { "Start" }.to_owned(),
+                    if session.running {
+                        loc::t("FocusPause")
+                    } else {
+                        loc::t("FocusStart")
+                    },
                     true,
                 ),
             ]),
