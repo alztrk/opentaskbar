@@ -23,6 +23,9 @@ use windows_sys::Win32::Graphics::Gdi::{
 };
 
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows_sys::Win32::System::Registry::{
+    HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
@@ -71,6 +74,40 @@ pub fn deactivate_live_preview() {
         unsafe {
             let _ = f();
         }
+    }
+}
+
+/// Honours the user's `HKCU\Software\Microsoft\Windows\DWM\EnableAeroPeek`
+/// setting. A missing value, a failed query or a non-DWORD value defaults to
+/// enabled; only an explicit REG_DWORD `0` suppresses Aero Peek. The registry is
+/// read once per preview show (an infrequent, hover-settled event), never from
+/// the VSync or mouse hot path.
+pub fn aero_peek_enabled() -> bool {
+    let path: Vec<u16> = "Software\\Microsoft\\Windows\\DWM\0"
+        .encode_utf16()
+        .collect();
+    let name: Vec<u16> = "EnableAeroPeek\0".encode_utf16().collect();
+    let mut key = std::ptr::null_mut();
+    // SAFETY: both buffers are NUL-terminated and `key` is only used on success.
+    unsafe {
+        if RegOpenKeyExW(HKEY_CURRENT_USER, path.as_ptr(), 0, KEY_READ, &mut key) != 0 {
+            return true;
+        }
+        let mut value: u32 = 0;
+        let mut len = size_of::<u32>() as u32;
+        let status = RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            (&mut value as *mut u32).cast(),
+            &mut len,
+        );
+        RegCloseKey(key);
+        if status != 0 || len != size_of::<u32>() as u32 {
+            return true;
+        }
+        super::layout::aero_peek_enabled(Some(value))
     }
 }
 

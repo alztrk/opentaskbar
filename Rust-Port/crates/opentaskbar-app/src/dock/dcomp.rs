@@ -209,6 +209,166 @@ impl WidgetChipSpec {
         out.clear();
         let _ = write!(out, "{self:?}");
     }
+
+    /// Text payload for the Dynamic Island's 246 DIP expanded details panel
+    /// (C# `GetDetails()` on each `TimedWidgetTile` / widget). Kept next to the
+    /// chip renderer so the panel never shows data the chip itself could not have.
+    pub fn details_lines(&self) -> Vec<(String, String)> {
+        let line = |label: &str, value: String| (label.to_owned(), value);
+        match self {
+            Self::Clock {
+                time,
+                date,
+                weekday,
+            } => vec![
+                line("Time", time.clone()),
+                line("Date", date.clone()),
+                line("Day", weekday.clone()),
+            ],
+            Self::Weather {
+                available,
+                temp,
+                place,
+                condition,
+                today_range,
+                ..
+            } => {
+                let mut out = vec![
+                    line("Temperature", temp.clone()),
+                    line("Place", place.clone()),
+                    line("Condition", condition.clone()),
+                ];
+                if let Some(range) = today_range {
+                    out.push(line("Today", range.clone()));
+                }
+                if !available {
+                    out.push(line("Status", "Unavailable".to_owned()));
+                }
+                out
+            }
+            Self::DayProgress {
+                percent, unit, ..
+            } => vec![
+                line("Elapsed", percent.clone()),
+                line("Unit", unit.clone()),
+            ],
+            Self::Timed {
+                text, running, ..
+            } => vec![
+                line("Time", text.clone()),
+                line(
+                    "State",
+                    if *running {
+                        "Running".to_owned()
+                    } else {
+                        "Paused".to_owned()
+                    },
+                ),
+            ],
+            Self::SystemStats { columns } => columns
+                .iter()
+                .map(|c| line(&c.label, c.value_text.clone()))
+                .collect(),
+            Self::NetSpeed { down, up, .. } => {
+                vec![line("Download", down.clone()), line("Upload", up.clone())]
+            }
+            Self::BatteryLiquid {
+                present,
+                percent,
+                charging,
+                ..
+            } => vec![
+                line("Charge", format!("{percent}%")),
+                line("State", {
+                    if !*present {
+                        "No battery"
+                    } else if *charging {
+                        "Charging"
+                    } else {
+                        "On battery"
+                    }
+                    .to_owned()
+                }),
+            ],
+            Self::Bluetooth { devices } => devices
+                .iter()
+                .map(|(kind, percent, _, _)| {
+                    line(
+                        "Device",
+                        format!("{kind:?} {percent}%"),
+                    )
+                })
+                .collect(),
+            Self::Storage { drives } => drives
+                .iter()
+                .map(|(name, usage)| line(name, usage.clone()))
+                .collect(),
+            Self::Media {
+                title,
+                artist,
+                muted,
+            } => vec![
+                line("Title", title.clone()),
+                line("Artist", artist.clone()),
+                line(
+                    "Sound",
+                    if *muted {
+                        "Muted".to_owned()
+                    } else {
+                        "On".to_owned()
+                    },
+                ),
+            ],
+            Self::Audio { volume, muted } => vec![
+                line("Volume", format!("{volume}%")),
+                line(
+                    "State",
+                    if *muted {
+                        "Muted".to_owned()
+                    } else {
+                        "On".to_owned()
+                    },
+                ),
+            ],
+            Self::QuickSettings { pills } => pills
+                .iter()
+                .map(|(name, on)| line(name, if *on { "On" } else { "Off" }.to_owned()))
+                .collect(),
+            Self::Keyboard { code } => vec![line("Layout", code.clone())],
+            Self::AiDual { rows, .. } => rows
+                .iter()
+                .map(|(name, used, _, reset)| line(name, format!("{used:.0}% · {reset}")))
+                .collect(),
+            Self::AiAntigravity { columns } => columns
+                .iter()
+                .flat_map(|(header, rows)| {
+                    let mut out = vec![line(header, "Quota".to_owned())];
+                    out.extend(rows.iter().map(|(name, used, _, reset)| {
+                        line(name, format!("{used:.0}% · {reset}"))
+                    }));
+                    out
+                })
+                .collect(),
+            Self::AiOpenCode { columns } => columns
+                .iter()
+                .map(|(name, pct, _, _, reset)| line(name, format!("{pct} · {reset}")))
+                .collect(),
+            Self::AiCopilot {
+                value_text,
+                meta_text,
+                ..
+            } => vec![
+                line("Balance", value_text.clone()),
+                line("Window", meta_text.clone()),
+            ],
+            Self::AiBalance {
+                name, value_text, ..
+            } => vec![line(name, value_text.clone())],
+            Self::Simple { top, bottom, .. } => {
+                vec![line("Info", top.clone()), line("Detail", bottom.clone())]
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
