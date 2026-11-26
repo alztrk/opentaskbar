@@ -5651,6 +5651,62 @@ impl SettingsView {
                         cx,
                     ),
                 ),
+                self.target_row(
+                    "WirelessBatteryPollSeconds",
+                    t,
+                    Some("\u{E916}"),
+                    loc::t_fmt(
+                        "WirelessBatteryPollInterval",
+                        &[&self.settings.wireless_battery_poll_seconds.to_string()],
+                    ),
+                    self.make_dropdown(
+                        "bt-poll-interval",
+                        t,
+                        [15, 30, 60, 120, 300]
+                            .into_iter()
+                            .map(|secs| {
+                                let entity = cx.entity().downgrade();
+                                DropdownOption {
+                                    label: SharedString::from(format!("{secs}s")),
+                                    flag_path: None,
+                                    glyph: None,
+                                    selected: self.settings.wireless_battery_poll_seconds == secs,
+                                    on_select: std::rc::Rc::new(move |_win, app| {
+                                        let _ = entity.update(app, |this, cx| {
+                                            this.open_dropdown = None;
+                                            this.settings.wireless_battery_poll_seconds = secs;
+                                            this.auto_save(cx);
+                                        });
+                                    }),
+                                }
+                            })
+                            .collect(),
+                        cx,
+                    ),
+                ),
+                self.target_row(
+                    "WirelessBatteryListenOnly",
+                    t,
+                    Some("\u{E702}"),
+                    loc::t_fmt(
+                        "WirelessBatteryListenOnly",
+                        &[&loc::t(if self.settings.wireless_battery_listen_only {
+                            "WirelessBatteryListenOnlyOn"
+                        } else {
+                            "WirelessBatteryListenOnlyOff"
+                        })],
+                    ),
+                    ios_switch(
+                        "sw-bt-listen-only",
+                        t,
+                        self.settings.wireless_battery_listen_only,
+                        cx.listener(|this, _, _, cx| {
+                            this.settings.wireless_battery_listen_only =
+                                !this.settings.wireless_battery_listen_only;
+                            this.auto_save(cx);
+                        }),
+                    ),
+                ),
             ],
             other if other.starts_with("aiusage_") => {
                 let mut rows = Vec::new();

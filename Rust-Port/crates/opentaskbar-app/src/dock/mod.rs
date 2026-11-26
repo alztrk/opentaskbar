@@ -4135,6 +4135,10 @@ impl DockState {
             self.cancel_widget_hover();
             return;
         };
+        if !widgets::widget_has_flyout(id) {
+            self.cancel_widget_hover();
+            return;
+        }
         if let Some(rect) = self.widget_phys_rect(id) {
             self.widget_runtime.hover.set_expanded_rect(rect);
         }
@@ -4199,6 +4203,9 @@ impl DockState {
         let Some(id) = self.widget_runtime.hover.expanded_id().map(str::to_owned) else {
             return;
         };
+        if !widgets::widget_has_flyout(&id) {
+            return;
+        }
         if let (Some(rect), Some(cursor)) = (self.widget_phys_rect(&id), self.screen_cursor())
             && !self.widget_runtime.hover.verify_cursor(rect, cursor)
         {

@@ -193,6 +193,26 @@ pub fn widget_name(id: &str) -> String {
     }
 }
 
+/// Single source of truth for widgets that open a popup flyout.
+/// Widgets whose settings live in Settings > Widgets or whose controls are inline on the chip
+/// (`dayprogress`, `stats`, `netspeed`, `bluetoothbattery`, `storage`, `media`, `aiusage_*`, `battery`)
+/// intentionally do not open flyouts.
+pub fn widget_has_flyout(id: &str) -> bool {
+    matches!(
+        id,
+        "clock"
+            | "weather"
+            | "stopwatch"
+            | "countdown"
+            | "focus"
+            | "audio"
+            | "quicksettings"
+            | "keyboard"
+            | "stacks"
+            | "groups"
+    )
+}
+
 pub fn widget_descriptor(id: &str) -> Option<&'static WidgetDescriptor> {
     if id.eq_ignore_ascii_case("stacks") {
         return Some(&STACKS_WIDGET);
@@ -485,17 +505,6 @@ fn shortcut_uri(id: u32) -> &'static str {
         115 => "ms-settings:taskbar",
         _ => "ms-settings:",
     }
-}
-
-/// Copies diagnostics text to the Windows clipboard without showing a console window.
-fn copy_to_clipboard(text: &str) {
-    use std::os::windows::process::CommandExt;
-    let escaped = text.replace('\'', "''");
-    let script = format!("Set-Clipboard -Value '{escaped}'");
-    let _ = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-        .creation_flags(0x0800_0000)
-        .spawn();
 }
 
 fn weather_icon_glyph_text(condition: &str) -> &'static str {
@@ -1622,14 +1631,16 @@ impl WidgetRuntime {
         width_dips: f32,
         _settings: &mut DockSettings,
     ) -> DirectClickOutcome {
-        if telemetry::ai_provider_meta(id).is_some() {
+        if let Some(ai) = telemetry::ai_provider_meta(id) {
+            telemetry::refresh_ai_provider(&self.ai_usage, ai.id, true);
             return DirectClickOutcome::Handled;
         }
         match id {
             "media" => {
                 let controls_l = width_dips - 116.0;
                 if rel_x_dips < controls_l {
-                    DirectClickOutcome::OpenFlyout
+                    telemetry::send_media_vk(VK_MEDIA_PLAY_PAUSE);
+                    DirectClickOutcome::Handled
                 } else if rel_x_dips < controls_l + 26.0 {
                     telemetry::send_media_vk(VK_MEDIA_PREV_TRACK);
                     DirectClickOutcome::Handled
@@ -1712,8 +1723,25 @@ impl WidgetRuntime {
                 pins::launch("ms-settings:batterysaver".to_owned());
                 DirectClickOutcome::Handled
             }
-            "clock" | "audio" | "weather" | "bluetoothbattery" | "storage" | "keyboard"
-            | "dayprogress" | "stacks" | "groups" | "stats" => DirectClickOutcome::OpenFlyout,
+            "stats" => {
+                pins::launch("taskmgr.exe".to_owned());
+                DirectClickOutcome::Handled
+            }
+            "netspeed" => {
+                pins::launch("ms-settings:network".to_owned());
+                DirectClickOutcome::Handled
+            }
+            "bluetoothbattery" => {
+                pins::launch("ms-settings:bluetooth".to_owned());
+                DirectClickOutcome::Handled
+            }
+            "storage" => {
+                pins::launch("explorer.exe".to_owned());
+                DirectClickOutcome::Handled
+            }
+            "clock" | "audio" | "weather" | "keyboard" | "stacks" | "groups" => {
+                DirectClickOutcome::OpenFlyout
+            }
             _ => DirectClickOutcome::Handled,
         }
     }
@@ -2048,198 +2076,6 @@ impl WidgetRuntime {
         }
     }
 
-    /// Unified C# `SystemStatsWidget` flyout: localized metrics (WIP), GPU meters with
-    /// hysteresis (WS-G), C2 `Chart`/`Sparkline` series (WS-C) and cached top processes.
-    fn build_stats_spec(&self, settings: &DockSettings, is_dark: bool) -> FlyoutSpec {
-        let pal = design::palette(is_dark);
-        let top = self
-            .stats_top
-            .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default();
-        let (_, used_gib, total_gib) = telemetry::sample_ram_info();
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get() as u64)
-            .unwrap_or(1);
-        let cpu_col = if self.cpu_pct >= 90 {
-            pal.danger
-        } else if self.cpu_pct >= 75 {
-            pal.warning
-        } else {
-            pal.widget_blue
-        };
-        let ram_col = if self.ram_pct >= 90 {
-            pal.danger
-        } else if self.ram_pct >= 75 {
-            pal.warning
-        } else {
-            pal.widget_accent
-        };
-        let mut blocks = vec![
-            FlyoutBlock::Hero {
-                value: self.stats_uptime.clone(),
-                caption: Some(loc::t("StatsUptime")),
-                centered: false,
-                large: false,
-                right_meta: None,
-            },
-            FlyoutBlock::StatRow {
-                label: "CPU".to_owned(),
-                value: format!(
-                    "{}% · {}",
-                    self.cpu_pct,
-                    loc::t_fmt("StatsLogicalCores", &[&cores.to_string()])
-                ),
-            },
-            FlyoutBlock::StatRow {
-                label: "RAM".to_owned(),
-                value: format!(
-                    "{}% · {} · {}",
-                    self.ram_pct,
-                    loc::t_fmt(
-                        "StatsMemoryUsed",
-                        &[&telemetry::format_bytes(
-                            (used_gib * 1_073_741_824.0) as u64
-                        )]
-                    ),
-                    loc::t_fmt(
-                        "StatsMemoryAvailable",
-                        &[&telemetry::format_bytes(
-                            ((total_gib - used_gib).max(0.0) * 1_073_741_824.0) as u64
-                        )]
-                    )
-                ),
-            },
-            // C2 `Chart` blocks with named CPU / RAM series (WS-C contract).
-            FlyoutBlock::Chart {
-                label: "CPU".to_owned(),
-                series: vec![("CPU".to_owned(), self.stats.cpu_history.as_vec())],
-                accent: cpu_col,
-            },
-            FlyoutBlock::Chart {
-                label: format!("Memory · {used_gib:.1} / {total_gib:.0} GB"),
-                series: vec![("RAM".to_owned(), self.stats.ram_history.as_vec())],
-                accent: ram_col,
-            },
-            FlyoutBlock::Sparkline {
-                label: "CPU trend".to_owned(),
-                value_text: format!("{}%", self.cpu_pct),
-                detail_text: None,
-                samples: self.stats.cpu_history.as_vec(),
-                color: cpu_col,
-            },
-        ];
-        if gpu_metrics_visible(self.gpu_samples, self.gpu_misses) {
-            blocks.push(FlyoutBlock::Chart {
-                label: "GPU".to_owned(),
-                series: vec![("GPU".to_owned(), vec![self.gpu_pct as f32 / 100.0; 45])],
-                accent: pal.widget_blue,
-            });
-            blocks.push(FlyoutBlock::ProgressBar {
-                label: "GPU Load".to_owned(),
-                value_text: format!("{}%", self.gpu_pct),
-                ratio: self.gpu_pct as f32 / 100.0,
-                tone: BarTone::Usage,
-            });
-            if let Some(temp) = self.gpu_temp_c {
-                blocks.push(FlyoutBlock::ProgressBar {
-                    label: "GPU Temperature".to_owned(),
-                    value_text: format!("{temp}°C"),
-                    ratio: (temp as f32 / 100.0).clamp(0.0, 1.0),
-                    tone: if temp >= 85 {
-                        BarTone::Usage
-                    } else {
-                        BarTone::Level
-                    },
-                });
-            }
-        }
-        if settings.stats_meters & 16 != 0 {
-            let gpu = diagnostics::sample_gpu();
-            let value = if let Some(temp) = gpu.temperature_c {
-                format!(
-                    "{}% · {}°C · {}",
-                    (gpu.usage_01 * 100.0).round() as u32,
-                    temp.round() as i32,
-                    gpu.engine_name
-                )
-            } else {
-                format!(
-                    "{}% · {}",
-                    (gpu.usage_01 * 100.0).round() as u32,
-                    gpu.engine_name
-                )
-            };
-            blocks.insert(
-                3,
-                FlyoutBlock::StatRow {
-                    label: loc::t("Gpu"),
-                    value,
-                },
-            );
-        } else if settings.stats_meters & 32 != 0 {
-            let gpu = diagnostics::sample_gpu();
-            if let Some(temp) = gpu.temperature_c {
-                blocks.insert(
-                    3,
-                    FlyoutBlock::StatRow {
-                        label: loc::t("GpuTemperature"),
-                        value: format!("{}°C", temp.round() as i32),
-                    },
-                );
-            }
-        }
-        blocks.push(FlyoutBlock::Separator);
-        if top.is_empty() {
-            let sampling = self
-                .last_stats_top
-                .is_none_or(|t| t.elapsed() < Duration::from_secs(10));
-            blocks.push(FlyoutBlock::Note(loc::t(if sampling {
-                "StatsSamplingProcesses"
-            } else {
-                "StatsTopProcessesEmpty"
-            })));
-            // WS-C fallback: sample directly while the background sampler has no data yet.
-            let procs = telemetry::sample_top_processes(5);
-            if !procs.is_empty() {
-                blocks.push(FlyoutBlock::StatRow {
-                    label: loc::t("StatsTopProcesses"),
-                    value: String::new(),
-                });
-                for (name, bytes) in procs {
-                    blocks.push(FlyoutBlock::StatRow {
-                        label: name,
-                        value: telemetry::format_bytes(bytes),
-                    });
-                }
-            }
-        } else {
-            blocks.push(FlyoutBlock::StatRow {
-                label: loc::t("StatsTopProcesses"),
-                value: String::new(),
-            });
-            for (name, bytes) in top {
-                blocks.push(FlyoutBlock::StatRow {
-                    label: name,
-                    value: telemetry::format_bytes(bytes),
-                });
-            }
-        }
-        blocks.push(FlyoutBlock::Separator);
-        blocks.push(FlyoutBlock::ButtonBar(vec![
-            (1, loc::t("TaskManager"), false),
-            (2, "Resource Monitor".to_owned(), false),
-            (3, loc::t("AiUsageRefresh"), false),
-        ]));
-        blocks.push(FlyoutBlock::Note(loc::t("StatsAvailabilityNote")));
-        FlyoutSpec {
-            title: loc::t("WidgetSystemStats"),
-            subtitle: None,
-            width_dips: 320.0,
-            blocks,
-        }
-    }
-
     /// WS-1: `open_widget_flyout`'s return value means "persist settings and reload
     /// them live". Only a real `LiveEvent::Click` / `TextCommit` that actually
     /// changed a setting may return `true`; opening a flyout on hover must never
@@ -2257,122 +2093,11 @@ impl WidgetRuntime {
         anchor_y: i32,
         settings: &mut DockSettings,
     ) -> bool {
-        let pal = design::palette(is_dark);
-
-        if id == "aiusage_all" {
-            let mut blocks = Vec::new();
-            let guard_map = self
-                .ai_usage
-                .lock()
-                .ok()
-                .map(|g| g.providers.clone())
-                .unwrap_or_default();
-            for ai in telemetry::AI_PROVIDERS {
-                let snap = guard_map.get(ai.id).cloned().unwrap_or_default();
-                if let Some(w) = snap.windows.first() {
-                    blocks.push(FlyoutBlock::ProgressBar {
-                        label: format!("{} ({})", ai.name, w.label),
-                        value_text: format!("{:.0}% · {}", w.used * 100.0, w.reset_text),
-                        ratio: w.used,
-                        tone: BarTone::Usage,
-                    });
-                } else if let Some(bal) = snap.balance_text {
-                    blocks.push(FlyoutBlock::StatRow {
-                        label: ai.name.to_owned(),
-                        value: bal,
-                    });
-                } else {
-                    blocks.push(FlyoutBlock::StatRow {
-                        label: ai.name.to_owned(),
-                        value: if snap.has_cred {
-                            "Configured".to_owned()
-                        } else {
-                            "Sign in".to_owned()
-                        },
-                    });
-                }
-            }
-            blocks.push(FlyoutBlock::Separator);
-            blocks.push(FlyoutBlock::ButtonBar(vec![
-                (1, "Refresh All".to_owned(), true),
-                (2, "Full Refresh (all providers)".to_owned(), false),
-            ]));
-            let spec = FlyoutSpec {
-                title: "AI Quotas".to_owned(),
-                subtitle: Some("Live usage across all configured providers".to_owned()),
-                width_dips: 316.0,
-                blocks,
-            };
-            match flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) {
-                Some(1) => {
-                    for ai in telemetry::AI_PROVIDERS {
-                        telemetry::refresh_ai_provider(&self.ai_usage, ai.id, true);
-                    }
-                }
-                Some(2) => {
-                    for ai in telemetry::AI_PROVIDERS {
-                        ai_flyout::refresh_full(ai.id);
-                    }
-                }
-                _ => {}
-            }
-        }
-        // Full C# `AiUsageWidget.BuildFlyout` — spend / breakdown / reset / plan chip /
-        // severity dot / refresh. Antigravity (8th provider) gets group/pool rows.
-        else if let Some(ai) = telemetry::ai_provider_meta(id) {
-            let snap = self
-                .ai_usage
-                .lock()
-                .ok()
-                .and_then(|g| g.providers.get(ai.id).cloned())
-                .unwrap_or_default();
-            let has_data = snap.balance_text.is_some() || !snap.windows.is_empty();
-            let peak = snap.windows.iter().map(|w| w.used).fold(0.0f32, f32::max);
-            let detail = ai_flyout::AiFullDetail {
-                severity: ai_flyout::severity_for_usage(peak, false),
-                ..Default::default()
-            };
-            let spec = ai_flyout::build_ai_flyout(ai.id, &snap, &detail, settings, is_dark);
-            match flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) {
-                Some(1) => pins::launch(ai.dashboard_url.to_owned()),
-                Some(2) => telemetry::refresh_ai_provider(&self.ai_usage, ai.id, true),
-                Some(3) => ai_flyout::refresh_full(ai.id),
-                _ => {}
-            }
-            let _ = (has_data, &pal);
+        if !widget_has_flyout(id) {
+            return false;
         }
 
         match id {
-            // System stats flyout: uptime, memory, GPU, charts and top processes (union).
-            "stats" => {
-                let init = self.build_stats_spec(settings, is_dark);
-                flyout::show_flyout_live_with_border(
-                    "stats",
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    init,
-                    BorderStyle::from_widget_settings(is_dark, settings),
-                    |ev| match ev {
-                        LiveEvent::Click(1) => {
-                            pins::launch("taskmgr.exe".to_owned());
-                            LiveOutcome::Close
-                        }
-                        LiveEvent::Click(2) => {
-                            pins::launch("perfmon.exe".to_owned());
-                            LiveOutcome::Close
-                        }
-                        LiveEvent::Click(3) => {
-                            (self.cpu_pct, self.ram_pct) = self.stats.sample();
-                            self.stats_uptime = telemetry::system_uptime_string();
-                            self.last_stats_top = None;
-                            LiveOutcome::Update(self.build_stats_spec(settings, is_dark))
-                        }
-                        _ => LiveOutcome::Close,
-                    },
-                );
-            }
             // Exact C# `ClockWidget.BuildCalendar` (live interactive month/year nav & day selection)
             "clock" => {
                 let info = telemetry::local_clock_info();
@@ -2634,349 +2359,6 @@ impl WidgetRuntime {
                         Some(Instant::now() + std::time::Duration::from_secs(30 * 60));
                 }
             }
-            // C# `NetSpeedWidget`: live throughput + 6-stream speed test with cancel/retry/restart.
-            "netspeed" => {
-                let adapter = if self.net.adapter_name.is_empty() {
-                    None
-                } else {
-                    Some(format!("Adapter: {}", self.net.adapter_name))
-                };
-                let build = |runtime: &Self| {
-                    let mut spec = speedtest::build_speedtest_flyout(
-                        runtime.speedtest.state(),
-                        runtime.speedtest.result(),
-                    );
-                    spec.subtitle = adapter.clone();
-                    // Live throughput + session totals above the test grid.
-                    let mut blocks = vec![
-                        FlyoutBlock::MetricTiles(vec![
-                            (
-                                "↓ Download".to_owned(),
-                                telemetry::format_speed(runtime.net.rx_bps),
-                            ),
-                            (
-                                "↑ Upload".to_owned(),
-                                telemetry::format_speed(runtime.net.tx_bps),
-                            ),
-                            (
-                                "Session received".to_owned(),
-                                telemetry::format_bytes(runtime.net.session_rx),
-                            ),
-                            (
-                                "Session sent".to_owned(),
-                                telemetry::format_bytes(runtime.net.session_tx),
-                            ),
-                        ]),
-                        FlyoutBlock::Separator,
-                    ];
-                    blocks.append(&mut spec.blocks);
-                    blocks.push(FlyoutBlock::ButtonBar(vec![(
-                        5,
-                        "Network Settings".to_owned(),
-                        false,
-                    )]));
-                    spec.blocks = blocks;
-                    spec
-                };
-                let init = build(self);
-                flyout::show_flyout_live(
-                    "netspeed",
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    init,
-                    |ev| match ev {
-                        LiveEvent::Click(1) => {
-                            self.speedtest.start();
-                            self.speedtest_started_at = Some(Instant::now());
-                            self.speedtest
-                                .poll(Instant::now(), self.speedtest_started_at);
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Click(2) => {
-                            self.speedtest.cancel();
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Click(3) => {
-                            self.speedtest.retry();
-                            self.speedtest_started_at = Some(Instant::now());
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Click(4) => {
-                            self.speedtest.restart();
-                            self.speedtest_started_at = Some(Instant::now());
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Click(5) => {
-                            pins::launch("ms-settings:network".to_owned());
-                            LiveOutcome::Close
-                        }
-                        _ => {
-                            self.speedtest
-                                .poll(Instant::now(), self.speedtest_started_at);
-                            LiveOutcome::Update(build(self))
-                        }
-                    },
-                );
-            }
-            // C# `BluetoothBatteryWidget.PopulateHoverFlyoutPanel` + device management.
-            "bluetoothbattery" => {
-                let ignored = setting_string_list(settings, "IgnoredWirelessDevices");
-                let aliases = setting_value(settings, "WirelessDeviceAliases")
-                    .and_then(|v| v.as_object().cloned())
-                    .unwrap_or_default();
-                let low = setting_i64(settings, "WirelessBatteryLowThreshold", 20) as u32;
-                let interval = setting_i64(settings, "WirelessBatteryPollSeconds", 60) as u64;
-                let listen_only = setting_bool(settings, "WirelessBatteryListenOnly", false);
-                // WS-1: only a real live-event click/commit may request a settings save.
-                // Hover-generated flyouts must leave this `false`.
-                let mut settings_changed = false;
-                let build = |_settings: &DockSettings, selected: usize, rename_value: String| {
-                    let devices: Vec<_> = self
-                        .bt_battery
-                        .lock()
-                        .map(|g| g.devices.clone())
-                        .unwrap_or_default();
-                    let mut blocks: Vec<FlyoutBlock> = devices
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, d)| !ignored.iter().any(|n| n.eq_ignore_ascii_case(&d.name)))
-                        .map(|(i, d)| {
-                            let shown = aliases
-                                .get(&d.name)
-                                .and_then(|v| v.as_str())
-                                .unwrap_or(&d.name);
-                            let bolt = if d.percent >= 95 { " ⚡" } else { "" };
-                            let stale = self
-                                .bt_battery
-                                .lock()
-                                .ok()
-                                .and_then(|g| g.last_fetch)
-                                .is_some_and(|t| t.elapsed().as_secs() > interval * 2);
-                            FlyoutBlock::ActionRow {
-                                id: 100 + i as u32,
-                                title: format!("{shown}{bolt}"),
-                                subtitle: Some(if stale {
-                                    format!("{}% · stale", d.percent)
-                                } else {
-                                    format!("{}%", d.percent)
-                                }),
-                                badge: Some(format!("{}%", d.percent)),
-                                icon: None,
-                                destructive: false,
-                            }
-                        })
-                        .collect();
-                    if blocks.is_empty() {
-                        blocks.push(FlyoutBlock::Note(
-                            "No connected Bluetooth battery devices detected.".to_owned(),
-                        ));
-                    }
-                    let _ = selected;
-                    // C2 TextInput — device rename (1-64 chars).
-                    blocks.push(FlyoutBlock::TextInput {
-                        id: 50,
-                        label: "Rename selected device".to_owned(),
-                        value: rename_value,
-                        numeric: false,
-                        min: 0.0,
-                        max: 0.0,
-                    });
-                    blocks.push(FlyoutBlock::StatRow {
-                        label: "Poll interval".to_owned(),
-                        value: format!("{interval}s"),
-                    });
-                    blocks.push(FlyoutBlock::StatRow {
-                        label: "Low threshold".to_owned(),
-                        value: format!("{low}%"),
-                    });
-                    blocks.push(FlyoutBlock::ToggleGrid(vec![(
-                        7,
-                        "Listen only".to_owned(),
-                        if listen_only { "On" } else { "Off" }.to_owned(),
-                        listen_only,
-                    )]));
-                    blocks.push(FlyoutBlock::ButtonBar(vec![
-                        (1, "Refresh".to_owned(), false),
-                        (2, "Hide".to_owned(), false),
-                        (3, "Restore ignored".to_owned(), false),
-                        (4, "Interval".to_owned(), false),
-                        (5, "Threshold".to_owned(), false),
-                    ]));
-                    blocks.push(FlyoutBlock::ButtonBar(vec![
-                        (6, "Copy Diagnostics".to_owned(), false),
-                        (8, "Bluetooth Settings".to_owned(), false),
-                    ]));
-                    FlyoutSpec {
-                        title: "Bluetooth Battery".to_owned(),
-                        subtitle: Some(format!("{interval}s · low {low}%")),
-                        width_dips: 296.0,
-                        blocks,
-                    }
-                };
-                let init = build(settings, 0, String::new());
-                flyout::show_flyout_live_with_border(
-                    "bluetoothbattery",
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    init,
-                    BorderStyle::from_widget_settings(is_dark, settings),
-                    |ev| match ev {
-                        LiveEvent::Click(1) => {
-                            telemetry::refresh_bluetooth_battery(&self.bt_battery, true);
-                            LiveOutcome::Update(build(settings, 0, String::new()))
-                        }
-                        LiveEvent::Click(2) => {
-                            // Hide the currently selected device.
-                            if let Ok(g) = self.bt_battery.lock()
-                                && let Some(d) = g.devices.first()
-                            {
-                                let mut list =
-                                    setting_string_list(settings, "IgnoredWirelessDevices");
-                                if !list.iter().any(|n| n.eq_ignore_ascii_case(&d.name)) {
-                                    list.push(d.name.clone());
-                                    set_setting(
-                                        settings,
-                                        "IgnoredWirelessDevices",
-                                        serde_json::json!(list),
-                                    );
-                                    settings_changed = true;
-                                }
-                            }
-                            LiveOutcome::Update(build(settings, 0, String::new()))
-                        }
-                        LiveEvent::Click(3) => {
-                            set_setting(settings, "IgnoredWirelessDevices", serde_json::json!([]));
-                            settings_changed = true;
-                            LiveOutcome::Update(build(settings, 0, String::new()))
-                        }
-                        LiveEvent::Click(4) => {
-                            const STEPS: [i64; 5] = [15, 30, 60, 120, 300];
-                            let cur = setting_i64(settings, "WirelessBatteryPollSeconds", 60);
-                            let next = STEPS
-                                .iter()
-                                .find(|&&s| s > cur)
-                                .copied()
-                                .unwrap_or(STEPS[0]);
-                            set_setting(
-                                settings,
-                                "WirelessBatteryPollSeconds",
-                                serde_json::json!(next),
-                            );
-                            settings_changed = true;
-                            LiveOutcome::Update(build(settings, 0, String::new()))
-                        }
-                        LiveEvent::Click(5) => {
-                            let cur = setting_i64(settings, "WirelessBatteryLowThreshold", 20);
-                            let next = if cur >= 50 { 5 } else { cur + 5 };
-                            set_setting(
-                                settings,
-                                "WirelessBatteryLowThreshold",
-                                serde_json::json!(next),
-                            );
-                            settings_changed = true;
-                            LiveOutcome::Update(build(settings, 0, String::new()))
-                        }
-                        LiveEvent::Click(6) => {
-                            let diag = self
-                                .bt_battery
-                                .lock()
-                                .map(|g| {
-                                    g.devices
-                                        .iter()
-                                        .map(|d| format!("{}={}%", d.name, d.percent))
-                                        .collect::<Vec<_>>()
-                                        .join("\n")
-                                })
-                                .unwrap_or_default();
-                            copy_to_clipboard(&diag);
-                            LiveOutcome::Update(build(settings, 0, String::new()))
-                        }
-                        LiveEvent::Click(7) => {
-                            let next = !setting_bool(settings, "WirelessBatteryListenOnly", false);
-                            set_setting(
-                                settings,
-                                "WirelessBatteryListenOnly",
-                                serde_json::json!(next),
-                            );
-                            settings_changed = true;
-                            LiveOutcome::Update(build(settings, 0, String::new()))
-                        }
-                        LiveEvent::Click(8) => {
-                            pins::launch("ms-settings:bluetooth".to_owned());
-                            LiveOutcome::Close
-                        }
-                        LiveEvent::TextCommit { id: 50, text } => {
-                            if (1..=64).contains(&text.len())
-                                && let Ok(g) = self.bt_battery.lock()
-                                && let Some(d) = g.devices.first()
-                            {
-                                let mut map = setting_value(settings, "WirelessDeviceAliases")
-                                    .and_then(|v| v.as_object().cloned())
-                                    .unwrap_or_default();
-                                map.insert(d.name.clone(), serde_json::json!(text));
-                                set_setting(
-                                    settings,
-                                    "WirelessDeviceAliases",
-                                    serde_json::json!(map),
-                                );
-                                settings_changed = true;
-                            }
-                            LiveOutcome::Update(build(settings, 0, String::new()))
-                        }
-                        _ => LiveOutcome::Close,
-                    },
-                );
-                // WS-1: no unconditional `true` — a hover-opened flyout must not
-                // trigger settings save + live reload on the hook-owning UI thread.
-                return Self::flyout_settings_changed("bluetoothbattery", settings_changed);
-            }
-            // C# `StorageWidget` expanded drives flyout (DriveType.Fixed && IsReady).
-            "storage" => {
-                let drives = self.poll_snapshot.fixed_drives();
-                let mut blocks: Vec<FlyoutBlock> = drives
-                    .iter()
-                    .take(6)
-                    .map(|d| {
-                        let used = (d.total_gb - d.free_gb).max(0.0);
-                        FlyoutBlock::ProgressBar {
-                            label: format!("{}:", d.letter),
-                            value_text: d.format_capacity_pair(),
-                            ratio: (used / d.total_gb.max(1.0)) as f32,
-                            tone: BarTone::Usage,
-                        }
-                    })
-                    .collect();
-                if blocks.is_empty() {
-                    blocks.push(FlyoutBlock::Note("No fixed drives found.".to_owned()));
-                }
-                blocks.push(FlyoutBlock::Separator);
-                blocks.push(FlyoutBlock::ButtonBar(vec![(
-                    1,
-                    loc::t("OpenFileExplorer").to_owned(),
-                    false,
-                )]));
-                let spec = FlyoutSpec {
-                    title: loc::t("WidgetStorage"),
-                    subtitle: None,
-                    width_dips: 286.0,
-                    blocks,
-                };
-                if flyout::show_flyout_with_border(
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    spec,
-                    BorderStyle::from_widget_settings(is_dark, settings),
-                ) == Some(1)
-                {
-                    pins::launch("explorer.exe".to_owned());
-                }
-            }
             // Exact C# `KeyboardLayoutWidget.BuildFlyoutContent` (`BadgeRow` with code pill + full name)
             "keyboard" => {
                 let layouts = telemetry::installed_keyboard_layouts();
@@ -3009,49 +2391,6 @@ impl WidgetRuntime {
                 {
                     telemetry::activate_keyboard_layout(*hkl);
                 }
-            }
-            "dayprogress" => {
-                let (day, week, year, left) = day_progress_metrics();
-                let spec = FlyoutSpec {
-                    title: loc::t("WidgetDayProgress"),
-                    subtitle: None,
-                    width_dips: 272.0,
-                    blocks: vec![
-                        FlyoutBlock::Hero {
-                            value: format!("{:.0}%", day * 100.0),
-                            caption: Some(format!("{left}h remaining today")),
-                            centered: false,
-                            large: false,
-                            right_meta: None,
-                        },
-                        FlyoutBlock::ProgressBar {
-                            label: "Day".to_owned(),
-                            value_text: format!("{:.0}%", day * 100.0),
-                            ratio: day,
-                            tone: BarTone::Accent,
-                        },
-                        FlyoutBlock::ProgressBar {
-                            label: "Week".to_owned(),
-                            value_text: format!("{:.0}%", week * 100.0),
-                            ratio: week,
-                            tone: BarTone::Accent,
-                        },
-                        FlyoutBlock::ProgressBar {
-                            label: "Year".to_owned(),
-                            value_text: format!("{:.0}%", year * 100.0),
-                            ratio: year,
-                            tone: BarTone::Accent,
-                        },
-                    ],
-                };
-                let _ = flyout::show_flyout_with_border(
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    spec,
-                    BorderStyle::from_widget_settings(is_dark, settings),
-                );
             }
             // C# `FocusWidget.BuildFocusFlyout` — Break phase + session number + pulse.
             "focus" => {
@@ -3166,102 +2505,6 @@ impl WidgetRuntime {
                                 self.countdown_running = false;
                             }
                             LiveOutcome::Update(self.build_countdown_spec())
-                        }
-                        _ => LiveOutcome::Close,
-                    },
-                );
-            }
-            "media" => {
-                telemetry::refresh_media_session(&self.media_session, true);
-                let build = |runtime: &Self| {
-                    let snap = runtime.media_snapshot();
-                    let details =
-                        media_ext::get_details(&snap, runtime.audio_vol, runtime.audio_muted);
-                    let sessions = media_ext::list_app_sessions();
-                    let mut spec = media_ext::build_media_flyout(&details, &sessions, settings);
-                    spec.blocks.push(FlyoutBlock::Separator);
-                    spec.blocks.push(FlyoutBlock::ButtonBar(vec![(
-                        4,
-                        loc::t_fmt("RadioSettings", &[&loc::t("LauncherSound")]).to_owned(),
-                        false,
-                    )]));
-                    spec
-                };
-                let init = build(self);
-                flyout::show_flyout_live_with_border(
-                    "media",
-                    owner_hwnd,
-                    is_dark,
-                    anchor_x,
-                    anchor_y,
-                    init,
-                    BorderStyle::from_widget_settings(is_dark, settings),
-                    |ev| match ev {
-                        LiveEvent::Click(1) => {
-                            telemetry::send_media_vk(VK_MEDIA_PREV_TRACK);
-                            telemetry::refresh_media_session(&self.media_session, true);
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Click(2) => {
-                            telemetry::send_media_vk(VK_MEDIA_PLAY_PAUSE);
-                            telemetry::refresh_media_session(&self.media_session, true);
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Click(3) => {
-                            telemetry::send_media_vk(VK_MEDIA_NEXT_TRACK);
-                            telemetry::refresh_media_session(&self.media_session, true);
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Click(4) => {
-                            pins::launch("ms-settings:sound".to_owned());
-                            LiveOutcome::Close
-                        }
-                        LiveEvent::Click(60) => {
-                            toggle_audio_mute();
-                            (self.audio_vol, self.audio_muted) = get_audio_state();
-                            LiveOutcome::Update(build(self))
-                        }
-                        // C2 LiveEvent::Seek — C4 `telemetry::media_seek(secs)`.
-                        LiveEvent::Seek { id: 50, ratio } => {
-                            let dur = self
-                                .media_session
-                                .lock()
-                                .ok()
-                                .map_or(0, |g| g.duration_secs);
-                            let target = media_ext::seek_position(ratio, dur);
-                            if telemetry::media_seek(target) {
-                                // Anchor locally at once; a stale SMTC echo of the old position
-                                // must not rewind the slider until the provider catches up.
-                                let now = self.now_secs();
-                                confirm_seek(&mut self.media_timeline, target as f64, now);
-                            }
-                            telemetry::refresh_media_session(&self.media_session, true);
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Slider { id: 51, ratio } => {
-                            set_audio_volume((ratio * 100.0).round() as u32);
-                            (self.audio_vol, self.audio_muted) = get_audio_state();
-                            LiveOutcome::Update(build(self))
-                        }
-                        // Per-app mixer rows (ids 120..=131) from `media_ext::list_app_sessions`.
-                        LiveEvent::Click(id) if (120..132).contains(&id) && id % 2 == 0 => {
-                            let sessions = media_ext::list_app_sessions();
-                            if let Some(session) = sessions.get(((id - 120) / 2) as usize) {
-                                media_ext::set_app_mute(&session.session_id, !session.muted);
-                            }
-                            LiveOutcome::Update(build(self))
-                        }
-                        LiveEvent::Slider { id, ratio }
-                            if (121..132).contains(&id) && id % 2 == 1 =>
-                        {
-                            let sessions = media_ext::list_app_sessions();
-                            if let Some(session) = sessions.get(((id - 121) / 2) as usize) {
-                                media_ext::set_app_volume(
-                                    &session.session_id,
-                                    (ratio * 100.0).round() as u32,
-                                );
-                            }
-                            LiveOutcome::Update(build(self))
                         }
                         _ => LiveOutcome::Close,
                     },
@@ -3648,6 +2891,50 @@ mod tests {
         assert!(widget_descriptor("bluetoothbattery").is_some());
         assert!(widget_descriptor("dayprogress").is_some());
         assert!(widget_descriptor("keyboard").is_some());
+    }
+
+    #[test]
+    fn removed_widget_flyouts_are_disabled() {
+        for disabled in [
+            "dayprogress",
+            "stats",
+            "netspeed",
+            "bluetoothbattery",
+            "storage",
+            "media",
+            "battery",
+            "aiusage_all",
+            "aiusage_claude",
+            "aiusage_codex",
+            "aiusage_antigravity",
+            "aiusage_opencode",
+            "aiusage_copilot",
+            "aiusage_deepseek",
+            "aiusage_openrouter",
+            "aiusage_cursor",
+        ] {
+            assert!(
+                !widget_has_flyout(disabled),
+                "{disabled} should not have a flyout"
+            );
+        }
+        for enabled in [
+            "clock",
+            "weather",
+            "stopwatch",
+            "countdown",
+            "focus",
+            "audio",
+            "quicksettings",
+            "keyboard",
+            "stacks",
+            "groups",
+        ] {
+            assert!(
+                widget_has_flyout(enabled),
+                "{enabled} should retain its flyout"
+            );
+        }
     }
 
     #[test]
