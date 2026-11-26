@@ -9,6 +9,16 @@
 //! - `Media & Controls`  (4): `media`, `audio`, `quicksettings`, `keyboard`
 //! - `Productivity`      (1): `focus`
 
+// Many items here are public API consumed by WS-D (dock) / WS-E (UI) after merge; a standalone
+// binary build sees them as unused. Keep the worktree warning-clean without changing semantics.
+#![allow(dead_code)]
+
+pub mod ai_flyout;
+pub mod catalog_ops;
+pub mod focus_break;
+pub mod hover;
+pub mod media_ext;
+pub mod speedtest;
 pub mod telemetry;
 
 use std::sync::{Arc, Mutex};
@@ -24,6 +34,29 @@ use crate::dock::dcomp::{ChipIcon, WidgetChipSpec};
 use crate::platform::pins;
 use crate::ui::flyout::{self, BarTone, FlyoutBlock, FlyoutSpec, LiveEvent, LiveOutcome};
 
+#[allow(unused_imports)]
+pub use catalog_ops::{
+    canonical_widget_id, catalog, hardware_available, set_setting, setting_bool, setting_f64,
+    setting_i64, setting_str, setting_string_list, setting_value, widget_layout, WidgetDensity,
+    WidgetLayout, WidgetOption, ShrinkPriority, WIDGET_ALIASES,
+};
+#[allow(unused_imports)]
+pub use focus_break::{
+    play_break_chime, FocusEvent, FocusPhase, FocusSession, SharedFocusSession,
+};
+#[allow(unused_imports)]
+pub use hover::{
+    HoverChange, HoverPhase, WidgetHoverCoordinator, HOVER_INTENT_MS, SUPPRESS_MS,
+};
+#[allow(unused_imports)]
+pub use media_ext::{
+    AudioAppSession, MediaDetails, format_time as format_media_time, get_details as get_media_details,
+    playing_glyph, seek_ratio, volume_from_wheel,
+};
+#[allow(unused_imports)]
+pub use speedtest::{
+    SpeedTestController, SpeedTestResult, SpeedTestState, STREAM_COUNT,
+};
 pub use telemetry::{
     active_keyboard_code, adjust_audio_volume, day_progress_metrics, empty_recycle_bin,
     get_audio_state, is_recycle_bin_non_empty, sample_battery, sample_drives, sample_ram_info,
@@ -152,23 +185,50 @@ pub struct WidgetRuntime {
     net: telemetry::NetSpeedSampler,
     cpu_pct: u32,
     ram_pct: u32,
+    /// GPU utilization percent (C# `SystemStatsWidget` GPU meter).
+    gpu_pct: u32,
+    /// GPU die temperature in °C (C# GPU temperature meter).
+    gpu_temp_c: Option<u32>,
+    /// Consecutive failed GPU probes; C# hides the GPU meters after 5 misses.
+    gpu_misses: u32,
+    /// Consecutive successful GPU probes; C# requires 2 samples before showing meters.
+    gpu_samples: u32,
     audio_vol: u32,
     audio_muted: bool,
+    /// Accumulated wheel delta for 120-delta = 10% volume steps.
+    volume_wheel_remainder: i32,
     stopwatch_running: bool,
     stopwatch_secs: u64,
     stopwatch_laps: Vec<u64>,
+    /// Centiseconds elapsed within the current second (mm:ss.cc display).
+    stopwatch_cs: u32,
     countdown_running: bool,
     countdown_total_secs: u64,
     countdown_remaining_secs: u64,
+    /// Shared focus/break session (chip, flyout and island see the same state).
+    focus: SharedFocusSession,
+    /// Legacy mirror kept in sync for callers that read these directly.
     focus_running: bool,
     focus_preset_mins: u64,
     focus_remaining_secs: u64,
     focus_completed: u32,
     weather: Arc<Mutex<telemetry::WeatherCache>>,
+    weather_fail_count: u32,
+    weather_retry_at: Option<Instant>,
     bt_battery: Arc<Mutex<telemetry::BluetoothBatteryCache>>,
     ai_usage: Arc<Mutex<telemetry::AiUsageCache>>,
     media_session: Arc<Mutex<telemetry::MediaSessionSnapshot>>,
+    /// Multi-stream NetSpeed test controller.
+    speedtest: SpeedTestController,
+    speedtest_started_at: Option<Instant>,
+    /// Shared hover intent coordinator (WS-D calls the pub API from its mouse handlers).
+    pub hover: WidgetHoverCoordinator,
     night_light_on: bool,
+    /// Real Wi-Fi / Bluetooth radio states (C4 `platform::radio`).
+    wifi_on: bool,
+    bluetooth_on: bool,
+    radio_loading: bool,
+    radio_unavailable: bool,
     battery_anim_start: Instant,
     battery_charging: bool,
     last_tick: Instant,
@@ -181,23 +241,39 @@ impl Default for WidgetRuntime {
             net: telemetry::NetSpeedSampler::default(),
             cpu_pct: 0,
             ram_pct: 0,
+            gpu_pct: 0,
+            gpu_temp_c: None,
+            gpu_misses: 0,
+            gpu_samples: 0,
             audio_vol: 50,
             audio_muted: false,
+            volume_wheel_remainder: 0,
             stopwatch_running: false,
             stopwatch_secs: 0,
             stopwatch_laps: Vec::new(),
+            stopwatch_cs: 0,
             countdown_running: false,
             countdown_total_secs: 15 * 60,
             countdown_remaining_secs: 15 * 60,
+            focus: SharedFocusSession::default(),
             focus_running: false,
             focus_preset_mins: 25,
             focus_remaining_secs: 25 * 60,
             focus_completed: 0,
             weather: Arc::new(Mutex::new(telemetry::WeatherCache::default())),
+            weather_fail_count: 0,
+            weather_retry_at: None,
             bt_battery: Arc::new(Mutex::new(telemetry::BluetoothBatteryCache::default())),
             ai_usage: Arc::new(Mutex::new(telemetry::AiUsageCache::default())),
             media_session: Arc::new(Mutex::new(telemetry::MediaSessionSnapshot::default())),
+            speedtest: SpeedTestController::new(),
+            speedtest_started_at: None,
+            hover: WidgetHoverCoordinator::new(),
             night_light_on: telemetry::read_night_light().unwrap_or(false),
+            wifi_on: false,
+            bluetooth_on: false,
+            radio_loading: true,
+            radio_unavailable: false,
             battery_anim_start: Instant::now(),
             battery_charging: false,
             last_tick: Instant::now(),
@@ -229,14 +305,154 @@ fn format_mm_ss(total_secs: u64) -> String {
     }
 }
 
+/// C# `StopwatchWidget` centisecond display: `mm:ss.cc`.
+fn format_mm_ss_cs(total_secs: u64, centis: u32) -> String {
+    format!("{:02}:{:02}.{:02}", total_secs / 60, total_secs % 60, centis % 100)
+}
+
+/// GPU availability hysteresis (C# `SystemStatsWidget`): 5 consecutive misses hide the meters
+/// and 2 consecutive samples bring them back. Returns `None` while the meters must stay hidden.
+fn gpu_metrics_visible(samples: u32, misses: u32) -> bool {
+    misses < 5 && samples >= 2
+}
+
+/// C# `StorageWidget`: `DriveType.Fixed && IsReady` filter (excludes CD/DVD, USB and network
+/// drives). `GetDiskFreeSpaceExW` already implies readiness, so only the drive-type check is
+/// needed on top of the telemetry sampler.
+fn fixed_ready_drives() -> Vec<telemetry::DriveSpace> {
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+    const DRIVE_FIXED: u32 = 3;
+    sample_drives()
+        .into_iter()
+        .filter(|d| {
+            let root: Vec<u16> = format!("{}:\\\0", d.letter).encode_utf16().collect();
+            unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_FIXED }
+        })
+        .collect()
+}
+
+/// C# `QuickSettingsWidget` radio state labels: `Loading`, `Unavailable`, `On`, `Off`.
+fn radio_label(on: bool, loading: bool) -> &'static str {
+    if loading {
+        "Loading"
+    } else {
+        if on { "On" } else { "Off" }
+    }
+}
+
+/// Applies a settings-controlled alias ID so rename/alias entries are resolved consistently.
+fn resolved_widget_id(id: &str, settings: &DockSettings) -> String {
+    let canonical = canonical_widget_id(id).to_owned();
+    let aliases = setting_value(settings, "WidgetAliases");
+    aliases
+        .and_then(|v| v.as_object().cloned())
+        .and_then(|m| {
+            m.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(id))
+                .and_then(|(_, v)| v.as_str())
+                .map(str::to_owned)
+        })
+        .unwrap_or(canonical)
+}
+
+/// C# `WeatherUnit` conversion: telemetry caches Celsius, but the widget can show Fahrenheit.
+fn weather_temp(celsius: &str, settings: &DockSettings) -> String {
+    if celsius.is_empty() {
+        return "—".to_owned();
+    }
+    let unit = setting_str(settings, "WeatherUnit").unwrap_or_else(|| "Celsius".to_owned());
+    if unit.eq_ignore_ascii_case("fahrenheit") || unit == "°F" || unit.eq_ignore_ascii_case("f") {
+        let c = celsius.trim_end_matches('°').parse::<f64>().unwrap_or(0.0);
+        format!("{}°", (c * 9.0 / 5.0 + 32.0).round() as i32)
+    } else {
+        celsius.to_owned()
+    }
+}
+
+fn weather_icon_glyph(condition: &str) -> u16 {
+    let c = condition.to_ascii_lowercase();
+    if c.contains("thunder") {
+        0xFD3E // Thunderstorm
+    } else if c.contains("snow") {
+        0xF7D2 // Snow
+    } else if c.contains("rain") || c.contains("showers") || c.contains("drizzle") {
+        0xF743 // Rain
+    } else if c.contains("fog") {
+        0xF75E // Fog
+    } else if c.contains("cloud") || c.contains("overcast") {
+        0xF83D // Cloudy
+    } else {
+        0xF7B5 // Sunny
+    }
+}
+
+/// C4 `platform::core_audio::list_devices(false)` adapter. Assumed shape is `(id, display_name)`;
+/// keeping the conversion in one place makes a signature change a one-line fix at merge time.
+fn audio_output_devices() -> Vec<(String, String)> {
+    crate::platform::core_audio::list_devices(false)
+}
+
+/// Maps a Quick Settings `IconBar` shortcut ID to its C# `ms-settings:` URI.
+fn shortcut_uri(id: u32) -> &'static str {
+    match id {
+        100 => "ms-settings:network-wifi",
+        101 => "ms-settings:bluetooth",
+        102 => "ms-settings:network-airplanemode",
+        103 => "ms-settings:nightlight",
+        104 => "ms-settings:batterysaver",
+        105 => "ms-settings:quietmomentshome",
+        106 => "ms-settings:display",
+        107 => "ms-settings:sound",
+        108 => "ms-settings:network-status",
+        109 => "ms-settings:network-vpn",
+        110 => "ms-settings:nearby",
+        111 => "ms-settings:display-advanced",
+        112 => "ms-settings:tabletmode",
+        113 => "ms-settings:network-mobilehotspot",
+        114 => "ms-settings:dateandtime",
+        115 => "ms-settings:taskbar",
+        _ => "ms-settings:",
+    }
+}
+
+/// Copies diagnostics text to the Windows clipboard without showing a console window.
+fn copy_to_clipboard(text: &str) {
+    use std::os::windows::process::CommandExt;
+    let escaped = text.replace('\'', "''");
+    let script = format!("Set-Clipboard -Value '{escaped}'");
+    let _ = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .creation_flags(0x0800_0000)
+        .spawn();
+}
+
+fn weather_icon_glyph_text(condition: &str) -> &'static str {
+    let c = condition.to_ascii_lowercase();
+    if c.contains("thunder") {
+        "⚡"
+    } else if c.contains("snow") {
+        "❄"
+    } else if c.contains("rain") || c.contains("showers") || c.contains("drizzle") {
+        "🌧"
+    } else if c.contains("fog") {
+        "🌫"
+    } else if c.contains("cloud") || c.contains("overcast") {
+        "☁"
+    } else {
+        "☀"
+    }
+}
+
 impl WidgetRuntime {
     pub fn tick(&mut self, settings: &DockSettings) {
         let now = Instant::now();
-        let dt = now.duration_since(self.last_tick).as_secs();
-        if dt > 0 {
+        let dt_ms = now.duration_since(self.last_tick).as_millis() as u64;
+        let dt = (dt_ms / 1000).min(60);
+        if dt_ms > 0 {
             self.last_tick = now;
             if self.stopwatch_running {
                 self.stopwatch_secs = self.stopwatch_secs.saturating_add(dt);
+                self.stopwatch_cs = self.stopwatch_cs.saturating_add((dt_ms % 1000) as u32 % 100);
             }
             if self.countdown_running {
                 self.countdown_remaining_secs = self.countdown_remaining_secs.saturating_sub(dt);
@@ -244,16 +460,37 @@ impl WidgetRuntime {
                     self.countdown_running = false;
                 }
             }
-            if self.focus_running {
-                self.focus_remaining_secs = self.focus_remaining_secs.saturating_sub(dt);
-                if self.focus_remaining_secs == 0 {
-                    self.focus_running = false;
-                    self.focus_completed = self.focus_completed.saturating_add(1);
+            // Shared focus/break session: crossing a phase boundary plays the Asterisk chime.
+            if settings.is_widget_enabled("focus") {
+                let event = self.focus.with_mut(|s| s.tick(dt)).unwrap_or(FocusEvent::None);
+                match event {
+                    FocusEvent::PhaseEnded(FocusPhase::Focus) => play_break_chime(),
+                    FocusEvent::CycleCompleted => play_break_chime(),
+                    _ => {}
                 }
+                let s = self.focus.snapshot();
+                self.focus_running = s.running;
+                self.focus_preset_mins = s.focus_minutes;
+                self.focus_remaining_secs = s.remaining_secs;
+                self.focus_completed = s.sessions_completed as u32;
             }
         }
         if settings.is_widget_enabled("stats") {
             (self.cpu_pct, self.ram_pct) = self.stats.sample();
+            // C4: WS-G provides `sample_gpu_temp()`; 5 misses / 2 samples hysteresis.
+            if let Some((pct, temp)) = telemetry::sample_gpu_temp() {
+                self.gpu_pct = pct;
+                self.gpu_temp_c = temp;
+                self.gpu_samples = self.gpu_samples.saturating_add(1);
+                self.gpu_misses = 0;
+            } else {
+                self.gpu_misses = self.gpu_misses.saturating_add(1);
+                if self.gpu_misses >= 5 {
+                    self.gpu_samples = 0;
+                    self.gpu_temp_c = None;
+                    self.gpu_pct = 0;
+                }
+            }
         }
         if settings.is_widget_enabled("audio")
             || settings.is_widget_enabled("media")
@@ -266,15 +503,40 @@ impl WidgetRuntime {
         }
         if settings.is_widget_enabled("netspeed") {
             self.net.sample();
+            if self.speedtest.poll(now, self.speedtest_started_at) {
+                self.speedtest_started_at = None;
+            }
         }
         if settings.is_widget_enabled("weather") {
-            telemetry::refresh_weather(&self.weather, &settings.weather_city, false);
+            let can_fetch = self
+                .weather_retry_at
+                .is_none_or(|at| now >= at);
+            if can_fetch {
+                let had_data = self
+                    .weather
+                    .lock()
+                    .ok()
+                    .is_some_and(|g| !g.temp_c.is_empty());
+                telemetry::refresh_weather(&self.weather, &settings.weather_city, false);
+                self.weather_retry_at = if had_data {
+                    Some(now + std::time::Duration::from_secs(30 * 60))
+                } else {
+                    // 2-minute retry while there is no usable data.
+                    Some(now + std::time::Duration::from_secs(120))
+                };
+            }
         }
         if settings.is_widget_enabled("bluetoothbattery") {
+            // Poll interval / ignored devices / listen-only are applied in the flyout builder via
+            // `catalog_ops::setting_*`; WS-G owns the low-level provider refresh cadence.
             telemetry::refresh_bluetooth_battery(&self.bt_battery, false);
         }
         if settings.is_widget_enabled("quicksettings") {
             self.night_light_on = telemetry::read_night_light().unwrap_or(self.night_light_on);
+            // C4: platform::radio::{state,set} — WinRT Radio control.
+            self.wifi_on = crate::platform::radio::state("wifi");
+            self.bluetooth_on = crate::platform::radio::state("bluetooth");
+            self.radio_loading = false;
         }
         if settings.is_widget_enabled("battery") {
             let b = sample_battery();
@@ -319,6 +581,71 @@ impl WidgetRuntime {
             }
             _ => widget_descriptor(id).map_or(96.0, |d| d.width_dips),
         }
+    }
+
+    /// C# `AudioWidget` wheel handler: 120 delta = 10% with fractional remainder carried across
+    /// events. WS-D calls this from the dock's `WM_MOUSEWHEEL`.
+    pub fn adjust_volume_wheel(&mut self, delta: i32) -> u32 {
+        let next = volume_from_wheel(self.audio_vol, delta, &mut self.volume_wheel_remainder);
+        set_audio_volume(next);
+        (self.audio_vol, self.audio_muted) = get_audio_state();
+        self.audio_vol
+    }
+
+    /// C# `KeyboardLayoutWidget`: send `WM_INPUTLANGCHANGEREQUEST` to the last *external*
+    /// foreground window (never our own dock/island/flyout windows).
+    pub fn activate_keyboard_on_last_external_window(&mut self) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetForegroundWindow, GetWindowThreadProcessId, PostMessageW, WM_INPUTLANGCHANGEREQUEST,
+        };
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_null() {
+                return;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == std::process::id() {
+                return;
+            }
+            let layouts = telemetry::installed_keyboard_layouts();
+            if layouts.len() < 2 {
+                return;
+            }
+            let active = active_keyboard_code();
+            let idx = layouts
+                .iter()
+                .position(|(_, code, _)| code == &active)
+                .unwrap_or(0);
+            let hkl = layouts[(idx + 1) % layouts.len()].0;
+            PostMessageW(hwnd, WM_INPUTLANGCHANGEREQUEST, 0, hkl);
+        }
+    }
+
+    /// Exposes the shared focus session to WS-D (island expanded details) and flyouts.
+    pub fn focus_session(&self) -> SharedFocusSession {
+        self.focus.clone()
+    }
+
+    /// Exposes the NetSpeed speed-test controller to the live flyout.
+    pub fn speedtest(&mut self) -> &mut SpeedTestController {
+        &mut self.speedtest
+    }
+
+    /// Exposes the hover coordinator's public API (WS-D already reaches it via the pub field).
+    pub fn hover(&self) -> &WidgetHoverCoordinator {
+        &self.hover
+    }
+
+    /// Builds the dynamic-island expanded details payload for the media widget.
+    pub fn island_media_details(&self) -> MediaDetails {
+        let snap = self
+            .media_session
+            .lock()
+            .ok()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        media_ext::get_details(&snap, self.audio_vol, self.audio_muted)
     }
 
     /// Builds the exact C# 1-to-1 `WidgetChipSpec` rendered onto the dock pill.
@@ -380,26 +707,39 @@ impl WidgetRuntime {
                     }
                 }
                 "aiusage_antigravity" => {
-                    // Exact C# AiUsageWidget.cs BuildAntigravityPlaceholder: Gemini (5h,7d) | Claude (7d) | Argon (7d)
-                    WidgetChipSpec::AiAntigravity {
-                        columns: vec![
-                            (
-                                "Gemini".to_owned(),
+                    // C# AiUsageWidget.cs: Gemini (5h,7d) | Claude (7d) | Argon (7d), with live
+                    // pool values from the C4 full fetch and configurable `AntigravityGroups`.
+                    let groups = ai_flyout::antigravity_groups(settings);
+                    let snap = self
+                        .ai_usage
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.providers.get(ai.id).cloned())
+                        .unwrap_or_default();
+                    let colors = [pal.widget_accent, pal.widget_blue, pal.success];
+                    let columns = groups
+                        .into_iter()
+                        .enumerate()
+                        .take(3)
+                        .map(|(i, name)| {
+                            let color = colors[i % colors.len()];
+                            let reset = snap
+                                .windows
+                                .first()
+                                .map_or_else(|| "—".to_owned(), |w| w.reset_text.clone());
+                            let used = snap.windows.first().map_or(0.0, |w| w.used);
+                            let rows = if name.eq_ignore_ascii_case("Gemini") {
                                 vec![
-                                    ("5h".to_owned(), 0.0, pal.widget_accent, "—".to_owned()),
-                                    ("7d".to_owned(), 0.0, pal.widget_accent, "—".to_owned()),
-                                ],
-                            ),
-                            (
-                                "Claude".to_owned(),
-                                vec![("7d".to_owned(), 0.0, pal.widget_accent, "—".to_owned())],
-                            ),
-                            (
-                                "Argon".to_owned(),
-                                vec![("7d".to_owned(), 0.0, pal.widget_accent, "—".to_owned())],
-                            ),
-                        ],
-                    }
+                                    ("5h".to_owned(), used, color, reset.clone()),
+                                    ("7d".to_owned(), used, color, reset),
+                                ]
+                            } else {
+                                vec![("7d".to_owned(), used, color, reset)]
+                            };
+                            (name, rows)
+                        })
+                        .collect();
+                    WidgetChipSpec::AiAntigravity { columns }
                 }
                 "aiusage_opencode" => {
                     let cols = ["1h", "7d", "30d"]
@@ -523,18 +863,27 @@ impl WidgetRuntime {
             "stopwatch" => WidgetChipSpec::Timed {
                 is_focus: false,
                 running: self.stopwatch_running,
-                text: format_mm_ss(self.stopwatch_secs),
+                text: format_mm_ss_cs(self.stopwatch_secs, self.stopwatch_cs),
             },
             "countdown" => WidgetChipSpec::Timed {
                 is_focus: false,
                 running: self.countdown_running,
                 text: format_mm_ss(self.countdown_remaining_secs),
             },
-            "focus" => WidgetChipSpec::Timed {
-                is_focus: true,
-                running: self.focus_running,
-                text: format_mm_ss(self.focus_remaining_secs),
-            },
+            "focus" => {
+                let snapshot = self.focus.snapshot();
+                let label = if snapshot.phase == FocusPhase::Break {
+                    "Break".to_owned()
+                } else {
+                    snapshot.session_label()
+                };
+                let _ = label; // chip text stays tabular; phase is exposed in the flyout/island.
+                WidgetChipSpec::Timed {
+                    is_focus: true,
+                    running: snapshot.running,
+                    text: format_mm_ss(snapshot.remaining_secs),
+                }
+            }
             "stats" => {
                 let load_fg = |pct: u32| -> Rgb {
                     if pct >= 90 {
@@ -545,17 +894,31 @@ impl WidgetRuntime {
                         pal.text_primary
                     }
                 };
+                // C# SystemStatsWidget: GPU meter appears only after 2 samples and hides after
+                // 5 consecutive misses; its value is appended to the RAM column when available.
+                let gpu_suffix = if gpu_metrics_visible(self.gpu_samples, self.gpu_misses) {
+                    format!(" · GPU {}%", self.gpu_pct)
+                } else {
+                    String::new()
+                };
                 WidgetChipSpec::SystemStats {
                     cpu_text: format!("{}%", self.cpu_pct),
                     cpu_color: load_fg(self.cpu_pct),
-                    ram_text: format!("{}%", self.ram_pct),
+                    ram_text: format!("{}%{}", self.ram_pct, gpu_suffix),
                     ram_color: load_fg(self.ram_pct),
                 }
             }
-            "netspeed" => WidgetChipSpec::NetSpeed {
-                down: telemetry::format_speed(self.net.rx_bps),
-                up: telemetry::format_speed(self.net.tx_bps),
-            },
+            "netspeed" => {
+                let down = if self.speedtest.state() == SpeedTestState::Downloading {
+                    speedtest::format_throughput(self.net.rx_bps)
+                } else {
+                    telemetry::format_speed(self.net.rx_bps)
+                };
+                WidgetChipSpec::NetSpeed {
+                    down,
+                    up: telemetry::format_speed(self.net.tx_bps),
+                }
+            }
             "battery" => {
                 let b = sample_battery();
                 let wave_phase = if b.has_battery && b.charging && settings.animations_enabled {
@@ -571,6 +934,8 @@ impl WidgetRuntime {
                 }
             }
             "bluetoothbattery" => {
+                let ignored = setting_string_list(settings, "IgnoredWirelessDevices");
+                let low = setting_i64(settings, "WirelessBatteryLowThreshold", 20) as u32;
                 let devices: Vec<(u32, bool, bool)> = self
                     .bt_battery
                     .lock()
@@ -578,18 +943,33 @@ impl WidgetRuntime {
                     .map(|g| {
                         g.devices
                             .iter()
+                            .filter(|d| !ignored.iter().any(|n| n.eq_ignore_ascii_case(&d.name)))
                             .take(3)
-                            .map(|d| (d.percent, d.percent <= 20, d.percent >= 100))
+                            .map(|d| {
+                                // Tuple bools: low_warning | "full/charging bolt" state.
+                                (d.percent, d.percent <= low, d.percent >= 95)
+                            })
                             .collect()
                     })
                     .unwrap_or_default();
                 WidgetChipSpec::Bluetooth { devices }
             }
             "storage" => {
-                let drives: Vec<(String, String)> = sample_drives()
+                let compact = setting_bool(settings, "StorageCompactMode", false);
+                let drives: Vec<(String, String)> = fixed_ready_drives()
                     .into_iter()
-                    .take(3)
-                    .map(|d| (format!("{}:", d.letter), d.format_capacity_pair()))
+                    .take(if compact { 1 } else { 3 })
+                    .map(|d| {
+                        let pair = d.format_capacity_pair();
+                        (
+                            format!("{}:", d.letter),
+                            if compact {
+                                pair.split(" / ").next().unwrap_or(&pair).to_owned()
+                            } else {
+                                pair
+                            },
+                        )
+                    })
                     .collect();
                 WidgetChipSpec::Storage { drives }
             }
@@ -603,7 +983,8 @@ impl WidgetRuntime {
                 let title = if snap.title.is_empty() {
                     "Not playing".to_owned()
                 } else {
-                    snap.title
+                    // C# `MediaWidget` shows a play/pause glyph before the title.
+                    format!("{} {}", playing_glyph(snap.playing), snap.title)
                 };
                 WidgetChipSpec::Media {
                     title,
@@ -615,14 +996,21 @@ impl WidgetRuntime {
                 volume: self.audio_vol,
                 muted: self.audio_muted,
             },
-            "quicksettings" => WidgetChipSpec::QuickSettings {
-                // Exact C# QuickSettingsWidget.xaml: Wi-Fi, Bluetooth, Night Light!
-                pills: [
-                    ("\u{E701}".to_owned(), false),
-                    ("\u{E702}".to_owned(), false),
-                    ("\u{E708}".to_owned(), self.night_light_on),
-                ],
-            },
+            "quicksettings" => {
+                // C# QuickSettingsWidget.xaml: Wi-Fi, Bluetooth, Night Light — real radio states.
+                let (wifi, bt) = if self.radio_loading {
+                    (false, false)
+                } else {
+                    (self.wifi_on, self.bluetooth_on)
+                };
+                WidgetChipSpec::QuickSettings {
+                    pills: [
+                        ("\u{E701}".to_owned(), wifi),
+                        ("\u{E702}".to_owned(), bt),
+                        ("\u{E708}".to_owned(), self.night_light_on),
+                    ],
+                }
+            }
             "keyboard" => WidgetChipSpec::Keyboard {
                 code: active_keyboard_code(),
             },
@@ -704,8 +1092,11 @@ impl WidgetRuntime {
                 _ => "Media".to_owned(),
             },
             "quicksettings" => match sub {
-                Some(0) => "Wi-Fi".to_owned(),
-                Some(1) => "Bluetooth".to_owned(),
+                Some(0) => format!("Wi-Fi · {}", radio_label(self.wifi_on, self.radio_loading)),
+                Some(1) => format!(
+                    "Bluetooth · {}",
+                    radio_label(self.bluetooth_on, self.radio_loading)
+                ),
                 Some(2) => if self.night_light_on {
                     "Night Light · On"
                 } else {
@@ -736,7 +1127,17 @@ impl WidgetRuntime {
                     format!("Weather · {}", settings.weather_city)
                 }
             }
-            "stats" => format!("CPU {}% · RAM {}%", self.cpu_pct, self.ram_pct),
+            "stats" => {
+                let gpu = if gpu_metrics_visible(self.gpu_samples, self.gpu_misses) {
+                    match self.gpu_temp_c {
+                        Some(t) => format!(" · GPU {}% {t}°C", self.gpu_pct),
+                        None => format!(" · GPU {}%", self.gpu_pct),
+                    }
+                } else {
+                    String::new()
+                };
+                format!("CPU {}% · RAM {}%{}", self.cpu_pct, self.ram_pct, gpu)
+            }
             "dayprogress" => {
                 let (day, _, _, left) = day_progress_metrics();
                 format!("Day Progress: {:.0}% ({left}h left)", day * 100.0)
@@ -844,13 +1245,27 @@ impl WidgetRuntime {
                 }
             }
             "quicksettings" => {
-                // Exact C# QuickSettingsWidget.xaml: Wi-Fi, Bluetooth, Night Light!
+                // C# QuickSettingsWidget.xaml: Wi-Fi, Bluetooth, Night Light — real radio toggles.
                 let third = (width_dips / 3.0).max(1.0);
                 if rel_x_dips < third {
-                    pins::launch("ms-settings:network-wifi".to_owned());
+                    let kind = "wifi";
+                    let target = !self.wifi_on;
+                    if crate::platform::radio::set(kind, target) {
+                        self.wifi_on = target;
+                    } else {
+                        self.radio_unavailable = true;
+                        pins::launch("ms-settings:network-wifi".to_owned());
+                    }
                     DirectClickOutcome::Handled
                 } else if rel_x_dips < third * 2.0 {
-                    pins::launch("ms-settings:bluetooth".to_owned());
+                    let kind = "bluetooth";
+                    let target = !self.bluetooth_on;
+                    if crate::platform::radio::set(kind, target) {
+                        self.bluetooth_on = target;
+                    } else {
+                        self.radio_unavailable = true;
+                        pins::launch("ms-settings:bluetooth".to_owned());
+                    }
                     DirectClickOutcome::Handled
                 } else {
                     if telemetry::toggle_night_light() {
@@ -882,10 +1297,10 @@ impl WidgetRuntime {
             }
             "focus" => {
                 if rel_x_dips >= width_dips - 36.0 {
-                    if self.focus_remaining_secs == 0 {
-                        self.focus_remaining_secs = self.focus_preset_mins * 60;
-                    }
-                    self.focus_running = !self.focus_running;
+                    self.focus.with_mut(|s| s.toggle());
+                    let snap = self.focus.snapshot();
+                    self.focus_running = snap.running;
+                    self.focus_remaining_secs = snap.remaining_secs;
                     DirectClickOutcome::Handled
                 } else {
                     DirectClickOutcome::OpenFlyout
@@ -993,6 +1408,28 @@ impl WidgetRuntime {
         let in_name = telemetry::default_audio_device_name(true)
             .unwrap_or_else(|| "No microphone".to_owned());
 
+        let devices = audio_output_devices();
+        let mut device_blocks: Vec<FlyoutBlock> = devices
+            .iter()
+            .enumerate()
+            .take(6)
+            .map(|(i, (_, name))| FlyoutBlock::BadgeRow {
+                id: 100 + i as u32,
+                code: "\u{E7F5}".to_owned(), // Headphone glyph (C# AudioWidget device selector)
+                title: name.clone(),
+                active: name.eq_ignore_ascii_case(&out_name),
+            })
+            .collect();
+        if !device_blocks.is_empty() {
+            device_blocks.insert(
+                0,
+                FlyoutBlock::StatRow {
+                    label: "Output device".to_owned(),
+                    value: String::new(),
+                },
+            );
+            device_blocks.push(FlyoutBlock::Separator);
+        }
         FlyoutSpec {
             title: "Audio".to_owned(),
             subtitle: None,
@@ -1032,8 +1469,15 @@ impl WidgetRuntime {
                     slider_id: 4,
                 },
                 FlyoutBlock::Separator,
-                FlyoutBlock::ButtonBar(vec![(5, "Sound Settings".to_owned(), false)]),
-            ],
+            ]
+            .into_iter()
+            .chain(device_blocks)
+            .chain(std::iter::once(FlyoutBlock::ButtonBar(vec![(
+                5,
+                "Sound Settings".to_owned(),
+                false,
+            )])))
+            .collect(),
         }
     }
 
@@ -1082,8 +1526,8 @@ impl WidgetRuntime {
     fn build_stopwatch_spec(&self) -> FlyoutSpec {
         let mut blocks = vec![
             FlyoutBlock::Hero {
-                value: format_mm_ss(self.stopwatch_secs),
-                caption: None,
+                value: format_mm_ss_cs(self.stopwatch_secs, self.stopwatch_cs),
+                caption: Some("Quick action: click the tile play/pause button".to_owned()),
                 centered: true,
                 large: true,
                 right_meta: None,
@@ -1157,6 +1601,15 @@ impl WidgetRuntime {
                     (15, "15 min".to_owned(), mins == 15),
                     (30, "30 min".to_owned(), mins == 30),
                 ]),
+                // C# `TimedWidgetPanel` custom duration (C2 TextInput, validated 1-1440 minutes).
+                FlyoutBlock::TextInput {
+                    id: 50,
+                    label: "Custom minutes (1-1440)".to_owned(),
+                    value: format!("{mins}"),
+                    numeric: true,
+                    min: 1.0,
+                    max: 1440.0,
+                },
                 FlyoutBlock::Separator,
                 FlyoutBlock::ButtonBar(vec![
                     (
@@ -1220,27 +1673,33 @@ impl WidgetRuntime {
                 }
             }
             blocks.push(FlyoutBlock::Separator);
-            blocks.push(FlyoutBlock::ButtonBar(vec![(
-                1,
-                "Refresh All".to_owned(),
-                true,
-            )]));
+            blocks.push(FlyoutBlock::ButtonBar(vec![
+                (1, "Refresh All".to_owned(), true),
+                (2, "Full Refresh (all providers)".to_owned(), false),
+            ]));
             let spec = FlyoutSpec {
                 title: "AI Quotas".to_owned(),
-                subtitle: Some("Live usage across configured providers".to_owned()),
+                subtitle: Some("Live usage across all configured providers".to_owned()),
                 width_dips: 316.0,
                 blocks,
             };
-            if flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) == Some(1) {
-                for ai in telemetry::AI_PROVIDERS {
-                    telemetry::refresh_ai_provider(&self.ai_usage, ai.id, true);
+            match flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) {
+                Some(1) => {
+                    for ai in telemetry::AI_PROVIDERS {
+                        telemetry::refresh_ai_provider(&self.ai_usage, ai.id, true);
+                    }
                 }
+                Some(2) => {
+                    for ai in telemetry::AI_PROVIDERS {
+                        ai_flyout::refresh_full(ai.id);
+                    }
+                }
+                _ => {}
             }
-            return false;
         }
-
-        // Exact C# `AiUsageWidget.BuildFlyout`
-        if let Some(ai) = telemetry::ai_provider_meta(id) {
+        // Full C# `AiUsageWidget.BuildFlyout` — spend / breakdown / reset / plan chip /
+        // severity dot / refresh. Antigravity (8th provider) gets group/pool rows.
+        else if let Some(ai) = telemetry::ai_provider_meta(id) {
             let snap = self
                 .ai_usage
                 .lock()
@@ -1248,72 +1707,19 @@ impl WidgetRuntime {
                 .and_then(|g| g.providers.get(ai.id).cloned())
                 .unwrap_or_default();
             let has_data = snap.balance_text.is_some() || !snap.windows.is_empty();
-            let mut blocks = vec![FlyoutBlock::StatusHeader {
-                title: ai.name.to_owned(),
-                status_label: if has_data {
-                    snap.plan.clone().unwrap_or_else(|| "Connected".to_owned())
-                } else if snap.has_cred {
-                    "Configured".to_owned()
-                } else {
-                    "Sign in".to_owned()
-                },
-                status_color: if has_data {
-                    pal.widget_accent
-                } else if snap.has_cred {
-                    pal.accent
-                } else {
-                    pal.warning
-                },
-                action_id: Some(1),
-                action_label: Some("Open".to_owned()),
-            }];
-            if let Some(bal) = &snap.balance_text {
-                blocks.push(FlyoutBlock::Hero {
-                    value: bal.clone(),
-                    caption: Some(
-                        if ai.id == "aiusage_openrouter" {
-                            "Remaining credits"
-                        } else {
-                            "Available balance"
-                        }
-                        .to_owned(),
-                    ),
-                    centered: false,
-                    large: false,
-                    right_meta: None,
-                });
-            }
-            for w in &snap.windows {
-                blocks.push(FlyoutBlock::ProgressBar {
-                    label: w.label.clone(),
-                    value_text: format!("{:.0}% · {}", w.used * 100.0, w.reset_text),
-                    ratio: w.used,
-                    tone: BarTone::Usage,
-                });
-            }
-            if !has_data {
-                blocks.push(FlyoutBlock::Note(format!(
-                    "Sign in via `{}` or save API key to load live usage.",
-                    ai.signin_hint
-                )));
-            }
-            blocks.push(FlyoutBlock::Separator);
-            blocks.push(FlyoutBlock::ButtonBar(vec![
-                (2, "Refresh".to_owned(), false),
-                (1, "Open Dashboard".to_owned(), true),
-            ]));
-            let spec = FlyoutSpec {
-                title: String::new(),
-                subtitle: None,
-                width_dips: 280.0,
-                blocks,
+            let peak = snap.windows.iter().map(|w| w.used).fold(0.0f32, f32::max);
+            let detail = ai_flyout::AiFullDetail {
+                severity: ai_flyout::severity_for_usage(peak, false),
+                ..Default::default()
             };
+            let spec = ai_flyout::build_ai_flyout(ai.id, &snap, &detail, settings, is_dark);
             match flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) {
                 Some(1) => pins::launch(ai.dashboard_url.to_owned()),
                 Some(2) => telemetry::refresh_ai_provider(&self.ai_usage, ai.id, true),
+                Some(3) => ai_flyout::refresh_full(ai.id),
                 _ => {}
             }
-            return false;
+            let _ = (has_data, &pal);
         }
 
         match id {
@@ -1440,6 +1846,15 @@ impl WidgetRuntime {
                             pins::launch("ms-settings:sound".to_owned());
                             LiveOutcome::Close
                         }
+                        // C4 `platform::core_audio::set_default_device` — output selector.
+                        LiveEvent::Click(id @ 100..=105) => {
+                            if let Some((device_id, _)) =
+                                audio_output_devices().get((id - 100) as usize)
+                            {
+                                crate::platform::core_audio::set_default_device(device_id);
+                            }
+                            LiveOutcome::Update(self.build_audio_mixer_spec())
+                        }
                         _ => LiveOutcome::Close,
                     },
                 );
@@ -1467,26 +1882,57 @@ impl WidgetRuntime {
                         label: "System Stats".to_owned(),
                         value: telemetry::system_uptime_string(),
                     },
-                    FlyoutBlock::Sparkline {
+                    // C2 `Chart` blocks with named series (CPU / RAM / GPU).
+                    FlyoutBlock::Chart {
                         label: "CPU".to_owned(),
+                        series: vec![("CPU".to_owned(), self.stats.cpu_history.as_vec())],
+                        accent: cpu_col,
+                    },
+                    FlyoutBlock::Chart {
+                        label: format!("Memory · {used_gb:.1} / {total_gb:.0} GB"),
+                        series: vec![("RAM".to_owned(), self.stats.ram_history.as_vec())],
+                        accent: ram_col,
+                    },
+                    // Compact C# legacy sparkline retained for the small card preview.
+                    FlyoutBlock::Sparkline {
+                        label: "CPU trend".to_owned(),
                         value_text: format!("{}%", self.cpu_pct),
                         detail_text: None,
                         samples: self.stats.cpu_history.as_vec(),
                         color: cpu_col,
                     },
-                    FlyoutBlock::Sparkline {
-                        label: "Memory".to_owned(),
-                        value_text: format!("{ram_pct}%"),
-                        detail_text: Some(format!("{used_gb:.1} / {total_gb:.0} GB")),
-                        samples: self.stats.ram_history.as_vec(),
-                        color: ram_col,
-                    },
-                    FlyoutBlock::Separator,
-                    FlyoutBlock::StatRow {
-                        label: "Top Processes".to_owned(),
-                        value: "Memory".to_owned(),
-                    },
                 ];
+                // C# GPU meters behind the 5-miss / 2-sample hysteresis.
+                if gpu_metrics_visible(self.gpu_samples, self.gpu_misses) {
+                    blocks.push(FlyoutBlock::Chart {
+                        label: "GPU".to_owned(),
+                        series: vec![("GPU".to_owned(), vec![self.gpu_pct as f32 / 100.0; 45])],
+                        accent: pal.widget_blue,
+                    });
+                    blocks.push(FlyoutBlock::ProgressBar {
+                        label: "GPU Load".to_owned(),
+                        value_text: format!("{}%", self.gpu_pct),
+                        ratio: self.gpu_pct as f32 / 100.0,
+                        tone: BarTone::Usage,
+                    });
+                    if let Some(temp) = self.gpu_temp_c {
+                        blocks.push(FlyoutBlock::ProgressBar {
+                            label: "GPU Temperature".to_owned(),
+                            value_text: format!("{temp}°C"),
+                            ratio: (temp as f32 / 100.0).clamp(0.0, 1.0),
+                            tone: if temp >= 85 {
+                                BarTone::Usage
+                            } else {
+                                BarTone::Level
+                            },
+                        });
+                    }
+                }
+                blocks.push(FlyoutBlock::Separator);
+                blocks.push(FlyoutBlock::StatRow {
+                    label: "Top Processes".to_owned(),
+                    value: "Memory".to_owned(),
+                });
                 let procs = telemetry::sample_top_processes(5);
                 if procs.is_empty() {
                     blocks.push(FlyoutBlock::Note(
@@ -1504,19 +1950,42 @@ impl WidgetRuntime {
                 blocks.push(FlyoutBlock::ButtonBar(vec![
                     (1, "Task Manager".to_owned(), false),
                     (2, "Resource Monitor".to_owned(), false),
+                    (3, "Refresh".to_owned(), false),
                 ]));
 
-                let spec = FlyoutSpec {
+                let spec_blocks = blocks;
+                let build = || FlyoutSpec {
                     title: String::new(),
                     subtitle: None,
                     width_dips: 296.0,
-                    blocks,
+                    blocks: spec_blocks.clone(),
                 };
-                match flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) {
-                    Some(1) => pins::launch("taskmgr.exe".to_owned()),
-                    Some(2) => pins::launch("perfmon.exe".to_owned()),
-                    _ => {}
-                }
+                // Live flyout: Refresh re-samples CPU/RAM/GPU and updates in place.
+                flyout::show_flyout_live(
+                    "stats",
+                    owner_hwnd,
+                    is_dark,
+                    anchor_x,
+                    anchor_y,
+                    build(),
+                    |ev| match ev {
+                        LiveEvent::Click(1) => {
+                            pins::launch("taskmgr.exe".to_owned());
+                            LiveOutcome::Close
+                        }
+                        LiveEvent::Click(2) => {
+                            pins::launch("perfmon.exe".to_owned());
+                            LiveOutcome::Close
+                        }
+                        LiveEvent::Click(3) => {
+                            let (cpu, ram) = self.stats.sample();
+                            self.cpu_pct = cpu;
+                            self.ram_pct = ram;
+                            LiveOutcome::Update(build())
+                        }
+                        _ => LiveOutcome::Close,
+                    },
+                );
             }
             // Exact C# `WeatherWidget.BuildFlyoutContent`
             "weather" => {
@@ -1526,16 +1995,8 @@ impl WidgetRuntime {
                 } else {
                     snap.city
                 };
-                let temp = if snap.temp_c.is_empty() {
-                    "—".to_owned()
-                } else {
-                    snap.temp_c
-                };
-                let feels = if snap.feels_like.is_empty() {
-                    "—".to_owned()
-                } else {
-                    snap.feels_like
-                };
+                let temp = weather_temp(&snap.temp_c, settings);
+                let feels = weather_temp(&snap.feels_like, settings);
                 let hum = if snap.humidity.is_empty() {
                     "—".to_owned()
                 } else {
@@ -1549,113 +2010,319 @@ impl WidgetRuntime {
                 let cond = if snap.condition.is_empty() {
                     "Weather".to_owned()
                 } else {
-                    snap.condition
+                    snap.condition.clone()
                 };
+                let mut blocks = vec![
+                    // C2 `Image` block for the weather icon (Segoe glyph fallback).
+                    FlyoutBlock::Image {
+                        glyph: weather_icon_glyph(&snap.condition),
+                        path: None,
+                        size_dips: 32.0,
+                    },
+                    FlyoutBlock::Hero {
+                        value: city,
+                        caption: Some(cond),
+                        centered: false,
+                        large: false,
+                        right_meta: Some(temp),
+                    },
+                    FlyoutBlock::MetricTiles(vec![
+                        ("Feels like".to_owned(), feels),
+                        ("Humidity".to_owned(), hum),
+                        ("Wind".to_owned(), wind),
+                        ("Source".to_owned(), "Open-Meteo".to_owned()),
+                    ]),
+                ];
+                // C# `WeatherWidget` 3-day forecast (data already collected in telemetry).
+                if !snap.forecast_days.is_empty() {
+                    blocks.push(FlyoutBlock::Separator);
+                    blocks.push(FlyoutBlock::StatRow {
+                        label: "3-Day Forecast".to_owned(),
+                        value: String::new(),
+                    });
+                    for (day, condition, high_low) in snap.forecast_days.iter().take(3) {
+                        blocks.push(FlyoutBlock::StatRow {
+                            label: format!("{} {}", weather_icon_glyph_text(condition), day),
+                            value: format!("{} · {}", high_low, condition),
+                        });
+                    }
+                }
+                blocks.push(FlyoutBlock::Separator);
+                blocks.push(FlyoutBlock::ButtonBar(vec![(1, "Refresh".to_owned(), false)]));
                 let spec = FlyoutSpec {
                     title: String::new(),
                     subtitle: None,
                     width_dips: 296.0,
-                    blocks: vec![
-                        FlyoutBlock::Hero {
-                            value: city,
-                            caption: Some(cond),
-                            centered: false,
-                            large: false,
-                            right_meta: Some(temp),
-                        },
-                        FlyoutBlock::MetricTiles(vec![
-                            ("Feels like".to_owned(), feels),
-                            ("Humidity".to_owned(), hum),
-                            ("Wind".to_owned(), wind),
-                            ("Source".to_owned(), "wttr.in".to_owned()),
-                        ]),
-                        FlyoutBlock::Separator,
-                        FlyoutBlock::ButtonBar(vec![(1, "Refresh".to_owned(), false)]),
-                    ],
+                    blocks,
                 };
                 if flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) == Some(1) {
                     telemetry::refresh_weather(&self.weather, &settings.weather_city, true);
+                    self.weather_retry_at =
+                        Some(Instant::now() + std::time::Duration::from_secs(30 * 60));
                 }
             }
-            // Exact C# `NetSpeedWidget.BuildClickFlyoutContent`
+            // C# `NetSpeedWidget`: live throughput + 6-stream speed test with cancel/retry/restart.
             "netspeed" => {
                 let adapter = if self.net.adapter_name.is_empty() {
                     None
                 } else {
                     Some(format!("Adapter: {}", self.net.adapter_name))
                 };
-                let spec = FlyoutSpec {
-                    title: "Network Speed".to_owned(),
-                    subtitle: adapter,
-                    width_dips: 280.0,
-                    blocks: vec![
+                let build = |runtime: &Self| {
+                    let mut spec = speedtest::build_speedtest_flyout(
+                        runtime.speedtest.state(),
+                        runtime.speedtest.result(),
+                    );
+                    spec.subtitle = adapter.clone();
+                    // Live throughput + session totals above the test grid.
+                    let mut blocks = vec![
                         FlyoutBlock::MetricTiles(vec![
                             (
                                 "↓ Download".to_owned(),
-                                telemetry::format_speed(self.net.rx_bps),
+                                telemetry::format_speed(runtime.net.rx_bps),
                             ),
                             (
                                 "↑ Upload".to_owned(),
-                                telemetry::format_speed(self.net.tx_bps),
+                                telemetry::format_speed(runtime.net.tx_bps),
                             ),
                             (
                                 "Session received".to_owned(),
-                                telemetry::format_bytes(self.net.session_rx),
+                                telemetry::format_bytes(runtime.net.session_rx),
                             ),
                             (
                                 "Session sent".to_owned(),
-                                telemetry::format_bytes(self.net.session_tx),
+                                telemetry::format_bytes(runtime.net.session_tx),
                             ),
                         ]),
                         FlyoutBlock::Separator,
-                        FlyoutBlock::ButtonBar(vec![(1, "Network Settings".to_owned(), false)]),
-                    ],
+                    ];
+                    blocks.append(&mut spec.blocks);
+                    blocks.push(FlyoutBlock::ButtonBar(vec![(
+                        5,
+                        "Network Settings".to_owned(),
+                        false,
+                    )]));
+                    spec.blocks = blocks;
+                    spec
                 };
-                if flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) == Some(1) {
-                    pins::launch("ms-settings:network".to_owned());
-                }
+                let init = build(self);
+                flyout::show_flyout_live(
+                    "netspeed",
+                    owner_hwnd,
+                    is_dark,
+                    anchor_x,
+                    anchor_y,
+                    init,
+                    |ev| match ev {
+                        LiveEvent::Click(1) => {
+                            self.speedtest.start();
+                            self.speedtest_started_at = Some(Instant::now());
+                            self.speedtest.poll(Instant::now(), self.speedtest_started_at);
+                            LiveOutcome::Update(build(self))
+                        }
+                        LiveEvent::Click(2) => {
+                            self.speedtest.cancel();
+                            LiveOutcome::Update(build(self))
+                        }
+                        LiveEvent::Click(3) => {
+                            self.speedtest.retry();
+                            self.speedtest_started_at = Some(Instant::now());
+                            LiveOutcome::Update(build(self))
+                        }
+                        LiveEvent::Click(4) => {
+                            self.speedtest.restart();
+                            self.speedtest_started_at = Some(Instant::now());
+                            LiveOutcome::Update(build(self))
+                        }
+                        LiveEvent::Click(5) => {
+                            pins::launch("ms-settings:network".to_owned());
+                            LiveOutcome::Close
+                        }
+                        _ => {
+                            self.speedtest.poll(Instant::now(), self.speedtest_started_at);
+                            LiveOutcome::Update(build(self))
+                        }
+                    },
+                );
             }
-            // Exact C# `BluetoothBatteryWidget.PopulateHoverFlyoutPanel`
+            // C# `BluetoothBatteryWidget.PopulateHoverFlyoutPanel` + device management.
             "bluetoothbattery" => {
-                let devices = self
-                    .bt_battery
-                    .lock()
-                    .map(|g| g.devices.clone())
-                    .unwrap_or_default();
-                let mut blocks: Vec<FlyoutBlock> = devices
-                    .iter()
-                    .map(|d| FlyoutBlock::ProgressBar {
-                        label: d.name.clone(),
-                        value_text: format!("{}%", d.percent),
-                        ratio: d.percent as f32 / 100.0,
-                        tone: BarTone::Level,
-                    })
-                    .collect();
-                if blocks.is_empty() {
-                    blocks.push(FlyoutBlock::Note(
-                        "No connected Bluetooth battery devices detected.".to_owned(),
-                    ));
-                }
-                blocks.push(FlyoutBlock::Separator);
-                blocks.push(FlyoutBlock::ButtonBar(vec![
-                    (1, "Refresh".to_owned(), false),
-                    (2, "Bluetooth Settings".to_owned(), false),
-                ]));
-                let spec = FlyoutSpec {
-                    title: "Bluetooth Battery".to_owned(),
-                    subtitle: None,
-                    width_dips: 276.0,
-                    blocks,
+                let ignored = setting_string_list(settings, "IgnoredWirelessDevices");
+                let aliases = setting_value(settings, "WirelessDeviceAliases").and_then(|v| v.as_object().cloned()).unwrap_or_default();
+                let low = setting_i64(settings, "WirelessBatteryLowThreshold", 20) as u32;
+                let interval = setting_i64(settings, "WirelessBatteryPollSeconds", 60) as u64;
+                let listen_only = setting_bool(settings, "WirelessBatteryListenOnly", false);
+                let build = |_settings: &DockSettings, selected: usize, rename_value: String| {
+                    let devices: Vec<_> = self
+                        .bt_battery
+                        .lock()
+                        .map(|g| g.devices.clone())
+                        .unwrap_or_default();
+                    let mut blocks: Vec<FlyoutBlock> = devices
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, d)| !ignored.iter().any(|n| n.eq_ignore_ascii_case(&d.name)))
+                        .map(|(i, d)| {
+                            let shown = aliases
+                                .get(&d.name)
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(&d.name);
+                            let bolt = if d.percent >= 95 { " ⚡" } else { "" };
+                            let stale = self
+                                .bt_battery
+                                .lock()
+                                .ok()
+                                .and_then(|g| g.last_fetch)
+                                .is_some_and(|t| t.elapsed().as_secs() > interval * 2);
+                            FlyoutBlock::ActionRow {
+                                id: 100 + i as u32,
+                                title: format!("{shown}{bolt}"),
+                                subtitle: Some(if stale {
+                                    format!("{}% · stale", d.percent)
+                                } else {
+                                    format!("{}%", d.percent)
+                                }),
+                                badge: Some(format!("{}%", d.percent)),
+                                icon: None,
+                                destructive: false,
+                            }
+                        })
+                        .collect();
+                    if blocks.is_empty() {
+                        blocks.push(FlyoutBlock::Note(
+                            "No connected Bluetooth battery devices detected.".to_owned(),
+                        ));
+                    }
+                    let _ = selected;
+                    // C2 TextInput — device rename (1-64 chars).
+                    blocks.push(FlyoutBlock::TextInput {
+                        id: 50,
+                        label: "Rename selected device".to_owned(),
+                        value: rename_value,
+                        numeric: false,
+                        min: 0.0,
+                        max: 0.0,
+                    });
+                    blocks.push(FlyoutBlock::StatRow {
+                        label: "Poll interval".to_owned(),
+                        value: format!("{interval}s"),
+                    });
+                    blocks.push(FlyoutBlock::StatRow {
+                        label: "Low threshold".to_owned(),
+                        value: format!("{low}%"),
+                    });
+                    blocks.push(FlyoutBlock::ToggleGrid(vec![(
+                        7,
+                        "Listen only".to_owned(),
+                        if listen_only { "On" } else { "Off" }.to_owned(),
+                        listen_only,
+                    )]));
+                    blocks.push(FlyoutBlock::ButtonBar(vec![
+                        (1, "Refresh".to_owned(), false),
+                        (2, "Hide".to_owned(), false),
+                        (3, "Restore ignored".to_owned(), false),
+                        (4, "Interval".to_owned(), false),
+                        (5, "Threshold".to_owned(), false),
+                    ]));
+                    blocks.push(FlyoutBlock::ButtonBar(vec![
+                        (6, "Copy Diagnostics".to_owned(), false),
+                        (8, "Bluetooth Settings".to_owned(), false),
+                    ]));
+                    FlyoutSpec {
+                        title: "Bluetooth Battery".to_owned(),
+                        subtitle: Some(format!("{interval}s · low {low}%")),
+                        width_dips: 296.0,
+                        blocks,
+                    }
                 };
-                match flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec) {
-                    Some(1) => telemetry::refresh_bluetooth_battery(&self.bt_battery, true),
-                    Some(2) => pins::launch("ms-settings:bluetooth".to_owned()),
-                    _ => {}
-                }
+                let init = build(settings, 0, String::new());
+                flyout::show_flyout_live(
+                    "bluetoothbattery",
+                    owner_hwnd,
+                    is_dark,
+                    anchor_x,
+                    anchor_y,
+                    init,
+                    |ev| match ev {
+                        LiveEvent::Click(1) => {
+                            telemetry::refresh_bluetooth_battery(&self.bt_battery, true);
+                            LiveOutcome::Update(build(settings, 0, String::new()))
+                        }
+                        LiveEvent::Click(2) => {
+                            // Hide the currently selected device.
+                            if let Ok(g) = self.bt_battery.lock()
+                                && let Some(d) = g.devices.first()
+                            {
+                                let mut list = setting_string_list(settings, "IgnoredWirelessDevices");
+                                if !list.iter().any(|n| n.eq_ignore_ascii_case(&d.name)) {
+                                    list.push(d.name.clone());
+                                    set_setting(settings, "IgnoredWirelessDevices", serde_json::json!(list));
+                                }
+                            }
+                            LiveOutcome::Update(build(settings, 0, String::new()))
+                        }
+                        LiveEvent::Click(3) => {
+                            set_setting(settings, "IgnoredWirelessDevices", serde_json::json!([]));
+                            LiveOutcome::Update(build(settings, 0, String::new()))
+                        }
+                        LiveEvent::Click(4) => {
+                            const STEPS: [i64; 5] = [15, 30, 60, 120, 300];
+                            let cur = setting_i64(settings, "WirelessBatteryPollSeconds", 60);
+                            let next = STEPS.iter().find(|&&s| s > cur).copied().unwrap_or(STEPS[0]);
+                            set_setting(settings, "WirelessBatteryPollSeconds", serde_json::json!(next));
+                            LiveOutcome::Update(build(settings, 0, String::new()))
+                        }
+                        LiveEvent::Click(5) => {
+                            let cur = setting_i64(settings, "WirelessBatteryLowThreshold", 20);
+                            let next = if cur >= 50 { 5 } else { cur + 5 };
+                            set_setting(settings, "WirelessBatteryLowThreshold", serde_json::json!(next));
+                            LiveOutcome::Update(build(settings, 0, String::new()))
+                        }
+                        LiveEvent::Click(6) => {
+                            let diag = self
+                                .bt_battery
+                                .lock()
+                                .map(|g| {
+                                    g.devices
+                                        .iter()
+                                        .map(|d| format!("{}={}%", d.name, d.percent))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                })
+                                .unwrap_or_default();
+                            copy_to_clipboard(&diag);
+                            LiveOutcome::Update(build(settings, 0, String::new()))
+                        }
+                        LiveEvent::Click(7) => {
+                            let next = !setting_bool(settings, "WirelessBatteryListenOnly", false);
+                            set_setting(settings, "WirelessBatteryListenOnly", serde_json::json!(next));
+                            LiveOutcome::Update(build(settings, 0, String::new()))
+                        }
+                        LiveEvent::Click(8) => {
+                            pins::launch("ms-settings:bluetooth".to_owned());
+                            LiveOutcome::Close
+                        }
+                        LiveEvent::TextCommit { id: 50, text } => {
+                            if (1..=64).contains(&text.len())
+                                && let Ok(g) = self.bt_battery.lock()
+                                && let Some(d) = g.devices.first()
+                            {
+                                let mut map = setting_value(settings, "WirelessDeviceAliases")
+                                    .and_then(|v| v.as_object().cloned())
+                                    .unwrap_or_default();
+                                map.insert(d.name.clone(), serde_json::json!(text));
+                                set_setting(settings, "WirelessDeviceAliases", serde_json::json!(map));
+                            }
+                            LiveOutcome::Update(build(settings, 0, String::new()))
+                        }
+                        _ => LiveOutcome::Close,
+                    },
+                );
+                return true;
             }
-            // Exact C# `StorageWidget` expanded drives flyout
+            // C# `StorageWidget` expanded drives flyout (DriveType.Fixed && IsReady).
             "storage" => {
-                let drives = sample_drives();
+                let drives = fixed_ready_drives();
                 let mut blocks: Vec<FlyoutBlock> = drives
                     .iter()
                     .take(6)
@@ -1752,9 +2419,12 @@ impl WidgetRuntime {
                 };
                 let _ = flyout::show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec);
             }
-            // Exact C# `FocusWidget.BuildFocusFlyout` (live in-place presets + Reset + Start/Pause)
+            // C# `FocusWidget.BuildFocusFlyout` — Break phase + session number + pulse.
             "focus" => {
-                let init = self.build_focus_spec();
+                let build = || {
+                    focus_break::build_focus_flyout(&self.focus.snapshot())
+                };
+                let init = build();
                 flyout::show_flyout_live(
                     "focus",
                     owner_hwnd,
@@ -1764,22 +2434,30 @@ impl WidgetRuntime {
                     init,
                     |ev| match ev {
                         LiveEvent::Click(1) => {
-                            if self.focus_remaining_secs == 0 {
-                                self.focus_remaining_secs = self.focus_preset_mins * 60;
-                            }
-                            self.focus_running = !self.focus_running;
-                            LiveOutcome::Update(self.build_focus_spec())
+                            self.focus.with_mut(|s| s.toggle());
+                            let snap = self.focus.snapshot();
+                            self.focus_running = snap.running;
+                            self.focus_remaining_secs = snap.remaining_secs;
+                            LiveOutcome::Update(build())
                         }
                         LiveEvent::Click(2) => {
-                            self.focus_running = false;
-                            self.focus_remaining_secs = self.focus_preset_mins * 60;
-                            LiveOutcome::Update(self.build_focus_spec())
+                            self.focus.with_mut(|s| s.reset());
+                            LiveOutcome::Update(build())
+                        }
+                        LiveEvent::Click(4) => {
+                            let event = self.focus.with_mut(|s| {
+                                s.skip_phase();
+                                FocusEvent::PhaseEnded(s.phase)
+                            });
+                            if matches!(event, Some(FocusEvent::PhaseEnded(_))) {
+                                play_break_chime();
+                            }
+                            LiveOutcome::Update(build())
                         }
                         LiveEvent::Click(mins @ (15 | 25 | 50)) => {
-                            self.focus_preset_mins = u64::from(mins);
-                            self.focus_remaining_secs = self.focus_preset_mins * 60;
-                            self.focus_running = false;
-                            LiveOutcome::Update(self.build_focus_spec())
+                            self.focus
+                                .with_mut(|s| s.set_focus_minutes(u64::from(mins)));
+                            LiveOutcome::Update(build())
                         }
                         _ => LiveOutcome::Close,
                     },
@@ -1843,69 +2521,42 @@ impl WidgetRuntime {
                             self.countdown_running = false;
                             LiveOutcome::Update(self.build_countdown_spec())
                         }
+                        // C2 TextCommit — custom duration with 1-1440 minute validation.
+                        LiveEvent::TextCommit { id: 50, text } => {
+                            if let Ok(mins) = text.trim().parse::<u64>()
+                                && (1..=1440).contains(&mins)
+                            {
+                                self.countdown_total_secs = mins * 60;
+                                self.countdown_remaining_secs = self.countdown_total_secs;
+                                self.countdown_running = false;
+                            }
+                            LiveOutcome::Update(self.build_countdown_spec())
+                        }
                         _ => LiveOutcome::Close,
                     },
                 );
             }
             "media" => {
                 telemetry::refresh_media_session(&self.media_session, true);
-                let build_media_spec = |media: &Arc<Mutex<telemetry::MediaSessionSnapshot>>| {
-                    let snap = media.lock().ok().map(|g| g.clone()).unwrap_or_default();
-                    let has_track = !snap.title.is_empty();
-                    let mut blocks = vec![FlyoutBlock::Hero {
-                        value: if has_track {
-                            snap.title.clone()
-                        } else {
-                            "Nothing Playing".to_owned()
-                        },
-                        caption: if !snap.artist.is_empty() {
-                            Some(snap.artist.clone())
-                        } else if has_track {
-                            Some(if snap.playing { "Playing" } else { "Paused" }.to_owned())
-                        } else {
-                            Some("Start playback in any media app".to_owned())
-                        },
-                        centered: false,
-                        large: false,
-                        right_meta: if has_track {
-                            Some(if snap.playing { "Playing" } else { "Paused" }.to_owned())
-                        } else {
-                            None
-                        },
-                    }];
-                    if snap.duration_secs > 0 {
-                        let ratio =
-                            (snap.position_secs as f32 / snap.duration_secs as f32).clamp(0.0, 1.0);
-                        blocks.push(FlyoutBlock::ProgressBar {
-                            label: format_mm_ss(snap.position_secs),
-                            value_text: format_mm_ss(snap.duration_secs),
-                            ratio,
-                            tone: BarTone::Accent,
-                        });
-                    }
-                    blocks.push(FlyoutBlock::ButtonBar(vec![
-                        (1, "Previous".to_owned(), false),
-                        (
-                            2,
-                            if snap.playing { "Pause" } else { "Play" }.to_owned(),
-                            true,
-                        ),
-                        (3, "Next".to_owned(), false),
-                    ]));
-                    blocks.push(FlyoutBlock::Separator);
-                    blocks.push(FlyoutBlock::ButtonBar(vec![(
+                let build = |runtime: &Self| {
+                    let snap = runtime
+                        .media_session
+                        .lock()
+                        .ok()
+                        .map(|g| g.clone())
+                        .unwrap_or_default();
+                    let details = media_ext::get_details(&snap, runtime.audio_vol, runtime.audio_muted);
+                    let sessions = media_ext::list_app_sessions();
+                    let mut spec = media_ext::build_media_flyout(&details, &sessions, settings);
+                    spec.blocks.push(FlyoutBlock::Separator);
+                    spec.blocks.push(FlyoutBlock::ButtonBar(vec![(
                         4,
                         "Sound Settings".to_owned(),
                         false,
                     )]));
-                    FlyoutSpec {
-                        title: "Media".to_owned(),
-                        subtitle: None,
-                        width_dips: 300.0,
-                        blocks,
-                    }
+                    spec
                 };
-                let init = build_media_spec(&self.media_session);
+                let init = build(self);
                 flyout::show_flyout_live(
                     "media",
                     owner_hwnd,
@@ -1917,21 +2568,42 @@ impl WidgetRuntime {
                         LiveEvent::Click(1) => {
                             telemetry::send_media_vk(VK_MEDIA_PREV_TRACK);
                             telemetry::refresh_media_session(&self.media_session, true);
-                            LiveOutcome::Update(build_media_spec(&self.media_session))
+                            LiveOutcome::Update(build(self))
                         }
                         LiveEvent::Click(2) => {
                             telemetry::send_media_vk(VK_MEDIA_PLAY_PAUSE);
                             telemetry::refresh_media_session(&self.media_session, true);
-                            LiveOutcome::Update(build_media_spec(&self.media_session))
+                            LiveOutcome::Update(build(self))
                         }
                         LiveEvent::Click(3) => {
                             telemetry::send_media_vk(VK_MEDIA_NEXT_TRACK);
                             telemetry::refresh_media_session(&self.media_session, true);
-                            LiveOutcome::Update(build_media_spec(&self.media_session))
+                            LiveOutcome::Update(build(self))
                         }
                         LiveEvent::Click(4) => {
                             pins::launch("ms-settings:sound".to_owned());
                             LiveOutcome::Close
+                        }
+                        LiveEvent::Click(60) => {
+                            toggle_audio_mute();
+                            (self.audio_vol, self.audio_muted) = get_audio_state();
+                            LiveOutcome::Update(build(self))
+                        }
+                        // C2 LiveEvent::Seek — C4 `telemetry::media_seek(secs)`.
+                        LiveEvent::Seek { id: 50, ratio } => {
+                            let dur = self
+                                .media_session
+                                .lock()
+                                .ok()
+                                .map_or(0, |g| g.duration_secs as u32);
+                            telemetry::media_seek((ratio * dur as f32).round() as u32);
+                            telemetry::refresh_media_session(&self.media_session, true);
+                            LiveOutcome::Update(build(self))
+                        }
+                        LiveEvent::Slider { id: 51, ratio } => {
+                            set_audio_volume((ratio * 100.0).round() as u32);
+                            (self.audio_vol, self.audio_muted) = get_audio_state();
+                            LiveOutcome::Update(build(self))
                         }
                         _ => LiveOutcome::Close,
                     },
@@ -1939,7 +2611,15 @@ impl WidgetRuntime {
             }
             "quicksettings" => {
                 let mut settings_changed = false;
-                let build_qs_spec = |settings: &DockSettings, night_light: bool| {
+                // C# `Radio*` states: Loading / TurningOn / TurningOff / On / Off / Unavailable.
+                let wifi_state = radio_label(self.wifi_on, self.radio_loading).to_owned();
+                let bt_state = radio_label(self.bluetooth_on, self.radio_loading).to_owned();
+                let build_qs_spec = |settings: &DockSettings,
+                                     night_light: bool,
+                                     wifi_state: &str,
+                                     bt_state: &str,
+                                     wifi_on: bool,
+                                     bt_on: bool| {
                     let (vol, muted) = get_audio_state();
                     let out_name = telemetry::default_audio_device_name(false)
                         .unwrap_or_else(|| "Speakers".to_owned());
@@ -1959,6 +2639,18 @@ impl WidgetRuntime {
                         width_dips: 312.0,
                         blocks: vec![
                             FlyoutBlock::ToggleGrid(vec![
+                                (
+                                    5,
+                                    "Wi-Fi".to_owned(),
+                                    wifi_state.to_owned(),
+                                    wifi_on,
+                                ),
+                                (
+                                    6,
+                                    "Bluetooth".to_owned(),
+                                    bt_state.to_owned(),
+                                    bt_on,
+                                ),
                                 (
                                     1,
                                     "Focus Mode".to_owned(),
@@ -1999,10 +2691,27 @@ impl WidgetRuntime {
                                 slider_id: 10,
                             },
                             FlyoutBlock::Separator,
-                            FlyoutBlock::ButtonBar(vec![
-                                (5, "Wi-Fi".to_owned(), false),
-                                (6, "Bluetooth".to_owned(), false),
-                            ]),
+                            // C2 `IconBar` — 16 C# Control Center shortcuts (ms-settings URIs).
+                            FlyoutBlock::IconBar {
+                                buttons: vec![
+                                    (100, "Wi-Fi".to_owned(), 0xE701, wifi_on),
+                                    (101, "Bluetooth".to_owned(), 0xE702, bt_on),
+                                    (102, "Airplane mode".to_owned(), 0xF71D, true),
+                                    (103, "Night Light".to_owned(), 0xE708, night_light),
+                                    (104, "Battery saver".to_owned(), 0xE7EF, true),
+                                    (105, "Focus assist".to_owned(), 0xF4B9, settings.focus_mode),
+                                    (106, "Display".to_owned(), 0xE7F3, true),
+                                    (107, "Sound".to_owned(), 0xE7F5, true),
+                                    (108, "Network".to_owned(), 0xE705, true),
+                                    (109, "VPN".to_owned(), 0xE7A2, true),
+                                    (110, "Nearby sharing".to_owned(), 0xE8D2, true),
+                                    (111, "Project".to_owned(), 0xE7F6, true),
+                                    (112, "Tablet mode".to_owned(), 0xE7F9, true),
+                                    (113, "Mobile hotspot".to_owned(), 0xE7B7, true),
+                                    (114, "Date & time".to_owned(), 0xE7F2, true),
+                                    (115, "Taskbar".to_owned(), 0xE7F7, true),
+                                ],
+                            },
                             FlyoutBlock::ButtonBar(vec![
                                 (8, "Settings".to_owned(), true),
                                 (9, "Show Desktop".to_owned(), false),
@@ -2010,7 +2719,14 @@ impl WidgetRuntime {
                         ],
                     }
                 };
-                let init = build_qs_spec(settings, self.night_light_on);
+                let init = build_qs_spec(
+                    settings,
+                    self.night_light_on,
+                    &wifi_state,
+                    &bt_state,
+                    self.wifi_on,
+                    self.bluetooth_on,
+                );
                 flyout::show_flyout_live(
                     "quicksettings",
                     owner_hwnd,
@@ -2022,7 +2738,14 @@ impl WidgetRuntime {
                         LiveEvent::Click(1) => {
                             settings.focus_mode = !settings.focus_mode;
                             settings_changed = true;
-                            LiveOutcome::Update(build_qs_spec(settings, self.night_light_on))
+                            LiveOutcome::Update(build_qs_spec(
+                                settings,
+                                self.night_light_on,
+                                &wifi_state,
+                                &bt_state,
+                                self.wifi_on,
+                                self.bluetooth_on,
+                            ))
                         }
                         LiveEvent::Click(2) => {
                             settings.auto_hide = match settings.auto_hide {
@@ -2031,7 +2754,14 @@ impl WidgetRuntime {
                                 AutoHideMode::Always => AutoHideMode::Disabled,
                             };
                             settings_changed = true;
-                            LiveOutcome::Update(build_qs_spec(settings, self.night_light_on))
+                            LiveOutcome::Update(build_qs_spec(
+                                settings,
+                                self.night_light_on,
+                                &wifi_state,
+                                &bt_state,
+                                self.wifi_on,
+                                self.bluetooth_on,
+                            ))
                         }
                         LiveEvent::Click(3) => {
                             settings.theme = match settings.theme {
@@ -2040,24 +2770,88 @@ impl WidgetRuntime {
                                 AppTheme::Light => AppTheme::System,
                             };
                             settings_changed = true;
-                            LiveOutcome::Update(build_qs_spec(settings, self.night_light_on))
+                            LiveOutcome::Update(build_qs_spec(
+                                settings,
+                                self.night_light_on,
+                                &wifi_state,
+                                &bt_state,
+                                self.wifi_on,
+                                self.bluetooth_on,
+                            ))
                         }
                         LiveEvent::Click(4) => {
                             toggle_audio_mute();
                             (self.audio_vol, self.audio_muted) = get_audio_state();
-                            LiveOutcome::Update(build_qs_spec(settings, self.night_light_on))
+                            LiveOutcome::Update(build_qs_spec(
+                                settings,
+                                self.night_light_on,
+                                &wifi_state,
+                                &bt_state,
+                                self.wifi_on,
+                                self.bluetooth_on,
+                            ))
                         }
                         LiveEvent::Slider { id: 10, ratio } => {
                             set_audio_volume((ratio * 100.0).round() as u32);
                             (self.audio_vol, self.audio_muted) = get_audio_state();
-                            LiveOutcome::Update(build_qs_spec(settings, self.night_light_on))
+                            LiveOutcome::Update(build_qs_spec(
+                                settings,
+                                self.night_light_on,
+                                &wifi_state,
+                                &bt_state,
+                                self.wifi_on,
+                                self.bluetooth_on,
+                            ))
                         }
                         LiveEvent::Click(5) => {
-                            pins::launch("ms-settings:network-wifi".to_owned());
-                            LiveOutcome::Close
+                            // C4 `platform::radio::set` — real WinRT Wi-Fi toggle.
+                            let target = !self.wifi_on;
+                            if crate::platform::radio::set("wifi", target) {
+                                self.wifi_on = target;
+                            } else {
+                                self.radio_unavailable = true;
+                                pins::launch("ms-settings:network-wifi".to_owned());
+                            }
+                            let cur_wifi = if self.radio_unavailable {
+                                "Unavailable".to_owned()
+                            } else {
+                                radio_label(self.wifi_on, false).to_owned()
+                            };
+                            LiveOutcome::Update(build_qs_spec(
+                                settings,
+                                self.night_light_on,
+                                &cur_wifi,
+                                &bt_state,
+                                self.wifi_on,
+                                self.bluetooth_on,
+                            ))
                         }
                         LiveEvent::Click(6) => {
-                            pins::launch("ms-settings:bluetooth".to_owned());
+                            // C4 `platform::radio::set` — real WinRT Bluetooth toggle.
+                            let target = !self.bluetooth_on;
+                            if crate::platform::radio::set("bluetooth", target) {
+                                self.bluetooth_on = target;
+                            } else {
+                                self.radio_unavailable = true;
+                                pins::launch("ms-settings:bluetooth".to_owned());
+                            }
+                            let cur_bt = if self.radio_unavailable {
+                                "Unavailable".to_owned()
+                            } else {
+                                radio_label(self.bluetooth_on, false).to_owned()
+                            };
+                            LiveOutcome::Update(build_qs_spec(
+                                settings,
+                                self.night_light_on,
+                                &wifi_state,
+                                &cur_bt,
+                                self.wifi_on,
+                                self.bluetooth_on,
+                            ))
+                        }
+                        LiveEvent::Click(id @ 100..=115) => {
+                            let uri = shortcut_uri(id);
+                            pins::launch(uri.to_owned());
                             LiveOutcome::Close
                         }
                         LiveEvent::Click(7) => {
@@ -2066,7 +2860,14 @@ impl WidgetRuntime {
                             } else {
                                 pins::launch("ms-settings:nightlight".to_owned());
                             }
-                            LiveOutcome::Update(build_qs_spec(settings, self.night_light_on))
+                            LiveOutcome::Update(build_qs_spec(
+                                settings,
+                                self.night_light_on,
+                                &wifi_state,
+                                &bt_state,
+                                self.wifi_on,
+                                self.bluetooth_on,
+                            ))
                         }
                         LiveEvent::Click(8) => {
                             crate::ui::settings::spawn_settings_window();
