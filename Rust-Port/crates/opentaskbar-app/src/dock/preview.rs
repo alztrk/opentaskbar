@@ -20,7 +20,9 @@ use windows_sys::Win32::Graphics::Gdi::{
     DrawTextW, EndPaint, FillRect, InvalidateRect, LineTo, MoveToEx, PAINTSTRUCT, PS_SOLID,
     RoundRect, SRCCOPY, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use std::sync::OnceLock;
+
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
 };
@@ -34,23 +36,41 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::platform::win32;
 
-// `DwmActivateLivePreview` starts Aero Peek for a window; `DwmDeactivateLivePreview`
-// ends it. Missing/older DWM versions simply no-op.
-#[link(name = "dwmapi")]
-unsafe extern "system" {
-    fn DwmActivateLivePreview(hwnd: HWND, color: u32, kind: i32, flags: u32) -> i32;
-    fn DwmDeactivateLivePreview() -> i32;
+type DwmActivateFn = unsafe extern "system" fn(HWND, u32, i32, u32) -> i32;
+type DwmDeactivateFn = unsafe extern "system" fn() -> i32;
+
+// Resolve optional DWM live-preview exports dynamically so linking succeeds against standard
+// Windows SDK `dwmapi.lib`, which does not export these symbols by name.
+fn dwm_live_preview_fns() -> (Option<DwmActivateFn>, Option<DwmDeactivateFn>) {
+    static FNS: OnceLock<(Option<DwmActivateFn>, Option<DwmDeactivateFn>)> = OnceLock::new();
+    *FNS.get_or_init(|| unsafe {
+        let dll: Vec<u16> = "dwmapi.dll\0".encode_utf16().collect();
+        let hmod = GetModuleHandleW(dll.as_ptr());
+        if hmod.is_null() {
+            return (None, None);
+        }
+        let act = GetProcAddress(hmod, c"DwmActivateLivePreview".as_ptr().cast())
+            .map(|f| std::mem::transmute::<unsafe extern "system" fn() -> isize, DwmActivateFn>(f));
+        let deact = GetProcAddress(hmod, c"DwmDeactivateLivePreview".as_ptr().cast()).map(|f| {
+            std::mem::transmute::<unsafe extern "system" fn() -> isize, DwmDeactivateFn>(f)
+        });
+        (act, deact)
+    })
 }
 
-/// Activates Aero Peek on the first thumbnail's source window.
+/// Activates Aero Peek on the first thumbnail's source window when the export is present.
 pub fn activate_live_preview(hwnd: usize) -> bool {
-    // SAFETY: DWM validates the window handle; kind 0 == DWM_LIVE_PREVIEW_KIND_PEEK.
-    unsafe { DwmActivateLivePreview(hwnd as HWND, 0, 0, 0) == 0 }
+    let Some(f) = dwm_live_preview_fns().0 else {
+        return false;
+    };
+    unsafe { f(hwnd as HWND, 0, 0, 0) == 0 }
 }
 
 pub fn deactivate_live_preview() {
-    unsafe {
-        let _ = DwmDeactivateLivePreview();
+    if let Some(f) = dwm_live_preview_fns().1 {
+        unsafe {
+            let _ = f();
+        }
     }
 }
 
