@@ -432,6 +432,42 @@ pub fn is_supported_widget_id(id: &str) -> bool {
         .any(|known| known.eq_ignore_ascii_case(id))
 }
 
+/// Maps a UI catalog ID or legacy alias to the exact ID persisted by C#
+/// `DockWidgetService` (`Widgets` / `InstalledWidgets` are validated against case-sensitive
+/// PascalCase IDs). The Rust settings page uses snake_case catalog IDs such as `stats`,
+/// `aiusage_claude` and `keyboard`; writing those verbatim made the next `load_from()` reject
+/// the whole file as `UnsupportedWidgetId`, which is the "widgets vanished after adding a few"
+/// failure. Normalizing every ID at the settings boundary keeps both builds reading the same
+/// file and keeps `validate()`'s `enabled ⊆ installed` rule satisfiable.
+pub fn canonical_widget_setting_id(id: &str) -> &str {
+    let id = id.trim();
+    if let Some(canonical) = SUPPORTED_WIDGET_IDS
+        .iter()
+        .find(|known| known.eq_ignore_ascii_case(id))
+    {
+        return canonical;
+    }
+    let compact: String = id
+        .chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .flat_map(char::to_lowercase)
+        .collect();
+    if let Some(canonical) = SUPPORTED_WIDGET_IDS.iter().find(|known| {
+        known
+            .chars()
+            .filter(|c| *c != '_' && *c != '-')
+            .flat_map(char::to_lowercase)
+            .eq(compact.chars())
+    }) {
+        return canonical;
+    }
+    match compact.as_str() {
+        "stats" => "SystemStats",
+        "keyboard" => "KeyboardLayout",
+        _ => id,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct DockAppGroup {
@@ -1078,38 +1114,47 @@ impl DockSettings {
     }
 
     pub fn is_widget_enabled(&self, id: &str) -> bool {
-        if self.focus_mode && !id.eq_ignore_ascii_case("focus") && !id.eq_ignore_ascii_case("clock")
+        let id = canonical_widget_setting_id(id);
+        // C# `WidgetCoordinator.Apply` deactivates every widget while Focus Mode is on. Clock and
+        // Focus stay available in this port because the focus timer is the mode's visible control.
+        if self.focus_mode && !id.eq_ignore_ascii_case("Focus") && !id.eq_ignore_ascii_case("Clock")
         {
             return false;
         }
-        if id.eq_ignore_ascii_case("clock") && self.show_clock_widget {
+        if id.eq_ignore_ascii_case("Clock") && self.show_clock_widget {
             return true;
         }
-        if id.eq_ignore_ascii_case("stats") && self.show_system_stats_widget {
+        if id.eq_ignore_ascii_case("SystemStats") && self.show_system_stats_widget {
             return true;
         }
+        // Compare canonical IDs so files written by older port builds (lowercase/snake_case) and
+        // files written by C# (PascalCase) both resolve to the same widget.
         self.enabled_widgets
             .iter()
-            .any(|w| w.eq_ignore_ascii_case(id))
+            .any(|w| canonical_widget_setting_id(w).eq_ignore_ascii_case(id))
     }
 
     pub fn set_widget_enabled(&mut self, id: &str, enabled: bool) {
-        if id.eq_ignore_ascii_case("clock") {
+        let id = canonical_widget_setting_id(id);
+        if id.eq_ignore_ascii_case("Clock") {
             self.show_clock_widget = enabled;
         }
-        if id.eq_ignore_ascii_case("stats") {
+        if id.eq_ignore_ascii_case("SystemStats") {
             self.show_system_stats_widget = enabled;
         }
+        let is_same = |w: &String| canonical_widget_setting_id(w).eq_ignore_ascii_case(id);
         if enabled {
-            if !self
-                .enabled_widgets
-                .iter()
-                .any(|w| w.eq_ignore_ascii_case(id))
-            {
+            if !self.enabled_widgets.iter().any(is_same) {
                 self.enabled_widgets.push(id.to_owned());
             }
+            // C# keeps a widget installed when only its switch is turned off, so enabling one
+            // must also add it to `InstalledWidgets` or the next `Validate()` rejects the file
+            // and `load_from()` resets every setting to defaults.
+            if !self.installed_widgets.iter().any(is_same) {
+                self.installed_widgets.push(id.to_owned());
+            }
         } else {
-            self.enabled_widgets.retain(|w| !w.eq_ignore_ascii_case(id));
+            self.enabled_widgets.retain(|w| !is_same(w));
         }
     }
 }
@@ -1513,6 +1558,33 @@ fn replace_ai_usage_in(list: &mut Vec<String>, replacement: &[String]) {
     *list = next;
 }
 
+/// Canonicalizes saved widget IDs and drops case-insensitive duplicates, matching C#'s
+/// `Distinct(StringComparer.OrdinalIgnoreCase)` on widget lists.
+fn normalize_widget_ids(list: &mut Vec<String>) {
+    let mut seen = BTreeSet::new();
+    let mut next = Vec::with_capacity(list.len());
+    for id in list.drain(..) {
+        let canonical = canonical_widget_setting_id(&id).to_owned();
+        if seen.insert(ordinal_ignore_case_key(&canonical)) {
+            next.push(canonical);
+        }
+    }
+    *list = next;
+}
+
+/// Repairs `enabled ⊆ installed` by deriving installed from enabled, mirroring C#
+/// `DockProfileService.MergeInstalledWidgets`. Rejecting the whole settings file for this one
+/// legacy inconsistency destroyed every other preference; a union preserves them all.
+fn repair_widget_lists(enabled: &mut Vec<String>, installed: &mut Vec<String>) {
+    normalize_widget_ids(enabled);
+    normalize_widget_ids(installed);
+    for id in enabled.iter() {
+        if !installed.iter().any(|w| w.eq_ignore_ascii_case(id)) {
+            installed.push(id.clone());
+        }
+    }
+}
+
 impl DockSettings {
     /// Re-applies the legacy migrations to already-deserialized settings (no raw JSON needed).
     pub fn migrate_legacy(&mut self) {
@@ -1638,9 +1710,15 @@ impl DockSettings {
             self.ai_usage_providers = 0;
         }
 
-        // C# treats an absent InstalledWidgets list as "exactly the enabled widgets".
-        if self.installed_widgets.is_empty() && !self.enabled_widgets.is_empty() {
-            self.installed_widgets = self.enabled_widgets.clone();
+        // C# treats an absent InstalledWidgets list as "exactly the enabled widgets" and merges
+        // enabled IDs into it when applying a profile. Older port builds wrote only the enabled
+        // list (and snake_case IDs), leaving files that `Validate()` rejected wholesale. Repair
+        // the invariant here instead of resetting every setting to defaults.
+        repair_widget_lists(&mut self.enabled_widgets, &mut self.installed_widgets);
+        normalize_widget_ids(&mut self.widget_order);
+        for profile in &mut self.profiles {
+            repair_widget_lists(&mut profile.enabled_widgets, &mut profile.installed_widgets);
+            normalize_widget_ids(&mut profile.widget_order);
         }
 
         // Tray pins: trim, drop invalid/duplicate keys, cap at the C# limit.

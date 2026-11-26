@@ -198,6 +198,182 @@ fn csharp_settings_file_survives_load_save_load() {
 }
 
 #[test]
+fn enabling_a_widget_installs_it_and_uses_csharp_ids() {
+    let mut settings = DockSettings::default();
+
+    // The settings page passes its snake_case catalog IDs; C# validates PascalCase IDs.
+    settings.set_widget_enabled("aiusage_claude", true);
+    assert!(settings.is_widget_enabled("aiusage_claude"));
+    assert!(settings.is_widget_enabled("AiUsageClaude"));
+    assert_eq!(settings.enabled_widgets, ["AiUsageClaude"]);
+    assert_eq!(settings.installed_widgets, ["AiUsageClaude"]);
+    assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+
+    // Repeated toggles must not create case-insensitive duplicates.
+    settings.set_widget_enabled("AiUsageClaude", true);
+    settings.set_widget_enabled("aiusage_claude", true);
+    assert_eq!(settings.enabled_widgets, ["AiUsageClaude"]);
+    assert_eq!(settings.installed_widgets, ["AiUsageClaude"]);
+
+    // Turning the switch off deactivates but never uninstalls (C# keeps `InstalledWidgets`).
+    settings.set_widget_enabled("aiusage_claude", false);
+    assert!(!settings.is_widget_enabled("aiusage_claude"));
+    assert!(settings.enabled_widgets.is_empty());
+    assert_eq!(settings.installed_widgets, ["AiUsageClaude"]);
+    assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+}
+
+#[test]
+fn clock_and_stats_toggles_keep_special_flags_consistent() {
+    let mut settings = DockSettings::default();
+
+    settings.set_widget_enabled("stats", true);
+    assert!(settings.show_system_stats_widget);
+    assert!(settings.is_widget_enabled("stats"));
+    assert_eq!(settings.enabled_widgets, ["SystemStats"]);
+    assert_eq!(settings.installed_widgets, ["SystemStats"]);
+    settings.set_widget_enabled("stats", false);
+    assert!(!settings.show_system_stats_widget);
+    assert!(!settings.is_widget_enabled("stats"));
+    assert_eq!(settings.installed_widgets, ["SystemStats"]);
+
+    settings.set_widget_enabled("clock", true);
+    assert!(settings.show_clock_widget);
+    assert!(settings.is_widget_enabled("clock"));
+    assert_eq!(settings.enabled_widgets, ["Clock"]);
+    assert!(settings.installed_widgets.iter().any(|id| id == "Clock"));
+    settings.set_widget_enabled("clock", false);
+    assert!(!settings.show_clock_widget);
+    assert!(!settings.is_widget_enabled("clock"));
+    assert!(
+        settings
+            .installed_widgets
+            .iter()
+            .any(|id| id.eq_ignore_ascii_case("Clock"))
+    );
+    assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+}
+
+#[test]
+fn legacy_settings_with_missing_installed_widgets_are_repaired_not_reset() {
+    let (dir, path) = temp_settings("repair-subset");
+    fs::write(
+        &path,
+        r#"{
+          "Theme": "Dark",
+          "WeatherCity": "Izmir",
+          "Widgets": ["Clock", "Media", "Focus"],
+          "InstalledWidgets": ["Clock"]
+        }"#,
+    )
+    .unwrap();
+
+    let loaded = load_from(&path);
+    assert_eq!(loaded.theme, AppTheme::Dark);
+    assert_eq!(loaded.weather_city, "Izmir");
+    assert_eq!(loaded.enabled_widgets, ["Clock", "Media", "Focus"]);
+    for id in ["Clock", "Media", "Focus"] {
+        assert!(
+            loaded
+                .installed_widgets
+                .iter()
+                .any(|installed| installed.eq_ignore_ascii_case(id)),
+            "{id} must be derived into InstalledWidgets: {:?}",
+            loaded.installed_widgets
+        );
+    }
+    assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
+    assert!(
+        !fs::read_dir(&dir).unwrap().flatten().any(|e| e
+            .file_name()
+            .to_string_lossy()
+            .starts_with("settings.json.invalid-")),
+        "a repairable file must not be backed up as invalid"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn legacy_lowercase_catalog_ids_are_canonicalized_on_load() {
+    let (dir, path) = temp_settings("repair-ids");
+    fs::write(
+        &path,
+        r#"{
+          "Widgets": ["stats", "aiusage_claude", "keyboard"],
+          "InstalledWidgets": []
+        }"#,
+    )
+    .unwrap();
+
+    let loaded = load_from(&path);
+    assert_eq!(
+        loaded.enabled_widgets,
+        ["SystemStats", "AiUsageClaude", "KeyboardLayout"]
+    );
+    assert_eq!(loaded.installed_widgets, loaded.enabled_widgets);
+    for id in ["stats", "aiusage_claude", "keyboard"] {
+        assert!(loaded.is_widget_enabled(id), "{id} must stay active");
+    }
+    assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
+
+    save_to(&path, &loaded).unwrap();
+    let reloaded = load_from(&path);
+    assert_eq!(reloaded, loaded);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn adding_three_widgets_survives_a_reload() {
+    let (dir, path) = temp_settings("three-widgets");
+    let mut settings = DockSettings::default();
+    for id in ["weather", "aiusage_claude", "media"] {
+        settings.set_widget_enabled(id, true);
+    }
+    assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+    save_to(&path, &settings).unwrap();
+
+    let loaded = load_from(&path);
+    for id in ["Weather", "AiUsageClaude", "Media"] {
+        assert!(
+            loaded.is_widget_enabled(id),
+            "{id} must be active after reload"
+        );
+        assert!(
+            loaded
+                .installed_widgets
+                .iter()
+                .any(|installed| installed.eq_ignore_ascii_case(id)),
+            "{id} must be installed after reload"
+        );
+    }
+    assert_eq!(loaded.enabled_widgets.len(), 3);
+    assert_eq!(loaded.installed_widgets.len(), 3);
+    assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn focus_mode_hides_widgets_like_csharp() {
+    let mut settings = DockSettings::default();
+    settings.set_widget_enabled("weather", true);
+    settings.set_widget_enabled("focus", true);
+
+    settings.focus_mode = true;
+    assert!(
+        !settings.is_widget_enabled("weather"),
+        "C# WidgetCoordinator deactivates widgets in Focus Mode"
+    );
+    assert!(
+        settings.is_widget_enabled("focus"),
+        "the Focus timer stays visible in this port"
+    );
+
+    settings.focus_mode = false;
+    assert!(settings.is_widget_enabled("weather"));
+    assert!(settings.is_widget_enabled("focus"));
+}
+
+#[test]
 fn all_new_csharp_properties_deserialize() {
     let raw = r#"{
         "PreviewsEnabled": false,

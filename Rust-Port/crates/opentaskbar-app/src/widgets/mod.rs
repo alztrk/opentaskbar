@@ -43,8 +43,9 @@ use telemetry::{BluetoothBatteryDevice, BluetoothDeviceKind};
 #[allow(unused_imports)]
 pub use catalog_ops::{
     SHOW_DESKTOP_WIDGET, ShrinkPriority, WIDGET_ALIASES, WidgetDensity, WidgetLayout, WidgetOption,
-    canonical_widget_id, catalog, hardware_available, set_setting, setting_bool, setting_f64,
-    setting_i64, setting_str, setting_string_list, setting_value, widget_layout,
+    canonical_widget_id, catalog, hardware_available, installed_catalog_widget_ids,
+    is_widget_installed, set_setting, setting_bool, setting_f64, setting_i64, setting_str,
+    setting_string_list, setting_value, widget_layout,
 };
 #[allow(unused_imports)]
 pub use focus_break::{FocusEvent, FocusPhase, FocusSession, SharedFocusSession, play_break_chime};
@@ -240,6 +241,11 @@ pub fn widget_descriptor(id: &str) -> Option<&'static WidgetDescriptor> {
     ALL_WIDGETS.iter().find(|w| w.id.eq_ignore_ascii_case(id))
 }
 
+/// Widgets currently rendered on the dock. This deliberately reads the *effective* enabled state
+/// from `DockSettings::is_widget_enabled` (not the raw `Widgets`/`InstalledWidgets` arrays): the
+/// core canonicalizes IDs and keeps those arrays consistent when a widget is toggled, so the dock
+/// sees a newly installed+enabled widget on the next settings reload. Focus Mode hides widgets
+/// here just as C# `WidgetCoordinator.Apply` does.
 pub fn active_widgets(settings: &DockSettings) -> Vec<&'static WidgetDescriptor> {
     let mut out: Vec<&'static WidgetDescriptor> = ALL_WIDGETS
         .iter()

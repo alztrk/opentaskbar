@@ -43,9 +43,17 @@ pub fn canonical_widget_id(id: &str) -> &str {
     {
         return canonical;
     }
+    // C# writes `AiUsageClaude` / `KeyboardLayout` while the catalog uses `aiusage_claude` /
+    // `keyboard`; ignore word separators so both spellings resolve to the same card.
+    let compact: String = lower.chars().filter(|c| *c != '_' && *c != '-').collect();
     ALL_WIDGETS
         .iter()
-        .find(|w| w.id.eq_ignore_ascii_case(&lower))
+        .find(|w| {
+            w.id.chars()
+                .filter(|c| *c != '_' && *c != '-')
+                .collect::<String>()
+                == compact
+        })
         .map_or(id, |w| w.id)
 }
 
@@ -254,6 +262,25 @@ pub fn setting_string_list(settings: &DockSettings, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// C# `InstalledWidgets` IDs normalized to the lowercase catalog space used by `ALL_WIDGETS`
+/// and `active_widgets`. `InstalledWidgets` is written in C# PascalCase (`SystemStats`,
+/// `AiUsageClaude`, ...), so comparing it directly with a catalog ID would always report a
+/// widget as missing even after the settings page installed it.
+pub fn installed_catalog_widget_ids(settings: &DockSettings) -> Vec<String> {
+    setting_string_list(settings, "InstalledWidgets")
+        .into_iter()
+        .map(|id| canonical_widget_id(&id).to_owned())
+        .collect()
+}
+
+/// Whether a catalog ID is present in the persisted `InstalledWidgets` list.
+pub fn is_widget_installed(id: &str, settings: &DockSettings) -> bool {
+    let canonical = canonical_widget_id(id);
+    installed_catalog_widget_ids(settings)
+        .iter()
+        .any(|installed| installed.eq_ignore_ascii_case(canonical))
+}
+
 /// Resolved layout for a widget: effective density, shrink priority, and hardware visibility.
 #[derive(Clone, Copy, Debug)]
 pub struct WidgetLayout {
@@ -362,5 +389,29 @@ mod tests {
         // Typed key is read through the same catalog helper as the extra JSON keys.
         s.weather_city = "Istanbul".to_owned();
         assert_eq!(setting_str(&s, "weather_city").as_deref(), Some("Istanbul"));
+    }
+
+    #[test]
+    fn installing_a_widget_updates_both_catalog_and_installed_views() {
+        let mut s = DockSettings::default();
+        s.set_widget_enabled("aiusage_claude", true);
+        assert!(is_widget_installed("aiusage_claude", &s));
+        assert!(is_widget_installed("AiUsageClaude", &s));
+        assert_eq!(installed_catalog_widget_ids(&s), ["aiusage_claude"]);
+        assert!(
+            crate::widgets::active_widgets(&s)
+                .iter()
+                .any(|w| w.id == "aiusage_claude"),
+            "an installed+enabled widget must be active in the dock"
+        );
+
+        // Disabling keeps it installed, exactly like the C# widget option switch.
+        s.set_widget_enabled("aiusage_claude", false);
+        assert!(is_widget_installed("aiusage_claude", &s));
+        assert!(
+            !crate::widgets::active_widgets(&s)
+                .iter()
+                .any(|w| w.id == "aiusage_claude")
+        );
     }
 }
