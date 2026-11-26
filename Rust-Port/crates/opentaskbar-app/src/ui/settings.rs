@@ -197,6 +197,8 @@ struct SettingsView {
     hotkey_status: String,
     theme_status: String,
     api_key_status: String,
+    weather_suggestions: Vec<widgets::telemetry::GeoLocationMatch>,
+    weather_search_status: String,
     /// A burst of slider/toggle events collapses into one disk write + dock broadcast.
     save_pending: bool,
     update_status: String,
@@ -228,6 +230,8 @@ impl SettingsView {
             hotkey_status: String::new(),
             theme_status: String::new(),
             api_key_status: String::new(),
+            weather_suggestions: Vec::new(),
+            weather_search_status: String::new(),
             save_pending: false,
             update_status: String::new(),
             update_release: None,
@@ -1549,8 +1553,48 @@ impl SettingsView {
         let Some(text) = prompt::ask_name(0, self.is_dark(), &title, &hint, &current) else {
             return;
         };
-        self.settings.weather_city = text.trim().to_owned();
-        self.auto_save(cx);
+        let query = text.trim().to_owned();
+        if query.is_empty() {
+            self.weather_suggestions.clear();
+            self.weather_search_status.clear();
+            return;
+        }
+        let lang = self.settings.language.clone();
+        self.weather_suggestions.clear();
+        self.weather_search_status = loc::t("QuickLoading");
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { widgets::telemetry::search_weather_locations(&query, &lang, 6) })
+                .await;
+            let _ = this.update(cx, |view, cx| {
+                match result {
+                    Ok(list) if list.len() == 1 => {
+                        view.settings.weather_city = list[0].setting_value();
+                        view.weather_suggestions.clear();
+                        view.weather_search_status.clear();
+                        view.auto_save(cx);
+                    }
+                    Ok(list) if !list.is_empty() => {
+                        view.weather_suggestions = list;
+                        view.weather_search_status.clear();
+                        cx.notify();
+                    }
+                    Ok(_) => {
+                        view.weather_suggestions.clear();
+                        view.weather_search_status = loc::t("SettingsSearchEmpty");
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        view.weather_suggestions.clear();
+                        view.weather_search_status = err;
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     fn edit_border_color(&mut self, surface: usize, cx: &mut Context<Self>) {
@@ -3548,6 +3592,43 @@ impl SettingsView {
                             cx.listener(|this, _, _, cx| this.edit_weather_city(cx)),
                         ))
                         .into_any_element(),
+                    if !self.weather_search_status.is_empty() {
+                        div()
+                            .w_full()
+                            .px(px(14.0))
+                            .pb(px(10.0))
+                            .text_size(px(fonts::scaled_size(11.5)))
+                            .text_color(rgba(t.text_secondary))
+                            .child(self.weather_search_status.clone())
+                            .into_any_element()
+                    } else if !self.weather_suggestions.is_empty() {
+                        div()
+                            .w_full()
+                            .px(px(14.0))
+                            .pb(px(12.0))
+                            .flex()
+                            .flex_wrap()
+                            .gap(px(6.0))
+                            .children(self.weather_suggestions.iter().enumerate().map(|(idx, loc_match)| {
+                                let label = loc_match.display_label();
+                                let value = loc_match.setting_value();
+                                button(
+                                    SharedString::from(format!("btn-weather-loc-{idx}")),
+                                    t,
+                                    label,
+                                    ButtonVariant::Secondary,
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.settings.weather_city = value.clone();
+                                        this.weather_suggestions.clear();
+                                        this.weather_search_status.clear();
+                                        this.auto_save(cx);
+                                    }),
+                                )
+                            }))
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    },
                 ],
             )
             .into_any_element(),

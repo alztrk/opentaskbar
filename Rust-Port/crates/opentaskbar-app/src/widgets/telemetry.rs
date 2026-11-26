@@ -2267,6 +2267,108 @@ fn urlencode_query(s: &str) -> String {
     out
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct GeoLocationMatch {
+    pub name: String,
+    pub admin1: String,
+    pub country: String,
+    pub country_code: String,
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+impl GeoLocationMatch {
+    pub fn display_label(&self) -> String {
+        let mut parts = vec![self.name.as_str()];
+        if !self.admin1.is_empty() && !self.admin1.eq_ignore_ascii_case(&self.name) {
+            parts.push(self.admin1.as_str());
+        }
+        if !self.country.is_empty() {
+            parts.push(self.country.as_str());
+        }
+        let base = parts.join(", ");
+        if self.country_code.is_empty() {
+            base
+        } else {
+            format!("{base} ({})", self.country_code)
+        }
+    }
+
+    pub fn setting_value(&self) -> String {
+        if self.country.is_empty() {
+            self.name.clone()
+        } else {
+            format!("{}, {}", self.name, self.country)
+        }
+    }
+}
+
+/// Queries Open-Meteo Geocoding API for matching cities/locations (no API key required).
+pub fn search_weather_locations(
+    query: &str,
+    language: &str,
+    count: usize,
+) -> Result<Vec<GeoLocationMatch>, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let lang = language
+        .split(['-', '_'])
+        .next()
+        .filter(|s| s.len() == 2)
+        .unwrap_or("en");
+    let path = format!(
+        "/v1/search?count={}&format=json&language={}&name={}",
+        count.clamp(1, 20),
+        lang,
+        urlencode_query(trimmed)
+    );
+    let (status, body) = winhttp_get("geocoding-api.open-meteo.com", &path, &[])
+        .ok_or_else(|| "Geocoding request failed".to_owned())?;
+    if status != 200 {
+        return Err(format!("Geocoding HTTP {status}"));
+    }
+    let root: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("Invalid geocoding JSON: {e}"))?;
+    let Some(results) = root.get("results").and_then(|v| v.as_array()) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(results.len());
+    for item in results {
+        let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(latitude) = item.get("latitude").and_then(|v| v.as_f64()) else {
+            continue;
+        };
+        let Some(longitude) = item.get("longitude").and_then(|v| v.as_f64()) else {
+            continue;
+        };
+        out.push(GeoLocationMatch {
+            name: name.to_owned(),
+            admin1: item
+                .get("admin1")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            country: item
+                .get("country")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            country_code: item
+                .get("country_code")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            latitude,
+            longitude,
+        });
+    }
+    Ok(out)
+}
+
 pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool) {
     let city = if city.trim().is_empty() {
         "Istanbul"
