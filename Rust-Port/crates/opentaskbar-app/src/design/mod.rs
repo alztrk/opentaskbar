@@ -11,6 +11,7 @@
 pub mod brand_paths;
 pub mod brush;
 pub mod fonts;
+pub mod glass;
 pub mod icons;
 pub mod radius;
 pub mod theme;
