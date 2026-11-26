@@ -564,6 +564,13 @@ impl DcompEngine {
         }
     }
 
+    /// Horizontal auto-hide slide for left/right docks.
+    pub fn set_root_offset_x(&self, offset_x_px: f32) {
+        unsafe {
+            let _ = self.root.SetOffsetX2(offset_x_px);
+        }
+    }
+
     /// Renders one of the 1-to-1 C# dock widget modules at automatic `height_dips`
     /// derived from the live dock pill height, using Slate/Aurora tokens and Windows 11 Fluent icons.
     pub fn create_widget_chip_surface(
@@ -2541,6 +2548,64 @@ impl DcompEngine {
                     windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
                 );
             }
+            Ok(())
+        })
+    }
+
+    /// Notification badge: red circular pill with a centered count (C# `TrackedWindow.HasNotification`).
+    pub fn create_notification_badge_surface(
+        &self,
+        count: u32,
+        is_dark: bool,
+        dpi: f32,
+    ) -> Result<IDCompositionSurface> {
+        let label: std::borrow::Cow<'_, str> = if count > 99 {
+            std::borrow::Cow::Borrowed("99+")
+        } else {
+            std::borrow::Cow::Owned(count.to_string())
+        };
+        let size_dips = if label.len() > 1 { 22.0 } else { 18.0 };
+        let px = (size_dips * dpi).ceil().max(1.0) as u32;
+        self.draw_surface(px, px, |dc, w, h| unsafe {
+            let bg = dc.CreateSolidColorBrush(&color_rgba(0xe8, 0x11, 0x23, 1.0), None)?;
+            dc.FillEllipse(
+                &D2D1_ELLIPSE {
+                    point: Vector2 {
+                        X: w * 0.5,
+                        Y: h * 0.5,
+                    },
+                    radiusX: (w * 0.5 - dpi).max(1.0),
+                    radiusY: (h * 0.5 - dpi).max(1.0),
+                },
+                &bg,
+            );
+            let fmt = self.dwrite_factory.CreateTextFormat(
+                &HSTRING::from("Segoe UI Variable Text"),
+                None,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                10.0 * dpi,
+                &HSTRING::from("en-US"),
+            )?;
+            fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            let fg = dc.CreateSolidColorBrush(&color_rgba(0xff, 0xff, 0xff, 1.0), None)?;
+            let text: windows::core::HSTRING = HSTRING::from(label.as_ref());
+            dc.DrawText(
+                &text,
+                &fmt,
+                &D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: w,
+                    bottom: h,
+                },
+                &fg,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                windows::Win32::Graphics::DirectWrite::DWRITE_MEASURING_MODE_NATURAL,
+            );
+            let _ = is_dark;
             Ok(())
         })
     }

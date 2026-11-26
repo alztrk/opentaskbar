@@ -32,6 +32,40 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::platform::win32;
 
+// `DwmActivateLivePreview` starts Aero Peek for a window; `DwmDeactivateLivePreview`
+// ends it. Missing/older DWM versions simply no-op.
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    fn DwmActivateLivePreview(hwnd: HWND, color: u32, kind: i32, flags: u32) -> i32;
+    fn DwmDeactivateLivePreview() -> i32;
+}
+
+/// Activates Aero Peek on the first thumbnail's source window.
+pub fn activate_live_preview(hwnd: usize) -> bool {
+    // SAFETY: DWM validates the window handle; kind 0 == DWM_LIVE_PREVIEW_KIND_PEEK.
+    unsafe { DwmActivateLivePreview(hwnd as HWND, 0, 0, 0) == 0 }
+}
+
+pub fn deactivate_live_preview() {
+    unsafe {
+        let _ = DwmDeactivateLivePreview();
+    }
+}
+
+/// Clamps an overlay window to the primary screen (C# `PositionOverlayWindow`).
+pub fn position_overlay_window(
+    width: i32,
+    height: i32,
+    center_x: i32,
+    bottom_y: i32,
+    screen: (i32, i32),
+    margin: i32,
+) -> (i32, i32) {
+    let x = (center_x - width / 2).clamp(margin, (screen.0 - width - margin).max(margin));
+    let y = (bottom_y - height).clamp(margin, (screen.1 - height - margin).max(margin));
+    (x, y)
+}
+
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
 const MAX_CARDS: usize = 6;
@@ -241,10 +275,14 @@ impl PreviewPopup {
 
         let (scr_w, scr_h) = win32::primary_screen_px();
         let margin = (8.0 * dpi).round() as i32;
-        let x = (anchor_center_x_px - total_w / 2)
-            .clamp(margin, (scr_w - total_w - margin).max(margin));
-        let y =
-            (anchor_bottom_y_px - total_h).clamp(margin, (scr_h - total_h - margin).max(margin));
+        let (x, y) = position_overlay_window(
+            total_w,
+            total_h,
+            anchor_center_x_px,
+            anchor_bottom_y_px,
+            (scr_w, scr_h),
+            margin,
+        );
 
         unsafe {
             SetWindowPos(
@@ -602,6 +640,34 @@ impl Drop for PreviewPopup {
                 DestroyWindow(self.hwnd);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlay_window_stays_inside_screen() {
+        assert_eq!(
+            position_overlay_window(400, 200, 500, 300, (1920, 1080), 8),
+            (300, 100)
+        );
+        assert_eq!(
+            position_overlay_window(400, 200, -100, -50, (1920, 1080), 8),
+            (8, 8)
+        );
+        assert_eq!(
+            position_overlay_window(400, 200, 5000, 5000, (1920, 1080), 8),
+            (1512, 872)
+        );
+    }
+
+    #[test]
+    fn peek_timing_matches_csharp() {
+        assert_eq!(super::super::layout::PREVIEW_GRACE_MS, 250);
+        assert_eq!(super::super::layout::PREVIEW_DELAY_MS, 500);
+        assert_eq!(super::super::layout::PREVIEW_FADE_MS, 140);
     }
 }
 
