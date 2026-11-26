@@ -22,17 +22,22 @@ use windows::core::{GUID, HSTRING};
 use opentaskbar_core::log;
 
 const RADIO_ACCESS_STATUS_ALLOWED: i32 = 1;
-const ASYNC_STATUS_COMPLETED: i32 = 4;
-const RADIO_STATE_OFF: i32 = 1;
-const RADIO_STATE_ON: i32 = 2;
+// Windows.Foundation.AsyncStatus: Started=0, Completed=1, Canceled=2, Error=3.
+const ASYNC_STATUS_STARTED: i32 = 0;
+const ASYNC_STATUS_COMPLETED: i32 = 1;
+// Windows.Devices.Radios.RadioState: Unknown=0, On=1, Off=2, Disabled=3.
+const RADIO_STATE_ON: i32 = 1;
+const RADIO_STATE_OFF: i32 = 2;
 const RADIO_STATE_DISABLED: i32 = 3;
+// Windows.Devices.Radios.RadioKind: Other=0, WiFi=1, MobileBroadband=2, Bluetooth=3, FM=4.
 const RADIO_KIND_WIFI: i32 = 1;
-const RADIO_KIND_BLUETOOTH: i32 = 2;
+const RADIO_KIND_BLUETOOTH: i32 = 3;
 const RO_INIT_MULTITHREADED: i32 = 1;
 const ASYNC_POLL_LIMIT: usize = 200; // 2 s at 10 ms
 const REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 
-// IIDs from Windows.Devices.Radios metadata.
+// IIDs from Windows.Foundation and Windows.Devices.Radios metadata.
+const IID_IASYNC_INFO: GUID = GUID::from_u128(0x0000_0036_0000_0000_c000_0000_0000_0046);
 const IID_RADIO_STATICS: GUID = GUID::from_u128(0x5fb6_a12e_67cb_46ae_aae9_6591_9f86_eff4);
 
 // WinRT activation entry points come from combase.dll. Loading them dynamically
@@ -115,28 +120,34 @@ struct RadioVtbl {
     kind: unsafe extern "system" fn(*mut c_void, *mut i32) -> i32,
 }
 
-/// `IAsyncInfo` methods plus the first `IAsyncOperation<T>` method. The result
-/// pointer is interpreted by the caller according to the operation's T.
+/// `Windows.Foundation.IAsyncInfo` (`{00000036-0000-0000-C000-000000000046}`),
+/// queried separately from `IAsyncOperation<T>` because WinRT interfaces do not
+/// flatten required interfaces into a single vtable.
 #[repr(C)]
-struct AsyncVtbl {
+struct AsyncInfoVtbl {
     base: WinRtVtbl,
+    _get_id: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32,
     get_status: unsafe extern "system" fn(*mut c_void, *mut i32) -> i32,
     _get_error_code: unsafe extern "system" fn(*mut c_void, *mut i32) -> i32,
     _cancel: unsafe extern "system" fn(*mut c_void) -> i32,
-    _close: unsafe extern "system" fn(*mut c_void) -> i32,
-    _get_id: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32,
-    get_results_ptr: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> i32,
+    close: unsafe extern "system" fn(*mut c_void) -> i32,
+}
+
+/// `Windows.Foundation.IAsyncOperation<T>` vtable (`put_Completed`, `get_Completed`, `GetResults`).
+#[repr(C)]
+struct AsyncOpPtrVtbl {
+    base: WinRtVtbl,
+    _put_completed: unsafe extern "system" fn(*mut c_void, *mut c_void) -> i32,
+    _get_completed: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> i32,
+    get_results: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> i32,
 }
 
 #[repr(C)]
-struct AsyncEnumVtbl {
+struct AsyncOpEnumVtbl {
     base: WinRtVtbl,
-    get_status: unsafe extern "system" fn(*mut c_void, *mut i32) -> i32,
-    _get_error_code: unsafe extern "system" fn(*mut c_void, *mut i32) -> i32,
-    _cancel: unsafe extern "system" fn(*mut c_void) -> i32,
-    _close: unsafe extern "system" fn(*mut c_void) -> i32,
-    _get_id: unsafe extern "system" fn(*mut c_void, *mut u32) -> i32,
-    get_results_enum: unsafe extern "system" fn(*mut c_void, *mut i32) -> i32,
+    _put_completed: unsafe extern "system" fn(*mut c_void, *mut c_void) -> i32,
+    _get_completed: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> i32,
+    get_results: unsafe extern "system" fn(*mut c_void, *mut i32) -> i32,
 }
 
 #[repr(C)]
@@ -199,50 +210,68 @@ fn activate_statics() -> Option<*mut c_void> {
     (hr == 0).then_some(factory)
 }
 
-fn wait_async_ptr(operation: *mut c_void) -> Option<*mut c_void> {
-    let table = vtbl::<AsyncVtbl>(operation)?;
+fn wait_async_completed(operation: *mut c_void) -> bool {
+    let Some(info) = query(operation, &IID_IASYNC_INFO) else {
+        return false;
+    };
+    let Some(table) = vtbl::<AsyncInfoVtbl>(info) else {
+        release(info);
+        return false;
+    };
+    let mut done = false;
     for _ in 0..ASYNC_POLL_LIMIT {
-        let mut status = 0i32;
-        // SAFETY: live async operation, out parameter is owned.
-        let hr = unsafe { ((*table).get_status)(operation, &mut status) };
+        let mut status = -1i32;
+        // SAFETY: `info` is a live `IAsyncInfo` interface pointer obtained via QueryInterface.
+        let hr = unsafe { ((*table).get_status)(info, &mut status) };
         if hr != 0 {
-            return None;
+            break;
         }
         if status == ASYNC_STATUS_COMPLETED {
-            let mut result = ptr::null_mut();
-            // SAFETY: `get_results` signature matches an interface-result T.
-            let ok = unsafe { ((*table).get_results_ptr)(operation, &mut result) };
-            return (ok == 0).then_some(result);
+            done = true;
+            break;
         }
-        if status != 0 {
-            return None;
+        if status != ASYNC_STATUS_STARTED {
+            break;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    None
+    release(info);
+    done
+}
+
+fn close_async(operation: *mut c_void) {
+    if let Some(info) = query(operation, &IID_IASYNC_INFO) {
+        if let Some(table) = vtbl::<AsyncInfoVtbl>(info) {
+            unsafe {
+                let _ = ((*table).close)(info);
+            }
+        }
+        release(info);
+    }
+}
+
+fn wait_async_ptr(operation: *mut c_void) -> Option<*mut c_void> {
+    if !wait_async_completed(operation) {
+        return None;
+    }
+    let table = vtbl::<AsyncOpPtrVtbl>(operation)?;
+    let mut result = ptr::null_mut();
+    // SAFETY: `operation` is a completed `IAsyncOperation<T>` returning an interface pointer.
+    let ok = unsafe { ((*table).get_results)(operation, &mut result) };
+    close_async(operation);
+    (ok == 0 && !result.is_null()).then_some(result)
 }
 
 fn wait_async_enum(operation: *mut c_void) -> Option<i32> {
-    let table = vtbl::<AsyncEnumVtbl>(operation)?;
-    for _ in 0..ASYNC_POLL_LIMIT {
-        let mut status = 0i32;
-        // SAFETY: live async operation, out parameter is owned.
-        let hr = unsafe { ((*table).get_status)(operation, &mut status) };
-        if hr != 0 {
-            return None;
-        }
-        if status == ASYNC_STATUS_COMPLETED {
-            let mut result = 0i32;
-            // SAFETY: `get_results` signature matches an enum-result T.
-            let ok = unsafe { ((*table).get_results_enum)(operation, &mut result) };
-            return (ok == 0).then_some(result);
-        }
-        if status != 0 {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(10));
+    if !wait_async_completed(operation) {
+        return None;
     }
-    None
+    let table = vtbl::<AsyncOpEnumVtbl>(operation)?;
+    let mut result = 0i32;
+    // SAFETY: `operation` is a completed `IAsyncOperation<T>` returning an i32 enum.
+    let ok = unsafe { ((*table).get_results)(operation, &mut result) };
+    close_async(operation);
+    (ok == 0).then_some(result)
 }
 
 /// Runs a closure on a COM/MTA-initialized worker thread and joins it, so the
@@ -339,10 +368,6 @@ fn request_access(statics: *mut c_void) -> bool {
 fn refresh_cache() -> bool {
     on_worker(|| {
         let Some(statics) = activate_statics() else {
-            return false;
-        };
-        let Some(statics) = query(statics, &IID_RADIO_STATICS) else {
-            release(statics);
             return false;
         };
         let allowed = request_access(statics);
@@ -487,5 +512,18 @@ mod tests {
         assert_eq!(normalize_kind("wlan"), Some(RADIO_KIND_WIFI));
         assert_eq!(normalize_kind("BT"), Some(RADIO_KIND_BLUETOOTH));
         assert_eq!(normalize_kind("nightlight"), None);
+        assert_eq!(RADIO_STATE_ON, 1);
+        assert_eq!(RADIO_STATE_OFF, 2);
+        assert_eq!(RADIO_KIND_BLUETOOTH, 3);
+        assert_eq!(ASYNC_STATUS_COMPLETED, 1);
+    }
+
+    #[test]
+    fn winrt_radio_refresh_completes_without_crashing() {
+        // Exercises the real combase.dll WinRT activation, QueryInterface(IAsyncInfo),
+        // and IAsyncOperation::GetResults path that previously faulted with 0xC0000005.
+        let _ = refresh_cache();
+        let _ = state("wifi");
+        let _ = state("bluetooth");
     }
 }
