@@ -5,6 +5,7 @@
 //! and an `X` close button per card. Uses 0% 3D GPU overhead because DWM composites thumbnails
 //! directly into the desktop pass.
 
+use crate::design::fonts;
 use opentaskbar_shell::tracker;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
@@ -45,6 +46,8 @@ const CLOSE_BTN_DIPS: f32 = 22.0;
 #[derive(Clone, Debug)]
 pub struct PreviewItem {
     pub hwnd: usize,
+    /// Process captured with the HWND, used to reject recycled handles before acting on them.
+    pub pid: u32,
     pub title: String,
 }
 
@@ -239,12 +242,14 @@ impl PreviewPopup {
         let total_w = pad * 2 + card_w * (count as i32) + gap * ((count as i32) - 1);
         let total_h = pad * 2 + card_h;
 
-        let (scr_w, scr_h) = win32::primary_screen_px();
-        let margin = (8.0 * dpi).round() as i32;
-        let x = (anchor_center_x_px - total_w / 2)
-            .clamp(margin, (scr_w - total_w - margin).max(margin));
-        let y =
-            (anchor_bottom_y_px - total_h).clamp(margin, (scr_h - total_h - margin).max(margin));
+        let monitor = win32::monitor_for_point_px(anchor_center_x_px, anchor_bottom_y_px);
+        let margin = (8.0 * monitor.dpi_scale).round() as i32;
+        let min_x = monitor.left + margin;
+        let max_x = (monitor.right - total_w - margin).max(min_x);
+        let min_y = monitor.top + margin;
+        let max_y = (monitor.bottom - total_h - margin).max(min_y);
+        let x = (anchor_center_x_px - total_w / 2).clamp(min_x, max_x);
+        let y = (anchor_bottom_y_px - total_h).clamp(min_y, max_y);
 
         unsafe {
             SetWindowPos(
@@ -359,7 +364,7 @@ impl PreviewPopup {
             DeleteObject(bg_brush as _);
 
             let font_h = -((12.0 * dpi).round() as i32);
-            let font_name = wide("Segoe UI");
+            let font_name = wide(fonts::native_ui_face());
             let font = CreateFontW(
                 font_h,
                 0,

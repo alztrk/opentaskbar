@@ -1,5 +1,9 @@
 //! Win32 running-window enumeration with DWM cloaked filtering and activation helpers.
 
+use windows::Win32::Foundation::HWND as WinHwnd;
+use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance};
+use windows::Win32::UI::Shell::IVirtualDesktopManager;
+use windows::core::GUID;
 use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
 use windows_sys::Win32::System::Threading::{
@@ -13,6 +17,32 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_CLOSE, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
 };
 use windows_sys::core::BOOL;
+
+thread_local! {
+    /// `IVirtualDesktopManager` is apartment-bound, so it is cached per dock UI thread.
+    static VIRTUAL_DESKTOP_MANAGER: std::cell::OnceCell<Option<IVirtualDesktopManager>> =
+        const { std::cell::OnceCell::new() };
+}
+
+/// True when `hwnd` belongs to the active virtual desktop. Reader-friendly fallback:
+/// if the COM manager is unavailable (older Windows / no COM), keep the window visible.
+pub fn is_on_current_desktop(hwnd: usize) -> bool {
+    VIRTUAL_DESKTOP_MANAGER.with(|cell| {
+        let manager = cell.get_or_init(|| {
+            // CLSID_VirtualDesktopManager (not exported by the windows crate).
+            let clsid = GUID::from_u128(0xaa509086_5ca9_4c25_8f95_589d3c07b48a);
+            // SAFETY: COM is initialized by the dock before window enumeration.
+            unsafe { CoCreateInstance::<_, IVirtualDesktopManager>(&clsid, None, CLSCTX_ALL) }.ok()
+        });
+        let Some(manager) = manager else {
+            return true;
+        };
+        // SAFETY: `hwnd` is a live top-level window handle from EnumWindows.
+        unsafe { manager.IsWindowOnCurrentVirtualDesktop(WinHwnd(hwnd as *mut core::ffi::c_void)) }
+            .map(|on_current| on_current.as_bool())
+            .unwrap_or(true)
+    })
+}
 
 #[derive(Clone, Debug)]
 pub struct RunningWindow {
@@ -199,6 +229,47 @@ pub fn activate_window(hwnd_val: usize) {
     }
 }
 
+/// Verifies that an HWND still belongs to the process captured in the snapshot. Without this,
+/// a handle recycled between the 800 ms tracker refresh and the user's click can target an
+/// unrelated application.
+fn identity_matches(hwnd_val: usize, pid: u32) -> bool {
+    if hwnd_val == 0 || pid == 0 || pid == std::process::id() {
+        return false;
+    }
+    let mut current = 0u32;
+    // SAFETY: querying the PID of an arbitrary handle is safe; the result is only compared.
+    unsafe { GetWindowThreadProcessId(hwnd_val as HWND, &mut current) };
+    current == pid
+}
+
+/// Requests a graceful close only when the HWND still belongs to the captured process.
+pub fn close_window_verified(hwnd_val: usize, pid: u32) {
+    if identity_matches(hwnd_val, pid) {
+        close_window(hwnd_val);
+    }
+}
+
+/// Terminates the captured process only when the HWND still belongs to it and its image path
+/// still matches the app represented by the dock button.
+pub fn terminate_window_process_verified(hwnd_val: usize, pid: u32, expected_exe: &str) {
+    if !identity_matches(hwnd_val, pid) {
+        return;
+    }
+    if !expected_exe.is_empty()
+        && process_image_path(pid).is_some_and(|path| !path.eq_ignore_ascii_case(expected_exe))
+    {
+        return;
+    }
+    // SAFETY: verified PID; only this process handle is opened and closed.
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+        if !handle.is_null() {
+            let _ = TerminateProcess(handle, 1);
+            CloseHandle(handle);
+        }
+    }
+}
+
 /// Requests a graceful close (`WM_CLOSE`) for a specific window.
 pub fn close_window(hwnd_val: usize) {
     if hwnd_val == 0 {
@@ -282,6 +353,35 @@ pub fn activate_or_toggle(hwnds: &[usize]) -> bool {
         cycle_windows(&live, true);
         true
     }
+}
+
+/// Same as [`activate_or_toggle`], but drops windows whose HWND was recycled into a different
+/// process since the snapshot was captured.
+pub fn activate_or_toggle_verified(windows: &[(usize, u32)]) -> bool {
+    let live: Vec<usize> = windows
+        .iter()
+        .filter(|(hwnd, pid)| {
+            let handle = *hwnd as HWND;
+            identity_matches(*hwnd, *pid)
+                && unsafe { IsWindow(handle) != 0 && IsWindowVisible(handle) != 0 }
+        })
+        .map(|(hwnd, _)| *hwnd)
+        .collect();
+    if live.is_empty() {
+        return false;
+    }
+    let fg = unsafe { GetForegroundWindow() as usize };
+    if live.len() == 1 {
+        let hwnd = live[0] as HWND;
+        if fg == live[0] && unsafe { IsIconic(hwnd) } == 0 {
+            unsafe { ShowWindow(hwnd, SW_MINIMIZE) };
+        } else {
+            activate_window(live[0]);
+        }
+        return true;
+    }
+    cycle_windows(&live, true);
+    true
 }
 
 #[cfg(test)]

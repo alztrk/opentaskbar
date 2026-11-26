@@ -6,6 +6,7 @@
 //! one cohesive visual language.
 
 pub mod brand_paths;
+pub mod fonts;
 pub mod icons;
 
 /// RGB color tuple `(r, g, b)`.
@@ -100,6 +101,27 @@ pub const LIGHT: Palette = Palette {
 
 pub const fn palette(is_dark: bool) -> Palette {
     if is_dark { DARK } else { LIGHT }
+}
+
+/// Parses `#RRGGBB` (or `RRGGBB`) into the RGB tuple used by DComp/GDI surfaces.
+pub fn parse_hex_rgb(value: &str) -> Option<Rgb> {
+    let hex = value.trim().trim_start_matches('#');
+    if hex.len() != 6 {
+        return None;
+    }
+    Some((
+        u8::from_str_radix(&hex[0..2], 16).ok()?,
+        u8::from_str_radix(&hex[2..4], 16).ok()?,
+        u8::from_str_radix(&hex[4..6], 16).ok()?,
+    ))
+}
+
+pub fn palette_with_border(is_dark: bool, border: Option<Rgb>) -> Palette {
+    let mut p = palette(is_dark);
+    if let Some(rgb) = border {
+        p.border_rgb = rgb;
+    }
+    p
 }
 
 /// Converts `(r, g, b)` to Win32 GDI `COLORREF` (`0x00BBGGRR`).

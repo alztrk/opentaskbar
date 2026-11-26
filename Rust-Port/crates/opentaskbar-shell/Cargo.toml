@@ -13,4 +13,5 @@ workspace = true
 opentaskbar-core = { path = "../opentaskbar-core" }
 
 [target.'cfg(windows)'.dependencies]
+windows.workspace = true
 windows-sys.workspace = true

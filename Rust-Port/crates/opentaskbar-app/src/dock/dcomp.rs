@@ -5,6 +5,12 @@
 //! 2D affine transforms (`IDCompositionMatrixTransform`) are updated and committed to DWM
 //! (`IDCompositionDevice::Commit`) with zero D3D11 draw calls and ~0-1% GPU usage.
 
+use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::sync::Mutex;
+
+use opentaskbar_core::i18n as loc;
+use opentaskbar_core::settings::SurfaceBackground;
 use windows::Win32::Foundation::{HWND, POINT, RECT};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U, D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F,
@@ -18,7 +24,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LINE_JOIN_ROUND,
     D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES1,
     D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext,
-    ID2D1Factory1, ID2D1StrokeStyle,
+    ID2D1Factory1, ID2D1LinearGradientBrush, ID2D1StrokeStyle,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
@@ -63,6 +69,13 @@ pub enum WidgetInteraction {
     Idle,
     Hovered(Option<u8>),
     Pressed(Option<u8>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IslandButton {
+    Prev,
+    Next,
+    Expand,
 }
 
 /// Exact C# 1-to-1 dock widget specs ported from `Widgets/*.xaml` and `Widgets/*.cs`.
@@ -112,10 +125,15 @@ pub enum WidgetChipSpec {
         charging: bool,
         wave_phase: f32,
     },
-    /// C# `BluetoothBatteryWidget.cs`: horizontal connected device tiles (`icon + %`) or centered `—`
+    /// C# `BluetoothBatteryWidget.cs`: horizontal connected device tiles (`device-kind icon + %`) or centered `—`
     Bluetooth {
-        /// `(percent, low_warning, full_charge)`
-        devices: Vec<(u32, bool, bool)>,
+        /// `(kind, percent, low_warning, full_charge)`
+        devices: Vec<(
+            crate::widgets::telemetry::BluetoothDeviceKind,
+            u32,
+            bool,
+            bool,
+        )>,
     },
     /// C# `StorageWidget.cs`: `"C: 213 / 476 GB | D: 1.2 / 1.8 TB"` (clean typographic, no bars)
     Storage { drives: Vec<(String, String)> },
@@ -137,11 +155,6 @@ pub enum WidgetChipSpec {
         brand_color: Option<Rgb>,
         /// `(short_label, used_01, bar_color, reset_text)`
         rows: Vec<AiQuotaRow>,
-    },
-    /// C# `AiUsageWidget.cs` 3-column Antigravity layout (`Gemini | Claude | Argon`)
-    AiAntigravity {
-        /// `(group_header, rows: Vec<(short_label, used_01, bar_color, reset_text)>)`
-        columns: Vec<AiQuotaColumn>,
     },
     /// C# `AiUsageWidget.cs` triple-column OpenCode layout (`1h | 7d | 30d`)
     AiOpenCode {
@@ -172,11 +185,13 @@ pub enum WidgetChipSpec {
 }
 
 type AiQuotaRow = (String, f32, Rgb, String);
-type AiQuotaColumn = (String, Vec<AiQuotaRow>);
 
 impl WidgetChipSpec {
-    pub fn cache_key(&self) -> String {
-        format!("{self:?}")
+    /// Writes the spec into a reusable buffer so per-widget refresh does not allocate a new
+    /// String for every Debug-formatted chip spec.
+    pub fn write_cache_key(&self, out: &mut String) {
+        out.clear();
+        let _ = write!(out, "{self:?}");
     }
 }
 
@@ -269,6 +284,9 @@ pub struct DcompEngine {
     dwrite_factory: IDWriteFactory,
     tooltip_format: IDWriteTextFormat,
     fallback_format: IDWriteTextFormat,
+    /// Chip typography is a fixed set; creating 21 formats on every chip redraw cost ~300+
+    /// COM object constructions/sec during the 15 Hz battery animation.
+    text_formats: Mutex<HashMap<(u16, bool, u8), IDWriteTextFormat>>,
     dcomp_device: IDCompositionDevice,
     _target: IDCompositionTarget,
     pub root: IDCompositionVisual,
@@ -317,8 +335,8 @@ impl DcompEngine {
 
         let dwrite_factory: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
-        let font_name = HSTRING::from("Segoe UI Variable Text");
-        let locale = HSTRING::from("en-US");
+        let font_name = HSTRING::from(design::fonts::ui_family_list().as_str());
+        let locale = HSTRING::from(design::fonts::ui_locale().as_str());
         let tooltip_format = unsafe {
             let fmt = dwrite_factory.CreateTextFormat(
                 &font_name,
@@ -326,7 +344,7 @@ impl DcompEngine {
                 DWRITE_FONT_WEIGHT_MEDIUM,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                12.0,
+                design::fonts::scaled_size(12.0),
                 &locale,
             )?;
             fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
@@ -340,7 +358,7 @@ impl DcompEngine {
                 DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                18.0,
+                design::fonts::scaled_size(18.0),
                 &locale,
             )?;
             fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
@@ -364,6 +382,7 @@ impl DcompEngine {
             dwrite_factory,
             tooltip_format,
             fallback_format,
+            text_formats: Mutex::new(HashMap::new()),
             dcomp_device,
             _target: target,
             root,
@@ -564,8 +583,62 @@ impl DcompEngine {
         }
     }
 
+    /// Returns a cached chip text format; only the first request per (size, weight, alignment)
+    /// creates COM objects, later redraws just AddRef the existing format.
+    fn cached_text_format(&self, size: f32, bold: bool, align: u8) -> Result<IDWriteTextFormat> {
+        let key = ((size * 2.0) as u16, bold, align);
+        if let Some(cached) = self
+            .text_formats
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
+            return Ok(cached.clone());
+        }
+        unsafe {
+            let fmt = self.dwrite_factory.CreateTextFormat(
+                &HSTRING::from(design::fonts::ui_family_list().as_str()),
+                None,
+                if bold {
+                    DWRITE_FONT_WEIGHT_SEMI_BOLD
+                } else {
+                    DWRITE_FONT_WEIGHT_MEDIUM
+                },
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                size,
+                &HSTRING::from(design::fonts::ui_locale().as_str()),
+            )?;
+            let al = match align {
+                1 => windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_LEADING,
+                2 => windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_TRAILING,
+                _ => DWRITE_TEXT_ALIGNMENT_CENTER,
+            };
+            fmt.SetTextAlignment(al)?;
+            fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            fmt.SetWordWrapping(
+                windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_NO_WRAP,
+            )?;
+            let trim = windows::Win32::Graphics::DirectWrite::DWRITE_TRIMMING {
+                granularity:
+                    windows::Win32::Graphics::DirectWrite::DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                delimiter: 0,
+                delimiterCount: 0,
+            };
+            if let Ok(ellipsis) = self.dwrite_factory.CreateEllipsisTrimmingSign(&fmt) {
+                let _ = fmt.SetTrimming(&trim, &ellipsis);
+            }
+            self.text_formats
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, fmt.clone());
+            Ok(fmt)
+        }
+    }
+
     /// Renders one of the 1-to-1 C# dock widget modules at automatic `height_dips`
     /// derived from the live dock pill height, using Slate/Aurora tokens and Windows 11 Fluent icons.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_widget_chip_surface(
         &self,
         spec: &WidgetChipSpec,
@@ -574,8 +647,10 @@ impl DcompEngine {
         dpi: f32,
         is_dark: bool,
         interaction: WidgetInteraction,
+        border_rgb: Option<Rgb>,
+        border_width_dips: f32,
     ) -> Result<IDCompositionSurface> {
-        let pal = design::palette(is_dark);
+        let pal = design::palette_with_border(is_dark, border_rgb);
         let w_px = (width_dips * dpi).ceil().max(1.0) as u32;
         let h_px = (height_dips * dpi).ceil().max(1.0) as u32;
         let fg_p = color_rgba(
@@ -596,67 +671,29 @@ impl DcompEngine {
             color_rgba(0x18, 0x18, 0x1b, 0.14)
         };
 
-        // `align`: 0 = center, 1 = leading, 2 = trailing
-        let mk_fmt = |size: f32, bold: bool, align: u8| -> Result<IDWriteTextFormat> {
-            unsafe {
-                let fmt = self.dwrite_factory.CreateTextFormat(
-                    &HSTRING::from("Segoe UI Variable Text"),
-                    None,
-                    if bold {
-                        DWRITE_FONT_WEIGHT_SEMI_BOLD
-                    } else {
-                        DWRITE_FONT_WEIGHT_MEDIUM
-                    },
-                    DWRITE_FONT_STYLE_NORMAL,
-                    DWRITE_FONT_STRETCH_NORMAL,
-                    size,
-                    &HSTRING::from("en-US"),
-                )?;
-                let al = match align {
-                    1 => windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_LEADING,
-                    2 => windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_ALIGNMENT_TRAILING,
-                    _ => DWRITE_TEXT_ALIGNMENT_CENTER,
-                };
-                fmt.SetTextAlignment(al)?;
-                fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-                fmt.SetWordWrapping(
-                    windows::Win32::Graphics::DirectWrite::DWRITE_WORD_WRAPPING_NO_WRAP,
-                )?;
-                let trim = windows::Win32::Graphics::DirectWrite::DWRITE_TRIMMING {
-                    granularity:
-                        windows::Win32::Graphics::DirectWrite::DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-                    delimiter: 0,
-                    delimiterCount: 0,
-                };
-                if let Ok(ellipsis) = self.dwrite_factory.CreateEllipsisTrimmingSign(&fmt) {
-                    let _ = fmt.SetTrimming(&trim, &ellipsis);
-                }
-                Ok(fmt)
-            }
-        };
-
         // Integer typography scale (`9, 10, 11, 12, 13, 15, 16, 18` DIP) for sharp pixel hinting.
-        let fmt_18_b_l = mk_fmt(18.0, true, 1)?;
-        let fmt_16_b_l = mk_fmt(16.0, true, 1)?;
-        let fmt_15_b_l = mk_fmt(15.0, true, 1)?;
-        let fmt_13_b_c = mk_fmt(13.0, true, 0)?;
-        let fmt_13_b_l = mk_fmt(13.0, true, 1)?;
-        let fmt_125_b_l = mk_fmt(12.0, true, 1)?;
-        let fmt_12_b_l = mk_fmt(12.0, true, 1)?;
-        let fmt_12_c = mk_fmt(12.0, false, 0)?;
-        let fmt_115_b_l = mk_fmt(11.0, true, 1)?;
-        let fmt_115_b_c = mk_fmt(11.0, true, 0)?;
-        let fmt_115_l = mk_fmt(11.0, false, 1)?;
-        let fmt_11_b_l = mk_fmt(11.0, true, 1)?;
-        let fmt_105_b_r = mk_fmt(10.0, true, 2)?;
-        let fmt_105_l = mk_fmt(10.0, false, 1)?;
-        let fmt_10_l = mk_fmt(10.0, false, 1)?;
-        let fmt_95_b_l = mk_fmt(10.0, true, 1)?;
-        let fmt_95_l = mk_fmt(10.0, false, 1)?;
-        let fmt_9_l = mk_fmt(9.0, false, 1)?;
-        let fmt_9_b_l = mk_fmt(9.0, true, 1)?;
-        let fmt_85_l = mk_fmt(9.0, false, 1)?;
-        let fmt_85_b_l = mk_fmt(9.0, true, 1)?;
+        // Secondary captions sit at 11 DIP (not 10) so the second line of two-line cards stays readable.
+        // Formats come from the engine cache; a redraw only AddRefs them.
+        let fmt_18_b_l = self.cached_text_format(design::fonts::scaled_size(18.0), true, 1)?;
+        let fmt_15_b_l = self.cached_text_format(15.0, true, 1)?;
+        let fmt_13_b_c = self.cached_text_format(13.0, true, 0)?;
+        let fmt_13_b_l = self.cached_text_format(13.0, true, 1)?;
+        let fmt_125_b_l = self.cached_text_format(design::fonts::scaled_size(12.0), true, 1)?;
+        let fmt_12_b_l = self.cached_text_format(design::fonts::scaled_size(12.0), true, 1)?;
+        let fmt_12_c = self.cached_text_format(design::fonts::scaled_size(12.0), false, 0)?;
+        let fmt_115_b_l = self.cached_text_format(11.0, true, 1)?;
+        let fmt_115_b_c = self.cached_text_format(11.0, true, 0)?;
+        let fmt_115_l = self.cached_text_format(11.0, false, 1)?;
+        let fmt_11_b_l = self.cached_text_format(11.0, true, 1)?;
+        let fmt_105_b_r = self.cached_text_format(11.0, true, 2)?;
+        let fmt_105_l = self.cached_text_format(11.0, false, 1)?;
+        let fmt_10_l = self.cached_text_format(11.0, false, 1)?;
+        let fmt_95_b_l = self.cached_text_format(10.0, true, 1)?;
+        let fmt_95_l = self.cached_text_format(10.0, false, 1)?;
+        let fmt_9_l = self.cached_text_format(10.0, false, 1)?;
+        let _fmt_9_b_l = self.cached_text_format(9.0, true, 1)?;
+        let fmt_85_l = self.cached_text_format(9.0, false, 1)?;
+        let _fmt_85_b_l = self.cached_text_format(9.0, true, 1)?;
 
         // OpenType `tnum` (tabular lining figures) so clocks, timers, and metrics never jitter horizontally.
         let tnum_typo = unsafe {
@@ -776,7 +813,16 @@ impl DcompEngine {
                     date,
                     weekday,
                 } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     // ClockWidget.xaml: [IconClock 15px, margin 0,0,8,0] [Time 15px Bold] + 9px + [Date 11.5px / DayOfWeek 10.5px]
                     draw_fluent_str_d2d(
                         &self.dwrite_factory,
@@ -837,7 +883,16 @@ impl DcompEngine {
                     condition,
                     today_range,
                 } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     if !*available {
                         draw_text(
                             condition,
@@ -911,7 +966,7 @@ impl DcompEngine {
                             let sep_x = width_dips - 76.0;
                             draw_vdiv(sep_x, 20.0);
                             draw_text(
-                                "Today",
+                                &loc::t("Today"),
                                 &fmt_9_l,
                                 D2D_RECT_F {
                                     left: sep_x + 8.0,
@@ -940,7 +995,16 @@ impl DcompEngine {
                     percent,
                     unit,
                 } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     // DayProgressWidget.cs: [RingMeter 22x22 Stroke=2.8 WidgetBlue] + 7px + [13px SemiBold %] + 5px + [11.5px "day"]
                     let rx = 21.0;
                     let rad = 9.5_f32.min(height_dips * 0.30);
@@ -1012,7 +1076,16 @@ impl DcompEngine {
                     running,
                     text,
                 } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     // FocusWidget.xaml / TimedWidgetTile.xaml: [Icon 16px] [13px Tabular Time] [26x26 Play/Pause]
                     let icon_glyph = if *is_focus { "\u{E7C8}" } else { "\u{E916}" };
                     let icon_col = if *running {
@@ -1096,7 +1169,16 @@ impl DcompEngine {
                     ram_text,
                     ram_color,
                 } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     // SystemStatsWidget.xaml: [CPU 10px / 14% 12px] | [RAM 10px / 48% 12px]
                     let mid_x = width_dips * 0.5;
                     let mid_y = height_dips * 0.46;
@@ -1155,7 +1237,16 @@ impl DcompEngine {
                     );
                 }
                 WidgetChipSpec::NetSpeed { down, up } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     // NetSpeedWidget.cs: [Wifi 15px Secondary] + [↓ WidgetGreen + 11.5px] / [↑ WidgetBlue + 11.5px]
                     draw_fluent_str_d2d(
                         &self.dwrite_factory,
@@ -1232,7 +1323,16 @@ impl DcompEngine {
                     // Exact C# BatteryWidget.cs horizontal liquid-fill card with scrolling sinusoidal
                     // meniscus wave + -22deg skewed left-to-right charging sheen!
                     if !*present {
-                        draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                        draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                         draw_text(
                             "—",
                             &fmt_13_b_c,
@@ -1473,7 +1573,7 @@ impl DcompEngine {
                         let _ = std::mem::ManuallyDrop::into_inner(layer_params.geometricMask);
 
                         // Hover/press overlay above liquid fill (exact C# _hoverOverlay/_pressOverlay)
-                        draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                        draw_chip_overlay(dc, width_dips, height_dips, is_dark, interaction)?;
 
                         let label = format!("{percent}%");
                         let sh_b = dc.CreateSolidColorBrush(&color_rgba(0, 0, 0, 0.35), None)?;
@@ -1562,7 +1662,16 @@ impl DcompEngine {
                     }
                 }
                 WidgetChipSpec::Bluetooth { devices } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     if devices.is_empty() {
                         // Exact C# BluetoothBatteryWidget.cs: centered "—" (`11.5px SemiBold TextSecondary`)
                         draw_text(
@@ -1579,7 +1688,7 @@ impl DcompEngine {
                     } else {
                         let count = devices.len().min(3);
                         let tile_w = (width_dips - 12.0) / count as f32;
-                        for (i, (pct, low, full)) in devices.iter().take(3).enumerate() {
+                        for (i, (kind, pct, low, full)) in devices.iter().take(3).enumerate() {
                             let tx = 6.0 + i as f32 * tile_w;
                             if i > 0 {
                                 draw_vdiv(tx - 2.0, 20.0);
@@ -1587,16 +1696,16 @@ impl DcompEngine {
                             draw_fluent_str_d2d(
                                 &self.dwrite_factory,
                                 dc,
-                                "\u{E702}",
+                                kind.fluent_glyph(),
                                 D2D_RECT_F {
                                     left: tx + 3.0,
                                     top: cy - 8.0,
                                     right: tx + 19.0,
                                     bottom: cy + 8.0,
                                 },
-                                14.0,
+                                14.5,
                                 pal.text_secondary,
-                                0.92,
+                                0.94,
                             )?;
                             let val_col = if *low {
                                 pal.warning
@@ -1613,7 +1722,7 @@ impl DcompEngine {
                                 &format!("{pct}%"),
                                 &fmt_12_b_l,
                                 D2D_RECT_F {
-                                    left: tx + 21.0,
+                                    left: tx + 22.0,
                                     top: 0.0,
                                     right: tx + tile_w - 2.0,
                                     bottom: height_dips,
@@ -1624,7 +1733,16 @@ impl DcompEngine {
                     }
                 }
                 WidgetChipSpec::Storage { drives } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     // StorageWidget.cs: "C: 213 / 476 GB | D: 1.2 / 1.8 TB" (all fixed drives up to 3)
                     if drives.is_empty() {
                         draw_text(
@@ -1676,7 +1794,16 @@ impl DcompEngine {
                     artist,
                     muted,
                 } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     // MediaWidget.xaml: [29x29 ArtTint #526D84] [InfoPanel] [Prev 25x27 | Play 27x27 | Next 25x27] [Mute 27x27]
                     let art_sz = 29.0_f32.min(height_dips - 6.0);
                     let art_y = cy - art_sz * 0.5;
@@ -1781,7 +1908,16 @@ impl DcompEngine {
                     }
                 }
                 WidgetChipSpec::Audio { volume, muted } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     // AudioWidget.xaml: [Speaker 16px, margin 0,0,7,0] [12.5px SemiBold "67%" / "0%"]
                     let silent = *muted || *volume == 0;
                     let glyph = if silent {
@@ -1829,7 +1965,16 @@ impl DcompEngine {
                     );
                 }
                 WidgetChipSpec::QuickSettings { pills } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     // QuickSettingsWidget.xaml: 3 x 27x27 rounded pills with 4px gap + 8px padding
                     let sz = 27.0_f32.min(height_dips - 6.0);
                     let gap = 4.0;
@@ -1880,7 +2025,16 @@ impl DcompEngine {
                     }
                 }
                 WidgetChipSpec::Keyboard { code } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     // KeyboardLayoutWidget.cs: [IconKeyboard 13px Secondary, margin 0,0,5,0] [12px SemiBold Primary]
                     draw_fluent_str_d2d(
                         &self.dwrite_factory,
@@ -1913,7 +2067,16 @@ impl DcompEngine {
                     brand_color,
                     rows,
                 } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     // Exact C# `AiUsageWidget.cs` DualQuotaBars (Claude, Codex, single-row Cursor):
                     // Padding 10, [16x16 Brand Logo] + 8px + stacked rows (1 row for Cursor, 2 rows for Claude/Codex)
                     let logo_col = brand_color.unwrap_or(pal.text_primary);
@@ -2007,121 +2170,17 @@ impl DcompEngine {
                         );
                     }
                 }
-                WidgetChipSpec::AiAntigravity { columns } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
-                    // Exact C# `AiUsageWidget.cs` Antigravity: [Logo 16x16] + [Gemini (5h,7d) | Claude (7d) | Argon (7d)]
-                    design::brand_paths::draw_brand_logo(
-                        &self.d2d_factory,
-                        dc,
-                        "aiusage_antigravity",
-                        D2D_RECT_F {
-                            left: 10.0,
-                            top: cy - 8.0,
-                            right: 26.0,
-                            bottom: cy + 8.0,
-                        },
-                        pal.text_primary,
-                        0.98,
-                    )?;
-                    let muted_tr = dc.CreateSolidColorBrush(
-                        &if is_dark {
-                            color_rgba(0x7c, 0x86, 0x98, 0.35)
-                        } else {
-                            color_rgba(0x61, 0x66, 0x6e, 0.28)
-                        },
-                        None,
-                    )?;
-                    let col_count = columns.len().clamp(1, 3);
-                    let start_x = 34.0;
-                    let usable_w = (width_dips - start_x - 8.0).max(40.0);
-                    let div_w = 11.0;
-                    let col_w = (usable_w - (col_count.saturating_sub(1) as f32) * div_w)
-                        / col_count as f32;
-                    for (ci, (header, rows)) in columns.iter().take(3).enumerate() {
-                        let cx_l = start_x + ci as f32 * (col_w + div_w);
-                        if ci > 0 {
-                            draw_vdiv(cx_l - div_w * 0.5, 24.0);
-                        }
-                        let rn = rows.len().clamp(1, 2);
-                        let stack_h = 11.5 + rn as f32 * 10.5;
-                        let top_y = cy - stack_h * 0.5;
-                        draw_text(
-                            header,
-                            &fmt_9_b_l,
-                            D2D_RECT_F {
-                                left: cx_l,
-                                top: top_y,
-                                right: cx_l + col_w,
-                                bottom: top_y + 11.0,
-                            },
-                            &p_brush,
-                        );
-                        for (ri, (lbl, used, bar_col, reset_txt)) in rows.iter().take(2).enumerate()
-                        {
-                            let ry = top_y + 11.5 + ri as f32 * 10.5;
-                            draw_text(
-                                lbl,
-                                &fmt_85_b_l,
-                                D2D_RECT_F {
-                                    left: cx_l,
-                                    top: ry,
-                                    right: cx_l + 16.0,
-                                    bottom: ry + 10.0,
-                                },
-                                &s_brush,
-                            );
-                            let bl = cx_l + 17.5;
-                            let bw = (col_w - 34.0).clamp(20.0, 32.0);
-                            let by = ry + 3.2;
-                            dc.FillRoundedRectangle(
-                                &D2D1_ROUNDED_RECT {
-                                    rect: D2D_RECT_F {
-                                        left: bl,
-                                        top: by,
-                                        right: bl + bw,
-                                        bottom: by + 3.5,
-                                    },
-                                    radiusX: 1.75,
-                                    radiusY: 1.75,
-                                },
-                                &muted_tr,
-                            );
-                            let fw = (bw * used.clamp(0.0, 1.0)).min(bw);
-                            if fw >= 1.0 {
-                                let fb = dc.CreateSolidColorBrush(
-                                    &color_rgba(bar_col.0, bar_col.1, bar_col.2, 0.98),
-                                    None,
-                                )?;
-                                dc.FillRoundedRectangle(
-                                    &D2D1_ROUNDED_RECT {
-                                        rect: D2D_RECT_F {
-                                            left: bl,
-                                            top: by,
-                                            right: bl + fw,
-                                            bottom: by + 3.5,
-                                        },
-                                        radiusX: 1.75,
-                                        radiusY: 1.75,
-                                    },
-                                    &fb,
-                                );
-                            }
-                            draw_text(
-                                reset_txt,
-                                &fmt_85_l,
-                                D2D_RECT_F {
-                                    left: bl + bw + 3.5,
-                                    top: ry,
-                                    right: cx_l + col_w,
-                                    bottom: ry + 10.0,
-                                },
-                                &p_brush,
-                            );
-                        }
-                    }
-                }
                 WidgetChipSpec::AiOpenCode { columns } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     // Exact C# `AiUsageWidget.cs` OpenCode: [Logo 16x16] [OpenCode 12px SemiBold] + 3 x 54px columns (`1h | 7d | 30d`)
                     design::brand_paths::draw_brand_logo(
                         &self.d2d_factory,
@@ -2234,7 +2293,16 @@ impl DcompEngine {
                     used,
                     bar_color,
                 } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     // Exact C# `AiUsageWidget.cs` Copilot: [Logo 16x16] [Copilot 12px SemiBold] | [12px Val / 9.5px Meta] [31x4 track]
                     design::brand_paths::draw_brand_logo(
                         &self.d2d_factory,
@@ -2326,84 +2394,53 @@ impl DcompEngine {
                     brand_color,
                     value_text,
                 } => {
-                    // Exact C# `AiUsageWidget.cs` lines 769-804 (DeepSeek / OpenRouter):
-                    // `WidgetCardButton` hover/press layer behind an inner `Border` with `Padding=(8,2,13,2)`,
-                    // `CornerRadius=12`, `TintedBrush(accent, 26)` -> 29x29 circle (`TintedBrush(accent, 52)`)
-                    // with 15x15 brand-colored logo + right stack (`9.5px SemiBold TextSecondary` name over
-                    // `16px SemiBold TextPrimary` balance value, Margin=9,0,0,0).
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
-
-                    let surf_h = 37.0_f32.min(height_dips - 2.0);
-                    let surf_top = (height_dips - surf_h) * 0.5;
-                    let card_rr = D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F {
-                            left: 0.0,
-                            top: surf_top,
-                            right: width_dips,
-                            bottom: surf_top + surf_h,
-                        },
-                        radiusX: 12.0,
-                        radiusY: 12.0,
-                    };
-                    let tint_b = dc.CreateSolidColorBrush(
-                        &color_rgba(brand_color.0, brand_color.1, brand_color.2, 26.0 / 255.0),
+                    // Unified AI card style matching Claude, Codex, Copilot, OpenCode, and Cursor:
+                    // neutral card surface, crisp 16x16 brand logo, subtle divider, and 2-line metric stack.
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
                         None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
                     )?;
-                    dc.FillRoundedRectangle(&card_rr, &tint_b);
-
-                    let well = 29.0_f32.min(surf_h - 4.0);
-                    let wy = cy - well * 0.5;
-                    let well_rr = D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F {
-                            left: 8.0,
-                            top: wy,
-                            right: 8.0 + well,
-                            bottom: wy + well,
-                        },
-                        radiusX: well * 0.5,
-                        radiusY: well * 0.5,
-                    };
-                    let well_b = dc.CreateSolidColorBrush(
-                        &color_rgba(brand_color.0, brand_color.1, brand_color.2, 52.0 / 255.0),
-                        None,
-                    )?;
-                    dc.FillRoundedRectangle(&well_rr, &well_b);
                     design::brand_paths::draw_brand_logo(
                         &self.d2d_factory,
                         dc,
                         provider_id,
                         D2D_RECT_F {
-                            left: 8.0 + (well - 15.0) * 0.5,
-                            top: wy + (well - 15.0) * 0.5,
-                            right: 8.0 + (well + 15.0) * 0.5,
-                            bottom: wy + (well + 15.0) * 0.5,
+                            left: 10.0,
+                            top: cy - 8.0,
+                            right: 26.0,
+                            bottom: cy + 8.0,
                         },
                         *brand_color,
-                        1.0,
+                        0.98,
                     )?;
-
-                    let tx = 8.0 + well + 9.0;
-                    // Exact C# vertical stack: 9.5pt name (~11px) directly above 16pt balance (~19px), centered inside surface.
-                    let stack_top = cy - 15.5;
+                    draw_vdiv(33.0, 20.0);
+                    let tx = 41.0;
+                    let mid = height_dips * 0.50;
                     draw_text(
                         name,
                         &fmt_95_b_l,
                         D2D_RECT_F {
                             left: tx,
-                            top: stack_top,
-                            right: width_dips - 10.0,
-                            bottom: stack_top + 12.0,
+                            top: (mid - 13.5).max(2.0),
+                            right: width_dips - 8.0,
+                            bottom: mid,
                         },
                         &s_brush,
                     );
                     draw_text(
                         value_text,
-                        &fmt_16_b_l,
+                        &fmt_125_b_l,
                         D2D_RECT_F {
                             left: tx,
-                            top: stack_top + 11.5,
-                            right: width_dips - 10.0,
-                            bottom: stack_top + 31.5,
+                            top: mid - 0.5,
+                            right: width_dips - 8.0,
+                            bottom: (mid + 14.5).min(height_dips - 2.0),
                         },
                         &p_brush,
                     );
@@ -2414,7 +2451,16 @@ impl DcompEngine {
                     top,
                     bottom,
                 } => {
-                    draw_chip_card(dc, width_dips, height_dips, is_dark, None, interaction)?;
+                    draw_chip_card(
+                        dc,
+                        width_dips,
+                        height_dips,
+                        is_dark,
+                        None,
+                        interaction,
+                        border_rgb,
+                        border_width_dips,
+                    )?;
                     draw_chip_icon(&self.dwrite_factory, dc, *icon, 18.0, cy, 15.0, *icon_color)?;
                     let mid = height_dips * 0.51;
                     draw_text(
@@ -2472,13 +2518,13 @@ impl DcompEngine {
         };
         let sec_fmt = unsafe {
             let fmt = self.dwrite_factory.CreateTextFormat(
-                &HSTRING::from("Segoe UI"),
+                &HSTRING::from(design::fonts::ui_family_list().as_str()),
                 None,
                 DWRITE_FONT_WEIGHT_MEDIUM,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                10.5,
-                &HSTRING::from("en-US"),
+                design::fonts::scaled_size(10.5),
+                &HSTRING::from(design::fonts::ui_locale().as_str()),
             )?;
             fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
             fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
@@ -2598,11 +2644,13 @@ impl DcompEngine {
         bg: (u8, u8, u8, f32),
         border: (u8, u8, u8, f32),
         dpi: f32,
+        border_width_dips: f32,
     ) -> Result<PillNodes> {
         let h = pill_h_px.ceil().max(4.0) as u32;
         let r = radius_px.clamp(2.0, pill_h_px * 0.5);
         let cap_w = (r.ceil() as u32).max(2);
         let bw = dpi.max(1.0);
+        let stroke_w = (border_width_dips * dpi).max(0.0);
         let half_bw = bw * 0.5;
         let is_dark = (u16::from(bg.0) + u16::from(bg.1) + u16::from(bg.2)) < 384;
         let top_bg = color_rgba(
@@ -2694,8 +2742,8 @@ impl DcompEngine {
             );
             dc.DrawRoundedRectangle(&inner_rr, &spec_brush, bw, None);
             dc.PopAxisAlignedClip();
-            if border.3 > 0.0 {
-                dc.DrawRoundedRectangle(&rr, &bd_brush, bw, None);
+            if border.3 > 0.0 && stroke_w > 0.0 {
+                dc.DrawRoundedRectangle(&rr, &bd_brush, stroke_w, None);
             }
             dc.PopAxisAlignedClip();
             Ok(())
@@ -2728,12 +2776,12 @@ impl DcompEngine {
                 bw,
                 None,
             );
-            if border.3 > 0.0 {
+            if border.3 > 0.0 && stroke_w > 0.0 {
                 dc.DrawLine(
                     Vector2 { X: 0.0, Y: half_bw },
                     Vector2 { X: 1.0, Y: half_bw },
                     &bd_brush,
-                    bw,
+                    stroke_w,
                     None,
                 );
                 dc.DrawLine(
@@ -2746,7 +2794,7 @@ impl DcompEngine {
                         Y: fh - half_bw,
                     },
                     &bd_brush,
-                    bw,
+                    stroke_w,
                     None,
                 );
             }
@@ -2798,8 +2846,8 @@ impl DcompEngine {
             );
             dc.DrawRoundedRectangle(&inner_rr, &spec_brush, bw, None);
             dc.PopAxisAlignedClip();
-            if border.3 > 0.0 {
-                dc.DrawRoundedRectangle(&rr, &bd_brush, bw, None);
+            if border.3 > 0.0 && stroke_w > 0.0 {
+                dc.DrawRoundedRectangle(&rr, &bd_brush, stroke_w, None);
             }
             dc.PopAxisAlignedClip();
             Ok(())
@@ -2955,7 +3003,7 @@ impl DcompEngine {
 
     pub fn create_app_icon_surface(&self, raw: &RawIcon) -> Result<IDCompositionSurface> {
         // Convert straight BGRA32 to premultiplied BGRA32 once at upload time.
-        let mut premul = raw.pixels.clone();
+        let mut premul = raw.pixels.to_vec();
         for px in premul.chunks_exact_mut(4) {
             let a = u16::from(px[3]);
             if a == 0 {
@@ -3052,6 +3100,8 @@ impl DcompEngine {
         text: &str,
         dpi: f32,
         is_dark: bool,
+        border_rgb: Rgb,
+        border_width_dips: f32,
     ) -> Result<(IDCompositionSurface, f32, f32)> {
         let wide: Vec<u16> = text.encode_utf16().collect();
         let layout = unsafe {
@@ -3069,7 +3119,7 @@ impl DcompEngine {
         let w_px = (w_dips * dpi).ceil() as u32;
         let h_px = (h_dips * dpi).ceil() as u32;
 
-        let pal = design::palette(is_dark);
+        let pal = design::palette_with_border(is_dark, Some(border_rgb));
         let (bg_c, bd_c, fg_c) = (
             color_rgba(pal.surface.0, pal.surface.1, pal.surface.2, 0.96),
             color_rgba(pal.border_rgb.0, pal.border_rgb.1, pal.border_rgb.2, 0.90),
@@ -3085,7 +3135,7 @@ impl DcompEngine {
             let bg = dc.CreateSolidColorBrush(&bg_c, None)?;
             let bd = dc.CreateSolidColorBrush(&bd_c, None)?;
             let fg = dc.CreateSolidColorBrush(&fg_c, None)?;
-            let bw = dpi.max(1.0);
+            let bw = (border_width_dips * dpi).max(0.0);
             let half_bw = bw * 0.5;
             let rr = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
@@ -3134,15 +3184,123 @@ impl DcompEngine {
 #[allow(dead_code)]
 fn _unused_rect_check(_: RECT, _: D2D_SIZE_F) {}
 
-/// Exact C# `WidgetCardBorder` / `WidgetCardButton`: completely transparent at rest (`#00000000`),
-/// smooth translucent hover (`#22FFFFFF` dark / `#18000000` light) and press (`#38FFFFFF` / `#2A000000`),
-/// with `WidgetRadius = 12.0` and zero borders.
+/// Shared widget card material used by every dock widget so all cards read as one family:
+/// a frosted-glass surface (vertical fill gradient), a 1px rim that is brightest at the top edge,
+/// and a thin specular line under the rim. Hover and press raise fill and rim opacity.
+#[allow(clippy::too_many_arguments)]
 unsafe fn draw_chip_card(
     dc: &ID2D1DeviceContext,
     width_dips: f32,
     height_dips: f32,
     is_dark: bool,
     _active_tint: Option<Rgb>,
+    interaction: WidgetInteraction,
+    border_rgb: Option<Rgb>,
+    border_width_dips: f32,
+) -> Result<()> {
+    // (top fill alpha, bottom fill alpha, rim top alpha, rim bottom alpha, specular alpha)
+    let (fill_top, fill_bottom, rim_top, rim_bottom, specular) = match (is_dark, interaction) {
+        (true, WidgetInteraction::Idle) => (0.105, 0.050, 0.24, 0.06, 0.14),
+        (true, WidgetInteraction::Hovered(_)) => (0.170, 0.100, 0.34, 0.12, 0.22),
+        (true, WidgetInteraction::Pressed(_)) => (0.230, 0.150, 0.28, 0.14, 0.10),
+        (false, WidgetInteraction::Idle) => (0.060, 0.030, 0.12, 0.05, 0.0),
+        (false, WidgetInteraction::Hovered(_)) => (0.100, 0.065, 0.18, 0.08, 0.0),
+        (false, WidgetInteraction::Pressed(_)) => (0.150, 0.110, 0.20, 0.10, 0.0),
+    };
+    let base = if is_dark { 0xff } else { 0x00 };
+    let rim_base = if is_dark { 0xff } else { 0x00 };
+    let gradient = |top: f32, bottom: f32, c: u8| -> Result<ID2D1LinearGradientBrush> {
+        unsafe {
+            let stops = [
+                D2D1_GRADIENT_STOP {
+                    position: 0.0,
+                    color: color_rgba(c, c, c, top),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 1.0,
+                    color: color_rgba(c, c, c, bottom),
+                },
+            ];
+            let collection = dc.CreateGradientStopCollection(
+                &stops,
+                D2D1_COLOR_SPACE_SRGB,
+                D2D1_COLOR_SPACE_SRGB,
+                D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                D2D1_EXTEND_MODE_CLAMP,
+                D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+            )?;
+            dc.CreateLinearGradientBrush(
+                &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                    startPoint: Vector2 { X: 0.0, Y: 0.0 },
+                    endPoint: Vector2 {
+                        X: 0.0,
+                        Y: height_dips,
+                    },
+                },
+                None,
+                &collection,
+            )
+        }
+    };
+    unsafe {
+        let fill_rr = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: 0.0,
+                top: 0.0,
+                right: width_dips,
+                bottom: height_dips,
+            },
+            radiusX: 12.0,
+            radiusY: 12.0,
+        };
+        dc.FillRoundedRectangle(&fill_rr, &gradient(fill_top, fill_bottom, base)?);
+        let rim_rr = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: 0.5,
+                top: 0.5,
+                right: width_dips - 0.5,
+                bottom: height_dips - 0.5,
+            },
+            radiusX: 11.5,
+            radiusY: 11.5,
+        };
+        dc.DrawRoundedRectangle(
+            &rim_rr,
+            &gradient(rim_top, rim_bottom, rim_base)?,
+            1.0,
+            None,
+        );
+        if let Some(rgb) = border_rgb
+            && border_width_dips > 0.0
+        {
+            let brush = dc.CreateSolidColorBrush(&color_rgba(rgb.0, rgb.1, rgb.2, 0.85), None)?;
+            dc.DrawRoundedRectangle(&rim_rr, &brush, border_width_dips, None);
+        }
+        if specular > 0.0 {
+            let line = dc.CreateSolidColorBrush(&color_rgba(0xff, 0xff, 0xff, specular), None)?;
+            dc.DrawLine(
+                Vector2 { X: 12.0, Y: 1.5 },
+                Vector2 {
+                    X: width_dips - 12.0,
+                    Y: 1.5,
+                },
+                &line,
+                1.0,
+                None,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Exact C# `WidgetCardBorder` / `WidgetCardButton` hover/press-only overlay (transparent at rest,
+/// `#22FFFFFF` dark / `#18000000` light hover, `#38FFFFFF` / `#2A000000` press, `WidgetRadius = 12`).
+/// Used where a widget paints its own full-card surface (the liquid Battery card).
+unsafe fn draw_chip_overlay(
+    dc: &ID2D1DeviceContext,
+    width_dips: f32,
+    height_dips: f32,
+    is_dark: bool,
     interaction: WidgetInteraction,
 ) -> Result<()> {
     let fill_c = match interaction {
@@ -3198,7 +3356,7 @@ unsafe fn draw_fluent_str_d2d(
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
             font_size,
-            &HSTRING::from("en-US"),
+            &HSTRING::from(design::fonts::ui_locale().as_str()),
         )?;
         fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
         fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
@@ -3267,5 +3425,178 @@ unsafe fn draw_chip_icon(
             color,
             0.96,
         )
+    }
+}
+
+impl DcompEngine {
+    /// Draws the Dynamic Island surface (top-flush rounded bottom pill, border, nav chevrons,
+    /// tabular page counter, and expand chevron).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_island_chrome_surface(
+        &self,
+        width_dips: f32,
+        height_dips: f32,
+        dpi: f32,
+        is_dark: bool,
+        opacity: f32,
+        background: SurfaceBackground,
+        use_theme: bool,
+        has_prev_next: bool,
+        page_count_text: &str,
+        has_expand: bool,
+        hovered_btn: Option<IslandButton>,
+        pressed_btn: Option<IslandButton>,
+        border_rgb: Rgb,
+        border_width_dips: f32,
+    ) -> Result<IDCompositionSurface> {
+        let pal = design::palette(is_dark);
+        let w_px = (width_dips * dpi).ceil().max(1.0) as u32;
+        let h_px = (height_dips * dpi).ceil().max(1.0) as u32;
+        let fmt_count = self.cached_text_format(11.0 * dpi, false, 0)?;
+
+        self.draw_surface(w_px, h_px, |dc, w, h| unsafe {
+            let r = 20.0 * dpi;
+            let stroke = (border_width_dips * dpi).max(0.0);
+            // Theme follows the active palette; opting out paints a fixed neutral pill.
+            let neutral_pill = if is_dark {
+                (0x2b_u8, 0x2b_u8, 0x30_u8)
+            } else {
+                (0xf7_u8, 0xf7_u8, 0xfa_u8)
+            };
+            let fill_rgb = if use_theme { pal.dock_pill } else { neutral_pill };
+            let fill_alpha = match background {
+                SurfaceBackground::None => 0.0,
+                SurfaceBackground::Solid => 1.0,
+                SurfaceBackground::Glass => opacity.clamp(0.1, 1.0),
+            };
+            let bd_alpha = if is_dark { 0.14_f32 } else { 0.12_f32 };
+            let bd_color = color_rgba(border_rgb.0, border_rgb.1, border_rgb.2, bd_alpha);
+            let bd_brush = dc.CreateSolidColorBrush(&bd_color, None)?;
+
+            // Top-flush rounded rectangle (flat top edge, 20 DIP bottom corners).
+            let pill_rect = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: stroke * 0.5,
+                    top: -r,
+                    right: w - stroke * 0.5,
+                    bottom: h - stroke * 0.5,
+                },
+                radiusX: r,
+                radiusY: r,
+            };
+            if fill_alpha > 0.0 {
+                let bg_brush = dc.CreateSolidColorBrush(
+                    &color_rgba(fill_rgb.0, fill_rgb.1, fill_rgb.2, fill_alpha),
+                    None,
+                )?;
+                dc.FillRoundedRectangle(&pill_rect, &bg_brush);
+            }
+            if background != SurfaceBackground::None {
+                dc.DrawRoundedRectangle(&pill_rect, &bd_brush, stroke, None);
+            }
+
+            let draw_btn = |btn: IslandButton, cx_dips: f32, glyph: &str, enabled: bool| -> Result<()> {
+                let bx = cx_dips * dpi;
+                let by = 9.0 * dpi;
+                let bsz = 32.0 * dpi;
+                let is_pressed = pressed_btn == Some(btn);
+                let is_hovered = hovered_btn == Some(btn);
+                if enabled && (is_pressed || is_hovered) {
+                    let alpha = if is_pressed {
+                        0.16
+                    } else if is_dark {
+                        0.10
+                    } else {
+                        0.08
+                    };
+                    let ink = if is_dark { (0xff, 0xff, 0xff) } else { (0x18, 0x18, 0x1b) };
+                    let hb = dc.CreateSolidColorBrush(&color_rgba(ink.0, ink.1, ink.2, alpha), None)?;
+                    dc.FillRoundedRectangle(
+                        &D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: bx,
+                                top: by,
+                                right: bx + bsz,
+                                bottom: by + bsz,
+                            },
+                            radiusX: 8.0 * dpi,
+                            radiusY: 8.0 * dpi,
+                        },
+                        &hb,
+                    );
+                }
+                let ink = if enabled { pal.text_primary } else { pal.text_secondary };
+                let alpha = if enabled { 0.92 } else { 0.35 };
+                draw_fluent_str_d2d(
+                    &self.dwrite_factory,
+                    dc,
+                    glyph,
+                    D2D_RECT_F {
+                        left: bx,
+                        top: by,
+                        right: bx + bsz,
+                        bottom: by + bsz,
+                    },
+                    13.0 * dpi,
+                    ink,
+                    alpha,
+                )
+            };
+
+            draw_btn(IslandButton::Prev, 3.0, "\u{E76B}", has_prev_next)?;
+            let right_total = 38.0 + 56.0 + 38.0;
+            let next_x = width_dips - right_total;
+            draw_btn(IslandButton::Next, next_x + 3.0, "\u{E76C}", has_prev_next)?;
+
+            if !page_count_text.is_empty() {
+                let count_rect = D2D_RECT_F {
+                    left: (next_x + 38.0) * dpi,
+                    top: 0.0,
+                    right: (next_x + 38.0 + 56.0) * dpi,
+                    bottom: 50.0 * dpi,
+                };
+                let sec_brush = dc.CreateSolidColorBrush(
+                    &color_rgba(pal.text_secondary.0, pal.text_secondary.1, pal.text_secondary.2, 0.9),
+                    None,
+                )?;
+                let layout = self.dwrite_factory.CreateTextLayout(
+                    &HSTRING::from(page_count_text),
+                    &fmt_count,
+                    56.0 * dpi,
+                    50.0 * dpi,
+                )?;
+                if let Ok(typo) = self.dwrite_factory.CreateTypography() {
+                    let _ = typo.AddFontFeature(
+                        windows::Win32::Graphics::DirectWrite::DWRITE_FONT_FEATURE {
+                            nameTag: windows::Win32::Graphics::DirectWrite::DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
+                            parameter: 1,
+                        },
+                    );
+                    let _ = layout.SetTypography(
+                        &typo,
+                        windows::Win32::Graphics::DirectWrite::DWRITE_TEXT_RANGE {
+                            startPosition: 0,
+                            length: page_count_text.encode_utf16().count() as u32,
+                        },
+                    );
+                }
+                dc.DrawTextLayout(
+                    Vector2 {
+                        X: count_rect.left,
+                        Y: count_rect.top,
+                    },
+                    &layout,
+                    &sec_brush,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                );
+            }
+
+            if has_expand {
+                let expand_x = width_dips - 35.0;
+                draw_btn(IslandButton::Expand, expand_x, "\u{E70D}", true)?;
+            }
+
+            Ok(())
+        })
     }
 }

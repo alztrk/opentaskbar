@@ -4,15 +4,20 @@
 //! input (microphone) volume/mute/device names, media transport keys, network throughput + session
 //! totals (`GetIfTable2`), system battery, Bluetooth PnP device battery, fixed storage drives,
 //! keyboard layout switcher with localized display names, day progress, cached weather (`wttr.in`),
-//! Recycle Bin status, and AI CLI credential presence.
+//! Recycle Bin status, AI CLI credential presence, and optional GPU usage/temperature sampling.
 
 use std::collections::{HashMap, VecDeque};
+use std::ffi::c_void;
+use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use opentaskbar_core::i18n as loc;
+use opentaskbar_core::settings::{ClockDateFormat, ClockDateStyle, DockSettings};
 
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
@@ -20,7 +25,9 @@ use windows::Win32::Media::Audio::{
     EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eMultimedia, eRender,
 };
 use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, STGM_READ};
-use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, LocalFree, SYSTEMTIME};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, FARPROC, FILETIME, FreeLibrary, HMODULE, LocalFree, SYSTEMTIME,
+};
 use windows_sys::Win32::Globalization::{
     GetLocaleInfoW, LOCALE_SISO639LANGNAME, LOCALE_SLOCALIZEDDISPLAYNAME,
 };
@@ -34,9 +41,12 @@ use windows_sys::Win32::Networking::WinHttp::{
     WinHttpSendRequest, WinHttpSetTimeouts,
 };
 use windows_sys::Win32::Security::Cryptography::{
-    CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptUnprotectData,
+    CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
 };
 use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetLogicalDrives};
+use windows_sys::Win32::System::LibraryLoader::{
+    GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW, LoadLibraryW,
+};
 use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows_sys::Win32::System::ProcessStatus::{
     EnumProcesses, GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
@@ -60,7 +70,9 @@ use windows_sys::Win32::UI::Shell::{
     SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND, SHEmptyRecycleBinW, SHQUERYRBINFO,
     SHQueryRecycleBinW,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowThreadProcessId, PostMessageW, WM_INPUTLANGCHANGEREQUEST,
+};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const SPARKLINE_CAPACITY: usize = 45;
@@ -323,11 +335,775 @@ pub fn sample_top_processes(limit: usize) -> Vec<(String, u64)> {
     list
 }
 
+// --- GPU Usage & Temperature (PDH + optional NVIDIA NVML) ---
+
+const PDH_FMT_DOUBLE: u32 = 0x0000_0200;
+const PDH_MORE_DATA: u32 = 0x8000_07D2;
+const GPU_ENGINE_PATH: &str = r"\GPU Engine(*)\Utilization Percentage";
+
+/// Native `PDH_FMT_COUNTERVALUE`: a `DWORD` status followed by an 8-byte aligned value union.
+#[repr(C)]
+struct PdhFmtValue {
+    status: u32,
+    value: f64,
+}
+
+/// Native `PDH_FMT_COUNTERVALUE_ITEM_W`: instance name plus the formatted value above.
+#[repr(C)]
+struct PdhFmtItemW {
+    name: *const u16,
+    value: PdhFmtValue,
+}
+
+#[link(name = "pdh")]
+#[allow(non_snake_case)]
+unsafe extern "system" {
+    fn PdhOpenQueryW(data_source: *const u16, user_data: usize, query: *mut isize) -> u32;
+    fn PdhAddCounterW(
+        query: isize,
+        counter_path: *const u16,
+        user_data: usize,
+        counter: *mut isize,
+    ) -> u32;
+    fn PdhAddEnglishCounterW(
+        query: isize,
+        counter_path: *const u16,
+        user_data: usize,
+        counter: *mut isize,
+    ) -> u32;
+    fn PdhCollectQueryData(query: isize) -> u32;
+    fn PdhGetFormattedCounterArrayW(
+        counter: isize,
+        format: u32,
+        buffer_size: *mut u32,
+        item_count: *mut u32,
+        buffer: *mut c_void,
+    ) -> u32;
+    fn PdhGetFormattedCounterValue(
+        counter: isize,
+        format: u32,
+        counter_type: *mut u32,
+        value: *mut PdhFmtValue,
+    ) -> u32;
+    fn PdhCloseQuery(query: isize) -> u32;
+}
+
+/// Copies a PDH-owned NUL-terminated wide string (`szName`) into a Rust `String`.
+unsafe fn pdh_wide_string(text: *const u16) -> String {
+    if text.is_null() {
+        return String::new();
+    }
+    // SAFETY: PDH supplies a valid NUL-terminated wide string for each formatted item.
+    unsafe {
+        let mut len = 0usize;
+        while len < 1024 && *text.add(len) != 0 {
+            len += 1;
+        }
+        String::from_utf16_lossy(std::slice::from_raw_parts(text, len))
+    }
+}
+
+/// Group key for one GPU engine node, e.g. `0x00000000_0x0000F3A1_phys_0|3D`.
+///
+/// PDH instance names look like
+/// `pid_1234_luid_0x00000000_0x0000F3A1_phys_0_eng_0_engtype_3D`.
+fn gpu_engine_key(instance: &str) -> Option<String> {
+    const LUID: &str = "_luid_";
+    const ENGINE: &str = "_engtype_";
+    let luid_at = instance.find(LUID)? + LUID.len();
+    let engine_at = instance.find(ENGINE)?;
+    if engine_at <= luid_at {
+        return None;
+    }
+    let luid = &instance[luid_at..engine_at];
+    let engine = &instance[engine_at + ENGINE.len()..];
+    if luid.is_empty() || luid.len() > 96 || engine.is_empty() || engine.len() > 64 {
+        return None;
+    }
+    Some(format!("{luid}|{engine}"))
+}
+
+/// Engine kind (e.g. `"3D"`, `"Video Decode"`) from a PDH instance name such as
+/// `pid_1234_luid_0x00000000_0x0000F3A1_phys_0_eng_0_engtype_3D`.
+fn gpu_engine_name(instance: &str) -> Option<&str> {
+    if !instance.contains("_luid_") {
+        return None;
+    }
+    let (_, engine) = instance.rsplit_once("_engtype_")?;
+    (!engine.is_empty() && engine.len() <= 64).then_some(engine)
+}
+
+/// One long-lived PDH query. Rate counters need a time delta, so the query is never recreated.
+struct PdhGpu {
+    query: isize,
+    counter: isize,
+    /// `u64` backing store keeps the `PDH_FMT_COUNTERVALUE_ITEM_W` array 8-byte aligned.
+    buffer: Vec<u64>,
+}
+
+impl PdhGpu {
+    fn new() -> Option<Self> {
+        let path: Vec<u16> = GPU_ENGINE_PATH.encode_utf16().chain(Some(0)).collect();
+        unsafe {
+            let mut query = 0isize;
+            if PdhOpenQueryW(std::ptr::null(), 0, &mut query) != 0 || query == 0 {
+                return None;
+            }
+            let mut counter = 0isize;
+            // English path first, then the localized counter on non-English Windows.
+            let added = (PdhAddEnglishCounterW(query, path.as_ptr(), 0, &mut counter) == 0
+                || PdhAddCounterW(query, path.as_ptr(), 0, &mut counter) == 0)
+                && counter != 0;
+            if !added {
+                let _ = PdhCloseQuery(query);
+                return None;
+            }
+            Some(Self {
+                query,
+                counter,
+                buffer: vec![0u64; 512],
+            })
+        }
+    }
+
+    /// Collects one sample and returns the busiest engine load in percent (`0..=100`) together
+    /// with the engine kind that produced it (e.g. `"3D"`; `"GPU Engine"` when unknown).
+    fn read_max(&mut self) -> Option<(f64, String)> {
+        unsafe {
+            if PdhCollectQueryData(self.query) != 0 {
+                return None;
+            }
+
+            let mut size = (self.buffer.len() * size_of::<u64>()) as u32;
+            let mut count = 0u32;
+            let mut status = PdhGetFormattedCounterArrayW(
+                self.counter,
+                PDH_FMT_DOUBLE,
+                &mut size,
+                &mut count,
+                self.buffer.as_mut_ptr().cast(),
+            );
+            if status == PDH_MORE_DATA && size > 0 {
+                let words = (size as usize).div_ceil(size_of::<u64>()).max(1);
+                self.buffer.resize(words, 0);
+                size = (self.buffer.len() * size_of::<u64>()) as u32;
+                status = PdhGetFormattedCounterArrayW(
+                    self.counter,
+                    PDH_FMT_DOUBLE,
+                    &mut size,
+                    &mut count,
+                    self.buffer.as_mut_ptr().cast(),
+                );
+            }
+
+            let mut found = false;
+            let mut best = 0.0f64;
+            let mut best_engine = String::new();
+            if status == 0 && count > 0 {
+                let capacity = (self.buffer.len() * size_of::<u64>()) / size_of::<PdhFmtItemW>();
+                let items = std::slice::from_raw_parts(
+                    self.buffer.as_ptr().cast::<PdhFmtItemW>(),
+                    (count as usize).min(capacity),
+                );
+                // Keyed by luid+engine (one GPU engine node) with its engine label alongside.
+                let mut by_engine: HashMap<String, (f64, String)> = HashMap::new();
+                for item in items {
+                    // Status > 1 means "no data" / "not validated": skip that instance.
+                    if item.value.status > 1 || !item.value.value.is_finite() {
+                        continue;
+                    }
+                    let value = item.value.value.max(0.0);
+                    found = true;
+                    let name = pdh_wide_string(item.name);
+                    let engine = gpu_engine_name(&name);
+                    // `>=` keeps an engine label even for an idle (0%) GPU, as the old flyout did.
+                    if value >= best {
+                        best = value;
+                        best_engine = engine
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| "GPU Engine".to_owned());
+                    }
+                    if let (Some(key), Some(engine)) = (gpu_engine_key(&name), engine) {
+                        let entry = by_engine
+                            .entry(key)
+                            .or_insert((0.0, engine.to_owned()));
+                        entry.0 += value;
+                    }
+                }
+                // C# reports the busiest engine of the busiest GPU: sum per engine node, then max.
+                if let Some((_, (value, engine))) = by_engine
+                    .into_iter()
+                    .max_by(|a, b| (a.1).0.total_cmp(&(b.1).0))
+                    && value > best
+                {
+                    best = value;
+                    best_engine = engine;
+                }
+            }
+
+            // A few systems expose only a single (non-wildcard) counter instance.
+            if !found {
+                let mut formatted = PdhFmtValue {
+                    status: 0,
+                    value: 0.0,
+                };
+                if PdhGetFormattedCounterValue(
+                    self.counter,
+                    PDH_FMT_DOUBLE,
+                    std::ptr::null_mut(),
+                    &mut formatted,
+                ) == 0
+                    && formatted.status <= 1
+                    && formatted.value.is_finite()
+                {
+                    found = true;
+                    best = formatted.value.max(0.0);
+                    best_engine = "GPU Engine".to_owned();
+                }
+            }
+            found.then_some((best, best_engine))
+        }
+    }
+}
+
+impl Drop for PdhGpu {
+    fn drop(&mut self) {
+        // SAFETY: `query` came from `PdhOpenQueryW` and is closed exactly once here.
+        unsafe {
+            let _ = PdhCloseQuery(self.query);
+        }
+    }
+}
+
+static GPU_QUERY: OnceLock<Mutex<Option<PdhGpu>>> = OnceLock::new();
+
+/// One PDH sample of the GPU engine counter: `(load in [0, 1], busiest engine name)`.
+///
+/// Non-blocking: a poisoned/contended query or a collection failure yields `None` rather than
+/// stalling a UI frame. A valid but idle GPU yields `Some((0.0, engine))`.
+fn sample_gpu_pdh() -> Option<(f32, String)> {
+    let slot = GPU_QUERY.get_or_init(|| Mutex::new(PdhGpu::new()));
+    let mut guard = slot.try_lock().ok()?;
+    let query = guard.as_mut()?;
+    // A rate counter's first collection has no baseline; collect twice and keep the larger value.
+    let mut best = (0.0f64, String::new());
+    let mut saw_data = false;
+    for _ in 0..2 {
+        if let Some((value, engine)) = query.read_max() {
+            saw_data = true;
+            if value >= best.0 {
+                best = (value, engine);
+            }
+        }
+    }
+    if !saw_data {
+        return None;
+    }
+    let ratio = (best.0 / 100.0) as f32;
+    ratio
+        .is_finite()
+        .then(|| (ratio.clamp(0.0, 1.0), best.1))
+}
+
+/// Busiest GPU engine load in `[0.0, 1.0]`, matching C# `SystemSensors.SampleGpuUsage`.
+///
+/// Reads the PDH wildcard counter `\GPU Engine(*)\Utilization Percentage`. Returns `None` when the
+/// counter is unavailable or no sample can be collected; a valid but idle GPU yields `Some(0.0)`.
+pub fn sample_gpu_usage() -> Option<f32> {
+    sample_gpu_pdh().map(|(usage, _)| usage)
+}
+
+/// Engine kind of the busiest GPU engine in the latest PDH sample (e.g. `"3D"`,
+/// `"Video Decode"`). Returns `None` when no sample can be collected.
+pub fn sample_gpu_engine_name() -> Option<String> {
+    sample_gpu_pdh().map(|(_, engine)| engine)
+}
+
+// NVML is resolved on demand from System32: no link-time dependency, and a rogue DLL placed next to
+// the executable cannot replace the driver library (matches C#'s System32-only DllImport search).
+
+type NvmlInitFn = unsafe extern "C" fn() -> i32;
+type NvmlShutdownFn = unsafe extern "C" fn() -> i32;
+type NvmlCountFn = unsafe extern "C" fn(*mut u32) -> i32;
+type NvmlHandleFn = unsafe extern "C" fn(u32, *mut *mut c_void) -> i32;
+type NvmlTempFn = unsafe extern "C" fn(*mut c_void, i32, *mut u32) -> i32;
+
+struct NvmlLib {
+    /// Integer handle keeps the `OnceLock` static `Send + Sync`.
+    module: isize,
+    shutdown: NvmlShutdownFn,
+    get_count: NvmlCountFn,
+    get_handle: NvmlHandleFn,
+    get_temp: NvmlTempFn,
+}
+
+impl Drop for NvmlLib {
+    fn drop(&mut self) {
+        // SAFETY: the handle and symbols all came from the same live library loaded below.
+        unsafe {
+            let _ = (self.shutdown)();
+            let _ = FreeLibrary(self.module as HMODULE);
+        }
+    }
+}
+
+/// Resolves one exported DLL symbol into its typed function pointer.
+unsafe fn nvml_symbol<T: Copy>(module: HMODULE, name: &[u8]) -> Option<T> {
+    // SAFETY: `module` is a live library handle and `name` is NUL-terminated.
+    let raw: FARPROC = Some(unsafe { GetProcAddress(module, name.as_ptr().cast())? });
+    // `FARPROC` is a niche-optimized `Option<fn()>`; copy its pointer bits into `T`.
+    Some(unsafe { std::mem::transmute_copy::<FARPROC, T>(&raw) })
+}
+
+fn nvml_lib() -> Option<&'static NvmlLib> {
+    NVML.get_or_init(|| unsafe {
+        let name: Vec<u16> = "nvml.dll\0".encode_utf16().collect();
+        let mut module = LoadLibraryExW(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            LOAD_LIBRARY_SEARCH_SYSTEM32,
+        );
+        // Standard (non-DCH) NVIDIA installs keep nvml.dll under Program Files, not System32.
+        if module.is_null()
+            && let Some(root) = std::env::var_os("ProgramW6432")
+        {
+            let path = std::path::Path::new(&root)
+                .join("NVIDIA Corporation")
+                .join("NVSMI")
+                .join("nvml.dll");
+            let wide: Vec<u16> = path
+                .as_os_str()
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+            module = LoadLibraryW(wide.as_ptr());
+        }
+        if module.is_null() {
+            return None;
+        }
+        let (init, shutdown, get_count, get_handle, get_temp) = (
+            nvml_symbol::<NvmlInitFn>(module, b"nvmlInit_v2\0"),
+            nvml_symbol::<NvmlShutdownFn>(module, b"nvmlShutdown\0"),
+            nvml_symbol::<NvmlCountFn>(module, b"nvmlDeviceGetCount_v2\0"),
+            nvml_symbol::<NvmlHandleFn>(module, b"nvmlDeviceGetHandleByIndex_v2\0"),
+            nvml_symbol::<NvmlTempFn>(module, b"nvmlDeviceGetTemperature\0"),
+        );
+        let (init, shutdown, get_count, get_handle, get_temp) =
+            match (init, shutdown, get_count, get_handle, get_temp) {
+                (Some(a), Some(b), Some(c), Some(d), Some(e)) => (a, b, c, d, e),
+                _ => {
+                    let _ = FreeLibrary(module);
+                    return None;
+                }
+            };
+        if init() != 0 {
+            let _ = FreeLibrary(module);
+            return None;
+        }
+        Some(NvmlLib {
+            module: module as isize,
+            shutdown,
+            get_count,
+            get_handle,
+            get_temp,
+        })
+    })
+    .as_ref()
+}
+
+static NVML: OnceLock<Option<NvmlLib>> = OnceLock::new();
+
+// --- WDDM adapter temperature (vendor-agnostic, C# `SystemSensors` parity) ---
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct D3dkmtLuid {
+    low_part: u32,
+    high_part: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct D3dkmtAdapterInfo {
+    adapter: u32,
+    adapter_luid: D3dkmtLuid,
+    num_of_sources: u32,
+    present_move_regions_preferred: u32,
+}
+
+#[repr(C)]
+struct D3dkmtEnumAdapters2 {
+    num_adapters: u32,
+    adapters: *mut D3dkmtAdapterInfo,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct D3dkmtCloseAdapter {
+    adapter: u32,
+}
+
+#[repr(C)]
+struct D3dkmtQueryAdapterInfo {
+    adapter: u32,
+    info_type: u32,
+    private_driver_data: *mut std::ffi::c_void,
+    private_driver_data_size: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct D3dkmtAdapterPerfData {
+    physical_adapter_index: u32,
+    memory_frequency: u64,
+    max_memory_frequency: u64,
+    max_memory_frequency_oc: u64,
+    memory_bandwidth: u64,
+    pcie_bandwidth: u64,
+    fan_rpm: u32,
+    power: u32,
+    /// Tenths of a degree Celsius.
+    temperature: u32,
+    power_state_override: u8,
+}
+
+// Pin the documented WDDM ABI (d3dkmthk.h): both structs are naturally aligned on x64.
+const _: () = assert!(size_of::<D3dkmtAdapterPerfData>() == 64);
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct D3dkmtAdapterPerfDataCaps {
+    physical_adapter_index: u32,
+    max_memory_bandwidth: u64,
+    max_pcie_bandwidth: u64,
+    max_fan_rpm: u32,
+    /// Deci-Celsius; zero means the driver does not publish a thermal reading.
+    temperature_max: u32,
+    temperature_warning: u32,
+}
+
+const _: () = assert!(size_of::<D3dkmtAdapterPerfDataCaps>() == 40);
+
+// SAFETY: these are the documented gdi32 WDDM entry points; all arguments are live structs.
+#[link(name = "gdi32")]
+unsafe extern "system" {
+    fn D3DKMTEnumAdapters2(arg: *mut D3dkmtEnumAdapters2) -> i32;
+    fn D3DKMTCloseAdapter(arg: *mut D3dkmtCloseAdapter) -> i32;
+    fn D3DKMTQueryAdapterInfo(arg: *mut D3dkmtQueryAdapterInfo) -> i32;
+}
+
+/// Reads GPU temperature through WDDM's `KMTQAITYPE_ADAPTERPERFDATA` (62), which works for
+/// AMD/Intel/NVIDIA drivers that expose a thermal reading without vendor-specific DLLs.
+fn sample_wddm_temperature() -> Option<f32> {
+    const KMTQAITYPE_ADAPTERTYPE: u32 = 15;
+    const KMTQAITYPE_ADAPTERPERFDATA: u32 = 62;
+    const KMTQAITYPE_ADAPTERPERFDATA_CAPS: u32 = 63;
+    /// `D3DKMT_ADAPTERTYPE.SoftwareDevice` bit (Microsoft Basic Render Driver etc.).
+    const SOFTWARE_DEVICE_BIT: u32 = 1 << 2;
+    let mut count = D3dkmtEnumAdapters2 {
+        num_adapters: 0,
+        adapters: std::ptr::null_mut(),
+    };
+    // SAFETY: `count` is a live zeroed struct; a null adapter list asks for the count only.
+    if unsafe { D3DKMTEnumAdapters2(&mut count) } != 0 || count.num_adapters == 0 {
+        return None;
+    }
+    let mut adapters = vec![D3dkmtAdapterInfo::default(); count.num_adapters as usize];
+    count.adapters = adapters.as_mut_ptr();
+    // SAFETY: `adapters` outlives the call and has exactly `num_adapters` elements.
+    if unsafe { D3DKMTEnumAdapters2(&mut count) } != 0 {
+        return None;
+    }
+    let mut hottest = 0.0f32;
+    for info in &mut adapters {
+        // Skip software-only adapters (e.g. Microsoft Basic Render Driver) — they have no
+        // physical thermal sensor and would otherwise mask a real GPU's reading with zero.
+        let mut adapter_type = 0u32;
+        let mut type_query = D3dkmtQueryAdapterInfo {
+            adapter: info.adapter,
+            info_type: KMTQAITYPE_ADAPTERTYPE,
+            private_driver_data: (&mut adapter_type as *mut u32).cast(),
+            private_driver_data_size: size_of::<u32>() as u32,
+        };
+        // SAFETY: `type_query` points at a live u32 with the documented D3DKMT_ADAPTERTYPE size.
+        if unsafe { D3DKMTQueryAdapterInfo(&mut type_query) } == 0
+            && adapter_type & SOFTWARE_DEVICE_BIT != 0
+        {
+            let mut close = D3dkmtCloseAdapter {
+                adapter: info.adapter,
+            };
+            // SAFETY: handle was opened by D3DKMTEnumAdapters2 and is closed exactly once.
+            unsafe {
+                D3DKMTCloseAdapter(&mut close);
+            }
+            continue;
+        }
+
+        // Capabilities tell us whether the driver publishes temperature at all. This is a
+        // capability gate, not a prerequisite for the perf query.
+        let mut caps = D3dkmtAdapterPerfDataCaps::default();
+        let mut caps_query = D3dkmtQueryAdapterInfo {
+            adapter: info.adapter,
+            info_type: KMTQAITYPE_ADAPTERPERFDATA_CAPS,
+            private_driver_data: (&mut caps as *mut D3dkmtAdapterPerfDataCaps).cast(),
+            private_driver_data_size: size_of::<D3dkmtAdapterPerfDataCaps>() as u32,
+        };
+        // SAFETY: `caps_query` points at a live caps struct with the documented size.
+        let caps_ok = unsafe { D3DKMTQueryAdapterInfo(&mut caps_query) } == 0;
+
+        // Zero on every pass: a partial driver write must not leave a stale reading behind.
+        let mut perf = D3dkmtAdapterPerfData::default();
+        let mut query = D3dkmtQueryAdapterInfo {
+            adapter: info.adapter,
+            info_type: KMTQAITYPE_ADAPTERPERFDATA,
+            private_driver_data: (&mut perf as *mut D3dkmtAdapterPerfData).cast(),
+            private_driver_data_size: size_of::<D3dkmtAdapterPerfData>() as u32,
+        };
+        // SAFETY: `query` points at a live perf struct with the exact documented size.
+        let ok = unsafe { D3DKMTQueryAdapterInfo(&mut query) } == 0;
+        if ok && (!caps_ok || caps.temperature_max > 0) {
+            let celsius = perf.temperature as f32 / 10.0;
+            if celsius > 0.0 && celsius < 150.0 {
+                hottest = hottest.max(celsius);
+            }
+        }
+        let mut close = D3dkmtCloseAdapter {
+            adapter: info.adapter,
+        };
+        // SAFETY: the adapter handle was opened by D3DKMTEnumAdapters2 and is closed exactly once.
+        unsafe {
+            D3DKMTCloseAdapter(&mut close);
+        }
+    }
+    (hottest > 0.0).then_some(hottest)
+}
+
+/// Hottest GPU temperature in degrees Celsius.
+///
+/// Fallback order: vendor-neutral WDDM adapter perf data (AMD / Intel / NVIDIA), then NVML for
+/// NVIDIA drivers without a WDDM thermal reading, then AMD ADL Overdrive5 for older AMD drivers.
+/// Returns `None` when no source is available. No admin rights, kernel driver or new Cargo
+/// dependency is required.
+pub fn sample_gpu_temperature() -> Option<f32> {
+    if let Some(celsius) = sample_wddm_temperature() {
+        return Some(celsius);
+    }
+    if let Some(celsius) = sample_nvml_temperature() {
+        return Some(celsius);
+    }
+    sample_adl_temperature()
+}
+
+fn sample_nvml_temperature() -> Option<f32> {
+    let lib = nvml_lib()?;
+    unsafe {
+        let mut count = 0u32;
+        if (lib.get_count)(&mut count) != 0 || count == 0 {
+            return None;
+        }
+        let mut hottest = 0.0f32;
+        for index in 0..count.min(64) {
+            let mut device: *mut c_void = std::ptr::null_mut();
+            if (lib.get_handle)(index, &mut device) != 0 || device.is_null() {
+                continue;
+            }
+            let mut celsius = 0u32;
+            // NVML_TEMPERATURE_GPU == 0.
+            if (lib.get_temp)(device, 0, &mut celsius) == 0 {
+                let value = celsius as f32;
+                if value > 0.0 && value < 150.0 {
+                    hottest = hottest.max(value);
+                }
+            }
+        }
+        (hottest > 0.0).then_some(hottest)
+    }
+}
+
+// --- AMD ADL Overdrive5 temperature fallback (optional, loaded on demand) ---
+
+// ADL allocates its own buffers and requires a CRT-compatible allocator (msvcrt.dll malloc).
+#[link(name = "msvcrt")]
+unsafe extern "C" {
+    fn malloc(size: usize) -> *mut c_void;
+}
+
+/// CRT-compatible allocation callback passed to `ADL_Main_Control_Create`.
+extern "system" fn adl_alloc(size: i32, count: i32) -> *mut c_void {
+    let bytes = (size.max(0) as usize).saturating_mul(count.max(0) as usize);
+    // SAFETY: `malloc` accepts any byte count (including zero) and may validly return null.
+    unsafe { malloc(bytes) }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct AdlTemperature {
+    i_size: i32,
+    /// Milli-degrees Celsius.
+    i_temperature: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct AdlThermalControllerInfo {
+    i_size: i32,
+    /// `0` == GPU thermal domain (`ADL_TDOMAIN_GPU`).
+    i_thermal_domain: i32,
+    i_domain_index: i32,
+    i_flags: i32,
+}
+
+// Pin the documented ADL ABI (adl_structures.h): both structs are naturally 4-byte aligned.
+const _: () = assert!(size_of::<AdlTemperature>() == 8);
+const _: () = assert!(size_of::<AdlThermalControllerInfo>() == 16);
+
+type AdlAllocFn = extern "system" fn(i32, i32) -> *mut c_void;
+type AdlMainControlCreateFn = unsafe extern "system" fn(Option<AdlAllocFn>, i32) -> i32;
+type AdlMainControlDestroyFn = unsafe extern "system" fn() -> i32;
+type AdlThermalDevicesEnumFn =
+    unsafe extern "system" fn(i32, i32, *mut AdlThermalControllerInfo) -> i32;
+type AdlTemperatureGetFn = unsafe extern "system" fn(i32, i32, *mut AdlTemperature) -> i32;
+
+struct AdlLib {
+    /// Integer handle keeps the `OnceLock` static `Send + Sync`.
+    module: isize,
+    create: AdlMainControlCreateFn,
+    destroy: AdlMainControlDestroyFn,
+    enum_thermal: AdlThermalDevicesEnumFn,
+    get_temp: AdlTemperatureGetFn,
+}
+
+impl Drop for AdlLib {
+    fn drop(&mut self) {
+        // SAFETY: `module` came from a successful LoadLibrary* call. The ADL control object is
+        // created and destroyed within each sample, so only the library handle is released here.
+        unsafe {
+            let _ = FreeLibrary(self.module as HMODULE);
+        }
+    }
+}
+
+fn adl_lib() -> Option<&'static AdlLib> {
+    ADL.get_or_init(|| unsafe {
+        let name: Vec<u16> = "atiadlxx.dll\0".encode_utf16().collect();
+        let mut module = LoadLibraryExW(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            LOAD_LIBRARY_SEARCH_SYSTEM32,
+        );
+        // Non-DCH AMD installs ship the DLL inside the Catalyst control center folder.
+        if module.is_null()
+            && let Some(root) = std::env::var_os("ProgramW6432")
+        {
+            let path = PathBuf::from(root)
+                .join("ATI Technologies")
+                .join("ATI.ACE")
+                .join("Core-Static")
+                .join("atiadlxx.dll");
+            let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            module = LoadLibraryW(wide.as_ptr());
+        }
+        if module.is_null() {
+            return None;
+        }
+        let symbols = (
+            nvml_symbol::<AdlMainControlCreateFn>(module, b"ADL_Main_Control_Create\0"),
+            nvml_symbol::<AdlMainControlDestroyFn>(module, b"ADL_Main_Control_Destroy\0"),
+            nvml_symbol::<AdlThermalDevicesEnumFn>(
+                module,
+                b"ADL_Overdrive5_ThermalDevices_Enum\0",
+            ),
+            nvml_symbol::<AdlTemperatureGetFn>(module, b"ADL_Overdrive5_Temperature_Get\0"),
+        );
+        let (create, destroy, enum_thermal, get_temp) = match symbols {
+            (Some(create), Some(destroy), Some(enum_thermal), Some(get_temp)) => {
+                (create, destroy, enum_thermal, get_temp)
+            }
+            _ => {
+                let _ = FreeLibrary(module);
+                return None;
+            }
+        };
+        Some(AdlLib {
+            module: module as isize,
+            create,
+            destroy,
+            enum_thermal,
+            get_temp,
+        })
+    })
+    .as_ref()
+}
+
+static ADL: OnceLock<Option<AdlLib>> = OnceLock::new();
+/// ADL owns one global control object: serialize create/enumerate/destroy across threads.
+static ADL_CONTROL_LOCK: Mutex<()> = Mutex::new(());
+
+/// Hottest GPU temperature in degrees Celsius reported by AMD ADL Overdrive5, if any.
+fn sample_adl_temperature() -> Option<f32> {
+    let lib = adl_lib()?;
+    // Never block a UI frame on a concurrent ADL sample.
+    let _guard = ADL_CONTROL_LOCK.try_lock().ok()?;
+    // SAFETY: all symbols come from the loaded library, the callback has static lifetime, and
+    // `1` asks ADL to enumerate only connected adapters.
+    if unsafe { (lib.create)(Some(adl_alloc), 1) } != 0 {
+        return None;
+    }
+    let hottest = unsafe { adl_hottest_temperature(lib) };
+    // SAFETY: control was created successfully above and is destroyed exactly once here, even
+    // when no thermal controller yielded a plausible reading.
+    unsafe {
+        let _ = (lib.destroy)();
+    }
+    hottest
+}
+
+/// Reads all plausible GPU thermal controllers with an already-created ADL control object.
+///
+/// # Safety
+/// `lib` must come from a live library whose control object has been created and not yet
+/// destroyed by `sample_adl_temperature`.
+unsafe fn adl_hottest_temperature(lib: &AdlLib) -> Option<f32> {
+    // ADLTemperature and ADLThermalControllerInfo are plain i32 structs (size asserts above).
+    let mut hottest = 0.0f32;
+    for adapter in 0..=7 {
+        for controller in 0..=3 {
+            let mut info = AdlThermalControllerInfo {
+                i_size: size_of::<AdlThermalControllerInfo>() as i32,
+                ..Default::default()
+            };
+            // SAFETY: `info` is a live, correctly sized ADL struct for this controller index.
+            if unsafe { (lib.enum_thermal)(adapter, controller, &mut info) } != 0
+                || info.i_thermal_domain != 0
+            {
+                continue;
+            }
+            let mut temp = AdlTemperature {
+                i_size: size_of::<AdlTemperature>() as i32,
+                ..Default::default()
+            };
+            // SAFETY: `temp` is a live, correctly sized ADL struct for this controller index.
+            if unsafe { (lib.get_temp)(adapter, controller, &mut temp) } != 0 {
+                continue;
+            }
+            // ADL reports milli-degrees Celsius.
+            let celsius = temp.i_temperature as f32 / 1000.0;
+            if celsius.is_finite() && celsius > 0.0 && celsius < 150.0 {
+                hottest = hottest.max(celsius);
+            }
+        }
+    }
+    (hottest > 0.0).then_some(hottest)
+}
+
 // --- Clock & Calendar Helpers ---
 
 #[derive(Clone, Debug)]
 pub struct LocalClockInfo {
     pub time_hm: String,
+    pub hour: u32,
+    pub minute: u32,
+    pub second: u32,
     pub short_date: String,
     pub weekday_short: String,
     pub full_date: String,
@@ -337,39 +1113,61 @@ pub struct LocalClockInfo {
     pub day: u32,
 }
 
-const SHORT_DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-const FULL_DAYS: [&str; 7] = [
-    "Sunday",
-    "Monday",
-    "Tuesday",
-    "Wednesday",
-    "Thursday",
-    "Friday",
-    "Saturday",
-];
-const SHORT_MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
-const FULL_MONTHS: [&str; 12] = [
-    "January",
-    "February",
-    "March",
-    "April",
-    "May",
-    "June",
-    "July",
-    "August",
-    "September",
-    "October",
-    "November",
-    "December",
-];
+fn month_key(month: u32) -> &'static str {
+    match month {
+        1 => "MonthJanuary",
+        2 => "MonthFebruary",
+        3 => "MonthMarch",
+        4 => "MonthApril",
+        5 => "MonthMay",
+        6 => "MonthJune",
+        7 => "MonthJuly",
+        8 => "MonthAugust",
+        9 => "MonthSeptember",
+        10 => "MonthOctober",
+        11 => "MonthNovember",
+        _ => "MonthDecember",
+    }
+}
 
-pub fn month_name(month: u32) -> &'static str {
-    FULL_MONTHS
-        .get(month.saturating_sub(1) as usize)
-        .copied()
-        .unwrap_or("January")
+/// Localized full month name (1-based).
+pub fn month_name(month: u32) -> String {
+    loc::t(month_key(month))
+}
+
+/// Localized weekday name. `index` is 0 = Sunday .. 6 = Saturday (Win32 convention).
+pub fn weekday_name(index: u32) -> String {
+    match index {
+        0 => loc::t("WeekdaySunday"),
+        1 => loc::t("WeekdayMonday"),
+        2 => loc::t("WeekdayTuesday"),
+        3 => loc::t("WeekdayWednesday"),
+        4 => loc::t("WeekdayThursday"),
+        5 => loc::t("WeekdayFriday"),
+        _ => loc::t("WeekdaySaturday"),
+    }
+}
+
+fn short_name(full: String) -> String {
+    if full.chars().count() <= 3 {
+        full
+    } else {
+        full.chars().take(3).collect()
+    }
+}
+
+/// Short weekday for Monday-first calendar headers (`0 = Monday`).
+pub fn weekday_short_monday_first(index: usize) -> String {
+    let sunday_index = match index {
+        0 => 1,
+        1 => 2,
+        2 => 3,
+        3 => 4,
+        4 => 5,
+        5 => 6,
+        _ => 0,
+    };
+    short_name(weekday_name(sunday_index))
 }
 
 /// Returns `(year, month, day)` -> days in that Gregorian month.
@@ -403,22 +1201,10 @@ pub fn local_clock_info() -> LocalClockInfo {
         GetLocalTime(&mut lt);
         GetSystemTime(&mut ut);
     }
-    let dow_s = SHORT_DAYS
-        .get(usize::from(lt.wDayOfWeek))
-        .copied()
-        .unwrap_or("");
-    let dow_f = FULL_DAYS
-        .get(usize::from(lt.wDayOfWeek))
-        .copied()
-        .unwrap_or("");
-    let mon_s = SHORT_MONTHS
-        .get(usize::from(lt.wMonth.saturating_sub(1)))
-        .copied()
-        .unwrap_or("");
-    let mon_f = FULL_MONTHS
-        .get(usize::from(lt.wMonth.saturating_sub(1)))
-        .copied()
-        .unwrap_or("");
+    let dow_s = short_name(weekday_name(u32::from(lt.wDayOfWeek)));
+    let dow_f = weekday_name(u32::from(lt.wDayOfWeek));
+    let mon_s = short_name(loc::t(month_key(u32::from(lt.wMonth))));
+    let mon_f = loc::t(month_key(u32::from(lt.wMonth)));
 
     // Derive UTC offset directly from `GetLocalTime` vs `GetSystemTime`.
     let l_mins = i32::from(lt.wHour) * 60 + i32::from(lt.wMinute);
@@ -439,8 +1225,11 @@ pub fn local_clock_info() -> LocalClockInfo {
 
     LocalClockInfo {
         time_hm: format!("{:02}:{:02}", lt.wHour, lt.wMinute),
+        hour: u32::from(lt.wHour),
+        minute: u32::from(lt.wMinute),
+        second: u32::from(lt.wSecond),
         short_date: format!("{} {mon_s}", lt.wDay),
-        weekday_short: dow_s.to_owned(),
+        weekday_short: dow_s,
         full_date: format!("{dow_f}, {} {mon_f}", lt.wDay),
         tz_label,
         year: i32::from(lt.wYear),
@@ -449,13 +1238,61 @@ pub fn local_clock_info() -> LocalClockInfo {
     }
 }
 
+#[allow(dead_code)]
+/// Applies C# `Clock24Hour`, `ClockShowSeconds`, `DateStyle` and `DateFormat`
+/// to the dock chip text. Returns `(time, date)`.
+pub fn format_clock(info: &LocalClockInfo, settings: &DockSettings) -> (String, String) {
+    let time = if settings.clock_24_hour {
+        if settings.clock_show_seconds {
+            format!("{:02}:{:02}:{:02}", info.hour, info.minute, info.second)
+        } else {
+            info.time_hm.clone()
+        }
+    } else {
+        let hour_12 = match info.hour % 12 {
+            0 => 12,
+            value => value,
+        };
+        let suffix = if info.hour < 12 { "AM" } else { "PM" };
+        if settings.clock_show_seconds {
+            format!("{hour_12}:{:02}:{:02} {suffix}", info.minute, info.second)
+        } else {
+            format!("{hour_12}:{:02} {suffix}", info.minute)
+        }
+    };
+    let date = match settings.date_style {
+        ClockDateStyle::Hidden => String::new(),
+        ClockDateStyle::ShortDateOnly => info.short_date.clone(),
+        ClockDateStyle::DayAndShortDate => format!("{} {}", info.weekday_short, info.short_date),
+        ClockDateStyle::NumericDate => {
+            let m = info.month;
+            let d = info.day;
+            let y = info.year;
+            match settings.date_format {
+                ClockDateFormat::DdMmYyyy => format!("{d:02}.{m:02}.{y:04}"),
+                ClockDateFormat::DdMmYy => format!("{d:02}.{m:02}.{:02}", y % 100),
+                ClockDateFormat::MmDdYyyy => format!("{m:02}/{d:02}/{y:04}"),
+                ClockDateFormat::YyyyMmDd => format!("{y:04}-{m:02}-{d:02}"),
+                ClockDateFormat::DdMmYyyyDots => format!("{d:02}.{m:02}.{y:04}"),
+                ClockDateFormat::System => info.short_date.clone(),
+            }
+        }
+    };
+    (time, date)
+}
+
 pub fn system_uptime_string() -> String {
     let secs = unsafe { GetTickCount64() } / 1000;
     let (d, h, m) = (secs / 86_400, (secs % 86_400) / 3600, (secs % 3600) / 60);
     if d > 0 {
-        format!("{d}d {h}h {m}m")
+        loc::t_fmt(
+            "StatsUptimeDaysFormat",
+            &[&d.to_string(), &h.to_string(), &m.to_string()],
+        )
+    } else if h > 0 {
+        loc::t_fmt("StatsUptimeHoursFormat", &[&h.to_string(), &m.to_string()])
     } else {
-        format!("{h}h {m}m")
+        loc::t_fmt("StatsUptimeMinutesFormat", &[&m.to_string()])
     }
 }
 
@@ -757,10 +1594,109 @@ pub fn sample_battery() -> BatteryInfo {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BluetoothDeviceKind {
+    Generic,
+    Headphones,
+    Mouse,
+    Keyboard,
+    Speaker,
+    Watch,
+    Phone,
+    Gamepad,
+}
+
+impl BluetoothDeviceKind {
+    /// Native Windows 11 `Segoe Fluent Icons` glyph matching each Bluetooth device category.
+    pub const fn fluent_glyph(self) -> &'static str {
+        match self {
+            Self::Headphones => "\u{E7F6}",
+            Self::Mouse => "\u{E962}",
+            Self::Keyboard => "\u{E765}",
+            Self::Speaker => "\u{E7F5}",
+            Self::Watch => "\u{E916}",
+            Self::Phone => "\u{E8EA}",
+            Self::Gamepad => "\u{E7FC}",
+            Self::Generic => "\u{E702}",
+        }
+    }
+}
+
+fn clean_bluetooth_name(raw: &str) -> String {
+    let text = raw.trim();
+    for suffix in [
+        " Hands-Free AG",
+        " Headset",
+        " Audio Gateway",
+        " Stereo",
+        " A2DP",
+    ] {
+        if let Some(idx) = text.to_ascii_lowercase().find(&suffix.to_ascii_lowercase())
+            && idx > 0
+        {
+            return text[..idx].trim().to_owned();
+        }
+    }
+    text.to_owned()
+}
+
+pub fn classify_bluetooth_device(name: &str, instance_id: &str) -> BluetoothDeviceKind {
+    let lower = name.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| lower.contains(w));
+    if has(&[
+        "hands-free",
+        "headset",
+        "headphone",
+        "earbud",
+        "airpods",
+        "buds",
+        "stereo",
+        "audio gateway",
+        "kulaklık",
+        "kulaklik",
+    ]) {
+        return BluetoothDeviceKind::Headphones;
+    }
+    if has(&["mouse", "trackball", "fare"]) {
+        return BluetoothDeviceKind::Mouse;
+    }
+    if has(&["keyboard", "keypad", "klavye"]) {
+        return BluetoothDeviceKind::Keyboard;
+    }
+    if has(&[
+        "gamepad",
+        "controller",
+        "joystick",
+        "xbox",
+        "dualsense",
+        "dualshock",
+    ]) {
+        return BluetoothDeviceKind::Gamepad;
+    }
+    if has(&["speaker", "soundbar", "hoparlör", "hoparlor"]) {
+        return BluetoothDeviceKind::Speaker;
+    }
+    if has(&["watch", "band"]) {
+        return BluetoothDeviceKind::Watch;
+    }
+    if has(&["phone", "iphone", "galaxy", "pixel"]) {
+        return BluetoothDeviceKind::Phone;
+    }
+    let id_lower = instance_id.to_ascii_lowercase();
+    if ["0000111e", "0000110b", "0000110d"]
+        .iter()
+        .any(|u| id_lower.contains(u))
+    {
+        return BluetoothDeviceKind::Headphones;
+    }
+    BluetoothDeviceKind::Generic
+}
+
 #[derive(Clone, Debug)]
 pub struct BluetoothBatteryDevice {
     pub name: String,
     pub percent: u32,
+    pub kind: BluetoothDeviceKind,
 }
 
 #[derive(Clone, Default)]
@@ -790,25 +1726,45 @@ pub fn refresh_bluetooth_battery(cache: &Arc<Mutex<BluetoothBatteryCache>>, forc
     let _ = std::thread::Builder::new()
         .name("opentaskbar-bt-bat".into())
         .spawn(move || {
-            let ps = r#"Get-PnpDevice -Class Bluetooth -Status OK -ErrorAction SilentlyContinue | ForEach-Object { $p = Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2' -ErrorAction SilentlyContinue; if ($p -and $null -ne $p.Data) { "$($_.FriendlyName)|$($p.Data)" } }"#;
+            let ps = r#"Get-PnpDevice -Class Bluetooth -Status OK -ErrorAction SilentlyContinue | ForEach-Object { $p = Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName '{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2' -ErrorAction SilentlyContinue; if ($p -and $null -ne $p.Data) { "$($_.FriendlyName)|$($_.InstanceId)|$($p.Data)" } }"#;
             let output = Command::new("powershell.exe")
                 .args(["-NoProfile", "-NonInteractive", "-Command", ps])
                 .creation_flags(CREATE_NO_WINDOW)
                 .output();
-            let mut found = Vec::new();
+            let mut found: Vec<BluetoothBatteryDevice> = Vec::new();
             if let Ok(out) = output
                 && out.status.success()
             {
                 for line in String::from_utf8_lossy(&out.stdout).lines() {
-                    if let Some((name, pct)) = line.trim().rsplit_once('|')
-                        && let Ok(val) = pct.trim().parse::<u32>()
+                    let parts: Vec<&str> = line.trim().rsplitn(3, '|').collect();
+                    if parts.len() == 3
+                        && let Ok(val) = parts[0].trim().parse::<u32>()
                         && val <= 100
-                        && !name.trim().is_empty()
                     {
-                        found.push(BluetoothBatteryDevice {
-                            name: name.trim().to_owned(),
-                            percent: val,
-                        });
+                        let raw_name = parts[2].trim();
+                        let instance_id = parts[1].trim();
+                        if raw_name.is_empty() {
+                            continue;
+                        }
+                        let kind = classify_bluetooth_device(raw_name, instance_id);
+                        let display = clean_bluetooth_name(raw_name);
+                        if let Some(existing) = found
+                            .iter_mut()
+                            .find(|d| d.name.eq_ignore_ascii_case(&display))
+                        {
+                            if existing.kind == BluetoothDeviceKind::Generic
+                                && kind != BluetoothDeviceKind::Generic
+                            {
+                                existing.kind = kind;
+                            }
+                            existing.percent = val;
+                        } else {
+                            found.push(BluetoothBatteryDevice {
+                                name: display,
+                                percent: val,
+                                kind,
+                            });
+                        }
                     }
                 }
             }
@@ -930,22 +1886,32 @@ pub fn installed_keyboard_layouts() -> Vec<(isize, String, String)> {
 
 pub fn activate_keyboard_layout(hkl: isize) {
     unsafe {
+        let fg = GetForegroundWindow();
+        if !fg.is_null() {
+            let _ = PostMessageW(fg, WM_INPUTLANGCHANGEREQUEST, 0, hkl);
+        }
         ActivateKeyboardLayout(hkl as _, 0);
     }
 }
 
-pub fn cycle_keyboard_layout() {
+pub fn cycle_keyboard_layout(forward: bool) -> Option<String> {
     let layouts = installed_keyboard_layouts();
     if layouts.len() < 2 {
-        return;
+        return None;
     }
     let active = active_keyboard_code();
     let idx = layouts
         .iter()
         .position(|(_, code, _)| code == &active)
         .unwrap_or(0);
-    let next = (idx + 1) % layouts.len();
-    activate_keyboard_layout(layouts[next].0);
+    let next = if forward {
+        (idx + 1) % layouts.len()
+    } else {
+        (idx + layouts.len() - 1) % layouts.len()
+    };
+    let (hkl, ref code, _) = layouts[next];
+    activate_keyboard_layout(hkl);
+    Some(code.clone())
 }
 
 // --- Day Progress ---
@@ -1255,6 +2221,9 @@ fn encode_night_light_toggle(orig: &[u8], on: bool) -> Option<Vec<u8>> {
 
 #[derive(Clone, Default)]
 pub struct WeatherCache {
+    /// Display name resolved by the API; kept separate from the user's requested city so a
+    /// spelling difference does not force a refetch on every tick.
+    pub requested_city: String,
     pub city: String,
     pub temp_c: String,
     pub condition: String,
@@ -1269,20 +2238,19 @@ pub struct WeatherCache {
     pub loading: bool,
 }
 
-fn describe_wmo(code: i64) -> (&'static str, bool) {
-    match code {
-        0 => ("Clear", false),
-        1 | 2 => ("Partly cloudy", false),
-        3 => ("Overcast", false),
-        45 | 48 => ("Fog", false),
-        51..=57 => ("Drizzle", true),
-        61..=67 => ("Rain", true),
-        71..=77 => ("Snow", true),
-        80..=82 => ("Showers", true),
-        85 | 86 => ("Snow showers", true),
-        95..=99 => ("Thunderstorm", true),
-        _ => ("Cloudy", false),
-    }
+fn describe_wmo(code: i64) -> (String, bool) {
+    let key = match code {
+        0 => "WeatherClear",
+        1 | 2 => "WeatherPartlyCloudy",
+        3 => "WeatherCloudy",
+        45 | 48 => "WeatherFog",
+        71..=77 | 85 | 86 => "WeatherSnow",
+        51..=82 => "WeatherRain",
+        95..=99 => "WeatherStorm",
+        _ => "WeatherCloudy",
+    };
+    let rain = matches!(code, 51..=99);
+    (loc::t(key), rain)
 }
 
 fn urlencode_query(s: &str) -> String {
@@ -1307,10 +2275,10 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
     };
     let should = if let Ok(mut g) = cache.lock() {
         let stale = g.last_fetch.is_none_or(|t| t.elapsed().as_secs() >= 1800);
-        let changed = !g.city.eq_ignore_ascii_case(city);
+        let changed = !g.requested_city.eq_ignore_ascii_case(city);
         if !g.loading && (force || stale || changed) {
             g.loading = true;
-            g.city = city.to_owned();
+            g.requested_city = city.to_owned();
             true
         } else {
             false
@@ -1407,21 +2375,21 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
                                 (y.parse::<i32>(), m.parse::<u32>(), d.parse::<u32>())
                         {
                             let wd = weekday_of(yi, mi, di) as usize;
-                            SHORT_DAYS.get(wd).copied().unwrap_or(date_str).to_owned()
+                            short_name(weekday_name(wd as u32))
                         } else {
                             date_str.to_owned()
                         };
                         let (dc, _) = describe_wmo(cds[i].as_i64().unwrap_or(0));
                         let hi = mxs[i].as_f64().unwrap_or(0.0).round() as i32;
                         let lo = mns[i].as_f64().unwrap_or(0.0).round() as i32;
-                        forecast.push((day_lbl, dc.to_owned(), format!("{hi}° / {lo}°")));
+                        forecast.push((day_lbl, dc, format!("{hi}° / {lo}°")));
                     }
                 }
 
                 Some((
                     place_name,
                     format!("{}°", temp.round() as i32),
-                    cond.to_owned(),
+                    cond,
                     is_rain,
                     format!("{}°", feels.round() as i32),
                     format!("{}%", hum.round() as i32),
@@ -1433,8 +2401,9 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
 
             if let Ok(mut g) = cache.lock() {
                 g.loading = false;
-                g.last_fetch = Some(Instant::now());
+                // A failed fetch must stay retryable and must not relabel stale data with a new city.
                 if let Some((place, temp, cond, is_rain, feels, hum, wind, range, fc)) = parsed {
+                    g.last_fetch = Some(Instant::now());
                     g.city = place;
                     g.temp_c = temp;
                     g.condition = cond;
@@ -1473,13 +2442,6 @@ pub const AI_PROVIDERS: &[AiProviderMeta] = &[
         short: "Codex",
         dashboard_url: "https://chatgpt.com/codex/settings/usage",
         signin_hint: "codex login",
-    },
-    AiProviderMeta {
-        id: "aiusage_antigravity",
-        name: "Antigravity",
-        short: "Antigravity",
-        dashboard_url: "https://antigravity.google/docs",
-        signin_hint: "agy",
     },
     AiProviderMeta {
         id: "aiusage_opencode",
@@ -1601,6 +2563,105 @@ fn read_dpapi_secret(secret_key: &str) -> Option<String> {
         LocalFree(out_blob.pbData.cast());
         (!text.is_empty()).then_some(text)
     }
+}
+
+fn secret_file_path(secret_key: &str) -> Option<PathBuf> {
+    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
+    let sanitized: String = secret_key
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Some(
+        local
+            .join("OpenTaskbar")
+            .join("secrets")
+            .join(format!("{sanitized}.bin")),
+    )
+}
+
+/// Encrypts and stores an API key with the same per-user DPAPI format the C# app reads.
+pub fn save_dpapi_secret(secret_key: &str, value: &str) -> bool {
+    let Some(path) = secret_file_path(secret_key) else {
+        return false;
+    };
+    if value.trim().is_empty() {
+        return false;
+    }
+    let mut plain = value.as_bytes().to_vec();
+    let mut entropy = *b"OpenTaskbar.AiSecretStore.v1";
+    let in_blob = CRYPT_INTEGER_BLOB {
+        cbData: plain.len() as u32,
+        pbData: plain.as_mut_ptr(),
+    };
+    let ent_blob = CRYPT_INTEGER_BLOB {
+        cbData: entropy.len() as u32,
+        pbData: entropy.as_mut_ptr(),
+    };
+    let mut out_blob = CRYPT_INTEGER_BLOB {
+        cbData: 0,
+        pbData: std::ptr::null_mut(),
+    };
+    // SAFETY: all blobs point at live buffers; the output blob is owned by us and freed below.
+    let ok = unsafe {
+        CryptProtectData(
+            &in_blob,
+            std::ptr::null(),
+            &ent_blob,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut out_blob,
+        ) != 0
+            && !out_blob.pbData.is_null()
+            && out_blob.cbData > 0
+    };
+    unsafe {
+        std::ptr::write_bytes(plain.as_mut_ptr(), 0, plain.len());
+    }
+    if !ok {
+        return false;
+    }
+    let encrypted =
+        unsafe { std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize) }.to_vec();
+    unsafe {
+        LocalFree(out_blob.pbData.cast());
+    }
+    if std::fs::create_dir_all(path.parent().expect("secret file has a parent directory")).is_err()
+    {
+        return false;
+    }
+    std::fs::write(path, encrypted).is_ok()
+}
+
+pub fn clear_dpapi_secret(secret_key: &str) -> bool {
+    let Some(path) = secret_file_path(secret_key) else {
+        return false;
+    };
+    match std::fs::remove_file(path) {
+        Ok(()) => true,
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+pub fn has_dpapi_secret(secret_key: &str) -> bool {
+    secret_file_path(secret_key)
+        .is_some_and(|path| std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0))
+}
+
+/// DPAPI-backed API keys are supported by these providers (C# `AiSecretStore.cs` parity).
+pub fn ai_api_key_providers() -> &'static [(&'static str, &'static str)] {
+    &[
+        ("aiusage_deepseek", "api-key:deepseek"),
+        ("aiusage_openrouter", "api-key:openrouter"),
+        ("aiusage_opencode", "api-key:opencode"),
+    ]
 }
 
 fn read_provider_token(provider_id: &str) -> Option<(String, Option<String>)> {
@@ -1930,7 +2991,6 @@ pub fn ai_provider_detected(provider_id: &str) -> bool {
     match provider_id {
         "aiusage_claude" => home.join(".claude").exists(),
         "aiusage_codex" => home.join(".codex").exists(),
-        "aiusage_antigravity" => home.join(".gemini").join("antigravity-cli").exists(),
         "aiusage_opencode" => {
             has_dpapi("api-key_opencode")
                 || home.join(".local").join("share").join("opencode").exists()
@@ -1948,5 +3008,18 @@ pub fn ai_provider_detected(provider_id: &str) -> bool {
         }
         "aiusage_cursor" => appdata.is_some_and(|d| d.join("Cursor").exists()),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gpu_engine_name_is_extracted_from_pdh_instance() {
+        let instance = "pid_1234_luid_0x00000000_0x0000F3A1_phys_0_eng_0_engtype_3D";
+        assert_eq!(gpu_engine_name(instance), Some("3D"));
+        assert_eq!(gpu_engine_name("NVIDIA GeForce RTX 4070"), None);
+        assert_eq!(gpu_engine_name("pid_1_luid_0x0_0x1_eng_0_engtype_"), None);
     }
 }

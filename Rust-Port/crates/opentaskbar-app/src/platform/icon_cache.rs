@@ -10,14 +10,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use gpui::RenderImage;
-use image::{Frame, RgbaImage};
-use smallvec::smallvec;
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{BITMAP, DeleteObject, GetObjectW, HBITMAP, HGDIOBJ};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
@@ -46,8 +43,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 pub struct RawIcon {
     pub width: u32,
     pub height: u32,
-    /// Top-down straight BGRA32 pixels.
-    pub pixels: Vec<u8>,
+    /// Top-down straight BGRA32 pixels. `Arc` lets the disk cache hand off its buffer
+    /// without copying the ~16 KiB payload on every cache hit.
+    pub pixels: Arc<[u8]>,
 }
 
 fn cache_dir() -> PathBuf {
@@ -95,8 +93,10 @@ pub fn read_cached_raw(spec: &str) -> Option<RawIcon> {
 }
 
 fn read_cached(spec: &str) -> Option<RawIcon> {
+    // Open the cache file first: on a miss this avoids stat-ing the source executable
+    // (the UI thread and the worker both probe the same cache during startup).
+    let mut bytes = fs::read(cache_path(spec)).ok()?;
     let expected_fp = fingerprint(spec)?;
-    let bytes = fs::read(cache_path(spec)).ok()?;
     if bytes.len() < CACHE_HEADER_LEN || &bytes[..8] != CACHE_MAGIC {
         return None;
     }
@@ -115,7 +115,7 @@ fn read_cached(spec: &str) -> Option<RawIcon> {
     Some(RawIcon {
         width,
         height,
-        pixels: bytes[CACHE_HEADER_LEN..].to_vec(),
+        pixels: Arc::from(bytes.split_off(CACHE_HEADER_LEN)),
     })
 }
 
@@ -138,11 +138,6 @@ fn write_cached(spec: &str, icon: &RawIcon) {
     if fs::write(&tmp, &out).is_ok() {
         let _ = fs::rename(&tmp, &dst);
     }
-}
-
-fn to_render_image(icon: RawIcon) -> Option<Arc<RenderImage>> {
-    let buffer = RgbaImage::from_raw(icon.width, icon.height, icon.pixels)?;
-    Some(Arc::new(RenderImage::new(smallvec![Frame::new(buffer)])))
 }
 
 /// Extracts an HICON to top-down straight BGRA32, applying the AND mask when the icon has no alpha channel.
@@ -227,7 +222,7 @@ fn hicon_to_bgra(hicon: HICON) -> Option<RawIcon> {
                         Some(RawIcon {
                             width,
                             height,
-                            pixels,
+                            pixels: Arc::from(pixels),
                         })
                     } else {
                         DeleteDC(dc);
@@ -339,7 +334,7 @@ fn from_shell_hbitmap(bitmap: HBITMAP) -> Option<RawIcon> {
                 Some(RawIcon {
                     width: width as u32,
                     height: height as u32,
-                    pixels,
+                    pixels: Arc::from(pixels),
                 })
             }
         } else {
@@ -464,7 +459,7 @@ impl Worker {
         Ok(Some(RawIcon {
             width,
             height,
-            pixels,
+            pixels: Arc::from(pixels),
         }))
     }
 }
@@ -476,6 +471,22 @@ impl Drop for Worker {
     }
 }
 
+/// Decodes a custom-pack image (PNG/ICO/JPG/BMP) into the straight BGRA32 format used
+/// by DirectComposition surfaces.
+fn decode_pack_icon(path: &Path) -> Option<RawIcon> {
+    let decoded = image::open(path).ok()?.to_rgba8();
+    let (width, height) = decoded.dimensions();
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for pixel in decoded.as_raw().chunks_exact(4) {
+        pixels.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    }
+    Some(RawIcon {
+        width,
+        height,
+        pixels: pixels.into(),
+    })
+}
+
 pub fn resolve_batch_raw(specs: &[String]) -> HashMap<String, Option<RawIcon>> {
     let mut result = HashMap::with_capacity(specs.len());
     let mut worker: Option<Worker> = None;
@@ -484,7 +495,11 @@ pub fn resolve_batch_raw(specs: &[String]) -> HashMap<String, Option<RawIcon>> {
         if result.contains_key(spec) {
             continue;
         }
-        let raw = if let Some(cached) = read_cached(spec) {
+        let raw = if let Some(icon) = super::icon_pack::find_for_spec(spec)
+            .and_then(|path| decode_pack_icon(Path::new(&path)))
+        {
+            Some(icon)
+        } else if let Some(cached) = read_cached(spec) {
             Some(cached)
         } else {
             let extracted = fetch_from_worker(&mut worker, spec);
@@ -496,14 +511,6 @@ pub fn resolve_batch_raw(specs: &[String]) -> HashMap<String, Option<RawIcon>> {
         result.insert(spec.clone(), raw);
     }
     result
-}
-
-#[allow(dead_code)]
-pub fn resolve_batch(specs: &[String]) -> HashMap<String, Option<Arc<RenderImage>>> {
-    resolve_batch_raw(specs)
-        .into_iter()
-        .map(|(k, v)| (k, v.and_then(to_render_image)))
-        .collect()
 }
 
 fn fetch_from_worker(worker: &mut Option<Worker>, spec: &str) -> Option<RawIcon> {

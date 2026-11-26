@@ -4,6 +4,10 @@
 //! - System dark/light theme detection via Windows Personalize registry key (Issue #88)
 //! - Native context menus (Dock, Per-App, Task View), file drop extraction, and key modifiers
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::DockSettings;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
@@ -12,18 +16,21 @@ use windows_sys::Win32::Graphics::Dwm::{
     DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW,
+    MonitorFromWindow,
 };
 use windows_sys::Win32::System::ProcessStatus::K32EmptyWorkingSet;
 use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, VK_CONTROL, VK_SHIFT,
 };
 use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetSystemMetrics, GetWindowLongPtrW, HTCAPTION, HWND_TOPMOST, SM_CXSCREEN,
+    EnumWindows, GA_ROOTOWNER, GW_OWNER, GWL_EXSTYLE, GetAncestor, GetClassNameW,
+    GetForegroundWindow, GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect,
+    GetWindowThreadProcessId, HTCAPTION, HWND_TOPMOST, IsIconic, IsWindowVisible, SM_CXSCREEN,
     SM_CYSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW,
     WM_NCLBUTTONDOWN, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
@@ -69,20 +76,17 @@ const MENU_LOCK_PC: u32 = 1014;
 const MENU_SIGN_OUT: u32 = 1015;
 const MENU_RESTART_PC: u32 = 1016;
 const MENU_SHUTDOWN_PC: u32 = 1017;
+const MENU_SLEEP_PC: u32 = 1018;
+const MENU_NOTIFICATION_CENTER: u32 = 1019;
 
 const MENU_PROFILE_APPLY_BASE: u32 = 6000;
 const MENU_PROFILE_APPLY_MAX: u32 = 6199;
-const MENU_PROFILE_SAVE_WORK: u32 = 6201;
-const MENU_PROFILE_SAVE_GAMING: u32 = 6202;
-const MENU_PROFILE_SAVE_MINIMAL: u32 = 6203;
+const MENU_PROFILE_SAVE_NEW: u32 = 6201;
 const MENU_STACK_ADD_DOWNLOADS: u32 = 6301;
 const MENU_STACK_ADD_DESKTOP: u32 = 6302;
 const MENU_STACK_ADD_DOCUMENTS: u32 = 6303;
 const MENU_STACK_REMOVE_BASE: u32 = 6400;
 const MENU_STACK_REMOVE_MAX: u32 = 6499;
-const MENU_GROUP_ADD_PRODUCTIVITY: u32 = 6501;
-const MENU_GROUP_REMOVE_BASE: u32 = 6600;
-const MENU_GROUP_REMOVE_MAX: u32 = 6699;
 
 const APP_MENU_OPEN: u32 = 2001;
 const APP_MENU_NEW_WINDOW: u32 = 2002;
@@ -90,6 +94,15 @@ const APP_MENU_ADMIN: u32 = 2003;
 const APP_MENU_TOGGLE_PIN: u32 = 2004;
 const APP_MENU_CLOSE: u32 = 2005;
 const APP_MENU_TERMINATE: u32 = 2006;
+const APP_MENU_GROUP_CREATE: u32 = 2100;
+const APP_MENU_GROUP_TOGGLE_BASE: u32 = 2200;
+const APP_MENU_GROUP_TOGGLE_MAX: u32 = 2299;
+const JUMPLIST_ID_BASE: u32 = 2300;
+const JUMPLIST_ID_MAX: u32 = 2399;
+
+thread_local! {
+    static JUMPLIST_COMMANDS: RefCell<HashMap<u32, (i64, i32)>> = RefCell::new(HashMap::new());
+}
 
 const TV_MENU_PREV: u32 = 3001;
 const TV_MENU_NEXT: u32 = 3002;
@@ -111,19 +124,106 @@ pub enum WidgetContextAction {
     None,
     Secondary,
     Remove,
+    PlaceAllDisplays,
+    PlaceOnDisplay(usize),
+    MoveToTaskbar,
+    MoveEarlier,
+    MoveLater,
     Dock(ContextAction),
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn show_widget_context_menu(
     hwnd: usize,
     is_dark: bool,
+    widget_id: &str,
     secondary_label: Option<&str>,
+    monitors: &[MonitorInfo],
+    in_island: bool,
+    can_move_earlier: bool,
+    can_move_later: bool,
     settings: &DockSettings,
 ) -> WidgetContextAction {
     const MENU_WIDGET_SECONDARY: u32 = 5001;
     const MENU_WIDGET_REMOVE: u32 = 5002;
+    const MENU_ISLAND_ALL: u32 = 5100;
+    const MENU_ISLAND_TASKBAR: u32 = 5101;
+    const MENU_ISLAND_MOVE_EARLIER: u32 = 5102;
+    const MENU_ISLAND_MOVE_LATER: u32 = 5103;
+    const MENU_ISLAND_DISPLAY_BASE: u32 = 5200;
+    const MENU_ISLAND_DISPLAY_MAX: u32 = 5299;
+
+    let current_target = settings
+        .dynamic_island_placements
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(widget_id))
+        .map(|(_, v)| v.as_str());
+
+    let mut placement_items = Vec::new();
+    if !monitors.is_empty() {
+        let all_checked = current_target.is_some_and(|t| {
+            t.eq_ignore_ascii_case(opentaskbar_core::settings::DYNAMIC_ISLAND_ALL_DISPLAYS)
+        });
+        let all_label = if all_checked {
+            format!("✓ {}", loc::t("DynamicIslandAllDisplays"))
+        } else {
+            loc::t("DynamicIslandAllDisplays")
+        };
+        placement_items.push(MenuEntry::item(
+            MENU_ISLAND_ALL,
+            MenuIcon::Monitor,
+            all_label,
+        ));
+        placement_items.push(MenuEntry::Separator);
+        for (idx, mon) in monitors.iter().enumerate().take(100) {
+            let checked = current_target.is_some_and(|t| t.eq_ignore_ascii_case(&mon.device_name));
+            let label = if checked {
+                format!("✓ {}", mon.display_label())
+            } else {
+                mon.display_label()
+            };
+            placement_items.push(MenuEntry::item(
+                MENU_ISLAND_DISPLAY_BASE + idx as u32,
+                MenuIcon::Monitor,
+                label,
+            ));
+        }
+    }
+    if current_target.is_some() {
+        if !placement_items.is_empty() {
+            placement_items.push(MenuEntry::Separator);
+        }
+        placement_items.push(MenuEntry::item(
+            MENU_ISLAND_TASKBAR,
+            MenuIcon::Layers,
+            loc::t("DynamicIslandMoveToTaskbar"),
+        ));
+    }
 
     let mut entries = Vec::new();
+    if !placement_items.is_empty() {
+        entries.push(MenuEntry::submenu(
+            MenuIcon::Monitor,
+            loc::t("DynamicIslandShowOn"),
+            placement_items,
+        ));
+    }
+    if in_island && (can_move_earlier || can_move_later) {
+        if can_move_earlier {
+            entries.push(MenuEntry::item(
+                MENU_ISLAND_MOVE_EARLIER,
+                MenuIcon::ChevronLeft,
+                loc::t("DynamicIslandMoveEarlier"),
+            ));
+        }
+        if can_move_later {
+            entries.push(MenuEntry::item(
+                MENU_ISLAND_MOVE_LATER,
+                MenuIcon::ChevronRight,
+                loc::t("DynamicIslandMoveLater"),
+            ));
+        }
+    }
     if let Some(label) = secondary_label {
         entries.push(MenuEntry::item(
             MENU_WIDGET_SECONDARY,
@@ -134,14 +234,30 @@ pub fn show_widget_context_menu(
     entries.push(MenuEntry::destructive(
         MENU_WIDGET_REMOVE,
         MenuIcon::Trash,
-        "Remove Widget",
+        loc::t("RemoveWidget"),
     ));
-    entries.push(MenuEntry::Separator);
-    entries.extend(dock_menu_entries(settings));
+    if !in_island {
+        entries.push(MenuEntry::Separator);
+        entries.extend(dock_menu_entries(settings));
+    }
 
-    match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
+    match menu::show_popup_menu_with_border(
+        hwnd,
+        is_dark,
+        entries,
+        BorderStyle::from_menu_settings(is_dark, settings),
+    )
+    .unwrap_or(0)
+    {
         MENU_WIDGET_SECONDARY => WidgetContextAction::Secondary,
         MENU_WIDGET_REMOVE => WidgetContextAction::Remove,
+        MENU_ISLAND_ALL => WidgetContextAction::PlaceAllDisplays,
+        MENU_ISLAND_TASKBAR => WidgetContextAction::MoveToTaskbar,
+        MENU_ISLAND_MOVE_EARLIER => WidgetContextAction::MoveEarlier,
+        MENU_ISLAND_MOVE_LATER => WidgetContextAction::MoveLater,
+        id @ MENU_ISLAND_DISPLAY_BASE..=MENU_ISLAND_DISPLAY_MAX => {
+            WidgetContextAction::PlaceOnDisplay((id - MENU_ISLAND_DISPLAY_BASE) as usize)
+        }
         id => match map_context_action(id) {
             ContextAction::None => WidgetContextAction::None,
             act => WidgetContextAction::Dock(act),
@@ -154,11 +270,9 @@ pub enum ContextAction {
     None,
     Search,
     ApplyProfile(usize),
-    SaveProfile(&'static str),
+    SaveNewProfile,
     AddStack(&'static str),
     RemoveStack(usize),
-    AddStarterGroup,
-    RemoveGroup(usize),
     ToggleFocusMode,
     Settings,
     TaskManager,
@@ -166,6 +280,7 @@ pub enum ContextAction {
     Terminal,
     TerminalAdmin,
     RunDialog,
+    Notifications,
     DeviceManager,
     DiskManagement,
     ComputerManagement,
@@ -175,6 +290,7 @@ pub enum ContextAction {
     SignOut,
     RestartComputer,
     ShutDownComputer,
+    SleepComputer,
     ShowDesktop,
     RestoreTaskbar,
     Exit,
@@ -187,6 +303,8 @@ pub enum AppContextAction {
     NewWindow,
     RunAsAdmin,
     TogglePin,
+    ToggleGroup(usize),
+    CreateGroup,
     Close,
     Terminate,
     Dock(ContextAction),
@@ -201,9 +319,10 @@ pub enum TaskViewAction {
     TaskView,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct MonitorInfo {
     pub handle: usize,
+    pub device_name: String,
     pub left: i32,
     pub top: i32,
     pub right: i32,
@@ -213,12 +332,21 @@ pub struct MonitorInfo {
 }
 
 impl MonitorInfo {
-    pub fn width(self) -> i32 {
+    pub fn width(&self) -> i32 {
         (self.right - self.left).max(1)
     }
 
-    pub fn height(self) -> i32 {
+    pub fn height(&self) -> i32 {
         (self.bottom - self.top).max(1)
+    }
+
+    pub fn display_label(&self) -> String {
+        let short = self.device_name.trim_start_matches(r"\\.\").trim();
+        if short.is_empty() {
+            "Display".to_owned()
+        } else {
+            short.to_owned()
+        }
     }
 }
 
@@ -238,21 +366,28 @@ pub fn enumerate_monitors() -> Vec<MonitorInfo> {
         // SAFETY: `lparam` points to `Vec<MonitorInfo>` alive for the duration of `EnumDisplayMonitors`.
         unsafe {
             let list = &mut *(lparam as *mut Vec<MonitorInfo>);
-            let mut info: MONITORINFO = std::mem::zeroed();
-            info.cbSize = size_of::<MONITORINFO>() as u32;
-            if GetMonitorInfoW(hmon, &mut info) != 0 {
+            let mut info: MONITORINFOEXW = std::mem::zeroed();
+            info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+            if GetMonitorInfoW(hmon, (&mut info as *mut MONITORINFOEXW).cast()) != 0 {
                 let mut dpi_x = 96u32;
                 let mut dpi_y = 96u32;
                 let _ = GetDpiForMonitor(hmon, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
                 let dpi_scale = if dpi_x == 0 { 1.0 } else { dpi_x as f32 / 96.0 };
+                let end = info
+                    .szDevice
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(info.szDevice.len());
+                let device_name = String::from_utf16_lossy(&info.szDevice[..end]);
                 list.push(MonitorInfo {
                     handle: hmon as usize,
-                    left: info.rcMonitor.left,
-                    top: info.rcMonitor.top,
-                    right: info.rcMonitor.right,
-                    bottom: info.rcMonitor.bottom,
+                    device_name,
+                    left: info.monitorInfo.rcMonitor.left,
+                    top: info.monitorInfo.rcMonitor.top,
+                    right: info.monitorInfo.rcMonitor.right,
+                    bottom: info.monitorInfo.rcMonitor.bottom,
                     dpi_scale,
-                    is_primary: (info.dwFlags & MONITORINFOF_PRIMARY) != 0,
+                    is_primary: (info.monitorInfo.dwFlags & MONITORINFOF_PRIMARY) != 0,
                 });
             }
             1
@@ -273,6 +408,7 @@ pub fn enumerate_monitors() -> Vec<MonitorInfo> {
         let (w, h) = primary_screen_px();
         monitors.push(MonitorInfo {
             handle: 0,
+            device_name: r"\\.\DISPLAY1".to_owned(),
             left: 0,
             top: 0,
             right: w,
@@ -284,6 +420,121 @@ pub fn enumerate_monitors() -> Vec<MonitorInfo> {
         monitors.sort_by_key(|m| !m.is_primary);
     }
     monitors
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForegroundProbe {
+    OwnProcess,
+    DesktopOrEmpty,
+    Window(usize),
+}
+
+pub fn try_get_foreground_application_window() -> ForegroundProbe {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg.is_null() {
+            return ForegroundProbe::DesktopOrEmpty;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(fg, &mut pid);
+        if pid == GetCurrentProcessId() {
+            return ForegroundProbe::OwnProcess;
+        }
+        let root = GetAncestor(fg, GA_ROOTOWNER);
+        let resolved = if !root.is_null() { root } else { fg };
+        ForegroundProbe::Window(resolved as usize)
+    }
+}
+
+pub fn is_window_on_monitor(hwnd_val: usize, monitor_handle: usize) -> bool {
+    if hwnd_val == 0 || monitor_handle == 0 {
+        return false;
+    }
+    unsafe {
+        let hmon = MonitorFromWindow(hwnd_val as HWND, MONITOR_DEFAULTTONEAREST);
+        (hmon as usize) == monitor_handle
+    }
+}
+
+pub fn is_any_fullscreen_on_monitor(monitor: &MonitorInfo) -> bool {
+    if monitor.handle == 0 {
+        return false;
+    }
+    struct FullscreenScan {
+        monitor: MonitorInfo,
+        own_pid: u32,
+        found: bool,
+    }
+    unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        unsafe {
+            let scan = &mut *(lparam as *mut FullscreenScan);
+            if scan.found {
+                return 0;
+            }
+            if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
+                return 1;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == scan.own_pid {
+                return 1;
+            }
+            let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+            let app_window = (ex & WS_EX_APPWINDOW) != 0;
+            let no_activate = (ex & WS_EX_NOACTIVATE) != 0;
+            let tool_window = (ex & WS_EX_TOOLWINDOW) != 0;
+            let has_taskbar_btn = if GetWindow(hwnd, GW_OWNER).is_null() {
+                (!no_activate || app_window) && !tool_window
+            } else {
+                app_window
+            };
+            if !has_taskbar_btn {
+                return 1;
+            }
+            let mut rc: RECT = std::mem::zeroed();
+            if GetWindowRect(hwnd, &mut rc) == 0 {
+                return 1;
+            }
+            let covers = rc.left <= scan.monitor.left
+                && rc.top <= scan.monitor.top
+                && rc.right >= scan.monitor.right
+                && rc.bottom >= scan.monitor.bottom;
+            if !covers {
+                return 1;
+            }
+            let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            if (hmon as usize) != scan.monitor.handle {
+                return 1;
+            }
+            let mut cls = [0u16; 64];
+            let len = GetClassNameW(hwnd, cls.as_mut_ptr(), cls.len() as i32);
+            if len > 0 {
+                let name = String::from_utf16_lossy(&cls[..len as usize]);
+                if matches!(
+                    name.as_str(),
+                    "Progman"
+                        | "WorkerW"
+                        | "Shell_TrayWnd"
+                        | "Shell_SecondaryTrayWnd"
+                        | "Windows.UI.Core.CoreWindow"
+                ) {
+                    return 1;
+                }
+            }
+            scan.found = true;
+            0
+        }
+    }
+
+    let mut scan = FullscreenScan {
+        monitor: monitor.clone(),
+        own_pid: unsafe { GetCurrentProcessId() },
+        found: false,
+    };
+    unsafe {
+        EnumWindows(Some(enum_cb), (&mut scan as *mut FullscreenScan) as LPARAM);
+    }
+    scan.found
 }
 
 /// Reads Windows' `AppsUseLightTheme` registry value (returns `true` for Dark mode, fixing Issue #88).
@@ -356,17 +607,6 @@ pub fn start_native_window_drag(window: &gpui::Window) {
     }
 }
 
-#[allow(dead_code)]
-pub fn configure_dock_window(window: &gpui::Window) -> Option<usize> {
-    let handle = HasWindowHandle::window_handle(window).ok()?;
-    let hwnd = match handle.as_raw() {
-        RawWindowHandle::Win32(win32) => win32.hwnd.get() as HWND,
-        _ => return None,
-    };
-    configure_native_dock_hwnd(hwnd as usize);
-    Some(hwnd as usize)
-}
-
 pub fn configure_native_dock_hwnd(hwnd_val: usize) {
     if hwnd_val == 0 {
         return;
@@ -429,6 +669,19 @@ pub fn primary_screen_px() -> (i32, i32) {
     unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
 }
 
+/// Returns the monitor containing a physical point, falling back to the primary monitor.
+/// Popups must clamp against this, not `SM_CXSCREEN`/`SM_CYSCREEN`: on a monitor left of or
+/// above the primary one the coordinates are negative, and primary-only clamping teleports
+/// the popup to the wrong display.
+pub fn monitor_for_point_px(x: i32, y: i32) -> MonitorInfo {
+    let monitors = enumerate_monitors();
+    monitors
+        .iter()
+        .find(|m| x >= m.left && x < m.right && y >= m.top && y < m.bottom)
+        .cloned()
+        .unwrap_or_else(|| monitors.first().cloned().unwrap())
+}
+
 pub fn reposition_dock_window(hwnd: usize, x: i32, y: i32, w: i32, h: i32) {
     if hwnd == 0 || w <= 0 || h <= 0 {
         return;
@@ -447,7 +700,7 @@ pub fn reposition_dock_window(hwnd: usize, x: i32, y: i32, w: i32, h: i32) {
     }
 }
 
-use crate::ui::menu::{self, MenuEntry, MenuIcon};
+use crate::ui::menu::{self, BorderStyle, MenuEntry, MenuIcon};
 
 fn map_context_action(id: u32) -> ContextAction {
     match id {
@@ -455,18 +708,12 @@ fn map_context_action(id: u32) -> ContextAction {
         MENU_PROFILE_APPLY_BASE..=MENU_PROFILE_APPLY_MAX => {
             ContextAction::ApplyProfile((id - MENU_PROFILE_APPLY_BASE) as usize)
         }
-        MENU_PROFILE_SAVE_WORK => ContextAction::SaveProfile("Work"),
-        MENU_PROFILE_SAVE_GAMING => ContextAction::SaveProfile("Gaming"),
-        MENU_PROFILE_SAVE_MINIMAL => ContextAction::SaveProfile("Minimal"),
+        MENU_PROFILE_SAVE_NEW => ContextAction::SaveNewProfile,
         MENU_STACK_ADD_DOWNLOADS => ContextAction::AddStack("Downloads"),
         MENU_STACK_ADD_DESKTOP => ContextAction::AddStack("Desktop"),
         MENU_STACK_ADD_DOCUMENTS => ContextAction::AddStack("Documents"),
         MENU_STACK_REMOVE_BASE..=MENU_STACK_REMOVE_MAX => {
             ContextAction::RemoveStack((id - MENU_STACK_REMOVE_BASE) as usize)
-        }
-        MENU_GROUP_ADD_PRODUCTIVITY => ContextAction::AddStarterGroup,
-        MENU_GROUP_REMOVE_BASE..=MENU_GROUP_REMOVE_MAX => {
-            ContextAction::RemoveGroup((id - MENU_GROUP_REMOVE_BASE) as usize)
         }
         MENU_FOCUS_MODE => ContextAction::ToggleFocusMode,
         MENU_SETTINGS => ContextAction::Settings,
@@ -475,6 +722,7 @@ fn map_context_action(id: u32) -> ContextAction {
         MENU_TERMINAL => ContextAction::Terminal,
         MENU_TERMINAL_ADMIN => ContextAction::TerminalAdmin,
         MENU_RUN => ContextAction::RunDialog,
+        MENU_NOTIFICATION_CENTER => ContextAction::Notifications,
         MENU_DEV_MGMT => ContextAction::DeviceManager,
         MENU_DISK_MGMT => ContextAction::DiskManagement,
         MENU_COMP_MGMT => ContextAction::ComputerManagement,
@@ -484,6 +732,7 @@ fn map_context_action(id: u32) -> ContextAction {
         MENU_SIGN_OUT => ContextAction::SignOut,
         MENU_RESTART_PC => ContextAction::RestartComputer,
         MENU_SHUTDOWN_PC => ContextAction::ShutDownComputer,
+        MENU_SLEEP_PC => ContextAction::SleepComputer,
         MENU_SHOW_DESKTOP => ContextAction::ShowDesktop,
         MENU_RESTORE => ContextAction::RestoreTaskbar,
         MENU_EXIT => ContextAction::Exit,
@@ -507,7 +756,7 @@ fn dock_menu_entries(settings: &DockSettings) -> Vec<MenuEntry> {
                     MENU_PROFILE_APPLY_BASE + i as u32,
                     MenuIcon::Layers,
                     p.name.clone(),
-                    "Active",
+                    loc::t("Active"),
                 )
             } else {
                 MenuEntry::item(
@@ -522,19 +771,9 @@ fn dock_menu_entries(settings: &DockSettings) -> Vec<MenuEntry> {
         profile_items.push(MenuEntry::Separator);
     }
     profile_items.push(MenuEntry::item(
-        MENU_PROFILE_SAVE_WORK,
+        MENU_PROFILE_SAVE_NEW,
         MenuIcon::Plus,
-        "Save as Work",
-    ));
-    profile_items.push(MenuEntry::item(
-        MENU_PROFILE_SAVE_GAMING,
-        MenuIcon::Plus,
-        "Save as Gaming",
-    ));
-    profile_items.push(MenuEntry::item(
-        MENU_PROFILE_SAVE_MINIMAL,
-        MenuIcon::Plus,
-        "Save as Minimal",
+        loc::t("ProfileNew"),
     ));
 
     let mut stack_items: Vec<MenuEntry> = settings
@@ -550,7 +789,7 @@ fn dock_menu_entries(settings: &DockSettings) -> Vec<MenuEntry> {
             MenuEntry::destructive(
                 MENU_STACK_REMOVE_BASE + i as u32,
                 MenuIcon::Trash,
-                format!("Remove {name}"),
+                format!("{} {name}", loc::t("WidgetRemove")),
             )
         })
         .collect();
@@ -560,108 +799,156 @@ fn dock_menu_entries(settings: &DockSettings) -> Vec<MenuEntry> {
     stack_items.push(MenuEntry::item(
         MENU_STACK_ADD_DOWNLOADS,
         MenuIcon::Folder,
-        "Add Downloads",
+        format!("{} {}", loc::t("AddStack"), loc::t("Desktop")),
     ));
     stack_items.push(MenuEntry::item(
         MENU_STACK_ADD_DESKTOP,
         MenuIcon::Folder,
-        "Add Desktop",
+        format!("{} {}", loc::t("AddStack"), loc::t("Desktop")),
     ));
     stack_items.push(MenuEntry::item(
         MENU_STACK_ADD_DOCUMENTS,
         MenuIcon::Folder,
-        "Add Documents",
-    ));
-
-    let mut group_items: Vec<MenuEntry> = settings
-        .app_groups
-        .iter()
-        .enumerate()
-        .take(20)
-        .map(|(i, g)| {
-            MenuEntry::destructive(
-                MENU_GROUP_REMOVE_BASE + i as u32,
-                MenuIcon::Trash,
-                format!("Remove {}", g.name),
-            )
-        })
-        .collect();
-    if !group_items.is_empty() {
-        group_items.push(MenuEntry::Separator);
-    }
-    group_items.push(MenuEntry::item(
-        MENU_GROUP_ADD_PRODUCTIVITY,
-        MenuIcon::Plus,
-        "Add Productivity Group",
+        format!("{} {}", loc::t("AddStack"), loc::t("OpenFolder")),
     ));
 
     vec![
-        MenuEntry::item(MENU_SEARCH, MenuIcon::Search, "Search Apps"),
-        MenuEntry::submenu(MenuIcon::Layers, "Profiles", profile_items),
-        MenuEntry::submenu(MenuIcon::Folder, "Folder Stacks", stack_items),
-        MenuEntry::submenu(MenuIcon::Layers, "App Groups", group_items),
+        MenuEntry::item(MENU_SEARCH, MenuIcon::Search, loc::t("SearchApps")),
+        MenuEntry::with_shortcut(
+            MENU_NOTIFICATION_CENTER,
+            MenuIcon::Activity,
+            loc::t("NotificationCenter"),
+            "Win+N",
+        ),
+        MenuEntry::submenu(MenuIcon::Layers, loc::t("Profiles"), profile_items),
+        MenuEntry::submenu(MenuIcon::Folder, loc::t("FolderStacks"), stack_items),
         MenuEntry::item(
             MENU_FOCUS_MODE,
             MenuIcon::Layers,
             if settings.focus_mode {
-                "Focus Mode (On)"
+                format!("{} ({})", loc::t("FocusMode"), loc::t("QuickOn"))
             } else {
-                "Focus Mode"
+                loc::t("FocusMode")
             },
         ),
-        MenuEntry::item(MENU_SETTINGS, MenuIcon::Settings, "Settings"),
+        MenuEntry::item(MENU_SETTINGS, MenuIcon::Settings, loc::t("Settings")),
         MenuEntry::with_shortcut(
             MENU_TASKMGR,
             MenuIcon::Activity,
-            "Task Manager",
+            loc::t("TaskManager"),
             "Ctrl+Shift+Esc",
         ),
         MenuEntry::Separator,
         MenuEntry::with_shortcut(
             MENU_SHOW_DESKTOP,
             MenuIcon::Monitor,
-            "Show Desktop",
+            loc::t("ShowDesktop"),
             "Win+D",
         ),
-        MenuEntry::item(MENU_RESTORE, MenuIcon::Refresh, "Restore Windows Taskbar"),
+        MenuEntry::item(
+            MENU_RESTORE,
+            MenuIcon::Refresh,
+            format!("{} {}", loc::t("Restore"), loc::t("WindowsTaskbar")),
+        ),
         MenuEntry::Separator,
-        MenuEntry::destructive(MENU_EXIT, MenuIcon::Power, "Exit OpenTaskbar"),
+        MenuEntry::destructive(MENU_EXIT, MenuIcon::Power, loc::t("Exit")),
     ]
 }
 
 /// Power-user / system menu opened only on right-clicking the Windows Start logo.
-pub fn show_start_context_menu(hwnd: usize, is_dark: bool) -> ContextAction {
+pub fn show_start_context_menu(
+    hwnd: usize,
+    is_dark: bool,
+    settings: &DockSettings,
+) -> ContextAction {
     let entries = vec![
         MenuEntry::with_shortcut(
             MENU_TASKMGR,
             MenuIcon::Activity,
-            "Task Manager",
+            loc::t("TaskManager"),
             "Ctrl+Shift+Esc",
         ),
-        MenuEntry::with_shortcut(MENU_EXPLORER, MenuIcon::Folder, "File Explorer", "Win+E"),
-        MenuEntry::with_shortcut(MENU_RUN, MenuIcon::Play, "Run", "Win+R"),
-        MenuEntry::item(MENU_TERMINAL, MenuIcon::Terminal, "Terminal"),
-        MenuEntry::item(MENU_TERMINAL_ADMIN, MenuIcon::Shield, "Terminal (Admin)"),
+        MenuEntry::with_shortcut(
+            MENU_EXPLORER,
+            MenuIcon::Folder,
+            loc::t("OpenFileExplorer"),
+            "Win+E",
+        ),
+        MenuEntry::with_shortcut(MENU_RUN, MenuIcon::Play, loc::t("OpenRunDialog"), "Win+R"),
+        MenuEntry::with_shortcut(
+            MENU_NOTIFICATION_CENTER,
+            MenuIcon::Activity,
+            loc::t("NotificationCenter"),
+            "Win+N",
+        ),
+        MenuEntry::item(MENU_TERMINAL, MenuIcon::Terminal, loc::t("OpenTerminal")),
+        MenuEntry::item(
+            MENU_TERMINAL_ADMIN,
+            MenuIcon::Shield,
+            loc::t("OpenTerminalAdmin"),
+        ),
         MenuEntry::Separator,
-        MenuEntry::item(MENU_DEV_MGMT, MenuIcon::Settings, "Device Manager"),
-        MenuEntry::item(MENU_DISK_MGMT, MenuIcon::Layers, "Disk Management"),
-        MenuEntry::item(MENU_COMP_MGMT, MenuIcon::Monitor, "Computer Management"),
-        MenuEntry::item(MENU_EVENT_VWR, MenuIcon::Activity, "Event Viewer"),
-        MenuEntry::item(MENU_NET_CONN, MenuIcon::Refresh, "Network Connections"),
+        MenuEntry::item(
+            MENU_DEV_MGMT,
+            MenuIcon::Settings,
+            loc::t("OpenDeviceManager"),
+        ),
+        MenuEntry::item(
+            MENU_DISK_MGMT,
+            MenuIcon::Layers,
+            loc::t("OpenDiskManagement"),
+        ),
+        MenuEntry::item(
+            MENU_COMP_MGMT,
+            MenuIcon::Monitor,
+            loc::t("OpenComputerManagement"),
+        ),
+        MenuEntry::item(
+            MENU_EVENT_VWR,
+            MenuIcon::Activity,
+            loc::t("OpenEventViewer"),
+        ),
+        MenuEntry::item(
+            MENU_NET_CONN,
+            MenuIcon::Refresh,
+            loc::t("OpenNetworkConnections"),
+        ),
         MenuEntry::Separator,
         MenuEntry::with_shortcut(
             MENU_SHOW_DESKTOP,
             MenuIcon::Monitor,
-            "Show Desktop",
+            loc::t("ShowDesktop"),
             "Win+D",
         ),
         MenuEntry::Separator,
-        MenuEntry::with_shortcut(MENU_LOCK_PC, MenuIcon::Shield, "Lock", "Win+L"),
-        MenuEntry::item(MENU_SIGN_OUT, MenuIcon::ChevronRight, "Sign Out"),
-        MenuEntry::item(MENU_RESTART_PC, MenuIcon::Refresh, "Restart"),
-        MenuEntry::destructive(MENU_SHUTDOWN_PC, MenuIcon::Power, "Shut Down"),
+        MenuEntry::with_shortcut(
+            MENU_LOCK_PC,
+            MenuIcon::Shield,
+            loc::t("LockWorkstation"),
+            "Win+L",
+        ),
+        MenuEntry::item(MENU_SIGN_OUT, MenuIcon::ChevronRight, loc::t("SignOut")),
+        MenuEntry::item(MENU_SLEEP_PC, MenuIcon::Power, loc::t("SleepComputer")),
+        MenuEntry::item(
+            MENU_RESTART_PC,
+            MenuIcon::Refresh,
+            loc::t("RestartComputer"),
+        ),
+        MenuEntry::destructive(
+            MENU_SHUTDOWN_PC,
+            MenuIcon::Power,
+            loc::t("ShutDownComputer"),
+        ),
     ];
-    map_context_action(menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0))
+    map_context_action(
+        menu::show_popup_menu_with_border(
+            hwnd,
+            is_dark,
+            entries,
+            BorderStyle::from_menu_settings(is_dark, settings),
+        )
+        .unwrap_or(0),
+    )
 }
 
 pub fn show_dock_context_menu(
@@ -670,7 +957,13 @@ pub fn show_dock_context_menu(
     settings: &DockSettings,
 ) -> ContextAction {
     map_context_action(
-        menu::show_popup_menu(hwnd, is_dark, dock_menu_entries(settings)).unwrap_or(0),
+        menu::show_popup_menu_with_border(
+            hwnd,
+            is_dark,
+            dock_menu_entries(settings),
+            BorderStyle::from_menu_settings(is_dark, settings),
+        )
+        .unwrap_or(0),
     )
 }
 
@@ -678,22 +971,58 @@ pub fn show_app_context_menu(
     hwnd: usize,
     is_dark: bool,
     app_name: &str,
+    app_launch_path: &str,
     pinned: bool,
     running: bool,
     settings: &DockSettings,
 ) -> AppContextAction {
+    let mut group_items: Vec<MenuEntry> = settings
+        .app_groups
+        .iter()
+        .enumerate()
+        .take(20)
+        .map(|(i, g)| {
+            let member = g
+                .executable_paths
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(app_launch_path));
+            if member {
+                MenuEntry::with_shortcut(
+                    APP_MENU_GROUP_TOGGLE_BASE + i as u32,
+                    MenuIcon::Layers,
+                    g.name.clone(),
+                    loc::t("WidgetInstalled"),
+                )
+            } else {
+                MenuEntry::item(
+                    APP_MENU_GROUP_TOGGLE_BASE + i as u32,
+                    MenuIcon::Layers,
+                    g.name.clone(),
+                )
+            }
+        })
+        .collect();
+    if !group_items.is_empty() {
+        group_items.push(MenuEntry::Separator);
+    }
+    group_items.push(MenuEntry::item(
+        APP_MENU_GROUP_CREATE,
+        MenuIcon::Plus,
+        loc::t("NewGroup"),
+    ));
+
     let mut entries = vec![
         MenuEntry::item(APP_MENU_OPEN, MenuIcon::Play, app_name),
         MenuEntry::with_shortcut(
             APP_MENU_NEW_WINDOW,
             MenuIcon::Plus,
-            "New Window",
+            loc::t("NewInstance"),
             "Shift+Click",
         ),
         MenuEntry::with_shortcut(
             APP_MENU_ADMIN,
             MenuIcon::Shield,
-            "Run as Admin",
+            loc::t("RunAsAdmin"),
             "Ctrl+Shift",
         ),
         MenuEntry::Separator,
@@ -701,36 +1030,88 @@ pub fn show_app_context_menu(
             APP_MENU_TOGGLE_PIN,
             MenuIcon::Pin,
             if pinned {
-                "Unpin from Dock"
+                loc::t("Unpin")
             } else {
-                "Pin to Dock"
+                loc::t("PinApplication")
             },
         ),
+        MenuEntry::submenu(MenuIcon::Layers, loc::t("AppGroups"), group_items),
     ];
     if running {
         entries.push(MenuEntry::Separator);
         entries.push(MenuEntry::item(
             APP_MENU_CLOSE,
             MenuIcon::Close,
-            "Close Window",
+            loc::t("CloseWindow"),
         ));
         entries.push(MenuEntry::destructive(
             APP_MENU_TERMINATE,
             MenuIcon::Power,
-            "Terminate Process",
+            loc::t("Terminate"),
         ));
+    }
+    JUMPLIST_COMMANDS.with(|commands| commands.borrow_mut().clear());
+    if let Some(list) = crate::platform::jumplist::read_jump_list(hwnd, Some(app_launch_path)) {
+        let mut jump_items: Vec<MenuEntry> = Vec::new();
+        'groups: for group in &list.groups {
+            if !group.title.is_empty() && !jump_items.is_empty() {
+                jump_items.push(MenuEntry::Separator);
+            }
+            for entry in &group.entries {
+                if entry.is_separator {
+                    jump_items.push(MenuEntry::Separator);
+                    continue;
+                }
+                let id = JUMPLIST_ID_BASE + jump_items.len() as u32;
+                if id > JUMPLIST_ID_MAX {
+                    break 'groups;
+                }
+                JUMPLIST_COMMANDS.with(|commands| {
+                    commands
+                        .borrow_mut()
+                        .insert(id, (list.session_id, entry.command_id));
+                });
+                jump_items.push(MenuEntry::item(id, MenuIcon::Folder, entry.title.clone()));
+            }
+        }
+        if !jump_items.is_empty() {
+            entries.push(MenuEntry::submenu(
+                MenuIcon::Layers,
+                loc::t("PinnedDestinations"),
+                jump_items,
+            ));
+        }
     }
     entries.push(MenuEntry::Separator);
     entries.extend(dock_menu_entries(settings));
 
-    let chosen = menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0);
+    let chosen = menu::show_popup_menu_with_border(
+        hwnd,
+        is_dark,
+        entries,
+        BorderStyle::from_menu_settings(is_dark, settings),
+    )
+    .unwrap_or(0);
     match chosen {
         APP_MENU_OPEN => AppContextAction::Open,
         APP_MENU_NEW_WINDOW => AppContextAction::NewWindow,
         APP_MENU_ADMIN => AppContextAction::RunAsAdmin,
         APP_MENU_TOGGLE_PIN => AppContextAction::TogglePin,
+        APP_MENU_GROUP_CREATE => AppContextAction::CreateGroup,
+        APP_MENU_GROUP_TOGGLE_BASE..=APP_MENU_GROUP_TOGGLE_MAX => {
+            AppContextAction::ToggleGroup((chosen - APP_MENU_GROUP_TOGGLE_BASE) as usize)
+        }
         APP_MENU_CLOSE => AppContextAction::Close,
         APP_MENU_TERMINATE => AppContextAction::Terminate,
+        id if (JUMPLIST_ID_BASE..=JUMPLIST_ID_MAX).contains(&id) => {
+            if let Some((session, command)) =
+                JUMPLIST_COMMANDS.with(|commands| commands.borrow_mut().remove(&id))
+            {
+                crate::platform::jumplist::invoke_command(session, command, hwnd);
+                crate::platform::jumplist::release_session(session);
+            }
+            AppContextAction::None
+        }
         id => match map_context_action(id) {
             ContextAction::None => AppContextAction::None,
             act => AppContextAction::Dock(act),
@@ -738,15 +1119,30 @@ pub fn show_app_context_menu(
     }
 }
 
-pub fn show_taskview_context_menu(hwnd: usize, is_dark: bool) -> TaskViewAction {
+pub fn show_taskview_context_menu(
+    hwnd: usize,
+    is_dark: bool,
+    settings: &DockSettings,
+) -> TaskViewAction {
     let entries = vec![
-        MenuEntry::item(TV_MENU_PREV, MenuIcon::ChevronLeft, "Previous Desktop"),
-        MenuEntry::item(TV_MENU_NEXT, MenuIcon::ChevronRight, "Next Desktop"),
-        MenuEntry::item(TV_MENU_NEW, MenuIcon::Plus, "New Desktop"),
+        MenuEntry::item(
+            TV_MENU_PREV,
+            MenuIcon::ChevronLeft,
+            loc::t("DesktopPrevious"),
+        ),
+        MenuEntry::item(TV_MENU_NEXT, MenuIcon::ChevronRight, loc::t("DesktopNext")),
+        MenuEntry::item(TV_MENU_NEW, MenuIcon::Plus, loc::t("DesktopNew")),
         MenuEntry::Separator,
-        MenuEntry::item(TV_MENU_VIEW, MenuIcon::Layers, "Task View"),
+        MenuEntry::item(TV_MENU_VIEW, MenuIcon::Layers, loc::t("DesktopTaskView")),
     ];
-    match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
+    match menu::show_popup_menu_with_border(
+        hwnd,
+        is_dark,
+        entries,
+        BorderStyle::from_menu_settings(is_dark, settings),
+    )
+    .unwrap_or(0)
+    {
         TV_MENU_PREV => TaskViewAction::PreviousDesktop,
         TV_MENU_NEXT => TaskViewAction::NextDesktop,
         TV_MENU_NEW => TaskViewAction::NewDesktop,
@@ -755,13 +1151,24 @@ pub fn show_taskview_context_menu(hwnd: usize, is_dark: bool) -> TaskViewAction 
     }
 }
 
-pub fn show_recycle_bin_context_menu(hwnd: usize, is_dark: bool) -> RecycleBinAction {
+pub fn show_recycle_bin_context_menu(
+    hwnd: usize,
+    is_dark: bool,
+    settings: &DockSettings,
+) -> RecycleBinAction {
     let entries = vec![
-        MenuEntry::item(BIN_MENU_OPEN, MenuIcon::Folder, "Open Recycle Bin"),
+        MenuEntry::item(BIN_MENU_OPEN, MenuIcon::Folder, loc::t("OpenRecycleBin")),
         MenuEntry::Separator,
-        MenuEntry::destructive(BIN_MENU_EMPTY, MenuIcon::Trash, "Empty Recycle Bin"),
+        MenuEntry::destructive(BIN_MENU_EMPTY, MenuIcon::Trash, loc::t("EmptyRecycleBin")),
     ];
-    match menu::show_popup_menu(hwnd, is_dark, entries).unwrap_or(0) {
+    match menu::show_popup_menu_with_border(
+        hwnd,
+        is_dark,
+        entries,
+        BorderStyle::from_menu_settings(is_dark, settings),
+    )
+    .unwrap_or(0)
+    {
         BIN_MENU_OPEN => RecycleBinAction::Open,
         BIN_MENU_EMPTY => RecycleBinAction::Empty,
         _ => RecycleBinAction::None,

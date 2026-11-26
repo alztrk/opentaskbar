@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use windows::Win32::Foundation::PROPERTYKEY;
-use windows::Win32::System::Com::StructuredStorage::PropVariantToStringAlloc;
+use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
 use windows::Win32::System::Com::{
     CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
     CoTaskMemFree, IPersistFile, STGM_READ,
@@ -82,10 +82,12 @@ fn pins_dir() -> PathBuf {
 unsafe fn read_prop_string(store: &IPropertyStore, key: &PROPERTYKEY) -> Option<String> {
     // SAFETY: caller ensures COM STA is initialized and `store` is valid.
     unsafe {
-        let val = store.GetValue(key).ok()?;
+        // windows-rs 0.61 PROPVARIANT has no Drop impl: the caller must clear the variant itself.
+        let mut val = store.GetValue(key).ok()?;
         let pwstr = PropVariantToStringAlloc(&val).ok()?;
         let text = pwstr.to_string().ok();
         CoTaskMemFree(Some(pwstr.0.cast()));
+        let _ = PropVariantClear(&mut val);
         text.map(|s| s.trim().to_owned()).filter(|s| !s.is_empty())
     }
 }

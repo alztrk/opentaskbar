@@ -3,6 +3,9 @@
 //! Compact icon-bearing rows, scrollable overflow, toggle-close on the tray button,
 //! and right-click context menu to Open, Close Window, or End Process.
 
+use opentaskbar_core::i18n as loc;
+use opentaskbar_core::settings::DockSettings;
+
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -21,7 +24,7 @@ use windows_sys::core::BOOL;
 
 use crate::platform::{icon_cache, pins};
 use crate::ui::flyout::{self, FlyoutAction, FlyoutBlock, FlyoutIcon, FlyoutSpec};
-use crate::ui::menu::{self, MenuEntry, MenuIcon};
+use crate::ui::menu::{self, BorderStyle, MenuEntry, MenuIcon};
 
 #[derive(Clone, Debug)]
 pub struct BackgroundApp {
@@ -212,12 +215,22 @@ pub(super) fn open_pinned_app(owner_hwnd: usize, path: &str) {
     }
 }
 
-pub(super) fn show_pinned_app_menu(owner_hwnd: usize, is_dark: bool, path: &str) -> bool {
+pub(super) fn show_pinned_app_menu(
+    owner_hwnd: usize,
+    is_dark: bool,
+    settings: &DockSettings,
+    path: &str,
+) -> bool {
     let entries = vec![
         MenuEntry::item(1, MenuIcon::Play, format!("Open {}", friendly_name(path))),
-        MenuEntry::item(2, MenuIcon::Pin, "Unpin background app"),
+        MenuEntry::item(2, MenuIcon::Pin, loc::t("UnpinTrayIcon")),
     ];
-    match menu::show_popup_menu(owner_hwnd, is_dark, entries) {
+    match menu::show_popup_menu_with_border(
+        owner_hwnd,
+        is_dark,
+        entries,
+        BorderStyle::from_menu_settings(is_dark, settings),
+    ) {
         Some(1) => open_pinned_app(owner_hwnd, path),
         Some(2) => return true,
         _ => {}
@@ -252,8 +265,11 @@ pub(super) fn show_action_error(owner_hwnd: usize, message: &str) {
     };
 }
 
-fn terminate_pid(pid: u32) {
-    if pid == 0 || pid == std::process::id() {
+fn terminate_pid(pid: u32, expected_exe: &str) {
+    if pid == 0
+        || pid == std::process::id()
+        || process_image_path(pid).is_none_or(|path| !path.eq_ignore_ascii_case(expected_exe))
+    {
         return;
     }
     unsafe {
@@ -269,6 +285,7 @@ fn terminate_pid(pid: u32) {
 pub(super) fn open_background_apps_flyout(
     owner_hwnd: usize,
     is_dark: bool,
+    settings: &DockSettings,
     anchor_center_x_px: i32,
     anchor_bottom_y_px: i32,
     pinned_paths: &[String],
@@ -301,7 +318,7 @@ pub(super) fn open_background_apps_flyout(
                     FlyoutIcon {
                         width: r.width,
                         height: r.height,
-                        bgra: r.pixels,
+                        bgra: r.pixels.to_vec(),
                     },
                 )
             })
@@ -326,12 +343,12 @@ pub(super) fn open_background_apps_flyout(
     }
     blocks.push(FlyoutBlock::Separator);
     blocks.push(FlyoutBlock::ButtonBar(vec![
-        (1, "Task Manager".to_owned(), false),
+        (1, loc::t("TaskManager").to_owned(), false),
         (2, "Windows Tray".to_owned(), false),
     ]));
 
     let spec = FlyoutSpec {
-        title: "Background Apps".to_owned(),
+        title: loc::t("TrayApps").to_owned(),
         subtitle: Some(match apps.len() {
             1 => "1 app running in the background".to_owned(),
             count => format!("{count} apps running in the background"),
@@ -350,11 +367,18 @@ pub(super) fn open_background_apps_flyout(
         };
         let entries = vec![
             MenuEntry::item(1, MenuIcon::Play, format!("Open {}", app.name)),
-            MenuEntry::item(2, MenuIcon::Close, "Close Window"),
+            MenuEntry::item(2, MenuIcon::Close, loc::t("CloseWindow")),
             MenuEntry::Separator,
-            MenuEntry::destructive(3, MenuIcon::Power, "End Process"),
+            MenuEntry::destructive(3, MenuIcon::Power, loc::t("Terminate")),
         ];
-        match menu::show_popup_menu(owner_hwnd, is_dark, entries).unwrap_or(0) {
+        match menu::show_popup_menu_with_border(
+            owner_hwnd,
+            is_dark,
+            entries,
+            BorderStyle::from_menu_settings(is_dark, settings),
+        )
+        .unwrap_or(0)
+        {
             1 => {
                 open_from_menu = Some(app);
                 true
@@ -364,14 +388,14 @@ pub(super) fn open_background_apps_flyout(
                 true
             }
             3 => {
-                terminate_pid(app.pid);
+                terminate_pid(app.pid, &app.exe_path);
                 false
             }
             _ => false,
         }
     };
 
-    let action = flyout::show_flyout_interactive(
+    let action = flyout::show_flyout_interactive_with_border(
         "tray",
         owner_hwnd,
         is_dark,
@@ -379,6 +403,7 @@ pub(super) fn open_background_apps_flyout(
         anchor_bottom_y_px,
         spec,
         Some(&mut handle_right_click),
+        BorderStyle::from_menu_settings(is_dark, settings),
     );
     if let Some(app) = open_from_menu {
         activate_or_relaunch(app);

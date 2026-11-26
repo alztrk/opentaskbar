@@ -7,7 +7,9 @@
 //! - Grouped inset `section_card`, concise `setting_row`, `ios_switch`, `segmented_track`,
 //!   `stepper`, `button`, `badge`, `sidebar_nav_item`, and `scrollbar_overlay`.
 
-use gpui::{AnyElement, Div, MouseButton, SharedString, div, prelude::*, px, rgba};
+use gpui::{
+    AnyElement, Div, MouseButton, ScrollAnchor, SharedString, div, prelude::*, px, rgba,
+};
 
 use crate::design::{self, gpui_rgba};
 
@@ -27,6 +29,7 @@ pub struct UiTheme {
     pub dock_preview_fg: u32,
     pub dock_preview_sub: u32,
     pub border: u32,
+    pub border_width: f32,
     pub separator: u32,
     pub text_primary: u32,
     pub text_secondary: u32,
@@ -54,6 +57,7 @@ impl UiTheme {
             dock_preview_fg: gpui_rgba(p.text_primary, 0xff),
             dock_preview_sub: gpui_rgba(p.text_secondary, 0xff),
             border: if is_dark { 0xffffff16 } else { 0x00000014 },
+            border_width: 1.0,
             separator: if is_dark { 0xffffff10 } else { 0x0000000e },
             text_primary: gpui_rgba(p.text_primary, 0xff),
             text_secondary: gpui_rgba(p.text_secondary, 0xff),
@@ -91,7 +95,7 @@ pub fn section_card(theme: &UiTheme, title: impl Into<SharedString>, rows: Vec<A
         .flex_col()
         .rounded(px(PANEL_RADIUS))
         .bg(rgba(theme.surface))
-        .border_1()
+        .border(px(theme.border_width))
         .border_color(rgba(theme.border))
         .overflow_hidden();
 
@@ -120,8 +124,43 @@ pub fn section_card(theme: &UiTheme, title: impl Into<SharedString>, rows: Vec<A
 }
 
 /// Concise two-column setting row with strict `min_w_0` + `shrink_0` anti-overflow protection.
+///
+/// Thin wrapper for the ~100 rows that are not search targets: no element id, no highlight,
+/// no scroll anchor. Searchable rows use [`setting_row_with_id`] instead.
 pub fn setting_row(
     theme: &UiTheme,
+    icon: Option<&'static str>,
+    title: impl Into<SharedString>,
+    control: impl IntoElement,
+) -> Div {
+    setting_row_inner(theme, false, icon, title, control)
+}
+
+/// Searchable variant of [`setting_row`].
+///
+/// `id` is the stable id shared with the Settings search catalog. When `highlighted` is true
+/// the row gets a tinted background plus a left accent bar so the jumped-to control is
+/// obvious. `anchor` is a [`ScrollAnchor`] tied to the Settings scroll handle; attaching it
+/// lets GPUI scroll to this row even though it is nested several levels inside a section card.
+pub fn setting_row_with_id(
+    id: impl Into<SharedString>,
+    theme: &UiTheme,
+    anchor: Option<ScrollAnchor>,
+    highlighted: bool,
+    icon: Option<&'static str>,
+    title: impl Into<SharedString>,
+    control: impl IntoElement,
+) -> gpui::Stateful<Div> {
+    let id: SharedString = id.into();
+    // `anchor_scroll` lives on `StatefulInteractiveElement`, so the element id comes first.
+    setting_row_inner(theme, highlighted, icon, title, control)
+        .id(id)
+        .anchor_scroll(anchor)
+}
+
+fn setting_row_inner(
+    theme: &UiTheme,
+    highlighted: bool,
     icon: Option<&'static str>,
     title: impl Into<SharedString>,
     control: impl IntoElement,
@@ -149,7 +188,7 @@ pub fn setting_row(
             .child(title.into()),
     );
 
-    div()
+    let mut row = div()
         .w_full()
         .min_w_0()
         .flex()
@@ -158,9 +197,22 @@ pub fn setting_row(
         .justify_between()
         .gap(px(12.0))
         .px(px(ROW_INSET))
-        .py(px(12.0))
-        .child(left)
-        .child(div().flex_shrink_0().child(control))
+        .py(px(12.0));
+
+    if highlighted {
+        row = row
+            .bg(rgba(theme.accent_soft))
+            .child(
+                div()
+                    .w(px(3.0))
+                    .h(px(18.0))
+                    .rounded(px(2.0))
+                    .bg(rgba(theme.accent))
+                    .flex_shrink_0(),
+            );
+    }
+
+    row.child(left).child(div().flex_shrink_0().child(control))
 }
 
 /// Crisp desktop toggle switch pill (`36x20`).
@@ -426,7 +478,6 @@ where
         )
 }
 
-#[allow(dead_code)]
 pub fn stepper(
     id_minus: impl Into<gpui::ElementId>,
     id_plus: impl Into<gpui::ElementId>,

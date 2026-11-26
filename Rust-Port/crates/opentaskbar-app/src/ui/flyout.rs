@@ -9,10 +9,14 @@
 //!   `StatusHeader`, `Hero`, `ToggleGrid`, `ProgressBar`, `StatRow`, `ActionRow`, `AppRow`, `ButtonBar`
 //! - Mouse-wheel vertical scrolling + thin scrollbar thumb + toggle-close suppression.
 
+use opentaskbar_core::i18n as loc;
+
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use crate::design::fonts;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -21,10 +25,10 @@ use windows_sys::Win32::Graphics::Dwm::{
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, CreateFontW, CreatePen, CreateSolidBrush,
     DIB_RGB_COLORS, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, GetMonitorInfoW, HDC,
-    IntersectClipRect, InvalidateRect, LineTo, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromPoint, MoveToEx, PAINTSTRUCT, PS_SOLID, RestoreDC, RoundRect, SaveDC, SelectObject,
-    SetBkMode, SetTextColor, StretchDIBits, TRANSPARENT,
+    DT_VCENTER, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, GetMonitorInfoW, HBRUSH, HDC,
+    HFONT, HPEN, IntersectClipRect, InvalidateRect, LineTo, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromPoint, MoveToEx, PAINTSTRUCT, PS_NULL, PS_SOLID, RestoreDC, RoundRect, SaveDC,
+    SelectObject, SetBkMode, SetTextColor, StretchDIBits, TRANSPARENT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -42,13 +46,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOPMOST, WS_POPUP,
 };
 
-use super::menu::{MenuIcon, draw_menu_icon};
-use crate::design::{self, Rgb, gdi_rgb};
+use super::menu::{BorderStyle, MenuIcon, draw_menu_icon};
+use crate::design::{self, gdi_rgb};
 use crate::platform::win32;
 use crate::widgets::telemetry;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
+const DWMWA_COLOR_NONE: u32 = 0xFFFF_FFFE;
 const MAX_FLYOUT_H_DIPS: f32 = 460.0;
 const TIMER_ANIM: usize = 1;
 const OPEN_ANIM_MS: f32 = 175.0;
@@ -159,14 +164,6 @@ pub enum FlyoutBlock {
         mute_id: u32,
         slider_id: u32,
     },
-    /// C# `SystemStatsWidget` telemetry row with 45-sample vector sparkline.
-    Sparkline {
-        label: String,
-        value_text: String,
-        detail_text: Option<String>,
-        samples: Vec<f32>,
-        color: Rgb,
-    },
     /// C# `WeatherWidget` / `NetSpeedWidget` 2-column metric tiles (`SurfaceSelected`, `r=8`).
     MetricTiles(Vec<(String, String)>),
     /// C# `KeyboardLayoutWidget` selectable row: short-code badge pill + full display name.
@@ -175,14 +172,6 @@ pub enum FlyoutBlock {
         code: String,
         title: String,
         active: bool,
-    },
-    /// C# `AiUsageWidget.SectionHeader`: title + status dot + right dashboard button.
-    StatusHeader {
-        title: String,
-        status_label: String,
-        status_color: Rgb,
-        action_id: Option<u32>,
-        action_label: Option<String>,
     },
     /// 2-column Control Center toggle tile grid (`(id, title, state_label, active)`).
     ToggleGrid(Vec<(u32, String, String, bool)>),
@@ -248,6 +237,7 @@ struct FlyoutState<'a> {
     suppress_blur: bool,
     on_secondary: Option<&'a mut dyn FnMut(u32) -> bool>,
     on_live: Option<&'a mut dyn FnMut(LiveEvent) -> LiveOutcome>,
+    border: BorderStyle,
     content_top_px: i32,
     viewport_h_px: i32,
     content_h_px: i32,
@@ -264,6 +254,116 @@ struct FlyoutState<'a> {
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
+}
+
+/// Per-paint GDI object cache. A flyout paint previously created and deleted a brush/pen for
+/// every rounded rectangle (15+ per frame) plus five fonts, regardless of whether the color or
+/// font had already been used. Handles live for one paint and are released together.
+#[derive(Default)]
+struct FlyoutGdi {
+    brushes: HashMap<u32, HBRUSH>,
+    pens: HashMap<(u32, i32), HPEN>,
+    fonts: HashMap<(i32, i32), HFONT>,
+    fluent_fonts: HashMap<(i32, i32), HFONT>,
+}
+
+impl FlyoutGdi {
+    fn brush(&mut self, color: u32) -> HBRUSH {
+        if let Some(&handle) = self.brushes.get(&color) {
+            return handle;
+        }
+        let handle = unsafe { CreateSolidBrush(color) };
+        self.brushes.insert(color, handle);
+        handle
+    }
+
+    /// Solid pen of `width_px`; a non-positive width yields a `PS_NULL` pen so
+    /// callers can skip the stroke without branching on GDI object selection.
+    fn pen(&mut self, color: u32, width_px: i32) -> HPEN {
+        let key = (color, width_px);
+        if let Some(&handle) = self.pens.get(&key) {
+            return handle;
+        }
+        let (style, width) = if width_px > 0 {
+            (PS_SOLID, width_px)
+        } else {
+            (PS_NULL, 0)
+        };
+        let handle = unsafe { CreatePen(style, width, color) };
+        self.pens.insert(key, handle);
+        handle
+    }
+
+    fn font(&mut self, height_px: i32, weight: i32) -> HFONT {
+        let height_px = fonts::scaled_size(height_px as f32).round() as i32;
+        let key = (height_px, weight);
+        if let Some(&handle) = self.fonts.get(&key) {
+            return handle;
+        }
+        let handle = unsafe {
+            CreateFontW(
+                height_px,
+                0,
+                0,
+                0,
+                weight,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                4,
+                0,
+                wide(fonts::native_ui_face()).as_ptr(),
+            )
+        };
+        self.fonts.insert(key, handle);
+        handle
+    }
+
+    fn fluent_font(&mut self, height_px: i32) -> HFONT {
+        let key = (height_px, 400);
+        if let Some(&handle) = self.fluent_fonts.get(&key) {
+            return handle;
+        }
+        let handle = unsafe {
+            CreateFontW(
+                height_px,
+                0,
+                0,
+                0,
+                400,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                4,
+                0,
+                wide("Segoe Fluent Icons").as_ptr(),
+            )
+        };
+        self.fluent_fonts.insert(key, handle);
+        handle
+    }
+}
+
+impl Drop for FlyoutGdi {
+    fn drop(&mut self) {
+        unsafe {
+            for &handle in self.brushes.values() {
+                let _ = DeleteObject(handle as _);
+            }
+            for &handle in self.pens.values() {
+                let _ = DeleteObject(handle as _);
+            }
+            for &handle in self.fonts.values().chain(self.fluent_fonts.values()) {
+                let _ = DeleteObject(handle as _);
+            }
+        }
+    }
 }
 
 /// Null-terminated, empty-safe wrapper around `user32!DrawTextW`.
@@ -307,22 +407,39 @@ fn app_row_targets(left: i32, right: i32, top: i32, dpi: f32) -> [RECT; 3] {
     })
 }
 
-fn fill_round_rect_bordered(hdc: HDC, rc: RECT, rad: i32, fill_color: u32, border_color: u32) {
+fn fill_round_rect_bordered(
+    gdi: &mut FlyoutGdi,
+    hdc: HDC,
+    rc: RECT,
+    rad: i32,
+    fill_color: u32,
+    border_color: u32,
+    border_width_px: i32,
+) {
     unsafe {
-        let brush = CreateSolidBrush(fill_color);
-        let pen = CreatePen(PS_SOLID, 1, border_color);
+        let brush = gdi.brush(fill_color);
+        let pen = gdi.pen(border_color, border_width_px);
         let ob = SelectObject(hdc, brush as _);
         let op = SelectObject(hdc, pen as _);
         RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, rad, rad);
         SelectObject(hdc, ob);
         SelectObject(hdc, op);
-        DeleteObject(brush as _);
-        DeleteObject(pen as _);
     }
 }
 
-fn fill_round_rect(hdc: HDC, l: i32, t: i32, r: i32, b: i32, rad: i32, color: u32) {
+#[allow(clippy::too_many_arguments)]
+fn fill_round_rect(
+    gdi: &mut FlyoutGdi,
+    hdc: HDC,
+    l: i32,
+    t: i32,
+    r: i32,
+    b: i32,
+    rad: i32,
+    color: u32,
+) {
     fill_round_rect_bordered(
+        gdi,
         hdc,
         RECT {
             left: l,
@@ -333,6 +450,7 @@ fn fill_round_rect(hdc: HDC, l: i32, t: i32, r: i32, b: i32, rad: i32, color: u3
         rad,
         color,
         color,
+        1,
     );
 }
 
@@ -492,9 +610,6 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                 });
                 y = slider_top + s(24.0);
             }
-            FlyoutBlock::Sparkline { .. } => {
-                y += s(48.0);
-            }
             FlyoutBlock::MetricTiles(tiles) => {
                 let rows = tiles.len().div_ceil(2) as i32;
                 let tile_h = s(44.0);
@@ -515,24 +630,6 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                     },
                 });
                 y += h + s(4.0);
-            }
-            FlyoutBlock::StatusHeader { action_id, .. } => {
-                let h = s(28.0);
-                if let Some(id) = *action_id {
-                    let bw = s(64.0);
-                    targets.push(HitTarget {
-                        id,
-                        menu_id: id,
-                        is_slider: false,
-                        rect: RECT {
-                            left: pad + content_w - bw,
-                            top: y,
-                            right: pad + content_w,
-                            bottom: y + h,
-                        },
-                    });
-                }
-                y += h + s(6.0);
             }
             FlyoutBlock::ToggleGrid(tiles) => {
                 let rows = tiles.len().div_ceil(2) as i32;
@@ -626,6 +723,10 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
 }
 
 /// Convenience wrapper for consumers that only handle primary clicks.
+///
+/// Call sites without `DockSettings` get the palette hairline; use
+/// [`show_flyout_with_border`] to apply the persisted `widget_border_*` settings.
+#[allow(dead_code)] // kept for call sites that have no DockSettings in scope
 pub fn show_flyout(
     owner_hwnd: usize,
     is_dark: bool,
@@ -633,7 +734,26 @@ pub fn show_flyout(
     anchor_bottom_y_px: i32,
     spec: FlyoutSpec,
 ) -> Option<u32> {
-    match show_flyout_interactive(
+    show_flyout_with_border(
+        owner_hwnd,
+        is_dark,
+        anchor_center_x_px,
+        anchor_bottom_y_px,
+        spec,
+        BorderStyle::default_for(is_dark),
+    )
+}
+
+/// Same as [`show_flyout`] with an explicit border stroke color/width.
+pub fn show_flyout_with_border(
+    owner_hwnd: usize,
+    is_dark: bool,
+    anchor_center_x_px: i32,
+    anchor_bottom_y_px: i32,
+    spec: FlyoutSpec,
+    border: BorderStyle,
+) -> Option<u32> {
+    match show_flyout_interactive_with_border(
         &spec.title.clone(),
         owner_hwnd,
         is_dark,
@@ -641,6 +761,7 @@ pub fn show_flyout(
         anchor_bottom_y_px,
         spec,
         None,
+        border,
     ) {
         Some(FlyoutAction::Primary(id)) => Some(id),
         _ => None,
@@ -648,6 +769,7 @@ pub fn show_flyout(
 }
 
 /// Shows an interactive flyout that updates in place on clicks and slider drags (C# WPF parity).
+#[allow(dead_code)] // kept for call sites that have no DockSettings in scope
 pub fn show_flyout_live(
     tag: &str,
     owner_hwnd: usize,
@@ -655,6 +777,29 @@ pub fn show_flyout_live(
     anchor_center_x_px: i32,
     anchor_bottom_y_px: i32,
     spec: FlyoutSpec,
+    on_live: impl FnMut(LiveEvent) -> LiveOutcome,
+) {
+    show_flyout_live_with_border(
+        tag,
+        owner_hwnd,
+        is_dark,
+        anchor_center_x_px,
+        anchor_bottom_y_px,
+        spec,
+        BorderStyle::default_for(is_dark),
+        on_live,
+    );
+}
+
+/// Same as [`show_flyout_live`] with an explicit border stroke color/width.
+pub fn show_flyout_live_with_border(
+    tag: &str,
+    owner_hwnd: usize,
+    is_dark: bool,
+    anchor_center_x_px: i32,
+    anchor_bottom_y_px: i32,
+    spec: FlyoutSpec,
+    border: BorderStyle,
     mut on_live: impl FnMut(LiveEvent) -> LiveOutcome,
 ) {
     let _ = show_flyout_impl(
@@ -666,6 +811,7 @@ pub fn show_flyout_live(
         spec,
         None,
         Some(&mut on_live),
+        border,
     );
 }
 
@@ -679,6 +825,29 @@ pub fn show_flyout_interactive(
     spec: FlyoutSpec,
     on_secondary: Option<&mut dyn FnMut(u32) -> bool>,
 ) -> Option<FlyoutAction> {
+    show_flyout_interactive_with_border(
+        tag,
+        owner_hwnd,
+        is_dark,
+        anchor_center_x_px,
+        anchor_bottom_y_px,
+        spec,
+        on_secondary,
+        BorderStyle::default_for(is_dark),
+    )
+}
+
+/// Same as [`show_flyout_interactive`] with an explicit border stroke color/width.
+pub fn show_flyout_interactive_with_border(
+    tag: &str,
+    owner_hwnd: usize,
+    is_dark: bool,
+    anchor_center_x_px: i32,
+    anchor_bottom_y_px: i32,
+    spec: FlyoutSpec,
+    on_secondary: Option<&mut dyn FnMut(u32) -> bool>,
+    border: BorderStyle,
+) -> Option<FlyoutAction> {
     show_flyout_impl(
         tag,
         owner_hwnd,
@@ -688,6 +857,7 @@ pub fn show_flyout_interactive(
         spec,
         on_secondary,
         None,
+        border,
     )
 }
 
@@ -701,6 +871,7 @@ fn show_flyout_impl<'a>(
     spec: FlyoutSpec,
     on_secondary: Option<&'a mut dyn FnMut(u32) -> bool>,
     on_live: Option<&'a mut dyn FnMut(LiveEvent) -> LiveOutcome>,
+    border: BorderStyle,
 ) -> Option<FlyoutAction> {
     if should_suppress_reopen(tag) {
         return None;
@@ -758,8 +929,14 @@ fn show_flyout_impl<'a>(
     let top = screen.top + margin;
     let x = (anchor_center_x_px - width_px / 2)
         .clamp(left, (screen.right - width_px - margin).max(left));
-    let top_y =
+    let mut top_y =
         (anchor_bottom_y_px - height_px).clamp(top, (screen.bottom - height_px - margin).max(top));
+    let mut x = x;
+    if let Some((saved_x, saved_y)) = opentaskbar_shell::flyout_journal::read_tag(tag) {
+        x = saved_x.clamp(left, (screen.right - width_px - margin).max(left));
+        top_y = saved_y.clamp(top, (screen.bottom - height_px - margin).max(top));
+    }
+    opentaskbar_shell::flyout_journal::write_tag(tag, x, top_y);
 
     let animate = win32::client_area_animations_enabled();
     let slide_px = if animate { s(SLIDE_OFFSET_DIPS) } else { 0 };
@@ -799,7 +976,11 @@ fn show_flyout_impl<'a>(
             (&corner as *const u32).cast(),
             size_of::<u32>() as u32,
         );
-        let border = gdi_rgb(design::palette(is_dark).border_rgb);
+        let border = if border.width_dips > 0.0 {
+            gdi_rgb(border.rgb)
+        } else {
+            DWMWA_COLOR_NONE
+        };
         let _ = DwmSetWindowAttribute(
             hwnd,
             DWMWA_BORDER_COLOR as u32,
@@ -822,6 +1003,7 @@ fn show_flyout_impl<'a>(
         suppress_blur: false,
         on_secondary,
         on_live,
+        border,
         content_top_px,
         viewport_h_px,
         content_h_px,
@@ -1113,7 +1295,8 @@ impl FlyoutState<'_> {
         let content_w = (w - pad - right_pad).max(s(120.0));
         let focused_id = self.keyboard_index.map(|index| self.targets[index].id);
 
-        let pal = design::palette(self.is_dark);
+        let pal = design::palette_with_border(self.is_dark, Some(self.border.rgb));
+        let border_w_px = (self.border.width_dips * dpi).round() as i32;
         let bg = gdi_rgb(pal.surface);
         let card_bg = gdi_rgb(pal.elevated);
         let hover_bg = gdi_rgb(pal.hover);
@@ -1134,43 +1317,23 @@ impl FlyoutState<'_> {
             rgb(0xdc, 0xe1, 0xe8)
         };
 
+        let mut gdi = FlyoutGdi::default();
+
         unsafe {
-            let bg_brush = CreateSolidBrush(bg);
-            FillRect(hdc, &ps.rcPaint, bg_brush);
-            DeleteObject(bg_brush as _);
+            FillRect(hdc, &ps.rcPaint, gdi.brush(bg));
 
             // Top specular hairline for crisp Apple/Raycast surface elevation.
-            let spec_pen = CreatePen(PS_SOLID, 1, gdi_rgb(pal.specular_top));
+            let spec_pen = gdi.pen(gdi_rgb(pal.specular_top), 1);
             let prev_pen = SelectObject(hdc, spec_pen as _);
             MoveToEx(hdc, s(8.0), 0, std::ptr::null_mut());
             LineTo(hdc, (w - s(8.0)).max(s(8.0)), 0);
             SelectObject(hdc, prev_pen);
-            DeleteObject(spec_pen as _);
 
-            let fname = wide("Segoe UI Variable Text");
-            let mk_font = |pt: f32, weight: i32| {
-                CreateFontW(
-                    -s(pt),
-                    0,
-                    0,
-                    0,
-                    weight,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    0,
-                    4, // ANTIALIASED_QUALITY (grayscale AA, zero RGB fringing)
-                    0,
-                    fname.as_ptr(),
-                )
-            };
-            let title_font = mk_font(if self.keyboard_navigation { 16.0 } else { 14.0 }, 600);
-            let body_font = mk_font(12.0, 500);
-            let bold_font = mk_font(12.0, 600);
-            let small_font = mk_font(11.0, 400);
-            let tiny_font = mk_font(10.0, 500);
+            let title_font = gdi.font(-s(if self.keyboard_navigation { 16.0 } else { 14.0 }), 600);
+            let body_font = gdi.font(-s(12.0), 500);
+            let bold_font = gdi.font(-s(12.0), 600);
+            let small_font = gdi.font(-s(11.0), 400);
+            let tiny_font = gdi.font(-s(10.0), 500);
             SetBkMode(hdc, TRANSPARENT as i32);
 
             let old_f = SelectObject(hdc, title_font as _);
@@ -1198,20 +1361,20 @@ impl FlyoutState<'_> {
                     } => {
                         let active = self.hovered_id.or(focused_id);
                         if active == Some(*pin_id) {
-                            Some(if *pinned {
-                                "Unpin background app"
+                            Some(loc::t(if *pinned {
+                                "UnpinTrayIcon"
                             } else {
-                                "Pin next to Background Apps"
-                            })
+                                "PinTrayIcon"
+                            }))
                         } else if active.is_some() && active == *close_id {
-                            Some("Close app window")
+                            Some(loc::t("CloseWindow"))
                         } else {
                             None
                         }
                     }
                     _ => None,
                 });
-                if let Some(sub) = action_label.or(self.spec.subtitle.as_deref()) {
+                if let Some(sub) = action_label.as_deref().or(self.spec.subtitle.as_deref()) {
                     SelectObject(hdc, small_font as _);
                     SetTextColor(hdc, muted_fg);
                     let mut src = RECT {
@@ -1250,7 +1413,7 @@ impl FlyoutState<'_> {
                     } => {
                         let pt = if *large { 40.0 } else { 27.0 };
                         let val_h = if *large { s(46.0) } else { s(32.0) };
-                        let hero_font = mk_font(pt, 700);
+                        let hero_font = gdi.font(-s(pt), 700);
                         let prev_font = SelectObject(hdc, hero_font as _);
                         SetTextColor(hdc, text_fg);
                         let mut hrc = RECT {
@@ -1262,7 +1425,6 @@ impl FlyoutState<'_> {
                         let align = if *centered { DT_CENTER } else { DT_LEFT };
                         draw_gdi_text(hdc, value, &mut hrc, align | DT_VCENTER | DT_SINGLELINE);
                         SelectObject(hdc, prev_font);
-                        DeleteObject(hero_font as _);
 
                         if let Some(meta) = right_meta {
                             SelectObject(hdc, small_font as _);
@@ -1336,7 +1498,16 @@ impl FlyoutState<'_> {
                         SelectObject(hdc, bold_font as _);
                         for (id, glyph, l, r) in nav_btns {
                             if self.hovered_id == Some(id) {
-                                fill_round_rect(hdc, l, y, r, y + nav_h, s(7.0), hover_bg);
+                                fill_round_rect(
+                                    &mut gdi,
+                                    hdc,
+                                    l,
+                                    y,
+                                    r,
+                                    y + nav_h,
+                                    s(7.0),
+                                    hover_bg,
+                                );
                             }
                             SetTextColor(hdc, text_fg);
                             let mut rc = RECT {
@@ -1355,7 +1526,7 @@ impl FlyoutState<'_> {
                         let tl = pad + btn_w * 2 + gap * 2;
                         let tr = right - btn_w * 2 - gap * 2;
                         if self.hovered_id == Some(*title_id) {
-                            fill_round_rect(hdc, tl, y, tr, y + nav_h, s(7.0), hover_bg);
+                            fill_round_rect(&mut gdi, hdc, tl, y, tr, y + nav_h, s(7.0), hover_bg);
                         }
                         SetTextColor(hdc, text_fg);
                         let mut title_rc = RECT {
@@ -1377,8 +1548,9 @@ impl FlyoutState<'_> {
                         let cell_w = content_w / 7;
                         SelectObject(hdc, tiny_font as _);
                         SetTextColor(hdc, muted_fg);
-                        const DOWS: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
-                        for (i, dow) in DOWS.iter().enumerate() {
+                        let dows: Vec<String> =
+                            (0..7).map(telemetry::weekday_short_monday_first).collect();
+                        for (i, dow) in dows.iter().enumerate() {
                             let mut rc = RECT {
                                 left: pad + (i as i32) * cell_w,
                                 top: y,
@@ -1387,7 +1559,7 @@ impl FlyoutState<'_> {
                             };
                             draw_gdi_text(
                                 hdc,
-                                dow,
+                                dow.as_str(),
                                 &mut rc,
                                 DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                             );
@@ -1439,14 +1611,26 @@ impl FlyoutState<'_> {
                             };
                             if is_today {
                                 fill_round_rect_bordered(
-                                    hdc, cell_rc, cell_r, sel_fill, sel_stroke,
+                                    &mut gdi,
+                                    hdc,
+                                    cell_rc,
+                                    cell_r,
+                                    sel_fill,
+                                    sel_stroke,
+                                    border_w_px,
                                 );
                             } else if is_sel {
                                 fill_round_rect_bordered(
-                                    hdc, cell_rc, cell_r, hover_bg, border_col,
+                                    &mut gdi,
+                                    hdc,
+                                    cell_rc,
+                                    cell_r,
+                                    hover_bg,
+                                    border_col,
+                                    border_w_px,
                                 );
                             } else if is_hov {
-                                fill_round_rect(hdc, l, t, r, b, cell_r, hover_bg);
+                                fill_round_rect(&mut gdi, hdc, l, t, r, b, cell_r, hover_bg);
                             }
 
                             SelectObject(
@@ -1517,6 +1701,7 @@ impl FlyoutState<'_> {
                         let mute_w = s(32.0);
                         let dev_r = pad + content_w - mute_w - s(8.0);
                         fill_round_rect_bordered(
+                            &mut gdi,
                             hdc,
                             RECT {
                                 left: pad,
@@ -1527,6 +1712,7 @@ impl FlyoutState<'_> {
                             radius,
                             card_bg,
                             border_col,
+                            border_w_px,
                         );
                         SelectObject(hdc, small_font as _);
                         SetTextColor(hdc, text_fg);
@@ -1553,6 +1739,7 @@ impl FlyoutState<'_> {
                             (card_bg, border_col, muted_fg)
                         };
                         fill_round_rect_bordered(
+                            &mut gdi,
                             hdc,
                             RECT {
                                 left: mute_l,
@@ -1563,23 +1750,9 @@ impl FlyoutState<'_> {
                             radius,
                             m_bg,
                             m_bd,
+                            border_w_px,
                         );
-                        let glyph_font = CreateFontW(
-                            -s(14.0),
-                            0,
-                            0,
-                            0,
-                            400,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            0,
-                            4,
-                            0,
-                            wide("Segoe Fluent Icons").as_ptr(),
-                        );
+                        let glyph_font = gdi.fluent_font(-s(14.0));
                         let prev_font = SelectObject(hdc, glyph_font as _);
                         SetTextColor(hdc, m_fg);
                         let mut mrc = RECT {
@@ -1595,13 +1768,13 @@ impl FlyoutState<'_> {
                             DT_CENTER | DT_VCENTER | DT_SINGLELINE,
                         );
                         SelectObject(hdc, prev_font);
-                        DeleteObject(glyph_font as _);
 
                         // 3. C# `WidgetSlider`: 5px track + Aurora teal fill + 10px circular thumb
                         let slider_top = dev_top + dev_h + s(8.0);
                         let mid_y = slider_top + s(10.0);
                         let tr_h = s(5.0).max(4);
                         fill_round_rect(
+                            &mut gdi,
                             hdc,
                             pad,
                             mid_y - tr_h / 2,
@@ -1614,6 +1787,7 @@ impl FlyoutState<'_> {
                         let fill_w = (content_w as f32 * r_clamped).round() as i32;
                         if fill_w > s(2.0) {
                             fill_round_rect(
+                                &mut gdi,
                                 hdc,
                                 pad,
                                 mid_y - tr_h / 2,
@@ -1633,8 +1807,8 @@ impl FlyoutState<'_> {
                             s(5.0)
                         };
                         let tx = (pad + fill_w).clamp(pad + thumb_r, pad + content_w - thumb_r);
-                        let tb = CreateSolidBrush(text_fg);
-                        let tp = CreatePen(PS_SOLID, 1, text_fg);
+                        let tb = gdi.brush(text_fg);
+                        let tp = gdi.pen(text_fg, 1);
                         let ob = SelectObject(hdc, tb as _);
                         let op = SelectObject(hdc, tp as _);
                         Ellipse(
@@ -1646,79 +1820,8 @@ impl FlyoutState<'_> {
                         );
                         SelectObject(hdc, ob);
                         SelectObject(hdc, op);
-                        DeleteObject(tb as _);
-                        DeleteObject(tp as _);
 
                         y = slider_top + s(24.0);
-                    }
-                    FlyoutBlock::Sparkline {
-                        label,
-                        value_text,
-                        detail_text,
-                        samples,
-                        color,
-                    } => {
-                        SelectObject(hdc, body_font as _);
-                        SetTextColor(hdc, text_fg);
-                        let mut lrc = RECT {
-                            left: pad,
-                            top: y,
-                            right: pad + content_w,
-                            bottom: y + s(18.0),
-                        };
-                        draw_gdi_text(hdc, label, &mut lrc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-                        let val_full = match detail_text {
-                            Some(d) => format!("{d}  {value_text}"),
-                            None => value_text.clone(),
-                        };
-                        SelectObject(hdc, bold_font as _);
-                        SetTextColor(hdc, gdi_rgb(*color));
-                        draw_gdi_text(
-                            hdc,
-                            &val_full,
-                            &mut lrc,
-                            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-                        );
-
-                        // Vector sparkline matching C# `TelemetrySparkline.cs` (height 22px)
-                        let plot_top = y + s(21.0);
-                        let plot_h = s(22.0);
-                        let plot_bot = plot_top + plot_h;
-                        let base_pen = CreatePen(PS_SOLID, 1, sep_col);
-                        let op = SelectObject(hdc, base_pen as _);
-                        MoveToEx(hdc, pad, plot_bot, std::ptr::null_mut());
-                        LineTo(hdc, pad + content_w, plot_bot);
-                        SelectObject(hdc, op);
-                        DeleteObject(base_pen as _);
-
-                        if !samples.is_empty() {
-                            let line_pen = CreatePen(
-                                PS_SOLID,
-                                (1.5 * dpi).round().max(1.0) as i32,
-                                gdi_rgb(*color),
-                            );
-                            let op = SelectObject(hdc, line_pen as _);
-                            let n = samples.len();
-                            let py = |v: f32| {
-                                plot_bot
-                                    - (v.clamp(0.0, 1.0) * (plot_h - s(3.0)) as f32).round() as i32
-                            };
-                            if n == 1 {
-                                let y0 = py(samples[0]);
-                                MoveToEx(hdc, pad, y0, std::ptr::null_mut());
-                                LineTo(hdc, pad + content_w, y0);
-                            } else {
-                                let step = content_w as f32 / (n - 1) as f32;
-                                MoveToEx(hdc, pad, py(samples[0]), std::ptr::null_mut());
-                                for (i, &val) in samples.iter().enumerate().skip(1) {
-                                    let px = pad + (i as f32 * step).round() as i32;
-                                    LineTo(hdc, px, py(val));
-                                }
-                            }
-                            SelectObject(hdc, op);
-                            DeleteObject(line_pen as _);
-                        }
-                        y += s(48.0);
                     }
                     FlyoutBlock::MetricTiles(tiles) => {
                         let rows = tiles.len().div_ceil(2) as i32;
@@ -1730,7 +1833,16 @@ impl FlyoutState<'_> {
                             let row = (i / 2) as i32;
                             let l = pad + col * (tw + gap);
                             let t = y + row * (tile_h + gap);
-                            fill_round_rect(hdc, l, t, l + tw, t + tile_h, radius, card_bg);
+                            fill_round_rect(
+                                &mut gdi,
+                                hdc,
+                                l,
+                                t,
+                                l + tw,
+                                t + tile_h,
+                                radius,
+                                card_bg,
+                            );
                             SelectObject(hdc, tiny_font as _);
                             SetTextColor(hdc, muted_fg);
                             let mut lrc = RECT {
@@ -1778,13 +1890,23 @@ impl FlyoutState<'_> {
                             bg
                         };
                         if hovered || *active {
-                            fill_round_rect(hdc, pad, y, pad + content_w, y + h, radius, row_bg);
+                            fill_round_rect(
+                                &mut gdi,
+                                hdc,
+                                pad,
+                                y,
+                                pad + content_w,
+                                y + h,
+                                radius,
+                                row_bg,
+                            );
                         }
                         let bw = s(34.0);
                         let bh = s(22.0);
                         let bx = pad + s(8.0);
                         let by = y + (h - bh) / 2;
                         fill_round_rect(
+                            &mut gdi,
                             hdc,
                             bx,
                             by,
@@ -1826,100 +1948,6 @@ impl FlyoutState<'_> {
                         );
                         y += h + s(4.0);
                     }
-                    FlyoutBlock::StatusHeader {
-                        title,
-                        status_label,
-                        status_color,
-                        action_id,
-                        action_label,
-                    } => {
-                        let h = s(28.0);
-                        SelectObject(hdc, bold_font as _);
-                        SetTextColor(hdc, text_fg);
-                        let mut trc = RECT {
-                            left: pad,
-                            top: y,
-                            right: pad + content_w - s(90.0),
-                            bottom: y + h,
-                        };
-                        draw_gdi_text(
-                            hdc,
-                            title,
-                            &mut trc,
-                            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-                        );
-
-                        let right_edge = if let (Some(id), Some(lbl)) = (*action_id, action_label) {
-                            let bw = s(64.0);
-                            let bl = pad + content_w - bw;
-                            let hovered = self.hovered_id == Some(id);
-                            fill_round_rect_bordered(
-                                hdc,
-                                RECT {
-                                    left: bl,
-                                    top: y + s(2.0),
-                                    right: pad + content_w,
-                                    bottom: y + h - s(2.0),
-                                },
-                                s(6.0),
-                                if hovered { hover_bg } else { card_bg },
-                                border_col,
-                            );
-                            SelectObject(hdc, tiny_font as _);
-                            SetTextColor(hdc, text_fg);
-                            let mut brc = RECT {
-                                left: bl,
-                                top: y,
-                                right: pad + content_w,
-                                bottom: y + h,
-                            };
-                            draw_gdi_text(
-                                hdc,
-                                lbl,
-                                &mut brc,
-                                DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                            );
-                            bl - s(8.0)
-                        } else {
-                            pad + content_w
-                        };
-
-                        SelectObject(hdc, small_font as _);
-                        SetTextColor(hdc, muted_fg);
-                        let mut src = RECT {
-                            left: pad + content_w / 3,
-                            top: y,
-                            right: right_edge,
-                            bottom: y + h,
-                        };
-                        draw_gdi_text(
-                            hdc,
-                            status_label,
-                            &mut src,
-                            DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
-                        );
-                        // Status dot left of status label
-                        let dot_r = s(3.0).max(2);
-                        let dot_x = right_edge - s(status_label.len() as f32 * 6.5 + 8.0);
-                        let dot_y = y + h / 2;
-                        let db = CreateSolidBrush(gdi_rgb(*status_color));
-                        let dp = CreatePen(PS_SOLID, 1, gdi_rgb(*status_color));
-                        let ob = SelectObject(hdc, db as _);
-                        let op = SelectObject(hdc, dp as _);
-                        Ellipse(
-                            hdc,
-                            dot_x - dot_r,
-                            dot_y - dot_r,
-                            dot_x + dot_r,
-                            dot_y + dot_r,
-                        );
-                        SelectObject(hdc, ob);
-                        SelectObject(hdc, op);
-                        DeleteObject(db as _);
-                        DeleteObject(dp as _);
-
-                        y += h + s(6.0);
-                    }
                     FlyoutBlock::ToggleGrid(tiles) => {
                         let rows = tiles.len().div_ceil(2) as i32;
                         let tile_h = s(48.0);
@@ -1939,6 +1967,7 @@ impl FlyoutState<'_> {
                                 (card_bg, border_col)
                             };
                             fill_round_rect_bordered(
+                                &mut gdi,
                                 hdc,
                                 RECT {
                                     left,
@@ -1949,6 +1978,7 @@ impl FlyoutState<'_> {
                                 radius,
                                 fill,
                                 bd,
+                                border_w_px,
                             );
                             SelectObject(hdc, bold_font as _);
                             SetTextColor(hdc, if *active { sel_fg } else { text_fg });
@@ -2034,6 +2064,7 @@ impl FlyoutState<'_> {
                         let bar_top = y + s(21.0);
                         let bar_h = s(6.0);
                         fill_round_rect(
+                            &mut gdi,
                             hdc,
                             pad,
                             bar_top,
@@ -2051,6 +2082,7 @@ impl FlyoutState<'_> {
                                 BarTone::Level => design::level_color(&pal, *ratio),
                             };
                             fill_round_rect(
+                                &mut gdi,
                                 hdc,
                                 pad,
                                 bar_top,
@@ -2077,7 +2109,16 @@ impl FlyoutState<'_> {
                         } else {
                             card_bg
                         };
-                        fill_round_rect(hdc, pad, y, pad + content_w, y + h, radius, fill);
+                        fill_round_rect(
+                            &mut gdi,
+                            hdc,
+                            pad,
+                            y,
+                            pad + content_w,
+                            y + h,
+                            radius,
+                            fill,
+                        );
 
                         let mut text_left = pad + s(10.0);
                         if let Some(ic) = icon {
@@ -2147,6 +2188,7 @@ impl FlyoutState<'_> {
                         let app_fill = if row_hovered { hover_bg } else { bg };
                         if row_hovered {
                             fill_round_rect(
+                                &mut gdi,
                                 hdc,
                                 app.left,
                                 y,
@@ -2201,6 +2243,7 @@ impl FlyoutState<'_> {
                             let inset = s(3.0);
                             if active || selected {
                                 fill_round_rect(
+                                    &mut gdi,
                                     hdc,
                                     rect.left + inset,
                                     y + inset,
@@ -2238,6 +2281,7 @@ impl FlyoutState<'_> {
                                 (card_bg, border_col, text_fg)
                             };
                             fill_round_rect_bordered(
+                                &mut gdi,
                                 hdc,
                                 RECT {
                                     left,
@@ -2248,6 +2292,7 @@ impl FlyoutState<'_> {
                                 radius,
                                 fill,
                                 bd,
+                                border_w_px,
                             );
 
                             SelectObject(hdc, bold_font as _);
@@ -2268,13 +2313,12 @@ impl FlyoutState<'_> {
                         y += h + s(6.0);
                     }
                     FlyoutBlock::Separator => {
-                        let pen = CreatePen(PS_SOLID, 1, sep_col);
+                        let pen = gdi.pen(sep_col, 1);
                         let op = SelectObject(hdc, pen as _);
                         let sy = y + s(6.0);
                         MoveToEx(hdc, pad, sy, std::ptr::null_mut());
                         LineTo(hdc, pad + content_w, sy);
                         SelectObject(hdc, op);
-                        DeleteObject(pen as _);
                         y += s(12.0);
                     }
                     FlyoutBlock::Note(text) => {
@@ -2305,9 +2349,8 @@ impl FlyoutState<'_> {
                 rect.right -= s(2.0);
                 rect.top += s(2.0) - self.scroll_y;
                 rect.bottom -= s(2.0) + self.scroll_y;
-                let brush = CreateSolidBrush(accent);
+                let brush = gdi.brush(accent);
                 windows_sys::Win32::Graphics::Gdi::FrameRect(hdc, &rect, brush);
-                DeleteObject(brush as _);
             }
             RestoreDC(hdc, saved);
 
@@ -2322,6 +2365,7 @@ impl FlyoutState<'_> {
                 let sb_w = s(4.0).max(3);
                 let sb_left = w - s(8.0);
                 fill_round_rect(
+                    &mut gdi,
                     hdc,
                     sb_left,
                     thumb_top,
@@ -2333,11 +2377,6 @@ impl FlyoutState<'_> {
             }
 
             SelectObject(hdc, old_f);
-            DeleteObject(title_font as _);
-            DeleteObject(body_font as _);
-            DeleteObject(bold_font as _);
-            DeleteObject(small_font as _);
-            DeleteObject(tiny_font as _);
             EndPaint(self.hwnd, &ps);
         }
     }

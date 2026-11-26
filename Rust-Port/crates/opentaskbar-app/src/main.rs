@@ -43,6 +43,23 @@ fn main() {
         }
         enable_dpi_awareness();
         if args.iter().any(|a| a == ui::settings::SETTINGS_ARG) {
+            let settings =
+                opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
+            opentaskbar_core::i18n::init(Some(&settings.language));
+            design::fonts::apply_settings(&settings);
+        let theme_dir = if settings.theme_pack.trim().is_empty() {
+            None
+        } else {
+            Some(
+                std::env::var_os("LOCALAPPDATA")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("OpenTaskbar")
+                    .join("Themes")
+                    .join(&settings.theme_pack),
+            )
+        };
+        platform::icon_pack::set_active_pack(theme_dir.as_deref());
             ui::settings::run_settings_window();
             return;
         }
@@ -50,10 +67,11 @@ fn main() {
 
     opentaskbar_core::log::init(opentaskbar_core::settings::app_data_dir().join("opentaskbar.log"));
 
+    // Never restore Explorer from the hook: it can run on worker threads (no COM apartment) while the
+    // dock is still alive, which unregisters a live AppBar and clears the recovery journal. The main
+    // thread handles restoration after `dock::run` unwinds; other threads are left to the watchdog.
     std::panic::set_hook(Box::new(|info| {
         opentaskbar_core::log::error(format!("PANIC: {info}"));
-        #[cfg(windows)]
-        opentaskbar_shell::taskbar::restore_from_journal();
     }));
 
     #[cfg(windows)]
@@ -71,8 +89,42 @@ fn main() {
 
         let settings =
             opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
+        opentaskbar_core::i18n::init(Some(&settings.language));
+        design::fonts::apply_settings(&settings);
+        let theme_dir = if settings.theme_pack.trim().is_empty() {
+            None
+        } else {
+            Some(
+                std::env::var_os("LOCALAPPDATA")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("OpenTaskbar")
+                    .join("Themes")
+                    .join(&settings.theme_pack),
+            )
+        };
+        platform::icon_pack::set_active_pack(theme_dir.as_deref());
+        // Non-blocking startup update check with an Action Center toast (C# NotificationService).
+        if settings.check_updates {
+            std::thread::spawn(|| {
+                if let Ok(Some(release)) = platform::update::find_newer() {
+                    let title = opentaskbar_core::i18n::t("UpdateAvailableTitle");
+                    let body =
+                        opentaskbar_core::i18n::t_fmt("UpdateToastBody", &[&release.version]);
+                    let action =
+                        opentaskbar_core::i18n::t_fmt("UpdateDownload", &[&release.version]);
+                    platform::toast::show_update_toast(&title, &body, &action, &release.url);
+                }
+            });
+        }
         opentaskbar_core::log::info("Starting OpenTaskBar hybrid dock.");
-        dock::run(settings);
+        let panicked = std::panic::catch_unwind(|| dock::run(settings)).is_err();
         opentaskbar_shell::taskbar::end_replacement();
+        if panicked {
+            opentaskbar_core::log::error(
+                "Dock panicked on the UI thread; restoring taskbar from journal.",
+            );
+            opentaskbar_shell::taskbar::restore_from_journal();
+        }
     }
 }

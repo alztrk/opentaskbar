@@ -63,9 +63,9 @@ OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replaceme
 - **Fullscreen Detection:** Automatically yields and hides when full-screen applications, borderless games, or browser videos are playing.
 
 ### Modular Widget System
-- **AI Usage Providers:** Dedicated per-provider widgets for Claude, Codex, Antigravity, OpenCode, GitHub Copilot, DeepSeek, and OpenRouter with session/weekly quota bars or rings, reset countdowns, and read-only local credential discovery without modifying, logging, or exporting credentials.
+- **AI Usage Providers:** Dedicated per-provider widgets for Claude, Codex, Antigravity (C# build only), OpenCode, GitHub Copilot, DeepSeek, and OpenRouter with session/weekly quota bars or rings and reset countdowns. Credentials are discovered locally without logging or exporting them; the Rust port can additionally store DeepSeek/OpenRouter/OpenCode keys encrypted with Windows DPAPI.
 - **Bluetooth Battery:** Live Windows PnP battery levels for connected Bluetooth headsets, mice, keyboards, controllers, watches, and phones with automatic device-type icons and active-node filtering.
-- **Real-Time Hardware Meters:** CPU usage, RAM usage, GPU usage, and GPU temperature (NVIDIA) rings with customizable thresholds.
+- **Real-Time Hardware Meters:** CPU usage, RAM usage, GPU usage, and GPU temperature rings with customizable thresholds. Temperature uses vendor-neutral WDDM adapter data first (AMD/Intel/NVIDIA, WDDM 2.4+), then optional NVIDIA NVML and AMD ADL libraries. Intel GPUs need driver-published WDDM data; there is no non-admin Intel API.
 - **Media Controls:** Now Playing track information, artist metadata, track seek bar, and volume slider.
 - **Clock, Calendar and Weather:** Unified date and time capsule with detailed optical glass weather and multi-day forecast flyout.
 - **Quick Settings and Connectivity:** Wi-Fi, Bluetooth and Night Light controls sit beside shortcuts to native Windows quick actions and settings, including networks, casting, airplane mode, mobile hotspot, accessibility, captions and focus. Direct controls show while Windows applies a change. Audio offers output/input selection and a per-app volume mixer.

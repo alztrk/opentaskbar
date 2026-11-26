@@ -45,7 +45,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
+use opentaskbar_core::settings::DockSettings;
+
+use crate::design::fonts;
 use crate::design::icons::{self, AppIcon};
+use crate::design::{self, Rgb};
 use crate::platform::win32;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -163,6 +167,57 @@ impl MenuEntry {
     }
 }
 
+/// Stroke style for popup surfaces (menus and flyouts).
+///
+/// `width_dips <= 0.0` disables the stroke entirely. Values are clamped to the
+/// settings UI range (`0..8`) and invalid (NaN/infinite) widths fall back to 1.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BorderStyle {
+    pub rgb: Rgb,
+    pub width_dips: f32,
+}
+
+impl BorderStyle {
+    /// Palette hairline used by call sites that do not have `DockSettings`.
+    pub fn default_for(is_dark: bool) -> Self {
+        Self {
+            rgb: design::palette(is_dark).border_rgb,
+            width_dips: 1.0,
+        }
+    }
+
+    /// Popup menus follow the `menu_border_*` settings.
+    pub fn from_menu_settings(is_dark: bool, settings: &DockSettings) -> Self {
+        Self::from_settings(
+            is_dark,
+            &settings.menu_border_color,
+            settings.menu_border_thickness,
+        )
+    }
+
+    /// Widget flyouts follow the `widget_border_*` settings.
+    pub fn from_widget_settings(is_dark: bool, settings: &DockSettings) -> Self {
+        Self::from_settings(
+            is_dark,
+            &settings.widget_border_color,
+            settings.widget_border_thickness,
+        )
+    }
+
+    fn from_settings(is_dark: bool, color: &Option<String>, thickness: f64) -> Self {
+        let rgb = color
+            .as_deref()
+            .and_then(design::parse_hex_rgb)
+            .unwrap_or_else(|| design::palette(is_dark).border_rgb);
+        let width_dips = if thickness.is_finite() {
+            thickness.clamp(0.0, 8.0) as f32
+        } else {
+            1.0
+        };
+        Self { rgb, width_dips }
+    }
+}
+
 struct MenuD2d {
     rt: ID2D1HwndRenderTarget,
     text_fmt: IDWriteTextFormat,
@@ -185,6 +240,7 @@ struct MenuPane {
     tracking: bool,
     d2d: Option<MenuD2d>,
     is_submenu: bool,
+    border: BorderStyle,
     session: *mut MenuSession,
 }
 
@@ -193,6 +249,7 @@ struct MenuSession {
     class_name: Vec<u16>,
     dpi: f32,
     is_dark: bool,
+    border: BorderStyle,
     root: *mut MenuPane,
     submenu: Option<Box<MenuPane>>,
     selected_id: Option<u32>,
@@ -243,9 +300,11 @@ fn create_menu_d2d(hwnd: HWND, width_px: u32, height_px: u32, dpi: f32) -> Optio
         rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
 
         let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
-        let ui_font = HSTRING::from("Segoe UI Variable Text");
+        // Windows' own menu font + fallback chain: keeps native look and guarantees
+        // glyph coverage for localized text (çğıöşü, Cyrillic, CJK, ...).
+        let ui_font = HSTRING::from(fonts::ui_family_list().as_str());
         let icon_font = HSTRING::from("Segoe Fluent Icons");
-        let locale = HSTRING::from("en-US");
+        let locale = HSTRING::from(fonts::ui_locale().as_str());
 
         let text_fmt = dwrite
             .CreateTextFormat(
@@ -254,7 +313,7 @@ fn create_menu_d2d(hwnd: HWND, width_px: u32, height_px: u32, dpi: f32) -> Optio
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                13.0,
+                fonts::scaled_size(13.0),
                 &locale,
             )
             .ok()?;
@@ -268,7 +327,7 @@ fn create_menu_d2d(hwnd: HWND, width_px: u32, height_px: u32, dpi: f32) -> Optio
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                11.0,
+                fonts::scaled_size(11.0),
                 &locale,
             )
             .ok()?;
@@ -282,7 +341,7 @@ fn create_menu_d2d(hwnd: HWND, width_px: u32, height_px: u32, dpi: f32) -> Optio
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                15.0,
+                fonts::scaled_size(15.0),
                 &locale,
             )
             .ok()?;
@@ -296,7 +355,7 @@ fn create_menu_d2d(hwnd: HWND, width_px: u32, height_px: u32, dpi: f32) -> Optio
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                10.0,
+                fonts::scaled_size(10.0),
                 &locale,
             )
             .ok()?;
@@ -335,7 +394,7 @@ fn measure_entries(
 ) -> (i32, i32, Vec<Option<RECT>>) {
     let pad_x = (PAD_X_DIPS * dpi).round() as i32;
     let pad_y = (PAD_Y_DIPS * dpi).round() as i32;
-    let row_h = (ROW_H_DIPS * dpi).round() as i32;
+    let row_h = (fonts::scaled_size(ROW_H_DIPS) * dpi).round() as i32;
     let sep_h = (SEP_H_DIPS * dpi).round() as i32;
     let menu_w = (width_dips * dpi).round() as i32;
 
@@ -370,9 +429,15 @@ fn create_pane_window(
     y: i32,
     is_submenu: bool,
 ) -> Option<Box<MenuPane>> {
-    let (hinstance, class_ptr, dpi, is_dark) = unsafe {
+    let (hinstance, class_ptr, dpi, is_dark, border) = unsafe {
         let s = &*session;
-        (s.hinstance, s.class_name.as_ptr(), s.dpi, s.is_dark)
+        (
+            s.hinstance,
+            s.class_name.as_ptr(),
+            s.dpi,
+            s.is_dark,
+            s.border,
+        )
     };
     let (menu_w, menu_h, row_rects) = measure_entries(&entries, width_dips, dpi);
     let ex_style = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | if is_submenu { WS_EX_NOACTIVATE } else { 0 };
@@ -447,6 +512,7 @@ fn create_pane_window(
         tracking: false,
         d2d,
         is_submenu,
+        border,
         session,
     });
     let ptr = (&mut *pane) as *mut MenuPane as isize;
@@ -471,7 +537,25 @@ fn destroy_pane(pane: &mut MenuPane) {
 }
 
 /// Displays a native Windows 11 Acrylic popup menu (with hover submenus) at the cursor.
+///
+/// Call sites without `DockSettings` get the palette hairline; use
+/// [`show_popup_menu_with_border`] to apply the persisted `menu_border_*` settings.
 pub fn show_popup_menu(owner_hwnd: usize, is_dark: bool, entries: Vec<MenuEntry>) -> Option<u32> {
+    show_popup_menu_with_border(
+        owner_hwnd,
+        is_dark,
+        entries,
+        BorderStyle::default_for(is_dark),
+    )
+}
+
+/// Same as [`show_popup_menu`] with an explicit border stroke color/width.
+pub fn show_popup_menu_with_border(
+    owner_hwnd: usize,
+    is_dark: bool,
+    entries: Vec<MenuEntry>,
+    border: BorderStyle,
+) -> Option<u32> {
     if entries.is_empty() {
         return None;
     }
@@ -495,16 +579,21 @@ pub fn show_popup_menu(owner_hwnd: usize, is_dark: bool, entries: Vec<MenuEntry>
     unsafe {
         GetCursorPos(&mut pt);
     }
-    let (scr_w, scr_h) = win32::primary_screen_px();
-    let margin = (8.0 * dpi).round() as i32;
-    let x = pt.x.clamp(margin, (scr_w - menu_w - margin).max(margin));
-    let y = (pt.y - menu_h).clamp(margin, (scr_h - menu_h - margin).max(margin));
+    let monitor = win32::monitor_for_point_px(pt.x, pt.y);
+    let margin = (8.0 * monitor.dpi_scale).round() as i32;
+    let min_x = monitor.left + margin;
+    let max_x = (monitor.right - menu_w - margin).max(min_x);
+    let min_y = monitor.top + margin;
+    let max_y = (monitor.bottom - menu_h - margin).max(min_y);
+    let x = pt.x.clamp(min_x, max_x);
+    let y = (pt.y - menu_h).clamp(min_y, max_y);
 
     let mut session = Box::new(MenuSession {
         hinstance,
         class_name,
         dpi,
         is_dark,
+        border,
         root: std::ptr::null_mut(),
         submenu: None,
         selected_id: None,
@@ -561,20 +650,23 @@ impl MenuSession {
             destroy_pane(&mut old);
         }
         let (sub_w, sub_h, _) = measure_entries(&items, SUBMENU_W_DIPS, self.dpi);
-        let (scr_w, scr_h) = win32::primary_screen_px();
-        let margin = (8.0 * self.dpi).round() as i32;
+        let monitor = win32::monitor_for_point_px(root.screen_rect.left, root.screen_rect.top);
+        let margin = (8.0 * monitor.dpi_scale).round() as i32;
         let pad_y = (PAD_Y_DIPS * self.dpi).round() as i32;
 
-        // Open to the right of the parent menu; flip to the left if near the right screen edge.
+        // Open to the right of the parent menu; flip to the left if near the display edge.
         let right_x = root.screen_rect.right - (2.0 * self.dpi).round() as i32;
         let left_x = root.screen_rect.left - sub_w + (2.0 * self.dpi).round() as i32;
-        let sub_x = if right_x + sub_w <= scr_w - margin {
+        let sub_x = if right_x + sub_w <= monitor.right - margin {
             right_x
         } else {
-            left_x.max(margin)
+            left_x.max(monitor.left + margin)
         };
         let ideal_y = root.screen_rect.top + row_rect.top - pad_y;
-        let sub_y = ideal_y.clamp(margin, (scr_h - sub_h - margin).max(margin));
+        let sub_y = ideal_y.clamp(
+            monitor.top + margin,
+            (monitor.bottom - sub_h - margin).max(monitor.top + margin),
+        );
 
         let session_ptr = self as *mut MenuSession;
         if let Some(sub_pane) =
@@ -651,6 +743,28 @@ impl MenuPane {
             rt.BeginDraw();
             rt.Clear(Some(&clear_col));
 
+            // Persisted `menu_border_color` / `menu_border_thickness` stroke, drawn inside
+            // the window bounds so the full line stays visible (non-positive widths skip it).
+            if self.border.width_dips > 0.0 {
+                let height_dips =
+                    (self.screen_rect.bottom - self.screen_rect.top) as f32 / self.dpi.max(1.0);
+                let stroke_col =
+                    rgba_f(self.border.rgb.0, self.border.rgb.1, self.border.rgb.2, 1.0);
+                let stroke_br = rt.CreateSolidColorBrush(&stroke_col, None)?;
+                let inset = self.border.width_dips * 0.5;
+                rt.DrawRectangle(
+                    &D2D_RECT_F {
+                        left: inset,
+                        top: inset,
+                        right: (self.width_dips - inset).max(inset),
+                        bottom: (height_dips - inset).max(inset),
+                    },
+                    &stroke_br,
+                    self.border.width_dips,
+                    None,
+                );
+            }
+
             let hover_br = rt.CreateSolidColorBrush(&hover_col, None)?;
             let danger_hover_br = rt.CreateSolidColorBrush(&danger_hover_col, None)?;
             let text_br = rt.CreateSolidColorBrush(&text_col, None)?;
@@ -678,7 +792,7 @@ impl MenuPane {
                                     left,
                                     top: y,
                                     right,
-                                    bottom: y + ROW_H_DIPS,
+                                    bottom: y + fonts::scaled_size(ROW_H_DIPS),
                                 },
                                 radiusX: 6.0,
                                 radiusY: 6.0,
@@ -704,7 +818,7 @@ impl MenuPane {
                                 left: left + 6.0,
                                 top: y,
                                 right: left + 30.0,
-                                bottom: y + ROW_H_DIPS,
+                                bottom: y + fonts::scaled_size(ROW_H_DIPS),
                             },
                             if active_danger {
                                 &danger_br
@@ -722,7 +836,7 @@ impl MenuPane {
                             left: left + 36.0,
                             top: y,
                             right: right - 10.0,
-                            bottom: y + ROW_H_DIPS,
+                            bottom: y + fonts::scaled_size(ROW_H_DIPS),
                         };
                         rt.DrawText(
                             &label_w,
@@ -744,7 +858,7 @@ impl MenuPane {
                                 DWRITE_MEASURING_MODE_NATURAL,
                             );
                         }
-                        y += ROW_H_DIPS;
+                        y += fonts::scaled_size(ROW_H_DIPS);
                     }
                     MenuEntry::Submenu { icon, label, .. } => {
                         let active =
@@ -757,7 +871,7 @@ impl MenuPane {
                                     left,
                                     top: y,
                                     right,
-                                    bottom: y + ROW_H_DIPS,
+                                    bottom: y + fonts::scaled_size(ROW_H_DIPS),
                                 },
                                 radiusX: 6.0,
                                 radiusY: 6.0,
@@ -775,7 +889,7 @@ impl MenuPane {
                                 left: left + 6.0,
                                 top: y,
                                 right: left + 30.0,
-                                bottom: y + ROW_H_DIPS,
+                                bottom: y + fonts::scaled_size(ROW_H_DIPS),
                             },
                             if active { &text_br } else { &icon_br },
                             D2D1_DRAW_TEXT_OPTIONS_NONE,
@@ -787,7 +901,7 @@ impl MenuPane {
                             left: left + 36.0,
                             top: y,
                             right: right - 24.0,
-                            bottom: y + ROW_H_DIPS,
+                            bottom: y + fonts::scaled_size(ROW_H_DIPS),
                         };
                         rt.DrawText(
                             &label_w,
@@ -806,13 +920,13 @@ impl MenuPane {
                                 left: right - 24.0,
                                 top: y,
                                 right: right - 8.0,
-                                bottom: y + ROW_H_DIPS,
+                                bottom: y + fonts::scaled_size(ROW_H_DIPS),
                             },
                             &hint_br,
                             D2D1_DRAW_TEXT_OPTIONS_NONE,
                             DWRITE_MEASURING_MODE_NATURAL,
                         );
-                        y += ROW_H_DIPS;
+                        y += fonts::scaled_size(ROW_H_DIPS);
                     }
                     MenuEntry::Separator => {
                         let sy = (y + SEP_H_DIPS * 0.5).floor() + 0.5;

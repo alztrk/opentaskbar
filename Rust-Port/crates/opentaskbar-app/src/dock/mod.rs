@@ -7,12 +7,15 @@
 //! - Per-app / Task View / Dock context menus, Shift+Click / Ctrl+Shift+Click / Middle-click / Wheel
 //! - File drag-and-drop (`WM_DROPFILES`), Dark/Light/System theme, Clock & CPU/RAM widgets, Show Desktop
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::{
     self, AppTheme, AutoHideMode, DockPosition, DockSettings, SurfaceBackground,
 };
@@ -26,7 +29,8 @@ use windows_sys::Win32::Graphics::Dwm::DwmFlush;
 use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    RegisterHotKey, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
+    UnregisterHotKey, VK_LWIN, VK_RWIN,
 };
 use windows_sys::Win32::UI::Shell::DragAcceptFiles;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -35,14 +39,15 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     HTTRANSPARENT, HWND_BROADCAST, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IsIconic, IsWindowVisible,
     KillTimer, LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW, PostQuitMessage, RegisterClassExW,
     RegisterWindowMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowsHookExW,
-    TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_APP, WM_DESTROY, WM_DROPFILES,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCHITTEST, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE,
-    WindowFromPoint,
+    TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_DESTROY,
+    WM_DROPFILES, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, WindowFromPoint,
 };
 
 pub mod dcomp;
+pub mod dynamic_island;
 pub mod preview;
 pub mod show_desktop;
 pub mod tray;
@@ -53,6 +58,8 @@ use self::show_desktop::ShowDesktopCorner;
 use crate::design;
 use crate::platform::icon_cache::{self, RawIcon};
 use crate::platform::pins::{self, PinnedApp};
+use crate::platform::shell_files;
+use crate::platform::tray_host;
 use crate::platform::win32::{
     self, AppContextAction, ContextAction, MonitorInfo, RecycleBinAction, TaskViewAction,
     WidgetContextAction,
@@ -84,6 +91,12 @@ const WM_MOUSEHWHEEL: u32 = 0x020E;
 const WM_APP_VSYNC: u32 = WM_APP + 1;
 const WM_APP_ICONS: u32 = WM_APP + 2;
 const WM_APP_PREVIEW_LEAVE: u32 = WM_APP + 3;
+const WM_APP_WINKEY_REVEAL: u32 = WM_APP + 4;
+const WM_HOTKEY: u32 = 0x0312;
+const HOTKEY_LAUNCHER_ID: i32 = 0x4F01;
+const HOTKEY_DOCK_ID: i32 = 0x4F02;
+/// How long a standalone Windows-key press keeps an auto-hidden dock revealed.
+const WINKEY_REVEAL_MS: u64 = 1500;
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
@@ -258,11 +271,11 @@ enum ShellButton {
 impl ShellButton {
     const ALL: [Self; 3] = [Self::Start, Self::Search, Self::TaskView];
 
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::Start => "Start",
-            Self::Search => "Search",
-            Self::TaskView => "Task View",
+            Self::Start => loc::t("Start"),
+            Self::Search => loc::t("SearchApps"),
+            Self::TaskView => loc::t("DesktopTaskView"),
         }
     }
 
@@ -331,6 +344,7 @@ struct TrayPinVisual {
     icon: VisualNode,
     source: String,
     has_icon: bool,
+    label: String,
 }
 
 struct TooltipCache {
@@ -345,12 +359,15 @@ type DipRect = (f32, f32, f32, f32);
 struct DockState {
     hwnd: usize,
     monitor: MonitorInfo,
+    all_monitors: Vec<MonitorInfo>,
     dpi: f32,
     is_dark: bool,
     reload_msg: u32,
     settings: DockSettings,
     pins: Vec<PinnedApp>,
     slots: Vec<DockSlot>,
+    /// Window snapshot from the last `sync_slots` call, reused by auto-hide overlap checks.
+    running_windows: Vec<RunningWindow>,
     dcomp: DcompEngine,
     pill: PillNodes,
     shell_bgs: [VisualNode; 3],
@@ -378,6 +395,7 @@ struct DockState {
     bin_is_full: bool,
     widget_visuals: Vec<WidgetVisual>,
     widget_runtime: WidgetRuntime,
+    dynamic_island: Option<dynamic_island::DynamicIslandManager>,
     show_desktop_corner: Option<ShowDesktopCorner>,
     dot_running: IDCompositionSurface,
     dot_active: IDCompositionSurface,
@@ -418,6 +436,8 @@ struct DockState {
     /// Auto-hide smooth animation (`0.0` = fully shown, `1.0` = slid off bottom edge).
     hide_progress: f32,
     target_hidden: bool,
+    /// A standalone Win-key press suppresses auto-hide for a short window (#164).
+    win_key_reveal_until: Option<Instant>,
     last_frame: Option<Instant>,
     last_window_rect: Option<(i32, i32, i32, i32)>,
     anim_signal: Arc<(Mutex<bool>, Condvar)>,
@@ -524,6 +544,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                     list.iter()
                         .map(|w| PreviewItem {
                             hwnd: w.hwnd,
+                            pid: w.pid,
                             title: w.title.clone(),
                         })
                         .collect(),
@@ -575,6 +596,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                     .iter()
                     .map(|w| PreviewItem {
                         hwnd: w.hwnd,
+                        pid: w.pid,
                         title: w.title.clone(),
                     })
                     .collect(),
@@ -630,6 +652,7 @@ fn build_slots(pins: &[PinnedApp], running: &[RunningWindow], prev: &[DockSlot])
                 .iter()
                 .map(|w| PreviewItem {
                     hwnd: w.hwnd,
+                    pid: w.pid,
                     title: w.title.clone(),
                 })
                 .collect(),
@@ -787,6 +810,7 @@ fn spawn_settings_window() {
 }
 
 impl DockState {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         hwnd: usize,
         monitor: MonitorInfo,
@@ -794,6 +818,7 @@ impl DockState {
         settings: DockSettings,
         pins: Vec<PinnedApp>,
         initial_slots: Vec<DockSlot>,
+        initial_running: Vec<RunningWindow>,
         initial_rect: (i32, i32, i32, i32),
     ) -> windows::core::Result<Self> {
         let dpi = monitor.dpi_scale;
@@ -837,12 +862,18 @@ impl DockState {
         } else {
             bd_rgb.3
         };
+        let user_bd = settings
+            .dock_border_color
+            .as_deref()
+            .and_then(design::parse_hex_rgb)
+            .unwrap_or((bd_rgb.0, bd_rgb.1, bd_rgb.2));
         let pill = dcomp.create_pill_nodes(
             radius * dpi,
             pill_h * dpi,
             (pill_rgb.0, pill_rgb.1, pill_rgb.2, bg_alpha),
-            (bd_rgb.0, bd_rgb.1, bd_rgb.2, bd_alpha),
+            (user_bd.0, user_bd.1, user_bd.2, bd_alpha),
             dpi,
+            settings.dock_border_thickness.clamp(0.0, 8.0) as f32,
         )?;
 
         let shell_px = (base * dpi).ceil() as u32;
@@ -971,8 +1002,20 @@ impl DockState {
         }));
 
         let corner_h = pill_h + settings.dock_bottom_gap_pixels.max(0) as f32;
-        let show_desktop_corner =
-            ShowDesktopCorner::new(monitor, corner_h, is_dark, settings.show_desktop_button);
+        let all_monitors = win32::enumerate_monitors();
+        let dynamic_island = if monitor.is_primary {
+            let mut mgr = dynamic_island::DynamicIslandManager::new();
+            mgr.apply(&settings, &all_monitors, is_dark);
+            Some(mgr)
+        } else {
+            None
+        };
+        let show_desktop_corner = ShowDesktopCorner::new(
+            monitor.clone(),
+            corner_h,
+            is_dark,
+            settings.show_desktop_button,
+        );
 
         let dot_h_px = (3.5 * dpi).ceil() as u32;
         let dot_running = dcomp.create_rounded_rect_surface(
@@ -1004,12 +1047,14 @@ impl DockState {
         let mut state = Self {
             hwnd,
             monitor,
+            all_monitors,
             dpi,
             is_dark,
             reload_msg,
             settings,
             pins,
             slots: initial_slots,
+            running_windows: initial_running,
             dcomp,
             pill,
             shell_bgs,
@@ -1037,6 +1082,7 @@ impl DockState {
             bin_is_full,
             widget_visuals: Vec::new(),
             widget_runtime: WidgetRuntime::default(),
+            dynamic_island,
             show_desktop_corner,
             dot_running,
             dot_active,
@@ -1076,6 +1122,7 @@ impl DockState {
             tracking_mouse: false,
             hide_progress: 0.0,
             target_hidden: false,
+            win_key_reveal_until: None,
             last_frame: None,
             last_window_rect: Some(initial_rect),
             anim_signal,
@@ -1205,6 +1252,7 @@ impl DockState {
                 icon,
                 source: String::new(),
                 has_icon: false,
+                label: String::new(),
             });
         }
         for pin in &self.tray_pin_visuals {
@@ -1225,7 +1273,17 @@ impl DockState {
     }
 
     fn sync_widget_visuals(&mut self) {
-        let active = widgets::active_widgets(&self.settings);
+        let active: Vec<&'static widgets::WidgetDescriptor> =
+            widgets::active_widgets(&self.settings)
+                .into_iter()
+                .filter(|wd| {
+                    !dynamic_island::is_widget_placed_on_connected_display(
+                        &self.settings,
+                        wd.id,
+                        &self.all_monitors,
+                    )
+                })
+                .collect();
         let same = self.widget_visuals.len() == active.len()
             && self
                 .widget_visuals
@@ -1255,9 +1313,13 @@ impl DockState {
     fn refresh_widgets(&mut self) -> bool {
         self.sync_widget_visuals();
         self.widget_runtime.tick(&self.settings);
+        if let Some(island) = &mut self.dynamic_island {
+            island.tick();
+        }
         let mut changed = false;
         let mut width_changed = false;
         let widget_h = design::widget_height_dips(pill_height_dips(&self.settings));
+        let mut key_scratch = String::with_capacity(256);
         for wv in &mut self.widget_visuals {
             let live_w = self.widget_runtime.widget_width_dips(wv.id);
             if (live_w - wv.width_dips).abs() > 0.5 {
@@ -1275,12 +1337,19 @@ impl DockState {
             let spec = self
                 .widget_runtime
                 .chip_spec(wv.id, &self.settings, self.is_dark);
-            let key = format!(
-                "{}|{:.1}|{widget_h:.1}|{}|{interaction:?}",
-                spec.cache_key(),
-                wv.width_dips,
-                self.is_dark
+            spec.write_cache_key(&mut key_scratch);
+            let border_rgb = self
+                .settings
+                .widget_border_color
+                .as_deref()
+                .and_then(design::parse_hex_rgb);
+            let border_width = self.settings.widget_border_thickness.clamp(0.0, 8.0) as f32;
+            let _ = write!(
+                key_scratch,
+                "|{:.1}|{widget_h:.1}|{}|{:?}|{}|{:?}",
+                wv.width_dips, self.is_dark, border_rgb, border_width, interaction,
             );
+            let key = key_scratch.as_str();
             if key != wv.last_key
                 && let Ok(surf) = self.dcomp.create_widget_chip_surface(
                     &spec,
@@ -1289,10 +1358,12 @@ impl DockState {
                     self.dpi,
                     self.is_dark,
                     interaction,
+                    border_rgb,
+                    border_width,
                 )
             {
                 wv.node.set_content(Some(&surf));
-                wv.last_key = key;
+                wv.last_key.clone_from(&key_scratch);
                 changed = true;
             }
         }
@@ -1322,14 +1393,22 @@ impl DockState {
                 .as_deref()
                 .is_some_and(|p| p.is_visible() || p.is_pointer_inside());
 
-        let should_hide = match self.settings.auto_hide {
-            AutoHideMode::Disabled => false,
-            AutoHideMode::Always => !pointer_busy,
-            AutoHideMode::Smart => {
-                if pointer_busy {
-                    false
-                } else {
-                    self.is_overlapped_by_window()
+        let win_key_hold = self.settings.reveal_dock_on_win_key
+            && self
+                .win_key_reveal_until
+                .is_some_and(|until| Instant::now() < until);
+        let should_hide = if win_key_hold {
+            false
+        } else {
+            match self.settings.auto_hide {
+                AutoHideMode::Disabled => false,
+                AutoHideMode::Always => !pointer_busy,
+                AutoHideMode::Smart => {
+                    if pointer_busy {
+                        false
+                    } else {
+                        self.is_overlapped_by_window()
+                    }
                 }
             }
         };
@@ -1346,8 +1425,9 @@ impl DockState {
         let pill_h_px =
             ((pill_height_dips(&self.settings) + VERTICAL_EDGE_GAP) * self.dpi).ceil() as i32;
         let shelf_top = self.monitor.bottom - pill_h_px;
-        let running = tracker::enumerate_windows();
-        for win in running {
+        // Reuse the snapshot taken by `sync_slots`; a second full EnumWindows + OpenProcess pass
+        // per 800 ms poll was the single most expensive part of idle auto-hide evaluation.
+        for win in &self.running_windows {
             let hwnd = win.hwnd as HWND;
             unsafe {
                 if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
@@ -1408,12 +1488,19 @@ impl DockState {
         } else {
             bd_rgb.3
         };
+        let user_bd = self
+            .settings
+            .dock_border_color
+            .as_deref()
+            .and_then(design::parse_hex_rgb)
+            .unwrap_or((bd_rgb.0, bd_rgb.1, bd_rgb.2));
         if let Ok(pill) = self.dcomp.create_pill_nodes(
             radius * dpi,
             pill_h * dpi,
             (pill_rgb.0, pill_rgb.1, pill_rgb.2, bg_alpha),
-            (bd_rgb.0, bd_rgb.1, bd_rgb.2, bd_alpha),
+            (user_bd.0, user_bd.1, user_bd.2, bd_alpha),
             dpi,
+            self.settings.dock_border_thickness.clamp(0.0, 8.0) as f32,
         ) {
             self.pill = pill;
         }
@@ -1564,9 +1651,47 @@ impl DockState {
         let next =
             opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
         self.settings = next;
+        // The Settings window runs in a separate process: apply its language change here too.
+        loc::set_language(&self.settings.language);
+        design::fonts::apply_settings(&self.settings);
+        let theme_dir = if self.settings.theme_pack.trim().is_empty() {
+            None
+        } else {
+            Some(
+                std::env::var_os("LOCALAPPDATA")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(std::env::temp_dir)
+                    .join("OpenTaskbar")
+                    .join("Themes")
+                    .join(&self.settings.theme_pack),
+            )
+        };
+        crate::platform::icon_pack::set_active_pack(theme_dir.as_deref());
+        register_global_hotkeys(self.hwnd as HWND, &self.settings);
+        let registry_icons = tray_host::enumerate_tray_icons();
+        let pinned_paths: Vec<String> = self
+            .settings
+            .user_pinned_background_apps
+            .iter()
+            .filter_map(|key| {
+                registry_icons
+                    .iter()
+                    .find(|icon| tray_host::matches_pin(icon, key))
+                    .map(|icon| icon.executable_path.clone())
+            })
+            .collect();
+        if pinned_paths.is_empty() {
+            tray_host::stop_host();
+        } else {
+            tray_host::start_host(&pinned_paths);
+        }
         self.hovered_tray_pin = None;
         self.pressed_tray_pin = None;
+        self.all_monitors = win32::enumerate_monitors();
         self.is_dark = resolve_is_dark(self.settings.theme);
+        if let Some(ref mut island) = self.dynamic_island {
+            island.apply(&self.settings, &self.all_monitors, self.is_dark);
+        }
         self.pins = load_effective_pins(&self.settings);
         for wv in &mut self.widget_visuals {
             wv.last_key.clear();
@@ -1577,7 +1702,7 @@ impl DockState {
             let corner_h = pill_height_dips(&self.settings)
                 + self.settings.dock_bottom_gap_pixels.max(0) as f32;
             corner.update(
-                self.monitor,
+                self.monitor.clone(),
                 corner_h,
                 self.is_dark,
                 self.settings.show_desktop_button,
@@ -1664,8 +1789,12 @@ impl DockState {
         if self.drag.is_some() {
             return false;
         }
-        let running = tracker::enumerate_windows();
-        let mut next = build_slots(&self.pins, &running, &self.slots);
+        self.running_windows = tracker::enumerate_windows();
+        if self.settings.current_desktop_only {
+            self.running_windows
+                .retain(|window| tracker::is_on_current_desktop(window.hwnd));
+        }
+        let mut next = build_slots(&self.pins, &self.running_windows, &self.slots);
         if animate_closes
             && self.settings.animations_enabled
             && win32::client_area_animations_enabled()
@@ -1698,11 +1827,32 @@ impl DockState {
             self.ensure_animation();
         }
         self.request_missing_icons();
+        self.prune_icon_surfaces();
         changed
     }
 
+    /// Drops DComp surfaces for icons that are no longer pinned. Without this, the cache grows
+    /// with every icon source ever seen (each surface is 64×64 BGRA ≈ 16 KiB of VRAM).
+    /// `None` entries are kept: they record a failed extraction and avoid re-spawning the worker.
+    fn prune_icon_surfaces(&mut self) {
+        let keep: HashSet<&str> = self
+            .slots
+            .iter()
+            .map(|slot| slot.icon_source.as_str())
+            .chain(
+                self.settings
+                    .user_pinned_background_apps
+                    .iter()
+                    .map(String::as_str),
+            )
+            .chain(self.in_flight_icons.iter().map(String::as_str))
+            .collect();
+        self.icon_surfaces
+            .retain(|source, surface| surface.is_none() || keep.contains(source.as_str()));
+    }
+
     fn sync_window_bounds(&mut self) {
-        let rect = compute_window_rect(&self.settings, self.slots.len(), self.monitor);
+        let rect = compute_window_rect(&self.settings, self.slots.len(), self.monitor.clone());
         if self.last_window_rect != Some(rect) {
             self.last_window_rect = Some(rect);
             win32::reposition_dock_window(self.hwnd, rect.0, rect.1, rect.2, rect.3);
@@ -1795,9 +1945,9 @@ impl DockState {
         (w - gap * largest_fraction).max(0.0)
     }
 
-    fn live_scroll_metrics(&self) -> ScrollMetrics {
+    /// Same as `live_scroll_metrics`, but reuses pill geometry the caller has already computed.
+    fn scroll_metrics_for_pill(&self, pill_left: f32, pill_w: f32) -> ScrollMetrics {
         let base = self.settings.icon_dips();
-        let (pill_left, _, pill_w, _) = self.live_pill_geometry();
         // Flush with the outer rounded edges of the dock pill (matching C# `MainWindow.xaml`).
         let vp_left = pill_left + 1.0;
         let vp_right = (pill_left + pill_w - 1.0).max(vp_left + 1.0);
@@ -1814,13 +1964,36 @@ impl DockState {
         )
     }
 
+    fn live_scroll_metrics(&self) -> ScrollMetrics {
+        let (pill_left, _, pill_w, _) = self.live_pill_geometry();
+        self.scroll_metrics_for_pill(pill_left, pill_w)
+    }
+
+    /// Slot centers in one O(N) pass. `resting` matches `resting_slot_center_x` (unscaled
+    /// geometry used for hit-testing and fisheye targets); otherwise matches `live_slot_center_x`
+    /// (current animated scales). Callers that iterate all slots must use this instead of calling
+    /// the per-index helpers, which would rebuild scroll metrics and re-walk prefixes O(N²) times.
+    fn slot_centers(&self, sm: &ScrollMetrics, resting: bool) -> Vec<f32> {
+        let base = self.settings.icon_dips();
+        let gap = slot_gap(&self.settings);
+        let now = Instant::now();
+        let mut cursor = sm.apps_start_x;
+        let mut centers = Vec::with_capacity(self.slots.len());
+        for slot in &self.slots {
+            let w = if resting { base } else { base * slot.scale };
+            centers.push(cursor + w * 0.5);
+            cursor += (w + gap) * slot.layout_fraction(now);
+        }
+        centers
+    }
+
     /// Returns `Some(false)` for left `<` scroll button, `Some(true)` for right `>` scroll button.
     fn hit_scroll_button(&self, mx: f32, my: f32) -> Option<bool> {
-        let (_, pill_top, _, pill_h) = self.live_pill_geometry();
+        let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
         if my < pill_top || my > pill_top + pill_h {
             return None;
         }
-        let sm = self.live_scroll_metrics();
+        let sm = self.scroll_metrics_for_pill(pill_left, pill_w);
         if sm.can_scroll_left && mx >= sm.vp_left && mx <= sm.vp_left + SCROLL_EDGE_W_DIPS {
             return Some(false);
         }
@@ -1861,20 +2034,6 @@ impl DockState {
             return Some(ResizeEdge::Right);
         }
         None
-    }
-
-    fn resting_slot_center_x(&self, idx: usize) -> f32 {
-        let base = self.settings.icon_dips();
-        let gap = slot_gap(&self.settings);
-        let sm = self.live_scroll_metrics();
-        let now = Instant::now();
-        let before: f32 = self
-            .slots
-            .iter()
-            .take(idx)
-            .map(|slot| (base + gap) * slot.layout_fraction(now))
-            .sum();
-        sm.apps_start_x + before + base * 0.5
     }
 
     fn live_slot_center_x(&self, idx: usize) -> f32 {
@@ -1990,18 +2149,19 @@ impl DockState {
         {
             return true;
         }
-        let sm = self.live_scroll_metrics();
+        let sm = self.scroll_metrics_for_pill(pill_left, pill_w);
         if mx < sm.vp_left || mx > sm.vp_right {
             return false;
         }
         let base = self.settings.icon_dips();
         let icon_base_bottom = pill_top + 7.5 + base;
+        let centers = self.slot_centers(&sm, false);
         for (idx, slot) in self.slots.iter().enumerate() {
             if slot.is_exiting() {
                 continue;
             }
             let dim = base * slot.scale;
-            let cx = self.live_slot_center_x(idx) + slot.slide_x;
+            let cx = centers[idx] + slot.slide_x;
             let bounce = bounce_offset_dips(slot.bounce_started).unwrap_or(0.0);
             let lift = ((slot.scale - 1.0) * 14.0 + bounce).max(0.0);
             let top = icon_base_bottom - lift - dim;
@@ -2014,8 +2174,8 @@ impl DockState {
 
     fn hit_shell_button(&self, mx: f32, my: f32) -> Option<ShellButton> {
         let base = self.settings.icon_dips();
-        let (_, pill_top, _, pill_h) = self.live_pill_geometry();
-        let sm = self.live_scroll_metrics();
+        let (pill_left, pill_top, pill_w, pill_h) = self.live_pill_geometry();
+        let sm = self.scroll_metrics_for_pill(pill_left, pill_w);
         if my < pill_top || my > pill_top + pill_h {
             return None;
         }
@@ -2041,13 +2201,14 @@ impl DockState {
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
         let max_dist = (base + gap) * 0.55;
+        let centers = self.slot_centers(&sm, true);
         self.hovered_idx = self
             .slots
             .iter()
             .enumerate()
             .filter(|(_, slot)| !slot.is_exiting())
             .map(|(i, _)| {
-                let cx = self.resting_slot_center_x(i);
+                let cx = centers[i];
                 (i, cx, (mx - cx).abs())
             })
             .filter(|(_, cx, _)| *cx >= sm.vp_left - base * 0.4 && *cx <= sm.vp_right + base * 0.4)
@@ -2056,7 +2217,7 @@ impl DockState {
             .map(|(i, _, _)| i);
     }
 
-    fn target_scale_for(&self, idx: usize) -> f32 {
+    fn target_scale_for(&self, center_x: f32) -> f32 {
         if self.drag.is_some_and(|d| d.active) {
             return 1.0;
         }
@@ -2069,7 +2230,7 @@ impl DockState {
         let base = self.settings.icon_dips();
         let gap = slot_gap(&self.settings);
         let radius = (base + gap) * FISHEYE_RADIUS_SLOTS;
-        let dist = (mx - self.resting_slot_center_x(idx)).abs();
+        let dist = (mx - center_x).abs();
         if dist >= radius {
             return 1.0;
         }
@@ -2103,7 +2264,8 @@ impl DockState {
         let scroll_k = 1.0 - (-dt / 0.045).exp();
         let mut moving = self.drag.is_some_and(|d| d.active);
 
-        let max_scroll = self.live_scroll_metrics().max_scroll;
+        let scroll_metrics = self.live_scroll_metrics();
+        let max_scroll = scroll_metrics.max_scroll;
         self.scroll_target = self.scroll_target.clamp(0.0, max_scroll);
         if self.scroll_pan.is_none() {
             let sdiff = self.scroll_target - self.scroll_offset;
@@ -2126,42 +2288,45 @@ impl DockState {
             self.hide_progress = hide_target;
         }
 
-        for idx in 0..self.slots.len() {
-            if self.slots[idx].close_started.is_some() {
-                if self.slots[idx].is_exiting()
-                    || close_progress(self.slots[idx].close_started, now) < 1.0
-                {
+        let resting_centers = self.slot_centers(&scroll_metrics, true);
+        let scale_targets: Vec<f32> = resting_centers
+            .iter()
+            .map(|&center| self.target_scale_for(center))
+            .collect();
+        for (idx, slot) in self.slots.iter_mut().enumerate() {
+            if slot.close_started.is_some() {
+                if slot.is_exiting() || close_progress(slot.close_started, now) < 1.0 {
                     moving = true;
                 } else {
-                    self.slots[idx].close_started = None;
+                    slot.close_started = None;
                 }
             }
-            if self.slots[idx].is_exiting() {
+            if slot.is_exiting() {
                 continue;
             }
-            let target = self.target_scale_for(idx);
-            let cur = self.slots[idx].scale;
+            let target = scale_targets[idx];
+            let cur = slot.scale;
             let diff = target - cur;
             if diff.abs() > 0.004 {
-                self.slots[idx].scale = cur + diff * scale_k;
+                slot.scale = cur + diff * scale_k;
                 moving = true;
             } else if (cur - target).abs() > 0.0 {
-                self.slots[idx].scale = target;
+                slot.scale = target;
             }
 
-            let sx = self.slots[idx].slide_x;
+            let sx = slot.slide_x;
             if sx.abs() > 0.35 {
-                self.slots[idx].slide_x = sx * (1.0 - slide_k);
+                slot.slide_x = sx * (1.0 - slide_k);
                 moving = true;
             } else if sx != 0.0 {
-                self.slots[idx].slide_x = 0.0;
+                slot.slide_x = 0.0;
             }
 
-            if let Some(started) = self.slots[idx].bounce_started {
+            if let Some(started) = slot.bounce_started {
                 if bounce_offset_dips(Some(started)).is_some() {
                     moving = true;
                 } else {
-                    self.slots[idx].bounce_started = None;
+                    slot.bounce_started = None;
                 }
             }
         }
@@ -2185,11 +2350,13 @@ impl DockState {
         }
         if drag.active && !self.slots.is_empty() {
             let center_x = mx - drag.grab_offset_x;
+            let sm = self.live_scroll_metrics();
+            let centers = self.slot_centers(&sm, true);
             let target = self
                 .slots
                 .iter()
                 .enumerate()
-                .map(|(i, _)| (i, (center_x - self.resting_slot_center_x(i)).abs()))
+                .map(|(i, _)| (i, (center_x - centers[i]).abs()))
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(i, _)| i)
                 .unwrap_or(drag.idx);
@@ -2267,12 +2434,13 @@ impl DockState {
             {
                 let path = path.clone();
                 let surface = self.icon_surfaces.get(&path).and_then(Clone::clone);
-                let surface =
-                    surface.or_else(|| self.fallback_surface_for(&tray::friendly_name(&path)));
+                let label = tray::friendly_name(&path);
+                let surface = surface.or_else(|| self.fallback_surface_for(&label));
                 let visual = &mut self.tray_pin_visuals[index];
                 visual.icon.set_content(surface.as_ref());
                 visual.source = path;
                 visual.has_icon = has_icon;
+                visual.label = label;
             }
             let path = &self.settings.user_pinned_background_apps[index];
             let pressed = self.pressed_tray_pin.as_deref() == Some(path);
@@ -2337,7 +2505,7 @@ impl DockState {
         let icon_base_top = pill_top + 7.5;
         let icon_base_bottom = icon_base_top + base;
         let dot_top = icon_base_bottom + 4.5;
-        let sm = self.live_scroll_metrics();
+        let sm = self.scroll_metrics_for_pill(pill_left, pill_w);
 
         // 2. Shell buttons + divider share the horizontally clipped content coordinate space.
         let shell_top = pill_top + (pill_h - base) * 0.5;
@@ -2401,8 +2569,8 @@ impl DockState {
                 - if pressed { 2.0 } else { 0.0 })
             .max(0.0);
             let slide_x = self.slots[idx].slide_x;
-            let source = self.slots[idx].icon_source.clone();
-            let label = self.slots[idx].label.clone();
+            // Borrow by default; allocate only when the binding actually changes (rare).
+            let source_ref = self.slots[idx].icon_source.as_str();
             let running = !self.slots[idx].windows.is_empty();
             let active = self.slots[idx].is_foreground;
             let close = close_progress(self.slots[idx].close_started, now);
@@ -2418,12 +2586,14 @@ impl DockState {
 
             let has_real_icon = self
                 .icon_surfaces
-                .get(&source)
+                .get(source_ref)
                 .and_then(|o| o.as_ref())
                 .is_some();
-            if self.slot_visuals[idx].bound_source != source
+            if self.slot_visuals[idx].bound_source != source_ref
                 || self.slot_visuals[idx].bound_has_icon != has_real_icon
             {
+                let source = source_ref.to_owned();
+                let label = self.slots[idx].label.clone();
                 let surf = self
                     .icon_surfaces
                     .get(&source)
@@ -2657,7 +2827,10 @@ impl DockState {
             .as_deref()
             .filter(|p| p.is_visible())
             .and_then(|p| p.owner_key());
-        let tooltip_info: Option<(String, f32, f32)> = if active_drag.is_some() {
+        // Borrow text from existing state; allocate only when the surface actually changes.
+        // Cow keeps borrowed label strings allocation-free; only localized strings whose source
+        // is produced by `loc::t` need an owned buffer.
+        let tooltip_info: Option<(Cow<'_, str>, f32, f32)> = if active_drag.is_some() {
             None
         } else if let Some(is_next) = self.hovered_scroll {
             let cx = if is_next {
@@ -2665,26 +2838,21 @@ impl DockState {
             } else {
                 sm.vp_left + SCROLL_EDGE_W_DIPS * 0.5
             };
-            Some((
-                if is_next {
-                    "Scroll Right"
-                } else {
-                    "Scroll Left"
-                }
-                .to_owned(),
-                cx,
-                pill_top - 8.0,
-            ))
+            Some((Cow::Owned(loc::t("ScrollDockHelp")), cx, pill_top - 8.0))
         } else if self.hovered_bin {
             let (_, bin_rc, _) = self.right_widget_rects_dips();
             let cx = bin_rc.map_or(pill_left + pill_w - 60.0, |(l, _, r, _)| (l + r) * 0.5);
-            Some(("Recycle Bin".to_owned(), cx, pill_top - 8.0))
+            Some((Cow::Owned(loc::t("RecycleBin")), cx, pill_top - 8.0))
         } else if self.hovered_tray {
             let (tray_rc, _, _) = self.right_widget_rects_dips();
             let cx = tray_rc.map_or(pill_left + pill_w - 110.0, |(l, _, r, _)| (l + r) * 0.5);
-            Some(("Background Apps".to_owned(), cx, pill_top - 8.0))
+            Some((Cow::Owned(loc::t("TrayApps")), cx, pill_top - 8.0))
         } else if let Some(index) = self.hovered_tray_pin
-            && let Some(path) = self.settings.user_pinned_background_apps.get(index)
+            && self
+                .settings
+                .user_pinned_background_apps
+                .get(index)
+                .is_some()
             && let (Some(tray), _, _) = self.right_widget_rects_dips()
         {
             let (left, _, right, _) = tray_pin_rect(
@@ -2693,24 +2861,25 @@ impl DockState {
                 self.tray_pin_visuals.len(),
                 index,
             );
-            Some((
-                tray::friendly_name(path),
-                (left + right) * 0.5,
-                pill_top - 8.0,
-            ))
+            let label = self
+                .tray_pin_visuals
+                .get(index)
+                .map_or("", |pin| pin.label.as_str());
+            Some((Cow::Borrowed(label), (left + right) * 0.5, pill_top - 8.0))
         } else if let Some(wid) = self.hovered_widget {
             let (_, _, wrects) = self.right_widget_rects_dips();
             let cx = wrects
                 .iter()
                 .find(|(id, _)| *id == wid)
                 .map_or(pill_left + pill_w - 60.0, |(_, (l, _, r, _))| (l + r) * 0.5);
-            let label =
-                self.widget_runtime
-                    .hover_tooltip(wid, self.hovered_widget_sub, &self.settings);
-            Some((label, cx, pill_top - 8.0))
+            let settings = &self.settings;
+            let label = self
+                .widget_runtime
+                .hover_tooltip(wid, self.hovered_widget_sub, settings);
+            Some((Cow::Borrowed(label), cx, pill_top - 8.0))
         } else if let Some(shell) = self.hovered_shell {
             Some((
-                shell.label().to_owned(),
+                Cow::Owned(shell.label()),
                 self.live_shell_center_x(shell),
                 pill_top - 8.0,
             ))
@@ -2722,24 +2891,33 @@ impl DockState {
             let lift = ((slot.scale - 1.0) * 14.0 + bounce).max(0.0);
             let icon_top = icon_base_bottom - lift - base * slot.scale;
             let top_edge = icon_top.min(pill_top);
-            Some((
-                slot.label.clone(),
-                self.live_slot_center_x(idx),
-                top_edge - 8.0,
-            ))
+            let center_x = self.live_slot_center_x(idx);
+            Some((Cow::Borrowed(slot.label.as_str()), center_x, top_edge - 8.0))
         } else {
             None
         };
 
         if let Some((text, center_x, bottom_y)) = tooltip_info {
-            let needs_redraw = self.tooltip_cache.as_ref().is_none_or(|c| c.text != text);
+            let needs_redraw = self
+                .tooltip_cache
+                .as_ref()
+                .is_none_or(|c| c.text != text.as_ref());
             if needs_redraw
-                && let Ok((surf, w_dips, h_dips)) =
-                    self.dcomp.create_tooltip_surface(&text, dpi, self.is_dark)
+                && let Ok((surf, w_dips, h_dips)) = self.dcomp.create_tooltip_surface(
+                    text.as_ref(),
+                    dpi,
+                    self.is_dark,
+                    self.settings
+                        .menu_border_color
+                        .as_deref()
+                        .and_then(design::parse_hex_rgb)
+                        .unwrap_or(design::palette(self.is_dark).border_rgb),
+                    self.settings.menu_border_thickness.clamp(0.0, 8.0) as f32,
+                )
             {
                 self.tooltip_node.set_content(Some(&surf));
                 self.tooltip_cache = Some(TooltipCache {
-                    text,
+                    text: text.into_owned(),
                     width_dips: w_dips,
                     height_dips: h_dips,
                 });
@@ -2858,9 +3036,9 @@ impl DockState {
         }
         let key = slot.key.clone();
         let items = slot.windows.clone();
-        let (win_x, win_y, _, _) = self
-            .last_window_rect
-            .unwrap_or_else(|| compute_window_rect(&self.settings, self.slots.len(), self.monitor));
+        let (win_x, win_y, _, _) = self.last_window_rect.unwrap_or_else(|| {
+            compute_window_rect(&self.settings, self.slots.len(), self.monitor.clone())
+        });
         let (_, pill_top, _, _) = self.live_pill_geometry();
         let base = self.settings.icon_dips();
         let max_icon_top =
@@ -3278,6 +3456,7 @@ impl DockState {
                 if let Some((path, pinned)) = tray::open_background_apps_flyout(
                     self.hwnd,
                     self.is_dark,
+                    &self.settings,
                     ax,
                     ay,
                     &self.settings.user_pinned_background_apps,
@@ -3371,10 +3550,12 @@ impl DockState {
             let launch_path = slot.launch_path.clone();
             let shift = win32::is_shift_down();
             let ctrl = win32::is_ctrl_down();
+            let identities: Vec<(usize, u32)> =
+                slot.windows.iter().map(|w| (w.hwnd, w.pid)).collect();
             self.ensure_animation();
             self.update_visuals();
 
-            if shift || !tracker::activate_or_toggle(&hwnds) {
+            if shift || !tracker::activate_or_toggle_verified(&identities) {
                 pins::launch_app(launch_path, hwnds.first().copied(), ctrl && shift);
             }
         } else {
@@ -3421,8 +3602,8 @@ impl DockState {
             self.update_visuals();
             return;
         }
-        if !horizontal && self.hovered_widget == Some("keyboard") {
-            widgets::telemetry::cycle_keyboard_layout();
+        if !horizontal && self.hovered_widget == Some("keyboard") && delta != 0 {
+            self.widget_runtime.cycle_keyboard_layout(delta < 0);
             self.refresh_widgets();
             self.update_visuals();
             return;
@@ -3516,6 +3697,25 @@ impl DockState {
         if files.is_empty() {
             return;
         }
+
+        // Dropping files on the Win11 Show Desktop corner moves (or Ctrl+copies) them
+        // to the Desktop through a real SHFileOperation with Explorer undo support.
+        let mut screen_pt = POINT { x: 0, y: 0 };
+        unsafe {
+            GetCursorPos(&mut screen_pt);
+        }
+        let over_desktop_corner = self.settings.show_desktop_button
+            && (self.monitor.right - screen_pt.x).unsigned_abs() <= 24
+            && (self.monitor.bottom - screen_pt.y).unsigned_abs() <= 48;
+        if over_desktop_corner {
+            let copy = win32::is_ctrl_down();
+            let paths: Vec<String> = files.to_vec();
+            if let Err(error) = shell_files::transfer_to_desktop(&paths, copy) {
+                opentaskbar_core::log::warn(format!("Desktop drop failed: {error}"));
+            }
+            return;
+        }
+
         let mut pt = POINT { x: 0, y: 0 };
         unsafe {
             GetCursorPos(&mut pt);
@@ -3572,13 +3772,13 @@ impl DockState {
         let (tray_rc, bin_rc, wrects) = self.right_widget_rects_dips();
         if let Some(index) = self.hit_tray_pin(tray_rc, mx, my) {
             let path = self.settings.user_pinned_background_apps[index].clone();
-            if tray::show_pinned_app_menu(self.hwnd, self.is_dark, &path) {
+            if tray::show_pinned_app_menu(self.hwnd, self.is_dark, &self.settings, &path) {
                 self.set_background_pin(&path, false);
             }
             return;
         }
         if Self::hit_rect_in_vp(&sm, bin_rc, mx, my) {
-            match win32::show_recycle_bin_context_menu(self.hwnd, self.is_dark) {
+            match win32::show_recycle_bin_context_menu(self.hwnd, self.is_dark, &self.settings) {
                 RecycleBinAction::Open => pins::launch("shell:RecycleBinFolder".to_owned()),
                 RecycleBinAction::Empty => {
                     widgets::empty_recycle_bin();
@@ -3593,18 +3793,90 @@ impl DockState {
             .iter()
             .find(|(_, rc)| Self::hit_rect_in_vp(&sm, Some(*rc), mx, my))
         {
+            let reset_label = loc::t("Reset");
+            let sound_label = loc::t_fmt("RadioSettings", &[&loc::t("LauncherSound")]);
+            let focus_label = loc::t("FocusMode");
             let secondary_label = match *wid {
-                "stopwatch" | "countdown" | "focus" => Some("Reset"),
-                "audio" => Some("Sound Settings"),
-                "quicksettings" => Some("Toggle Focus Mode"),
+                "stopwatch" | "countdown" | "focus" => Some(reset_label.as_str()),
+                "audio" => Some(sound_label.as_str()),
+                "quicksettings" => Some(focus_label.as_str()),
                 _ => None,
             };
             match win32::show_widget_context_menu(
                 self.hwnd,
                 self.is_dark,
+                wid,
                 secondary_label,
+                &self.all_monitors,
+                false,
+                false,
+                false,
                 &self.settings,
             ) {
+                WidgetContextAction::PlaceAllDisplays => {
+                    self.settings.dynamic_island_placements.insert(
+                        (*wid).to_owned(),
+                        opentaskbar_core::settings::DYNAMIC_ISLAND_ALL_DISPLAYS.to_owned(),
+                    );
+                    if let Err(error) = opentaskbar_core::settings::save_to(
+                        &opentaskbar_core::settings::settings_path(),
+                        &self.settings,
+                    ) {
+                        opentaskbar_core::log::error(format!(
+                            "Could not place widget {wid} on Dynamic Island: {error}"
+                        ));
+                    } else {
+                        self.reload_settings_live();
+                        if self.reload_msg != 0 {
+                            unsafe {
+                                windows_sys::Win32::UI::WindowsAndMessaging::SendNotifyMessageW(
+                                    HWND_BROADCAST,
+                                    self.reload_msg,
+                                    0,
+                                    0,
+                                );
+                            }
+                        }
+                    }
+                }
+                WidgetContextAction::PlaceOnDisplay(idx) => {
+                    if let Some(mon) = self.all_monitors.get(idx) {
+                        self.settings
+                            .dynamic_island_placements
+                            .insert((*wid).to_owned(), mon.device_name.clone());
+                        if let Err(error) = opentaskbar_core::settings::save_to(
+                            &opentaskbar_core::settings::settings_path(),
+                            &self.settings,
+                        ) {
+                            opentaskbar_core::log::error(format!(
+                                "Could not place widget {wid} on display: {error}"
+                            ));
+                        } else {
+                            self.reload_settings_live();
+                            if self.reload_msg != 0 {
+                                unsafe {
+                                    windows_sys::Win32::UI::WindowsAndMessaging::SendNotifyMessageW(
+                                        HWND_BROADCAST,
+                                        self.reload_msg,
+                                        0,
+                                        0,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                WidgetContextAction::MoveToTaskbar => {
+                    self.settings
+                        .dynamic_island_placements
+                        .retain(|k, _| !k.eq_ignore_ascii_case(wid));
+                    let _ = opentaskbar_core::settings::save_to(
+                        &opentaskbar_core::settings::settings_path(),
+                        &self.settings,
+                    );
+                    self.reload_settings_live();
+                }
+                WidgetContextAction::MoveEarlier | WidgetContextAction::MoveLater => {}
                 WidgetContextAction::Remove => {
                     self.settings.set_widget_enabled(wid, false);
                     if let Err(error) = opentaskbar_core::settings::save_to(
@@ -3646,13 +3918,14 @@ impl DockState {
         }
 
         if self.hit_shell_button(mx, my) == Some(ShellButton::Start) {
-            let act = win32::show_start_context_menu(self.hwnd, self.is_dark);
+            let act =
+                win32::show_start_context_menu(self.hwnd, self.is_dark, &self.settings);
             self.execute_context_action(act);
             return;
         }
 
         if self.hit_shell_button(mx, my) == Some(ShellButton::TaskView) {
-            match win32::show_taskview_context_menu(self.hwnd, self.is_dark) {
+            match win32::show_taskview_context_menu(self.hwnd, self.is_dark, &self.settings) {
                 TaskViewAction::PreviousDesktop => opentaskbar_shell::taskbar::previous_desktop(),
                 TaskViewAction::NextDesktop => opentaskbar_shell::taskbar::next_desktop(),
                 TaskViewAction::NewDesktop => opentaskbar_shell::taskbar::new_desktop(),
@@ -3671,27 +3944,88 @@ impl DockState {
                 self.hwnd,
                 self.is_dark,
                 &slot.label,
+                &slot.launch_path,
                 slot.pinned,
                 running,
                 &self.settings,
             ) {
                 AppContextAction::Open => {
-                    let hwnds = slot.hwnds();
-                    if !tracker::activate_or_toggle(&hwnds) {
+                    let identities: Vec<(usize, u32)> =
+                        slot.windows.iter().map(|w| (w.hwnd, w.pid)).collect();
+                    if !tracker::activate_or_toggle_verified(&identities) {
                         pins::launch_app(slot.launch_path, window, false);
                     }
                 }
                 AppContextAction::NewWindow => pins::launch_app(slot.launch_path, window, false),
                 AppContextAction::RunAsAdmin => pins::launch_app(slot.launch_path, window, true),
                 AppContextAction::TogglePin => self.toggle_pin_for_slot(idx),
+                AppContextAction::ToggleGroup(gidx) => {
+                    if let Some(group) = self.settings.app_groups.get_mut(gidx) {
+                        if let Some(pos) = group
+                            .executable_paths
+                            .iter()
+                            .position(|p| p.eq_ignore_ascii_case(&slot.launch_path))
+                        {
+                            group.executable_paths.remove(pos);
+                            if group.executable_paths.is_empty() {
+                                self.settings.app_groups.remove(gidx);
+                            }
+                        } else {
+                            group.executable_paths.push(slot.launch_path.clone());
+                        }
+                        let _ = settings::save_to(&settings::settings_path(), &self.settings);
+                        self.reload_settings_live();
+                    }
+                }
+                AppContextAction::CreateGroup => {
+                    let title = loc::t("NewGroup");
+                    let label = loc::t("GroupNamePrompt");
+                    if let Some(name) =
+                        crate::ui::prompt::ask_name(self.hwnd, self.is_dark, &title, &label, "")
+                    {
+                        if let Some(existing) = self
+                            .settings
+                            .app_groups
+                            .iter_mut()
+                            .find(|g| g.name.eq_ignore_ascii_case(&name))
+                        {
+                            if !existing
+                                .executable_paths
+                                .iter()
+                                .any(|p| p.eq_ignore_ascii_case(&slot.launch_path))
+                            {
+                                existing.executable_paths.push(slot.launch_path.clone());
+                            }
+                        } else {
+                            let id = name
+                                .to_lowercase()
+                                .chars()
+                                .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+                                .collect::<String>();
+                            self.settings.app_groups.push(
+                                opentaskbar_core::settings::DockAppGroup {
+                                    id,
+                                    name,
+                                    executable_paths: vec![slot.launch_path.clone()],
+                                },
+                            );
+                        }
+                        let _ = settings::save_to(&settings::settings_path(), &self.settings);
+                        self.reload_settings_live();
+                    }
+                }
                 AppContextAction::Close => {
                     for w in &slot.windows {
-                        tracker::close_window(w.hwnd);
+                        tracker::close_window_verified(w.hwnd, w.pid);
                     }
                 }
                 AppContextAction::Terminate => {
                     if let Some(first) = slot.windows.first() {
-                        tracker::terminate_window_process(first.hwnd);
+                        tracker::terminate_window_process_verified(
+                            first.hwnd,
+                            first.pid,
+                            &slot.launch_path,
+                        );
                     }
                 }
                 AppContextAction::Dock(act) => self.execute_context_action(act),
@@ -3722,21 +4056,27 @@ impl DockState {
                     self.reload_settings_live();
                 }
             }
-            ContextAction::SaveProfile(preset) => {
-                let snap = opentaskbar_core::settings::DockProfile {
-                    name: preset.to_owned(),
-                    position: self.settings.position,
-                    size: self.settings.size,
-                    auto_hide: self.settings.auto_hide,
-                    enabled_widgets: self.settings.enabled_widgets.clone(),
-                };
-                self.settings
-                    .profiles
-                    .retain(|p| !p.name.eq_ignore_ascii_case(preset));
-                self.settings.profiles.push(snap);
-                self.settings.active_profile = Some(preset.to_owned());
-                let _ = settings::save_to(&settings::settings_path(), &self.settings);
-                self.reload_settings_live();
+            ContextAction::SaveNewProfile => {
+                let title = loc::t("Profiles");
+                let label = loc::t("ProfileNamePrompt");
+                if let Some(name) =
+                    crate::ui::prompt::ask_name(self.hwnd, self.is_dark, &title, &label, "")
+                {
+                    let snap = opentaskbar_core::settings::DockProfile {
+                        name: name.clone(),
+                        position: self.settings.position,
+                        size: self.settings.size,
+                        auto_hide: self.settings.auto_hide,
+                        enabled_widgets: self.settings.enabled_widgets.clone(),
+                    };
+                    self.settings
+                        .profiles
+                        .retain(|p| !p.name.eq_ignore_ascii_case(&name));
+                    self.settings.profiles.push(snap);
+                    self.settings.active_profile = Some(name);
+                    let _ = settings::save_to(&settings::settings_path(), &self.settings);
+                    self.reload_settings_live();
+                }
             }
             ContextAction::AddStack(folder) => {
                 if let Some(base) = std::env::var_os("USERPROFILE") {
@@ -3763,31 +4103,6 @@ impl DockState {
                     self.reload_settings_live();
                 }
             }
-            ContextAction::AddStarterGroup => {
-                if !self
-                    .settings
-                    .app_groups
-                    .iter()
-                    .any(|g| g.name.eq_ignore_ascii_case("Productivity"))
-                {
-                    self.settings
-                        .app_groups
-                        .push(opentaskbar_core::settings::DockAppGroup {
-                            id: "productivity".to_owned(),
-                            name: "Productivity".to_owned(),
-                            executable_paths: vec!["explorer.exe".to_owned(), "wt.exe".to_owned()],
-                        });
-                    let _ = settings::save_to(&settings::settings_path(), &self.settings);
-                    self.reload_settings_live();
-                }
-            }
-            ContextAction::RemoveGroup(idx) => {
-                if idx < self.settings.app_groups.len() {
-                    self.settings.app_groups.remove(idx);
-                    let _ = settings::save_to(&settings::settings_path(), &self.settings);
-                    self.reload_settings_live();
-                }
-            }
             ContextAction::ToggleFocusMode => {
                 self.settings.focus_mode = !self.settings.focus_mode;
                 let _ = opentaskbar_core::settings::save_to(
@@ -3802,6 +4117,7 @@ impl DockState {
             ContextAction::Terminal => pins::launch("wt.exe".to_owned()),
             ContextAction::TerminalAdmin => pins::launch_elevated("wt.exe".to_owned()),
             ContextAction::RunDialog => opentaskbar_shell::taskbar::open_run_dialog(),
+            ContextAction::Notifications => opentaskbar_shell::taskbar::open_notifications(),
             ContextAction::DeviceManager => pins::launch("devmgmt.msc".to_owned()),
             ContextAction::DiskManagement => pins::launch("diskmgmt.msc".to_owned()),
             ContextAction::ComputerManagement => pins::launch("compmgmt.msc".to_owned()),
@@ -3821,6 +4137,13 @@ impl DockState {
             }
             ContextAction::ShutDownComputer => {
                 pins::launch_with_args("shutdown.exe".to_owned(), "/s /t 0".to_owned());
+            }
+            ContextAction::SleepComputer => {
+                // bHibernate=0 (sleep/S3), bForce=1, bWakeupEventsDisabled=0.
+                pins::launch_with_args(
+                    "rundll32.exe".to_owned(),
+                    "powrprof.dll,SetSuspendState 0,1,0".to_owned(),
+                );
             }
             ContextAction::ShowDesktop => opentaskbar_shell::taskbar::show_desktop(),
             ContextAction::RestoreTaskbar => opentaskbar_shell::taskbar::restore_from_journal(),
@@ -3844,6 +4167,100 @@ impl Drop for DockState {
 }
 
 thread_local! {
+    /// HWND currently owning the two global hotkeys (only the primary dock registers).
+    static HOTKEY_OWNER: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Re-registers the launcher/dock hotkeys for the primary dock window. Bindings that
+/// fail (another app owns the combination) stay pending and retry on the next reload.
+fn register_global_hotkeys(hwnd: HWND, settings: &DockSettings) {
+    let previous = HOTKEY_OWNER.replace(hwnd as usize);
+    unsafe {
+        if previous != 0 && previous != hwnd as usize {
+            UnregisterHotKey(previous as HWND, HOTKEY_LAUNCHER_ID);
+            UnregisterHotKey(previous as HWND, HOTKEY_DOCK_ID);
+        }
+        UnregisterHotKey(hwnd, HOTKEY_LAUNCHER_ID);
+        UnregisterHotKey(hwnd, HOTKEY_DOCK_ID);
+
+        let launcher = settings.launcher_binding();
+        let dock = settings.dock_binding();
+        let no_repeat = opentaskbar_core::hotkey::MOD_NOREPEAT;
+        if let Some(binding) = &launcher
+            && RegisterHotKey(
+                hwnd,
+                HOTKEY_LAUNCHER_ID,
+                binding.modifiers | no_repeat,
+                binding.virtual_key,
+            ) == 0
+        {
+            opentaskbar_core::log::warn(format!(
+                "RegisterHotKey launcher ({}) failed: {}",
+                binding.display,
+                windows_sys::Win32::Foundation::GetLastError()
+            ));
+        }
+        if let Some(binding) = &dock
+            && launcher.as_ref() != Some(binding)
+            && RegisterHotKey(
+                hwnd,
+                HOTKEY_DOCK_ID,
+                binding.modifiers | no_repeat,
+                binding.virtual_key,
+            ) == 0
+        {
+            opentaskbar_core::log::warn(format!(
+                "RegisterHotKey dock ({}) failed: {}",
+                binding.display,
+                windows_sys::Win32::Foundation::GetLastError()
+            ));
+        }
+    }
+}
+
+#[repr(C)]
+struct KbdLlHookStruct {
+    vk_code: u32,
+    scan_code: u32,
+    flags: u32,
+    time: u32,
+    extra_info: usize,
+}
+
+/// Detects a standalone Windows-key tap (Win up with no intervening key) and asks
+/// every dock window to reveal itself. Mirrors C# `WinKeyRevealMonitor` (#164).
+unsafe extern "system" fn win_key_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    let msg = wparam as u32;
+    if code >= 0
+        && lparam != 0
+        && matches!(msg, WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP)
+    {
+        let info = unsafe { &*(lparam as *const KbdLlHookStruct) };
+        let is_win = info.vk_code == VK_LWIN as u32 || info.vk_code == VK_RWIN as u32;
+        match msg {
+            WM_KEYDOWN | WM_SYSKEYDOWN => {
+                WIN_KEY_ALONE.with(|flag| flag.set(is_win));
+            }
+            _ => {
+                let was_alone = WIN_KEY_ALONE.with(std::cell::Cell::get);
+                WIN_KEY_ALONE.with(|flag| flag.set(false));
+                if is_win && was_alone {
+                    DOCK_HWNDS.with(|list| {
+                        for hwnd in list.borrow().iter() {
+                            unsafe {
+                                let _ = PostMessageW(*hwnd as HWND, WM_APP_WINKEY_REVEAL, 0, 0);
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+}
+
+thread_local! {
+    static WIN_KEY_ALONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Prevents re-entrant `&mut DockState` aliasing when modal flyouts/menus or
     /// synchronous Win32 callbacks (`SetWindowPos`) dispatch messages to the dock window.
     static DOCK_WNDPROC_ACTIVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -4041,6 +4458,29 @@ unsafe extern "system" fn wnd_proc(
             state.evaluate_auto_hide();
             0
         }
+        WM_APP_WINKEY_REVEAL => {
+            state.win_key_reveal_until =
+                Some(Instant::now() + Duration::from_millis(WINKEY_REVEAL_MS));
+            state.evaluate_auto_hide();
+            0
+        }
+        WM_HOTKEY => {
+            match wparam as i32 {
+                HOTKEY_LAUNCHER_ID => {
+                    opentaskbar_shell::taskbar::open_search();
+                }
+                HOTKEY_DOCK_ID => {
+                    state.settings.focus_mode = !state.settings.focus_mode;
+                    let _ = settings::save_to(&settings::settings_path(), &state.settings);
+                    state.reload_settings_live();
+                    state.win_key_reveal_until =
+                        Some(Instant::now() + Duration::from_millis(WINKEY_REVEAL_MS));
+                    state.evaluate_auto_hide();
+                }
+                _ => {}
+            }
+            0
+        }
         WM_TIMER if wparam == TIMER_PREVIEW_SHOW => {
             unsafe {
                 let _ = KillTimer(hwnd, TIMER_PREVIEW_SHOW);
@@ -4158,7 +4598,10 @@ pub fn run(settings: DockSettings) {
 
     let auto_hide = settings.auto_hide != AutoHideMode::Disabled;
     let initial_pins = load_effective_pins(&settings);
-    let initial_running = tracker::enumerate_windows();
+    let mut initial_running = tracker::enumerate_windows();
+    if settings.current_desktop_only {
+        initial_running.retain(|window| tracker::is_on_current_desktop(window.hwnd));
+    }
     let initial_slots = build_slots(&initial_pins, &initial_running, &[]);
     let t_pins_ms = startup_t0.elapsed().as_millis();
 
@@ -4190,7 +4633,10 @@ pub fn run(settings: DockSettings) {
     let mut created: Vec<(HWND, *mut DockState)> = Vec::new();
 
     for monitor in target_monitors {
-        let rect = compute_window_rect(&settings, initial_slots.len(), monitor);
+        let is_primary = monitor.is_primary;
+        let dpi_scale = monitor.dpi_scale;
+        let mon_handle = monitor.handle;
+        let rect = compute_window_rect(&settings, initial_slots.len(), monitor.clone());
         let hwnd = unsafe {
             CreateWindowExW(
                 ex_style,
@@ -4225,6 +4671,7 @@ pub fn run(settings: DockSettings) {
             settings.clone(),
             initial_pins.clone(),
             initial_slots.clone(),
+            initial_running.clone(),
             rect,
         ) {
             Ok(state) => {
@@ -4236,9 +4683,9 @@ pub fn run(settings: DockSettings) {
                     SetTimer(hwnd, TIMER_WIDGETS, 2000, None);
                 }
                 created.push((hwnd, ptr));
-                if monitor.is_primary {
+                if is_primary {
                     let desired_total_dips = pill_height_dips(&settings) + VERTICAL_EDGE_GAP * 2.0;
-                    let desired_total_px = (desired_total_dips * monitor.dpi_scale).ceil() as i32;
+                    let desired_total_px = (desired_total_dips * dpi_scale).ceil() as i32;
                     opentaskbar_shell::taskbar::begin_replacement(
                         hwnd_val,
                         auto_hide,
@@ -4248,8 +4695,7 @@ pub fn run(settings: DockSettings) {
             }
             Err(err) => {
                 opentaskbar_core::log::error(format!(
-                    "Failed to initialize DirectComposition on monitor {}: {err}",
-                    monitor.handle
+                    "Failed to initialize DirectComposition on monitor {mon_handle}: {err}",
                 ));
                 unsafe {
                     DestroyWindow(hwnd);
@@ -4278,8 +4724,13 @@ pub fn run(settings: DockSettings) {
         guard.clear();
         guard.extend(created.iter().map(|(hwnd, _)| *hwnd as usize));
     });
+    if let Some((primary_hwnd, _)) = created.first() {
+        register_global_hotkeys(*primary_hwnd as HWND, &settings);
+    }
     let wheel_hook: HHOOK =
         unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_wheel_hook), hinstance, 0) };
+    let key_hook: HHOOK =
+        unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(win_key_hook), hinstance, 0) };
 
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     loop {
@@ -4298,6 +4749,19 @@ pub fn run(settings: DockSettings) {
             let _ = UnhookWindowsHookEx(wheel_hook);
         }
     }
+    if !key_hook.is_null() {
+        unsafe {
+            let _ = UnhookWindowsHookEx(key_hook);
+        }
+    }
+    let owner = HOTKEY_OWNER.take();
+    if owner != 0 {
+        unsafe {
+            UnregisterHotKey(owner as HWND, HOTKEY_LAUNCHER_ID);
+            UnregisterHotKey(owner as HWND, HOTKEY_DOCK_ID);
+        }
+    }
+    tray_host::stop_host();
     DOCK_HWNDS.with(|list| list.borrow_mut().clear());
 
     for (hwnd, ptr) in created {
@@ -4321,6 +4785,7 @@ mod tests {
         let settings = DockSettings::default();
         let left_monitor = MonitorInfo {
             handle: 2,
+            device_name: r"\\.\DISPLAY2".to_owned(),
             left: -2560,
             top: 0,
             right: 0,
@@ -4328,7 +4793,7 @@ mod tests {
             dpi_scale: 1.0,
             is_primary: false,
         };
-        let (x, y, w, h) = compute_window_rect(&settings, 8, left_monitor);
+        let (x, y, w, h) = compute_window_rect(&settings, 8, left_monitor.clone());
         assert!(
             x < 0,
             "dock on left monitor must keep negative X (Issue #95)"
@@ -4342,6 +4807,7 @@ mod tests {
         let settings = DockSettings::default();
         let hidpi = MonitorInfo {
             handle: 1,
+            device_name: r"\\.\DISPLAY1".to_owned(),
             left: 0,
             top: 0,
             right: 3840,
