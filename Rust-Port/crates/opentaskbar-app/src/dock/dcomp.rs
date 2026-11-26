@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
+use opentaskbar_core::dynamic_island::geometry as island_geo;
 use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::SurfaceBackground;
 use windows::Win32::Foundation::{HWND, POINT, RECT};
@@ -214,16 +215,18 @@ impl WidgetChipSpec {
     /// (C# `GetDetails()` on each `TimedWidgetTile` / widget). Kept next to the
     /// chip renderer so the panel never shows data the chip itself could not have.
     pub fn details_lines(&self) -> Vec<(String, String)> {
-        let line = |label: &str, value: String| (label.to_owned(), value);
+        // All user-visible island detail labels/values go through `loc::t`.
+        // New keys are listed in the WS-C handoff; WS-F adds them to all 14 catalogs.
+        let line = |key: &str, value: String| (loc::t(key), value);
         match self {
             Self::Clock {
                 time,
                 date,
                 weekday,
             } => vec![
-                line("Time", time.clone()),
-                line("Date", date.clone()),
-                line("Day", weekday.clone()),
+                line("WidgetDetailTime", time.clone()),
+                line("WidgetDate", date.clone()),
+                line("WidgetDetailDay", weekday.clone()),
             ],
             Self::Weather {
                 available,
@@ -234,29 +237,30 @@ impl WidgetChipSpec {
                 ..
             } => {
                 let mut out = vec![
-                    line("Temperature", temp.clone()),
-                    line("Place", place.clone()),
-                    line("Condition", condition.clone()),
+                    line("WidgetDetailTemperature", temp.clone()),
+                    line("WidgetDetailPlace", place.clone()),
+                    line("WidgetDetailCondition", condition.clone()),
                 ];
                 if let Some(range) = today_range {
-                    out.push(line("Today", range.clone()));
+                    out.push(line("WeatherToday", range.clone()));
                 }
                 if !available {
-                    out.push(line("Status", "Unavailable".to_owned()));
+                    out.push(line("WidgetDetailStatus", loc::t("SystemDataUnavailable")));
                 }
                 out
             }
-            Self::DayProgress { percent, unit, .. } => {
-                vec![line("Elapsed", percent.clone()), line("Unit", unit.clone())]
-            }
+            Self::DayProgress { percent, unit, .. } => vec![
+                line("WidgetDetailElapsed", percent.clone()),
+                line("WidgetDetailUnit", unit.clone()),
+            ],
             Self::Timed { text, running, .. } => vec![
-                line("Time", text.clone()),
+                line("WidgetDetailTime", text.clone()),
                 line(
-                    "State",
+                    "WidgetDetailState",
                     if *running {
-                        "Running".to_owned()
+                        loc::t("WidgetDetailRunning")
                     } else {
-                        "Paused".to_owned()
+                        loc::t("WidgetDetailPaused")
                     },
                 ),
             ],
@@ -264,30 +268,32 @@ impl WidgetChipSpec {
                 .iter()
                 .map(|c| line(&c.label, c.value_text.clone()))
                 .collect(),
-            Self::NetSpeed { down, up, .. } => {
-                vec![line("Download", down.clone()), line("Upload", up.clone())]
-            }
+            Self::NetSpeed { down, up, .. } => vec![
+                line("NetworkDownload", down.clone()),
+                line("NetworkUpload", up.clone()),
+            ],
             Self::BatteryLiquid {
                 present,
                 percent,
                 charging,
                 ..
             } => vec![
-                line("Charge", format!("{percent}%")),
-                line("State", {
+                line("WidgetDetailCharge", format!("{percent}%")),
+                line("WidgetDetailState", {
                     if !*present {
-                        "No battery"
+                        loc::t("WidgetDetailNoBattery")
                     } else if *charging {
-                        "Charging"
+                        loc::t("Charging")
                     } else {
-                        "On battery"
+                        loc::t("WidgetDetailOnBattery")
                     }
-                    .to_owned()
                 }),
             ],
             Self::Bluetooth { devices } => devices
                 .iter()
-                .map(|(kind, percent, _, _)| line("Device", format!("{kind:?} {percent}%")))
+                .map(|(kind, percent, _, _)| {
+                    line("WidgetDetailDevice", format!("{kind:?} {percent}%"))
+                })
                 .collect(),
             Self::Storage { drives } => drives
                 .iter()
@@ -298,31 +304,40 @@ impl WidgetChipSpec {
                 artist,
                 muted,
             } => vec![
-                line("Title", title.clone()),
-                line("Artist", artist.clone()),
+                line("WidgetDetailTitle", title.clone()),
+                line("WidgetDetailArtist", artist.clone()),
                 line(
-                    "Sound",
+                    "LauncherSound",
                     if *muted {
-                        "Muted".to_owned()
+                        loc::t("WidgetDetailMuted")
                     } else {
-                        "On".to_owned()
+                        loc::t("WidgetDetailOn")
                     },
                 ),
             ],
             Self::Audio { volume, muted } => vec![
                 line("Volume", format!("{volume}%")),
                 line(
-                    "State",
+                    "WidgetDetailState",
                     if *muted {
-                        "Muted".to_owned()
+                        loc::t("WidgetDetailMuted")
                     } else {
-                        "On".to_owned()
+                        loc::t("WidgetDetailOn")
                     },
                 ),
             ],
             Self::QuickSettings { pills } => pills
                 .iter()
-                .map(|(name, on)| line(name, if *on { "On" } else { "Off" }.to_owned()))
+                .map(|(name, on)| {
+                    line(
+                        name,
+                        if *on {
+                            loc::t("WidgetDetailOn")
+                        } else {
+                            loc::t("WidgetDetailOff")
+                        },
+                    )
+                })
                 .collect(),
             Self::Keyboard { code } => vec![line("Layout", code.clone())],
             Self::AiDual { rows, .. } => rows
@@ -333,7 +348,7 @@ impl WidgetChipSpec {
                 columns
                     .iter()
                     .flat_map(|(header, rows)| {
-                        let mut out = vec![line(header, "Quota".to_owned())];
+                        let mut out = vec![line(header, loc::t("AiUsageQuota"))];
                         out.extend(rows.iter().map(|(name, used, _, reset)| {
                             line(name, format!("{used:.0}% · {reset}"))
                         }));
@@ -350,15 +365,16 @@ impl WidgetChipSpec {
                 meta_text,
                 ..
             } => vec![
-                line("Balance", value_text.clone()),
-                line("Window", meta_text.clone()),
+                line("AiUsageBalance", value_text.clone()),
+                line("WidgetDetailWindow", meta_text.clone()),
             ],
             Self::AiBalance {
                 name, value_text, ..
             } => vec![line(name, value_text.clone())],
-            Self::Simple { top, bottom, .. } => {
-                vec![line("Info", top.clone()), line("Detail", bottom.clone())]
-            }
+            Self::Simple { top, bottom, .. } => vec![
+                line("WidgetDetailInfo", top.clone()),
+                line("WidgetDetailDetail", bottom.clone()),
+            ],
         }
     }
 }
@@ -4161,8 +4177,8 @@ unsafe fn draw_chip_card(
                 right: width_dips,
                 bottom: height_dips,
             },
-            radiusX: 12.0,
-            radiusY: 12.0,
+            radiusX: island_geo::CHIP_RADIUS_DIPS,
+            radiusY: island_geo::CHIP_RADIUS_DIPS,
         };
         dc.FillRoundedRectangle(&fill_rr, &gradient(fill_top, fill_bottom, base)?);
         let rim_rr = D2D1_ROUNDED_RECT {
@@ -4366,7 +4382,7 @@ impl DcompEngine {
         let fmt_count = self.cached_text_format(11.0 * dpi, false, 0)?;
 
         self.draw_surface(w_px, h_px, |dc, w, h| unsafe {
-            let r = 20.0 * dpi;
+            let r = island_geo::BOTTOM_RADIUS_DIPS * dpi;
             let stroke = (border_width_dips * dpi).max(0.0);
             // Theme follows the active palette; opting out paints a fixed neutral pill.
             let neutral_pill = if is_dark {
@@ -4430,8 +4446,8 @@ impl DcompEngine {
                                 right: bx + bsz,
                                 bottom: by + bsz,
                             },
-                            radiusX: 8.0 * dpi,
-                            radiusY: 8.0 * dpi,
+                            radiusX: island_geo::BUTTON_RADIUS_DIPS * dpi,
+                            radiusY: island_geo::BUTTON_RADIUS_DIPS * dpi,
                         },
                         &hb,
                     );

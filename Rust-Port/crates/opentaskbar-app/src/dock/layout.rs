@@ -1130,6 +1130,31 @@ pub fn overlap_scan_due(
     min_age_met && (dirty || periodic_due)
 }
 
+/// C# `DockSettings.EffectiveAnimationsEnabled`: the app toggle plus Focus Mode.
+pub fn effective_animations_enabled(animations_enabled: bool, focus_mode: bool) -> bool {
+    animations_enabled && !focus_mode
+}
+
+/// Whether the VSync producer should keep posting frames.
+///
+/// The dock renders with DirectComposition transforms, which are *not* governed by
+/// `SPI_GETCLIENTAREAANIMATION`. That OS flag only gates WPF/OS-native transitions;
+/// consulting it here made the whole dock freeze when the OS flag was off while the
+/// in-app toggle was on (the reported bug). Core motion therefore depends only on
+/// the effective setting, and `moving` must be true to keep the producer awake.
+pub fn vsync_tick_allowed(effective: bool, moving: bool) -> bool {
+    effective && moving
+}
+
+/// Number of animation frames in an elapsed window, used for the pure tick counter
+/// tests and for `WM_APP_VSYNC` cadence checks.
+pub fn animation_tick_count(elapsed: Duration, interval: Duration) -> u32 {
+    if interval.is_zero() || elapsed.is_zero() {
+        return 0;
+    }
+    (elapsed.as_nanos() / interval.as_nanos()).min(u32::MAX as u128) as u32
+}
+
 /// Rate limit for animation wake-ups: repeated calls within a single frame would
 /// otherwise post a fresh `WM_APP_VSYNC` on every high-polling-rate mouse event.
 pub fn animation_request_due(last_request: Option<Instant>, now: Instant) -> bool {
@@ -2046,6 +2071,40 @@ mod tests {
             Some(now - Duration::from_millis(100)),
             now
         ));
+    }
+
+    /// Pure decision table for the animation toggle / VSync chain:
+    /// (in-app toggle, focus mode, motion pending) -> tick allowed.
+    #[test]
+    fn animation_toggle_decision_table_and_tick_counter() {
+        let table = [
+            (true, false, true, true),   // normal fisheye/spring/bounce
+            (true, false, false, false), // at rest: producer parks (0 CPU)
+            (true, true, true, false), // focus mode suppresses motion (C# EffectiveAnimationsEnabled)
+            (false, false, true, false), // toggle off: no VSync wake-ups
+            (false, true, true, false),
+        ];
+        for (enabled, focus_mode, moving, expected) in table {
+            let effective = effective_animations_enabled(enabled, focus_mode);
+            assert_eq!(
+                vsync_tick_allowed(effective, moving),
+                expected,
+                "animations_enabled={enabled} focus_mode={focus_mode} moving={moving}"
+            );
+        }
+
+        // 190 ms slide at a 60 Hz VSync cadence gets ~11 ticks.
+        assert_eq!(
+            animation_tick_count(Duration::from_millis(190), Duration::from_millis(16)),
+            11
+        );
+        // Disabled animations: producer never wakes, so no ticks are accumulated.
+        let effective = effective_animations_enabled(false, false);
+        assert!(!vsync_tick_allowed(effective, true));
+        assert_eq!(
+            animation_tick_count(Duration::from_secs(5), Duration::from_millis(16)),
+            312
+        );
     }
 
     #[test]

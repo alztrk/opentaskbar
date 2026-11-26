@@ -359,14 +359,15 @@ pub(super) fn open_background_apps_flyout(
     blocks.push(FlyoutBlock::Separator);
     blocks.push(FlyoutBlock::ButtonBar(vec![
         (1, loc::t("TaskManager").to_owned(), false),
-        (2, "Windows Tray".to_owned(), false),
+        (2, loc::t("WindowsTray").to_owned(), false),
     ]));
 
     let spec = FlyoutSpec {
         title: loc::t("TrayApps").to_owned(),
-        subtitle: Some(match apps.len() {
-            1 => "1 app running in the background".to_owned(),
-            count => format!("{count} apps running in the background"),
+        subtitle: Some(if apps.len() == 1 {
+            loc::t("TrayAppsRunningOne")
+        } else {
+            loc::t_fmt("TrayAppsRunningMany", &[&apps.len().to_string()])
         }),
         width_dips: 336.0,
         blocks,

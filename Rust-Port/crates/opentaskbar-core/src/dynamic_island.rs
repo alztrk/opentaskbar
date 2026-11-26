@@ -6,6 +6,89 @@ use std::collections::{HashMap, HashSet};
 
 use crate::settings::{DYNAMIC_ISLAND_ALL_DISPLAYS, DynamicIslandVisibilityMode};
 
+/// Geometry vectors copied 1:1 from C# `DynamicIslandWindow.xaml.cs` and
+/// `Views/Windows/DynamicIslandWindow.xaml`. The Rust native host must use these
+/// instead of locally invented sizes (the old port expanded *width* by 246 DIP,
+/// while C# expands the window *height* to 246 DIP).
+pub mod geometry {
+    pub const COMPACT_HEIGHT_DIPS: f32 = 50.0;
+    pub const EXPANDED_HEIGHT_DIPS: f32 = 246.0;
+    pub const COMPACT_MIN_WIDTH_DIPS: f32 = 360.0;
+    pub const EXPANDED_MIN_WIDTH_DIPS: f32 = 430.0;
+    pub const MAX_WIDTH_DIPS: f32 = 960.0;
+    pub const EDGE_INSET_DIPS: f32 = 16.0;
+    /// `CornerRadius="0,0,20,20"` on `IslandSurface` (`DockRadius` token).
+    pub const BOTTOM_RADIUS_DIPS: f32 = 20.0;
+    /// `DockInnerRadius` token — used by the inner chrome highlight.
+    pub const INNER_RADIUS_DIPS: f32 = 19.0;
+    /// `WidgetRadius` / `DockWidgetActionRadius` / `WidgetFieldRadius` tokens.
+    pub const CHIP_RADIUS_DIPS: f32 = 12.0;
+    pub const BUTTON_RADIUS_DIPS: f32 = 5.0;
+    pub const FIELD_RADIUS_DIPS: f32 = 7.0;
+    /// `DetailsPanel Padding="14,2,14,12"`.
+    pub const DETAILS_PADDING_X_DIPS: f32 = 14.0;
+    pub const DETAILS_PADDING_TOP_DIPS: f32 = 2.0;
+    pub const DETAILS_PADDING_BOTTOM_DIPS: f32 = 12.0;
+    /// Navigation column widths from the island header grid (38/38/56/38 DIP).
+    pub const LEFT_CONTROLS_DIPS: f32 = 38.0;
+    pub const RIGHT_CONTROLS_DIPS: f32 = 38.0 + 56.0 + 38.0;
+    /// C# `WidthForCurrentPage()` adds 176 DIP of chrome to the widget estimate.
+    pub const CHROME_ALLOWANCE_DIPS: f32 = 176.0;
+    pub const EXPANDED_PREFERRED_MIN_DIPS: f32 = 540.0;
+    pub const FALLBACK_WIDGET_WIDTH_DIPS: f32 = 280.0;
+    pub const DETAILS_WIDTH_ALLOWANCE_DIPS: f32 = 32.0;
+}
+
+/// C# `CompactHeight` / `ExpandedHeight`: the island grows vertically, not horizontally.
+pub fn island_height_dips(expanded: bool) -> f32 {
+    if expanded {
+        geometry::EXPANDED_HEIGHT_DIPS
+    } else {
+        geometry::COMPACT_HEIGHT_DIPS
+    }
+}
+
+/// Mirrors C# `DynamicIslandWindow.WidthForCurrentPage()`.
+///
+/// `widget_width` is `widget.FullWidthEstimate` (280 DIP when unknown), and
+/// `details_width` is the measured desired width of the expanded details panel.
+pub fn preferred_window_width(
+    widget_width: Option<f32>,
+    details_width: f32,
+    expanded: bool,
+) -> f32 {
+    let widget = widget_width
+        .filter(|w| w.is_finite() && *w > 0.0)
+        .unwrap_or(geometry::FALLBACK_WIDGET_WIDTH_DIPS);
+    let base = widget + geometry::CHROME_ALLOWANCE_DIPS;
+    if expanded {
+        base.max(geometry::EXPANDED_PREFERRED_MIN_DIPS)
+            .max(details_width.max(0.0) + geometry::DETAILS_WIDTH_ALLOWANCE_DIPS)
+    } else {
+        base
+    }
+}
+
+/// Clamps `preferred_window_width` with C#'s compact/expanded minimums.
+pub fn window_width_for_page(
+    widget_width: Option<f32>,
+    details_width: f32,
+    monitor_width: f32,
+    expanded: bool,
+) -> f32 {
+    clamp_window_width(
+        preferred_window_width(widget_width, details_width, expanded),
+        monitor_width,
+        if expanded {
+            geometry::EXPANDED_MIN_WIDTH_DIPS
+        } else {
+            geometry::COMPACT_MIN_WIDTH_DIPS
+        },
+        geometry::MAX_WIDTH_DIPS,
+        geometry::EDGE_INSET_DIPS,
+    )
+}
+
 /// Returns whether `widget_id` is assigned to `device_name` (or `*` for all displays).
 pub fn is_assigned_to_display(
     placements: &HashMap<String, String>,
@@ -242,5 +325,35 @@ mod tests {
             clamp_window_width(1200.0, 1920.0, 360.0, 960.0, 16.0),
             960.0
         );
+    }
+
+    /// Direct vectors from C# `DynamicIslandWindow.xaml.cs` (lines 22-25) and
+    /// `Design/Tokens/Radii.xaml`. Keeping them here catches port drift.
+    #[test]
+    fn csharp_geometry_vectors() {
+        assert_eq!(island_height_dips(false), 50.0);
+        assert_eq!(island_height_dips(true), 246.0);
+        assert_eq!(geometry::COMPACT_MIN_WIDTH_DIPS, 360.0);
+        assert_eq!(geometry::EXPANDED_MIN_WIDTH_DIPS, 430.0);
+        assert_eq!(geometry::MAX_WIDTH_DIPS, 960.0);
+        assert_eq!(geometry::EDGE_INSET_DIPS, 16.0);
+        assert_eq!(geometry::BOTTOM_RADIUS_DIPS, 20.0);
+        assert_eq!(geometry::INNER_RADIUS_DIPS, 19.0);
+        assert_eq!(geometry::CHIP_RADIUS_DIPS, 12.0);
+        assert_eq!(geometry::BUTTON_RADIUS_DIPS, 5.0);
+        assert_eq!(geometry::FIELD_RADIUS_DIPS, 7.0);
+    }
+
+    #[test]
+    fn csharp_width_for_current_page_vectors() {
+        // 280 (default FullWidthEstimate) + 176 chrome = 456 compact.
+        assert_eq!(preferred_window_width(None, 0.0, false), 456.0);
+        // Expanded prefers >= 540 even for a 280 DIP widget.
+        assert_eq!(preferred_window_width(None, 0.0, true), 540.0);
+        // A wide details panel can drive the width (C#: detailWidth + 32).
+        assert_eq!(preferred_window_width(Some(280.0), 620.0, true), 652.0);
+        // Clamped to the C# expanded minimum on a narrow monitor.
+        assert_eq!(window_width_for_page(None, 0.0, 420.0, true), 388.0);
+        assert_eq!(window_width_for_page(None, 0.0, 1920.0, false), 456.0);
     }
 }
