@@ -280,6 +280,9 @@ fn compute_target_with_alignment(
 ) -> (i32, i32) {
     let margin = scale_px(8, dpi);
     let gap = scale_px(12, dpi);
+    // #185: Start is anchored from the center of its shell cell (the same
+    // center the dock draws/hit-tests), never from the cell's leading edge.
+    let anchor_center_x = (anchor.left + anchor.right) / 2;
 
     if is_full_screen_canvas(flyout_width, work.width()) {
         // UIA measurement is not available in the shell crate, so use the same
@@ -302,7 +305,7 @@ fn compute_target_with_alignment(
                 side_flyout_y(anchor, panel_h, work, dpi),
             ),
             DockEdge::Bottom => (
-                clamp(anchor.left - margin, min_x, max_x),
+                clamp(anchor_center_x - panel_w / 2 - margin, min_x, max_x),
                 clamp(
                     anchor.top - panel_h - gap,
                     work.top + margin,
@@ -327,7 +330,7 @@ fn compute_target_with_alignment(
             side_flyout_y(anchor, flyout_height, work, dpi),
         ),
         DockEdge::Bottom => (
-            clamp(anchor.left - margin, min_x, max_x),
+            clamp(anchor_center_x - flyout_width / 2 - margin, min_x, max_x),
             clamp(anchor.top - flyout_height - gap, min_y, max_y),
         ),
     }
@@ -1699,7 +1702,36 @@ mod tests {
         };
         assert_eq!(
             target(anchor, 640, 724, work(), DockEdge::Bottom, 96),
-            (92, 264)
+            (8, 264)
+        );
+    }
+
+    #[test]
+    fn start_uses_cell_center_without_changing_search_or_control_center() {
+        let anchor = Anchor {
+            left: 100,
+            top: 1000,
+            right: 160,
+            bottom: 1040,
+        };
+        // Moving the cell right by 20 DIP moves Start by the same 20 DIP.
+        let moved = Anchor {
+            left: anchor.left + 20,
+            right: anchor.right + 20,
+            ..anchor
+        };
+        // A narrow panel is not clamped to the work area, so the 20 DIP shift
+        // of the cell center is observable (a 640 px panel would clamp at 8).
+        let start = target(anchor, 60, 724, work(), DockEdge::Bottom, 96);
+        let start_moved = target(moved, 60, 724, work(), DockEdge::Bottom, 96);
+        assert_eq!(start_moved.0 - start.0, 20);
+        assert_eq!(
+            compute_search_target(anchor, 640, 724, work(), DockEdge::Bottom, 96),
+            (92, 268)
+        );
+        assert_eq!(
+            compute_control_center_target(anchor, 640, 724, work(), DockEdge::Bottom, 96),
+            (8, 264)
         );
     }
 
@@ -1742,7 +1774,7 @@ mod tests {
         };
         assert_eq!(
             target(anchor, 640, 724, work(), DockEdge::Bottom, 192),
-            (84, 252)
+            (16, 252)
         );
     }
 
@@ -1757,7 +1789,7 @@ mod tests {
         assert!(is_full_screen_canvas(1920, work().width()));
         assert_eq!(
             target(anchor, 1920, 1080, work(), DockEdge::Bottom, 96),
-            (-547, -80)
+            (-592, -80)
         );
     }
 

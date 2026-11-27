@@ -87,6 +87,21 @@ pub const PREVIEW_CARD_DIPS: (f32, f32) = (228.0, 154.0);
 /// Enlarged card used for the Large profile / expanded preview strip.
 pub const PREVIEW_CARD_LARGE_DIPS: (f32, f32) = (250.0, 180.0);
 
+// ---- Single horizontal spacing model (#185) ------------------------------------
+//
+// `dock_icon_padding` belongs to the *gap*, never to the cell width. Applying it
+// to both (as the old `cell = cell_h + pad` + `gap = 9 + pad` pairing did) counted
+// it twice and made the shell group grow faster than the icons, which in turn
+// shifted the Start button/flyout when spacing changed.
+/// Baseline app-to-app gap (`DockMetrics` reference: 9 DIP).
+pub const BASE_CELL_GAP_DIPS: f32 = 9.0;
+/// Baseline gap between neighbouring shell buttons (Start/Search/TaskView).
+pub const SHELL_GAP_DIPS: f32 = 4.0;
+/// Baseline gap between widget chips and trailing tray/bin buttons.
+pub const WIDGET_GAP_DIPS: f32 = 6.0;
+/// Inner horizontal padding on each end of the content strip.
+pub const CONTENT_EDGE_PAD_DIPS: f32 = 14.0;
+
 /// Resolved geometry for one dock size profile. All values are DIPs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SizeProfile {
@@ -146,8 +161,10 @@ pub fn aggregate_by_executable_path(settings: &DockSettings) -> bool {
         .unwrap_or(false)
 }
 
-/// `DockMetrics.For(size, scale, padding)` — scaled profile with a fixed extra
-/// gap that widens cells horizontally but never grows the dock vertically.
+/// `DockMetrics.For(size, scale, padding)` — scaled profile. The icon padding is
+/// *not* folded into `cell`: it is applied exactly once, through [`gap_for`].
+/// That keeps the cell square and makes every section (shell/apps/widgets) grow
+/// by the same amount when spacing changes.
 pub fn size_profile(settings: &DockSettings) -> SizeProfile {
     let i = profile_index(settings.size);
     let scale = if settings.dock_scale.is_finite() {
@@ -155,7 +172,6 @@ pub fn size_profile(settings: &DockSettings) -> SizeProfile {
     } else {
         1.0
     };
-    let pad = settings.dock_icon_padding.clamp(0, 12) as f32;
     let shelf = PROFILE_SHELF_DIPS[i];
     let cell_h = (PROFILE_CELL_DIPS[i] * scale).round().max(24.0);
     let radius = (PROFILE_RADIUS_DIPS[i] * scale).round().clamp(10.0, 30.0);
@@ -171,7 +187,7 @@ pub fn size_profile(settings: &DockSettings) -> SizeProfile {
     };
     SizeProfile {
         shelf: (shelf * scale).round(),
-        cell: cell_h + pad,
+        cell: cell_h,
         icon: (PROFILE_ICON_DIPS[i] * scale).round().max(20.0),
         radius,
         secondary_shelf,
@@ -184,7 +200,58 @@ pub fn size_profile(settings: &DockSettings) -> SizeProfile {
     }
 }
 
-/// `content_alignment` decides where the content strip sits inside a wide pill.
+/// The only place `dock_icon_padding` enters horizontal layout (0..=12 DIP).
+pub fn icon_padding_dips(settings: &DockSettings) -> f32 {
+    settings.dock_icon_padding.clamp(0, 12) as f32
+}
+
+/// Single gap function: a baseline gap plus the user spacing, applied once.
+///
+/// Every section uses this helper (apps `9`, shell `4`, widgets/trail `6`), so a
+/// spacing change grows all strides by exactly `padding` and never by `2*padding`.
+pub fn gap_for(settings: &DockSettings, baseline: f32) -> f32 {
+    baseline + icon_padding_dips(settings)
+}
+
+pub fn slot_gap(settings: &DockSettings) -> f32 {
+    gap_for(settings, BASE_CELL_GAP_DIPS)
+}
+
+pub fn shell_gap(settings: &DockSettings) -> f32 {
+    gap_for(settings, SHELL_GAP_DIPS)
+}
+
+pub fn widget_gap(settings: &DockSettings) -> f32 {
+    gap_for(settings, WIDGET_GAP_DIPS)
+}
+
+/// Width of `count` equal cells separated by `gap` (no trailing gap).
+pub fn section_width(cell: f32, gap: f32, count: usize) -> f32 {
+    if count == 0 {
+        0.0
+    } else {
+        cell * count as f32 + gap * (count.saturating_sub(1) as f32)
+    }
+}
+
+/// Total content width of the four dock sections, including both inner edges.
+/// Shared by pill auto-sizing and the scroll viewport so they cannot drift.
+pub fn content_strip_width(shell_w: f32, apps_w: f32, widgets_w: f32, trail_w: f32) -> f32 {
+    shell_w + apps_w + widgets_w + trail_w + CONTENT_EDGE_PAD_DIPS * 2.0
+}
+
+/// DIP rect of a shell cell centered on `center_x` (anchor/hit-test/draw parity).
+pub fn centered_shell_rect(
+    center_x: f32,
+    base: f32,
+    top: f32,
+    bottom: f32,
+) -> (f32, f32, f32, f32) {
+    (center_x - base * 0.5, top, center_x + base * 0.5, bottom)
+}
+
+/// `content_alignment` decides where the trailing strip sits inside a wide pill.
+/// The leading shell group never uses this offset (see `compute_scroll_metrics`).
 pub fn content_alignment_offset(available: f32, used: f32, alignment: DockContentAlignment) -> f32 {
     let slack = (available - used).max(0.0);
     match alignment {
@@ -916,6 +983,32 @@ pub fn normalized_start_placement(settings: &DockSettings) -> StartButtonPlaceme
     settings.start_placement
 }
 
+/// Resolves a shell-button toggle from its typed field (#184/#185): the typed
+/// flag is authoritative when it turns the button OFF, while a legacy `extra`
+/// key is still honoured when the typed value is left at its default `true`.
+pub fn shell_button_enabled(settings: &DockSettings, typed: bool, legacy_key: &str) -> bool {
+    if !typed {
+        return false;
+    }
+    settings
+        .extra
+        .get(legacy_key)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
+pub fn show_search_button(settings: &DockSettings) -> bool {
+    shell_button_enabled(settings, settings.show_search_button, "ShowSearchButton")
+}
+
+pub fn show_task_view_button(settings: &DockSettings) -> bool {
+    shell_button_enabled(
+        settings,
+        settings.show_task_view_button,
+        "ShowTaskViewButton",
+    )
+}
+
 /// Rewrites the persisted order so pinned shell groups lead and trail the strip.
 /// `End` / `InWidgets` move the Start token into the trailing (widget/tray)
 /// group instead of leaving the setting ineffective at the head of the strip.
@@ -925,20 +1018,10 @@ pub fn apply_pinned_groups(order: &[String], settings: &DockSettings) -> Vec<Str
     if placement == StartButtonPlacement::Start {
         lead.push("start".to_owned());
     }
-    if settings
-        .extra
-        .get("ShowSearchButton")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    if show_search_button(settings) {
         lead.push("search".to_owned());
     }
-    if settings
-        .extra
-        .get("ShowTaskViewButton")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+    if show_task_view_button(settings) {
         lead.push("taskview".to_owned());
     }
 
@@ -1274,6 +1357,53 @@ pub fn overlap_scan_due(
 /// `DockSettings.EffectiveAnimationsEnabled`: the app toggle plus Focus Mode.
 pub fn effective_animations_enabled(animations_enabled: bool, focus_mode: bool) -> bool {
     animations_enabled && !focus_mode
+}
+
+/// Single gate for every magnification/fisheye path (app icons *and* shell
+/// buttons). Raw `animations_enabled` must never bypass Focus Mode.
+pub fn fisheye_enabled(settings: &DockSettings) -> bool {
+    settings.magnification_enabled
+        && effective_animations_enabled(settings.animations_enabled, settings.focus_mode)
+}
+
+/// Raised-cosine target scale shared by app slots and shell buttons.
+/// `expansion_fraction` is the captured budget fraction (1.0 = full radius).
+pub fn fisheye_target_scale(
+    settings: &DockSettings,
+    pointer_x: Option<f32>,
+    center_x: f32,
+    configured_max: f32,
+    expansion_fraction: f32,
+) -> f32 {
+    if !fisheye_enabled(settings) || configured_max <= 1.0 {
+        return 1.0;
+    }
+    let Some(mx) = pointer_x else {
+        return 1.0;
+    };
+    let cell = size_profile(settings).cell + slot_gap(settings);
+    let radius = influence_radius_for_expansion(cell, expansion_fraction);
+    compute_target_scale((mx - center_x).abs(), radius, configured_max)
+}
+
+/// Springs all three shell glyph scales in one pass. Kept pure so the Start
+/// hover / Focus Mode decision table can be tested without a desktop session.
+pub fn step_shell_spring(
+    scales: &mut [f32; 3],
+    velocities: &mut [f32; 3],
+    targets: [f32; 3],
+    dt_seconds: f32,
+    max_scale: f32,
+) -> bool {
+    let mut moving = false;
+    for i in 0..3 {
+        let (scale, velocity, settled) =
+            step_spring(scales[i], targets[i], velocities[i], dt_seconds, max_scale);
+        scales[i] = scale;
+        velocities[i] = velocity;
+        moving |= !settled;
+    }
+    moving
 }
 
 /// Whether the VSync producer should keep posting frames.
@@ -1904,6 +2034,9 @@ mod tests {
         let mut settings = DockSettings {
             show_tray_button: true,
             show_recycle_bin: true,
+            // This test is about Start placement only; keep the lead group minimal.
+            show_search_button: false,
+            show_task_view_button: false,
             ..DockSettings::default()
         };
         let order = ["app:a", "widget:clock"].map(str::to_owned);
@@ -2510,6 +2643,126 @@ mod tests {
         assert!(use_hover_icon(true, true, true));
         assert!(!use_hover_icon(true, false, true));
         assert!(!use_hover_icon(true, true, false));
+    }
+
+    #[test]
+    fn single_padding_model_applies_spacing_exactly_once() {
+        let mut settings = DockSettings::default();
+        for padding in [0, 12] {
+            settings.dock_icon_padding = padding;
+            let p = padding as f32;
+            // The cell stays square; spacing lives only in the gaps.
+            assert_eq!(size_profile(&settings).cell, 38.0);
+            assert_eq!(slot_gap(&settings), 9.0 + p);
+            assert_eq!(shell_gap(&settings), 4.0 + p);
+            assert_eq!(widget_gap(&settings), 6.0 + p);
+            // One shared section-width primitive for shell/apps/widgets.
+            assert_eq!(
+                section_width(38.0, slot_gap(&settings), 4),
+                152.0 + 3.0 * (9.0 + p)
+            );
+            assert_eq!(
+                content_strip_width(139.0 + 2.0 * p, 152.0, 101.0 + p, 0.0),
+                420.0 + 3.0 * p
+            );
+        }
+    }
+
+    #[test]
+    fn typed_shell_button_flags_drive_pinned_groups_with_legacy_fallback() {
+        let order = ["app:a"].map(str::to_owned);
+        let mut settings = DockSettings::default();
+
+        // Typed OFF wins over a stale `extra` key (the #184 side effect).
+        settings
+            .extra
+            .insert("ShowSearchButton".into(), json!(true));
+        settings.show_search_button = false;
+        let applied = apply_pinned_groups(&order, &settings);
+        assert!(!applied.iter().any(|token| token == "search"));
+
+        // Typed ON with no legacy key shows the button.
+        settings.extra.remove("ShowSearchButton");
+        settings.show_search_button = true;
+        assert!(show_search_button(&settings));
+        assert!(
+            apply_pinned_groups(&order, &settings)
+                .iter()
+                .any(|token| token == "search")
+        );
+
+        // A legacy `extra: false` is still honoured while typed stays at default.
+        settings
+            .extra
+            .insert("ShowSearchButton".into(), json!(false));
+        assert!(!show_search_button(&settings));
+
+        settings.show_task_view_button = false;
+        assert!(!show_task_view_button(&settings));
+        assert!(
+            !apply_pinned_groups(&order, &settings)
+                .iter()
+                .any(|token| token == "taskview")
+        );
+    }
+
+    #[test]
+    fn shell_fisheye_gate_decision_table_and_spring() {
+        let table = [
+            (true, true, false, true),
+            (true, true, true, false), // Focus Mode suppresses shell magnification
+            (true, false, false, false),
+            (false, true, false, false),
+            (false, false, true, false),
+        ];
+        for (magnification, animations, focus_mode, expected) in table {
+            let settings = DockSettings {
+                magnification_enabled: magnification,
+                animations_enabled: animations,
+                focus_mode,
+                ..DockSettings::default()
+            };
+            assert_eq!(fisheye_enabled(&settings), expected);
+        }
+
+        let settings = DockSettings {
+            magnification_enabled: true,
+            animations_enabled: true,
+            ..DockSettings::default()
+        };
+        let centers = [100.0_f32, 400.0, 700.0];
+        let targets =
+            centers.map(|center| fisheye_target_scale(&settings, Some(100.0), center, 1.5, 1.0));
+        assert!(targets[0] > 1.0, "Start hover must magnify the Start glyph");
+        assert_eq!(targets[1], 1.0);
+        assert_eq!(targets[2], 1.0);
+        let mut scales = [1.0_f32; 3];
+        let mut velocities = [0.0_f32; 3];
+        step_shell_spring(&mut scales, &mut velocities, targets, 1.0 / 60.0, 1.5);
+        assert!(scales[0] > 1.0);
+        assert_eq!(scales[1], 1.0);
+
+        let focus = DockSettings {
+            focus_mode: true,
+            ..settings.clone()
+        };
+        let gated =
+            centers.map(|center| fisheye_target_scale(&focus, Some(100.0), center, 1.5, 1.0));
+        assert_eq!(gated, [1.0; 3]);
+        for _ in 0..120 {
+            step_shell_spring(&mut scales, &mut velocities, gated, 1.0 / 60.0, 1.5);
+        }
+        assert!((scales[0] - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn centered_shell_rect_anchor_comes_from_the_cell_center() {
+        for center in [46.0_f32, 70.0, 94.0] {
+            let rect = centered_shell_rect(center, 38.0, 960.0, 1004.0);
+            assert_eq!((rect.0 + rect.2) * 0.5, center);
+            assert_eq!(rect.1, 960.0);
+            assert_eq!(rect.2 - rect.0, 38.0);
+        }
     }
 
     #[test]
