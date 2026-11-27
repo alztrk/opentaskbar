@@ -1,289 +1,160 @@
-# Windows taskbar çalışma modeli ve OpenTaskbar sağlamlaştırma planı
+# Windows görev çubuğu çalışma modeli ve OpenTaskbar güvenilirliği
 
 > Bu döküman, `docs/windows-reliability-audit.md` (doğrulama matrisi) ile birlikte kullanılmalıdır.
 > Audit "hangi senaryoları test etmeliyiz?" sorusunu cevaplar; bu döküman "Windows gerçekte nasıl çalışıyor ve
-> biz neden tekrar tekrar aynı sınıf hataları üretiyoruz?" sorusunu cevaplar.
+> Rust uygulaması hangi mekanizmalara dayanıyor?" sorusunu cevaplar.
 >
-> Kaynaklar en sonda listelenmiştir. Dokümante edilmemiş davranışlar (`SetWindowBand`, `SHELLTRAYDATA`
-> alan ofsetleri, Win11 `TaskbarCreated` değişimi) her Windows sürüm yükseltmesinde yeniden doğrulanmalıdır.
+> Uygulama Rust-only'dır: kök workspace `Cargo.toml` + `crates/{opentaskbar-core,opentaskbar-shell,opentaskbar-app}`.
+> Kaynaklar en sonda listelenmiştir. Belgelenmemiş davranışlar (`SetWindowBand`, `SHELLTRAYDATA` ofsetleri,
+> Win11 `TaskbarCreated` değişimi) her Windows sürüm yükseltmesinde yeniden doğrulanmalıdır.
 
 ---
 
 ## Bölüm 1 — Windows görev çubuğu gerçekte nasıl çalışıyor?
 
-### 1.1 `Shell_TrayWnd` ve bildirim alanının taşıma katmanı
+### 1.1 `Shell_TrayWnd` ve bildirim alanı
 
-Görünür görev çubuğu `Shell_TrayWnd` sınıfından bir penceredir ve normalde **explorer.exe** tarafından sağlanır.
+Görünür görev çubuğu normalde `explorer.exe` tarafından sağlanan `Shell_TrayWnd` sınıfından bir penceredir.
 `Shell_NotifyIcon` çizim yapmaz; SHELL32.dll içindeki bir "switchboard"dur:
 
-1. `FindWindow("Shell_TrayWnd", ...)` ile hedef pencereyi bulur (bulunamazsa doğrudan başarısız olur).
-2. Parametreleri **`WM_COPYDATA`** ile gönderir. `COPYDATASTRUCT.dwData`:
-   - `0` → `SHAppBarMessage`
-   - `1` → `Shell_NotifyIcon`
-   - `2` → `SHEnableServiceObject` / `SHLoadInProc`
-3. Explorer'ın pencere prosedürü mesajı işler ve callback mesajını uygulamanın `uCallbackMessage`
-   penceresine geri gönderir. NT tabanlı sistemlerde çağrı **engellenerek** yapılır; ~4 sn (Vista'da 7 sn)
-   zaman aşımı vardır.
+1. `FindWindow("Shell_TrayWnd", ...)` ile hedef pencere bulunur (yoksa çağrı başarısız olur).
+2. Parametreler **`WM_COPYDATA`** ile gönderilir. `COPYDATASTRUCT.dwData`: `0` → `SHAppBarMessage`,
+   `1` → `Shell_NotifyIcon`, `2` → `SHEnableServiceObject` / `SHLoadInProc`.
+3. Explorer pencere prosedürü mesajı işler ve callback mesajını uygulamanın `uCallbackMessage`
+   penceresine geri gönderir. NT tabanlı sistemlerde çağrı **engellenerek** yapılır (~4 sn zaman aşımı).
 
-Vista+ güvenlik detayı: `NIF_MESSAGE` verildiğinde `uCallbackMessage` numarası **çağrı yapan process'in
-mesaj filtresine eklenir**; böylece daha yüksek integrity seviyesindeki Explorer'dan gelen geri çağrı
-daha düşük seviyeli istemciye ulaşabilir (UIPI).
+Vista+ güvenlik detayı: `NIF_MESSAGE` verildiğinde `uCallbackMessage` numarası çağıran process'in mesaj
+filtresine eklenir; böylece daha yüksek integrity seviyesindeki Explorer'dan gelen geri çağrı daha düşük
+seviyeli istemciye ulaşabilir (UIPI).
 
-Üçüncü parti dock'ların (ManagedShell, zebar, yasb) kullandığı iki yaklaşım:
+Üçüncü parti dock'ların kullandığı iki yaklaşım:
 
-- **Spy window:** `Shell_TrayWnd` sınıf adıyla gizli bir pencere açıp aynı `WM_COPYDATA` mesajlarını yakalar,
-  sonra gerçek Explorer penceresine **forward eder** (etmezse sistem tepsisi bozulur).
-- **Explorer DLL injection + subclass:** `SetWindowLongPtrW` ile `Shell_TrayWnd` window proc'u değiştirilir,
-  veri named pipe ile dışarı aktarılır. Daha fazla control sağlar ama AV/EDR false positive, sürüm
-  bağımlılığı ve process'i dondurma riski taşır. Pipe yazımı **overlapped I/O + 500 ms üst sınır** ile
-  yapılmalıdır; aksi halde dock'un WriteFile bloklaması tüm görev çubuğunu dondurur.
+- **Spy window:** `Shell_TrayWnd` sınıfıyla gizli pencere açıp aynı `WM_COPYDATA` mesajlarını yakalar ve
+  gerçek Explorer penceresine **forward eder** (etmezse sistem tepsisi bozulur).
+- **DLL injection + subclass:** `SetWindowLongPtrW` ile window proc değiştirilir, veri named pipe ile
+  dışarı aktarılır. Daha fazla kontrol sağlar ama AV/EDR false positive ve sürüm bağımlılığı riski taşır;
+  pipe yazımı `overlapped I/O` + üst sınır gerektirir.
 
 ### 1.2 `Shell_NotifyIcon` yaşam döngüsü
 
-**Sürüm / `cbSize`:** Vista+ için `cbSize = sizeof(NOTIFYICONDATA)`, XP `NOTIFYICONDATA_V3_SIZE (504)`,
-Win2000 `V2_SIZE (488)`, daha eskisi `V1_SIZE (88)`. `NIM_ADD`'den hemen sonra **`NIM_SETVERSION(NOTIFYICON_VERSION_4)`**
-çağrılmalıdır (oturum kapanınca kalıcı değildir, `NIM_MODIFY` ile gerekmez).
+- Vista+ için `cbSize = sizeof(NOTIFYICONDATA)`; `NIM_ADD`'den hemen sonra **`NIM_SETVERSION(NOTIFYICON_VERSION_4)`** çağrılmalıdır.
+- Kimlik: `hWnd + uID` (klasik) veya **`guidItem` + `NIF_GUID`** (Win7+ önerilen). GUID, exe yolu
+  değişse bile tek kaydı korur; MSIX/güncelleme/taşıma sonrası "promoted" seçimi kaybolmaz.
+- v4 callback semantiği gerçek Windows mesajı değildir; `uCallbackMessage` mesajının `lParam` içinde taşınır:
+  `LOWORD(lParam)` olay (`NIN_*`, `WM_CONTEXTMENU`), `HIWORD(lParam)` ikon ID'si (16 bit),
+  `GET_X/Y_LPARAM(wParam)` **signed** koordinatlar (negatif değerler sol/üst monitör için normaldir).
+- Aynı fiziksel gesture için hem fare mesajı hem `NIN_SELECT` gelir; tıklama soyutlaması **dedupe** etmelidir.
 
-**Kimlik:** `hWnd + uID` (klasik) veya **`guidItem` + `NIF_GUID`** (Win7+ önerilen).
+### 1.3 Foreground izni alınamaz, verilir
 
-| Kimlik | Dayanak | Kırılganlık |
-|---|---|---|
-| `hWnd + uID` | Process HWND'si + sayısal ID | HWND her başlatmada değişir; uID çakışabilir |
-| `ExecutablePath + uID` (Shell'in sakladığı) | Dosya yolu | MSIX/güncelleme/taşıma → yeni kayıt, `IsPromoted` kaybı |
-| `guidItem` | Uygulamanın sabit 128-bit GUID'i | Exe yolu değişse bile tek kayıt korunur; en kararlı kimlik |
+`SetForegroundWindow` yalnızca masaüstü uygulaması, foreground kilidi yok, aktif menü yok **ve** çağıranın
+zaten foreground olması / son girdiyi alması / foreground yokluğu gibi koşullarda başarılı olur.
+Dock, ikonun penceresine `SendNotifyMessage(WM_LBUTTONUP)` gönderdiğinde girdiyi alan process dock'dır;
+hedef uygulama öne çıkamaz ve görev çubuğu flaşlar. Doğru yaklaşım:
+`GetWindowThreadProcessId` → **`AllowSetForegroundWindow(pid)`** → mesajları gönder → yanıt vermeyen
+"zombie" ikonlarda `ms-settings:` URI veya exe yolu fallback'i. `AttachThreadInput` kötü bir çözümdür.
 
-GUID'in kritik önemi: bir MSIX uygulaması her sürümde `...\1.2.3.0_...` klasörüne kurulduğunda Shell,
-`ExecutablePath + uID` ile eşleştirdiği için her güncellemede yeni bir ikon sanır ve kullanıcının "göster"
-seçimini kaybeder. GUID ile Shell tek kaydı günceller.
+### 1.4 AppBar ve çalışma alanı protokolü
 
-**Komutlar:** `NIM_ADD → NIM_MODIFY / NIM_DELETE`, `NIM_SETFOCUS` (Shell32 bu durumda taskbar
-sürecine açıkça `AllowSetForegroundWindow` çağırır), `NIM_SETVERSION`.
+Doğru sıra: `ABM_NEW` (callback mesajıyla) → `ABM_QUERYPOS` (Tam EKRAN koordinatı, work area DEĞİL)
+→ sabit kenarı yeniden uygula → `ABM_SETPOS` → dönen `rc` ile `MoveWindow` → `ABM_WINDOWPOSCHANGED` /
+`ABM_ACTIVATE`.
 
-### 1.3 v4 callback semantiği ve tıklama sırası — en çok karıştırılan kısım
+Sık yapılan hatalar: QUERYPOS atlanması, SETPOS'un döndürdüğü `rc`'nin kullanılmaması, work area
+koordinatı verilmesi (çift indentation), `SPI_GETWORKAREA`'nın yalnızca birincil monitörü vermesi,
+`SPI_SETWORKAREA + SPIF_SENDCHANGE` senkron broadcast'in ~3,5 sn bloklaması (yerine `PostMessage`),
+`ABN_FULLSCREENAPP` / `ABN_POSCHANGED` yanıtlarının atlanması ve aynı kenarda birden fazla autohide appbar.
+Değer değişmediyse `SetWindowPos` çağrısını atlamak gerekir; aksi halde geri besleme döngüsü oluşur.
 
-Bunlar gerçek Windows mesajları **değildir**; `uCallbackMessage` ile belirtilen mesajın `lParam` içinde taşınır:
+### 1.5 Explorer restart ve kabuk sinyalleri
 
-```
-NIN_SELECT=0x400, NIN_KEYSELECT=0x401, NIN_BALLOONSHOW..USERCLICK=0x402..0x405,
-NIN_POPUPOPEN=0x406, NIN_POPUPCLOSE=0x407, WM_CONTEXTMENU=0x007B
-```
-
-**v0–v3:** `wParam = uID`, `lParam = WM_LBUTTONDOWN/UP/DBLCLK...` (fare mesajı numarası).
-**Koordinat gelmez** — `GetCursorPos()` gerekir.
-
-**v4 (doğru modern yorum):**
-- `LOWORD(lParam)` = olay (`NIN_*` veya `WM_CONTEXTMENU`)
-- `HIWORD(lParam)` = ikon ID'si (**16 bit ile sınırlı**; GUID kullanıldığında anlamsız)
-- `GET_X_LPARAM(wParam)` / `GET_Y_LPARAM(wParam)` = **signed** koordinatlar (negatif değerler sol/üst
-  monitör için normaldir; `LOWORD/HIWORD` kullanmak çoklu monitörde yanlış konum verir)
-
-| Kullanıcı eylemi | Uygulamaya gelen sıra |
-|---|---|
-| Sol tık | `WM_LBUTTONDOWN → WM_LBUTTONUP → NIN_SELECT` |
-| Sol çift tık | `DOWN → UP → WM_LBUTTONDBLCLK → UP` (+ `NIN_SELECT`) |
-| Sağ tık | `WM_RBUTTONDOWN → WM_RBUTTONUP → WM_CONTEXTMENU` |
-| Klavye Space/Enter | `NIN_KEYSELECT` |
-| Klavye Menu / Shift+F10 | `WM_CONTEXTMENU` (koordinat `-1,-1` olabilir) |
-| Hover | `NIN_POPUPOPEN / NIN_POPUPCLOSE` (`NIF_SHOWTIP` verilmezse standart tooltip bastırılır) |
-
-**Kritik sonuç:** aynı fiziksel gesture için hem mouse mesajı hem `NIN_SELECT` gelir. İkisini de "Click"
-sayan istemciler tek tıkta **çift olay** üretir (microsoft-ui-reactor #1180'de gerçek bir bug). Tıklama
-soyutlaması mutlaka **dedupe** etmelidir.
-
-### 1.4 Foreground izni alınamaz, verilir
-
-`SetForegroundWindow` yalnızca şu durumlarda başarılı olur: masaüstü uygulaması (UWP değil), foreground
-kilitli değil, aktif menü yok, **ve** en az biri: çağıran zaten foreground / foreground tarafından
-başlatıldı / son girdiyi çağıran aldı / foreground yok / debug ediliyor.
-
-Raymond Chen: *"Foreground activation permission is like love: you can't steal it, it has to be given to you."*
-
-Bir dock, ikonun penceresine `SendNotifyMessage(WM_LBUTTONUP)` gönderdiğinde **girdiyi alan process dock'dır**,
-hedef uygulama değildir. Uygulama `SetForegroundWindow` çağırırsa koşullar sağlanmaz → pencere arka planda
-kalır, görev çubuğu **flaşlar**. Bu, "sabitlenen Steam ikonuna tıklayınca açılmıyor" şikayetinin tam
-mekanizmasıdır.
-
-Doğru yaklaşım (zebar, komorebi):
-1. `GetWindowThreadProcessId(icon.HWnd, &pid)`
-2. **`AllowSetForegroundWindow(pid)`**
-3. Sonra mesajları gönder
-
-Buna rağmen bazı "zombie" ikonlar (SecurityHealthSystray, microphone vb.) hiç yanıt vermez → `ms-settings:`
-URI'si veya exe yolu ile **fallback** gerekir. Ayrıca `SendMessageTimeout(hwnd, WM_NULL, ..., 5000)` ile
-asenkron aktivasyon doğrulanabilir; `AttachThreadInput` kötü bir çözümdür (hedef yanıt vermezse siz de
-kilitlenirsiniz).
-
-### 1.5 Tepsi metadata'sı nerede tutuluyor?
-
-- **`HKCU\Control Panel\NotifyIconSettings`** (Vista+): her ikon için Windows üretimi anahtar;
-  `ExecutablePath`, `IsPromoted` (1 = görünür/promoted, 0 = overflow), GUID. Win11 Ayarlar'daki "Other
-  system tray icons" listesi buradan beslenir; `IsPromoted` değişikliği Explorer restart gerektirmez.
-- **`...\TrayNotify\IconStreams`** (klasik): 20 bayt header + 1640 bayt kayıtlar; exe yolu ROT13 ile
-  obfuscate, görünürlük baytı 0/1/2. Explorer bunu açılışta belleğe okur, kapanışta yazar → çalışma
-  anındaki registry değişiklikleri **üzerine yazılabilir**.
-- Win11'de taskbar XAML ile yeniden yazıldı; eski `ToolbarWindow32` / `TB_BUTTONCOUNT` yöntemleri çalışmaz;
-  `IsPromoted` şeması da yenilendi. Network ve volume ikonları artık sabit, gizlenemez.
-
-### 1.6 AppBar ve çalışma alanı protokolü
-
-Doğru sıra (Microsoft klasik örneği):
-
-```
-ABM_NEW (uCallbackMessage ile; diğer her mesajdan önce)
-→ ABM_QUERYPOS (Tam EKRAN koordinatı verilir, work area DEĞİL!)
-→ sistem rc'yi "dikdörtgen çıkarma" ile değiştirir → sabit kenarı yeniden uygula
-   (ör. ABE_BOTTOM: rc.top = rc.bottom - height)
-→ ABM_SETPOS → dönen rc ile MoveWindow
-→ ABM_WINDOWPOSCHANGED, WM_ACTIVATE → ABM_ACTIVATE
-```
-
-Sık yapılan hatalar:
-- QUERYPOS atlanırsa sistem görev çubuğunun üstüne biner.
-- SETPOS'un **döndürdüğü** `rc` kullanılmazsa bar ezilir / yanlış yerde kalır.
-- Work area koordinatı verilirse "çift indentation" olur (hem siz hem QUERYPOS aynı payı düşer).
-- `SPI_GETWORKAREA` yalnızca birincil monitörü verir; çoklu monitörde `GetMonitorInfo().rcWork` şart.
-- `SPI_SETWORKAREA` + `SPIF_SENDCHANGE` senkron broadcast **~3.5 sn bloklayabilir**; yerine
-  `PostMessage(HWND_BROADCAST, WM_SETTINGCHANGE)` önerilir (ExplorerPatcher #5118).
-- `ABN_FULLSCREENAPP` açılışta barı `HWND_BOTTOM`'a, kapanışta `HWND_TOPMOST`'a almalı.
-- `ABN_POSCHANGED` gelince yeniden QUERYPOS+SETPOS yapılmalı; yapılmazsa eski yerde kalır.
-- Her ekran kenarı için **yalnızca bir** autohide appbar vardır; önce `ABM_GETAUTOHIDEBAR` kontrolü gerekir.
-
-Work-area geri besleme döngüsü: `SPI_SETWORKAREA → WM_SETTINGCHANGE → ABN_POSCHANGED → ABM_SETPOS →
-SPI_SETWORKAREA...`. Değer değişmediyse `SetWindowPos` çağrısını **atlamak** gerekir.
-
-### 1.7 Explorer restart ve diğer kabuk sinyalleri
-
-- **`TaskbarCreated`**: Explorer görev çubuğunu oluşturunca `RegisterWindowMessage("TaskbarCreated")`
-  ile tüm üst seviye pencerelere broadcast eder. Alıcı şunları **yeniden kurmalıdır**: tray ikonları
-  (`NIM_ADD + NIM_SETVERSION`), AppBar kaydı (`ABM_NEW → QUERYPOS → SETPOS`), shell hook'ları, work area,
-  native taskbar gizleme politikası.
-  - PowerToys deneyimi: Explorer hazır olmadığında ilk `NIM_ADD` **başarısız olabilir** ve uygulama bir
-    daha `TaskbarCreated` almayabilir → `WM_WINDOWPOSCHANGING` içinde yeniden deneme gerekir.
-  - Win10'da birincil monitör DPI'sı değişince de gelir; Win11'de bu davranış kaldırılmış olabilir →
-    `WM_DPICHANGED` / `WM_DISPLAYCHANGE` ayrıca izlenmelidir.
-- **`WH_SHELL` / `RegisterShellHookWindow`**: `HSHELL_WINDOWCREATED/DESTROYED/ACTIVATED`,
-  `HSHELL_MONITORCHANGED`, `HSHELL_REDRAW`, `HSHELL_FLASH`. Explorer `RegisterShellHookWindow` kullanır;
-  mesaj `RegisterWindowMessage("SHELLHOOK")` ile gelir. Genel kullanım için değildir, değiştirilebilir.
-- **`SHChangeNotify`**: `SHCNE_ASSOCCHANGED` ikon önbelleğini geçersiz kılar; `SHCNE_UPDATEITEM` tek öğe
-  için daha uygundur (Old New Thing: "evi yıkıp yeniden yapmak" yerine tek tuğla değiştir).
-- **Cloaking**: `IsWindowVisible` tek başına yeterli değildir. `DwmGetWindowAttribute(DWMWA_CLOAKED)` ile
-  `DWM_CLOAKED_APP/SHELL/INHERITED` kontrol edilmelidir.
-- **Win11 z-order**: tek seferlik `SetWindowPos(HWND_TOPMOST)` yetmez; Start/Action Center/fullscreen
-  geçişlerinde Explorer z-order'ı yeniden dayatır. Windhawk çözümü: her `EVENT_SYSTEM_FOREGROUND`'da
-  topmost'i yeniden dayat + `WM_WINDOWPOSCHANGING` içinde `hwndInsertAfter`'ı `HWND_TOPMOST` yap.
+- **`TaskbarCreated`:** Explorer görev çubuğunu oluşturunca tüm üst seviye pencerelere broadcast edilir.
+  Alıcı tray ikonlarını, AppBar kaydını, shell hook'larını, work area'yı ve gizleme politikasını yeniden kurmalıdır.
+  PowerToys deneyimi: Explorer hazır olmadığında ilk `NIM_ADD` başarısız olabilir → `WM_WINDOWPOSCHANGING`
+  içinde yeniden deneme gerekir. Win10'da DPI değişiminde de gelir; Win11'de `WM_DPICHANGED` /
+  `WM_DISPLAYCHANGE` ayrıca izlenmelidir.
+- **`WH_SHELL` / `RegisterShellHookWindow`:** `HSHELL_WINDOWCREATED/DESTROYED/ACTIVATED`,
+  `HSHELL_MONITORCHANGED`, `HSHELL_REDRAW`, `HSHELL_FLASH`; mesaj `RegisterWindowMessage("SHELLHOOK")`.
+- **Cloaking:** `IsWindowVisible` tek başına yeterli değildir; `DwmGetWindowAttribute(DWMWA_CLOAKED)` gerekir.
+- **Win11 z-order:** tek seferlik `SetWindowPos(HWND_TOPMOST)` yetmez; Start/Action Center/fullscreen
+  geçişlerinde Explorer z-order'ı yeniden dayatır; foreground olaylarında topmost yeniden uygulanmalıdır.
 
 ---
 
-## Bölüm 2 — Bizim uygulamamızın haritası
+## Bölüm 2 — Rust uygulamasının haritası
 
-| Windows mekanizması | Koddaki yeri | Durum |
-|---|---|---|
-| `Shell_NotifyIcon` (ManagedShell) | `Services/Interop/TrayHost.cs:50-97`, `AppIcons()` `86-87`, `Click()` `90-97` | Spy-window modeli; `Click()` zaman aşımsız, `AllowSetForegroundWindow` yok |
-| AppBar / work area | `Services/Interop/TaskbarReplacementSession.cs:353-360, 735-800, 1230-1261`, ABN_* `425-471` | `SHAppBarMessage` **senkron, zaman aşımsız** (`1435`); döngü kırma `bool` bayraklarla |
-| AppBar forward (iyi örnek) | `TrayHost.cs:121-222` | `APPBARDATAV2` → Explorer PID, `SendMessageTimeout(..., 1000 ms)` — tek disiplinli çağrı |
-| `TaskbarCreated` | `MainWindow.xaml.cs:307, 599-607`; `TaskbarReplacementSession.cs:382-423`; yayın `TrayHost.cs:228-232` | Yayın asenkron, `IsBroadcasting` hemen sıfırlanıyor → kendi mesajımızı "Explorer restart" sanabiliyoruz |
-| Journal / kurtarma | `TaskbarReplacementSession.cs:1288-1354`, `218-255`, `506-548`; `ShellFlyoutPositionRegistry.cs` | Journal doğrulamadan sonra siliniyor (iyi); flyout journal'ı recycled handle'da silinmiyor |
-| Watchdog (2. süreç) | `Services/App/TaskbarRecoveryWatchdog.cs`; `App.xaml.cs:30-45, 203-296` | 1 sn heartbeat, 4 sn timeout × 3 miss; **`AppLog.Initialize()` öncesinde çalışıyor** → log düşüyor |
-| WinEvent / hook | `Services/Interop/NativeWindowTracker.cs:146-158, 234-258` | **Doğru örnek**: try/catch + `Dispatcher.InvokeAsync` |
-| Registry anlık görüntüsü | `Services/Interop/TrayIcons.cs:33-117, 153-302` | Registry watcher yok, tooltip'e göre dedup, tek seferlik enumerasyon |
-| Pin kimliği | `Services/Interop/TrayPinIdentity.cs`, `Views/Shell/PinnedTrayStrip.cs`, `TrayShellButton.cs` | GUID/path ayrımı var ama strateji kaydı pin anahtarından türetmeli (bkz. §3) |
-| Kaydırma / yerleşim | `Views/DockScrollViewer.cs`, `MainWindow.Magnification.cs`, `MainWindow.Resizing.cs` | `ScrollChanged → reset → timer → resize → ResetScroll` geri besleme zinciri |
+| Windows mekanizması | Rust koddaki yeri | Davranış |
+| :--- | :--- | :--- |
+| Komut satırı modları | `crates/opentaskbar-app/src/main.rs` | *(yok)* dock, `--settings`, `--restore`, `--extract-icons`, `--update*` / `action=update*`, `--software-render`; tek örnek kilidi |
+| Görev çubuğu gizle/restore, AppBar | `crates/opentaskbar-shell/src/taskbar.rs`, `appbar.rs` | `SHAppBarMessage` state/reservation, doğrulamalı `SetState`, ikincil taskbar'ları da kontrol eden görünürlük testi |
+| Kurtarma journal'ı | `crates/opentaskbar-shell/src/journal.rs` | `taskbar-state.txt`, yalnızca `ABS_AUTOHIDE \| ABS_ALWAYSONTOP` bitleri, bozuk/eski değer reddi, atomic `*.tmp` yazımı |
+| Flyout journal'ı | `crates/opentaskbar-shell/src/flyout_journal.rs`, `flyout_reposition.rs`, `flyout_writer.rs` | Start/Search/Control Center konumları, generation counter, HWND/PID doğrulaması, `native_flyout_reposition` tek anahtarı |
+| Watchdog (2. süreç) | `crates/opentaskbar-shell/src/watchdog.rs`, `tools/watchdog/watchdog.c`, `build.rs` | Yerleşik C PE, `--watchdog=<pid>:<token>`, 1 sn heartbeat, 4 sn × 3 kaçırma, clean-exit event'i, x64 `0x8664` / x86 `0x014C` |
+| Shell oturumu / `TaskbarCreated` | `crates/opentaskbar-shell/src/session.rs` | Kayıtlı mesaj, `wParam` kaynak etiketi (self/restore), idempotent yeniden kurulum |
+| Pencere takibi ve kuralları | `crates/opentaskbar-shell/src/tracker.rs`, `window_rules.rs` | Taskbar düğmesi olan gerçek uygulama pencereleri, cloak/hidden/sahip filtreleri |
+| Auto-hide / fullscreen | `crates/opentaskbar-app/src/dock/mod.rs`, `dock/layout.rs`, `platform/win32.rs` | Per-monitör 500 ms fullscreen taraması, shell overlay filtresi, flyout açıkken görünür kalma |
+| GPUI dock ve ayarlar | `crates/opentaskbar-app/src/dock/`, `ui/`, `widgets/` | Fisheye, sürükle-bırak, 22 katalog widget'ı, on-demand Settings penceresi |
+| Paylaşılan veri | `crates/opentaskbar-core/src/paths.rs` | `%LOCALAPPDATA%\OpenTaskbar`: `settings.json`, `opentaskbar.log`, `Themes\`, `secrets\`, journal'lar |
+| Deterministik kontroller | `crates/opentaskbar-core/tests/` | `shell_recovery.rs`, `production_seams.rs`, `i18n_parity.rs`, `dock_layout_extra.rs`, diğer sözleşme testleri |
 
-**Güçlü yönlerimizi genelleştirmeliyiz:** `NativeWindowTracker`'ın hook → dispatcher marshal + try/catch
-deseni, `TrayHost.ForwardSharedAppBarMessage`'deki `SendMessageTimeout`, `ShellFlyoutPositionRegistry`'deki
-lock + `volatile Generation` + PID kontrolü ve journal'ın doğrulamadan sonra silinmesi.
+**Genelleştirilmiş iyi uygulamalar:** HWND'yi kullanmadan hemen önce doğrula (PID + generation),
+asenkron işlemin sonucunu bekle/doğrula, journal'ı yalnızca görünür taskbar doğrulandıktan sonra sil,
+kendi yayınladığın kabuk mesajını etiketle, ve tüm restore yollarını tek koordinatöre bağla.
 
 ---
 
-## Bölüm 3 — Neden tekrar tekrar aynı sınıf hataları çıkıyor?
+## Bölüm 3 — Neden tekrar tekrar aynı sınıf hatalar çıkıyor?
 
-Son üç düzeltme aslında tek bir kök sorunun üç farklı görünümüydü:
+Üç yaygın görünüm aynı kök sorunun farklı yüzleridir:
 
-| Görüntü | Gerçek kök neden |
-|---|---|
-| Steam pin'ine tıklayınca açılmıyor | Tıklama stratejisi sentetik tray mesajına dayanıyordu; foreground izni olmadığı için uygulama penceresini açamıyordu. Ayrıca kayıtlı `path:` pin, canlı ikonun GUID'i yüzünden `guid:` sanılıyordu. |
-| Discord ikonu dock'ta görünmüyor | Pin registry'den `path:` olarak kaydediliyor ama strip yalnızca canlı `NotifyIcon`'lardan seçim yapıyordu; gizli/olmayan ikon → eşleşme yok. |
-| Kaydırma başa dönüyor | `ScrollChanged → magnifier reset → ertelenmiş ResizeDockToContent → FitDockToContent` zinciri; full-width modda `appsContentWidth = 0` olduğu için "taşma yok" kararı yanlıştı. |
+| Görünüm | Gerçek kök neden |
+| :--- | :--- |
+| Dock'a sabitlenen uygulama tıklanınca açılmıyor | Sentetik mesaj foreground izni olmadan gönderiliyor; kayıtlı kimlik ile canlı HWND/GUID karışıyor |
+| Gizli/ardplan uygulaması normal çalışan uygulama gibi görünüyor | Pin niyeti ile canlı pencere durumu birbirine karıştırılıyor; filtre kuralları tek kaynaktan gelmiyor |
+| Kaydırma başa dönüyor | Ölçüm → magnifier reset → ertelenmiş resize → reset geri besleme zinciri; "taşma yok" kararı yanlış geometriden çıkıyor |
 
 Ortak kalıplar:
 
-1. **Dört ayrı doğruluk kaynağı:** Win32 kabuk durumu + journal dosyaları + registry anlık görüntüsü +
-   ManagedShell canlı koleksiyonu. Bunların senkronizasyonu `bool` bayrak, `DispatcherTimer` ve
-   fire-and-forget `async` ile yapılıyor.
-2. **Kayıtlı niyet ile canlı durum karışıyor:** Pin anahtarını yeniden üretip stratejiyi ona göre seçmek
-   (Steam hatası), tooltip'e göre dedup (aynı isimli iki uygulama), `ExecutablePath` eşleşmesi (MSIX'te kırılır).
-3. **Asenkron işlem doğrulanmıyor:** `SendNotifyMessage`, `Task.Run`, `async void` — "gönderdim, oldu" varsayımı.
-4. **Yeniden giriş (reentrancy) bayraklarla kırılıyor:** `ABN_POSCHANGED → ABM_SETSTATE → ABN_STATECHANGE → ...`
-   döngüsü idempotency'ye güveniyor; gerçek bir durum makinesi yok.
-5. **Sessiz bozulma:** `TrayHost.Start` catch → null → registry listesi; watchdog/log yolları
-   `AppLog.Initialize()` öncesinde; kullanıcı hiçbir şey görmüyor.
+1. **Birden fazla doğruluk kaynağı:** kabuk durumu + journal dosyaları + kayıt/pin verisi + canlı pencere listesi.
+2. **Kayıtlı niyet ile canlı durum karışıyor:** kimlik yeniden üretilip strateji ona göre seçiliyor, GUID/path eşleşmesi kırılıyor.
+3. **Asenkron işlem doğrulanmıyor:** "gönderdim, oldu" varsayımı.
+4. **Yeniden giriş bayraklarla kırılıyor:** gerçek bir durum makinesi yerine bool yığını.
+5. **Sessiz bozulma:** hata log'a yazılmadan yutuluyor; kullanıcı hiçbir şey görmüyor.
 
-**Ders:** Bu hatalar "bir satır eksik" hataları değil; **tek doğruluk kaynağı + açık durum makinesi +
-doğrulanmış asenkron** disiplininin eksikliği. Tekil yamalarla değil, mimariyle çözülmelidir.
+**Ders:** Bu hatalar tek satır eksikliği değil; **tek doğruluk kaynağı + açık durum makinesi +
+doğrulanmış asenkron** disiplininin eksikliğidir. Rust uygulamasında bu disiplin `paths.rs` (tek veri kökü),
+`journal.rs` (tek kurtarma durumu), `session.rs` (tek shell oturumu) ve `watchdog.rs` (tek süreç sahibi)
+etrafında toplanmıştır.
 
 ---
 
-## Bölüm 4 — Sağlamlaştırma planı (öncelikli)
+## Bölüm 4 — Mevcut sağlamlaştırma kontrolleri
 
-### P0 — Sistemi gözlemlenebilir ve tek karar merkezine kavuşturmak
+### Kurtarma (P0)
 
-1. **AppLog'u en başta başlat.** `App.xaml.cs:30-47` ve `--restore`/watchdog yollarında
-   `AppLog.Initialize()` ilk satır olmalı; şu an oradaki hatalar sessizce düşüyor.
-2. **Korelasyon ID'li telemetri.** Her olaya seq kaydet:
-   `TaskbarCreated(source=self|explorer|watchdog, seq)`, `AppBarSetPos(before, after, verified)`,
-   `PinClick(keyKind, strategy)`, `TrayEnumeration(source=live|registry, count, ms)`,
-   `ScrollReset(reason, before, after)`.
-3. **TaskbarCreated kendi mesajını ayırt etsin.** `lParam`'a benzersiz sequence koy; `WindowProc`
-   `IsBroadcasting` yerine sequence'i karşılaştırsın. Yayından sonra ManagedShell `Icons` koleksiyonunda
-   beklenen yeniden kaydı **bounded wait** ile doğrula; olmadıysa ikinci yayın + `OperationReported`.
-4. **Tıklama stratejisini kayıtlı pin anahtarından türet.** `TrayPinIdentity.FindMatchingKey(...)` sonucu
-   `?? KeyFor(...)` — `KeyFor` tek başına kullanılmasın (bkz. `PinnedTrayStrip.cs` son hali).
-5. **Restore yollarını tek koordinatöre bağla.** `ForceRestoreNativeTaskbar`, `Stop`, `Process_Exit`,
-   crash handler ve watchdog → `RestoreCoordinator.RestoreAsync(reason)`; journal silme yalnızca
-   koordinatörün doğrulamasıyla.
+- **Başlangıç:** `main.rs`, tek örnek kilidini aldıktan sonra bekleyen journal'ı onarır; watchdog arm edilir,
+  dock `catch_unwind` ile çalıştırılır; panik halinde journal'dan restore yapılır.
+- **Journal:** `journal.rs::effective_state` bozuk değeri reddeder, görünür taskbar'da eski journal'ı
+  yok sayar ve yalnızca desteklenen bitleri uygular. `taskbar-state.txt` atomic `*.tmp` + rename ile yazılır.
+- **Watchdog:** ayrı process, 1 sn heartbeat, üç kaçırmadan sonra restore, clean-exit event'i ile susturulur.
+  `-NoFallback` ile yanlış mimari PE asla "geçerli" sayılmaz.
+- **Manual:** `OpenTaskbar.exe --restore` dock çalışmasa da journal'ı oynatır.
+- **Flyout'lar:** `flyout_journal.rs` özgün konumları kaydeder; `flyout_reposition.rs` generation ile
+  eski açılışları iptal eder; `taskbar.rs` kendi `TaskbarCreated` yayınını `wParam` etiketiyle ayırt eder.
 
-### P1 — Açık durum makinesi ve HWND yaşam döngüsü
+### Auto-hide ve fullscreen (P1)
 
-6. `TaskbarReplacementSession` içindeki `bool` yığınını (`_active`, `_registered`, `_stateChangeStarted`,
-   `_positioning`, `_clearingReservation`, `_fullScreenSuppressed`) tek bir enum durum makinesine çevir:
-   `Uninitialized → Hiding → Registered → Positioning → Active → Stopping → Restoring → Failed`.
-   OS olayları doğrudan alan yazmaz, `Post(Reconcile(reason))` üretir; geçersiz geçişler reddedilir.
-7. **HwndLease(handle, pid, generation)**: her kullanımdan önce `IsWindow` + PID kontrolü; Explorer
-   yeniden başlarsa otomatik yeniden abonelik. `SetTaskbarState` kendi HWND'sine **fallback etmesin**;
-   `Find() == 0` → `Degraded` durumuna geç, `Reconcile` zamanlasın.
-8. **AppBarClient sarmalayıcı:** tüm `SHAppBarMessage` çağrıları buraya taşınmalı; `SendMessageTimeout`,
-   `OperationReported` ve yeniden giriş kilidi merkezileşmeli (iyi örnek: `TrayHost.cs:188-196`).
-   `StopForRestart()` ya bağlanmalı ya kaldırılmalı — şu an ölü kod.
-9. **TrayIconSource servisi:** ManagedShell canlı koleksiyonu birincil, registry snapshot ikincil;
-   `RegistryKey` değişiklik bildirimi + process-start olayıyla yeniden enumerasyon. `TrayShellButton`
-   (`_lastApps`) ve `PinnedTrayStrip` (`_fallbackApps`) **aynı snapshot'ı paylaşmalı**. `seenNames` dedup'u
-   tooltip yerine `(exe, guid, uid)` üçlüsüne dayanmalı.
-10. **Pin şeması:** `TrayPinIdentity`'yi string üretiminden `TrayIconRef(Guid?, NormalizedPath, Uid, Source)`
-    değer nesnesine çevir; JSON olarak yapılandırılmış kaydet (`kind`, `path`, `guid`, `uid`,
-    `schemaVersion`), eski `guid:`/`path:` string'leri için tek seferlik migrasyon.
+- `dock/mod.rs::evaluate_auto_hide` per-monitör fullscreen durumunu 500 ms aralıklarla tarar; yalnızca
+  gerçek taskbar düğmesi olan pencereler sayılır, shell overlay'leri (masaüstü, IME, GPU katmanları) sayılmaz.
+- Task View / Alt-Tab / flyout açıkken dock görünür kalır; ikincil dock yalnızca kendi monitöründeki
+  fullscreen uygulama için gizlenir.
 
-### P2 — Kaydırma/yerleşim ve sınırlı asenkron
+### Doğruluk ve sınırlar (P2)
 
-11. `DockScrollViewer` "desired offset" alanının **tek sahibi** olsun: `ScrollByWheel`, `AnimateScroll*`,
-    `ResetHorizontalScroll`, `SmoothScrollFrame` aynı `_target` üzerinde çalışsın. `FitDockToContent`
-    doğrudan reset çağırmasın; `ScrollOwner.OnContentOverflowChanged(bool)` + gesture state machine
-    (aktif gesture sırasında reset yasak).
-12. `ResizeDockToContent` 2-pass döngüsü ve `_deferredDockResize`, `_resizePending`,
-    `_magnificationLayoutActive`, `_updatingMagnificationLayout`, `SuppressOverflowIndicators` bayrakları
-    tek `LayoutController` içinde **ölç → karar → uygula → doğrula** fazlarına dönüşsün.
-13. Tüm cross-process çağrılara `CancellationToken` + deadline; `async void` yerine `Task` +
-    hata raporu. `TrayHost.Click` için yanıt vermeyen ikonlarda kısa timeout + exe/URI fallback.
-
-### P3 — Test stratejisi
-
-14. `INativeShell`, `IRegistryReader`, `IProcessEnumerator`, `IDispatcher`, `IClock` seam'leriyle
-    **OS olaylarını simüle eden** testler: Explorer restart, HWND recycling, PID reuse, DPI değişimi,
-    kaydırma sırasında resize, GUID'li ama path pin'li ikon, gizli ikon + registry fallback.
-15. Mevcut testler yardımcı fonksiyonları test ediyor (`PinnedTrayChecks`, `DockLayoutChecks`); zincirin
-    tamamını simüle eden entegrasyon testleri eklenmeli. Canlı OS'u değiştiren testler
-    (`TaskbarRecoveryChecks.cs:57`) izole bir test profiline alınmalı.
-16. Her Windows sürüm yükseltmesinde §1.1–1.9'daki dokümante edilmemiş davranışları yeniden doğrulayan
-    bir "shell compatibility smoke test" çalıştırılmalı.
+- Yazılar `Local\OpenTaskbar.Settings.Lock` ile serileştirilir; GUID temp dosya + rename kullanılır.
+- Yüzde ve aralıklar `DockSettings::validate()` ile sınırlanır; AI sağlayıcı bit maskeleri ve widget ID'leri
+  yükleyişte kanonikleştirilir.
+- Tema/backup içe aktarımı absolute path ve `..` traversal'ını reddeder; token sayısı 256 ile sınırlıdır.
 
 ---
 
@@ -293,79 +164,73 @@ doğrulanmış asenkron** disiplininin eksikliği. Tekil yamalarla değil, mimar
 - https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shell_notifyiconw
 - https://learn.microsoft.com/en-us/windows/win32/api/shellapi/ns-shellapi-notifyicondataa
 - https://learn.microsoft.com/en-us/windows/win32/shell/notification-area
-- https://geoffchappell.com/studies/windows/shell/shell32/api/shlnot/notifyicon.htm
 - https://geoffchappell.com/studies/windows/shell/shell32/api/shlnot/copydata.htm
 - https://github.com/microsoft/windows-rs/issues/5284 (GUID vs ExecutablePath, MSIX)
 - https://github.com/microsoft/microsoft-ui-reactor/issues/1180 (çift olay dedupe)
-- https://github.com/glzr-io/zebar/commit/50bee67551af104b4ff9b444db8aef911778245b (AllowSetForegroundWindow + click sırası)
-- https://github.com/LGUG2Z/komorebi/commit/ea35d818a179837d179235d885b4ae0c2d71a55a (stale HWND, zombie icon)
-- https://github.com/amnweb/yasb/commit/71d7f494ae068470412e3ab0a6e1b060bbde0250 (spy vs injection)
-- https://lib.rs/crates/systray-util (WM_COPYDATA dwData değerleri)
+- https://github.com/glzr-io/zebar/commit/50bee67551af104b4ff9b444db8aef911778245b (AllowSetForegroundWindow + tıklama sırası)
 
 **Foreground / aktivasyon**
 - https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setforegroundwindow
 - https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-allowsetforegroundwindow
 - https://devblogs.microsoft.com/oldnewthing/20090220-00?p=19083
-- https://devblogs.microsoft.com/oldnewthing/20161118-00?p=94745
 - https://learn.microsoft.com/en-us/windows/win32/api/dwmapi/nf-dwmapi-dwmgetwindowattribute
 
 **AppBar / work area / kabuk olayları**
 - https://learn.microsoft.com/en-us/windows/win32/shell/application-desktop-toolbars
 - https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shappbarmessage
-- https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/Win7Samples/winui/shell/legacysamples/appbar/AppBar.cpp
 - https://learn.microsoft.com/en-us/windows/win32/shell/taskbar
 - https://github.com/microsoft/PowerToys/blob/master/src/runner/tray_icon.cpp
-- https://github.com/valinet/ExplorerPatcher/pull/5118 (work-area watchdog, debounce, SPI_SETWORKAREA)
-- https://github.com/Milvasoft/kabuk/blob/main/docs/ARCHITECTURE.md (watchdog, TaskbarCreated sonrası yeniden kurulum)
-- https://github.com/ChocolateyMilk/chocobar (1 sn reconciliation)
-- https://github.com/cairoshell/ManagedShell/wiki/AppBar
+- https://github.com/valinet/ExplorerPatcher/pull/5118 (work-area watchdog, debounce)
 - https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registershellhookwindow
 
 ---
 
-## Bölüm 6 — Doğrulama ve uyumluluk
+## Bölüm 6 — Doğrulama ve kanıt
 
-P3 kontrolleri, §4'teki sağlamlaştırma değişikliklerini **canlı kabuğu değiştirmeden** doğrular. Testler explorer'ı
-kapatıp açmaz, `TaskbarCreated` yayınlamaz, `SHAppBarMessage` göndermez ve HKCU'ya yazmaz; OS olayları inject edilmiş
-dizi/değerlerle simüle edilir.
-
-### Komutlar
+Tüm komutlar **kök workspace'ten** çalıştırılır; canlı kabuğu değiştiren bir test yoktur.
+Deterministik testler Explorer'ı kapatıp açmaz, `TaskbarCreated` yayınlamaz ve HKCU'ya yazmaz.
 
 ```powershell
-# Rust: biçim, lint ve workspace testleri ( altında)
-
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cd ..
+cargo check --workspace
 
-# Dil ve sürüm kapıları
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check-locale-parity.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check-release-version.ps1 -Tag v0.4.0
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-locale-parity.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1 -Tag v0.4.0
 ```
 
-### Yeni kontroller
+| Kontrol | Ne doğrular |
+| :--- | :--- |
+| `crates/opentaskbar-core/tests/shell_recovery.rs` | Journal satır ayrıştırma, retry/backoff, watchdog argümanları, `finally` modifier semantiği, 3 denemeli restore doğrulaması |
+| `crates/opentaskbar-core/tests/dock_layout_extra.rs` | Yay fiziği, raised-cosine falloff, overlap guard, gap/height çözümü, sabitlenmiş grup sırası |
+| `crates/opentaskbar-core/tests/i18n_parity.rs`, `telemetry_parity.rs` | 14 × 1373 Rust anahtarı, çeviri regresyonları, yer tutucu korunması |
+| `crates/opentaskbar-shell/src/journal.rs` (unit) | Bozuk/eski journal, `*.tmp` atomic yazım, desteklenen bit maskesi |
+| `crates/opentaskbar-shell/src/watchdog.rs` (unit) | `--watchdog` argümanı, heartbeat token'ı, clean-exit sinyali |
+| `scripts/check-locale-parity.ps1` | 14 × 1046 donmuş referans + 14 × 1373 Rust anahtarı, gerekli sözleşme anahtarları |
+| `scripts/check-release-version.ps1` | Tag ↔ Cargo workspace `0.4.0` ↔ MSIX `0.4.0.0` |
 
-| Dosya | Ne simüle eder |
-|---|---|
-| `tests/OpenTaskbar.Tests/ShellRecoveryChecks.cs` | `ShellTelemetry.NextSequence()` ile üretilen sequence'i `TrayHost._lastSelfBroadcastSequence` alanına enjekte edip `IsOwnBroadcast` + wParam marker birleşimini sınar; restore-etiketli yayının kendi yayınımız sayılmadığını doğrular. `RestoreCoordinator` tek-giriş kapısını (`SemaphoreSlim(1,1)`) ve eşzamanlı çağrıların `RestoreBusy` dönüp telemetri yazdığını doğrular (gerçek restore yolu çalıştırılmaz). `HwndLease`/`NativeTaskbarWindow` üzerinden Explorer HWND'si yoksa bozulmanın kendi pencemize yazmadığını kontrol eder. |
-| `tests/OpenTaskbar.Tests/TraySourceChecks.cs` | `guid:`, `path:`, `path:\|uid`, `path:\|*`, yapılandırılmış JSON ve bozuk girdiler için `TrayIconRef.TryParse`/migrasyonu; `(path, guid, uid)` comparer kimliği; `TrayIconSource.Merge` üzerinde bellek içi anlık görüntü birleştirme (aynı exe + farklı GUID/UID ayrı kalır, aynı tooltip farklı exe'leri birleştirmez, eşleşmeyen fallback görünür). UI bölümü `PinnedTrayStrip` seam'leriyle, GUID'li canlı ikon `path:` pin'e eşleşse bile tıklamanın **saklı anahtarın** stratejisini kullandığını (`PinClickTelemetry`) doğrular. |
-| `tests/OpenTaskbar.Tests/DockGestureChecks.cs` | `DockScrollViewer` üzerinde `ScrollChanged → ResetMagnification → ertelenmiş resize → Reset` zincirini `BeginGesture` / `SetContentOverflow(false)` / `SuppressScrollReset` / `ResetHorizontalScroll` / `EndGesture` çağrılarıyla simüle eder; gesture boyunca `HorizontalOffset` ve `DesiredHorizontalOffset` korunur, gesture bitince gerçek reset çalışır. |
-| `scripts/check-shell-compat.ps1` | OS/build, explorer.exe varlığı/sürümü, `TaskbarCreated` mesaj kimliği ve canlı `Shell_TrayWnd` pencereleri, DPI ölçeği, monitör sayısı ve işlem integrity düzeyini **salt okunur** raporlar; Windows güncellemesi sonrası el kontrol listesini hatırlatır. |
+### Canlı smoke kontrol listesi
 
-### Eksik seam'ler (üretim kodu değiştirilmedi)
+Her satır gerçek Windows oturumunda çalıştırılmalı; başlangıç durumu **not run**'dur.
+Ayrıntılı senaryolar ve pass koşulları `docs/windows-reliability-audit.md` içindedir.
 
-Aşağıdaki noktalar için testler reflection ile durum enjekte ediyor veya yalnızca kapı davranışını doğruluyor;
-gelecekte seam eklenirse testler bunlara taşınmalı:
+| # | Senaryo | Kısa adım |
+| :--- | :--- | :--- |
+| S1 | Start/flyout anchoring | Start 10× hızlı aç/kapat, Search/CC, Explorer restart |
+| S2 | Auto-hide ve shell overlay | Kenar hover, Task View/Alt-Tab, fullscreen uygulama, geri dönüş |
+| S3 | Watchdog ve temiz çıkış (x64 + x86) | `taskkill /F` ve normal kapatma; PE machine doğrulaması |
+| S4 | Radyo anahtarları | Wi-Fi/Bluetooth, airplane mode açık/kapalı |
+| S5 | Çoklu monitör | Dock'u taşı, ikincil ekranı çıkar/tak, negatif sanal koordinat |
+| S6 | Night Light ve medya | Registry payload, LibreWolf zaman çizelgesi, seek clamp |
+| S7 | Tam yedekleme | Dışa/içe aktarım, traversal ve `.exe` girişleri |
+| S8 | Güncelleyici ve tek örnek | Unicode `%` içeren yol, ikinci dock process'i |
 
-- `TrayHost._lastSelfBroadcastSequence` özel alanı için injectable sequence sağlayıcısı yok. Aday:
-  `internal static bool IsOwnBroadcast(nuint wParam, IntPtr lParam)` saf yardımcı metodu ya da `internal` sequence özelliği.
-- `RestoreCoordinator`, gerçek restore yolunu (`TaskbarReplacementSession.ForceRestoreNativeTaskbar()`) doğrudan
-  çağırıyor; "iki eşzamanlı çağrı → birebir gerçek restore" ve "Explorer HWND yoksa degrade" senaryolarının OS'a
-  dokunmadan test edilmesi için `internal static Func<string?, string?>? RestoreOverride` benzeri bir seam gerekir.
-- `TrayIconSource.Merge` private static; testler reflection ile çağırıyor. `internal static` olması yeterli.
-- `MainWindow.BeginScrollGestureScope` / `EndScrollGestureScope` ve `MagnificationLayoutPhase` özel/örnek
-  üyeleri; zincir simülasyonu `DockScrollViewer` seviyesinde yapılıyor.
+### Kanıt formatı
 
-> Windows sürüm yükseltmesinden sonra §1.1–1.9'daki dokümante edilmemiş davranışları yukarıdaki üç komutla yeniden
-> doğrulayın; smoke testi yalnızca gerçekleri raporlar, doğrulamayı kullanıcı yapar.
+Her vaka için şunu kaydet: vaka kimliği, commit, OS build, EXE mimarisi, monitör topolojisi/DPI,
+atılan adımlar, beklenen/gerçek sonuç, ekran görüntüsü/video yolu,
+`%LOCALAPPDATA%\OpenTaskbar\opentaskbar.log` excerpt'i ve varsa CPU/bellek/handle ölçümleri.
+Statik inceleme veya simülasyon tek başına **geçerli kanıt değildir**; yapılamayan test **not run** olarak işaretlenir.
+Kaynak seviyesindeki bir testin geçmesi canlı Windows uyumluluğunu kanıtlamaz; her Windows sürüm
+yükseltmesinde §1'deki belgelenmemiş davranışlar yeniden doğrulanmalıdır.

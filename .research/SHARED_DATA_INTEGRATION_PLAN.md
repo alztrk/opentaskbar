@@ -96,12 +96,12 @@ Yönlendirilecek dosyalar:
 
 ## Faz 4 — Operasyonel geçiş
 
-1. **Push + tag (önce güvenlik):** `git push origin Rust workspace` (187 commit FF), backup tag `pre-shared-data-20261127`, mevcut `v0.3.4` korunur.
+1. **Push + tag (önce güvenlik):** `git push origin Rust workspace` (187 commit FF), backup tag `pre-shared-data-20261127`, mevcut `v0.4.0` korunur.
 2. **master sync:** `git switch master && git pull --ff-only origin master` (9 commit).
 3. **Entegrasyon PR:** `origin/master` ↔ `Rust workspace` → **14 çakışma**: `CHANGELOG.md`, `Widgets/AiUsageWidget.cs`, 12 dil kataloğu. Çözüm: CHANGELOG union, AI widget theirs(master), locale anahtar union + `check-locale-parity.ps1` sabitleri (son değerler reference 1046 / Rust 1423). Kapı: cargo fmt/clippy/test/release build + headless test + locale parity.
 4. **x86 watchdog:** yeni `build.rs` → `CARGO_CFG_TARGET_ARCH` ile `build.ps1 -Architecture x86 -Force -NoFallback`, `OT_WATCHDOG_EXE` env, `watchdog.rs` `include_bytes!(env!(...))`; PE machine x86=0x014C / x64=0x8664 doğrulaması; rust-ci path filtrelerine `tools/watchdog/**`, Rust scriptleri, `packaging/msix/AppxManifest.Rust.xml`, `release.yml` ekle; yeni `watchdog-arch` job'u.
-5. **Sürüm kapısı:** `scripts/check-release-version.ps1` — tag ↔ legacy project 0.3.5 ↔ Cargo (0.1.0 açıkça kayıt veya eşit) ↔ MSIX `0.3.5.0`; `publish-rust-msix.ps1` hardcoded 0.3.2 kaldır.
-6. **Çift artifact release v0.3.5:** checksums + manifest `rustPort.crateVersion` + watchdog arch/sha alanları + SLSA/VT doğrulama; legacy binary geri dönüş için kalır.
+5. **Sürüm kapısı:** `scripts/check-release-version.ps1` — tag ↔ Cargo workspace `0.4.0` ↔ MSIX `0.4.0.0`; `publish-rust-msix.ps1` hardcoded sürüm kaldır.
+6. **Rust-only artifact release v0.4.0:** checksums + manifest `rustPort.crateVersion` + watchdog arch/sha alanları + SLSA/VT doğrulama; yalnızca Rust EXE/ZIP'leri yayınlanır.
 
 ---
 
@@ -121,7 +121,7 @@ Korunur: `tools/watchdog/**`, `packaging/msix/Assets/**`, `AppxManifest.Rust.xml
 
 Silinecek (iki dalga): UI framework kaynakları/legacy project/bin/obj/Design/kök Fonts/themes/reference testleri; reference publish/package betikleri; CodeQL reference job'u; dependabot nuget; release.yml reference build/asset satırları.
 
-PR sırası: A (entegrasyon) → B (watchdog/CI) → C (v0.3.5 çift release) → smoke → D (reference silme) → E (Rust-only v0.4.0). Her PR tek commit revert ile geri alınabilir.
+PR sırası: A (entegrasyon) → B (watchdog/CI) → C (v0.4.0 Rust-only release) → smoke → D (reference silme) → E (Rust-only v0.4.0 temizliği). Her PR tek commit revert ile geri alınabilir.
 
 ---
 
@@ -129,10 +129,10 @@ PR sırası: A (entegrasyon) → B (watchdog/CI) → C (v0.3.5 çift release) �
 
 | Risk | Kapı | Geri dönüş |
 |---|---|---|
-| reference bilinmeyen anahtarları silmeye devam ederse Rust ayarları kaybolur | G2 gerçek round-trip testi | `[JsonExtensionData]` PR'ını revert etmeden düzelt; v0.3.5 legacy binary korunur |
+| reference bilinmeyen anahtarları silmeye devam ederse Rust ayarları kaybolur | G2 gerçek round-trip testi | `[JsonExtensionData]` PR'ını revert etmeden düzelt; v0.4.0 Rust artifact'leri korunur |
 | İki process aynı settings.json'ı bozarsa | G2 eşzamanlı yazma testi + ortak mutex | Mutex + GUID tmp; bozuk dosya `invalid-<build>-<utc>` yedeğinden dön |
 | Locale sayıları entegrasyonda güncellenmezse CI kırmızı | G1 parity script | 1034/1406 sabitlerini union sonrası güncelle |
-| x86 watchdog x64 kalırsa 32-bit Windows'ta recovery ölür | G4 PE machine 0x014C + -NoFallback | build.ps1 fallback kapat; v0.3.5 ikilileri kullan |
+| x86 watchdog x64 kalırsa 32-bit Windows'ta recovery ölür | G4 PE machine 0x014C + -NoFallback | build.ps1 fallback kapat; v0.4.0 ikilileri kullan |
 | Tag ↔ sürüm uyuşmazlığı release'i yarım bırakır | check-release-version build öncesi | Tag push edilmeden düzelt; yayınlandıysa yama tag |
 | reference silme sonrası release legacy project ararsa çöker | PR-D aynı PR'da legacy project kapılarını kaldırır | PR-D revert |
 

@@ -1,8 +1,9 @@
 {
-  // Design tokens to replace. See docs/themes.md for value types.
+  // Design tokens to replace. "tokens" applies to both themes; "dark"/"light" override it.
+  // Value types and the 256-token limit are documented in docs/themes.md.
   "tokens": {
     "WidgetAccent": "#FF2DD4BF",
-    "WidgetAccentFill": { "stops": ["#FF2DD4BF", "#FF0EA5E9"] },
+    "WidgetAccentFill": { "stops": ["#FF2DD4BF", "#FF0EA5E9"], "direction": "vertical" },
     "WidgetRadius": 12
   },
   "dark": {

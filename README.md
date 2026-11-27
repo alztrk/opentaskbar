@@ -5,7 +5,7 @@
 **A dock for Windows, like the one on macOS.**
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?style=flat-square&logo=windows)](https://github.com/alztrk/opentaskbar)
-[![Runtime](https://img.shields.io/badge/Rust-stable-orange?style=flat-square&logo=rust)](https://github.com/alztrk/opentaskbar)
+[![Runtime](https://img.shields.io/badge/Rust-1.95%2B-orange?style=flat-square&logo=rust)](https://github.com/alztrk/opentaskbar)
 [![Architecture](https://img.shields.io/badge/Architecture-x64%20%7C%20x86-blue?style=flat-square)](https://github.com/alztrk/opentaskbar)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-cargo%20test-brightgreen?style=flat-square)](crates/opentaskbar-core/tests)
@@ -24,14 +24,14 @@ OpenTaskbar replaces the Windows taskbar with a floating row of app icons. Hover
 - **Reach Windows controls.** Start, Search, Task View and the Recycle Bin have their own buttons. Right-click an app to see its Windows Jump List (pinned tasks and recent files).
 - **Hide it when you want.** Choose to keep it always visible, hide it when a window covers it, or hide it until you move your mouse to its edge. It also gets out of the way for fullscreen games and videos.
 - **Make it look like yours.** Move it to the bottom, left or right of your screen; change its size, corners and see-through look; pick one of six color themes or add your own. You can even change the app icons — see [Themes](docs/themes.md).
-- **See useful things at a glance.** Clock, weather, music controls, computer and battery usage, Wi-Fi and Bluetooth switches, volume, focus timer, stopwatch, network speed and how much of your AI plan is left. You can also add your own widgets.
+- **See useful things at a glance.** 22 widgets are included: clock, weather, music, Wi-Fi and Bluetooth switches, volume, computer and battery usage, focus timer, stopwatch, network speed, and how much of your AI plan is left (Claude, Codex, OpenCode, Copilot, DeepSeek, OpenRouter or Cursor). You can also [add your own](docs/custom-widgets.md).
 - **Use every screen.** Have a dock on each monitor, or use the optional strip at the top of the screen.
 - **Never lose your taskbar.** If OpenTaskbar closes or crashes, the normal Windows taskbar comes back by itself. You can also restore it any time with `OpenTaskbar.exe --restore`.
 
 <div align="center">
 
 | Dock settings | Themes |
-| :---: | :---: |
+| :---: | :--- |
 | <img src="docs/screenshots/settings-general.jpg" alt="Dock settings" width="460" /> | <img src="docs/screenshots/settings-themes.jpg" alt="Theme gallery" width="460" /> |
 
 </div>
@@ -62,50 +62,87 @@ OpenTaskbar doesn't collect anything about you. It only goes online when you tur
 <details>
 <summary><strong>Technical details (for developers)</strong></summary>
 
+Version **0.4.0**. The repository root is a Cargo workspace; run all commands below from there.
+
 ### Build and check it
 
 ```powershell
 git clone https://github.com/alztrk/opentaskbar.git
 cd opentaskbar
 
-cargo run --bin OpenTaskBar
-cargo run --bin OpenTaskBar -- --settings
+cargo run --bin OpenTaskBar                 # start the dock
+cargo run --bin OpenTaskBar -- --settings   # open Settings only
 
-# Portable EXE and checks
-.\scripts\publish-portable.ps1 -Runtime win-x64
-.\scripts\check-portable.ps1 -OutputDir release -ExecutableName OpenTaskbar-x64.exe
+# Same gates as CI
+cargo check --workspace
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 
-# MSIX package
-.\scripts\publish-rust-msix.ps1 -Runtime win-x64
+powershell -ExecutionPolicy Bypass -File .\scripts\check-locale-parity.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1 -Tag v0.4.0
 ```
 
-You need Rust stable (see `rust-version` in `Cargo.toml`) and PowerShell 7+ for packaging.
+Building needs Rust 1.95+ (edition 2024, MSVC on Windows) and PowerShell 7+ for packaging.
 
-Verify with `cargo check --workspace`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`. Automated tests cover logic and settings; real Windows behavior needs the manual checks in [docs/windows-reliability-audit.md](docs/windows-reliability-audit.md).
+```powershell
+# Portable EXE and verification
+.\scripts\publish-portable.ps1 -Runtime win-x64
+.\scripts\check-portable.ps1 -ExecutableName OpenTaskbar-x64.exe
+
+# MSIX package (identity 0.4.0.0)
+.\scripts\publish-rust-msix.ps1 -Runtime win-x64
+
+# Versioned release artifacts
+.\scripts\package-rust-release.ps1 -Tag v0.4.0
+```
+
+`publish-portable.ps1` builds a single self-contained EXE with the architecture-matched watchdog embedded; `check-portable.ps1` verifies its architecture, watchdog and icon worker. The release script writes the x64/x86 EXEs and ZIPs, `checksums.txt`, a schemaVersion 2 `release-manifest.json` and `release-notes.md`.
+
+Tests cover deterministic settings/i18n/shell-recovery logic; real Windows behavior needs the manual checks in [docs/windows-reliability-audit.md](docs/windows-reliability-audit.md). Design notes: [docs/windows-taskbar-model.md](docs/windows-taskbar-model.md).
 
 ### Command line
 
 | Argument | Effect |
 | :--- | :--- |
-| *(none)* | Acquire single-instance lock, restore pending journal, load settings, run the dock |
+| *(none)* | Acquire the single-instance lock, repair a pending journal, load settings, run the dock |
 | `--settings` | Open only the Settings window; exit when it closes |
-| `--restore` | Replay the flyout/taskbar recovery journal and exit |
+| `--restore` | Replay the taskbar/flyout recovery journal and exit |
 | `--extract-icons` | Icon extractor worker driven over stdin/stdout |
 | `--software-render` | Force software rendering for this launch |
+| `--update*` / `action=update*` | Update-toast activation arguments handled by the in-app updater |
+
+There are no file-manager or panel launch modes.
 
 ### Where data is stored
 
-Everything lives in `%LOCALAPPDATA%\OpenTaskbar\`: `settings.json` (preferences and pins), `taskbar-state.txt` (taskbar recovery journal), `opentaskbar.log` (diagnostics, rotated to `opentaskbar.log.old`) and `Themes\` (theme packs). The old separate-folder layout is retired; import a full backup to migrate from it.
+Everything lives in `%LOCALAPPDATA%\OpenTaskbar\`:
+
+| Path | Contents |
+| :--- | :--- |
+| `settings.json` | Preferences, dock geometry, pins, widget IDs, profiles |
+| `opentaskbar.log` | Diagnostics; rotated to `opentaskbar.log.old` |
+| `Themes\` | Installed theme packs |
+| `secrets\` | DPAPI-protected provider credentials |
+| `rust-cache\icon-cache\` | Extracted icons |
+| `taskbar-state.txt`, `flyout-positions.txt` | Recovery journals |
+| `OpenTaskbarWatchdog.exe` | Architecture-matched watchdog copy used by release metadata |
+
+Unknown settings keys are preserved on save, invalid JSON is backed up before defaults are restored, and no secret is written to the log or to `.otbackup` archives. The old separate-folder layout is retired; import a full backup to migrate from it.
+
+### Widget catalog
+
+The catalog is generated from `crates/opentaskbar-app/src/widgets/registry.rs`: Time & Weather (Clock & Date, Weather, Day Progress, Stopwatch, Countdown), System & Hardware (System Stats, Net Speed, Battery, Bluetooth Battery, Storage), AI Quotas (seven providers plus an aggregate), Media & Controls (Media, Audio, Quick Settings, Keyboard Layout) and Productivity (Focus). Folder Stacks and App Groups are dock helpers; Show Desktop is a shell action. [Custom widgets](docs/custom-widgets.md) run as separate local processes.
 
 ### Code layout
 
 | Crate | Responsibility |
 | :--- | :--- |
-| `opentaskbar-core` | Settings, 14 locale catalogs, paths, deterministic logic |
-| `opentaskbar-shell` | Taskbar hide/restore, recovery journal, watchdog |
-| `opentaskbar-app` | GPUI dock, widgets, flyouts and Win32 platform layer |
+| `opentaskbar-core` | Settings schema, i18n (14 catalogs), paths, logging, deterministic logic |
+| `opentaskbar-shell` | Taskbar journal, AppBar reservation, flyout repositioning, watchdog |
+| `opentaskbar-app` | GPUI dock and Settings UI, widget catalog, Win32 platform layer |
 
-Bundled resources live in `Fonts/`, `Assets/`, `themes/` and `tools/watchdog/`. CI runs checks, tests and an x86 watchdog build on every branch.
+The root also holds `Fonts/`, `Assets/`, `themes/`, `packaging/msix/`, `scripts/`, `tests/reference/locales/` and `tools/watchdog/`. CI lives in `.github/workflows/`: `ci.yml` (fmt, clippy, tests, release build), `rust-ci.yml` (watchdog/x86 and locale gates) and `release.yml` (packaging with SLSA attestation and an optional VirusTotal scan).
 
 ### Feature flags
 

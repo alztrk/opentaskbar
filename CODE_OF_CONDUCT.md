@@ -36,9 +36,9 @@ This Code of Conduct applies within all community spaces, and also applies when 
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the project maintainers. All complaints will be reviewed and investigated promptly and fairly.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the project maintainers. Open a private report through the repository's [security advisory form](https://github.com/alztrk/opentaskbar/security/advisories/new) when discretion is needed; for non-sensitive community matters, use the [issue tracker](https://github.com/alztrk/opentaskbar/issues). All complaints will be reviewed and investigated promptly and fairly.
 
-All community leaders are obligated to respect the privacy and security of the reporter of any incident.
+All community leaders are obligated to respect the privacy and security of the reporter of any incident. This Code of Conduct applies to the Rust workspace, its issue tracker, pull requests and all project documentation under `docs/` and `.github/`.
 
 ## Attribution
 
