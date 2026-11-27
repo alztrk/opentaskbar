@@ -5,6 +5,7 @@
 //! The pickers use the modern COM API so dark mode, Acrylic shell and per-monitor DPI of the
 //! rest of the app are preserved.
 
+use crate::platform::win32_helpers::set_window_long_ptr;
 use opentaskbar_core::i18n as loc;
 
 use std::cell::Cell;
@@ -29,10 +30,10 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_OWNERDRAW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
     ES_AUTOHSCROLL, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW, GetWindowTextLengthW,
-    GetWindowTextW, IsDialogMessageW, SW_SHOW, SendMessageW, SetForegroundWindow,
-    SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
-    WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_PAINT, WM_SETFONT, WS_CAPTION,
-    WS_CHILD, WS_EX_DLGMODALFRAME, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+    GetWindowTextW, IsDialogMessageW, SW_SHOW, SendMessageW, SetForegroundWindow, ShowWindow,
+    WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DRAWITEM,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_PAINT, WM_SETFONT, WS_CAPTION, WS_CHILD, WS_EX_DLGMODALFRAME,
+    WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::design::{self, Rgb};
@@ -484,7 +485,7 @@ pub fn ask_name(
     });
     let state_ptr = &mut *state as *mut PromptState;
     unsafe {
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
+        set_window_long_ptr(hwnd, GWLP_USERDATA, state_ptr as isize);
         if owner_hwnd != 0 {
             let _ = EnableWindow(owner_hwnd as HWND, 0);
         }
@@ -522,7 +523,7 @@ pub fn ask_name(
 
     let out = state.result.take();
     unsafe {
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        set_window_long_ptr(hwnd, GWLP_USERDATA, 0);
         if owner_hwnd != 0 {
             let _ = EnableWindow(owner_hwnd as HWND, 1);
         }

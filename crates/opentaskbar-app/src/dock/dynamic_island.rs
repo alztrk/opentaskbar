@@ -6,6 +6,7 @@
 //! - Per-display widget ordering (`DynamicIslandWidgetOrders`), placement context menus,
 //!   desktop-only visibility mode, and fullscreen app suppression.
 
+use crate::platform::win32_helpers::set_window_long_ptr;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -23,10 +24,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW,
     HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_HAND, KillTimer, LoadCursorW, MA_NOACTIVATE,
     RegisterClassExW, RegisterWindowMessageW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-    SWP_NOMOVE, SWP_NOZORDER, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    WM_DESTROY, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_NCHITTEST, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
-    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SWP_NOMOVE, SWP_NOZORDER, SetCursor, SetTimer, SetWindowPos, ShowWindow, WM_DESTROY,
+    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCHITTEST, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use super::dcomp::{DcompEngine, IslandButton, VisualNode, WidgetInteraction};
@@ -494,7 +495,7 @@ impl DynamicIslandWindow {
 
         let ptr = (&mut *boxed as *mut Self) as isize;
         unsafe {
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr);
+            set_window_long_ptr(hwnd, GWLP_USERDATA, ptr);
             SetTimer(hwnd, TIMER_VISIBILITY, 400, None);
             SetTimer(hwnd, TIMER_WIDGETS, 1000, None);
         }
@@ -1540,7 +1541,7 @@ impl DynamicIslandWindow {
             KillTimer(self.hwnd as HWND, TIMER_WIDGETS);
             KillTimer(self.hwnd as HWND, TIMER_ANIM);
             KillTimer(self.hwnd as HWND, TIMER_HIDE_ANIM);
-            SetWindowLongPtrW(self.hwnd as HWND, GWLP_USERDATA, 0);
+            set_window_long_ptr(self.hwnd as HWND, GWLP_USERDATA, 0);
             DestroyWindow(self.hwnd as HWND);
         }
     }

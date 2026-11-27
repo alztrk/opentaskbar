@@ -9,6 +9,7 @@
 //!   `StatusHeader`, `Hero`, `ToggleGrid`, `ProgressBar`, `StatRow`, `ActionRow`, `AppRow`, `ButtonBar`
 //! - Mouse-wheel vertical scrolling + thin scrollbar thumb + toggle-close suppression.
 
+use crate::platform::win32_helpers::set_window_long_ptr;
 use opentaskbar_core::i18n as loc;
 
 use std::cell::RefCell;
@@ -69,12 +70,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, GetWindowRect, HC_ACTION, HHOOK, HWND_TOPMOST, IDC_ARROW, IDC_HAND,
     IsWindow, KillTimer, LWA_ALPHA, LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW,
     RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor,
-    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
-    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_ACTIVATE,
-    WM_CHAR, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP, WindowFromPoint,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowPos, SetWindowsHookExW,
+    ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_ACTIVATE, WM_CHAR, WM_CLOSE,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WindowFromPoint,
 };
 
 use super::menu::BorderStyle;
@@ -2208,7 +2209,7 @@ fn show_flyout_impl<'a>(
     });
     let ptr = (&mut *state) as *mut FlyoutState<'_> as isize;
     unsafe {
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr);
+        set_window_long_ptr(hwnd, GWLP_USERDATA, ptr);
         SetWindowPos(
             hwnd,
             HWND_TOPMOST,
@@ -2268,7 +2269,7 @@ fn show_flyout_impl<'a>(
         KillTimer(hwnd, TIMER_ANIM);
         KillTimer(hwnd, TIMER_DISMISS);
         KillTimer(hwnd, TIMER_LIVE);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        set_window_long_ptr(hwnd, GWLP_USERDATA, 0);
         DestroyWindow(hwnd);
     }
     // Focus return: best effort, only when the original window still exists.

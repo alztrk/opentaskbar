@@ -4,6 +4,7 @@
 //! with hardware-accelerated Direct2D rounded hover pills, DirectWrite grayscale anti-aliasing,
 //! `Segoe UI Variable Text`, and `Segoe Fluent Icons`.
 
+use crate::platform::win32_helpers::set_window_long_ptr;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -42,9 +43,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetCursorPos, GetMenu,
     GetMenuItemCount, GetMenuItemID, GetMenuStringW, GetSystemMenu, GetWindowLongPtrW,
     HWND_TOPMOST, IDC_ARROW, IDC_HAND, LoadCursorW, MF_BYPOSITION, SW_SHOW, SWP_NOACTIVATE,
-    SWP_SHOWWINDOW, SendMessageW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SYSCOMMAND, WS_EX_NOACTIVATE,
+    SWP_SHOWWINDOW, SendMessageW, SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow,
+    WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SYSCOMMAND, WS_EX_NOACTIVATE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -891,7 +892,7 @@ fn create_pane_window(
     pane.paint_glass_surface();
     let ptr = (&mut *pane) as *mut MenuPane as isize;
     unsafe {
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr);
+        set_window_long_ptr(hwnd, GWLP_USERDATA, ptr);
         let flags = SWP_SHOWWINDOW | if is_submenu { SWP_NOACTIVATE } else { 0 };
         SetWindowPos(hwnd, HWND_TOPMOST, x, y, menu_w, menu_h, flags);
         if !is_submenu {
@@ -908,7 +909,7 @@ fn destroy_pane(pane: &mut MenuPane) {
     pane.glass_formats = None;
     pane.d2d = None;
     unsafe {
-        SetWindowLongPtrW(pane.hwnd, GWLP_USERDATA, 0);
+        set_window_long_ptr(pane.hwnd, GWLP_USERDATA, 0);
         DestroyWindow(pane.hwnd);
     }
 }

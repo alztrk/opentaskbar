@@ -10,6 +10,7 @@ use crate::design::spatial_glass::{
     DCompForeground, SpatialGlassConfig, SpatialGlassHost, configure_host_backdrop_window,
 };
 use crate::design::{self, Rgb, fonts, gdi_rgb};
+use crate::platform::win32_helpers::set_window_long_ptr;
 use opentaskbar_shell::tracker;
 use std::cell::RefCell;
 use std::sync::OnceLock;
@@ -57,10 +58,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
     GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LoadCursorW, RegisterClassExW, SW_HIDE,
-    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, WM_ERASEBKGND, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR,
-    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetWindowPos, ShowWindow,
+    WM_ERASEBKGND, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW,
+    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::platform::win32;
@@ -322,9 +322,7 @@ impl PreviewPopup {
             on_pointer_leave: Box::new(on_pointer_leave),
         });
         let ptr = (&mut *popup) as *mut Self as isize;
-        unsafe {
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr);
-        }
+        set_window_long_ptr(hwnd, GWLP_USERDATA, ptr);
         Some(popup)
     }
 
@@ -975,7 +973,7 @@ impl Drop for PreviewPopup {
         self.spatial_glass = None;
         if !self.hwnd.is_null() {
             unsafe {
-                SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
+                set_window_long_ptr(self.hwnd, GWLP_USERDATA, 0);
                 DestroyWindow(self.hwnd);
             }
         }

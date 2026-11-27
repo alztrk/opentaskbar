@@ -4,6 +4,7 @@
 //! - System dark/light theme detection via Windows Personalize registry key (Issue #88)
 //! - Native context menus (Dock, Per-App, Task View), file drop extraction, and key modifiers
 
+use super::win32_helpers::set_window_long_ptr;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -31,8 +32,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetSystemMetrics, GetWindow, GetWindowLongPtrW, GetWindowRect,
     GetWindowThreadProcessId, HTCAPTION, HWND_TOPMOST, IsIconic, IsWindowVisible, SM_CXSCREEN,
     SM_CYSCREEN, SPI_GETCLIENTAREAANIMATION, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowLongPtrW, SetWindowPos, SystemParametersInfoW,
-    WM_NCLBUTTONDOWN, WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetWindowPos, SystemParametersInfoW, WM_NCLBUTTONDOWN,
+    WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
 };
 use windows_sys::core::BOOL;
 
@@ -664,7 +665,7 @@ pub fn configure_native_dock_hwnd(hwnd_val: usize) {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as usize;
         let next = (ex & !(WS_EX_APPWINDOW as usize))
             | (WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE) as usize;
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next as isize);
+        set_window_long_ptr(hwnd, GWL_EXSTYLE, next as isize);
 
         // Enable Windows 11 HostBackdropBrush sampling on transparent WS_EX_NOREDIRECTIONBITMAP
         // dock/island windows without setting DWMWA_SYSTEMBACKDROP_TYPE (which causes a giant

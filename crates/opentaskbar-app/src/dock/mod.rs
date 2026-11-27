@@ -19,6 +19,7 @@
 //!   effective_bottom_gap, widget_density_for}` are resolved once per settings
 //!   load into `EffectiveMetrics` so the mouse hot path never re-reads disk.
 
+use crate::platform::win32_helpers::set_window_long_ptr;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -65,12 +66,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     HHOOK, HTCLIENT, HTTRANSPARENT, HWND_BROADCAST, IDC_ARROW, IDC_HAND, IDC_SIZEWE, IsIconic,
     IsWindow, IsWindowVisible, IsZoomed, KillTimer, LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW,
     PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetCursor, SetForegroundWindow,
-    SetTimer, SetWindowLongPtrW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_APP, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_NCHITTEST, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
-    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP, WS_VISIBLE,
+    SetTimer, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_APP, WM_DESTROY, WM_DROPFILES, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCHITTEST,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSEXW,
+    WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_VISIBLE,
 };
 
 pub mod dcomp;
@@ -7799,7 +7800,7 @@ pub fn run(settings: DockSettings) {
                 }
                 let ptr = Box::into_raw(Box::new(state));
                 unsafe {
-                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
+                    set_window_long_ptr(hwnd, GWLP_USERDATA, ptr as isize);
                     SetTimer(hwnd, TIMER_POLL, 800, None);
                     SetTimer(hwnd, TIMER_WINDOW_CLOSE, 50, None);
                     SetTimer(hwnd, TIMER_WIDGETS, 2000, None);
@@ -7904,7 +7905,7 @@ pub fn run(settings: DockSettings) {
             if (*ptr).appbar_registered {
                 opentaskbar_shell::appbar::unregister(hwnd as usize, (*ptr).appbar_reason);
             }
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            set_window_long_ptr(hwnd, GWLP_USERDATA, 0);
             DestroyWindow(hwnd);
             drop(Box::from_raw(ptr));
         }

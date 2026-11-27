@@ -5,6 +5,7 @@
 //! - Hover: draws only a crisp Windows 11-style vertical hairline (1.5 DIP wide,
 //!   height derived from the dock height and clamped to 16..34 DIP).
 
+use crate::platform::win32_helpers::set_window_long_ptr;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
     AC_SRC_ALPHA, AC_SRC_OVER, BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BLENDFUNCTION,
@@ -17,9 +18,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetWindowLongPtrW, HWND_TOPMOST,
     IDC_HAND, LoadCursorW, RegisterClassExW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetCursor,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    SetWindowPos, ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_SETCURSOR, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
 use opentaskbar_core::settings::DockEdge;
@@ -217,7 +218,7 @@ impl ShowDesktopCorner {
             vertical_edge: edge != DockEdge::Bottom,
         }));
         unsafe {
-            SetWindowLongPtrW(hwnd, GWLP_USERDATA, state as isize);
+            set_window_long_ptr(hwnd, GWLP_USERDATA, state as isize);
             (*state).render();
             SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
             ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
@@ -263,7 +264,7 @@ impl ShowDesktopCorner {
 impl Drop for ShowDesktopCorner {
     fn drop(&mut self) {
         unsafe {
-            SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
+            set_window_long_ptr(self.hwnd, GWLP_USERDATA, 0);
             DestroyWindow(self.hwnd);
             if !self.state.is_null() {
                 drop(Box::from_raw(self.state));

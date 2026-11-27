@@ -67,14 +67,21 @@ if ($sidecars.Count -gt 0) {
 }
 
 # --extract-icons exits immediately when stdin is closed, making it a safe smoke
-# test that never opens the dock or touches the taskbar.
+# test that never opens the dock or touches the taskbar. Use System.Diagnostics.Process
+# directly: Windows PowerShell 5.1 can return an empty ExitCode after
+# Start-Process -PassThru + WaitForExit(timeout), which made this gate fail on a
+# perfectly good EXE.
 Write-Host "Starting Rust EXE in icon-worker smoke-test mode..."
-$nullIn = Join-Path $env:TEMP 'opentaskbar-stdin-null'
-[IO.File]::WriteAllText($nullIn, '')
+$startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName = $executable
+$startInfo.Arguments = '--extract-icons'
+$startInfo.UseShellExecute = $false
+$startInfo.CreateNoWindow = $true
+$startInfo.RedirectStandardInput = $true
 $process = $null
 try {
-    $process = Start-Process -FilePath $executable -ArgumentList '--extract-icons' -PassThru `
-        -WindowStyle Hidden -RedirectStandardInput $nullIn
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $process.StandardInput.Close()
     if (-not $process.WaitForExit(20000)) {
         throw "Rust EXE did not exit from icon-worker mode within 20 seconds."
     }
@@ -87,7 +94,6 @@ try {
         $process.WaitForExit()
     }
     if ($process) { $process.Dispose() }
-    Remove-Item -LiteralPath $nullIn -Force -ErrorAction SilentlyContinue
 }
 
 Write-Host "Rust portable EXE startup check passed ($Architecture)."

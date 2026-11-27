@@ -9,6 +9,7 @@
 //! modal message loop. `super::preview` supplies the shared DWM identity type and
 //! the Aero-Peek teardown used by the rest of the dock.
 
+use crate::platform::win32_helpers::set_window_long_ptr;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,10 +61,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     ASFW_ANY, AllowSetForegroundWindow, CreateWindowExW, DefWindowProcW, DestroyWindow,
     DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW, HWND_TOPMOST,
     IDC_ARROW, IDC_HAND, IsWindow, LoadCursorW, MSG, PostMessageW, RegisterClassExW, SW_HIDE,
-    SW_SHOW, SWP_NOACTIVATE, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY,
-    WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR,
-    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    SW_SHOW, SWP_NOACTIVATE, SetCursor, SetForegroundWindow, SetWindowPos, ShowWindow,
+    TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 /// Modal picker close signal. Broadcast by the settings process and posted to
@@ -1128,7 +1129,7 @@ impl Drop for PickerState {
         release_thumbs(self);
         if !self.hwnd.is_null() && unsafe { IsWindow(self.hwnd) } != 0 {
             unsafe {
-                SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
+                set_window_long_ptr(self.hwnd, GWLP_USERDATA, 0);
                 DestroyWindow(self.hwnd);
             }
         }
@@ -1324,9 +1325,7 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
         activating: false,
     });
     let ptr = Box::into_raw(state);
-    unsafe {
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
-    }
+    set_window_long_ptr(hwnd, GWLP_USERDATA, ptr as isize);
     track(hwnd as usize);
     unsafe {
         SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
