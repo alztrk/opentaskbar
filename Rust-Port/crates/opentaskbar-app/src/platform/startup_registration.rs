@@ -285,16 +285,16 @@ pub fn expand_env_with(text: &str, lookup: impl Fn(&str) -> Option<String>) -> S
     let mut index = 0usize;
     while index < text.len() {
         let rest = &text[index..];
-        if rest.starts_with('%') {
-            if let Some(end) = rest[1..].find('%') {
-                let name = &rest[1..1 + end];
-                if !name.is_empty()
-                    && let Some(value) = lookup(name)
-                {
-                    out.push_str(&value);
-                    index += 1 + end + 1;
-                    continue;
-                }
+        if let Some(stripped) = rest.strip_prefix('%')
+            && let Some(end) = stripped.find('%')
+        {
+            let name = &stripped[..end];
+            if !name.is_empty()
+                && let Some(value) = lookup(name)
+            {
+                out.push_str(&value);
+                index += 1 + end + 1;
+                continue;
             }
         }
         let ch = rest.chars().next().unwrap_or('\0');
@@ -319,7 +319,10 @@ pub fn expand_environment_variables(text: &str) -> String {
     if written == 0 || written > size {
         return expand_env_with(text, |name| std::env::var(name).ok());
     }
-    let used = buffer.iter().position(|&unit| unit == 0).unwrap_or(buffer.len());
+    let used = buffer
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(buffer.len());
     String::from_utf16_lossy(&buffer[..used])
 }
 
@@ -333,7 +336,8 @@ fn file_version(path: &Path) -> Option<(u32, u32, u32, u32)> {
     }
     let mut buffer = vec![0u8; size as usize];
     // SAFETY: buffer size is exactly the value reported by the size query.
-    if unsafe { GetFileVersionInfoW(name.as_ptr(), handle, size, buffer.as_mut_ptr().cast()) } == 0 {
+    if unsafe { GetFileVersionInfoW(name.as_ptr(), handle, size, buffer.as_mut_ptr().cast()) } == 0
+    {
         return None;
     }
     let sub_block = wide("\\");
@@ -366,7 +370,10 @@ fn file_version(path: &Path) -> Option<(u32, u32, u32, u32)> {
 /// True when `registered` is older than `current`. Falls back to the file
 /// modification time for builds that do not embed a version resource.
 fn is_older_executable(registered: &str, current: &str) -> bool {
-    match (file_version(Path::new(registered)), file_version(Path::new(current))) {
+    match (
+        file_version(Path::new(registered)),
+        file_version(Path::new(current)),
+    ) {
         (Some(a), Some(b)) => a < b,
         _ => match (
             std::fs::metadata(registered).and_then(|meta| meta.modified()),
@@ -705,7 +712,8 @@ pub fn sync_startup_folder_shortcuts(folder: &Path, current_executable: &str) ->
     let Ok(entries) = std::fs::read_dir(folder) else {
         return 0;
     };
-    let Some(current) = try_normalize_path(&expand_environment_variables(current_executable)) else {
+    let Some(current) = try_normalize_path(&expand_environment_variables(current_executable))
+    else {
         return 0;
     };
     // SAFETY: COM STA for IShellLinkW on this thread.
@@ -884,7 +892,7 @@ mod tests {
     fn version_tuples_compare_component_wise() {
         assert!((0, 1, 2, 0) < (0, 1, 3, 0));
         assert!((1, 0, 0, 0) > (0, 9, 9, 9));
-        assert!(!((1, 0, 0, 0) < (1, 0, 0, 0)));
+        assert!((1, 0, 0, 0) >= (1, 0, 0, 0));
     }
 
     #[test]

@@ -543,9 +543,11 @@ fn widget_density_override_and_shrink_priority_are_exposed() {
 
 #[test]
 fn full_profile_applies_all_fifteen_scoped_fields() {
-    let mut settings = DockSettings::default();
-    settings.theme_pack = "previous".to_owned();
-    settings.custom_launcher_hotkey = Some("Ctrl+Alt+L".to_owned());
+    let mut settings = DockSettings {
+        theme_pack: "previous".to_owned(),
+        custom_launcher_hotkey: Some("Ctrl+Alt+L".to_owned()),
+        ..DockSettings::default()
+    };
     let profile = DockProfile {
         name: "Work".to_owned(),
         position: DockPosition::Center,

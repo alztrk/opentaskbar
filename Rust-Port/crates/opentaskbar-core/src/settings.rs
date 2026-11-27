@@ -1546,7 +1546,7 @@ pub fn widget_shrink_priority(id: &str) -> u8 {
         .filter(|c| c.is_ascii_alphanumeric())
         .flat_map(char::to_lowercase)
         .collect();
-    let priority = match compact.as_str() {
+    match compact.as_str() {
         "media" => 10,
         "weather" => 15,
         "audio" => 18,
@@ -1562,8 +1562,7 @@ pub fn widget_shrink_priority(id: &str) -> u8 {
         "clock" => 80,
         _ if compact.starts_with("aiusage") => 40,
         _ => 100,
-    };
-    priority
+    }
 }
 
 fn canonical_widget_list(ids: &[String]) -> Vec<String> {
@@ -1597,6 +1596,8 @@ pub fn apply_full_profile(settings: &mut DockSettings, profile: &DockProfile) {
         return;
     }
 
+    settings.position = profile.position;
+    settings.size = profile.size;
     if !profile.enabled_widgets.is_empty() {
         settings.enabled_widgets = canonical_widget_list(&profile.enabled_widgets);
     }

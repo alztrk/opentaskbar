@@ -132,7 +132,8 @@ fn is_c_sharp_guid_token(token: &str) -> bool {
 fn create_event(name: &str, manual_reset: bool) -> Option<EventHandle> {
     let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
     // SAFETY: fixed name, explicit reset mode, initially unsignalled.
-    let handle = unsafe { CreateEventW(std::ptr::null(), i32::from(manual_reset), 0, wide.as_ptr()) };
+    let handle =
+        unsafe { CreateEventW(std::ptr::null(), i32::from(manual_reset), 0, wide.as_ptr()) };
     (!handle.is_null()).then(|| EventHandle {
         raw: handle,
         _owner: Arc::new(EventOwner::new(handle)),
@@ -148,7 +149,9 @@ fn needs_watchdog_refresh(existing: Option<&[u8]>, expected: &[u8]) -> bool {
 /// App-directory priority: a deployed/packaged watchdog is already signed and
 /// must be launched directly instead of a copy in `%LOCALAPPDATA%`.
 fn select_watchdog_path(app_dir_candidate: Option<PathBuf>, data_dir_path: PathBuf) -> PathBuf {
-    app_dir_candidate.filter(|path| path.exists()).unwrap_or(data_dir_path)
+    app_dir_candidate
+        .filter(|path| path.exists())
+        .unwrap_or(data_dir_path)
 }
 
 fn app_dir_watchdog() -> Option<PathBuf> {
@@ -168,13 +171,12 @@ fn ensure_watchdog_exe() -> Option<PathBuf> {
         if needs_watchdog_refresh(existing.as_deref(), WATCHDOG_BYTES) {
             // A kill mid-write must not leave a truncated watchdog behind.
             let tmp = path.with_extension("exe.tmp");
-            if fs::write(&tmp, WATCHDOG_BYTES).is_ok() {
-                if fs::rename(&tmp, &path).is_err()
-                    && path.exists()
-                    && fs::remove_file(&path).is_ok()
-                {
-                    let _ = fs::rename(&tmp, &path);
-                }
+            if fs::write(&tmp, WATCHDOG_BYTES).is_ok()
+                && fs::rename(&tmp, &path).is_err()
+                && path.exists()
+                && fs::remove_file(&path).is_ok()
+            {
+                let _ = fs::rename(&tmp, &path);
             }
         }
     }
@@ -390,17 +392,20 @@ mod tests {
     #[test]
     fn watchdog_binary_refresh_is_byte_exact_and_app_dir_wins() {
         assert!(needs_watchdog_refresh(None, WATCHDOG_BYTES));
-        assert!(!needs_watchdog_refresh(Some(WATCHDOG_BYTES), WATCHDOG_BYTES));
+        assert!(!needs_watchdog_refresh(
+            Some(WATCHDOG_BYTES),
+            WATCHDOG_BYTES
+        ));
         let mut same_length = WATCHDOG_BYTES.to_vec();
         if let Some(byte) = same_length.first_mut() {
             *byte ^= 0xFF;
         }
-        assert!(needs_watchdog_refresh(
-            Some(&same_length),
-            WATCHDOG_BYTES
-        ));
+        assert!(needs_watchdog_refresh(Some(&same_length), WATCHDOG_BYTES));
 
-        let unique = format!("ot-watchdog-select-{}", TEST_ID.fetch_add(1, Ordering::Relaxed));
+        let unique = format!(
+            "ot-watchdog-select-{}",
+            TEST_ID.fetch_add(1, Ordering::Relaxed)
+        );
         let app_exe = std::env::temp_dir().join(format!("{unique}-app.exe"));
         let missing = std::env::temp_dir().join(format!("{unique}-missing.exe"));
         let data_exe = std::env::temp_dir().join(format!("{unique}-data.exe"));

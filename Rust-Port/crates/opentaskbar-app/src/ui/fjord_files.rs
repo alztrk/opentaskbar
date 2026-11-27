@@ -22,7 +22,20 @@ use crate::platform::win32;
 use crate::ui::components::{ButtonVariant, UiTheme, button, icon_glyph};
 use crate::ui::text_input::apply_keystroke;
 
-actions!(fjord_files, [FocusLocation, FocusSearch, GoBack, GoForward, GoUp, TogglePreview, RefreshFolder, OpenSelection, QuickLook]);
+actions!(
+    fjord_files,
+    [
+        FocusLocation,
+        FocusSearch,
+        GoBack,
+        GoForward,
+        GoUp,
+        TogglePreview,
+        RefreshFolder,
+        OpenSelection,
+        QuickLook
+    ]
+);
 
 const WIN_W: f32 = 1020.0;
 const WIN_H: f32 = 690.0;
@@ -148,7 +161,7 @@ impl FjordFilesView {
                 .map(|entries| (path, entries))
                 .map_err(|error| error.to_string())
         });
-        let _ = cx.spawn(async move |this, cx| {
+        drop(cx.spawn(async move |this, cx| {
             let result = task.await;
             if cancel.load(Ordering::SeqCst) {
                 return;
@@ -183,7 +196,7 @@ impl FjordFilesView {
                 cx.notify();
                 view.refresh_preview(cx);
             });
-        });
+        }));
     }
 
     fn step_history(&mut self, delta: i32, cx: &mut Context<Self>) {
@@ -208,7 +221,10 @@ impl FjordFilesView {
             .filter(|(_, entry)| files::matches_filter(&entry.name, &self.query, culture))
             .map(|(index, _)| index)
             .collect();
-        if self.selected.is_some_and(|row| !self.visible.contains(&row)) {
+        if self
+            .selected
+            .is_some_and(|row| !self.visible.contains(&row))
+        {
             self.selected = None;
         }
         self.status = if self.query.trim().is_empty() {
@@ -227,7 +243,9 @@ impl FjordFilesView {
     }
 
     fn open_selection(&mut self, cx: &mut Context<Self>) {
-        let Some(entry) = self.selected_entry().cloned() else { return };
+        let Some(entry) = self.selected_entry().cloned() else {
+            return;
+        };
         if entry.is_folder {
             self.navigate(entry.path, None, cx);
         } else if !files::open_file(&entry.path, None) {
@@ -255,7 +273,7 @@ impl FjordFilesView {
         let entry = self.selected_entry().cloned();
         let task_cancel = Arc::clone(&cancel);
         let task = cx.background_spawn(async move { preview::build(entry.as_ref(), &task_cancel) });
-        let _ = cx.spawn(async move |this, cx| {
+        drop(cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |view, cx| {
                 if !cancel.load(Ordering::SeqCst) {
@@ -263,7 +281,7 @@ impl FjordFilesView {
                     cx.notify();
                 }
             });
-        });
+        }));
     }
 
     fn copy_path(&mut self, cx: &mut Context<Self>) {
@@ -293,7 +311,11 @@ impl FjordFilesView {
             return; // each field owns its own keystrokes
         }
         if modifiers.control && matches!(key, "l" | "f") {
-            let focus = if key == "l" { &self.location_focus } else { &self.search_focus };
+            let focus = if key == "l" {
+                &self.location_focus
+            } else {
+                &self.search_focus
+            };
             focus.focus(window);
             return;
         }
@@ -336,7 +358,9 @@ impl FjordFilesView {
             preview::Preview::NothingSelected => loc::t("SelectPreview"),
             preview::Preview::Folder { name } => name.clone(),
             preview::Preview::Image { width, height } => format!("{width} × {height}"),
-            preview::Preview::Pdf { pages } => loc::t("PdfPages").replace("{0}", &pages.to_string()),
+            preview::Preview::Pdf { pages } => {
+                loc::t("PdfPages").replace("{0}", &pages.to_string())
+            }
             preview::Preview::Text { text, .. } => text.clone(),
             preview::Preview::Unsupported => loc::t("UnsupportedPreview"),
             preview::Preview::Failed => loc::t("PreviewFailed"),
@@ -372,10 +396,44 @@ impl Render for FjordFilesView {
             .flex()
             .items_center()
             .gap(px(4.0))
-            .child(div().when(can_back, |b| b.opacity(1.0)).when(!can_back, |b| b.opacity(0.4)).child(button("fjord-back", &t, "‹", ButtonVariant::Secondary, cx.listener(|this, _, _, cx| this.step_history(-1, cx)))))
-            .child(div().when(can_forward, |b| b.opacity(1.0)).when(!can_forward, |b| b.opacity(0.4)).child(button("fjord-forward", &t, "›", ButtonVariant::Secondary, cx.listener(|this, _, _, cx| this.step_history(1, cx)))))
-            .child(button("fjord-up", &t, "↑", ButtonVariant::Secondary, cx.listener(|this, _, _, cx| this.up(cx))))
-            .child(button("fjord-preview-toggle", &t, loc::t("FjordFilesPreview"), ButtonVariant::Secondary, cx.listener(|this, _, _, cx| this.toggle_preview(cx))));
+            .child(
+                div()
+                    .when(can_back, |b| b.opacity(1.0))
+                    .when(!can_back, |b| b.opacity(0.4))
+                    .child(button(
+                        "fjord-back",
+                        &t,
+                        "‹",
+                        ButtonVariant::Secondary,
+                        cx.listener(|this, _, _, cx| this.step_history(-1, cx)),
+                    )),
+            )
+            .child(
+                div()
+                    .when(can_forward, |b| b.opacity(1.0))
+                    .when(!can_forward, |b| b.opacity(0.4))
+                    .child(button(
+                        "fjord-forward",
+                        &t,
+                        "›",
+                        ButtonVariant::Secondary,
+                        cx.listener(|this, _, _, cx| this.step_history(1, cx)),
+                    )),
+            )
+            .child(button(
+                "fjord-up",
+                &t,
+                "↑",
+                ButtonVariant::Secondary,
+                cx.listener(|this, _, _, cx| this.up(cx)),
+            ))
+            .child(button(
+                "fjord-preview-toggle",
+                &t,
+                loc::t("FjordFilesPreview"),
+                ButtonVariant::Secondary,
+                cx.listener(|this, _, _, cx| this.toggle_preview(cx)),
+            ));
 
         let search_focus = self.search_focus.clone();
         let search = div()
@@ -402,7 +460,11 @@ impl Render for FjordFilesView {
             .border_color(rgba(t.border))
             .text_size(px(12.5))
             .text_color(rgba(t.text_primary))
-            .child(if self.query.is_empty() { loc::t("FjordFilesSearch") } else { self.query.clone() });
+            .child(if self.query.is_empty() {
+                loc::t("FjordFilesSearch")
+            } else {
+                self.query.clone()
+            });
 
         let location_focus = self.location_focus.clone();
         let location = div()
@@ -419,7 +481,10 @@ impl Render for FjordFilesView {
                     return;
                 }
                 if key == "escape" {
-                    this.location = this.folder.clone().unwrap_or_else(|| files::COMPUTER_LOCATION.to_owned());
+                    this.location = this
+                        .folder
+                        .clone()
+                        .unwrap_or_else(|| files::COMPUTER_LOCATION.to_owned());
                     cx.notify();
                     return;
                 }
@@ -448,30 +513,46 @@ impl Render for FjordFilesView {
             .flex_1()
             .min_w_0()
             .overflow_y_scroll()
-            .child(div().flex().flex_col().children(entries.into_iter().enumerate().map(|(row, entry)| {
-                let name = entry.name.clone();
-                let meta = if entry.is_folder {
-                    loc::t("FjordFilesFolder")
-                } else {
-                    format!("{} · {}", entry.size_label(','), entry.date_label(culture))
-                };
-                let selected = self.selected == Some(row);
-                let glyph = if entry.is_folder { "\u{e8b7}" } else { "\u{e7c3}" };
+            .child(
                 div()
-                    .id(SharedString::from(format!("fjord-row-{row}")))
                     .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .h(px(ROW_H))
-                    .px(px(10.0))
-                    .rounded(px(5.0))
-                    .bg(rgba(if selected { t.accent_soft } else { 0 }))
-                    .text_color(rgba(t.text_primary))
-                    .on_click(cx.listener(move |this: &mut Self, _, _, cx| this.select(row, cx)))
-                    .child(icon_glyph(glyph, 13.0, t.accent))
-                    .child(div().min_w_0().flex_1().child(name))
-                    .child(div().text_size(px(11.0)).text_color(rgba(t.text_secondary)).child(meta))
-            })));
+                    .flex_col()
+                    .children(entries.into_iter().enumerate().map(|(row, entry)| {
+                        let name = entry.name.clone();
+                        let meta = if entry.is_folder {
+                            loc::t("FjordFilesFolder")
+                        } else {
+                            format!("{} · {}", entry.size_label(','), entry.date_label(culture))
+                        };
+                        let selected = self.selected == Some(row);
+                        let glyph = if entry.is_folder {
+                            "\u{e8b7}"
+                        } else {
+                            "\u{e7c3}"
+                        };
+                        div()
+                            .id(SharedString::from(format!("fjord-row-{row}")))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .h(px(ROW_H))
+                            .px(px(10.0))
+                            .rounded(px(5.0))
+                            .bg(rgba(if selected { t.accent_soft } else { 0 }))
+                            .text_color(rgba(t.text_primary))
+                            .on_click(
+                                cx.listener(move |this: &mut Self, _, _, cx| this.select(row, cx)),
+                            )
+                            .child(icon_glyph(glyph, 13.0, t.accent))
+                            .child(div().min_w_0().flex_1().child(name))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgba(t.text_secondary))
+                                    .child(meta),
+                            )
+                    })),
+            );
 
         let sidebar = div()
             .w(px(184.0))
@@ -482,45 +563,58 @@ impl Render for FjordFilesView {
             .p(px(8.0))
             .border_r_1()
             .border_color(rgba(t.border))
-            .children(files::favorites(&Self::home()).into_iter().enumerate().map(|(index, (label, glyph, path))| {
+            .children(files::favorites(&Self::home()).into_iter().enumerate().map(
+                |(index, (label, glyph, path))| {
+                    div()
+                        .id(SharedString::from(format!("fjord-place-{index}")))
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(8.0))
+                        .py(px(5.0))
+                        .rounded(px(6.0))
+                        .text_size(px(12.0))
+                        .text_color(rgba(t.text_primary))
+                        .hover(|style| style.bg(rgba(t.surface_hover)))
+                        .on_click(cx.listener(move |this: &mut Self, _, _, cx| {
+                            this.navigate(path.clone(), None, cx);
+                        }))
+                        .child(icon_glyph(glyph, 13.0, t.accent))
+                        .child(loc::t(label))
+                },
+            ))
+            .child(
                 div()
-                    .id(SharedString::from(format!("fjord-place-{index}")))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .px(px(8.0))
-                    .py(px(5.0))
-                    .rounded(px(6.0))
-                    .text_size(px(12.0))
-                    .text_color(rgba(t.text_primary))
-                    .hover(|style| style.bg(rgba(t.surface_hover)))
-                    .on_click(cx.listener(move |this: &mut Self, _, _, cx| {
-                        this.navigate(path.clone(), None, cx);
-                    }))
-                    .child(icon_glyph(glyph, 13.0, t.accent))
-                    .child(loc::t(label))
-            }))
-            .child(div().py(px(6.0)).text_size(px(10.0)).text_color(rgba(t.text_secondary)).child(loc::t("FjordFilesVolumes")))
-            .children(files::read_drives().into_iter().enumerate().map(|(index, drive)| {
-                let path = drive.path.clone();
-                let name = drive.name.clone();
-                div()
-                    .id(SharedString::from(format!("fjord-drive-{index}")))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .px(px(8.0))
-                    .py(px(5.0))
-                    .rounded(px(6.0))
-                    .text_size(px(12.0))
-                    .text_color(rgba(t.text_primary))
-                    .hover(|style| style.bg(rgba(t.surface_hover)))
-                    .on_click(cx.listener(move |this: &mut Self, _, _, cx| {
-                        this.navigate(path.clone(), None, cx);
-                    }))
-                    .child(icon_glyph("\u{eda2}", 13.0, t.text_secondary))
-                    .child(name)
-            }));
+                    .py(px(6.0))
+                    .text_size(px(10.0))
+                    .text_color(rgba(t.text_secondary))
+                    .child(loc::t("FjordFilesVolumes")),
+            )
+            .children(
+                files::read_drives()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, drive)| {
+                        let path = drive.path.clone();
+                        let name = drive.name.clone();
+                        div()
+                            .id(SharedString::from(format!("fjord-drive-{index}")))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.0))
+                            .px(px(8.0))
+                            .py(px(5.0))
+                            .rounded(px(6.0))
+                            .text_size(px(12.0))
+                            .text_color(rgba(t.text_primary))
+                            .hover(|style| style.bg(rgba(t.surface_hover)))
+                            .on_click(cx.listener(move |this: &mut Self, _, _, cx| {
+                                this.navigate(path.clone(), None, cx);
+                            }))
+                            .child(icon_glyph("\u{eda2}", 13.0, t.text_secondary))
+                            .child(name)
+                    }),
+            );
 
         let mut body = div().flex().flex_1().min_h_0().child(sidebar).child(
             div()
@@ -551,8 +645,20 @@ impl Render for FjordFilesView {
                         .text_size(px(11.0))
                         .text_color(rgba(t.text_secondary))
                         .child(self.status.clone())
-                        .child(button("fjord-copy-path", &t, loc::t("FjordFilesCopyPath"), ButtonVariant::Secondary, cx.listener(|this, _, _, cx| this.copy_path(cx))))
-                        .child(button("fjord-reveal", &t, loc::t("FjordFilesReveal"), ButtonVariant::Secondary, cx.listener(|this, _, _, cx| this.reveal(cx)))),
+                        .child(button(
+                            "fjord-copy-path",
+                            &t,
+                            loc::t("FjordFilesCopyPath"),
+                            ButtonVariant::Secondary,
+                            cx.listener(|this, _, _, cx| this.copy_path(cx)),
+                        ))
+                        .child(button(
+                            "fjord-reveal",
+                            &t,
+                            loc::t("FjordFilesReveal"),
+                            ButtonVariant::Secondary,
+                            cx.listener(|this, _, _, cx| this.reveal(cx)),
+                        )),
                 ),
         );
         if self.preview_open || self.quick_look {

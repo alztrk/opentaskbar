@@ -16,11 +16,15 @@ mod design;
 #[cfg(windows)]
 mod dock;
 #[cfg(windows)]
+mod fjord;
+#[cfg(windows)]
 mod platform;
 #[cfg(windows)]
 mod ui;
 #[cfg(windows)]
 mod widgets;
+#[cfg(windows)]
+mod window_picker;
 
 #[cfg(windows)]
 fn enable_dpi_awareness() {
@@ -117,6 +121,11 @@ fn main() {
     #[cfg(windows)]
     {
         platform::render_mode::apply_cli_args(&args);
+        if let Some(handled) = fjord::activation::handle_cli_arg(&args)
+            && handled
+        {
+            return;
+        }
         if let Some(arg) = args
             .iter()
             .find(|a| a.starts_with("--update") || a.starts_with("action=update"))

@@ -536,6 +536,20 @@ pub struct DetailedRelease {
 
 pub type ReleaseWithVersion = DetailedRelease;
 
+/// Builds the typed release shape from the canonical release used by the UI.
+impl From<&Release> for DetailedRelease {
+    fn from(release: &Release) -> Self {
+        Self {
+            version: Version::parse(&release.version).unwrap_or_default(),
+            tag: release.tag.clone(),
+            url: release.url.clone(),
+            download_url: release.download_url.clone(),
+            size: release.size.map(|value| value as i64),
+            sha256: release.sha256.clone(),
+        }
+    }
+}
+
 impl Release {
     /// Typed view of the canonical String version.
     pub fn version_struct(&self) -> Option<Version> {
@@ -991,9 +1005,8 @@ fn http_get_detailed(url: &str) -> Result<(u16, Vec<u8>), String> {
         use windows_sys::Win32::Networking::WinHttp::{
             WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER,
             WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen,
-            WinHttpOpenRequest,
-            WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
-            WinHttpSetTimeouts,
+            WinHttpOpenRequest, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
+            WinHttpSendRequest, WinHttpSetTimeouts,
         };
         let (scheme, rest) = url.split_once("://").ok_or("invalid URL")?;
         let secure = scheme.eq_ignore_ascii_case("https");

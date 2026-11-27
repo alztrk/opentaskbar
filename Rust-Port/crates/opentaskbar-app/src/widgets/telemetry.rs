@@ -101,7 +101,11 @@ unsafe extern "system" {
 pub fn timezone_display_name() -> String {
     let mut info: WinTimeZoneInformation = unsafe { std::mem::zeroed() };
     let id = unsafe { GetTimeZoneInformation(&mut info) };
-    let name = if id == 2 { info.daylight_name } else { info.standard_name };
+    let name = if id == 2 {
+        info.daylight_name
+    } else {
+        info.standard_name
+    };
     let len = name.iter().position(|c| *c == 0).unwrap_or(name.len());
     let value = String::from_utf16_lossy(&name[..len]).trim().to_owned();
     if value.is_empty() {
@@ -3238,7 +3242,10 @@ fn refresh_claude_oauth(path: &std::path::Path, auth: &serde_json::Value) -> Opt
             if let Some(new_refresh) = root.get("refresh_token").and_then(|v| v.as_str()) {
                 target.insert("refreshToken".to_owned(), serde_json::json!(new_refresh));
             }
-            let _ = std::fs::write(path, serde_json::to_string_pretty(&file).unwrap_or_default());
+            let _ = std::fs::write(
+                path,
+                serde_json::to_string_pretty(&file).unwrap_or_default(),
+            );
         }
     }
     Some(token)
@@ -3264,8 +3271,12 @@ fn read_provider_token(provider_id: &str) -> Option<(String, Option<String>)> {
             // Legacy opencode CLI locations (both Windows and portable home layouts).
             let paths = [
                 home.as_ref().map(|h| h.join(".opencode").join("auth.json")),
-                home.as_ref()
-                    .map(|h| h.join(".local").join("share").join("opencode").join("auth.json")),
+                home.as_ref().map(|h| {
+                    h.join(".local")
+                        .join("share")
+                        .join("opencode")
+                        .join("auth.json")
+                }),
                 local.as_ref().map(|l| l.join("opencode").join("auth.json")),
             ];
             paths.into_iter().flatten().find_map(|path| {
@@ -3310,12 +3321,20 @@ fn read_provider_token(provider_id: &str) -> Option<(String, Option<String>)> {
             }
             let paths = [
                 home.as_ref().map(|h| h.join(".codex").join("auth.json")),
-                home.as_ref()
-                    .map(|h| h.join(".local").join("share").join("codex").join("auth.json")),
+                home.as_ref().map(|h| {
+                    h.join(".local")
+                        .join("share")
+                        .join("codex")
+                        .join("auth.json")
+                }),
             ];
             for path in paths.into_iter().flatten() {
-                let Ok(raw) = std::fs::read_to_string(path) else { continue };
-                let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+                let Ok(raw) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                    continue;
+                };
                 let tokens = v.get("tokens").unwrap_or(&v);
                 let Some(tok) = tokens
                     .get("access_token")
@@ -3323,7 +3342,9 @@ fn read_provider_token(provider_id: &str) -> Option<(String, Option<String>)> {
                     .and_then(|t| t.as_str())
                     .map(str::trim)
                     .filter(|t| !t.is_empty())
-                else { continue };
+                else {
+                    continue;
+                };
                 let acct = tokens
                     .get("account_id")
                     .and_then(|s| s.as_str())
@@ -3339,7 +3360,9 @@ fn read_provider_token(provider_id: &str) -> Option<(String, Option<String>)> {
             let paths = [
                 home.as_ref()
                     .map(|h| h.join(".config").join("github-copilot").join("apps.json")),
-                local.as_ref().map(|l| l.join("github-copilot").join("apps.json")),
+                local
+                    .as_ref()
+                    .map(|l| l.join("github-copilot").join("apps.json")),
             ];
             for path in paths.into_iter().flatten() {
                 if let Ok(raw) = std::fs::read_to_string(path)
@@ -4320,9 +4343,9 @@ fn winhttp_json_with_retry(
     let mut last = None;
     for attempt in 0..3u32 {
         last = winhttp_json(method, host, path, headers, body);
-        let retryable = last.as_ref().is_none_or(|(status, _, retry)| {
-            *status == 429 || *status >= 500 || retry.is_some()
-        });
+        let retryable = last
+            .as_ref()
+            .is_none_or(|(status, _, retry)| *status == 429 || *status >= 500 || retry.is_some());
         if !retryable || attempt == 2 {
             break;
         }
@@ -4763,10 +4786,12 @@ mod sweep_parity_tests {
 
     #[test]
     fn clock_formats_every_date_style_and_layout() {
-        let mut settings = DockSettings::default();
-        settings.clock_24_hour = true;
-        settings.clock_show_seconds = true;
-        settings.date_style = ClockDateStyle::NumericDate;
+        let mut settings = DockSettings {
+            clock_24_hour: true,
+            clock_show_seconds: true,
+            date_style: ClockDateStyle::NumericDate,
+            ..Default::default()
+        };
         for (format, expected) in [
             (ClockDateFormat::DdMmYyyy, "26/11/2026"),
             (ClockDateFormat::DdMmYy, "26/11/26"),
@@ -4798,20 +4823,39 @@ mod sweep_parity_tests {
         });
         let days = parse_weather_forecast(&root);
         assert_eq!(days[0].0, loc::t("WeatherTomorrow"));
-        assert_eq!(format_temperature(10.0, TemperatureUnit::Fahrenheit), "50°F");
+        assert_eq!(
+            format_temperature(10.0, TemperatureUnit::Fahrenheit),
+            "50°F"
+        );
         let cache = WeatherCache {
             wind_kmh_val: Some(10.0),
             ..Default::default()
         };
-        assert!(cache.formatted_wind(TemperatureUnit::Fahrenheit).contains("mph"));
-        assert!(cache.formatted_wind(TemperatureUnit::Celsius).contains("km/h"));
+        assert!(
+            cache
+                .formatted_wind(TemperatureUnit::Fahrenheit)
+                .contains("mph")
+        );
+        assert!(
+            cache
+                .formatted_wind(TemperatureUnit::Celsius)
+                .contains("km/h")
+        );
     }
 
     #[test]
     fn storage_uses_972_8_gib_tb_cutoff() {
-        let drive = DriveSpace { letter: 'C', free_gb: 500.0, total_gb: 972.7 };
+        let drive = DriveSpace {
+            letter: 'C',
+            free_gb: 500.0,
+            total_gb: 972.7,
+        };
         assert!(drive.format_capacity_pair().contains("GB"));
-        let drive = DriveSpace { letter: 'D', free_gb: 500.0, total_gb: 972.8 };
+        let drive = DriveSpace {
+            letter: 'D',
+            free_gb: 500.0,
+            total_gb: 972.8,
+        };
         assert!(drive.format_capacity_pair().contains("TB"));
     }
 
@@ -4824,7 +4868,10 @@ mod sweep_parity_tests {
         let next = encode_night_light_toggle(&base, false).unwrap();
         let next_state = decode_night_light_state(&next).unwrap();
         assert!(!next_state.on);
-        assert!(next_state.modified > modified, "timestamp must advance monotonically");
+        assert!(
+            next_state.modified > modified,
+            "timestamp must advance monotonically"
+        );
         // An unrecognized blob is never treated as Night Light state.
         assert_eq!(decode_night_light_on(b"not a CloudStore blob"), None);
     }

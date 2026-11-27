@@ -12,7 +12,9 @@ use windows_sys::Win32::Foundation::{HINSTANCE, HWND, RECT};
 use windows_sys::Win32::Graphics::Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, SendInput, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
+    KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, KEYEVENTF_UNICODE, MAPVK_VK_TO_VSC, MapVirtualKeyW,
+    SendInput, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_RCONTROL,
+    VK_RMENU, VK_RSHIFT, VK_RWIN, VK_SHIFT, keybd_event,
 };
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, SW_SHOWNORMAL, WM_COMMAND};
@@ -52,16 +54,64 @@ fn send_key(vk: u16, flags: u32, scan: u16) -> bool {
     unsafe { SendInput(1, &input, size_of::<INPUT>() as i32) == 1 }
 }
 
+/// Generic `VK_SHIFT` / `VK_CONTROL` / `VK_MENU` are aliases: a key-up for the
+/// alias does not reliably release a physical left/right key after a secure
+/// desktop transition. Track the real keys instead.
+const PHYSICAL_MODIFIERS: [u16; 8] = [
+    VK_LSHIFT,
+    VK_RSHIFT,
+    VK_LCONTROL,
+    VK_RCONTROL,
+    VK_LMENU,
+    VK_RMENU,
+    VK_LWIN,
+    VK_RWIN,
+];
+
+/// Maps a generic or physical modifier to the physical key we can release.
+fn physical_modifier(vk: u16) -> Option<u16> {
+    match vk {
+        VK_SHIFT => Some(VK_LSHIFT),
+        VK_CONTROL => Some(VK_LCONTROL),
+        VK_MENU => Some(VK_LMENU),
+        vk if PHYSICAL_MODIFIERS.contains(&vk) => Some(vk),
+        _ => None,
+    }
+}
+
 fn is_modifier(vk: u16) -> bool {
-    matches!(vk, VK_SHIFT | VK_MENU | VK_CONTROL | VK_LWIN | VK_RWIN)
+    physical_modifier(vk).is_some()
+}
+
+/// Extended-key flag: right Ctrl/Alt, both Win keys and the right Shift are
+/// delivered with `KEYEVENTF_EXTENDEDKEY` on a standard US layout.
+fn modifier_keyup(vk: u16) -> INPUT {
+    let scan = unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) as u16 };
+    let extended = matches!(vk, VK_RCONTROL | VK_RMENU | VK_LWIN | VK_RWIN);
+    let flags =
+        KEYEVENTF_KEYUP | KEYEVENTF_SCANCODE | if extended { KEYEVENTF_EXTENDEDKEY } else { 0 };
+    key_input(0, flags, scan)
+}
+
+/// Releases the most recently noted modifier first and drops duplicates, so a
+/// key tracked both by `note_modifier_pressed` and `GetAsyncKeyState` gets one
+/// physical key-up, not two.
+fn release_order(keys: Vec<u16>) -> Vec<u16> {
+    let mut out = Vec::with_capacity(keys.len());
+    for vk in keys.into_iter().rev() {
+        if !out.contains(&vk) {
+            out.push(vk);
+        }
+    }
+    out
 }
 
 /// Remembers a modifier pressed by a chord sender so `release_stuck_modifiers`
 /// can clean it up if a keystroke is lost during a session lock transition.
 pub fn note_modifier_pressed(vk: u16) {
-    if !is_modifier(vk) {
+    let Some(vk) = physical_modifier(vk) else {
         return;
-    }
+    };
     if let Ok(mut held) = HELD_MODIFIERS.lock()
         && !held.contains(&vk)
     {
@@ -70,13 +120,16 @@ pub fn note_modifier_pressed(vk: u16) {
 }
 
 pub fn note_modifier_released(vk: u16) {
+    let Some(vk) = physical_modifier(vk) else {
+        return;
+    };
     if let Ok(mut held) = HELD_MODIFIERS.lock() {
         held.retain(|&key| key != vk);
     }
 }
 
 fn physical_modifiers() -> Vec<u16> {
-    [VK_SHIFT, VK_MENU, VK_CONTROL, VK_RWIN, VK_LWIN]
+    PHYSICAL_MODIFIERS
         .into_iter()
         // SAFETY: `GetAsyncKeyState` is a read-only key-state query.
         .filter(|&vk| unsafe { GetAsyncKeyState(vk as i32) < 0 })
@@ -84,8 +137,9 @@ fn physical_modifiers() -> Vec<u16> {
 }
 
 /// Releases every modifier we pressed plus any that are physically stuck down.
-/// Called when the interactive desktop returns, so a modifier lost during a
-/// lock transition cannot leak into the next keystroke.
+/// Called on session unlock, so a modifier lost during a secure-desktop
+/// transition cannot leak into the next keystroke. `SendInput` emits real
+/// scan-code key-ups; `keybd_event` is the fallback if UIPI blocks injection.
 pub fn release_stuck_modifiers() {
     let mut keys = physical_modifiers();
     if let Ok(mut held) = HELD_MODIFIERS.lock() {
@@ -96,9 +150,29 @@ pub fn release_stuck_modifiers() {
         }
         held.clear();
     }
-    // Release in reverse order so Win is the final modifier to go up.
-    for key in keys.into_iter().rev() {
-        send_key(key, KEYEVENTF_KEYUP, 0);
+    let keys = release_order(keys);
+    if keys.is_empty() {
+        return;
+    }
+    // SAFETY: every INPUT is initialized and the count matches the slice length.
+    let inputs: Vec<INPUT> = keys.iter().copied().map(modifier_keyup).collect();
+    let sent = unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            size_of::<INPUT>() as i32,
+        )
+    };
+    if sent as usize != inputs.len() {
+        // Legacy fallback: same physical key-ups, accepted in more contexts.
+        for vk in keys {
+            let input = modifier_keyup(vk);
+            // SAFETY: a well-formed INPUT structure read from our own stack.
+            let ki = unsafe { input.Anonymous.ki };
+            unsafe {
+                keybd_event(vk as u8, ki.wScan as u8, ki.dwFlags, ki.dwExtraInfo);
+            }
+        }
     }
 }
 
@@ -307,5 +381,44 @@ mod tests {
     fn modifier_bookkeeping_ignores_regular_keys() {
         note_modifier_pressed(VK_A_U16);
         assert!(HELD_MODIFIERS.lock().is_ok_and(|keys| keys.is_empty()));
+    }
+
+    #[test]
+    fn generic_modifiers_are_canonicalized_to_physical_keys() {
+        assert_eq!(physical_modifier(VK_SHIFT), Some(VK_LSHIFT));
+        assert_eq!(physical_modifier(VK_CONTROL), Some(VK_LCONTROL));
+        assert_eq!(physical_modifier(VK_MENU), Some(VK_LMENU));
+        assert_eq!(physical_modifier(VK_RWIN), Some(VK_RWIN));
+        assert_eq!(physical_modifier(VK_A_U16), None);
+        assert_eq!(PHYSICAL_MODIFIERS.len(), 8);
+
+        HELD_MODIFIERS.lock().unwrap().clear();
+        note_modifier_pressed(VK_SHIFT);
+        assert!(
+            HELD_MODIFIERS
+                .lock()
+                .is_ok_and(|keys| keys.as_slice() == [VK_LSHIFT])
+        );
+        note_modifier_released(VK_SHIFT);
+        assert!(HELD_MODIFIERS.lock().is_ok_and(|keys| keys.is_empty()));
+    }
+
+    #[test]
+    fn release_order_reverses_and_deduplicates_physical_modifiers() {
+        assert_eq!(
+            release_order(vec![VK_LSHIFT, VK_LWIN, VK_LSHIFT, VK_RCONTROL]),
+            vec![VK_RCONTROL, VK_LSHIFT, VK_LWIN]
+        );
+        assert!(release_order(Vec::new()).is_empty());
+
+        let src = include_str!("shell_shortcuts_ex.rs");
+        for needle in [
+            "SendInput(",
+            "keybd_event(vk as u8",
+            "KEYEVENTF_SCANCODE",
+            "fn physical_modifiers()",
+        ] {
+            assert!(src.contains(needle), "release path must use {needle:?}");
+        }
     }
 }

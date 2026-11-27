@@ -23,8 +23,42 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use windows_sys::core::BOOL;
 
 use crate::platform::{icon_cache, pins};
-use crate::ui::flyout::{self, FlyoutAction, FlyoutBlock, FlyoutIcon, FlyoutSpec};
+use crate::ui::flyout::{self, FlyoutAction, FlyoutBlock, FlyoutIcon, FlyoutOptions, FlyoutSpec};
 use crate::ui::menu::{self, BorderStyle, MenuEntry, MenuIcon};
+
+/// Remapped ids for the target app's own menu so its command ids (often `1`,
+/// `2`, ...) cannot collide with tray row ids or the footer ButtonBar ids.
+const NATIVE_MENU_COMMAND_BASE: u32 = 5000;
+
+/// Pure id remapping for the target's native menu. Kept separate from Win32 so
+/// the no-collision contract can be unit tested.
+fn remap_native_menu_entries(entries: Vec<MenuEntry>) -> (Vec<(u32, u32)>, Vec<MenuEntry>) {
+    let mut commands = Vec::new();
+    let mut items = Vec::new();
+    for (offset, entry) in entries.into_iter().enumerate() {
+        let remapped = NATIVE_MENU_COMMAND_BASE + offset as u32;
+        match entry {
+            MenuEntry::Item {
+                id,
+                icon,
+                label,
+                shortcut,
+                destructive,
+            } => {
+                commands.push((remapped, id));
+                items.push(MenuEntry::Item {
+                    id: remapped,
+                    icon,
+                    label,
+                    shortcut,
+                    destructive,
+                });
+            }
+            other => items.push(other),
+        }
+    }
+    (commands, items)
+}
 
 #[derive(Clone, Debug)]
 pub struct BackgroundApp {
@@ -403,7 +437,7 @@ pub(super) fn open_background_apps_flyout(
         let Some((_, Some(app))) = rows.get(((id - 100) / 3) as usize) else {
             return false;
         };
-        let entries = vec![
+        let mut entries = vec![
             MenuEntry::item(
                 1,
                 MenuIcon::Play,
@@ -413,6 +447,18 @@ pub(super) fn open_background_apps_flyout(
             MenuEntry::Separator,
             MenuEntry::destructive(3, MenuIcon::Power, loc::t("Terminate")),
         ];
+        // Expose the target's own `GetMenu` / `GetSystemMenu` commands (C#
+        // `ApplicationWindowMenu`) as a submenu of this row's context menu.
+        let (native_commands, native_items) =
+            remap_native_menu_entries(menu::native_app_menu_entries(app.hwnd));
+        if !native_items.is_empty() {
+            entries.push(MenuEntry::Separator);
+            entries.push(MenuEntry::submenu(
+                MenuIcon::Terminal,
+                "System menu",
+                native_items,
+            ));
+        }
         match menu::show_popup_menu_with_border(
             owner_hwnd,
             is_dark,
@@ -433,11 +479,20 @@ pub(super) fn open_background_apps_flyout(
                 terminate_pid(app.pid, &app.exe_path);
                 false
             }
-            _ => false,
+            id => {
+                // Native commands must be sent to the *target* window, not to
+                // our popup, and never keep a stale menu id after the click.
+                if let Some((_, command)) = native_commands.iter().find(|(item, _)| *item == id) {
+                    menu::invoke_native_app_command(app.hwnd, *command);
+                }
+                false
+            }
         }
     };
 
-    let action = flyout::show_flyout_interactive_with_border(
+    // `FlyoutOptions::tray()` arms the #32768 retention hook so the target
+    // application's native context menu can stay open over this flyout.
+    let action = flyout::show_flyout_interactive_with_options(
         "tray",
         owner_hwnd,
         is_dark,
@@ -446,6 +501,7 @@ pub(super) fn open_background_apps_flyout(
         spec,
         Some(&mut handle_right_click),
         BorderStyle::from_menu_settings(is_dark, settings),
+        FlyoutOptions::tray(),
     );
     if let Some(app) = open_from_menu {
         activate_or_relaunch(app);
@@ -478,4 +534,46 @@ pub(super) fn open_background_apps_flyout(
         _ => {}
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_flyout_enables_external_native_menu_retention() {
+        let src = include_str!("tray.rs");
+        assert!(src.contains("flyout::show_flyout_interactive_with_options("));
+        assert!(src.contains("FlyoutOptions::tray()"));
+        // Built at runtime so the assertion itself is not a source-level hit.
+        let retired = ["show_flyout_interactive", "_with_border("].concat();
+        assert!(!src.contains(&retired));
+    }
+
+    #[test]
+    fn native_menu_commands_are_remapped_without_colliding_with_rows() {
+        let entries = vec![
+            MenuEntry::item(1, MenuIcon::Terminal, "Restore".to_owned()),
+            MenuEntry::Separator,
+            MenuEntry::item(0xF020, MenuIcon::Close, "Minimize".to_owned()),
+        ];
+        let (commands, items) = remap_native_menu_entries(entries);
+        assert_eq!(
+            commands,
+            vec![
+                (NATIVE_MENU_COMMAND_BASE, 1),
+                (NATIVE_MENU_COMMAND_BASE + 2, 0xF020),
+            ]
+        );
+        assert!(matches!(items[1], MenuEntry::Separator));
+        let MenuEntry::Item { id, .. } = items[0] else {
+            panic!("first native entry must stay selectable");
+        };
+        assert_eq!(id, NATIVE_MENU_COMMAND_BASE);
+        assert!(id >= 5000);
+
+        let src = include_str!("tray.rs");
+        assert!(src.contains("menu::native_app_menu_entries(app.hwnd)"));
+        assert!(src.contains("menu::invoke_native_app_command(app.hwnd, *command)"));
+    }
 }

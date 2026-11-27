@@ -112,13 +112,11 @@ pub fn profile_index(size: DockSize) -> usize {
 /// typed field in newer ones. Reading it through `serde_json` works for both without
 /// depending on a cross-WS field name at compile time.
 pub fn magnification_expands_dock(settings: &DockSettings) -> bool {
-    if let Some(value) = settings.extra.get("MagnificationExpandsDock").and_then(|v| v.as_bool()) {
-        return value;
-    }
-    serde_json::to_value(settings)
-        .ok()
-        .and_then(|value| value.get("MagnificationExpandsDock").and_then(|v| v.as_bool()))
-        .unwrap_or(false)
+    settings
+        .extra
+        .get("MagnificationExpandsDock")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(settings.magnification_expands_dock)
 }
 
 /// C# `RunningAppProjection.AggregateByExecutablePath`: merge all windows of a
@@ -133,7 +131,11 @@ pub fn aggregate_by_executable_path(settings: &DockSettings) -> bool {
     }
     serde_json::to_value(settings)
         .ok()
-        .and_then(|value| value.get("AggregateByExecutablePath").and_then(|v| v.as_bool()))
+        .and_then(|value| {
+            value
+                .get("AggregateByExecutablePath")
+                .and_then(|v| v.as_bool())
+        })
         .unwrap_or(false)
 }
 
@@ -156,7 +158,9 @@ pub fn size_profile(settings: &DockSettings) -> SizeProfile {
     let headroom = if magnification_expands_dock(settings) {
         0.0
     } else {
-        (PROFILE_HEADROOM_DIPS[i] - shelf + shelf * scale).round().max(0.0)
+        (PROFILE_HEADROOM_DIPS[i] - shelf + shelf * scale)
+            .round()
+            .max(0.0)
     };
     SizeProfile {
         shelf: (shelf * scale).round(),
@@ -2397,6 +2401,7 @@ mod tests {
         {
             let settings = DockSettings {
                 size,
+                magnification_expands_dock: false,
                 ..DockSettings::default()
             };
             let profile = size_profile(&settings);
@@ -2430,14 +2435,15 @@ mod tests {
     #[test]
     fn magnification_expands_dock_removes_headroom() {
         let settings = DockSettings::default();
-        assert!(!magnification_expands_dock(&settings));
-        assert!(size_profile(&settings).headroom > 0.0);
-        let mut expanded = settings.clone();
-        expanded
+        // C# #182 default: magnification may expand the dock surface.
+        assert!(magnification_expands_dock(&settings));
+        assert_eq!(size_profile(&settings).headroom, 0.0);
+        let mut fixed = settings.clone();
+        fixed
             .extra
-            .insert("MagnificationExpandsDock".into(), serde_json::json!(true));
-        assert!(magnification_expands_dock(&expanded));
-        assert_eq!(size_profile(&expanded).headroom, 0.0);
+            .insert("MagnificationExpandsDock".into(), serde_json::json!(false));
+        assert!(!magnification_expands_dock(&fixed));
+        assert!(size_profile(&fixed).headroom > 0.0);
     }
 
     #[test]

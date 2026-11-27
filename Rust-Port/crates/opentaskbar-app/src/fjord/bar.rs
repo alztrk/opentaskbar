@@ -31,7 +31,12 @@ pub struct Rect {
 
 impl Rect {
     pub const fn new(left: i32, top: i32, right: i32, bottom: i32) -> Self {
-        Self { left, top, right, bottom }
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+        }
     }
 
     pub const fn width(self) -> i32 {
@@ -49,22 +54,43 @@ impl Rect {
 
 /// `FjordBarNative.PixelBounds`: DIP -> physical rectangle.
 pub fn pixel_bounds(bounds: Rect, scale: f32) -> Rect {
-    let scale = if scale.is_finite() && scale > 0.0 { scale as f64 } else { 1.0 };
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale as f64
+    } else {
+        1.0
+    };
     let round = |value: i32| -> i32 { (value as f64 * scale).round() as i32 };
-    Rect::new(round(bounds.left), round(bounds.top), round(bounds.right), round(bounds.bottom))
+    Rect::new(
+        round(bounds.left),
+        round(bounds.top),
+        round(bounds.right),
+        round(bounds.bottom),
+    )
 }
 
 /// Top-edge strip reserved for the bar, height rounded up like C# `Math.Ceiling`.
 pub fn bar_rect(monitor: Rect, scale: f32, height_dip: f32) -> Rect {
     let height = ((height_dip as f64 * scale as f64).ceil() as i32).max(1);
-    Rect::new(monitor.left, monitor.top, monitor.right, monitor.top + height)
+    Rect::new(
+        monitor.left,
+        monitor.top,
+        monitor.right,
+        monitor.top + height,
+    )
 }
 
 /// `ABM_QUERYPOS` may shrink the rectangle; never let it leave the monitor.
 pub fn pin_to_edge(requested: Rect, monitor: Rect) -> Rect {
-    let left = requested.left.clamp(monitor.left, monitor.right.max(monitor.left));
+    let left = requested
+        .left
+        .clamp(monitor.left, monitor.right.max(monitor.left));
     let right = requested.right.clamp(left, monitor.right.max(left));
-    Rect::new(left, monitor.top, right, requested.bottom.clamp(monitor.top + 1, monitor.bottom))
+    Rect::new(
+        left,
+        monitor.top,
+        right,
+        requested.bottom.clamp(monitor.top + 1, monitor.bottom),
+    )
 }
 
 /// C# `FjordBarNative.IsFullscreen` geometry rule.
@@ -148,14 +174,23 @@ pub fn reconcile(
         let hidden = hidden_keys.contains(&monitor.key);
         if let Some(existing) = tracked.iter_mut().find(|entry| entry.key == monitor.key) {
             if existing.bounds != monitor.bounds {
-                events.push(BarEvent::SetBounds { key: monitor.key, bounds: monitor.bounds });
+                events.push(BarEvent::SetBounds {
+                    key: monitor.key,
+                    bounds: monitor.bounds,
+                });
             }
-            events.push(BarEvent::SetHidden { key: monitor.key, hidden });
+            events.push(BarEvent::SetHidden {
+                key: monitor.key,
+                hidden,
+            });
             existing.bounds = monitor.bounds;
         } else {
             tracked.push(monitor.clone());
             events.push(BarEvent::Open { key: monitor.key });
-            events.push(BarEvent::SetHidden { key: monitor.key, hidden });
+            events.push(BarEvent::SetHidden {
+                key: monitor.key,
+                hidden,
+            });
         }
     }
     events
@@ -236,7 +271,11 @@ pub struct AppBar {
 
 impl AppBar {
     pub fn new(hwnd: usize, callback_message: u32) -> Self {
-        Self { hwnd, callback_message, registered: false }
+        Self {
+            hwnd,
+            callback_message,
+            registered: false,
+        }
     }
 
     pub fn is_registered(&self) -> bool {
@@ -247,11 +286,8 @@ impl AppBar {
         let mut data = opentaskbar_shell::appbar::create_data(self.hwnd);
         data.uCallbackMessage = self.callback_message;
         data.uEdge = ABE_TOP;
-        self.registered = opentaskbar_shell::appbar::register(
-            self.hwnd,
-            self.callback_message,
-            "FjordBar",
-        ) != 0;
+        self.registered =
+            opentaskbar_shell::appbar::register(self.hwnd, self.callback_message, "FjordBar") != 0;
         // The contracted `set_and_verify_state()` replaces the explicit
         // ABM_NEW verification below once WS-3 exposes it.
         let _ = (&mut data, contract_state(self.hwnd));
@@ -324,9 +360,14 @@ fn contract_position(_hwnd: usize, _rect: Rect) -> Option<Rect> {
 pub fn show_window(hwnd: usize, visible: bool) {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE, SW_SHOWNOACTIVATE};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, SW_SHOWNOACTIVATE, ShowWindow};
         // SAFETY: `hwnd` belongs to this process's bar window.
-        unsafe { ShowWindow(hwnd as windows_sys::Win32::Foundation::HWND, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE }) };
+        unsafe {
+            ShowWindow(
+                hwnd as windows_sys::Win32::Foundation::HWND,
+                if visible { SW_SHOWNOACTIVATE } else { SW_HIDE },
+            )
+        };
     }
     #[cfg(not(windows))]
     let _ = (hwnd, visible);
@@ -336,7 +377,9 @@ pub fn show_window(hwnd: usize, visible: bool) {
 pub fn move_window(hwnd: usize, rect: Rect) {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOOWNERZORDER};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SetWindowPos,
+        };
         // SAFETY: coordinates come from the AppBar reservation.
         unsafe {
             SetWindowPos(
@@ -414,8 +457,9 @@ pub fn monitor_is_fullscreen(key: usize) -> bool {
 #[cfg(windows)]
 const ABE_TOP: u32 = 1;
 
+// Mirrors the Win32 `SYSTEMTIME` FFI layout; keep the native name for parity.
 #[cfg(windows)]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, clippy::upper_case_acronyms)]
 #[repr(C)]
 struct SYSTEMTIME {
     wYear: u16,
@@ -433,7 +477,11 @@ struct SYSTEMTIME {
 #[cfg(windows)]
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn CreateMutexW(attributes: *const core::ffi::c_void, initial_owner: i32, name: *const u16) -> isize;
+    fn CreateMutexW(
+        attributes: *const core::ffi::c_void,
+        initial_owner: i32,
+        name: *const u16,
+    ) -> isize;
     fn ReleaseMutex(handle: isize) -> i32;
     fn CloseHandle(handle: isize) -> i32;
     fn GetLastError() -> u32;
@@ -469,8 +517,14 @@ mod tests {
 
     #[test]
     fn bar_rect_is_top_strip_at_dpi() {
-        assert_eq!(bar_rect(Rect::new(0, 0, 1920, 1080), 1.5, 32.0), Rect::new(0, 0, 1920, 48));
-        assert_eq!(bar_rect(Rect::new(-1920, -500, 0, 580), 1.0, 32.0), Rect::new(-1920, -500, 0, -468));
+        assert_eq!(
+            bar_rect(Rect::new(0, 0, 1920, 1080), 1.5, 32.0),
+            Rect::new(0, 0, 1920, 48)
+        );
+        assert_eq!(
+            bar_rect(Rect::new(-1920, -500, 0, 580), 1.0, 32.0),
+            Rect::new(-1920, -500, 0, -468)
+        );
     }
 
     #[test]
@@ -483,9 +537,21 @@ mod tests {
     #[test]
     fn fullscreen_geometry_requires_all_edges() {
         let monitor = Rect::new(0, 0, 1920, 1080);
-        assert!(covers_monitor(Rect::new(0, 0, 1920, 1080), monitor, FULLSCREEN_TOLERANCE));
-        assert!(covers_monitor(Rect::new(-1, -2, 1921, 1081), monitor, FULLSCREEN_TOLERANCE));
-        assert!(!covers_monitor(Rect::new(0, 0, 1900, 1080), monitor, FULLSCREEN_TOLERANCE));
+        assert!(covers_monitor(
+            Rect::new(0, 0, 1920, 1080),
+            monitor,
+            FULLSCREEN_TOLERANCE
+        ));
+        assert!(covers_monitor(
+            Rect::new(-1, -2, 1921, 1081),
+            monitor,
+            FULLSCREEN_TOLERANCE
+        ));
+        assert!(!covers_monitor(
+            Rect::new(0, 0, 1900, 1080),
+            monitor,
+            FULLSCREEN_TOLERANCE
+        ));
     }
 
     #[test]
@@ -498,15 +564,33 @@ mod tests {
     #[test]
     fn reconcile_opens_closes_and_hides() {
         let mut tracked = Vec::new();
-        let monitors = [MonitorSnapshot { key: 1, bounds: Rect::new(0, 0, 1920, 1080) }];
+        let monitors = [MonitorSnapshot {
+            key: 1,
+            bounds: Rect::new(0, 0, 1920, 1080),
+        }];
         let events = reconcile(&mut tracked, &monitors, &HashSet::new());
-        assert_eq!(events, vec![BarEvent::Open { key: 1 }, BarEvent::SetHidden { key: 1, hidden: false }]);
+        assert_eq!(
+            events,
+            vec![
+                BarEvent::Open { key: 1 },
+                BarEvent::SetHidden {
+                    key: 1,
+                    hidden: false
+                }
+            ]
+        );
         let hidden = HashSet::from([1]);
         assert_eq!(
             reconcile(&mut tracked, &monitors, &hidden),
-            vec![BarEvent::SetHidden { key: 1, hidden: true }]
+            vec![BarEvent::SetHidden {
+                key: 1,
+                hidden: true
+            }]
         );
-        assert_eq!(reconcile(&mut tracked, &[], &HashSet::new()), vec![BarEvent::Close { key: 1 }]);
+        assert_eq!(
+            reconcile(&mut tracked, &[], &HashSet::new()),
+            vec![BarEvent::Close { key: 1 }]
+        );
     }
 
     #[test]

@@ -91,7 +91,7 @@ The final integration wires these production entry points; integration test file
 
 ## Localization
 
-14 cultures ship as embedded JSON: `de-DE`, `en-US`, `es-ES`, `fr-FR`, `it-IT`, `ja-JP`, `ko-KR`, `nl-NL`, `pl-PL`, `pt-BR`, `ru-RU`, `tr-TR`, `uk-UA`, `zh-CN`. Every catalog has the **same 1361 keys** — Rust-port additions on top of the 999 C# keys: DI/calendar/font, C3 widget features, 207 UI localization keys for island details, Settings/theme and widgets, 27 window-picker/magnification/Fjord/Wi-Fi/settings labels (24 newly added; three already shipped), 3 keys covering the last English-literal fallbacks, and 3 keys for the searchable location pickers / geolocation status. `opentaskbar_core::i18n::{t, tr, t_fmt}` resolve with exact → same-language → `en-US` → key-name fallback; a missing key never crashes. Key parity is enforced by `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`, which also guard the nine restored tr-TR focus/radio/spacing labels and assert 0 empty values and 0 lost placeholders in every catalog. See [docs/localization.md](../docs/localization.md).
+14 cultures ship as embedded JSON: `de-DE`, `en-US`, `es-ES`, `fr-FR`, `it-IT`, `ja-JP`, `ko-KR`, `nl-NL`, `pl-PL`, `pt-BR`, `ru-RU`, `tr-TR`, `uk-UA`, `zh-CN`. Every catalog has the **same 1406 keys** — Rust-port additions on top of the 994 C# keys: DI/calendar/font, C3 widget features, 207 UI localization keys for island details, Settings/theme and widgets, 27 window-picker/magnification/Fjord/Wi-Fi/settings labels (24 newly added; three already shipped), 3 keys covering the last English-literal fallbacks, 3 keys for the searchable location pickers / geolocation status, and 40 Fjord/Wi-Fi/preview labels (`FjordFiles*`, `Connected`, `Saved`, `WifiNetworks`, `PdfPages`, `SelectPreview`, …). `opentaskbar_core::i18n::{t, tr, t_fmt}` resolve with exact → same-language → `en-US` → key-name fallback; a missing key never crashes. Key parity is enforced by `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`, which also guard the nine restored tr-TR focus/radio/spacing labels and assert 0 empty values and 0 lost placeholders in every catalog. See [docs/localization.md](../docs/localization.md).
 
 ## Tests and CI
 
@@ -104,7 +104,7 @@ cargo test --workspace
 
 `crates/opentaskbar-core/tests/` ports the deterministic parts of the C# checks: settings key parity, AI usage/JWT/quota logic, `.otbackup` ZIP round-trip, wireless battery vendor parsing, media timeline/seek, shell recovery/journal, dock layout math, audio mixer scoring and locale completeness. Where the production API is a private function in another crate, a bridge test asserts the production source contract instead of duplicating it; cases that need a not-yet-landed cross-WS API are `#[ignore]`d with the owning workstream named in the message. Core-owned behaviour (settings enums/validation, i18n, the single-instance mutex) is tested against the real production functions.
 
-`rust-ci.yml` runs on every branch and also when C# locale catalogs change; `codeql.yml` scans Rust on every branch/PR and keeps C# on master; `dependabot.yml` tracks NuGet, Cargo and Actions. `scripts/check-locale-parity.ps1` gates 14 × 999 C# keys and 14 × 1361 Rust keys.
+`rust-ci.yml` runs on every branch and also when C# locale catalogs change; `codeql.yml` scans Rust on every branch/PR and keeps C# on master; `dependabot.yml` tracks NuGet, Cargo and Actions. `scripts/check-locale-parity.ps1` gates 14 × 994 C# keys and 14 × 1406 Rust keys.
 
 ## Privacy
 

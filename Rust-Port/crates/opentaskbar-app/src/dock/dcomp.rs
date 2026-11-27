@@ -167,11 +167,6 @@ pub enum WidgetChipSpec {
         /// `(short_label, used_01, bar_color, reset_text)`
         rows: Vec<AiQuotaRow>,
     },
-    /// C# `AiUsageWidget.cs` 3-column Antigravity layout (`Gemini | Claude | Argon`)
-    AiAntigravity {
-        /// `(group_header, rows: Vec<(short_label, used_01, bar_color, reset_text)>`
-        columns: Vec<AiQuotaColumn>,
-    },
     /// C# `AiUsageWidget.cs` triple-column OpenCode layout (`1h | 7d | 30d`)
     AiOpenCode {
         /// `(short_label, pct_text, used_01, bar_color, reset_text)`
@@ -201,7 +196,6 @@ pub enum WidgetChipSpec {
 }
 
 type AiQuotaRow = (String, f32, Rgb, String);
-type AiQuotaColumn = (String, Vec<AiQuotaRow>);
 
 impl WidgetChipSpec {
     /// Writes the spec into a reusable buffer so per-widget refresh does not allocate a new
@@ -344,18 +338,6 @@ impl WidgetChipSpec {
                 .iter()
                 .map(|(name, used, _, reset)| line(name, format!("{used:.0}% · {reset}")))
                 .collect(),
-            Self::AiAntigravity { columns } => {
-                columns
-                    .iter()
-                    .flat_map(|(header, rows)| {
-                        let mut out = vec![line(header, loc::t("AiUsageQuota"))];
-                        out.extend(rows.iter().map(|(name, used, _, reset)| {
-                            line(name, format!("{used:.0}% · {reset}"))
-                        }));
-                        out
-                    })
-                    .collect()
-            }
             Self::AiOpenCode { columns } => columns
                 .iter()
                 .map(|(name, pct, _, _, reset)| line(name, format!("{pct} · {reset}")))
@@ -915,9 +897,7 @@ impl DcompEngine {
         let fmt_95_b_l = self.cached_text_format(design::fonts::scaled_size(10.0), true, 1)?;
         let fmt_95_l = self.cached_text_format(design::fonts::scaled_size(10.0), false, 1)?;
         let fmt_9_l = self.cached_text_format(design::fonts::scaled_size(10.0), false, 1)?;
-        let fmt_9_b_l = self.cached_text_format(design::fonts::scaled_size(9.0), true, 1)?;
         let fmt_85_l = self.cached_text_format(design::fonts::scaled_size(9.0), false, 1)?;
-        let fmt_85_b_l = self.cached_text_format(design::fonts::scaled_size(9.0), true, 1)?;
 
         // OpenType `tnum` (tabular lining figures) so clocks, timers, and metrics never jitter horizontally.
         let tnum_typo = unsafe {
@@ -2915,128 +2895,6 @@ impl DcompEngine {
                             },
                             &p_brush,
                         );
-                    }
-                }
-                WidgetChipSpec::AiAntigravity { columns } => {
-                    draw_chip_card(
-                        dc,
-                        width_dips,
-                        height_dips,
-                        is_dark,
-                        None,
-                        interaction,
-                        border_rgb,
-                        border_width_dips,
-                    )?;
-                    // Exact C# `AiUsageWidget.cs` Antigravity: [Logo 16x16] + [Gemini (5h,7d) | Claude (7d) | Argon (7d)]
-                    design::brand_paths::draw_brand_logo(
-                        &self.d2d_factory,
-                        dc,
-                        "aiusage_antigravity",
-                        D2D_RECT_F {
-                            left: 10.0,
-                            top: cy - 8.0,
-                            right: 26.0,
-                            bottom: cy + 8.0,
-                        },
-                        pal.text_primary,
-                        0.98,
-                    )?;
-                    let muted_tr = dc.CreateSolidColorBrush(
-                        &if is_dark {
-                            color_rgba(0x7c, 0x86, 0x98, 0.35)
-                        } else {
-                            color_rgba(0x61, 0x66, 0x6e, 0.28)
-                        },
-                        None,
-                    )?;
-                    let col_count = columns.len().clamp(1, 3);
-                    let start_x = 34.0;
-                    let usable_w = (width_dips - start_x - 8.0).max(40.0);
-                    let div_w = 11.0;
-                    let col_w = (usable_w - (col_count.saturating_sub(1) as f32) * div_w)
-                        / col_count as f32;
-                    for (ci, (header, rows)) in columns.iter().take(3).enumerate() {
-                        let cx_l = start_x + ci as f32 * (col_w + div_w);
-                        if ci > 0 {
-                            draw_vdiv(cx_l - div_w * 0.5, 24.0);
-                        }
-                        let rn = rows.len().clamp(1, 2);
-                        let stack_h = 11.5 + rn as f32 * 10.5;
-                        let top_y = cy - stack_h * 0.5;
-                        draw_text(
-                            header,
-                            &fmt_9_b_l,
-                            D2D_RECT_F {
-                                left: cx_l,
-                                top: top_y,
-                                right: cx_l + col_w,
-                                bottom: top_y + 11.0,
-                            },
-                            &p_brush,
-                        );
-                        for (ri, (lbl, used, bar_col, reset_txt)) in rows.iter().take(2).enumerate()
-                        {
-                            let ry = top_y + 11.5 + ri as f32 * 10.5;
-                            draw_text(
-                                lbl,
-                                &fmt_85_b_l,
-                                D2D_RECT_F {
-                                    left: cx_l,
-                                    top: ry,
-                                    right: cx_l + 16.0,
-                                    bottom: ry + 10.0,
-                                },
-                                &s_brush,
-                            );
-                            let bl = cx_l + 17.5;
-                            let bw = (col_w - 34.0).clamp(20.0, 32.0);
-                            let by = ry + 3.2;
-                            dc.FillRoundedRectangle(
-                                &D2D1_ROUNDED_RECT {
-                                    rect: D2D_RECT_F {
-                                        left: bl,
-                                        top: by,
-                                        right: bl + bw,
-                                        bottom: by + 3.5,
-                                    },
-                                    radiusX: 1.75,
-                                    radiusY: 1.75,
-                                },
-                                &muted_tr,
-                            );
-                            let fw = (bw * used.clamp(0.0, 1.0)).min(bw);
-                            if fw >= 1.0 {
-                                let fb = dc.CreateSolidColorBrush(
-                                    &color_rgba(bar_col.0, bar_col.1, bar_col.2, 0.98),
-                                    None,
-                                )?;
-                                dc.FillRoundedRectangle(
-                                    &D2D1_ROUNDED_RECT {
-                                        rect: D2D_RECT_F {
-                                            left: bl,
-                                            top: by,
-                                            right: bl + fw,
-                                            bottom: by + 3.5,
-                                        },
-                                        radiusX: 1.75,
-                                        radiusY: 1.75,
-                                    },
-                                    &fb,
-                                );
-                            }
-                            draw_text(
-                                reset_txt,
-                                &fmt_85_l,
-                                D2D_RECT_F {
-                                    left: bl + bw + 3.5,
-                                    top: ry,
-                                    right: cx_l + col_w,
-                                    bottom: ry + 10.0,
-                                },
-                                &p_brush,
-                            );
-                        }
                     }
                 }
                 WidgetChipSpec::AiOpenCode { columns } => {

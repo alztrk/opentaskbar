@@ -599,7 +599,11 @@ pub fn displayed_position(
 // ---------------------------------------------------------------------------
 
 /// Pure AUMID scoring used by the media flyout matcher (2 = AUMID, 1 = executable, 0 = none).
-pub fn aumid_match_score(process_name: &str, app_user_model_id: Option<&str>, source_id: &str) -> u8 {
+pub fn aumid_match_score(
+    process_name: &str,
+    app_user_model_id: Option<&str>,
+    source_id: &str,
+) -> u8 {
     crate::platform::core_audio::match_score(process_name, app_user_model_id, source_id, None)
 }
 

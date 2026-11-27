@@ -2,7 +2,7 @@
 
 ## §C3 locale contract — delivered
 
-- 14 Rust catalogs at `Rust-Port/crates/opentaskbar-core/locales/*.json` now have **1361 keys each, identical key sets** (verified by `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`).
+- 14 Rust catalogs at `Rust-Port/crates/opentaskbar-core/locales/*.json` now have **1406 keys each, identical key sets** (verified by `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`).
 - The final key-contract sweep removed five retired AI-grouping keys and added 27 window-picker, magnification, Fjord, Wi-Fi, search, alignment, preview, focus, density and AI-ring keys (24 newly added; `WidgetDensityCompact`, `WidgetDensityFull` and `AiUsageRingLabel` already shipped) with real translations in all 14 languages.
 - 32 additional feature keys cover the C3 prefixes: `SpeedTestDownload/Upload/Jitter/Result/Running`, `FocusBreakTitle/Start/Skip/Countdown/Complete`, `FocusSession`, `RadioWifi/Bluetooth/On/Off`, `FullBackupInspect/Contents`, `ThemeEditorTitle/Save/Reset/Token/Advanced/Autosave`, `SeekTo/Label/Duration/Unavailable`, `HardwareUnavailable`, `StartMenuOpen/Close/Toggle`, `ProfileHiddenApps`.
 

@@ -59,8 +59,7 @@ pub fn from_telemetry(full: &super::telemetry::AiFullDetail) -> AiFullDetail {
         .filter(|ms| *ms > 0)
         .and_then(|ms| super::telemetry::countdown_from_unix(ms / 1000, now))
         .or_else(|| {
-            (!full.reset_text.is_empty() && full.reset_text != "—")
-                .then(|| full.reset_text.clone())
+            (!full.reset_text.is_empty() && full.reset_text != "—").then(|| full.reset_text.clone())
         });
     let peak = std::iter::once(full.used)
         .chain(full.breakdown.iter().map(|s| s.used))

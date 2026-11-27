@@ -51,7 +51,7 @@ Kaynak: 8 denetim subagentının bulguları. Hedef: parite + hata + performans +
 - `media_ext::librewolf_timeline(source_app_id,title) -> Option<(f64,f64)>` gerçek UIA (production).
 - `media_ext::confirm_seek(...)` bayat SMTC sample'ını reddeder; rate/duration=0 senaryoları.
 - `WidgetRuntime::tick` storage/keyboard snapshot 1 sn TTL; animasyon tick sadece DComp transform.
-- Antigravity/AI/BT/weather mevcut davranış korunur.
+- AI/BT/weather mevcut davranış korunur.
 
 ### WS-7 UI/tema
 - `design::theme::apply_token_overrides(map)` — tema editörü kaydedilen token'ı gerçek palete uygular; brush picker (HSV/alpha/gradient stop) eklenir.

@@ -21,7 +21,9 @@ pub const MAX_IMAGE_BYTES: usize = 24 * 1024 * 1024;
 /// Only the PDF header is parsed for page metadata.
 pub const MAX_PDF_HEADER: usize = 64 * 1024;
 
-const IMAGE_EXTENSIONS: [&str; 8] = [".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".ico"];
+const IMAGE_EXTENSIONS: [&str; 8] = [
+    ".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".ico",
+];
 const TEXT_EXTENSIONS: [&str; 18] = [
     ".txt", ".md", ".json", ".csv", ".log", ".ini", ".xml", ".yaml", ".yml", ".cs", ".py", ".js",
     ".css", ".html", ".ps1", ".m", ".ts", ".tex",
@@ -79,7 +81,9 @@ impl Preview {
             Preview::Failed => Some("PreviewFailed"),
             Preview::Cancelled => Some("PreviewDisabledHint"),
             Preview::Pdf { .. } => Some("PdfPages"),
-            Preview::Text { truncated: true, .. } => Some("TextLimit"),
+            Preview::Text {
+                truncated: true, ..
+            } => Some("TextLimit"),
             _ => None,
         }
     }
@@ -118,7 +122,8 @@ pub fn pdf_page_count(header: &[u8]) -> Option<u32> {
             .take_while(char::is_ascii_digit)
             .collect();
         if let Ok(count) = digits.parse::<u32>()
-            && count > 0 && count < 100_000
+            && count > 0
+            && count < 100_000
         {
             best = Some(count);
         }
@@ -254,7 +259,10 @@ mod tests {
 
     #[test]
     fn pdf_page_count_reads_count_and_ignores_noise() {
-        assert_eq!(pdf_page_count(b"%PDF-1.7 /Type /Catalog /Count 7 >>"), Some(7));
+        assert_eq!(
+            pdf_page_count(b"%PDF-1.7 /Type /Catalog /Count 7 >>"),
+            Some(7)
+        );
         assert_eq!(pdf_page_count(b"%PDF-1.7 /Count 0 /Count 12"), Some(12));
         assert_eq!(pdf_page_count(b"%PDF-1.7 no page tree"), None);
     }
@@ -275,7 +283,9 @@ mod tests {
         let entry = FileEntry::new(r"C:\Users", "Users", true);
         assert_eq!(
             build(Some(&entry), &AtomicBool::new(false)),
-            Preview::Folder { name: "Users".to_owned() }
+            Preview::Folder {
+                name: "Users".to_owned()
+            }
         );
     }
 }

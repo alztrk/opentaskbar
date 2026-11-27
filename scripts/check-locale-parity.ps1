@@ -12,15 +12,15 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 $langs = @('de-DE','en-US','es-ES','fr-FR','it-IT','ja-JP','ko-KR','nl-NL','pl-PL','pt-BR','ru-RU','tr-TR','uk-UA','zh-CN')
-# 14 C# catalogs x 999 keys and 14 Rust catalogs x 1366 keys; the 367 extra
+# 14 C# catalogs x 994 keys and 14 Rust catalogs x 1406 keys; the 412 extra
 # Rust keys are the port's feature keys (the C3 feature keys, 207 UI
 # localization keys, 27 picker/Fjord/Wi-Fi/settings labels — three of which
 # already shipped — the 3 keys replacing the last English literals and the 3
-# searchable-location keys). Each family must stay identical across languages.
+# searchable-location keys, plus 40 Fjord/Wi-Fi/preview labels). Each family must stay identical across languages.
 # These numbers are a hard gate, not just a display string.
 $expectedLanguages = 14
-$expectedCsKeys = 999
-$expectedRustKeys = 1366
+$expectedCsKeys = 994
+$expectedRustKeys = 1406
 $csDir = Join-Path $RepoRoot 'Services\Localization\Languages'
 $rustDir = Join-Path $RepoRoot 'Rust-Port\crates\opentaskbar-core\locales'
 
@@ -47,7 +47,9 @@ $required = @(
     'ProfileHiddenApps',
     'PlacementInWidgets','OpenLocation','GpuEngine',
     'DropdownSearchPlaceholder','DropdownNoResults','WeatherLocationUsed',
-    'SectionGlassEffect','GlassBlurLabel','GlassSaturationLabel','GlassEdgeGlowLabel','GlassPointerLightLabel'
+    'SectionGlassEffect','GlassBlurLabel','GlassSaturationLabel','GlassEdgeGlowLabel','GlassPointerLightLabel',
+    # Fjord / Wi-Fi labels consumed by the ported UI.
+    'Connected','Copied','CopyFailed','ConnectionEstablished','FjordFilesComputer','FjordFilesCopyPath','FjordFilesCount','FjordFilesDesktop','FjordFilesDocuments','FjordFilesDownloads','FjordFilesFilteredCount','FjordFilesFolder','FjordFilesHome','FjordFilesMusic','FjordFilesPictures','FjordFilesPreview','FjordFilesReveal','FjordFilesSearch','FjordFilesVideos','FjordFilesVolumes','Loading','LocationDenied','Missing','OpenItemFailed','OpenNetwork','PdfPages','PreviewFailed','Revealed','Saved','SecuredNetwork','SelectPreview','TextLimit','UnsupportedPreview','WindowsError','WifiNetworks','WifiOff','WlanStopped','Wpa2Personal','Wpa3Personal','WpaPersonal'
 )
 
 function Get-Catalog([string]$Path) {

@@ -84,19 +84,19 @@ pub mod layout;
 pub mod preview;
 pub mod show_desktop;
 pub mod tray;
+pub mod window_picker;
 
 use self::dcomp::{DcompEngine, PillNodes, ShellGlyph, VisualNode, WidgetInteraction};
 use self::dynamic_island::{InputDisposition, IslandInput, IslandState};
 use self::layout::{
-    anchor_from_window_rect, bounce_direction, capture_expansion_budget,
+    MAX_FISHEYE_SCALE, anchor_from_window_rect, bounce_direction, capture_expansion_budget,
     compute_preview_clearance, compute_safe_lift, compute_slot_extras, content_alignment_offset,
     drop_targets_recycle_bin, effective_animations_enabled, effective_edge,
     escape_closes_transient, folder_stack_preview_cells, group_reorder, has_scroll_overflow,
     hide_offset, insertion_index, is_full_screen_on_monitor, is_injected_key_event,
     keyboard_next_index, magnification_expands_dock, revealed_guard_should_hide,
-    start_menu_hide_fallback, step_spring, use_hover_icon, vsync_tick_allowed,
-    wheel_scroll_step, wheel_to_axis_delta, win_key_modifier_pressed, win_key_reveal_allowed,
-    win_key_reveal_enabled, MAX_FISHEYE_SCALE,
+    start_menu_hide_fallback, step_spring, use_hover_icon, vsync_tick_allowed, wheel_scroll_step,
+    wheel_to_axis_delta, win_key_modifier_pressed, win_key_reveal_allowed, win_key_reveal_enabled,
 };
 use self::preview::{PreviewItem, PreviewPopup};
 use self::show_desktop::ShowDesktopCorner;
@@ -109,6 +109,8 @@ use crate::platform::win32::{
     self, AppContextAction, ContextAction, MonitorInfo, RecycleBinAction, TaskViewAction,
     WidgetContextAction,
 };
+use crate::ui::flyout::{FlyoutBlock, FlyoutSpec};
+use crate::ui::menu::{self, BorderStyle, MenuEntry, MenuIcon};
 use crate::ui::settings as settings_ui;
 use crate::widgets::{self, HOVER_INTENT_MS, HoverChange, HoverPhase, WidgetRuntime};
 
@@ -158,6 +160,11 @@ const WM_HOTKEY: u32 = 0x0312;
 const WM_CLOSE: u32 = 0x0010;
 const HOTKEY_LAUNCHER_ID: i32 = 0x4F01;
 const HOTKEY_DOCK_ID: i32 = 0x4F02;
+/// Integration menu ids live above every dock/app menu id so a native command
+/// or Fjord `BarCommand` can never be mistaken for a dock context action.
+const NATIVE_APP_MENU_ID_BASE: u32 = 7000;
+const FJORD_MENU_ID_BASE: u32 = 7700;
+const GROUP_FLYOUT_ROW_ID_BASE: u32 = 100;
 /// How long a standalone Windows-key press keeps an auto-hidden dock revealed.
 /// 1500 ms kept the dock pinned across ordinary keyboard shortcuts; 600 ms matches
 /// the Win-key grace window and C# `WinKeyRevealMonitor`.
@@ -988,9 +995,13 @@ fn update_background_pin(settings: &mut DockSettings, path: &str, pinned: bool) 
 /// `AggregateByExecutablePath` forces executable grouping for every window.
 pub fn running_group_key(win: &RunningWindow, aggregate_by_exe: bool) -> String {
     let exe = win.exe_path.to_lowercase();
-    let shared_host = ["explorer.exe", "applicationframehost.exe", "systemsettings.exe"]
-        .iter()
-        .any(|host| exe.ends_with(host));
+    let shared_host = [
+        "explorer.exe",
+        "applicationframehost.exe",
+        "systemsettings.exe",
+    ]
+    .iter()
+    .any(|host| exe.ends_with(host));
     if aggregate_by_exe || shared_host || win.aumid.trim().is_empty() {
         format!("exe:{exe}")
     } else {
@@ -1304,12 +1315,20 @@ fn compute_window_dips_with(
 }
 
 fn compute_window_dips(settings: &DockSettings, slot_count: usize, mon_w_dips: f32) -> (f32, f32) {
-    compute_window_dips_with(settings, slot_count, mon_w_dips, &EffectiveMetrics::default())
+    compute_window_dips_with(
+        settings,
+        slot_count,
+        mon_w_dips,
+        &EffectiveMetrics::default(),
+    )
 }
 
 /// Fisheye ceiling: never above C# `DockMetrics.HoverScale = 1.5`.
 fn profile_peak(settings: &DockSettings) -> f32 {
-    settings.fisheye_intensity.peak().clamp(0.0, MAX_FISHEYE_SCALE - 1.0)
+    settings
+        .fisheye_intensity
+        .peak()
+        .clamp(0.0, MAX_FISHEYE_SCALE - 1.0)
 }
 
 /// Computes exact signed physical coordinates for a monitor (supports negative X on left monitors).
@@ -1400,6 +1419,74 @@ fn bounce_offset_dips(started: Option<Instant>) -> Option<f32> {
         (u * std::f32::consts::PI).sin() * 4.5
     };
     Some(y)
+}
+
+/// Persisted `settings.extra` toggle (`1` = on, `0` = off). The defaults keep
+/// the WS-10 picker available while Fjord stays opt-in (WS-11).
+fn extra_flag(settings: &DockSettings, key: &str, default: bool) -> bool {
+    settings
+        .extra
+        .get(key)
+        .and_then(|value| value.as_i64())
+        .map(|value| value != 0)
+        .unwrap_or(default)
+}
+
+/// Native commands use small ids (`1`, `2`, ...) that collide with dock rows;
+/// remap them before adding them to our context menu and keep the original id
+/// for `menu::invoke_native_app_command`.
+fn remap_native_app_menu_entries(entries: Vec<MenuEntry>) -> (Vec<(u32, u32)>, Vec<MenuEntry>) {
+    let mut commands = Vec::new();
+    let mut items = Vec::new();
+    for (offset, entry) in entries.into_iter().enumerate() {
+        let remapped = NATIVE_APP_MENU_ID_BASE + offset as u32;
+        match entry {
+            MenuEntry::Item {
+                id,
+                icon,
+                label,
+                shortcut,
+                destructive,
+            } => {
+                commands.push((remapped, id));
+                items.push(MenuEntry::Item {
+                    id: remapped,
+                    icon,
+                    label,
+                    shortcut,
+                    destructive,
+                });
+            }
+            other => items.push(other),
+        }
+    }
+    (commands, items)
+}
+
+/// Fjord workspace commands appended to the dock context menu (WS-11).
+fn fjord_bar_menu_entries(files_enabled: bool) -> Vec<(u32, MenuEntry)> {
+    (0..2)
+        .filter_map(|index| {
+            let command = crate::fjord::bar::menu_command(index, files_enabled)?;
+            let id = FJORD_MENU_ID_BASE + index as u32;
+            let label = match command {
+                crate::fjord::bar::BarCommand::OpenFiles => loc::t("FjordFilesOpen"),
+                crate::fjord::bar::BarCommand::CloseBar => loc::t(if files_enabled {
+                    "FjordBarHide"
+                } else {
+                    "FjordBarShow"
+                }),
+                crate::fjord::bar::BarCommand::ToggleWifi => return None,
+            };
+            Some((id, MenuEntry::item(id, MenuIcon::Folder, label)))
+        })
+        .collect()
+}
+
+fn fjord_command_for_id(chosen: u32, files_enabled: bool) -> Option<crate::fjord::bar::BarCommand> {
+    chosen
+        .checked_sub(FJORD_MENU_ID_BASE)
+        .and_then(|index| crate::fjord::bar::menu_command(index as usize, files_enabled))
 }
 
 impl DockState {
@@ -2065,8 +2152,8 @@ impl DockState {
         let widget_h = design::widget_height_dips(pill_height_dips(&self.settings));
         let mut key_scratch = String::with_capacity(256);
         for wv in &mut self.widget_visuals {
-            let live_w = self.widget_runtime.widget_width_dips(wv.id)
-                * self.effective.widget_density(wv.id);
+            let live_w =
+                self.widget_runtime.widget_width_dips(wv.id) * self.effective.widget_density(wv.id);
             if (live_w - wv.width_dips).abs() > 0.5 {
                 wv.width_dips = live_w;
                 wv.last_key.clear();
@@ -2176,9 +2263,10 @@ impl DockState {
         if !self.is_secondary {
             return;
         }
-        if self.last_fullscreen_scan.is_none_or(|t| {
-            now.saturating_duration_since(t) >= layout::OVERLAP_SCAN_MIN_INTERVAL
-        }) {
+        if self
+            .last_fullscreen_scan
+            .is_none_or(|t| now.saturating_duration_since(t) >= layout::OVERLAP_SCAN_MIN_INTERVAL)
+        {
             self.last_fullscreen_scan = Some(now);
             self.fullscreen_on_other_monitor = self.all_monitors.iter().any(|monitor| {
                 monitor.handle != self.monitor.handle
@@ -2252,17 +2340,14 @@ impl DockState {
         // If the shell's reposition attempt finished without anchoring Start,
         // hiding the dock is the only way to guarantee no overlap remains.
         // While the attempt is pending the dock must stay put (no ~800 ms flicker).
-        let should_hide = if self.fullscreen_on_other_monitor {
-            true
-        } else if start_menu_hide_fallback(
-            start_menu_open,
-            anchored,
-            anchor_pending,
-            self.settings.auto_hide,
-        ) {
-            true
-        } else {
-            revealed_guard_should_hide(
+        let should_hide = self.fullscreen_on_other_monitor
+            || start_menu_hide_fallback(
+                start_menu_open,
+                anchored,
+                anchor_pending,
+                self.settings.auto_hide,
+            )
+            || revealed_guard_should_hide(
                 self.settings.auto_hide,
                 pointer_busy,
                 at_edge,
@@ -2270,8 +2355,7 @@ impl DockState {
                 start_menu_open,
                 self.drag.is_some() || self.resize_drag.is_some() || self.scroll_pan.is_some(),
                 win_key_grace,
-            )
-        };
+            );
 
         if self.target_hidden != should_hide {
             self.target_hidden = should_hide;
@@ -2297,7 +2381,12 @@ impl DockState {
     /// Uses `DWMWA_EXTENDED_FRAME_BOUNDS` for the true visible frame and filters shell
     /// overlays (Start/Alt+Tab/Task View) via `platform::win32_ex::is_shell_overlay` parity.
     fn is_overlapped_by_window(&self) -> bool {
-        let rect = compute_window_rect_with(&self.settings, self.slots.len(), self.monitor.clone(), &self.effective);
+        let rect = compute_window_rect_with(
+            &self.settings,
+            self.slots.len(),
+            self.monitor.clone(),
+            &self.effective,
+        );
         let edge = effective_edge(&self.settings);
         let headroom_px = (layout::HEADROOM_DIPS * self.dpi).round() as i32;
         let (dl, dt, dr, db) = match edge {
@@ -2888,7 +2977,12 @@ impl DockState {
     }
 
     fn sync_window_bounds(&mut self) {
-        let rect = compute_window_rect_with(&self.settings, self.slots.len(), self.monitor.clone(), &self.effective);
+        let rect = compute_window_rect_with(
+            &self.settings,
+            self.slots.len(),
+            self.monitor.clone(),
+            &self.effective,
+        );
         if self.last_window_rect != Some(rect) {
             self.last_window_rect = Some(rect);
             win32::reposition_dock_window(self.hwnd, rect.0, rect.1, rect.2, rect.3);
@@ -2917,7 +3011,8 @@ impl DockState {
         let base_w = base_trail_width(&self.settings);
         if base_w > 0.0 {
             let pins_w = if self.settings.show_tray_button {
-                self.tray_pin_visuals.len() as f32 * tray_pin_cell(layout::size_profile(&self.settings).cell)
+                self.tray_pin_visuals.len() as f32
+                    * tray_pin_cell(layout::size_profile(&self.settings).cell)
             } else {
                 0.0
             };
@@ -3049,7 +3144,9 @@ impl DockState {
     /// C# `ComputeSafeLift` + launch bounce, capped at 1 DIP by `MAX_LIFT_DIPS`.
     fn slot_lift(&self, slot: &DockSlot) -> f32 {
         let profile = layout::size_profile(&self.settings);
-        let max_scale = profile_peak(&self.settings).max(1.0).min(self.session_max_scale);
+        let max_scale = profile_peak(&self.settings)
+            .max(1.0)
+            .min(self.session_max_scale);
         let headroom = (pill_height_dips(&self.settings) - profile.icon - 4.0).max(0.0);
         compute_safe_lift(slot.scale, max_scale, profile.icon, headroom)
             + bounce_offset_dips(slot.bounce_started).unwrap_or(0.0)
@@ -3107,7 +3204,11 @@ impl DockState {
         let base = layout::size_profile(&self.settings).cell;
         let gap = slot_gap(&self.settings);
         let now = Instant::now();
-        let widths = if resting { Vec::new() } else { self.slot_widths(now) };
+        let widths = if resting {
+            Vec::new()
+        } else {
+            self.slot_widths(now)
+        };
         let mut cursor = sm.apps_start_x;
         let mut centers = Vec::with_capacity(self.slots.len());
         for (idx, slot) in self.slots.iter().enumerate() {
@@ -3139,7 +3240,10 @@ impl DockState {
         if sm.max_scroll <= 0.5 {
             return;
         }
-        let step = wheel_scroll_step(layout::size_profile(&self.settings).cell, slot_gap(&self.settings));
+        let step = wheel_scroll_step(
+            layout::size_profile(&self.settings).cell,
+            slot_gap(&self.settings),
+        );
         let base = if (self.scroll_offset - self.scroll_target).abs() > 1.0 {
             self.scroll_target
         } else {
@@ -3185,11 +3289,14 @@ impl DockState {
         let now = Instant::now();
         let widths = self.slot_widths(now);
         let mut cursor = sm.apps_start_x;
-        for i in 0..idx.min(self.slots.len()) {
+        for (i, &width) in widths.iter().enumerate().take(idx.min(self.slots.len())) {
             let slot = &self.slots[i];
-            cursor += (widths[i] + gap) * slot.layout_fraction(now);
+            cursor += (width + gap) * slot.layout_fraction(now);
         }
-        let w = widths.get(idx).copied().unwrap_or(layout::size_profile(&self.settings).cell);
+        let w = widths
+            .get(idx)
+            .copied()
+            .unwrap_or(layout::size_profile(&self.settings).cell);
         cursor + w * 0.5
     }
 
@@ -3605,13 +3712,8 @@ impl DockState {
             let max_scale = profile_peak(&self.settings)
                 .max(1.0)
                 .min(self.session_max_scale);
-            let (scale, velocity, settled) = step_spring(
-                slot.scale,
-                target,
-                slot.scale_velocity,
-                dt,
-                max_scale,
-            );
+            let (scale, velocity, settled) =
+                step_spring(slot.scale, target, slot.scale_velocity, dt, max_scale);
             slot.scale = scale;
             slot.scale_velocity = velocity;
             if !settled {
@@ -3710,12 +3812,18 @@ impl DockState {
         else {
             return;
         };
-        let Some(group_id) = self.settings.app_groups.iter().find(|group| {
-            group
-                .executable_paths
-                .iter()
-                .any(|path| path.eq_ignore_ascii_case(&from_path))
-        }).map(|group| group.id.clone()) else {
+        let Some(group_id) = self
+            .settings
+            .app_groups
+            .iter()
+            .find(|group| {
+                group
+                    .executable_paths
+                    .iter()
+                    .any(|path| path.eq_ignore_ascii_case(&from_path))
+            })
+            .map(|group| group.id.clone())
+        else {
             return;
         };
         let Some(group) = self
@@ -3991,17 +4099,15 @@ impl DockState {
         let mut cursor_x = sm.apps_start_x;
         let slot_count = self.slots.len().min(self.slot_visuals.len());
         let slot_widths = self.slot_widths(now);
-        for idx in 0..slot_count {
-            let slot_w = slot_widths[idx];
+        for (idx, &slot_w) in slot_widths.iter().enumerate().take(slot_count) {
             let dragging_this = active_drag.is_some_and(|d| d.idx == idx);
             let pressed = self.pressed_idx == Some(idx) && !dragging_this;
             let press_factor = if pressed { 0.88 } else { 1.0 };
             // Icon artwork is smaller than the cell (C# icon 28/34/38 vs cell 38/44/50).
             let dim = icon_size * self.slots[idx].scale * press_factor;
             let bounce = bounce_offset_dips(self.slots[idx].bounce_started).unwrap_or(0.0);
-            let lift = (self.slot_lift(&self.slots[idx])
-                - if pressed { 2.0 } else { 0.0 })
-            .max(0.0);
+            let lift =
+                (self.slot_lift(&self.slots[idx]) - if pressed { 2.0 } else { 0.0 }).max(0.0);
             let slide_x = self.slots[idx].slide_x;
             // C# `ApplicationIconProvider.UseHoverIcon`: only swap when a hover
             // variant actually exists and the icon is magnified by the pointer.
@@ -4548,7 +4654,12 @@ impl DockState {
         let key = slot.key.clone();
         let items = slot.windows.clone();
         let (win_x, win_y, _, _) = self.last_window_rect.unwrap_or_else(|| {
-            compute_window_rect_with(&self.settings, self.slots.len(), self.monitor.clone(), &self.effective)
+            compute_window_rect_with(
+                &self.settings,
+                self.slots.len(),
+                self.monitor.clone(),
+                &self.effective,
+            )
         });
         let (_, pill_top, _, _) = self.live_pill_geometry();
         let profile = layout::size_profile(&self.settings);
@@ -4556,7 +4667,9 @@ impl DockState {
             && self.settings.animations_enabled
             && !magnification_expands_dock(&self.settings)
         {
-            profile_peak(&self.settings).max(1.0).min(self.session_max_scale)
+            profile_peak(&self.settings)
+                .max(1.0)
+                .min(self.session_max_scale)
         } else {
             1.0
         };
@@ -4602,6 +4715,208 @@ impl DockState {
     // ---------------------------------------------------------------------
     // WidgetHoverCoordinator wiring (WS-D message loop ↔ WS-C hover policy).
     // ---------------------------------------------------------------------
+
+    /// Physical dock rect in pixels, used as the window-picker anchor. Both the
+    /// primary dock and a secondary mirror resolve this from their own HWND.
+    fn dock_screen_rect(&self) -> (i32, i32, i32, i32) {
+        let mut rc = RECT::default();
+        if unsafe { GetWindowRect(self.hwnd as HWND, &mut rc) } != 0
+            && rc.right > rc.left
+            && rc.bottom > rc.top
+        {
+            (rc.left, rc.top, rc.right, rc.bottom)
+        } else {
+            self.last_window_rect.unwrap_or((
+                self.monitor.left,
+                self.monitor.top,
+                self.monitor.right,
+                self.monitor.bottom,
+            ))
+        }
+    }
+
+    fn picker_monitor_index(&self) -> usize {
+        self.all_monitors
+            .iter()
+            .position(|monitor| monitor.handle == self.monitor.handle)
+            .unwrap_or(0)
+    }
+
+    /// Promotes preview items to the full `RunningWindow` shape the picker
+    /// orders by monitor/AUMID, borrowing the freshest async snapshot we have.
+    fn picker_windows(&self, previews: &[PreviewItem], launch_path: &str) -> Vec<RunningWindow> {
+        previews
+            .iter()
+            .map(|item| {
+                self.running_windows
+                    .iter()
+                    .find(|window| window.hwnd == item.hwnd && window.pid == item.pid)
+                    .cloned()
+                    .unwrap_or_else(|| RunningWindow {
+                        hwnd: item.hwnd,
+                        pid: item.pid,
+                        title: item.title.clone(),
+                        exe_path: launch_path.to_owned(),
+                        aumid: String::new(),
+                        is_foreground: false,
+                    })
+            })
+            .collect()
+    }
+
+    /// WS-10: a multi-window application click opens the native window picker
+    /// instead of blindly toggling the first window. Reached from the primary
+    /// app-click path and, unchanged, from the secondary dock's mirror slot.
+    fn show_picker_for_windows(&self, previews: &[PreviewItem], launch_path: &str) -> bool {
+        if previews.len() < 2 || !extra_flag(&self.settings, "WindowPickerEnabled", true) {
+            return false;
+        }
+        let windows = self.picker_windows(previews, launch_path);
+        if windows.len() < 2 {
+            return false;
+        }
+        window_picker::show(
+            self.picker_monitor_index(),
+            windows,
+            self.dock_screen_rect(),
+        )
+    }
+
+    /// Ctrl+right-click on a running app exposes that app's own menu commands
+    /// through the WS-B `native_app_menu_entries` / `invoke_native_app_command`
+    /// wrappers, remapped so their ids cannot collide with our menu.
+    fn show_native_app_menu(&self, target_hwnd: usize) -> bool {
+        let entries = menu::native_app_menu_entries(target_hwnd);
+        if entries.is_empty() {
+            return false;
+        }
+        let (commands, items) = remap_native_app_menu_entries(entries);
+        let chosen = menu::show_popup_menu_with_border(
+            self.hwnd,
+            self.is_dark,
+            items,
+            BorderStyle::from_menu_settings(self.is_dark, &self.settings),
+        )
+        .unwrap_or(0);
+        if let Some((_, original)) = commands.into_iter().find(|(id, _)| *id == chosen) {
+            menu::invoke_native_app_command(target_hwnd, original);
+        }
+        true
+    }
+
+    /// WS-10: a group flyout row with several live windows opens the picker
+    /// keyed by the dock's own monitor; a single window launches directly.
+    fn open_group_flyout(&mut self, group_index: usize, slot_path: &str) {
+        let Some(group) = self.settings.app_groups.get(group_index).cloned() else {
+            return;
+        };
+        let mut blocks = Vec::new();
+        let mut live_total = 0usize;
+        for (offset, path) in group.executable_paths.iter().enumerate() {
+            let live: Vec<PreviewItem> = self
+                .running_windows
+                .iter()
+                .filter(|window| window.exe_path.eq_ignore_ascii_case(path))
+                .map(|window| PreviewItem {
+                    hwnd: window.hwnd,
+                    pid: window.pid,
+                    title: window.title.clone(),
+                })
+                .collect();
+            live_total += live.len();
+            blocks.push(FlyoutBlock::ActionRow {
+                id: GROUP_FLYOUT_ROW_ID_BASE + offset as u32,
+                title: Path::new(path)
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or(path)
+                    .to_owned(),
+                subtitle: Some(format!("{} · {}", live.len(), loc::t("WidgetInstalled"))),
+                badge: None,
+                icon: None,
+                destructive: false,
+            });
+        }
+        blocks.push(FlyoutBlock::Separator);
+        blocks.push(FlyoutBlock::ButtonBar(vec![(
+            1,
+            loc::t("WidgetRemove").to_owned(),
+            false,
+        )]));
+        let title =
+            layout::group_flyout_title(&group.name, live_total, group.executable_paths.len());
+        let spec = FlyoutSpec {
+            title,
+            subtitle: None,
+            width_dips: 316.0,
+            blocks,
+        };
+        let (left, _top, right, bottom) = self.dock_screen_rect();
+        let action = crate::ui::flyout::show_flyout_with_border(
+            self.hwnd,
+            self.is_dark,
+            (left + right) / 2,
+            bottom,
+            spec,
+            BorderStyle::from_menu_settings(self.is_dark, &self.settings),
+        );
+        match action {
+            Some(1) => {
+                if let Some(member) = self.settings.app_groups.get_mut(group_index) {
+                    member
+                        .executable_paths
+                        .retain(|path| !path.eq_ignore_ascii_case(slot_path));
+                    if member.executable_paths.is_empty() {
+                        self.settings.app_groups.remove(group_index);
+                    }
+                }
+                let _ = settings::save_to(&settings::settings_path(), &self.settings);
+                self.reload_settings_live();
+            }
+            Some(id) if id >= GROUP_FLYOUT_ROW_ID_BASE => {
+                let index = (id - GROUP_FLYOUT_ROW_ID_BASE) as usize;
+                if let Some(path) = group.executable_paths.get(index).cloned() {
+                    let previews: Vec<PreviewItem> = self
+                        .running_windows
+                        .iter()
+                        .filter(|window| window.exe_path.eq_ignore_ascii_case(&path))
+                        .map(|window| PreviewItem {
+                            hwnd: window.hwnd,
+                            pid: window.pid,
+                            title: window.title.clone(),
+                        })
+                        .collect();
+                    if previews.len() >= 2
+                        && extra_flag(&self.settings, "WindowPickerEnabled", true)
+                    {
+                        let windows = self.picker_windows(&previews, &path);
+                        window_picker::show(
+                            self.picker_monitor_index(),
+                            windows,
+                            self.dock_screen_rect(),
+                        );
+                    } else {
+                        pins::launch_app(path, None, false);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// WS-11 `fjord::bar` commands appended to the dock context menu.
+    fn execute_fjord_command(&mut self, command: crate::fjord::bar::BarCommand) {
+        match command {
+            crate::fjord::bar::BarCommand::OpenFiles => {
+                let home = std::env::var("USERPROFILE").unwrap_or_default();
+                crate::fjord::activation::handle_cli(&home);
+            }
+            crate::fjord::bar::BarCommand::CloseBar => {
+                crate::fjord::activation::close_all_windows();
+            }
+            crate::fjord::bar::BarCommand::ToggleWifi => {}
+        }
+    }
 
     fn screen_cursor(&self) -> Option<POINT> {
         let mut pt = POINT { x: 0, y: 0 };
@@ -5463,6 +5778,7 @@ impl DockState {
         {
             slot.bounce_started = Some(Instant::now());
             let hwnds = slot.hwnds();
+            let slot_windows = slot.windows.clone();
             let launch_path = slot.launch_path.clone();
             let shift = win32::is_shift_down();
             let ctrl = win32::is_ctrl_down();
@@ -5471,11 +5787,12 @@ impl DockState {
             self.ensure_animation();
             self.update_visuals();
 
-            // WS-10: when several windows share this slot, the picker should be
-            // shown here via `crate::window_picker::show(...)` (also used by the
-            // secondary mirror, which reaches this same path).
-            // WS-11: route Fjord dock-button commands through `crate::fjord::bar`.
-            if shift || !tracker::activate_or_toggle_verified(&identities) {
+            // WS-10: a multi-window click opens the picker on this dock's monitor.
+            // A secondary dock instance reaches the exact same path with its own
+            // HWND/monitor, so the mirror slot is wired without a special case.
+            // Shift+click keeps the classic "launch a new instance" behaviour.
+            let picker_opened = !shift && self.show_picker_for_windows(&slot_windows, &launch_path);
+            if !picker_opened && (shift || !tracker::activate_or_toggle_verified(&identities)) {
                 pins::launch_app(launch_path, hwnds.first().copied(), ctrl && shift);
             }
         } else {
@@ -5540,9 +5857,7 @@ impl DockState {
     }
 
     fn handle_mouse_wheel(&mut self, delta: i16, horizontal: bool) {
-        if !horizontal
-            && self.hovered_widget == Some("audio")
-            && self.settings.wheel_volume_enabled
+        if !horizontal && self.hovered_widget == Some("audio") && self.settings.wheel_volume_enabled
         {
             widgets::adjust_audio_volume(if delta > 0 { 4 } else { -4 });
             self.refresh_widgets_throttled();
@@ -5557,8 +5872,10 @@ impl DockState {
         }
         let sm = self.live_scroll_metrics();
         if sm.max_scroll > 0.5 && delta != 0 {
-            let step =
-                wheel_scroll_step(layout::size_profile(&self.settings).cell, slot_gap(&self.settings));
+            let step = wheel_scroll_step(
+                layout::size_profile(&self.settings).cell,
+                slot_gap(&self.settings),
+            );
             let signed =
                 wheel_to_axis_delta(delta, horizontal, effective_edge(&self.settings), step);
             let base = if (self.scroll_offset - self.scroll_target).abs() > 1.0
@@ -5964,6 +6281,14 @@ impl DockState {
         {
             let running = !slot.windows.is_empty();
             let window = slot.windows.first().map(|window| window.hwnd);
+            // Ctrl+right-click reaches the target application's own menu via the
+            // WS-B wrappers instead of our dock menu.
+            if win32::is_ctrl_down()
+                && let Some(target) = window
+                && self.show_native_app_menu(target)
+            {
+                return;
+            }
             match win32::show_app_context_menu(
                 self.hwnd,
                 self.is_dark,
@@ -5984,8 +6309,21 @@ impl DockState {
                 AppContextAction::RunAsAdmin => pins::launch_app(slot.launch_path, window, true),
                 AppContextAction::TogglePin => self.toggle_pin_for_slot(idx),
                 AppContextAction::ToggleGroup(gidx) => {
-                    // WS-10: a group with multiple live members should open
-                    // `crate::window_picker::show(...)` keyed by the group id here.
+                    // WS-10: clicking a group this app already belongs to opens
+                    // its flyout; each row can then show the window picker for
+                    // the matching live windows. Clicking a foreign group still
+                    // adds this app, and the flyout's Remove button undoes it.
+                    let group_has_slot = self.settings.app_groups.get(gidx).is_some_and(|group| {
+                        group.executable_paths.len() > 1
+                            && group
+                                .executable_paths
+                                .iter()
+                                .any(|path| path.eq_ignore_ascii_case(&slot.launch_path))
+                    });
+                    if group_has_slot {
+                        self.open_group_flyout(gidx, &slot.launch_path);
+                        return;
+                    }
                     if let Some(group) = self.settings.app_groups.get_mut(gidx) {
                         if let Some(pos) = group
                             .executable_paths
@@ -6060,7 +6398,24 @@ impl DockState {
             return;
         }
 
-        let act = win32::show_dock_context_menu(self.hwnd, self.is_dark, &self.settings);
+        // WS-11: Fjord workspace commands are appended to the shared dock menu
+        // with ids outside the dock's reserved range; dispatch them here before
+        // the normal `ContextAction` mapping.
+        let files_enabled = extra_flag(&self.settings, "FjordFilesEnabled", false);
+        let fjord_entries = fjord_bar_menu_entries(files_enabled);
+        let (chosen, act) = win32::show_dock_context_menu_with_entries(
+            self.hwnd,
+            self.is_dark,
+            &self.settings,
+            fjord_entries
+                .iter()
+                .map(|(_, entry)| entry.clone())
+                .collect(),
+        );
+        if let Some(command) = fjord_command_for_id(chosen, files_enabled) {
+            self.execute_fjord_command(command);
+            return;
+        }
         self.execute_context_action(act);
     }
 
@@ -6217,12 +6572,15 @@ impl DockState {
             return;
         };
         slot.bounce_started = Some(Instant::now());
+        let slot_windows = slot.windows.clone();
         let identities: Vec<(usize, u32)> = slot.windows.iter().map(|w| (w.hwnd, w.pid)).collect();
         let launch_path = slot.launch_path.clone();
         let hwnds = slot.hwnds();
         self.ensure_animation();
         self.update_visuals();
-        if !tracker::activate_or_toggle_verified(&identities) {
+        // Keyboard activation of a secondary dock slot uses the same picker path.
+        let picker_opened = self.show_picker_for_windows(&slot_windows, &launch_path);
+        if !picker_opened && !tracker::activate_or_toggle_verified(&identities) {
             pins::launch_app(launch_path, hwnds.first().copied(), false);
         }
     }
@@ -6300,8 +6658,7 @@ impl DockState {
     fn resync_foreground_after_session(&mut self) {
         let foreground = unsafe { GetForegroundWindow() } as usize;
         let start_hwnd = crate::platform::start_menu_state::start_window();
-        self.flyout_focus_return =
-            restore_target_for_press(foreground, start_hwnd, self.hwnd);
+        self.flyout_focus_return = restore_target_for_press(foreground, start_hwnd, self.hwnd);
         self.start_restore_hwnd = self.flyout_focus_return;
         self.pressed_shell_start_was_open = crate::platform::start_menu_state::is_open();
         self.keyboard_idx = None;
@@ -7010,10 +7367,10 @@ unsafe extern "system" fn wnd_proc(
             }
             if event == WTS_SESSION_UNLOCK {
                 // A secure-desktop transition can drop key-ups and unregister
-                // hotkeys. Use the shell's release helper (WS-3's
-                // `shell_shortcuts_ex::release_stuck_modifiers()` replaces this
-                // call once that module lands), re-register both hotkeys and
-                // resync the cached foreground/Start state.
+                // hotkeys. Release *physical* left/right modifiers with real
+                // Win32 key-up injection, then the shell's generic key cleanup,
+                // re-register both hotkeys and resync the cached state.
+                crate::platform::shell_shortcuts_ex::release_stuck_modifiers();
                 opentaskbar_shell::taskbar::release_held_keys();
                 if state.monitor.is_primary {
                     register_global_hotkeys(hwnd, &state.settings);
@@ -7932,8 +8289,14 @@ mod tests {
             is_foreground: true,
             aumid: "Contoso.App_1.0_x64__abc".into(),
         };
-        assert_eq!(running_group_key(&packaged, false), running_group_key(&second, false));
-        assert_ne!(running_group_key(&packaged, false), running_group_key(&packaged, true));
+        assert_eq!(
+            running_group_key(&packaged, false),
+            running_group_key(&second, false)
+        );
+        assert_ne!(
+            running_group_key(&packaged, false),
+            running_group_key(&packaged, true)
+        );
         assert_eq!(
             running_group_key(&packaged, true),
             format!("exe:{}", packaged.exe_path.to_lowercase())
@@ -7978,7 +8341,10 @@ mod tests {
             "register_global_hotkeys(hwnd, &state.settings)",
             "restore_app_foreground(self.flyout_focus_return, start_hwnd)",
         ] {
-            assert!(src.contains(needle), "production code must contain {needle:?}");
+            assert!(
+                src.contains(needle),
+                "production code must contain {needle:?}"
+            );
         }
     }
 
@@ -7991,7 +8357,92 @@ mod tests {
             "win32::is_any_fullscreen_on_monitor(monitor)",
             "!self.settings.mirror_main_dock",
         ] {
-            assert!(src.contains(needle), "secondary path must contain {needle:?}");
+            assert!(
+                src.contains(needle),
+                "secondary path must contain {needle:?}"
+            );
         }
+    }
+
+    #[test]
+    fn window_picker_is_wired_to_app_click_group_row_and_secondary_slot() {
+        let src = include_str!("mod.rs");
+        assert!(src.contains("window_picker::show("));
+        // App click (also the secondary dock mirror) and keyboard slot activation.
+        assert!(
+            src.contains("!shift && self.show_picker_for_windows(&slot_windows, &launch_path)")
+        );
+        assert!(src.contains(
+            "let picker_opened = self.show_picker_for_windows(&slot_windows, &launch_path);"
+        ));
+        // Group flyout row: its own picker call keyed by the dock's monitor.
+        assert!(src.contains("self.open_group_flyout(gidx, &slot.launch_path)"));
+        assert!(src.contains("window_picker::show("));
+        assert!(src.contains("self.picker_monitor_index(),"));
+        assert!(src.contains("show_flyout_with_border("));
+    }
+
+    #[test]
+    fn native_app_menu_wrappers_are_wired_into_the_context_menu() {
+        let src = include_str!("mod.rs");
+        for needle in [
+            "menu::native_app_menu_entries(target_hwnd)",
+            "menu::invoke_native_app_command(target_hwnd, original)",
+            "self.show_native_app_menu(target)",
+            "remap_native_app_menu_entries(",
+        ] {
+            assert!(src.contains(needle), "native menu must contain {needle:?}");
+        }
+        let entries = vec![
+            MenuEntry::item(1, MenuIcon::Terminal, "Restore".to_owned()),
+            MenuEntry::Separator,
+        ];
+        let (commands, items) = remap_native_app_menu_entries(entries);
+        assert_eq!(commands, vec![(NATIVE_APP_MENU_ID_BASE, 1)]);
+        assert!(matches!(items[1], MenuEntry::Separator));
+        assert!(commands[0].0 > 1000);
+    }
+
+    #[test]
+    fn fjord_bar_commands_are_added_to_the_dock_menu() {
+        let src = include_str!("mod.rs");
+        for needle in [
+            "crate::fjord::bar::menu_command(",
+            "crate::fjord::bar::BarCommand::OpenFiles",
+            "crate::fjord::bar::BarCommand::CloseBar",
+            "win32::show_dock_context_menu_with_entries(",
+            "self.execute_fjord_command(command)",
+        ] {
+            assert!(src.contains(needle), "Fjord menu must contain {needle:?}");
+        }
+        let enabled = fjord_bar_menu_entries(true);
+        assert_eq!(enabled.len(), 2);
+        assert_eq!(
+            enabled.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![FJORD_MENU_ID_BASE, FJORD_MENU_ID_BASE + 1]
+        );
+        assert_eq!(
+            fjord_command_for_id(FJORD_MENU_ID_BASE, true),
+            Some(crate::fjord::bar::BarCommand::OpenFiles)
+        );
+        assert_eq!(
+            fjord_command_for_id(FJORD_MENU_ID_BASE, false),
+            Some(crate::fjord::bar::BarCommand::CloseBar)
+        );
+        assert_eq!(fjord_command_for_id(0, true), None);
+        let disabled = fjord_bar_menu_entries(false);
+        assert_eq!(disabled.len(), 1);
+    }
+
+    #[test]
+    fn session_unlock_releases_physical_modifiers() {
+        let src = include_str!("mod.rs");
+        let unlock = src
+            .find("if event == WTS_SESSION_UNLOCK {")
+            .expect("unlock arm");
+        let arm = &src[unlock..unlock + 900];
+        assert!(arm.contains("shell_shortcuts_ex::release_stuck_modifiers()"));
+        assert!(arm.contains("register_global_hotkeys(hwnd, &state.settings)"));
+        assert!(arm.contains("resync_foreground_after_session()"));
     }
 }

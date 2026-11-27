@@ -69,13 +69,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GWLP_USERDATA, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow, GetMessageW,
     GetWindowLongPtrW, GetWindowRect, HC_ACTION, HHOOK, HWND_TOPMOST, IDC_ARROW, IDC_HAND,
     IsWindow, KillTimer, LWA_ALPHA, LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW,
-    RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
-    SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
-    WH_MOUSE_LL, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
+    RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos,
+    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_ACTIVATE,
+    WM_CHAR, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
 };
 
 use super::menu::BorderStyle;
@@ -90,6 +89,12 @@ const MAX_FLYOUT_H_DIPS: f32 = 500.0;
 const FLYOUT_PAD_DIPS: f32 = 16.0;
 const TIMER_ANIM: usize = 1;
 const TIMER_DISMISS: usize = 2;
+/// Live widget tick. Deliberately distinct from animation/dismiss so a data
+/// refresh can never start (or cancel) the close animation.
+const TIMER_LIVE: usize = 3;
+/// One second matches the clock's second hand, the stopwatch/countdown display,
+/// stats sampling and the network speed-test progress (no sub-second repaint).
+const LIVE_TICK_MS: u32 = 1000;
 const DISMISS_POLL_MS: u32 = 45;
 const HOVER_LEAVE_GRACE: Duration = Duration::from_millis(240);
 /// A flyout that just closed must not immediately reopen from the same click that
@@ -273,6 +278,80 @@ fn wm_close_action(msg: u32, already_closing: bool) -> WmCloseAction {
     }
 }
 
+/// Only widgets with time-varying state accept a periodic tick. Other live
+/// flyouts (audio, media, quick settings, device lists) deliberately answer
+/// unknown events with `LiveOutcome::Close`; ticking them would dismiss them.
+#[must_use]
+fn live_tick_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "clock" | "stats" | "focus" | "stopwatch" | "countdown" | "netspeed"
+    )
+}
+
+/// A live tick must not repaint (or re-layout) a flyout that is already closing,
+/// and a plain non-live flyout has no callback to answer `LiveEvent::Update`.
+#[must_use]
+fn live_tick_allowed(closing: bool, has_live_callback: bool) -> bool {
+    !closing && has_live_callback
+}
+
+/// Culture weekday order for calendar headers. Indices follow the .NET
+/// `DayOfWeek` convention (`0 = Sunday .. 6 = Saturday`) used by
+/// `telemetry::weekday_name` / `weekday_of`.
+#[must_use]
+fn calendar_weekday_order(first_day_of_week: u32) -> [u32; 7] {
+    let first = first_day_of_week % 7;
+    std::array::from_fn(|i| (first + i as u32) % 7)
+}
+
+/// Leading blank cells before day 1 for the culture's first day of week.
+#[must_use]
+fn calendar_leading_blanks(first_day_of_week: u32, weekday_of_first: u32) -> i32 {
+    ((weekday_of_first + 7 - first_day_of_week % 7) % 7) as i32
+}
+
+/// A tick rebuilds a calendar flyout from "now"; keep the month/year/selection
+/// the user navigated to (only click-driven updates may change them).
+fn preserve_calendar_navigation(current: &FlyoutSpec, next: &mut FlyoutSpec) {
+    let Some((year, month, selected)) = current.blocks.iter().find_map(|block| match block {
+        FlyoutBlock::CalendarGrid {
+            year,
+            month,
+            selected,
+            ..
+        } => Some((*year, *month, *selected)),
+        _ => None,
+    }) else {
+        return;
+    };
+    for block in &mut next.blocks {
+        if let FlyoutBlock::CalendarGrid {
+            year: next_year,
+            month: next_month,
+            selected: next_selected,
+            ..
+        } = block
+        {
+            *next_year = year;
+            *next_month = month;
+            *next_selected = selected;
+            return;
+        }
+    }
+}
+
+/// Short localized weekday label (`Sun`, `Mon`, ...) for a .NET day index.
+#[must_use]
+fn weekday_short_label(day_of_week: u32) -> String {
+    let name = telemetry::weekday_name(day_of_week % 7);
+    if name.chars().count() <= 3 {
+        name
+    } else {
+        name.chars().take(3).collect()
+    }
+}
+
 /// Straight BGRA32 icon payload for `FlyoutBlock::ActionRow` / `AppRow`.
 #[derive(Clone, Debug)]
 pub struct FlyoutIcon {
@@ -294,6 +373,9 @@ pub enum FlyoutAction {
 #[derive(Clone, Debug)]
 pub enum LiveEvent {
     Click(u32),
+    /// Periodic WM_TIMER tick for widgets with time-varying state (WS-7). The
+    /// callback answers with `LiveOutcome::Update(spec)` from `live_spec()`.
+    Update,
     Slider {
         id: u32,
         ratio: f32,
@@ -535,6 +617,8 @@ struct FlyoutState<'a> {
     shadow_rings: u8,
     on_secondary: Option<&'a mut dyn FnMut(u32) -> bool>,
     on_live: Option<&'a mut dyn FnMut(LiveEvent) -> LiveOutcome>,
+    /// Whether this live flyout's widget expects `LiveEvent::Update` ticks.
+    tick_enabled: bool,
     border: BorderStyle,
     content_top_px: i32,
     viewport_h_px: i32,
@@ -1986,6 +2070,8 @@ fn show_flyout_impl<'a>(
     }
 
     let hover_anchor = NEXT_HOVER_ANCHOR.with(|slot| slot.borrow_mut().take());
+    let has_live_callback = on_live.is_some();
+    let tick_enabled = has_live_callback && live_tick_tag(tag);
     let mut state = Box::new(FlyoutState {
         hwnd,
         dpi,
@@ -2004,6 +2090,7 @@ fn show_flyout_impl<'a>(
         shadow_rings: options.shadow_rings.min(8),
         on_secondary,
         on_live,
+        tick_enabled,
         border,
         content_top_px,
         viewport_h_px,
@@ -2040,6 +2127,9 @@ fn show_flyout_impl<'a>(
             SetTimer(hwnd, TIMER_ANIM, flyout_anim_interval_ms(), None);
         }
         SetTimer(hwnd, TIMER_DISMISS, DISMISS_POLL_MS, None);
+        if tick_enabled {
+            SetTimer(hwnd, TIMER_LIVE, LIVE_TICK_MS, None);
+        }
     }
 
     if options.retain_for_external_context_menu {
@@ -2078,6 +2168,7 @@ fn show_flyout_impl<'a>(
     unsafe {
         KillTimer(hwnd, TIMER_ANIM);
         KillTimer(hwnd, TIMER_DISMISS);
+        KillTimer(hwnd, TIMER_LIVE);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         DestroyWindow(hwnd);
     }
@@ -2120,16 +2211,34 @@ impl FlyoutState<'_> {
     }
 
     fn dispatch_live(&mut self, event: LiveEvent) -> bool {
+        let is_tick = matches!(event, LiveEvent::Update);
         let outcome = if let Some(cb) = self.on_live.as_deref_mut() {
             cb(event)
         } else {
             return false;
         };
         match outcome {
-            LiveOutcome::Update(spec) => self.apply_live_spec(spec),
+            LiveOutcome::Update(mut spec) => {
+                if is_tick {
+                    // `live_spec("clock")` always builds the *current* month. A
+                    // periodic tick must refresh the time/date header without
+                    // yanking the user back from a month they navigated to.
+                    preserve_calendar_navigation(&self.spec, &mut spec);
+                }
+                self.apply_live_spec(spec)
+            }
             LiveOutcome::Close => self.begin_close(),
         }
         true
+    }
+
+    /// WM_TIMER live tick. Uses the exact same `dispatch_live` path as clicks,
+    /// so a widget's `live_spec()` replaces the content in place (or closes the
+    /// flyout when its callback decides the timer has expired).
+    fn dispatch_live_tick(&mut self) {
+        if self.tick_enabled && live_tick_allowed(self.closing, self.on_live.is_some()) {
+            self.dispatch_live(LiveEvent::Update);
+        }
     }
 
     /// Focus a C2 `TextInput` in place; the buffer starts from the block's current value.
@@ -2781,10 +2890,14 @@ impl FlyoutState<'_> {
                         );
                         y += nav_h + s(8.0);
 
-                        // Weekday headers (Monday first).
+                        // Weekday headers follow the user's culture (C# `FirstDayOfWeek`),
+                        // not a hard-coded Monday-first column order.
                         let cell_w = content_w / 7;
-                        let dows: Vec<String> =
-                            (0..7).map(telemetry::weekday_short_monday_first).collect();
+                        let first_day = telemetry::first_day_of_week();
+                        let dows: Vec<String> = calendar_weekday_order(first_day)
+                            .into_iter()
+                            .map(weekday_short_label)
+                            .collect();
                         for (i, dow) in dows.iter().enumerate() {
                             let cl = (pad + (i as i32) * cell_w) as f32;
                             let cr = (pad + ((i as i32) + 1) * cell_w) as f32;
@@ -2801,7 +2914,7 @@ impl FlyoutState<'_> {
                         y += s(20.0);
 
                         let first_wd = telemetry::weekday_of(*year, *month, 1);
-                        let mon_offset = ((first_wd + 6) % 7) as i32;
+                        let mon_offset = calendar_leading_blanks(first_day, first_wd);
                         let prev_m = if *month == 1 { 12 } else { *month - 1 };
                         let prev_y = if *month == 1 { *year - 1 } else { *year };
                         let prev_days = telemetry::days_in_month(prev_y, prev_m) as i32;
@@ -4419,6 +4532,10 @@ unsafe extern "system" fn flyout_wnd_proc(
             state.step_animation();
             0
         }
+        WM_TIMER if wparam == TIMER_LIVE => {
+            state.dispatch_live_tick();
+            0
+        }
         WM_TIMER if wparam == TIMER_DISMISS => {
             if !state.closing
                 && !state.suppress_blur
@@ -4637,12 +4754,14 @@ unsafe extern "system" fn flyout_wnd_proc(
 mod tests {
     use super::{
         DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, Duration, FlyoutBlock, FlyoutEdge,
-        FlyoutOptions, FlyoutSpec, Instant, LiveEvent, MENU_CLASS_CACHE_TTL, MENU_CLASS_PROBE,
-        MenuClassProbe, POINT, RECT, REOPEN_SUPPRESSION_WINDOW, WM_APP_MENU_CANDIDATE,
-        WmCloseAction, anim_interval_for_fps, app_row_targets, blend_rgb, draw_gdi_text,
-        format_clock, is_native_menu_class, layout_flyout, pack_point, post_menu_candidate,
-        pt_in_rect, record_closed, should_suppress_reopen, stays_open_for_external_menu,
-        suppression_window_hit, unpack_point, wm_close_action,
+        FlyoutOptions, FlyoutSpec, Instant, LiveEvent, LiveOutcome, MENU_CLASS_CACHE_TTL,
+        MENU_CLASS_PROBE, MenuClassProbe, POINT, RECT, REOPEN_SUPPRESSION_WINDOW,
+        WM_APP_MENU_CANDIDATE, WmCloseAction, anim_interval_for_fps, app_row_targets, blend_rgb,
+        calendar_leading_blanks, calendar_weekday_order, draw_gdi_text, format_clock,
+        is_native_menu_class, layout_flyout, live_tick_allowed, live_tick_tag, pack_point,
+        post_menu_candidate, preserve_calendar_navigation, pt_in_rect, record_closed,
+        should_suppress_reopen, stays_open_for_external_menu, suppression_window_hit, unpack_point,
+        weekday_short_label, wm_close_action,
     };
     use windows_sys::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC};
     use windows_sys::Win32::UI::WindowsAndMessaging::{WM_CLOSE, WM_KEYDOWN, WM_PAINT};
@@ -4913,7 +5032,10 @@ mod tests {
         let b = "sweep-flyout-suppress-b";
         assert!(!should_suppress_reopen(a));
         record_closed(a);
-        assert!(should_suppress_reopen(a), "first close suppresses same target");
+        assert!(
+            should_suppress_reopen(a),
+            "first close suppresses same target"
+        );
         assert!(!should_suppress_reopen(a), "entry is consumed exactly once");
         assert!(!should_suppress_reopen(b), "other target is unaffected");
         record_closed(b);
@@ -4983,5 +5105,132 @@ mod tests {
         assert!(targets.iter().any(|t| t.id == 50));
         assert_eq!(super::is_single_pua_glyph("\u{E7F5}"), Some('\u{E7F5}'));
         assert_eq!(super::is_single_pua_glyph("TR"), None);
+    }
+
+    #[test]
+    fn live_timer_is_separate_from_animation_and_dismiss() {
+        assert_ne!(super::TIMER_LIVE, super::TIMER_ANIM);
+        assert_ne!(super::TIMER_LIVE, super::TIMER_DISMISS);
+        assert_eq!(super::LIVE_TICK_MS, 1000);
+        // A live flyout ticks; a plain flyout and a closing flyout never do.
+        assert!(live_tick_allowed(false, true));
+        assert!(!live_tick_allowed(true, true));
+        assert!(!live_tick_allowed(false, false));
+        for tag in [
+            "clock",
+            "stats",
+            "focus",
+            "stopwatch",
+            "countdown",
+            "netspeed",
+        ] {
+            assert!(live_tick_tag(tag), "{tag} must tick");
+        }
+        // Audio/media/quick-settings callbacks close on unknown events: ticking
+        // them would dismiss the flyout after one second.
+        for tag in [
+            "audio",
+            "media",
+            "quicksettings",
+            "bluetoothbattery",
+            "tray",
+        ] {
+            assert!(!live_tick_tag(tag), "{tag} must not tick");
+        }
+
+        let src = include_str!("flyout.rs");
+        for needle in [
+            "WM_TIMER if wparam == TIMER_LIVE => {",
+            "state.dispatch_live_tick();",
+            "LiveOutcome::Update(spec) => self.apply_live_spec(spec),",
+            "SetTimer(hwnd, TIMER_LIVE, LIVE_TICK_MS, None);",
+            "KillTimer(hwnd, TIMER_LIVE);",
+        ] {
+            assert!(src.contains(needle), "live tick must contain {needle:?}");
+        }
+    }
+
+    #[test]
+    fn live_update_event_rebuilds_the_widget_spec() {
+        let spec = FlyoutSpec {
+            title: "clock".to_owned(),
+            subtitle: None,
+            width_dips: 300.0,
+            blocks: vec![FlyoutBlock::Hero {
+                value: "12:34:56".to_owned(),
+                caption: None,
+                centered: false,
+                large: false,
+                right_meta: None,
+            }],
+        };
+        let next = spec.clone();
+        let respond = |event: LiveEvent| match event {
+            LiveEvent::Update => LiveOutcome::Update(next.clone()),
+            _ => LiveOutcome::Close,
+        };
+        match respond(LiveEvent::Update) {
+            LiveOutcome::Update(rebuilt) => assert_eq!(rebuilt.title, "clock"),
+            LiveOutcome::Close => panic!("live tick must request a spec update"),
+        }
+    }
+
+    #[test]
+    fn live_tick_keeps_the_navigated_calendar_month() {
+        let calendar =
+            |year: i32, month: u32, selected: Option<(i32, u32, u32)>| FlyoutBlock::CalendarGrid {
+                year,
+                month,
+                today: (2026, 11, 27),
+                selected,
+                prev_year_id: 1,
+                prev_month_id: 2,
+                title_id: 3,
+                next_month_id: 4,
+                next_year_id: 5,
+                day_id_base: 100,
+            };
+        let current = FlyoutSpec {
+            title: String::new(),
+            subtitle: None,
+            width_dips: 316.0,
+            blocks: vec![calendar(2025, 3, Some((2025, 3, 14)))],
+        };
+        let mut next = FlyoutSpec {
+            title: String::new(),
+            subtitle: None,
+            width_dips: 316.0,
+            blocks: vec![calendar(2026, 11, None)],
+        };
+        preserve_calendar_navigation(&current, &mut next);
+        let FlyoutBlock::CalendarGrid {
+            year,
+            month,
+            selected,
+            ..
+        } = &next.blocks[0]
+        else {
+            panic!("calendar block missing");
+        };
+        assert_eq!((*year, *month, *selected), (2025, 3, Some((2025, 3, 14))));
+    }
+
+    #[test]
+    fn calendar_headers_and_leading_blanks_follow_the_culture() {
+        assert_eq!(calendar_weekday_order(0), [0, 1, 2, 3, 4, 5, 6]);
+        assert_eq!(calendar_weekday_order(1), [1, 2, 3, 4, 5, 6, 0]);
+        assert_eq!(calendar_weekday_order(6), [6, 0, 1, 2, 3, 4, 5]);
+        // 2024-01-01 was a Monday (.NET index 1).
+        assert_eq!(calendar_leading_blanks(1, 1), 0);
+        assert_eq!(calendar_leading_blanks(0, 1), 1);
+        assert_eq!(calendar_leading_blanks(6, 1), 2);
+        assert!(!weekday_short_label(1).is_empty());
+        assert!(weekday_short_label(1).chars().count() <= 3);
+
+        let src = include_str!("flyout.rs");
+        assert!(src.contains("telemetry::first_day_of_week()"));
+        // Concatenated so the assertion itself is not a source-level hit.
+        let retired = ["weekday_short_", "monday_first"].concat();
+        assert!(!src.contains(&retired));
     }
 }

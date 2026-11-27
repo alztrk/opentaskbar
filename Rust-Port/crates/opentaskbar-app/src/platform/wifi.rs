@@ -270,19 +270,10 @@ pub fn build_profile_xml(ssid: &str, password: &str, security: WifiSecurity) -> 
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Dot11Ssid {
     length: u32,
     ssid: [u8; 32],
-}
-
-impl Default for Dot11Ssid {
-    fn default() -> Self {
-        Self {
-            length: 0,
-            ssid: [0; 32],
-        }
-    }
 }
 
 #[repr(C)]
@@ -302,7 +293,7 @@ impl Default for WlanRateSet {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct WlanBssEntry {
     ssid: Dot11Ssid,
     phy_id: u32,
@@ -320,29 +311,6 @@ struct WlanBssEntry {
     rate_set: WlanRateSet,
     ie_offset: u32,
     ie_size: u32,
-}
-
-impl Default for WlanBssEntry {
-    fn default() -> Self {
-        Self {
-            ssid: Dot11Ssid::default(),
-            phy_id: 0,
-            bssid: [0; 6],
-            bss_type: 0,
-            phy_type: 0,
-            rssi: 0,
-            link_quality: 0,
-            in_reg_domain: 0,
-            beacon_period: 0,
-            timestamp: 0,
-            host_timestamp: 0,
-            capabilities: 0,
-            channel_frequency: 0,
-            rate_set: WlanRateSet::default(),
-            ie_offset: 0,
-            ie_size: 0,
-        }
-    }
 }
 
 #[repr(C)]
@@ -618,7 +586,10 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 fn string_from_wide(units: &[u16]) -> String {
-    let used = units.iter().position(|&unit| unit == 0).unwrap_or(units.len());
+    let used = units
+        .iter()
+        .position(|&unit| unit == 0)
+        .unwrap_or(units.len());
     String::from_utf16_lossy(&units[..used])
 }
 
@@ -726,7 +697,8 @@ fn networks_on_interface(
             {
                 ies = std::slice::from_raw_parts(base.wrapping_add(ie_start) as *const u8, ie_len);
             }
-            let security = security_from_ies(entry.capabilities & DOT11_CAPABILITY_PRIVACY != 0, ies);
+            let security =
+                security_from_ies(entry.capabilities & DOT11_CAPABILITY_PRIVACY != 0, ies);
             result.push(WifiNetwork::new(
                 ssid.clone(),
                 entry.link_quality.min(100) as u8,
@@ -784,15 +756,8 @@ pub fn scan_networks() -> Vec<WifiNetwork> {
             let mut found = networks_on_interface(&client, &interface.guid, &connected);
             // The associated SSID can disappear from the BSS list while roaming;
             // keep it visible so the flyout can show the current connection.
-            if !connected.is_empty()
-                && !found.iter().any(|network| network.ssid == connected)
-            {
-                found.push(WifiNetwork::new(
-                    connected,
-                    100,
-                    WifiSecurity::Wpa2,
-                    true,
-                ));
+            if !connected.is_empty() && !found.iter().any(|network| network.ssid == connected) {
+                found.push(WifiNetwork::new(connected, 100, WifiSecurity::Wpa2, true));
             }
             result.extend(found);
         }
@@ -812,7 +777,11 @@ pub fn scan_networks() -> Vec<WifiNetwork> {
             b.is_connected
                 .cmp(&a.is_connected)
                 .then_with(|| b.signal_percent.cmp(&a.signal_percent))
-                .then_with(|| a.ssid.to_ascii_lowercase().cmp(&b.ssid.to_ascii_lowercase()))
+                .then_with(|| {
+                    a.ssid
+                        .to_ascii_lowercase()
+                        .cmp(&b.ssid.to_ascii_lowercase())
+                })
         });
         result.dedup_by(|a, b| a.ssid.eq_ignore_ascii_case(&b.ssid));
         result
@@ -914,9 +883,9 @@ pub fn disconnect() -> bool {
         let mut disconnected = false;
         for interface in interfaces.slice() {
             // SAFETY: GUID is borrowed from the enumerated list.
-            disconnected |= unsafe {
-                WlanDisconnect(client.as_ptr(), &interface.guid, std::ptr::null())
-            } == ERROR_SUCCESS;
+            disconnected |=
+                unsafe { WlanDisconnect(client.as_ptr(), &interface.guid, std::ptr::null()) }
+                    == ERROR_SUCCESS;
         }
         disconnected
     }
@@ -983,7 +952,10 @@ mod tests {
         let owe = ie(IE_RSN, &rsn(AKM_OWE));
         assert_eq!(security_from_ies(true, &owe), WifiSecurity::Wpa3);
         // Truncated RSN must not panic or be misclassified as WPA3.
-        assert_eq!(security_from_ies(true, &[IE_RSN, 2, 1, 0]), WifiSecurity::Wpa2);
+        assert_eq!(
+            security_from_ies(true, &[IE_RSN, 2, 1, 0]),
+            WifiSecurity::Wpa2
+        );
     }
 
     #[test]

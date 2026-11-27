@@ -232,11 +232,7 @@ pub const fn restore_observation(visible: bool, consecutive: u32) -> (u32, bool)
 /// Reveals the tray and asks for verification in one bounded pass. This is the
 /// shared engine for [`verify_restored`] and the restore loop in `taskbar`.
 /// `restore_once` re-applies AppBar state/geometry before each observation.
-pub fn verify_restored_with(
-    tray: usize,
-    attempts: u32,
-    mut restore_once: impl FnMut(),
-) -> bool {
+pub fn verify_restored_with(tray: usize, attempts: u32, mut restore_once: impl FnMut()) -> bool {
     let tray = tray as HWND;
     let total = attempts.max(1);
     let mut consecutive = 0u32;
@@ -359,7 +355,9 @@ static HIDE_RETRY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static DEGRADED_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 fn runtime() -> std::sync::MutexGuard<'static, RuntimeState> {
-    RUNTIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    RUNTIME
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Records the live dock geometry when replacement starts so the hook-driven
@@ -441,12 +439,7 @@ pub fn run_hide_retry_step() -> HideRetryStep {
             state.hide_stable_settle,
         )
     };
-    let step = evaluate_hide_retry_step(
-        taskbar::hide_observation(),
-        attempt,
-        clean,
-        stable,
-    );
+    let step = evaluate_hide_retry_step(taskbar::hide_observation(), attempt, clean, stable);
     {
         let mut state = runtime();
         state.hide_clean = step.next_consecutive_clean;

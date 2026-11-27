@@ -27,7 +27,6 @@ public partial class SettingsWindow : Window
     private readonly ObservableCollection<DockWidgetOption> _widgetOptions = [];
     private readonly ObservableCollection<WidgetCategoryGroup> _widgetGroups = [];
     private readonly List<ComboBox> _aiRingBoxes = [];
-    private readonly Dictionary<AntigravityGroups, CheckBox> _antigravityGroupBoxes = [];
     private readonly List<Action> _aiAccountRefreshers = [];
     private readonly Action<AiProviders> _credentialsChangedHandler;
     private readonly DockWidgetService _widgetPreviewService = new(TimeProvider.System);
@@ -50,7 +49,6 @@ public partial class SettingsWindow : Window
     private bool _isInternalSave;
     private bool _hasUnappliedThemePreview;
     private AiUsageRing _aiUsageRing;
-    private AntigravityGroups _antigravityGroups = AntigravityGroups.All;
     private bool _closed;
     private bool _sourceReady;
     private HwndSource? _source;
@@ -158,7 +156,6 @@ public partial class SettingsWindow : Window
             _widgetOptions.Clear();
             _widgetGroups.Clear();
             _aiRingBoxes.Clear();
-            _antigravityGroupBoxes.Clear();
             _aiAccountRefreshers.Clear();
             WeatherCountryBox.ItemsSource = null;
             if (_hasUnappliedThemePreview || !ThemeManager.IsApplied(_preferences.Current))
@@ -585,7 +582,6 @@ public partial class SettingsWindow : Window
             WeatherUnit = Enum.TryParse<TemperatureUnit>(Choice(WeatherUnitBox), out var weatherUnit) ? weatherUnit : TemperatureUnit.Celsius,
             StatsMeters = ReadStatsMeters(),
             AiUsageRing = _aiUsageRing,
-            AntigravityGroups = _antigravityGroups,
             ThemePack = _selectedThemePackId,
             ThemeApplicationIcons = false
         };
@@ -1548,10 +1544,6 @@ public partial class SettingsWindow : Window
                 }
             }
         }
-        _antigravityGroups = (settings.AntigravityGroups & AntigravityGroups.All) == AntigravityGroups.None
-            ? AntigravityGroups.All
-            : (settings.AntigravityGroups & AntigravityGroups.All);
-        UpdateAntigravityGroupCheckboxes();
         StatsCpuToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Cpu);
         StatsMemoryToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Memory);
         StatsGpuToggle.IsChecked = settings.StatsMeters.HasFlag(SystemMeters.Gpu);
@@ -1659,7 +1651,6 @@ public partial class SettingsWindow : Window
     {
         WidgetPanelsPool.Children.Clear();
         _aiRingBoxes.Clear();
-        _antigravityGroupBoxes.Clear();
         _aiAccountRefreshers.Clear();
         if (_widgetOptions.FirstOrDefault(o => o.Id == "Clock") is { } clock)
         {
@@ -1692,10 +1683,6 @@ public partial class SettingsWindow : Window
                 {
                     AttachAiAccountSection(option.Id, provider, panel);
                 }
-            }
-            if (option.Id == "AiUsageAntigravity")
-            {
-                AttachAntigravityGroupsRow(panel);
             }
             option.SettingsView = panel;
         }
@@ -2260,102 +2247,6 @@ public partial class SettingsWindow : Window
         panel.Children.Add(row);
     }
 
-    private void AttachAntigravityGroupsRow(Panel panel)
-    {
-        var row = new Grid { Margin = new Thickness(0, panel.Children.Count > 0 ? 4 : 0, 0, 0) };
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-        var label = new TextBlock
-        {
-            Text = UiText.Get("AiUsageAntigravityGroupsLabel"),
-            FontSize = 12,
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 12, 0)
-        };
-        label.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
-        Grid.SetColumn(label, 0);
-        row.Children.Add(label);
-
-        var checksPanel = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-
-        foreach (var (group, name) in new[]
-        {
-            (AntigravityGroups.Gemini, "Gemini"),
-            (AntigravityGroups.Claude, "Claude"),
-            (AntigravityGroups.Argon, "Argon")
-        })
-        {
-            var box = new CheckBox
-            {
-                Content = name,
-                Tag = $"AntigravityGroup:{name}",
-                IsChecked = _antigravityGroups.HasFlag(group),
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            box.SetResourceReference(StyleProperty, "SettingsCheckbox");
-            System.Windows.Automation.AutomationProperties.SetName(box, name);
-
-            void HandleToggle(object sender, RoutedEventArgs e)
-            {
-                e.Handled = true;
-                if (_initializing) return;
-                var next = ReadAntigravityGroupsFromBoxes();
-                if (next == AntigravityGroups.None)
-                {
-                    var wasInitializing = _initializing;
-                    _initializing = true;
-                    try
-                    {
-                        box.IsChecked = true;
-                    }
-                    finally
-                    {
-                        _initializing = wasInitializing;
-                    }
-                    next = ReadAntigravityGroupsFromBoxes();
-                    if (next == AntigravityGroups.None) next = group;
-                    _antigravityGroups = next;
-                    return;
-                }
-                _antigravityGroups = next;
-                ApplySettingsToLivePreviews(ReadSelection());
-                TriggerAutoSave(immediate: true);
-            }
-
-            box.Checked += HandleToggle;
-            box.Unchecked += HandleToggle;
-            _antigravityGroupBoxes[group] = box;
-            checksPanel.Children.Add(box);
-        }
-
-        Grid.SetColumn(checksPanel, 1);
-        row.Children.Add(checksPanel);
-        panel.Children.Add(row);
-    }
-
-    private AntigravityGroups ReadAntigravityGroupsFromBoxes()
-    {
-        var flags = AntigravityGroups.None;
-        foreach (var (group, box) in _antigravityGroupBoxes)
-        {
-            if (box.IsChecked == true) flags |= group;
-        }
-        return flags;
-    }
-
-    private void UpdateAntigravityGroupCheckboxes()
-    {
-        foreach (var (group, box) in _antigravityGroupBoxes)
-        {
-            box.IsChecked = _antigravityGroups.HasFlag(group);
-        }
-    }
-
     private async Task InitializeWeatherLocationsAsync(string savedCity)
     {
         try
@@ -2735,8 +2626,6 @@ public partial class SettingsWindow : Window
             SecondaryWidgetsToggle.IsChecked = defaults.SecondaryWidgets;
             MirrorMainDockToggle.IsChecked = defaults.MirrorMainDock;
             UpdateMultiMonitorControls();
-            _antigravityGroups = defaults.AntigravityGroups;
-            UpdateAntigravityGroupCheckboxes();
         }
         finally
         {

@@ -835,7 +835,8 @@ impl SearchDebounce {
     /// True once the most recent query has been stable for `interval`.
     #[must_use]
     pub fn settled(&self, now: Instant) -> bool {
-        self.last_change.is_none_or(|at| now.duration_since(at) >= self.interval)
+        self.last_change
+            .is_none_or(|at| now.duration_since(at) >= self.interval)
     }
 }
 
@@ -1063,20 +1064,15 @@ pub fn searchable_dropdown(
                 slot.scroll_top = 0;
             }
             let settled = !changed && slot.debounce.settled(now);
-            if !settled
-                || slot.cached_query != state.query
-                || slot.cached_options != options.len()
+            if !settled || slot.cached_query != state.query || slot.cached_options != options.len()
             {
                 slot.cached = state.filtered_indices(options);
                 slot.cached_query = state.query.clone();
                 slot.cached_options = options.len();
             }
-            slot.scroll_top = scroll_top_for_active(
-                state.active,
-                slot.scroll_top,
-                SEARCH_VIEWPORT_ROWS,
-            )
-            .min(slot.cached.len().saturating_sub(1));
+            slot.scroll_top =
+                scroll_top_for_active(state.active, slot.scroll_top, SEARCH_VIEWPORT_ROWS)
+                    .min(slot.cached.len().saturating_sub(1));
             (
                 slot.cached.clone(),
                 visible_row_range(
@@ -1096,49 +1092,48 @@ pub fn searchable_dropdown(
         let wheel_id = id.clone();
         let key_scroll_id = id.clone();
         let key_active = state.active;
-        let key_handler = move |event: &KeyDownEvent,
-                                window: &mut gpui::Window,
-                                cx: &mut gpui::App| {
-            match event.keystroke.key.as_str() {
-                "escape" => {
-                    input_close(window, cx);
-                    cx.stop_propagation();
-                }
-                "enter" => {
-                    if let Some(handler) = &active_handler {
-                        handler(window, cx);
+        let key_handler =
+            move |event: &KeyDownEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        input_close(window, cx);
+                        cx.stop_propagation();
                     }
-                    input_close(window, cx);
-                    cx.stop_propagation();
-                }
-                "up" | "down" => {
-                    // The owning entity moves `active`; here we only keep the
-                    // virtual window paged so the new active row stays visible.
-                    on_key_down(event, window, cx);
-                    let len = SEARCH_LISTS.with(|lists| {
-                        lists
-                            .borrow()
-                            .get(&key_scroll_id)
-                            .map_or(0, |slot| slot.cached.len())
-                    });
-                    let next_active = if event.keystroke.key == "down" {
-                        (key_active + 1).min(len.saturating_sub(1))
-                    } else {
-                        key_active.saturating_sub(1)
-                    };
-                    SEARCH_LISTS.with(|lists| {
-                        if let Some(slot) = lists.borrow_mut().get_mut(&key_scroll_id) {
-                            slot.scroll_top = scroll_top_for_active(
-                                next_active,
-                                slot.scroll_top,
-                                SEARCH_VIEWPORT_ROWS,
-                            );
+                    "enter" => {
+                        if let Some(handler) = &active_handler {
+                            handler(window, cx);
                         }
-                    });
+                        input_close(window, cx);
+                        cx.stop_propagation();
+                    }
+                    "up" | "down" => {
+                        // The owning entity moves `active`; here we only keep the
+                        // virtual window paged so the new active row stays visible.
+                        on_key_down(event, window, cx);
+                        let len = SEARCH_LISTS.with(|lists| {
+                            lists
+                                .borrow()
+                                .get(&key_scroll_id)
+                                .map_or(0, |slot| slot.cached.len())
+                        });
+                        let next_active = if event.keystroke.key == "down" {
+                            (key_active + 1).min(len.saturating_sub(1))
+                        } else {
+                            key_active.saturating_sub(1)
+                        };
+                        SEARCH_LISTS.with(|lists| {
+                            if let Some(slot) = lists.borrow_mut().get_mut(&key_scroll_id) {
+                                slot.scroll_top = scroll_top_for_active(
+                                    next_active,
+                                    slot.scroll_top,
+                                    SEARCH_VIEWPORT_ROWS,
+                                );
+                            }
+                        });
+                    }
+                    _ => on_key_down(event, window, cx),
                 }
-                _ => on_key_down(event, window, cx),
-            }
-        };
+            };
 
         let input_value = if state.query.is_empty() {
             div()

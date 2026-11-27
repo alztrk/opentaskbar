@@ -304,7 +304,7 @@ mod tests {
             91
         );
         for name in names {
-            let path = lucide(&name).unwrap_or_else(|| panic!("missing Lucide path {name}"));
+            let path = lucide(name).unwrap_or_else(|| panic!("missing Lucide path {name}"));
             assert!(path.len() > 8, "empty Lucide path {name}");
             let (_, ops, consumed) = crate::design::brand_paths::parse_stream_geometry(path);
             assert_eq!(consumed, path.len(), "parser stopped early for {name}");

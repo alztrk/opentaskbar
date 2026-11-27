@@ -1584,31 +1584,27 @@ unsafe extern "system" fn menu_wnd_proc(
                     }
                 }
                 MenuKeyAction::Right => {
-                    if !session_ptr.is_null() && !is_submenu {
-                        if let Some(idx) = cursor
-                            && let Some(MenuEntry::Submenu { items, .. }) = entries.get(idx)
-                            && let Some(rect) =
-                                unsafe { (&*pane_ptr).row_rects.get(idx).copied().flatten() }
-                        {
-                            let items = items.clone();
-                            unsafe {
-                                (*session_ptr).open_submenu(idx, items, rect);
-                            }
-                            invalidate = true;
+                    if !session_ptr.is_null()
+                        && !is_submenu
+                        && let Some(idx) = cursor
+                        && let Some(MenuEntry::Submenu { items, .. }) = entries.get(idx)
+                        && let Some(rect) =
+                            unsafe { (&*pane_ptr).row_rects.get(idx).copied().flatten() }
+                    {
+                        let items = items.clone();
+                        unsafe {
+                            (*session_ptr).open_submenu(idx, items, rect);
                         }
+                        invalidate = true;
                     }
                 }
                 MenuKeyAction::Confirm => {
                     if let Some(idx) = cursor {
                         match entries.get(idx) {
-                            Some(MenuEntry::Item { id, .. }) => {
-                                if !session_ptr.is_null() {
-                                    unsafe {
-                                        (*session_ptr).selected_id = Some(*id);
-                                        (*session_ptr).done.store(true, Ordering::Release);
-                                    }
-                                }
-                            }
+                            Some(MenuEntry::Item { id, .. }) if !session_ptr.is_null() => unsafe {
+                                (*session_ptr).selected_id = Some(*id);
+                                (*session_ptr).done.store(true, Ordering::Release);
+                            },
                             Some(MenuEntry::Submenu { items, .. }) if !is_submenu => {
                                 if let Some(rect) =
                                     unsafe { (&*pane_ptr).row_rects.get(idx).copied().flatten() }

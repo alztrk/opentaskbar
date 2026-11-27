@@ -303,9 +303,6 @@
                                 <DataTrigger Binding="{Binding Id}" Value="AiUsageCodex">
                                     <Setter Property="Data" Value="{StaticResource LogoCodex}" />
                                 </DataTrigger>
-                                <DataTrigger Binding="{Binding Id}" Value="AiUsageAntigravity">
-                                    <Setter Property="Data" Value="{StaticResource LogoAntigravity}" />
-                                </DataTrigger>
                                 <DataTrigger Binding="{Binding Id}" Value="AiUsageOpenCode">
                                     <Setter Property="Data" Value="{StaticResource LogoOpenCode}" />
                                 </DataTrigger>
@@ -333,9 +330,6 @@
                                 <Style.Triggers>
                                 <DataTrigger Binding="{Binding Id}" Value="AiUsageCodex">
                                     <Setter Property="Text" Value="Codex" />
-                                </DataTrigger>
-                                <DataTrigger Binding="{Binding Id}" Value="AiUsageAntigravity">
-                                    <Setter Property="Text" Value="Antigravity" />
                                 </DataTrigger>
                                 <DataTrigger Binding="{Binding Id}" Value="AiUsageOpenCode">
                                     <Setter Property="Text" Value="OpenCode" />
@@ -429,10 +423,6 @@
                 <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
             </DataTrigger>
             <DataTrigger Binding="{Binding Id}" Value="AiUsageCodex">
-                <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
-                <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
-            </DataTrigger>
-            <DataTrigger Binding="{Binding Id}" Value="AiUsageAntigravity">
                 <Setter TargetName="DefaultTile" Property="Visibility" Value="Collapsed" />
                 <Setter TargetName="AiUsagePreview" Property="Visibility" Value="Visible" />
             </DataTrigger>

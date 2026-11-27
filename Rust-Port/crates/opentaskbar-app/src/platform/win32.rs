@@ -1016,15 +1016,29 @@ pub fn show_dock_context_menu(
     is_dark: bool,
     settings: &DockSettings,
 ) -> ContextAction {
-    map_context_action(
-        menu::show_popup_menu_with_border(
-            hwnd,
-            is_dark,
-            dock_menu_entries(settings),
-            BorderStyle::from_menu_settings(is_dark, settings),
-        )
-        .unwrap_or(0),
+    show_dock_context_menu_with_entries(hwnd, is_dark, settings, Vec::new()).1
+}
+
+/// Same dock menu with extra entries appended. The raw chosen id is returned
+/// alongside the mapped action so integration layers (Fjord `BarCommand`,
+/// native window commands) can dispatch their own ids without colliding with
+/// the dock's reserved `MENU_*` range.
+pub fn show_dock_context_menu_with_entries(
+    hwnd: usize,
+    is_dark: bool,
+    settings: &DockSettings,
+    extra: Vec<MenuEntry>,
+) -> (u32, ContextAction) {
+    let mut entries = dock_menu_entries(settings);
+    entries.extend(extra);
+    let chosen = menu::show_popup_menu_with_border(
+        hwnd,
+        is_dark,
+        entries,
+        BorderStyle::from_menu_settings(is_dark, settings),
     )
+    .unwrap_or(0);
+    (chosen, map_context_action(chosen))
 }
 
 pub fn show_app_context_menu(

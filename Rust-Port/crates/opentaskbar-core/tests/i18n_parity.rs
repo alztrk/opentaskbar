@@ -11,7 +11,7 @@ const LANGS: &[&str] = &[
     "ru-RU", "tr-TR", "uk-UA", "zh-CN",
 ];
 
-const EXPECTED_KEY_COUNT: usize = 1366;
+const EXPECTED_KEY_COUNT: usize = 1406;
 
 const C3_NEW_KEYS: &[&str] = &[
     // Window picker, magnification and Fjord labels.
@@ -91,6 +91,47 @@ const C3_NEW_KEYS: &[&str] = &[
     "GlassSaturationLabel",
     "GlassEdgeGlowLabel",
     "GlassPointerLightLabel",
+    // Fjord / Wi-Fi / preview labels consumed by the ported UI.
+    "Connected",
+    "Copied",
+    "CopyFailed",
+    "ConnectionEstablished",
+    "FjordFilesComputer",
+    "FjordFilesCopyPath",
+    "FjordFilesCount",
+    "FjordFilesDesktop",
+    "FjordFilesDocuments",
+    "FjordFilesDownloads",
+    "FjordFilesFilteredCount",
+    "FjordFilesFolder",
+    "FjordFilesHome",
+    "FjordFilesMusic",
+    "FjordFilesPictures",
+    "FjordFilesPreview",
+    "FjordFilesReveal",
+    "FjordFilesSearch",
+    "FjordFilesVideos",
+    "FjordFilesVolumes",
+    "Loading",
+    "LocationDenied",
+    "Missing",
+    "OpenItemFailed",
+    "OpenNetwork",
+    "PdfPages",
+    "PreviewFailed",
+    "Revealed",
+    "Saved",
+    "SecuredNetwork",
+    "SelectPreview",
+    "TextLimit",
+    "UnsupportedPreview",
+    "WindowsError",
+    "WifiNetworks",
+    "WifiOff",
+    "WlanStopped",
+    "Wpa2Personal",
+    "Wpa3Personal",
+    "WpaPersonal",
 ];
 
 #[test]

@@ -79,6 +79,47 @@ const FEATURE_KEYS: &[&str] = &[
     "WidgetDensityCompact",
     "WidgetDensityFull",
     "AiUsageRingLabel",
+    // Fjord / Wi-Fi / preview labels consumed by the ported UI.
+    "Connected",
+    "Copied",
+    "CopyFailed",
+    "ConnectionEstablished",
+    "FjordFilesComputer",
+    "FjordFilesCopyPath",
+    "FjordFilesCount",
+    "FjordFilesDesktop",
+    "FjordFilesDocuments",
+    "FjordFilesDownloads",
+    "FjordFilesFilteredCount",
+    "FjordFilesFolder",
+    "FjordFilesHome",
+    "FjordFilesMusic",
+    "FjordFilesPictures",
+    "FjordFilesPreview",
+    "FjordFilesReveal",
+    "FjordFilesSearch",
+    "FjordFilesVideos",
+    "FjordFilesVolumes",
+    "Loading",
+    "LocationDenied",
+    "Missing",
+    "OpenItemFailed",
+    "OpenNetwork",
+    "PdfPages",
+    "PreviewFailed",
+    "Revealed",
+    "Saved",
+    "SecuredNetwork",
+    "SelectPreview",
+    "TextLimit",
+    "UnsupportedPreview",
+    "WindowsError",
+    "WifiNetworks",
+    "WifiOff",
+    "WlanStopped",
+    "Wpa2Personal",
+    "Wpa3Personal",
+    "WpaPersonal",
 ];
 
 #[test]
@@ -112,7 +153,7 @@ fn formatted_labels_keep_their_placeholders_replaceable() {
 #[test]
 fn locale_key_counts_stay_at_the_contract_value() {
     for tag in LANGS {
-        assert_eq!(i18n::key_count(tag), 1366, "{tag} key count drifted");
+        assert_eq!(i18n::key_count(tag), 1406, "{tag} key count drifted");
     }
 }
 

@@ -53,7 +53,6 @@ public sealed class DockWidgetService(TimeProvider timeProvider)
     [
         new("AiUsageClaude", AiProviders.Claude, "WidgetAiUsageClaude", "LogoClaude"),
         new("AiUsageCodex", AiProviders.Codex, "WidgetAiUsageCodex", "LogoCodex"),
-        new("AiUsageAntigravity", AiProviders.Antigravity, "WidgetAiUsageAntigravity", "LogoAntigravity"),
         new("AiUsageOpenCode", AiProviders.OpenCode, "WidgetAiUsageOpenCode", "LogoOpenCode"),
         new("AiUsageCopilot", AiProviders.Copilot, "WidgetAiUsageCopilot", "LogoCopilot"),
         new("AiUsageDeepSeek", AiProviders.DeepSeek, "WidgetAiUsageDeepSeek", "LogoDeepSeek"),

@@ -128,7 +128,9 @@ pub fn folder_trail(path: &str) -> String {
     let mut parts: Vec<String> = Vec::new();
     loop {
         parts.push(component_name(&current));
-        let Some(parent) = parent_of(&current) else { break };
+        let Some(parent) = parent_of(&current) else {
+            break;
+        };
         current = parent;
         if parts.len() == 3 {
             parts.push(ELLIPSIS.to_owned());
@@ -169,19 +171,22 @@ pub fn expand_environment(input: &str, lookup: impl Fn(&str) -> Option<String>) 
     let bytes = input.as_bytes();
     let mut index = 0usize;
     while index < bytes.len() {
-        if bytes[index] == b'%' {
-            if let Some(end) = input[index + 1..].find('%') {
-                let name = &input[index + 1..index + 1 + end];
-                if let Some(value) = lookup(name)
-                    && !name.is_empty()
-                {
-                    out.push_str(&value);
-                    index += end + 2;
-                    continue;
-                }
+        if bytes[index] == b'%'
+            && let Some(end) = input[index + 1..].find('%')
+        {
+            let name = &input[index + 1..index + 1 + end];
+            if let Some(value) = lookup(name)
+                && !name.is_empty()
+            {
+                out.push_str(&value);
+                index += end + 2;
+                continue;
             }
         }
-        let ch = input[index..].chars().next().expect("index is inside the string");
+        let ch = input[index..]
+            .chars()
+            .next()
+            .expect("index is inside the string");
         out.push(ch);
         index += ch.len_utf8();
     }
@@ -355,10 +360,15 @@ pub fn read_entries(path: &str, cancel: &AtomicBool) -> std::io::Result<Vec<File
     let mut entries = Vec::new();
     for item in std::fs::read_dir(path)? {
         if cancel.load(Ordering::SeqCst) {
-            return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "cancelled",
+            ));
         }
         let Ok(item) = item else { continue };
-        let Ok(metadata) = item.metadata() else { continue };
+        let Ok(metadata) = item.metadata() else {
+            continue;
+        };
         let name = item.file_name().to_string_lossy().into_owned();
         entries.push(FileEntry {
             path: item.path().to_string_lossy().into_owned(),
@@ -368,7 +378,7 @@ pub fn read_entries(path: &str, cancel: &AtomicBool) -> std::io::Result<Vec<File
             name,
         });
     }
-    entries.sort_by(|left, right| entry_sort_key(left).cmp(&entry_sort_key(right)));
+    entries.sort_by_key(entry_sort_key);
     Ok(entries)
 }
 
@@ -409,13 +419,13 @@ fn fallback_drives() -> Vec<FileEntry> {
 pub fn favorites(home: &str) -> Vec<(&'static str, &'static str, String)> {
     let join = |name: &str| format!("{}\\{}", home.trim_end_matches(['\\', '/']), name);
     vec![
-        ("FjordFilesComputer", "\u{e770}", COMPUTER_LOCATION.to_owned()),
-        ("FjordFilesHome", "\u{e80f}", home.to_owned()),
         (
-            "FjordFilesDesktop",
-            "\u{e7f4}",
-            join("Desktop"),
+            "FjordFilesComputer",
+            "\u{e770}",
+            COMPUTER_LOCATION.to_owned(),
         ),
+        ("FjordFilesHome", "\u{e80f}", home.to_owned()),
+        ("FjordFilesDesktop", "\u{e7f4}", join("Desktop")),
         ("FjordFilesDownloads", "\u{e896}", downloads_path(home)),
         ("FjordFilesDocuments", "\u{e8a5}", join("Documents")),
         ("FjordFilesPictures", "\u{eb9f}", join("Pictures")),
@@ -444,7 +454,8 @@ pub fn downloads_path(home: &str) -> String {
             while unsafe { *pointer.add(end) } != 0 {
                 end += 1;
             }
-            let value = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(pointer, end) });
+            let value =
+                String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(pointer, end) });
             // SAFETY: allocation came from CoTaskMemAlloc in SHGetKnownFolderPath.
             unsafe { CoTaskMemFree(pointer.cast()) };
             if !value.is_empty() {
@@ -472,7 +483,11 @@ pub fn open_file(path: &str, argument: Option<&str>) -> bool {
                 std::ptr::null_mut(),
                 verb.as_ptr(),
                 file.as_ptr(),
-                if params.is_empty() { std::ptr::null() } else { params.as_ptr() },
+                if params.is_empty() {
+                    std::ptr::null()
+                } else {
+                    params.as_ptr()
+                },
                 std::ptr::null(),
                 SW_SHOWNORMAL,
             )
@@ -600,7 +615,12 @@ mod tests {
     #[test]
     fn breadcrumb_shows_last_three_components() {
         // C# adds the ellipsis once the third segment still has a parent.
-        assert_eq!(folder_trail(r"C:\Users\agnes\Downloads"), format!("{ELLIPSIS}{TRAIL_SEPARATOR}Users{TRAIL_SEPARATOR}agnes{TRAIL_SEPARATOR}Downloads"));
+        assert_eq!(
+            folder_trail(r"C:\Users\agnes\Downloads"),
+            format!(
+                "{ELLIPSIS}{TRAIL_SEPARATOR}Users{TRAIL_SEPARATOR}agnes{TRAIL_SEPARATOR}Downloads"
+            )
+        );
         assert!(folder_trail(r"C:\Users\agnes\Downloads\A\B").starts_with(ELLIPSIS));
         assert_eq!(folder_trail(r"C:\Users"), r"C:   ›   Users");
     }
@@ -609,14 +629,19 @@ mod tests {
     fn breadcrumb_handles_this_pc_and_forward_slashes() {
         assert_eq!(folder_trail(COMPUTER_LOCATION), "This PC");
         assert_eq!(folder_trail("Bu Bilgisayar"), "This PC");
-        assert_eq!(folder_trail("C:/Users/agnes"), folder_trail(r"C:\Users\agnes"));
+        assert_eq!(
+            folder_trail("C:/Users/agnes"),
+            folder_trail(r"C:\Users\agnes")
+        );
     }
 
     #[test]
     fn computer_location_recognizes_all_shell_spellings() {
         assert!(is_computer_location(" shell:mycomputerfolder "));
         assert!(is_computer_location("\"This PC\""));
-        assert!(is_computer_location("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"));
+        assert!(is_computer_location(
+            "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+        ));
         assert!(!is_computer_location(r"C:\Users"));
     }
 
@@ -662,13 +687,22 @@ mod tests {
             navigation_target("%USERPROFILE%\\Music", Some(r"C:\Users"), r"C:\Users\agnes"),
             Some(r"C:\Users\agnes\Music".to_owned())
         );
-        assert_eq!(navigation_target("shell:MyComputerFolder", None, "C:\\"), Some(COMPUTER_LOCATION.to_owned()));
+        assert_eq!(
+            navigation_target("shell:MyComputerFolder", None, "C:\\"),
+            Some(COMPUTER_LOCATION.to_owned())
+        );
     }
 
     #[test]
     fn normalization_collapses_dot_segments() {
-        assert_eq!(normalize_path_text(r"C:\Users\.\agnes\..\Downloads", None).as_deref(), Some(r"C:\Users\Downloads"));
-        assert_eq!(normalize_path_text("Docs", Some(r"D:\Work")).as_deref(), Some(r"D:\Work\Docs"));
+        assert_eq!(
+            normalize_path_text(r"C:\Users\.\agnes\..\Downloads", None).as_deref(),
+            Some(r"C:\Users\Downloads")
+        );
+        assert_eq!(
+            normalize_path_text("Docs", Some(r"D:\Work")).as_deref(),
+            Some(r"D:\Work\Docs")
+        );
         assert_eq!(normalize_path_text("   ", None), None);
     }
 

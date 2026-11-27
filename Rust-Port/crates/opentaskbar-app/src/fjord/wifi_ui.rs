@@ -83,7 +83,9 @@ impl NetworkView {
 
     /// `WifiNetworks.Usable` (a known profile or a supported temporary profile).
     pub fn usable(&self) -> bool {
-        self.connectable && (self.has_profile || supports_temporary_profile(self.authentication, self.cipher, self.secured))
+        self.connectable
+            && (self.has_profile
+                || supports_temporary_profile(self.authentication, self.cipher, self.secured))
     }
 
     pub fn needs_password(&self) -> bool {
@@ -91,7 +93,12 @@ impl NetworkView {
     }
 
     pub fn identity(&self) -> (String, bool, u32, u32) {
-        (self.ssid.clone(), self.secured, self.authentication, self.cipher)
+        (
+            self.ssid.clone(),
+            self.secured,
+            self.authentication,
+            self.cipher,
+        )
     }
 }
 
@@ -189,7 +196,9 @@ impl WifiUiState {
         let previous = self.selected_network().map(NetworkView::identity);
         self.networks = networks;
         self.selected = self.networks.iter().position(|network| {
-            previous.as_ref().is_some_and(|identity| network.identity() == *identity)
+            previous
+                .as_ref()
+                .is_some_and(|identity| network.identity() == *identity)
         });
         self.status = if self.networks.is_empty() {
             Some("WifiNoNetworks")
@@ -199,11 +208,15 @@ impl WifiUiState {
     }
 
     pub fn password_required(&self) -> bool {
-        self.selected_network().is_some_and(NetworkView::needs_password)
+        self.selected_network()
+            .is_some_and(NetworkView::needs_password)
     }
 
     pub fn action_key(&self) -> &'static str {
-        if self.selected_network().is_some_and(|network| network.connected) {
+        if self
+            .selected_network()
+            .is_some_and(|network| network.connected)
+        {
             "WifiDisconnect"
         } else {
             "WifiConnect"
@@ -211,7 +224,8 @@ impl WifiUiState {
     }
 
     pub fn can_connect(&self) -> bool {
-        self.selected_network().is_some_and(|network| network.connected || network.usable())
+        self.selected_network()
+            .is_some_and(|network| network.connected || network.usable())
     }
 }
 
@@ -252,16 +266,17 @@ pub fn disconnect() {
 impl NetworkView {
     /// Field names mirror the C# `WifiNetworks.Network` record.
     pub fn from_platform(network: crate::platform::wifi::WifiNetwork) -> Self {
+        let secured = network.security != crate::platform::wifi::WifiSecurity::Open;
         Self {
-            name: network.name,
+            name: network.ssid.clone(),
             ssid: network.ssid,
-            signal: network.signal,
-            secured: network.secured,
-            connected: network.connected,
-            connectable: network.connectable,
-            has_profile: !network.profile.is_empty(),
-            authentication: network.authentication,
-            cipher: network.cipher,
+            signal: u32::from(network.signal_percent),
+            secured,
+            connected: network.is_connected,
+            connectable: true,
+            has_profile: false,
+            authentication: 0,
+            cipher: 0,
         }
     }
 }
@@ -288,7 +303,11 @@ mod tests {
     // Tiny hex helper keeps tests independent of any crate feature.
     mod hex {
         pub fn encode(value: &str) -> String {
-            value.as_bytes().iter().map(|byte| format!("{byte:02X}")).collect()
+            value
+                .as_bytes()
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect()
         }
     }
 
@@ -342,7 +361,10 @@ mod tests {
 
     #[test]
     fn duplicate_ssids_are_removed() {
-        let networks = vec![network("Home", 70, true, false), network("Home", 60, true, false)];
+        let networks = vec![
+            network("Home", 70, true, false),
+            network("Home", 60, true, false),
+        ];
         assert_eq!(deduplicate(networks).len(), 1);
     }
 
@@ -352,7 +374,10 @@ mod tests {
         assert_eq!(error_key(1062), "WlanStopped");
         assert_eq!(error_key(0x8034_2002), "WifiOff");
         assert_eq!(error_key(87), "WindowsError");
-        assert_eq!(ConnectionOutcome::Connected.status_key(), "ConnectionEstablished");
+        assert_eq!(
+            ConnectionOutcome::Connected.status_key(),
+            "ConnectionEstablished"
+        );
         assert_eq!(ConnectionOutcome::Failed.status_key(), "WifiConnectFailed");
     }
 

@@ -854,17 +854,17 @@ impl WidgetRuntime {
             self.bluetooth_on = crate::platform::radio::state("bluetooth");
             // Reconcile a previous toggle: access denied has no refresh at all, a failed write
             // leaves a refresh but the state does not match the requested target (C# ChangeResult).
-            if let Some(target) = self.wifi_target.take() {
-                if self.wifi_on != target {
-                    self.radio_failed = true;
-                    self.radio_denied = crate::platform::radio::last_refresh().is_none();
-                }
+            if let Some(target) = self.wifi_target.take()
+                && self.wifi_on != target
+            {
+                self.radio_failed = true;
+                self.radio_denied = crate::platform::radio::last_refresh().is_none();
             }
-            if let Some(target) = self.bluetooth_target.take() {
-                if self.bluetooth_on != target {
-                    self.radio_failed = true;
-                    self.radio_denied = crate::platform::radio::last_refresh().is_none();
-                }
+            if let Some(target) = self.bluetooth_target.take()
+                && self.bluetooth_on != target
+            {
+                self.radio_failed = true;
+                self.radio_denied = crate::platform::radio::last_refresh().is_none();
             }
             self.radio_loading = false;
         }
@@ -893,9 +893,7 @@ impl WidgetRuntime {
     }
 
     pub fn cycle_keyboard_layout(&mut self, forward: bool) {
-        if let Some(code) =
-            telemetry::cycle_keyboard_layout(forward, self.keyboard_target_hwnd)
-        {
+        if let Some(code) = telemetry::cycle_keyboard_layout(forward, self.keyboard_target_hwnd) {
             self.keyboard_override = Some((code, Instant::now()));
         }
     }
@@ -1179,7 +1177,11 @@ impl WidgetRuntime {
 
     /// Builds flyout detail from the cache, falling back to a severity-only snapshot while the
     /// first full fetch is still in flight.
-    fn ai_flyout_detail(&self, id: &str, snap: &telemetry::AiUsageSnapshot) -> ai_flyout::AiFullDetail {
+    fn ai_flyout_detail(
+        &self,
+        id: &str,
+        snap: &telemetry::AiUsageSnapshot,
+    ) -> ai_flyout::AiFullDetail {
         if let Some(full) = self.ai_full_detail(id) {
             return ai_flyout::from_telemetry(&full);
         }
@@ -2866,7 +2868,8 @@ impl WidgetRuntime {
                         LiveEvent::Click(id) if (100..200).contains(&id) && id % 2 == 0 => {
                             let sessions = media_ext::list_app_sessions();
                             if let Some(session) = sessions.get(((id - 100) / 2) as usize) {
-                                let _ = media_ext::set_app_mute(&session.session_id, !session.muted);
+                                let _ =
+                                    media_ext::set_app_mute(&session.session_id, !session.muted);
                             }
                             LiveOutcome::Update(self.build_audio_mixer_spec())
                         }
@@ -2935,7 +2938,11 @@ impl WidgetRuntime {
                     feels
                 };
                 let wind = snap.formatted_wind(settings.weather_unit);
-                let wind = if wind.is_empty() { "—".to_owned() } else { wind };
+                let wind = if wind.is_empty() {
+                    "—".to_owned()
+                } else {
+                    wind
+                };
                 let hum = if snap.humidity.is_empty() {
                     "—".to_owned()
                 } else {
@@ -2984,8 +2991,7 @@ impl WidgetRuntime {
                     for (i, (day, condition, high_low)) in
                         snap.forecast_days.iter().take(3).enumerate()
                     {
-                        let value = if let Some((Some(hi), Some(lo))) =
-                            snap.forecast_hi_lo_c.get(i)
+                        let value = if let Some((Some(hi), Some(lo))) = snap.forecast_hi_lo_c.get(i)
                         {
                             format!(
                                 "{} / {}",
@@ -3166,11 +3172,11 @@ impl WidgetRuntime {
                             let shown = alias_for(cfg, &d.name);
                             let charging = d.charging || d.percent >= 95;
                             let stale = d.stale
-                                || d.sampled_at.is_some_and(|t| t.elapsed().as_secs() > interval * 2)
+                                || d.sampled_at
+                                    .is_some_and(|t| t.elapsed().as_secs() > interval * 2)
                                 || (d.sampled_at.is_none()
-                                    && last_fetch.is_some_and(|t| {
-                                        t.elapsed().as_secs() > interval * 2
-                                    }));
+                                    && last_fetch
+                                        .is_some_and(|t| t.elapsed().as_secs() > interval * 2));
                             let subtitle = if stale {
                                 loc::t_fmt("WirelessBatteryStale", &[&d.percent.to_string()])
                             } else if charging {
@@ -3182,7 +3188,11 @@ impl WidgetRuntime {
                                 id: 100 + i as u32,
                                 title: format!("{shown}{}", if charging { " ⚡" } else { "" }),
                                 subtitle: Some(subtitle),
-                                badge: Some(format!("{}%{}", d.percent, if charging { " ⚡" } else { "" })),
+                                badge: Some(format!(
+                                    "{}%{}",
+                                    d.percent,
+                                    if charging { " ⚡" } else { "" }
+                                )),
                                 icon: None,
                                 destructive: false,
                             }
@@ -3313,7 +3323,12 @@ impl WidgetRuntime {
                                 .get(selected)
                                 .map(|d| alias_for(settings, &d.name))
                                 .unwrap_or_default();
-                            LiveOutcome::Update(build(settings, selected, prefill, feedback.as_deref()))
+                            LiveOutcome::Update(build(
+                                settings,
+                                selected,
+                                prefill,
+                                feedback.as_deref(),
+                            ))
                         }
                         LiveEvent::Click(3) => {
                             set_setting(settings, "IgnoredWirelessDevices", serde_json::json!([]));
@@ -3383,7 +3398,11 @@ impl WidgetRuntime {
                                                 d.id,
                                                 d.percent,
                                                 d.source_label,
-                                                if d.charging { "charging" } else { "discharging" }
+                                                if d.charging {
+                                                    "charging"
+                                                } else {
+                                                    "discharging"
+                                                }
                                             )
                                         })
                                         .collect::<Vec<_>>()
@@ -3441,7 +3460,12 @@ impl WidgetRuntime {
                                 );
                                 settings_changed = true;
                             }
-                            LiveOutcome::Update(build(settings, selected, text, feedback.as_deref()))
+                            LiveOutcome::Update(build(
+                                settings,
+                                selected,
+                                text,
+                                feedback.as_deref(),
+                            ))
                         }
                         _ => LiveOutcome::Close,
                     },
@@ -3800,8 +3824,8 @@ impl WidgetRuntime {
                     }
                 };
                 // C# `ChangeResult`: Applied / Denied / Failed are distinct user-visible states.
-                let wifi_state = change_error()
-                    .unwrap_or_else(|| radio_label(self.wifi_on, self.radio_loading));
+                let wifi_state =
+                    change_error().unwrap_or_else(|| radio_label(self.wifi_on, self.radio_loading));
                 let bt_state = change_error()
                     .unwrap_or_else(|| radio_label(self.bluetooth_on, self.radio_loading));
                 // Ours: surface the WinRT probe state while the radios are still being read.
@@ -4344,19 +4368,25 @@ mod tests {
         let mut runtime = WidgetRuntime::default();
         let settings = DockSettings::default();
         let clock = runtime.live_spec("clock", &settings, true);
-        assert!(clock
-            .blocks
-            .iter()
-            .any(|b| matches!(b, FlyoutBlock::Hero { .. })));
-        assert!(clock
-            .blocks
-            .iter()
-            .any(|b| matches!(b, FlyoutBlock::CalendarGrid { .. })));
+        assert!(
+            clock
+                .blocks
+                .iter()
+                .any(|b| matches!(b, FlyoutBlock::Hero { .. }))
+        );
+        assert!(
+            clock
+                .blocks
+                .iter()
+                .any(|b| matches!(b, FlyoutBlock::CalendarGrid { .. }))
+        );
         let stats = runtime.live_spec("stats", &settings, true);
-        assert!(stats
-            .blocks
-            .iter()
-            .any(|b| matches!(b, FlyoutBlock::Chart { .. })));
+        assert!(
+            stats
+                .blocks
+                .iter()
+                .any(|b| matches!(b, FlyoutBlock::Chart { .. }))
+        );
         let stopwatch = runtime.live_spec("stopwatch", &settings, true);
         assert!(!stopwatch.blocks.is_empty());
         let countdown = runtime.live_spec("countdown", &settings, true);
@@ -4376,9 +4406,11 @@ mod tests {
 
     #[test]
     fn catalog_and_ai_flyout_use_the_seven_remaining_providers() {
-        assert!(!ALL_WIDGETS
-            .iter()
-            .any(|w| w.id.eq_ignore_ascii_case("aiusage_ag")));
+        assert!(
+            !ALL_WIDGETS
+                .iter()
+                .any(|w| w.id.eq_ignore_ascii_case("aiusage_ag"))
+        );
         assert_eq!(
             ALL_WIDGETS
                 .iter()
@@ -4391,7 +4423,7 @@ mod tests {
 
     #[test]
     fn cached_ai_full_detail_is_rendered_instead_of_default() {
-        let mut runtime = WidgetRuntime::default();
+        let runtime = WidgetRuntime::default();
         let full = telemetry::AiFullDetail {
             provider_id: "aiusage_claude".to_owned(),
             plan: Some("Pro".to_owned()),

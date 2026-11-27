@@ -4,7 +4,7 @@
 
 ### Rust port — test/CI/docs/packaging parity
 
-- Removed five retired AI-provider grouping keys and added 27 window-picker, magnification, Fjord, Wi-Fi, search, alignment, preview, focus, density and AI-ring keys (24 newly added; three already shipped in every catalog) to all 14 Rust catalogs. Every catalog and every numeric gate now sits at **1361 keys**.
+- Removed five retired AI-provider grouping keys and added 27 window-picker, magnification, Fjord, Wi-Fi, search, alignment, preview, focus, density and AI-ring keys (24 newly added; three already shipped in every catalog) to all 14 Rust catalogs. The C# catalogs now hold **994 keys** and every Rust catalog and numeric gate sits at **1406 keys** (40 Fjord/Wi-Fi/preview labels added for the ported UI).
 - Added 32 new feature keys to all 14 Rust catalogs and enforced identical key sets with `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`.
 - Merged 202 new UI localization keys (Dynamic Island details, Settings/theme controls and widget labels) with the five widget/start-layout keys from the other branch, all with real translations in 14 Rust catalogs, raising every catalog from 1129 to **1336 keys**, and raised the numeric parity gates to match.
 - Restored the nine tr-TR labels that the merge overwrote with en-US or ASCII-only text (`FocusBreakTitle/Start/Skip/Countdown/Complete`, `FocusSession`, `RadioOn`, `RadioOff`, `DockBottomGap`) and added parity tests for translation regressions, empty values and placeholder retention. The key count stayed **1336** at that point in all 14 catalogs and every gate.

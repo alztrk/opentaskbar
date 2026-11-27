@@ -19,7 +19,7 @@ C# tarafında var, Rust portında olmayan/eksik olan maddeler. Detaylı kaynak: 
 | `ShellTelemetry.cs` | `EVENT name key=value` yapılandırılmış log, seq üreticisi, Result(reason/ok/verified/ms/error) |
 | `StaTask.cs` | 3 STA kuyruğu (genel/window scan/search), BelowNormal öncelik |
 | `StartupStopwatch.cs` | Faz bazlı startup timing (`Startup +NNNms`) |
-| `AiUsageService.cs` | Cursor fetch (Rust `_ => {}` boş dal), **Antigravity**, pool/group ayrıştırma, CLI sign-in, Claude OAuth refresh, gh keyring, Spend/Breakdown/UnlimitedCredits/LimitReached/Severity, Retry-After |
+| `AiUsageService.cs` | Cursor fetch (Rust `_ => {}` boş dal), pool/group ayrıştırma, CLI sign-in, Claude OAuth refresh, gh keyring, Spend/Breakdown/UnlimitedCredits/LimitReached/Severity, Retry-After |
 | `ApplicationIconProvider.cs` | SHGetFileInfo + ExtractIconEx fallback, 12–256 px snap, hover icon varyantları, straight→premultiplied alpha, ShellItemDisplayName |
 | `AppShortcutResolver.cs` | NameCache displayName/stem eşleme, webhelper marker, WScript.Shell .lnk indeksi, WorkingDirectory |
 | `AppLog.cs` | thread id, OT_VERBOSE_LOG, ReportError, ResolveMessage, Shutdown |
@@ -98,7 +98,7 @@ C# tarafında var, Rust portında olmayan/eksik olan maddeler. Detaylı kaynak: 
 ## 5. Widgets (Rust: `widgets/mod.rs` chip spec + `ui/flyout.rs`)
 
 1. **WidgetHoverCoordinator.cs** — 350 ms hover intent, inline genişleme, slider capture, imleç doğrulama, Suppress — tamamen yok
-2. **AiUsageWidget.cs** — tüm AI flyout'ları (`open_widget_flyout` doğrudan `return false`); spend/breakdown/reset/plan/stale; Antigravity 8. provider
+2. **AiUsageWidget.cs** — tüm AI flyout'ları (`open_widget_flyout` doğrudan `return false`); spend/breakdown/reset/plan/stale
 3. **NetSpeedWidget.cs** — multi-stream hız testi, ping, 6 stream, sonuç grid'i, iptal/retry — yok
 4. **MediaWidget.xaml.cs + MediaTimeline.cs** — albüm kapağı/tint, seek slider, dikey volume popover, 560px island genişleme, LibreWolf timeline; Rust `WidgetChipSpec::Media` sabit play glyph
 5. **QuickSettingsWidget.xaml.cs** — WinRT Radio API gerçek Wi-Fi/BT toggle; Rust `false` sabiti + `ms-settings:` URI
@@ -146,7 +146,7 @@ Mevcut: live drag, temel fisheye, island sayfalama, arama, TextPrompt, scroll vi
 - **themes/**: 6 bundled tema (catppuccin/gruvbox/nord/prism/solarized/tokyo-night) + widget pack — Rust'ta asset yok, `built_in_ids()` sadece testte
 - **Fonts/**: Inter 4 ağırlık + OFL — Rust'ta yok
 - **Flags/**: 14 PNG — Rust'ta yok
-- **Locale**: C# 14×999 ↔ Rust 14×1071; C# fazlası 5 Antigravity anahtarı; Rust fazlası 77 (DI/takvim/font)
+- **Locale**: C# 14×999 ↔ Rust 14×1071; C# fazlası 5 kullanımdan kaldırılmış anahtar; Rust fazlası 77 (DI/takvim/font)
 - **Release**: publish/package/check script'leri, checksums.txt, release-manifest, SLSA/VirusTotal, MSIX AppxManifest + 5 logo, CodeQL(csharp), dependabot nuget — Rust'ta yok; rust-ci sadece rust-port branch'inde
 - **Docs**: Rust-Port/README.md 15 satır; CHANGELOG/PRIVACY/docs/*/Design README yok
 - **Test**: C# 31 dosya ~1935 Check (gerçek pencere + sentetik input + görsel ağaç); Rust 93 #[test] saf fonksiyon. En büyük boşluklar: AiUsageChecks(151), FeatureAndMemoryChecks(221, .otbackup), DockLayoutChecks(286), WirelessBatteryChecks(106), MediaVolume/AudioMixer, ShellRecovery/TaskbarRecovery/flyout pozisyon, per-app mixer, telemetry locale parity.

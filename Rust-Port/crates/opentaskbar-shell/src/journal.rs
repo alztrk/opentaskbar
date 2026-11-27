@@ -122,7 +122,17 @@ mod tests {
         assert_eq!(parse_state(" 3 "), Some(3));
         assert_eq!(parse_state("2"), Some(2));
         // Bits outside ABS_AUTOHIDE | ABS_ALWAYSONTOP are invalid (C# ParseJournal).
-        for bad in ["4", "0x2", "-1", "+1", "", "  ", "2\n3", "abc", "4294967296"] {
+        for bad in [
+            "4",
+            "0x2",
+            "-1",
+            "+1",
+            "",
+            "  ",
+            "2\n3",
+            "abc",
+            "4294967296",
+        ] {
             assert_eq!(parse_state(bad), None, "must reject {bad:?}");
         }
         assert_eq!(resolve_state(0, false, 2), 0);

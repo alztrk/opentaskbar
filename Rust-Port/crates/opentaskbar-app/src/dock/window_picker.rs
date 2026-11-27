@@ -528,7 +528,7 @@ fn paint(state: &PickerState) {
             }
         {
             let rc = D2D_RECT_F {
-                left: (crate::window_picker::PICKER_FRAME_PADDING_DIPS * dip).round() as f32,
+                left: (crate::window_picker::PICKER_FRAME_PADDING_DIPS * dip).round(),
                 top: 0.0,
                 right: cw as f32 - 12.0 * dip,
                 bottom: header as f32,
@@ -693,45 +693,27 @@ fn paint(state: &PickerState) {
             }
         }
 
-        if state.paging {
-            if let Some(ref fmt) = center_fmt
-                && let Ok(fg) = unsafe {
-                    d2d.target
-                        .CreateSolidColorBrush(&d2d_rgba(pal.text_primary, 1.0), None)
-                }
-            {
-                for (rect, text) in [
-                    (state.prev_rect, label("WindowPickerPrevious", "<")),
-                    (state.next_rect, label("WindowPickerNext", ">")),
-                ] {
-                    let rc = D2D_RECT_F {
-                        left: rect.left as f32,
-                        top: rect.top as f32,
-                        right: rect.right as f32,
-                        bottom: rect.bottom as f32,
-                    };
-                    let wide_text: Vec<u16> = text.encode_utf16().collect();
-                    unsafe {
-                        d2d.target.DrawText(
-                            &wide_text,
-                            fmt,
-                            &rc,
-                            &fg,
-                            D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                            DWRITE_MEASURING_MODE_NATURAL,
-                        );
-                    }
-                }
+        if state.paging
+            && let Some(ref fmt) = center_fmt
+            && let Ok(fg) = unsafe {
+                d2d.target
+                    .CreateSolidColorBrush(&d2d_rgba(pal.text_primary, 1.0), None)
+            }
+        {
+            for (rect, text) in [
+                (state.prev_rect, label("WindowPickerPrevious", "<")),
+                (state.next_rect, label("WindowPickerNext", ">")),
+            ] {
                 let rc = D2D_RECT_F {
-                    left: state.prev_rect.right as f32,
-                    top: state.prev_rect.top as f32,
-                    right: state.next_rect.left as f32,
-                    bottom: state.prev_rect.bottom as f32,
+                    left: rect.left as f32,
+                    top: rect.top as f32,
+                    right: rect.right as f32,
+                    bottom: rect.bottom as f32,
                 };
-                let text: Vec<u16> = page_label(state.page, state.pages).encode_utf16().collect();
+                let wide_text: Vec<u16> = text.encode_utf16().collect();
                 unsafe {
                     d2d.target.DrawText(
-                        &text,
+                        &wide_text,
                         fmt,
                         &rc,
                         &fg,
@@ -739,6 +721,23 @@ fn paint(state: &PickerState) {
                         DWRITE_MEASURING_MODE_NATURAL,
                     );
                 }
+            }
+            let rc = D2D_RECT_F {
+                left: state.prev_rect.right as f32,
+                top: state.prev_rect.top as f32,
+                right: state.next_rect.left as f32,
+                bottom: state.prev_rect.bottom as f32,
+            };
+            let text: Vec<u16> = page_label(state.page, state.pages).encode_utf16().collect();
+            unsafe {
+                d2d.target.DrawText(
+                    &text,
+                    fmt,
+                    &rc,
+                    &fg,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
             }
         }
 
@@ -890,8 +889,7 @@ unsafe extern "system" fn picker_wnd_proc(
             0
         }
         WM_ACTIVATE => {
-            if (wparam as u32 & 0xffff) == WA_INACTIVE as u32 && !state.activating && !state.closed
-            {
+            if (wparam as u32 & 0xffff) == WA_INACTIVE && !state.activating && !state.closed {
                 unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
             }
             0

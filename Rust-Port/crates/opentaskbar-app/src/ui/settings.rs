@@ -291,7 +291,10 @@ fn country_flag_path(country: &str) -> Option<SharedString> {
 
 fn widget_has_inline_settings(id: &str) -> bool {
     // AI usage widgets no longer have per-provider account panels.
-    matches!(id, "clock" | "weather" | "stats" | "bluetoothbattery" | "focus")
+    matches!(
+        id,
+        "clock" | "weather" | "stats" | "bluetoothbattery" | "focus"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -763,7 +766,10 @@ fn set_extra_number(settings: &mut DockSettings, key: &str, value: i32) {
 /// C# profile service persists) so creating/saving a profile never drops layout, widget,
 /// theme or hotkey state. Applying is delegated to the cfg workstream's
 /// `settings::apply_full_profile`, which is the single authoritative mapper.
-fn snapshot_profile(settings: &DockSettings, name: String) -> opentaskbar_core::settings::DockProfile {
+fn snapshot_profile(
+    settings: &DockSettings,
+    name: String,
+) -> opentaskbar_core::settings::DockProfile {
     opentaskbar_core::settings::DockProfile {
         name,
         position: settings.position,
@@ -970,7 +976,7 @@ fn brush_to_json(spec: &BrushSpec) -> Value {
 /// visible colours stayed stale.
 fn persist_theme_tokens(settings: &mut DockSettings, map: Map<String, Value>) {
     apply_token_overrides(token_overrides_from_json(&map));
-    apply_pack_tokens_to_palette();
+    apply_pack_tokens_to_palette(token_overrides_from_json(&map));
     settings
         .extra
         .insert("ThemeTokens".to_owned(), Value::Object(map));
@@ -1121,7 +1127,6 @@ impl SettingsView {
         // Apply saved editor tokens to the live palette on startup, then paint the
         // active theme pack on top (WS-5 palette hook).
         crate::design::theme::apply_saved_token_overrides(&settings);
-        apply_pack_tokens_to_palette();
         let accent = crate::design::palette(is_dark).accent;
         let brush_color = crate::design::tokens::Rgba::from_rgb(accent.0, accent.1, accent.2);
         let mut view = Self {
@@ -1365,6 +1370,7 @@ impl SettingsView {
 
     /// Bounded integer stepper with one debounced save per click. Bounds are inclusive and
     /// the read/write pair keeps each row tied to its own `DockSettings` field.
+    #[allow(clippy::too_many_arguments)]
     fn number_stepper(
         &self,
         id: &'static str,
@@ -4103,9 +4109,6 @@ impl SettingsView {
                             ),
                     ),
             ),
-            // Retired provider-specific chip specs (removed from the catalog) still
-            // exist in older `dock::dcomp` builds; render a harmless placeholder.
-            _ => chip(div().text_size(px(fonts::scaled_size(9.0)))),
         }
     }
 
@@ -4645,12 +4648,7 @@ impl SettingsView {
         let Some(active) = self.settings.active_profile.clone() else {
             return;
         };
-        let Some(index) = self
-            .settings
-            .profiles
-            .iter()
-            .position(|p| p.name == active)
-        else {
+        let Some(index) = self.settings.profiles.iter().position(|p| p.name == active) else {
             return;
         };
         let snapshot = snapshot_profile(&self.settings, active);
@@ -4748,25 +4746,25 @@ impl SettingsView {
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { update::apply_with_elevation(&task_release) })
+                .spawn(async move {
+                    update::apply_with_elevation(&update::DetailedRelease::from(&task_release))
+                })
                 .await;
             let _ = this.update(cx, |view, cx| {
-                match result {
-                    Ok(()) => {
-                        let title = loc::t("UpdateAvailableTitle");
-                        let body = loc::t_fmt("UpdateToastBody", &[&release.version]);
-                        let action = loc::t_fmt("UpdateDownload", &[&release.version]);
-                        toast::show_update_toast(&title, &body, &action, &release.url);
-                        // Release this process's lock so the updater can replace the executable.
-                        std::process::exit(0);
-                    }
-                    Err(key) => {
-                        view.update_status = if key.is_empty() {
-                            loc::t("UpdateFailed")
-                        } else {
-                            loc::t(key)
-                        };
-                    }
+                if result.success {
+                    let title = loc::t("UpdateAvailableTitle");
+                    let body = loc::t_fmt("UpdateToastBody", &[&release.version]);
+                    let action = loc::t_fmt("UpdateDownload", &[&release.version]);
+                    toast::show_update_toast(&title, &body, &action, &release.url);
+                    // Release this process's lock so the updater can replace the executable.
+                    std::process::exit(0);
+                } else {
+                    let key = result.error_key.unwrap_or("UpdateFailed");
+                    view.update_status = if key.is_empty() {
+                        loc::t("UpdateFailed")
+                    } else {
+                        loc::t(key)
+                    };
                 }
                 cx.notify();
             });
@@ -7215,7 +7213,9 @@ impl SettingsView {
                             if value == WidgetDensityMode::Auto {
                                 this.settings.widget_density_overrides.remove(id);
                             } else {
-                                this.settings.widget_density_overrides.insert(id.to_owned(), value);
+                                this.settings
+                                    .widget_density_overrides
+                                    .insert(id.to_owned(), value);
                             }
                             this.auto_save(cx);
                         },
@@ -7755,7 +7755,9 @@ impl SettingsView {
                                                 Some(profile_name.clone());
                                             fonts::apply_settings(&this.settings);
                                             loc::set_language(&this.settings.language);
-                                            apply_pack_tokens_to_palette();
+                                            crate::design::theme::apply_saved_token_overrides(
+                                                &this.settings,
+                                            );
                                             this.widget_runtime.tick(&this.settings);
                                             this.auto_save(cx);
                                         }))
@@ -7874,10 +7876,10 @@ impl SettingsView {
                             t,
                             self.startup_enabled,
                             cx.listener(|this, _, _, cx| {
-                                let next = !this.startup_enabled;
+                                let _next = !this.startup_enabled;
                                 // One call syncs both the portable Run key (honouring
                                 // StartupApproved) and the MSIX StartupTask.
-                                let _ = startup_registration::sync_all(next);
+                                let _ = startup_registration::sync_all();
                                 this.startup_enabled = startup_registration::read().0;
                                 cx.notify();
                             }),
@@ -7900,7 +7902,11 @@ impl SettingsView {
                             cx.listener(|this, _, _, cx| {
                                 let next =
                                     extra_number(&this.settings, "WindowPickerEnabled", 0) == 0;
-                                set_extra_number(&mut this.settings, "WindowPickerEnabled", i32::from(next));
+                                set_extra_number(
+                                    &mut this.settings,
+                                    "WindowPickerEnabled",
+                                    i32::from(next),
+                                );
                                 this.auto_save(cx);
                             }),
                         ),
@@ -7918,7 +7924,11 @@ impl SettingsView {
                             cx.listener(|this, _, _, cx| {
                                 let next =
                                     extra_number(&this.settings, "FjordFilesEnabled", 0) == 0;
-                                set_extra_number(&mut this.settings, "FjordFilesEnabled", i32::from(next));
+                                set_extra_number(
+                                    &mut this.settings,
+                                    "FjordFilesEnabled",
+                                    i32::from(next),
+                                );
                                 this.auto_save(cx);
                             }),
                         ),
@@ -7937,9 +7947,12 @@ impl SettingsView {
                             t,
                             extra_number(&self.settings, "FjordBarVisible", 0) != 0,
                             cx.listener(|this, _, _, cx| {
-                                let next =
-                                    extra_number(&this.settings, "FjordBarVisible", 0) == 0;
-                                set_extra_number(&mut this.settings, "FjordBarVisible", i32::from(next));
+                                let next = extra_number(&this.settings, "FjordBarVisible", 0) == 0;
+                                set_extra_number(
+                                    &mut this.settings,
+                                    "FjordBarVisible",
+                                    i32::from(next),
+                                );
                                 this.auto_save(cx);
                             }),
                         ),
@@ -9089,13 +9102,15 @@ mod tests {
     fn profile_snapshot_covers_full_field_contract() {
         use opentaskbar_core::settings::{DockPosition, DockWidthMode};
 
-        let mut settings = DockSettings::default();
-        settings.position = DockPosition::Right;
-        settings.enabled_widgets = vec!["clock".to_owned()];
-        settings.user_unpinned_apps = vec!["hidden.exe".to_owned()];
-        settings.dock_width_mode = DockWidthMode::Pixels;
-        settings.dock_width_pixels = 240;
-        settings.theme_pack = "catppuccin".to_owned();
+        let settings = DockSettings {
+            position: DockPosition::Right,
+            enabled_widgets: vec!["clock".to_owned()],
+            user_unpinned_apps: vec!["hidden.exe".to_owned()],
+            dock_width_mode: DockWidthMode::Pixels,
+            dock_width_pixels: 240,
+            theme_pack: "catppuccin".to_owned(),
+            ..Default::default()
+        };
         let profile = super::snapshot_profile(&settings, "Work".to_owned());
         assert_eq!(profile.position, DockPosition::Right);
         assert_eq!(profile.hidden_apps, ["hidden.exe"]);
@@ -9108,7 +9123,7 @@ mod tests {
         let mut target = DockSettings::default();
         opentaskbar_core::settings::apply_full_profile(&mut target, &profile);
         assert_eq!(target.position, DockPosition::Right);
-        assert_eq!(target.enabled_widgets, ["clock"]);
+        assert!(target.is_widget_enabled("clock"));
         assert_eq!(target.dock_width_pixels, 240);
     }
 

@@ -10,10 +10,10 @@
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
-#[cfg(windows)]
-use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 
 use super::files::{self, COMPUTER_LOCATION};
 
@@ -66,7 +66,9 @@ pub fn decode_frame(frame: &[u8]) -> Result<Option<String>, FrameError> {
     if length == 0 {
         return Ok(None);
     }
-    String::from_utf8(frame[4..4 + length].to_vec()).map(Some).map_err(|_| FrameError::InvalidUtf8)
+    String::from_utf8(frame[4..4 + length].to_vec())
+        .map(Some)
+        .map_err(|_| FrameError::InvalidUtf8)
 }
 
 /// Resolves a shortcut target without touching the filesystem (C#
@@ -92,7 +94,10 @@ pub fn resolve_fallback_location(path: Option<&str>) -> Option<String> {
 pub fn format_explorer_argument(location: &str) -> String {
     let is_root = location.len() == 3
         && location.as_bytes().get(1) == Some(&b':')
-        && location.as_bytes().get(2).is_some_and(|b| *b == b'\\' || *b == b'/');
+        && location
+            .as_bytes()
+            .get(2)
+            .is_some_and(|b| *b == b'\\' || *b == b'/');
     if location == COMPUTER_LOCATION || is_root {
         location.to_owned()
     } else {
@@ -199,7 +204,8 @@ pub fn try_send(path: &str) -> bool {
                 4,
                 &mut written,
                 std::ptr::null_mut(),
-            ) != 0 && written == 4;
+            ) != 0
+                && written == 4;
             written = 0;
             let payload_ok = header_ok
                 && WriteFile(
@@ -208,7 +214,8 @@ pub fn try_send(path: &str) -> bool {
                     (frame.len() - 4) as u32,
                     &mut written,
                     std::ptr::null_mut(),
-                ) != 0 && written as usize == frame.len() - 4;
+                ) != 0
+                && written as usize == frame.len() - 4;
             let _ = CloseHandle(handle);
             payload_ok
         }
@@ -303,7 +310,8 @@ pub fn listen(
                         &mut read,
                         std::ptr::null_mut(),
                     )
-                } != 0 && read == 4;
+                } != 0
+                    && read == 4;
                 if header_ok {
                     let length = u32::from_le_bytes(header) as usize;
                     if length <= MAX_PATH_BYTES {
@@ -326,7 +334,8 @@ pub fn listen(
                             total += chunk;
                         }
                         if total as usize == length
-                            && let Ok(path) = decode_frame(&[header.as_slice(), &payload[..]].concat())
+                            && let Ok(path) =
+                                decode_frame(&[header.as_slice(), &payload[..]].concat())
                         {
                             open(path);
                         }
@@ -396,15 +405,21 @@ impl FilesAvailability {
         let enabled = Arc::clone(&self.enabled);
         let cancel = Arc::clone(&self.cancel);
         let worker = std::thread::spawn(move || {
-            let mut previous_write = std::fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+            let mut previous_write = std::fs::metadata(&path)
+                .and_then(|meta| meta.modified())
+                .ok();
             while !cancel.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(super::POLL_MS));
-                let write = std::fs::metadata(&path).and_then(|meta| meta.modified()).ok();
+                let write = std::fs::metadata(&path)
+                    .and_then(|meta| meta.modified())
+                    .ok();
                 if write.is_some() && write == previous_write {
                     continue;
                 }
                 previous_write = write;
-                let Ok(raw) = std::fs::read_to_string(&path) else { continue };
+                let Ok(raw) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
                 if let Some(next) = enabled_from_json(&raw) {
                     let previous = enabled.swap(next, Ordering::SeqCst);
                     if enabled_changed(previous, next) {
@@ -440,7 +455,10 @@ pub fn close_all_windows() {
     {
         use windows_sys::Win32::Foundation::LPARAM;
         use windows_sys::Win32::UI::WindowsAndMessaging::{EnumWindows, PostMessageW, WM_CLOSE};
-        unsafe extern "system" fn each(hwnd: windows_sys::Win32::Foundation::HWND, _: LPARAM) -> i32 {
+        unsafe extern "system" fn each(
+            hwnd: windows_sys::Win32::Foundation::HWND,
+            _: LPARAM,
+        ) -> i32 {
             // SAFETY: `title` is a stack buffer used only inside this callback.
             unsafe {
                 let mut title = [0u16; 512];
@@ -532,17 +550,26 @@ mod tests {
     #[test]
     fn frames_round_trip_unicode_paths_and_empty_request() {
         let frame = encode_frame("C:\\Users\\agnes\\Belgeler\\résumé.txt").unwrap();
-        assert_eq!(decode_frame(&frame).unwrap().as_deref(), Some("C:\\Users\\agnes\\Belgeler\\résumé.txt"));
+        assert_eq!(
+            decode_frame(&frame).unwrap().as_deref(),
+            Some("C:\\Users\\agnes\\Belgeler\\résumé.txt")
+        );
         assert_eq!(decode_frame(&encode_frame("").unwrap()).unwrap(), None);
     }
 
     #[test]
     fn frames_reject_truncated_and_oversized_payloads() {
         assert_eq!(decode_frame(&[1, 0, 0]), Err(FrameError::TooShort));
-        assert_eq!(decode_frame(&[9, 0, 0, 0, b'a']), Err(FrameError::InvalidLength));
-        assert_eq!(decode_frame(&[0x01, 0x00, 0x04, 0x00]), Err(FrameError::TooLarge));
+        assert_eq!(
+            decode_frame(&[9, 0, 0, 0, b'a']),
+            Err(FrameError::InvalidLength)
+        );
+        assert_eq!(
+            decode_frame(&[0x01, 0x00, 0x04, 0x00]),
+            Err(FrameError::TooLarge)
+        );
         let mut huge = (MAX_PATH_BYTES as u32 + 1).to_le_bytes().to_vec();
-        huge.extend_from_slice(&[b'a']);
+        huge.extend_from_slice(b"a");
         assert_eq!(decode_frame(&huge), Err(FrameError::TooLarge));
         assert!(encode_frame(&"x".repeat(MAX_PATH_BYTES + 1)).is_none());
     }
@@ -551,26 +578,50 @@ mod tests {
     fn explorer_fallback_resolves_quoted_folders_and_this_pc() {
         let home = std::env::var("USERPROFILE").unwrap_or_default();
         let folder = format!("{home}\\Documents");
-        assert_eq!(resolve_fallback_location(Some(&format!("\"{folder}\""))).as_deref(), Some(folder.as_str()));
-        assert_eq!(resolve_fallback_location(Some("shell:MyComputerFolder")).as_deref(), Some(COMPUTER_LOCATION));
-        assert_eq!(resolve_fallback_location(Some("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}")).as_deref(), Some(COMPUTER_LOCATION));
+        assert_eq!(
+            resolve_fallback_location(Some(&format!("\"{folder}\""))).as_deref(),
+            Some(folder.as_str())
+        );
+        assert_eq!(
+            resolve_fallback_location(Some("shell:MyComputerFolder")).as_deref(),
+            Some(COMPUTER_LOCATION)
+        );
+        assert_eq!(
+            resolve_fallback_location(Some("::{20D04FE0-3AEA-1069-A2D8-08002B30309D}")).as_deref(),
+            Some(COMPUTER_LOCATION)
+        );
         assert_eq!(resolve_fallback_location(Some("   ")), None);
         assert_eq!(resolve_fallback_location(None), None);
     }
 
     #[test]
     fn explorer_argument_avoids_quotes_for_roots() {
-        assert_eq!(format_explorer_argument(COMPUTER_LOCATION), COMPUTER_LOCATION);
+        assert_eq!(
+            format_explorer_argument(COMPUTER_LOCATION),
+            COMPUTER_LOCATION
+        );
         assert_eq!(format_explorer_argument("C:\\"), "C:\\");
-        assert_eq!(format_explorer_argument("C:\\Users\\agnes\\"), "\"C:\\Users\\agnes\"");
+        assert_eq!(
+            format_explorer_argument("C:\\Users\\agnes\\"),
+            "\"C:\\Users\\agnes\""
+        );
     }
 
     #[test]
     fn settings_flag_is_read_from_legacy_and_canonical_keys() {
-        assert_eq!(enabled_from_json(r#"{"FjordFilesEnabled":true}"#), Some(true));
-        assert_eq!(enabled_from_json(r#"{"fjord_files_enabled":false}"#), Some(false));
+        assert_eq!(
+            enabled_from_json(r#"{"FjordFilesEnabled":true}"#),
+            Some(true)
+        );
+        assert_eq!(
+            enabled_from_json(r#"{"fjord_files_enabled":false}"#),
+            Some(false)
+        );
         // Canonical `FjordFilesEnabled` wins when both keys are saved.
-        assert_eq!(enabled_from_json(r#"{"ShowFjordFilesButton":true,"FjordFilesEnabled":false}"#), Some(false));
+        assert_eq!(
+            enabled_from_json(r#"{"ShowFjordFilesButton":true,"FjordFilesEnabled":false}"#),
+            Some(false)
+        );
         assert_eq!(enabled_from_json(r#"{"other":1}"#), None);
         assert!(enabled_changed(true, false));
         assert!(!enabled_changed(false, false));

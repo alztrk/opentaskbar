@@ -26,7 +26,7 @@ internal static class AiUsageChecks
             checks++;
         }
 
-        foreach (var command in new[] { "opencode", "agy" })
+        foreach (var command in new[] { "opencode" })
         {
             var startInfo = AiUsageService.HiddenCliStartInfo(command, "--test");
             Check(Path.GetFileNameWithoutExtension(startInfo.FileName).Equals(command, StringComparison.OrdinalIgnoreCase)
@@ -219,7 +219,6 @@ internal static class AiUsageChecks
         {
             Check(AiUsageService.ParseClaude(json, null).Error == "ErrorAiUsageLoad", "Invalid Claude responses must return a localization key.");
             Check(AiUsageService.ParseCodex(json).Error == "ErrorAiUsageLoad", "Invalid Codex responses must return a localization key.");
-            Check(AiUsageService.ParseAntigravity(json).Error == "ErrorAiUsageLoad", "Invalid Antigravity responses must return a localization key.");
             Check(AiUsageService.ParseOpenCode(json).Error == "ErrorAiUsageLoad", "Invalid OpenCode responses must return a localization key.");
             Check(AiUsageService.ParseCursor(json).Error == "ErrorAiUsageLoad", "Invalid Cursor responses must return a localization key.");
         }
@@ -407,47 +406,6 @@ internal static class AiUsageChecks
             && openCode.Windows.All(window => window.ResetsAt is not null),
             "OpenCode Go must parse 5-hour, weekly and monthly rolling quota windows and derive percentage from dollars when usagePercent is omitted.");
 
-        var agy = AiUsageService.ParseAntigravity("""
-            {"buckets":[
-                {"modelId":"chat_20706","remainingFraction":1},
-                {"modelId":"gemini-2.5-pro","remainingFraction":0.6,"resetTime":"2026-11-18T20:30:00Z"},
-                {"modelId":"gemini-4-hydrogen-sonar","remainingFraction":0.55,"resetTime":"2026-11-18T20:30:00Z"},
-                {"modelId":"gemini-3-flash","remainingFraction":0.8,"resetTime":"2026-11-18T20:30:00Z"},
-                {"modelId":"claude-sonnet-5-5-medium","remainingFraction":0.05,"resetTime":"2026-11-18T21:20:00Z"},
-                {"modelId":"gpt-oss-120b-medium","remainingFraction":0.05,"resetTime":"2026-11-18T21:20:00Z"}
-            ]}
-            """, "Google AI Pro").Report!;
-        Check(agy.Provider == AiProviders.Antigravity && agy.Plan == "Google AI Pro" && agy.Windows.Count == 3
-            && agy.Windows[0] is { LabelKey: "AiUsagePool:Gemini Pro" } && Math.Abs(agy.Windows[0].Used - 0.45) < 1e-6
-            && agy.Windows[1] is { LabelKey: "AiUsagePool:Gemini Flash" } && Math.Abs(agy.Windows[1].Used - 0.2) < 1e-6
-            && agy.Windows[2] is { LabelKey: "AiUsagePool:Claude" } && Math.Abs(agy.Windows[2].Used - 0.95) < 1e-6,
-            "Antigravity must group model buckets into Gemini Pro, Gemini Flash and Claude pools and deduplicate shared GPT-OSS quota.");
-        var agyExhausted = AiUsageService.ParseAntigravity("""
-            {"buckets":[{"modelId":"claude-opus-5-5-high","resetTime":"2026-11-18T21:20:00Z"}]}
-            """).Report!;
-        Check(agyExhausted.LimitReached && agyExhausted.Windows is [{ LabelKey: "AiUsagePool:Claude", Used: 1.0 }],
-            "Antigravity buckets that omit remainingFraction when resetTime is set must register as 100% used.");
-        var agyGrouped = AiUsageService.ParseAntigravity("""
-            {"command":{"name":"usage","data":{"groups":[
-                {"name":"Gemini Models","description":"Models within this group: Gemini 4 Hydrogen, Gemini 3.8 Flash",
-                 "buckets":[{"id":"gemini-weekly","window":"weekly","remaining_fraction":0.5878,"reset_time":"2026-11-24T23:28:59Z"},
-                            {"id":"gemini-5h","window":"5h","remaining_fraction":0.4554,"reset_time":"2026-11-18T20:26:15Z"}]},
-                {"name":"Claude and GPT models","description":"Models within this group: Claude Opus 5.5, Claude Sonnet 5.5, GPT-OSS 120B",
-                 "buckets":[{"id":"3p-weekly","window":"weekly","remaining_fraction":0.4907,"reset_time":"2026-11-25T16:21:48Z"},
-                            {"id":"3p-5h","window":"5h","remaining_fraction":0.0,"reset_time":"2026-11-18T21:21:48Z"}]},
-                {"name":"Gemini 4 Argon","description":"For paid Pro plans, Argon quota is separate.",
-                 "buckets":[{"id":"gemini-argon-wtu-weekly","window":"weekly","remaining_fraction":0.6967,"reset_time":"2026-11-25T16:56:21Z"}]}
-            ]}}}
-            """).Report!;
-        Check(!agyGrouped.LimitReached && agyGrouped.Windows.Count == 5
-            && agyGrouped.Windows[0] is { Group: "AiUsageGroupGemini", GroupModels: "Gemini 4 Hydrogen, Gemini 3.8 Flash", LabelKey: "AiUsageWeekly", WindowSeconds: 604800 }
-            && agyGrouped.Windows[1] is { Group: "AiUsageGroupGemini", LabelKey: "AiUsageSession", WindowSeconds: 18000 }
-            && agyGrouped.Windows[3] is { Group: "AiUsageGroupClaudeGpt", LabelKey: "AiUsageSession", Used: 1.0 }
-            && agyGrouped.Windows[4] is { Group: "Gemini 4 Argon", GroupModels: null, LabelKey: "AiUsageWeekly" }
-            && AiUsageWidget.RingWindow(agyGrouped, AiUsageRing.Session)!.Used == 1.0
-            && Math.Abs(AiUsageWidget.RingWindow(agyGrouped, AiUsageRing.Weekly)!.Used - (1 - 0.4907)) < 1e-6,
-            "Antigravity grouped usage must preserve weekly and 5-hour windows per model group.");
-
         var codexFreeMonthly = AiUsageService.ParseCodex("""
             {"plan_type":"free","rate_limit":{"allowed":true,"limit_reached":false,
              "primary_window":{"used_percent":45,"limit_window_seconds":2592000,"reset_after_seconds":864000},
@@ -489,10 +447,6 @@ internal static class AiUsageChecks
             }
             File.WriteAllText(path, """{"tokens":{"access_token":"fixture-codex","account_id":"fixture-account"}}""");
             Check(AiUsageService.ReadCodexToken(path) == "fixture-codex", "Codex must read its nested CLI token.");
-            File.WriteAllText(path, """{"token":{"access_token":"fixture-agy"}}""");
-            Check(AiUsageService.ReadAntigravityToken(path) == "fixture-agy", "Antigravity must read its nested keyring token.");
-            File.WriteAllText(path, """{"access_token":"fixture-agy-flat","expiry_date":1}""");
-            Check(AiUsageService.ReadAntigravityToken(path) is null, "Expired Antigravity oauth_creds must not be used.");
             File.WriteAllText(path, """{"opencode-go":{"type":"api","key":"fixture-oc-v1"}}""");
             Check(AiUsageService.ReadOpenCodeToken(path) == "fixture-oc-v1", "OpenCode must read v1 auth.json provider keys.");
             File.WriteAllText(path, """[{"integrationID":"ollama-cloud","active":true,"value":{"key":"other"}},{"integrationID":"opencode-go","active":true,"value":{"type":"key","key":"fixture-oc-v2"}}]""");
@@ -530,17 +484,13 @@ internal static class AiUsageChecks
             Check(store.Save(settings) is null && store.Load().Settings.AiUsageProviders == AiProviders.None,
                 "Legacy provider flags must be consumed by the per-provider widget migration.");
             File.WriteAllText(path, "{}");
-            Check(store.Load().Settings is { AiUsageProviders: AiProviders.None, AiUsageRing: AiUsageRing.Highest, AntigravityGroups: AntigravityGroups.All },
-                "Legacy settings must leave providers disabled, the ring on the highest window, and Antigravity groups on All.");
+            Check(store.Load().Settings is { AiUsageProviders: AiProviders.None, AiUsageRing: AiUsageRing.Highest },
+                "Legacy settings must leave providers disabled and the ring on the highest window.");
             Check(!DockSettingsStore.Validate(settings with { AiUsageRing = (AiUsageRing)7 }), "Unknown ring windows must be rejected.");
-            Check(!DockSettingsStore.Validate(settings with { AntigravityGroups = AntigravityGroups.None })
-                && !DockSettingsStore.Validate(settings with { AntigravityGroups = (AntigravityGroups)99 })
-                && DockSettingsStore.Validate(settings with { AntigravityGroups = AntigravityGroups.Gemini | AntigravityGroups.Argon }),
-                "AntigravityGroups must require at least one valid group flag and reject unknown bits.");
-            Check(store.Save(settings with { AiUsageRing = AiUsageRing.Weekly, AntigravityGroups = AntigravityGroups.Gemini | AntigravityGroups.Argon }) is null
-                && store.Load().Settings is { AiUsageRing: AiUsageRing.Weekly, AntigravityGroups: AntigravityGroups.Gemini | AntigravityGroups.Argon }
+            Check(store.Save(settings with { AiUsageRing = AiUsageRing.Weekly }) is null
+                && store.Load().Settings is { AiUsageRing: AiUsageRing.Weekly }
                 && File.ReadAllText(path).Contains("\"AiUsageRing\": \"Weekly\"", StringComparison.Ordinal),
-                "The ring window and Antigravity groups must round-trip through settings.");
+                "The ring window must round-trip through settings.");
             Check(SettingsBackup.Export(path, settings) is null, "AI preferences must support settings export.");
             using var backup = JsonDocument.Parse(File.ReadAllText(path));
             var exported = backup.RootElement.GetProperty("Settings");
@@ -570,7 +520,7 @@ internal static class AiUsageChecks
         Check(AiUsageWidget.RetryDelay(null, 0, null).TotalSeconds is >= 300 and <= 330, "Successful loads must refresh after five minutes plus jitter.");
 
         string[] keys = ["WidgetAiUsage", "WidgetAiUsageDescription", "AiUsageSettingsHeading", "AiUsageProviderHint",
-            "AiUsageUnofficialNote", "AiUsageSession", "AiUsageWeekly", "AiUsageSessionShort", "AiUsageWeeklyShort", "AiUsageMonthly", "AiUsageWeeklyModel", "AiUsageGroupGemini", "AiUsageGroupClaudeGpt", "AiUsageAntigravityGroupsLabel", "AiUsageResetsIn", "AiUsageResetsAt",
+            "AiUsageUnofficialNote", "AiUsageSession", "AiUsageWeekly", "AiUsageSessionShort", "AiUsageWeeklyShort", "AiUsageMonthly", "AiUsageWeeklyModel", "AiUsageResetsIn", "AiUsageResetsAt",
             "AiUsageUpdated", "AiUsageRefresh", "AiUsageOpenDashboard", "AiUsageNoProviders", "AiUsageRingLabel",
             "AiUsageRingHighest", "AiUsageRingSession", "AiUsageLimitReached", "AiUsageStatusOk", "AiUsageStatusSignIn",
             "AiUsageStatusStale", "AiUsageStatusNearLimit", "AiUsageStatusHigh", "AiUsageStatusUnavailable", "AiUsageStatusLoading", "AiUsagePaceIn", "AiUsagePaceAt", "AiUsagePaceMarker", "HoursMinutesFormat",
@@ -652,7 +602,7 @@ internal static class AiUsageChecks
                 AiUsageService.CredentialsChanged -= OnChanged;
             }
 
-            foreach (var cliProvider in new[] { AiProviders.Claude, AiProviders.Codex, AiProviders.Copilot, AiProviders.OpenCode, AiProviders.Antigravity })
+            foreach (var cliProvider in new[] { AiProviders.Claude, AiProviders.Codex, AiProviders.Copilot, AiProviders.OpenCode })
             {
                 var signInInfo = AiUsageService.BuildSignInStartInfo(cliProvider);
                 Check(signInInfo is not null && !signInInfo.CreateNoWindow && signInInfo.WindowStyle != ProcessWindowStyle.Hidden,
@@ -980,152 +930,11 @@ internal static class AiUsageChecks
             checks += 9;
         }
 
-        // Antigravity widget checks: dynamic columns with vertical dividers, headers on top, no empty quotas, no name, no ring, no flyout menu
-        using var agyWidget = new AiUsageWidget(AiProviders.Antigravity, (provider, _) =>
-        {
-            var agyReport = new AiUsageReport(provider, "Google AI Pro",
-            [
-                new("AiUsageSession", 0.40, DateTimeOffset.UtcNow.AddHours(3), 18000L, Group: "AiUsageGroupGemini"),
-                new("AiUsageWeekly", 0.60, DateTimeOffset.UtcNow.AddDays(5), 604800L, Group: "AiUsageGroupGemini"),
-                // Claude group only has weekly quota, no 5h session data
-                new("AiUsageWeekly", 0.30, DateTimeOffset.UtcNow.AddDays(4), 604800L, Group: "AiUsageGroupClaudeGpt")
-            ], DateTimeOffset.UtcNow);
-            return Task.FromResult<(AiUsageReport?, string?)>((agyReport, null));
-        });
-        agyWidget.Activate();
-        if (agyWidget.BuildHoverFlyoutContent() is null)
-            throw new InvalidOperationException("Antigravity must use the shared hover flyout.");
-
-        var agyCardField = typeof(AiUsageWidget).GetField("_card", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
-        var agyCardObj = agyCardField.GetValue(agyWidget)!;
-        var agyRingProp = agyCardObj.GetType().GetProperty("Ring")!;
-        if (agyRingProp.GetValue(agyCardObj) is not null)
-            throw new InvalidOperationException("Antigravity must not use a RingMeter.");
-
-        var agyProp = agyCardObj.GetType().GetProperty("Antigravity")!;
-        var agyCard = agyProp.GetValue(agyCardObj);
-        if (agyCard is null)
-            throw new InvalidOperationException("Antigravity must have AntigravityCard container.");
-
-        var agyNameProp = agyCardObj.GetType().GetProperty("Name")!;
-        var agyNameBlock = (TextBlock)agyNameProp.GetValue(agyCardObj)!;
-        if (agyNameBlock.Visibility != System.Windows.Visibility.Collapsed)
-            throw new InvalidOperationException("Antigravity card must hide its provider name text.");
-
-        var containerProp = agyCard.GetType().GetProperty("Container")!;
-        var container = (StackPanel)containerProp.GetValue(agyCard)!;
-        // 2 groups (Gemini, Claude) separated by 1 divider = 3 children in container
-        if (container.Children.Count != 3)
-            throw new InvalidOperationException($"Antigravity container must have 3 children (2 columns + 1 divider), got {container.Children.Count}");
-
-        var columnsProp = agyCard.GetType().GetProperty("Columns")!;
-        var columnsList = (System.Collections.IList)columnsProp.GetValue(agyCard)!;
-        if (columnsList.Count != 2)
-            throw new InvalidOperationException($"Antigravity must have 2 columns, got {columnsList.Count}");
-
-        // Column 1 (Gemini) has 2 slots (5h + weekly) and header "Gemini" on top
-        var col1 = columnsList[0]!;
-        var col1SlotsProp = col1.GetType().GetProperty("Slots")!;
-        var col1Slots = (System.Collections.IList)col1SlotsProp.GetValue(col1)!;
-        if (col1Slots.Count != 2)
-            throw new InvalidOperationException($"Gemini column must have 2 quota slots, got {col1Slots.Count}");
-        var col1ElemProp = col1.GetType().GetProperty("Element")!;
-        var col1Panel = (StackPanel)col1ElemProp.GetValue(col1)!;
-        if (col1Panel.Orientation != Orientation.Vertical || ((TextBlock)col1Panel.Children[0]).Text != "Gemini")
-            throw new InvalidOperationException("Gemini column must be vertical StackPanel with 'Gemini' header on top.");
-        if (col1Panel.VerticalAlignment != System.Windows.VerticalAlignment.Center || container.VerticalAlignment != System.Windows.VerticalAlignment.Center)
-            throw new InvalidOperationException("Antigravity column and container must be vertically centered.");
-        var agyButton = (Button)agyCardObj.GetType().GetProperty("Button")!.GetValue(agyCardObj)!;
-        var agyRow = (StackPanel)agyButton.Content;
-        if (agyRow.VerticalAlignment != System.Windows.VerticalAlignment.Center)
-            throw new InvalidOperationException("Antigravity card row must be vertically centered.");
-        col1Panel.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
-        if (col1Panel.DesiredSize.Height <= 0 || col1Panel.DesiredSize.Height > 33)
-            throw new InvalidOperationException($"Antigravity Full Gemini column (header + 5s + 7g) must measure <= 33 DIP to avoid vertical clipping in 34 DIP cards, got {col1Panel.DesiredSize.Height:F2}.");
-        agyRow.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
-        if (agyRow.DesiredSize.Height <= 0 || agyRow.DesiredSize.Height > 33)
-            throw new InvalidOperationException($"Antigravity Full card row must measure <= 33 DIP, got {agyRow.DesiredSize.Height:F2}.");
-
-        // Column 2 (Claude) has only 1 slot (weekly only, no missing 5h slot) and header "Claude" on top
-        var col2 = columnsList[1]!;
-        var col2SlotsProp = col2.GetType().GetProperty("Slots")!;
-        var col2Slots = (System.Collections.IList)col2SlotsProp.GetValue(col2)!;
-        if (col2Slots.Count != 1)
-            throw new InvalidOperationException($"Claude column must only have 1 quota slot when 5h data is missing, got {col2Slots.Count}");
-        var col2ElemProp = col2.GetType().GetProperty("Element")!;
-        var col2Panel = (StackPanel)col2ElemProp.GetValue(col2)!;
-        if (col2Panel.Orientation != Orientation.Vertical || ((TextBlock)col2Panel.Children[0]).Text != "Claude")
-            throw new InvalidOperationException("Claude column must be vertical StackPanel with 'Claude' header on top.");
-
-        // Placeholder Antigravity widget (no report yet) must also measure <= 33 DIP for 2-row Gemini column
-        using (var agyPlaceholderWidget = new AiUsageWidget(AiProviders.Antigravity, loaders[0]))
-        {
-            var phCardObj = agyCardField.GetValue(agyPlaceholderWidget)!;
-            var phCard = agyProp.GetValue(phCardObj)!;
-            var phCols = (System.Collections.IList)columnsProp.GetValue(phCard)!;
-            var phGeminiCol = (StackPanel)col1ElemProp.GetValue(phCols[0]!)!;
-            phGeminiCol.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
-            if (phGeminiCol.DesiredSize.Height <= 0 || phGeminiCol.DesiredSize.Height > 33)
-                throw new InvalidOperationException($"Antigravity Full Gemini placeholder column must measure <= 33 DIP, got {phGeminiCol.DesiredSize.Height:F2}.");
-        }
-
-        // Full Antigravity group with 3 windows must cap card rows at 2 (keeping full list in flyout) and measure <= 33 DIP
-        using (var agyThreeWinWidget = new AiUsageWidget(AiProviders.Antigravity, (provider, _) =>
-        {
-            var threeWinReport = new AiUsageReport(provider, "Google AI Pro",
-            [
-                new("AiUsageSession", 0.40, DateTimeOffset.UtcNow.AddHours(2), 18000L, Group: "AiUsageGroupGemini"),
-                new("AiUsageWeekly", 0.65, DateTimeOffset.UtcNow.AddDays(5), 604800L, Group: "AiUsageGroupGemini"),
-                new("AiUsageMonthly", 0.20, DateTimeOffset.UtcNow.AddDays(20), 2592000L, Group: "AiUsageGroupGemini")
-            ], DateTimeOffset.UtcNow);
-            return Task.FromResult<(AiUsageReport?, string?)>((threeWinReport, null));
-        }))
-        {
-            agyThreeWinWidget.Activate();
-            var twCardObj = agyCardField.GetValue(agyThreeWinWidget)!;
-            var twCard = agyProp.GetValue(twCardObj)!;
-            var twCols = (System.Collections.IList)columnsProp.GetValue(twCard)!;
-            var twSlots = (System.Collections.IList)col1SlotsProp.GetValue(twCols[0]!)!;
-            if (twSlots.Count != 2)
-                throw new InvalidOperationException($"Antigravity Full group column must cap displayed card rows at 2 when 3+ windows are present, got {twSlots.Count}.");
-            var twColPanel = (StackPanel)col1ElemProp.GetValue(twCols[0]!)!;
-            twColPanel.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
-            if (twColPanel.DesiredSize.Height <= 0 || twColPanel.DesiredSize.Height > 33)
-                throw new InvalidOperationException($"Antigravity Full 3-window group column must measure <= 33 DIP, got {twColPanel.DesiredSize.Height:F2}.");
-            if (agyThreeWinWidget.BuildHoverFlyoutContent() is null)
-                throw new InvalidOperationException("Antigravity 3-window hover flyout must still build with all windows.");
-        }
-
-        // Now test 3 pools format
-        using var agyPoolWidget = new AiUsageWidget(AiProviders.Antigravity, (provider, _) =>
-        {
-            var agyPoolReport = new AiUsageReport(provider, "Google AI Pro",
-            [
-                new("AiUsagePool:Gemini Pro", 0.45, DateTimeOffset.UtcNow.AddHours(2), 18000L),
-                new("AiUsagePool:Gemini Flash", 0.20, DateTimeOffset.UtcNow.AddHours(3), 18000L),
-                new("AiUsagePool:Claude", 0.95, DateTimeOffset.UtcNow.AddMinutes(45), 18000L)
-            ], DateTimeOffset.UtcNow);
-            return Task.FromResult<(AiUsageReport?, string?)>((agyPoolReport, null));
-        });
-        agyPoolWidget.Activate();
-        var agyPoolCardObj = agyCardField.GetValue(agyPoolWidget)!;
-        var agyPoolCard = agyProp.GetValue(agyPoolCardObj)!;
-        var poolContainer = (StackPanel)containerProp.GetValue(agyPoolCard)!;
-        // 3 pools separated by 2 dividers = 5 children
-        if (poolContainer.Children.Count != 5)
-            throw new InvalidOperationException($"Antigravity pool container must have 5 children (3 columns + 2 dividers), got {poolContainer.Children.Count}");
-        var poolColumnsList = (System.Collections.IList)columnsProp.GetValue(agyPoolCard)!;
-        var poolCol0 = (StackPanel)col1ElemProp.GetValue(poolColumnsList[0]!)!;
-        poolCol0.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
-        if (poolCol0.DesiredSize.Height <= 0 || poolCol0.DesiredSize.Height > 33)
-            throw new InvalidOperationException($"Antigravity Pool column must measure <= 33 DIP to avoid vertical clipping, got {poolCol0.DesiredSize.Height:F2}.");
-
-        checks += 16;
+        var sharedCardField = typeof(AiUsageWidget).GetField("_card", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!;
 
         // Width estimate checks: CompactWidthEstimate must be strictly smaller than FullWidthEstimate for every AI provider
         foreach (var provider in new[]
         {
-            AiProviders.Claude, AiProviders.Codex, AiProviders.Antigravity,
             AiProviders.OpenCode, AiProviders.Copilot, AiProviders.DeepSeek, AiProviders.OpenRouter
         })
         {
@@ -1149,7 +958,7 @@ internal static class AiUsageChecks
             claudeWidget.Activate();
             UiText.Current.SetLanguage(AppLanguage.English);
 
-            var cardObj = agyCardField.GetValue(claudeWidget)!;
+            var cardObj = sharedCardField.GetValue(claudeWidget)!;
             var bars = cardObj.GetType().GetProperty("Codex")!.GetValue(cardObj)!;
             var sessionRow = (StackPanel)bars.GetType().GetProperty("SessionRow")!.GetValue(bars)!;
             var weeklyRow = (StackPanel)bars.GetType().GetProperty("WeeklyRow")!.GetValue(bars)!;
@@ -1189,64 +998,6 @@ internal static class AiUsageChecks
             checks += 5;
         }
 
-        // Antigravity groups filtering, placeholder fallback, AiUsageRing, and Compact mode checks
-        {
-            using var agyFilterWidget = new AiUsageWidget(AiProviders.Antigravity, (provider, _) =>
-            {
-                var report = new AiUsageReport(provider, "Google AI Pro",
-                [
-                    new("AiUsageSession", 0.25, DateTimeOffset.UtcNow.AddHours(3), 18000L, Group: "AiUsageGroupGemini"),
-                    new("AiUsageWeekly", 0.55, DateTimeOffset.UtcNow.AddDays(5), 604800L, Group: "AiUsageGroupGemini"),
-                    new("AiUsageSession", 0.80, DateTimeOffset.UtcNow.AddHours(1), 18000L, Group: "AiUsageGroupClaudeGpt"),
-                    new("AiUsageWeekly", 0.40, DateTimeOffset.UtcNow.AddDays(4), 604800L, Group: "AiUsageGroupClaudeGpt")
-                ], DateTimeOffset.UtcNow);
-                return Task.FromResult<(AiUsageReport?, string?)>((report, null));
-            });
-            agyFilterWidget.Activate();
-            UiText.Current.SetLanguage(AppLanguage.English);
-
-            var cardObj = agyCardField.GetValue(agyFilterWidget)!;
-            var card = agyProp.GetValue(cardObj)!;
-            var cols = (System.Collections.IList)columnsProp.GetValue(card)!;
-
-            // Filter to Gemini only => 1 column
-            agyFilterWidget.ApplySettings(new DockSettings(Language: AppLanguage.English, AntigravityGroups: AntigravityGroups.Gemini));
-            if (cols.Count != 1)
-                throw new InvalidOperationException($"Antigravity filtered to Gemini must have 1 column, got {cols.Count}.");
-
-            // Filter to Argon only (when report has no Argon windows) => must build Argon placeholder column instead of empty card
-            agyFilterWidget.ApplySettings(new DockSettings(Language: AppLanguage.English, AntigravityGroups: AntigravityGroups.Argon));
-            if (cols.Count != 1)
-                throw new InvalidOperationException($"Antigravity filtered to missing Argon group must show 1 Argon placeholder column, got {cols.Count}.");
-            var argonColPanel = (StackPanel)col1ElemProp.GetValue(cols[0]!)!;
-            if (((TextBlock)argonColPanel.Children[0]).Text != "Argon")
-                throw new InvalidOperationException("Antigravity missing Argon fallback must show 'Argon' header.");
-            argonColPanel.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
-            if (argonColPanel.DesiredSize.Height <= 0 || argonColPanel.DesiredSize.Height > 33)
-                throw new InvalidOperationException($"Antigravity Placeholder column must measure <= 33 DIP, got {argonColPanel.DesiredSize.Height:F2}.");
-
-            // Compact + All => 2 matched columns, each with 1 slot, 22px bar width, and concise percentage text preserved across Tick
-            agyFilterWidget.ApplySettings(new DockSettings(Language: AppLanguage.English, AntigravityGroups: AntigravityGroups.All, AiUsageRing: AiUsageRing.Highest));
-            agyFilterWidget.SetCompactState(true);
-            if (cols.Count != 2)
-                throw new InvalidOperationException($"Antigravity Compact+All with Gemini & Claude data must have 2 columns, got {cols.Count}.");
-            var compactCol0 = (StackPanel)col1ElemProp.GetValue(cols[0]!)!;
-            compactCol0.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
-            if (compactCol0.DesiredSize.Height <= 0 || compactCol0.DesiredSize.Height > 33)
-                throw new InvalidOperationException($"Antigravity Compact column must measure <= 33 DIP, got {compactCol0.DesiredSize.Height:F2}.");
-            var compactSlots0 = (System.Collections.IList)col1SlotsProp.GetValue(cols[0]!)!;
-            var compactSlots1 = (System.Collections.IList)col1SlotsProp.GetValue(cols[1]!)!;
-            if (compactSlots0.Count != 1 || compactSlots1.Count != 1)
-                throw new InvalidOperationException("Antigravity Compact mode must render exactly 1 row per enabled group.");
-            var slot0Reset = (TextBlock)compactSlots0[0]!.GetType().GetProperty("Reset")!.GetValue(compactSlots0[0]!)!;
-            if (slot0Reset.Text != "55%")
-                throw new InvalidOperationException($"Antigravity Compact+Highest Gemini slot must show '55%', got '{slot0Reset.Text}'.");
-            agyFilterWidget.Tick(DateTime.Now.AddMinutes(4));
-            if (slot0Reset.Text != "55%")
-                throw new InvalidOperationException($"Antigravity Compact percentage text must survive OnTick, got '{slot0Reset.Text}'.");
-            checks += 7;
-        }
-
         // OpenCode and Copilot/DeepSeek compact mode checks
         {
             using var ocWidget = new AiUsageWidget(AiProviders.OpenCode, (provider, _) =>
@@ -1260,7 +1011,7 @@ internal static class AiUsageChecks
                 return Task.FromResult<(AiUsageReport?, string?)>((report, null));
             });
             ocWidget.Activate();
-            var ocCardObj = agyCardField.GetValue(ocWidget)!;
+            var ocCardObj = sharedCardField.GetValue(ocWidget)!;
             var ocBars = ocCardObj.GetType().GetProperty("OpenCode")!.GetValue(ocCardObj)!;
             var hourCol = (StackPanel)ocBars.GetType().GetProperty("HourCol")!.GetValue(ocBars)!;
             var weekCol = (StackPanel)ocBars.GetType().GetProperty("WeekCol")!.GetValue(ocBars)!;
@@ -1289,7 +1040,7 @@ internal static class AiUsageChecks
                 return Task.FromResult<(AiUsageReport?, string?)>((report, null));
             });
             copilotWidget.Activate();
-            var cpCardObj = agyCardField.GetValue(copilotWidget)!;
+            var cpCardObj = sharedCardField.GetValue(copilotWidget)!;
             var cpName = (TextBlock)cpCardObj.GetType().GetProperty("Name")!.GetValue(cpCardObj)!;
             var cpSimple = cpCardObj.GetType().GetProperty("Simple")!.GetValue(cpCardObj)!;
             var cpSep = (Border)cpSimple.GetType().GetProperty("Separator")!.GetValue(cpSimple)!;

@@ -9,10 +9,10 @@
 //! `native_flyout_reposition` flag (default **false**) because an incorrect
 //! reposition loop can disturb Explorer; recovery reading always stays active.
 
+use crate::flyout_journal;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use crate::flyout_journal;
 use std::sync::atomic::{AtomicI8, AtomicU64, Ordering};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
@@ -460,9 +460,11 @@ mod tests {
     fn both_flyout_writers_use_the_same_temporary_file_name() {
         let journal = journal_path();
         assert_eq!(temp_path(&journal), flyout_journal::tmp_path(&journal));
-        assert!(temp_path(&journal)
-            .file_name()
-            .is_some_and(|name| name.to_string_lossy() == "flyout-positions.txt.tmp"));
+        assert!(
+            temp_path(&journal)
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy() == "flyout-positions.txt.tmp")
+        );
     }
 
     #[test]

@@ -15,8 +15,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use gpui::{
-    App, Application, Bounds, Context, Entity, Render, SharedString, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowKind, WindowOptions, div, point, prelude::*, px, rgba, size,
+    App, Application, Bounds, Context, Entity, Render, SharedString, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, div, point, prelude::*,
+    px, rgba, size,
 };
 use opentaskbar_core::i18n as loc;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -36,11 +37,12 @@ pub fn run_bar_host(files_enabled: bool, settings_path: PathBuf) {
     let Some(_instance) = bar::SingleInstance::acquire() else {
         return;
     };
-    let availability = activation::FilesAvailability::new(settings_path, files_enabled).start(|enabled| {
-        if !enabled {
-            activation::close_all_windows();
-        }
-    });
+    let availability =
+        activation::FilesAvailability::new(settings_path, files_enabled).start(|enabled| {
+            if !enabled {
+                activation::close_all_windows();
+            }
+        });
     let cancel = Arc::new(AtomicBool::new(false));
     let clock_cancel = Arc::clone(&cancel);
 
@@ -56,7 +58,7 @@ pub fn run_bar_host(files_enabled: bool, settings_path: PathBuf) {
                         .await;
                 }
             });
-            let _ = clock;
+            drop(clock);
 
             let monitors = bar::poll_monitors(&cancel);
             for monitor in monitors {
@@ -79,7 +81,13 @@ pub fn run_bar_host(files_enabled: bool, settings_path: PathBuf) {
                         match event {
                             bar::BarEvent::Open { key } => {
                                 if let Some(monitor) = monitors.iter().find(|m| m.key == key) {
-                                    let _ = app.update(|app| open_bar_window(monitor.clone(), poll_availability.enabled(), app));
+                                    let _ = app.update(|app| {
+                                        open_bar_window(
+                                            monitor.clone(),
+                                            poll_availability.enabled(),
+                                            app,
+                                        )
+                                    });
                                 }
                             }
                             bar::BarEvent::Close { key } => {
@@ -144,8 +152,10 @@ fn open_bar_window(monitor: bar::MonitorSnapshot, files_enabled: bool, cx: &mut 
                 },
                 Err(_) => 0,
             };
-            let _ = view.update(cx, |view, cx| view.attach(hwnd, cx));
-            with_registry(|bars| { bars.insert(monitor.key, view.clone()); });
+            view.update(cx, |view, cx| view.attach(hwnd, cx));
+            with_registry(|bars| {
+                bars.insert(monitor.key, view.clone());
+            });
             view
         },
     );
@@ -154,21 +164,21 @@ fn open_bar_window(monitor: bar::MonitorSnapshot, files_enabled: bool, cx: &mut 
 fn close_bar_window(key: usize, cx: &mut App) {
     let view = with_registry(|bars| bars.remove(&key));
     if let Some(view) = view {
-        let _ = view.update(cx, |view, cx| view.shutdown(cx));
+        view.update(cx, |view, cx| view.shutdown(cx));
     }
 }
 
 fn set_hidden(key: usize, hidden: bool, cx: &mut App) {
     let view = with_registry(|bars| bars.get(&key).cloned());
     if let Some(view) = view {
-        let _ = view.update(cx, |view, cx| view.set_hidden(hidden, cx));
+        view.update(cx, |view, cx| view.set_hidden(hidden, cx));
     }
 }
 
 fn set_bounds(key: usize, bounds: bar::Rect, cx: &mut App) {
     let view = with_registry(|bars| bars.get(&key).cloned());
     if let Some(view) = view {
-        let _ = view.update(cx, |view, cx| view.set_bounds(bounds, cx));
+        view.update(cx, |view, cx| view.set_bounds(bounds, cx));
     }
 }
 
@@ -265,7 +275,11 @@ impl FjordBarView {
     fn show_menu(&mut self, cx: &mut Context<Self>) {
         let mut entries = Vec::new();
         if self.files_enabled {
-            entries.push(MenuEntry::item(MENU_FILES, MenuIcon::Folder, loc::t("FjordFilesOpen")));
+            entries.push(MenuEntry::item(
+                MENU_FILES,
+                MenuIcon::Folder,
+                loc::t("FjordFilesOpen"),
+            ));
         }
         entries.push(MenuEntry::destructive(
             MENU_CLOSE_BAR,
@@ -302,24 +316,26 @@ impl FjordBarView {
             return;
         }
         self.wifi_busy = true;
-        self.wifi.status = Some(if rescan { "WifiScan" } else { "WifiScan" });
+        self.wifi.status = Some("WifiScan");
         cx.notify();
         let task = cx.background_spawn(async move {
             let _ = rescan; // WS-4 owns the actual scan trigger.
             wifi_ui::scan_networks()
         });
-        let _ = cx.spawn(async move |this, cx| {
+        drop(cx.spawn(async move |this, cx| {
             let networks = task.await;
             let _ = this.update(cx, |view, cx| {
                 view.wifi_busy = false;
                 view.wifi.apply_scan(networks);
                 cx.notify();
             });
-        });
+        }));
     }
 
     fn connect_wifi(&mut self, cx: &mut Context<Self>) {
-        let Some(network) = self.wifi.selected_network().cloned() else { return };
+        let Some(network) = self.wifi.selected_network().cloned() else {
+            return;
+        };
         let password = self.wifi.password.clone();
         self.wifi_busy = true;
         self.wifi.status = Some("WifiConnect");
@@ -334,7 +350,7 @@ impl FjordBarView {
                 wifi_ui::ConnectionOutcome::Failed
             }
         });
-        let _ = cx.spawn(async move |this, cx| {
+        drop(cx.spawn(async move |this, cx| {
             let outcome = task.await;
             let _ = this.update(cx, |view, cx| {
                 view.wifi_busy = false;
@@ -343,10 +359,15 @@ impl FjordBarView {
                 cx.notify();
                 view.scan_wifi(false, cx);
             });
-        });
+        }));
     }
 
-    fn wifi_row(&self, index: usize, network: &wifi_ui::NetworkView, cx: &mut Context<Self>) -> impl IntoElement {
+    fn wifi_row(
+        &self,
+        index: usize,
+        network: &wifi_ui::NetworkView,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let t = self.theme;
         let detail = if network.connected {
             loc::t("Connected")
@@ -364,7 +385,11 @@ impl FjordBarView {
             .px(px(8.0))
             .py(px(5.0))
             .rounded(px(6.0))
-            .bg(rgba(if self.wifi.selected == Some(index) { t.accent_soft } else { 0 }))
+            .bg(rgba(if self.wifi.selected == Some(index) {
+                t.accent_soft
+            } else {
+                0
+            }))
             .text_color(rgba(t.text_primary))
             .hover(|style| style.bg(rgba(t.surface_hover)))
             .on_click(cx.listener(move |this: &mut Self, _, _, cx| {
@@ -377,11 +402,26 @@ impl FjordBarView {
                     .flex_col()
                     .min_w_0()
                     .child(network.name.clone())
-                    .child(div().text_size(px(10.5)).text_color(rgba(t.text_secondary)).child(detail)),
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(rgba(t.text_secondary))
+                            .child(detail),
+                    ),
             )
-            .child(div().flex().items_center().gap(px(6.0))
-                .child(icon_glyph(signal.glyph(), 13.0, t.accent))
-                .child(div().text_size(px(10.5)).text_color(rgba(t.text_secondary)).child(signal.percent_text())))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(icon_glyph(signal.glyph(), 13.0, t.accent))
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(rgba(t.text_secondary))
+                            .child(signal.percent_text()),
+                    ),
+            )
     }
 
     fn wifi_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -402,39 +442,90 @@ impl FjordBarView {
             .flex_col()
             .gap(px(6.0))
             .child(
-                div().flex().items_center().justify_between()
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .child(div().text_size(px(13.0)).child(loc::t("WifiNetworks")))
-                    .child(button("fjord-wifi-scan", &t, loc::t("WifiScan"), ButtonVariant::Secondary,
-                        cx.listener(|this, _, _, cx| this.scan_wifi(true, cx)))),
+                    .child(button(
+                        "fjord-wifi-scan",
+                        &t,
+                        loc::t("WifiScan"),
+                        ButtonVariant::Secondary,
+                        cx.listener(|this, _, _, cx| this.scan_wifi(true, cx)),
+                    )),
             )
             .when_some(status, |panel, status| {
-                panel.child(div().text_size(px(11.0)).text_color(rgba(t.text_secondary)).child(status))
+                panel.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgba(t.text_secondary))
+                        .child(status),
+                )
             })
             .child(
-                div().id("fjord-wifi-list").flex().flex_col().overflow_y_scroll().max_h(px(230.0))
-                    .children(self.wifi.networks.iter().enumerate().map(|(index, network)| {
-                        self.wifi_row(index, network, cx).into_any_element()
-                    })),
+                div()
+                    .id("fjord-wifi-list")
+                    .flex()
+                    .flex_col()
+                    .overflow_y_scroll()
+                    .max_h(px(230.0))
+                    .children(
+                        self.wifi
+                            .networks
+                            .iter()
+                            .enumerate()
+                            .map(|(index, network)| {
+                                self.wifi_row(index, network, cx).into_any_element()
+                            }),
+                    ),
             )
             .when(self.wifi.password_required(), |panel| {
-                panel.child(div().text_size(px(11.0)).text_color(rgba(t.text_secondary)).child(loc::t("WifiPassword")))
-                    .child(div().id("fjord-wifi-password").track_focus(&self.wifi_password_focus)
-                        .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                            let mut buffer = this.wifi.password.clone();
-                            if crate::ui::text_input::apply_keystroke(&mut buffer,
-                                &event.keystroke.key, event.keystroke.key_char.as_deref(), false) {
-                                this.wifi.password = buffer;
-                                cx.notify();
-                            }
-                        }))
-                        .px(px(8.0)).py(px(5.0)).rounded(px(6.0))
-                        .bg(rgba(t.surface_muted)).border_1().border_color(rgba(t.border))
-                        .child(password.clone()))
+                panel
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .text_color(rgba(t.text_secondary))
+                            .child(loc::t("WifiPassword")),
+                    )
+                    .child(
+                        div()
+                            .id("fjord-wifi-password")
+                            .track_focus(&self.wifi_password_focus)
+                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                                let mut buffer = this.wifi.password.clone();
+                                if crate::ui::text_input::apply_keystroke(
+                                    &mut buffer,
+                                    &event.keystroke.key,
+                                    event.keystroke.key_char.as_deref(),
+                                    false,
+                                ) {
+                                    this.wifi.password = buffer;
+                                    cx.notify();
+                                }
+                            }))
+                            .px(px(8.0))
+                            .py(px(5.0))
+                            .rounded(px(6.0))
+                            .bg(rgba(t.surface_muted))
+                            .border_1()
+                            .border_color(rgba(t.border))
+                            .child(password.clone()),
+                    )
             })
-            .child(div()
-                .when(!self.wifi.can_connect() || self.wifi_busy, |b| b.opacity(0.5))
-                .child(button("fjord-wifi-connect", &t, loc::t(self.wifi.action_key()), ButtonVariant::Primary,
-                    cx.listener(|this, _, _, cx| this.connect_wifi(cx)))))
+            .child(
+                div()
+                    .when(!self.wifi.can_connect() || self.wifi_busy, |b| {
+                        b.opacity(0.5)
+                    })
+                    .child(button(
+                        "fjord-wifi-connect",
+                        &t,
+                        loc::t(self.wifi.action_key()),
+                        ButtonVariant::Primary,
+                        cx.listener(|this, _, _, cx| this.connect_wifi(cx)),
+                    )),
+            )
     }
 }
 
@@ -455,18 +546,42 @@ impl Render for FjordBarView {
             .text_color(rgba(t.text_primary))
             .font_family("Segoe UI Variable Text, Segoe UI")
             .child(
-                div().flex().items_center().gap(px(6.0))
-                    .child(button("fjord-bar-menu", &t, "◆", ButtonVariant::Secondary,
-                        cx.listener(|this, _, _, cx| this.show_menu(cx))))
-                    .child(div().text_size(px(11.5)).text_color(rgba(t.text_secondary))
-                        .child(self.monitor.display_label())),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(button(
+                        "fjord-bar-menu",
+                        &t,
+                        "◆",
+                        ButtonVariant::Secondary,
+                        cx.listener(|this, _, _, cx| this.show_menu(cx)),
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(rgba(t.text_secondary))
+                            .child(self.monitor.display_label()),
+                    ),
             )
             .child(
-                div().flex().items_center().gap(px(6.0))
-                    .child(button("fjord-bar-wifi", &t, loc::t("WifiNetworks"), ButtonVariant::Secondary,
-                        cx.listener(|this, _, _, cx| this.toggle_wifi(cx))))
-                    .child(div().text_size(px(12.5)).font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(self.clock.clone())),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(button(
+                        "fjord-bar-wifi",
+                        &t,
+                        loc::t("WifiNetworks"),
+                        ButtonVariant::Secondary,
+                        cx.listener(|this, _, _, cx| this.toggle_wifi(cx)),
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(self.clock.clone()),
+                    ),
             );
         if self.wifi_open {
             root = root.child(self.wifi_panel(cx));

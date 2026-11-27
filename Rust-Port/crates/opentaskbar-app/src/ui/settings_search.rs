@@ -750,7 +750,11 @@ mod tests {
             );
         }
         let needle = concat!("antig", "ravity");
-        assert!(!include_str!("settings_search.rs").to_ascii_lowercase().contains(needle));
+        assert!(
+            !include_str!("settings_search.rs")
+                .to_ascii_lowercase()
+                .contains(needle)
+        );
     }
 }
 
@@ -1157,7 +1161,11 @@ pub const SETTINGS_ROWS: &[RowDef] = &[
         "System",
         "Window Picker",
         "WindowPickerEnabled",
-        &["WindowPickerTitle", "WindowPickerPrevious", "WindowPickerNext"],
+        &[
+            "WindowPickerTitle",
+            "WindowPickerPrevious",
+            "WindowPickerNext",
+        ],
     ),
     (
         "Preferences",

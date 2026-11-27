@@ -48,7 +48,7 @@ public static class AiUsageService
         provider is AiProviders.DeepSeek or AiProviders.OpenRouter or AiProviders.OpenCode;
 
     public static bool IsCliSignInProvider(AiProviders provider) =>
-        provider is AiProviders.Claude or AiProviders.Codex or AiProviders.Copilot or AiProviders.OpenCode or AiProviders.Antigravity;
+        provider is AiProviders.Claude or AiProviders.Codex or AiProviders.Copilot or AiProviders.OpenCode;
 
     internal static string SecretKey(AiProviders provider) => provider switch
     {
@@ -92,7 +92,6 @@ public static class AiUsageService
         AiProviders.Codex => "codex login",
         AiProviders.Copilot => "gh auth login",
         AiProviders.OpenCode => "opencode auth login",
-        AiProviders.Antigravity => "agy",
         _ => null
     };
 
@@ -102,7 +101,6 @@ public static class AiUsageService
         AiProviders.Codex => "codex",
         AiProviders.Copilot => "gh",
         AiProviders.OpenCode => "opencode",
-        AiProviders.Antigravity => "agy",
         _ => null
     };
 
@@ -112,7 +110,6 @@ public static class AiUsageService
         AiProviders.Codex => ["codex", "login"],
         AiProviders.Copilot => ["gh", "auth", "login"],
         AiProviders.OpenCode => ["opencode", "auth", "login"],
-        AiProviders.Antigravity => ["agy"],
         _ => null
     };
 
@@ -279,7 +276,7 @@ public static class AiUsageService
 
     internal static async Task<LoadResult> LoadWithPolicyAsync(AiProviders provider, CancellationToken cancellation)
     {
-        if (provider is not (AiProviders.Claude or AiProviders.Codex or AiProviders.Antigravity or AiProviders.OpenCode or AiProviders.Copilot or AiProviders.DeepSeek or AiProviders.OpenRouter or AiProviders.Cursor))
+        if (provider is not (AiProviders.Claude or AiProviders.Codex or AiProviders.OpenCode or AiProviders.Copilot or AiProviders.DeepSeek or AiProviders.OpenRouter or AiProviders.Cursor))
             return new(null, "ErrorAiUsageLoad");
         int? status = null;
         try
@@ -298,8 +295,6 @@ public static class AiUsageService
                 credential = await RefreshClaudeCredentialAsync(credential, null, timeout.Token).ConfigureAwait(false);
                 if (credential is null || string.IsNullOrWhiteSpace(credential.Token)) return new(null, "ErrorAiUsageSignIn");
             }
-            if (provider == AiProviders.Antigravity && await TryLoadAntigravityCliAsync(credential.Plan, timeout.Token).ConfigureAwait(false) is { } cliReport)
-                return new(cliReport, null);
             var response = await SendUsageRequestAsync(provider, credential, timeout.Token).ConfigureAwait(false);
             try
             {
@@ -326,7 +321,7 @@ public static class AiUsageService
                     AiProviders.Copilot => ParseCopilot(json, credential.Plan),
                     AiProviders.DeepSeek => ParseDeepSeek(json, credential.Plan),
                     AiProviders.OpenRouter => ParseOpenRouter(json, credential.Plan),
-                    _ => ParseAntigravity(json, credential.Plan)
+                    _ => (null, "ErrorAiUsageLoad")
                 };
                 return new(report, error);
             }
@@ -361,7 +356,7 @@ public static class AiUsageService
             AiProviders.OpenCode => ("OPENCODE_CONFIG_DIR", Path.Combine(".local", "share", "opencode"), "auth.json"),
             AiProviders.DeepSeek => ("DEEPSEEK_CONFIG_DIR", ".deepseek", "auth.json"),
             AiProviders.OpenRouter => ("OPENROUTER_CONFIG_DIR", ".openrouter", "auth.json"),
-            _ => ("GEMINI_CONFIG_DIR", ".gemini", "oauth_creds.json")
+            _ => ("OPENAI_CONFIG_DIR", ".config", "auth.json")
         };
         var directory = Environment.GetEnvironmentVariable(envVar);
         if (string.IsNullOrWhiteSpace(directory))
@@ -379,9 +374,7 @@ public static class AiUsageService
             var secretStamp = AiSecretStore.GetLastWriteTimeUtc(SecretKey(provider));
             if (secretStamp > stamp) stamp = secretStamp;
         }
-        if (provider == AiProviders.Antigravity && ReadKeyringCredential("gemini:antigravity", out var keyringStamp) is not null)
-            stamp = keyringStamp;
-        else if (provider == AiProviders.Claude && ReadKeyringCredential("Claude Code-credentials", out var claudeKeyringStamp) is not null)
+        if (provider == AiProviders.Claude && ReadKeyringCredential("Claude Code-credentials", out var claudeKeyringStamp) is not null)
             stamp = claudeKeyringStamp;
         try
         {
@@ -411,7 +404,6 @@ public static class AiUsageService
     internal static string? ReadClaudeToken(string? path = null) =>
         ReadCredential(AiProviders.Claude, path ?? CredentialPath(AiProviders.Claude)) is { Token.Length: > 0 } cred ? cred.Token : null;
     internal static string? ReadCodexToken(string? path = null) => ReadCredential(AiProviders.Codex, path ?? CredentialPath(AiProviders.Codex))?.Token;
-    internal static string? ReadAntigravityToken(string? path = null) => ReadCredential(AiProviders.Antigravity, path)?.Token;
     internal static string? ReadOpenCodeToken(string? path = null) => ReadCredential(AiProviders.OpenCode, path)?.Token;
     internal static string? ReadCopilotToken(string? path = null) => ReadCredential(AiProviders.Copilot, path)?.Token;
     internal static string? ReadDeepSeekToken(string? path = null) => ReadCredential(AiProviders.DeepSeek, path)?.Token;
@@ -437,11 +429,10 @@ public static class AiUsageService
             AiProviders.Copilot => "https://api.github.com/copilot_internal/user",
             AiProviders.DeepSeek => "https://api.deepseek.com/user/balance",
             AiProviders.OpenRouter => "https://openrouter.ai/api/v1/credits",
-            _ => "https://aicode.googleapis.com/v1alpha:fetchQuotaStatus"
+            _ => throw new ArgumentOutOfRangeException(nameof(provider))
         });
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential.Token);
         if (provider == AiProviders.Claude) request.Headers.Add("anthropic-beta", "oauth-2025-04-20");
-        else if (provider == AiProviders.Antigravity) request.Headers.UserAgent.ParseAdd("antigravity");
         else if (provider == AiProviders.Copilot) request.Headers.TryAddWithoutValidation("Accept", "application/vnd.github+json");
         else if (!string.IsNullOrWhiteSpace(credential.Account)) request.Headers.Add("ChatGPT-Account-Id", credential.Account);
         return await Client.SendAsync(request, cancellation).ConfigureAwait(false);
@@ -451,11 +442,6 @@ public static class AiUsageService
     {
         if (path is null && IsApiKeyProvider(provider) && AiSecretStore.Get(SecretKey(provider)) is { Length: > 0 } savedSecret)
             return new(savedSecret);
-        if (provider == AiProviders.Antigravity && path is null
-            && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GEMINI_CONFIG_DIR"))
-            && ReadKeyringCredential("gemini:antigravity", out var unusedLastWritten) is { } keyringJson
-            && ParseAntigravityCredential(keyringJson) is { } keyringCred)
-            return keyringCred;
         if (provider == AiProviders.OpenCode && path is null)
         {
             foreach (var envKey in new[] { "OPENCODE_GO_API_KEY", "OPENCODE_API_KEY", "OPENCODE_ZEN_API_KEY" })
@@ -501,7 +487,6 @@ public static class AiUsageService
             using var stream = new FileStream(targetPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var document = JsonDocument.Parse(stream);
             var root = document.RootElement;
-            if (provider == AiProviders.Antigravity) return ParseAntigravityCredential(root);
             if (provider == AiProviders.OpenCode) return ParseOpenCodeCredential(root);
             if (provider == AiProviders.Copilot) return ParseCopilotCredential(root);
             if (provider == AiProviders.DeepSeek) return ParseDeepSeekCredential(root);
@@ -722,29 +707,6 @@ public static class AiUsageService
         }
     }
 
-    private static Credential? ParseAntigravityCredential(string json)
-    {
-        try
-        {
-            using var document = JsonDocument.Parse(json);
-            return ParseAntigravityCredential(document.RootElement);
-        }
-        catch (JsonException) { return null; }
-    }
-
-    private static Credential? ParseAntigravityCredential(JsonElement root)
-    {
-        if (root.ValueKind != JsonValueKind.Object) return null;
-        var auth = Property(root, "token") ?? root;
-        var token = Text(auth, "access_token") ?? Text(auth, "accessToken");
-        if (string.IsNullOrWhiteSpace(token)) return null;
-        if (Property(auth, "expiry_date") is { ValueKind: JsonValueKind.Number } expiryMs
-            && expiryMs.TryGetInt64(out var ms)
-            && DateTimeOffset.FromUnixTimeMilliseconds(ms) <= DateTimeOffset.UtcNow)
-            return null;
-        return new(token, Plan: Text(root, "plan") ?? Text(root, "tier"));
-    }
-
     private static Credential? ParseOpenCodeCredential(JsonElement root)
     {
         static string? ExtractKey(JsonElement element)
@@ -817,7 +779,6 @@ public static class AiUsageService
 
     internal static (AiUsageReport? Report, string? Error) ParseClaude(string json, string? plan) => Parse(json, AiProviders.Claude, plan);
     internal static (AiUsageReport? Report, string? Error) ParseCodex(string json) => Parse(json, AiProviders.Codex, null);
-    internal static (AiUsageReport? Report, string? Error) ParseAntigravity(string json, string? plan = null) => Parse(json, AiProviders.Antigravity, plan);
     internal static (AiUsageReport? Report, string? Error) ParseOpenCode(string json, string? plan = null) => Parse(json, AiProviders.OpenCode, plan);
     internal static (AiUsageReport? Report, string? Error) ParseCopilot(string json, string? plan = null) => Parse(json, AiProviders.Copilot, plan);
     internal static (AiUsageReport? Report, string? Error) ParseDeepSeek(string json, string? plan = null) => Parse(json, AiProviders.DeepSeek, plan);
@@ -1301,93 +1262,6 @@ public static class AiUsageService
                             && Percent(share) is { } part && Math.Round(part * 100) >= 1) breakdown.Add(new(name, part));
                 report = new(provider, PlanLabel(plan), windows, now) { Breakdown = breakdown, Spend = ParseSpend(root) };
             }
-            else if (provider == AiProviders.Antigravity)
-            {
-                plan ??= Text(root, "plan") ?? Text(root, "tier");
-                var groups = Property(Property(Property(root, "command"), "data"), "groups")
-                    ?? Property(Property(root, "quotaSummary"), "groups")
-                    ?? Property(root, "groups");
-                if (groups is { ValueKind: JsonValueKind.Array } groupArray)
-                {
-                    foreach (var group in groupArray.EnumerateArray())
-                    {
-                        var groupName = NormalizeAntigravityGroup(Text(group, "name") ?? Text(group, "displayName"));
-                        if (string.IsNullOrWhiteSpace(groupName) || Property(group, "buckets") is not { ValueKind: JsonValueKind.Array } groupBuckets)
-                            continue;
-                        var groupModels = ExtractGroupModels(Text(group, "description"));
-                        foreach (var bucket in groupBuckets.EnumerateArray())
-                        {
-                            var resetText = Text(bucket, "reset_time") ?? Text(bucket, "resetTime");
-                            DateTimeOffset? resetAt = resetText is not null
-                                && DateTimeOffset.TryParse(resetText, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsed)
-                                ? parsed : null;
-                            double used;
-                            if ((Property(bucket, "remaining_fraction") ?? Property(bucket, "remainingFraction")) is { } rem)
-                            {
-                                if (Number(rem) is not { } fraction || !double.IsFinite(fraction)) continue;
-                                used = Math.Clamp(1.0 - fraction, 0.0, 1.0);
-                            }
-                            else if (resetAt is not null) used = 1.0;
-                            else continue;
-                            var windowId = Text(bucket, "window") ?? Text(bucket, "refreshWindowLabel") ?? Text(bucket, "id") ?? Text(bucket, "bucketId");
-                            var isFiveHour = windowId is not null
-                                && (windowId.Equals("5h", StringComparison.OrdinalIgnoreCase) || windowId.EndsWith("-5h", StringComparison.OrdinalIgnoreCase));
-                            windows.Add(new(
-                                isFiveHour ? "AiUsageSession" : "AiUsageWeekly",
-                                used,
-                                resetAt,
-                                isFiveHour ? 18000L : 604800L,
-                                Group: groupName,
-                                GroupModels: groupModels));
-                        }
-                    }
-                }
-                else
-                {
-                    var pools = new Dictionary<string, (double Used, DateTimeOffset? ResetsAt)>(StringComparer.Ordinal);
-                    void CollectBucket(string? modelId, JsonElement quota)
-                    {
-                        if (AntigravityPool(modelId) is not { } pool || quota.ValueKind != JsonValueKind.Object) return;
-                        DateTimeOffset? resetAt = Text(quota, "resetTime") is { } resetText
-                            && DateTimeOffset.TryParse(resetText, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsed)
-                            ? parsed : null;
-                        double used;
-                        if (Property(quota, "remainingFraction") is { } rem)
-                        {
-                            if (Number(rem) is not { } fraction || !double.IsFinite(fraction)) return;
-                            used = Math.Clamp(1.0 - fraction, 0.0, 1.0);
-                        }
-                        else if (resetAt is not null) used = 1.0;
-                        else return;
-                        if (!pools.TryGetValue(pool, out var existing) || used > existing.Used
-                            || (Math.Abs(used - existing.Used) < 1e-6 && existing.ResetsAt is null && resetAt is not null))
-                            pools[pool] = (used, resetAt ?? existing.ResetsAt);
-                    }
-                    if (Property(root, "buckets") is { ValueKind: JsonValueKind.Array } buckets)
-                        foreach (var bucket in buckets.EnumerateArray())
-                            CollectBucket(Text(bucket, "modelId"), bucket);
-                    if (Property(root, "models") is { ValueKind: JsonValueKind.Object } models)
-                        foreach (var prop in models.EnumerateObject())
-                            if (Property(prop.Value, "quotaInfo") is { } quotaInfo)
-                                CollectBucket(prop.Name, quotaInfo);
-                    // When GPT-OSS shares the exact same partner quota pool as Claude, avoid repeating an identical row.
-                    if (pools.TryGetValue("Claude", out var claudePool) && pools.TryGetValue("GPT-OSS", out var gptPool)
-                        && Math.Abs(claudePool.Used - gptPool.Used) < 1e-4 && claudePool.ResetsAt == gptPool.ResetsAt)
-                        pools.Remove("GPT-OSS");
-                    foreach (var name in new[] { "Gemini Pro", "Gemini Flash", "Claude", "GPT-OSS" })
-                    {
-                        if (!pools.TryGetValue(name, out var pool)) continue;
-                        long windowSeconds = pool.ResetsAt is { } r && (r - now).TotalSeconds > 18000 ? 604800L : 18000L;
-                        windows.Add(new("AiUsagePool:" + name, pool.Used, pool.ResetsAt, windowSeconds));
-                    }
-                }
-                report = new(provider, PlanLabel(plan), windows, now)
-                {
-                    LimitReached = windows.Count > 0
-                        && windows.GroupBy(window => window.Group ?? window.LabelKey, StringComparer.Ordinal)
-                            .All(group => group.Any(window => window.Used >= 1.0))
-                };
-            }
             else if (provider == AiProviders.OpenCode)
             {
                 plan ??= Text(root, "plan") ?? Text(root, "plan_type") ?? Text(root, "tier") ?? "Go";
@@ -1618,71 +1492,6 @@ public static class AiUsageService
         { Timeout = TimeSpan.FromSeconds(15), MaxResponseContentBufferSize = 1 << 20 };
         client.DefaultRequestHeaders.UserAgent.ParseAdd("OpenTaskbar");
         return client;
-    }
-
-    private static string? AntigravityPool(string? modelId)
-    {
-        if (string.IsNullOrWhiteSpace(modelId)) return null;
-        if (modelId.StartsWith("gemini-", StringComparison.OrdinalIgnoreCase))
-            return modelId.Contains("pro", StringComparison.OrdinalIgnoreCase)
-                || modelId.Contains("argon", StringComparison.OrdinalIgnoreCase)
-                || modelId.Contains("hydrogen", StringComparison.OrdinalIgnoreCase)
-                || modelId.Contains("ultra", StringComparison.OrdinalIgnoreCase)
-                ? "Gemini Pro" : "Gemini Flash";
-        if (modelId.StartsWith("claude-", StringComparison.OrdinalIgnoreCase)) return "Claude";
-        if (modelId.StartsWith("gpt-", StringComparison.OrdinalIgnoreCase)) return "GPT-OSS";
-        return null;
-    }
-
-    private static string? NormalizeAntigravityGroup(string? name)
-    {
-        if (string.IsNullOrWhiteSpace(name)) return null;
-        var trimmed = name.Trim();
-        if (trimmed.Equals("Gemini Models", StringComparison.OrdinalIgnoreCase)) return "AiUsageGroupGemini";
-        if (trimmed.Equals("Claude and GPT models", StringComparison.OrdinalIgnoreCase)) return "AiUsageGroupClaudeGpt";
-        return trimmed;
-    }
-
-    private static string? ExtractGroupModels(string? description)
-    {
-        if (string.IsNullOrWhiteSpace(description)) return null;
-        const string prefix = "Models within this group:";
-        return description.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-            ? description[prefix.Length..].Trim()
-            : null;
-    }
-
-    private static async Task<AiUsageReport?> TryLoadAntigravityCliAsync(string? plan, CancellationToken cancellation)
-    {
-        try
-        {
-            using var process = new Process
-            {
-                StartInfo = HiddenCliStartInfo("agy", "-p", "/usage", "--output-format", "json")
-            };
-            if (!process.Start()) return null;
-            process.StandardInput.Close();
-            AppLog.Info($"AI usage CLI started: Antigravity pid={process.Id}");
-            var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellation);
-            var stderrTask = process.StandardError.ReadToEndAsync(cancellation);
-            try
-            {
-                await process.WaitForExitAsync(cancellation).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                try { process.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
-                throw;
-            }
-            var stdout = await stdoutTask.ConfigureAwait(false);
-            _ = await stderrTask.ConfigureAwait(false);
-            if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(stdout)) return null;
-            return ParseAntigravity(stdout, plan).Report;
-        }
-        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or InvalidOperationException)
-        {
-            return null;
-        }
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]

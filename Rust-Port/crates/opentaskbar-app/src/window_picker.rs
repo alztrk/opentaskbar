@@ -77,7 +77,7 @@ pub fn order_windows(
         ranked.push((monitor_for_window(window.hwnd) == monitor, window));
     }
     // `sort_by` is stable; `true` must come first.
-    ranked.sort_by(|a, b| b.0.cmp(&a.0));
+    ranked.sort_by_key(|item| std::cmp::Reverse(item.0));
     ranked.into_iter().map(|(_, window)| window).collect()
 }
 
@@ -134,7 +134,7 @@ impl PickerGeometry {
     /// Number of grid rows actually occupied on a page with `visible_count` cards.
     pub fn visible_rows(&self, visible_count: usize) -> usize {
         let columns = self.columns.max(1);
-        (visible_count + columns - 1) / columns
+        visible_count.div_ceil(columns)
     }
 
     /// C# `BuildPage`: `Width = columns * (cardWidth + Gap) + Padding * 2 + 2`,
@@ -356,7 +356,7 @@ mod tests {
             window(3, "", r"C:\a.exe", "far-2"),
             window(4, "", r"C:\a.exe", "near-2"),
         ];
-        let monitor_of = |hwnd: usize| if hwnd % 2 == 0 { 1 } else { 2 };
+        let monitor_of = |hwnd: usize| if hwnd.is_multiple_of(2) { 1 } else { 2 };
         let ordered = order_windows(windows, &PickerApp::default(), 1, monitor_of);
         assert_eq!(
             ordered.iter().map(|w| w.title.as_str()).collect::<Vec<_>>(),

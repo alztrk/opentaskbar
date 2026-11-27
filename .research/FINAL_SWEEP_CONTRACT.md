@@ -1,16 +1,16 @@
 # Son temizlik turu — sözleşme
 
-Hedef: (A) Antigravity ile ilgili **her şeyi** kaldır; (B) 8 derin denetim raporundaki kalan tüm bulguları düzelt. Orchestrator: ana oturum. Her dosya tek ajana ait.
+Hedef: (A) Kaldırılan yapay zekâ sağlayıcısına ait **her şeyi** kaldır; (B) 8 derin denetim raporundaki kalan tüm bulguları düzelt. Orchestrator: ana oturum. Her dosya tek ajana ait.
 
-## ANTIGRAVITY — kaldırma listesi (her ajan kendi dosyalarında yapacak)
+## Kaldırılan sağlayıcı — temizlik listesi (her ajan kendi dosyalarında yapacak)
 - widget registry/descriptor/chip spec/flyout/katalog arama alias'ları
-- `telemetry::AI_PROVIDERS`, `read_provider_token`, `ai_provider_detected`, `full_antigravity_pool`, `parse_antigravity_pools`, `antigravity_groups`
-- `core/settings.rs`: `AntigravityGroups` alanı + migrate/validate/default
-- `ui/settings.rs`: Antigravity ayar satırları
-- locale'ler: `WidgetAiUsageAntigravity*`, `AiUsageGroupGemini`, `AiUsageGroupClaudeGpt`, `AiUsageAntigravityGroupsLabel` (5 anahtar)
-- README/CHANGELOG/docs/testlerdeki tüm Antigravity referansları
-- `design/brand_paths.rs` Antigravity path'i
-Not: Antigravity **hiçbir yerde** kalmamalı (`git grep -i antigravity` → boş).
+- `telemetry::AI_PROVIDERS`, `read_provider_token`, `ai_provider_detected`
+- `core/settings.rs`: kaldırılan grup filtresi alanı + migrate/validate/default
+- `ui/settings.rs`: kaldırılan sağlayıcının ayar satırları
+- locale'ler: kullanımdan kaldırılan 5 AI grubu anahtarı
+- README/CHANGELOG/docs/testlerdeki tüm eski sağlayıcı referansları
+- `design/brand_paths.rs` kaldırılan sağlayıcının path'i
+Not: eski sağlayıcı adı **hiçbir yerde** kalmamalı (`git grep -i <eski-ad>` → boş).
 
 ## Dosya sahipliği
 
@@ -38,15 +38,15 @@ Not: Antigravity **hiçbir yerde** kalmamalı (`git grep -i antigravity` → bo�
 - **WS-5 design**: `icons::lucide(name)->Option<&'static str>` (93 path), `theme::apply_pack_tokens_to_palette()`, varsayılan font Inter, Fluent glyph fallback listesi.
 - **WS-6 dock**: `dock::apply_runtime_settings()` tüm yeni ayarları kullanır; `window_picker::show(...)` çağrısı; `fjord::bar` komutları; WM_CLOSE; 400 ms hide; geçerli geometri sabitleri; layout helper'larını üretime bağla.
 - **WS-7 flyout**: WM_CLOSE, klavye gezinme, focus return, target-based suppression, searchable dropdown sanallaştırma (`components.rs`).
-- **WS-8 uisettings**: tüm yeni ayar satırları, Antigravity temizliği, profil 15 alan, update/startup doğru API'ler, tema token uygulama hook'u.
+- **WS-8 uisettings**: tüm yeni ayar satırları, eski sağlayıcı temizliği, profil 15 alan, update/startup doğru API'ler, tema token uygulama hook'u.
 - **WS-9 widgets**: AI `AiFullDetail` cache'e yazılmalı (artık `default()` değil), BT device id dispatch, canlı flyout tick, clock culture/DST, weather birimler, stats gerçek GPU history, media AUMID, night light, AI creds/backoff, storage format, keyboard sticky.
 
 ## Yeni i18n anahtarları (WS-2 bunları 14 dile ekler; diğer ajanlar `loc::t("...")` kullanır)
 `WindowPickerTitle, WindowPickerPrevious, WindowPickerNext, WindowPickerPage, MagnificationExpandsDock, MagnificationExpandsDockDescription, FjordFiles, FjordFilesOpen, FjordBarShow, FjordBarHide, WifiScan, WifiConnect, WifiDisconnect, WifiPassword, WifiNoNetworks, WifiConnectFailed, SearchNoResults, ContentAlignStart, ContentAlignCenter, ContentAlignEnd, PreviewDisabledHint, FocusMinutesLabel, FocusBreakMinutesLabel, FocusSessionsLabel, WidgetDensityCompact, WidgetDensityFull, AiUsageRingLabel`
-Ayrıca Antigravity'nin 5 anahtarı **silinir**. Sayısal kapılar yeni sayıya eşitlenir.
+Ayrıca eski sağlayıcının 5 anahtarı **silinir**. Sayısal kapılar yeni sayıya eşitlenir.
 
 ## Kurallar
 - Her ajan YALNIZCA kendi dosyalarını düzenler; `git add <kendi dosyaların>`, ASLA `-A`; commit atar, merge/rebase yapmaz.
 - Cross-WS API worktree'de yoksa derleme hatasını düzeltmeye çalışmaz, not bırakır.
-- Her ajan `cargo check --workspace` + kendi testlerini çalıştırır; çıktıda Antigravity temizliği ve eklediği anahtarları listeler.
+- Her ajan `cargo check --workspace` + kendi testlerini çalıştırır; çıktıda eski sağlayıcı temizliği ve eklediği anahtarları listeler.
 - Worktree'ler: `sweep-cfg`, `sweep-i18n`, `sweep-shell`, `sweep-platform`, `sweep-design`, `sweep-dock`, `sweep-flyout`, `sweep-uisettings`, `sweep-widgets`, `sweep-picker`, `sweep-fjord`.

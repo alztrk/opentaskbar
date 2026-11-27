@@ -1,13 +1,13 @@
 //! C# `AiUsageChecks` parity.
 //!
-//! The deterministic logic (JWT expiry, quota/pace/reset, severity and the
-//! Antigravity model-group split) is kept as reference vectors. Bridge tests
-//! below compare those vectors against the real provider/group flags and
-//! serde representation in `opentaskbar-core::settings`.
+//! The deterministic logic (JWT expiry, quota/pace/reset and severity) is kept
+//! as reference vectors. The bridge test below compares those vectors against
+//! the real provider flags and serde representation in
+//! `opentaskbar-core::settings`.
 
 mod common;
 
-use opentaskbar_core::settings::{DockSettings, ai_providers, antigravity_groups};
+use opentaskbar_core::settings::{DockSettings, ai_providers};
 
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
@@ -105,46 +105,6 @@ fn severity(remaining_pct: f64) -> &'static str {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AiGroup {
-    Gemini,
-    ClaudeGpt,
-    Other,
-}
-
-fn group_for_model(model: &str) -> AiGroup {
-    let lower = model.to_ascii_lowercase();
-    if lower.contains("gemini") {
-        AiGroup::Gemini
-    } else if lower.contains("claude") || lower.contains("gpt") {
-        AiGroup::ClaudeGpt
-    } else {
-        AiGroup::Other
-    }
-}
-
-/// `AntigravityGroups` filter values from C# settings.
-fn visible_groups(models: &[&str], filter: &str) -> Vec<&'static str> {
-    let mut seen = Vec::new();
-    for model in models {
-        let label = match group_for_model(model) {
-            AiGroup::Gemini => "Gemini",
-            AiGroup::ClaudeGpt => "Claude / GPT",
-            AiGroup::Other => "Other",
-        };
-        if !seen.contains(&label) {
-            seen.push(label);
-        }
-    }
-    match filter {
-        "Gemini" => seen.retain(|g| *g == "Gemini"),
-        "ClaudeGpt" => seen.retain(|g| *g == "Claude / GPT"),
-        "Hidden" => seen.clear(),
-        _ => {}
-    }
-    seen
-}
-
 #[test]
 fn jwt_expiry_is_parsed_from_the_payload() {
     let token = make_token(1_900_000_000, "");
@@ -206,74 +166,32 @@ fn severity_tracks_remaining_quota() {
     assert_eq!(severity(0.0), "critical");
 }
 
-#[test]
-fn antigravity_models_are_grouped() {
-    assert_eq!(group_for_model("gemini-2.5-pro"), AiGroup::Gemini);
-    assert_eq!(group_for_model("claude-sonnet-4"), AiGroup::ClaudeGpt);
-    assert_eq!(group_for_model("gpt-5"), AiGroup::ClaudeGpt);
-    assert_eq!(group_for_model("mystery-model"), AiGroup::Other);
-}
-
-#[test]
-fn antigravity_group_filter_hides_and_isolates_groups() {
-    let models = [
-        "gemini-2.5-pro",
-        "gemini-flash",
-        "claude-sonnet-4",
-        "gpt-5",
-        "local-llm",
-    ];
-    assert_eq!(
-        visible_groups(&models, "All"),
-        vec!["Gemini", "Claude / GPT", "Other"]
-    );
-    assert_eq!(visible_groups(&models, "Gemini"), vec!["Gemini"]);
-    assert_eq!(visible_groups(&models, "ClaudeGpt"), vec!["Claude / GPT"]);
-    assert!(visible_groups(&models, "Hidden").is_empty());
-}
-
-/// Production bridge: the eight provider bits and the Antigravity group bits
-/// are real core constants; the reference grouping must agree with them and
+/// Production bridge: the provider bits are real core constants and must agree
 /// with the C# flag-string serialization.
 #[test]
-fn production_provider_and_group_flags_match_the_reference_grouping() {
-    assert_eq!(ai_providers::ALL, 0b1111_1111);
-    assert_eq!(ai_providers::WIDGETS.len(), 8);
+fn production_provider_flags_are_consistent() {
     assert_eq!(
-        ai_providers::WIDGETS[2],
-        (ai_providers::ANTIGRAVITY, "AiUsageAntigravity")
+        ai_providers::ALL,
+        ai_providers::WIDGETS
+            .iter()
+            .fold(0, |acc, (bit, _)| acc | bit)
     );
-    assert_eq!(antigravity_groups::ALL, 0b0111);
-    assert_eq!(group_for_model("gemini-2.5-pro"), AiGroup::Gemini);
+    assert_eq!(ai_providers::WIDGETS.len(), 7);
 
     let settings = DockSettings {
-        ai_usage_providers: ai_providers::CLAUDE | ai_providers::ANTIGRAVITY,
-        antigravity_groups: antigravity_groups::GEMINI | antigravity_groups::ARGON,
+        ai_usage_providers: ai_providers::CLAUDE | ai_providers::OPEN_CODE,
         ..DockSettings::default()
     };
     let json = serde_json::to_value(&settings).expect("settings serialize");
-    assert_eq!(json["AiUsageProviders"], "Claude, Antigravity");
-    assert_eq!(json["AntigravityGroups"], "Gemini, Argon");
+    assert_eq!(json["AiUsageProviders"], "Claude, OpenCode");
     let back: DockSettings = serde_json::from_value(json).expect("settings round-trip");
     assert_eq!(
         back.ai_usage_providers,
-        ai_providers::CLAUDE | ai_providers::ANTIGRAVITY
-    );
-    assert_eq!(
-        back.antigravity_groups,
-        antigravity_groups::GEMINI | antigravity_groups::ARGON
-    );
-    assert_eq!(
-        visible_groups(&["gemini-flash", "claude-sonnet-4"], "Gemini"),
-        vec!["Gemini"]
+        ai_providers::CLAUDE | ai_providers::OPEN_CODE
     );
 
     common::assert_source_has(
         "crates/opentaskbar-core/src/settings.rs",
-        &[
-            "AiUsageAntigravity",
-            "antigravity_groups::ALL",
-            "parse_flag_names",
-        ],
+        &["parse_flag_names"],
     );
 }

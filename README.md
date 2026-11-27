@@ -192,7 +192,7 @@ For in-depth documentation on OpenTaskbar's design tokens, materials, typography
 
 ## Rust port
 
-A parallel Rust + GPUI implementation lives in [`Rust-Port/`](Rust-Port/README.md). It targets the same `settings.json` schema, 14-language locale catalogs (1361 keys per language), theme packs and recovery journal as the C# build; each build keeps its own settings folder and there is no automatic migration between them. Build it with `.\scripts\publish-rust-portable.ps1 -Runtime win-x64` and verify with `.\scripts\check-rust-portable.ps1`; `cargo test --workspace` runs the ported C# logic checks. Rust artifacts are included in the release checksums, manifest, SLSA attestation and optional VirusTotal scan.
+A parallel Rust + GPUI implementation lives in [`Rust-Port/`](Rust-Port/README.md). It targets the same `settings.json` schema, 14-language locale catalogs (994 C# / 1406 Rust keys per language), theme packs and recovery journal as the C# build; each build keeps its own settings folder and there is no automatic migration between them. Build it with `.\scripts\publish-rust-portable.ps1 -Runtime win-x64` and verify with `.\scripts\check-rust-portable.ps1`; `cargo test --workspace` runs the ported C# logic checks. Rust artifacts are included in the release checksums, manifest, SLSA attestation and optional VirusTotal scan.
 
 ---
 

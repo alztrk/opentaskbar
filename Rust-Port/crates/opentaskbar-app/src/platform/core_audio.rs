@@ -831,9 +831,11 @@ mod tests {
         push_event(AudioEventKind::DeviceAdded, &PCWSTR::null());
         assert!(device_generation() > before);
         let events = take_events();
-        assert!(events
-            .iter()
-            .any(|event| event.kind == AudioEventKind::DeviceAdded));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == AudioEventKind::DeviceAdded)
+        );
         assert!(!has_pending_events());
         assert!(device_generation() > before);
     }
@@ -852,8 +854,7 @@ mod tests {
         };
         assert_eq!(match_score(&session.name, Some(AUMID), AUMID, None), 2);
         assert_eq!(
-            find_app_session(std::slice::from_ref(&session), AUMID)
-                .map(|found| found.process_id),
+            find_app_session(std::slice::from_ref(&session), AUMID).map(|found| found.process_id),
             Some(24)
         );
     }

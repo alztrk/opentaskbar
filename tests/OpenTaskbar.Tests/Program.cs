@@ -481,7 +481,7 @@ void WidgetCategoryChecks()
     var catalog = new DockWidgetService(clock);
     var options = catalog.CreateOptions([], []);
 
-    Check(options.Count == 23, "Catalog must define exactly 23 widgets.");
+    Check(options.Count == 22, "Catalog must define exactly 22 widgets.");
 
     var timeWidgets = options.Where(o => o.CategoryEnum == DockWidgetCategory.TimeAndWeather).Select(o => o.Id).ToArray();
     Check(timeWidgets.Length == 5
@@ -502,9 +502,9 @@ void WidgetCategoryChecks()
         "SystemAndHardware category must contain SystemStats, NetSpeed, Battery, BluetoothBattery and Storage.");
 
     var aiWidgets = options.Where(o => o.CategoryEnum == DockWidgetCategory.AiQuotas).Select(o => o.Id).ToArray();
-    Check(aiWidgets.Length == 8
+    Check(aiWidgets.Length == 7
         && DockWidgetService.AiUsageWidgets.All(w => aiWidgets.Contains(w.Id)),
-        "AiQuotas category must contain all 8 AI provider widgets.");
+        "AiQuotas category must contain all 7 AI provider widgets.");
 
     var mediaWidgets = options.Where(o => o.CategoryEnum == DockWidgetCategory.MediaAndControls).Select(o => o.Id).ToArray();
     Check(mediaWidgets.Length == 4
@@ -548,7 +548,7 @@ void WidgetRegistryChecks()
     var expectedOrder = new[]
     {
         "Media", "SystemStats", "Focus", "Weather", "NetSpeed", "BluetoothBattery", "Battery", "Storage",
-        "DayProgress", "AiUsageClaude", "AiUsageCodex", "AiUsageAntigravity", "AiUsageOpenCode",
+        "DayProgress", "AiUsageClaude", "AiUsageCodex", "AiUsageOpenCode",
         "AiUsageCopilot", "AiUsageDeepSeek", "AiUsageOpenRouter", "AiUsageCursor", "Audio", "QuickSettings", "Clock",
         "KeyboardLayout"
     };
