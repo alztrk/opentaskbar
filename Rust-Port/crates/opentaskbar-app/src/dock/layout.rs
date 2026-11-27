@@ -108,15 +108,22 @@ pub fn profile_index(size: DockSize) -> usize {
     }
 }
 
-/// `MagnificationExpandsDock` lives in `DockSettings.extra` in older builds and is a
-/// typed field in newer ones. Reading it through `serde_json` works for both without
-/// depending on a cross-WS field name at compile time.
+/// The typed `DockSettings::magnification_expands_dock` field is the single
+/// source of truth. A stale `extra["MagnificationExpandsDock"]` is only a
+/// migration input for `normalize_legacy_json` and must never override an
+/// explicit typed value (a persisted PascalCase key is deserialized straight
+/// into the typed field, so no lookup in `extra` is needed here).
 pub fn magnification_expands_dock(settings: &DockSettings) -> bool {
+    settings.magnification_expands_dock
+}
+
+/// Migration-only view of the legacy `extra` key. Returns `None` when the key is
+/// absent; loaders can write the result into the typed field and drop the key.
+pub fn legacy_magnification_expands_dock(settings: &DockSettings) -> Option<bool> {
     settings
         .extra
         .get("MagnificationExpandsDock")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(settings.magnification_expands_dock)
+        .and_then(serde_json::Value::as_bool)
 }
 
 /// C# `RunningAppProjection.AggregateByExecutablePath`: merge all windows of a
@@ -2439,11 +2446,34 @@ mod tests {
         assert!(magnification_expands_dock(&settings));
         assert_eq!(size_profile(&settings).headroom, 0.0);
         let mut fixed = settings.clone();
-        fixed
-            .extra
-            .insert("MagnificationExpandsDock".into(), serde_json::json!(false));
+        fixed.magnification_expands_dock = false;
         assert!(!magnification_expands_dock(&fixed));
         assert!(size_profile(&fixed).headroom > 0.0);
+    }
+
+    #[test]
+    fn typed_magnification_setting_wins_over_stale_extra_key() {
+        let mut settings = DockSettings {
+            magnification_expands_dock: false,
+            ..DockSettings::default()
+        };
+        settings
+            .extra
+            .insert("MagnificationExpandsDock".into(), serde_json::json!(true));
+        assert!(!magnification_expands_dock(&settings));
+        assert_eq!(legacy_magnification_expands_dock(&settings), Some(true));
+        assert!(size_profile(&settings).headroom > 0.0);
+
+        settings.magnification_expands_dock = true;
+        settings
+            .extra
+            .insert("MagnificationExpandsDock".into(), serde_json::json!(false));
+        assert!(magnification_expands_dock(&settings));
+        assert_eq!(legacy_magnification_expands_dock(&settings), Some(false));
+        assert_eq!(size_profile(&settings).headroom, 0.0);
+
+        settings.extra.clear();
+        assert_eq!(legacy_magnification_expands_dock(&settings), None);
     }
 
     #[test]

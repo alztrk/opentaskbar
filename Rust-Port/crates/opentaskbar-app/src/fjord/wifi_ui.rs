@@ -1,13 +1,10 @@
 //! Wi-Fi flyout data model and UI state (C# `FjordBarWindow.Wifi.cs` +
 //! `Services/Interop/WifiNetworks.cs`).
 //!
-//! NOTE(WS-4): the backend is the contracted
-//! `crate::platform::wifi::{scan_networks, connect, disconnect}` API. The
-//! module does not exist in this worktree; the three call sites in this file
-//! use the contract names and no local shim is added. `WifiNetwork` fields are
-//! assumed to mirror the C# record (`name`, `ssid`, `signal`, `secured`,
-//! `connected`, `connectable`, `profile`, `authentication`, `cipher`); if WS-4
-//! renames one, only [`NetworkView::from_platform`] needs adjusting.
+//! The backend is `crate::platform::wifi::{scan_networks, connect, disconnect}`.
+//! [`NetworkView::from_platform`] is the only place that maps its `WifiNetwork`
+//! (SSID, signal, security, saved-profile flag and real BSS availability) onto
+//! the C#-style view model fields (`authentication`, `cipher`, `has_profile`, ...).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -253,9 +250,10 @@ pub fn scan_networks() -> Vec<NetworkView> {
         .collect()
 }
 
-/// WS-4 bridge: connect to an SSID with an optional passphrase.
-pub fn connect(ssid: &str, password: &str) -> bool {
-    crate::platform::wifi::connect(ssid, password)
+/// Bridge: connect to an SSID with an optional passphrase. `remember` is
+/// forwarded so the platform only persists a WLAN profile when requested.
+pub fn connect(ssid: &str, password: &str, remember: bool) -> bool {
+    crate::platform::wifi::connect(ssid, password, remember)
 }
 
 /// WS-4 bridge: disconnect from the current network.
@@ -264,19 +262,25 @@ pub fn disconnect() {
 }
 
 impl NetworkView {
-    /// Field names mirror the C# `WifiNetworks.Network` record.
+    /// Field names mirror the C# `WifiNetworks.Network` record. Security codes
+    /// come from the real `WifiSecurity`, and profile / connectable come from the
+    /// scan (saved WLAN profile + BSS availability), never from constants.
     pub fn from_platform(network: crate::platform::wifi::WifiNetwork) -> Self {
-        let secured = network.security != crate::platform::wifi::WifiSecurity::Open;
+        use crate::platform::wifi::WifiSecurity;
+
+        let secured = network.security != WifiSecurity::Open;
+        let authentication = network.security.authentication_code();
+        let cipher = network.security.cipher_code();
         Self {
             name: network.ssid.clone(),
             ssid: network.ssid,
             signal: u32::from(network.signal_percent),
             secured,
             connected: network.is_connected,
-            connectable: true,
-            has_profile: false,
-            authentication: 0,
-            cipher: 0,
+            connectable: network.connectable,
+            has_profile: network.has_profile,
+            authentication,
+            cipher,
         }
     }
 }
@@ -402,6 +406,60 @@ mod tests {
         assert_eq!(state.status, Some("WifiNoNetworks"));
         assert!(state.selected_network().is_none());
         assert!(!state.can_connect());
+    }
+
+    #[test]
+    fn platform_security_maps_to_real_authentication_cipher_and_profile() {
+        use crate::platform::wifi::{WifiNetwork, WifiSecurity};
+
+        let cases = [
+            (WifiSecurity::Open, false, 1, 0, "OpenNetwork"),
+            (WifiSecurity::Wpa, true, 4, 2, "WpaPersonal"),
+            (WifiSecurity::Wpa2, true, 7, 4, "Wpa2Personal"),
+            (WifiSecurity::Wpa3, true, 9, 4, "Wpa3Personal"),
+        ];
+        for (security, secured, auth, cipher, key) in cases {
+            let view = NetworkView::from_platform(
+                WifiNetwork::new("Home".into(), 80, security, false)
+                    .with_profile(true)
+                    .with_connectable(true),
+            );
+            assert_eq!(view.secured, secured);
+            assert_eq!(view.authentication, auth);
+            assert_eq!(view.cipher, cipher);
+            assert_eq!(view.security_key(), key);
+            assert!(view.has_profile);
+            assert!(view.connectable);
+            assert!(supports_temporary_profile(auth, cipher, secured));
+        }
+    }
+
+    #[test]
+    fn platform_profile_and_availability_drive_usable_and_password() {
+        use crate::platform::wifi::{WifiNetwork, WifiSecurity};
+
+        let saved = NetworkView::from_platform(
+            WifiNetwork::new("Saved".into(), 80, WifiSecurity::Wpa2, false)
+                .with_profile(true)
+                .with_connectable(true),
+        );
+        assert!(saved.usable());
+        assert!(!saved.needs_password());
+
+        let new_secured = NetworkView::from_platform(
+            WifiNetwork::new("New".into(), 80, WifiSecurity::Wpa3, false).with_connectable(true),
+        );
+        assert!(!new_secured.has_profile);
+        assert!(new_secured.usable());
+        assert!(new_secured.needs_password());
+
+        let out_of_range = NetworkView::from_platform(
+            WifiNetwork::new("Far".into(), 80, WifiSecurity::Wpa2, false)
+                .with_profile(true)
+                .with_connectable(false),
+        );
+        assert!(!out_of_range.usable());
+        assert!(!out_of_range.needs_password());
     }
 
     #[test]

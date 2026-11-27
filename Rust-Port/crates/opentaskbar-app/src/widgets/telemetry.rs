@@ -1264,6 +1264,15 @@ pub fn weekday_of(year: i32, month: u32, day: u32) -> u32 {
     ((y + y / 4 - y / 100 + y / 400 + T[m] + day as i32).rem_euclid(7)) as u32
 }
 
+/// Leading blank cells before day 1 in a calendar laid out from the culture's
+/// first day of week. Both arguments use the .NET `DayOfWeek` convention
+/// (`0 = Sunday .. 6 = Saturday`) returned by [`first_day_of_week`] and
+/// [`weekday_of`]. This is the formula the flyout uses for its grid; sharing it
+/// keeps click hit-testing aligned with the painted cells.
+pub fn calendar_leading_blanks(first_day_of_week: u32, weekday_of_first: u32) -> u32 {
+    (weekday_of_first + 7 - first_day_of_week % 7) % 7
+}
+
 pub fn local_clock_info() -> LocalClockInfo {
     let mut lt: SYSTEMTIME = unsafe { std::mem::zeroed() };
     let mut ut: SYSTEMTIME = unsafe { std::mem::zeroed() };
