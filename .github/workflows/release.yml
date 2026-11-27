@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag name for the release (e.g. v0.4.0 or v0.4.0-rc.1)'
+        description: 'Tag name for the release (e.g. v0.3.5 or v0.3.5-rc.1)'
         required: true
         type: string
       prerelease:
@@ -51,7 +51,7 @@ jobs:
             "${{ inputs.tag_name }}"
           }
           if ($tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?<pre>-[0-9A-Za-z.-]+)?$') {
-            throw "Release tag must look like v0.4.0 or v0.4.0-rc.1."
+            throw "Release tag must look like v0.3.5 or v0.3.5-rc.1."
           }
           $version = $Matches['base']
           $isPre = -not [string]::IsNullOrEmpty($Matches['pre'])

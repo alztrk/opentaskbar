@@ -30,7 +30,7 @@ gated against it by `scripts/check-release-version.ps1`.
 
 - Refreshed `README.md`, `PRIVACY.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `docs/**` and `.github/*.md` against the current Rust implementation: CLI modes, 22 catalog widgets, 14 languages / 1375 keys, theme packs, and journal/watchdog recovery.
 
-## 0.4.0 - 2026-11-27
+## 0.3.5 - 2026-11-27
 
 ### Rust-only application
 
@@ -54,4 +54,4 @@ gated against it by `scripts/check-release-version.ps1`.
 
 ### Version gate
 
-- Release tag ↔ Cargo workspace version `0.4.0` ↔ MSIX identity `0.4.0.0` must match before any build. `package-rust-release.ps1` generates the versioned x64/x86 EXE and ZIP names (`OpenTaskbar-v0.4.0-win-{x64,x86}.exe/.zip`), records each watchdog's architecture/PE machine/SHA-256 and verifies every checksum row against disk before attestation.
+- Release tag ↔ Cargo workspace version `0.3.5` ↔ MSIX identity `0.3.5.0` must match before any build. `package-rust-release.ps1` generates the versioned x64/x86 EXE and ZIP names (`OpenTaskbar-v0.3.5-win-{x64,x86}.exe/.zip`), records each watchdog's architecture/PE machine/SHA-256 and verifies every checksum row against disk before attestation.

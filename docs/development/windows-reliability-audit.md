@@ -68,7 +68,7 @@ All paths are Rust-only, from the workspace root:
 - **SEC-01:** Theme ZIP traversal, duplicate entries, reserved Windows names, size limits, import/export symmetry.
 - **SEC-02:** Update asset selection, SHA-256 verification, signing, atomic replacement, backup/rollback.
 - **SEC-03:** Shell command arguments, special-character paths, log privacy, permission boundaries.
-- **REL-01:** Reproducible release, checksums, pinned Actions, Windows test reporting. `check-release-version.ps1` gates tag ↔ Cargo `0.4.0` ↔ MSIX `0.4.0.0`; `package-rust-release.ps1` records watchdog architecture/PE machine/SHA-256 and verifies `checksums.txt` before SLSA attestation.
+- **REL-01:** Reproducible release, checksums, pinned Actions, Windows test reporting. `check-release-version.ps1` gates tag ↔ Cargo `0.3.5` ↔ MSIX `0.3.5.0`; `package-rust-release.ps1` records watchdog architecture/PE machine/SHA-256 and verifies `checksums.txt` before SLSA attestation.
 - **ARCH-01:** Reduce coupling between GPUI dock, Settings and the shell taskbar session in small tested changes.
 
 ## Cross-cutting regression controls

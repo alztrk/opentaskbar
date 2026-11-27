@@ -48,7 +48,7 @@ OpenTaskbar replaces the Windows taskbar with a floating row of app icons. Hover
 
 ## Get it running
 
-1. Go to [GitHub Releases](https://github.com/alztrk/opentaskbar/releases) and download `OpenTaskbar-v0.4.0-win-x64.exe` (most PCs) or `OpenTaskbar-v0.4.0-win-x86.exe` (32-bit Windows).
+1. Go to [GitHub Releases](https://github.com/alztrk/opentaskbar/releases) and download `OpenTaskbar-v0.3.5-win-x64.exe` (most PCs) or `OpenTaskbar-v0.3.5-win-x86.exe` (32-bit Windows).
 2. Double-click the file. That's it — no installer, no extra software, no admin rights.
 
 You need Windows 10 (version 2004 or newer) or Windows 11. The portable build checks for new versions itself. Releases also include a ZIP, checksums and release notes.
@@ -62,7 +62,7 @@ OpenTaskbar doesn't collect anything about you. The portable build checks for up
 <details>
 <summary><strong>Technical details (for developers)</strong></summary>
 
-Version **0.4.0**. The repository root is a Cargo workspace; run all commands below from there.
+Version **0.3.5**. The repository root is a Cargo workspace; run all commands below from there.
 
 ### Build and check it
 
@@ -80,7 +80,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
 powershell -ExecutionPolicy Bypass -File .\scripts\check-locale-parity.ps1
-powershell -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1 -Tag v0.4.0
+powershell -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1 -Tag v0.3.5
 ```
 
 Building needs Rust 1.95+ (edition 2024, MSVC on Windows) and PowerShell 7+ for packaging.
@@ -90,11 +90,11 @@ Building needs Rust 1.95+ (edition 2024, MSVC on Windows) and PowerShell 7+ for 
 .\scripts\publish-portable.ps1 -Runtime win-x64
 .\scripts\check-portable.ps1 -ExecutableName OpenTaskbar-x64.exe
 
-# MSIX package (identity 0.4.0.0)
+# MSIX package (identity 0.3.5.0)
 .\scripts\publish-rust-msix.ps1 -Runtime win-x64
 
 # Versioned release artifacts
-.\scripts\package-rust-release.ps1 -Tag v0.4.0
+.\scripts\package-rust-release.ps1 -Tag v0.3.5
 ```
 
 `publish-portable.ps1` builds a single self-contained EXE with the architecture-matched watchdog embedded; `check-portable.ps1` verifies its architecture, watchdog and icon worker. The release script writes the x64/x86 EXEs and ZIPs, `checksums.txt`, a schemaVersion 2 `release-manifest.json` and `release-notes.md`.

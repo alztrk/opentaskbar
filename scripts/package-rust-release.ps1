@@ -26,7 +26,7 @@ if (-not (Test-Path -LiteralPath $OutputDir -PathType Container)) {
 $OutputDir = (Resolve-Path -LiteralPath $OutputDir).Path
 
 if ($Tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?<pre>-[0-9A-Za-z.-]+)?$') {
-    throw "Tag must look like v0.4.0 or v0.4.0-rc.1 (got: $Tag)."
+    throw "Tag must look like v0.3.5 or v0.3.5-rc.1 (got: $Tag)."
 }
 $version = $Matches['base']
 

@@ -197,7 +197,7 @@ cargo test --workspace
 cargo check --workspace
 
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-locale-parity.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1 -Tag v0.4.0
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1 -Tag v0.3.5
 ```
 
 | Kontrol | Ne doğrular |
@@ -208,7 +208,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-release-vers
 | `crates/opentaskbar-shell/src/journal.rs` (unit) | Bozuk/eski journal, `*.tmp` atomic yazım, desteklenen bit maskesi |
 | `crates/opentaskbar-shell/src/watchdog.rs` (unit) | `--watchdog` argümanı, heartbeat token'ı, clean-exit sinyali |
 | `scripts/check-locale-parity.ps1` | 14 × 1046 donmuş referans + 14 × 1375 Rust anahtarı, gerekli sözleşme anahtarları |
-| `scripts/check-release-version.ps1` | Tag ↔ Cargo workspace `0.4.0` ↔ MSIX `0.4.0.0` |
+| `scripts/check-release-version.ps1` | Tag ↔ Cargo workspace `0.3.5` ↔ MSIX `0.3.5.0` |
 
 ### Canlı smoke kontrol listesi
 

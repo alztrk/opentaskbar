@@ -16,7 +16,7 @@ if (-not $Tag) { $Tag = $env:RELEASE_TAG }
 if (-not $Tag) { throw 'No release tag supplied (-Tag, GITHUB_REF_NAME or RELEASE_TAG). Release CI supplies it; local runs must pass -Tag explicitly.' }
 
 if ($Tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?<pre>-[0-9A-Za-z.-]+)?$') {
-    throw "Tag must look like v0.4.0 or v0.4.0-rc.1 (got: $Tag)."
+    throw "Tag must look like v0.3.5 or v0.3.5-rc.1 (got: $Tag)."
 }
 $tagVersion = $Matches['base']
 
