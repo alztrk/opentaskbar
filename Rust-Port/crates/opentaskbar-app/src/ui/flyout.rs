@@ -45,8 +45,8 @@ use windows::core::HSTRING;
 use windows_numerics::Vector2;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
-    DWMWA_BORDER_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DwmSetWindowAttribute,
+    DWMWA_BORDER_COLOR, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection,
@@ -58,6 +58,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DrawTextW, HDC,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::UI::Controls::MARGINS;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT,
     TrackMouseEvent, VK_BACK, VK_ESCAPE, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_RETURN, VK_SHIFT,
@@ -1781,9 +1782,12 @@ fn show_flyout_impl<'a>(
     let animate = win32::client_area_animations_enabled()
         && FLYOUT_ANIMATIONS_ENABLED.load(Ordering::Relaxed);
     let slide_px = if animate { s(SLIDE_OFFSET_DIPS) } else { 0 };
+    let use_glass_backdrop = border.glass_mode;
+    let ex_style =
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | if use_glass_backdrop { 0 } else { WS_EX_LAYERED };
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED,
+            ex_style,
             class_name.as_ptr(),
             wide(if is_tray { &spec.title } else { "" }).as_ptr(),
             WS_POPUP,
@@ -1802,7 +1806,9 @@ fn show_flyout_impl<'a>(
     }
 
     unsafe {
-        let _ = SetLayeredWindowAttributes(hwnd, 0, if animate { 0 } else { 255 }, LWA_ALPHA);
+        if !use_glass_backdrop {
+            let _ = SetLayeredWindowAttributes(hwnd, 0, if animate { 0 } else { 255 }, LWA_ALPHA);
+        }
         let dark_val: u32 = u32::from(is_dark);
         let _ = DwmSetWindowAttribute(
             hwnd,
@@ -1817,6 +1823,22 @@ fn show_flyout_impl<'a>(
             (&corner as *const u32).cast(),
             size_of::<u32>() as u32,
         );
+        if use_glass_backdrop {
+            let margins = MARGINS {
+                cxLeftWidth: -1,
+                cxRightWidth: -1,
+                cyTopHeight: -1,
+                cyBottomHeight: -1,
+            };
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+            let backdrop: u32 = crate::design::glass::DWMSBT_TRANSIENTWINDOW;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE as u32,
+                (&backdrop as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+        }
         let border = if border.width_dips > 0.0 {
             gdi_rgb(border.rgb)
         } else {
@@ -2183,9 +2205,34 @@ impl FlyoutState<'_> {
 
         let pal = design::palette_with_border(self.is_dark, Some(self.border.rgb));
         let border_w = (self.border.width_dips * dpi).clamp(1.0, 2.0);
-        let surface_c = d2d_rgba(pal.surface, 1.0);
-        let card_bg = d2d_rgba(pal.elevated, 1.0);
-        let hover_bg = d2d_rgba(pal.hover, 1.0);
+        let surface_c = if self.border.glass_mode {
+            let tint = if self.is_dark {
+                (0x10_u8, 0x12_u8, 0x18_u8)
+            } else {
+                (0xf6_u8, 0xf8_u8, 0xfc_u8)
+            };
+            d2d_rgba(tint, self.border.glass_tint_alpha.clamp(0.18, 0.48))
+        } else {
+            d2d_rgba(pal.surface, 1.0)
+        };
+        let card_bg = if self.border.glass_mode {
+            if self.is_dark {
+                d2d_rgba((0xff, 0xff, 0xff), 0.08)
+            } else {
+                d2d_rgba((0xff, 0xff, 0xff), 0.56)
+            }
+        } else {
+            d2d_rgba(pal.elevated, 1.0)
+        };
+        let hover_bg = if self.border.glass_mode {
+            if self.is_dark {
+                d2d_rgba((0xff, 0xff, 0xff), 0.14)
+            } else {
+                d2d_rgba((0xff, 0xff, 0xff), 0.76)
+            }
+        } else {
+            d2d_rgba(pal.hover, 1.0)
+        };
         let border_col = d2d_rgba(pal.border_rgb, if self.is_dark { 0.85 } else { 1.0 });
         let subtle_border = d2d_rgba(pal.border_rgb, if self.is_dark { 0.55 } else { 0.85 });
         let accent = d2d_rgba(pal.widget_accent, 1.0);

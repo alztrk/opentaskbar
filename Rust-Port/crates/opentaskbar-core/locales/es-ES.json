@@ -1340,5 +1340,10 @@
   "OpenLocation": "Abrir ubicación",
   "DropdownSearchPlaceholder": "Buscar...",
   "DropdownNoResults": "No se encontraron resultados",
-  "WeatherLocationUsed": "Se está usando su ubicación"
+  "WeatherLocationUsed": "Se está usando su ubicación",
+  "SectionGlassEffect": "Efecto de cristal (Clear Crystal)",
+  "GlassBlurLabel": "Desenfoque del cristal",
+  "GlassSaturationLabel": "Intensidad de color del cristal",
+  "GlassEdgeGlowLabel": "Luz del borde de cristal",
+  "GlassPointerLightLabel": "Reflejo de borde con el cursor"
 }

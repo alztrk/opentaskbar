@@ -319,6 +319,30 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
         ),
         SettingsSearchEntry::new(
             SettingsPage::Themes,
+            "GlassBlurLabel",
+            &loc::t("SectionGlassEffect"),
+            "glass blur bulaniklik clear crystal frost",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Themes,
+            "GlassSaturationLabel",
+            &loc::t("SectionGlassEffect"),
+            "glass vibrancy saturation canlilik doygunluk clear crystal",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Themes,
+            "GlassEdgeGlowLabel",
+            &loc::t("SectionGlassEffect"),
+            "glass edge glow light kenar isigi clear crystal",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Themes,
+            "GlassPointerLightLabel",
+            &loc::t("SectionGlassEffect"),
+            "glass pointer cursor reflection imlec yansima clear crystal",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Themes,
             "Animations",
             &loc::t("Animations"),
             "motion effects animation",

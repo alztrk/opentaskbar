@@ -1340,5 +1340,10 @@
   "OpenLocation": "Открыть расположение",
   "DropdownSearchPlaceholder": "Поиск...",
   "DropdownNoResults": "Результаты не найдены",
-  "WeatherLocationUsed": "Используется ваше местоположение"
+  "WeatherLocationUsed": "Используется ваше местоположение",
+  "SectionGlassEffect": "Эффект стекла (Clear Crystal)",
+  "GlassBlurLabel": "Размытие стекла",
+  "GlassSaturationLabel": "Насыщенность стекла",
+  "GlassEdgeGlowLabel": "Подсветка края стекла",
+  "GlassPointerLightLabel": "Отражение на краю от курсора"
 }

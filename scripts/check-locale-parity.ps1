@@ -1,4 +1,4 @@
-# Locale key-parity gate (WS-H / §C3).
+﻿# Locale key-parity gate (WS-H / §C3).
 # Compares the 14 C# catalogs with the 14 embedded Rust catalogs and fails when
 # key counts or key sets drift within a family, or when a C# key is absent from
 # Rust. Mirrors the Rust integration test tests/i18n_parity.rs but needs no
@@ -19,7 +19,7 @@ $langs = @('de-DE','en-US','es-ES','fr-FR','it-IT','ja-JP','ko-KR','nl-NL','pl-P
 # These numbers are a hard gate, not just a display string.
 $expectedLanguages = 14
 $expectedCsKeys = 999
-$expectedRustKeys = 1342
+$expectedRustKeys = 1347
 $csDir = Join-Path $RepoRoot 'Services\Localization\Languages'
 $rustDir = Join-Path $RepoRoot 'Rust-Port\crates\opentaskbar-core\locales'
 
@@ -38,7 +38,8 @@ $required = @(
     'StartMenuOpen','StartMenuClose','StartMenuToggle',
     'ProfileHiddenApps',
     'PlacementInWidgets','OpenLocation','GpuEngine',
-    'DropdownSearchPlaceholder','DropdownNoResults','WeatherLocationUsed'
+    'DropdownSearchPlaceholder','DropdownNoResults','WeatherLocationUsed',
+    'SectionGlassEffect','GlassBlurLabel','GlassSaturationLabel','GlassEdgeGlowLabel','GlassPointerLightLabel'
 )
 
 function Get-Catalog([string]$Path) {

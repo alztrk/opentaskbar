@@ -1340,5 +1340,10 @@
   "OpenLocation": "Apri posizione",
   "DropdownSearchPlaceholder": "Cerca...",
   "DropdownNoResults": "Nessun risultato trovato",
-  "WeatherLocationUsed": "Viene usata la tua posizione"
+  "WeatherLocationUsed": "Viene usata la tua posizione",
+  "SectionGlassEffect": "Effetto vetro (Clear Crystal)",
+  "GlassBlurLabel": "Sfocatura vetro",
+  "GlassSaturationLabel": "Vividezza del vetro",
+  "GlassEdgeGlowLabel": "Luce bordo vetro",
+  "GlassPointerLightLabel": "Riflesso bordo al cursore"
 }

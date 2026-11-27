@@ -14,6 +14,7 @@ pub mod fonts;
 pub mod glass;
 pub mod icons;
 pub mod radius;
+pub mod spatial_glass;
 pub mod theme;
 pub mod tokens;
 pub mod widget_pack;

@@ -4375,6 +4375,7 @@ impl DcompEngine {
         pressed_btn: Option<IslandButton>,
         border_rgb: Rgb,
         border_width_dips: f32,
+        glass_host_active: bool,
     ) -> Result<IDCompositionSurface> {
         let pal = design::palette(is_dark);
         let w_px = (width_dips * dpi).ceil().max(1.0) as u32;
@@ -4394,6 +4395,7 @@ impl DcompEngine {
             let fill_alpha = match background {
                 SurfaceBackground::None => 0.0,
                 SurfaceBackground::Solid => 1.0,
+                SurfaceBackground::Glass if glass_host_active => 0.0,
                 SurfaceBackground::Glass => opacity.clamp(0.1, 1.0),
             };
             let bd_alpha = if is_dark { 0.14_f32 } else { 0.12_f32 };
@@ -4418,7 +4420,9 @@ impl DcompEngine {
                 )?;
                 dc.FillRoundedRectangle(&pill_rect, &bg_brush);
             }
-            if background != SurfaceBackground::None {
+            if background != SurfaceBackground::None
+                && !(glass_host_active && background == SurfaceBackground::Glass)
+            {
                 dc.DrawRoundedRectangle(&pill_rect, &bd_brush, stroke, None);
             }
 

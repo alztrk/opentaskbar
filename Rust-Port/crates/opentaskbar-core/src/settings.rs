@@ -41,6 +41,35 @@ fn default_dynamic_island_opacity() -> f64 {
     0.9
 }
 
+pub const DEFAULT_GLASS_BLUR_SIGMA: f64 = 9.0;
+pub const DEFAULT_GLASS_SATURATION: f64 = 1.32;
+pub const DEFAULT_GLASS_EDGE_GLOW: f64 = 0.88;
+
+fn default_glass_blur_sigma() -> f64 {
+    DEFAULT_GLASS_BLUR_SIGMA
+}
+
+fn default_glass_saturation() -> f64 {
+    DEFAULT_GLASS_SATURATION
+}
+
+fn default_glass_edge_glow() -> f64 {
+    DEFAULT_GLASS_EDGE_GLOW
+}
+
+/// Maps a per-surface opacity (`0.0..=1.0`, default `0.90`) into Clear Crystal's
+/// neutral glass tint alpha so default `0.90` lands on the verified Clear Crystal
+/// sweet spot (`0.12` dark / `0.18` light) while remaining user-adjustable.
+pub fn clear_crystal_tint_alpha(surface_opacity: f64, is_dark: bool) -> f32 {
+    let op = if surface_opacity.is_finite() {
+        surface_opacity.clamp(0.0, 1.0) as f32
+    } else {
+        0.9
+    };
+    let scale = if is_dark { 0.135 } else { 0.20 };
+    (op * scale).clamp(0.0, 0.65)
+}
+
 /// C# `SystemMeters` is written as `"Cpu, Memory, Gpu"` by `JsonStringEnumConverter`, while older
 /// builds used a numeric bitmask. Accept both; keep the retired CPU-temperature bit slot unused.
 fn deserialize_stats_meters<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
@@ -606,6 +635,18 @@ pub struct DockSettings {
     pub widget_background: SurfaceBackground,
     pub settings_background: SurfaceBackground,
     pub surface_opacity: f64,
+    /// Clear Crystal optical glass blur sigma in DIPs (`0.0..=36.0`, default `9.0`).
+    #[serde(default = "default_glass_blur_sigma")]
+    pub glass_blur_sigma: f64,
+    /// Clear Crystal color vibrancy multiplier (`0.80..=1.80`, default `1.32`).
+    #[serde(default = "default_glass_saturation")]
+    pub glass_saturation: f64,
+    /// Clear Crystal razor 1 px optical edge highlight intensity (`0.0..=1.0`, default `0.88`).
+    #[serde(default = "default_glass_edge_glow")]
+    pub glass_edge_glow: f64,
+    /// Clear Crystal cursor-tracking 3D edge light toggle (default `true`).
+    #[serde(default = "default_true")]
+    pub glass_pointer_light: bool,
     pub dock_border_color: Option<String>,
     pub menu_border_thickness: f64,
     pub menu_border_color: Option<String>,
@@ -791,6 +832,10 @@ impl Default for DockSettings {
             widget_background: SurfaceBackground::Glass,
             settings_background: SurfaceBackground::Glass,
             surface_opacity: 0.9,
+            glass_blur_sigma: default_glass_blur_sigma(),
+            glass_saturation: default_glass_saturation(),
+            glass_edge_glow: default_glass_edge_glow(),
+            glass_pointer_light: true,
             dock_border_color: None,
             menu_border_thickness: 1.0,
             menu_border_color: None,
@@ -2311,6 +2356,9 @@ pub fn load_from(path: &Path) -> DockSettings {
             settings.dock_scale = settings.dock_scale.clamp(0.75, 1.5);
             settings.dynamic_island_opacity = settings.dynamic_island_opacity.clamp(0.1, 1.0);
             settings.surface_opacity = settings.surface_opacity.clamp(0.1, 1.0);
+            settings.glass_blur_sigma = settings.glass_blur_sigma.clamp(0.0, 36.0);
+            settings.glass_saturation = settings.glass_saturation.clamp(0.8, 1.8);
+            settings.glass_edge_glow = settings.glass_edge_glow.clamp(0.0, 1.0);
             settings.ui_font_size = settings.ui_font_size.clamp(9.0, 24.0);
             let errors = settings.validate();
             if errors.is_empty() {

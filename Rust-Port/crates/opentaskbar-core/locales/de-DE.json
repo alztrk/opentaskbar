@@ -1340,5 +1340,10 @@
   "OpenLocation": "Speicherort öffnen",
   "DropdownSearchPlaceholder": "Suchen...",
   "DropdownNoResults": "Keine Ergebnisse gefunden",
-  "WeatherLocationUsed": "Ihr Standort wird verwendet"
+  "WeatherLocationUsed": "Ihr Standort wird verwendet",
+  "SectionGlassEffect": "Glaseffekt (Clear Crystal)",
+  "GlassBlurLabel": "Glas-Unschärfe",
+  "GlassSaturationLabel": "Glas-Farbsättigung",
+  "GlassEdgeGlowLabel": "Glaskantenlicht",
+  "GlassPointerLightLabel": "Cursor-Kantenreflexion"
 }

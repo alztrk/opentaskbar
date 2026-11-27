@@ -318,9 +318,8 @@ fn high_contrast_enabled() -> bool {
     }
 }
 
-/// Applies the acrylic/system backdrop as soon as the settings window opens.
-/// The DWM/Win10-acrylic policy lives in `design::glass` (single source of truth).
-fn apply_settings_backdrop(window: &Window, is_dark: bool) {
+/// Applies or clears the system backdrop so Settings uses glass ONLY in Glass mode.
+fn apply_settings_backdrop(window: &Window, is_dark: bool, glass_mode: bool) {
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
         return;
     };
@@ -328,7 +327,11 @@ fn apply_settings_backdrop(window: &Window, is_dark: bool) {
         return;
     };
     let hwnd = win32_handle.hwnd.get() as usize;
-    let _ = crate::design::glass::apply_window_backdrop(hwnd, is_dark);
+    if glass_mode {
+        let _ = crate::design::glass::apply_window_backdrop(hwnd, is_dark);
+    } else {
+        let _ = crate::design::glass::clear_window_backdrop(hwnd, is_dark);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1056,7 +1059,11 @@ impl SettingsView {
         };
         // Window-open backdrop hook: WS-B will expose this as
         // `design::glass::apply_window_backdrop(hwnd, is_dark)` (see function note).
-        apply_settings_backdrop(window, is_dark);
+        apply_settings_backdrop(
+            window,
+            is_dark,
+            settings.settings_background == SurfaceBackground::Glass,
+        );
         let saved_city = settings.weather_city.clone();
         let weather_city = if saved_city.trim().is_empty() {
             "Istanbul".to_owned()
@@ -4484,10 +4491,20 @@ impl SettingsView {
                 flag_path: None,
                 glyph: None,
                 selected: current == background,
-                on_select: std::rc::Rc::new(move |_win, app| {
+                on_select: std::rc::Rc::new(move |win, app| {
                     let _ = entity.update(app, |this, cx| {
                         this.open_dropdown = None;
                         apply(&mut this.settings, background);
+                        let is_dark = match this.settings.theme {
+                            AppTheme::Dark => true,
+                            AppTheme::Light => false,
+                            AppTheme::System => win32::read_system_is_dark(),
+                        };
+                        apply_settings_backdrop(
+                            win,
+                            is_dark,
+                            this.settings.settings_background == SurfaceBackground::Glass,
+                        );
                         this.auto_save(cx);
                     });
                 }),
@@ -5363,6 +5380,129 @@ impl SettingsView {
                 ],
             )
             .into_any_element(),
+        ];
+
+        // Clear Crystal optical glass tuning controls — strictly shown when Glass mode is active.
+        let any_glass = self.settings.dock_background == SurfaceBackground::Glass
+            || self.settings.dynamic_island_background == SurfaceBackground::Glass
+            || self.settings.menu_background == SurfaceBackground::Glass
+            || self.settings.widget_background == SurfaceBackground::Glass
+            || self.settings.settings_background == SurfaceBackground::Glass;
+        if any_glass {
+            let blur_px = self.settings.glass_blur_sigma.clamp(0.0, 36.0).round() as i32;
+            let sat_pct = (self.settings.glass_saturation.clamp(0.8, 1.8) * 100.0).round() as i32;
+            let edge_pct = (self.settings.glass_edge_glow.clamp(0.0, 1.0) * 100.0).round() as i32;
+            out.push(
+                section_card(
+                    t,
+                    loc::t("SectionGlassEffect"),
+                    vec![
+                        self.target_row(
+                            "GlassBlurLabel",
+                            t,
+                            Some("\u{E793}"),
+                            loc::t("GlassBlurLabel"),
+                            live_slider(
+                                "glass-blur",
+                                t,
+                                (self.settings.glass_blur_sigma.clamp(0.0, 36.0) as f32) / 36.0,
+                                37,
+                                loc::t_fmt("PixelsValue", &[&blur_px.to_string()]),
+                                |i| {
+                                    let entity = cx.entity().downgrade();
+                                    std::rc::Rc::new(move |_win, app| {
+                                        let _ = entity.update(app, |this, cx| {
+                                            let next = (i as f64).clamp(0.0, 36.0);
+                                            if (this.settings.glass_blur_sigma - next).abs() > 0.01
+                                            {
+                                                this.settings.glass_blur_sigma = next;
+                                                this.auto_save(cx);
+                                            }
+                                        });
+                                    })
+                                },
+                            ),
+                        )
+                        .into_any_element(),
+                        self.target_row(
+                            "GlassSaturationLabel",
+                            t,
+                            Some("\u{E790}"),
+                            loc::t("GlassSaturationLabel"),
+                            live_slider(
+                                "glass-sat",
+                                t,
+                                ((self.settings.glass_saturation.clamp(0.8, 1.8) as f32) - 0.8)
+                                    / 1.0,
+                                26,
+                                loc::t_fmt("OpacityPercent", &[&sat_pct.to_string()]),
+                                |i| {
+                                    let entity = cx.entity().downgrade();
+                                    std::rc::Rc::new(move |_win, app| {
+                                        let _ = entity.update(app, |this, cx| {
+                                            let next = (0.80 + (i as f64) * 0.04).clamp(0.80, 1.80);
+                                            if (this.settings.glass_saturation - next).abs() > 0.001
+                                            {
+                                                this.settings.glass_saturation = next;
+                                                this.auto_save(cx);
+                                            }
+                                        });
+                                    })
+                                },
+                            ),
+                        )
+                        .into_any_element(),
+                        self.target_row(
+                            "GlassEdgeGlowLabel",
+                            t,
+                            Some("\u{E706}"),
+                            loc::t("GlassEdgeGlowLabel"),
+                            live_slider(
+                                "glass-edge",
+                                t,
+                                self.settings.glass_edge_glow.clamp(0.0, 1.0) as f32,
+                                26,
+                                loc::t_fmt("OpacityPercent", &[&edge_pct.to_string()]),
+                                |i| {
+                                    let entity = cx.entity().downgrade();
+                                    std::rc::Rc::new(move |_win, app| {
+                                        let _ = entity.update(app, |this, cx| {
+                                            let next = ((i as f64) * 0.04).clamp(0.0, 1.0);
+                                            if (this.settings.glass_edge_glow - next).abs() > 0.001
+                                            {
+                                                this.settings.glass_edge_glow = next;
+                                                this.auto_save(cx);
+                                            }
+                                        });
+                                    })
+                                },
+                            ),
+                        )
+                        .into_any_element(),
+                        self.target_row(
+                            "GlassPointerLightLabel",
+                            t,
+                            Some("\u{E8B0}"),
+                            loc::t("GlassPointerLightLabel"),
+                            ios_switch(
+                                "sw-glass-ptr",
+                                t,
+                                self.settings.glass_pointer_light,
+                                cx.listener(|this, _, _, cx| {
+                                    this.settings.glass_pointer_light =
+                                        !this.settings.glass_pointer_light;
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        )
+                        .into_any_element(),
+                    ],
+                )
+                .into_any_element(),
+            );
+        }
+
+        out.extend([
             section_card(
                 t,
                 loc::t("Animations"),
@@ -5899,7 +6039,7 @@ impl SettingsView {
                 }
                 section_card(t, loc::t("BorderStyleLabel"), border_rows).into_any_element()
             },
-        ];
+        ]);
         out.extend(self.render_theme_editor(t, cx));
         out
     }

@@ -11,7 +11,7 @@ const LANGS: &[&str] = &[
     "ru-RU", "tr-TR", "uk-UA", "zh-CN",
 ];
 
-const EXPECTED_KEY_COUNT: usize = 1342;
+const EXPECTED_KEY_COUNT: usize = 1347;
 
 const C3_NEW_KEYS: &[&str] = &[
     // The five keys C# has and the pre-port Rust catalogs lacked.
@@ -61,6 +61,12 @@ const C3_NEW_KEYS: &[&str] = &[
     "DropdownSearchPlaceholder",
     "DropdownNoResults",
     "WeatherLocationUsed",
+    // Clear Crystal optical glass settings.
+    "SectionGlassEffect",
+    "GlassBlurLabel",
+    "GlassSaturationLabel",
+    "GlassEdgeGlowLabel",
+    "GlassPointerLightLabel",
 ];
 
 #[test]

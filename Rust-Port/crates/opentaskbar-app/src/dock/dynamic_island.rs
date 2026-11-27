@@ -337,6 +337,7 @@ struct DynamicIslandWindow {
     is_dark: bool,
     reload_msg: u32,
     dcomp: DcompEngine,
+    spatial_glass: Option<design::spatial_glass::SpatialGlassHost>,
     chrome_node: VisualNode,
     viewport_node: VisualNode,
     viewport_clip: IDCompositionRectangleClip,
@@ -450,6 +451,16 @@ impl DynamicIslandWindow {
         let mut widget_runtime = WidgetRuntime::default();
         widget_runtime.tick(settings);
 
+        let glass_cfg = design::spatial_glass::SpatialGlassConfig::from_settings(
+            settings,
+            settings.dynamic_island_background,
+            settings.dynamic_island_opacity,
+            is_dark,
+            true,
+        );
+        let spatial_glass =
+            design::spatial_glass::SpatialGlassHost::attach(hwnd_val, false, glass_cfg);
+
         let mut boxed = Box::new(Self {
             hwnd: hwnd_val,
             monitor,
@@ -458,6 +469,7 @@ impl DynamicIslandWindow {
             is_dark,
             reload_msg,
             dcomp,
+            spatial_glass,
             chrome_node,
             viewport_node,
             viewport_clip,
@@ -553,6 +565,16 @@ impl DynamicIslandWindow {
         self.island.page_index = self.current_page.min(self.page_ids.len().saturating_sub(1));
 
         self.width_dips = self.width_for_current_page();
+        let glass_cfg = design::spatial_glass::SpatialGlassConfig::from_settings(
+            &self.settings,
+            self.settings.dynamic_island_background,
+            self.settings.dynamic_island_opacity,
+            self.is_dark,
+            true,
+        );
+        if let Some(ref mut glass) = self.spatial_glass {
+            glass.apply_config(glass_cfg);
+        }
         self.position_window();
         self.render_all();
         let vis_interval_ms = if settings.dynamic_island_auto_hide {
@@ -676,6 +698,20 @@ impl DynamicIslandWindow {
         if self.slide_anim.is_none() && !self.is_dragging {
             self.slide_offset_px = -(self.current_page as f32) * self.viewport_width_px();
         }
+        let slide_h = (COMPACT_HEIGHT_DIPS + 6.0) * dpi.max(0.5);
+        let offset_y = -(self.hide_progress * slide_h).round();
+        if let Some(ref mut glass) = self.spatial_glass {
+            glass.sync_rect(
+                0.0,
+                0.0,
+                w_px as f32,
+                h_px as f32,
+                island_geo::BOTTOM_RADIUS_DIPS * dpi,
+                dpi,
+                0.0,
+                offset_y,
+            );
+        }
     }
 
     fn render_all(&self) {
@@ -687,6 +723,10 @@ impl DynamicIslandWindow {
             String::new()
         };
         let has_expand = Self::has_expandable_content(self.current_page_id());
+        let glass_host_active = self
+            .spatial_glass
+            .as_ref()
+            .is_some_and(design::spatial_glass::SpatialGlassHost::is_enabled);
         if let Ok(surf) = self.dcomp.create_island_chrome_surface(
             self.width_dips,
             COMPACT_HEIGHT_DIPS,
@@ -710,6 +750,7 @@ impl DynamicIslandWindow {
                     (0x18, 0x18, 0x1b)
                 }),
             self.settings.widget_border_thickness.clamp(0.0, 8.0) as f32,
+            glass_host_active,
         ) {
             self.chrome_node.set_content(Some(&surf));
         }
@@ -897,6 +938,9 @@ impl DynamicIslandWindow {
         let slide_h = (COMPACT_HEIGHT_DIPS + 6.0) * self.monitor.dpi_scale.max(0.5);
         let offset_y = -(self.hide_progress * slide_h).round();
         self.dcomp.set_root_offset_y(offset_y);
+        if let Some(ref glass) = self.spatial_glass {
+            glass.set_root_offset(0.0, offset_y);
+        }
         self.dcomp.commit();
     }
 
@@ -962,6 +1006,16 @@ impl DynamicIslandWindow {
             self.slide_offset_px = target_offset;
         }
         self.width_dips = self.width_for_current_page();
+        let glass_cfg = design::spatial_glass::SpatialGlassConfig::from_settings(
+            &self.settings,
+            self.settings.dynamic_island_background,
+            self.settings.dynamic_island_opacity,
+            self.is_dark,
+            true,
+        );
+        if let Some(ref mut glass) = self.spatial_glass {
+            glass.apply_config(glass_cfg);
+        }
         self.position_window();
         self.render_all();
     }
@@ -987,6 +1041,16 @@ impl DynamicIslandWindow {
             self.request_details();
         }
         self.width_dips = self.width_for_current_page();
+        let glass_cfg = design::spatial_glass::SpatialGlassConfig::from_settings(
+            &self.settings,
+            self.settings.dynamic_island_background,
+            self.settings.dynamic_island_opacity,
+            self.is_dark,
+            true,
+        );
+        if let Some(ref mut glass) = self.spatial_glass {
+            glass.apply_config(glass_cfg);
+        }
         self.position_window();
         self.render_all();
     }
@@ -1507,10 +1571,18 @@ unsafe extern "system" fn island_wnd_proc(
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_MOUSEMOVE => {
-            state.handle_mouse_move(loword_i16(lparam), hiword_i16(lparam));
+            let mx = loword_i16(lparam);
+            let my = hiword_i16(lparam);
+            if let Some(ref mut glass) = state.spatial_glass {
+                glass.set_pointer(mx, my);
+            }
+            state.handle_mouse_move(mx, my);
             0
         }
         WM_MOUSELEAVE => {
+            if let Some(ref mut glass) = state.spatial_glass {
+                glass.clear_pointer();
+            }
             state.tracking_mouse = false;
             if state.hovered_btn.is_some() {
                 state.hovered_btn = None;

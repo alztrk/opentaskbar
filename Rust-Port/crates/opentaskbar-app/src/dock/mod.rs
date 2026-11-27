@@ -667,6 +667,7 @@ struct DockState {
     light_strip: bool,
     appbar_registered: bool,
     dcomp: DcompEngine,
+    spatial_glass: Option<design::spatial_glass::SpatialGlassHost>,
     pill: PillNodes,
     shell_bgs: [VisualNode; 3],
     shell_icons: [VisualNode; 3],
@@ -1238,12 +1239,29 @@ impl DockState {
             )
         };
 
+        let glass_cfg = design::spatial_glass::SpatialGlassConfig::from_settings(
+            &settings,
+            settings.dock_background,
+            settings.dock_opacity,
+            is_dark,
+            false,
+        );
+        let spatial_glass = design::spatial_glass::SpatialGlassHost::attach(hwnd, false, glass_cfg);
+        let glass_host_active = spatial_glass
+            .as_ref()
+            .is_some_and(design::spatial_glass::SpatialGlassHost::is_enabled);
+        let has_custom_border = settings.dock_border_color.is_some()
+            || (settings.dock_border_thickness - 1.0).abs() > 0.05;
+
         let bg_alpha = match settings.dock_background {
             SurfaceBackground::None => 0.0_f32,
             SurfaceBackground::Solid => 0.98_f32,
+            SurfaceBackground::Glass if glass_host_active => 0.0_f32,
             SurfaceBackground::Glass => (settings.dock_opacity.clamp(0.1, 1.0) * 0.88) as f32,
         };
-        let bd_alpha = if settings.dock_background == SurfaceBackground::None {
+        let bd_alpha = if settings.dock_background == SurfaceBackground::None
+            || (glass_host_active && !has_custom_border)
+        {
             0.0
         } else {
             bd_rgb.3
@@ -1459,6 +1477,7 @@ impl DockState {
             light_strip,
             appbar_registered: false,
             dcomp,
+            spatial_glass,
             pill,
             shell_bgs,
             shell_icons,
@@ -2141,12 +2160,32 @@ impl DockState {
             )
         };
 
+        let glass_cfg = design::spatial_glass::SpatialGlassConfig::from_settings(
+            &self.settings,
+            self.settings.dock_background,
+            self.settings.dock_opacity,
+            is_dark,
+            false,
+        );
+        if let Some(ref mut glass) = self.spatial_glass {
+            glass.apply_config(glass_cfg);
+        }
+        let glass_host_active = self
+            .spatial_glass
+            .as_ref()
+            .is_some_and(design::spatial_glass::SpatialGlassHost::is_enabled);
+        let has_custom_border = self.settings.dock_border_color.is_some()
+            || (self.settings.dock_border_thickness - 1.0).abs() > 0.05;
+
         let bg_alpha = match self.settings.dock_background {
             SurfaceBackground::None => 0.0_f32,
             SurfaceBackground::Solid => 0.98_f32,
+            SurfaceBackground::Glass if glass_host_active => 0.0_f32,
             SurfaceBackground::Glass => (self.settings.dock_opacity.clamp(0.1, 1.0) * 0.88) as f32,
         };
-        let bd_alpha = if self.settings.dock_background == SurfaceBackground::None {
+        let bd_alpha = if self.settings.dock_background == SurfaceBackground::None
+            || (glass_host_active && !has_custom_border)
+        {
             0.0
         } else {
             bd_rgb.3
@@ -3456,20 +3495,33 @@ impl DockState {
         let hide_shift_px =
             (self.hide_progress * hide_offset(edge, pill_h + VERTICAL_EDGE_GAP + 10.0) * dpi)
                 .round();
-        if vertical {
-            self.dcomp.set_root_offset_x(hide_shift_px);
-            self.dcomp.set_root_offset_y(0.0);
+        let (hide_x_px, hide_y_px) = if vertical {
+            (hide_shift_px, 0.0)
         } else {
-            self.dcomp.set_root_offset_y(hide_shift_px);
-            self.dcomp.set_root_offset_x(0.0);
-        }
+            (0.0, hide_shift_px)
+        };
+        self.dcomp.set_root_offset_x(hide_x_px);
+        self.dcomp.set_root_offset_y(hide_y_px);
 
-        // 1. 3-piece pill transform.
+        // 1. 3-piece pill transform + Clear Crystal Spatial Glass host sync (Glass mode only).
         let cap_w_px = self.pill.cap_w_px;
         let pill_left_px = (pill_left * dpi).round();
         let pill_top_px = (pill_top * dpi).round();
         let pill_w_px = (pill_w * dpi).round().max(cap_w_px * 2.0 + 1.0);
+        let pill_h_px = (pill_h * dpi).round().max(1.0);
         let center_w_px = (pill_w_px - cap_w_px * 2.0).max(1.0);
+        if let Some(ref mut glass) = self.spatial_glass {
+            glass.sync_rect(
+                pill_left_px,
+                pill_top_px,
+                pill_w_px,
+                pill_h_px,
+                self.settings.corner_radius_dips() * dpi,
+                dpi,
+                hide_x_px,
+                hide_y_px,
+            );
+        }
         self.pill
             .left
             .set_transform(1.0, 1.0, pill_left_px, pill_top_px);
@@ -4114,6 +4166,13 @@ impl DockState {
         let anchor_bottom_y = win_y + ((top_edge - 10.0) * self.dpi).round() as i32;
 
         if let Some(ref mut preview) = self.preview {
+            preview.set_glass_mode(
+                self.settings.dock_background == SurfaceBackground::Glass,
+                opentaskbar_core::settings::clear_crystal_tint_alpha(
+                    self.settings.dock_opacity,
+                    self.is_dark,
+                ),
+            );
             preview.show(&key, &items, anchor_x, anchor_bottom_y, self.is_dark);
             // DWM Aero Peek is user-controlled: HKCU\...\DWM\EnableAeroPeek = 0
             // means no live preview even though the thumbnails still render.
@@ -6247,8 +6306,13 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_MOUSEMOVE => {
-            let mx = loword_i16(lparam) / state.dpi;
-            let my = hiword_i16(lparam) / state.dpi;
+            let mx_px = loword_i16(lparam);
+            let my_px = hiword_i16(lparam);
+            if let Some(ref mut glass) = state.spatial_glass {
+                glass.set_pointer(mx_px, my_px);
+            }
+            let mx = mx_px / state.dpi;
+            let my = my_px / state.dpi;
             // 1000 Hz mice repeat the same point many times; hit testing and
             // animation wake-ups must run only for a genuinely new coordinate.
             if layout::mouse_move_coalesce(&mut state.last_mouse_move, mx, my) {
@@ -6259,6 +6323,9 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_MOUSELEAVE => {
+            if let Some(ref mut glass) = state.spatial_glass {
+                glass.clear_pointer();
+            }
             state.handle_mouse_leave();
             0
         }

@@ -1340,5 +1340,10 @@
   "OpenLocation": "위치 열기",
   "DropdownSearchPlaceholder": "검색...",
   "DropdownNoResults": "결과가 없습니다",
-  "WeatherLocationUsed": "현재 위치를 사용 중입니다"
+  "WeatherLocationUsed": "현재 위치를 사용 중입니다",
+  "SectionGlassEffect": "유리 효과 (Clear Crystal)",
+  "GlassBlurLabel": "유리 흐림",
+  "GlassSaturationLabel": "유리 채도",
+  "GlassEdgeGlowLabel": "유리 테두리 빛",
+  "GlassPointerLightLabel": "커서 테두리 반사"
 }

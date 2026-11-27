@@ -1340,5 +1340,10 @@
   "OpenLocation": "Open location",
   "DropdownSearchPlaceholder": "Search...",
   "DropdownNoResults": "No results found",
-  "WeatherLocationUsed": "Using your location"
+  "WeatherLocationUsed": "Using your location",
+  "SectionGlassEffect": "Glass effect (Clear Crystal)",
+  "GlassBlurLabel": "Glass blur",
+  "GlassSaturationLabel": "Glass vibrancy",
+  "GlassEdgeGlowLabel": "Glass edge light",
+  "GlassPointerLightLabel": "Cursor edge reflection"
 }

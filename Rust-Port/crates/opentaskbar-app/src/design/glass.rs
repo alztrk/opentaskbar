@@ -19,6 +19,8 @@ use super::tokens::Rgba;
 
 /// `DWMWA_SYSTEMBACKDROP_TYPE` (Windows 11).
 pub const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
+/// `DWMSBT_NONE` — disables system backdrop when the user selects Solid or None.
+pub const DWMSBT_NONE: u32 = 1;
 /// `DWMSBT_TRANSIENTWINDOW` — the acrylic "flyout" backdrop.
 pub const DWMSBT_TRANSIENTWINDOW: u32 = 3;
 pub const DWMWA_BORDER_COLOR: u32 = 34;
@@ -149,6 +151,24 @@ pub trait GlassBackend {
 /// or any of the required DWM/composition calls fail.
 pub fn apply_window_backdrop(hwnd: usize, is_dark: bool) -> bool {
     apply_window_backdrop_with(hwnd, is_dark, &WindowsBackend)
+}
+
+/// Clears any previously applied DWM system backdrop when a window switches out of Glass mode.
+pub fn clear_window_backdrop(hwnd: usize, is_dark: bool) -> bool {
+    if !valid_handle(hwnd) || !WindowsBackend.is_valid_window(hwnd) {
+        return false;
+    }
+    let _ = WindowsBackend.set_window_attribute(
+        hwnd,
+        DWMWA_USE_IMMERSIVE_DARK_MODE,
+        u32::from(is_dark),
+    );
+    let version = classify_windows(WindowsBackend.build_number());
+    if version == WindowsVersion::Windows11OrNewer {
+        WindowsBackend.set_window_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE)
+    } else {
+        true
+    }
 }
 
 /// Same as [`apply_window_backdrop`] with an explicit backend (test seam).

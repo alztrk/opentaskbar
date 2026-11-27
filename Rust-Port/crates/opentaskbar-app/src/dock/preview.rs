@@ -33,15 +33,17 @@ use windows_numerics::Vector2;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION, DWM_TNP_VISIBLE,
-    DWMWA_BORDER_COLOR, DWMWA_EXCLUDED_FROM_PEEK, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DwmQueryThumbnailSourceSize, DwmRegisterThumbnail,
-    DwmSetWindowAttribute, DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
+    DWMWA_BORDER_COLOR, DWMWA_EXCLUDED_FROM_PEEK, DWMWA_SYSTEMBACKDROP_TYPE,
+    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DwmExtendFrameIntoClientArea,
+    DwmQueryThumbnailSourceSize, DwmRegisterThumbnail, DwmSetWindowAttribute,
+    DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection,
     DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, InvalidateRect, PAINTSTRUCT, SRCCOPY,
     SelectObject,
 };
+use windows_sys::Win32::UI::Controls::MARGINS;
 
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Registry::{
@@ -175,6 +177,8 @@ pub struct PreviewPopup {
     hwnd: HWND,
     dpi: f32,
     is_dark: bool,
+    glass_mode: bool,
+    glass_tint_alpha: f32,
     visible: bool,
     pointer_inside: bool,
     tracking_mouse: bool,
@@ -310,6 +314,8 @@ impl PreviewPopup {
             hwnd,
             dpi,
             is_dark: true,
+            glass_mode: true,
+            glass_tint_alpha: 0.18,
             visible: false,
             pointer_inside: false,
             tracking_mouse: false,
@@ -324,6 +330,31 @@ impl PreviewPopup {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr);
         }
         Some(popup)
+    }
+
+    pub fn set_glass_mode(&mut self, glass_mode: bool, tint_alpha: f32) {
+        self.glass_mode = glass_mode;
+        self.glass_tint_alpha = tint_alpha;
+        unsafe {
+            let margins = MARGINS {
+                cxLeftWidth: if glass_mode { -1 } else { 0 },
+                cxRightWidth: if glass_mode { -1 } else { 0 },
+                cyTopHeight: if glass_mode { -1 } else { 0 },
+                cyBottomHeight: if glass_mode { -1 } else { 0 },
+            };
+            let _ = DwmExtendFrameIntoClientArea(self.hwnd, &margins);
+            let backdrop: u32 = if glass_mode {
+                crate::design::glass::DWMSBT_TRANSIENTWINDOW
+            } else {
+                crate::design::glass::DWMSBT_NONE
+            };
+            let _ = DwmSetWindowAttribute(
+                self.hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE as u32,
+                (&backdrop as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+        }
     }
 
     pub fn is_visible(&self) -> bool {
@@ -613,7 +644,17 @@ impl PreviewPopup {
             }
             unsafe {
                 d2d.target.BeginDraw();
-                d2d.target.Clear(Some(&d2d_rgba(pal.surface, 1.0)));
+                let bg = if self.glass_mode {
+                    let tint = if self.is_dark {
+                        (0x10_u8, 0x12_u8, 0x18_u8)
+                    } else {
+                        (0xf6_u8, 0xf8_u8, 0xfc_u8)
+                    };
+                    d2d_rgba(tint, self.glass_tint_alpha.clamp(0.18, 0.48))
+                } else {
+                    d2d_rgba(pal.surface, 1.0)
+                };
+                d2d.target.Clear(Some(&bg));
             }
 
             // Subtle top specular highlight matching flyouts and menus.

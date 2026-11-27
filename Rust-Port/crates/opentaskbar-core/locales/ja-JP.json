@@ -1340,5 +1340,10 @@
   "OpenLocation": "場所を開く",
   "DropdownSearchPlaceholder": "検索...",
   "DropdownNoResults": "結果が見つかりません",
-  "WeatherLocationUsed": "現在地を使用しています"
+  "WeatherLocationUsed": "現在地を使用しています",
+  "SectionGlassEffect": "ガラス効果 (Clear Crystal)",
+  "GlassBlurLabel": "ガラスのぼかし",
+  "GlassSaturationLabel": "ガラスの彩度",
+  "GlassEdgeGlowLabel": "ガラスのエッジライト",
+  "GlassPointerLightLabel": "カーソルエッジ反射"
 }

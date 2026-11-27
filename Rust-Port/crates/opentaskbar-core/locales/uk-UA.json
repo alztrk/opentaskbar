@@ -1340,5 +1340,10 @@
   "OpenLocation": "Відкрити розташування",
   "DropdownSearchPlaceholder": "Пошук...",
   "DropdownNoResults": "Результатів не знайдено",
-  "WeatherLocationUsed": "Використовується ваше місцезнаходження"
+  "WeatherLocationUsed": "Використовується ваше місцезнаходження",
+  "SectionGlassEffect": "Ефект скла (Clear Crystal)",
+  "GlassBlurLabel": "Розмиття скла",
+  "GlassSaturationLabel": "Насиченість скла",
+  "GlassEdgeGlowLabel": "Підсвітка краю скла",
+  "GlassPointerLightLabel": "Відблиск на краю від курсора"
 }

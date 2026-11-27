@@ -12,8 +12,7 @@ use opentaskbar_core::settings::DockSettings;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
-    DWMWA_BORDER_COLOR, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DwmSetWindowAttribute,
+    DWMWA_BORDER_COLOR, DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW,
@@ -669,13 +668,24 @@ pub fn configure_native_dock_hwnd(hwnd_val: usize) {
             | (WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE) as usize;
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next as isize);
 
-        let ncrp = DWMNCRP_DISABLED;
+        // Enable Windows 11 HostBackdropBrush sampling on transparent WS_EX_NOREDIRECTIONBITMAP
+        // dock/island windows without setting DWMWA_SYSTEMBACKDROP_TYPE (which causes a giant
+        // rectangular gray backdrop) and without DWMNCRP_DISABLED (which blocks HostBackdropBrush).
+        const DWMWA_USE_HOSTBACKDROPBRUSH: u32 = 17;
+        let use_host_backdrop: u32 = 1;
         let _ = DwmSetWindowAttribute(
             hwnd,
-            DWMWA_NCRENDERING_POLICY as u32,
-            (&ncrp as *const u32).cast(),
+            DWMWA_USE_HOSTBACKDROPBRUSH,
+            (&use_host_backdrop as *const u32).cast(),
             size_of::<u32>() as u32,
         );
+        let margins = windows_sys::Win32::UI::Controls::MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
+        };
+        let _ = windows_sys::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea(hwnd, &margins);
 
         let corner = DWMWCP_DONOTROUND;
         let _ = DwmSetWindowAttribute(

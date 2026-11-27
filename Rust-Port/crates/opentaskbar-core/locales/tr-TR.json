@@ -1340,5 +1340,10 @@
   "OpenLocation": "Konumu aç",
   "DropdownSearchPlaceholder": "Ara...",
   "DropdownNoResults": "Sonuç bulunamadı",
-  "WeatherLocationUsed": "Konumunuz kullanılıyor"
+  "WeatherLocationUsed": "Konumunuz kullanılıyor",
+  "SectionGlassEffect": "Cam efekti (Clear Crystal)",
+  "GlassBlurLabel": "Cam bulanıklığı",
+  "GlassSaturationLabel": "Cam renk canlılığı",
+  "GlassEdgeGlowLabel": "Cam kenar ışığı",
+  "GlassPointerLightLabel": "İmleç kenar yansıması"
 }

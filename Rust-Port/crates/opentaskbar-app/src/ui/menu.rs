@@ -49,7 +49,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOPMOST, WS_POPUP,
 };
 
-use opentaskbar_core::settings::DockSettings;
+use opentaskbar_core::settings::{DockSettings, SurfaceBackground, clear_crystal_tint_alpha};
 
 use crate::design::fonts;
 use crate::design::icons::{self, AppIcon};
@@ -182,6 +182,10 @@ impl MenuEntry {
 pub struct BorderStyle {
     pub rgb: Rgb,
     pub width_dips: f32,
+    /// True only when the owning surface (`menu_background` / `widget_background`) is in Glass mode.
+    pub glass_mode: bool,
+    /// Clear Crystal translucent tint alpha derived from the surface opacity.
+    pub glass_tint_alpha: f32,
 }
 
 impl BorderStyle {
@@ -190,25 +194,33 @@ impl BorderStyle {
         Self {
             rgb: design::palette(is_dark).border_rgb,
             width_dips: 1.0,
+            glass_mode: true,
+            glass_tint_alpha: clear_crystal_tint_alpha(0.9, is_dark),
         }
     }
 
-    /// Popup menus follow the `menu_border_*` settings.
+    /// Popup menus follow the `menu_border_*` and `menu_background` settings.
     pub fn from_menu_settings(is_dark: bool, settings: &DockSettings) -> Self {
-        Self::from_settings(
+        let mut style = Self::from_settings(
             is_dark,
             &settings.menu_border_color,
             settings.menu_border_thickness,
-        )
+        );
+        style.glass_mode = settings.menu_background == SurfaceBackground::Glass;
+        style.glass_tint_alpha = clear_crystal_tint_alpha(settings.menu_opacity, is_dark);
+        style
     }
 
-    /// Widget flyouts follow the `widget_border_*` settings.
+    /// Widget flyouts follow the `widget_border_*` and `widget_background` settings.
     pub fn from_widget_settings(is_dark: bool, settings: &DockSettings) -> Self {
-        Self::from_settings(
+        let mut style = Self::from_settings(
             is_dark,
             &settings.widget_border_color,
             settings.widget_border_thickness,
-        )
+        );
+        style.glass_mode = settings.widget_background == SurfaceBackground::Glass;
+        style.glass_tint_alpha = clear_crystal_tint_alpha(settings.widget_opacity, is_dark);
+        style
     }
 
     fn from_settings(is_dark: bool, color: &Option<String>, thickness: f64) -> Self {
@@ -221,7 +233,12 @@ impl BorderStyle {
         } else {
             1.0
         };
-        Self { rgb, width_dips }
+        Self {
+            rgb,
+            width_dips,
+            glass_mode: true,
+            glass_tint_alpha: clear_crystal_tint_alpha(0.9, is_dark),
+        }
     }
 }
 
@@ -656,20 +673,24 @@ fn create_pane_window(
             (&corner as *const u32).cast(),
             size_of::<u32>() as u32,
         );
-        let margins = MARGINS {
-            cxLeftWidth: -1,
-            cxRightWidth: -1,
-            cyTopHeight: -1,
-            cyBottomHeight: -1,
-        };
-        let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
-        let backdrop = DWMSBT_TRANSIENTWINDOW;
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_SYSTEMBACKDROP_TYPE as u32,
-            (&backdrop as *const u32).cast(),
-            size_of::<u32>() as u32,
-        ) == 0
+        if border.glass_mode {
+            let margins = MARGINS {
+                cxLeftWidth: -1,
+                cxRightWidth: -1,
+                cyTopHeight: -1,
+                cyBottomHeight: -1,
+            };
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+            let backdrop = DWMSBT_TRANSIENTWINDOW;
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE as u32,
+                (&backdrop as *const u32).cast(),
+                size_of::<u32>() as u32,
+            ) == 0
+        } else {
+            false
+        }
     };
 
     let d2d = create_menu_d2d(hwnd, menu_w as u32, menu_h as u32, dpi);
@@ -935,7 +956,12 @@ impl MenuPane {
         ) = if self.is_dark {
             (
                 if self.acrylic {
-                    rgba_f(0x18, 0x18, 0x1b, 0.35)
+                    rgba_f(
+                        0x10,
+                        0x12,
+                        0x18,
+                        self.border.glass_tint_alpha.clamp(0.14, 0.45),
+                    )
                 } else {
                     rgba_f(0x1a, 0x1a, 0x1e, 0.98)
                 },
@@ -950,7 +976,12 @@ impl MenuPane {
         } else {
             (
                 if self.acrylic {
-                    rgba_f(0xf9, 0xf9, 0xfb, 0.35)
+                    rgba_f(
+                        0xf6,
+                        0xf8,
+                        0xfc,
+                        self.border.glass_tint_alpha.clamp(0.18, 0.50),
+                    )
                 } else {
                     rgba_f(0xff, 0xff, 0xff, 0.98)
                 },

@@ -1340,5 +1340,10 @@
   "OpenLocation": "Locatie openen",
   "DropdownSearchPlaceholder": "Zoeken...",
   "DropdownNoResults": "Geen resultaten gevonden",
-  "WeatherLocationUsed": "Uw locatie wordt gebruikt"
+  "WeatherLocationUsed": "Uw locatie wordt gebruikt",
+  "SectionGlassEffect": "Glaseffect (Clear Crystal)",
+  "GlassBlurLabel": "Glasvervaging",
+  "GlassSaturationLabel": "Glaskleurintensiteit",
+  "GlassEdgeGlowLabel": "Glasrandlicht",
+  "GlassPointerLightLabel": "Cursorrandreflectie"
 }

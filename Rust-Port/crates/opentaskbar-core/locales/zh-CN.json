@@ -1340,5 +1340,10 @@
   "OpenLocation": "打开位置",
   "DropdownSearchPlaceholder": "搜索...",
   "DropdownNoResults": "未找到结果",
-  "WeatherLocationUsed": "正在使用您的位置"
+  "WeatherLocationUsed": "正在使用您的位置",
+  "SectionGlassEffect": "玻璃效果 (Clear Crystal)",
+  "GlassBlurLabel": "玻璃模糊",
+  "GlassSaturationLabel": "玻璃饱和度",
+  "GlassEdgeGlowLabel": "玻璃边缘光效",
+  "GlassPointerLightLabel": "光标边缘反光"
 }
