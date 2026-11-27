@@ -589,6 +589,9 @@ mod tests {
 
     #[test]
     fn bundled_packs_have_valid_manifests() {
+        // Bundled files are shared with the other theme-parity tests; serialize so
+        // a concurrent install/import cannot be observed half-written.
+        let _guard = crate::design::theme::theme_test_guard();
         let root = Path::new(crate::resource!("themes"));
         for id in [
             "catppuccin",

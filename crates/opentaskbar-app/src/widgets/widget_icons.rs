@@ -222,6 +222,39 @@ pub fn load_bgra(path: &Path) -> Option<Arc<(u32, u32, Vec<u8>)>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::UNIX_EPOCH;
+
+    static TEST_UNIQUE: AtomicU64 = AtomicU64::new(0);
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "otb-icon-{tag}-{}-{}-{nanos}",
+                std::process::id(),
+                TEST_UNIQUE.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = fs::remove_dir_all(&path);
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
 
     #[test]
     fn safe_ids_reject_traversal() {
@@ -234,38 +267,38 @@ mod tests {
 
     #[test]
     fn relative_paths_cannot_escape_the_pack() {
-        let base = std::env::temp_dir().join("opentaskbar-icon-test");
+        let temp = TempDir::new("paths");
+        let base = temp.path();
         fs::create_dir_all(base.join("icons")).unwrap();
         let file = base.join("icon.png");
         let nested = base.join("icons").join("icon.png");
         fs::write(&file, b"not-a-real-png").unwrap();
         fs::write(&nested, b"not-a-real-png").unwrap();
         assert_eq!(
-            inside_dir(&base, "icon.png"),
+            inside_dir(base, "icon.png"),
             Some(fs::canonicalize(&file).unwrap())
         );
         assert_eq!(
-            inside_dir(&base, "icons\\icon.png"),
+            inside_dir(base, "icons\\icon.png"),
             Some(fs::canonicalize(&nested).unwrap())
         );
-        assert!(inside_dir(&base, "../secret.png").is_none());
-        assert!(inside_dir(&base, "C:\\secret.png").is_none());
-        fs::remove_dir_all(&base).ok();
+        assert!(inside_dir(base, "../secret.png").is_none());
+        assert!(inside_dir(base, "C:\\secret.png").is_none());
     }
 
     #[test]
     fn path_data_wins_over_file_mapping() {
-        let dir = std::env::temp_dir().join("opentaskbar-icon-manifest-test");
-        fs::create_dir_all(&dir).unwrap();
+        let temp = TempDir::new("manifest");
+        let dir = temp.path();
+        fs::create_dir_all(dir).unwrap();
         let value: Value = serde_json::from_str(
             r#"{"icons":{"widget:clock":"icons/clock.png"},"pathData":{"widget:clock":"M0 0 L10 10 Z"}}"#,
         )
         .unwrap();
         assert_eq!(
-            icon_from_manifest(&value, "clock", &dir),
+            icon_from_manifest(&value, "clock", dir),
             Some(WidgetIcon::PathData("M0 0 L10 10 Z".to_owned()))
         );
-        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

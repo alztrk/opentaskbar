@@ -1314,13 +1314,18 @@ impl ThemeState {
     }
 }
 
-/// ThemeManager is process-global; tests that mutate the live palette (in this module or in
-/// the Settings tests) must hold this guard so one test's overrides cannot change another
-/// test's expectations while it asserts.
+/// One process-wide lock for every test that touches shared theme state: the global
+/// `ThemeManager`, bundled theme resources, and the sidecar/registry tests that
+/// install or read those resources. Tests must take [`theme_test_guard`] before
+/// mutating or observing any of it.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Serializes tests that share the live palette, bundled theme files or sidecar state.
+/// Poisoning is recovered from: a failing test must not deadlock every later test.
 #[cfg(test)]
 pub(crate) fn theme_test_guard() -> std::sync::MutexGuard<'static, ()> {
-    static THEME_TEST_LOCK: Mutex<()> = Mutex::new(());
-    THEME_TEST_LOCK
+    TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
