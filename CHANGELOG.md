@@ -9,11 +9,11 @@ gated against it by `scripts/check-release-version.ps1`.
 ### Removed features and stale code paths
 
 - Removed the bundled file manager, per-monitor top bar and Wi-Fi panel, including their launch modes, settings toggles, dock menu entries and 50 panel-only locale keys. The Rust catalog gate is now **1373 keys** in each of 14 languages; the frozen reference snapshots remain at 1046 keys.
-- Removed the remaining outdated documentation, history and source-path references. Documentation now describes only the root workspace: `Cargo.toml`, `crates/`, `scripts/` and the shared `%LOCALAPPDATA%\OpenTaskbar` data folder.
+- Removed the remaining outdated documentation, history and source-path references. Documentation now describes the root workspace first — `Cargo.toml`, `crates/`, `scripts/` — alongside `docs/`, `resources/`, `packaging/`, `tests/` and `tools/`, plus the shared `%LOCALAPPDATA%\OpenTaskbar` data folder.
 
 ### Repository and pipeline
 
-- Flattened the Rust workspace into the repository root: `Cargo.toml`, `Cargo.lock`, `crates/`, `Fonts/`, `Assets/`, `themes/` and the merged README now live at the top level. CI path filters, packaging scripts, docs and test helpers resolve paths from the new root.
+- Flattened the Rust workspace into the repository root: `Cargo.toml`, `Cargo.lock`, `crates/` and the merged README now live at the top level; bundled data lives in `resources/fonts/`, `resources/assets/` and `resources/themes/`. CI path filters, packaging scripts, docs and test helpers resolve paths from the new root.
 - MSIX packaging uses `packaging/msix/AppxManifest.Rust.xml`; the release workflow builds x64/x86 Rust EXEs and ZIPs only.
 
 ### Behavior and UI

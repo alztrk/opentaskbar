@@ -1,0 +1,12 @@
+{
+  // Custom-widget icon overrides. Use the widget's slug — its id without the
+  // "custom:" prefix — for example "widget:usd-try" for custom:usd-try.
+  // Paths stay inside this theme (e.g. "icons/usd.png"); ".." and absolute
+  // paths are rejected. See docs/guides/themes.md for every option.
+  "icons": {
+    // "widget:usd-try": "icons/usd.png"
+  },
+  "pathData": {
+    // "widget:groups": "M3 3 L21 3 L21 21 L3 21 Z"
+  }
+}

@@ -24,7 +24,7 @@ OpenTaskbar replaces the Windows taskbar with a floating row of app icons. Hover
 - **Reach Windows controls.** Start, Search, Task View and the Recycle Bin have their own buttons. Right-click an app to see its Windows Jump List (pinned tasks and recent files).
 - **Hide it when you want.** Choose to keep it always visible, hide it when a window covers it, or hide it until you move your mouse to its edge. It also gets out of the way for fullscreen games and videos.
 - **Make it look like yours.** Move it to the bottom, left or right of your screen; change its size, corners and see-through look; pick one of six color themes or add your own. You can even change the app icons — see [Themes](docs/guides/themes.md).
-- **See useful things at a glance.** 22 widgets are included: clock, weather, music, Wi-Fi and Bluetooth switches, volume, computer and battery usage, focus timer, stopwatch, network speed, and how much of your AI plan is left (Claude, Codex, OpenCode, Copilot, DeepSeek, OpenRouter or Cursor). You can also [add your own](docs/guides/custom-widgets.md).
+- **See useful things at a glance.** 22 widgets are included. Examples: clock & date, weather, day progress, stopwatch, countdown, system stats, net speed, battery, Bluetooth battery, storage, focus, media and audio, Wi-Fi and Bluetooth switches, quick settings, keyboard layout, and AI quota widgets for Claude, Codex, OpenCode, Copilot, DeepSeek, OpenRouter and Cursor (plus an aggregate). You can also [add your own](docs/guides/custom-widgets.md).
 - **Use every screen.** Have a dock on each monitor, or use the optional strip at the top of the screen.
 - **Never lose your taskbar.** If OpenTaskbar closes or crashes, the normal Windows taskbar comes back by itself. You can also restore it any time with `OpenTaskbar.exe --restore`.
 
@@ -57,7 +57,7 @@ To change the language or the look, open **Settings → Appearance**. There are 
 
 ## Privacy and license
 
-OpenTaskbar doesn't collect anything about you. It only goes online when you turn on a feature that needs it, such as weather or update checks, and your credentials stay on your computer. See [PRIVACY.md](PRIVACY.md). It's free under the MIT license — see [LICENSE](LICENSE).
+OpenTaskbar doesn't collect anything about you. The portable build checks for updates by default; turn that off in Settings if you don't want the check. Otherwise it only goes online when you turn on a feature that needs it, such as weather, and your credentials stay on your computer. See [PRIVACY.md](PRIVACY.md). It's free under the MIT license — see [LICENSE](LICENSE).
 
 <details>
 <summary><strong>Technical details (for developers)</strong></summary>
@@ -153,8 +153,8 @@ Flags are read from `DockSettings.extra`; defaults match the code.
 | `enable_live_tray_host` | `false` | Registry discovery and tray strip leave the native tray untouched |
 | `native_flyout_reposition` | `true` | Generation-cancelled Start/Search/Control Center positioning; `false` uses journal-only legacy positioning |
 | `enable_vertical_dock` | `true` | Left/right edges enabled; `false` forces Bottom |
-| `enable_vendor_battery_probes` | `false` | Generic HID capacity reading until vendor transports are enabled |
-| `enable_theme_editor` | `false` | Theme list/import/export only; no token editing |
-| `enable_ai_oauth` | `true` | AI account sign-in flows; missing token stays in the "Sign in" state |
+
+The theme editor, vendor battery reading and AI sign-in flows are always
+available; they are not gated by settings flags.
 
 </details>
