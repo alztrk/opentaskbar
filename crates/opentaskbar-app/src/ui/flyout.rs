@@ -27,8 +27,8 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_ELLIPSE,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT,
-    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory1,
-    ID2D1SolidColorBrush,
+    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget,
+    ID2D1Factory1, ID2D1SolidColorBrush,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_FEATURE, DWRITE_FONT_FEATURE_TAG_TABULAR_FIGURES,
@@ -60,8 +60,8 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT,
-    TrackMouseEvent, VK_BACK, VK_ESCAPE, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_RETURN, VK_SHIFT,
-    VK_SPACE, VK_TAB,
+    TrackMouseEvent, VK_BACK, VK_DELETE, VK_ESCAPE, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_RETURN,
+    VK_SHIFT, VK_SPACE, VK_TAB,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
@@ -83,6 +83,7 @@ use crate::design::spatial_glass::{
 };
 use crate::design::{self, Rgb, gdi_rgb};
 use crate::platform::win32;
+use crate::ui::text_input::{MAX_TEXT_CHARS, normalize_numeric, push_char};
 use crate::widgets::telemetry;
 
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -145,7 +146,8 @@ fn flyout_anim_interval_ms() -> u32 {
 
 /// `DockFlyout.RetainForExternalContextMenu`: keep the flyout alive while the target
 /// application's own native context menu (#32768) is on screen.
-#[allow(dead_code)] // invoked by WS-D dock windows after merge
+/// Public API for dock call sites; currently unused inside this crate.
+#[allow(dead_code)]
 pub fn retain_for_external_context_menu(active: bool) {
     EXTERNAL_MENU_ACTIVE.store(active, Ordering::Release);
 }
@@ -159,9 +161,7 @@ pub fn external_context_menu_active() -> bool {
 pub enum FlyoutEdge {
     #[default]
     Bottom,
-    #[allow(dead_code)] // used by WS-D vertical dock after merge
     Left,
-    #[allow(dead_code)]
     Right,
 }
 
@@ -384,13 +384,11 @@ pub enum LiveEvent {
         ratio: f32,
     },
     /// Media timeline scrubbing — `ratio` is in `0.0..=1.0`.
-    #[allow(dead_code)] // consumed by WS-C widgets after merge
     Seek {
         id: u32,
         ratio: f32,
     },
     /// Text input committed with Enter (numeric inputs are clamped to their bounds).
-    #[allow(dead_code)] // consumed by WS-C widgets after merge
     TextCommit {
         id: u32,
         text: String,
@@ -401,6 +399,32 @@ pub enum LiveEvent {
 pub enum LiveOutcome {
     Update(FlyoutSpec),
     Close,
+}
+
+/// Pure half of `dispatch_live`: resolves an outcome to the next spec. `None`
+/// means "close the flyout". Keeping it separate lets tests verify the actual
+/// decision (including calendar preservation on a periodic tick) without
+/// creating a Win32 window.
+fn resolve_live_outcome(
+    current: &FlyoutSpec,
+    outcome: LiveOutcome,
+    is_tick: bool,
+) -> Option<FlyoutSpec> {
+    match outcome {
+        LiveOutcome::Update(mut spec) => {
+            if is_tick {
+                preserve_calendar_navigation(current, &mut spec);
+            }
+            Some(spec)
+        }
+        LiveOutcome::Close => None,
+    }
+}
+
+/// Square image size in DIPs, clamped once for layout and paint.
+#[must_use]
+fn image_size_dips(value: f32) -> f32 {
+    value.clamp(24.0, 160.0)
 }
 
 /// Semantic color mode for `FlyoutBlock::ProgressBar`.
@@ -532,8 +556,7 @@ pub enum FlyoutBlock {
     /// Horizontal button row: `(id, label, primary_selected_style)`.
     ButtonBar(Vec<(u32, String, bool)>),
 
-    // ---- C2 contract blocks (WS-C widget flyouts consume these verbatim) ----
-    #[allow(dead_code)] // consumed by WS-C widgets after merge
+    // ---- C2 contract blocks (widget flyouts consume these verbatim) ----
     /// Media / timeline scrubber. `ratio` is authoritative for rendering; the
     /// `position_secs`/`duration_secs` pair supplies the `m:ss / m:ss` caption.
     SeekSlider {
@@ -545,7 +568,6 @@ pub enum FlyoutBlock {
     },
     /// Inline editable text field (e.g. custom countdown minutes). Emits
     /// `LiveEvent::TextCommit` on Enter; numeric fields accept only numbers.
-    #[allow(dead_code)] // consumed by WS-C widgets after merge
     TextInput {
         id: u32,
         label: String,
@@ -555,7 +577,6 @@ pub enum FlyoutBlock {
         max: f64,
     },
     /// Multi-series sparkline/area chart: `(series_name, samples)` with an accent color.
-    #[allow(dead_code)] // consumed by WS-C widgets after merge
     Chart {
         label: String,
         series: Vec<(String, Vec<f32>)>,
@@ -563,14 +584,12 @@ pub enum FlyoutBlock {
     },
     /// Cover art / country flag. `glyph` is a Segoe Fluent Icons code point used
     /// when `path` is absent or cannot be decoded; `size_dips` is the square size.
-    #[allow(dead_code)] // consumed by WS-C widgets after merge
     Image {
         glyph: u16,
         path: Option<String>,
         size_dips: f32,
     },
     /// Compact toolbar: `(id, accessible label, Segoe Fluent Icons glyph, active)`.
-    #[allow(dead_code)] // consumed by WS-C widgets after merge
     IconBar {
         buttons: Vec<(u32, String, u16, bool)>,
     },
@@ -663,6 +682,9 @@ struct FlyoutD2d {
     target: ID2D1DCRenderTarget,
     tabular: Option<IDWriteTypography>,
     formats: HashMap<(bool, u16, u16, u8, String), IDWriteTextFormat>,
+    /// Decoded cover bitmaps keyed by path. A live-tick repaint must not decode
+    /// the same JPEG from disk (and upload a fresh D2D bitmap) every second.
+    covers: HashMap<String, Option<ID2D1Bitmap>>,
 }
 
 thread_local! {
@@ -736,6 +758,7 @@ impl FlyoutD2d {
                 target,
                 tabular,
                 formats: HashMap::new(),
+                covers: HashMap::new(),
             })
         }
     }
@@ -1034,27 +1057,64 @@ impl FlyoutD2d {
         }
     }
 
-    fn draw_cover_image(&self, path: &str, dst: D2D_RECT_F) {
-        let Ok(img) = image::open(path) else {
+    /// Decodes one cover image into a target-owned D2D bitmap. Called at most
+    /// once per distinct path; failures are cached as `None` so a missing file
+    /// is not retried on every repaint.
+    fn load_cover_bitmap(&self, path: &str) -> Option<ID2D1Bitmap> {
+        let img = image::open(path).ok()?.to_rgba8();
+        let (w, h) = (img.width(), img.height());
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let mut premul = Vec::with_capacity(w as usize * h as usize * 4);
+        for px in img.as_raw().chunks_exact(4) {
+            let a = u16::from(px[3]);
+            premul.push(((u16::from(px[2]) * a + 127) / 255) as u8);
+            premul.push(((u16::from(px[1]) * a + 127) / 255) as u8);
+            premul.push(((u16::from(px[0]) * a + 127) / 255) as u8);
+            premul.push(px[3]);
+        }
+        let props = D2D1_BITMAP_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+        };
+        // SAFETY: `premul` outlives the call; D2D copies all pixel data into the bitmap.
+        unsafe {
+            self.target
+                .CreateBitmap(
+                    D2D_SIZE_U {
+                        width: w,
+                        height: h,
+                    },
+                    Some(premul.as_ptr().cast()),
+                    w * 4,
+                    &props,
+                )
+                .ok()
+        }
+    }
+
+    fn draw_cover_image(&mut self, path: &str, dst: D2D_RECT_F) {
+        if !self.covers.contains_key(path) {
+            let bitmap = self.load_cover_bitmap(path);
+            self.covers.insert(path.to_owned(), bitmap);
+        }
+        let Some(Some(bitmap)) = self.covers.get(path) else {
             return;
         };
-        let rgba = img.to_rgba8();
-        let (w, h) = (rgba.width(), rgba.height());
-        if w == 0 || h == 0 {
-            return;
+        unsafe {
+            self.target.DrawBitmap(
+                bitmap,
+                Some(&dst),
+                1.0,
+                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+                None,
+            );
         }
-        let mut bgra = Vec::with_capacity(w as usize * h as usize * 4);
-        for px in rgba.as_raw().chunks_exact(4) {
-            bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-        }
-        self.draw_bgra_icon(
-            &FlyoutIcon {
-                width: w,
-                height: h,
-                bgra,
-            },
-            dst,
-        );
     }
 }
 
@@ -1485,7 +1545,7 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
                 y += s(80.0);
             }
             FlyoutBlock::Image { size_dips, .. } => {
-                y += s(size_dips.clamp(24.0, 160.0)) + s(8.0);
+                y += s(image_size_dips(*size_dips)) + s(8.0);
             }
             FlyoutBlock::IconBar { buttons } => {
                 if !buttons.is_empty() {
@@ -1527,7 +1587,6 @@ fn layout_flyout(spec: &FlyoutSpec, width_px: i32, dpi: f32) -> (i32, i32, Vec<H
 ///
 /// Call sites without `DockSettings` get the palette hairline; use
 /// [`show_flyout_with_border`] to apply the persisted `widget_border_*` settings.
-#[allow(dead_code)] // kept for call sites that have no DockSettings in scope
 pub fn show_flyout(
     owner_hwnd: usize,
     is_dark: bool,
@@ -1570,7 +1629,6 @@ pub fn show_flyout_with_border(
 }
 
 /// Shows an interactive flyout that updates in place on clicks and slider drags (reference UI parity).
-#[allow(dead_code)] // kept for call sites that have no DockSettings in scope
 pub fn show_flyout_live(
     tag: &str,
     owner_hwnd: usize,
@@ -1667,7 +1725,8 @@ pub fn show_flyout_interactive_with_border(
 }
 
 /// Shows a flyout with explicit lifecycle/placement options (`DockFlyout.cs` parity).
-#[allow(dead_code)] // consumed by WS-D dock flyouts after merge
+/// Public API for dock call sites; currently unused inside this crate.
+#[allow(dead_code)]
 pub fn show_flyout_with_options(
     tag: &str,
     owner_hwnd: usize,
@@ -2255,17 +2314,11 @@ impl FlyoutState<'_> {
         } else {
             return false;
         };
-        match outcome {
-            LiveOutcome::Update(mut spec) => {
-                if is_tick {
-                    // `live_spec("clock")` always builds the *current* month. A
-                    // periodic tick must refresh the time/date header without
-                    // yanking the user back from a month they navigated to.
-                    preserve_calendar_navigation(&self.spec, &mut spec);
-                }
-                self.apply_live_spec(spec)
-            }
-            LiveOutcome::Close => self.begin_close(),
+        // A tick rebuilds `live_spec("clock")` with the current month; resolving
+        // the outcome preserves the month the user navigated to.
+        match resolve_live_outcome(&self.spec, outcome, is_tick) {
+            Some(spec) => self.apply_live_spec(spec),
+            None => self.begin_close(),
         }
         true
     }
@@ -2309,14 +2362,11 @@ impl FlyoutState<'_> {
                 FlyoutBlock::TextInput { id: bid, numeric: true, .. } if *bid == id
             )
         });
-        if numeric && !ch.is_ascii_digit() && ch != '.' && ch != '-' {
-            return;
-        }
-        if let Some((_, buf)) = self.editing.as_mut()
-            && buf.len() < 32
-            && !ch.is_control()
-        {
-            buf.push(ch);
+        let changed = self
+            .editing
+            .as_mut()
+            .is_some_and(|(_, buf)| push_char(buf, ch, numeric, MAX_TEXT_CHARS));
+        if changed {
             unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
         }
     }
@@ -2326,6 +2376,16 @@ impl FlyoutState<'_> {
         if let Some((_, buf)) = self.editing.as_mut()
             && buf.pop().is_some()
         {
+            unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
+        }
+    }
+
+    /// Delete the whole buffer, matching the GPUI `apply_keystroke("delete")` path.
+    fn editing_delete(&mut self) {
+        if let Some((_, buf)) = self.editing.as_mut()
+            && !buf.is_empty()
+        {
+            buf.clear();
             unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
         }
     }
@@ -2345,15 +2405,8 @@ impl FlyoutState<'_> {
             } if *bid == id => Some((*numeric, *min, *max)),
             _ => None,
         });
-        if let Some((true, min, max)) = bounds
-            && let Ok(mut value) = buf.parse::<f64>()
-        {
-            value = value.clamp(min, max);
-            buf = if value.fract() == 0.0 {
-                format!("{value:.0}")
-            } else {
-                format!("{value}")
-            };
+        if let Some((true, min, max)) = bounds {
+            normalize_numeric(&mut buf, min, max);
         }
         unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
         let handled = self.dispatch_live(LiveEvent::TextCommit { id, text: buf });
@@ -4323,7 +4376,7 @@ impl FlyoutState<'_> {
                         path,
                         size_dips,
                     } => {
-                        let sz = s(size_dips.clamp(24.0, 160.0));
+                        let sz = s(image_size_dips(*size_dips));
                         let szf = sz as f32;
                         d2d.fill_rrect_bordered(
                             pad_f,
@@ -4766,6 +4819,7 @@ unsafe extern "system" fn flyout_wnd_proc(
                 VK_RETURN => state.commit_editing(),
                 VK_ESCAPE => state.cancel_editing(),
                 VK_BACK => state.editing_backspace(),
+                VK_DELETE => state.editing_delete(),
                 VK_TAB => {
                     state.commit_editing();
                     state.focus_next_target(unsafe { GetKeyState(VK_SHIFT as i32) } < 0);
@@ -4825,8 +4879,8 @@ mod tests {
         calendar_leading_blanks, calendar_weekday_order, draw_gdi_text, format_clock,
         is_native_menu_class, layout_flyout, live_tick_allowed, live_tick_tag, pack_point,
         post_menu_candidate, preserve_calendar_navigation, pt_in_rect, record_closed,
-        should_suppress_reopen, stays_open_for_external_menu, suppression_window_hit, unpack_point,
-        weekday_short_label, wm_close_action,
+        resolve_live_outcome, should_suppress_reopen, stays_open_for_external_menu,
+        suppression_window_hit, unpack_point, weekday_short_label, wm_close_action,
     };
     use windows_sys::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC};
     use windows_sys::Win32::UI::WindowsAndMessaging::{WM_CLOSE, WM_KEYDOWN, WM_PAINT};
@@ -5203,16 +5257,32 @@ mod tests {
             assert!(!live_tick_tag(tag), "{tag} must not tick");
         }
 
-        let src = include_str!("flyout.rs");
-        for needle in [
-            "WM_TIMER if wparam == TIMER_LIVE => {",
-            "state.dispatch_live_tick();",
-            "LiveOutcome::Update(spec) => self.apply_live_spec(spec),",
-            "SetTimer(hwnd, TIMER_LIVE, LIVE_TICK_MS, None);",
-            "KillTimer(hwnd, TIMER_LIVE);",
-        ] {
-            assert!(src.contains(needle), "live tick must contain {needle:?}");
-        }
+        // Behavioural check of the exact path the timer drives: an Update
+        // outcome produces a new spec, Close produces none.
+        let base = FlyoutSpec {
+            title: "clock".to_owned(),
+            subtitle: None,
+            width_dips: 300.0,
+            blocks: Vec::new(),
+        };
+        let rebuilt = FlyoutSpec {
+            title: "clock".to_owned(),
+            subtitle: None,
+            width_dips: 300.0,
+            blocks: vec![FlyoutBlock::Hero {
+                value: "12:00".to_owned(),
+                caption: None,
+                centered: false,
+                large: false,
+                right_meta: None,
+            }],
+        };
+        let outcome = resolve_live_outcome(&base, LiveOutcome::Update(rebuilt), true);
+        assert!(
+            outcome
+                .is_some_and(|spec| matches!(spec.blocks.first(), Some(FlyoutBlock::Hero { .. })))
+        );
+        assert!(resolve_live_outcome(&base, LiveOutcome::Close, true).is_none());
     }
 
     #[test]
@@ -5292,10 +5362,16 @@ mod tests {
         assert!(!weekday_short_label(1).is_empty());
         assert!(weekday_short_label(1).chars().count() <= 3);
 
-        let src = include_str!("flyout.rs");
-        assert!(src.contains("telemetry::first_day_of_week()"));
-        // Concatenated so the assertion itself is not a source-level hit.
-        let retired = ["weekday_short_", "monday_first"].concat();
-        assert!(!src.contains(&retired));
+        // The culture setting actually reaches the header order and labels.
+        let first = super::telemetry::first_day_of_week();
+        assert!(first < 7);
+        let order = calendar_weekday_order(first);
+        assert_eq!(order[0], first);
+        assert_eq!(order[6], (first + 6) % 7);
+        let expected: String = super::telemetry::weekday_name(first)
+            .chars()
+            .take(3)
+            .collect();
+        assert_eq!(weekday_short_label(first), expected);
     }
 }

@@ -164,10 +164,14 @@ impl WidgetHoverCoordinator {
             && cursor.y >= rect.top
             && cursor.y < rect.bottom;
         if !inside && self.captured.is_none() {
-            if let Some(id) = self.expanded_id.take() {
+            // Clear pending intent too: leaving the widget must not let a 350 ms
+            // timer fire after the cursor has already gone (verify_cursor_stored
+            // path, where on_leave is not guaranteed to run).
+            self.pending_id = None;
+            self.pending_since = None;
+            if self.expanded_id.take().is_some() {
                 self.expanded_rect = None;
                 self.phase = HoverPhase::Idle;
-                let _ = id; // caller is told via `verify_cursor` returning false
             }
         } else if inside {
             self.expanded_rect = Some(rect);
@@ -222,7 +226,7 @@ impl WidgetHoverCoordinator {
     pub fn is_suppressed(&self, id: &str, now: Instant) -> bool {
         self.suppressed.as_ref().is_some_and(|(sid, at)| {
             sid.eq_ignore_ascii_case(id)
-                && now.duration_since(*at) < Duration::from_millis(SUPPRESS_MS)
+                && now.saturating_duration_since(*at) < Duration::from_millis(SUPPRESS_MS)
         })
     }
 

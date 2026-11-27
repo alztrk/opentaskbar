@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 
 use opentaskbar_core::i18n as loc;
 
-use crate::design;
 use crate::ui::flyout::{BarTone, FlyoutBlock, FlyoutSpec};
 
 /// `NetSpeedWidget.StreamCount`.
@@ -79,6 +78,9 @@ struct RunningTest {
 pub struct SpeedTestController {
     state: SpeedTestState,
     running: Option<RunningTest>,
+    /// Cancelled workers are kept here until `poll()` can reap them; dropping a
+    /// `JoinHandle` detaches the thread instead of joining it.
+    reaper: Vec<JoinHandle<SpeedTestResult>>,
     result: Option<SpeedTestResult>,
     runs_completed: u32,
 }
@@ -107,18 +109,27 @@ impl SpeedTestController {
         let worker_cancel = Arc::clone(&cancel);
         let handle = thread::Builder::new()
             .name("otb-speedtest".to_owned())
-            .spawn(move || run_speed_test(worker_cancel))
-            .ok();
-        self.running = handle.map(|handle| RunningTest { cancel, handle });
-        self.state = SpeedTestState::MeasuringPing;
+            .spawn(move || run_speed_test(worker_cancel));
+        match handle {
+            Ok(handle) => {
+                self.running = Some(RunningTest { cancel, handle });
+                self.state = SpeedTestState::MeasuringPing;
+            }
+            Err(_) => {
+                // No worker exists, so `poll()` would return early forever.
+                self.running = None;
+                self.state = SpeedTestState::Failed;
+            }
+        }
     }
 
     /// `CancelSpeedTest`: flips the flag; workers check it every 64 KB.
     pub fn cancel(&mut self) {
         if let Some(run) = self.running.take() {
             run.cancel.store(true, Ordering::Release);
-            // Do not join here — the worker may be mid-connect. `poll` reaps later runs.
-            let _ = run.handle;
+            // Do not join here — the worker may be mid-connect. Keep the handle
+            // so `poll()` can reap it without blocking the UI thread.
+            self.reaper.push(run.handle);
         }
         if self.state == SpeedTestState::MeasuringPing || self.state == SpeedTestState::Downloading
         {
@@ -140,25 +151,38 @@ impl SpeedTestController {
 
     /// Advances the state machine. Must be called from the flyout's live tick / timer.
     pub fn poll(&mut self, now: Instant, started_at: Option<Instant>) -> bool {
+        // Reap cancelled workers. `is_finished()` guarantees the join cannot block.
+        if !self.reaper.is_empty() {
+            let mut pending = Vec::with_capacity(self.reaper.len());
+            for handle in std::mem::take(&mut self.reaper) {
+                if handle.is_finished() {
+                    let _ = handle.join();
+                } else {
+                    pending.push(handle);
+                }
+            }
+            self.reaper = pending;
+        }
         let Some(run) = self.running.as_ref() else {
             return false;
         };
         if run.handle.is_finished() {
-            let done = self.running.take();
-            if let Some(done) = done
-                && let Ok(result) = done.handle.join()
-            {
-                if done.cancel.load(Ordering::Acquire) || !result.is_success() {
-                    self.state = if done.cancel.load(Ordering::Acquire) {
-                        SpeedTestState::Cancelled
+            let done = self.running.take().expect("checked above");
+            match done.handle.join() {
+                Ok(result) => {
+                    if done.cancel.load(Ordering::Acquire) || !result.is_success() {
+                        self.state = if done.cancel.load(Ordering::Acquire) {
+                            SpeedTestState::Cancelled
+                        } else {
+                            SpeedTestState::Failed
+                        };
                     } else {
-                        SpeedTestState::Failed
-                    };
-                } else {
-                    self.result = Some(result);
-                    self.runs_completed = self.runs_completed.saturating_add(1);
-                    self.state = SpeedTestState::Finished;
+                        self.result = Some(result);
+                        self.runs_completed = self.runs_completed.saturating_add(1);
+                        self.state = SpeedTestState::Finished;
+                    }
                 }
+                Err(_) => self.state = SpeedTestState::Failed,
             }
             return true;
         }
@@ -280,7 +304,6 @@ pub fn build_speedtest_flyout(
     state: SpeedTestState,
     result: Option<&SpeedTestResult>,
 ) -> FlyoutSpec {
-    let pal = design::palette(true);
     let mut blocks = vec![
         FlyoutBlock::StatRow {
             label: loc::t("SpeedTestStatus"),
@@ -327,7 +350,6 @@ pub fn build_speedtest_flyout(
             });
         }
     }
-    let _ = pal;
     blocks.push(FlyoutBlock::Separator);
     blocks.push(FlyoutBlock::ButtonBar(vec![
         (1, loc::t("Start"), state == SpeedTestState::Idle),
@@ -374,8 +396,60 @@ mod tests {
     }
 
     #[test]
-    fn state_labels_are_stable() {
-        assert_eq!(SpeedTestState::Idle.label(), "Idle");
-        assert_eq!(SpeedTestState::Cancelled.label(), "Cancelled");
+    fn state_labels_follow_the_active_locale() {
+        assert_eq!(SpeedTestState::Idle.label(), loc::t("Idle"));
+        assert_eq!(SpeedTestState::Cancelled.label(), loc::t("Cancelled"));
+        assert_eq!(
+            SpeedTestState::Finished.label(),
+            loc::t("SpeedTestComplete")
+        );
+    }
+
+    #[test]
+    fn cancelled_handle_is_reaped_by_poll() {
+        let mut controller = SpeedTestController::new();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancel);
+        let handle = thread::spawn(move || {
+            while !flag.load(Ordering::Acquire) {
+                std::hint::spin_loop();
+            }
+            SpeedTestResult::default()
+        });
+        controller.running = Some(RunningTest { cancel, handle });
+        controller.state = SpeedTestState::MeasuringPing;
+        controller.cancel();
+        assert!(controller.running.is_none());
+        assert_eq!(controller.reaper.len(), 1);
+        assert_eq!(controller.state, SpeedTestState::Cancelled);
+        for _ in 0..100 {
+            controller.poll(Instant::now(), None);
+            if controller.reaper.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            controller.reaper.is_empty(),
+            "poll must join cancelled workers"
+        );
+        assert_eq!(controller.state, SpeedTestState::Cancelled);
+    }
+
+    #[test]
+    fn panicked_worker_marks_the_state_failed() {
+        let mut controller = SpeedTestController::new();
+        controller.running = Some(RunningTest {
+            cancel: Arc::new(AtomicBool::new(false)),
+            handle: thread::spawn(|| panic!("worker failed")),
+        });
+        controller.state = SpeedTestState::Downloading;
+        for _ in 0..100 {
+            if controller.poll(Instant::now(), None) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(controller.state, SpeedTestState::Failed);
     }
 }

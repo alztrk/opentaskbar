@@ -778,9 +778,8 @@ mod tests {
         );
         let needle = concat!("antig", "ravity");
         assert!(
-            !include_str!("settings_search.rs")
-                .to_ascii_lowercase()
-                .contains(needle)
+            search(&catalog, needle).is_empty(),
+            "the {needle} alias must not surface in search results"
         );
     }
 }
@@ -1276,23 +1275,11 @@ pub const SETTINGS_ROWS: &[RowDef] = &[
     ),
 ];
 
-/// `DockWidgetOption.HasSettings`: only widgets with a dedicated options panel get one.
-/// WS-C `catalog_ops` will expose this authoritatively; until then use this local source.
+/// `DockWidgetOption.HasSettings` counterpart. Delegates to the registry's
+/// `WidgetOption` so search results stay in sync with the authoritative
+/// descriptor table (including aliases and custom widgets).
 pub fn widget_has_settings(id: &str) -> bool {
-    matches!(
-        id,
-        "weather"
-            | "stats"
-            | "netspeed"
-            | "battery"
-            | "bluetoothbattery"
-            | "storage"
-            | "audio"
-            | "quicksettings"
-            | "focus"
-            | "countdown"
-            | "media"
-    )
+    widgets::WidgetOption::for_id(id).is_some_and(|option| option.has_settings)
 }
 
 #[derive(Clone, Debug)]
@@ -1411,7 +1398,7 @@ impl SearchCatalog {
 
 #[cfg(test)]
 mod dynamic_tests {
-    use super::{SearchCatalog, widget_has_settings};
+    use super::{SearchCatalog, widget_has_settings, widgets};
 
     #[test]
     fn catalog_is_built_from_the_live_widget_catalog() {
@@ -1444,6 +1431,16 @@ mod dynamic_tests {
         let multi = catalog.search("theme editor");
         assert!(multi.iter().any(|e| e.label == "Theme Editor"));
         assert!(catalog.search("zzzz-not-present").is_empty());
-        assert!(widget_has_settings("weather") && !widget_has_settings("clock"));
+        // The predicate must match the registry, not a second hand-written list.
+        for widget in crate::widgets::catalog_widgets() {
+            assert_eq!(
+                widget_has_settings(widget.id),
+                widgets::WidgetOption::for_id(widget.id).is_some_and(|option| option.has_settings),
+                "settings flag diverged for {}",
+                widget.id
+            );
+        }
+        assert!(widget_has_settings("weather"));
+        assert!(!widget_has_settings("dayprogress"));
     }
 }

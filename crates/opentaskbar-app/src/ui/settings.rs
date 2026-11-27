@@ -16,7 +16,7 @@ use gpui::{
     AnyElement, App, Application, Bounds, Context, EntityInputHandler, FocusHandle,
     InteractiveElement, KeyBinding, KeyDownEvent, MouseButton, ScrollAnchor, ScrollHandle,
     SharedString, TitlebarOptions, UTF16Selection, Window, WindowBounds, WindowControlArea,
-    WindowOptions, actions, div, prelude::*, px, rgba, size,
+    WindowOptions, actions, div, img, prelude::*, px, rgba, size,
 };
 use opentaskbar_core::hotkey;
 use opentaskbar_core::i18n::{self as loc, LANGUAGES};
@@ -47,16 +47,17 @@ use crate::design::theme::{
     SurfaceKind, ThemeManager, apply_pack_tokens_to_palette, apply_token_overrides,
     token_overrides_from_json,
 };
-use crate::dock::dcomp::{SystemStatColumn, WidgetChipSpec};
+use crate::dock::dcomp::{SystemStatColumn, WidgetChipSpec, WidgetIcon};
 use crate::platform::cursor_auth;
 use crate::platform::{
     country_city, pins, startup_registration, theme_packs, toast, update, win32,
 };
 use crate::ui::components::{
     ButtonVariant, DropdownOption, DropdownSelectHandler, SearchableDropdownHandlers,
-    SearchableDropdownState, UiTheme, badge, button, dim_when, dropdown, icon_action_menu,
-    icon_glyph, ios_switch, live_slider, searchable_dropdown, section_card, setting_row,
-    setting_row_desc, setting_row_with_id, setting_row_with_id_desc, sidebar_nav_item, stepper,
+    SearchableDropdownState, UiTheme, badge, button, card_button, compact_card_button, dim_when,
+    dropdown, icon_action_menu, icon_glyph, icon_glyph_owned, ios_switch, live_slider,
+    searchable_dropdown, section_card, setting_row, setting_row_desc, setting_row_with_id,
+    setting_row_with_id_desc, sidebar_nav_item, stepper,
 };
 use crate::ui::prompt;
 use crate::ui::settings_search::{self, SettingsSearchEntry};
@@ -248,27 +249,47 @@ pub(crate) fn category_label(category: &str) -> String {
     }
 }
 
+/// Glyph table for built-in widgets. Registry metadata does not carry a glyph
+/// field, so the single UI-owned table is the authoritative mapping.
+const WIDGET_GLYPHS: &[(&str, &str)] = &[
+    ("clock", "\u{E823}"),
+    ("weather", "\u{E753}"),
+    ("dayprogress", "\u{E706}"),
+    ("stopwatch", "\u{E916}"),
+    ("countdown", "\u{E917}"),
+    ("stats", "\u{E9D9}"),
+    ("netspeed", "\u{E8AB}"),
+    ("battery", "\u{E850}"),
+    ("bluetoothbattery", "\u{E702}"),
+    ("storage", "\u{EDA2}"),
+    ("media", "\u{E8D6}"),
+    ("audio", "\u{E995}"),
+    ("quicksettings", "\u{E9E9}"),
+    ("keyboard", "\u{E765}"),
+    ("focus", "\u{E7C8}"),
+];
+const AI_USAGE_GLYPH: &str = "\u{E99A}";
+const FALLBACK_WIDGET_GLYPH: &str = "\u{F246}";
+
 fn widget_glyph(id: &str) -> &'static str {
     if id.starts_with("aiusage_") {
-        return "\u{E99A}";
+        return AI_USAGE_GLYPH;
     }
-    match id {
-        "clock" => "\u{E823}",
-        "weather" => "\u{E753}",
-        "dayprogress" => "\u{E706}",
-        "stopwatch" => "\u{E916}",
-        "countdown" => "\u{E917}",
-        "stats" => "\u{E9D9}",
-        "netspeed" => "\u{E8AB}",
-        "battery" => "\u{E850}",
-        "bluetoothbattery" => "\u{E702}",
-        "storage" => "\u{EDA2}",
-        "media" => "\u{E8D6}",
-        "audio" => "\u{E995}",
-        "quicksettings" => "\u{E9E9}",
-        "keyboard" => "\u{E765}",
-        "focus" => "\u{E7C8}",
-        _ => "\u{F246}",
+    WIDGET_GLYPHS
+        .iter()
+        .find(|(key, _)| *key == id)
+        .map_or(FALLBACK_WIDGET_GLYPH, |(_, glyph)| *glyph)
+}
+
+/// Uses a locale key when the translation catalog provides one, otherwise the
+/// current English fallback. Lets new keys be added to core locales without a
+/// UI-side behaviour change in the meantime.
+fn localized_action(key: &str, fallback: &str) -> String {
+    let translated = loc::t(key);
+    if translated == key {
+        fallback.to_owned()
+    } else {
+        translated
     }
 }
 
@@ -1695,6 +1716,15 @@ impl SettingsView {
             });
         });
 
+        let entity = cx.entity().downgrade();
+        let active_id = id.to_owned();
+        let read_active: crate::ui::components::SearchableDropdownActiveHandler =
+            std::rc::Rc::new(move |app| {
+                entity
+                    .update(app, |this, _| this.picker_state(&active_id).active)
+                    .unwrap_or(0)
+            });
+
         searchable_dropdown(
             id,
             t,
@@ -1708,6 +1738,7 @@ impl SettingsView {
                 on_toggle,
                 on_key_down,
                 on_close,
+                active: read_active,
             },
         )
     }
@@ -4652,36 +4683,69 @@ impl SettingsView {
                 label,
                 value,
                 color,
-                ..
-            } => chip(
-                div()
+                ratio,
+                icon,
+                details,
+            } => {
+                let tint = crate::design::gpui_rgba(color, 0xff);
+                let icon_node: AnyElement = match icon {
+                    WidgetIcon::Glyph(code) => icon_glyph_owned(
+                        char::from_u32(u32::from(code))
+                            .unwrap_or('\u{E81E}')
+                            .to_string(),
+                        13.0,
+                        tint,
+                    )
+                    .into_any_element(),
+                    WidgetIcon::Asset(path) => {
+                        img(SharedString::from(path.to_string_lossy().into_owned()))
+                            .w(px(13.0))
+                            .h(px(13.0))
+                            .rounded(px(2.0))
+                            .flex_shrink_0()
+                            .into_any_element()
+                    }
+                    // PathData is rendered by the native D2D chip; keep the
+                    // familiar fallback glyph in the lightweight GPUI preview.
+                    WidgetIcon::PathData(_) => {
+                        icon_glyph("\u{E81E}", 13.0, tint).into_any_element()
+                    }
+                };
+                let mut column = div()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(fonts::scaled_size(11.0)))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgba(t.dock_preview_fg))
+                            .child(value),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(fonts::scaled_size(9.0)))
+                            .text_color(rgba(t.dock_preview_sub))
+                            .child(label),
+                    );
+                if let Some((_, detail)) = details.first() {
+                    column = column.child(
+                        div()
+                            .text_size(px(fonts::scaled_size(9.0)))
+                            .text_color(rgba(t.dock_preview_sub))
+                            .child(detail.clone()),
+                    );
+                }
+                let mut inner = div()
                     .flex()
                     .items_center()
                     .gap(px(7.0))
-                    .child(icon_glyph(
-                        "\u{E81E}",
-                        13.0,
-                        crate::design::gpui_rgba(color, 0xff),
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(11.0)))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgba(t.dock_preview_fg))
-                                    .child(value),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(9.0)))
-                                    .text_color(rgba(t.dock_preview_sub))
-                                    .child(label),
-                            ),
-                    ),
-            ),
+                    .child(icon_node)
+                    .child(column);
+                if let Some(ratio) = ratio {
+                    inner = inner.child(mini_bar(ratio, color, 24.0));
+                }
+                chip(inner)
+            }
         }
     }
 
@@ -7514,63 +7578,27 @@ impl SettingsView {
         let summary = self.widget_summary(wid);
 
         let cfg_button = if has_inline {
-            let btn_bg = if expanded {
-                t.accent_soft
-            } else {
-                t.surface_muted
-            };
-            let btn_bd = if expanded { t.accent } else { t.border };
-            let btn_fg = if expanded { t.accent } else { t.text_secondary };
-            let btn_hov = if expanded {
-                t.accent_soft
-            } else {
-                t.surface_hover
-            };
-            Some(
-                div()
-                    .id(SharedString::from(format!("wcfg-{wid}")))
-                    .h(px(28.0))
-                    .px(px(9.0))
-                    .rounded(px(7.0))
-                    .bg(rgba(btn_bg))
-                    .border_1()
-                    .border_color(rgba(btn_bd))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(rgba(btn_hov)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.open_dropdown = None;
-                            this.expanded_widget = if this.expanded_widget == Some(wid) {
-                                None
-                            } else {
-                                Some(wid)
-                            };
-                            cx.notify();
-                        }),
-                    )
-                    .child(icon_glyph(
-                        if expanded { "\u{E70E}" } else { "\u{E713}" },
-                        11.5,
-                        btn_fg,
-                    ))
-                    .child(
-                        div()
-                            .whitespace_nowrap()
-                            .text_size(px(fonts::scaled_size(11.5)))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(rgba(btn_fg))
-                            .child(if expanded {
-                                loc::t("Close")
-                            } else {
-                                loc::t("Settings")
-                            }),
-                    ),
-            )
+            Some(card_button(
+                SharedString::from(format!("wcfg-{wid}")),
+                t,
+                Some(if expanded { "\u{E70E}" } else { "\u{E713}" }),
+                if expanded {
+                    loc::t("Close")
+                } else {
+                    loc::t("Settings")
+                },
+                expanded,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.open_dropdown = None;
+                    this.expanded_widget = if this.expanded_widget == Some(wid) {
+                        None
+                    } else {
+                        Some(wid)
+                    };
+                    cx.notify();
+                }),
+            ))
         } else {
             None
         };
@@ -7579,75 +7607,50 @@ impl SettingsView {
             let approved = widgets::custom_widgets::is_approved(wid, &self.settings);
             let mut row = div().flex().items_center().gap(px(6.0));
             if !approved {
-                row = row.child(
-                    div()
-                        .id(SharedString::from(format!("wapprove-{wid}")))
-                        .px(px(7.0))
-                        .py(px(4.0))
-                        .rounded(px(6.0))
-                        .bg(rgba(t.accent_soft))
-                        .cursor_pointer()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                widgets::custom_widgets::approve(&mut this.settings, wid);
-                                this.auto_save(cx);
-                            }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(fonts::scaled_size(10.5)))
-                                .text_color(rgba(t.accent))
-                                .child("Approve"),
-                        ),
-                );
+                row = row.child(compact_card_button(
+                    SharedString::from(format!("wapprove-{wid}")),
+                    t,
+                    localized_action("WidgetApprove", "Approve"),
+                    true,
+                    cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        widgets::custom_widgets::approve(&mut this.settings, wid);
+                        this.auto_save(cx);
+                    }),
+                ));
             }
             #[allow(clippy::type_complexity)]
-            let actions: [(&str, &str, fn(&Path)); 3] = [
-                ("wfolder", "Folder", |path| {
+            let actions: [(&str, String, fn(&Path)); 3] = [
+                ("wfolder", loc::t("OpenFolder"), |path| {
                     let _ = std::process::Command::new("explorer.exe").arg(path).spawn();
                 }),
-                ("wedit", "Edit", |path| {
+                ("wedit", loc::t("Edit"), |path| {
                     let _ = std::process::Command::new("notepad.exe").arg(path).spawn();
                 }),
-                ("wremove", "Remove", |path| {
+                ("wremove", loc::t("WidgetRemove"), |path| {
                     let _ = std::fs::remove_dir_all(path);
                     widgets::custom_widgets::reload();
                 }),
             ];
             for (suffix, label, action) in actions {
-                row = row.child(
-                    div()
-                        .id(SharedString::from(format!("{suffix}-{wid}")))
-                        .px(px(7.0))
-                        .py(px(4.0))
-                        .rounded(px(6.0))
-                        .bg(rgba(t.surface_muted))
-                        .cursor_pointer()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |_, _, _, cx| {
-                                cx.stop_propagation();
-                                if let Some(path) =
-                                    widgets::custom_widgets::widget_dir(wid).map(|dir| match suffix
-                                    {
-                                        "wedit" => dir.join("widget.json"),
-                                        _ => dir,
-                                    })
-                                {
-                                    action(&path);
-                                    cx.notify();
-                                }
-                            }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(fonts::scaled_size(10.5)))
-                                .text_color(rgba(t.text_secondary))
-                                .child(label),
-                        ),
-                );
+                row = row.child(compact_card_button(
+                    SharedString::from(format!("{suffix}-{wid}")),
+                    t,
+                    label,
+                    false,
+                    cx.listener(move |_, _, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(path) =
+                            widgets::custom_widgets::widget_dir(wid).map(|dir| match suffix {
+                                "wedit" => dir.join("widget.json"),
+                                _ => dir,
+                            })
+                        {
+                            action(&path);
+                            cx.notify();
+                        }
+                    }),
+                ));
             }
             Some(row)
         } else {
@@ -7655,56 +7658,31 @@ impl SettingsView {
         };
 
         let icon_button = if widgets::custom_widgets::is_custom(wid) {
-            Some(
-                div()
-                    .id(SharedString::from(format!("wicon-{wid}")))
-                    .h(px(28.0))
-                    .px(px(9.0))
-                    .rounded(px(7.0))
-                    .bg(rgba(t.surface_muted))
-                    .border_1()
-                    .border_color(rgba(t.border))
-                    .flex()
-                    .items_center()
-                    .gap(px(5.0))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(rgba(t.surface_hover)))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            if let Some(path) = crate::ui::prompt::open_file(
-                                "Choose widget icon",
-                                "PNG image",
-                                "*.png",
-                            ) {
-                                let mut overrides =
-                                    widgets::setting_value(&this.settings, "CustomWidgetIcons")
-                                        .and_then(|v| v.as_object().cloned())
-                                        .unwrap_or_default();
-                                overrides.insert(
-                                    wid.to_owned(),
-                                    serde_json::json!(path.to_string_lossy()),
-                                );
-                                widgets::set_setting(
-                                    &mut this.settings,
-                                    "CustomWidgetIcons",
-                                    serde_json::Value::Object(overrides),
-                                );
-                                this.auto_save(cx);
-                            }
-                        }),
-                    )
-                    .child(icon_glyph("\u{E91B}", 11.5, t.text_secondary))
-                    .child(
-                        div()
-                            .whitespace_nowrap()
-                            .text_size(px(fonts::scaled_size(11.5)))
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(rgba(t.text_secondary))
-                            .child(loc::t("ThemeSectionIcons")),
-                    ),
-            )
+            Some(card_button(
+                SharedString::from(format!("wicon-{wid}")),
+                t,
+                Some("\u{E91B}"),
+                loc::t("ThemeSectionIcons"),
+                false,
+                cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(path) =
+                        crate::ui::prompt::open_file("Choose widget icon", "PNG image", "*.png")
+                    {
+                        let mut overrides =
+                            widgets::setting_value(&this.settings, "CustomWidgetIcons")
+                                .and_then(|v| v.as_object().cloned())
+                                .unwrap_or_default();
+                        overrides.insert(wid.to_owned(), serde_json::json!(path.to_string_lossy()));
+                        widgets::set_setting(
+                            &mut this.settings,
+                            "CustomWidgetIcons",
+                            serde_json::Value::Object(overrides),
+                        );
+                        this.auto_save(cx);
+                    }
+                }),
+            ))
         } else {
             None
         };
@@ -7778,7 +7756,7 @@ impl SettingsView {
         }
         if widgets::custom_widgets::is_custom(wid) {
             let status = if !widgets::custom_widgets::is_approved(wid, &self.settings) {
-                Some("Approval required".to_owned())
+                Some(localized_action("ApprovalRequired", "Approval required"))
             } else {
                 widgets::custom_widgets::error(wid)
             };
@@ -9670,12 +9648,13 @@ impl Render for SettingsView {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrushMode, DockSettings, SettingsPage, WIN_H, WIN_W, ai_cli_sign_in_command, brush_to_json,
-        build_backup, build_brush, city_list, civil_from_days, close_spawned_settings_windows,
-        field_cell_hsv, gradient_stop_at, import_backup_into, inspect_backup,
-        location_auto_fill_value, persist_theme_tokens, reorder_gradient_stop,
+        BrushMode, DockSettings, FALLBACK_WIDGET_GLYPH, SettingsPage, WIN_H, WIN_W,
+        ai_cli_sign_in_command,
+        brush_to_json, build_backup, build_brush, city_list, civil_from_days,
+        close_spawned_settings_windows, field_cell_hsv, gradient_stop_at, import_backup_into,
+        inspect_backup, location_auto_fill_value, persist_theme_tokens, reorder_gradient_stop,
         resolve_startup_toggle, safe_backup_path, settings_search, settings_window_options,
-        weather_country_for, zip_store, zip_unstore,
+        weather_country_for, widget_glyph, zip_store, zip_unstore,
     };
     use crate::design::brush::Hsv;
     use crate::design::theme::{
@@ -9685,6 +9664,24 @@ mod tests {
     use gpui::px;
     use opentaskbar_core::i18n as loc;
     use serde_json::Map;
+
+    #[test]
+    fn every_catalog_widget_has_a_non_fallback_glyph() {
+        for widget in crate::widgets::catalog_widgets() {
+            assert_ne!(
+                widget_glyph(widget.id),
+                FALLBACK_WIDGET_GLYPH,
+                "missing glyph for catalog widget {}",
+                widget.id
+            );
+            assert_eq!(widget_glyph(widget.id).chars().count(), 1);
+        }
+        assert_eq!(
+            widget_glyph("aiusage_claude"),
+            widget_glyph("aiusage_cursor")
+        );
+        assert_eq!(widget_glyph("unknown-widget"), FALLBACK_WIDGET_GLYPH);
+    }
 
     #[test]
     fn stored_zip_round_trips_entries() {
