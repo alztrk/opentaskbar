@@ -10,8 +10,8 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{
@@ -20,25 +20,135 @@ use gpui::{
     px, rgba, size,
 };
 use opentaskbar_core::i18n as loc;
+use opentaskbar_core::settings::{self, SurfaceBackground};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use serde_json::json;
+use windows_sys::Win32::Foundation::{HWND, LPARAM};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
+};
 
 use crate::design::fonts;
+use crate::design::spatial_glass::{
+    SpatialGlassConfig, SpatialGlassHost, configure_host_backdrop_window,
+};
 use crate::fjord::{activation, bar, wifi_ui};
 use crate::platform::win32;
 use crate::ui::components::{ButtonVariant, UiTheme, button, icon_glyph};
 use crate::ui::menu::{self, MenuEntry, MenuIcon};
 
+pub const FJORD_BAR_ARG: &str = "--fjord-bar";
+
 const MENU_FILES: u32 = 1;
 const MENU_CLOSE_BAR: u32 = 2;
 const WIFI_PANEL_W: f32 = 320.0;
+
+static FJORD_BAR_CHILDREN: Mutex<Vec<std::process::Child>> = Mutex::new(Vec::new());
+
+/// True if a Fjord Bar child spawned by this process is currently alive.
+pub fn is_fjord_bar_running() -> bool {
+    let Ok(mut children) = FJORD_BAR_CHILDREN.lock() else {
+        return false;
+    };
+    children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+    !children.is_empty()
+}
+
+/// Spawns the Fjord top-bar GPUI process if not already running.
+pub fn spawn_fjord_bar() {
+    if is_fjord_bar_running() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        opentaskbar_core::log::error("Cannot open Fjord Bar: current_exe failed.");
+        return;
+    };
+    match std::process::Command::new(exe).arg(FJORD_BAR_ARG).spawn() {
+        Ok(child) => {
+            if let Ok(mut children) = FJORD_BAR_CHILDREN.lock() {
+                children.retain_mut(|existing| matches!(existing.try_wait(), Ok(None)));
+                children.push(child);
+            }
+        }
+        Err(error) => opentaskbar_core::log::error(format!("Cannot open Fjord Bar: {error}")),
+    }
+}
+
+/// Gracefully closes any running Fjord Bar child process so its top AppBar reservation is freed.
+pub fn close_fjord_bar() {
+    let Ok(mut children) = FJORD_BAR_CHILDREN.lock() else {
+        return;
+    };
+    children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+    let pids: Vec<u32> = children.iter().map(std::process::Child::id).collect();
+    if pids.is_empty() {
+        return;
+    }
+
+    struct CloseCtx {
+        pids: Vec<u32>,
+    }
+    unsafe extern "system" fn close_bar_hwnd(hwnd: HWND, lparam: LPARAM) -> i32 {
+        unsafe {
+            let ctx = &*(lparam as *const CloseCtx);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if ctx.pids.contains(&pid) {
+                let _ = PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            }
+        }
+        1
+    }
+
+    let ctx = CloseCtx { pids };
+    unsafe {
+        let _ = EnumWindows(Some(close_bar_hwnd), (&ctx as *const CloseCtx) as LPARAM);
+    }
+    children.clear();
+}
+
+/// Synchronizes the Fjord top bar process with `FjordBarVisible`.
+pub fn sync_fjord_bar(visible: bool) {
+    if visible {
+        spawn_fjord_bar();
+    } else {
+        close_fjord_bar();
+    }
+}
+
+fn current_monitors() -> Vec<bar::MonitorSnapshot> {
+    win32::enumerate_monitors()
+        .into_iter()
+        .map(|monitor| bar::MonitorSnapshot {
+            key: monitor.handle,
+            bounds: bar::Rect::new(monitor.left, monitor.top, monitor.right, monitor.bottom),
+        })
+        .collect()
+}
+
+fn bar_visible_in_settings(path: &std::path::Path) -> bool {
+    let loaded = settings::load_from(path);
+    loaded
+        .extra
+        .get("FjordBarVisible")
+        .and_then(|v| v.as_i64().map(|n| n != 0).or_else(|| v.as_bool()))
+        .unwrap_or(true)
+}
+
+fn persist_bar_hidden(path: &std::path::Path) {
+    let mut loaded = settings::load_from(path);
+    loaded.extra.insert("FjordBarVisible".to_owned(), json!(0));
+    let _ = settings::save_to(path, &loaded);
+    crate::dock::apply_runtime_settings();
+}
 
 /// Starts the bar host. Returns immediately if another host owns the session.
 pub fn run_bar_host(files_enabled: bool, settings_path: PathBuf) {
     let Some(_instance) = bar::SingleInstance::acquire() else {
         return;
     };
-    let availability =
-        activation::FilesAvailability::new(settings_path, files_enabled).start(|enabled| {
+    let availability = activation::FilesAvailability::new(settings_path.clone(), files_enabled)
+        .start(|enabled| {
             if !enabled {
                 activation::close_all_windows();
             }
@@ -60,18 +170,27 @@ pub fn run_bar_host(files_enabled: bool, settings_path: PathBuf) {
             });
             drop(clock);
 
-            let monitors = bar::poll_monitors(&cancel);
-            for monitor in monitors {
-                open_bar_window(monitor, availability.enabled(), cx);
+            let initial_monitors = current_monitors();
+            for monitor in &initial_monitors {
+                open_bar_window(monitor.clone(), availability.enabled(), cx);
             }
 
             let poll_cancel = Arc::clone(&cancel);
             let poll_availability = Arc::clone(&availability);
+            let poll_settings_path = settings_path.clone();
             let _poll = cx.spawn(async move |app| {
-                let mut known: Vec<bar::MonitorSnapshot> = Vec::new();
+                let mut known: Vec<bar::MonitorSnapshot> = initial_monitors;
                 while !poll_cancel.load(Ordering::SeqCst) {
                     // `poll_monitors` itself waits 750 ms (cancellable).
                     let monitors = bar::poll_monitors(&poll_cancel);
+                    if !bar_visible_in_settings(&poll_settings_path) {
+                        poll_cancel.store(true, Ordering::SeqCst);
+                        let _ = app.update(|app| {
+                            close_all_bar_windows(app);
+                            app.quit();
+                        });
+                        break;
+                    }
                     let hidden: HashSet<usize> = monitors
                         .iter()
                         .filter(|monitor| bar::monitor_is_fullscreen(monitor.key))
@@ -107,6 +226,13 @@ pub fn run_bar_host(files_enabled: bool, settings_path: PathBuf) {
                 }
             });
         });
+}
+
+fn close_all_bar_windows(cx: &mut App) {
+    let keys: Vec<usize> = with_registry(|bars| bars.keys().copied().collect());
+    for key in keys {
+        close_bar_window(key, cx);
+    }
 }
 
 fn window_bounds(monitor: bar::MonitorSnapshot) -> Bounds<gpui::Pixels> {
@@ -188,6 +314,8 @@ struct FjordBarView {
     appbar: bar::AppBar,
     hidden: bool,
     files_enabled: bool,
+    glass_mode: bool,
+    spatial_glass: Option<SpatialGlassHost>,
     clock: String,
     theme: UiTheme,
     wifi: wifi_ui::WifiUiState,
@@ -196,16 +324,31 @@ struct FjordBarView {
     wifi_password_focus: gpui::FocusHandle,
 }
 
+impl Drop for FjordBarView {
+    fn drop(&mut self) {
+        self.appbar.unregister();
+    }
+}
+
 impl FjordBarView {
     fn new(monitor: bar::MonitorSnapshot, files_enabled: bool, cx: &mut Context<Self>) -> Self {
+        let loaded = settings::load_from(&settings::settings_path());
+        let is_dark = match loaded.theme {
+            settings::AppTheme::Dark => true,
+            settings::AppTheme::Light => false,
+            settings::AppTheme::System => win32::read_system_is_dark(),
+        };
+        let glass_mode = loaded.dock_background == SurfaceBackground::Glass;
         Self {
             monitor,
             hwnd: 0,
             appbar: bar::AppBar::new(0, 0),
             hidden: false,
             files_enabled,
+            glass_mode,
+            spatial_glass: None,
             clock: bar::local_clock(loc::language()),
-            theme: UiTheme::new(win32::read_system_is_dark()),
+            theme: UiTheme::for_settings(is_dark, glass_mode),
             wifi: wifi_ui::WifiUiState::default(),
             wifi_open: false,
             wifi_busy: false,
@@ -218,6 +361,21 @@ impl FjordBarView {
         if hwnd == 0 {
             return;
         }
+        let loaded = settings::load_from(&settings::settings_path());
+        let is_dark = match loaded.theme {
+            settings::AppTheme::Dark => true,
+            settings::AppTheme::Light => false,
+            settings::AppTheme::System => win32::read_system_is_dark(),
+        };
+        let glass_cfg = SpatialGlassConfig::from_settings(
+            &loaded,
+            loaded.dock_background,
+            loaded.dock_opacity,
+            is_dark,
+            false,
+        );
+        configure_host_backdrop_window(hwnd, is_dark, glass_cfg.enabled);
+        self.spatial_glass = SpatialGlassHost::attach(hwnd, false, glass_cfg);
         let messages = bar::registered_messages().unwrap_or((0, 0));
         self.appbar = bar::AppBar::new(hwnd, messages.0);
         self.appbar.register();
@@ -228,8 +386,21 @@ impl FjordBarView {
         if self.hwnd == 0 || self.hidden {
             return;
         }
-        if let Some(rect) = self.appbar.position(self.monitor.bounds, 1.0) {
+        let dpi = win32::dpi_scale(self.hwnd);
+        if let Some(rect) = self.appbar.position(self.monitor.bounds, dpi) {
             bar::move_window(self.hwnd, rect);
+            if let Some(ref mut glass) = self.spatial_glass {
+                glass.sync_rect(
+                    0.0,
+                    0.0,
+                    rect.width().max(2) as f32,
+                    rect.height().max(2) as f32,
+                    0.0,
+                    dpi,
+                    0.0,
+                    0.0,
+                );
+            }
         }
     }
 
@@ -298,6 +469,8 @@ impl FjordBarView {
             }
             Some(MENU_CLOSE_BAR) => {
                 self.shutdown(cx);
+                persist_bar_hidden(&settings::settings_path());
+                cx.quit();
             }
             _ => {}
         }
@@ -533,6 +706,11 @@ impl Render for FjordBarView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.clock = bar::local_clock(loc::language());
         let t = self.theme;
+        let bar_bg = if self.glass_mode {
+            0x0000_0000
+        } else {
+            t.dock_preview_bg
+        };
         let mut root = div()
             .flex()
             .items_center()
@@ -540,7 +718,7 @@ impl Render for FjordBarView {
             .w_full()
             .h(px(bar::BAR_HEIGHT_DIP))
             .px(px(12.0))
-            .bg(rgba(t.dock_preview_bg))
+            .bg(rgba(bar_bg))
             .border_b_1()
             .border_color(rgba(t.border))
             .text_color(rgba(t.text_primary))

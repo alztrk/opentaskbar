@@ -157,6 +157,26 @@ fn main() {
             ui::settings::run_settings_window();
             return;
         }
+        if args.iter().any(|a| a == ui::fjord_bar::FJORD_BAR_ARG) {
+            opentaskbar_core::log::init(
+                opentaskbar_core::settings::app_data_dir().join("opentaskbar.log"),
+            );
+            std::panic::set_hook(Box::new(|info| {
+                opentaskbar_core::log::error(format!("FJORD BAR PANIC: {info}"));
+            }));
+            let settings =
+                opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
+            opentaskbar_core::i18n::init(Some(&settings.language));
+            design::fonts::apply_settings(&settings);
+            apply_startup_context(&settings);
+            let files_enabled = settings
+                .extra
+                .get("FjordFilesEnabled")
+                .and_then(|v| v.as_i64().map(|n| n != 0).or_else(|| v.as_bool()))
+                .unwrap_or(false);
+            ui::fjord_bar::run_bar_host(files_enabled, opentaskbar_core::settings::settings_path());
+            return;
+        }
     }
 
     opentaskbar_core::log::init(opentaskbar_core::settings::app_data_dir().join("opentaskbar.log"));

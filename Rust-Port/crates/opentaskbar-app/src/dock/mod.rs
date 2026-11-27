@@ -1318,7 +1318,7 @@ fn compute_window_dips_with(
     let peak = profile_peak(settings);
     let expands = magnification_expands_dock(settings);
     let mag_extra = if settings.magnification_enabled && !settings.full_width && !expands {
-        base * peak
+        base * peak * 2.8
     } else {
         0.0
     };
@@ -1351,12 +1351,17 @@ fn compute_window_dips(settings: &DockSettings, slot_count: usize, mon_w_dips: f
     )
 }
 
-/// Fisheye ceiling: never above C# `DockMetrics.HoverScale = 1.5`.
+/// Fisheye extra-scale ceiling above 1.0: never above C# `DockMetrics.HoverScale - 1.0 = 0.5`.
 fn profile_peak(settings: &DockSettings) -> f32 {
     settings
         .fisheye_intensity
         .peak()
         .clamp(0.0, MAX_FISHEYE_SCALE - 1.0)
+}
+
+/// Absolute fisheye peak scale factor (`1.0..=MAX_FISHEYE_SCALE`, e.g. 1.20 / 1.42 / 1.50).
+fn profile_max_scale(settings: &DockSettings) -> f32 {
+    (1.0 + profile_peak(settings)).clamp(1.0, MAX_FISHEYE_SCALE)
 }
 
 /// Computes exact signed physical coordinates for a monitor (supports negative X on left monitors).
@@ -1488,13 +1493,17 @@ fn remap_native_app_menu_entries(entries: Vec<MenuEntry>) -> (Vec<(u32, u32)>, V
 
 /// Fjord workspace commands appended to the dock context menu (WS-11).
 fn fjord_bar_menu_entries(files_enabled: bool) -> Vec<(u32, MenuEntry)> {
+    fjord_bar_menu_entries_for(files_enabled, files_enabled)
+}
+
+fn fjord_bar_menu_entries_for(files_enabled: bool, bar_visible: bool) -> Vec<(u32, MenuEntry)> {
     (0..2)
         .filter_map(|index| {
             let command = crate::fjord::bar::menu_command(index, files_enabled)?;
             let id = FJORD_MENU_ID_BASE + index as u32;
             let label = match command {
                 crate::fjord::bar::BarCommand::OpenFiles => loc::t("FjordFilesOpen"),
-                crate::fjord::bar::BarCommand::CloseBar => loc::t(if files_enabled {
+                crate::fjord::bar::BarCommand::CloseBar => loc::t(if bar_visible {
                     "FjordBarHide"
                 } else {
                     "FjordBarShow"
@@ -2818,6 +2827,11 @@ impl DockState {
                 auto_hide,
                 desired_total_px,
             );
+            crate::ui::fjord_bar::sync_fjord_bar(extra_flag(
+                &self.settings,
+                "FjordBarVisible",
+                false,
+            ));
         }
         self.sync_slots(false);
         self.sync_window_bounds();
@@ -3144,7 +3158,7 @@ impl DockState {
         let profile = layout::size_profile(&self.settings);
         let base = profile.cell;
         let cell = base + slot_gap(&self.settings);
-        let configured = profile_peak(&self.settings).max(1.0);
+        let configured = profile_max_scale(&self.settings);
         let budget = capture_expansion_budget(
             cell,
             profile.icon,
@@ -3167,9 +3181,7 @@ impl DockState {
     /// C# `ComputeSafeLift` + launch bounce, capped at 1 DIP by `MAX_LIFT_DIPS`.
     fn slot_lift(&self, slot: &DockSlot) -> f32 {
         let profile = layout::size_profile(&self.settings);
-        let max_scale = profile_peak(&self.settings)
-            .max(1.0)
-            .min(self.session_max_scale);
+        let max_scale = profile_max_scale(&self.settings).min(self.session_max_scale);
         let headroom = (pill_height_dips(&self.settings) - profile.icon - 4.0).max(0.0);
         compute_safe_lift(slot.scale, max_scale, profile.icon, headroom)
             + bounce_offset_dips(slot.bounce_started).unwrap_or(0.0)
@@ -3619,13 +3631,13 @@ impl DockState {
         let cell = profile.cell + slot_gap(&self.settings);
         // C# `HoverScale = 1.5` is the ceiling; the expansion budget trims it to the
         // available pill space so neighbouring icons never overlap.
-        let configured_max = profile_peak(&self.settings).max(1.0);
+        let configured_max = profile_max_scale(&self.settings);
         let budget = capture_expansion_budget(
             cell,
             profile.icon,
             configured_max,
             self.mon_w_dips(),
-            self.live_apps_width_dips(),
+            self.raw_apps_width(Instant::now()),
             self.live_scroll_metrics().max_scroll,
             self.session_max_scale,
         );
@@ -3731,9 +3743,7 @@ impl DockState {
                 continue;
             }
             let target = scale_targets[idx];
-            let max_scale = profile_peak(&self.settings)
-                .max(1.0)
-                .min(self.session_max_scale);
+            let max_scale = profile_max_scale(&self.settings).min(self.session_max_scale);
             let (scale, velocity, settled) =
                 step_spring(slot.scale, target, slot.scale_velocity, dt, max_scale);
             slot.scale = scale;
@@ -4687,9 +4697,7 @@ impl DockState {
             && self.settings.animations_enabled
             && !magnification_expands_dock(&self.settings)
         {
-            profile_peak(&self.settings)
-                .max(1.0)
-                .min(self.session_max_scale)
+            profile_max_scale(&self.settings).min(self.session_max_scale)
         } else {
             1.0
         };
@@ -4933,7 +4941,18 @@ impl DockState {
                 crate::fjord::activation::handle_cli(&home);
             }
             crate::fjord::bar::BarCommand::CloseBar => {
-                crate::fjord::activation::close_all_windows();
+                let currently_visible = extra_flag(&self.settings, "FjordBarVisible", false)
+                    || crate::ui::fjord_bar::is_fjord_bar_running();
+                let next_visible = !currently_visible;
+                self.settings.extra.insert(
+                    "FjordBarVisible".to_owned(),
+                    serde_json::json!(i32::from(next_visible)),
+                );
+                let _ = settings::save_to(&settings::settings_path(), &self.settings);
+                crate::ui::fjord_bar::sync_fjord_bar(next_visible);
+                if !next_visible {
+                    crate::fjord::activation::close_all_windows();
+                }
             }
             crate::fjord::bar::BarCommand::ToggleWifi => {}
         }
@@ -6423,7 +6442,9 @@ impl DockState {
         // with ids outside the dock's reserved range; dispatch them here before
         // the normal `ContextAction` mapping.
         let files_enabled = extra_flag(&self.settings, "FjordFilesEnabled", false);
-        let fjord_entries = fjord_bar_menu_entries(files_enabled);
+        let bar_visible = extra_flag(&self.settings, "FjordBarVisible", false)
+            || crate::ui::fjord_bar::is_fjord_bar_running();
+        let fjord_entries = fjord_bar_menu_entries_for(files_enabled, bar_visible);
         let (chosen, act) = win32::show_dock_context_menu_with_entries(
             self.hwnd,
             self.is_dark,
@@ -7726,6 +7747,9 @@ pub fn run(settings: DockSettings) {
                         auto_hide,
                         desired_total_px,
                     );
+                    if extra_flag(&settings, "FjordBarVisible", false) {
+                        crate::ui::fjord_bar::spawn_fjord_bar();
+                    }
                 }
             }
             Err(err) => {
@@ -7784,6 +7808,7 @@ pub fn run(settings: DockSettings) {
     // menu must close it as C# MainWindow.Window_Closed does with
     // SettingsWindow.CloseForShutdown(), otherwise its window stays on screen.
     settings_ui::close_spawned_settings_windows();
+    crate::ui::fjord_bar::close_fjord_bar();
 
     if !wheel_hook.is_null() {
         unsafe {
@@ -8504,6 +8529,31 @@ mod tests {
                 dot_top >= bottom + 2.0 && dot_top <= pill_top + pill_h - 5.0,
                 "indicator dot ({dot_top}) must remain visible inside pill ({pill_top}..{})",
                 pill_top + pill_h
+            );
+        }
+    }
+
+    #[test]
+    fn fisheye_max_scale_exceeds_one_for_all_intensities() {
+        use opentaskbar_core::settings::FisheyeIntensity;
+        for (intensity, expected_min) in [
+            (FisheyeIntensity::Low, 1.19),
+            (FisheyeIntensity::Normal, 1.40),
+            (FisheyeIntensity::Strong, 1.49),
+        ] {
+            let settings = DockSettings {
+                fisheye_intensity: intensity,
+                ..DockSettings::default()
+            };
+            let max_scale = profile_max_scale(&settings);
+            assert!(
+                max_scale >= expected_min && max_scale <= MAX_FISHEYE_SCALE,
+                "fisheye {intensity:?} must magnify above 1.0, got {max_scale}"
+            );
+            let center_target = layout::compute_target_scale(0.0, 120.0, max_scale);
+            assert!(
+                (center_target - max_scale).abs() < 0.001,
+                "center icon target scale must reach {max_scale}, got {center_target}"
             );
         }
     }

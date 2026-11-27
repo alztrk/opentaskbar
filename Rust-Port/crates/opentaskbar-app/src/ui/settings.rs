@@ -1132,7 +1132,7 @@ impl SettingsView {
             let vp = window.viewport_size();
             let w_px = (f32::from(vp.width) * dpi).max(WIN_W * dpi);
             let h_px = (f32::from(vp.height) * dpi).max(WIN_H * dpi);
-            g.sync_rect(0.0, 0.0, w_px, h_px, (10.0 * dpi).round(), dpi, 0.0, 0.0);
+            g.sync_rect(0.0, 0.0, w_px, h_px, (8.0 * dpi).round(), dpi, 0.0, 0.0);
         }
         let installed_fonts = fonts::installed_fonts().to_vec();
         let saved_city = settings.weather_city.clone();
@@ -1486,7 +1486,7 @@ impl SettingsView {
                 let vp = window.viewport_size();
                 let w_px = (f32::from(vp.width) * dpi).max(2.0);
                 let h_px = (f32::from(vp.height) * dpi).max(2.0);
-                g.sync_rect(0.0, 0.0, w_px, h_px, (10.0 * dpi).round(), dpi, 0.0, 0.0);
+                g.sync_rect(0.0, 0.0, w_px, h_px, (8.0 * dpi).round(), dpi, 0.0, 0.0);
             }
         }
     }
