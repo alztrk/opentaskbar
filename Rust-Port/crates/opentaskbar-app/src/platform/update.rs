@@ -7,11 +7,8 @@
 use std::fs;
 use std::io::Write;
 use std::mem::size_of;
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
-use opentaskbar_core::single_instance::{MUTEX_NAME, SingleInstance};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use windows_sys::Win32::Networking::WinHttp::{
@@ -21,7 +18,6 @@ use windows_sys::Win32::Networking::WinHttp::{
     WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
     WinHttpSendRequest, WinHttpSetTimeouts,
 };
-use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 
 pub const REPOSITORY: &str = "alztrk/opentaskbar";
 pub const RELEASES_PAGE: &str = "https://github.com/alztrk/opentaskbar/releases/latest";
@@ -83,7 +79,10 @@ fn http_get<F: FnMut(&[u8])>(
         if session.is_null() {
             return None;
         }
-        WinHttpSetTimeouts(session, 5_000, 5_000, 15_000, 20_000);
+        // Release binaries are ~10+ MB; a slow connection must not abort the
+        // download after 20 seconds. Resolve/connect stay short, send/receive
+        // allow the full five-minute download budget.
+        WinHttpSetTimeouts(session, 5_000, 5_000, 300_000, 300_000);
         let connect = WinHttpConnect(session, host_w.as_ptr(), 443, 0);
         if connect.is_null() {
             WinHttpCloseHandle(session);
@@ -231,7 +230,29 @@ pub fn parse_release(json: &str) -> Option<Release> {
 }
 
 /// `Ok(None)` means up to date; `Err(())` means GitHub could not be reached.
+///
+/// Packaged/MSIX builds are intentionally short-circuited: their updates are
+/// delivered by the Store, and `GetCurrentPackageFullName` reports success with
+/// `ERROR_INSUFFICIENT_BUFFER (122)` on the length query.
 pub fn find_newer() -> Result<Option<Release>, ()> {
+    find_newer_packaged_guard()
+}
+
+/// Packaged-build guard used by `find_newer()` (also callable directly by WS-8).
+pub fn find_newer_packaged_guard() -> Result<Option<Release>, ()> {
+    find_newer_with_packaged(!supports_in_app_updates())
+}
+
+/// Testable core of the packaged guard: a Store build always reports "no
+/// update" without touching the network.
+fn find_newer_with_packaged(packaged: bool) -> Result<Option<Release>, ()> {
+    if packaged {
+        return Ok(None);
+    }
+    find_newer_github()
+}
+
+fn find_newer_github() -> Result<Option<Release>, ()> {
     let mut body = Vec::new();
     let status = http_get(
         "api.github.com",
@@ -248,7 +269,7 @@ pub fn find_newer() -> Result<Option<Release>, ()> {
         },
     )
     .ok_or(())?;
-    if status != 200 {
+    if !(200..300).contains(&status) {
         return Err(());
     }
     let json = String::from_utf8(body).map_err(|_| ())?;
@@ -283,16 +304,19 @@ fn split_url(url: &str) -> Option<(&str, &str)> {
 
 /// Downloads, verifies and schedules the replacement. Returns an error key on failure.
 pub fn download_and_apply(release: &Release) -> Result<(), &'static str> {
-    // The batch script copies over the executable. Windows cannot replace a mapped image while the
-    // dock is running, so refuse early instead of reporting a success that never takes effect.
-    if SingleInstance::acquire(MUTEX_NAME).is_none() {
-        return Err("ErrorUpdateDockRunning");
-    }
+    // The batch script retries the copy until the running dock releases the
+    // executable. Refusing while the dock is alive meant an update could never
+    // be applied from the Settings UI, so we schedule it and let the caller
+    // exit normally (see `exit_for_update`).
     let target = std::env::current_exe().map_err(|_| "ErrorUpdatePath")?;
     let file_name = target.file_name().and_then(|s| s.to_str()).unwrap_or("");
     if file_name.eq_ignore_ascii_case("dotnet.exe") {
         return Err("ErrorUpdateDeveloperMode");
     }
+    // A read-only install directory forces the elevated updater path.
+    let requires_elevation = target
+        .parent()
+        .is_none_or(|parent| !is_directory_writable(parent));
     let digest = match valid_digest(release.sha256.as_deref()) {
         true => release.sha256.as_ref().unwrap().clone(),
         false => return Err("ErrorUpdateExecutableInvalid"),
@@ -307,17 +331,24 @@ pub fn download_and_apply(release: &Release) -> Result<(), &'static str> {
     let _ = fs::remove_file(&part);
 
     let mut file = fs::File::create(&part).map_err(|_| "ErrorUpdateFailed")?;
+    let mut write_failed = false;
     let status = http_get(
         host,
         path,
         &[("User-Agent", &format!("OpenTaskbar/{CURRENT_VERSION}"))],
         |chunk| {
-            let _ = file.write_all(chunk);
+            if file.write_all(chunk).is_err() {
+                write_failed = true;
+            }
         },
     )
     .ok_or("ErrorUpdateHttp")?;
     drop(file);
-    if status != 200 {
+    if write_failed {
+        let _ = fs::remove_file(&part);
+        return Err("ErrorUpdateFailed");
+    }
+    if !(200..300).contains(&status) {
         let _ = fs::remove_file(&part);
         return Err("ErrorUpdateHttp");
     }
@@ -343,7 +374,7 @@ pub fn download_and_apply(release: &Release) -> Result<(), &'static str> {
         .and_then(hex_to_bytes)
         .ok_or("ErrorUpdateExecutableInvalid")?;
     let actual = Sha256::digest(&bytes);
-    if actual.as_slice() != expected.as_slice() {
+    if !constant_time_eq(actual.as_slice(), &expected) {
         let _ = fs::remove_file(&part);
         return Err("ErrorUpdateExecutableInvalid");
     }
@@ -351,19 +382,27 @@ pub fn download_and_apply(release: &Release) -> Result<(), &'static str> {
     let _ = fs::remove_file(&temp_exe);
     fs::rename(&part, &temp_exe).map_err(|_| "ErrorUpdateFailed")?;
 
-    let script_path = dir.join("apply-update.cmd");
-    let script = updater_script(&temp_exe.to_string_lossy(), &target.to_string_lossy())?;
-    // UTF-8 without BOM: a BOM breaks `@echo off` on the first line of a .cmd file.
-    fs::write(&script_path, script).map_err(|_| "ErrorUpdateFailed")?;
-
-    let working_dir = target.parent().unwrap_or(Path::new("."));
-    Command::new("cmd.exe")
-        .args(["/c", &script_path.to_string_lossy()])
-        .current_dir(working_dir)
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(|_| "ErrorUpdateFailed")?;
+    if requires_elevation {
+        if !launch_updater_elevated(&temp_exe, &target) {
+            return Err("ErrorUpdateFailed");
+        }
+    } else if !launch_updater_and_restart(&temp_exe, &target) {
+        return Err("ErrorUpdateFailed");
+    }
     Ok(())
+}
+
+/// Constant-time digest comparison: the number of compared bytes never depends
+/// on where the first mismatch occurs.
+pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut difference = 0u8;
+    for (a, b) in left.iter().zip(right) {
+        difference |= a ^ b;
+    }
+    difference == 0
 }
 
 fn hex_to_bytes(text: &str) -> Option<Vec<u8>> {
@@ -529,6 +568,20 @@ impl From<DetailedRelease> for Release {
     }
 }
 
+/// `GetCurrentPackageFullName` status codes used by the packaged guard.
+pub const ERROR_SUCCESS_I32: i32 = 0;
+/// Returned with a null buffer when the caller *is* packaged: the buffer is too
+/// small, but the length query itself succeeded. Treating this as "unpackaged"
+/// was the original bug that let Store builds run the GitHub updater.
+pub const ERROR_INSUFFICIENT_BUFFER_I32: i32 = 122;
+/// `APPMODEL_ERROR_NO_PACKAGE`: the caller is a portable build.
+pub const APPMODEL_ERROR_NO_PACKAGE_I32: i32 = 15700;
+
+/// Pure classifier for the `GetCurrentPackageFullName` status code.
+pub fn status_means_packaged(status: i32) -> bool {
+    status == ERROR_SUCCESS_I32 || status == ERROR_INSUFFICIENT_BUFFER_I32
+}
+
 /// Detects an MSIX/Store install via `GetCurrentPackageFullName` (kernel32, dynamically loaded).
 pub fn is_packaged() -> bool {
     #[cfg(windows)]
@@ -549,9 +602,9 @@ pub fn is_packaged() -> bool {
             let get: unsafe extern "system" fn(*mut u32, *mut u16) -> i32 =
                 std::mem::transmute(address);
             let mut length: u32 = 0;
-            // Passing a null buffer returns APPMODEL_ERROR_NO_PACKAGE and the required length.
-            let result = get(&mut length, std::ptr::null_mut());
-            result == 0
+            // With a null buffer a packaged process gets 122 (ERROR_INSUFFICIENT_BUFFER),
+            // while a portable process gets 15700 (APPMODEL_ERROR_NO_PACKAGE).
+            status_means_packaged(get(&mut length, std::ptr::null_mut()))
         }
     }
     #[cfg(not(windows))]
@@ -691,6 +744,17 @@ impl UpdateOutcome {
 /// Downloads and applies an update. Successful application spawns the updater; call
 /// `exit_for_update()` afterwards to release the running executable.
 pub fn download_and_apply_update(release: &DetailedRelease) -> UpdateOutcome {
+    apply_update(release, false)
+}
+
+/// Same as [`download_and_apply_update`] but always launches the copy/restart
+/// script through `ShellExecuteW("runas")`, even when the install directory
+/// happens to be writable by the current user.
+pub fn apply_with_elevation(release: &DetailedRelease) -> UpdateOutcome {
+    apply_update(release, true)
+}
+
+fn apply_update(release: &DetailedRelease, force_elevation: bool) -> UpdateOutcome {
     if !supports_in_app_updates() {
         return UpdateOutcome::failure("UpdateFailed", None);
     }
@@ -751,7 +815,7 @@ pub fn download_and_apply_update(release: &DetailedRelease) -> UpdateOutcome {
         .map(|i| u8::from_str_radix(&expected[i..i + 2], 16))
         .collect::<Result<Vec<_>, _>>();
     if expected
-        .map(|expected| sha256(&bytes) != expected)
+        .map(|expected| !constant_time_eq(&sha256(&bytes), &expected))
         .unwrap_or(true)
     {
         let _ = fs::remove_file(&part);
@@ -765,7 +829,7 @@ pub fn download_and_apply_update(release: &DetailedRelease) -> UpdateOutcome {
     if fs::rename(&part, &temp_exe).is_err() {
         return UpdateOutcome::failure("ErrorUpdateFailed", None);
     }
-    if !launch_updater_and_restart(&temp_exe, &target) {
+    if !launch_updater(&temp_exe, &target, force_elevation) {
         return UpdateOutcome::failure("ErrorUpdateFailed", None);
     }
     UpdateOutcome {
@@ -852,6 +916,15 @@ fn is_directory_writable(dir: &Path) -> bool {
 
 /// Writes the script, spawns it (elevated with `runas` when needed), returns success.
 pub fn launch_updater_and_restart(temp_exe: &Path, target: &Path) -> bool {
+    launch_updater(temp_exe, target, false)
+}
+
+/// Always elevates the updater via `ShellExecuteW("runas")`.
+pub fn launch_updater_elevated(temp_exe: &Path, target: &Path) -> bool {
+    launch_updater(temp_exe, target, true)
+}
+
+fn launch_updater(temp_exe: &Path, target: &Path, force_elevation: bool) -> bool {
     let Some(parent) = target.parent() else {
         return false;
     };
@@ -862,7 +935,7 @@ pub fn launch_updater_and_restart(temp_exe: &Path, target: &Path) -> bool {
     if write_updater_script(&script, temp_exe, target).is_err() {
         return false;
     }
-    let requires_elevation = !is_directory_writable(parent);
+    let requires_elevation = force_elevation || !is_directory_writable(parent);
     #[cfg(windows)]
     let spawned = if requires_elevation {
         use windows_sys::Win32::UI::Shell::ShellExecuteW;
@@ -916,9 +989,11 @@ fn http_get_detailed(url: &str) -> Result<(u16, Vec<u8>), String> {
     #[cfg(windows)]
     {
         use windows_sys::Win32::Networking::WinHttp::{
-            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_STATUS_CODE,
-            WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
+            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen,
+            WinHttpOpenRequest,
             WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
+            WinHttpSetTimeouts,
         };
         let (scheme, rest) = url.split_once("://").ok_or("invalid URL")?;
         let secure = scheme.eq_ignore_ascii_case("https");
@@ -949,6 +1024,8 @@ fn http_get_detailed(url: &str) -> Result<(u16, Vec<u8>), String> {
             if session.is_null() {
                 return Err("WinHttpOpen failed".into());
             }
+            // Five-minute send/receive budget for full release binaries.
+            WinHttpSetTimeouts(session, 5_000, 5_000, 300_000, 300_000);
             let connection = WinHttpConnect(session, host_wide.as_ptr(), port, 0);
             if connection.is_null() {
                 WinHttpCloseHandle(session);
@@ -991,7 +1068,7 @@ fn http_get_detailed(url: &str) -> Result<(u16, Vec<u8>), String> {
             let mut length = size_of::<u32>() as u32;
             WinHttpQueryHeaders(
                 request,
-                WINHTTP_QUERY_STATUS_CODE,
+                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                 std::ptr::null(),
                 (&mut status as *mut u32).cast(),
                 &mut length,
@@ -1102,6 +1179,25 @@ pub fn sha256(data: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod parity_tests {
     use super::*;
+
+    #[test]
+    fn packaged_guard_accepts_insufficient_buffer() {
+        assert!(status_means_packaged(ERROR_SUCCESS_I32));
+        // A null-buffer length query succeeds with 122 for packaged processes.
+        assert!(status_means_packaged(ERROR_INSUFFICIENT_BUFFER_I32));
+        assert!(!status_means_packaged(APPMODEL_ERROR_NO_PACKAGE_I32));
+        assert!(!status_means_packaged(5));
+        assert_eq!(find_newer_with_packaged(true), Ok(None));
+    }
+
+    #[test]
+    fn digest_comparison_is_exact_and_constant_time() {
+        let expected = [0xAAu8, 0xBB, 0xCC, 0xDD];
+        assert!(constant_time_eq(&expected, &[0xAA, 0xBB, 0xCC, 0xDD]));
+        assert!(!constant_time_eq(&expected, &[0xAA, 0xBB, 0xCC, 0xDE]));
+        assert!(!constant_time_eq(&expected, &[0xAA, 0xBB, 0xCC]));
+        assert!(!constant_time_eq(&expected, &[]));
+    }
 
     #[test]
     fn version_parsing_and_comparison() {

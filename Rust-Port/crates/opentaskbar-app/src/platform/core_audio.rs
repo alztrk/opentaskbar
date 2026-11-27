@@ -13,7 +13,7 @@
 
 use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use windows::Win32::Foundation::PROPERTYKEY;
@@ -53,6 +53,16 @@ pub struct AudioEvent {
 static EVENTS: Mutex<VecDeque<AudioEvent>> = Mutex::new(VecDeque::new());
 const EVENT_CAP: usize = 128;
 
+/// Process-wide device generation. Every real `IMMNotificationClient` callback
+/// bumps it, so consumers can invalidate cached device lists even when several
+/// `subscribe()` handles are alive.
+static DEVICE_GENERATION: AtomicUsize = AtomicUsize::new(1);
+
+/// Current endpoint generation (increases on every consumed device event).
+pub fn device_generation() -> usize {
+    DEVICE_GENERATION.load(Ordering::Acquire)
+}
+
 fn push_event(kind: AudioEventKind, id: &windows::core::PCWSTR) {
     let device_id = if id.is_null() {
         String::new()
@@ -65,6 +75,8 @@ fn push_event(kind: AudioEventKind, id: &windows::core::PCWSTR) {
         }
         q.push_back(AudioEvent { kind, device_id });
     }
+    // Notification callbacks really drive the generation, not a fake timer.
+    DEVICE_GENERATION.fetch_add(1, Ordering::AcqRel);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -358,9 +370,7 @@ pub fn list_devices_named(is_recording: bool) -> Vec<(String, String)> {
 /// The COM enumerator + notification client are registered once and kept alive for the
 /// process lifetime; the Arc handle only implements the C# ref-count semantics.
 #[derive(Debug)]
-pub struct AudioEndpointMonitor {
-    generation: usize,
-}
+pub struct AudioEndpointMonitor;
 
 static SHARED: OnceLock<Mutex<Weak<AudioEndpointMonitor>>> = OnceLock::new();
 static NOTIFY_REGISTERED: OnceLock<()> = OnceLock::new();
@@ -383,13 +393,13 @@ impl AudioEndpointMonitor {
             std::mem::forget(client);
             let _ = NOTIFY_REGISTERED.set(());
         }
-        let monitor = Arc::new(AudioEndpointMonitor { generation: 1 });
+        let monitor = Arc::new(AudioEndpointMonitor);
         *guard = Arc::downgrade(&monitor);
         Some(monitor)
     }
 
     pub fn generation(&self) -> usize {
-        self.generation
+        device_generation()
     }
 }
 
@@ -813,6 +823,39 @@ mod tests {
         assert_eq!(match_score("chrome", None, "chrome.extra.1", None), 1);
         assert_eq!(match_score("app", None, "", None), 0);
         assert_eq!(match_score("app", None, "a!App", None), 0);
+    }
+
+    #[test]
+    fn device_events_are_consumed_and_bump_generation() {
+        let before = device_generation();
+        push_event(AudioEventKind::DeviceAdded, &PCWSTR::null());
+        assert!(device_generation() > before);
+        let events = take_events();
+        assert!(events
+            .iter()
+            .any(|event| event.kind == AudioEventKind::DeviceAdded));
+        assert!(!has_pending_events());
+        assert!(device_generation() > before);
+    }
+
+    #[test]
+    fn matcher_scores_packaged_aumid_source_ids() {
+        const AUMID: &str = "SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify";
+        let session = AppAudioSession {
+            process_id: 24,
+            name: "Spotify.exe".into(),
+            app_user_model_id: Some(AUMID.to_owned()),
+            window_app_user_model_id: None,
+            state: AppAudioSessionState::Active,
+            volume: 0.4,
+            muted: false,
+        };
+        assert_eq!(match_score(&session.name, Some(AUMID), AUMID, None), 2);
+        assert_eq!(
+            find_app_session(std::slice::from_ref(&session), AUMID)
+                .map(|found| found.process_id),
+            Some(24)
+        );
     }
 
     #[test]

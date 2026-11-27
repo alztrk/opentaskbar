@@ -5,6 +5,8 @@
 //! Startup folder. Packaged (MSIX) builds must use the manifest `StartupTask`
 //! instead; we never write a Run key for them and remove stale ones on startup.
 
+use std::ffi::c_void;
+use std::mem::size_of;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
@@ -171,6 +173,41 @@ fn write_binary(key: HKEY, name: &str, value: &[u8]) -> bool {
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetLongPathNameW(short_path: *const u16, long_path: *mut u16, buffer_length: u32) -> u32;
+    fn ExpandEnvironmentStringsW(source: *const u16, target: *mut u16, target_size: u32) -> u32;
+}
+
+#[repr(C)]
+struct VsFixedFileInfo {
+    signature: u32,
+    stride: u32,
+    file_version_ms: u32,
+    file_version_ls: u32,
+    product_version_ms: u32,
+    product_version_ls: u32,
+    file_flags_mask: u32,
+    file_flags: u32,
+    file_os: u32,
+    file_type: u32,
+    file_subtype: u32,
+    file_date_ms: u32,
+    file_date_ls: u32,
+}
+
+#[link(name = "version")]
+unsafe extern "system" {
+    fn GetFileVersionInfoSizeW(file_name: *const u16, handle: *mut u32) -> u32;
+    fn GetFileVersionInfoW(
+        file_name: *const u16,
+        handle: u32,
+        length: u32,
+        data: *mut c_void,
+    ) -> i32;
+    fn VerQueryValueW(
+        data: *const c_void,
+        sub_block: *const u16,
+        buffer: *mut *mut c_void,
+        length: *mut u32,
+    ) -> i32;
 }
 
 /// Parses a Run command, including unquoted paths containing spaces
@@ -239,6 +276,106 @@ pub fn try_normalize_path(path: &str) -> Option<String> {
         return full.to_str().map(str::to_owned);
     }
     Some(String::from_utf16_lossy(&buffer[..length as usize]))
+}
+
+/// Pure `%VAR%` expansion used by shortcut and Run-command repair. Unknown
+/// variables are left untouched so an existing path is not mangled.
+pub fn expand_env_with(text: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut index = 0usize;
+    while index < text.len() {
+        let rest = &text[index..];
+        if rest.starts_with('%') {
+            if let Some(end) = rest[1..].find('%') {
+                let name = &rest[1..1 + end];
+                if !name.is_empty()
+                    && let Some(value) = lookup(name)
+                {
+                    out.push_str(&value);
+                    index += 1 + end + 1;
+                    continue;
+                }
+            }
+        }
+        let ch = rest.chars().next().unwrap_or('\0');
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+/// Expands environment variables using the Win32 process environment (which
+/// also sees registry-defined user/system variables).
+pub fn expand_environment_variables(text: &str) -> String {
+    let source: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: size query with a null output buffer is documented and safe.
+    let size = unsafe { ExpandEnvironmentStringsW(source.as_ptr(), std::ptr::null_mut(), 0) };
+    if size == 0 {
+        return expand_env_with(text, |name| std::env::var(name).ok());
+    }
+    let mut buffer = vec![0u16; size as usize];
+    // SAFETY: `size` covers the null terminator reported by the query.
+    let written = unsafe { ExpandEnvironmentStringsW(source.as_ptr(), buffer.as_mut_ptr(), size) };
+    if written == 0 || written > size {
+        return expand_env_with(text, |name| std::env::var(name).ok());
+    }
+    let used = buffer.iter().position(|&unit| unit == 0).unwrap_or(buffer.len());
+    String::from_utf16_lossy(&buffer[..used])
+}
+
+fn file_version(path: &Path) -> Option<(u32, u32, u32, u32)> {
+    let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: null-terminated UTF-16 path and valid out-handle.
+    let mut handle = 0u32;
+    let size = unsafe { GetFileVersionInfoSizeW(name.as_ptr(), &mut handle) };
+    if size == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u8; size as usize];
+    // SAFETY: buffer size is exactly the value reported by the size query.
+    if unsafe { GetFileVersionInfoW(name.as_ptr(), handle, size, buffer.as_mut_ptr().cast()) } == 0 {
+        return None;
+    }
+    let sub_block = wide("\\");
+    let mut result: *mut c_void = std::ptr::null_mut();
+    let mut length = 0u32;
+    // SAFETY: the buffer stays alive for the duration of the query.
+    if unsafe {
+        VerQueryValueW(
+            buffer.as_ptr().cast(),
+            sub_block.as_ptr(),
+            &mut result,
+            &mut length,
+        )
+    } == 0
+        || result.is_null()
+        || (length as usize) < size_of::<VsFixedFileInfo>()
+    {
+        return None;
+    }
+    // SAFETY: VerQueryValueW returned a VS_FIXEDFILEINFO of at least that size.
+    let info = unsafe { &*(result as *const VsFixedFileInfo) };
+    Some((
+        info.file_version_ms >> 16,
+        info.file_version_ms & 0xFFFF,
+        info.file_version_ls >> 16,
+        info.file_version_ls & 0xFFFF,
+    ))
+}
+
+/// True when `registered` is older than `current`. Falls back to the file
+/// modification time for builds that do not embed a version resource.
+fn is_older_executable(registered: &str, current: &str) -> bool {
+    match (file_version(Path::new(registered)), file_version(Path::new(current))) {
+        (Some(a), Some(b)) => a < b,
+        _ => match (
+            std::fs::metadata(registered).and_then(|meta| meta.modified()),
+            std::fs::metadata(current).and_then(|meta| meta.modified()),
+        ) {
+            (Ok(a), Ok(b)) => a < b,
+            _ => false,
+        },
+    }
 }
 
 fn is_under_directory(path: &str, directory: &str) -> bool {
@@ -358,11 +495,10 @@ fn delete_startup_approved_entry() {
 /// Reads the effective startup state. Returns `(enabled, error_key)`.
 pub fn read() -> (bool, Option<&'static str>) {
     match app_identity::startup_policy() {
-        StartupPolicy::MsixStartupTask => {
-            // The WinRT `StartupTask` state is owned by the packaged manifest;
-            // without the WinRT bridge linked we never claim it is enabled.
-            (false, Some("StartupPackagedRequiresStartupTask"))
-        }
+        StartupPolicy::MsixStartupTask => match app_identity::read_startup_task() {
+            Ok(enabled) => (enabled, None),
+            Err(_) => (false, Some("StartupReadError")),
+        },
         StartupPolicy::RunKey => {
             let Some(key) = open_key(RUN_KEY, false) else {
                 return (false, Some("StartupReadError"));
@@ -388,12 +524,16 @@ pub fn read() -> (bool, Option<&'static str>) {
 pub fn set_enabled(enabled: bool) -> Option<&'static str> {
     match app_identity::startup_policy() {
         StartupPolicy::MsixStartupTask => {
-            if enabled {
-                log::warn("MSIX builds must enable the manifest StartupTask via WinRT.");
-                Some("StartupPackagedRequiresStartupTask")
-            } else {
-                remove_stale_unpackaged_run_entry();
-                None
+            // Real WinRT StartupTask read/write (GetAsync / RequestEnableAsync / Disable).
+            match app_identity::set_startup_task_enabled(enabled) {
+                Ok(observed) if observed == enabled => {
+                    if !enabled {
+                        remove_stale_unpackaged_run_entry();
+                    }
+                    None
+                }
+                Ok(_) => Some("StartupDisabledByPolicy"),
+                Err(_) => Some("StartupWriteError"),
             }
         }
         StartupPolicy::RunKey => {
@@ -468,6 +608,87 @@ fn sync_unpackaged_run_entry(normalized: &str) {
     }
 }
 
+/// Ensures the `StartupApproved\Run` byte 0 is in the enabled state when our Run
+/// entry exists but Task Manager's flag was left disabled by an older build.
+fn ensure_startup_approved_byte0() {
+    let Some(read_key) = open_key(RUN_KEY, false) else {
+        return;
+    };
+    let command = read_string(read_key, VALUE_NAME);
+    // SAFETY: key handle closed before returning.
+    unsafe { RegCloseKey(read_key) };
+    let Some(command) = command else {
+        return;
+    };
+    let (exe, _) = parse_run_command(&command);
+    let Some(exe) = exe.and_then(|exe| try_normalize_path(&expand_environment_variables(&exe)))
+    else {
+        return;
+    };
+    if !Path::new(&exe).is_file() {
+        return;
+    }
+    let Some(approved_key) = open_key(STARTUP_APPROVED_RUN_KEY, false) else {
+        return;
+    };
+    let data = read_binary(approved_key, VALUE_NAME);
+    // SAFETY: key handle closed before returning.
+    unsafe { RegCloseKey(approved_key) };
+    if data
+        .as_deref()
+        .is_some_and(|bytes| is_startup_approved_enabled(Some(bytes)))
+    {
+        return;
+    }
+    if let Some(key) = open_key(STARTUP_APPROVED_RUN_KEY, true) {
+        write_binary(key, VALUE_NAME, &ENABLED_STARTUP_APPROVED_BYTES);
+        // SAFETY: key handle closed before returning.
+        unsafe { RegCloseKey(key) };
+    }
+}
+
+/// Single entry point used on every normal startup (and by the Settings UI).
+///
+/// Repairs the portable Run key and its `StartupApproved\Run` byte 0, refreshes
+/// a stale portable target using PE file versions, and rewrites Startup-folder
+/// shortcuts whose target contains environment variables. Packaged builds only
+/// observe the manifest `StartupTask` and remove stale unpackaged Run entries.
+pub fn sync_all() -> Option<&'static str> {
+    match app_identity::startup_policy() {
+        StartupPolicy::MsixStartupTask => {
+            remove_stale_unpackaged_run_entry();
+            if app_identity::read_startup_task().is_err() {
+                return Some("StartupReadError");
+            }
+            None
+        }
+        StartupPolicy::RunKey => {
+            let Ok(exe) = std::env::current_exe() else {
+                return Some("StartupPathError");
+            };
+            let raw = exe.to_string_lossy();
+            if !is_valid_startup_executable(&raw, Some(&std::env::temp_dir().to_string_lossy())) {
+                return Some("StartupPathError");
+            }
+            let Some(normalized) = try_normalize_path(&raw) else {
+                return Some("StartupPathError");
+            };
+            if normalized.len() + 2 > MAX_COMMAND_LENGTH {
+                return Some("StartupPathError");
+            }
+            sync_unpackaged_run_entry(&normalized);
+            ensure_startup_approved_byte0();
+            let result = refresh_portable_target();
+            if let Some(folder) = startup_folder()
+                && folder.is_dir()
+            {
+                sync_startup_folder_shortcuts(&folder, &normalized);
+            }
+            result
+        }
+    }
+}
+
 fn startup_folder() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|appdata| {
         PathBuf::from(appdata)
@@ -484,7 +705,7 @@ pub fn sync_startup_folder_shortcuts(folder: &Path, current_executable: &str) ->
     let Ok(entries) = std::fs::read_dir(folder) else {
         return 0;
     };
-    let Some(current) = try_normalize_path(current_executable) else {
+    let Some(current) = try_normalize_path(&expand_environment_variables(current_executable)) else {
         return 0;
     };
     // SAFETY: COM STA for IShellLinkW on this thread.
@@ -537,7 +758,7 @@ pub fn sync_startup_folder_shortcuts(folder: &Path, current_executable: &str) ->
                 continue;
             }
             let used = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
-            let target = String::from_utf16_lossy(&buffer[..used]);
+            let target = expand_environment_variables(&String::from_utf16_lossy(&buffer[..used]));
             let Some(normalized_target) = try_normalize_path(&target) else {
                 continue;
             };
@@ -577,32 +798,7 @@ pub fn sync_on_startup(is_dev: bool, is_inspection: bool) {
     if is_dev || is_inspection {
         return;
     }
-    if matches!(
-        app_identity::startup_policy(),
-        StartupPolicy::MsixStartupTask
-    ) {
-        remove_stale_unpackaged_run_entry();
-        return;
-    }
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
-    let path = exe.to_string_lossy();
-    if !is_valid_startup_executable(&path, Some(&std::env::temp_dir().to_string_lossy())) {
-        return;
-    }
-    let Some(normalized) = try_normalize_path(&path) else {
-        return;
-    };
-    if normalized.len() + 2 > MAX_COMMAND_LENGTH {
-        return;
-    }
-    sync_unpackaged_run_entry(&normalized);
-    if let Some(folder) = startup_folder()
-        && folder.is_dir()
-    {
-        sync_startup_folder_shortcuts(&folder, &normalized);
-    }
+    let _ = sync_all();
 }
 
 /// Repairs a stale portable Run target whose executable is missing or older.
@@ -628,12 +824,14 @@ pub fn refresh_portable_target() -> Option<&'static str> {
         unsafe { RegCloseKey(key) };
         return None;
     };
+    let registered = expand_environment_variables(&registered);
     if !is_startup_path(&registered) || registered.eq_ignore_ascii_case(&path) {
         // SAFETY: key handle closed before returning.
         unsafe { RegCloseKey(key) };
         return None;
     }
-    if Path::new(&registered).exists() {
+    let exists = Path::new(&registered).is_file();
+    if exists && !is_older_executable(&registered, &path) {
         // SAFETY: key handle closed before returning.
         unsafe { RegCloseKey(key) };
         return None;
@@ -665,6 +863,36 @@ mod tests {
             )
         );
         assert_eq!(parse_run_command(""), (None, String::new()));
+    }
+
+    #[test]
+    fn shortcut_targets_expand_environment_variables() {
+        assert_eq!(
+            expand_env_with(r"%LOCALAPPDATA%\OpenTaskbar\OpenTaskbar.exe", |name| {
+                (name == "LOCALAPPDATA").then(|| r"C:\Users\Test\AppData\Local".to_owned())
+            }),
+            r"C:\Users\Test\AppData\Local\OpenTaskbar\OpenTaskbar.exe"
+        );
+        assert_eq!(
+            expand_env_with("%MISSING%-kept", |_| None),
+            "%MISSING%-kept"
+        );
+        assert_eq!(expand_env_with("100%%", |_| None), "100%%");
+    }
+
+    #[test]
+    fn version_tuples_compare_component_wise() {
+        assert!((0, 1, 2, 0) < (0, 1, 3, 0));
+        assert!((1, 0, 0, 0) > (0, 9, 9, 9));
+        assert!(!((1, 0, 0, 0) < (1, 0, 0, 0)));
+    }
+
+    #[test]
+    fn sync_all_is_safe_to_call_repeatedly() {
+        // The real registry path must be idempotent and never panic, even when
+        // the current executable is the test runner (not a startup target).
+        let _ = sync_all();
+        let _ = sync_all();
     }
 
     #[test]

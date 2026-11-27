@@ -33,6 +33,7 @@ pub mod update;
 pub mod win32;
 #[allow(dead_code)]
 pub mod win32_ex;
+pub mod wifi;
 pub mod wireless_battery;
 
 // WS-G provider modules (kept with the same dead-code allowance).
