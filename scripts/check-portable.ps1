@@ -45,14 +45,16 @@ if ($machine -ne $expectedMachine) {
 }
 Write-Host ("PE machine OK for {0}: 0x{1:X4} ({2})" -f $ExecutableName, $machine, $Architecture) -ForegroundColor DarkGray
 
-# publish-portable.ps1 drops the exact watchdog embedded by build.rs next
-# to the EXE for manifest/attestation purposes; verify it is the same arch too.
+# publish-portable.ps1 always drops the exact watchdog embedded by build.rs next
+# to the EXE. Its hash is recorded in the release manifest, so a missing file
+# must fail the gate instead of silently producing an unverifiable manifest.
 $watchdog = Join-Path $directory "OpenTaskbarWatchdog-$Architecture.exe"
-if (Test-Path -LiteralPath $watchdog -PathType Leaf) {
-    $watchdogMachine = Get-PeMachine -Path $watchdog
-    if ($watchdogMachine -ne $expectedMachine) {
-        throw ("Wrong PE machine for embedded watchdog ({0}): 0x{1:X4}, expected 0x{2:X4}." -f $Architecture, $watchdogMachine, $expectedMachine)
-    }
+if (-not (Test-Path -LiteralPath $watchdog -PathType Leaf)) {
+    throw "Embedded watchdog is missing: $watchdog (run scripts/publish-portable.ps1 first)."
+}
+$watchdogMachine = Get-PeMachine -Path $watchdog
+if ($watchdogMachine -ne $expectedMachine) {
+    throw ("Wrong PE machine for embedded watchdog ({0}): 0x{1:X4}, expected 0x{2:X4}." -f $Architecture, $watchdogMachine, $expectedMachine)
 }
 
 # The release ships a single EXE. Any third-party DLL beside it would mean the

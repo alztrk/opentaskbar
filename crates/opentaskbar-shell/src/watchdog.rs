@@ -15,6 +15,7 @@
 use std::fs;
 use std::hash::{BuildHasher, RandomState};
 use std::os::windows::process::CommandExt;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -95,6 +96,31 @@ struct WatchdogState {
 
 static WATCHDOG: Mutex<Option<WatchdogState>> = Mutex::new(None);
 
+/// A clean-exit signal is only trustworthy after the native taskbar has been
+/// *verified* as restored. `taskbar::restore_from_journal` publishes that fact
+/// with [`set_restore_verified`]; every new `arm()` resets it. This makes the
+/// legacy `notify_clean_exit()` call in `main.rs` (which runs before
+/// `end_replacement()`) harmless instead of disabling recovery too early.
+static RESTORE_VERIFIED: AtomicBool = AtomicBool::new(false);
+
+/// Records the outcome of the most recent restore attempt. Called by the shell
+/// restore path with `false` on *every* failed/aborted attempt so a stale
+/// success can never authorize a later clean-exit signal.
+pub fn set_restore_verified(verified: bool) {
+    RESTORE_VERIFIED.store(verified, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub fn is_restore_verified() -> bool {
+    RESTORE_VERIFIED.load(Ordering::SeqCst)
+}
+
+/// Pure policy behind the legacy signal: a clean exit may only be signalled
+/// when a restore has been verified in the current replacement session.
+fn clean_exit_permitted(restore_verified: bool) -> bool {
+    restore_verified
+}
+
 /// Builds the single `--watchdog=<pid>:<token>` argument understood by the C
 /// watchdog and by [`parse_watchdog_arg`].
 fn watchdog_arg(pid: u32, token: &str) -> String {
@@ -116,10 +142,10 @@ fn parse_watchdog_arg(arg: &str) -> Option<(u32, String)> {
 }
 
 /// Hex token check shared by the Rust armer and the C watchdog parser. Accepts
-/// both the historical 16-hex token and `Guid.NewGuid().ToString("N")`'s
-/// 32-hex token; no other character may ever reach a named-event path.
+/// exactly the historical 16-hex token and `Guid.NewGuid().ToString("N")`'s
+/// 32-hex token; no other length or character may reach a named-event path.
 fn is_hex_token(token: &str) -> bool {
-    !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+    matches!(token.len(), 16 | 32) && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// True for a reference GUID "N" token (exactly 32 hex digits, e.g. `0f3a9c1122334455aabbccddeeff0011`).
@@ -148,11 +174,16 @@ fn needs_watchdog_refresh(existing: Option<&[u8]>, expected: &[u8]) -> bool {
     existing != Some(expected)
 }
 
-/// App-directory priority: a deployed/packaged watchdog is already signed and
-/// must be launched directly instead of a copy in `%LOCALAPPDATA%`.
+/// App-directory priority, but only for a byte-identical PE. A stale or
+/// wrong-architecture file left beside the EXE must never silently replace the
+/// architecture-matched binary built by `build.rs`.
+fn app_dir_watchdog_matches(path: &Path) -> bool {
+    fs::read(path).is_ok_and(|bytes| bytes == WATCHDOG_BYTES)
+}
+
 fn select_watchdog_path(app_dir_candidate: Option<PathBuf>, data_dir_path: PathBuf) -> PathBuf {
     app_dir_candidate
-        .filter(|path| path.exists())
+        .filter(|path| app_dir_watchdog_matches(path))
         .unwrap_or(data_dir_path)
 }
 
@@ -217,6 +248,9 @@ fn stop_heartbeat_and_signal(state: &mut WatchdogState) -> bool {
 
 /// Arms the watchdog and starts the heartbeat pulse. Idempotent.
 pub fn arm() {
+    // A new replacement session starts unverified even when a previous session
+    // restored successfully (e.g. startup heal before `arm()`).
+    set_restore_verified(false);
     let Ok(mut slot) = WATCHDOG.lock() else {
         return;
     };
@@ -288,8 +322,17 @@ pub fn is_armed() -> bool {
 }
 
 /// Stops the heartbeat first, then tells the watchdog this was a clean exit.
-/// Called only after the native taskbar has been verified as restored.
+///
+/// Safe to call from the legacy exit path *before* restoration: unless
+/// [`set_restore_verified`] has recorded a verified restore for this session,
+/// the call is a no-op and the watchdog stays armed. `taskbar::end_replacement`
+/// verifies first, then calls this again; that second call is the one that
+/// actually releases the watchdog.
 pub fn notify_clean_exit() {
+    if !clean_exit_permitted(RESTORE_VERIFIED.load(Ordering::SeqCst)) {
+        log::info("Clean-exit signal deferred: native taskbar restore not verified yet.");
+        return;
+    }
     let Ok(mut state) = WATCHDOG.lock() else {
         return;
     };
@@ -307,6 +350,7 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     static TEST_ID: AtomicUsize = AtomicUsize::new(0);
+    static GATE_SERIAL: Mutex<()> = Mutex::new(());
 
     #[test]
     fn watchdog_copy_uses_the_shared_appdata_folder() {
@@ -363,17 +407,23 @@ mod tests {
         assert!(!is_reference_guid_token(&guid[..31]));
         assert!(!is_reference_guid_token(&format!("{guid}0")));
         // Accepts upper/lower-case hex, but nothing else.
-        assert!(parse_watchdog_arg("--watchdog=1:ABCDEF").is_some());
+        assert!(parse_watchdog_arg("--watchdog=1:ABCDEF0123456789").is_some());
+        assert!(parse_watchdog_arg("--watchdog=4294967295:ABCDEF0123456789").is_some());
+        // The C parser accepts the same two lengths and character class.
         for bad in [
             "",
             "--watchdog=",
             "watchdog=1:abc",
-            "--watchdog=0:abc",
-            "--watchdog=pid:abc",
+            "--watchdog=0:abcdef0123456789",
+            "--watchdog=pid:abcdef0123456789",
             "--watchdog=1:",
-            "--watchdog=1:zzz",
+            "--watchdog=1:ABCDEF",
+            "--watchdog=1:abcdef012345678901234567890123456789",
+            "--watchdog=1:zzzzzzzzzzzzzzzz",
             "--watchdog=1:2:3",
-            "--other=1:abc",
+            "--watchdog=4294967296:abcdef",
+            "--watchdog=-1:abcdef",
+            "--other=1:abcdef",
         ] {
             assert_eq!(parse_watchdog_arg(bad), None, "must reject {bad:?}");
         }
@@ -419,19 +469,27 @@ mod tests {
             TEST_ID.fetch_add(1, Ordering::Relaxed)
         );
         let app_exe = std::env::temp_dir().join(format!("{unique}-app.exe"));
+        let stale_exe = std::env::temp_dir().join(format!("{unique}-stale.exe"));
         let missing = std::env::temp_dir().join(format!("{unique}-missing.exe"));
         let data_exe = std::env::temp_dir().join(format!("{unique}-data.exe"));
-        fs::write(&app_exe, b"app").expect("temp app-dir exe must be writable");
+        fs::write(&app_exe, WATCHDOG_BYTES).expect("temp app-dir exe must be writable");
+        fs::write(&stale_exe, b"stale").expect("temp stale exe must be writable");
         assert_eq!(
             select_watchdog_path(Some(app_exe.clone()), data_exe.clone()),
             app_exe
         );
-        // A missing app-dir binary falls back to the materialized copy.
+        // A missing or non-identical app-dir binary falls back to the
+        // materialized copy instead of silently running wrong code.
         assert_eq!(
             select_watchdog_path(Some(missing), data_exe.clone()),
             data_exe
         );
+        assert_eq!(
+            select_watchdog_path(Some(stale_exe.clone()), data_exe.clone()),
+            data_exe
+        );
         let _ = fs::remove_file(&app_exe);
+        let _ = fs::remove_file(&stale_exe);
     }
 
     #[test]
@@ -480,5 +538,40 @@ mod tests {
         assert!(stop.load(Ordering::Relaxed), "heartbeat stop flag set");
         assert!(state.pulse_thread.is_none(), "thread joined and taken");
         assert!(is_signalled(&clean_exit), "clean-exit event signalled");
+    }
+
+    #[test]
+    fn clean_exit_signal_waits_for_verified_restore() {
+        let _serial = GATE_SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        let clean_exit = test_event("gate-clean", true);
+        let heartbeat = test_event("gate-heartbeat", false);
+        *WATCHDOG.lock().unwrap_or_else(|p| p.into_inner()) = Some(WatchdogState {
+            clean_exit: clean_exit.clone(),
+            heartbeat,
+            stop: Arc::new(AtomicBool::new(false)),
+            pulse_thread: None,
+        });
+
+        // The legacy call in main.rs runs before restoration: it must not
+        // consume the watchdog or signal a clean exit.
+        set_restore_verified(false);
+        assert!(!clean_exit_permitted(false));
+        notify_clean_exit();
+        assert!(is_armed(), "watchdog must remain armed before verification");
+        assert!(!is_signalled(&clean_exit));
+
+        // end_replacement verifies first; only then may the signal be sent.
+        set_restore_verified(true);
+        assert!(clean_exit_permitted(true));
+        notify_clean_exit();
+        assert!(is_signalled(&clean_exit));
+        assert!(
+            !is_armed(),
+            "verified clean exit consumes the watchdog slot"
+        );
+
+        // A later failed restore must not leave a stale authorization behind.
+        set_restore_verified(false);
+        assert!(!is_restore_verified());
     }
 }

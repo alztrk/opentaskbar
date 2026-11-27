@@ -4,6 +4,7 @@
 #include <shellapi.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <wchar.h>
 
 #define ABS_AUTOHIDE    0x0000001
 #define ABS_ALWAYSONTOP 0x0000002
@@ -11,6 +12,16 @@
 #define WATCHDOG_PATH_CAPACITY 1024
 #define HEARTBEAT_TIMEOUT_MS 4000
 #define HEARTBEAT_MISSES_REQUIRED 3
+#define TOKEN_CAPACITY 128
+
+// Journal write failures are logged by the Rust side; the watchdog only reads
+// and deletes journals, but a failed delete is worth a debugger trace because
+// it can cause a stale restore on the next crash.
+static void DebugLogW(LPCWSTR message) {
+    OutputDebugStringW(L"OpenTaskbarWatchdog: ");
+    OutputDebugStringW(message);
+    OutputDebugStringW(L"\n");
+}
 
 static void AttachToDefaultDesktop(void) {
     HDESK hDesk = OpenDesktopW(L"Default", 0, FALSE, GENERIC_ALL);
@@ -33,36 +44,49 @@ static BOOL CALLBACK EnumSecondaryTrays(HWND hwnd, LPARAM lParam) {
     return TRUE;
 }
 
+typedef enum FlyoutRestoreStatus {
+    FLYOUT_JOURNAL_CLEAN = 0,
+    FLYOUT_JOURNAL_DEFERRED = 1,
+    FLYOUT_JOURNAL_FOREIGN = 2
+} FlyoutRestoreStatus;
+
+static BOOL GetJournalPath(LPCWSTR fileName, WCHAR *path, DWORD capacity) {
+    WCHAR localAppData[WATCHDOG_PATH_CAPACITY];
+    DWORD envLen = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, WATCHDOG_PATH_CAPACITY);
+    if (envLen == 0 || envLen >= WATCHDOG_PATH_CAPACITY) return FALSE;
+    return _snwprintf_s(path, capacity, _TRUNCATE, L"%s\\OpenTaskbar\\%s", localAppData, fileName) >= 0;
+}
+
 // Returns Start/Search/Control Center to the positions recorded before the dock anchored them. The journal is
 // atomic (written via flyout-positions.txt.tmp by BOTH the reference writer and Rust flyout_writer) and PID-checked
 // so a recycled HWND can never be moved by a stale entry. The four scanned fields are the shared wire format
 // "<hwnd> <pid> <left> <top>"; Rust may append generation/seq tokens, which fwscanf intentionally ignores.
-// Returns FALSE when an entry belongs to another process now, so the journal is kept for a later recovery pass.
-static BOOL RestoreFlyoutPositions(void) {
-    WCHAR localAppData[WATCHDOG_PATH_CAPACITY];
-    DWORD envLen = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, WATCHDOG_PATH_CAPACITY);
-    if (envLen == 0 || envLen >= WATCHDOG_PATH_CAPACITY) return TRUE;
-
+// The journal is deleted later only when every entry was restored: a not-yet-created HWND (shell flyout host
+// starts late) or a foreign owner keeps the only recovery clue for a later pass, matching flyout_writer.rs.
+static FlyoutRestoreStatus RestoreFlyoutPositions(void) {
     WCHAR path[WATCHDOG_PATH_CAPACITY];
-    if (_snwprintf_s(path, WATCHDOG_PATH_CAPACITY, _TRUNCATE, L"%s\\OpenTaskbar\\flyout-positions.txt", localAppData) < 0) {
-        return TRUE;
+    if (!GetJournalPath(L"flyout-positions.txt", path, WATCHDOG_PATH_CAPACITY)) {
+        return FLYOUT_JOURNAL_CLEAN;
     }
     FILE *file = _wfopen(path, L"r");
-    if (!file) return TRUE;
+    if (!file) return FLYOUT_JOURNAL_CLEAN;
 
-    BOOL ownedBySomeoneElse = FALSE;
+    FlyoutRestoreStatus status = FLYOUT_JOURNAL_CLEAN;
     unsigned long long handleValue = 0;
     unsigned int processId = 0;
     int left = 0;
     int top = 0;
     while (fwscanf(file, L"%llu %u %d %d", &handleValue, &processId, &left, &top) == 4) {
         HWND handle = (HWND)(UINT_PTR)handleValue;
-        if (!IsWindow(handle)) continue;
+        if (!IsWindow(handle)) {
+            status = FLYOUT_JOURNAL_DEFERRED;
+            continue;
+        }
 
         DWORD actualProcessId = 0;
         GetWindowThreadProcessId(handle, &actualProcessId);
         if (actualProcessId != (DWORD)processId) {
-            ownedBySomeoneElse = TRUE;
+            if (status != FLYOUT_JOURNAL_DEFERRED) status = FLYOUT_JOURNAL_FOREIGN;
             continue;
         }
 
@@ -70,8 +94,7 @@ static BOOL RestoreFlyoutPositions(void) {
             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
     fclose(file);
-    if (!ownedBySomeoneElse) DeleteFileW(path);
-    return !ownedBySomeoneElse;
+    return status;
 }
 
 // A killed tray host leaves app icons registered with its destroyed window; ask apps to re-register them.
@@ -84,23 +107,21 @@ static void RestoreNativeTaskbars(void) {
     AttachToDefaultDesktop();
 
     // 0. The dock may be gone, but its flyouts are hosted by long-lived shell processes. Put them back first.
-    RestoreFlyoutPositions();
+    FlyoutRestoreStatus flyoutStatus = RestoreFlyoutPositions();
+    WCHAR flyoutPath[WATCHDOG_PATH_CAPACITY] = {0};
+    BOOL hasFlyoutJournal = GetJournalPath(L"flyout-positions.txt", flyoutPath, WATCHDOG_PATH_CAPACITY);
 
     // 1. Read journal if available to recover original auto-hide/always-on-top state. Keep it until the
     //    taskbar is actually visible; deleting it on an Explorer restart would destroy the only recovery clue.
     WCHAR journalPath[WATCHDOG_PATH_CAPACITY] = {0};
-    BOOL hasJournal = FALSE;
-    WCHAR localAppData[WATCHDOG_PATH_CAPACITY];
+    BOOL hasJournal = GetJournalPath(L"taskbar-state.txt", journalPath, WATCHDOG_PATH_CAPACITY);
     DWORD state = 0;
-    DWORD envLen = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, WATCHDOG_PATH_CAPACITY);
-    if (envLen > 0 && envLen < WATCHDOG_PATH_CAPACITY
-        && _snwprintf_s(journalPath, WATCHDOG_PATH_CAPACITY, _TRUNCATE, L"%s\\OpenTaskbar\\taskbar-state.txt", localAppData) >= 0) {
+    if (hasJournal) {
         FILE *jf = _wfopen(journalPath, L"r");
         if (jf) {
             unsigned int readVal = 0;
             if (fwscanf(jf, L"%u", &readVal) == 1) {
                 state = (DWORD)readVal & (ABS_AUTOHIDE | ABS_ALWAYSONTOP);
-                hasJournal = TRUE;
             }
             fclose(jf);
         }
@@ -125,21 +146,77 @@ static void RestoreNativeTaskbars(void) {
 
         EnumWindows(EnumSecondaryTrays, 0);
 
-        if (attempt < 2) {
-            Sleep(60);
+        if (attempt < 2) Sleep(60);
+    }
+
+    // 4. Match the Rust path: two CONSECUTIVE visible observations 60 ms apart.
+    //    Explorer may re-hide the tray right after we show it; one positive
+    //    observation is not enough to delete the only recovery clue.
+    int cleanPasses = 0;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (IsWindowVisible(hPrimary)) {
+            cleanPasses++;
+            if (cleanPasses >= 2) break;
+        } else {
+            cleanPasses = 0;
+            ShowWindow(hPrimary, SW_SHOW);
+            EnumWindows(EnumSecondaryTrays, 0);
+        }
+        if (attempt < 2) Sleep(60);
+    }
+    if (cleanPasses < 2) return;
+
+    if (hasJournal && DeleteFileW(journalPath) == 0 && GetLastError() != ERROR_FILE_NOT_FOUND) {
+        DebugLogW(L"Could not delete taskbar-state recovery journal.");
+    }
+    if (hasFlyoutJournal && flyoutStatus == FLYOUT_JOURNAL_CLEAN
+        && DeleteFileW(flyoutPath) == 0 && GetLastError() != ERROR_FILE_NOT_FOUND) {
+        DebugLogW(L"Could not delete flyout position recovery journal.");
+    }
+    BroadcastTaskbarCreated();
+}
+
+static BOOL IsHexToken(LPCWSTR token) {
+    size_t length = wcslen(token);
+    if (length != 16 && length != 32) return FALSE;
+    for (size_t i = 0; i < length; i++) {
+        WCHAR c = token[i];
+        if (!((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F'))) {
+            return FALSE;
         }
     }
+    return TRUE;
+}
 
-    // Explorer can re-hide the tray right after we show it; do not drop the journal unless it stayed visible.
-    for (int attempt = 0; attempt < 3 && !IsWindowVisible(hPrimary); attempt++) {
-        ShowWindow(hPrimary, SW_SHOW);
-        EnumWindows(EnumSecondaryTrays, 0);
-        Sleep(60);
+// Mirrors watchdog.rs parse_watchdog_arg: --watchdog=<decimal pid>:<16|32 hex token>.
+// Rejecting malformed arguments prevents an injection path into the named-event
+// and journal paths, and keeps C/Rust parsing on the same vector.
+static BOOL ParseWatchdogArgument(int argc, LPWSTR *argv, int *parentPid, WCHAR *token, DWORD tokenCapacity) {
+    *parentPid = 0;
+    token[0] = L'\0';
+    for (int i = 1; i < argc; i++) {
+        if (wcsncmp(argv[i], L"--watchdog=", 11) != 0) continue;
+        LPCWSTR data = argv[i] + 11;
+        LPCWSTR colon = wcschr(data, L':');
+        if (!colon || colon == data) continue;
+
+        DWORD pid = 0;
+        BOOL digitsOnly = TRUE;
+        for (LPCWSTR p = data; p < colon; p++) {
+            if (*p < L'0' || *p > L'9') { digitsOnly = FALSE; break; }
+            DWORD digit = (DWORD)(*p - L'0');
+            if (pid > (MAXDWORD - digit) / 10) { digitsOnly = FALSE; break; }
+            pid = pid * 10 + digit;
+        }
+        LPCWSTR tokenText = colon + 1;
+        if (!digitsOnly || pid == 0 || !IsHexToken(tokenText)) continue;
+        if (wcslen(tokenText) >= tokenCapacity) continue;
+
+        *parentPid = (int)pid;
+        wcscpy_s(token, tokenCapacity, tokenText);
+        return TRUE;
     }
-    if (!IsWindowVisible(hPrimary)) return;
-
-    if (hasJournal) DeleteFileW(journalPath);
-    BroadcastTaskbarCreated();
+    return FALSE;
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
@@ -152,27 +229,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (!argv || argc < 2) return 1;
-
+    if (!argv) return 1;
     int parentPid = 0;
-    WCHAR token[128] = {0};
-
-    for (int i = 1; i < argc; i++) {
-        if (wcsncmp(argv[i], L"--watchdog=", 11) == 0) {
-            LPCWSTR data = argv[i] + 11;
-            LPCWSTR colon = wcschr(data, L':');
-            if (colon && colon > data) {
-                parentPid = _wtoi(data);
-                wcsncpy_s(token, 128, colon + 1, _TRUNCATE);
-                break;
-            }
-        }
-    }
+    WCHAR token[TOKEN_CAPACITY] = {0};
+    BOOL argsValid = ParseWatchdogArgument(argc, argv, &parentPid, token, TOKEN_CAPACITY);
     LocalFree(argv);
-
-    if (parentPid <= 0 || token[0] == L'\0') {
-        return 1;
-    }
+    if (!argsValid) return 1;
 
     HANDLE hProcess = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)parentPid);
     if (!hProcess) {
@@ -182,72 +244,67 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     WCHAR eventName[256];
     if (_snwprintf_s(eventName, 256, _TRUNCATE, L"Local\\OpenTaskbar.CleanExit.%d.%s", parentPid, token) < 0) {
+        DebugLogW(L"Clean-exit event name was truncated.");
         CloseHandle(hProcess);
         return 1;
     }
     HANDLE hCleanExit = OpenEventW(SYNCHRONIZE, FALSE, eventName);
+    if (!hCleanExit) DebugLogW(L"Clean-exit event could not be opened; fail-closed on restore.");
 
     WCHAR heartbeatName[256];
     HANDLE hHeartbeat = NULL;
     if (_snwprintf_s(heartbeatName, 256, _TRUNCATE, L"Local\\OpenTaskbar.Heartbeat.%d.%s", parentPid, token) >= 0) {
         hHeartbeat = OpenEventW(SYNCHRONIZE, FALSE, heartbeatName);
+    } else {
+        DebugLogW(L"Heartbeat event name was truncated.");
     }
 
+    // No `(DWORD)-1` index sentinels: a missing handle is never a wait index,
+    // so WAIT_FAILED can never alias "clean exit" (0 + MAXDWORD).
     HANDLE waitHandles[3];
     DWORD waitCount = 0;
-    DWORD cleanExitIndex = (DWORD)-1;
-    DWORD processIndex = (DWORD)-1;
-    DWORD heartbeatIndex = (DWORD)-1;
-
-    if (hCleanExit) {
-        cleanExitIndex = waitCount;
-        waitHandles[waitCount++] = hCleanExit;
-    }
-    processIndex = waitCount;
+    if (hCleanExit) waitHandles[waitCount++] = hCleanExit;
     waitHandles[waitCount++] = hProcess;
-    if (hHeartbeat) {
-        heartbeatIndex = waitCount;
-        waitHandles[waitCount++] = hHeartbeat;
-    }
+    if (hHeartbeat) waitHandles[waitCount++] = hHeartbeat;
 
     BOOL cleanExit = FALSE;
-    if (hHeartbeat) {
-        int heartbeatMisses = 0;
-        while (TRUE) {
-            DWORD waitResult = WaitForMultipleObjects(waitCount, waitHandles, FALSE, HEARTBEAT_TIMEOUT_MS);
-            if (waitResult == WAIT_OBJECT_0 + cleanExitIndex) {
+    int heartbeatMisses = 0;
+    for (;;) {
+        DWORD waitResult = WaitForMultipleObjects(
+            waitCount, waitHandles, FALSE, hHeartbeat ? HEARTBEAT_TIMEOUT_MS : INFINITE);
+
+        // Classify errors and abandoned handles as "not clean": restore instead
+        // of trusting an ambiguous wait result.
+        if (waitResult == WAIT_FAILED) {
+            DebugLogW(L"Wait failed; restoring taskbar (fail closed).");
+            break;
+        }
+        if (waitResult >= WAIT_ABANDONED_0 && waitResult < WAIT_ABANDONED_0 + waitCount) {
+            DebugLogW(L"Wait abandoned; restoring taskbar (fail closed).");
+            break;
+        }
+        if (waitResult >= WAIT_OBJECT_0 && waitResult < WAIT_OBJECT_0 + waitCount) {
+            HANDLE signalled = waitHandles[waitResult - WAIT_OBJECT_0];
+            if (signalled == hProcess) {
+                // Process death: only a previously signalled clean-exit event
+                // makes this a clean shutdown.
+                cleanExit = hCleanExit && WaitForSingleObject(hCleanExit, 0) == WAIT_OBJECT_0;
+                break;
+            }
+            if (signalled == hCleanExit) {
                 cleanExit = TRUE;
                 break;
             }
-            if (waitResult == WAIT_OBJECT_0 + processIndex) {
-                if (hCleanExit && WaitForSingleObject(hCleanExit, 0) == WAIT_OBJECT_0) {
-                    cleanExit = TRUE;
-                }
-                break;
-            }
-            if (waitResult == WAIT_OBJECT_0 + heartbeatIndex) {
+            if (signalled == hHeartbeat) {
                 heartbeatMisses = 0;
                 continue;
             }
-            if (waitResult == WAIT_TIMEOUT) {
-                if (++heartbeatMisses >= HEARTBEAT_MISSES_REQUIRED) {
-                    break;
-                }
-                continue;
-            }
-            break;
         }
-    } else {
-        DWORD waitResult = WaitForMultipleObjects(waitCount, waitHandles, FALSE, INFINITE);
-        if (hCleanExit) {
-            if (waitResult == WAIT_OBJECT_0 + cleanExitIndex) {
-                cleanExit = TRUE;
-            } else if (waitResult == WAIT_OBJECT_0 + processIndex) {
-                if (WaitForSingleObject(hCleanExit, 0) == WAIT_OBJECT_0) {
-                    cleanExit = TRUE;
-                }
-            }
+        if (waitResult == WAIT_TIMEOUT) {
+            if (hHeartbeat && ++heartbeatMisses >= HEARTBEAT_MISSES_REQUIRED) break;
+            continue;
         }
+        break;
     }
 
     if (hHeartbeat) CloseHandle(hHeartbeat);

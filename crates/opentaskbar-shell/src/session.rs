@@ -391,9 +391,10 @@ pub fn note_taskbar_identity(hwnd: usize, pid: u32) {
 }
 
 /// Pure budget reset used by `TaskbarCreated`: one new shell instance means the
-/// degraded budget and the hide streak both start over.
+/// degraded budget and the hide streak both start over. The counts are ignored
+/// by design, so they are not parameters.
 #[must_use]
-pub const fn reset_budgets(_degraded_attempts: u32, _hide_attempts: u32) -> (u32, u32) {
+pub const fn reset_budgets() -> (u32, u32) {
     (0, 0)
 }
 
@@ -403,7 +404,7 @@ pub const fn reset_budgets(_degraded_attempts: u32, _hide_attempts: u32) -> (u32
 pub fn reconcile_after_taskbar_created() -> bool {
     let config = {
         let mut state = runtime();
-        let (degraded, hide) = reset_budgets(state.degraded_attempts, state.hide_attempts);
+        let (degraded, hide) = reset_budgets();
         state.degraded_attempts = degraded;
         state.hide_attempts = hide;
         state.hide_clean = 0;
@@ -557,8 +558,31 @@ unsafe extern "system" {
 /// Stored as a plain fn pointer in a mutex instead of a `*mut ()` + transmute:
 /// a fn pointer is `Send`/`Copy`, needs no cast, and cannot dangle for the
 /// lifetime of the process-owned hook.
-static SHELL_CHANGE_CALLBACK: std::sync::Mutex<Option<fn()>> = std::sync::Mutex::new(None);
-static HOOKS_INSTALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SHELL_CHANGE_CALLBACK: Mutex<Option<fn()>> = Mutex::new(None);
+static HOOKS_INSTALLED: AtomicBool = AtomicBool::new(false);
+static HOOK_INSTALL_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// Raw WinEvent handle. The pump thread installs it and unhooks it exactly
+/// once when its message loop ends, so sharing it through a mutex is safe.
+struct HookHandle(HANDLE);
+
+// SAFETY: the handle is immutable once installed and closed only by the
+// owning message-pump thread via `uninstall_win_event_hook`.
+unsafe impl Send for HookHandle {}
+unsafe impl Sync for HookHandle {}
+
+static HOOK_HANDLE: Mutex<Option<HookHandle>> = Mutex::new(None);
+
+/// Test-only seam for `SetWinEventHook` failure: the 20/40 hide budgets and the
+/// 45-attempt degraded budget depend on this hook, so a failed installation
+/// must leave `HOOKS_INSTALLED` false and remain retryable.
+#[cfg(test)]
+static FORCE_HOOK_FAILURE: AtomicBool = AtomicBool::new(false);
+
+/// Real hook state, not a "we tried once" flag.
+pub fn are_shell_hooks_installed() -> bool {
+    HOOKS_INSTALLED.load(Ordering::SeqCst)
+}
 
 fn set_shell_change_callback(callback: Option<fn()>) {
     if let Ok(mut slot) = SHELL_CHANGE_CALLBACK.lock() {
@@ -640,34 +664,66 @@ unsafe extern "system" fn on_shell_event(
     invoke_shell_change_callback();
 }
 
+/// Registers the OS hook and publishes `HOOKS_INSTALLED` only when
+/// `SetWinEventHook` actually returned a handle. Kept separate from the message
+/// pump so the failure path can be exercised directly by unit tests.
+fn install_win_event_hook() -> bool {
+    #[cfg(test)]
+    if FORCE_HOOK_FAILURE.load(Ordering::SeqCst) {
+        log::warn("Injected SetWinEventHook failure; shell hooks not installed.");
+        return false;
+    }
+    // SAFETY: out-of-context hook; `on_shell_event` contains any callback panic
+    // with `catch_unwind` before it can cross the FFI boundary.
+    let hook = unsafe {
+        SetWinEventHook(
+            EVENT_OBJECT_CREATE,
+            EVENT_OBJECT_SHOW,
+            std::ptr::null_mut(),
+            Some(on_shell_event),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        )
+    };
+    if hook.is_null() {
+        log::warn("SetWinEventHook failed; Explorer-restart reconcile is disabled for now.");
+        return false;
+    }
+    if let Ok(mut slot) = HOOK_HANDLE.lock() {
+        *slot = Some(HookHandle(hook));
+    }
+    HOOKS_INSTALLED.store(true, Ordering::SeqCst);
+    true
+}
+
+fn uninstall_win_event_hook() {
+    HOOKS_INSTALLED.store(false, Ordering::SeqCst);
+    let handle = HOOK_HANDLE.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(hook) = handle {
+        // SAFETY: the hook handle is owned by this thread.
+        unsafe {
+            UnhookWinEvent(hook.0);
+        }
+    }
+}
+
 /// Installs an out-of-context WinEvent watcher for `Shell_TrayWnd` creation and
 /// show events on a dedicated message-pump thread. The callback must be cheap
 /// and non-blocking: it normally just queues a bounded reconcile pass.
 pub fn install_shell_hooks(on_shell_change: fn()) {
     set_shell_change_callback(Some(on_shell_change));
-    if HOOKS_INSTALLED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if HOOKS_INSTALLED.load(Ordering::SeqCst) || HOOK_INSTALL_PENDING.swap(true, Ordering::SeqCst) {
         return;
     }
-    let _ = std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("opentaskbar-shell-events".into())
         .spawn(|| {
-            // SAFETY: out-of-context hook; `on_shell_event` contains any
-            // callback panic with `catch_unwind` before it can cross the FFI
-            // boundary.
-            let hook = unsafe {
-                SetWinEventHook(
-                    EVENT_OBJECT_CREATE,
-                    EVENT_OBJECT_SHOW,
-                    std::ptr::null_mut(),
-                    Some(on_shell_event),
-                    0,
-                    0,
-                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-                )
-            };
-            if hook.is_null() {
+            if !install_win_event_hook() {
+                HOOK_INSTALL_PENDING.store(false, Ordering::Release);
                 return;
             }
+            HOOK_INSTALL_PENDING.store(false, Ordering::Release);
             let mut message: MSG = unsafe { std::mem::zeroed() };
             // SAFETY: owned MSG on this thread's message queue.
             while unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) } > 0 {
@@ -676,11 +732,14 @@ pub fn install_shell_hooks(on_shell_change: fn()) {
                     DispatchMessageW(&message);
                 }
             }
-            // SAFETY: the hook handle is owned by this thread.
-            unsafe {
-                UnhookWinEvent(hook);
-            }
+            uninstall_win_event_hook();
         });
+    if let Err(err) = spawned {
+        log::warn(format!(
+            "Shell-event hook thread could not be started: {err}"
+        ));
+        HOOK_INSTALL_PENDING.store(false, Ordering::Release);
+    }
 }
 
 #[cfg(test)]
@@ -767,6 +826,18 @@ mod tests {
     }
 
     #[test]
+    fn shell_hook_install_failure_keeps_the_flag_false_and_retryable() {
+        let _serial = serial();
+        FORCE_HOOK_FAILURE.store(true, Ordering::SeqCst);
+        assert!(!install_win_event_hook());
+        assert!(
+            !are_shell_hooks_installed(),
+            "a failed SetWinEventHook must not be reported as installed"
+        );
+        FORCE_HOOK_FAILURE.store(false, Ordering::SeqCst);
+    }
+
+    #[test]
     fn shell_hook_callback_runs_and_its_panic_is_contained() {
         let _serial = serial();
         CALLBACK_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -802,7 +873,7 @@ mod tests {
     #[test]
     fn taskbar_created_resets_both_budgets_and_identity_cache() {
         let _serial = serial();
-        assert_eq!(reset_budgets(44, 19), (0, 0));
+        assert_eq!(reset_budgets(), (0, 0));
         configure_replacement(0x1234, true, 72);
         note_taskbar_identity(0xABCD, 4242);
         assert_eq!(clear_cached_taskbar_identity(), (0xABCD, 4242));

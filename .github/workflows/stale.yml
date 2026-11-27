@@ -19,7 +19,9 @@ jobs:
           days-before-close: 7
           stale-issue-label: stale
           stale-pr-label: stale
-          exempt-issue-labels: 'pinned,security,bug,enhancement'
+          # Issue templates apply bug/enhancement to nearly every issue; exempting
+          # them made the bot a no-op. Keep only the intentional exemptions.
+          exempt-issue-labels: 'pinned,security'
           exempt-pr-labels: 'pinned,security'
           stale-issue-message: >
             This issue has had no activity for 60 days and will be closed in 7 days

@@ -1,7 +1,7 @@
 //! Explorer taskbar hiding, restoration, exact delta AppBar reservation, and
 //! native Windows shell shortcut triggers (Start, Search, Task View).
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -13,12 +13,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     FindWindowW, GetSystemMetrics, HWND_BROADCAST, IsWindowVisible, RegisterWindowMessageW,
     SM_CXSCREEN, SM_CYSCREEN, SW_HIDE, SW_SHOW, SW_SHOWNOACTIVATE, SWP_FRAMECHANGED,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SendNotifyMessageW,
-    SetWindowPos, ShowWindow, WM_APP,
+    SetWindowPos, ShowWindow,
 };
 
 use crate::{appbar, flyout_writer, journal, modifiers, native_tray, session, watchdog};
 
-const APPBAR_CALLBACK_MSG: u32 = WM_APP + 0x52;
 /// `TrayHost.SelfBroadcastWParam` / `RestoreBroadcastWParam`: the dock must
 /// not mistake its own restore broadcast for an icon-collection ping.
 const SELF_BROADCAST_WPARAM: usize = 1;
@@ -26,6 +25,10 @@ const RESTORE_BROADCAST_WPARAM: usize = 2;
 
 static REGISTERED_APPBAR: AtomicUsize = AtomicUsize::new(0);
 static BROADCAST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+/// Result of the most recent restore attempt. Kept internal because app call
+/// sites use `restore_from_journal()` as a statement; only `end_replacement`
+/// consumes it to authorize the clean-exit signal.
+static LAST_RESTORE_VERIFIED: AtomicBool = AtomicBool::new(false);
 
 /// `TaskbarCreated` broadcasts carry a source tag in `wParam`, matching reference
 /// `TrayHost.BroadcastTaskbarCreated(source)`.
@@ -126,8 +129,9 @@ pub fn register_bottom_appbar(dock_hwnd: usize, desired_total_px: i32, prev_stat
         return;
     }
 
+    // No ABN_* WndProc is registered by the Rust dock (reconcile is driven by
+    // WinEvent hooks), so advertise no callback message instead of a dead one.
     let mut abd = appbar::create_data(dock_hwnd);
-    abd.uCallbackMessage = APPBAR_CALLBACK_MSG;
     if appbar::send(appbar::ABM_NEW, &mut abd, "Register") == 0 {
         return;
     }
@@ -177,8 +181,12 @@ pub fn begin_replacement(dock_hwnd: usize, auto_hide: bool, desired_total_px: i3
     // Arm the shell-hook drivers used by the 20/40 hide budget and the
     // 45-attempt degraded budget before any Explorer state is changed.
     session::configure_replacement(dock_hwnd, auto_hide, desired_total_px);
-    if !journal::has_pending() {
-        let _ = journal::write_state(prev);
+    if !journal::has_pending()
+        && let Err(err) = journal::write_state(prev)
+    {
+        opentaskbar_core::log::warn(format!(
+            "Could not write taskbar-state recovery journal; crash recovery may be degraded: {err}"
+        ));
     }
     // Record where Windows put its own flyouts *before* we anchor them. The
     // writer is a no-op unless `native_flyout_reposition` is enabled.
@@ -202,6 +210,10 @@ pub fn begin_replacement(dock_hwnd: usize, auto_hide: bool, desired_total_px: i3
     session::start_hide_retry(true);
 }
 
+/// Restores Explorer from the journal. The outcome is recorded internally for
+/// `end_replacement` and is deliberately not returned: the existing app call
+/// sites (startup heal, panic path and the live "Restore taskbar" action) use
+/// this as a statement. A manual restore never signals the watchdog.
 pub fn restore_from_journal() {
     unregister_appbar();
     // Flyouts are hosted by long-lived shell processes, so put them back first.
@@ -210,43 +222,45 @@ pub fn restore_from_journal() {
     // with a different state (reference ForceRestore).
     let prev = active_state();
     let tray = find_primary_tray();
-    if tray.is_null() {
-        return;
-    }
-    // Mirror `watchdog.c` RestoreNativeTaskbars: at most 3 rounds of
-    // ABM_SETSTATE + SW_SHOW + SetWindowPos, requiring two consecutive visible
-    // observations. There is NO sleep after the final round.
-    let verified = session::verify_restored_with(tray as usize, session::RESTORE_ATTEMPTS, || {
-        set_taskbar_state(prev);
-        // SAFETY: restoring Explorer's primary taskbar window with SWP_SHOWWINDOW | SWP_FRAMECHANGED.
-        unsafe {
-            ShowWindow(tray, SW_SHOW);
-            SetWindowPos(
-                tray,
-                std::ptr::null_mut(),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE
-                    | SWP_NOSIZE
-                    | SWP_NOZORDER
-                    | SWP_NOACTIVATE
-                    | SWP_SHOWWINDOW
-                    | SWP_FRAMECHANGED,
-            );
-        }
-        set_secondary_trays_visible(true);
-    });
+    let verified = if tray.is_null() {
+        false
+    } else {
+        // Mirror `watchdog.c` RestoreNativeTaskbars: at most 3 rounds of
+        // ABM_SETSTATE + SW_SHOW + SetWindowPos, requiring two consecutive visible
+        // observations. There is NO sleep after the final round.
+        session::verify_restored_with(tray as usize, session::RESTORE_ATTEMPTS, || {
+            set_taskbar_state(prev);
+            // SAFETY: restoring Explorer's primary taskbar window with SWP_SHOWWINDOW | SWP_FRAMECHANGED.
+            unsafe {
+                ShowWindow(tray, SW_SHOW);
+                SetWindowPos(
+                    tray,
+                    std::ptr::null_mut(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE
+                        | SWP_NOSIZE
+                        | SWP_NOZORDER
+                        | SWP_NOACTIVATE
+                        | SWP_SHOWWINDOW
+                        | SWP_FRAMECHANGED,
+                );
+            }
+            set_secondary_trays_visible(true);
+        })
+    };
     opentaskbar_core::shell_result!("Restore", "Journal", true, verified, ms = 0);
+    LAST_RESTORE_VERIFIED.store(verified, Ordering::SeqCst);
+    // Never publish a clean-exit authorization here: a live "Restore taskbar"
+    // action uses this same function, and must leave the watchdog armed. Only
+    // `end_replacement` (the real shutdown path) publishes verification.
     // Never drop the only recovery clue while Explorer is still re-hiding the tray.
     if !verified {
         return;
     }
     journal::clear();
-    // A clean restore is the point where the watchdog must stop watching us.
-    // `end_replacement` also calls this, but it is idempotent.
-    watchdog::notify_clean_exit();
     broadcast_taskbar_created("restore");
 }
 
@@ -331,9 +345,15 @@ pub fn hide_observation() -> session::HideObservation {
 }
 
 pub fn end_replacement() {
+    // Restore first, verify second, signal third. The legacy notify call in
+    // main.rs runs before this function and is intentionally a no-op.
     restore_from_journal();
+    let verified = LAST_RESTORE_VERIFIED.swap(false, Ordering::SeqCst);
+    watchdog::set_restore_verified(verified);
     flyout_writer::restore();
     watchdog::notify_clean_exit();
+    // Do not leave a stale authorization for a later premature call.
+    watchdog::set_restore_verified(false);
 }
 
 // ---- Native Windows shell triggers ----

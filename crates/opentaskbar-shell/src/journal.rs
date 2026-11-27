@@ -52,7 +52,15 @@ fn write_state_to(path: &Path, state: u32) -> std::io::Result<()> {
 }
 
 pub fn write_state(state: u32) -> std::io::Result<()> {
-    write_state_to(&journal_path(), state)
+    let path = journal_path();
+    let result = write_state_to(&path, state);
+    if let Err(ref err) = result {
+        opentaskbar_core::log::warn(format!(
+            "Taskbar journal write failed at {}: {err}; crash recovery may be degraded",
+            path.display()
+        ));
+    }
+    result
 }
 
 fn read_state_from(path: &Path) -> Option<u32> {

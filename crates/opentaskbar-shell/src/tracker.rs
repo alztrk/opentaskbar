@@ -20,10 +20,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 use windows_sys::core::BOOL;
 
-// `GetApplicationUserModelId` lives in `Win32_Storage_Packaging_Appx`, whose
-// windows-sys feature is owned by the orchestrator's workspace Cargo.toml.
-// Declaring the kernel32 entry point here keeps this module self-contained and
-// avoids a cross-worktree Cargo edit.
+// `GetApplicationUserModelId` lives in `Win32_Storage_Packaging_Appx`, which is
+// not enabled for this crate's windows-sys feature set. Declaring the kernel32
+// entry point here keeps the AUMID lookup self-contained without widening the
+// workspace dependency surface.
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const MAX_AUMID_UTF16_UNITS: u32 = 4096;
 

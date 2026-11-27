@@ -208,6 +208,20 @@ foreach ($arch in @('x64', 'x86')) {
             watchdogSha256       = $watchdogHash
         })
     }
+
+    # Publish the exact PE the hash refers to. Without this asset the manifest's
+    # watchdogSha256 cannot be independently verified by consumers.
+    $newEntries.Add([ordered]@{
+        name                 = "OpenTaskbarWatchdog-$arch.exe"
+        architecture         = $arch
+        kind                 = 'native-watchdog'
+        size                 = (Get-Item -LiteralPath $watchdogPath).Length
+        sha256               = $watchdogHash
+        port                 = 'rust'
+        watchdogArchitecture = $arch
+        watchdogPeMachine    = ('0x{0:X4}' -f $peMachine)
+        watchdogSha256       = $watchdogHash
+    })
 }
 
 # Generate checksums.txt from the Rust assets only; no reference rows can survive.
