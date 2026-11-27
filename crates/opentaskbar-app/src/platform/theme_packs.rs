@@ -1458,7 +1458,7 @@ mod parity_tests {
         for id in built_in_ids() {
             let manifest = ThemePack::load(
                 &Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../../themes")
+                    .join("../../resources/themes")
                     .join(id),
             )
             .unwrap_or_else(|e| panic!("{id}: {e}"));
@@ -1507,9 +1507,10 @@ mod parity_tests {
 
     #[test]
     fn widget_override_is_typed() {
-        let pack =
-            ThemePack::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../themes/nord"))
-                .unwrap();
+        let pack = ThemePack::load(
+            &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/themes/nord"),
+        )
+        .unwrap();
         let tokens = widgets_override(&pack, opentaskbar_core::settings::AppTheme::Dark);
         assert!(tokens.contains_key("WidgetAccent"));
         assert!(matches!(

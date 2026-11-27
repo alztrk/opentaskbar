@@ -8,9 +8,8 @@ artifacts/
 dist/
 release/
 tmp/
-.research/
 .reports/
-.notes/
+.local/
 OpenTaskbar-*.zip
 checksums.txt
 
@@ -18,7 +17,3 @@ checksums.txt
 /target
 **/*.rs.bk
 *.pdb
-
-# Local-only performance probe and its output
-/bench.ps1
-/.bench/

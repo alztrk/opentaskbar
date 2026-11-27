@@ -3119,6 +3119,11 @@ fn guid_tmp_path(path: &Path) -> PathBuf {
 }
 
 /// Encrypts and stores an API key with the same per-user DPAPI format the reference app reads.
+/// Reads a DPAPI secret for a custom widget sidecar. Never logged, never sent anywhere.
+pub fn read_dpapi_secret_for_widget(secret_key: &str) -> Option<String> {
+    read_dpapi_secret(secret_key)
+}
+
 pub fn save_dpapi_secret(secret_key: &str, value: &str) -> bool {
     let Some(path) = secret_file_path(secret_key) else {
         return false;

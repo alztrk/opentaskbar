@@ -589,7 +589,7 @@ mod tests {
 
     #[test]
     fn bundled_packs_have_valid_manifests() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../themes");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/themes");
         for id in [
             "catppuccin",
             "gruvbox",

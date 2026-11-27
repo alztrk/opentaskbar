@@ -563,7 +563,7 @@ impl WidgetRuntime {
         // own `pollSeconds` throttle and does its I/O on a worker thread.
         for widget in registry::catalog_widgets() {
             if custom_widgets::is_custom(widget.id) && settings.is_widget_enabled(widget.id) {
-                custom_widgets::poll_widget(widget.id);
+                custom_widgets::poll_widget(widget.id, settings);
             }
         }
 
@@ -1061,18 +1061,21 @@ impl WidgetRuntime {
     pub fn chip_spec(&self, id: &str, settings: &DockSettings, is_dark: bool) -> WidgetChipSpec {
         let pal = design::palette(is_dark);
         if custom_widgets::is_custom(id) {
-            return custom_widgets::chip(id, settings).map_or_else(
-                || WidgetChipSpec::Simple {
-                    icon: custom_widgets::icon_for(
-                        &custom_widgets::CustomChip::default(),
-                        id,
-                        settings,
-                    ),
-                    icon_color: pal.widget_blue,
-                    top: "…".to_owned(),
-                    bottom: widget_name(id),
-                },
-                |chip| {
+            let details = custom_widgets::details(id);
+            let fallback_icon =
+                custom_widgets::icon_for(&custom_widgets::CustomChip::default(), id, settings);
+            if !custom_widgets::is_approved(id, settings) {
+                return WidgetChipSpec::Custom {
+                    label: "Approval required".to_owned(),
+                    value: "!".to_owned(),
+                    ratio: None,
+                    icon: fallback_icon,
+                    color: pal.warning,
+                    details,
+                };
+            }
+            return match custom_widgets::chip(id) {
+                Some(chip) => {
                     let icon = custom_widgets::icon_for(&chip, id, settings);
                     WidgetChipSpec::Custom {
                         label: chip.label,
@@ -1080,9 +1083,19 @@ impl WidgetRuntime {
                         ratio: chip.ratio,
                         icon,
                         color: pal.widget_accent,
+                        details,
                     }
+                }
+                None => WidgetChipSpec::Custom {
+                    label: custom_widgets::error(id)
+                        .unwrap_or_else(|| loc::t("AiUsageStatusLoading")),
+                    value: "…".to_owned(),
+                    ratio: None,
+                    icon: fallback_icon,
+                    color: pal.danger,
+                    details,
                 },
-            );
+            };
         }
         if let Some(ai) = telemetry::ai_provider_meta(id) {
             let snap = self
@@ -2553,7 +2566,7 @@ impl WidgetRuntime {
                 BorderStyle::from_widget_settings(is_dark, settings),
                 |ev| match ev {
                     LiveEvent::Click(action_id) => {
-                        custom_widgets::click_widget(id, action_id);
+                        custom_widgets::click_widget(id, action_id, settings);
                         LiveOutcome::Close
                     }
                     _ => LiveOutcome::Update(

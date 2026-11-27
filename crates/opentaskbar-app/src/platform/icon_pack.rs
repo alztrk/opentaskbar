@@ -960,7 +960,7 @@ mod parity_tests {
 
     #[test]
     fn loads_bundled_icon_manifests_if_any() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../themes");
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/themes");
         for id in [
             "catppuccin",
             "gruvbox",

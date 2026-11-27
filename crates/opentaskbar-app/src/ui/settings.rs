@@ -5,6 +5,7 @@
 //! dynamic search catalogue and widget panel host (`SettingsWindow` parity).
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -7574,6 +7575,85 @@ impl SettingsView {
             None
         };
 
+        let custom_actions = if widgets::custom_widgets::is_custom(wid) {
+            let approved = widgets::custom_widgets::is_approved(wid, &self.settings);
+            let mut row = div().flex().items_center().gap(px(6.0));
+            if !approved {
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!("wapprove-{wid}")))
+                        .px(px(7.0))
+                        .py(px(4.0))
+                        .rounded(px(6.0))
+                        .bg(rgba(t.accent_soft))
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                widgets::custom_widgets::approve(&mut this.settings, wid);
+                                this.auto_save(cx);
+                            }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(fonts::scaled_size(10.5)))
+                                .text_color(rgba(t.accent))
+                                .child("Approve"),
+                        ),
+                );
+            }
+            #[allow(clippy::type_complexity)]
+            let actions: [(&str, &str, fn(&Path)); 3] = [
+                ("wfolder", "Folder", |path| {
+                    let _ = std::process::Command::new("explorer.exe").arg(path).spawn();
+                }),
+                ("wedit", "Edit", |path| {
+                    let _ = std::process::Command::new("notepad.exe").arg(path).spawn();
+                }),
+                ("wremove", "Remove", |path| {
+                    let _ = std::fs::remove_dir_all(path);
+                    widgets::custom_widgets::reload();
+                }),
+            ];
+            for (suffix, label, action) in actions {
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!("{suffix}-{wid}")))
+                        .px(px(7.0))
+                        .py(px(4.0))
+                        .rounded(px(6.0))
+                        .bg(rgba(t.surface_muted))
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(path) =
+                                    widgets::custom_widgets::widget_dir(wid).map(|dir| match suffix
+                                    {
+                                        "wedit" => dir.join("widget.json"),
+                                        _ => dir,
+                                    })
+                                {
+                                    action(&path);
+                                    cx.notify();
+                                }
+                            }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(fonts::scaled_size(10.5)))
+                                .text_color(rgba(t.text_secondary))
+                                .child(label),
+                        ),
+                );
+            }
+            Some(row)
+        } else {
+            None
+        };
+
         let icon_button = if widgets::custom_widgets::is_custom(wid) {
             Some(
                 div()
@@ -7696,6 +7776,24 @@ impl SettingsView {
                     .child(sub),
             );
         }
+        if widgets::custom_widgets::is_custom(wid) {
+            let status = if !widgets::custom_widgets::is_approved(wid, &self.settings) {
+                Some("Approval required".to_owned())
+            } else {
+                widgets::custom_widgets::error(wid)
+            };
+            if let Some(status) = status {
+                meta = meta.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .pl(px(21.0))
+                        .text_size(px(fonts::scaled_size(10.0)))
+                        .text_color(rgba(t.text_secondary))
+                        .child(status),
+                );
+            }
+        }
 
         // Only flex-grow horizontally when laid out beside the preview in the expanded header;
         // inside the vertical collapsed `head` column, `.flex_1()` would collapse `flex-basis`
@@ -7715,6 +7813,7 @@ impl SettingsView {
                     .items_center()
                     .gap(px(8.0))
                     .flex_shrink_0()
+                    .when_some(custom_actions, |row, b| row.child(b))
                     .when_some(icon_button, |row, b| row.child(b))
                     .when_some(cfg_button, |row, b| row.child(b))
                     .child(enable_switch),

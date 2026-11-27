@@ -205,6 +205,8 @@ pub enum WidgetChipSpec {
         ratio: Option<f32>,
         icon: WidgetIcon,
         color: Rgb,
+        /// Detail rows supplied by the widget for the Dynamic Island panel.
+        details: Vec<(String, String)>,
     },
 }
 
@@ -370,10 +372,21 @@ impl WidgetChipSpec {
                 line("WidgetDetailInfo", top.clone()),
                 line("WidgetDetailDetail", bottom.clone()),
             ],
-            Self::Custom { label, value, .. } => vec![
-                line("WidgetDetailInfo", value.clone()),
-                line("WidgetDetailDetail", label.clone()),
-            ],
+            Self::Custom {
+                label,
+                value,
+                details,
+                ..
+            } => {
+                if details.is_empty() {
+                    vec![
+                        line("WidgetDetailInfo", value.clone()),
+                        line("WidgetDetailDetail", label.clone()),
+                    ]
+                } else {
+                    details.clone()
+                }
+            }
         }
     }
 }
@@ -3245,6 +3258,7 @@ impl DcompEngine {
                     ratio,
                     icon,
                     color,
+                    ..
                 } => {
                     draw_chip_card(
                         dc,

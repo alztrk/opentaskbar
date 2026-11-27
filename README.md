@@ -10,8 +10,8 @@
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![Tests](https://img.shields.io/badge/Tests-cargo%20test-brightgreen?style=flat-square)](crates/opentaskbar-core/tests)
 
-<img src="docs/screenshots/hero-desktop-2026-11.jpg" alt="OpenTaskbar on the desktop" width="100%" />
-<img src="docs/screenshots/hero-dock-crop-2026-11.png" alt="The floating dock" width="100%" />
+<img src="docs/guides/screenshots/hero-desktop-2026-11.jpg" alt="OpenTaskbar on the desktop" width="100%" />
+<img src="docs/guides/screenshots/hero-dock-crop-2026-11.png" alt="The floating dock" width="100%" />
 
 </div>
 
@@ -23,8 +23,8 @@ OpenTaskbar replaces the Windows taskbar with a floating row of app icons. Hover
 - **Keep your apps handy.** Drag an app onto the dock to pin it. Move icons around, put related apps in a group, or make a folder stack. Drag an icon off the dock to unpin it.
 - **Reach Windows controls.** Start, Search, Task View and the Recycle Bin have their own buttons. Right-click an app to see its Windows Jump List (pinned tasks and recent files).
 - **Hide it when you want.** Choose to keep it always visible, hide it when a window covers it, or hide it until you move your mouse to its edge. It also gets out of the way for fullscreen games and videos.
-- **Make it look like yours.** Move it to the bottom, left or right of your screen; change its size, corners and see-through look; pick one of six color themes or add your own. You can even change the app icons — see [Themes](docs/themes.md).
-- **See useful things at a glance.** 22 widgets are included: clock, weather, music, Wi-Fi and Bluetooth switches, volume, computer and battery usage, focus timer, stopwatch, network speed, and how much of your AI plan is left (Claude, Codex, OpenCode, Copilot, DeepSeek, OpenRouter or Cursor). You can also [add your own](docs/custom-widgets.md).
+- **Make it look like yours.** Move it to the bottom, left or right of your screen; change its size, corners and see-through look; pick one of six color themes or add your own. You can even change the app icons — see [Themes](docs/guides/themes.md).
+- **See useful things at a glance.** 22 widgets are included: clock, weather, music, Wi-Fi and Bluetooth switches, volume, computer and battery usage, focus timer, stopwatch, network speed, and how much of your AI plan is left (Claude, Codex, OpenCode, Copilot, DeepSeek, OpenRouter or Cursor). You can also [add your own](docs/guides/custom-widgets.md).
 - **Use every screen.** Have a dock on each monitor, or use the optional strip at the top of the screen.
 - **Never lose your taskbar.** If OpenTaskbar closes or crashes, the normal Windows taskbar comes back by itself. You can also restore it any time with `OpenTaskbar.exe --restore`.
 
@@ -32,7 +32,7 @@ OpenTaskbar replaces the Windows taskbar with a floating row of app icons. Hover
 
 | Dock settings | Themes |
 | :---: | :--- |
-| <img src="docs/screenshots/settings-general.jpg" alt="Dock settings" width="460" /> | <img src="docs/screenshots/settings-themes.jpg" alt="Theme gallery" width="460" /> |
+| <img src="docs/guides/screenshots/settings-general.jpg" alt="Dock settings" width="460" /> | <img src="docs/guides/screenshots/settings-themes.jpg" alt="Theme gallery" width="460" /> |
 
 </div>
 
@@ -53,7 +53,7 @@ OpenTaskbar replaces the Windows taskbar with a floating row of app icons. Hover
 
 You need Windows 10 (version 2004 or newer) or Windows 11. The portable build checks for new versions itself. Releases also include a ZIP, checksums and release notes.
 
-To change the language or the look, open **Settings → Appearance**. There are 14 languages; see [Languages](docs/localization.md).
+To change the language or the look, open **Settings → Appearance**. There are 14 languages; see [Languages](docs/guides/localization.md).
 
 ## Privacy and license
 
@@ -99,7 +99,7 @@ Building needs Rust 1.95+ (edition 2024, MSVC on Windows) and PowerShell 7+ for 
 
 `publish-portable.ps1` builds a single self-contained EXE with the architecture-matched watchdog embedded; `check-portable.ps1` verifies its architecture, watchdog and icon worker. The release script writes the x64/x86 EXEs and ZIPs, `checksums.txt`, a schemaVersion 2 `release-manifest.json` and `release-notes.md`.
 
-Tests cover deterministic settings/i18n/shell-recovery logic; real Windows behavior needs the manual checks in [docs/windows-reliability-audit.md](docs/windows-reliability-audit.md). Design notes: [docs/windows-taskbar-model.md](docs/windows-taskbar-model.md).
+Tests cover deterministic settings/i18n/shell-recovery logic; real Windows behavior needs the manual checks in [docs/development/windows-reliability-audit.md](docs/development/windows-reliability-audit.md). Design notes: [docs/development/windows-taskbar-model.md](docs/development/windows-taskbar-model.md).
 
 ### Command line
 
@@ -132,7 +132,7 @@ Unknown settings keys are preserved on save, invalid JSON is backed up before de
 
 ### Widget catalog
 
-The catalog is generated from `crates/opentaskbar-app/src/widgets/registry.rs`: Time & Weather (Clock & Date, Weather, Day Progress, Stopwatch, Countdown), System & Hardware (System Stats, Net Speed, Battery, Bluetooth Battery, Storage), AI Quotas (seven providers plus an aggregate), Media & Controls (Media, Audio, Quick Settings, Keyboard Layout) and Productivity (Focus). Folder Stacks and App Groups are dock helpers; Show Desktop is a shell action. [Custom widgets](docs/custom-widgets.md) run as separate local processes.
+The catalog is generated from `crates/opentaskbar-app/src/widgets/registry.rs`: Time & Weather (Clock & Date, Weather, Day Progress, Stopwatch, Countdown), System & Hardware (System Stats, Net Speed, Battery, Bluetooth Battery, Storage), AI Quotas (seven providers plus an aggregate), Media & Controls (Media, Audio, Quick Settings, Keyboard Layout) and Productivity (Focus). Folder Stacks and App Groups are dock helpers; Show Desktop is a shell action. [Custom widgets](docs/guides/custom-widgets.md) run as separate local processes.
 
 ### Code layout
 
@@ -142,7 +142,7 @@ The catalog is generated from `crates/opentaskbar-app/src/widgets/registry.rs`: 
 | `opentaskbar-shell` | Taskbar journal, AppBar reservation, flyout repositioning, watchdog |
 | `opentaskbar-app` | GPUI dock and Settings UI, widget catalog, Win32 platform layer |
 
-The root also holds `Fonts/`, `Assets/`, `themes/`, `packaging/msix/`, `scripts/`, `tests/reference/locales/` and `tools/watchdog/`. CI lives in `.github/workflows/`: `ci.yml` (fmt, clippy, tests, release build), `rust-ci.yml` (watchdog/x86 and locale gates) and `release.yml` (packaging with SLSA attestation and an optional VirusTotal scan).
+Bundled resources live in `resources/fonts/`, `resources/assets/` and `resources/themes/`; the root also holds `packaging/msix/`, `scripts/`, `tests/reference/locales/` and `tools/watchdog/`. User guides are in `docs/guides/`, engineering notes in `docs/development/`. CI lives in `.github/workflows/`: `ci.yml` (fmt, clippy, tests, release build), `rust-ci.yml` (watchdog/x86 and locale gates) and `release.yml` (packaging with SLSA attestation and an optional VirusTotal scan).
 
 ### Feature flags
 

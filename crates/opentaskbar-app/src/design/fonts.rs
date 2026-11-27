@@ -306,11 +306,11 @@ use gpui::{App, AssetSource, SharedString};
 /// Inter family name exposed to GPUI styles.
 pub const INTER_FAMILY: &str = "Inter";
 
-pub const FONT_REGULAR: &[u8] = include_bytes!("../../../../Fonts/Inter-Regular.ttf");
-pub const FONT_MEDIUM: &[u8] = include_bytes!("../../../../Fonts/Inter-Medium.ttf");
-pub const FONT_SEMIBOLD: &[u8] = include_bytes!("../../../../Fonts/Inter-SemiBold.ttf");
-pub const FONT_BOLD: &[u8] = include_bytes!("../../../../Fonts/Inter-Bold.ttf");
-pub const FONT_LICENSE: &[u8] = include_bytes!("../../../../Fonts/LICENSE.txt");
+pub const FONT_REGULAR: &[u8] = include_bytes!("../../../../resources/fonts/Inter-Regular.ttf");
+pub const FONT_MEDIUM: &[u8] = include_bytes!("../../../../resources/fonts/Inter-Medium.ttf");
+pub const FONT_SEMIBOLD: &[u8] = include_bytes!("../../../../resources/fonts/Inter-SemiBold.ttf");
+pub const FONT_BOLD: &[u8] = include_bytes!("../../../../resources/fonts/Inter-Bold.ttf");
+pub const FONT_LICENSE: &[u8] = include_bytes!("../../../../resources/fonts/LICENSE.txt");
 
 /// All four embedded font weights, in ascending weight order: Regular/Medium/SemiBold/Bold.
 pub const INTER_WEIGHTS: [u16; 4] = [400, 500, 600, 700];
@@ -351,20 +351,48 @@ pub const FLAG_LOCALES: [&str; 14] = [
 /// Looks up an embedded flag by locale name (e.g. `tr-TR`). Case-insensitive.
 pub fn flag_bytes(locale: &str) -> Option<&'static [u8]> {
     match locale.to_ascii_lowercase().as_str() {
-        "de-de" => Some(include_bytes!("../../../../Assets/Flags/de-DE.png")),
-        "en-us" => Some(include_bytes!("../../../../Assets/Flags/en-US.png")),
-        "es-es" => Some(include_bytes!("../../../../Assets/Flags/es-ES.png")),
-        "fr-fr" => Some(include_bytes!("../../../../Assets/Flags/fr-FR.png")),
-        "it-it" => Some(include_bytes!("../../../../Assets/Flags/it-IT.png")),
-        "ja-jp" => Some(include_bytes!("../../../../Assets/Flags/ja-JP.png")),
-        "ko-kr" => Some(include_bytes!("../../../../Assets/Flags/ko-KR.png")),
-        "nl-nl" => Some(include_bytes!("../../../../Assets/Flags/nl-NL.png")),
-        "pl-pl" => Some(include_bytes!("../../../../Assets/Flags/pl-PL.png")),
-        "pt-br" => Some(include_bytes!("../../../../Assets/Flags/pt-BR.png")),
-        "ru-ru" => Some(include_bytes!("../../../../Assets/Flags/ru-RU.png")),
-        "tr-tr" => Some(include_bytes!("../../../../Assets/Flags/tr-TR.png")),
-        "uk-ua" => Some(include_bytes!("../../../../Assets/Flags/uk-UA.png")),
-        "zh-cn" => Some(include_bytes!("../../../../Assets/Flags/zh-CN.png")),
+        "de-de" => Some(include_bytes!(
+            "../../../../resources/assets/flags/de-DE.png"
+        )),
+        "en-us" => Some(include_bytes!(
+            "../../../../resources/assets/flags/en-US.png"
+        )),
+        "es-es" => Some(include_bytes!(
+            "../../../../resources/assets/flags/es-ES.png"
+        )),
+        "fr-fr" => Some(include_bytes!(
+            "../../../../resources/assets/flags/fr-FR.png"
+        )),
+        "it-it" => Some(include_bytes!(
+            "../../../../resources/assets/flags/it-IT.png"
+        )),
+        "ja-jp" => Some(include_bytes!(
+            "../../../../resources/assets/flags/ja-JP.png"
+        )),
+        "ko-kr" => Some(include_bytes!(
+            "../../../../resources/assets/flags/ko-KR.png"
+        )),
+        "nl-nl" => Some(include_bytes!(
+            "../../../../resources/assets/flags/nl-NL.png"
+        )),
+        "pl-pl" => Some(include_bytes!(
+            "../../../../resources/assets/flags/pl-PL.png"
+        )),
+        "pt-br" => Some(include_bytes!(
+            "../../../../resources/assets/flags/pt-BR.png"
+        )),
+        "ru-ru" => Some(include_bytes!(
+            "../../../../resources/assets/flags/ru-RU.png"
+        )),
+        "tr-tr" => Some(include_bytes!(
+            "../../../../resources/assets/flags/tr-TR.png"
+        )),
+        "uk-ua" => Some(include_bytes!(
+            "../../../../resources/assets/flags/uk-UA.png"
+        )),
+        "zh-cn" => Some(include_bytes!(
+            "../../../../resources/assets/flags/zh-CN.png"
+        )),
         _ => None,
     }
 }
@@ -454,55 +482,89 @@ impl AssetSource for EmbeddedAssets {
             "fonts/Inter-SemiBold.ttf" => Some(FONT_SEMIBOLD),
             "fonts/Inter-Bold.ttf" => Some(FONT_BOLD),
             "fonts/LICENSE.txt" => Some(FONT_LICENSE),
-            "flags/de-DE.png" => Some(include_bytes!("../../../../Assets/Flags/de-DE.png")),
-            "flags/en-US.png" => Some(include_bytes!("../../../../Assets/Flags/en-US.png")),
-            "flags/es-ES.png" => Some(include_bytes!("../../../../Assets/Flags/es-ES.png")),
-            "flags/fr-FR.png" => Some(include_bytes!("../../../../Assets/Flags/fr-FR.png")),
-            "flags/it-IT.png" => Some(include_bytes!("../../../../Assets/Flags/it-IT.png")),
-            "flags/ja-JP.png" => Some(include_bytes!("../../../../Assets/Flags/ja-JP.png")),
-            "flags/ko-KR.png" => Some(include_bytes!("../../../../Assets/Flags/ko-KR.png")),
-            "flags/nl-NL.png" => Some(include_bytes!("../../../../Assets/Flags/nl-NL.png")),
-            "flags/pl-PL.png" => Some(include_bytes!("../../../../Assets/Flags/pl-PL.png")),
-            "flags/pt-BR.png" => Some(include_bytes!("../../../../Assets/Flags/pt-BR.png")),
-            "flags/ru-RU.png" => Some(include_bytes!("../../../../Assets/Flags/ru-RU.png")),
-            "flags/tr-TR.png" => Some(include_bytes!("../../../../Assets/Flags/tr-TR.png")),
-            "flags/uk-UA.png" => Some(include_bytes!("../../../../Assets/Flags/uk-UA.png")),
-            "flags/zh-CN.png" => Some(include_bytes!("../../../../Assets/Flags/zh-CN.png")),
-            "themes/catppuccin/theme.json" => {
-                Some(include_bytes!("../../../../themes/catppuccin/theme.json"))
-            }
+            "flags/de-DE.png" => Some(include_bytes!(
+                "../../../../resources/assets/flags/de-DE.png"
+            )),
+            "flags/en-US.png" => Some(include_bytes!(
+                "../../../../resources/assets/flags/en-US.png"
+            )),
+            "flags/es-ES.png" => Some(include_bytes!(
+                "../../../../resources/assets/flags/es-ES.png"
+            )),
+            "flags/fr-FR.png" => Some(include_bytes!(
+                "../../../../resources/assets/flags/fr-FR.png"
+            )),
+            "flags/it-IT.png" => Some(include_bytes!(
+                "../../../../resources/assets/flags/it-IT.png"
+            )),
+            "flags/ja-JP.png" => Some(include_bytes!(
+                "../../../../resources/assets/flags/ja-JP.png"
+            )),
+            "flags/ko-KR.png" => Some(include_bytes!(
+                "../../../../resources/assets/flags/ko-KR.png"
+            )),
+            "flags/nl-NL.png" => Some(include_bytes!(
+                "../../../../resources/assets/flags/nl-NL.png"
+            )),
+            "flags/pl-PL.png" => Some(include_bytes!(
+                "../../../../resources/assets/flags/pl-PL.png"
+            )),
+            "flags/pt-BR.png" => Some(include_bytes!(
+                "../../../../resources/assets/flags/pt-BR.png"
+            )),
+            "flags/ru-RU.png" => Some(include_bytes!(
+                "../../../../resources/assets/flags/ru-RU.png"
+            )),
+            "flags/tr-TR.png" => Some(include_bytes!(
+                "../../../../resources/assets/flags/tr-TR.png"
+            )),
+            "flags/uk-UA.png" => Some(include_bytes!(
+                "../../../../resources/assets/flags/uk-UA.png"
+            )),
+            "flags/zh-CN.png" => Some(include_bytes!(
+                "../../../../resources/assets/flags/zh-CN.png"
+            )),
+            "themes/catppuccin/theme.json" => Some(include_bytes!(
+                "../../../../resources/themes/catppuccin/theme.json"
+            )),
             "themes/catppuccin/widgets/pack.json" => Some(include_bytes!(
-                "../../../../themes/catppuccin/widgets/pack.json"
+                "../../../../resources/themes/catppuccin/widgets/pack.json"
             )),
-            "themes/gruvbox/theme.json" => {
-                Some(include_bytes!("../../../../themes/gruvbox/theme.json"))
-            }
+            "themes/gruvbox/theme.json" => Some(include_bytes!(
+                "../../../../resources/themes/gruvbox/theme.json"
+            )),
             "themes/gruvbox/widgets/pack.json" => Some(include_bytes!(
-                "../../../../themes/gruvbox/widgets/pack.json"
+                "../../../../resources/themes/gruvbox/widgets/pack.json"
             )),
-            "themes/nord/theme.json" => Some(include_bytes!("../../../../themes/nord/theme.json")),
-            "themes/nord/widgets/pack.json" => {
-                Some(include_bytes!("../../../../themes/nord/widgets/pack.json"))
+            "themes/nord/theme.json" => Some(include_bytes!(
+                "../../../../resources/themes/nord/theme.json"
+            )),
+            "themes/nord/widgets/pack.json" => Some(include_bytes!(
+                "../../../../resources/themes/nord/widgets/pack.json"
+            )),
+            "themes/prism/theme.json" => Some(include_bytes!(
+                "../../../../resources/themes/prism/theme.json"
+            )),
+            "themes/prism/widgets/pack.json" => Some(include_bytes!(
+                "../../../../resources/themes/prism/widgets/pack.json"
+            )),
+            "themes/prism/LICENSE" => {
+                Some(include_bytes!("../../../../resources/themes/prism/LICENSE"))
             }
-            "themes/prism/theme.json" => {
-                Some(include_bytes!("../../../../themes/prism/theme.json"))
-            }
-            "themes/prism/widgets/pack.json" => {
-                Some(include_bytes!("../../../../themes/prism/widgets/pack.json"))
-            }
-            "themes/prism/LICENSE" => Some(include_bytes!("../../../../themes/prism/LICENSE")),
-            "themes/prism/README.md" => Some(include_bytes!("../../../../themes/prism/README.md")),
-            "themes/solarized/theme.json" => {
-                Some(include_bytes!("../../../../themes/solarized/theme.json"))
-            }
+            "themes/prism/README.md" => Some(include_bytes!(
+                "../../../../resources/themes/prism/README.md"
+            )),
+            "themes/solarized/theme.json" => Some(include_bytes!(
+                "../../../../resources/themes/solarized/theme.json"
+            )),
             "themes/solarized/widgets/pack.json" => Some(include_bytes!(
-                "../../../../themes/solarized/widgets/pack.json"
+                "../../../../resources/themes/solarized/widgets/pack.json"
             )),
-            "themes/tokyo-night/theme.json" => {
-                Some(include_bytes!("../../../../themes/tokyo-night/theme.json"))
-            }
+            "themes/tokyo-night/theme.json" => Some(include_bytes!(
+                "../../../../resources/themes/tokyo-night/theme.json"
+            )),
             "themes/tokyo-night/widgets/pack.json" => Some(include_bytes!(
-                "../../../../themes/tokyo-night/widgets/pack.json"
+                "../../../../resources/themes/tokyo-night/widgets/pack.json"
             )),
             _ => None,
         };

@@ -553,6 +553,9 @@ pub fn canonical_widget_id(id: &str) -> &str {
 
 /// Localized widget name for the settings catalog and widget menus.
 pub fn widget_name(id: &str) -> String {
+    if super::custom_widgets::is_custom(id) {
+        return super::custom_widgets::display_name(id);
+    }
     BUILTINS
         .iter()
         .find(|w| w.id == id)

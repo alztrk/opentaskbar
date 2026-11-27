@@ -3,9 +3,9 @@ area/core:
       - any-glob-to-any-file:
           - 'crates/**'
           - 'Cargo.toml'
-          - 'Fonts/**'
-          - 'Assets/**'
-          - 'themes/**'
+          - 'resources/fonts/**'
+          - 'resources/assets/**'
+          - 'resources/themes/**'
           - 'tools/watchdog/**'
 
 area/scripts:
