@@ -5,8 +5,10 @@
 //! `extra`/`DockProfile::extra` so switching between the C# and Rust builds never drops data.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::hotkey::{HotkeyBinding, HotkeyChoice};
@@ -144,7 +146,8 @@ pub const DYNAMIC_ISLAND_ALL_DISPLAYS: &str = "*";
 
 /// C# property names that the port exposes under a different Rust field name. `save_to` writes
 /// both spellings so a settings.json written by Rust is readable by the C# build as well; the
-/// canonical (Rust) spelling wins when both appear in a file that is loaded again.
+/// C#-facing spelling wins when both appear in a file that is loaded again (that is the key the
+/// C# build owns, so a conflict must not silently reverse a value written by C#).
 const SETTINGS_ALIAS_PAIRS: [(&str, &str); 6] = [
     ("EnabledWidgets", "Widgets"),
     ("ShowClockWidget", "ShowClock"),
@@ -155,23 +158,24 @@ const SETTINGS_ALIAS_PAIRS: [(&str, &str); 6] = [
 ];
 
 /// Collapses the double-spelled keys written by `save_to`. Serde rejects a JSON object that maps
-/// two keys onto the same struct field, so the canonical key is kept before deserialization.
+/// two keys onto the same struct field, so exactly one spelling is kept before deserialization.
+/// The C#-facing key wins: `settings.json` is a shared file and C# writes that spelling.
 fn dedupe_written_aliases(map: &mut Map<String, Value>) {
-    for (canonical, alias) in SETTINGS_ALIAS_PAIRS {
-        if map.contains_key(canonical) {
-            map.remove(alias);
+    for (canonical, csharp) in SETTINGS_ALIAS_PAIRS {
+        if map.contains_key(csharp) {
+            map.remove(canonical);
         }
     }
     // `FullWidth` is a bool in Rust; C# persists the same value as the `DockLayout` enum name.
-    if map.contains_key("FullWidth") {
-        map.remove("Layout");
+    if map.contains_key("Layout") {
+        map.remove("FullWidth");
     }
     if let Some(Value::Array(profiles)) = map.get_mut("Profiles") {
         for profile in profiles.iter_mut() {
             if let Value::Object(object) = profile
-                && object.contains_key("EnabledWidgets")
+                && object.contains_key("Widgets")
             {
-                object.remove("Widgets");
+                object.remove("EnabledWidgets");
             }
         }
     }
@@ -677,6 +681,19 @@ pub fn canonical_widget_setting_id(id: &str) -> &str {
         "keyboard" => "KeyboardLayout",
         _ => id,
     }
+}
+
+/// Canonicalizes a free-form dock-order item. Only `widget:` tokens carry a widget
+/// ID; shell/app/stack tokens are returned unchanged.
+pub fn canonicalize_widget_token(item: &str) -> String {
+    let trimmed = item.trim();
+    let Some((prefix, id)) = trimmed.split_once(':') else {
+        return trimmed.to_owned();
+    };
+    if !prefix.eq_ignore_ascii_case("widget") {
+        return trimmed.to_owned();
+    }
+    format!("widget:{}", canonical_widget_setting_id(id))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2146,7 +2163,54 @@ fn repair_widget_lists(enabled: &mut Vec<String>, installed: &mut Vec<String>) {
     }
 }
 
+/// Same as `normalize_widget_ids` for free-form order lists: `widget:clock` and
+/// `Widget:Clock` both become `widget:Clock`, with no case-insensitive duplicates.
+fn normalize_widget_tokens(list: &mut Vec<String>) {
+    let mut seen = BTreeSet::new();
+    let mut next = Vec::with_capacity(list.len());
+    for item in list.drain(..) {
+        let canonical = canonicalize_widget_token(&item);
+        if seen.insert(ordinal_ignore_case_key(&canonical)) {
+            next.push(canonical);
+        }
+    }
+    *list = next;
+}
+
+fn canonicalize_density_map(map: &mut BTreeMap<String, WidgetDensityMode>) {
+    let previous = std::mem::take(map);
+    for (key, value) in previous {
+        let canonical = canonical_widget_setting_id(&key).to_owned();
+        map.entry(canonical).or_insert(value);
+    }
+}
+
+fn canonicalize_placements(map: &mut HashMap<String, String>) {
+    let mut previous: Vec<_> = std::mem::take(map).into_iter().collect();
+    previous.sort_by(|a, b| a.0.cmp(&b.0));
+    for (key, value) in previous {
+        let canonical = canonical_widget_setting_id(&key).to_owned();
+        map.entry(canonical).or_insert(value);
+    }
+}
+
 impl DockSettings {
+    /// Normalizes every widget-keyed collection to the IDs C# validates, so a
+    /// settings.json written by either build uses the same spellings. Called on
+    /// load (repair) and on save (before serialization).
+    pub fn canonicalize_widget_keys(&mut self) {
+        repair_widget_lists(&mut self.enabled_widgets, &mut self.installed_widgets);
+        normalize_widget_ids(&mut self.widget_order);
+        normalize_widget_tokens(&mut self.dock_item_order);
+        canonicalize_density_map(&mut self.widget_density_overrides);
+        canonicalize_placements(&mut self.dynamic_island_placements);
+        for profile in &mut self.profiles {
+            repair_widget_lists(&mut profile.enabled_widgets, &mut profile.installed_widgets);
+            normalize_widget_ids(&mut profile.widget_order);
+            normalize_widget_tokens(&mut profile.dock_item_order);
+        }
+    }
+
     /// Re-applies the legacy migrations to already-deserialized settings (no raw JSON needed).
     pub fn migrate_legacy(&mut self) {
         let mentioned_search = self
@@ -2285,12 +2349,7 @@ impl DockSettings {
         // enabled IDs into it when applying a profile. Older port builds wrote only the enabled
         // list (and snake_case IDs), leaving files that `Validate()` rejected wholesale. Repair
         // the invariant here instead of resetting every setting to defaults.
-        repair_widget_lists(&mut self.enabled_widgets, &mut self.installed_widgets);
-        normalize_widget_ids(&mut self.widget_order);
-        for profile in &mut self.profiles {
-            repair_widget_lists(&mut profile.enabled_widgets, &mut profile.installed_widgets);
-            normalize_widget_ids(&mut profile.widget_order);
-        }
+        self.canonicalize_widget_keys();
 
         // Tray pins: trim, drop invalid/duplicate keys, cap at the C# limit.
         let mut seen = BTreeSet::new();
@@ -2832,16 +2891,14 @@ impl DockSettings {
     }
 }
 
-/// Application data directory: `%LOCALAPPDATA%\OpenTaskBar-Rust`.
+/// Application data directory: `%LOCALAPPDATA%\OpenTaskbar` (shared with C#).
+/// Kept here as a facade because every Rust consumer already calls this name.
 pub fn app_data_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("OpenTaskBar-Rust")
+    crate::paths::shared_app_data_dir()
 }
 
 pub fn settings_path() -> PathBuf {
-    app_data_dir().join("settings.json")
+    crate::paths::settings_path()
 }
 
 /// C# `FullBackupArchive.CurrentVersion`. Any other manifest version is unsupported.
@@ -2972,21 +3029,84 @@ fn write_settings_aliases(root: &mut Map<String, Value>, settings: &DockSettings
     }
 }
 
-/// Atomically writes settings to `path`, including the C# alias spellings of aliased keys.
-pub fn save_to(path: &Path, settings: &DockSettings) -> std::io::Result<()> {
+static TMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Unique temporary file name for one write. The C# build uses the same
+/// `<file>.<guid>.tmp` scheme; a fixed `settings.json.tmp` would let two
+/// processes race on the same file and corrupt the shared settings.json.
+fn unique_settings_tmp(path: &Path) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    let salt = &nanos as *const u64 as usize as u64;
+    let sequence = TMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut bytes = [0u8; 16];
+    bytes[0..8].copy_from_slice(&nanos.to_le_bytes());
+    bytes[8..12].copy_from_slice(&(std::process::id() as u32).to_le_bytes());
+    bytes[12..16].copy_from_slice(&(sequence as u32 ^ salt as u32).to_le_bytes());
+    // RFC 4122 version 4 / variant 10 layout; uniqueness matters more than CSPRNG quality here.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex: Vec<String> = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let guid = format!(
+        "{}-{}-{}-{}-{}",
+        hex[0..4].concat(),
+        hex[4..6].concat(),
+        hex[6..8].concat(),
+        hex[8..10].concat(),
+        hex[10..16].concat()
+    );
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "settings.json".to_owned());
+    path.with_file_name(format!("{name}.{guid}.tmp"))
+}
+
+fn write_settings_to(path: &Path, settings: &DockSettings) -> std::io::Result<()> {
+    let errors = settings.validate();
+    if !errors.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid settings rejected ({errors:?})"),
+        ));
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut value = serde_json::to_value(settings)
+    let mut canonical = settings.clone();
+    canonical.canonicalize_widget_keys();
+    let mut value = serde_json::to_value(&canonical)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     if let Value::Object(root) = &mut value {
-        write_settings_aliases(root, settings);
+        write_settings_aliases(root, &canonical);
     }
     let json = serde_json::to_string_pretty(&value)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json)?;
-    fs::rename(&tmp, path)
+
+    let tmp = unique_settings_tmp(path);
+    let result = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        file.write_all(json.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// Atomically writes settings to `path`, including the C# alias spellings of aliased keys.
+/// Failures are logged instead of being silently swallowed by callers using `let _ = save_to(...)`.
+pub fn save_to(path: &Path, settings: &DockSettings) -> std::io::Result<()> {
+    write_settings_to(path, settings).inspect_err(|error| {
+        crate::log::error(format!(
+            "settings: failed to save {}: {error}",
+            path.display()
+        ));
+    })
 }
 
 #[cfg(test)]
@@ -3549,7 +3669,7 @@ mod tests {
         assert_eq!(
             loaded
                 .dynamic_island_placements
-                .get("clock")
+                .get("Clock")
                 .map(String::as_str),
             Some("*")
         );
@@ -3600,12 +3720,15 @@ mod tests {
                 .unwrap()
                 .dynamic_island_enable
         );
-        // The port's own spelling stays authoritative when both keys are written by save_to.
+        // The C#-facing spelling wins a conflict because settings.json is shared.
         let both = r#"{"DynamicIslandEnable":true,"DynamicIslandEnabled":false}"#;
         let deduped = normalize_legacy_json(both);
-        assert!(!deduped.contains("DynamicIslandEnabled"));
+        let deduped: Value = serde_json::from_str(&deduped).unwrap();
+        assert!(deduped.get("DynamicIslandEnable").is_none());
+        assert!(deduped.get("DynamicIslandEnabled").is_some());
+        let deduped = serde_json::to_string(&deduped).unwrap();
         assert!(
-            serde_json::from_str::<DockSettings>(&deduped)
+            !serde_json::from_str::<DockSettings>(&deduped)
                 .unwrap()
                 .dynamic_island_enable
         );
@@ -3700,6 +3823,7 @@ mod tests {
         let path = dir.join("settings.json");
         let settings = DockSettings {
             enabled_widgets: vec!["Clock".to_owned(), "Media".to_owned()],
+            installed_widgets: vec!["Clock".to_owned(), "Media".to_owned()],
             show_clock_widget: true,
             show_system_stats_widget: true,
             full_width: true,
@@ -3776,15 +3900,75 @@ mod tests {
     }
 
     #[test]
+    fn save_uses_unique_guid_temporary_files() {
+        let dir = temp_dir("cfg-guid-tmp");
+        let path = dir.join("settings.json");
+        let first = unique_settings_tmp(&path);
+        let second = unique_settings_tmp(&path);
+        assert_ne!(first, second);
+        let name = first.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("settings.json.") && name.ends_with(".tmp"));
+        let guid = name
+            .strip_prefix("settings.json.")
+            .and_then(|rest| rest.strip_suffix(".tmp"))
+            .unwrap();
+        assert_eq!(guid.len(), 36);
+        assert_eq!(guid.as_bytes()[14], b'4');
+        assert!(matches!(guid.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
+
+        save_to(&path, &DockSettings::default()).unwrap();
+        assert!(!dir.join("settings.json.tmp").exists());
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().filter(|e| e.is_ok()).count(),
+            1,
+            "no temporary file may be left behind"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn conflicting_aliases_prefer_the_csharp_spelling() {
+        let dir = temp_dir("cfg-alias-conflict");
+        let path = dir.join("settings.json");
+        fs::write(
+            &path,
+            r#"{
+                "EnabledWidgets": ["Clock"],
+                "Widgets": ["Media", "Weather"],
+                "FullWidth": true,
+                "Layout": "Floating",
+                "FocusMode": true,
+                "FocusModeEnabled": false,
+                "DynamicIslandEnable": true,
+                "DynamicIslandEnabled": false,
+                "Profiles": [{"Name":"P","EnabledWidgets":["Clock"],"Widgets":["Weather","Focus"]}]
+            }"#,
+        )
+        .unwrap();
+        let loaded = load_from(&path);
+        assert_eq!(loaded.enabled_widgets, ["Media", "Weather"]);
+        assert!(!loaded.full_width);
+        assert!(!loaded.focus_mode);
+        assert!(!loaded.dynamic_island_enable);
+        assert_eq!(loaded.profiles[0].enabled_widgets, ["Weather", "Focus"]);
+        assert!(loaded.extra.is_empty(), "aliases must not leak into extra");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn island_placements_dedupe_ordinal_ignore_case() {
         let mut placements = HashMap::new();
         placements.insert("Clock".to_owned(), "*".to_owned());
         placements.insert("clock".to_owned(), "*".to_owned());
-        let s = DockSettings {
+        let mut s = DockSettings {
             dynamic_island_placements: placements,
             ..DockSettings::default()
         };
         assert!(s.validate().contains(&"IslandPlacementInvalid"));
+        // The shared-file reader normalizes case variants instead of resetting the file.
+        s.canonicalize_widget_keys();
+        assert!(s.validate().is_empty());
+        assert_eq!(s.dynamic_island_placements.len(), 1);
 
         let dir = temp_dir("cfg-island-dedupe");
         let path = dir.join("settings.json");
@@ -3793,7 +3977,15 @@ mod tests {
             r#"{"DynamicIslandPlacements":{"Clock":"*","clock":"*"}}"#,
         )
         .unwrap();
-        assert_eq!(load_from(&path), DockSettings::default());
+        let loaded = load_from(&path);
+        assert_eq!(loaded.dynamic_island_placements.len(), 1);
+        assert_eq!(
+            loaded
+                .dynamic_island_placements
+                .get("Clock")
+                .map(String::as_str),
+            Some("*")
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

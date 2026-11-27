@@ -4,13 +4,40 @@ namespace OpenTaskbar.Services;
 
 public static class DynamicIslandPolicy
 {
+    private static bool TryGetPlacement(
+        IReadOnlyDictionary<string, string>? placements,
+        string widgetId,
+        out string? target)
+    {
+        target = null;
+        if (placements is null) return false;
+        var id = DockSettingsStore.CanonicalizeWidgetId(widgetId);
+        if (placements.TryGetValue(id, out var exact))
+        {
+            target = exact;
+            return true;
+        }
+        // Dictionaries created by older builds may still be case-sensitive.
+        foreach (var pair in placements)
+        {
+            if (string.Equals(DockSettingsStore.CanonicalizeWidgetId(pair.Key), id,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                target = pair.Value;
+                return true;
+            }
+        }
+        return false;
+    }
+
     public static bool IsAssignedToDisplay(
         IReadOnlyDictionary<string, string>? placements,
         string widgetId,
         string deviceName) =>
-        placements?.TryGetValue(widgetId, out var target) == true
-        && (string.Equals(target, DockSettings.DynamicIslandAllDisplays, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(target, deviceName, StringComparison.OrdinalIgnoreCase));
+        TryGetPlacement(placements, widgetId, out var target)
+        && (!string.IsNullOrWhiteSpace(target)
+            && (string.Equals(target, DockSettings.DynamicIslandAllDisplays, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(target, deviceName, StringComparison.OrdinalIgnoreCase)));
 
     public static bool IsAssignedToAnyDisplay(
         IReadOnlyDictionary<string, string>? placements,
@@ -23,6 +50,7 @@ public static class DynamicIslandPolicy
         IReadOnlyDictionary<string, string>? placements,
         string deviceName) =>
         selectedWidgets
+            .Select(DockSettingsStore.CanonicalizeWidgetId)
             .Where(widgetId => IsAssignedToDisplay(placements, widgetId, deviceName))
             .ToArray();
 
@@ -33,11 +61,14 @@ public static class DynamicIslandPolicy
         IReadOnlyList<string> defaultOrder,
         IEnumerable<string> timedOrder)
     {
-        var available = new HashSet<string>(availableWidgets, StringComparer.OrdinalIgnoreCase);
+        var available = new HashSet<string>(
+            availableWidgets.Select(DockSettingsStore.CanonicalizeWidgetId),
+            StringComparer.OrdinalIgnoreCase);
         return (displayOrder ?? [])
             .Concat(widgetOrder ?? [])
             .Concat(defaultOrder)
             .Concat(timedOrder)
+            .Select(DockSettingsStore.CanonicalizeWidgetId)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Where(available.Contains)
             .ToArray();

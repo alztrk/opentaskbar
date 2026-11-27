@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use opentaskbar_core::hotkey::HotkeyChoice;
+use opentaskbar_core::paths;
 use opentaskbar_core::settings::{
     AppTheme, AutoHideMode, DockGapUnit, DockHeightMode, DockPosition, DockProfile, DockSettings,
     DockSize, DockWidthMode, SurfaceBackground, WidgetDensityMode, apply_full_profile,
@@ -659,6 +660,218 @@ fn struct_migration_drops_retired_provider_data() {
     assert!(settings.validate().is_empty(), "{:?}", settings.validate());
 }
 
+#[test]
+fn shared_paths_point_at_the_csharp_folder() {
+    assert_eq!(paths::APP_DATA_FOLDER_NAME, "OpenTaskbar");
+    assert_eq!(paths::settings_path().file_name().unwrap(), "settings.json");
+    assert_eq!(
+        paths::rust_log_path().file_name().unwrap(),
+        "opentaskbar-rust.log"
+    );
+    assert_eq!(paths::theme_root().file_name().unwrap(), "Themes");
+    assert_eq!(paths::secrets_dir().file_name().unwrap(), "secrets");
+    assert_eq!(
+        paths::watchdog_path().file_name().unwrap(),
+        "OpenTaskbarWatchdog.exe"
+    );
+    assert_eq!(
+        paths::render_mode_path().file_name().unwrap(),
+        "render-mode.json"
+    );
+    assert_eq!(
+        paths::journal_path("taskbar-state.txt")
+            .file_name()
+            .unwrap(),
+        "taskbar-state.txt"
+    );
+    for path in [
+        paths::settings_path(),
+        paths::rust_log_path(),
+        paths::theme_root(),
+        paths::journal_path("flyout-positions.txt"),
+    ] {
+        assert!(
+            path.to_string_lossy().contains("OpenTaskbar"),
+            "{} must use the shared folder",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn csharp_save_preserves_rust_only_keys_across_a_rust_round_trip() {
+    // Shape of a settings.json after C# `[JsonExtensionData]` has written it back.
+    let (dir, path) = temp_settings("csharp-extension-data");
+    let raw = r#"{
+        "Widgets": ["Clock", "Media"],
+        "InstalledWidgets": ["Clock", "Media"],
+        "EnabledWidgets": ["Clock", "Media"],
+        "ThemeTokens": {"shell": {"accent": "aurora"}},
+        "AnimationFps": 45,
+        "UiFontFamily": "Segoe UI",
+        "FisheyeIntensity": "Strong",
+        "MiddleClickAction": "CloseWindow",
+        "UserPinnedApps": ["C:\\Apps\\a.exe"],
+        "ShowStartButton": true,
+        "DynamicIslandEnable": true,
+        "DynamicIslandEnabled": true,
+        "FutureCSharpSwitch": {"on": true}
+    }"#;
+    fs::write(&path, raw).unwrap();
+
+    let loaded = load_from(&path);
+    assert_eq!(loaded.animation_fps, Some(45));
+    assert_eq!(loaded.ui_font_family, "Segoe UI");
+    assert!(loaded.extra.get("ThemeTokens").is_some());
+    assert!(loaded.extra.get("FutureCSharpSwitch").is_some());
+
+    save_to(&path, &loaded).unwrap();
+    let written: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    for key in [
+        "ThemeTokens",
+        "AnimationFps",
+        "UiFontFamily",
+        "FisheyeIntensity",
+        "MiddleClickAction",
+        "UserPinnedApps",
+        "ShowStartButton",
+        "DynamicIslandEnable",
+        "DynamicIslandEnabled",
+        "FutureCSharpSwitch",
+    ] {
+        assert!(written.get(key).is_some(), "Rust dropped C# key {key}");
+    }
+    let reloaded = load_from(&path);
+    assert_eq!(reloaded, loaded);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn rust_save_emits_the_keys_the_csharp_loader_needs() {
+    let (dir, path) = temp_settings("rust-to-csharp");
+    let mut settings = DockSettings::default();
+    settings.set_widget_enabled("stats", true);
+    settings.full_width = true;
+    settings.focus_mode = true;
+    settings.dynamic_island_enable = false;
+    settings
+        .dynamic_island_placements
+        .insert("clock".to_owned(), "*".to_owned());
+    save_to(&path, &settings).unwrap();
+
+    let root: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(root["Widgets"], root["EnabledWidgets"]);
+    assert_eq!(root["ShowClock"], root["ShowClockWidget"]);
+    assert_eq!(root["ShowSystemStats"], root["ShowSystemStatsWidget"]);
+    assert_eq!(root["FocusModeEnabled"], root["FocusMode"]);
+    assert_eq!(root["PinnedTrayIcons"], root["UserPinnedBackgroundApps"]);
+    assert_eq!(root["Layout"], "FullWidth");
+    assert_eq!(root["DynamicIslandEnabled"], false);
+    assert_eq!(root["DynamicIslandEnable"], false);
+    assert!(root["DynamicIslandPlacements"].get("Clock").is_some());
+
+    // The C# loader repairs and validates the same object without resetting it.
+    let reloaded = load_from(&path);
+    assert!(reloaded.validate().is_empty(), "{:?}", reloaded.validate());
+    assert!(reloaded.full_width && reloaded.focus_mode);
+    assert!(!reloaded.dynamic_island_enable);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn widget_map_keys_are_canonicalized_for_both_builds() {
+    let (dir, path) = temp_settings("widget-map-keys");
+    fs::write(
+        &path,
+        r#"{
+            "Widgets": ["stats", "aiusage_claude", "keyboard"],
+            "InstalledWidgets": ["stats", "aiusage_claude", "keyboard"],
+            "WidgetDensityOverrides": {"stats": "Compact", "keyboard": "Full"},
+            "DynamicIslandPlacements": {"stats": "*"},
+            "DockItemOrder": ["start", "widget:stats", "widget:aiusage_claude"],
+            "Profiles": [{"Name":"P","Widgets":["stats"],"InstalledWidgets":["stats"],"DockItemOrder":["widget:keyboard"]}]
+        }"#,
+    )
+    .unwrap();
+    let loaded = load_from(&path);
+    assert_eq!(
+        loaded.enabled_widgets,
+        ["SystemStats", "AiUsageClaude", "KeyboardLayout"]
+    );
+    assert_eq!(
+        loaded.widget_density_overrides.get("SystemStats"),
+        Some(&WidgetDensityMode::Compact)
+    );
+    assert_eq!(
+        loaded.widget_density_overrides.get("KeyboardLayout"),
+        Some(&WidgetDensityMode::Full)
+    );
+    assert_eq!(
+        loaded
+            .dynamic_island_placements
+            .get("SystemStats")
+            .map(String::as_str),
+        Some("*")
+    );
+    assert_eq!(
+        loaded.dock_item_order,
+        ["start", "widget:SystemStats", "widget:AiUsageClaude"]
+    );
+    assert_eq!(
+        loaded.profiles[0].dock_item_order,
+        ["widget:KeyboardLayout"]
+    );
+    assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
+
+    save_to(&path, &loaded).unwrap();
+    let raw = fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("\"SystemStats\": \"Compact\""), "{raw}");
+    assert!(raw.contains("\"SystemStats\": \"*\""), "{raw}");
+    assert!(raw.contains("widget:SystemStats"), "{raw}");
+    assert!(!raw.contains("\"stats\""), "{raw}");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn concurrent_saves_use_unique_temporary_files_and_keep_valid_json() {
+    let (dir, path) = temp_settings("concurrent-writes");
+    let handles: Vec<_> = (0..8)
+        .map(|index| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                let settings = DockSettings {
+                    weather_city: format!("City-{index}"),
+                    ..DockSettings::default()
+                };
+                save_to(&path, &settings)
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap().unwrap();
+    }
+    let raw = fs::read_to_string(&path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(parsed.get("WeatherCity").is_some());
+    let leftovers: Vec<_> = fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("settings.json.")
+        })
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "temporary files must be renamed away: {leftovers:?}"
+    );
+    assert!(load_from(&path).validate().is_empty());
+    let _ = fs::remove_dir_all(&dir);
+}
 #[test]
 fn display_care_settings_survive_csharp_load_save_load() {
     let (dir, path) = temp_settings("display-care");

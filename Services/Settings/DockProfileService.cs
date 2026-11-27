@@ -15,6 +15,9 @@ public static class DockProfileService
     {
         var widgets = settings.Widgets?.ToArray() ?? [];
         var installedWidgets = MergeInstalledWidgets(settings.InstalledWidgets, widgets);
+        // Keep unknown profile keys written by the other build when re-capturing a snapshot.
+        var previous = settings.Profiles?.FirstOrDefault(profile =>
+            string.Equals(profile.Name, name, StringComparison.OrdinalIgnoreCase));
 
         return new DockProfile(
             Name: name,
@@ -33,7 +36,10 @@ public static class DockProfileService
             DockHotkey: settings.DockHotkey,
             AutoHide: settings.AutoHide,
             CustomLauncherHotkey: settings.CustomLauncherHotkey,
-            CustomDockHotkey: settings.CustomDockHotkey);
+            CustomDockHotkey: settings.CustomDockHotkey)
+        {
+            Extra = previous is null ? [] : new Dictionary<string, System.Text.Json.JsonElement>(previous.Extra, StringComparer.Ordinal)
+        };
     }
 
     /// <summary>Ensures at least one profile exists by seeding a Default profile when none are configured.</summary>
@@ -189,7 +195,9 @@ public static class DockProfileService
     }
 
     private static string[] MergeInstalledWidgets(IReadOnlyList<string>? installed, IReadOnlyList<string> widgets) =>
-        (installed ?? []).Concat(widgets).Distinct(StringComparer.Ordinal).ToArray();
+        (installed ?? []).Concat(widgets)
+            .Select(DockSettingsStore.CanonicalizeWidgetId)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
 
     /// <summary>Drops widget tokens from a dock item order so a widgets-free profile has no stale widget slots.</summary>
     private static IReadOnlyList<string>? RemoveWidgetTokens(IReadOnlyList<string>? order)
