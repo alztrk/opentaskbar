@@ -11,27 +11,16 @@ const LANGS: &[&str] = &[
     "ru-RU", "tr-TR", "uk-UA", "zh-CN",
 ];
 
-const EXPECTED_KEY_COUNT: usize = 1423;
+const EXPECTED_KEY_COUNT: usize = 1373;
 
 const C3_NEW_KEYS: &[&str] = &[
-    // Window picker, magnification and Fjord labels.
+    // Window picker and magnification labels.
     "WindowPickerTitle",
     "WindowPickerPrevious",
     "WindowPickerNext",
     "WindowPickerPage",
     "MagnificationExpandsDock",
     "MagnificationExpandsDockDescription",
-    "FjordFiles",
-    "FjordFilesOpen",
-    "FjordBarShow",
-    "FjordBarHide",
-    // Wi-Fi flyout labels.
-    "WifiScan",
-    "WifiConnect",
-    "WifiDisconnect",
-    "WifiPassword",
-    "WifiNoNetworks",
-    "WifiConnectFailed",
     // Search, alignment, preview, focus and widget labels.
     "SearchNoResults",
     "ContentAlignStart",
@@ -109,47 +98,6 @@ const C3_NEW_KEYS: &[&str] = &[
     "AnimationFpsCap",
     "AnimationFpsCapHelp",
     "FpsUnlimited",
-    // Fjord / Wi-Fi / preview labels consumed by the ported UI.
-    "Connected",
-    "Copied",
-    "CopyFailed",
-    "ConnectionEstablished",
-    "FjordFilesComputer",
-    "FjordFilesCopyPath",
-    "FjordFilesCount",
-    "FjordFilesDesktop",
-    "FjordFilesDocuments",
-    "FjordFilesDownloads",
-    "FjordFilesFilteredCount",
-    "FjordFilesFolder",
-    "FjordFilesHome",
-    "FjordFilesMusic",
-    "FjordFilesPictures",
-    "FjordFilesPreview",
-    "FjordFilesReveal",
-    "FjordFilesSearch",
-    "FjordFilesVideos",
-    "FjordFilesVolumes",
-    "Loading",
-    "LocationDenied",
-    "Missing",
-    "OpenItemFailed",
-    "OpenNetwork",
-    "PdfPages",
-    "PreviewFailed",
-    "Revealed",
-    "Saved",
-    "SecuredNetwork",
-    "SelectPreview",
-    "TextLimit",
-    "UnsupportedPreview",
-    "WindowsError",
-    "WifiNetworks",
-    "WifiOff",
-    "WlanStopped",
-    "Wpa2Personal",
-    "Wpa3Personal",
-    "WpaPersonal",
 ];
 
 #[test]

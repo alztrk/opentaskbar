@@ -763,24 +763,6 @@ fn set_extra_number(settings: &mut DockSettings, key: &str, value: i32) {
     settings.extra.insert(key.to_owned(), json!(value));
 }
 
-/// reference writes toggles as JSON booleans. Older port builds wrote `0`/`1`, so reads still accept
-/// numbers but every write from this UI is a real bool.
-fn extra_bool(settings: &DockSettings, key: &str, fallback: bool) -> bool {
-    settings
-        .extra
-        .get(key)
-        .and_then(|value| {
-            value
-                .as_bool()
-                .or_else(|| value.as_i64().map(|number| number != 0))
-        })
-        .unwrap_or(fallback)
-}
-
-fn set_extra_bool(settings: &mut DockSettings, key: &str, value: bool) {
-    settings.extra.insert(key.to_owned(), json!(value));
-}
-
 /// Resolves a startup toggle against the observed registry state. A failed write is shown even
 /// when `read()` still reports the old value; an unreadable state keeps the requested position so
 /// the switch never lies about a known target. A successful write that `read()` cannot confirm is
@@ -8612,7 +8594,7 @@ impl SettingsView {
             )
             .into_any_element(),
             section_card(t, loc::t("SectionSystem"), {
-                let mut rows: Vec<AnyElement> = vec![
+                let rows: Vec<AnyElement> = vec![
                     self.target_row(
                         "Startup",
                         t,
@@ -8644,9 +8626,9 @@ impl SettingsView {
                         .text_color(rgba(t.text_secondary))
                         .child(self.startup_status.clone())
                         .into_any_element(),
-                    // Window picker (WS-10) and Fjord (WS-11) toggles are persisted in
-                    // `extra`; the dock reads these keys when those workstreams land.
-                    // No WS-10/11 toggle API exists in this worktree yet.
+                    // The window-picker (WS-10) toggle is persisted in `extra`;
+                    // the dock reads this key when that workstream lands.
+                    // No WS-10 toggle API exists in this worktree yet.
                     self.target_row_desc(
                         "WindowPickerEnabled",
                         t,
@@ -8669,66 +8651,7 @@ impl SettingsView {
                             }),
                         ),
                     ),
-                    self.target_row_desc(
-                        "FjordFilesEnabled",
-                        t,
-                        Some("\u{E838}"),
-                        loc::t("FjordFiles"),
-                        loc::t("FjordFilesOpen"),
-                        ios_switch(
-                            "sw-fjord-files",
-                            t,
-                            extra_bool(&self.settings, "FjordFilesEnabled", false),
-                            cx.listener(|this, _, _, cx| {
-                                let next = !extra_bool(&this.settings, "FjordFilesEnabled", false);
-                                set_extra_bool(&mut this.settings, "FjordFilesEnabled", next);
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    ),
-                    // `show_fjord_files_button` is a typed setting, not an `extra` key. The
-                    // dock host consumes it in a separate workstream; this row owns read/write.
-                    self.target_row_desc(
-                        "ShowFjordFilesButton",
-                        t,
-                        Some("\u{E838}"),
-                        loc::t("WidgetShow"),
-                        loc::t("FjordFiles"),
-                        ios_switch(
-                            "sw-show-fjord-files-button",
-                            t,
-                            self.settings.show_fjord_files_button,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.show_fjord_files_button =
-                                    !this.settings.show_fjord_files_button;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    ),
                 ];
-                // Temporarily disabled together with the Fjord top bar.
-                if crate::ui::fjord_bar::FJORD_BAR_ENABLED {
-                    rows.push(self.target_row(
-                        "FjordBarVisible",
-                        t,
-                        Some("\u{E838}"),
-                        loc::t(if extra_bool(&self.settings, "FjordBarVisible", false) {
-                            "FjordBarHide"
-                        } else {
-                            "FjordBarShow"
-                        }),
-                        ios_switch(
-                            "sw-fjord-bar",
-                            t,
-                            extra_bool(&self.settings, "FjordBarVisible", false),
-                            cx.listener(|this, _, _, cx| {
-                                let next = !extra_bool(&this.settings, "FjordBarVisible", false);
-                                set_extra_bool(&mut this.settings, "FjordBarVisible", next);
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    ));
-                }
                 rows
             })
             .into_any_element(),
@@ -9551,11 +9474,10 @@ impl Render for SettingsView {
 mod tests {
     use super::{
         BrushMode, DockSettings, WIN_H, WIN_W, ai_cli_sign_in_command, brush_to_json, build_backup,
-        build_brush, city_list, civil_from_days, close_spawned_settings_windows, extra_bool,
-        field_cell_hsv, gradient_stop_at, import_backup_into, inspect_backup,
-        location_auto_fill_value, persist_theme_tokens, reorder_gradient_stop,
-        resolve_startup_toggle, safe_backup_path, set_extra_bool, settings_search,
-        settings_window_options, weather_country_for, zip_store, zip_unstore,
+        build_brush, city_list, civil_from_days, close_spawned_settings_windows, field_cell_hsv,
+        gradient_stop_at, import_backup_into, inspect_backup, location_auto_fill_value,
+        persist_theme_tokens, reorder_gradient_stop, resolve_startup_toggle, safe_backup_path,
+        settings_search, settings_window_options, weather_country_for, zip_store, zip_unstore,
     };
     use crate::design::brush::Hsv;
     use crate::design::theme::{
@@ -9856,7 +9778,6 @@ mod tests {
             "DockWidthMode",
             "DockHeightMode",
             "DockTopGapUnit",
-            "ShowFjordFilesButton",
         ] {
             assert!(defaults.get(key).is_some(), "missing persisted key {key}");
         }
@@ -9865,7 +9786,6 @@ mod tests {
             focus_minutes: 42,
             focus_break_minutes: 9,
             focus_sessions: 6,
-            show_fjord_files_button: true,
             dynamic_island_background_color: Some("#010203".to_owned()),
             ..Default::default()
         };
@@ -9873,27 +9793,12 @@ mod tests {
         assert_eq!(value["FocusMinutes"], 42);
         assert_eq!(value["FocusBreakMinutes"], 9);
         assert_eq!(value["FocusSessions"], 6);
-        assert_eq!(value["ShowFjordFilesButton"], true);
         assert_eq!(value["DynamicIslandBackgroundColor"], "#010203");
         assert_eq!(settings.dynamic_island_background_hex(), Some("#010203"));
 
         assert_eq!(super::FOCUS_MINUTES_MAX, 90);
         assert_eq!(super::FOCUS_BREAK_MINUTES_MAX, 30);
         assert_eq!(super::FOCUS_SESSIONS_MAX, 8);
-    }
-
-    #[test]
-    fn fjord_toggles_persist_as_json_booleans() {
-        let mut settings = DockSettings::default();
-        for key in ["FjordFilesEnabled", "FjordBarVisible"] {
-            assert!(!extra_bool(&settings, key, false));
-            set_extra_bool(&mut settings, key, true);
-            assert_eq!(settings.extra.get(key), Some(&serde_json::json!(true)));
-            assert!(extra_bool(&settings, key, false));
-            // Port builds before this fix wrote 0/1; reads still accept them.
-            settings.extra.insert(key.to_owned(), serde_json::json!(0));
-            assert!(!extra_bool(&settings, key, false));
-        }
     }
 
     #[test]

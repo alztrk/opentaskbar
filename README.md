@@ -174,14 +174,6 @@ cargo test --workspace
 
 `cargo test --workspace` runs the deterministic logic, i18n and settings-compatibility checks; live Windows shell behavior still needs the manual smoke list in [docs/windows-reliability-audit.md](docs/windows-reliability-audit.md).
 
-### Fjord top bar
-
-To open the optional top bar, run `OpenTaskBar.exe --fjord-bar` or `cargo run --bin OpenTaskBar -- --fjord-bar`. The bar opens on each display and can be closed from its desktop menu. The same menu opens Fjord Files.
-
-Use **Settings → Dock → Enable Fjord Files** to control the file browser. Turning it off closes any open Fjord Files windows and removes its entries from the dock and the top bar. A `--files` shortcut with an explicit folder or This PC target then opens in Windows File Explorer. A shortcut with no target simply exits.
-
-Click the Wi-Fi icon to scan, connect, or disconnect. For a new network, **Remember network** saves a per-user Windows Wi-Fi profile after a successful connection. Saved profiles support manual reconnection with the stored credentials. On Windows versions that restrict nearby Wi-Fi access, the panel reports when Windows location permissions block the scan.
-
 ---
 
 ## Configuration
@@ -261,8 +253,6 @@ Uses `packaging/msix/AppxManifest.Rust.xml` and the visual assets in `packaging/
 | `--settings` | Opens only the GPUI Settings window; exits when it closes. |
 | `--restore` | Replays the flyout/taskbar recovery journal and exits. |
 | `--extract-icons` | Short-lived icon extractor worker driven over stdin/stdout. Used by the tray/dock; safe to run manually with stdin closed. |
-| `--fjord-bar` | Opens the optional on-demand Fjord top bar host on every display. |
-| `--files <path>` | Opens Fjord Files at the given folder or This PC target (Explorer fallback); with no target, exits. |
 | `--software-render` | Forces software rendering for this launch instead of the saved preference. |
 
 ### Settings and shared data
@@ -307,7 +297,7 @@ Integration tests under `crates/opentaskbar-core/tests/` pin these production en
 
 ### Localization
 
-14 cultures ship as embedded JSON: `de-DE`, `en-US`, `es-ES`, `fr-FR`, `it-IT`, `ja-JP`, `ko-KR`, `nl-NL`, `pl-PL`, `pt-BR`, `ru-RU`, `tr-TR`, `uk-UA`, `zh-CN`. Every catalog has the **same 1423 keys** — Rust workspace additions include DI/calendar/font keys, C3 widget features, 207 UI localization keys for island details, Settings/theme and widgets, 27 window-picker/magnification/Fjord/Wi-Fi/settings labels (24 newly added; three already shipped), 3 keys covering the last English-literal fallbacks, 3 keys for searchable location pickers / geolocation status, the 40 Fjord/Wi-Fi/preview labels (`FjordFiles*`, `Connected`, `Saved`, `WifiNetworks`, `PdfPages`, `SelectPreview`, …) and 17 OLED/display-care keys. `opentaskbar_core::i18n::{t, tr, t_fmt}` resolve with exact → same-language → `en-US` → key-name fallback; a missing key never crashes. Key parity is enforced by `scripts/check-locale-parity.ps1` and `crates/opentaskbar-core/tests/i18n_parity.rs`, which also guard the nine restored tr-TR focus/radio/spacing labels and assert 0 empty values and 0 lost placeholders in every catalog. See [docs/localization.md](docs/localization.md).
+14 cultures ship as embedded JSON: `de-DE`, `en-US`, `es-ES`, `fr-FR`, `it-IT`, `ja-JP`, `ko-KR`, `nl-NL`, `pl-PL`, `pt-BR`, `ru-RU`, `tr-TR`, `uk-UA`, `zh-CN`. Every catalog has the **same 1373 keys** — Rust workspace additions include DI/calendar/font keys, C3 widget features, 207 UI localization keys for island details, Settings/theme and widgets, 17 window-picker/magnification/settings labels (14 newly added; three already shipped), 3 keys covering the last English-literal fallbacks, 3 keys for searchable location pickers / geolocation status and 17 OLED/display-care keys. `opentaskbar_core::i18n::{t, tr, t_fmt}` resolve with exact → same-language → `en-US` → key-name fallback; a missing key never crashes. Key parity is enforced by `scripts/check-locale-parity.ps1` and `crates/opentaskbar-core/tests/i18n_parity.rs`, which also guard the nine restored tr-TR focus/radio/spacing labels and assert 0 empty values and 0 lost placeholders in every catalog. See [docs/localization.md](docs/localization.md).
 
 ### Tests and CI
 
@@ -319,7 +309,7 @@ cargo test --workspace
 
 `crates/opentaskbar-core/tests/` ports the deterministic parts of the reference checks: settings key parity, AI usage/JWT/quota logic, `.otbackup` ZIP round-trip, wireless battery vendor parsing, media timeline/seek, shell recovery/journal, dock layout math, audio mixer scoring and locale completeness. Where the production API is a private function in another crate, a bridge test asserts the production source contract instead of duplicating it; cases that need a not-yet-landed cross-workstream API are `#[ignore]`d with the owning workstream named in the message. Core-owned behaviour (settings enums/validation, i18n, the single-instance mutex) is tested against the real production functions.
 
-`.github/workflows/rust-ci.yml` runs on every branch and also when Rust sources, locale catalogs, watchdog sources, packaging scripts or the Rust MSIX manifest change; its `watchdog-arch` job builds the x86 PE (`0x014C`) with `-NoFallback`, builds the workspace for `i686-pc-windows-msvc` and re-verifies the x86 portable EXE. `codeql.yml` scans the Rust workspace and the native C watchdog on every branch/PR; `dependabot.yml` tracks Cargo and GitHub Actions. `scripts/check-locale-parity.ps1` gates 14 × 1046 frozen reference keys and 14 × 1423 Rust keys, and `scripts/check-release-version.ps1` gates tag ↔ root Cargo workspace version (`0.4.0`) ↔ Rust MSIX identity (`0.4.0.0`) before release builds.
+`.github/workflows/rust-ci.yml` runs on every branch and also when Rust sources, locale catalogs, watchdog sources, packaging scripts or the Rust MSIX manifest change; its `watchdog-arch` job builds the x86 PE (`0x014C`) with `-NoFallback`, builds the workspace for `i686-pc-windows-msvc` and re-verifies the x86 portable EXE. `codeql.yml` scans the Rust workspace and the native C watchdog on every branch/PR; `dependabot.yml` tracks Cargo and GitHub Actions. `scripts/check-locale-parity.ps1` gates 14 × 1046 frozen reference keys and 14 × 1373 Rust keys, and `scripts/check-release-version.ps1` gates tag ↔ root Cargo workspace version (`0.4.0`) ↔ Rust MSIX identity (`0.4.0.0`) before release builds.
 
 ### Privacy
 

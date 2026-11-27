@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Feature removal
+
+- Removed the bundled file manager, per-monitor top bar and Wi-Fi panel, including their CLI modes, settings toggles, dock menu entries and 50 panel-only locale keys. The numeric Rust catalog gate moves from 1423 to **1373 keys**; the 14 frozen reference catalogs stay at 1046 keys.
+- Unknown legacy keys in `settings.json` are still preserved in `DockSettings.extra`, so existing installations do not lose data.
+
 ### Repository layout
 
 - Flattened the Rust workspace out of its old nested directory into the repository root: `Cargo.toml`, `Cargo.lock`, `crates/`, `Fonts/`, `Assets/`, `themes/` and the merged `README.md` now live at the top level, and the old directory is gone. CI path filters, packaging scripts, docs and the production-source test helper now resolve paths from the new root.
@@ -18,11 +23,11 @@
 
 - Added a fourth per-surface material, **True black (OLED)**: opaque `#000000` with no rim, sheen or shadow on the dock, menus, widgets and Settings window. Available independently for each surface in Settings → Appearance, with live preview.
 - Added independent display-care settings: reduce glow & shadows, burn-in shift (5–120 minute interval), automatic OLED look on low battery and/or Night Light, ambient display (minimal clock + battery strip after 5 minutes idle), and an animation frame limit (unlimited/30/60/120 FPS). Burn-in shift uses a tiny in-pill transform so layout and geometry stay untouched; the automatic trigger never rewrites saved settings.
-- All new settings and the TrueBlack material are implemented in Rust (schema, validation, glass/dock rendering and Settings UI), with 17 new locale keys translated in all 14 Rust catalogs. Numeric parity gate moved to **1423 Rust** keys.
+- All new settings and the TrueBlack material are implemented in Rust (schema, validation, glass/dock rendering and Settings UI), with 17 new locale keys translated in all 14 Rust catalogs. Numeric parity gate now sits at **1373 Rust** keys after the panel-key cleanup.
 
 ### Rust port — test/CI/docs/packaging parity
 
-- Removed five retired AI-provider grouping keys and added 27 window-picker, magnification, Fjord, Wi-Fi, search, alignment, preview, focus, density and AI-ring keys (24 newly added; three already shipped in every catalog) to all 14 Rust catalogs. At that point every Rust catalog and numeric gate sat at **1406 keys**.
+- Removed five retired AI-provider grouping keys and added 17 window-picker, magnification, search, alignment, preview, focus, density and AI-ring keys (14 newly added; three already shipped in every catalog) to all 14 Rust catalogs. At that point every Rust catalog and numeric gate sat at **1356 keys**.
 - Added 32 new feature keys to all 14 Rust catalogs and enforced identical key sets with `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`.
 - Merged 202 new UI localization keys (Dynamic Island details, Settings/theme controls and widget labels) with the five widget/start-layout keys from the other branch, all with real translations in 14 Rust catalogs, raising every catalog from 1129 to **1336 keys**, and raised the numeric parity gates to match.
 - Restored the nine tr-TR labels that the merge overwrote with en-US or ASCII-only text (`FocusBreakTitle/Start/Skip/Countdown/Complete`, `FocusSession`, `RadioOn`, `RadioOff`, `DockBottomGap`) and added parity tests for translation regressions, empty values and placeholder retention. The key count stayed **1336** at that point in all 14 catalogs and every gate.
@@ -41,7 +46,7 @@
 - `rust-ci.yml` now triggers on watchdog sources, packaging scripts, the Rust MSIX manifest and workflow changes. Its new `watchdog-arch` job asserts x86 PE machine `0x014C`, builds the workspace for `i686-pc-windows-msvc` and re-verifies the x86 portable EXE.
 - Added `scripts/check-release-version.ps1` and run it before any release build: tag ↔ Cargo workspace `0.4.0` ↔ Rust MSIX `0.4.0.0`. Staged the architecture-matched watchdog inside the MSIX package.
 - `package-rust-release.ps1` records `rustPort.crateVersion` and per-artifact watchdog architecture/PE machine/SHA-256, verifies deterministic ZIP payloads and every `checksums.txt` row against disk before SLSA attestation, and documents the optional report-only VirusTotal scan.
-- Locale parity constants updated for the integration union (1406 Rust keys at that point). The smoke checklist and docs now reference the shared `%LOCALAPPDATA%\OpenTaskbar` folder and `opentaskbar.log`.
+- Locale parity constants updated for the integration union (1356 Rust keys at that point). The smoke checklist and docs now reference the shared `%LOCALAPPDATA%\OpenTaskbar` folder and `opentaskbar.log`.
 
 - Placed Rust Background Apps pins in a compact strip beside the Background Apps button, with overflow available in the flyout. Added a short dock closing animation that respects Windows and OpenTaskbar animation settings.
 
@@ -51,7 +56,7 @@
 
 - Redesigned the Rust port's Settings and Background Apps panels with coordinated light and dark themes, responsive Settings navigation, and inline dock pin and window close controls.
 
-- Merged Dynamic Island, window-picker and AI-provider labels into all 14 Rust catalogs; after removing the retired provider labels the numeric parity gate is **1423 Rust** keys.
+- Merged Dynamic Island, window-picker and AI-provider labels into all 14 Rust catalogs; after removing the retired provider and panel labels the numeric parity gate is **1373 Rust** keys.
 
 - Applied the active theme and theme pack tokens to the Dynamic Island, with per-user background color and opacity controls.
 

@@ -15,8 +15,6 @@
 //! Cross-WS integration notes (APIs not present in this worktree):
 //! - WS-10 `window_picker::show(...)`: must be called from the app-click, group-member
 //!   and secondary-mirror activation paths (marked `WS-10` at each call site).
-//! - WS-11 `fjord::bar` commands: dock buttons need to dispatch through that module
-//!   once its new files land (marked `WS-11` at each call site).
 //! - WS-1 cfg: `settings::{effective_width(&settings, monitor_w),
 //!   effective_height(&settings), effective_top_gap(&settings),
 //!   effective_bottom_gap(&settings), widget_density_for(&settings, id)}` are
@@ -110,7 +108,7 @@ use crate::platform::win32::{
     WidgetContextAction,
 };
 use crate::ui::flyout::{FlyoutBlock, FlyoutSpec};
-use crate::ui::menu::{self, BorderStyle, MenuEntry, MenuIcon};
+use crate::ui::menu::{self, BorderStyle, MenuEntry};
 use crate::ui::settings as settings_ui;
 use crate::widgets::{self, HOVER_INTENT_MS, HoverChange, HoverPhase, WidgetRuntime};
 
@@ -161,9 +159,8 @@ const WM_CLOSE: u32 = 0x0010;
 const HOTKEY_LAUNCHER_ID: i32 = 0x4F01;
 const HOTKEY_DOCK_ID: i32 = 0x4F02;
 /// Integration menu ids live above every dock/app menu id so a native command
-/// or Fjord `BarCommand` can never be mistaken for a dock context action.
+/// can never be mistaken for a dock context action.
 const NATIVE_APP_MENU_ID_BASE: u32 = 7000;
-const FJORD_MENU_ID_BASE: u32 = 7700;
 const GROUP_FLYOUT_ROW_ID_BASE: u32 = 100;
 /// How long a standalone Windows-key press keeps an auto-hidden dock revealed.
 /// 1500 ms kept the dock pinned across ordinary keyboard shortcuts; 600 ms matches
@@ -1461,8 +1458,8 @@ fn bounce_offset_dips(started: Option<Instant>) -> Option<f32> {
     Some(y)
 }
 
-/// Persisted `settings.extra` toggle (`1` = on, `0` = off). The defaults keep
-/// the WS-10 picker available while Fjord stays opt-in (WS-11).
+/// Persisted `settings.extra` toggle (`1` = on, `0` = off). The default keeps
+/// the WS-10 picker available.
 fn extra_flag(settings: &DockSettings, key: &str, default: bool) -> bool {
     settings
         .extra
@@ -1501,63 +1498,6 @@ fn remap_native_app_menu_entries(entries: Vec<MenuEntry>) -> (Vec<(u32, u32)>, V
         }
     }
     (commands, items)
-}
-
-/// Fjord workspace commands appended to the dock context menu (WS-11). Wi-Fi is
-/// index 2: the original `menu_command` only covers Files/CloseBar, so the dock
-/// owns the extra command and its dispatch through `fjord::wifi_ui`.
-fn fjord_bar_menu_entries(files_enabled: bool) -> Vec<(u32, MenuEntry)> {
-    fjord_bar_menu_entries_for(files_enabled, files_enabled)
-}
-
-fn fjord_bar_menu_entries_for(files_enabled: bool, bar_visible: bool) -> Vec<(u32, MenuEntry)> {
-    (0..3)
-        .filter_map(|index| {
-            let command = fjord_command_for_index(index, files_enabled)?;
-            // Temporarily disabled: never surface the Show/Hide Fjord Bar item.
-            if !crate::ui::fjord_bar::FJORD_BAR_ENABLED
-                && matches!(command, crate::fjord::bar::BarCommand::CloseBar)
-            {
-                return None;
-            }
-            let id = FJORD_MENU_ID_BASE + index as u32;
-            let (icon, label) = match command {
-                crate::fjord::bar::BarCommand::OpenFiles => {
-                    (MenuIcon::Folder, loc::t("FjordFilesOpen"))
-                }
-                crate::fjord::bar::BarCommand::CloseBar => (
-                    MenuIcon::Close,
-                    loc::t(if bar_visible {
-                        "FjordBarHide"
-                    } else {
-                        "FjordBarShow"
-                    }),
-                ),
-                crate::fjord::bar::BarCommand::ToggleWifi => {
-                    (MenuIcon::Activity, loc::t("WifiNetworks"))
-                }
-            };
-            Some((id, MenuEntry::item(id, icon, label)))
-        })
-        .collect()
-}
-
-fn fjord_command_for_index(
-    index: usize,
-    files_enabled: bool,
-) -> Option<crate::fjord::bar::BarCommand> {
-    crate::fjord::bar::menu_command(index, files_enabled)
-        .filter(|command| {
-            crate::ui::fjord_bar::FJORD_BAR_ENABLED
-                || !matches!(command, crate::fjord::bar::BarCommand::CloseBar)
-        })
-        .or_else(|| (index == 2).then_some(crate::fjord::bar::BarCommand::ToggleWifi))
-}
-
-fn fjord_command_for_id(chosen: u32, files_enabled: bool) -> Option<crate::fjord::bar::BarCommand> {
-    chosen
-        .checked_sub(FJORD_MENU_ID_BASE)
-        .and_then(|index| fjord_command_for_index(index as usize, files_enabled))
 }
 
 impl DockState {
@@ -2892,11 +2832,6 @@ impl DockState {
                 auto_hide,
                 desired_total_px,
             );
-            crate::ui::fjord_bar::sync_fjord_bar(extra_flag(
-                &self.settings,
-                "FjordBarVisible",
-                false,
-            ));
         }
         self.sync_slots(false);
         self.sync_window_bounds();
@@ -5004,44 +4939,6 @@ impl DockState {
         }
     }
 
-    /// WS-11 `fjord::bar` commands appended to the dock context menu.
-    fn execute_fjord_command(&mut self, command: crate::fjord::bar::BarCommand) {
-        match command {
-            crate::fjord::bar::BarCommand::OpenFiles => {
-                let home = std::env::var("USERPROFILE").unwrap_or_default();
-                crate::fjord::activation::handle_cli(&home);
-            }
-            crate::fjord::bar::BarCommand::CloseBar => {
-                let currently_visible = extra_flag(&self.settings, "FjordBarVisible", false)
-                    || crate::ui::fjord_bar::is_fjord_bar_running();
-                let next_visible = !currently_visible;
-                self.settings.extra.insert(
-                    "FjordBarVisible".to_owned(),
-                    serde_json::json!(i32::from(next_visible)),
-                );
-                let _ = settings::save_to(&settings::settings_path(), &self.settings);
-                crate::ui::fjord_bar::sync_fjord_bar(next_visible);
-                if !next_visible {
-                    crate::fjord::activation::close_all_windows();
-                }
-            }
-            crate::fjord::bar::BarCommand::ToggleWifi => {
-                // Wi-Fi writes use WinRT; never run them on the dock UI thread.
-                // The `wifi_ui` bridge re-scans afterwards so the flyout state
-                // matches the radio we just toggled.
-                let _ = std::thread::Builder::new()
-                    .name("opentaskbar-fjord-wifi".into())
-                    .spawn(|| {
-                        let target = !crate::platform::radio::state("wifi");
-                        if !crate::platform::radio::set("wifi", target) {
-                            opentaskbar_core::log::warn("Fjord Wi-Fi toggle was rejected.");
-                        }
-                        let _ = crate::fjord::wifi_ui::scan_networks();
-                    });
-            }
-        }
-    }
-
     fn screen_cursor(&self) -> Option<POINT> {
         let mut pt = POINT { x: 0, y: 0 };
         (unsafe { GetCursorPos(&mut pt) } != 0).then_some(pt)
@@ -6522,27 +6419,7 @@ impl DockState {
             return;
         }
 
-        // WS-11: Fjord workspace commands are appended to the shared dock menu
-        // with ids outside the dock's reserved range; dispatch them here before
-        // the normal `ContextAction` mapping.
-        // reference writes a JSON bool; `extra_flag` only understood legacy 0/1 ints.
-        let files_enabled = crate::fjord::activation::files_enabled(&self.settings);
-        let bar_visible = crate::fjord::activation::bar_visible(&self.settings)
-            || crate::ui::fjord_bar::is_fjord_bar_running();
-        let fjord_entries = fjord_bar_menu_entries_for(files_enabled, bar_visible);
-        let (chosen, act) = win32::show_dock_context_menu_with_entries(
-            self.hwnd,
-            self.is_dark,
-            &self.settings,
-            fjord_entries
-                .iter()
-                .map(|(_, entry)| entry.clone())
-                .collect(),
-        );
-        if let Some(command) = fjord_command_for_id(chosen, files_enabled) {
-            self.execute_fjord_command(command);
-            return;
-        }
+        let act = win32::show_dock_context_menu(self.hwnd, self.is_dark, &self.settings);
         self.execute_context_action(act);
     }
 
@@ -7854,9 +7731,6 @@ pub fn run(settings: DockSettings) {
                         auto_hide,
                         desired_total_px,
                     );
-                    if extra_flag(&settings, "FjordBarVisible", false) {
-                        crate::ui::fjord_bar::spawn_fjord_bar();
-                    }
                 }
             }
             Err(err) => {
@@ -7915,7 +7789,6 @@ pub fn run(settings: DockSettings) {
     // menu must close it as reference MainWindow.Window_Closed does with
     // SettingsWindow.CloseForShutdown(), otherwise its window stays on screen.
     settings_ui::close_spawned_settings_windows();
-    crate::ui::fjord_bar::close_fjord_bar();
 
     if !wheel_hook.is_null() {
         unsafe {
@@ -7960,6 +7833,7 @@ pub fn run(settings: DockSettings) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::menu::MenuIcon;
 
     #[test]
     fn multi_monitor_anchor_selects_the_dock_on_the_flyout_monitor() {
@@ -8577,72 +8451,6 @@ mod tests {
         assert_eq!(commands, vec![(NATIVE_APP_MENU_ID_BASE, 1)]);
         assert!(matches!(items[1], MenuEntry::Separator));
         assert!(commands[0].0 > 1000);
-    }
-
-    #[test]
-    fn fjord_bar_commands_are_added_to_the_dock_menu() {
-        let src = include_str!("mod.rs");
-        for needle in [
-            "crate::fjord::bar::menu_command(",
-            "crate::fjord::bar::BarCommand::OpenFiles",
-            "crate::fjord::bar::BarCommand::CloseBar",
-            "win32::show_dock_context_menu_with_entries(",
-            "self.execute_fjord_command(command)",
-        ] {
-            assert!(src.contains(needle), "Fjord menu must contain {needle:?}");
-        }
-        let bar_enabled = crate::ui::fjord_bar::FJORD_BAR_ENABLED;
-        let enabled = fjord_bar_menu_entries(true);
-        let mut expected_ids = vec![FJORD_MENU_ID_BASE];
-        if bar_enabled {
-            expected_ids.push(FJORD_MENU_ID_BASE + 1);
-        }
-        expected_ids.push(FJORD_MENU_ID_BASE + 2);
-        assert_eq!(enabled.len(), expected_ids.len());
-        assert_eq!(
-            enabled.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            expected_ids
-        );
-        assert_eq!(
-            fjord_command_for_id(FJORD_MENU_ID_BASE, true),
-            Some(crate::fjord::bar::BarCommand::OpenFiles)
-        );
-        assert_eq!(
-            fjord_command_for_id(FJORD_MENU_ID_BASE + 1, true),
-            bar_enabled.then_some(crate::fjord::bar::BarCommand::CloseBar)
-        );
-        assert_eq!(fjord_command_for_id(0, true), None);
-        let disabled = fjord_bar_menu_entries(false);
-        assert_eq!(disabled.len(), if bar_enabled { 2 } else { 1 });
-    }
-
-    #[test]
-    fn fjord_wifi_command_is_in_the_menu_and_dispatched_through_wifi_ui() {
-        let src = include_str!("mod.rs");
-        assert_eq!(
-            fjord_command_for_id(FJORD_MENU_ID_BASE + 2, true),
-            Some(crate::fjord::bar::BarCommand::ToggleWifi)
-        );
-        for needle in [
-            "crate::fjord::bar::BarCommand::ToggleWifi => {",
-            "crate::platform::radio::state(\"wifi\")",
-            "crate::platform::radio::set(\"wifi\", target)",
-            "crate::fjord::wifi_ui::scan_networks()",
-        ] {
-            assert!(
-                src.contains(needle),
-                "Wi-Fi dispatch must contain {needle:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn dock_files_command_prefers_the_pipe_over_explorer() {
-        let src = include_str!("mod.rs");
-        assert!(src.contains("crate::fjord::activation::files_enabled(&self.settings)"));
-        assert!(src.contains("crate::fjord::activation::handle_cli(&home)"));
-        let stale_read = format!("extra_flag(&self.settings, \"Fjord{}Enabled\"", "Files");
-        assert!(!src.contains(&stale_read));
     }
 
     #[test]
