@@ -1,9 +1,8 @@
 name: Continuous Integration
 
-# Rust-only gate. rust-ci.yml carries the extended checks (watchdog PE,
-# 32-bit build, locale key parity); this workflow guarantees that every push
-# and PR is formatted, linted, tested and built even when path filters in the
-# extended workflow do not fire.
+# Rust-only gate and the required "Build & Test (Windows x64)" check. It runs
+# on every push and PR; rust-ci.yml carries only the extended checks (watchdog
+# PE, 32-bit build, locale key parity) so no step is executed twice.
 on:
   push:
   pull_request:
@@ -27,7 +26,7 @@ jobs:
           rustup default stable
 
       - name: Cache Cargo artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check

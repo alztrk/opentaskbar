@@ -6,7 +6,10 @@
 //! with `SendMessageTimeout` (250 ms) so a hung or restarting Explorer is
 //! detected instead of freezing the UI dispatcher for the shell's ~4 s timeout.
 //! Sent-message reentrancy (`ABN_POSCHANGED` arriving while a call is still on
-//! the stack) is broken with `NotificationsSuspended()`.
+//! the stack) is fenced with `NotificationsSuspended()`. The Rust dock does not
+//! register an AppBar callback WndProc (reconcile is driven by WinEvent hooks),
+//! so the gate is a defensive guard for any future callback handler, not a
+//! currently wired `ABN_*` dispatcher.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -76,8 +79,8 @@ pub fn pin_rect_to_edge(mut rect: RECT, edge: u32, requested: RECT) -> RECT {
 
 static NOTIFICATION_GATE: AtomicU32 = AtomicU32::new(0);
 
-/// True while an AppBar call is in flight; shell callbacks must be deferred,
-/// not handled inline.
+/// True while an AppBar call is in flight. A future callback WndProc should
+/// check this and defer `ABN_*` work instead of handling it inline.
 pub fn notifications_suspended() -> bool {
     NOTIFICATION_GATE.load(Ordering::SeqCst) != 0
 }

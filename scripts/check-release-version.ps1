@@ -1,12 +1,10 @@
 # Rust-only release version gate: tag <-> Cargo workspace version <-> Rust MSIX.
 # Runs before any build in release.yml so a mismatched tag cannot produce a
 # half-published release. There is no separate crate carve-out: the app version
-# is the workspace version.
+# is the workspace version, which is the single source of truth.
 param (
     [string]$Tag = '',
     [string]$RepoRoot = $PSScriptRoot,
-    # Bump together with Cargo.toml, the Rust MSIX manifest and the release tag.
-    [string]$ExpectedVersion = '0.4.0',
     [switch]$Quiet
 )
 
@@ -15,7 +13,7 @@ if ((Split-Path -Leaf $RepoRoot) -eq 'scripts') { $RepoRoot = Join-Path $RepoRoo
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 if (-not $Tag) { $Tag = $env:GITHUB_REF_NAME }
 if (-not $Tag) { $Tag = $env:RELEASE_TAG }
-if (-not $Tag) { throw 'No release tag supplied (-Tag, GITHUB_REF_NAME or RELEASE_TAG).' }
+if (-not $Tag) { throw 'No release tag supplied (-Tag, GITHUB_REF_NAME or RELEASE_TAG). Release CI supplies it; local runs must pass -Tag explicitly.' }
 
 if ($Tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?<pre>-[0-9A-Za-z.-]+)?$') {
     throw "Tag must look like v0.4.0 or v0.4.0-rc.1 (got: $Tag)."
@@ -41,22 +39,17 @@ foreach ($path in @($cargoPath, $msixPath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing version source: $path" }
 }
 
+# Cargo.toml is the only authoritative version: no fourth hardcoded copy.
 $cargoVersion = Get-CargoWorkspaceVersion -Path $cargoPath
 [xml]$manifest = Get-Content -Raw -LiteralPath $msixPath
 $msixVersion = $manifest.Package.Identity.Version
 
 $failures = [System.Collections.Generic.List[string]]::new()
-if ($tagVersion -ne $ExpectedVersion) {
-    $failures.Add("Tag $Tag carries $tagVersion; expected $ExpectedVersion.")
-}
-if ($cargoVersion -ne $ExpectedVersion) {
-    $failures.Add("Cargo.toml workspace version $cargoVersion != $ExpectedVersion.")
-}
 if ($tagVersion -ne $cargoVersion) {
     $failures.Add("Tag version $tagVersion does not match Cargo workspace version $cargoVersion.")
 }
-if ($msixVersion -ne "$ExpectedVersion.0") {
-    $failures.Add("Rust MSIX identity version $msixVersion != $ExpectedVersion.0")
+if ($msixVersion -ne "$cargoVersion.0") {
+    $failures.Add("Rust MSIX identity version $msixVersion != $cargoVersion.0")
 }
 
 if ($failures.Count -gt 0) {

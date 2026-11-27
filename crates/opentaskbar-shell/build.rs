@@ -21,15 +21,29 @@ fn pe_machine(path: &Path) -> Option<u16> {
         return None;
     }
     let offset = u32::from_le_bytes(bytes[0x3C..0x40].try_into().ok()?) as usize;
-    if offset + 6 > bytes.len() || &bytes[offset..offset + 4] != b"PE\0\0" {
+    // Checked arithmetic: a corrupt/oversized e_lfanew must fail closed on any
+    // host pointer width instead of wrapping and panicking while slicing.
+    let pe_end = offset.checked_add(4)?;
+    let machine_end = offset.checked_add(6)?;
+    if machine_end > bytes.len() || &bytes[offset..pe_end] != b"PE\0\0" {
         return None;
     }
     Some(u16::from_le_bytes(
-        bytes[offset + 4..offset + 6].try_into().ok()?,
+        bytes[pe_end..machine_end].try_into().ok()?,
     ))
 }
 
 fn main() {
+    // `powershell.exe` is a host tool; cross-compiling the native watchdog from
+    // a non-Windows host is not supported. Fail with a clear reason instead of
+    // a confusing "program not found" error.
+    const {
+        assert!(
+            cfg!(windows),
+            "opentaskbar-shell's native watchdog is built by tools/watchdog/build.ps1 \
+             and requires a Windows build host"
+        )
+    };
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let (arch, expected_machine) = match target_arch.as_str() {
         "x86_64" => ("x64", IMAGE_FILE_MACHINE_AMD64),

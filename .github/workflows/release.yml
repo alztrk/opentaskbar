@@ -1,11 +1,12 @@
 name: Release
 
 on:
+  # Tag pushes and explicit dispatch only. A `release/v*` branch push used to
+  # create/overwrite the same GitHub Release as the tag, allowing two jobs to
+  # race and silently mutate already-published assets.
   push:
     tags:
       - 'v*'
-    branches:
-      - 'release/v*'
   workflow_dispatch:
     inputs:
       tag_name:
@@ -19,7 +20,9 @@ on:
         default: false
 
 concurrency:
-  group: release-${{ github.ref }}
+  # Serialize by release tag, not by ref: a dispatch for an existing tag must
+  # not run in parallel with that tag's push-triggered publish.
+  group: release-${{ github.ref_type == 'tag' && github.ref_name || inputs.tag_name }}
   cancel-in-progress: false
 
 jobs:
@@ -44,8 +47,6 @@ jobs:
         run: |
           $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') {
             $env:GITHUB_REF_NAME
-          } elseif ($env:GITHUB_REF_TYPE -eq 'branch' -and $env:GITHUB_REF_NAME -match '^release/(v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
-            $Matches[1]
           } else {
             "${{ inputs.tag_name }}"
           }
@@ -96,15 +97,52 @@ jobs:
           path: |
             release/OpenTaskbar-v*-win-*.exe
             release/OpenTaskbar-v*-win-*.zip
+            release/OpenTaskbarWatchdog-*.exe
             release/checksums.txt
             release/release-manifest.json
             release/release-notes.md
           if-no-files-found: error
           retention-days: 7
 
+  msix:
+    name: Build and verify Rust MSIX packages
+    needs: build
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Rust toolchain (x64 + x86)
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc i686-pc-windows-msvc
+
+      # The package gate validates tag <-> Cargo <-> MSIX manifest; this job
+      # finally builds the payload the manifest describes instead of leaving
+      # "Store-ready MSIX" as an untested claim.
+      - name: Package unsigned MSIX for both architectures
+        shell: pwsh
+        run: |
+          & "scripts/publish-rust-msix.ps1" -Runtime win-x64 -OutputDir release/msix-rust
+          & "scripts/publish-rust-msix.ps1" -Runtime win-x86 -OutputDir release/msix-rust
+          $packages = @(Get-ChildItem -LiteralPath release/msix-rust -Filter '*.msix' -File)
+          if ($packages.Count -ne 2) { throw "Expected two Rust MSIX packages, found $($packages.Count)." }
+
+      - name: Upload MSIX packages
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: msix-packages
+          path: release/msix-rust/*.msix
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     name: Attest and publish GitHub Release
-    needs: build
+    needs: [build, msix]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -123,11 +161,20 @@ jobs:
           name: release-assets
           path: downloaded
 
+      - name: Download MSIX packages
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: msix-packages
+          path: downloaded-msix
+
       - name: Restore release/ layout
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path release -Force | Out-Null
           Get-ChildItem -LiteralPath downloaded -Recurse -File | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path release $_.Name) -Force
+          }
+          Get-ChildItem -LiteralPath downloaded-msix -Recurse -File | ForEach-Object {
             Copy-Item -LiteralPath $_.FullName -Destination (Join-Path release $_.Name) -Force
           }
           $required = @('checksums.txt', 'release-manifest.json', 'release-notes.md')
@@ -174,6 +221,8 @@ jobs:
           files: |
             release/OpenTaskbar-v*-win-*.exe
             release/OpenTaskbar-v*-win-*.zip
+            release/OpenTaskbarWatchdog-*.exe
+            release/*.msix
             release/checksums.txt
             release/release-manifest.json
 
@@ -191,6 +240,10 @@ jobs:
             "OpenTaskbar-$env:RELEASE_TAG-win-x64.zip",
             "OpenTaskbar-$env:RELEASE_TAG-win-x86.exe",
             "OpenTaskbar-$env:RELEASE_TAG-win-x86.zip",
+            'OpenTaskbarWatchdog-x64.exe',
+            'OpenTaskbarWatchdog-x86.exe',
+            "OpenTaskbar_${{ needs.build.outputs.version }}.0_x64.msix",
+            "OpenTaskbar_${{ needs.build.outputs.version }}.0_x86.msix",
             'checksums.txt',
             'release-manifest.json'
           )

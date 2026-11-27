@@ -1,17 +1,18 @@
-//! Shell flyout (Start / Search / Control Center) pozisyon journal'ı.
+//! Reference-compatible shell flyout journal helpers.
 //!
-//! Başvuru: `Services/Interop/ShellFlyoutPositionJournal.cs` ve
-//! `ShellFlyoutPositionRegistry.cs`. Normal çıkış journal'ı okuyup siler;
-//! sert kapanmada dosya kalır ve yerel watchdog geri yüklemeyi tamamlar.
+//! Mirrors `ShellFlyoutPositionJournal.cs` / `ShellFlyoutPositionRegistry.cs`.
+//! The live writer/reader used by the dock lives in `flyout_writer`; this module
+//! owns the shared wire-format parser, the dock-flyout tag journal and the
+//! optional generation/seq intent records. A normal exit clears the journal
+//! after verification; a hard kill leaves it for the native watchdog.
 //!
-//! Dosya `%LOCALAPPDATA%\OpenTaskbar\flyout-positions.txt`, satır başına
-//! `handle pid left top` biçimindedir. Yazma her zaman `*.tmp` dosyasına
-//! yapılıp atomik rename ile değiştirilir; böylece yarı yazılmış journal
-//! bir sonraki oturumda yanlış geri yüklemeye yol açmaz.
+//! The file is `%LOCALAPPDATA%\OpenTaskbar\flyout-positions.txt`, with
+//! `handle pid left top` per line (optionally followed by `generation=N seq=M`).
+//! Writes always target a `*.tmp` file and are atomically renamed, so a killed
+//! process cannot leave a half-written journal behind.
 //!
-//! Modülün çekirdeği tamamen std'dir. `read_valid()`/`is_current()` yalnızca
-//! Windows derlemelerinde HWND'nin hâlâ aynı PID'e ait olduğunu doğrular
-//! (Windows HWND'leri geri dönüştürülebilir).
+//! The core is pure std. `read_valid()` / `is_current()` additionally verify on
+//! Windows that a recycled HWND still belongs to the recorded PID.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,7 @@ use windows_sys::Win32::Foundation::HWND;
 #[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
 
-/// Windows'un flyout'a verdiği orijinal konum ve o anki sahibi.
+/// Original position recorded for a flyout and the PID that owned it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FlyoutPosition {
     pub handle: usize,
@@ -136,9 +137,28 @@ pub fn write_tag(tag: &str, left: i32, top: i32) {
         text.push_str(&format!("{name} {x} {y}\n"));
     }
     let tmp = tmp_path(&path);
-    if fs::write(&tmp, text).is_ok() {
-        let _ = fs::rename(&tmp, path);
+    if let Err(err) = fs::write(&tmp, text) {
+        warn_write_failure(&path, "write temporary file", &err);
+        return;
     }
+    if fs::rename(&tmp, &path).is_err() {
+        let retried = if path.exists() && fs::remove_file(&path).is_ok() {
+            fs::rename(&tmp, &path)
+        } else {
+            Err(std::io::Error::other("destination still locked"))
+        };
+        if let Err(err) = retried {
+            warn_write_failure(&path, "atomic replace", &err);
+            let _ = fs::remove_file(&tmp);
+        }
+    }
+}
+
+fn warn_write_failure(path: &Path, operation: &str, err: &std::io::Error) {
+    opentaskbar_core::log::warn(format!(
+        "Flyout journal write failed ({operation}) at {}: {err}; recovery may be degraded",
+        path.display()
+    ));
 }
 
 fn read_tags_inner(path: &Path) -> Vec<(String, i32, i32)> {
@@ -181,7 +201,8 @@ pub fn write_kind_records_to(path: &Path, records: &[FlyoutKindRecord]) {
     let Some(parent) = path.parent() else {
         return;
     };
-    if fs::create_dir_all(parent).is_err() {
+    if let Err(err) = fs::create_dir_all(parent) {
+        warn_write_failure(path, "create directory", &err);
         return;
     }
     let mut content = String::new();
@@ -189,12 +210,21 @@ pub fn write_kind_records_to(path: &Path, records: &[FlyoutKindRecord]) {
         content.push_str(&record.to_line());
         content.push('\n');
     }
-    let temporary = tmp_path(path);
-    if fs::write(&temporary, content).is_err() {
+    let tmp = tmp_path(path);
+    if let Err(err) = fs::write(&tmp, content) {
+        warn_write_failure(path, "write temporary file", &err);
         return;
     }
-    if fs::rename(&temporary, path).is_err() && path.exists() && fs::remove_file(path).is_ok() {
-        let _ = fs::rename(&temporary, path);
+    if fs::rename(&tmp, path).is_err() {
+        let retried = if path.exists() && fs::remove_file(path).is_ok() {
+            fs::rename(&tmp, path)
+        } else {
+            Err(std::io::Error::other("destination still locked"))
+        };
+        if let Err(err) = retried {
+            warn_write_failure(path, "atomic replace", &err);
+            let _ = fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -216,7 +246,7 @@ pub fn read_kind_records_from(path: &Path) -> Vec<FlyoutKindRecord> {
         .collect()
 }
 
-/// Journal dosyasının yolu — referans ile aynı ortak klasör.
+/// Path of the reference-compatible flyout position journal.
 pub fn journal_path() -> PathBuf {
     opentaskbar_core::paths::journal_path("flyout-positions.txt")
 }
@@ -234,7 +264,7 @@ pub fn tmp_path(path: &Path) -> PathBuf {
     path.with_file_name(file_name)
 }
 
-/// Bir pozisyonu ekler ya da aynı HWND için günceller ve journal'ı yeniden yazar.
+/// Inserts or updates one position and rewrites the journal.
 pub fn write(handle: usize, pid: u32, left: i32, top: i32) {
     if handle == 0 {
         return;
@@ -254,7 +284,7 @@ pub fn write(handle: usize, pid: u32, left: i32, top: i32) {
     write_all(&positions);
 }
 
-/// Tüm pozisyonları tek seferde yazar (en fazla 16 girdi tutulur).
+/// Writes every position at once (at most MAX_ENTRIES entries).
 pub fn write_all(positions: &[FlyoutPosition]) {
     write_all_to(&journal_path(), positions);
 }
@@ -283,7 +313,8 @@ fn write_all_to_with_meta_inner(
     let Some(parent) = path.parent() else {
         return;
     };
-    if fs::create_dir_all(parent).is_err() {
+    if let Err(err) = fs::create_dir_all(parent) {
+        warn_write_failure(path, "create directory", &err);
         return;
     }
     let mut content = String::new();
@@ -307,18 +338,27 @@ fn write_all_to_with_meta_inner(
             )),
         }
     }
-    let temporary = tmp_path(path);
-    if fs::write(&temporary, content).is_err() {
+    let tmp = tmp_path(path);
+    if let Err(err) = fs::write(&tmp, content) {
+        warn_write_failure(path, "write temporary file", &err);
         return;
     }
-    // `std::fs::rename` Windows'ta hedefi MOVEFILE_REPLACE_EXISTING ile değiştirir;
-    // yine de eski sürüm davranışına karşı yedek yolu dene.
-    if fs::rename(&temporary, path).is_err() && path.exists() && fs::remove_file(path).is_ok() {
-        let _ = fs::rename(&temporary, path);
+    // `std::fs::rename` replaces the destination on Windows via
+    // MOVEFILE_REPLACE_EXISTING; keep the guarded retry for older behaviour.
+    if fs::rename(&tmp, path).is_err() {
+        let retried = if path.exists() && fs::remove_file(path).is_ok() {
+            fs::rename(&tmp, path)
+        } else {
+            Err(std::io::Error::other("destination still locked"))
+        };
+        if let Err(err) = retried {
+            warn_write_failure(path, "atomic replace", &err);
+            let _ = fs::remove_file(&tmp);
+        }
     }
 }
 
-/// Journal'daki tüm geçerli pozisyonları okur (bozuk satırlar atlanır).
+/// Reads all valid positions from the journal (malformed lines are skipped).
 #[must_use]
 pub fn read() -> Vec<FlyoutPosition> {
     read_from(&journal_path())
@@ -377,7 +417,7 @@ fn parse_position_line(line: &str) -> Option<(FlyoutPosition, JournalMeta)> {
     if saw_generation != saw_seq {
         return None;
     }
-    // HWND 0 hiçbir zaman geri yüklenemez; reference journal'ı da bunu atar.
+    // HWND 0 can never be restored; the reference journal drops it too.
     (handle != 0).then_some((
         FlyoutPosition {
             handle,
@@ -404,7 +444,7 @@ fn parse_signed(text: &str) -> Option<i32> {
     text.parse().ok()
 }
 
-/// Journal dosyasını siler (normal çıkışta geri yükleme sonrası çağrılır).
+/// Deletes the journal (called after a verified restore on normal exit).
 pub fn clear() {
     clear_from(&journal_path());
 }
@@ -413,14 +453,14 @@ fn clear_from(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
-/// HWND hâlâ yaşıyor ve journal'a kaydedilen PID'e hâlâ aitse doğru.
+/// True when the HWND is alive and still owned by the recorded PID.
 #[cfg(windows)]
 pub fn is_current(position: &FlyoutPosition) -> bool {
     if position.handle == 0 || position.pid == 0 {
         return false;
     }
     let hwnd = position.handle as HWND;
-    // SAFETY: `IsWindow` ve `GetWindowThreadProcessId` herhangi bir HWND değeri için güvenlidir.
+    // SAFETY: `IsWindow` and `GetWindowThreadProcessId` are safe for any HWND value.
     unsafe {
         if IsWindow(hwnd) == 0 {
             return false;
@@ -431,7 +471,7 @@ pub fn is_current(position: &FlyoutPosition) -> bool {
     }
 }
 
-/// Sadece hâlâ geçerli (aynı PID'e ait) flyout konumlarını döndürür.
+/// Returns only still-valid flyout positions (same owning PID).
 #[cfg(windows)]
 pub fn read_valid() -> Vec<FlyoutPosition> {
     read().into_iter().filter(is_current).collect()
@@ -504,7 +544,7 @@ mod tests {
         );
         assert_eq!(positions[1].top, 1080);
 
-        // Aynı HWND güncellenir, yeni girdi eklenmez.
+        // The same HWND is updated, no new entry is appended.
         write_all_to(
             &path,
             &[

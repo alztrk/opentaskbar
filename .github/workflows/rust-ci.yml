@@ -1,7 +1,9 @@
 name: Rust Port CI
 
 # Runs on every branch (not just master) so integration worktrees and feature
-# branches get the same gate as the eventual merge onto master.
+# branches get the same extended checks as the eventual merge onto master.
+# The common fmt/clippy/test/build gate lives in ci.yml only: running it here
+# too doubled CI time and required-check noise for every code change.
 on:
   push:
     paths:
@@ -39,29 +41,11 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Toolchain
-        run: |
-          rustup toolchain install stable --profile minimal --component clippy,rustfmt
-          rustup default stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Format
-        run: cargo fmt --all --check
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Test
-        run: cargo test --workspace
-      - name: Release build
-        run: cargo build --workspace --release
-
   watchdog-arch:
     name: x86 watchdog PE + i686 portable build
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Toolchain (i686 target)
         working-directory: .
@@ -71,7 +55,7 @@ jobs:
           rustup default stable
           rustup target add i686-pc-windows-msvc
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: x86-watchdog
 
@@ -113,8 +97,27 @@ jobs:
     name: Locale key parity (14 languages)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Verify frozen reference and Rust catalog key parity
         shell: pwsh
         working-directory: .
         run: ./scripts/check-locale-parity.ps1
+
+      # The locale-parity script does not read the MSIX manifest. Compare the
+      # declared Resource Languages with the embedded catalogs here so a new
+      # locale cannot silently be missing from the Store package.
+      - name: Verify MSIX manifest declares every embedded locale
+        shell: pwsh
+        working-directory: .
+        run: |
+          [xml]$manifest = Get-Content -Raw -LiteralPath 'packaging/msix/AppxManifest.Rust.xml'
+          $declared = @($manifest.Package.Resources.Resource | ForEach-Object { $_.Language.ToLowerInvariant() } | Sort-Object)
+          $embedded = @(Get-ChildItem -LiteralPath 'crates/opentaskbar-core/locales' -Filter '*.json' -File |
+              ForEach-Object { $_.BaseName.ToLowerInvariant() } | Sort-Object)
+          if ($embedded.Count -ne 14) { throw "Expected 14 embedded catalogs, found $($embedded.Count)." }
+          $missing = @($embedded | Where-Object { $_ -notin $declared })
+          $extra = @($declared | Where-Object { $_ -notin $embedded })
+          if ($missing.Count -gt 0 -or $extra.Count -gt 0) {
+              throw "MSIX languages drifted: missing=$($missing -join ',') extra=$($extra -join ',')"
+          }
+          Write-Host "MSIX declares all $($embedded.Count) embedded locales." -ForegroundColor Green

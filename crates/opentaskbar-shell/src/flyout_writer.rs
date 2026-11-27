@@ -155,7 +155,8 @@ fn persist(registry: &Registry) {
     let Some(parent) = path.parent() else {
         return;
     };
-    if fs::create_dir_all(parent).is_err() {
+    if let Err(err) = fs::create_dir_all(parent) {
+        log_write_failure(&path, "create directory", &err);
         return;
     }
     let mut contents = String::new();
@@ -166,13 +167,30 @@ fn persist(registry: &Registry) {
         ));
     }
     let tmp = temp_path(&path);
-    if fs::write(&tmp, contents).is_ok()
-        && fs::rename(&tmp, &path).is_err()
-        && path.exists()
-        && fs::remove_file(&path).is_ok()
-    {
-        let _ = fs::rename(&tmp, &path);
+    if let Err(err) = fs::write(&tmp, contents) {
+        log_write_failure(&path, "write temporary file", &err);
+        return;
     }
+    if fs::rename(&tmp, &path).is_err() {
+        // Windows rename can fail on a locked destination; the guarded retry is
+        // the last chance to keep the journal current.
+        let retried = if path.exists() && fs::remove_file(&path).is_ok() {
+            fs::rename(&tmp, &path)
+        } else {
+            Err(std::io::Error::other("destination still locked"))
+        };
+        if let Err(err) = retried {
+            log_write_failure(&path, "atomic replace", &err);
+            let _ = fs::remove_file(&tmp);
+        }
+    }
+}
+
+fn log_write_failure(path: &Path, operation: &str, err: &std::io::Error) {
+    opentaskbar_core::log::warn(format!(
+        "Flyout journal write failed ({operation}) at {}: {err}; crash recovery may be degraded",
+        path.display()
+    ));
 }
 
 /// Must stay identical to `flyout_journal::tmp_path`: both writers target the
@@ -184,26 +202,22 @@ pub fn temp_path(path: &Path) -> PathBuf {
 }
 
 /// Reads the on-disk journal (also used after a hard kill, when the in-process
-/// registry is gone).
+/// registry is gone). Parsing lives in `flyout_journal` so the recovery reader
+/// and the generation/seq writer can never drift apart: extended lines
+/// (`... generation=N seq=M`) are accepted here too.
 pub fn read() -> Vec<FlyoutPosition> {
-    let Ok(raw) = fs::read_to_string(journal_path()) else {
-        return Vec::new();
-    };
-    raw.lines()
-        .take(MAX_ENTRIES)
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.split_whitespace().collect();
-            if fields.len() != 4 {
-                return None;
-            }
-            Some(FlyoutPosition {
-                hwnd: fields[0].parse().ok()?,
-                pid: fields[1].parse().ok()?,
-                left: fields[2].parse().ok()?,
-                top: fields[3].parse().ok()?,
-            })
+    read_from(&journal_path())
+}
+
+fn read_from(path: &Path) -> Vec<FlyoutPosition> {
+    flyout_journal::read_from_with_meta(path)
+        .into_iter()
+        .map(|(position, _)| FlyoutPosition {
+            hwnd: position.handle,
+            pid: position.pid,
+            left: position.left,
+            top: position.top,
         })
-        .filter(|position| position.hwnd != 0)
         .collect()
 }
 
@@ -227,27 +241,60 @@ fn move_back(position: FlyoutPosition) {
     }
 }
 
+/// Recovery has three outcomes, not two. A flyout host that has not created its
+/// window yet (watchdog runs at startup) must keep the journal just like a
+/// foreign-owned handle: deleting it would permanently lose the only recovery
+/// clue for a late-starting Start/Search host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JournalDisposition {
+    Restored,
+    Deferred,
+    ForeignOwned,
+}
+
+/// Pure classifier: `None` = window not alive yet, `Some(true)` = restored,
+/// `Some(false)` = recycled/foreign handle. Deferred wins over foreign-owned so
+/// the journal survives until the late window can be restored.
+fn classify_disposition(outcomes: impl IntoIterator<Item = Option<bool>>) -> JournalDisposition {
+    let mut foreign = false;
+    for outcome in outcomes {
+        match outcome {
+            None => return JournalDisposition::Deferred,
+            Some(false) => foreign = true,
+            Some(true) => {}
+        }
+    }
+    if foreign {
+        JournalDisposition::ForeignOwned
+    } else {
+        JournalDisposition::Restored
+    }
+}
+
 fn restore_positions(positions: Vec<FlyoutPosition>) -> bool {
-    let mut owned_by_someone_else = false;
+    let mut outcomes = Vec::with_capacity(positions.len());
     for position in positions {
         // SAFETY: PID check prevents a recycled HWND from moving an unrelated app.
         unsafe {
             if IsWindow(position.hwnd as HWND) == 0 {
+                outcomes.push(None);
                 continue;
             }
             let mut current = 0u32;
             GetWindowThreadProcessId(position.hwnd as HWND, &mut current);
             if current != position.pid {
-                owned_by_someone_else = true;
+                outcomes.push(Some(false));
                 continue;
             }
         }
         move_back(position);
+        outcomes.push(Some(true));
     }
-    if !owned_by_someone_else {
+    let disposition = classify_disposition(outcomes);
+    if disposition == JournalDisposition::Restored {
         clear();
     }
-    !owned_by_someone_else
+    disposition == JournalDisposition::Restored
 }
 
 /// Stops any pending moves (bumping the generation) and returns every still-valid
@@ -407,19 +454,70 @@ mod tests {
     use super::*;
 
     #[test]
-    fn journals_are_atomic_and_generation_only_advances_on_restore() {
-        let before = generation();
-        assert!(is_current(before));
+    fn generation_only_advances_on_restore() {
         set_enabled(Some(true));
         assert!(is_enabled());
         set_enabled(None);
-        let position = FlyoutPosition {
-            hwnd: 0,
-            pid: 0,
-            left: 0,
-            top: 0,
-        };
-        assert_eq!(position.hwnd, 0);
+        let before = generation();
+        assert!(is_current(before));
+        // Tray may be absent in CI; the generation still advances.
+        restore_from_journal();
+        assert_eq!(generation(), before + 1);
+        assert!(!is_current(before));
+    }
+
+    #[test]
+    fn recovery_reader_accepts_extended_generation_lines() {
+        let path = std::env::temp_dir().join(format!(
+            "ot-flyout-writer-{}-extended.txt",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "1234 56 -320 17\n9876 42 10 20 generation=11 seq=29\n0 1 2 3\nbroken line\n",
+        )
+        .expect("temp journal must be writable");
+        let positions = read_from(&path);
+        assert_eq!(
+            positions,
+            vec![
+                FlyoutPosition {
+                    hwnd: 1234,
+                    pid: 56,
+                    left: -320,
+                    top: 17,
+                },
+                FlyoutPosition {
+                    hwnd: 9876,
+                    pid: 42,
+                    left: 10,
+                    top: 20,
+                },
+            ]
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn journal_is_kept_for_late_or_foreign_owned_windows() {
+        assert_eq!(
+            classify_disposition([Some(true), Some(true)]),
+            JournalDisposition::Restored
+        );
+        assert_eq!(
+            classify_disposition([Some(true), Some(false)]),
+            JournalDisposition::ForeignOwned
+        );
+        // A not-yet-created flyout window must win over a recycled handle.
+        assert_eq!(
+            classify_disposition([Some(false), None]),
+            JournalDisposition::Deferred
+        );
+        assert_eq!(
+            classify_disposition([None, Some(true)]),
+            JournalDisposition::Deferred
+        );
+        assert_eq!(classify_disposition([]), JournalDisposition::Restored);
     }
 
     #[test]

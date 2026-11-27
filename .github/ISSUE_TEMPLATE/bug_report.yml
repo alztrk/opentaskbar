@@ -45,7 +45,7 @@ body:
       description: Provide details about your system.
       value: |
         - OS: Windows 11 / Windows 10 (Build number: e.g. 26100)
-        - OpenTaskbar Version: (e.g. 0.2.6 or commit hash)
+        - OpenTaskbar Version: (e.g. 0.4.0 or commit hash)
         - Display Resolution & Scale: (e.g. 2560x1440 @ 125%)
         - Multi-monitor Setup: (Single / Dual / Triple)
     validations:
