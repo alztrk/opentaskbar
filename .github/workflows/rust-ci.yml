@@ -8,22 +8,20 @@ on:
       - "Rust-Port/**"
       # Locale catalogs are mirrored into Rust by include_str!, so a C#-only
       # key change must trigger the Rust key-parity gate as well.
-      - "Services/Localization/Languages/**"
+      - "tests/reference/locales/**"
       - "scripts/**"
       # The native helper is embedded via build.rs/include_bytes!, so a C-only
       # change must rebuild and re-verify both architectures.
       - "tools/watchdog/**"
       - "packaging/msix/AppxManifest.Rust.xml"
-      - "OpenTaskbar.csproj"
       - ".github/workflows/**"
   pull_request:
     paths:
       - "Rust-Port/**"
-      - "Services/Localization/Languages/**"
+      - "tests/reference/locales/**"
       - "scripts/**"
       - "tools/watchdog/**"
       - "packaging/msix/AppxManifest.Rust.xml"
-      - "OpenTaskbar.csproj"
       - ".github/workflows/**"
   workflow_dispatch:
 
@@ -114,7 +112,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Compare C# and Rust catalog key sets
+      - name: Verify frozen reference and Rust catalog key parity
         shell: pwsh
         working-directory: .
         run: ./scripts/check-locale-parity.ps1

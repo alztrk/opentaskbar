@@ -332,14 +332,16 @@ dizi/değerlerle simüle edilir.
 ### Komutlar
 
 ```powershell
-# 0 uyarı garantisi (Release)
-dotnet build OpenTaskbar.csproj -c Release --warnaserror
+# Rust portu: biçim, lint ve workspace testleri (Rust-Port/ altında)
+cd Rust-Port
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+cd ..
 
-# Tüm davranış kontrolleri (headless + UI); çıkışta "N behavior checks passed." görünmelidir
-dotnet run --project tests/OpenTaskbar.Tests/OpenTaskbar.Tests.csproj --configuration Release
-
-# Salt-okunur kabuk uyumluluk smoke testi (yükseltme yetkisi gerekmez)
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check-shell-compat.ps1
+# Dil ve sürüm kapıları
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check-locale-parity.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\check-release-version.ps1 -Tag v0.4.0
 ```
 
 ### Yeni kontroller
