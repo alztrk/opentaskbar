@@ -15,8 +15,8 @@ use std::time::Duration;
 use gpui::{
     AnyElement, App, Application, Bounds, Context, EntityInputHandler, FocusHandle,
     InteractiveElement, KeyBinding, KeyDownEvent, MouseButton, ScrollAnchor, ScrollHandle,
-    SharedString, TitlebarOptions, UTF16Selection, Window, WindowBounds, WindowControlArea,
-    WindowOptions, actions, div, img, prelude::*, px, rgba, size,
+    SharedString, TitlebarOptions, UTF16Selection, Window, WindowBackgroundAppearance,
+    WindowBounds, WindowControlArea, WindowOptions, actions, div, img, prelude::*, px, rgba, size,
 };
 use opentaskbar_core::hotkey;
 use opentaskbar_core::i18n::{self as loc, LANGUAGES};
@@ -54,10 +54,10 @@ use crate::platform::{
 };
 use crate::ui::components::{
     ButtonVariant, DropdownOption, DropdownSelectHandler, SearchableDropdownHandlers,
-    SearchableDropdownState, UiTheme, badge, button, card_button, compact_card_button, dim_when,
-    dropdown, icon_action_menu, icon_glyph, icon_glyph_owned, ios_switch, live_slider,
-    searchable_dropdown, section_card, setting_row, setting_row_desc, setting_row_with_id,
-    setting_row_with_id_desc, sidebar_nav_item, stepper,
+    SearchableDropdownState, UiTheme, badge, button, button_with_state, card_button,
+    compact_card_button, dim_when, dropdown, icon_action_menu, icon_glyph, icon_glyph_owned,
+    ios_switch, live_slider, searchable_dropdown, section_card, setting_row, setting_row_desc,
+    setting_row_with_id, setting_row_with_id_desc, sidebar_nav_item, stepper,
 };
 use crate::ui::prompt;
 use crate::ui::settings_search::{self, SettingsSearchEntry};
@@ -109,6 +109,11 @@ fn parse_hex_color(value: &str) -> Option<u32> {
 static SETTINGS_CHILDREN: Mutex<Vec<std::process::Child>> = Mutex::new(Vec::new());
 
 pub fn spawn_settings_window() {
+    // Single-instance Settings: focus the live window instead of starting a second process.
+    // (The `--settings` process also holds a named mutex, so a racing launch still dedups.)
+    if window_chrome::focus_existing_settings_window() {
+        return;
+    }
     let Ok(exe) = std::env::current_exe() else {
         opentaskbar_core::log::error("Cannot open Settings: current_exe failed.");
         return;
@@ -244,6 +249,51 @@ pub(crate) fn category_label(category: &str) -> String {
     }
 }
 
+/// Segoe Fluent Icons: horizontal resize for width, vertical resize for height, and a
+/// spacing bar for gaps, so the Dock layout rows no longer repeat one glyph.
+const DOCK_WIDTH_GLYPH: &str = "\u{E745}";
+const DOCK_HEIGHT_GLYPH: &str = "\u{E746}";
+const DOCK_GAP_GLYPH: &str = "\u{E76F}";
+
+/// Width value stepper only makes sense for explicit pixel/percent sizes.
+fn dock_width_has_value(mode: DockWidthMode) -> bool {
+    matches!(mode, DockWidthMode::Pixels | DockWidthMode::Percent)
+}
+
+/// Height value stepper only makes sense for explicit pixel/percent sizes.
+fn dock_height_has_value(mode: DockHeightMode) -> bool {
+    matches!(mode, DockHeightMode::Pixels | DockHeightMode::Percent)
+}
+
+/// Unit suffix shown on dock size/gap stepper readouts.
+fn unit_suffix(percent: bool) -> &'static str {
+    if percent { "%" } else { " px" }
+}
+
+/// `(min, max, step)` bounds for the dock width stepper, matching `DockSettings::validate`.
+fn dock_width_stepper_bounds(mode: DockWidthMode) -> (i32, i32, i32) {
+    match mode {
+        DockWidthMode::Percent => (10, 100, 1),
+        _ => (100, 5000, 10),
+    }
+}
+
+/// `(min, max, step)` bounds for the dock height stepper, matching `DockSettings::validate`.
+fn dock_height_stepper_bounds(mode: DockHeightMode) -> (i32, i32, i32) {
+    match mode {
+        DockHeightMode::Percent => (2, 25, 1),
+        _ => (24, 400, 2),
+    }
+}
+
+/// `(min, max, step)` bounds for the dock top gap stepper, matching `DockSettings::validate`.
+fn dock_top_gap_stepper_bounds(unit: DockGapUnit) -> (i32, i32, i32) {
+    match unit {
+        DockGapUnit::Percent => (0, 100, 1),
+        DockGapUnit::Pixels => (0, 200, 2),
+    }
+}
+
 /// Glyph table for built-in widgets. Registry metadata does not carry a glyph
 /// field, so the single UI-owned table is the authoritative mapping.
 const WIDGET_GLYPHS: &[(&str, &str)] = &[
@@ -251,7 +301,7 @@ const WIDGET_GLYPHS: &[(&str, &str)] = &[
     ("weather", "\u{E753}"),
     ("dayprogress", "\u{E706}"),
     ("stopwatch", "\u{E916}"),
-    ("countdown", "\u{E917}"),
+    ("countdown", "\u{E916}"),
     ("stats", "\u{E9D9}"),
     ("netspeed", "\u{E8AB}"),
     ("battery", "\u{E850}"),
@@ -360,6 +410,421 @@ fn configure_settings_glass_hwnd(window: &Window, is_dark: bool, glass_mode: boo
     let hwnd = win32_handle.hwnd.get() as usize;
     configure_host_backdrop_window(hwnd, is_dark, glass_mode);
     hwnd
+}
+
+/// Outer corner radius (DIP) of the Settings surface: Windows 11 rounds top-level windows
+/// (`DWMWCP_ROUND` = 8 px); Windows 10 has square window corners, so GPUI must not round either.
+fn settings_corner_radius(is_windows_11: bool) -> f32 {
+    if is_windows_11 { 8.0 } else { 0.0 }
+}
+
+/// Exactly one crisp outer border: the Clear Crystal glass host already paints a 1 px optical
+/// rim when Glass is active and its edge glow is not suppressed (OLED glow reduction / 0 glow),
+/// so GPUI only draws its own border when that rim is absent.
+fn settings_root_draws_border(glass_rim_active: bool) -> bool {
+    !glass_rim_active
+}
+
+/// Clamps the fixed 1040×740 dialog so it always fits inside the monitor work area (e.g.
+/// 1080p at 150% leaves only ~1280×672 DIP of work area). `work` is in DIP.
+fn fit_settings_size(work: Option<gpui::Size<gpui::Pixels>>) -> gpui::Size<gpui::Pixels> {
+    const MARGIN: f32 = 16.0;
+    const FLOOR_W: f32 = 360.0;
+    const FLOOR_H: f32 = 320.0;
+    let Some(work) = work else {
+        return size(px(WIN_W), px(WIN_H));
+    };
+    let work_w = f32::from(work.width);
+    let work_h = f32::from(work.height);
+    if !(work_w.is_finite() && work_h.is_finite()) || work_w <= 0.0 || work_h <= 0.0 {
+        return size(px(WIN_W), px(WIN_H));
+    }
+    let w = WIN_W.min((work_w - MARGIN * 2.0).max(FLOOR_W.min(work_w)));
+    let h = WIN_H.min((work_h - MARGIN * 2.0).max(FLOOR_H.min(work_h)));
+    size(px(w.floor()), px(h.floor()))
+}
+
+/// Win32 chrome for the GPUI Settings window: Windows 11 rounded corners without the DWM
+/// accent border, removal of GPUI's phantom non-client skirt, the real OpenTaskbar icon,
+/// screen-space anchor lookup and the cross-process single-instance Settings lookup.
+pub(crate) mod window_chrome {
+    use std::sync::OnceLock;
+
+    use windows_sys::Win32::Foundation::{
+        GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+    };
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+        DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+    };
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
+    };
+    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+    use windows_sys::Win32::UI::Controls::MARGINS;
+    use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
+    use windows_sys::Win32::UI::Shell::{
+        DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, EnumWindows, GetPropW, GetSystemMetrics, GetWindowRect,
+        GetWindowThreadProcessId, ICON_BIG, ICON_SMALL, IMAGE_ICON, IsIconic, IsWindowVisible,
+        LR_DEFAULTCOLOR, LoadImageW, PostMessageW, RemovePropW, SM_CXICON, SM_CXSMICON, SM_CYICON,
+        SM_CYSMICON, SW_RESTORE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetPropW, SetWindowPos, ShowWindow,
+        WM_APP, WM_NCCALCSIZE, WM_NCDESTROY, WM_SETICON,
+    };
+
+    use crate::design::glass::{GlassBackend, WindowsBackend, WindowsVersion, classify_windows};
+
+    /// Window property that marks the live Settings HWND (cross-process, via a global atom).
+    const SETTINGS_WINDOW_PROP: &str = "OpenTaskbarSettingsWindow";
+    /// Per-session named mutex owned by the running `--settings` process.
+    const SETTINGS_MUTEX_NAME: &str = r"Local\OpenTaskbar.SettingsWindow";
+    /// `SetWindowSubclass` id for the non-client subclass.
+    const NC_SUBCLASS_ID: usize = 0x4F54_4E43; // "OTNC"
+    /// Private message (WM_APP range; GPUI only uses WM_USER-based ids) that re-runs
+    /// WM_NCCALCSIZE from the message loop after the subclass is installed.
+    const WM_APP_REFRAME: u32 = WM_APP + 0x0A11;
+    /// Application icon resource id embedded in `OpenTaskBar.exe` (`1 ICON "OpenTaskBar.ico"`).
+    const APP_ICON_RESOURCE_ID: usize = 1;
+    const ERROR_ALREADY_EXISTS: u32 = 183;
+
+    // `windows-sys` gates `CreateMutexW` behind `Win32_Security` (not enabled), so bind it
+    // directly; a null `SECURITY_ATTRIBUTES` pointer is all we ever pass.
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        #[link_name = "CreateMutexW"]
+        fn create_mutex_w(
+            attributes: *const core::ffi::c_void,
+            initial_owner: i32,
+            name: *const u16,
+        ) -> isize;
+    }
+
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(Some(0)).collect()
+    }
+
+    /// `RtlGetVersion` build >= 22000 (manifest-independent), cached for the process.
+    pub(crate) fn is_windows_11() -> bool {
+        static IS_WIN11: OnceLock<bool> = OnceLock::new();
+        *IS_WIN11.get_or_init(|| {
+            matches!(
+                classify_windows(WindowsBackend.build_number()),
+                WindowsVersion::Windows11OrNewer
+            )
+        })
+    }
+
+    /// GPUI's `WM_NCCALCSIZE` handler insets `frame_thickness` (~8 px) on the left, right and
+    /// bottom even for non-resizable windows, exposing the class' black background brush as a
+    /// sharp skirt around the rounded surface. Returning 0 without touching `rgrc[0]` makes the
+    /// client area cover the full window rect.
+    unsafe extern "system" fn nc_subclass_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        id: usize,
+        _ref_data: usize,
+    ) -> LRESULT {
+        match msg {
+            WM_NCCALCSIZE if wparam != 0 => 0,
+            WM_APP_REFRAME => {
+                // Runs from the Win32 message loop (outside any GPUI `App` borrow), so the
+                // WM_SIZE this triggers reaches GPUI's resize callback and the viewport grows
+                // to the full window rect.
+                // SAFETY: frame-only SetWindowPos on our own live window.
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        std::ptr::null_mut(),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+                0
+            }
+            WM_NCDESTROY => {
+                let prop = wide(SETTINGS_WINDOW_PROP);
+                // SAFETY: `hwnd` is still valid during WM_NCDESTROY; removing a missing
+                // property / our own subclass is a harmless no-op.
+                unsafe {
+                    RemovePropW(hwnd, prop.as_ptr());
+                    RemoveWindowSubclass(hwnd, Some(nc_subclass_proc), id);
+                    DefSubclassProc(hwnd, msg, wparam, lparam)
+                }
+            }
+            // SAFETY: forwarding to the next handler in the subclass chain.
+            _ => unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) },
+        }
+    }
+
+    /// Installs the non-client subclass once per HWND (must run on the window's UI thread).
+    fn install_nc_subclass(hwnd: HWND) {
+        let mut ref_data = 0usize;
+        // SAFETY: `hwnd` is a live window owned by the calling (GPUI) thread.
+        unsafe {
+            if GetWindowSubclass(hwnd, Some(nc_subclass_proc), NC_SUBCLASS_ID, &mut ref_data) != 0 {
+                return;
+            }
+            if SetWindowSubclass(hwnd, Some(nc_subclass_proc), NC_SUBCLASS_ID, 0) == 0 {
+                return;
+            }
+            // Re-run WM_NCCALCSIZE once (SWP_FRAMECHANGED) so the full-window client rect takes
+            // effect. It is posted rather than called here: this runs inside GPUI's view
+            // construction / render (the `App` is borrowed), where the synchronous WM_SIZE
+            // could not update GPUI's viewport and the layout would stay at the inset size.
+            PostMessageW(hwnd, WM_APP_REFRAME, 0, 0);
+        }
+    }
+
+    /// Applies the outer window chrome. Safe to call repeatedly (every glass transition):
+    /// `configure_host_backdrop_window` resets the DWM frame margins, so this must run after it.
+    pub(crate) fn apply_window_chrome(hwnd: usize) {
+        if hwnd == 0 {
+            return;
+        }
+        let hwnd = hwnd as HWND;
+        install_nc_subclass(hwnd);
+        if !is_windows_11() {
+            // Windows 10: square corners, no DWM border attribute; GPUI uses radius 0.
+            return;
+        }
+        let corner = DWMWCP_ROUND;
+        let border = DWMWA_COLOR_NONE;
+        // Sheet-of-glass margins: DWM never paints opaque black behind the anti-aliased
+        // rounded edges, even when the GPUI surface is Solid / True Black.
+        let margins = MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
+        };
+        // SAFETY: plain DWM attribute writes on a live HWND with correctly sized values.
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                (&corner as *const i32).cast(),
+                size_of::<i32>() as u32,
+            );
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR as u32,
+                (&border as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+        }
+    }
+
+    /// Sets the embedded OpenTaskbar icon (resource id 1) as the window's big and small icon.
+    /// A missing resource is a silent no-op (the GPUI class icon stays).
+    pub(crate) fn apply_app_icon(hwnd: usize) {
+        if hwnd == 0 {
+            return;
+        }
+        let hwnd = hwnd as HWND;
+        // SAFETY: loading an icon resource from our own module and sending it to our window.
+        unsafe {
+            let module = GetModuleHandleW(std::ptr::null());
+            if module.is_null() {
+                return;
+            }
+            let dpi = GetDpiForWindow(hwnd);
+            let metric = |index| {
+                if dpi > 0 {
+                    GetSystemMetricsForDpi(index, dpi)
+                } else {
+                    GetSystemMetrics(index)
+                }
+            };
+            for (which, cx, cy) in [
+                (ICON_BIG, metric(SM_CXICON), metric(SM_CYICON)),
+                (ICON_SMALL, metric(SM_CXSMICON), metric(SM_CYSMICON)),
+            ] {
+                // MAKEINTRESOURCEW(1). Not LR_SHARED: the shared cache ignores the requested
+                // size, which would hand the big icon to ICON_SMALL.
+                let icon = LoadImageW(
+                    module,
+                    APP_ICON_RESOURCE_ID as *const u16,
+                    IMAGE_ICON,
+                    cx,
+                    cy,
+                    LR_DEFAULTCOLOR,
+                );
+                if icon.is_null() {
+                    continue;
+                }
+                SendMessageW(hwnd, WM_SETICON, which as WPARAM, icon as LPARAM);
+            }
+        }
+    }
+
+    /// Marks `hwnd` as the live Settings window so other processes can find and focus it.
+    pub(crate) fn mark_settings_window(hwnd: usize) {
+        if hwnd == 0 {
+            return;
+        }
+        let prop = wide(SETTINGS_WINDOW_PROP);
+        // SAFETY: the property is removed again in `nc_subclass_proc` on WM_NCDESTROY.
+        unsafe {
+            SetPropW(
+                hwnd as HWND,
+                prop.as_ptr(),
+                std::ptr::dangling_mut::<core::ffi::c_void>(),
+            );
+        }
+    }
+
+    /// Finds a live Settings window owned by another process.
+    fn find_settings_window() -> Option<HWND> {
+        struct Search {
+            prop: Vec<u16>,
+            own_pid: u32,
+            found: HWND,
+        }
+        unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> i32 {
+            // SAFETY: `lparam` points at the live `Search` for the duration of EnumWindows.
+            unsafe {
+                let search = &mut *(lparam as *mut Search);
+                if GetPropW(hwnd, search.prop.as_ptr()).is_null() {
+                    return 1;
+                }
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(hwnd, &mut pid);
+                if pid == search.own_pid {
+                    return 1;
+                }
+                search.found = hwnd;
+            }
+            0
+        }
+        let mut search = Search {
+            prop: wide(SETTINGS_WINDOW_PROP),
+            // SAFETY: trivial process id query.
+            own_pid: unsafe { GetCurrentProcessId() },
+            found: std::ptr::null_mut(),
+        };
+        // SAFETY: the callback only touches `search`, which outlives the enumeration.
+        unsafe {
+            EnumWindows(Some(visit), &mut search as *mut Search as LPARAM);
+        }
+        (!search.found.is_null()).then_some(search.found)
+    }
+
+    /// Restores (if minimized) and focuses an existing Settings window. Returns `true` when one
+    /// was found, in which case no second Settings process/window must be created.
+    pub(crate) fn focus_existing_settings_window() -> bool {
+        let Some(hwnd) = find_settings_window() else {
+            return false;
+        };
+        // SAFETY: plain show/focus calls on a window that was alive during enumeration;
+        // a window that closed in between makes these calls fail harmlessly.
+        unsafe {
+            if IsIconic(hwnd) != 0 || IsWindowVisible(hwnd) == 0 {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+        }
+        true
+    }
+
+    /// Per-session ownership of the Settings window, held for the `--settings` process lifetime.
+    pub(crate) struct SettingsInstanceLock {
+        _handle: isize,
+    }
+
+    /// Acquires the Settings single-instance lock. `None` means another `--settings` process
+    /// already owns it; that process' window has then been focused (it may still be starting,
+    /// so the lookup is retried briefly).
+    pub(crate) fn acquire_settings_instance() -> Option<SettingsInstanceLock> {
+        let name = wide(SETTINGS_MUTEX_NAME);
+        // SAFETY: named mutex with a NUL-terminated name; the handle stays open (and owned) for
+        // the rest of the process, released by the OS on exit.
+        let (handle, already_exists) = unsafe {
+            let handle = create_mutex_w(std::ptr::null(), 0, name.as_ptr());
+            (handle, GetLastError() == ERROR_ALREADY_EXISTS)
+        };
+        if handle == 0 {
+            // Cannot coordinate: fall back to the window lookup only.
+            return if focus_existing_settings_window() {
+                None
+            } else {
+                Some(SettingsInstanceLock { _handle: 0 })
+            };
+        }
+        if !already_exists {
+            return Some(SettingsInstanceLock { _handle: handle });
+        }
+        for _ in 0..30 {
+            if focus_existing_settings_window() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        // Keep the handle open: closing it would let a racing third launch believe it owns
+        // Settings. It is released when this (exiting) process ends.
+        None
+    }
+
+    /// Returns `(center_x, anchor_y)` in screen pixels for the given HWND so flyout previews
+    /// open centered over the Settings window on its current monitor.
+    pub(crate) fn window_flyout_anchor(hwnd: usize) -> Option<(i32, i32)> {
+        if hwnd == 0 {
+            return None;
+        }
+        let mut rect: RECT = unsafe { std::mem::zeroed() };
+        // SAFETY: querying the live window rectangle into a stack-allocated `RECT`.
+        if unsafe { GetWindowRect(hwnd as HWND, &mut rect) } == 0 {
+            return None;
+        }
+        let cx = (rect.left + rect.right) / 2;
+        let anchor_y = rect.top + ((rect.bottom - rect.top) * 3) / 4;
+        Some((cx, anchor_y))
+    }
+
+    /// Primary monitor work area in DIP, derived from GPUI's logical display bounds and the
+    /// physical monitor/work rectangles (so taskbars and docks are excluded).
+    pub(crate) fn primary_work_area(
+        display: gpui::Bounds<gpui::Pixels>,
+    ) -> Option<gpui::Bounds<gpui::Pixels>> {
+        let mut info: MONITORINFO = unsafe { std::mem::zeroed() };
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        // SAFETY: querying the primary monitor into a correctly sized MONITORINFO.
+        let ok = unsafe {
+            let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+            !monitor.is_null() && GetMonitorInfoW(monitor, &mut info) != 0
+        };
+        if !ok {
+            return None;
+        }
+        let mon_w = (info.rcMonitor.right - info.rcMonitor.left) as f32;
+        let mon_h = (info.rcMonitor.bottom - info.rcMonitor.top) as f32;
+        let dip_w = f32::from(display.size.width);
+        let dip_h = f32::from(display.size.height);
+        if mon_w <= 0.0 || mon_h <= 0.0 || dip_w <= 0.0 || dip_h <= 0.0 {
+            return None;
+        }
+        let sx = dip_w / mon_w;
+        let sy = dip_h / mon_h;
+        let left =
+            f32::from(display.origin.x) + (info.rcWork.left - info.rcMonitor.left) as f32 * sx;
+        let top = f32::from(display.origin.y) + (info.rcWork.top - info.rcMonitor.top) as f32 * sy;
+        let width = (info.rcWork.right - info.rcWork.left) as f32 * sx;
+        let height = (info.rcWork.bottom - info.rcWork.top) as f32 * sy;
+        Some(gpui::Bounds {
+            origin: gpui::point(gpui::px(left), gpui::px(top)),
+            size: gpui::size(gpui::px(width), gpui::px(height)),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -871,6 +1336,163 @@ fn gradient_stop_at(position: f64, len: usize) -> usize {
     ((position * len as f64).round() as usize).min(len.saturating_sub(1))
 }
 
+/// Fallback city shown when no weather city is configured, spelled the way the UI language
+/// writes it ("İstanbul" in Turkish).
+fn weather_fallback_city_for(language: &str) -> &'static str {
+    if language.starts_with("tr") {
+        "İstanbul"
+    } else {
+        "Istanbul"
+    }
+}
+
+fn weather_fallback_city() -> &'static str {
+    weather_fallback_city_for(loc::language())
+}
+
+/// Short clock-format label for widget summaries, derived from the existing
+/// `ClockFormat24Hour` / `ClockFormat12Hour` strings by dropping their "(14:32)" example.
+fn short_clock_format_label(full: &str) -> &str {
+    full.split(" (").next().unwrap_or(full).trim()
+}
+
+/// True when the clock's date line already carries the weekday (e.g. "Cum 27 Kas"),
+/// so a separate weekday line would repeat it.
+fn clock_weekday_is_redundant(date: &str, weekday: &str) -> bool {
+    let weekday = weekday.trim();
+    !weekday.is_empty() && date.split_whitespace().any(|word| word == weekday)
+}
+
+/// Circular progress ring drawn via GPUI `canvas` + `PathBuilder`, matching DComp's arc meters.
+fn progress_ring(
+    size_px: f32,
+    stroke_px: f32,
+    ratio: f32,
+    track_color: u32,
+    fill_color: u32,
+) -> impl IntoElement {
+    let clamped = ratio.clamp(0.0, 1.0);
+    gpui::canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let cx = f32::from(bounds.origin.x) + f32::from(bounds.size.width) * 0.5;
+            let cy = f32::from(bounds.origin.y) + f32::from(bounds.size.height) * 0.5;
+            let rad = ((f32::from(bounds.size.width).min(f32::from(bounds.size.height))
+                - stroke_px)
+                * 0.5)
+                .max(1.0);
+            let arc = |start: f32, end: f32| {
+                let mut pb = gpui::PathBuilder::stroke(px(stroke_px));
+                pb.move_to(gpui::point(
+                    px(cx + start.cos() * rad),
+                    px(cy + start.sin() * rad),
+                ));
+                pb.arc_to(
+                    gpui::point(px(rad), px(rad)),
+                    px(0.0),
+                    (end - start).abs() > std::f32::consts::PI,
+                    true,
+                    gpui::point(px(cx + end.cos() * rad), px(cy + end.sin() * rad)),
+                );
+                pb.build()
+            };
+            let top = -std::f32::consts::FRAC_PI_2;
+            let bot = std::f32::consts::FRAC_PI_2;
+            if let Ok(path) = arc(top, bot) {
+                window.paint_path(path, rgba(track_color));
+            }
+            if let Ok(path) = arc(bot, top + std::f32::consts::TAU) {
+                window.paint_path(path, rgba(track_color));
+            }
+            if clamped >= 0.995 {
+                if let Ok(path) = arc(top, bot) {
+                    window.paint_path(path, rgba(fill_color));
+                }
+                if let Ok(path) = arc(bot, top + std::f32::consts::TAU) {
+                    window.paint_path(path, rgba(fill_color));
+                }
+            } else if clamped > 0.005 {
+                let end = top + clamped * std::f32::consts::TAU;
+                if let Ok(path) = arc(top, end) {
+                    window.paint_path(path, rgba(fill_color));
+                }
+            }
+        },
+    )
+    .size(px(size_px))
+    .flex_shrink_0()
+}
+
+/// Crisp tinted monogram badge for AI Usage preview cards.
+fn ai_brand_badge(provider_id: &str, brand_color: (u8, u8, u8), is_dark: bool) -> gpui::Div {
+    let monogram = match provider_id {
+        "aiusage_claude" => "C",
+        "aiusage_codex" => "Cx",
+        "aiusage_cursor" => "Cu",
+        "aiusage_opencode" => "OC",
+        "aiusage_copilot" => "Co",
+        "aiusage_deepseek" => "DS",
+        "aiusage_openrouter" => "OR",
+        _ => "AI",
+    };
+    let tint = if !is_dark && brand_color == (0xf3, 0xf4, 0xf6) {
+        (0x3f, 0x3f, 0x46)
+    } else {
+        brand_color
+    };
+    div()
+        .size(px(20.0))
+        .rounded(px(6.0))
+        .bg(rgba(crate::design::gpui_rgba(tint, 0x26)))
+        .border_1()
+        .border_color(rgba(crate::design::gpui_rgba(tint, 0x7a)))
+        .flex()
+        .items_center()
+        .justify_center()
+        .flex_shrink_0()
+        .child(
+            div()
+                .text_size(px(fonts::scaled_size(9.5)))
+                .font_weight(gpui::FontWeight::BOLD)
+                .text_color(rgba(crate::design::gpui_rgba(tint, 0xff)))
+                .child(monogram),
+        )
+}
+
+/// Reads a widget density override using its canonical PascalCase key (`"Clock"`, `"Weather"`,
+/// `"SystemStats"`), falling back to any legacy casing stored before canonicalization.
+fn read_density_override(settings: &DockSettings, canonical_id: &str) -> WidgetDensityMode {
+    settings
+        .widget_density_overrides
+        .get(canonical_id)
+        .copied()
+        .or_else(|| {
+            settings
+                .widget_density_overrides
+                .iter()
+                .find(|(k, _)| settings::canonical_widget_setting_id(k) == canonical_id)
+                .map(|(_, &v)| v)
+        })
+        .unwrap_or(WidgetDensityMode::Auto)
+}
+
+/// Persists a widget density override under its canonical PascalCase key, removing any stale
+/// legacy-cased entry and omitting `Auto` entries so the map stays clean.
+fn write_density_override(
+    settings: &mut DockSettings,
+    canonical_id: &str,
+    mode: WidgetDensityMode,
+) {
+    settings
+        .widget_density_overrides
+        .retain(|k, _| settings::canonical_widget_setting_id(k) != canonical_id);
+    if mode != WidgetDensityMode::Auto {
+        settings
+            .widget_density_overrides
+            .insert(canonical_id.to_owned(), mode);
+    }
+}
+
 /// Translates a persisted dimension option while keeping its stored value untouched.
 fn option_label(value: &str) -> String {
     match value {
@@ -1130,6 +1752,7 @@ struct SettingsView {
     brush_hex: String,
     /// Clear Crystal optical glass host (`topmost = false`) underneath GPUI's DComp swapchain.
     spatial_glass: Option<SpatialGlassHost>,
+    last_glass_hwnd_state: Option<(bool, bool)>,
     ai_status: String,
 }
 
@@ -1165,18 +1788,27 @@ impl SettingsView {
             false,
         );
         let hwnd = configure_settings_glass_hwnd(window, is_dark, glass_cfg.enabled);
+        // Rounded Win11 chrome / no phantom NC skirt (after the backdrop margins are set),
+        // the real app icon and the cross-process single-instance marker.
+        window_chrome::apply_window_chrome(hwnd);
+        window_chrome::apply_app_icon(hwnd);
+        window_chrome::mark_settings_window(hwnd);
+        let initial_glass_hwnd_state = Some((is_dark, glass_cfg.enabled));
         let mut spatial_glass = SpatialGlassHost::attach(hwnd, false, glass_cfg);
         if let Some(ref mut g) = spatial_glass {
             let dpi = win32::dpi_scale(hwnd);
             let vp = window.viewport_size();
-            let w_px = (f32::from(vp.width) * dpi).max(WIN_W * dpi);
-            let h_px = (f32::from(vp.height) * dpi).max(WIN_H * dpi);
-            g.sync_rect(0.0, 0.0, w_px, h_px, (8.0 * dpi).round(), dpi, 0.0, 0.0);
+            // The window may be clamped below WIN_W×WIN_H to fit the work area: use the
+            // real viewport so the glass rim matches the visible window edge.
+            let w_px = (f32::from(vp.width) * dpi).max(2.0);
+            let h_px = (f32::from(vp.height) * dpi).max(2.0);
+            let radius_px = (settings_corner_radius(window_chrome::is_windows_11()) * dpi).round();
+            g.sync_rect(0.0, 0.0, w_px, h_px, radius_px, dpi, 0.0, 0.0);
         }
         let installed_fonts = fonts::installed_fonts().to_vec();
         let saved_city = settings.weather_city.clone();
         let weather_city = if saved_city.trim().is_empty() {
-            "Istanbul".to_owned()
+            weather_fallback_city().to_owned()
         } else {
             saved_city.clone()
         };
@@ -1250,6 +1882,7 @@ impl SettingsView {
             brush_selected_stop: 0,
             brush_hex: brush_color.hex(),
             spatial_glass,
+            last_glass_hwnd_state: initial_glass_hwnd_state,
             ai_status: loc::t(if cursor_auth::has_session() {
                 "AiCursorSignedIn"
             } else {
@@ -1453,6 +2086,25 @@ impl SettingsView {
         write: impl Fn(&mut DockSettings, i32) + 'static,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        self.number_stepper_with_suffix(id, t, value, "", min, max, 1, read, write, cx)
+    }
+
+    /// [`Self::number_stepper`] whose readout carries a unit suffix (`px` / `%`) and step increment.
+    #[allow(clippy::too_many_arguments)]
+    fn number_stepper_with_suffix(
+        &self,
+        id: &'static str,
+        t: &UiTheme,
+        value: i32,
+        suffix: &str,
+        min: i32,
+        max: i32,
+        step: i32,
+        read: impl Fn(&DockSettings) -> i32 + 'static,
+        write: impl Fn(&mut DockSettings, i32) + 'static,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let step = step.max(1);
         let read = std::rc::Rc::new(read);
         let write = std::rc::Rc::new(write);
         let minus_read = read.clone();
@@ -1463,16 +2115,16 @@ impl SettingsView {
             SharedString::from(format!("{id}-minus")),
             SharedString::from(format!("{id}-plus")),
             t,
-            SharedString::from(value.to_string()),
+            SharedString::from(format!("{value}{suffix}")),
             cx.listener(move |this, _, _, cx| {
-                let next = (minus_read(&this.settings) - 1).max(min);
+                let next = (minus_read(&this.settings) - step).clamp(min, max);
                 if next != minus_read(&this.settings) {
                     minus_write(&mut this.settings, next);
                     this.auto_save(cx);
                 }
             }),
             cx.listener(move |this, _, _, cx| {
-                let next = (plus_read(&this.settings) + 1).min(max);
+                let next = (plus_read(&this.settings) + step).clamp(min, max);
                 if next != plus_read(&this.settings) {
                     plus_write(&mut this.settings, next);
                     this.auto_save(cx);
@@ -1516,7 +2168,16 @@ impl SettingsView {
             is_dark,
             false,
         );
-        let hwnd = configure_settings_glass_hwnd(window, is_dark, glass_cfg.enabled);
+        let hwnd = if self.last_glass_hwnd_state != Some((is_dark, glass_cfg.enabled)) {
+            self.last_glass_hwnd_state = Some((is_dark, glass_cfg.enabled));
+            let hwnd = configure_settings_glass_hwnd(window, is_dark, glass_cfg.enabled);
+            // `configure_host_backdrop_window` just reset the DWM frame margins: re-apply the
+            // rounded chrome on top (idempotent; the NC subclass is installed only once).
+            window_chrome::apply_window_chrome(hwnd);
+            hwnd
+        } else {
+            Self::window_hwnd(window)
+        };
         if self.spatial_glass.is_none() && glass_cfg.enabled {
             self.spatial_glass = SpatialGlassHost::attach(hwnd, false, glass_cfg);
         }
@@ -1527,7 +2188,9 @@ impl SettingsView {
                 let vp = window.viewport_size();
                 let w_px = (f32::from(vp.width) * dpi).max(2.0);
                 let h_px = (f32::from(vp.height) * dpi).max(2.0);
-                g.sync_rect(0.0, 0.0, w_px, h_px, (8.0 * dpi).round(), dpi, 0.0, 0.0);
+                let radius_px =
+                    (settings_corner_radius(window_chrome::is_windows_11()) * dpi).round();
+                g.sync_rect(0.0, 0.0, w_px, h_px, radius_px, dpi, 0.0, 0.0);
             }
         }
     }
@@ -1988,11 +2651,14 @@ impl SettingsView {
 
     // ---- WidgetPanelHost -----------------------------------------------------
 
-    fn preview_flyout(&self, id: &str) {
+    fn preview_flyout(&self, id: &str, owner_hwnd: usize) {
         if !self.flyout_preview {
             return;
         }
         use crate::ui::flyout::{FlyoutBlock, FlyoutSpec, show_flyout};
+        let is_dark = self.resolve_is_dark();
+        let (anchor_x, anchor_y) =
+            window_chrome::window_flyout_anchor(owner_hwnd).unwrap_or((0, 0));
         let spec = FlyoutSpec {
             title: loc::t_fmt("FlyoutDemoTitle", &[id]),
             subtitle: Some(loc::t("FlyoutDemoSubtitle")),
@@ -2024,7 +2690,7 @@ impl SettingsView {
         };
         // Own modal message loop: run it off the GPUI thread to avoid nesting loops.
         std::thread::spawn(move || {
-            let _ = show_flyout(0, true, 0, 0, spec);
+            let _ = show_flyout(owner_hwnd, is_dark, anchor_x, anchor_y, spec);
         });
     }
 
@@ -2041,6 +2707,8 @@ impl SettingsView {
                 .id("widget-panel-host")
                 .absolute()
                 .inset_0()
+                // Keep the scrim inside the rounded window outline.
+                .rounded(px(settings_corner_radius(window_chrome::is_windows_11())))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2097,8 +2765,11 @@ impl SettingsView {
                                 .items_center()
                                 .justify_center()
                                 .cursor_pointer()
-                                .on_click(cx.listener(|this, _, _, _| {
-                                    this.preview_flyout(this.widget_panel.unwrap_or("widget"));
+                                .on_click(cx.listener(|this, _, window, _| {
+                                    this.preview_flyout(
+                                        this.widget_panel.unwrap_or("widget"),
+                                        Self::window_hwnd(window),
+                                    );
                                 }))
                                 .child(
                                     div()
@@ -3597,6 +4268,8 @@ impl SettingsView {
                 .id("figma-brush-backdrop")
                 .absolute()
                 .inset_0()
+                // Keep the scrim inside the rounded window outline.
+                .rounded(px(settings_corner_radius(window_chrome::is_windows_11())))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -3631,7 +4304,7 @@ impl SettingsView {
                     is_rain: false,
                     temp: temp.to_owned(),
                     place: if self.settings.weather_city.is_empty() {
-                        "Istanbul".to_owned()
+                        weather_fallback_city().to_owned()
                     } else {
                         self.settings.weather_city.clone()
                     },
@@ -3652,7 +4325,7 @@ impl SettingsView {
                 }
                 if self.settings.stats_meters & 2 != 0 {
                     cols.push(SystemStatColumn {
-                        label: loc::t("Memory"),
+                        label: "RAM".to_owned(),
                         value_text: "58%".to_owned(),
                         ratio: 0.58,
                         bar_color: pal.widget_accent,
@@ -3661,7 +4334,7 @@ impl SettingsView {
                 }
                 if self.settings.stats_meters & 16 != 0 {
                     cols.push(SystemStatColumn {
-                        label: loc::t("Gpu"),
+                        label: "GPU".to_owned(),
                         value_text: "38%".to_owned(),
                         ratio: 0.38,
                         bar_color: pal.success,
@@ -3851,38 +4524,43 @@ impl SettingsView {
                 time,
                 date,
                 weekday,
-            } => chip(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .child(icon_glyph("\u{E823}", 13.0, t.dock_preview_sub))
-                    .child(
-                        div()
-                            .text_size(px(fonts::scaled_size(14.0)))
-                            .font_weight(gpui::FontWeight::BOLD)
-                            .text_color(rgba(t.dock_preview_fg))
-                            .child(time),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(10.0)))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgba(t.dock_preview_fg))
-                                    .child(date),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(9.0)))
-                                    .text_color(rgba(t.dock_preview_sub))
-                                    .child(weekday),
-                            ),
-                    ),
-            ),
+            } => {
+                let show_weekday = !clock_weekday_is_redundant(&date, &weekday);
+                chip(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .child(icon_glyph("\u{E823}", 13.0, t.dock_preview_sub))
+                        .child(
+                            div()
+                                .text_size(px(fonts::scaled_size(14.0)))
+                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_color(rgba(t.dock_preview_fg))
+                                .child(time),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(10.0)))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgba(t.dock_preview_fg))
+                                        .child(date),
+                                )
+                                .when(show_weekday, |col| {
+                                    col.child(
+                                        div()
+                                            .text_size(px(fonts::scaled_size(9.0)))
+                                            .text_color(rgba(t.dock_preview_sub))
+                                            .child(weekday),
+                                    )
+                                }),
+                        ),
+                )
+            }
             WidgetChipSpec::Weather {
                 available,
                 icon_color,
@@ -3905,7 +4583,7 @@ impl SettingsView {
                         .items_center()
                         .gap(px(7.0))
                         .child(icon_glyph(
-                            if is_rain { "\u{E9C4}" } else { "\u{E753}" },
+                            if is_rain { "\u{E9C4}" } else { "\u{E706}" },
                             15.0,
                             crate::design::gpui_rgba(icon_color, 0xff),
                         ))
@@ -3935,10 +4613,13 @@ impl SettingsView {
                                 ),
                         );
                     if let Some(range) = today_range {
-                        row = row.child(vdiv()).child(
+                        // Secondary info: extra breathing room around the divider and muted
+                        // high/low so the current temperature + city stay the focal point.
+                        row = row.child(vdiv().mx(px(4.0))).child(
                             div()
                                 .flex()
                                 .flex_col()
+                                .opacity(0.85)
                                 .child(
                                     div()
                                         .text_size(px(fonts::scaled_size(9.0)))
@@ -3948,8 +4629,8 @@ impl SettingsView {
                                 .child(
                                     div()
                                         .text_size(px(fonts::scaled_size(10.0)))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgba(t.dock_preview_fg))
+                                        .font_weight(gpui::FontWeight::MEDIUM)
+                                        .text_color(rgba(t.dock_preview_sub))
                                         .child(range),
                                 ),
                         );
@@ -3959,43 +4640,43 @@ impl SettingsView {
             }
             WidgetChipSpec::DayProgress {
                 ratio,
-                percent,
+                percent: _,
                 unit,
-            } => chip(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(7.0))
-                    .child(
-                        div()
-                            .size(px(18.0))
-                            .rounded(px(9.0))
-                            .border_2()
-                            .border_color(c_rgba(pal.widget_blue, 0xff))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                div()
-                                    .size(px((8.0 * ratio.clamp(0.25, 1.0)).round()))
-                                    .rounded(px(4.0))
-                                    .bg(c_rgba(pal.widget_blue, 0xaa)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(fonts::scaled_size(12.0)))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgba(t.dock_preview_fg))
-                            .child(percent),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(fonts::scaled_size(10.0)))
-                            .text_color(rgba(t.dock_preview_sub))
-                            .child(unit),
-                    ),
-            ),
+            } => {
+                let pct = format!("{:.0}", (ratio * 100.0).clamp(0.0, 100.0));
+                let pct_text = loc::t_fmt("OpacityPercent", &[&pct]);
+                chip(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(progress_ring(
+                            20.0,
+                            2.5,
+                            ratio,
+                            crate::design::gpui_rgba(pal.widget_blue, 0x38),
+                            crate::design::gpui_rgba(pal.widget_blue, 0xff),
+                        ))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(12.0)))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgba(t.dock_preview_fg))
+                                        .child(pct_text),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(9.0)))
+                                        .text_color(rgba(t.dock_preview_sub))
+                                        .child(unit),
+                                ),
+                        ),
+                )
+            }
             WidgetChipSpec::Timed {
                 is_focus,
                 running,
@@ -4005,15 +4686,25 @@ impl SettingsView {
                     .flex()
                     .items_center()
                     .gap(px(7.0))
-                    .child(icon_glyph(
-                        if is_focus { "\u{E7C8}" } else { "\u{E916}" },
-                        13.0,
-                        if running {
+                    .child(if is_focus {
+                        let ring_col = if running {
                             crate::design::gpui_rgba(pal.selected_fg, 0xff)
                         } else {
-                            t.dock_preview_sub
-                        },
-                    ))
+                            crate::design::gpui_rgba(pal.widget_accent, 0xcc)
+                        };
+                        progress_ring(18.0, 2.4, 0.72, track_bg, ring_col).into_any_element()
+                    } else {
+                        icon_glyph(
+                            "\u{E916}",
+                            13.0,
+                            if running {
+                                crate::design::gpui_rgba(pal.selected_fg, 0xff)
+                            } else {
+                                t.dock_preview_sub
+                            },
+                        )
+                        .into_any_element()
+                    })
                     .child(
                         div()
                             .text_size(px(fonts::scaled_size(12.0)))
@@ -4072,6 +4763,7 @@ impl SettingsView {
                                 .gap(px(2.0))
                                 .child(
                                     div()
+                                        .whitespace_nowrap()
                                         .text_size(px(fonts::scaled_size(9.0)))
                                         .font_weight(gpui::FontWeight::SEMIBOLD)
                                         .text_color(rgba(t.dock_preview_sub))
@@ -4348,10 +5040,35 @@ impl SettingsView {
                     )),
             ),
             WidgetChipSpec::Storage { drives } => {
-                let (drv, cap) = drives
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| ("C:".to_owned(), "—".to_owned()));
+                let sampled = widgets::sample_drives();
+                let (drv, used_pct, free_text, used_ratio) =
+                    if let Some(d) = sampled.iter().find(|d| d.total_gb > 0.0) {
+                        let used = (d.total_gb - d.free_gb).max(0.0);
+                        let ratio = (used / d.total_gb).clamp(0.0, 1.0) as f32;
+                        let pct = (ratio * 100.0).round() as u32;
+                        let free = if d.total_gb >= 972.8 {
+                            format!(
+                                "{} TB",
+                                widgets::telemetry::culture_number(d.free_gb / 1024.0, 1)
+                            )
+                        } else {
+                            format!("{} GB", widgets::telemetry::culture_number(d.free_gb, 0))
+                        };
+                        (format!("{}:", d.letter), pct, free, ratio)
+                    } else if let Some((drv, cap)) = drives.first() {
+                        let free = cap.split(" / ").next().unwrap_or(cap).to_owned();
+                        (drv.clone(), 55, free, 0.55)
+                    } else {
+                        ("C:".to_owned(), 55, "213 GB".to_owned(), 0.55)
+                    };
+                let pct_text = loc::t_fmt("OpacityPercent", &[&used_pct.to_string()]);
+                let bar_col = if used_pct >= 90 {
+                    pal.danger
+                } else if used_pct >= 75 {
+                    pal.warning
+                } else {
+                    pal.widget_blue
+                };
                 chip(
                     div()
                         .flex()
@@ -4362,19 +5079,27 @@ impl SettingsView {
                             div()
                                 .flex()
                                 .flex_col()
+                                .gap(px(2.0))
                                 .child(
                                     div()
-                                        .text_size(px(fonts::scaled_size(10.0)))
-                                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                                        .text_color(rgba(t.dock_preview_fg))
-                                        .child(drv),
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.0))
+                                        .child(
+                                            div()
+                                                .text_size(px(fonts::scaled_size(10.0)))
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .text_color(rgba(t.dock_preview_fg))
+                                                .child(format!("{drv} {pct_text}")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(fonts::scaled_size(9.0)))
+                                                .text_color(rgba(t.dock_preview_sub))
+                                                .child(free_text),
+                                        ),
                                 )
-                                .child(
-                                    div()
-                                        .text_size(px(fonts::scaled_size(9.0)))
-                                        .text_color(rgba(t.dock_preview_sub))
-                                        .child(cap),
-                                ),
+                                .child(mini_bar(used_ratio, bar_col, 72.0)),
                         ),
                 )
             }
@@ -4421,32 +5146,58 @@ impl SettingsView {
                         t.dock_preview_sub,
                     )),
             ),
-            WidgetChipSpec::Audio { volume, muted } => chip(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(6.0))
-                    .child(icon_glyph(
-                        if muted { "\u{E74F}" } else { "\u{E767}" },
-                        13.0,
-                        if muted {
-                            crate::design::gpui_rgba(pal.danger_fg, 0xff)
-                        } else {
-                            t.dock_preview_fg
-                        },
-                    ))
-                    .child(
-                        div()
-                            .text_size(px(fonts::scaled_size(12.0)))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(rgba(t.dock_preview_fg))
-                            .child(if muted {
-                                loc::t("MediaMute")
-                            } else {
-                                loc::t_fmt("OpacityPercent", &[&volume.to_string()])
-                            }),
-                    ),
-            ),
+            WidgetChipSpec::Audio { volume, muted } => {
+                let silent = muted || volume == 0;
+                let glyph = if silent {
+                    "\u{E74F}"
+                } else if volume < 50 {
+                    "\u{E993}"
+                } else {
+                    "\u{E995}"
+                };
+                let display_pct = if muted { 0 } else { volume };
+                let ratio = if silent {
+                    0.0
+                } else {
+                    (volume as f32 / 100.0).clamp(0.0, 1.0)
+                };
+                chip(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(3.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(icon_glyph(
+                                    glyph,
+                                    13.0,
+                                    if silent {
+                                        t.dock_preview_sub
+                                    } else {
+                                        t.dock_preview_fg
+                                    },
+                                ))
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(12.0)))
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgba(if silent {
+                                            t.dock_preview_sub
+                                        } else {
+                                            t.dock_preview_fg
+                                        }))
+                                        .child(loc::t_fmt(
+                                            "OpacityPercent",
+                                            &[&display_pct.to_string()],
+                                        )),
+                                ),
+                        )
+                        .child(mini_bar(ratio, pal.widget_blue, 52.0)),
+                )
+            }
             WidgetChipSpec::QuickSettings { pills } => {
                 chip(div().flex().items_center().gap(px(4.0)).children(
                     pills.into_iter().enumerate().map(|(i, (glyph, active))| {
@@ -4513,14 +5264,7 @@ impl SettingsView {
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .child(
-                            div()
-                                .size(px(14.0))
-                                .rounded(px(4.0))
-                                .bg(c_rgba(dot_col, 0x33))
-                                .border_1()
-                                .border_color(c_rgba(dot_col, 0xcc)),
-                        )
+                        .child(ai_brand_badge(provider_id, dot_col, is_dark))
                         .child(div().flex().flex_col().gap(px(3.0)).children(
                             rows.into_iter().take(2).map(|(lbl, used, col, reset)| {
                                 div()
@@ -4545,26 +5289,35 @@ impl SettingsView {
                         )),
                 )
             }
-            WidgetChipSpec::AiOpenCode { columns } => {
-                chip(div().flex().items_center().gap(px(7.0)).children(
-                    columns.into_iter().take(3).map(|(lbl, val, used, col, _)| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(9.0)))
-                                    .text_color(rgba(t.dock_preview_sub))
-                                    .child(loc::t_fmt(
-                                        "MetricValue",
-                                        &[&lbl.to_owned(), &val.to_owned()],
-                                    )),
-                            )
-                            .child(mini_bar(used, col, 36.0))
-                    }),
-                ))
-            }
+            WidgetChipSpec::AiOpenCode { columns } => chip(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(ai_brand_badge(
+                        "aiusage_opencode",
+                        widgets::ai_provider_color("aiusage_opencode"),
+                        is_dark,
+                    ))
+                    .child(div().flex().items_center().gap(px(7.0)).children(
+                        columns.into_iter().take(3).map(|(lbl, val, used, col, _)| {
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .child(
+                                    div()
+                                        .text_size(px(fonts::scaled_size(9.0)))
+                                        .text_color(rgba(t.dock_preview_sub))
+                                        .child(loc::t_fmt(
+                                            "MetricValue",
+                                            &[&lbl.to_owned(), &val.to_owned()],
+                                        )),
+                                )
+                                .child(mini_bar(used, col, 36.0))
+                        }),
+                    )),
+            ),
             WidgetChipSpec::AiCopilot {
                 value_text,
                 meta_text,
@@ -4573,29 +5326,36 @@ impl SettingsView {
             } => chip(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap(px(3.0))
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(ai_brand_badge("aiusage_copilot", bar_color, is_dark))
                     .child(
                         div()
                             .flex()
-                            .items_center()
-                            .justify_between()
-                            .gap(px(8.0))
+                            .flex_col()
+                            .gap(px(3.0))
                             .child(
                                 div()
-                                    .text_size(px(fonts::scaled_size(11.0)))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgba(t.dock_preview_fg))
-                                    .child(value_text),
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(fonts::scaled_size(11.0)))
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(rgba(t.dock_preview_fg))
+                                            .child(value_text),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(fonts::scaled_size(9.0)))
+                                            .text_color(rgba(t.dock_preview_sub))
+                                            .child(meta_text),
+                                    ),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(9.0)))
-                                    .text_color(rgba(t.dock_preview_sub))
-                                    .child(meta_text),
-                            ),
-                    )
-                    .child(mini_bar(used, bar_color, 88.0)),
+                            .child(mini_bar(used, bar_color, 72.0)),
+                    ),
             ),
             WidgetChipSpec::AiBalance {
                 provider_id,
@@ -4609,14 +5369,7 @@ impl SettingsView {
                         .flex()
                         .items_center()
                         .gap(px(7.0))
-                        .child(
-                            div()
-                                .size(px(14.0))
-                                .rounded(px(4.0))
-                                .bg(c_rgba(dot_col, 0x33))
-                                .border_1()
-                                .border_color(c_rgba(dot_col, 0xcc)),
-                        )
+                        .child(ai_brand_badge(provider_id, dot_col, is_dark))
                         .child(vdiv())
                         .child(
                             div()
@@ -5456,9 +6209,9 @@ impl SettingsView {
             "dock-width-mode",
             t,
             vec![
-                (loc::t("Auto"), DockWidthMode::Auto),
-                (loc::t("Pixels"), DockWidthMode::Pixels),
-                (loc::t("Percent"), DockWidthMode::Percent),
+                (loc::t("UnitAuto"), DockWidthMode::Auto),
+                (loc::t("UnitPixels"), DockWidthMode::Pixels),
+                (loc::t("UnitPercent"), DockWidthMode::Percent),
                 (loc::t("DockWidthFill"), DockWidthMode::Fill),
             ],
             self.settings.dock_width_mode,
@@ -5472,9 +6225,9 @@ impl SettingsView {
             "dock-height-mode",
             t,
             vec![
-                (loc::t("Auto"), DockHeightMode::Auto),
-                (loc::t("Pixels"), DockHeightMode::Pixels),
-                (loc::t("Percent"), DockHeightMode::Percent),
+                (loc::t("UnitAuto"), DockHeightMode::Auto),
+                (loc::t("UnitPixels"), DockHeightMode::Pixels),
+                (loc::t("UnitPercent"), DockHeightMode::Percent),
                 (loc::t("DockHeightFill"), DockHeightMode::Fill),
             ],
             self.settings.dock_height_mode,
@@ -5488,8 +6241,8 @@ impl SettingsView {
             "dock-top-gap-unit",
             t,
             vec![
-                (loc::t("Pixels"), DockGapUnit::Pixels),
-                (loc::t("Percent"), DockGapUnit::Percent),
+                (loc::t("UnitPixels"), DockGapUnit::Pixels),
+                (loc::t("UnitPercent"), DockGapUnit::Percent),
             ],
             self.settings.dock_top_gap_unit,
             |this, value, cx| {
@@ -5503,15 +6256,19 @@ impl SettingsView {
             DockWidthMode::Percent => loc::t("DockWidthPercent"),
             _ => loc::t("DockWidthMode"),
         };
-        let width_value = self.number_stepper(
+        let (width_min, width_max, width_step) =
+            dock_width_stepper_bounds(self.settings.dock_width_mode);
+        let width_value = self.number_stepper_with_suffix(
             "dock-width-value",
             t,
             match self.settings.dock_width_mode {
                 DockWidthMode::Percent => self.settings.dock_width_percent,
                 _ => self.settings.dock_width_pixels,
             },
-            0,
-            100,
+            unit_suffix(self.settings.dock_width_mode == DockWidthMode::Percent),
+            width_min,
+            width_max,
+            width_step,
             |s| {
                 if s.dock_width_mode == DockWidthMode::Percent {
                     s.dock_width_percent
@@ -5529,19 +6286,23 @@ impl SettingsView {
             cx,
         );
         let height_value_label = match self.settings.dock_height_mode {
-            DockHeightMode::Pixels => loc::t("Pixels"),
-            DockHeightMode::Percent => loc::t("Percent"),
+            DockHeightMode::Pixels => loc::t("DockHeightPixels"),
+            DockHeightMode::Percent => loc::t("DockHeightPercent"),
             _ => loc::t("DockHeightMode"),
         };
-        let height_value = self.number_stepper(
+        let (height_min, height_max, height_step) =
+            dock_height_stepper_bounds(self.settings.dock_height_mode);
+        let height_value = self.number_stepper_with_suffix(
             "dock-height-value",
             t,
             match self.settings.dock_height_mode {
                 DockHeightMode::Percent => self.settings.dock_height_percent,
                 _ => self.settings.dock_height_pixels,
             },
-            0,
-            100,
+            unit_suffix(self.settings.dock_height_mode == DockHeightMode::Percent),
+            height_min,
+            height_max,
+            height_step,
             |s| {
                 if s.dock_height_mode == DockHeightMode::Percent {
                     s.dock_height_percent
@@ -5558,15 +6319,19 @@ impl SettingsView {
             },
             cx,
         );
-        let top_gap_value = self.number_stepper(
+        let (top_gap_min, top_gap_max, top_gap_step) =
+            dock_top_gap_stepper_bounds(self.settings.dock_top_gap_unit);
+        let top_gap_value = self.number_stepper_with_suffix(
             "dock-top-gap-value",
             t,
             match self.settings.dock_top_gap_unit {
                 DockGapUnit::Percent => self.settings.dock_top_gap_percent,
                 DockGapUnit::Pixels => self.settings.dock_top_gap_pixels,
             },
-            0,
-            100,
+            unit_suffix(self.settings.dock_top_gap_unit == DockGapUnit::Percent),
+            top_gap_min,
+            top_gap_max,
+            top_gap_step,
             |s| {
                 if s.dock_top_gap_unit == DockGapUnit::Percent {
                     s.dock_top_gap_percent
@@ -5584,216 +6349,220 @@ impl SettingsView {
             cx,
         );
 
-        let out = vec![
-            section_card(
+        // Auto/Fill sizes are computed by the dock, so their numeric steppers are hidden.
+        let mut layout_rows = vec![
+            self.target_row(
+                "DockAlignment",
                 t,
-                loc::t("SectionDockLayout"),
-                vec![
-                    self.target_row(
-                        "DockAlignment",
-                        t,
-                        Some("\u{E8E3}"),
-                        loc::t("DockAlignment"),
-                        align_dd,
-                    ),
-                    self.target_row(
-                        "ContentAlignment",
-                        t,
-                        Some("\u{E8E3}"),
-                        loc::t("ContentAlignment"),
-                        content_align,
-                    ),
-                    self.target_row(
-                        "DockWidthMode",
-                        t,
-                        Some("\u{E740}"),
-                        loc::t("DockWidthMode"),
-                        width_mode,
-                    ),
-                    self.target_row(
-                        "DockWidthValue",
-                        t,
-                        Some("\u{E740}"),
-                        width_value_label,
-                        width_value,
-                    ),
-                    self.target_row(
-                        "DockHeightMode",
-                        t,
-                        Some("\u{E740}"),
-                        loc::t("DockHeightMode"),
-                        height_mode,
-                    ),
-                    self.target_row(
-                        "DockHeightValue",
-                        t,
-                        Some("\u{E740}"),
-                        height_value_label,
-                        height_value,
-                    ),
-                    self.target_row(
-                        "DockTopGap",
-                        t,
-                        Some("\u{E96F}"),
-                        loc::t("DockTopGap"),
-                        top_gap_unit,
-                    ),
-                    self.target_row(
-                        "DockTopGapValue",
-                        t,
-                        Some("\u{E96F}"),
-                        loc::t("DockTopGap"),
-                        top_gap_value,
-                    ),
-                    self.target_row("DockSize", t, Some("\u{E9A6}"), loc::t("DockSize"), size_dd),
-                    self.target_row(
-                        "StartPlacement",
-                        t,
-                        Some("\u{E7C5}"),
-                        loc::t("StartButtonPlacement"),
-                        start_placement_dd,
-                    ),
-                    self.target_row(
-                        "StartWidgetIndex",
-                        t,
-                        Some("\u{E9A6}"),
-                        loc::t("StartWidgetIndex"),
-                        stepper(
-                            "start-widget-index-minus",
-                            "start-widget-index-plus",
-                            t,
-                            self.settings.start_widget_index.to_string(),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.start_widget_index =
-                                    (this.settings.start_widget_index - 1).max(0);
-                                this.auto_save(cx);
-                            }),
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.start_widget_index =
-                                    (this.settings.start_widget_index + 1).min(32);
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    ),
-                    self.target_row(
-                        "DockScale",
-                        t,
-                        Some("\u{E8A3}"),
-                        loc::t("DockScale"),
-                        live_slider(
-                            "sc",
-                            t,
-                            ((self.settings.dock_scale as f32) - 0.75) / 0.75,
-                            16,
-                            loc::t_fmt("OpacityPercent", &[&scale_pct.to_string()]),
-                            |i| {
-                                let entity = cx.entity().downgrade();
-                                std::rc::Rc::new(move |_win, app| {
-                                    let _ = entity.update(app, |this, cx| {
-                                        let next = (0.75 + (i as f64) * 0.05).clamp(0.75, 1.50);
-                                        if (this.settings.dock_scale - next).abs() > 0.001 {
-                                            this.settings.dock_scale = next;
-                                            this.auto_save(cx);
-                                        }
-                                    });
-                                })
-                            },
-                        ),
-                    )
-                    .into_any_element(),
-                    self.target_row(
-                        "DockBottomGap",
-                        t,
-                        Some("\u{E96F}"),
-                        loc::t("DockBottomGap"),
-                        live_slider(
-                            "gap",
-                            t,
-                            self.settings.dock_bottom_gap_pixels as f32 / 32.0,
-                            17,
-                            loc::t_fmt(
-                                "PixelsValue",
-                                &[&self.settings.dock_bottom_gap_pixels.to_string()],
-                            ),
-                            |i| {
-                                let entity = cx.entity().downgrade();
-                                std::rc::Rc::new(move |_win, app| {
-                                    let _ = entity.update(app, |this, cx| {
-                                        let next = ((i as i32) * 2).clamp(0, 32);
-                                        if this.settings.dock_bottom_gap_pixels != next {
-                                            this.settings.dock_bottom_gap_pixels = next;
-                                            this.auto_save(cx);
-                                        }
-                                    });
-                                })
-                            },
-                        ),
-                    )
-                    .into_any_element(),
-                    self.target_row(
-                        "DockIconPadding",
-                        t,
-                        Some("\u{E96E}"),
-                        loc::t("DockIconPadding"),
-                        live_slider(
-                            "pad",
-                            t,
-                            self.settings.dock_icon_padding as f32 / 12.0,
-                            13,
-                            loc::t_fmt(
-                                "PixelsValue",
-                                &[&self.settings.dock_icon_padding.to_string()],
-                            ),
-                            |i| {
-                                let entity = cx.entity().downgrade();
-                                std::rc::Rc::new(move |_win, app| {
-                                    let _ = entity.update(app, |this, cx| {
-                                        let next = (i as i32).clamp(0, 12);
-                                        if this.settings.dock_icon_padding != next {
-                                            this.settings.dock_icon_padding = next;
-                                            this.auto_save(cx);
-                                        }
-                                    });
-                                })
-                            },
-                        ),
-                    )
-                    .into_any_element(),
-                    self.target_row(
-                        "LayoutFullWidth",
-                        t,
-                        Some("\u{E740}"),
-                        loc::t("LayoutFullWidth"),
-                        ios_switch(
-                            "sw-fullw",
-                            t,
-                            self.settings.full_width,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.full_width = !this.settings.full_width;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                    setting_row(
-                        t,
-                        Some("\u{E72C}"),
-                        width_label,
-                        button(
-                            "btn-reset-width",
-                            t,
-                            loc::t("Reset"),
-                            ButtonVariant::Secondary,
-                            cx.listener(|this, _, _, cx| {
-                                this.settings.dock_custom_width_dips = None;
-                                this.auto_save(cx);
-                            }),
-                        ),
-                    )
-                    .into_any_element(),
-                ],
+                Some("\u{E8E3}"),
+                loc::t("DockAlignment"),
+                align_dd,
+            ),
+            self.target_row(
+                "ContentAlignment",
+                t,
+                Some("\u{E8E3}"),
+                loc::t("ContentAlignment"),
+                content_align,
+            ),
+            self.target_row(
+                "DockWidthMode",
+                t,
+                Some(DOCK_WIDTH_GLYPH),
+                loc::t("DockWidthMode"),
+                width_mode,
+            ),
+        ];
+        if dock_width_has_value(self.settings.dock_width_mode) {
+            layout_rows.push(self.target_row(
+                "DockWidthValue",
+                t,
+                Some(DOCK_WIDTH_GLYPH),
+                width_value_label,
+                width_value,
+            ));
+        }
+        layout_rows.push(self.target_row(
+            "DockHeightMode",
+            t,
+            Some(DOCK_HEIGHT_GLYPH),
+            loc::t("DockHeightMode"),
+            height_mode,
+        ));
+        if dock_height_has_value(self.settings.dock_height_mode) {
+            layout_rows.push(self.target_row(
+                "DockHeightValue",
+                t,
+                Some(DOCK_HEIGHT_GLYPH),
+                height_value_label,
+                height_value,
+            ));
+        }
+        layout_rows.extend([
+            self.target_row(
+                "DockTopGap",
+                t,
+                Some(DOCK_GAP_GLYPH),
+                loc::t("DockTopGapUnit"),
+                top_gap_unit,
+            ),
+            self.target_row(
+                "DockTopGapValue",
+                t,
+                Some(DOCK_GAP_GLYPH),
+                loc::t("DockTopGap"),
+                top_gap_value,
+            ),
+            self.target_row("DockSize", t, Some("\u{E9A6}"), loc::t("DockSize"), size_dd),
+            self.target_row(
+                "StartPlacement",
+                t,
+                Some("\u{E7C5}"),
+                loc::t("StartButtonPlacement"),
+                start_placement_dd,
+            ),
+            self.target_row(
+                "StartWidgetIndex",
+                t,
+                Some("\u{E9A6}"),
+                loc::t("StartWidgetIndex"),
+                stepper(
+                    "start-widget-index-minus",
+                    "start-widget-index-plus",
+                    t,
+                    self.settings.start_widget_index.to_string(),
+                    cx.listener(|this, _, _, cx| {
+                        this.settings.start_widget_index =
+                            (this.settings.start_widget_index - 1).max(0);
+                        this.auto_save(cx);
+                    }),
+                    cx.listener(|this, _, _, cx| {
+                        this.settings.start_widget_index =
+                            (this.settings.start_widget_index + 1).min(32);
+                        this.auto_save(cx);
+                    }),
+                ),
+            ),
+            self.target_row(
+                "DockScale",
+                t,
+                Some("\u{E8A3}"),
+                loc::t("DockScale"),
+                live_slider(
+                    "sc",
+                    t,
+                    ((self.settings.dock_scale as f32) - 0.75) / 0.75,
+                    16,
+                    loc::t_fmt("OpacityPercent", &[&scale_pct.to_string()]),
+                    |i| {
+                        let entity = cx.entity().downgrade();
+                        std::rc::Rc::new(move |_win, app| {
+                            let _ = entity.update(app, |this, cx| {
+                                let next = (0.75 + (i as f64) * 0.05).clamp(0.75, 1.50);
+                                if (this.settings.dock_scale - next).abs() > 0.001 {
+                                    this.settings.dock_scale = next;
+                                    this.auto_save(cx);
+                                }
+                            });
+                        })
+                    },
+                ),
             )
             .into_any_element(),
+            self.target_row(
+                "DockBottomGap",
+                t,
+                Some(DOCK_GAP_GLYPH),
+                loc::t("DockBottomGap"),
+                live_slider(
+                    "gap",
+                    t,
+                    self.settings.dock_bottom_gap_pixels as f32 / 32.0,
+                    17,
+                    loc::t_fmt(
+                        "PixelsValue",
+                        &[&self.settings.dock_bottom_gap_pixels.to_string()],
+                    ),
+                    |i| {
+                        let entity = cx.entity().downgrade();
+                        std::rc::Rc::new(move |_win, app| {
+                            let _ = entity.update(app, |this, cx| {
+                                let next = ((i as i32) * 2).clamp(0, 32);
+                                if this.settings.dock_bottom_gap_pixels != next {
+                                    this.settings.dock_bottom_gap_pixels = next;
+                                    this.auto_save(cx);
+                                }
+                            });
+                        })
+                    },
+                ),
+            )
+            .into_any_element(),
+            self.target_row(
+                "DockIconPadding",
+                t,
+                Some("\u{E96E}"),
+                loc::t("DockIconPadding"),
+                live_slider(
+                    "pad",
+                    t,
+                    self.settings.dock_icon_padding as f32 / 12.0,
+                    13,
+                    loc::t_fmt(
+                        "PixelsValue",
+                        &[&self.settings.dock_icon_padding.to_string()],
+                    ),
+                    |i| {
+                        let entity = cx.entity().downgrade();
+                        std::rc::Rc::new(move |_win, app| {
+                            let _ = entity.update(app, |this, cx| {
+                                let next = (i as i32).clamp(0, 12);
+                                if this.settings.dock_icon_padding != next {
+                                    this.settings.dock_icon_padding = next;
+                                    this.auto_save(cx);
+                                }
+                            });
+                        })
+                    },
+                ),
+            )
+            .into_any_element(),
+            self.target_row(
+                "LayoutFullWidth",
+                t,
+                Some("\u{E740}"),
+                loc::t("LayoutFullWidth"),
+                ios_switch(
+                    "sw-fullw",
+                    t,
+                    self.settings.full_width,
+                    cx.listener(|this, _, _, cx| {
+                        this.settings.full_width = !this.settings.full_width;
+                        this.auto_save(cx);
+                    }),
+                ),
+            )
+            .into_any_element(),
+            setting_row(
+                t,
+                Some("\u{E72C}"),
+                width_label,
+                button(
+                    "btn-reset-width",
+                    t,
+                    loc::t("Reset"),
+                    ButtonVariant::Secondary,
+                    cx.listener(|this, _, _, cx| {
+                        this.settings.dock_custom_width_dips = None;
+                        this.auto_save(cx);
+                    }),
+                ),
+            )
+            .into_any_element(),
+        ]);
+
+        let out = vec![
+            section_card(t, loc::t("SectionDockLayout"), layout_rows).into_any_element(),
             section_card(
                 t,
                 format!(
@@ -6141,7 +6910,7 @@ impl SettingsView {
                     self.target_row(
                         "SurfaceOpacityLabel:Dock",
                         t,
-                        Some("\u{E793}"),
+                        Some("\u{E7B3}"),
                         loc::t("SurfaceOpacityLabel"),
                         live_slider(
                             "op",
@@ -6213,7 +6982,7 @@ impl SettingsView {
                         self.target_row(
                             "GlassBlurLabel",
                             t,
-                            Some("\u{E793}"),
+                            Some("\u{EB42}"),
                             loc::t("GlassBlurLabel"),
                             live_slider(
                                 "glass-blur",
@@ -6240,7 +7009,7 @@ impl SettingsView {
                         self.target_row(
                             "GlassSaturationLabel",
                             t,
-                            Some("\u{E790}"),
+                            Some("\u{E771}"),
                             loc::t("GlassSaturationLabel"),
                             live_slider(
                                 "glass-sat",
@@ -6351,9 +7120,10 @@ impl SettingsView {
                         div()
                             .w_full()
                             .px(px(16.0))
-                            .py(px(10.0))
+                            .pt(px(10.0))
+                            .pb(px(12.0))
                             .text_size(px(fonts::scaled_size(12.0)))
-                            .text_color(rgba(t.text_secondary))
+                            .text_color(rgba(t.text_primary))
                             .child(loc::t("SurfaceTrueBlack")),
                     )
                     .into_any_element(),
@@ -7146,11 +7916,11 @@ impl SettingsView {
         match id {
             "clock" => Some(format!(
                 "{} · {}",
-                if self.settings.clock_24_hour {
-                    "24h"
+                short_clock_format_label(&loc::t(if self.settings.clock_24_hour {
+                    "ClockFormat24Hour"
                 } else {
-                    "12h"
-                },
+                    "ClockFormat12Hour"
+                })),
                 match self.settings.clock_date_layout {
                     ClockDateLayout::Beside => loc::t("ClockDateLayoutBeside"),
                     ClockDateLayout::Below => loc::t("ClockDateLayoutBelow"),
@@ -7163,7 +7933,7 @@ impl SettingsView {
                     .split(", ")
                     .next()
                     .filter(|s| !s.is_empty())
-                    .unwrap_or("Istanbul");
+                    .unwrap_or(weather_fallback_city());
                 let unit = match self.settings.weather_unit {
                     TemperatureUnit::Celsius => "°C",
                     TemperatureUnit::Fahrenheit => "°F",
@@ -7685,11 +8455,14 @@ impl SettingsView {
             t,
             enabled,
             cx.listener(move |this, _, _, cx| {
-                let cur = this.settings.is_widget_enabled(wid);
-                if !cur && this.settings.focus_mode && wid != "clock" && wid != "focus" {
+                let next = !this.settings.is_widget_enabled(wid);
+                if next && this.settings.focus_mode && wid != "clock" && wid != "focus" {
                     this.settings.focus_mode = false;
                 }
-                this.settings.set_widget_enabled(wid, !cur);
+                this.settings.set_widget_enabled(wid, next);
+                if wid == "media" {
+                    this.settings.show_media = next;
+                }
                 this.auto_save(cx);
             }),
         );
@@ -7782,7 +8555,7 @@ impl SettingsView {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(8.0))
+                    .gap(px(12.0))
                     .flex_shrink_0()
                     .when_some(custom_actions, |row, b| row.child(b))
                     .when_some(icon_button, |row, b| row.child(b))
@@ -7923,14 +8696,16 @@ impl SettingsView {
                         cx.notify();
                     }),
                 ))
-                .child(button(
+                .child(button_with_state(
                     "btn-clear-widgets",
                     t,
                     loc::t("ClearAll"),
                     ButtonVariant::Secondary,
+                    active_count > 0,
                     cx.listener(|this, _, _, cx| {
                         this.settings.show_clock_widget = false;
                         this.settings.show_system_stats_widget = false;
+                        this.settings.show_media = false;
                         this.settings.enabled_widgets.clear();
                         this.auto_save(cx);
                     }),
@@ -8062,45 +8837,48 @@ impl SettingsView {
                 (loc::t("WidgetDensityFull"), WidgetDensityMode::Full),
             ]
         };
-        let density_override_rows: Vec<AnyElement> = ["clock", "weather", "stats"]
-            .into_iter()
-            .map(|id| {
-                let current = self
-                    .settings
-                    .widget_density_overrides
-                    .get(id)
-                    .copied()
-                    .unwrap_or(WidgetDensityMode::Auto);
-                let row_id = match id {
-                    "clock" => "WidgetDensityOverrideClock",
-                    "weather" => "WidgetDensityOverrideWeather",
-                    _ => "WidgetDensityOverrideStats",
-                };
-                self.target_row(
-                    row_id,
+        let density_override_rows: Vec<AnyElement> = [
+            (
+                "Clock",
+                "WidgetClock",
+                "WidgetDensityOverrideClock",
+                "clock",
+            ),
+            (
+                "Weather",
+                "WidgetWeather",
+                "WidgetDensityOverrideWeather",
+                "weather",
+            ),
+            (
+                "SystemStats",
+                "WidgetSystemStats",
+                "WidgetDensityOverrideStats",
+                "stats",
+            ),
+        ]
+        .into_iter()
+        .map(|(canonical_id, title_key, row_id, slug)| {
+            let current = read_density_override(&self.settings, canonical_id);
+            self.target_row(
+                row_id,
+                t,
+                Some("\u{E80A}"),
+                loc::t(title_key),
+                self.enum_dropdown(
+                    format!("widget-density-{slug}"),
                     t,
-                    Some("\u{E80A}"),
-                    loc::t(id),
-                    self.enum_dropdown(
-                        format!("widget-density-{id}"),
-                        t,
-                        density_choices(),
-                        current,
-                        move |this, value, cx| {
-                            if value == WidgetDensityMode::Auto {
-                                this.settings.widget_density_overrides.remove(id);
-                            } else {
-                                this.settings
-                                    .widget_density_overrides
-                                    .insert(id.to_owned(), value);
-                            }
-                            this.auto_save(cx);
-                        },
-                        cx,
-                    ),
-                )
-            })
-            .collect();
+                    density_choices(),
+                    current,
+                    move |this, value, cx| {
+                        write_density_override(&mut this.settings, canonical_id, value);
+                        this.auto_save(cx);
+                    },
+                    cx,
+                ),
+            )
+        })
+        .collect();
         let ai_ring = self.enum_dropdown(
             "ai-usage-ring",
             t,
@@ -8170,7 +8948,12 @@ impl SettingsView {
                             t,
                             self.settings.show_media,
                             cx.listener(|this, _, _, cx| {
-                                this.settings.show_media = !this.settings.show_media;
+                                let next = !this.settings.show_media;
+                                this.settings.show_media = next;
+                                if next && this.settings.focus_mode {
+                                    this.settings.focus_mode = false;
+                                }
+                                this.settings.set_widget_enabled("media", next);
                                 this.auto_save(cx);
                             }),
                         ),
@@ -8383,7 +9166,7 @@ impl SettingsView {
                         self.target_row_desc(
                             "DynamicIslandOpacity",
                             t,
-                            Some("\u{E793}"),
+                            Some("\u{E7B3}"),
                             // No `DynamicIslandOpacity` locale key exists; reuse the generic Opacity label.
                             loc::t("SurfaceOpacityLabel"),
                             loc::t("DynamicIslandOpacityDescription"),
@@ -8975,7 +9758,7 @@ impl SettingsView {
                         button(
                             "btn-restore-tb",
                             t,
-                            loc::t("Restore"),
+                            loc::t("RestoreWindowsTaskbar"),
                             ButtonVariant::Destructive,
                             |_, _, _| opentaskbar_shell::taskbar::restore_from_journal(),
                         ),
@@ -9079,15 +9862,34 @@ impl EntityInputHandler for SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_dark = self.resolve_is_dark();
-        let settings_glass = self.settings.settings_background == SurfaceBackground::Glass;
         self.sync_settings_glass(window);
-        let mut t = UiTheme::for_settings(is_dark, settings_glass);
+        let mut t = UiTheme::for_settings_background(is_dark, self.settings.settings_background);
         t.border_width = self.settings.settings_border_thickness.clamp(0.0, 8.0) as f32;
         if let Some(value) = &self.settings.settings_border_color
             && let Some(color) = parse_hex_color(value)
         {
             t.border = color;
         }
+        // Outer chrome: 8 DIP rounded surface on Windows 11 (matching DWMWCP_ROUND and the
+        // SpatialGlassHost clip), square on Windows 10. Exactly one crisp border: the glass
+        // host's optical rim when it is active, otherwise a GPUI border on the root.
+        let corner_radius = settings_corner_radius(window_chrome::is_windows_11());
+        let glass_rim_active = self.spatial_glass.is_some() && {
+            let cfg = SpatialGlassConfig::from_settings(
+                &self.settings,
+                self.settings.settings_background,
+                self.settings.settings_opacity,
+                is_dark,
+                false,
+            );
+            cfg.enabled && cfg.edge_glow > 0.0
+        };
+        let root_border_width = if settings_root_draws_border(glass_rim_active) {
+            Some(t.border_width.max(1.0))
+        } else {
+            None
+        };
+        let root_border_color = t.border;
         let width = window.viewport_size().width;
         let narrow = width < px(SIDEBAR_BREAKPOINT);
         let inset = px(if narrow { 20.0 } else { 32.0 });
@@ -9190,7 +9992,11 @@ impl Render for SettingsView {
             .border_color(rgba(t.border))
             .when(narrow, |panel| panel.w_full().border_b_1())
             .when(!narrow, |panel| {
-                panel.w(px(SIDEBAR_WIDTH)).h_full().border_r_1()
+                panel
+                    .w(px(SIDEBAR_WIDTH))
+                    .h_full()
+                    .border_r_1()
+                    .rounded_bl(px(corner_radius))
             })
             .child(
                 div()
@@ -9228,7 +10034,8 @@ impl Render for SettingsView {
                     cx.notify();
                 }))
                 .px(inset)
-                .py(px(20.0))
+                .pt(px(20.0))
+                .pb(px(40.0))
                 .child(page_content),
         );
 
@@ -9441,6 +10248,8 @@ impl Render for SettingsView {
             .flex()
             .items_center()
             .justify_between()
+            // GPUI content masks are rectangular: round the corner-touching fills themselves.
+            .rounded_t(px(corner_radius))
             .bg(rgba(t.sidebar_bg))
             .border_b_1()
             .border_color(rgba(t.border))
@@ -9503,6 +10312,7 @@ impl Render for SettingsView {
                             .id("cap-close")
                             .w(px(46.0))
                             .h_full()
+                            .rounded_tr(px(corner_radius))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -9606,7 +10416,11 @@ impl Render for SettingsView {
             .h_full()
             .flex()
             .flex_col()
+            .rounded(px(corner_radius))
             .overflow_hidden()
+            .when_some(root_border_width, |root, width| {
+                root.border(px(width)).border_color(rgba(root_border_color))
+            })
             .bg(rgba(t.canvas_bg))
             .font_family(SharedString::from(
                 if self.settings.ui_font_family.trim().is_empty() {
@@ -9643,19 +10457,255 @@ mod tests {
     use super::{
         BrushMode, DockSettings, FALLBACK_WIDGET_GLYPH, SettingsPage, WIN_H, WIN_W,
         ai_cli_sign_in_command, brush_to_json, build_backup, build_brush, city_list,
-        civil_from_days, close_spawned_settings_windows, field_cell_hsv, gradient_stop_at,
-        import_backup_into, inspect_backup, location_auto_fill_value, persist_theme_tokens,
-        reorder_gradient_stop, resolve_startup_toggle, safe_backup_path, settings_search,
-        settings_window_options, weather_country_for, widget_glyph, zip_store, zip_unstore,
+        civil_from_days, close_spawned_settings_windows, field_cell_hsv, fit_settings_size,
+        gradient_stop_at, import_backup_into, inspect_backup, location_auto_fill_value,
+        persist_theme_tokens, read_density_override, reorder_gradient_stop, resolve_startup_toggle,
+        safe_backup_path, settings_corner_radius, settings_root_draws_border, settings_search,
+        settings_window_options, weather_country_for, widget_glyph, write_density_override,
+        zip_store, zip_unstore,
     };
     use crate::design::brush::Hsv;
     use crate::design::theme::{
         apply_token_overrides, theme_test_guard, token_overrides_from_json,
     };
     use crate::design::tokens::{Rgba, TokenMap, TokenValue};
-    use gpui::px;
+    use gpui::{WindowBounds, px, size};
     use opentaskbar_core::i18n as loc;
     use serde_json::Map;
+
+    #[test]
+    fn widget_glyphs_avoid_unassigned_codepoints() {
+        // U+E917 has no glyph in Segoe Fluent Icons and rendered as a tofu box.
+        assert_ne!(widget_glyph("countdown"), "\u{E917}");
+        assert_eq!(widget_glyph("countdown"), "\u{E916}");
+    }
+
+    #[test]
+    fn dock_value_steppers_hidden_for_computed_sizes() {
+        use opentaskbar_core::settings::{DockHeightMode, DockWidthMode};
+        assert!(!super::dock_width_has_value(DockWidthMode::Auto));
+        assert!(!super::dock_width_has_value(DockWidthMode::Fill));
+        assert!(super::dock_width_has_value(DockWidthMode::Pixels));
+        assert!(super::dock_width_has_value(DockWidthMode::Percent));
+        assert!(!super::dock_height_has_value(DockHeightMode::Auto));
+        assert!(!super::dock_height_has_value(DockHeightMode::Fill));
+        assert!(super::dock_height_has_value(DockHeightMode::Pixels));
+        assert!(super::dock_height_has_value(DockHeightMode::Percent));
+        assert_eq!(super::unit_suffix(true), "%");
+        assert_eq!(super::unit_suffix(false), " px");
+    }
+
+    #[test]
+    fn dock_stepper_bounds_match_core_validation() {
+        use opentaskbar_core::settings::{DockGapUnit, DockHeightMode, DockWidthMode};
+
+        let (w_px_min, w_px_max, w_px_step) =
+            super::dock_width_stepper_bounds(DockWidthMode::Pixels);
+        let (w_pct_min, w_pct_max, w_pct_step) =
+            super::dock_width_stepper_bounds(DockWidthMode::Percent);
+        assert_eq!((w_px_min, w_px_max, w_px_step), (100, 5000, 10));
+        assert_eq!((w_pct_min, w_pct_max, w_pct_step), (10, 100, 1));
+
+        let (h_px_min, h_px_max, h_px_step) =
+            super::dock_height_stepper_bounds(DockHeightMode::Pixels);
+        let (h_pct_min, h_pct_max, h_pct_step) =
+            super::dock_height_stepper_bounds(DockHeightMode::Percent);
+        assert_eq!((h_px_min, h_px_max, h_px_step), (24, 400, 2));
+        assert_eq!((h_pct_min, h_pct_max, h_pct_step), (2, 25, 1));
+
+        let (g_px_min, g_px_max, g_px_step) =
+            super::dock_top_gap_stepper_bounds(DockGapUnit::Pixels);
+        let (g_pct_min, g_pct_max, g_pct_step) =
+            super::dock_top_gap_stepper_bounds(DockGapUnit::Percent);
+        assert_eq!((g_px_min, g_px_max, g_px_step), (0, 200, 2));
+        assert_eq!((g_pct_min, g_pct_max, g_pct_step), (0, 100, 1));
+
+        let min_valid = DockSettings {
+            dock_width_pixels: w_px_min,
+            dock_width_percent: w_pct_min,
+            dock_height_pixels: h_px_min,
+            dock_height_percent: h_pct_min,
+            dock_top_gap_pixels: g_px_min,
+            dock_top_gap_percent: g_pct_min,
+            ..Default::default()
+        };
+        assert!(
+            min_valid.validate().is_empty(),
+            "{:?}",
+            min_valid.validate()
+        );
+
+        let max_valid = DockSettings {
+            dock_width_pixels: w_px_max,
+            dock_width_percent: w_pct_max,
+            dock_height_pixels: h_px_max,
+            dock_height_percent: h_pct_max,
+            dock_top_gap_pixels: g_px_max,
+            dock_top_gap_percent: g_pct_max,
+            ..Default::default()
+        };
+        assert!(
+            max_valid.validate().is_empty(),
+            "{:?}",
+            max_valid.validate()
+        );
+
+        let below_min = DockSettings {
+            dock_width_pixels: w_px_min - 1,
+            dock_width_percent: w_pct_min - 1,
+            dock_height_pixels: h_px_min - 1,
+            dock_height_percent: h_pct_min - 1,
+            ..Default::default()
+        };
+        let below_errors = below_min.validate();
+        for rule in [
+            "DockWidthPixelsOutOfRange",
+            "DockWidthPercentOutOfRange",
+            "DockHeightPixelsOutOfRange",
+            "DockHeightPercentOutOfRange",
+        ] {
+            assert!(
+                below_errors.contains(&rule),
+                "missing {rule}: {below_errors:?}"
+            );
+        }
+
+        let above_max = DockSettings {
+            dock_width_pixels: w_px_max + 1,
+            dock_width_percent: w_pct_max + 1,
+            dock_height_pixels: h_px_max + 1,
+            dock_height_percent: h_pct_max + 1,
+            dock_top_gap_pixels: g_px_max + 1,
+            dock_top_gap_percent: g_pct_max + 1,
+            ..Default::default()
+        };
+        let above_errors = above_max.validate();
+        for rule in [
+            "DockWidthPixelsOutOfRange",
+            "DockWidthPercentOutOfRange",
+            "DockHeightPixelsOutOfRange",
+            "DockHeightPercentOutOfRange",
+            "DockTopGapPixelsOutOfRange",
+            "DockTopGapPercentOutOfRange",
+        ] {
+            assert!(
+                above_errors.contains(&rule),
+                "missing {rule}: {above_errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn weather_fallback_city_follows_language() {
+        assert_eq!(super::weather_fallback_city_for("tr-TR"), "İstanbul");
+        assert_eq!(super::weather_fallback_city_for("en-US"), "Istanbul");
+    }
+
+    #[test]
+    fn short_clock_format_label_drops_example() {
+        assert_eq!(
+            super::short_clock_format_label("24 saat (14:32)"),
+            "24 saat"
+        );
+        assert_eq!(
+            super::short_clock_format_label("12-hour (02:32 PM)"),
+            "12-hour"
+        );
+        assert_eq!(super::short_clock_format_label("24h"), "24h");
+    }
+
+    #[test]
+    fn clock_weekday_redundant_only_when_date_contains_it() {
+        assert!(super::clock_weekday_is_redundant("Cum 27 Kas", "Cum"));
+        assert!(super::clock_weekday_is_redundant("Fri 27 Nov", "Fri"));
+        assert!(!super::clock_weekday_is_redundant("27 Kas", "Cum"));
+        assert!(!super::clock_weekday_is_redundant(
+            "Cumartesi 28 Kas",
+            "Cum"
+        ));
+    }
+
+    #[test]
+    fn widget_density_override_uses_canonical_pascal_case_keys() {
+        use opentaskbar_core::settings::WidgetDensityMode;
+
+        let mut settings = DockSettings::default();
+        write_density_override(&mut settings, "Clock", WidgetDensityMode::Compact);
+        write_density_override(&mut settings, "SystemStats", WidgetDensityMode::Full);
+        assert_eq!(
+            settings.widget_density_overrides.get("Clock"),
+            Some(&WidgetDensityMode::Compact)
+        );
+        assert_eq!(
+            settings.widget_density_overrides.get("SystemStats"),
+            Some(&WidgetDensityMode::Full)
+        );
+        assert_eq!(
+            read_density_override(&settings, "Clock"),
+            WidgetDensityMode::Compact
+        );
+        assert_eq!(
+            read_density_override(&settings, "SystemStats"),
+            WidgetDensityMode::Full
+        );
+
+        // Legacy lowercase keys still read cleanly and are replaced on write.
+        settings
+            .widget_density_overrides
+            .insert("weather".to_owned(), WidgetDensityMode::Compact);
+        assert_eq!(
+            read_density_override(&settings, "Weather"),
+            WidgetDensityMode::Compact
+        );
+        write_density_override(&mut settings, "Weather", WidgetDensityMode::Auto);
+        assert!(!settings.widget_density_overrides.contains_key("weather"));
+        assert!(!settings.widget_density_overrides.contains_key("Weather"));
+    }
+
+    #[test]
+    fn settings_window_is_transparent_and_fits_small_work_areas() {
+        let options = settings_window_options(None);
+        assert!(matches!(
+            options.window_background,
+            gpui::WindowBackgroundAppearance::Transparent
+        ));
+
+        // Unknown work area keeps the fixed dialog size.
+        assert_eq!(fit_settings_size(None), size(px(WIN_W), px(WIN_H)));
+        // Large work area: unchanged.
+        assert_eq!(
+            fit_settings_size(Some(size(px(2560.0), px(1400.0)))),
+            size(px(WIN_W), px(WIN_H))
+        );
+        // 1080p at 150% with a 48 px taskbar ≈ 1280×688 DIP: the height must shrink.
+        let fitted = fit_settings_size(Some(size(px(1280.0), px(688.0))));
+        assert_eq!(fitted.width, px(WIN_W));
+        assert!(fitted.height <= px(688.0 - 32.0));
+        // Pathologically tiny work areas never produce a window larger than the work area.
+        let tiny = fit_settings_size(Some(size(px(300.0), px(200.0))));
+        assert!(tiny.width <= px(300.0) && tiny.height <= px(200.0));
+        assert!(tiny.width > px(0.0) && tiny.height > px(0.0));
+
+        // A clamped initial size lowers the minimum size with it (min == initial).
+        let bounds = gpui::Bounds {
+            origin: gpui::point(px(0.0), px(0.0)),
+            size: fitted,
+        };
+        let clamped = settings_window_options(Some(WindowBounds::Windowed(bounds)));
+        let minimum = clamped.window_min_size.expect("minimum size");
+        assert_eq!(minimum, fitted);
+        assert!(!clamped.is_resizable);
+    }
+
+    #[test]
+    fn settings_chrome_draws_exactly_one_rounded_border() {
+        assert_eq!(settings_corner_radius(true), 8.0);
+        assert_eq!(settings_corner_radius(false), 0.0);
+        // Active glass rim → GPUI root draws no border (no double outline).
+        assert!(!settings_root_draws_border(true));
+        // Solid / True Black / None, or Glass with OLED glow reduction → GPUI border.
+        assert!(settings_root_draws_border(false));
+    }
 
     #[test]
     fn every_catalog_widget_has_a_non_fallback_glyph() {
@@ -10114,10 +11164,21 @@ mod tests {
 /// Window options for the Settings dialog, kept as a function so the fixed-size/resize contract
 /// can be tested directly instead of by scanning this file's source text.
 fn settings_window_options(window_bounds: Option<WindowBounds>) -> WindowOptions {
+    // Fixed dialog: min == initial size. The initial size may have been clamped below
+    // WIN_W×WIN_H to fit a small work area, so the minimum never exceeds it.
+    let min_size = match window_bounds {
+        Some(WindowBounds::Windowed(bounds)) => size(
+            bounds.size.width.min(px(WIN_W)),
+            bounds.size.height.min(px(WIN_H)),
+        ),
+        _ => size(px(WIN_W), px(WIN_H)),
+    };
     WindowOptions {
         window_bounds,
-        // Fixed dialog: min == initial size and resizing (edge/corner handle) is off.
-        window_min_size: Some(size(px(WIN_W), px(WIN_H))),
+        window_min_size: Some(min_size),
+        // Transparent so the anti-aliased rounded corners show the desktop, not a black square.
+        window_background: WindowBackgroundAppearance::Transparent,
+        // Resizing (edge/corner handle) stays off.
         is_resizable: false,
         titlebar: Some(TitlebarOptions {
             title: Some(loc::t("SettingsTitle").into()),
@@ -10130,6 +11191,11 @@ fn settings_window_options(window_bounds: Option<WindowBounds>) -> WindowOptions
 
 #[allow(clippy::items_after_test_module)]
 pub fn run_settings_window() {
+    // Single-instance Settings even for external launches: a second `--settings` process
+    // focuses the existing window and exits. The lock lives until this function returns.
+    let Some(_instance_lock) = window_chrome::acquire_settings_instance() else {
+        return;
+    };
     let loaded = settings::load_from(&settings::settings_path());
     Application::new()
         .with_assets(fonts::EmbeddedAssets)
@@ -10141,7 +11207,16 @@ pub fn run_settings_window() {
                 KeyBinding::new("escape", CloseWidgetPanel, None),
                 KeyBinding::new("f9", ToggleFlyoutPreview, None),
             ]);
-            let bounds = Bounds::centered(None, size(px(WIN_W), px(WIN_H)), cx);
+            // Fit the fixed dialog into the primary work area (high DPI on small screens) and
+            // center it there instead of on the full display (which ignores the taskbar).
+            let work = cx
+                .primary_display()
+                .and_then(|display| window_chrome::primary_work_area(display.bounds()));
+            let win_size = fit_settings_size(work.map(|w| w.size));
+            let bounds = match work {
+                Some(work) => Bounds::centered_at(work.center(), win_size),
+                None => Bounds::centered(None, win_size, cx),
+            };
             let _ = cx.open_window(
                 settings_window_options(Some(WindowBounds::Windowed(bounds))),
                 |window, cx| cx.new(|cx| SettingsView::new(loaded.clone(), window, cx)),

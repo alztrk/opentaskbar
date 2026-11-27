@@ -24,6 +24,14 @@ use crate::design::{self, fonts, gpui_rgba};
 const PANEL_RADIUS: f32 = 14.0;
 const CONTROL_RADIUS: f32 = 8.0;
 const ROW_INSET: f32 = 16.0;
+/// Shared width of right-column controls (dropdown triggers, steppers) so a card's
+/// controls form one aligned vertical rail.
+const CONTROL_RAIL_WIDTH: f32 = 164.0;
+/// Fixed, right-aligned slider readout column; wide enough for "Otomatik" / "%132" so every
+/// slider track in a card starts and ends at the same x.
+const SLIDER_VALUE_WIDTH: f32 = 76.0;
+// Stepper = 2 x 28px buttons + 46px readout + gaps/padding/border; it must fit the rail.
+const _: () = assert!(CONTROL_RAIL_WIDTH >= 28.0 * 2.0 + 46.0 + 8.0 + 4.0 + 2.0);
 
 /// Rows kept alive in a virtualized searchable dropdown at once. A 10 000-city
 /// list costs ~12 row elements per keystroke instead of 10 000.
@@ -96,40 +104,76 @@ impl UiTheme {
         }
     }
 
-    /// Settings window theme: opaque in Solid/None modes; in Glass mode lets the EXACT same
-    /// unified Clear Crystal `SpatialGlassHost` shine cleanly across the whole window (zero
-    /// opaque titlebar/sidebar slabs) with crisp glass cards and high-contrast ink.
+    /// Settings window theme: opaque in Solid mode, pure black in TrueBlack (OLED) mode,
+    /// transparent canvas in None mode, and in Glass mode lets the unified Clear Crystal
+    /// `SpatialGlassHost` shine cleanly across the whole window.
     pub fn for_settings(is_dark: bool, glass_mode: bool) -> Self {
-        let mut t = Self::new(is_dark);
-        if !glass_mode {
-            return t;
-        }
-        if is_dark {
-            t.canvas_bg = 0x0000_0000;
-            t.sidebar_bg = 0x0000_001e;
-            t.surface = 0xffff_ff0f;
-            t.surface_muted = 0xffff_ff18;
-            t.surface_hover = 0xffff_ff28;
-            t.popover_bg = 0x1216_20f2;
-            t.border = 0xffff_ff26;
-            t.separator = 0xffff_ff18;
-            t.text_primary = 0xffff_ffff;
-            t.text_secondary = 0xe2e8_f0dc;
-            t.switch_off = 0xffff_ff36;
+        let bg = if glass_mode {
+            opentaskbar_core::settings::SurfaceBackground::Glass
         } else {
-            t.canvas_bg = 0x0000_0000;
-            t.sidebar_bg = 0xffff_ff28;
-            t.surface = 0xffff_ff4c;
-            t.surface_muted = 0x0000_0010;
-            t.surface_hover = 0x0000_001b;
-            t.popover_bg = 0xf8fa_fcf5;
-            t.border = 0x0000_001f;
-            t.separator = 0x0000_0015;
-            t.text_primary = 0x0f17_2aff;
-            t.text_secondary = 0x2632_45eb;
-            t.switch_off = 0x0000_002e;
+            opentaskbar_core::settings::SurfaceBackground::Solid
+        };
+        Self::for_settings_background(is_dark, bg)
+    }
+
+    pub fn for_settings_background(
+        is_dark: bool,
+        background: opentaskbar_core::settings::SurfaceBackground,
+    ) -> Self {
+        use opentaskbar_core::settings::SurfaceBackground;
+        match background {
+            SurfaceBackground::Solid => Self::new(is_dark),
+            SurfaceBackground::TrueBlack => {
+                let mut t = Self::new(true);
+                t.canvas_bg = 0x0000_00ff;
+                t.sidebar_bg = 0x0000_00ff;
+                t.surface = 0x0c0c_0eff;
+                t.surface_muted = 0x1414_18ff;
+                t.surface_hover = 0x1e1e_24ff;
+                t.popover_bg = 0x0a0a_0cff;
+                t.border = 0xffff_ff18;
+                t.separator = 0xffff_ff14;
+                t.text_primary = 0xf4f4_f5ff;
+                t.text_secondary = 0xa1a1_aaff;
+                t.switch_off = 0x2a2a_32ff;
+                t
+            }
+            SurfaceBackground::None => {
+                let mut t = Self::new(is_dark);
+                t.canvas_bg = 0x0000_0000;
+                t.sidebar_bg = if is_dark { 0x0000_0028 } else { 0xffff_ff28 };
+                t
+            }
+            SurfaceBackground::Glass => {
+                let mut t = Self::new(is_dark);
+                if is_dark {
+                    t.canvas_bg = 0x0000_0000;
+                    t.sidebar_bg = 0x0000_001e;
+                    t.surface = 0xffff_ff0f;
+                    t.surface_muted = 0xffff_ff18;
+                    t.surface_hover = 0xffff_ff28;
+                    t.popover_bg = 0x1216_20f2;
+                    t.border = 0xffff_ff26;
+                    t.separator = 0xffff_ff18;
+                    t.text_primary = 0xffff_ffff;
+                    t.text_secondary = 0xe2e8_f0dc;
+                    t.switch_off = 0xffff_ff36;
+                } else {
+                    t.canvas_bg = 0x0000_0000;
+                    t.sidebar_bg = 0xffff_ff28;
+                    t.surface = 0xffff_ff4c;
+                    t.surface_muted = 0x0000_0010;
+                    t.surface_hover = 0x0000_001b;
+                    t.popover_bg = 0xf8fa_fcf5;
+                    t.border = 0x0000_001f;
+                    t.separator = 0x0000_0015;
+                    t.text_primary = 0x0f17_2aff;
+                    t.text_secondary = 0x2632_45eb;
+                    t.switch_off = 0x0000_002e;
+                }
+                t
+            }
         }
-        t
     }
 }
 
@@ -356,6 +400,7 @@ pub fn ios_switch(
         theme.switch_off
     };
     let thumb_left = if checked { px(18.0) } else { px(2.0) };
+    let thumb_bg = switch_thumb_color(theme, checked);
     // Checked switches already use `theme.accent` as their fill, so keyboard focus uses a
     // high-contrast outline (`text_primary`) to stay visible in both checked and unchecked states.
     let focus_border = if checked {
@@ -385,9 +430,19 @@ pub fn ios_switch(
                 .w(px(16.0))
                 .h(px(16.0))
                 .rounded(px(8.0))
-                .bg(rgba(theme.switch_thumb))
+                .bg(rgba(thumb_bg))
                 .ml(thumb_left - px(1.0)),
         )
+}
+
+/// ON switches keep a crisp opaque thumb; OFF switches mute it (78% alpha) so the
+/// unchecked state reads as resting instead of competing with checked toggles.
+pub fn switch_thumb_color(theme: &UiTheme, checked: bool) -> u32 {
+    if checked {
+        theme.switch_thumb
+    } else {
+        (theme.switch_thumb & 0xffff_ff00) | 0xc8
+    }
 }
 
 /// Compact badge pill.
@@ -423,6 +478,22 @@ pub fn button(
     variant: ButtonVariant,
     on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
+    button_with_state(id, theme, label, variant, true, on_click)
+}
+
+/// Opacity applied to a disabled button; it also drops hover, focus and click handling.
+pub const DISABLED_OPACITY: f32 = 0.45;
+
+/// Same as [`button`], but `enabled == false` renders a dimmed, non-interactive button
+/// (no pointer cursor, hover, keyboard focus or click handler).
+pub fn button_with_state(
+    id: impl Into<gpui::ElementId>,
+    theme: &UiTheme,
+    label: impl Into<SharedString>,
+    variant: ButtonVariant,
+    enabled: bool,
+    on_click: impl Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
     let (bg, hover_bg, fg, border) = match variant {
         ButtonVariant::Primary => (
             theme.accent,
@@ -455,16 +526,17 @@ pub fn button(
         .text_size(px(fonts::scaled_size(12.0)))
         .font_weight(gpui::FontWeight::MEDIUM)
         .text_color(rgba(fg))
-        .cursor_pointer()
         .flex_shrink_0()
-        .tab_index(0)
-        .focus({
+        .when(!enabled, |b| b.opacity(DISABLED_OPACITY).cursor_default())
+        .when(enabled, move |b| {
             let focus = theme.text_primary;
-            move |style| style.border_color(rgba(focus))
+            b.cursor_pointer()
+                .tab_index(0)
+                .focus(move |style| style.border_color(rgba(focus)))
+                .hover(move |s| s.bg(rgba(hover_bg)))
+                .active(|s| s.opacity(0.84))
+                .on_click(on_click)
         })
-        .hover(move |s| s.bg(rgba(hover_bg)))
-        .active(|s| s.opacity(0.84))
-        .on_click(on_click)
         .child(label.into())
 }
 
@@ -747,7 +819,7 @@ pub fn dropdown_labeled(
 
     let trigger = div()
         .id(SharedString::from(format!("dd-trig-{id}")))
-        .min_w(px(148.0))
+        .min_w(px(CONTROL_RAIL_WIDTH))
         .h(px(32.0))
         .px(px(11.0))
         .rounded(px(CONTROL_RADIUS))
@@ -1254,7 +1326,7 @@ pub fn searchable_dropdown(
     let toggle = on_toggle.clone();
     let trigger = div()
         .id(SharedString::from(format!("sdd-trig-{id}")))
-        .min_w(px(148.0))
+        .min_w(px(CONTROL_RAIL_WIDTH))
         .h(px(32.0))
         .px(px(11.0))
         .rounded(px(CONTROL_RADIUS))
@@ -1674,10 +1746,12 @@ where
         )
         .child(
             div()
-                .min_w(px(46.0))
+                .w(px(SLIDER_VALUE_WIDTH))
+                .flex_shrink_0()
                 .flex()
                 .items_center()
                 .justify_end()
+                .whitespace_nowrap()
                 .text_size(px(fonts::scaled_size(12.0)))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgba(theme.text_primary))
@@ -1695,8 +1769,10 @@ pub fn stepper(
 ) -> Div {
     let hover = theme.surface_hover;
     div()
+        .min_w(px(CONTROL_RAIL_WIDTH))
         .flex()
         .items_center()
+        .justify_between()
         .gap(px(4.0))
         .p(px(2.0))
         .rounded(px(8.0))
@@ -1730,10 +1806,12 @@ pub fn stepper(
         )
         .child(
             div()
+                .flex_1()
                 .min_w(px(46.0))
                 .flex()
                 .items_center()
                 .justify_center()
+                .whitespace_nowrap()
                 .text_size(px(fonts::scaled_size(11.5)))
                 .font_weight(gpui::FontWeight::SEMIBOLD)
                 .text_color(rgba(theme.text_primary))
@@ -1797,6 +1875,7 @@ pub fn sidebar_nav_item(
 
     let mut row = div()
         .id(id)
+        .relative()
         .w_full()
         .flex()
         .items_center()
@@ -1805,12 +1884,14 @@ pub fn sidebar_nav_item(
         .min_h(px(38.0))
         .rounded(px(CONTROL_RADIUS))
         .border_1()
-        .border_color(rgba(if active { theme.accent_soft } else { 0 }))
+        .border_color(rgba(0))
         .bg(rgba(bg))
         .tab_index(0)
         .focus({
-            let accent = theme.accent;
-            move |style| style.border_color(rgba(accent))
+            // Subtle keyboard ring: a clicked (and therefore focused) active tab must not look
+            // stuck in a bright focus state; the accent pill carries the selection instead.
+            let ring = theme.accent_soft;
+            move |style| style.border_color(rgba(ring))
         })
         .cursor_pointer()
         .hover(move |s| s.bg(rgba(hover)))
@@ -1838,6 +1919,18 @@ pub fn sidebar_nav_item(
 
     if let Some(cnt) = count_badge {
         row = row.child(badge(theme, cnt, active));
+    }
+    if active {
+        row = row.child(
+            div()
+                .absolute()
+                .left(px(1.0))
+                .top(px(11.0))
+                .bottom(px(11.0))
+                .w(px(3.0))
+                .rounded(px(1.5))
+                .bg(rgba(theme.accent)),
+        );
     }
     row
 }
@@ -1982,5 +2075,31 @@ mod tests {
         state.clear();
         assert_eq!(state.query, "");
         assert_eq!(state.active, 0);
+    }
+
+    #[test]
+    fn switch_thumb_is_muted_only_when_off() {
+        let theme = super::UiTheme::new(true);
+        assert_eq!(super::switch_thumb_color(&theme, true), theme.switch_thumb);
+        let off = super::switch_thumb_color(&theme, false);
+        assert_ne!(off, theme.switch_thumb);
+        assert_eq!(off & 0xffff_ff00, theme.switch_thumb & 0xffff_ff00);
+        assert!((off & 0xff) < (theme.switch_thumb & 0xff));
+    }
+
+    #[test]
+    fn settings_theme_distinguishes_glass_solid_none_and_true_black() {
+        use super::UiTheme;
+        use opentaskbar_core::settings::SurfaceBackground;
+        let glass = UiTheme::for_settings_background(true, SurfaceBackground::Glass);
+        let solid = UiTheme::for_settings_background(false, SurfaceBackground::Solid);
+        let none = UiTheme::for_settings_background(true, SurfaceBackground::None);
+        let black = UiTheme::for_settings_background(false, SurfaceBackground::TrueBlack);
+        assert_eq!(glass.canvas_bg, 0x0000_0000);
+        assert_ne!(solid.canvas_bg & 0xff, 0);
+        assert_eq!(none.canvas_bg, 0x0000_0000);
+        assert_eq!(black.canvas_bg, 0x0000_00ff);
+        assert_eq!(black.sidebar_bg, 0x0000_00ff);
+        assert_eq!(black.text_primary, 0xf4f4_f5ff);
     }
 }
