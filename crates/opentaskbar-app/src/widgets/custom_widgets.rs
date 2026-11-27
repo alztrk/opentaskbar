@@ -1081,6 +1081,43 @@ pub fn icon_for(chip: &CustomChip, id: &str, settings: &DockSettings) -> WidgetI
 mod tests {
     use super::*;
 
+    static TEST_UNIQUE: AtomicU64 = AtomicU64::new(0);
+
+    /// Unique per invocation, even when several test binaries run at once.
+    fn unique_test_tag(tag: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        format!(
+            "{tag}-{}-{}-{nanos}",
+            std::process::id(),
+            TEST_UNIQUE.fetch_add(1, Ordering::Relaxed)
+        )
+    }
+
+    /// Private `%TEMP%` directory for a test; removed on drop (also after a panic).
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(tag: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("otb-{tag}"));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn manifest_parses_and_clamps() {
         let value: Value = serde_json::from_str(
@@ -1164,31 +1201,34 @@ mod tests {
 
     #[test]
     fn sidecar_secret_handshake() {
-        const SECRET_NAME: &str = "widget-test-secret";
+        let _guard = crate::design::theme::theme_test_guard();
+        let tag = unique_test_tag("secret");
+        let secret_name = format!("widget-test-secret-{tag}");
         assert!(crate::widgets::telemetry::save_dpapi_secret(
-            SECRET_NAME,
+            &secret_name,
             "secret-value"
         ));
-        let dir = std::env::temp_dir().join(format!("otb-secret-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("secret.ps1");
+        let dir = TestDir::new(&tag);
+        let script = dir.path().join("secret.ps1");
         std::fs::write(
             &script,
-            r#"while (($line = [Console]::In.ReadLine()) -ne $null) {
+            format!(
+                r#"while (($line = [Console]::In.ReadLine()) -ne $null) {{
     $msg = $line | ConvertFrom-Json
-    if ($msg.cmd -eq 'poll') {
-        '{"cmd":"secret","name":"widget-test-secret","seq":99,"protocol":1}'
+    if ($msg.cmd -eq 'poll') {{
+        '{{"cmd":"secret","name":"{secret_name}","seq":99,"protocol":1}}'
         $answer = [Console]::In.ReadLine() | ConvertFrom-Json
-        '{"protocol":1,"seq":' + $msg.seq + ',"chip":{"label":"S","value":"' + $answer.value + '"}}'
-    }
-}
-"#,
+        '{{"protocol":1,"seq":' + $msg.seq + ',"chip":{{"label":"S","value":"' + $answer.value + '"}}}}'
+    }}
+}}
+"#
+            ),
         )
         .unwrap();
+        let slug = format!("secret-{tag}");
         let spec = CustomWidgetSpec {
-            id: "custom:secret-test".to_owned(),
-            slug: "secret-test".to_owned(),
+            id: format!("custom:{slug}"),
+            slug,
             name: "Secret".to_owned(),
             names: HashMap::new(),
             category: "Productivity",
@@ -1201,7 +1241,7 @@ mod tests {
                 "-File".to_owned(),
                 script.to_string_lossy().into_owned(),
             ],
-            root: dir.clone(),
+            root: dir.path().to_path_buf(),
             manifest_hash: "test".to_owned(),
         };
         let id = spec.id.clone();
@@ -1211,8 +1251,7 @@ mod tests {
         if let Ok(mut guard) = state.state.lock() {
             terminate(&mut guard);
         }
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = crate::widgets::telemetry::clear_dpapi_secret(SECRET_NAME);
+        let _ = crate::widgets::telemetry::clear_dpapi_secret(&secret_name);
     }
 
     #[test]
@@ -1224,10 +1263,9 @@ mod tests {
 
     #[test]
     fn sidecar_process_round_trip() {
-        let dir = std::env::temp_dir().join(format!("otb-sidecar-test-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let script = dir.join("sidecar.ps1");
+        let _guard = crate::design::theme::theme_test_guard();
+        let dir = TestDir::new(&unique_test_tag("sidecar"));
+        let script = dir.path().join("sidecar.ps1");
         std::fs::write(
             &script,
             r#"while (($line = [Console]::In.ReadLine()) -ne $null) {
@@ -1242,9 +1280,10 @@ mod tests {
         )
         .unwrap();
 
+        let slug = format!("smoke-{}", unique_test_tag("widget"));
         let spec = CustomWidgetSpec {
-            id: "custom:smoke-test".to_owned(),
-            slug: "smoke-test".to_owned(),
+            id: format!("custom:{slug}"),
+            slug,
             name: "Smoke".to_owned(),
             names: HashMap::new(),
             category: "Productivity",
@@ -1262,7 +1301,7 @@ mod tests {
                 "-File".to_owned(),
                 script.to_string_lossy().into_owned(),
             ],
-            root: dir.clone(),
+            root: dir.path().to_path_buf(),
             manifest_hash: "test".to_owned(),
         };
         let id = spec.id.clone();
@@ -1276,6 +1315,5 @@ mod tests {
         if let Ok(mut guard) = state.state.lock() {
             terminate(&mut guard);
         }
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

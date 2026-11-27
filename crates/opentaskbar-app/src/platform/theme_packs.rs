@@ -1450,6 +1450,8 @@ mod parity_tests {
 
     #[test]
     fn built_in_ids_and_install_manifest_count() {
+        // Shares the bundled theme files with the widget-pack/i18n tests.
+        let _guard = crate::design::theme::theme_test_guard();
         assert_eq!(built_in_ids().len(), 6);
         assert!(is_built_in_theme("Tokyo-Night"));
         assert!(!is_built_in_theme("unknown"));
@@ -1507,6 +1509,7 @@ mod parity_tests {
 
     #[test]
     fn widget_override_is_typed() {
+        let _guard = crate::design::theme::theme_test_guard();
         let pack = ThemePack::load(
             &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../resources/themes/nord"),
         )
