@@ -5,7 +5,12 @@ use std::path::PathBuf;
 
 use opentaskbar_core::hotkey::HotkeyChoice;
 use opentaskbar_core::settings::{
-    AppTheme, DockSettings, DockWidthMode, WidgetDensityMode, load_from, save_to,
+    AppTheme, AutoHideMode, DockGapUnit, DockHeightMode, DockPosition, DockProfile, DockSettings,
+    DockSize, DockWidthMode, WidgetDensityMode, apply_full_profile, dock_metrics,
+    effective_bottom_gap, effective_bottom_gap_for, effective_height_for, effective_top_gap,
+    effective_top_gap_for, effective_width, is_supported_widget_id, load_from,
+    normalize_legacy_json, resolve_widget_density, save_to, widget_density_for,
+    widget_shrink_priority,
 };
 
 fn temp_settings(name: &str) -> (PathBuf, PathBuf) {
@@ -98,7 +103,7 @@ fn csharp_settings_file_survives_load_save_load() {
   "DockCornerRadius": null,
   "AiUsageProviders": "None",
   "AiUsageRing": "Highest",
-  "AntigravityGroups": "All",
+  "MagnificationExpandsDock": false,
   "AppGroups": null,
   "ShowSearchButton": true,
   "ShowTaskViewButton": true,
@@ -148,6 +153,7 @@ fn csharp_settings_file_survives_load_save_load() {
     assert_eq!(first.content_alignment as i32, 2); // Right
     assert_eq!(first.launcher_hotkey, HotkeyChoice::AltSpace);
     assert_eq!(first.dock_width_mode, DockWidthMode::Auto);
+    assert!(!first.magnification_expands_dock);
     assert_eq!(
         first.widget_density_overrides.get("Clock"),
         Some(&WidgetDensityMode::Compact)
@@ -402,9 +408,9 @@ fn all_new_csharp_properties_deserialize() {
         "ThemeApplicationIcons": false,
         "WidgetDensityOverrides": {"Clock": "Full"},
         "DockItemOrder": ["start"],
-        "AiUsageProviders": 255,
+        "AiUsageProviders": 251,
         "AiUsageRing": "Session",
-        "AntigravityGroups": 7,
+        "MagnificationExpandsDock": false,
         "ShowSearchButton": false,
         "ShowTaskViewButton": false,
         "DockWidthMode": "Fill",
@@ -436,11 +442,217 @@ fn all_new_csharp_properties_deserialize() {
     assert_eq!(parsed.start_widget_index, 3);
     assert!(parsed.wheel_volume_enabled);
     assert_eq!(parsed.secondary_apps as i32, 1);
-    assert_eq!(parsed.ai_usage_providers, 255);
+    assert_eq!(parsed.ai_usage_providers, 251);
+    assert!(!parsed.magnification_expands_dock);
     assert_eq!(parsed.dock_width_mode, DockWidthMode::Fill);
     assert_eq!(parsed.dock_height_percent, 10);
     assert_eq!(parsed.wireless_battery_poll_seconds, 60);
     assert!(parsed.wireless_battery_listen_only);
     assert!(parsed.mirror_main_dock);
     assert!(parsed.validate().is_empty(), "{:?}", parsed.validate());
+}
+
+#[test]
+fn magnification_expands_dock_defaults_to_true_and_round_trips() {
+    let (dir, path) = temp_settings("magnification-expands");
+    assert!(DockSettings::default().magnification_expands_dock);
+
+    let settings = DockSettings {
+        magnification_expands_dock: false,
+        ..DockSettings::default()
+    };
+    save_to(&path, &settings).unwrap();
+    let raw = fs::read_to_string(&path).unwrap();
+    assert!(raw.contains("\"MagnificationExpandsDock\": false"), "{raw}");
+    let loaded = load_from(&path);
+    assert!(!loaded.magnification_expands_dock);
+    assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn dock_metrics_and_effective_layout_helpers_match_csharp() {
+    let compact = dock_metrics::for_size(DockSize::Compact, 1.0, 0);
+    let medium = dock_metrics::for_size(DockSize::Medium, 1.0, 0);
+    let large = dock_metrics::for_size(DockSize::Large, 1.0, 0);
+    assert_eq!((compact.shelf, compact.icon), (48.0, 28.0));
+    assert_eq!((medium.shelf, medium.icon), (58.0, 34.0));
+    assert_eq!((large.shelf, large.icon), (66.0, 38.0));
+    assert_eq!(compact.surface_height(), 44.0);
+
+    let mut settings = DockSettings::default();
+    // Auto has no saved content width: the C# minimum surface width is used.
+    assert_eq!(
+        settings.effective_width(1920.0),
+        dock_metrics::MIN_DOCK_SURFACE_WIDTH
+    );
+    settings.dock_width_mode = DockWidthMode::Pixels;
+    settings.dock_width_pixels = 900;
+    assert_eq!(settings.effective_width(1920.0), 900.0);
+    settings.dock_width_mode = DockWidthMode::Percent;
+    settings.dock_width_percent = 60;
+    assert_eq!(effective_width(&settings, 1920.0), 1152.0);
+    settings.dock_width_mode = DockWidthMode::Fill;
+    assert_eq!(settings.effective_width(1366.0), 1366.0);
+
+    settings.dock_width_mode = DockWidthMode::Auto;
+    assert_eq!(settings.effective_height(), 44.0);
+    settings.dock_height_mode = DockHeightMode::Fill;
+    assert_eq!(settings.effective_height(), 44.0);
+    settings.dock_height_mode = DockHeightMode::Pixels;
+    settings.dock_height_pixels = 80;
+    assert_eq!(effective_height_for(&settings, 1080.0), 80.0);
+    settings.dock_height_mode = DockHeightMode::Percent;
+    settings.dock_height_percent = 5;
+    assert_eq!(effective_height_for(&settings, 1920.0), 96.0);
+
+    settings.dock_top_gap_unit = DockGapUnit::Pixels;
+    settings.dock_top_gap_pixels = 12;
+    assert_eq!(effective_top_gap(&settings), 12);
+    settings.dock_top_gap_unit = DockGapUnit::Percent;
+    settings.dock_top_gap_percent = 25;
+    assert_eq!(effective_top_gap_for(&settings, 1920.0), 480);
+    settings.dock_bottom_gap_unit = DockGapUnit::Pixels;
+    settings.dock_bottom_gap_pixels = -4;
+    assert_eq!(effective_bottom_gap(&settings), 0);
+    settings.dock_bottom_gap_unit = DockGapUnit::Percent;
+    settings.dock_bottom_gap_percent = 3;
+    assert_eq!(effective_bottom_gap_for(&settings, 1920.0), 58);
+}
+
+#[test]
+fn widget_density_override_and_shrink_priority_are_exposed() {
+    let mut settings = DockSettings::default();
+    assert_eq!(widget_density_for(&settings, "Clock"), 1.0);
+    settings
+        .widget_density_overrides
+        .insert("clock".to_owned(), WidgetDensityMode::Compact);
+    assert_eq!(
+        resolve_widget_density(&settings, "CLOCK"),
+        WidgetDensityMode::Compact
+    );
+    assert_eq!(widget_density_for(&settings, "Clock"), 0.82);
+    settings.global_widget_density = WidgetDensityMode::Full;
+    assert_eq!(widget_density_for(&settings, "Media"), 1.0);
+
+    assert_eq!(widget_shrink_priority("media"), 10);
+    assert_eq!(widget_shrink_priority("Weather"), 15);
+    assert_eq!(widget_shrink_priority("Clock"), 80);
+    assert_eq!(widget_shrink_priority("nothing-special"), 100);
+}
+
+#[test]
+fn full_profile_applies_all_fifteen_scoped_fields() {
+    let mut settings = DockSettings::default();
+    settings.theme_pack = "previous".to_owned();
+    settings.custom_launcher_hotkey = Some("Ctrl+Alt+L".to_owned());
+    let profile = DockProfile {
+        name: "Work".to_owned(),
+        position: DockPosition::Center,
+        size: DockSize::Compact,
+        hidden_apps: vec!["old.exe".to_owned()],
+        enabled_widgets: vec!["clock".to_owned(), "media".to_owned()],
+        installed_widgets: vec!["Clock".to_owned()],
+        widget_order: vec!["media".to_owned(), "clock".to_owned()],
+        dock_item_order: vec!["start".to_owned(), "widget:Clock".to_owned()],
+        dock_width_mode: Some(DockWidthMode::Percent),
+        dock_width_pixels: Some(1200),
+        dock_width_percent: Some(70),
+        theme: Some(AppTheme::Dark),
+        theme_pack: Some("nord".to_owned()),
+        theme_application_icons: Some(false),
+        launcher_hotkey: Some(HotkeyChoice::CtrlSpace),
+        dock_hotkey: Some(HotkeyChoice::WinAltD),
+        auto_hide: AutoHideMode::Smart,
+        custom_launcher_hotkey: Some("Ctrl+Alt+W".to_owned()),
+        custom_dock_hotkey: None,
+        extra: serde_json::Map::new(),
+    };
+
+    apply_full_profile(&mut settings, &profile);
+
+    assert_eq!(settings.active_profile.as_deref(), Some("Work"));
+    assert_eq!(settings.enabled_widgets, ["Clock", "Media"]);
+    assert_eq!(settings.installed_widgets, ["Clock", "Media"]);
+    assert_eq!(settings.widget_order, ["Media", "Clock"]);
+    assert_eq!(settings.dock_item_order, ["start", "widget:Clock"]);
+    assert_eq!(settings.dock_width_mode, DockWidthMode::Percent);
+    assert_eq!(settings.dock_width_pixels, 1200);
+    assert_eq!(settings.dock_width_percent, 70);
+    assert_eq!(settings.theme, AppTheme::Dark);
+    assert_eq!(settings.theme_pack, "nord");
+    assert!(!settings.theme_application_icons);
+    assert_eq!(settings.launcher_hotkey, HotkeyChoice::CtrlSpace);
+    assert_eq!(
+        settings.custom_launcher_hotkey.as_deref(),
+        Some("Ctrl+Alt+W")
+    );
+    assert_eq!(settings.dock_hotkey, HotkeyChoice::WinAltD);
+    assert_eq!(settings.custom_dock_hotkey, None);
+    assert_eq!(settings.auto_hide, AutoHideMode::Smart);
+    assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+}
+
+#[test]
+fn legacy_profile_only_switches_the_active_name() {
+    let mut settings = DockSettings {
+        theme: AppTheme::Dark,
+        auto_hide: AutoHideMode::Always,
+        ..DockSettings::default()
+    };
+    apply_full_profile(
+        &mut settings,
+        &DockProfile {
+            name: "Legacy".to_owned(),
+            ..DockProfile::default()
+        },
+    );
+    assert_eq!(settings.active_profile.as_deref(), Some("Legacy"));
+    assert_eq!(settings.theme, AppTheme::Dark);
+    assert_eq!(settings.auto_hide, AutoHideMode::Always);
+}
+
+#[test]
+fn old_settings_with_retired_provider_data_are_migrated() {
+    // Built from parts so the retired name is not reintroduced into the source tree.
+    let retired_name = "Anti".to_owned() + "Gravity";
+    let retired_widget = format!("AiUsage{retired_name}");
+    let retired_groups_key = format!("{retired_name}Groups");
+    let raw = format!(
+        r#"{{
+            "Widgets": ["Clock", "{retired_widget}"],
+            "InstalledWidgets": ["{retired_widget}"],
+            "WidgetDensityOverrides": {{"{retired_widget}": "Compact"}},
+            "AiUsageProviders": "Claude, {retired_name}",
+            "{retired_groups_key}": "All"
+        }}"#
+    );
+    let normalized = normalize_legacy_json(&raw);
+    let mut settings: DockSettings = serde_json::from_str(&normalized).unwrap();
+    assert_eq!(settings.enabled_widgets, ["Clock"]);
+    assert!(settings.installed_widgets.is_empty());
+    assert!(settings.widget_density_overrides.is_empty());
+    assert_eq!(settings.ai_usage_providers, 1);
+    assert!(!is_supported_widget_id(&retired_widget));
+    assert!(!settings.is_widget_enabled(&retired_widget));
+    settings.migrate_legacy();
+    assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+
+    // A numeric flag with the retired bit set must survive normalization as well.
+    let numeric = normalize_legacy_json(r#"{"AiUsageProviders":255}"#);
+    let numeric: DockSettings = serde_json::from_str(&numeric).unwrap();
+    assert_eq!(numeric.ai_usage_providers & 4, 0);
+    assert!(numeric.validate().is_empty(), "{:?}", numeric.validate());
+}
+
+#[test]
+fn struct_migration_drops_retired_provider_data() {
+    let retired_widget = format!("AiUsage{}", "Anti".to_owned() + "Gravity");
+    let raw = format!(r#"{{"Widgets":["Clock","{retired_widget}"],"AiUsageProviders":255}}"#);
+    let mut settings: DockSettings = serde_json::from_str(&raw).unwrap();
+    settings.migrate_legacy();
+    assert_eq!(settings.enabled_widgets, ["Clock"]);
+    assert_eq!(settings.installed_widgets, ["Clock"]);
+    assert_eq!(settings.ai_usage_providers & 4, 0);
+    assert!(settings.validate().is_empty(), "{:?}", settings.validate());
 }

@@ -374,6 +374,151 @@ pub enum AiUsageRing {
     Weekly,
 }
 
+/// C# `DockMetrics`: the single source of truth for dock geometry (all values DIPs).
+pub mod dock_metrics {
+    use super::{DockGapUnit, DockHeightMode, DockSize};
+
+    pub const HEADROOM: f32 = 24.0;
+    pub const BOTTOM_GAP: f32 = 6.0;
+    pub const SIDE_INSET: f32 = 12.0;
+    pub const FULL_WIDTH_SIDE_INSET: f32 = 6.0;
+    pub const MAX_ICON_PADDING: f32 = 12.0;
+    /// C# `MainWindow.Resizing`: `DockCellSize` (52) plus the horizontal frame chrome (10 + 10).
+    pub const MIN_DOCK_SURFACE_WIDTH: f32 = 72.0;
+    /// Extent used by the extent-free helpers; C# resolves against the target monitor.
+    pub const DEFAULT_MONITOR_EXTENT: f32 = 1920.0;
+    /// C# `DockMetrics.WidgetDesignHeight`.
+    pub const WIDGET_DESIGN_HEIGHT: f32 = 46.0;
+    pub const WIDGET_MIN_CARD_HEIGHT: f32 = 34.0;
+
+    /// C# `DockSizeProfile`.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct SizeProfile {
+        pub shelf: f32,
+        pub bottom_gap: f32,
+        pub cell: f32,
+        pub vertical_padding: f32,
+        pub icon: f32,
+        pub radius: f32,
+        pub cell_height: f32,
+        pub icon_padding: f32,
+    }
+
+    impl SizeProfile {
+        /// Height used by the layout; icon padding widens cells horizontally only.
+        pub fn effective_cell_height(self) -> f32 {
+            if self.cell_height > 0.0 {
+                self.cell_height
+            } else {
+                self.cell
+            }
+        }
+
+        /// C# `DockSizeProfile.SurfaceHeight`: cell + 2 * vertical padding + 2 px border.
+        pub fn surface_height(self) -> f32 {
+            self.effective_cell_height() + self.vertical_padding * 2.0 + 2.0
+        }
+
+        /// C# `DockSizeProfile.WidgetScale`.
+        pub fn widget_scale(self) -> f32 {
+            ((self.effective_cell_height() - 2.0) / WIDGET_DESIGN_HEIGHT).clamp(0.45, 1.35)
+        }
+    }
+
+    /// C# `DockMetrics.For(size, scale, padding)`. Compact/Medium/Large shelves are 48/58/66
+    /// and their resting icon sizes are 28/34/38 DIPs at 100% scale.
+    pub fn for_size(size: DockSize, scale: f64, padding: i32) -> SizeProfile {
+        let scale = if scale.is_finite() {
+            scale.clamp(0.75, 1.5)
+        } else {
+            1.0
+        };
+        let pad = (padding.max(0) as f32).min(MAX_ICON_PADDING);
+        let base = match size {
+            DockSize::Compact => SizeProfile {
+                shelf: 48.0,
+                bottom_gap: 3.0,
+                cell: 38.0,
+                vertical_padding: 2.0,
+                icon: 28.0,
+                radius: 16.0,
+                cell_height: 0.0,
+                icon_padding: 0.0,
+            },
+            DockSize::Medium => SizeProfile {
+                shelf: 58.0,
+                bottom_gap: 5.0,
+                cell: 44.0,
+                vertical_padding: 3.0,
+                icon: 34.0,
+                radius: 19.0,
+                cell_height: 0.0,
+                icon_padding: 0.0,
+            },
+            DockSize::Large => SizeProfile {
+                shelf: 66.0,
+                bottom_gap: 6.0,
+                cell: 50.0,
+                vertical_padding: 4.0,
+                icon: 38.0,
+                radius: 22.0,
+                cell_height: 0.0,
+                icon_padding: 0.0,
+            },
+        };
+        if (scale - 1.0).abs() < 0.001 {
+            return SizeProfile {
+                cell: base.cell + pad,
+                icon_padding: pad,
+                ..base
+            };
+        }
+        let factor = scale as f32;
+        let cell_height = (base.cell * factor).round();
+        let cell = cell_height + pad;
+        let icon = (base.icon * factor).round();
+        let vertical_padding = (base.vertical_padding * factor).round().max(2.0);
+        let bottom_gap = (base.bottom_gap * factor).round().max(2.0);
+        let surface = cell_height + vertical_padding * 2.0 + 2.0;
+        let shelf = (surface + bottom_gap + 1.0).max(36.0);
+        let radius = (base.radius * factor).round().clamp(10.0, 30.0);
+        SizeProfile {
+            shelf,
+            bottom_gap,
+            cell,
+            vertical_padding,
+            icon,
+            radius,
+            cell_height,
+            icon_padding: pad,
+        }
+    }
+
+    /// C# `DockMetrics.ResolveGap`.
+    pub fn resolve_gap(unit: DockGapUnit, pixels: i32, percent: i32, extent: f32) -> f32 {
+        let requested = match unit {
+            DockGapUnit::Pixels => pixels as f32,
+            DockGapUnit::Percent => extent.max(0.0) * percent.clamp(0, 100) as f32 / 100.0,
+        };
+        requested.max(0.0)
+    }
+
+    /// C# `DockMetrics.ResolveHeight`; `Auto`/`Fill` are handled by the caller.
+    pub fn resolve_height(
+        mode: DockHeightMode,
+        pixels: i32,
+        percent: i32,
+        extent: f32,
+        minimum: f32,
+    ) -> f32 {
+        let requested = match mode {
+            DockHeightMode::Percent => extent.max(0.0) * percent.clamp(0, 100) as f32 / 100.0,
+            _ => pixels as f32,
+        };
+        requested.max(minimum)
+    }
+}
+
 /// C# `SystemMeters` flags. Bit 8 (CpuTemperature) and bit 4 (Battery) are retired but their
 /// numeric values must stay stable in existing settings files.
 pub mod stats_meters {
@@ -386,23 +531,24 @@ pub mod stats_meters {
 }
 
 /// C# `AiProviders` flags; the retired single "AiUsage" widget is split by these bits.
+/// Bit 4 belonged to a provider removed from both builds and stays unused so older numeric
+/// settings values keep their meaning for every other bit.
 pub mod ai_providers {
     pub const CLAUDE: u32 = 1;
     pub const CODEX: u32 = 2;
-    pub const ANTIGRAVITY: u32 = 4;
     pub const OPEN_CODE: u32 = 8;
     pub const COPILOT: u32 = 16;
     pub const DEEP_SEEK: u32 = 32;
     pub const OPEN_ROUTER: u32 = 64;
     pub const CURSOR: u32 = 128;
-    pub const ALL: u32 =
-        CLAUDE | CODEX | ANTIGRAVITY | OPEN_CODE | COPILOT | DEEP_SEEK | OPEN_ROUTER | CURSOR;
+    pub const ALL: u32 = CLAUDE | CODEX | OPEN_CODE | COPILOT | DEEP_SEEK | OPEN_ROUTER | CURSOR;
+    /// Bit retired together with the removed provider; still masked out on load.
+    pub const RETIRED_BIT: u32 = 4;
 
     /// Widget IDs in the same order as C# `DockWidgetService.AiUsageWidgets`.
-    pub const WIDGETS: [(u32, &str); 8] = [
+    pub const WIDGETS: [(u32, &str); 7] = [
         (CLAUDE, "AiUsageClaude"),
         (CODEX, "AiUsageCodex"),
-        (ANTIGRAVITY, "AiUsageAntigravity"),
         (OPEN_CODE, "AiUsageOpenCode"),
         (COPILOT, "AiUsageCopilot"),
         (DEEP_SEEK, "AiUsageDeepSeek"),
@@ -411,15 +557,43 @@ pub mod ai_providers {
     ];
 }
 
-pub mod antigravity_groups {
-    pub const GEMINI: u32 = 1;
-    pub const CLAUDE: u32 = 2;
-    pub const ARGON: u32 = 4;
-    pub const ALL: u32 = GEMINI | CLAUDE | ARGON;
+/// C# `AiProviders` flag spellings shared by serde and legacy migration.
+const AI_PROVIDER_NAMES: [(u32, &str); 7] = [
+    (ai_providers::CLAUDE, "Claude"),
+    (ai_providers::CODEX, "Codex"),
+    (ai_providers::OPEN_CODE, "OpenCode"),
+    (ai_providers::COPILOT, "Copilot"),
+    (ai_providers::DEEP_SEEK, "DeepSeek"),
+    (ai_providers::OPEN_ROUTER, "OpenRouter"),
+    (ai_providers::CURSOR, "Cursor"),
+];
+
+/// A per-provider widget ID that is not one of the seven catalogued providers is retired data,
+/// even when an old file still lists it. Comparing the compact form also covers aliases written
+/// by earlier port builds (`aiusage_*`, `widget:AiUsage*`).
+fn is_retired_ai_provider_widget(id: &str) -> bool {
+    let compact: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    let compact = compact.strip_prefix("widget").unwrap_or(&compact);
+    let Some(rest) = compact.strip_prefix("aiusage") else {
+        return false;
+    };
+    !rest.is_empty()
+        && !AI_PROVIDER_NAMES.iter().any(|(_, name)| {
+            let known: String = name
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .flat_map(char::to_lowercase)
+                .collect();
+            known == rest
+        })
 }
 
 /// All C# `DockWidgetService` IDs, including the hidden legacy aliases `Date` and `ShowDesktop`.
-pub const SUPPORTED_WIDGET_IDS: [&str; 25] = [
+pub const SUPPORTED_WIDGET_IDS: [&str; 24] = [
     "Clock",
     "Weather",
     "DayProgress",
@@ -432,7 +606,6 @@ pub const SUPPORTED_WIDGET_IDS: [&str; 25] = [
     "Storage",
     "AiUsageClaude",
     "AiUsageCodex",
-    "AiUsageAntigravity",
     "AiUsageOpenCode",
     "AiUsageCopilot",
     "AiUsageDeepSeek",
@@ -448,7 +621,7 @@ pub const SUPPORTED_WIDGET_IDS: [&str; 25] = [
 ];
 
 /// Catalog cards only (C# `CatalogDescriptors`): used by island placement limits.
-pub const CATALOG_WIDGET_COUNT: usize = 23;
+pub const CATALOG_WIDGET_COUNT: usize = 22;
 
 const RETIRED_WIDGET_IDS: [&str; 4] = ["Memory", "Search", "Desktops", "Tray"];
 const MAX_PINNED_TRAY_ICONS: usize = 64;
@@ -456,6 +629,8 @@ const MAX_PINNED_TRAY_KEY_LEN: usize = 512;
 const MAX_ICON_PADDING: i32 = 12;
 
 pub fn is_supported_widget_id(id: &str) -> bool {
+    // Retired provider IDs are deliberately absent from the catalog, so old files that still
+    // mention one are rejected here instead of being silently accepted by an alias lookup.
     SUPPORTED_WIDGET_IDS
         .iter()
         .any(|known| known.eq_ignore_ascii_case(id))
@@ -588,6 +763,10 @@ pub struct DockSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation_fps: Option<u32>,
     pub magnification_enabled: bool,
+    /// Whether the magnified icon may push its neighbours aside and grow the dock surface.
+    /// C# feature request #182: older builds only scaled icons in place.
+    #[serde(default = "default_true")]
+    pub magnification_expands_dock: bool,
     #[serde(default)]
     pub fisheye_intensity: FisheyeIntensity,
     #[serde(default)]
@@ -744,11 +923,6 @@ pub struct DockSettings {
     )]
     pub ai_usage_providers: u32,
     pub ai_usage_ring: AiUsageRing,
-    #[serde(
-        deserialize_with = "deserialize_antigravity_groups",
-        serialize_with = "serialize_antigravity_groups"
-    )]
-    pub antigravity_groups: u32,
     #[serde(default = "default_true")]
     pub show_start_button: bool,
     pub show_search_button: bool,
@@ -803,6 +977,7 @@ impl Default for DockSettings {
             animations_enabled: true,
             animation_fps: None,
             magnification_enabled: true,
+            magnification_expands_dock: true,
             fisheye_intensity: FisheyeIntensity::Normal,
             middle_click_action: MiddleClickAction::NewWindow,
             focus_mode: false,
@@ -894,7 +1069,6 @@ impl Default for DockSettings {
             dock_item_order: Vec::new(),
             ai_usage_providers: 0,
             ai_usage_ring: AiUsageRing::Highest,
-            antigravity_groups: antigravity_groups::ALL,
             show_start_button: true,
             show_search_button: true,
             show_task_view_button: true,
@@ -1069,58 +1243,55 @@ fn deserialize_ai_providers<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
     D: Deserializer<'de>,
 {
-    const NAMES: [(u32, &str); 8] = [
-        (ai_providers::CLAUDE, "Claude"),
-        (ai_providers::CODEX, "Codex"),
-        (ai_providers::ANTIGRAVITY, "Antigravity"),
-        (ai_providers::OPEN_CODE, "OpenCode"),
-        (ai_providers::COPILOT, "Copilot"),
-        (ai_providers::DEEP_SEEK, "DeepSeek"),
-        (ai_providers::OPEN_ROUTER, "OpenRouter"),
-        (ai_providers::CURSOR, "Cursor"),
-    ];
-    parse_flag_names(deserializer, &NAMES, ai_providers::ALL)
+    parse_flag_names(deserializer, &AI_PROVIDER_NAMES, ai_providers::ALL)
 }
 
 fn serialize_ai_providers<S>(value: &u32, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    const NAMES: [(u32, &str); 8] = [
-        (ai_providers::CLAUDE, "Claude"),
-        (ai_providers::CODEX, "Codex"),
-        (ai_providers::ANTIGRAVITY, "Antigravity"),
-        (ai_providers::OPEN_CODE, "OpenCode"),
-        (ai_providers::COPILOT, "Copilot"),
-        (ai_providers::DEEP_SEEK, "DeepSeek"),
-        (ai_providers::OPEN_ROUTER, "OpenRouter"),
-        (ai_providers::CURSOR, "Cursor"),
-    ];
-    write_flag_names(value, serializer, &NAMES, ai_providers::ALL)
+    write_flag_names(value, serializer, &AI_PROVIDER_NAMES, ai_providers::ALL)
 }
 
-fn deserialize_antigravity_groups<'de, D>(deserializer: D) -> Result<u32, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    const NAMES: [(u32, &str); 3] = [
-        (antigravity_groups::GEMINI, "Gemini"),
-        (antigravity_groups::CLAUDE, "Claude"),
-        (antigravity_groups::ARGON, "Argon"),
-    ];
-    parse_flag_names(deserializer, &NAMES, antigravity_groups::ALL)
-}
-
-fn serialize_antigravity_groups<S>(value: &u32, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    const NAMES: [(u32, &str); 3] = [
-        (antigravity_groups::GEMINI, "Gemini"),
-        (antigravity_groups::CLAUDE, "Claude"),
-        (antigravity_groups::ARGON, "Argon"),
-    ];
-    write_flag_names(value, serializer, &NAMES, antigravity_groups::ALL)
+/// Drops flag tokens and bit slots that no longer belong to any provider so an old
+/// `AiUsageProviders` value cannot fail deserialization or `validate()`.
+fn sanitize_ai_provider_flags(map: &mut Map<String, Value>) {
+    let Some(value) = map.get_mut("AiUsageProviders") else {
+        return;
+    };
+    match value {
+        Value::Number(number) => {
+            if let Some(bits) = number.as_u64() {
+                let kept = bits & !(ai_providers::RETIRED_BIT as u64);
+                if kept != bits {
+                    *number = serde_json::Number::from(kept);
+                }
+            }
+        }
+        Value::String(text) => {
+            let kept: Vec<&str> = text
+                .split(',')
+                .map(str::trim)
+                .filter(|token| {
+                    token.is_empty()
+                        || token.eq_ignore_ascii_case("None")
+                        || token.eq_ignore_ascii_case("All")
+                        || AI_PROVIDER_NAMES
+                            .iter()
+                            .any(|(_, name)| token.eq_ignore_ascii_case(name))
+                })
+                .collect();
+            let replacement = if kept.is_empty() {
+                "None".to_owned()
+            } else {
+                kept.join(", ")
+            };
+            if replacement != *text {
+                *text = replacement;
+            }
+        }
+        _ => {}
+    }
 }
 
 impl DockSettings {
@@ -1226,6 +1397,273 @@ impl DockSettings {
             },
         }
     }
+
+    /// C# `DockMetrics.For` for the current size/scale/icon-padding settings.
+    pub fn size_profile(&self) -> dock_metrics::SizeProfile {
+        dock_metrics::for_size(self.size, self.dock_scale, self.dock_icon_padding)
+    }
+
+    pub fn effective_width(&self, monitor_w: f32) -> f32 {
+        effective_width(self, monitor_w)
+    }
+
+    pub fn effective_height(&self) -> f32 {
+        effective_height(self)
+    }
+
+    pub fn effective_height_for(&self, extent: f32) -> f32 {
+        effective_height_for(self, extent)
+    }
+
+    pub fn effective_top_gap(&self) -> i32 {
+        effective_top_gap(self)
+    }
+
+    pub fn effective_top_gap_for(&self, extent: f32) -> i32 {
+        effective_top_gap_for(self, extent)
+    }
+
+    pub fn effective_bottom_gap(&self) -> i32 {
+        effective_bottom_gap(self)
+    }
+
+    pub fn effective_bottom_gap_for(&self, extent: f32) -> i32 {
+        effective_bottom_gap_for(self, extent)
+    }
+
+    /// Effective density for a widget: an override (case-insensitive) wins over the global mode.
+    pub fn resolve_widget_density(&self, id: &str) -> WidgetDensityMode {
+        resolve_widget_density(self, id)
+    }
+
+    /// Width multiplier used by widget layout for the resolved density.
+    pub fn widget_density_for(&self, id: &str) -> f32 {
+        widget_density_for(self, id)
+    }
+
+    /// Applies every profile-scoped field at once (C# `DockProfileService.ApplyProfile`).
+    pub fn apply_full_profile(&mut self, profile: &DockProfile) {
+        apply_full_profile(self, profile);
+    }
+}
+
+/// Resolves the dock width in DIPs. `Auto` uses the content-fitted width when one was saved,
+/// `Fill` spans the whole monitor, and fixed modes clamp to the C# minimum/maximum.
+pub fn effective_width(settings: &DockSettings, monitor_w: f32) -> f32 {
+    let extent = monitor_w.max(0.0);
+    let maximum = extent.max(dock_metrics::MIN_DOCK_SURFACE_WIDTH);
+    match settings.dock_width_mode {
+        DockWidthMode::Auto => settings
+            .dock_custom_width_dips
+            .filter(|width| width.is_finite() && *width > 0.0)
+            .unwrap_or(dock_metrics::MIN_DOCK_SURFACE_WIDTH),
+        DockWidthMode::Pixels => {
+            (settings.dock_width_pixels as f32).clamp(dock_metrics::MIN_DOCK_SURFACE_WIDTH, maximum)
+        }
+        DockWidthMode::Percent => {
+            let requested = extent * settings.dock_width_percent.clamp(0, 100) as f32 / 100.0;
+            requested.clamp(dock_metrics::MIN_DOCK_SURFACE_WIDTH, maximum)
+        }
+        DockWidthMode::Fill => extent,
+    }
+}
+
+/// Resolves the thickness of the horizontal bar in DIPs against the default monitor extent.
+pub fn effective_height(settings: &DockSettings) -> f32 {
+    effective_height_for(settings, dock_metrics::DEFAULT_MONITOR_EXTENT)
+}
+
+/// Same as `effective_height` but resolves percentages against a real monitor extent.
+pub fn effective_height_for(settings: &DockSettings, extent: f32) -> f32 {
+    let minimum = settings.size_profile().surface_height();
+    match settings.dock_height_mode {
+        DockHeightMode::Auto | DockHeightMode::Fill => minimum,
+        DockHeightMode::Pixels | DockHeightMode::Percent => dock_metrics::resolve_height(
+            settings.dock_height_mode,
+            settings.dock_height_pixels,
+            settings.dock_height_percent,
+            extent,
+            minimum,
+        ),
+    }
+}
+
+/// External top gap in pixels, resolved against the default monitor extent.
+pub fn effective_top_gap(settings: &DockSettings) -> i32 {
+    effective_top_gap_for(settings, dock_metrics::DEFAULT_MONITOR_EXTENT)
+}
+
+pub fn effective_top_gap_for(settings: &DockSettings, extent: f32) -> i32 {
+    dock_metrics::resolve_gap(
+        settings.dock_top_gap_unit,
+        settings.dock_top_gap_pixels,
+        settings.dock_top_gap_percent,
+        extent,
+    )
+    .round()
+    .max(0.0) as i32
+}
+
+/// External bottom gap in pixels, resolved against the default monitor extent.
+pub fn effective_bottom_gap(settings: &DockSettings) -> i32 {
+    effective_bottom_gap_for(settings, dock_metrics::DEFAULT_MONITOR_EXTENT)
+}
+
+pub fn effective_bottom_gap_for(settings: &DockSettings, extent: f32) -> i32 {
+    dock_metrics::resolve_gap(
+        settings.dock_bottom_gap_unit,
+        settings.dock_bottom_gap_pixels,
+        settings.dock_bottom_gap_percent,
+        extent,
+    )
+    .round()
+    .max(0.0) as i32
+}
+
+/// C# `WidgetCoordinator.ResolveWidgetDensity`: override first, global mode otherwise.
+pub fn resolve_widget_density(settings: &DockSettings, id: &str) -> WidgetDensityMode {
+    settings
+        .widget_density_overrides
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(id))
+        .map(|(_, mode)| *mode)
+        .unwrap_or(settings.global_widget_density)
+}
+
+/// Layout multiplier for a widget: compact cards are 82% of the full width.
+pub fn widget_density_for(settings: &DockSettings, id: &str) -> f32 {
+    match resolve_widget_density(settings, id) {
+        WidgetDensityMode::Compact => 0.82,
+        WidgetDensityMode::Auto | WidgetDensityMode::Full => 1.0,
+    }
+}
+
+/// C# `DockWidget.ShrinkPriority`: lower values are compacted first when the dock overflows.
+/// 100 is the `DockWidget` base value for widgets without a specific priority.
+pub fn widget_shrink_priority(id: &str) -> u8 {
+    let compact: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect();
+    let priority = match compact.as_str() {
+        "media" => 10,
+        "weather" => 15,
+        "audio" => 18,
+        "quicksettings" => 20,
+        "systemstats" | "netspeed" => 30,
+        "bluetoothbattery" => 32,
+        "storage" => 35,
+        "battery" => 36,
+        "aiusage" => 40,
+        "focus" => 50,
+        "dayprogress" => 60,
+        "keyboardlayout" => 75,
+        "clock" => 80,
+        _ if compact.starts_with("aiusage") => 40,
+        _ => 100,
+    };
+    priority
+}
+
+fn canonical_widget_list(ids: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    ids.iter()
+        .map(|id| canonical_widget_setting_id(id).to_owned())
+        .filter(|id| seen.insert(ordinal_ignore_case_key(id)))
+        .collect()
+}
+
+/// Applies all profile-scoped fields (the 15 C# `DockProfile` properties). A profile whose
+/// scoped fields are all unset only activates its name, matching C#'s legacy-profile guard.
+pub fn apply_full_profile(settings: &mut DockSettings, profile: &DockProfile) {
+    let legacy = profile.enabled_widgets.is_empty()
+        && profile.installed_widgets.is_empty()
+        && profile.widget_order.is_empty()
+        && profile.dock_item_order.is_empty()
+        && profile.dock_width_mode.is_none()
+        && profile.dock_width_pixels.is_none()
+        && profile.dock_width_percent.is_none()
+        && profile.theme.is_none()
+        && profile.theme_pack.is_none()
+        && profile.theme_application_icons.is_none()
+        && profile.launcher_hotkey.is_none()
+        && profile.dock_hotkey.is_none()
+        && profile.custom_launcher_hotkey.is_none()
+        && profile.custom_dock_hotkey.is_none();
+
+    settings.active_profile = Some(profile.name.clone());
+    if legacy {
+        return;
+    }
+
+    if !profile.enabled_widgets.is_empty() {
+        settings.enabled_widgets = canonical_widget_list(&profile.enabled_widgets);
+    }
+    if !profile.installed_widgets.is_empty() {
+        let mut installed = canonical_widget_list(&profile.installed_widgets);
+        for id in &settings.enabled_widgets {
+            if !installed.iter().any(|known| known.eq_ignore_ascii_case(id)) {
+                installed.push(id.clone());
+            }
+        }
+        settings.installed_widgets = installed;
+    }
+    if settings.installed_widgets.is_empty() {
+        settings.installed_widgets = settings.enabled_widgets.clone();
+    }
+    if !profile.widget_order.is_empty() {
+        settings.widget_order = canonical_widget_list(&profile.widget_order);
+    }
+    if !profile.dock_item_order.is_empty() {
+        settings.dock_item_order = profile.dock_item_order.clone();
+    }
+
+    if let Some(mode) = profile.dock_width_mode {
+        settings.dock_width_mode = mode;
+    }
+    if let Some(pixels) = profile.dock_width_pixels {
+        settings.dock_width_pixels = pixels;
+    }
+    if let Some(percent) = profile.dock_width_percent {
+        settings.dock_width_percent = percent;
+    }
+    if let Some(theme) = profile.theme {
+        settings.theme = theme;
+    }
+    settings.theme_pack = profile.theme_pack.clone().unwrap_or_default();
+    if let Some(icons) = profile.theme_application_icons {
+        settings.theme_application_icons = icons;
+    }
+
+    let previous_launcher_custom = settings.custom_launcher_hotkey.clone();
+    let previous_dock_custom = settings.custom_dock_hotkey.clone();
+    if let Some(hotkey) = profile.launcher_hotkey {
+        settings.launcher_hotkey = hotkey;
+    }
+    if let Some(hotkey) = profile.dock_hotkey {
+        settings.dock_hotkey = hotkey;
+    }
+    settings.custom_launcher_hotkey = profile.custom_launcher_hotkey.clone().or_else(|| {
+        if profile.launcher_hotkey.is_some() {
+            None
+        } else {
+            previous_launcher_custom
+        }
+    });
+    settings.custom_dock_hotkey = profile.custom_dock_hotkey.clone().or_else(|| {
+        if profile.dock_hotkey.is_some() {
+            None
+        } else {
+            previous_dock_custom
+        }
+    });
+    settings.auto_hide = profile.auto_hide;
+
+    repair_widget_lists(
+        &mut settings.enabled_widgets,
+        &mut settings.installed_widgets,
+    );
 }
 
 // ---- Legacy migration (C# DockSettingsStore.NormalizeLegacyJson + Migrate*) ----
@@ -1290,6 +1728,10 @@ fn ai_replacement(id: &str, enabled: &[String]) -> Vec<String> {
     enabled.to_vec()
 }
 
+fn is_retired_list_widget(id: &str) -> bool {
+    is_retired_widget(id) || is_retired_ai_provider_widget(id)
+}
+
 fn migrate_widget_lists(map: &mut Map<String, Value>) {
     // Remember what the legacy widget meant before removing it (C# mirrors these into buttons).
     let mentioned = |id: &str| {
@@ -1321,7 +1763,7 @@ fn migrate_widget_lists(map: &mut Map<String, Value>) {
     ] {
         if let Some(value) = map.get_mut(key) {
             map_string_array(value, |id| {
-                if is_retired_widget(id) {
+                if is_retired_list_widget(id) {
                     Vec::new()
                 } else {
                     vec![id.to_owned()]
@@ -1331,9 +1773,10 @@ fn migrate_widget_lists(map: &mut Map<String, Value>) {
     }
     if let Some(value) = map.get_mut("DockItemOrder") {
         map_string_array(value, |id| {
-            if RETIRED_WIDGET_IDS
-                .iter()
-                .any(|r| id.eq_ignore_ascii_case(&format!("widget:{r}")))
+            if is_retired_ai_provider_widget(id)
+                || RETIRED_WIDGET_IDS
+                    .iter()
+                    .any(|r| id.eq_ignore_ascii_case(&format!("widget:{r}")))
             {
                 Vec::new()
             } else {
@@ -1342,7 +1785,7 @@ fn migrate_widget_lists(map: &mut Map<String, Value>) {
         });
     }
     if let Some(value) = map.get_mut("WidgetDensityOverrides") {
-        filter_object_keys(value, |key| !is_retired_widget(key));
+        filter_object_keys(value, |key| !is_retired_list_widget(key));
     }
     if let Some(profiles) = map.get_mut("Profiles").and_then(Value::as_array_mut) {
         for profile in profiles.iter_mut() {
@@ -1355,7 +1798,7 @@ fn migrate_widget_lists(map: &mut Map<String, Value>) {
                 ] {
                     if let Some(value) = p.get_mut(key) {
                         map_string_array(value, |id| {
-                            if is_retired_widget(id) {
+                            if is_retired_list_widget(id) {
                                 Vec::new()
                             } else {
                                 vec![id.to_owned()]
@@ -1365,9 +1808,10 @@ fn migrate_widget_lists(map: &mut Map<String, Value>) {
                 }
                 if let Some(value) = p.get_mut("DockItemOrder") {
                     map_string_array(value, |id| {
-                        if RETIRED_WIDGET_IDS
-                            .iter()
-                            .any(|r| id.eq_ignore_ascii_case(&format!("widget:{r}")))
+                        if is_retired_ai_provider_widget(id)
+                            || RETIRED_WIDGET_IDS
+                                .iter()
+                                .any(|r| id.eq_ignore_ascii_case(&format!("widget:{r}")))
                         {
                             Vec::new()
                         } else {
@@ -1553,6 +1997,7 @@ pub fn normalize_legacy_json(raw: &str) -> String {
 
     migrate_widget_lists(&mut root);
     migrate_ai_usage(&mut root);
+    sanitize_ai_provider_flags(&mut root);
     migrate_stats_meters(&mut root);
 
     // Retired SurfaceOpacity fed all four surfaces exactly once.
@@ -1667,28 +2112,38 @@ impl DockSettings {
             .iter()
             .any(|id| id.eq_ignore_ascii_case("Tray"));
 
-        self.enabled_widgets.retain(|id| !is_retired_widget(id));
-        self.installed_widgets.retain(|id| !is_retired_widget(id));
-        self.widget_order.retain(|id| !is_retired_widget(id));
+        self.enabled_widgets
+            .retain(|id| !is_retired_list_widget(id));
+        self.installed_widgets
+            .retain(|id| !is_retired_list_widget(id));
+        self.widget_order.retain(|id| !is_retired_list_widget(id));
         self.dock_item_order.retain(|id| {
-            !RETIRED_WIDGET_IDS
-                .iter()
-                .any(|retired| id.eq_ignore_ascii_case(&format!("widget:{retired}")))
-        });
-        self.widget_density_overrides
-            .retain(|id, _| !is_retired_widget(id));
-        for profile in &mut self.profiles {
-            profile.enabled_widgets.retain(|id| !is_retired_widget(id));
-            profile
-                .installed_widgets
-                .retain(|id| !is_retired_widget(id));
-            profile.widget_order.retain(|id| !is_retired_widget(id));
-            profile.dock_item_order.retain(|id| {
-                !RETIRED_WIDGET_IDS
+            !is_retired_ai_provider_widget(id)
+                && !RETIRED_WIDGET_IDS
                     .iter()
                     .any(|retired| id.eq_ignore_ascii_case(&format!("widget:{retired}")))
+        });
+        self.widget_density_overrides
+            .retain(|id, _| !is_retired_list_widget(id));
+        for profile in &mut self.profiles {
+            profile
+                .enabled_widgets
+                .retain(|id| !is_retired_list_widget(id));
+            profile
+                .installed_widgets
+                .retain(|id| !is_retired_list_widget(id));
+            profile
+                .widget_order
+                .retain(|id| !is_retired_list_widget(id));
+            profile.dock_item_order.retain(|id| {
+                !is_retired_ai_provider_widget(id)
+                    && !RETIRED_WIDGET_IDS
+                        .iter()
+                        .any(|retired| id.eq_ignore_ascii_case(&format!("widget:{retired}")))
             });
         }
+        // A retired provider flag must not survive into `validate()`.
+        self.ai_usage_providers &= !ai_providers::RETIRED_BIT;
         if mentioned_search {
             self.show_search_button = enabled_search;
         }
@@ -2145,9 +2600,6 @@ impl DockSettings {
         if self.ai_usage_providers & !ai_providers::ALL != 0 {
             errors.push("AiUsageProvidersInvalid");
         }
-        if self.antigravity_groups == 0 || self.antigravity_groups & !antigravity_groups::ALL != 0 {
-            errors.push("AntigravityGroupsInvalid");
-        }
         if self
             .dock_corner_radius
             .is_some_and(|radius| !(0..=48).contains(&radius))
@@ -2556,7 +3008,7 @@ mod tests {
         assert_eq!(s.focus_minutes, 25);
         assert_eq!(s.dock_width_pixels, 900);
         assert_eq!(s.dock_height_percent, 7);
-        assert_eq!(s.antigravity_groups, antigravity_groups::ALL);
+        assert!(s.magnification_expands_dock);
         assert!(s.validate().is_empty(), "{:?}", s.validate());
     }
 
@@ -2669,7 +3121,6 @@ mod tests {
             focus_sessions: 99,
             wireless_battery_poll_seconds: 5,
             wireless_battery_low_threshold: 15,
-            antigravity_groups: 0,
             dock_scale: 2.0,
             widget_order: vec!["Clock".to_owned(), "Clock".to_owned()],
             weather_city: "x".repeat(81),
@@ -2691,7 +3142,6 @@ mod tests {
             "FocusSessionsOutOfRange",
             "WirelessPollOutOfRange",
             "WirelessThresholdInvalid",
-            "AntigravityGroupsInvalid",
             "DockScaleOutOfRange",
             "StatsMetersInvalid",
             "WidgetOrderInvalid",
