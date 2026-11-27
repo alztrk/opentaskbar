@@ -1,15 +1,15 @@
-//! Single source of truth for the files shared by the C# and Rust builds.
+//! Single source of truth for the files shared by the reference and Rust builds.
 //!
 //! Both builds write under `%LOCALAPPDATA%\OpenTaskbar`. The Rust-only files keep
-//! distinct names (for example `opentaskbar-rust.log`) so they never collide with
-//! the C# `log.txt` / `settings.json` files inside that folder.
+//! distinct names (for example `opentaskbar.log`) so they never collide with
+//! the `log.txt` / `settings.json` files inside that folder.
 
 use std::path::{Path, PathBuf};
 
-/// Folder name used by the C# build since v0.1.
+/// Folder name used by the reference build since v0.1.
 pub const APP_DATA_FOLDER_NAME: &str = "OpenTaskbar";
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
-pub const RUST_LOG_FILE_NAME: &str = "opentaskbar-rust.log";
+pub const RUST_LOG_FILE_NAME: &str = "opentaskbar.log";
 pub const LEGACY_RUST_LOG_FILE_NAME: &str = "opentaskbar.log";
 pub const THEMES_FOLDER_NAME: &str = "Themes";
 pub const SECRETS_FOLDER_NAME: &str = "secrets";
@@ -59,7 +59,7 @@ pub fn rust_cache_dir() -> PathBuf {
 }
 
 /// Journal files (`taskbar-state.txt`, `flyout-positions.txt`, ...) live in the
-/// same root as the C# build so the native watchdog can read them unchanged.
+/// same root as the reference build so the native watchdog can read them unchanged.
 pub fn journal_path(name: &str) -> PathBuf {
     shared_app_data_dir().join(name)
 }
@@ -69,7 +69,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_shared_paths_live_under_the_csharp_folder_name() {
+    fn all_shared_paths_live_under_the_reference_folder_name() {
         let base = Path::new(r"C:\Users\Test\AppData\Local");
         let root = from_base(base);
         assert_eq!(root, base.join("OpenTaskbar"));
@@ -78,7 +78,7 @@ mod tests {
             from_base(base).join(SETTINGS_FILE_NAME)
         );
         assert_eq!(
-            root.join("opentaskbar-rust.log"),
+            root.join("opentaskbar.log"),
             from_base(base).join(RUST_LOG_FILE_NAME)
         );
         assert_eq!(

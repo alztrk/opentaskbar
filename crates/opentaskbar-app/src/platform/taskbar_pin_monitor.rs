@@ -146,7 +146,7 @@ pub fn read_aumids() -> HashSet<String> {
 
 /// Extracts packaged AUMIDs from the binary Taskband blob. PIDL structures are
 /// not guaranteed to be 2-byte aligned, so both even and odd UTF-16LE offsets
-/// are scanned (C# `ExtractAumidsFromTaskbandBytes` parity).
+/// are scanned (`ExtractAumidsFromTaskbandBytes` parity).
 pub fn extract_aumids(bytes: &[u8]) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut output = Vec::new();

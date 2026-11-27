@@ -1,4 +1,4 @@
-//! App shortcut / display-name resolution (C# `AppShortcutResolver.cs` parity).
+//! App shortcut / display-name resolution (`AppShortcutResolver.cs` parity).
 //!
 //! - `NameCache` maps `displayName` -> `stem` and back, so a pinned shortcut keeps its label
 //!   when the executable name differs (e.g. `chrome.exe` -> `Google Chrome`).
@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::{Component, Path};
 
-/// Bidirectional name cache (C# `NameCache`).
+/// Bidirectional name cache (`NameCache`).
 #[derive(Debug, Default)]
 pub struct NameCache {
     by_display: HashMap<String, String>,
@@ -52,7 +52,7 @@ pub fn is_webhelper(name_or_args: &str) -> bool {
         || s.contains("--type=gpu-process")
 }
 
-/// Extracts the `--app-id=` / `--app=` index from shortcut arguments (C# WScript.Shell index).
+/// Extracts the `--app-id=` / `--app=` index from shortcut arguments (reference WScript.Shell index).
 pub fn extract_app_argument_index(args: &str) -> Option<usize> {
     for token in args.split_whitespace() {
         let lower = token.to_ascii_lowercase();

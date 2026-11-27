@@ -527,7 +527,7 @@ pub fn read() -> (bool, Option<&'static str>) {
     }
 }
 
-/// Enables or disables startup. Returns an error key on failure (C# parity).
+/// Enables or disables startup. Returns an error key on failure (reference parity).
 pub fn set_enabled(enabled: bool) -> Option<&'static str> {
     match app_identity::startup_policy() {
         StartupPolicy::MsixStartupTask => {

@@ -560,7 +560,7 @@ pub fn set(kind: &str, on: bool) -> bool {
     true
 }
 
-/// Starts a background state-refresh loop. C# uses WinRT `StateChanged`;
+/// Starts a background state-refresh loop. reference uses WinRT `StateChanged`;
 /// polling at 4 s keeps the same cache freshness without needing a typed
 /// delegate. The apartment is initialized once and the loop never spawns or
 /// joins a helper thread (WS-4: remove the per-tick thread churn).

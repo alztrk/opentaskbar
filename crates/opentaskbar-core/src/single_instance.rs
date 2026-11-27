@@ -3,7 +3,7 @@
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 
-pub const MUTEX_NAME: &str = r"Local\OpenTaskBar-Rust.SingleInstance";
+pub const MUTEX_NAME: &str = r"Local\OpenTaskbar.SingleInstance";
 
 pub struct SingleInstance(HANDLE);
 

@@ -1,4 +1,4 @@
-//! C# `MediaTimeline` / `LibreWolfMediaTimeline` / `MediaVolumeChecks` parity.
+//! `MediaTimeline` / `LibreWolfMediaTimeline` / `MediaVolumeChecks` parity.
 //!
 //! The deterministic helpers are kept as reference vectors; bridge tests below
 //! assert that the production implementations in `widgets/media_ext.rs` still
@@ -53,7 +53,7 @@ fn is_stale(last_update_ms: u64, now_ms: u64, ttl_ms: u64) -> bool {
 }
 
 /// LibreWolf exposes a UIA `Document` with the track title and a `Slider`
-/// whose label reads `position / duration`. The C# helper extracts both.
+/// whose label reads `position / duration`. The reference helper extracts both.
 fn librewolf_timeline(uia_dump: &str) -> Option<(String, u32, u32)> {
     let fields: Vec<&str> = uia_dump.split('|').collect();
     if fields.len() < 4 || fields[0] != "music.youtube.com" {

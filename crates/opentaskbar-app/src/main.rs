@@ -13,7 +13,7 @@
 //! the settings/cfg workstream; until it lands in this branch, these calls need
 //! that workstream's `core/paths.rs` + `core/lib.rs` registration to compile.
 #![cfg_attr(windows, windows_subsystem = "windows")]
-// The merged C#-parity modules expose a deliberately broad public API (hardware
+// The merged reference parity modules expose a deliberately broad public API (hardware
 // vendors, theme tokens, flyout blocks, shell helpers). Individual call sites are
 // wired incrementally; keep the surface warning-clean without deleting code.
 #![allow(dead_code)]
@@ -112,7 +112,7 @@ fn apply_startup_context(settings: &opentaskbar_core::settings::DockSettings) {
     let _ = design::windows_palette::install_listener();
     platform::icon_pack::set_active_pack(None);
     if !settings.theme_pack.trim().is_empty() {
-        // Shared (uppercase) `Themes` root — same folder as the C# build.
+        // Shared (uppercase) `Themes` root — same folder as the reference build.
         let dir = opentaskbar_core::paths::theme_root().join(&settings.theme_pack);
         platform::icon_pack::set_active_pack(Some(dir.as_path()));
     }
@@ -253,7 +253,7 @@ fn main() {
         platform::taskbar_pin_monitor::start_watch();
         platform::radio::install_state_monitor();
         opentaskbar_shell::session::install_shell_hooks(on_shell_change);
-        // Non-blocking startup update check with an Action Center toast (C# NotificationService).
+        // Non-blocking startup update check with an Action Center toast (reference NotificationService).
         if settings.check_updates {
             std::thread::spawn(|| {
                 if let Ok(Some(release)) = platform::update::find_newer() {
@@ -302,14 +302,14 @@ mod tests {
         assert_eq!(paths::settings_path(), root.join("settings.json"));
         assert_eq!(
             paths::rust_log_path(),
-            root.join("opentaskbar-rust.log"),
-            "Rust log must not collide with the C# log.txt"
+            root.join("opentaskbar.log"),
+            "Rust log must not collide with the reference log.txt"
         );
         assert_eq!(paths::theme_root(), root.join("Themes"));
         assert_eq!(
             paths::theme_root().file_name().unwrap(),
             Path::new("Themes").file_name().unwrap(),
-            "uppercase T is required for C# theme-pack parity"
+            "uppercase T is required for reference theme-pack parity"
         );
     }
 }

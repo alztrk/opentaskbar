@@ -9,7 +9,7 @@
 //! validated by class + title so other shell flyouts do not latch the state.
 //!
 //! A Start button press within a [-60 ms, +150 ms] grace around the cloak counts
-//! as dismissing the menu rather than reopening it (`WasOpenAtPress` in C#).
+//! as dismissing the menu rather than reopening it (`WasOpenAtPress` in reference).
 //! The cloak is authoritative: it stamps `closed_at` even if the cached state
 //! was already closed, so repeated cloak events cannot erase the grace window.
 //! A genuine cloak also clears the shell's anchored flag instead of relying on
@@ -754,7 +754,7 @@ pub fn was_open_at_press(now: Instant) -> bool {
     was_open_at_press_impl(is_open, is_open_now(), closed_at, press)
 }
 
-/// Back-compatible form of the C# `WasOpenAtPress(openNow, pressTimestamp)`
+/// Back-compatible form of the `WasOpenAtPress(openNow, pressTimestamp)`
 /// API, kept for callers that already supply a live open query.
 pub fn was_open_at_press_with(open_now: bool, press: Instant) -> bool {
     let (is_open, closed_at) = STATE

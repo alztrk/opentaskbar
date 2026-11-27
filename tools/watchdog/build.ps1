@@ -149,7 +149,7 @@ if ($Architecture -eq 'x86') {
         }
         exit 1
     }
-    # Legacy C# path only: an x64 watchdog still launches from an x86 process on
+    # Legacy reference path only: an x64 watchdog still launches from an x86 process on
     # 64-bit Windows (WOW64). Degrade gracefully instead of breaking the release.
     if (Test-Path -LiteralPath $fallback -PathType Leaf) {
         Copy-Item -LiteralPath $fallback -Destination $outputExe -Force

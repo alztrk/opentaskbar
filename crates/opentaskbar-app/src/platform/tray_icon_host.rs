@@ -1,6 +1,6 @@
 //! Real `Shell_NotifyIcon` hosting for dock-pinned background apps.
 //!
-//! Unlike C# `TrayHost` this does **not** hide Explorer's `Shell_TrayWnd` — doing so from
+//! Unlike `TrayHost` this does **not** hide Explorer's `Shell_TrayWnd` — doing so from
 //! a second process is fragile and can remove the whole system tray. Instead it hosts a
 //! second icon for apps the user explicitly pinned to the dock, using our own hidden
 //! window and callback messages. Clicking that icon opens/focuses the app.

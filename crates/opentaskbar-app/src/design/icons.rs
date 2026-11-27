@@ -3,7 +3,7 @@
 //! Three complementary sources, one API:
 //! * the native `Segoe Fluent Icons` glyph catalog (Windows 11),
 //! * a Win10-compatible `Segoe MDL2 Assets` fallback list,
-//! * 93 Lucide `StreamGeometry` paths ported 1:1 from C# `Design/Icons/*.xaml`.
+//! * 93 Lucide `StreamGeometry` paths ported 1:1 from `Design/Icons/*.xaml`.
 
 #[path = "lucide_paths.rs"]
 mod lucide_paths;
@@ -50,7 +50,7 @@ pub const fn fluent_glyph(icon: AppIcon) -> &'static str {
         AppIcon::Search => "\u{E721}",
         AppIcon::TaskView => "\u{E7C4}",
         AppIcon::TrayChevron => "\u{E70E}",
-        // The empty/full bin states must be visually distinct (C# uses two shell icons).
+        // The empty/full bin states must be visually distinct (reference uses two shell icons).
         AppIcon::RecycleBinEmpty => "\u{E74D}",
         AppIcon::RecycleBinFull => "\u{E922}",
         AppIcon::Trash2 => "\u{E74D}",
@@ -136,7 +136,7 @@ pub fn glyph_for_icon(icon: AppIcon) -> &'static str {
     }
 }
 
-/// Exact Lucide `StreamGeometry` path data for a C# icon resource key
+/// Exact Lucide `StreamGeometry` path data for a reference icon resource key
 /// (`IconWifi`, `IconPlayFill`, `IconNavDock`, …). Unknown names return `None`.
 pub fn lucide(name: &str) -> Option<&'static str> {
     lucide_paths::LUCIDE_PATHS

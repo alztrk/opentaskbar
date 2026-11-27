@@ -758,12 +758,12 @@ mod tests {
     }
 }
 
-// --- Dynamic search catalogue (C# SettingsWindow.Search.cs parity) ---
+// --- Dynamic search catalogue (reference SettingsWindow.Search.cs parity) ---
 
 use opentaskbar_core::settings::DockSettings;
 
 /// One searchable Settings row. `field` is the WS-A JSON/PascalCase setting name (may be empty
-/// for non-setting actions), `keywords` holds aliases used by the C# UI and localizations.
+/// for non-setting actions), `keywords` holds aliases used by the reference UI and localizations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchEntry {
     pub page: &'static str,
@@ -773,7 +773,7 @@ pub struct SearchEntry {
     pub keywords: &'static [&'static str],
     /// Widget panel id (WidgetPanelHost target) when this is a widget entry.
     pub widget_id: Option<&'static str>,
-    /// C# `DockWidgetOption.HasSettings` counterpart.
+    /// `DockWidgetOption.HasSettings` counterpart.
     pub has_panel: bool,
 }
 
@@ -1263,7 +1263,7 @@ pub const SETTINGS_ROWS: &[RowDef] = &[
     ),
 ];
 
-/// C# `DockWidgetOption.HasSettings`: only widgets with a dedicated options panel get one.
+/// `DockWidgetOption.HasSettings`: only widgets with a dedicated options panel get one.
 /// WS-C `catalog_ops` will expose this authoritatively; until then use this local source.
 pub fn widget_has_settings(id: &str) -> bool {
     matches!(

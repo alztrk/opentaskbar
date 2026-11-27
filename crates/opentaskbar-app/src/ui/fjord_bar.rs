@@ -1,4 +1,4 @@
-//! GPUI top bar per monitor (C# `FjordBarWindow` + `FjordBarHost`).
+//! GPUI top bar per monitor (`FjordBarWindow` + `FjordBarHost`).
 //!
 //! The host owns one session-scoped mutex, reconciles monitors on the 750 ms
 //! tick, registers a top-edge AppBar per monitor, hides on fullscreen and shows
@@ -157,7 +157,7 @@ fn persist_bar_hidden(path: &std::path::Path) {
     crate::dock::apply_runtime_settings();
 }
 
-/// Process argument used by the C# `FjordBarHost` to launch this host process.
+/// Process argument used by the `FjordBarHost` to launch this host process.
 pub const BAR_ARG: &str = "--fjord-bar";
 
 /// Starts the bar host. Returns immediately if another host owns the session.

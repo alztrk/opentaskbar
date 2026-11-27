@@ -7,7 +7,7 @@ OpenTaskbar is an open-source desktop dock and taskbar customization utility for
 ## Data Collection
 
 - **No telemetry or analytics:** OpenTaskbar does not collect, sell, or transmit personal data, usage analytics, crash telemetry, or tracking identifiers to the developer or third parties.
-- **Local storage only:** Your preferences, pinned items, theme packs, profiles, and logs are stored locally on your device under `%LOCALAPPDATA%\OpenTaskbar` (or `%LOCALAPPDATA%\OpenTaskBar-Rust` for the Rust port). The Rust port preserves unknown `settings.json` keys and backs up unreadable files before restoring defaults.
+- **Local storage only:** Your preferences, pinned items, theme packs, profiles, and logs are stored locally on your device under `%LOCALAPPDATA%\OpenTaskbar`. The Rust application preserves unknown `settings.json` keys and backs up unreadable files before restoring defaults.
 
 ## Optional Network Requests
 

@@ -1,6 +1,6 @@
 # SON DÜZELTME TURU — sözleşme (orchestrator: ana oturum)
 
-Kaynak: 8 denetim subagentının bulguları. Hedef: parite + hata + performans + güvenlik + test bulgularının **tamamı** kapatılacak. C# silme bu turdan SONRA, ayrı onayla.
+Kaynak: 8 denetim subagentının bulguları. Hedef: parite + hata + performans + güvenlik + test bulgularının **tamamı** kapatılacak. reference silme bu turdan SONRA, ayrı onayla.
 
 ## Dosya sahipliği (çakışma yok — her dosya tek ajan)
 

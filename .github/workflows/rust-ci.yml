@@ -106,8 +106,8 @@ jobs:
         working-directory: .
         shell: pwsh
         run: |
-          & 'scripts/publish-rust-portable.ps1' -Runtime win-x86 -OutputDir release -SkipTargetInstall
-          & 'scripts/check-rust-portable.ps1' -OutputDir release -ExecutableName OpenTaskbar-Rust-x86.exe
+          & 'scripts/publish-portable.ps1' -Runtime win-x86 -OutputDir release -SkipTargetInstall
+          & 'scripts/check-portable.ps1' -OutputDir release -ExecutableName OpenTaskbar-x86.exe
 
   locale-parity:
     name: Locale key parity (14 languages)

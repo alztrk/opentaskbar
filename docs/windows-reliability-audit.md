@@ -62,9 +62,9 @@ All implementation paths are Rust-only; review them from the repository/workspac
 ## P1/P2: performance, security, delivery
 
 - PERF-01: Record idle and active CPU, private bytes, handles, GDI objects, GPU usage, UI frame time at 10/30/60 windows, 1/2/3 displays and 1h/8h uptime.
-  - The retired C# baseline workflow (`scripts/measure-baseline.ps1`) and its numbers no longer apply to the Rust binary. There is no Rust benchmark/baseline script yet; capture a fresh baseline with Windows tools on a real session and record OS build, EXE architecture, display topology and widget set with each run. Still open: every Rust baseline point above.
+  - The retired reference baseline workflow (`scripts/measure-baseline.ps1`) and its numbers no longer apply to the Rust binary. There is no Rust benchmark/baseline script yet; capture a fresh baseline with Windows tools on a real session and record OS build, EXE architecture, display topology and widget set with each run. Still open: every Rust baseline point above.
 - PERF-02: Profile window tracking refreshes, thumbnail previews, image decoding, widget timers and allocations; optimize only after measurement.
-  - Existing icon/flag/album-art decode caps and the bounded icon cache cover the obvious allocation sources. The historical ~180 MB private-byte figure came from the retired .NET/WPF build and must not be attributed to the Rust binary; measure before drawing conclusions or adopting further changes.
+  - Existing icon/flag/album-art decode caps and the bounded icon cache cover the obvious allocation sources. The historical ~180 MB private-byte figure came from the retired managed build and must not be attributed to the Rust binary; measure before drawing conclusions or adopting further changes.
 - SEC-01: Theme ZIP traversal, duplicate entries, reserved Windows names, size limits and import/export symmetry.
 - SEC-02: Update executable asset selection, SHA-256 verification, signing policy, atomic replacement, backup and rollback; coordinate with separate updater PR.
 - SEC-03: Review shell command arguments, paths with special characters, log privacy and permission boundaries.
@@ -113,7 +113,7 @@ The same caveat applies: a passing Rust source-level check is **not** live compa
 
 ### Rust port live smoke list
 
-Run every row on a real Windows session before signing off a release candidate. Record OS build, commit, EXE architecture, display topology, DPI, actual result and logs; **not run** is the only valid initial status. Collect logs from the shared data folder: `%LOCALAPPDATA%\OpenTaskbar\opentaskbar-rust.log` (rotated copy `opentaskbar-rust.log.old`), not the retired `%LOCALAPPDATA%\OpenTaskBar-Rust\` folder. The taskbar/flyout journals are read from that same shared `%LOCALAPPDATA%\OpenTaskbar` folder.
+Run every row on a real Windows session before signing off a release candidate. Record OS build, commit, EXE architecture, display topology, DPI, actual result and logs; **not run** is the only valid initial status. Collect logs from the shared data folder: `%LOCALAPPDATA%\OpenTaskbar\opentaskbar.log` (rotated copy `opentaskbar.log.old`), not the retired `%LOCALAPPDATA%\OpenTaskbar\` folder. The taskbar/flyout journals are read from that same shared `%LOCALAPPDATA%\OpenTaskbar` folder.
 
 | # | Smoke case | Steps | Pass condition | Status |
 | :--- | :--- | :--- | :--- | :--- |

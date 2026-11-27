@@ -1,15 +1,15 @@
 //! Pure policy logic for Dynamic Island widget placement, ordering, visibility, and sizing.
 //!
-//! Mirrors C# `Services/App/DynamicIslandPolicy.cs`.
+//! Mirrors `Services/App/DynamicIslandPolicy.cs`.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::settings::{DYNAMIC_ISLAND_ALL_DISPLAYS, DynamicIslandVisibilityMode};
 
-/// Geometry vectors copied 1:1 from C# `DynamicIslandWindow.xaml.cs` and
+/// Geometry vectors copied 1:1 from `DynamicIslandWindow.xaml.cs` and
 /// `Views/Windows/DynamicIslandWindow.xaml`. The Rust native host must use these
 /// instead of locally invented sizes (the old port expanded *width* by 246 DIP,
-/// while C# expands the window *height* to 246 DIP).
+/// while reference expands the window *height* to 246 DIP).
 pub mod geometry {
     pub const COMPACT_HEIGHT_DIPS: f32 = 50.0;
     pub const EXPANDED_HEIGHT_DIPS: f32 = 246.0;
@@ -32,14 +32,14 @@ pub mod geometry {
     /// Navigation column widths from the island header grid (38/38/56/38 DIP).
     pub const LEFT_CONTROLS_DIPS: f32 = 38.0;
     pub const RIGHT_CONTROLS_DIPS: f32 = 38.0 + 56.0 + 38.0;
-    /// C# `WidthForCurrentPage()` adds 176 DIP of chrome to the widget estimate.
+    /// `WidthForCurrentPage()` adds 176 DIP of chrome to the widget estimate.
     pub const CHROME_ALLOWANCE_DIPS: f32 = 176.0;
     pub const EXPANDED_PREFERRED_MIN_DIPS: f32 = 540.0;
     pub const FALLBACK_WIDGET_WIDTH_DIPS: f32 = 280.0;
     pub const DETAILS_WIDTH_ALLOWANCE_DIPS: f32 = 32.0;
 }
 
-/// C# `CompactHeight` / `ExpandedHeight`: the island grows vertically, not horizontally.
+/// `CompactHeight` / `ExpandedHeight`: the island grows vertically, not horizontally.
 pub fn island_height_dips(expanded: bool) -> f32 {
     if expanded {
         geometry::EXPANDED_HEIGHT_DIPS
@@ -48,7 +48,7 @@ pub fn island_height_dips(expanded: bool) -> f32 {
     }
 }
 
-/// Mirrors C# `DynamicIslandWindow.WidthForCurrentPage()`.
+/// Mirrors `DynamicIslandWindow.WidthForCurrentPage()`.
 ///
 /// `widget_width` is `widget.FullWidthEstimate` (280 DIP when unknown), and
 /// `details_width` is the measured desired width of the expanded details panel.
@@ -69,7 +69,7 @@ pub fn preferred_window_width(
     }
 }
 
-/// Clamps `preferred_window_width` with C#'s compact/expanded minimums.
+/// Clamps `preferred_window_width` with the reference compact/expanded minimums.
 pub fn window_width_for_page(
     widget_width: Option<f32>,
     details_width: f32,
@@ -327,10 +327,10 @@ mod tests {
         );
     }
 
-    /// Direct vectors from C# `DynamicIslandWindow.xaml.cs` (lines 22-25) and
+    /// Direct vectors from `DynamicIslandWindow.xaml.cs` (lines 22-25) and
     /// `Design/Tokens/Radii.xaml`. Keeping them here catches port drift.
     #[test]
-    fn csharp_geometry_vectors() {
+    fn reference_geometry_vectors() {
         assert_eq!(island_height_dips(false), 50.0);
         assert_eq!(island_height_dips(true), 246.0);
         assert_eq!(geometry::COMPACT_MIN_WIDTH_DIPS, 360.0);
@@ -345,14 +345,14 @@ mod tests {
     }
 
     #[test]
-    fn csharp_width_for_current_page_vectors() {
+    fn reference_width_for_current_page_vectors() {
         // 280 (default FullWidthEstimate) + 176 chrome = 456 compact.
         assert_eq!(preferred_window_width(None, 0.0, false), 456.0);
         // Expanded prefers >= 540 even for a 280 DIP widget.
         assert_eq!(preferred_window_width(None, 0.0, true), 540.0);
-        // A wide details panel can drive the width (C#: detailWidth + 32).
+        // A wide details panel can drive the width (reference: detailWidth + 32).
         assert_eq!(preferred_window_width(Some(280.0), 620.0, true), 652.0);
-        // Clamped to the C# expanded minimum on a narrow monitor.
+        // Clamped to the reference expanded minimum on a narrow monitor.
         assert_eq!(window_width_for_page(None, 0.0, 420.0, true), 388.0);
         assert_eq!(window_width_for_page(None, 0.0, 1920.0, false), 456.0);
     }

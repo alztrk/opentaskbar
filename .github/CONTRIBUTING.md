@@ -21,8 +21,8 @@ cargo build --workspace
 
 To produce a portable EXE and verify it:
 ```pwsh
-.\scripts\publish-rust-portable.ps1 -Runtime win-x64
-.\scripts\check-rust-portable.ps1 -ExecutableName OpenTaskbar-Rust-x64.exe
+.\scripts\publish-portable.ps1 -Runtime win-x64
+.\scripts\check-portable.ps1 -ExecutableName OpenTaskbar-x64.exe
 ```
 
 ### Running Tests

@@ -1,5 +1,5 @@
 //! Single source of truth for OpenTaskBar's Slate Neutral + Aurora design tokens,
-//! ported 1-to-1 from C# `Design/Palettes/Dark.xaml` and `Design/Palettes/Light.xaml`.
+//! ported 1-to-1 from `Design/Palettes/Dark.xaml` and `Design/Palettes/Light.xaml`.
 //!
 //! Shared across DirectComposition (`dock/dcomp.rs`), Win32 flyouts/menus (`ui/flyout.rs`,
 //! `ui/menu.rs`), and GPUI (`ui/components.rs`, `ui/settings.rs`) so every surface speaks
@@ -38,15 +38,15 @@ pub struct Palette {
     pub text_primary: Rgb,
     pub text_secondary: Rgb,
     pub accent: Rgb,
-    /// Aurora teal (`WidgetAccent` in C#): `#2DD4BF` dark / `#0D9488` light.
+    /// Aurora teal (`WidgetAccent` in reference): `#2DD4BF` dark / `#0D9488` light.
     pub widget_accent: Rgb,
-    /// Soft sky blue (`WidgetBlue` in C#): `#A2C0FF` dark / `#1D66D7` light.
+    /// Soft sky blue (`WidgetBlue` in reference): `#A2C0FF` dark / `#1D66D7` light.
     pub widget_blue: Rgb,
-    /// Selected pill fill blended on popup surface (`WidgetSelectedFill` in C#).
+    /// Selected pill fill blended on popup surface (`WidgetSelectedFill` in reference).
     pub selected_fill: Rgb,
-    /// Selected pill border (`WidgetSelectedStroke` in C#).
+    /// Selected pill border (`WidgetSelectedStroke` in reference).
     pub selected_stroke: Rgb,
-    /// Selected pill text/icon (`WidgetSelectedForeground` in C#).
+    /// Selected pill text/icon (`WidgetSelectedForeground` in reference).
     pub selected_fg: Rgb,
     pub success: Rgb,
     pub warning: Rgb,
@@ -139,7 +139,7 @@ pub const fn gpui_rgba(c: Rgb, a: u8) -> u32 {
     ((c.0 as u32) << 24) | ((c.1 as u32) << 16) | ((c.2 as u32) << 8) | (a as u32)
 }
 
-/// C# `SystemStatsWidget.LoadBrushKey` threshold (`<75%` accent, `75-89%` amber, `>=90%` red).
+/// `SystemStatsWidget.LoadBrushKey` threshold (`<75%` accent, `75-89%` amber, `>=90%` red).
 pub fn meter_color(p: &Palette, ratio: f32) -> Rgb {
     if ratio >= 0.90 {
         p.danger
@@ -161,7 +161,7 @@ pub fn level_color(p: &Palette, ratio: f32) -> Rgb {
     }
 }
 
-/// Computes dock widget chip height automatically from the live dock pill height (C# `WidgetHeight = 46`).
+/// Computes dock widget chip height automatically from the live dock pill height (`WidgetHeight = 46`).
 pub fn widget_height_dips(pill_h_dips: f32) -> f32 {
     (pill_h_dips - 10.0).clamp(32.0, 56.0)
 }

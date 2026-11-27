@@ -1,4 +1,4 @@
-//! Brush-picker model for the theme editor (C# `ThemePropertyEditor/ThemeBrushPicker`).
+//! Brush-picker model for the theme editor (`ThemePropertyEditor/ThemeBrushPicker`).
 //!
 //! Kept free of GPUI/Win32 so the colour math can be unit-tested on any host.
 //! The settings UI owns the widgets; this module owns the values they edit:
@@ -9,7 +9,7 @@ use super::tokens::{
     theme_to_picker_angle,
 };
 
-/// Maximum number of gradient stops exposed by the picker (C# `GradientStopCount`).
+/// Maximum number of gradient stops exposed by the picker (`GradientStopCount`).
 pub const MAX_GRADIENT_STOPS: usize = 16;
 
 /// Hue / saturation / value, with `h` in degrees and `s`, `v` in `0.0..=1.0`.
@@ -92,7 +92,7 @@ impl GradientSpec {
     }
 
     /// Pads a two-stop picker gradient to the full 16-stop resolution so tweak
-    /// handles are available for every stop, matching the C# picker.
+    /// handles are available for every stop, matching the reference picker.
     pub fn from_endpoints(start: Rgba, end: Rgba, angle_deg: f64) -> Self {
         let stops = (0..MAX_GRADIENT_STOPS)
             .map(|i| {
@@ -108,12 +108,12 @@ impl GradientSpec {
         gradient_endpoints(self.to_theme_angle())
     }
 
-    /// Picker angle (`0 = horizontal`, `90 = vertical`) → C# theme angle.
+    /// Picker angle (`0 = horizontal`, `90 = vertical`) → reference theme angle.
     pub fn to_theme_angle(&self) -> f64 {
         picker_to_theme_angle(self.angle_deg)
     }
 
-    /// C# theme angle → picker angle; use when persisting a picker brush as `pack.json`.
+    /// reference theme angle → picker angle; use when persisting a picker brush as `pack.json`.
     pub fn from_theme_angle(angle_deg: f64) -> f64 {
         theme_to_picker_angle(angle_deg)
     }

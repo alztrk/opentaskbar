@@ -134,7 +134,7 @@ pub struct DisplayInfo {
 }
 
 /// Enumerates displays, converting physical pixels to DIPs with `96 / dpi`
-/// (C# `DisplayService` parity). The primary monitor is always first.
+/// (`DisplayService` parity). The primary monitor is always first.
 pub fn displays() -> Vec<DisplayInfo> {
     unsafe extern "system" fn visit(
         monitor: HMONITOR,
@@ -208,7 +208,7 @@ pub fn displays() -> Vec<DisplayInfo> {
 }
 
 /// Resolves a target display by device name, 1-based index string, or primary
-/// fallback (C# `DisplayService.GetTargetDisplay`).
+/// fallback (`DisplayService.GetTargetDisplay`).
 pub fn display_for(name: &str) -> Option<DisplayInfo> {
     let all = displays();
     if let Some(match_) = all.iter().find(|display| {

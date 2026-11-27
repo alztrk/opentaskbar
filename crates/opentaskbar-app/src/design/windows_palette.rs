@@ -1,11 +1,11 @@
-//! C# parity for `Services/Settings/WindowsPalette.cs` and `WindowsPaletteListener.cs`.
+//! reference parity for `Services/Settings/WindowsPalette.cs` and `WindowsPaletteListener.cs`.
 //!
 //! Reads the eight RGBA stops of `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Accent\AccentPalette`,
 //! falling back to DWM `AccentColor` (ABGR) and `ColorizationColor` (ARGB), and derives ~30 design
 //! tokens. A hidden, zero-sized `WS_EX_TOOLWINDOW` HWND watches the personalization broadcasts.
 //! **`SystemUsesLightTheme` is authoritative** (OpenTaskbar replaces the taskbar); `AppsUseLightTheme`
 //! is only a fallback. `platform::win32::read_system_is_dark()` still reads `AppsUseLightTheme` only —
-//! callers that need C# parity must use `system_is_dark()` from this module (WS-B owns that file).
+//! callers that need reference parity must use `system_is_dark()` from this module (WS-B owns that file).
 
 use std::cell::RefCell;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -30,7 +30,7 @@ pub struct WindowsPalette {
 }
 
 impl WindowsPalette {
-    /// Number of tokens C# `WindowsPalette.Read` produces (33, including gradients).
+    /// Number of tokens `WindowsPalette.Read` produces (33, including gradients).
     pub const TOKEN_COUNT: usize = 33;
 
     pub fn is_empty(&self) -> bool {
@@ -275,7 +275,7 @@ fn read_dword(_: &str, _: &str) -> Option<u32> {
 }
 
 /// Reads the taskbar/System light flag first, then falls back to the apps flag.
-/// C# `ThemeManager.WindowsTheme()` uses exactly this precedence.
+/// `ThemeManager.WindowsTheme()` uses exactly this precedence.
 pub fn system_is_dark() -> bool {
     match read_dword(PERSONALIZE_KEY, "SystemUsesLightTheme") {
         Some(light) => light == 0,

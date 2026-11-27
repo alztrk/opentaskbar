@@ -98,12 +98,12 @@ const ATTEMPTS: usize = 40;
 const ATTEMPT_DELAY_MS: u64 = 20;
 const SETTLE_FRAMES: usize = 6;
 const SETTLE_DELAY_MS: u64 = 25;
-/// C# `RepositionSearchAsync`: 35 attempts x 20 ms, then 5 settle frames x 30 ms.
+/// `RepositionSearchAsync`: 35 attempts x 20 ms, then 5 settle frames x 30 ms.
 const SEARCH_ATTEMPTS: usize = 35;
 const SEARCH_DELAY_MS: u64 = 20;
 const SEARCH_SETTLE_FRAMES: usize = 5;
 const SEARCH_SETTLE_DELAY_MS: u64 = 30;
-/// C# `RepositionControlCenterAsync`: 24 attempts x 25 ms and one 75 ms re-assert.
+/// `RepositionControlCenterAsync`: 24 attempts x 25 ms and one 75 ms re-assert.
 const CONTROL_CENTER_ATTEMPTS: usize = 24;
 const CONTROL_CENTER_DELAY_MS: u64 = 25;
 const CONTROL_CENTER_REASSERT_MS: u64 = 75;
@@ -120,7 +120,7 @@ const PID_EXE_CACHE_TTL: Duration = Duration::from_secs(2);
 static PID_EXE_CACHE: OnceLock<Mutex<HashMap<u32, (String, Instant)>>> = OnceLock::new();
 
 /// Which native shell flyout a reposition worker owns. Each kind has its own
-/// generation, mirroring the C# per-surface `CancellationTokenSource`: opening
+/// generation, mirroring the reference per-surface `CancellationTokenSource`: opening
 /// Search must not cancel an in-flight Start worker (and vice versa).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FlyoutKind {
@@ -283,7 +283,7 @@ fn compute_target_with_alignment(
 
     if is_full_screen_canvas(flyout_width, work.width()) {
         // UIA measurement is not available in the shell crate, so use the same
-        // nominal flyout size as the C# parity implementation and subtract its
+        // nominal flyout size as the reference parity implementation and subtract its
         // local offset inside the canvas.
         let panel_w = scale_px(642, dpi);
         let panel_h = scale_px(724, dpi);
@@ -337,7 +337,7 @@ fn max(a: i32, b: i32) -> i32 {
     a.max(b)
 }
 
-/// C# `ComputeSearchPosition` parity. Search uses the margin (not the larger
+/// `ComputeSearchPosition` parity. Search uses the margin (not the larger
 /// flyout gap) for its bottom-edge vertical offset and tracks the button's
 /// horizontal position on a bottom dock.
 #[must_use]
@@ -371,7 +371,7 @@ pub fn compute_search_target(
     }
 }
 
-/// C# `RepositionControlCenterAsync` parity: the panel is centered on the
+/// `RepositionControlCenterAsync` parity: the panel is centered on the
 /// anchor for a bottom dock, or centered vertically beside a side dock.
 #[must_use]
 pub fn compute_control_center_target(
@@ -407,7 +407,7 @@ pub fn compute_control_center_target(
 }
 
 /// Geometry for a specific flyout kind. Start keeps the full-screen canvas
-/// compensation; Search and Control Center use their own C#-parity formulas.
+/// compensation; Search and Control Center use their own reference parity formulas.
 #[must_use]
 pub fn compute_flyout_target(
     kind: FlyoutKind,
@@ -974,7 +974,7 @@ fn window_belongs_to(hwnd: usize, exe_names: &[&str]) -> bool {
     })
 }
 
-/// Windows 10 Search fallback (C# `FindLegacySearchWindows`): a localized
+/// Windows 10 Search fallback (`FindLegacySearchWindows`): a localized
 /// `Windows.UI.Core.CoreWindow` whose PID still belongs to a Search host.
 fn find_search_window_by_title() -> Option<usize> {
     let class = wide(CORE_WINDOW_CLASS);
@@ -995,7 +995,7 @@ fn find_search_window_by_title() -> Option<usize> {
 }
 
 /// Finds Search windows with the same PID check the journal writer uses. The
-/// caller picks the largest rect (matching C# `OrderByDescending(area)`).
+/// caller picks the largest rect (matching `OrderByDescending(area)`).
 fn find_search_windows() -> Vec<usize> {
     let mut windows: Vec<usize> = flyout_writer::find_flyout_windows(flyout_writer::SEARCH_EXES)
         .into_iter()
@@ -1306,7 +1306,7 @@ fn monitor_while_open(hwnd: usize, token: u64, writer_token: u64) {
     }
 }
 
-/// Picks the largest live window (C#'s `OrderByDescending(area).First()`).
+/// Picks the largest live window (the reference `OrderByDescending(area).First()`).
 fn largest_window(candidates: Vec<usize>) -> Option<usize> {
     let mut best: Option<(usize, i64)> = None;
     for hwnd in candidates {
@@ -1331,7 +1331,7 @@ fn window_pid(hwnd: usize) -> u32 {
     pid
 }
 
-/// C# `RepositionSearchAsync` parity: bounded discovery, journal the original
+/// `RepositionSearchAsync` parity: bounded discovery, journal the original
 /// rect, re-assert across settle frames. Search uses its own generation, so it
 /// never cancels a Start worker running at the same time.
 fn search_worker(anchor: Anchor, edge: DockEdge, token: u64, writer_token: u64, work: Anchor) {
@@ -1385,7 +1385,7 @@ fn search_worker(anchor: Anchor, edge: DockEdge, token: u64, writer_token: u64, 
     log::result("SearchAnchor", "window-not-found", false, false, &[]);
 }
 
-/// C# `RepositionControlCenterAsync` parity: class + PID discovery, one
+/// `RepositionControlCenterAsync` parity: class + PID discovery, one
 /// re-assert after the shell finishes its entrance animation, and the same
 /// journal remember/restore path as the other flyouts.
 fn control_center_worker(
@@ -1428,7 +1428,7 @@ fn control_center_worker(
         {
             return;
         }
-        // One real re-assert after the entrance animation (C# line: 75 ms).
+        // One real re-assert after the entrance animation (reference line: 75 ms).
         thread::sleep(Duration::from_millis(CONTROL_CENTER_REASSERT_MS));
         if cancelled(FlyoutKind::ControlCenter, token, writer_token) || !is_window_live(hwnd) {
             return;
@@ -2155,7 +2155,7 @@ mod tests {
     }
 
     #[test]
-    fn search_and_control_center_workers_match_c_sharp_timing() {
+    fn search_and_control_center_workers_match_reference_timing() {
         assert_eq!(SEARCH_ATTEMPTS, 35);
         assert_eq!(SEARCH_DELAY_MS, 20);
         assert_eq!(SEARCH_SETTLE_FRAMES, 5);

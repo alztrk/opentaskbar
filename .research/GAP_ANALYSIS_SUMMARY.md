@@ -1,6 +1,6 @@
 # Gap Analizi Özeti — Subagent Referansı
 
-C# tarafında var, Rust portında olmayan/eksik olan maddeler. Detaylı kaynak: bu dosyanın maddelerini `D:\projects\OpenTaskbar\<dosya yolu>` üzerinden okuyarak doğrula. Rust karşılığı: `D:\projects\OpenTaskbar\crates\...`.
+referans tarafında var, Rust portında olmayan/eksik olan maddeler. Detaylı kaynak: bu dosyanın maddelerini `D:\projects\OpenTaskbar\<dosya yolu>` üzerinden okuyarak doğrula. Rust karşılığı: `D:\projects\OpenTaskbar\crates\...`.
 
 > NOT: Dosya adı eşleşmesi yeterli değil; içeriği oku. Birçok Rust dosyası stub/no-op.
 
@@ -8,7 +8,7 @@ C# tarafında var, Rust portında olmayan/eksik olan maddeler. Detaylı kaynak: 
 
 ## 1. Services\App
 
-| C# dosya | Eksik davranış |
+| reference dosya | Eksik davranış |
 |---|---|
 | `AppIdentity.cs` | MSIX/Store algılama (`GetCurrentPackageFullName`), Store update URI, StartupTask politikası |
 | `ApplicationWindowMenu.cs` | Hedef pencerenin kendi GetMenu/GetSystemMenu ağacını okuyup WM_COMMAND/WM_SYSCOMMAND çalıştırma |
@@ -56,7 +56,7 @@ C# tarafında var, Rust portında olmayan/eksik olan maddeler. Detaylı kaynak: 
 
 ## 3. Services\Interop
 
-| C# dosya | Eksik davranış |
+| reference dosya | Eksik davranış |
 |---|---|
 | `AppBarClient.cs` | SendMessageTimeout ile Explorer hung probe (500 ms), NotificationsSuspended reentrancy gate |
 | `CoreAudio.cs` | GetDevices(isRecording), SetDefaultDevice/PolicyConfigClient, IMMNotificationClient, AudioEndpointMonitor ref-count, AppAudioSessionMatcher scoring |
@@ -128,8 +128,8 @@ Kısmen mevcut: Clock (takvim var ama canlı saat/first-day-of-week/DST adı/lay
 8. **MainWindow.Magnification.cs** — non-magnified zone, native shell button, hover icon, scroll gesture scope, expansion budget
 9. **ThemePropertyEditor.cs / ThemeBrushPicker.cs** — token editörü (6 kategori + Advanced, 350 ms autosave) ve HSV/gradient diyaloğu (16 stop) — yok
 10. **SettingsWindow.xaml.cs** — tema editörü entegrasyonu, SaveFileDialog/OpenFileDialog, tam yedekleme, hotkey capture UI, hava durumu ülke/şehir seçici, AI OAuth (Cursor) UI, tema galerisi görselleri, pencere animasyonu/acrylic, DockTopGap/Width/Height UI, GitHub link
-11. **SettingsWindow.Search.cs** — C# çalışan WPF ağacından tüm satırları topluyor; Rust statik ~50 satır katalog
-12. **DockFlyout.cs** — keyfi WPF içeriği, RetainForExternalContextMenu + WH_MOUSE_LL #32768, 4 halkalı soft shadow, StaysOpen/focus lifecycle
+11. **SettingsWindow.Search.cs** — reference çalışan ağaçtan tüm satırları topluyor; Rust statik ~50 satır katalog
+12. **DockFlyout.cs** — keyfi UI içeriği, RetainForExternalContextMenu + WH_MOUSE_LL #32768, 4 halkalı soft shadow, StaysOpen/focus lifecycle
 13. **TrayShellButton/PinnedTrayStrip** — canlı Shell_NotifyIcon listesi, tıklama iletimi, GUID/UID/path pin stratejileri, abonelikler, oryantasyon
 14. **WidgetCardFeedback.cs** — temalı dolgu/gradyan geçişleri, 80/120/160 ms press animasyonu, ThemeChanged aboneliği
 15. **App.xaml.cs/Program.cs** — `--inspect`, `--dev`, `--smoke-test`, `--software-render`, SessionSwitch reset, WindowsPaletteListener, StartupRegistration.SyncOnStartup
@@ -138,7 +138,7 @@ Mevcut: live drag, temel fisheye, island sayfalama, arama, TextPrompt, scroll vi
 
 ## 7. Models / varlıklar / CI / test
 
-- **DockSettings**: C# 110 alan ↔ Rust 71; 49 alan tipik alan yok (extra'da korunuyor ama işlev yok); 6 alias yok; `DockProfile` `flatten extra` YOK → HiddenApps/Theme/hotkey'ler kalıcı siliniyor; `validate()` yok
+- **DockSettings**: reference 110 alan ↔ Rust 71; 49 alan tipik alan yok (extra'da korunuyor ama işlev yok); 6 alias yok; `DockProfile` `flatten extra` YOK → HiddenApps/Theme/hotkey'ler kalıcı siliniyor; `validate()` yok
 - **DockStack.cs**: FileSystemWatcher, `.crdownload/.part` filtresi, HasNewItems, 2×2 önizleme
 - **DockApp.cs**: DockKey, NormalizeArguments, IsSharedHostExecutable, AUMID
 - **TrackedWindow.cs**: HasNotification, AUMID
@@ -146,7 +146,7 @@ Mevcut: live drag, temel fisheye, island sayfalama, arama, TextPrompt, scroll vi
 - **themes/**: 6 bundled tema (catppuccin/gruvbox/nord/prism/solarized/tokyo-night) + widget pack — Rust'ta asset yok, `built_in_ids()` sadece testte
 - **Fonts/**: Inter 4 ağırlık + OFL — Rust'ta yok
 - **Flags/**: 14 PNG — Rust'ta yok
-- **Locale**: C# 14×999 ↔ Rust 14×1071; C# fazlası 5 kullanımdan kaldırılmış anahtar; Rust fazlası 77 (DI/takvim/font)
-- **Release**: publish/package/check script'leri, checksums.txt, release-manifest, SLSA/VirusTotal, MSIX AppxManifest + 5 logo, CodeQL(csharp), dependabot nuget — Rust'ta yok; rust-ci sadece rust-port branch'inde
+- **Locale**: reference 14×999 ↔ Rust 14×1071; reference fazlası 5 kullanımdan kaldırılmış anahtar; Rust fazlası 77 (DI/takvim/font)
+- **Release**: publish/package/check script'leri, checksums.txt, release-manifest, SLSA/VirusTotal, MSIX AppxManifest + 5 logo, CodeQL (Rust), dependabot Cargo — Rust'ta yok; rust-ci sadece Rust workspace branch'inde
 - **Docs**: README.md 15 satır; CHANGELOG/PRIVACY/docs/*/Design README yok
-- **Test**: C# 31 dosya ~1935 Check (gerçek pencere + sentetik input + görsel ağaç); Rust 93 #[test] saf fonksiyon. En büyük boşluklar: AiUsageChecks(151), FeatureAndMemoryChecks(221, .otbackup), DockLayoutChecks(286), WirelessBatteryChecks(106), MediaVolume/AudioMixer, ShellRecovery/TaskbarRecovery/flyout pozisyon, per-app mixer, telemetry locale parity.
+- **Test**: reference 31 dosya ~1935 Check (gerçek pencere + sentetik input + görsel ağaç); Rust 93 #[test] saf fonksiyon. En büyük boşluklar: AiUsageChecks(151), FeatureAndMemoryChecks(221, .otbackup), DockLayoutChecks(286), WirelessBatteryChecks(106), MediaVolume/AudioMixer, ShellRecovery/TaskbarRecovery/flyout pozisyon, per-app mixer, telemetry locale parity.

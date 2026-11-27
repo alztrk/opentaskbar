@@ -1,8 +1,8 @@
 //! Live application window picker — pure policy + public entry point (issue #174).
 //!
-//! Port of the C# `AppWindowPicker` / `MainWindow.WindowPicker` pair. All geometry,
+//! Rust implementation of `AppWindowPicker` / `MainWindow.WindowPicker` pair. All geometry,
 //! ordering, paging and navigation decisions live here as side-effect-free functions
-//! so they can be unit tested against the C# vectors; `dock::window_picker` owns the
+//! so they can be unit tested against the reference vectors; `dock::window_picker` owns the
 //! native Win32 popup, DWM thumbnails and the modal message loop.
 
 use std::collections::HashSet;
@@ -10,21 +10,21 @@ use std::collections::HashSet;
 use opentaskbar_core::i18n as loc;
 use opentaskbar_shell::tracker::RunningWindow;
 
-/// C# `AppWindowPicker.Gap` (DIPs).
+/// `AppWindowPicker.Gap` (DIPs).
 pub const PICKER_GAP_DIPS: f32 = 12.0;
-/// C# `AppWindowPicker.FramePadding` (DIPs).
+/// `AppWindowPicker.FramePadding` (DIPs).
 pub const PICKER_FRAME_PADDING_DIPS: f32 = 18.0;
-/// C# `_cardWidth` cap (DIPs).
+/// `_cardWidth` cap (DIPs).
 pub const PICKER_MAX_CARD_WIDTH_DIPS: f32 = 312.0;
-/// C# `_cardHeight` bounds (DIPs).
+/// `_cardHeight` bounds (DIPs).
 pub const PICKER_MIN_CARD_HEIGHT_DIPS: f32 = 64.0;
 pub const PICKER_MAX_CARD_HEIGHT_DIPS: f32 = 222.0;
-/// C# page-bar height, added only when more than one page exists.
+/// reference page-bar height, added only when more than one page exists.
 pub const PICKER_PAGING_HEIGHT_DIPS: f32 = 43.0;
-/// Header + frame chrome below the grid (C# `58` in `BuildPage`).
+/// Header + frame chrome below the grid (`58` in `BuildPage`).
 pub const PICKER_CHROME_HEIGHT_DIPS: f32 = 58.0;
 
-/// App identity used by [`matches_window`]. C# passes the clicked `DockApp`;
+/// App identity used by [`matches_window`]. reference passes the clicked `DockApp`;
 /// AUMID wins whenever both sides have one, executable path is the fallback.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PickerApp {
@@ -43,7 +43,7 @@ impl PickerApp {
     }
 }
 
-/// C# `AppWindowPicker.Matches`: AUMID is compared first when both are present,
+/// `AppWindowPicker.Matches`: AUMID is compared first when both are present,
 /// otherwise the executable paths are compared. An entirely empty identity matches
 /// every window — that is the mode used by [`show`], whose caller has already
 /// scoped the snapshot to the clicked dock icon.
@@ -59,7 +59,7 @@ pub fn matches_window(app: &PickerApp, window: &RunningWindow) -> bool {
     app.executable_path.eq_ignore_ascii_case(&window.exe_path)
 }
 
-/// C# `AppWindowPicker.OrderWindows`: drop null handles and non-matching apps,
+/// `AppWindowPicker.OrderWindows`: drop null handles and non-matching apps,
 /// dedupe by HWND (first wins), then put windows from `monitor` first. The sort is
 /// stable, exactly like LINQ `OrderByDescending`, so same-monitor order is preserved.
 pub fn order_windows(
@@ -81,7 +81,7 @@ pub fn order_windows(
     ranked.into_iter().map(|(_, window)| window).collect()
 }
 
-/// C# `(_windows.Count - 1) / _pageSize + 1`, with zero items giving zero pages.
+/// `(_windows.Count - 1) / _pageSize + 1`, with zero items giving zero pages.
 pub fn page_count(item_count: usize, page_size: usize) -> usize {
     if item_count == 0 || page_size == 0 {
         return 0;
@@ -89,7 +89,7 @@ pub fn page_count(item_count: usize, page_size: usize) -> usize {
     (item_count - 1) / page_size + 1
 }
 
-/// One cell of the row-major `UniformGrid` used by the C# picker. `index` is the
+/// One cell of the row-major `UniformGrid` used by the reference picker. `index` is the
 /// absolute position in the ordered window list, not the page-local position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GridCell {
@@ -98,7 +98,7 @@ pub struct GridCell {
     pub col: usize,
 }
 
-/// C# `UniformGrid` layout for a single page: `Rows = ceil(visible / Columns)`,
+/// `UniformGrid` layout for a single page: `Rows = ceil(visible / Columns)`,
 /// columns fixed at `columns`, cells filled row-major. `page_size` bounds the slice.
 pub fn grid_cells(
     item_count: usize,
@@ -137,7 +137,7 @@ impl PickerGeometry {
         visible_count.div_ceil(columns)
     }
 
-    /// C# `BuildPage`: `Width = columns * (cardWidth + Gap) + Padding * 2 + 2`,
+    /// `BuildPage`: `Width = columns * (cardWidth + Gap) + Padding * 2 + 2`,
     /// `Height = rows * (cardHeight + Gap) + Padding * 2 + 58 (+43 with paging)`.
     pub fn frame_size(&self, visible_count: usize, paging_visible: bool) -> (i32, i32) {
         let columns = self.columns.max(1) as f32;
@@ -156,7 +156,7 @@ impl PickerGeometry {
     }
 }
 
-/// Exact integer equivalent of the C# constructor:
+/// Exact integer equivalent of the reference constructor:
 /// `width = max(1, WorkArea.Width - 36 - Padding*2)`,
 /// `height = max(1, WorkArea.Height - 36 - Padding*2 - 96)`,
 /// `columns = min(count, clamp((width + 12) / 254, 1, 3))`,
@@ -185,7 +185,7 @@ pub fn geometry_for_area(work_width: i32, work_height: i32, window_count: usize)
     }
 }
 
-/// C# `Position`: centre the frame inside the invoking display's work area. Works
+/// `Position`: centre the frame inside the invoking display's work area. Works
 /// with signed virtual-desktop coordinates (monitors left/above the primary one).
 pub fn center_in_area(work_area: (i32, i32, i32, i32), width: i32, height: i32) -> (i32, i32) {
     let (left, top, right, bottom) = work_area;
@@ -194,7 +194,7 @@ pub fn center_in_area(work_area: (i32, i32, i32, i32), width: i32, height: i32) 
     (x, y)
 }
 
-/// Keys handled by C# `HandleKeys` (`Enter`/`Space` are left to WPF buttons,
+/// Keys handled by `HandleKeys` (`Enter`/`Space` are left to UI buttons,
 /// this port maps them explicitly to `Confirm` for the single focused window).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PickerKey {
@@ -221,7 +221,7 @@ pub enum PickerAction {
     Ignore,
 }
 
-/// C# `HandleKeys` + `FocusCard` + `ChangePage` as a pure function. Indices are
+/// `HandleKeys` + `FocusCard` + `ChangePage` as a pure function. Indices are
 /// clamped to the visible page, exactly like `FocusCard(index)`; page changes
 /// reset the selection to the first card of the new page (`BuildPage(0)`).
 pub fn navigate(
@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn page_count_matches_csharp_integer_expression() {
+    fn page_count_matches_reference_integer_expression() {
         assert_eq!(page_count(0, 9), 0);
         assert_eq!(page_count(1, 9), 1);
         assert_eq!(page_count(9, 9), 1);
@@ -436,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn geometry_matches_csharp_vector_for_1080p_work_area() {
+    fn geometry_matches_reference_vector_for_1080p_work_area() {
         // 1920x1080 screen minus a 48px taskbar -> 1920x1032 work area.
         let g = geometry_for_area(1920, 1032, 12);
         assert_eq!(g.columns, 3);

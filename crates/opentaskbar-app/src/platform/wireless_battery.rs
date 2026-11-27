@@ -1,4 +1,4 @@
-//! Kablosuz/Bluetooth pil veri katmanı (C# `Services/Hardware/WirelessBattery` portu).
+//! Kablosuz/Bluetooth pil veri katmanı (Rust implementation of `Services/Hardware/WirelessBattery`).
 //!
 //! Tek dosyada, dış bağımlılık gerektirmeyen ham Win32 FFI (setupapi.dll, hid.dll,
 //! kernel32.dll, advapi32.dll) ve dinamik olarak yüklenen xinput1_4.dll kullanılır.
@@ -51,7 +51,7 @@ pub enum BatterySource {
 }
 
 impl BatterySource {
-    /// Widget etiketi (C# `WirelessDeviceReading.GetSourceLabel` karşılığı).
+    /// Widget etiketi (`WirelessDeviceReading.GetSourceLabel` karşılığı).
     pub fn label(self) -> &'static str {
         match self {
             Self::XInput => "XInput",
@@ -92,7 +92,7 @@ impl WirelessReading {
     }
 }
 
-/// Reads either this port's snake_case cache key or the C# PascalCase
+/// Reads either this port's snake_case cache key or the reference PascalCase
 /// `WirelessDeviceReading` property of the same name.
 fn cache_field<'a>(
     value: &'a serde_json::Value,
@@ -113,9 +113,9 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
-/// Parses the `DateTimeOffset` text C# writes for `SampledAt` into Unix seconds.
+/// Parses the `DateTimeOffset` text reference writes for `SampledAt` into Unix seconds.
 /// Fractional seconds are irrelevant at the 30-minute stale threshold.
-fn csharp_timestamp_secs(text: &str) -> Option<u64> {
+fn reference_timestamp_secs(text: &str) -> Option<u64> {
     let digits = |at: usize, len: usize| -> Option<i64> { text.get(at..at + len)?.parse().ok() };
     let (year, month, day) = (digits(0, 4)?, digits(5, 2)?, digits(8, 2)?);
     let (hour, minute, second) = (digits(11, 2)?, digits(14, 2)?, digits(17, 2)?);
@@ -135,7 +135,7 @@ fn csharp_timestamp_secs(text: &str) -> Option<u64> {
     u64::try_from(secs).ok()
 }
 
-/// Inverse of [`days_from_civil`] — used to emit C# `DateTimeOffset` text.
+/// Inverse of [`days_from_civil`] — used to emit `DateTimeOffset` text.
 fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
@@ -553,7 +553,7 @@ fn normalize_name(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Kablolu cihaz filtresi (C# `IsIgnoredWiredDevice` + genel "wired" kontrolü).
+/// Kablolu cihaz filtresi (`IsIgnoredWiredDevice` + genel "wired" kontrolü).
 pub fn is_ignored_wired_device(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
     if lower.is_empty() {
@@ -2956,7 +2956,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn disk_cache_path_is_the_shared_csharp_file() {
+    fn disk_cache_path_is_the_shared_reference_file() {
         let aggregator = WirelessBatteryAggregator::new(AggregatorSettings::default());
         assert_eq!(
             aggregator.cache_path.as_deref(),
@@ -2969,13 +2969,13 @@ mod tests {
     }
 
     #[test]
-    fn reads_csharp_bom_and_pascalcase_cache_fields() {
+    fn reads_reference_bom_and_pascalcase_cache_fields() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "ot-wb-csharp-cache-{}-{unique}",
+            "ot-wb-reference-cache-{}-{unique}",
             std::process::id()
         ));
         let _ = std::fs::create_dir_all(&dir);
@@ -2988,15 +2988,15 @@ mod tests {
                 - 30,
         );
         let document = format!(
-            "\u{feff}{{\"csharp-key\":{{\"Id\":\"hid:046D:C52B\",\"Name\":\"Mouse\",\"BatteryLevel\":72,\"IsCharging\":true,\"Source\":2,\"SampledAt\":\"{sampled}\"}}}}"
+            "\u{feff}{{\"reference-key\":{{\"Id\":\"hid:046D:C52B\",\"Name\":\"Mouse\",\"BatteryLevel\":72,\"IsCharging\":true,\"Source\":2,\"SampledAt\":\"{sampled}\"}}}}"
         );
-        std::fs::write(&path, document).expect("C#-format cache fixture must be writable");
+        std::fs::write(&path, document).expect("reference-format cache fixture must be writable");
         let mut aggregator = WirelessBatteryAggregator::new(AggregatorSettings::default())
             .with_cache_path(path.clone());
         aggregator.ensure_loaded(Instant::now());
         let cached = aggregator
             .cache
-            .get("csharp-key")
+            .get("reference-key")
             .expect("BOM + PascalCase entry must load");
         assert_eq!(cached.name, "Mouse");
         assert_eq!(cached.level, 72);
@@ -3006,23 +3006,26 @@ mod tests {
 
         aggregator.save(Instant::now());
         let saved = std::fs::read_to_string(&path).unwrap();
-        assert!(saved.starts_with('\u{feff}'), "C# writes a UTF-8 BOM");
+        assert!(
+            saved.starts_with('\u{feff}'),
+            "reference writes a UTF-8 BOM"
+        );
         assert!(saved.contains("\"BatteryLevel\":72"));
         assert!(saved.contains("\"SampledAt\":"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn csharp_timestamp_parser_handles_offsets() {
+    fn reference_timestamp_parser_handles_offsets() {
         assert_eq!(
-            csharp_timestamp_secs("2026-11-27T12:34:56+00:00"),
-            csharp_timestamp_secs("2026-11-27T12:34:56Z")
+            reference_timestamp_secs("2026-11-27T12:34:56+00:00"),
+            reference_timestamp_secs("2026-11-27T12:34:56Z")
         );
         assert_eq!(
-            csharp_timestamp_secs("2026-11-27T12:34:56.1234567+03:00"),
-            csharp_timestamp_secs("2026-11-27T09:34:56Z")
+            reference_timestamp_secs("2026-11-27T12:34:56.1234567+03:00"),
+            reference_timestamp_secs("2026-11-27T09:34:56Z")
         );
-        assert_eq!(csharp_timestamp_secs("bad"), None);
+        assert_eq!(reference_timestamp_secs("bad"), None);
     }
 
     #[test]
@@ -3746,7 +3749,7 @@ pub fn is_valid_ghub_uri(uri: &str) -> bool {
     lower.contains("127.0.0.1") || lower.contains("localhost") || lower.starts_with("http://[::1]")
 }
 
-/// Parses G-Hub loopback JSON into readings (C# `ParseGHubJson` / `ExtractGHubDevices`).
+/// Parses G-Hub loopback JSON into readings (`ParseGHubJson` / `ExtractGHubDevices`).
 pub fn parse_ghub_json(json: &str) -> Vec<BatteryReading> {
     let Ok(root) = serde_json::from_str::<serde_json::Value>(json) else {
         return Vec::new();
@@ -4115,7 +4118,7 @@ impl Default for AggregatorSettings {
 }
 
 impl AggregatorSettings {
-    /// C# `validate()` range for `WirelessBatteryPollSeconds` is 15..=300.
+    /// `validate()` range for `WirelessBatteryPollSeconds` is 15..=300.
     pub fn poll_seconds_clamped(&self) -> u32 {
         self.poll_seconds.clamp(15, 300)
     }
@@ -4264,7 +4267,7 @@ pub struct WirelessBatteryAggregator {
 
 impl WirelessBatteryAggregator {
     pub fn new(settings: AggregatorSettings) -> Self {
-        // Same file name and folder as C# `WirelessBatteryAggregator`.
+        // Same file name and folder as `WirelessBatteryAggregator`.
         let cache_path = Some(
             opentaskbar_core::paths::shared_app_data_dir().join("wireless-battery-cache.json"),
         );
@@ -4282,7 +4285,7 @@ impl WirelessBatteryAggregator {
         self
     }
 
-    /// C# writes JSON with `Encoding.UTF8`, which emits a BOM. `.NET` readers
+    /// reference writes JSON with `Encoding.UTF8`, which emits a BOM. other readers
     /// strip it, so the Rust reader has to tolerate both forms.
     fn cache_json(raw: &str) -> Option<serde_json::Value> {
         serde_json::from_str(raw.strip_prefix('\u{feff}').unwrap_or(raw)).ok()
@@ -4337,7 +4340,7 @@ impl WirelessBatteryAggregator {
             } else if let Some(sampled) = value
                 .get("SampledAt")
                 .and_then(|x| x.as_str())
-                .and_then(csharp_timestamp_secs)
+                .and_then(reference_timestamp_secs)
             {
                 wall_now.saturating_sub(sampled)
             } else {
@@ -4393,7 +4396,7 @@ impl WirelessBatteryAggregator {
             let age_secs = now.saturating_duration_since(r.sampled_at).as_secs();
             let sampled = wall_now.saturating_sub(age_secs.min(wall_now));
             // Both spellings are written: snake_case for this port's existing
-            // readers, PascalCase for C# `WirelessDeviceReading` deserialization.
+            // readers, PascalCase for `WirelessDeviceReading` deserialization.
             root.insert(
                 key.clone(),
                 serde_json::json!({
@@ -4418,7 +4421,7 @@ impl WirelessBatteryAggregator {
         // Write to a sibling temporary file then rename: readers never observe a
         // half-written JSON document when the dock restarts mid-save.
         let temp = path.with_extension("json.tmp");
-        // C# `File.WriteAllText(..., Encoding.UTF8)` emits a UTF-8 BOM.
+        // `File.WriteAllText(..., Encoding.UTF8)` emits a UTF-8 BOM.
         let with_bom = format!("\u{feff}{json}");
         if std::fs::write(&temp, with_bom.as_bytes()).is_err() {
             let _ = std::fs::remove_file(&temp);

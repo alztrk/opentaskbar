@@ -1,4 +1,4 @@
-//! Full AI quota flyout — C# `AiUsageWidget.BuildFlyout` + `AiUsageService` parity.
+//! Full AI quota flyout — `AiUsageWidget.BuildFlyout` + `AiUsageService` parity.
 //!
 //! Adds the spend header, Usage breakdown, reset countdown, plan/status chips, severity dot and
 //! a live refresh action on top of the existing window bars.
@@ -16,7 +16,7 @@ use crate::ui::flyout::{BarTone, FlyoutBlock, FlyoutSpec};
 
 use super::telemetry::{AiUsageSnapshot, ai_provider_meta};
 
-/// C# `AiUsageService.Severity` — drives the status dot color in the flyout header.
+/// `AiUsageService.Severity` — drives the status dot color in the flyout header.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AiSeverity {
     #[default]
@@ -170,7 +170,7 @@ pub fn now_epoch() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Derives severity from a peak utilization value (C# `AiUsageService.SeverityFor`).
+/// Derives severity from a peak utilization value (`AiUsageService.SeverityFor`).
 pub fn severity_for_usage(peak: f32, limit_reached: bool) -> AiSeverity {
     if limit_reached || peak >= 0.98 {
         AiSeverity::Critical
@@ -189,7 +189,7 @@ pub fn refresh_full(provider_id: &'static str) {
     super::telemetry::ai_fetch_full(provider_id);
 }
 
-/// Builds the rich flyout blocks for one AI provider (C# `AiUsageWidget.BuildFlyout`).
+/// Builds the rich flyout blocks for one AI provider (`AiUsageWidget.BuildFlyout`).
 pub fn build_ai_flyout(
     id: &str,
     snap: &AiUsageSnapshot,
@@ -204,7 +204,7 @@ pub fn build_ai_flyout(
     let has_data = snap.balance_text.is_some() || !snap.windows.is_empty();
 
     let mut blocks = Vec::new();
-    // Status dot + plan chip in a single C# `SectionHeader`-style row.
+    // Status dot + plan chip in a single `SectionHeader`-style row.
     let status_label = if let Some(ref plan) = detail.plan {
         plan.clone()
     } else if let Some(ref plan) = snap.plan {
@@ -224,7 +224,7 @@ pub fn build_ai_flyout(
         action_label: Some(loc::t("Open")),
     });
 
-    // Plan chip (BadgeRow gives the rounded pill C# uses for subscription tier).
+    // Plan chip (BadgeRow gives the rounded pill reference uses for subscription tier).
     if let Some(plan) = detail.plan.as_ref().or(snap.plan.as_ref()) {
         blocks.push(FlyoutBlock::BadgeRow {
             id: 20,
@@ -403,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn severity_thresholds_match_csharp() {
+    fn severity_thresholds_match_reference() {
         assert_eq!(severity_for_usage(0.0, false), AiSeverity::None);
         assert_eq!(severity_for_usage(0.2, false), AiSeverity::Info);
         assert_eq!(severity_for_usage(0.92, false), AiSeverity::Warning);

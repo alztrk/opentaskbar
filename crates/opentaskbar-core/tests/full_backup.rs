@@ -1,4 +1,4 @@
-//! C# `FeatureAndMemoryChecks` / `FullBackupArchive` parity.
+//! `FeatureAndMemoryChecks` / `FullBackupArchive` parity.
 //!
 //! The ZIP store reader/writer below is retained as an independent vector, but
 //! the round-trip now goes through the production `DockSettings` model in a
@@ -274,7 +274,7 @@ fn production_import_rejects_unsupported_manifest_version() {
 
     let supported = br#"{"Format":"OpenTaskbarFullBackup","Version":1}"#;
     assert!(backup_manifest_version_supported(Some(supported)));
-    // C# deserializes the manifest case-insensitively.
+    // reference deserializes the manifest case-insensitively.
     assert!(backup_manifest_version_supported(Some(br#"{"version":1}"#)));
 
     let bad = BackupManifest {

@@ -19,7 +19,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::{appbar, flyout_writer, journal, modifiers, native_tray, session, watchdog};
 
 const APPBAR_CALLBACK_MSG: u32 = WM_APP + 0x52;
-/// C# `TrayHost.SelfBroadcastWParam` / `RestoreBroadcastWParam`: the dock must
+/// `TrayHost.SelfBroadcastWParam` / `RestoreBroadcastWParam`: the dock must
 /// not mistake its own restore broadcast for an icon-collection ping.
 const SELF_BROADCAST_WPARAM: usize = 1;
 const RESTORE_BROADCAST_WPARAM: usize = 2;
@@ -27,7 +27,7 @@ const RESTORE_BROADCAST_WPARAM: usize = 2;
 static REGISTERED_APPBAR: AtomicUsize = AtomicUsize::new(0);
 static BROADCAST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 
-/// `TaskbarCreated` broadcasts carry a source tag in `wParam`, matching C#
+/// `TaskbarCreated` broadcasts carry a source tag in `wParam`, matching reference
 /// `TrayHost.BroadcastTaskbarCreated(source)`.
 #[must_use]
 pub fn broadcast_wparam(source: &str) -> usize {
@@ -68,7 +68,7 @@ pub fn get_taskbar_state() -> u32 {
     appbar::get_state("GetState") & appbar::SUPPORTED_STATE_MASK
 }
 
-/// C# `IsNativeTaskbarVisible`: primary *and* every secondary tray must be
+/// `IsNativeTaskbarVisible`: primary *and* every secondary tray must be
 /// visible before a journal may be deleted.
 fn native_taskbar_is_visible() -> bool {
     let Some(tray) = native_tray::try_acquire() else {
@@ -207,7 +207,7 @@ pub fn restore_from_journal() {
     // Flyouts are hosted by long-lived shell processes, so put them back first.
     flyout_writer::restore_from_journal();
     // Default state 0, stale journal ignored when the tray is already visible
-    // with a different state (C# ForceRestore).
+    // with a different state (reference ForceRestore).
     let prev = active_state();
     let tray = find_primary_tray();
     if tray.is_null() {

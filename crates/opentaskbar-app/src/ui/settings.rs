@@ -2,7 +2,7 @@
 //!
 //! Grouped settings with a responsive navigation pane and immediate dock updates.
 //! Includes the full `.otbackup` archive UI, theme editor/gallery, hotkey capture,
-//! dynamic search catalogue and widget panel host (C# `SettingsWindow` parity).
+//! dynamic search catalogue and widget panel host (`SettingsWindow` parity).
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -103,7 +103,7 @@ fn parse_hex_color(value: &str) -> Option<u32> {
 }
 
 /// Settings runs in its own `--settings` process so GPUI memory is released when the window
-/// closes. Keep the children so dock shutdown can close them too (C# `CloseForShutdown` parity).
+/// closes. Keep the children so dock shutdown can close them too (`CloseForShutdown` parity).
 static SETTINGS_CHILDREN: Mutex<Vec<std::process::Child>> = Mutex::new(Vec::new());
 
 pub fn spawn_settings_window() {
@@ -302,7 +302,7 @@ fn widget_has_inline_settings(id: &str) -> bool {
 
 // ---------------------------------------------------------------------------
 // SettingsBackdrop — acrylic + DWMWA_BORDER_COLOR=NONE + Win11 system backdrop,
-// disabled under High Contrast so text remains readable (C# SettingsBackdrop.cs).
+// disabled under High Contrast so text remains readable (reference SettingsBackdrop.cs).
 // ---------------------------------------------------------------------------
 
 fn win_wide(text: &str) -> Vec<u16> {
@@ -349,7 +349,7 @@ fn configure_settings_glass_hwnd(window: &Window, is_dark: bool, glass_mode: boo
 
 // ---------------------------------------------------------------------------
 // Full backup (.otbackup) — small stored-ZIP writer/reader, no extra crate.
-// C# `FullBackupArchive.cs` packs manifest + settings + pins + active theme folder.
+// `FullBackupArchive.cs` packs manifest + settings + pins + active theme folder.
 // ---------------------------------------------------------------------------
 
 fn crc32(bytes: &[u8]) -> u32 {
@@ -763,7 +763,7 @@ fn set_extra_number(settings: &mut DockSettings, key: &str, value: i32) {
     settings.extra.insert(key.to_owned(), json!(value));
 }
 
-/// C# writes toggles as JSON booleans. Older port builds wrote `0`/`1`, so reads still accept
+/// reference writes toggles as JSON booleans. Older port builds wrote `0`/`1`, so reads still accept
 /// numbers but every write from this UI is a real bool.
 fn extra_bool(settings: &DockSettings, key: &str, fallback: bool) -> bool {
     settings
@@ -803,7 +803,7 @@ fn resolve_startup_toggle(
 }
 
 /// Snapshot the full profile contract (19 fields incl. name, i.e. the 15+ payload fields the
-/// C# profile service persists) so creating/saving a profile never drops layout, widget,
+/// reference profile service persists) so creating/saving a profile never drops layout, widget,
 /// theme or hotkey state. Applying is delegated to the cfg workstream's
 /// `settings::apply_full_profile`, which is the single authoritative mapper.
 fn snapshot_profile(
@@ -927,7 +927,7 @@ fn location_auto_fill_value(
         .map(|(country, city)| format!("{city}, {country}"))
 }
 
-/// Resolves an executable on `PATH` (C# `AiUsageService.FindExecutableOnPath`).
+/// Resolves an executable on `PATH` (`AiUsageService.FindExecutableOnPath`).
 fn find_executable_on_path(command: &str) -> Option<std::path::PathBuf> {
     let paths = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&paths) {
@@ -941,7 +941,7 @@ fn find_executable_on_path(command: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-/// CLI sign-in command per provider (C# `AiUsageService.CliSignInArguments`).
+/// CLI sign-in command per provider (`AiUsageService.CliSignInArguments`).
 fn ai_cli_sign_in_command(provider_id: &str) -> Option<(&'static str, Vec<&'static str>)> {
     match provider_id {
         "aiusage_claude" => Some(("claude", vec!["claude", "auth", "login"])),
@@ -1096,7 +1096,7 @@ struct SettingsView {
     save_pending: bool,
     update_status: String,
     update_release: Option<update::Release>,
-    // Search (C# SettingsWindow.Search.cs parity)
+    // Search (reference SettingsWindow.Search.cs parity)
     // WidgetPanelHost (Escape / focus return / 300 ms suppress / preview toggle)
     widget_panel: Option<&'static str>,
     panel_opened_at: Option<Instant>,
@@ -1926,7 +1926,7 @@ impl SettingsView {
         }
     }
 
-    /// C# `WidgetPanelHost`: Escape/focus return plus 300 ms suppress after close.
+    /// `WidgetPanelHost`: Escape/focus return plus 300 ms suppress after close.
     fn close_widget_panel(&mut self, window: &mut Window) {
         if self.widget_panel.take().is_some() {
             self.panel_opened_at = Some(Instant::now());
@@ -4941,7 +4941,7 @@ impl SettingsView {
         self.open_brush_picker(BrushPickerTarget::BorderSurface(surface), cx);
     }
 
-    /// Edits the C# `DynamicIslandBackgroundColor` hex string. Reads go through the typed field
+    /// Edits the `DynamicIslandBackgroundColor` hex string. Reads go through the typed field
     /// with the legacy `extra` fallback so an older settings.json stays visible in this editor.
     fn edit_island_background_color(&mut self, cx: &mut Context<Self>) {
         let current = self
@@ -8686,7 +8686,7 @@ impl SettingsView {
                             }),
                         ),
                     ),
-                    // C# `show_fjord_files_button` is a typed setting, not an `extra` key. The
+                    // `show_fjord_files_button` is a typed setting, not an `extra` key. The
                     // dock host consumes it in a separate workstream; this row owns read/write.
                     self.target_row_desc(
                         "ShowFjordFilesButton",

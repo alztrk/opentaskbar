@@ -1,6 +1,6 @@
-//! Unified 22-widget registry, runtime state, and C#-parity `DockFlyout` builders.
+//! Unified 22-widget registry, runtime state, and reference parity `DockFlyout` builders.
 //!
-//! Categories (matching C# `DockWidgetService.cs`):
+//! Categories (matching `DockWidgetService.cs`):
 //! - `Time & Weather`    (5): `clock`, `weather`, `dayprogress`, `stopwatch`, `countdown`
 //! - `System & Hardware` (5): `stats`, `netspeed`, `battery`, `bluetoothbattery`, `storage`
 //! - `AI Quotas`         (7): `aiusage_claude`, `aiusage_codex`,
@@ -238,7 +238,7 @@ pub fn widget_descriptor(id: &str) -> Option<&'static WidgetDescriptor> {
 /// from `DockSettings::is_widget_enabled` (not the raw `Widgets`/`InstalledWidgets` arrays): the
 /// core canonicalizes IDs and keeps those arrays consistent when a widget is toggled, so the dock
 /// sees a newly installed+enabled widget on the next settings reload. Focus Mode hides widgets
-/// here just as C# `WidgetCoordinator.Apply` does.
+/// here just as `WidgetCoordinator.Apply` does.
 pub fn active_widgets(settings: &DockSettings) -> Vec<&'static WidgetDescriptor> {
     let mut out: Vec<&'static WidgetDescriptor> = ALL_WIDGETS
         .iter()
@@ -268,17 +268,17 @@ pub struct WidgetRuntime {
     stats_uptime: String,
     stats_top: Arc<Mutex<Vec<(String, u64)>>>,
     last_stats_top: Option<Instant>,
-    /// GPU utilization percent (C# `SystemStatsWidget` GPU meter).
+    /// GPU utilization percent (`SystemStatsWidget` GPU meter).
     gpu_pct: u32,
-    /// GPU die temperature in °C (C# GPU temperature meter).
+    /// GPU die temperature in °C (reference GPU temperature meter).
     gpu_temp_c: Option<u32>,
-    /// Consecutive failed GPU probes; C# hides the GPU meters after 5 misses.
+    /// Consecutive failed GPU probes; reference hides the GPU meters after 5 misses.
     gpu_misses: u32,
-    /// Consecutive successful GPU probes; C# requires 2 samples before showing meters.
+    /// Consecutive successful GPU probes; reference requires 2 samples before showing meters.
     gpu_samples: u32,
     /// Thermal state 0 = normal, 1 = warning (>=70 °C), 2 = critical (>=85 °C).
     gpu_thermal_state: u8,
-    /// C# `SystemStatsWidget`: 5 samples to enter a hotter band, 2 to leave it.
+    /// `SystemStatsWidget`: 5 samples to enter a hotter band, 2 to leave it.
     gpu_thermal_enter: u8,
     gpu_thermal_exit: u8,
     /// Number of active stat columns on the Dock chip (1..=4), synced on `tick` for dynamic width.
@@ -439,7 +439,7 @@ fn format_mm_ss(total_secs: u64) -> String {
     }
 }
 
-/// C# `StopwatchWidget` centisecond display: `mm:ss.cc`.
+/// `StopwatchWidget` centisecond display: `mm:ss.cc`.
 fn format_mm_ss_cs(total_secs: u64, centis: u32) -> String {
     format!(
         "{:02}:{:02}.{:02}",
@@ -449,9 +449,9 @@ fn format_mm_ss_cs(total_secs: u64, centis: u32) -> String {
     )
 }
 
-/// GPU availability hysteresis (C# `SystemStatsWidget`): 5 consecutive misses hide the meters
+/// GPU availability hysteresis (`SystemStatsWidget`): 5 consecutive misses hide the meters
 /// and 2 consecutive samples bring them back. Returns `None` while the meters must stay hidden.
-/// C# `BluetoothBatteryWidget` low-alert threshold cycle (0 disables the alert).
+/// `BluetoothBatteryWidget` low-alert threshold cycle (0 disables the alert).
 fn bt_next_threshold(current: i64) -> i64 {
     const STEPS: [i64; 4] = [0, 10, 20, 30];
     STEPS
@@ -461,7 +461,7 @@ fn bt_next_threshold(current: i64) -> i64 {
         .unwrap_or(STEPS[0])
 }
 
-/// C# `SystemStatsWidget` thermal bands: 70 °C warning, 85 °C critical.
+/// `SystemStatsWidget` thermal bands: 70 °C warning, 85 °C critical.
 fn thermal_band(temp_c: u32) -> u8 {
     if temp_c >= 85 {
         2
@@ -498,7 +498,7 @@ fn copy_to_clipboard(text: &str) {
         .spawn();
 }
 
-/// C# `QuickSettingsWidget` radio state labels: `Loading`, `Unavailable`, `On`, `Off`.
+/// `QuickSettingsWidget` radio state labels: `Loading`, `Unavailable`, `On`, `Off`.
 fn radio_label(on: bool, loading: bool) -> String {
     if loading {
         loc::t("AiUsageStatusLoading")
@@ -524,7 +524,7 @@ fn resolved_widget_id(id: &str, settings: &DockSettings) -> String {
         .unwrap_or(canonical)
 }
 
-/// C# `WeatherUnit` conversion: telemetry caches Celsius, but the widget can show Fahrenheit.
+/// `WeatherUnit` conversion: telemetry caches Celsius, but the widget can show Fahrenheit.
 fn weather_temp(celsius: &str, settings: &DockSettings) -> String {
     if celsius.is_empty() {
         return "—".to_owned();
@@ -608,7 +608,7 @@ fn audio_input_devices() -> Vec<(String, String)> {
     crate::platform::core_audio::list_devices(true)
 }
 
-/// Maps a Quick Settings `IconBar` shortcut ID to its C# `ms-settings:` URI.
+/// Maps a Quick Settings `IconBar` shortcut ID to its `ms-settings:` URI.
 fn shortcut_uri(id: u32) -> &'static str {
     match id {
         100 => "ms-settings:network-wifi",
@@ -632,7 +632,7 @@ fn shortcut_uri(id: u32) -> &'static str {
     }
 }
 
-/// Number of C# Control Center shortcut tiles in the Quick Settings flyout.
+/// Number of reference Control Center shortcut tiles in the Quick Settings flyout.
 pub const QUICK_SETTINGS_SHORTCUT_COUNT: u32 = 17;
 
 impl WidgetRuntime {
@@ -853,7 +853,7 @@ impl WidgetRuntime {
             self.wifi_on = crate::platform::radio::state("wifi");
             self.bluetooth_on = crate::platform::radio::state("bluetooth");
             // Reconcile a previous toggle: access denied has no refresh at all, a failed write
-            // leaves a refresh but the state does not match the requested target (C# ChangeResult).
+            // leaves a refresh but the state does not match the requested target (reference ChangeResult).
             if let Some(target) = self.wifi_target.take()
                 && self.wifi_on != target
             {
@@ -885,7 +885,7 @@ impl WidgetRuntime {
         }
     }
 
-    /// Returns `true` when any dock widget needs a 15 FPS animation tick (e.g. C# Battery charging wave).
+    /// Returns `true` when any dock widget needs a 15 FPS animation tick (e.g. reference Battery charging wave).
     pub fn needs_animation_tick(&self, settings: &DockSettings) -> bool {
         settings.animations_enabled
             && settings.is_widget_enabled("battery")
@@ -913,7 +913,7 @@ impl WidgetRuntime {
         }
     }
 
-    /// Returns the live dynamic width for a dock widget (matching C# `StorageWidget` multi-drive
+    /// Returns the live dynamic width for a dock widget (matching `StorageWidget` multi-drive
     /// and `BluetoothBatteryWidget` multi-device width expansion).
     pub fn widget_width_dips(&self, id: &str) -> f32 {
         match id {
@@ -943,7 +943,7 @@ impl WidgetRuntime {
         }
     }
 
-    /// C# `AudioWidget` wheel handler: 120 delta = 10% with fractional remainder carried across
+    /// `AudioWidget` wheel handler: 120 delta = 10% with fractional remainder carried across
     /// events. WS-D calls this from the dock's `WM_MOUSEWHEEL`.
     pub fn adjust_volume_wheel(&mut self, delta: i32) -> u32 {
         let next = volume_from_wheel(self.audio_vol, delta, &mut self.volume_wheel_remainder);
@@ -952,7 +952,7 @@ impl WidgetRuntime {
         self.audio_vol
     }
 
-    /// C# `KeyboardLayoutWidget`: send `WM_INPUTLANGCHANGEREQUEST` to the last *external*
+    /// `KeyboardLayoutWidget`: send `WM_INPUTLANGCHANGEREQUEST` to the last *external*
     /// foreground window (never our own dock/island/flyout windows).
     pub fn activate_keyboard_on_last_external_window(&mut self) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -1203,7 +1203,7 @@ impl WidgetRuntime {
         media_ext::get_details(&snap, self.audio_vol, self.audio_muted)
     }
 
-    /// Builds the exact C# 1-to-1 `WidgetChipSpec` rendered onto the dock pill.
+    /// Builds the exact reference 1-to-1 `WidgetChipSpec` rendered onto the dock pill.
     pub fn chip_spec(&self, id: &str, settings: &DockSettings, is_dark: bool) -> WidgetChipSpec {
         let pal = design::palette(is_dark);
         if let Some(ai) = telemetry::ai_provider_meta(id) {
@@ -1247,7 +1247,7 @@ impl WidgetRuntime {
                     }
                 }
                 "aiusage_cursor" => {
-                    // Exact C# AiUsageWidget.cs: Cursor shows a single long window row (`30d` / `7d`).
+                    // Exact reference AiUsageWidget.cs: Cursor shows a single long window row (`30d` / `7d`).
                     let win = snap.windows.first();
                     let used = win.map_or(0.0, |w| w.used);
                     WidgetChipSpec::AiDual {
@@ -1296,7 +1296,7 @@ impl WidgetRuntime {
                         let col = if w.used >= 0.75 {
                             bar_accent(w.used)
                         } else {
-                            (0x9f, 0x9f, 0xf2) // C# CopilotBrandBrush
+                            (0x9f, 0x9f, 0xf2) // reference CopilotBrandBrush
                         };
                         WidgetChipSpec::AiCopilot {
                             value_text: format!("{:.0}%", w.used * 100.0),
@@ -1363,7 +1363,7 @@ impl WidgetRuntime {
                 } else {
                     loc::t("WeatherUnavailable").to_owned()
                 };
-                // Exact C# WeatherWidget.cs WarmSunBrush (#E5AE5E) & RainBrush (#6EAAF3)
+                // Exact reference WeatherWidget.cs WarmSunBrush (#E5AE5E) & RainBrush (#6EAAF3)
                 let icon_color = if snap.is_rain {
                     (0x6e, 0xaa, 0xf3)
                 } else {
@@ -1587,7 +1587,7 @@ impl WidgetRuntime {
                 let title = if snap.title.is_empty() {
                     loc::t("WidgetMediaDescription").to_owned()
                 } else {
-                    // C# `MediaWidget` shows a play/pause glyph before the title.
+                    // `MediaWidget` shows a play/pause glyph before the title.
                     format!("{} {}", playing_glyph(snap.playing), snap.title)
                 };
                 WidgetChipSpec::Media {
@@ -1601,7 +1601,7 @@ impl WidgetRuntime {
                 muted: self.audio_muted,
             },
             "quicksettings" => {
-                // C# QuickSettingsWidget.xaml: Wi-Fi, Bluetooth, Night Light — real radio states.
+                // reference QuickSettingsWidget.xaml: Wi-Fi, Bluetooth, Night Light — real radio states.
                 let (wifi, bt) = if self.radio_loading {
                     (false, false)
                 } else {
@@ -1682,7 +1682,7 @@ impl WidgetRuntime {
         }
     }
 
-    /// Concise C#-style tooltip above each hovered widget.
+    /// Concise reference-style tooltip above each hovered widget.
     /// Per-frame accessor. The expensive path (COM device name, disk queries, file checks)
     /// runs at most twice per second for the same sub-button instead of on every VSync.
     pub fn hover_tooltip(
@@ -1905,7 +1905,7 @@ impl WidgetRuntime {
         }
     }
 
-    /// Exact C# left-click dispatch: inline sub-buttons execute directly; AI, System Stats,
+    /// Exact reference left-click dispatch: inline sub-buttons execute directly; AI, System Stats,
     /// and Net Speed chips have no flyout.
     pub fn handle_direct_click(
         &mut self,
@@ -1940,7 +1940,7 @@ impl WidgetRuntime {
                 }
             }
             "quicksettings" => {
-                // C# QuickSettingsWidget.xaml: Wi-Fi, Bluetooth, Night Light — real radio toggles.
+                // reference QuickSettingsWidget.xaml: Wi-Fi, Bluetooth, Night Light — real radio toggles.
                 let third = (width_dips / 3.0).max(1.0);
                 if rel_x_dips < third {
                     let kind = "wifi";
@@ -2002,7 +2002,7 @@ impl WidgetRuntime {
                 }
             }
             "battery" => {
-                // Exact C# BatteryWidget.OpenPowerSettingsAction
+                // Exact reference BatteryWidget.OpenPowerSettingsAction
                 pins::launch("ms-settings:batterysaver".to_owned());
                 DirectClickOutcome::Handled
             }
@@ -2029,7 +2029,7 @@ impl WidgetRuntime {
         }
     }
 
-    /// Quick secondary (right-click) shortcuts matching C# widget context menus.
+    /// Quick secondary (right-click) shortcuts matching reference widget context menus.
     pub fn handle_secondary_click(
         &mut self,
         id: &str,
@@ -2215,7 +2215,7 @@ impl WidgetRuntime {
             .take(6)
             .map(|(i, (_, name))| FlyoutBlock::BadgeRow {
                 id: 200 + i as u32,
-                code: "\u{E7F5}".to_owned(), // Headphone glyph (C# AudioWidget device selector)
+                code: "\u{E7F5}".to_owned(), // Headphone glyph (reference AudioWidget device selector)
                 title: name.clone(),
                 active: name.eq_ignore_ascii_case(&out_name),
             })
@@ -2393,7 +2393,7 @@ impl WidgetRuntime {
                     (15, loc::t_fmt("CountdownMinutesShort", &["15"]), mins == 15),
                     (30, loc::t_fmt("CountdownMinutesShort", &["30"]), mins == 30),
                 ]),
-                // C# `TimedWidgetPanel` custom duration (C2 TextInput, validated 1-1440 minutes).
+                // `TimedWidgetPanel` custom duration (C2 TextInput, validated 1-1440 minutes).
                 FlyoutBlock::TextInput {
                     id: 50,
                     label: loc::t("CountdownCustomMinutes"),
@@ -2419,7 +2419,7 @@ impl WidgetRuntime {
         }
     }
 
-    /// Unified C# `SystemStatsWidget` flyout: localized metrics (WIP), GPU meters with
+    /// Unified `SystemStatsWidget` flyout: localized metrics (WIP), GPU meters with
     /// hysteresis (WS-G), C2 `Chart`/`Sparkline` series (WS-C) and cached top processes.
     fn build_stats_spec(&self, settings: &DockSettings, is_dark: bool) -> FlyoutSpec {
         let pal = design::palette(is_dark);
@@ -2708,7 +2708,7 @@ impl WidgetRuntime {
                 _ => {}
             }
         }
-        // Full C# `AiUsageWidget.BuildFlyout` — spend / breakdown / reset / plan chip /
+        // Full `AiUsageWidget.BuildFlyout` — spend / breakdown / reset / plan chip /
         // severity dot / refresh. Full detail is read from the shared AI fetch cache.
         else if let Some(ai) = telemetry::ai_provider_meta(id) {
             let snap = self
@@ -2766,7 +2766,7 @@ impl WidgetRuntime {
                     },
                 );
             }
-            // Exact C# `ClockWidget.BuildCalendar` (live interactive month/year nav & day selection)
+            // Exact `ClockWidget.BuildCalendar` (live interactive month/year nav & day selection)
             "clock" => {
                 let info = telemetry::local_clock_info();
                 let (mut shown_y, mut shown_m) = (info.year, info.month);
@@ -2845,7 +2845,7 @@ impl WidgetRuntime {
                     },
                 );
             }
-            // Exact C# `AudioWidget.PopulateFlyout` (live interactive Output + Input mixer!)
+            // Exact `AudioWidget.PopulateFlyout` (live interactive Output + Input mixer!)
             "audio" => {
                 let init = self.build_audio_mixer_spec();
                 flyout::show_flyout_live_with_border(
@@ -2923,7 +2923,7 @@ impl WidgetRuntime {
                 );
                 (self.audio_vol, self.audio_muted) = get_audio_state();
             }
-            // Exact C# `WeatherWidget.BuildFlyoutContent`
+            // Exact `WeatherWidget.BuildFlyoutContent`
             "weather" => {
                 let snap = self.weather.lock().map(|g| g.clone()).unwrap_or_default();
                 let city = if snap.city.is_empty() {
@@ -2941,7 +2941,7 @@ impl WidgetRuntime {
                 } else {
                     snap.formatted_feels_like(settings.weather_unit)
                 };
-                // C# `WeatherUnit` override from the settings catalog (WS-C), when configured.
+                // `WeatherUnit` override from the settings catalog (WS-C), when configured.
                 let temp = if setting_str(settings, "WeatherUnit").is_some() {
                     weather_temp(&snap.temp_c, settings)
                 } else {
@@ -3051,7 +3051,7 @@ impl WidgetRuntime {
                         Some(Instant::now() + std::time::Duration::from_secs(30 * 60));
                 }
             }
-            // C# `NetSpeedWidget`: live throughput + 6-stream speed test with cancel/retry/restart.
+            // `NetSpeedWidget`: live throughput + 6-stream speed test with cancel/retry/restart.
             "netspeed" => {
                 let adapter = if self.net.adapter_name.is_empty() {
                     None
@@ -3137,7 +3137,7 @@ impl WidgetRuntime {
                     },
                 );
             }
-            // C# `BluetoothBatteryWidget.PopulateHoverFlyoutPanel` + device management.
+            // `BluetoothBatteryWidget.PopulateHoverFlyoutPanel` + device management.
             "bluetoothbattery" => {
                 // WS-1: only a real live-event click/commit may request a settings save.
                 // Hover-generated flyouts must leave this `false`.
@@ -3380,7 +3380,7 @@ impl WidgetRuntime {
                             ))
                         }
                         LiveEvent::Click(5) => {
-                            // C# cycles 0 / 10 / 20 / 30 percent (0 disables the low alert).
+                            // reference cycles 0 / 10 / 20 / 30 percent (0 disables the low alert).
                             let cur = setting_i64(settings, "WirelessBatteryLowThreshold", 20);
                             let next = bt_next_threshold(cur);
                             set_setting(
@@ -3489,7 +3489,7 @@ impl WidgetRuntime {
                 // trigger settings save + live reload on the hook-owning UI thread.
                 return Self::flyout_settings_changed("bluetoothbattery", settings_changed);
             }
-            // C# `StorageWidget` expanded drives flyout (DriveType.Fixed && IsReady).
+            // `StorageWidget` expanded drives flyout (DriveType.Fixed && IsReady).
             "storage" => {
                 let drives = self.poll_snapshot.fixed_drives();
                 let mut blocks: Vec<FlyoutBlock> = drives
@@ -3532,7 +3532,7 @@ impl WidgetRuntime {
                     pins::launch("explorer.exe".to_owned());
                 }
             }
-            // Exact C# `KeyboardLayoutWidget.BuildFlyoutContent` (`BadgeRow` with code pill + full name)
+            // Exact `KeyboardLayoutWidget.BuildFlyoutContent` (`BadgeRow` with code pill + full name)
             "keyboard" => {
                 let layouts = telemetry::installed_keyboard_layouts();
                 let active = active_keyboard_code();
@@ -3608,7 +3608,7 @@ impl WidgetRuntime {
                     BorderStyle::from_widget_settings(is_dark, settings),
                 );
             }
-            // C# `FocusWidget.BuildFocusFlyout` — Break phase + session number + pulse.
+            // `FocusWidget.BuildFocusFlyout` — Break phase + session number + pulse.
             "focus" => {
                 let build = || focus_break::build_focus_flyout(&self.focus.snapshot());
                 let init = build();
@@ -3653,7 +3653,7 @@ impl WidgetRuntime {
                     },
                 );
             }
-            // Exact C# `TimedWidgetPanel.xaml` Stopwatch (live Lap / Start / Pause / Reset)
+            // Exact `TimedWidgetPanel.xaml` Stopwatch (live Lap / Start / Pause / Reset)
             "stopwatch" => {
                 let init = self.build_stopwatch_spec();
                 flyout::show_flyout_live_with_border(
@@ -3683,7 +3683,7 @@ impl WidgetRuntime {
                     },
                 );
             }
-            // Exact C# `TimedWidgetPanel.xaml` Countdown (live 5/10/15/30 presets + Start/Pause/Reset)
+            // Exact `TimedWidgetPanel.xaml` Countdown (live 5/10/15/30 presets + Start/Pause/Reset)
             "countdown" => {
                 let init = self.build_countdown_spec();
                 flyout::show_flyout_live_with_border(
@@ -3728,7 +3728,7 @@ impl WidgetRuntime {
                     },
                 );
             }
-            // C# `MediaWidget` live flyout: seek anchor + per-app mixer (WS-E).
+            // `MediaWidget` live flyout: seek anchor + per-app mixer (WS-E).
             "media" => {
                 telemetry::refresh_media_session(&self.media_session, true);
                 let build = |runtime: &Self| {
@@ -3838,7 +3838,7 @@ impl WidgetRuntime {
                         None
                     }
                 };
-                // C# `ChangeResult`: Applied / Denied / Failed are distinct user-visible states.
+                // `ChangeResult`: Applied / Denied / Failed are distinct user-visible states.
                 let wifi_state =
                     change_error().unwrap_or_else(|| radio_label(self.wifi_on, self.radio_loading));
                 let bt_state = change_error()
@@ -3926,7 +3926,7 @@ impl WidgetRuntime {
                                 slider_id: 10,
                             },
                             FlyoutBlock::Separator,
-                            // C# `QuickSettingsWidget.AddShortcuts`: 17 Control Center shortcuts.
+                            // `QuickSettingsWidget.AddShortcuts`: 17 Control Center shortcuts.
                             FlyoutBlock::IconBar {
                                 buttons: vec![
                                     (100, loc::t("QuickAvailableNetworks"), 0xE701, wifi_on),

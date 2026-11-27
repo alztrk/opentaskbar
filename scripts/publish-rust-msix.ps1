@@ -34,9 +34,9 @@ if (-not (Test-Path -LiteralPath $manifestTemplate -PathType Leaf)) {
 
 # Produce the portable Rust EXE first (it is the MSIX payload).
 $portableDir = Join-Path $OutputDir "portable-$arch"
-& (Join-Path $PSScriptRoot 'publish-rust-portable.ps1') -Runtime $Runtime -OutputDir $portableDir
+& (Join-Path $PSScriptRoot 'publish-portable.ps1') -Runtime $Runtime -OutputDir $portableDir
 if ($LASTEXITCODE -ne 0) { throw "Rust portable build failed for MSIX ($Runtime)." }
-$exe = Join-Path $portableDir "OpenTaskbar-Rust-$arch.exe"
+$exe = Join-Path $portableDir "OpenTaskbar-$arch.exe"
 
 $makeAppx = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter 'makeappx.exe' -ErrorAction SilentlyContinue |
     Where-Object { $_.FullName -like '*\x64\*' } |
@@ -72,7 +72,7 @@ $manifest.Package.Identity.ProcessorArchitecture = $arch
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [IO.File]::WriteAllText((Join-Path $stagingDir 'AppxManifest.xml'), $manifest.OuterXml, $utf8NoBom)
 
-$msixPath = Join-Path $OutputDir "OpenTaskbarRust_${msixVersion}_${arch}.msix"
+$msixPath = Join-Path $OutputDir "OpenTaskbar_${msixVersion}_${arch}.msix"
 Write-Host "Packing Rust MSIX $msixVersion ($arch)..." -ForegroundColor Cyan
 & $makeAppx pack /d $stagingDir /p $msixPath /o
 if ($LASTEXITCODE -ne 0) { throw "makeappx pack failed with exit code $LASTEXITCODE" }

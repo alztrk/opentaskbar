@@ -2,7 +2,7 @@
 # can start its short-lived icon worker without shipping sidecar DLLs.
 param (
     [string]$OutputDir = "$PSScriptRoot\..\release",
-    [string]$ExecutableName = 'OpenTaskbar-Rust-x64.exe',
+    [string]$ExecutableName = 'OpenTaskbar-x64.exe',
     # PE COFF machine (0x014C = x86, 0x8664 = x64). Derived from the file name
     # when omitted, so an "x86" asset can never hide an x64 payload.
     [ValidateSet('', 'x86', 'x64')]
@@ -45,7 +45,7 @@ if ($machine -ne $expectedMachine) {
 }
 Write-Host ("PE machine OK for {0}: 0x{1:X4} ({2})" -f $ExecutableName, $machine, $Architecture) -ForegroundColor DarkGray
 
-# publish-rust-portable.ps1 drops the exact watchdog embedded by build.rs next
+# publish-portable.ps1 drops the exact watchdog embedded by build.rs next
 # to the EXE for manifest/attestation purposes; verify it is the same arch too.
 $watchdog = Join-Path $directory "OpenTaskbarWatchdog-$Architecture.exe"
 if (Test-Path -LiteralPath $watchdog -PathType Leaf) {
@@ -67,7 +67,7 @@ if ($sidecars.Count -gt 0) {
 # --extract-icons exits immediately when stdin is closed, making it a safe smoke
 # test that never opens the dock or touches the taskbar.
 Write-Host "Starting Rust EXE in icon-worker smoke-test mode..."
-$nullIn = Join-Path $env:TEMP 'opentaskbar-rust-stdin-null'
+$nullIn = Join-Path $env:TEMP 'opentaskbar-stdin-null'
 [IO.File]::WriteAllText($nullIn, '')
 $process = $null
 try {

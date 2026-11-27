@@ -137,7 +137,7 @@ pub fn aero_peek_enabled() -> bool {
     }
 }
 
-/// Clamps an overlay window to the primary screen (C# `PositionOverlayWindow`).
+/// Clamps an overlay window to the primary screen (`PositionOverlayWindow`).
 pub fn position_overlay_window(
     width: i32,
     height: i32,
@@ -154,7 +154,7 @@ pub fn position_overlay_window(
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
 const MAX_CARDS: usize = 6;
-/// C# `Design/Tokens/Layout.xaml`: PreviewWidth/Height = 228x154 DIP.
+/// `Design/Tokens/Layout.xaml`: PreviewWidth/Height = 228x154 DIP.
 /// The Large profile uses 250x180 (set by the dock at show time).
 const CARD_W_DIPS: f32 = layout::PREVIEW_CARD_DIPS.0;
 const CARD_H_DIPS: f32 = layout::PREVIEW_CARD_DIPS.1;
@@ -359,7 +359,7 @@ impl PreviewPopup {
         self.set_glass_config(cfg);
     }
 
-    /// Applies the C# size-profile card dimensions (228x154 / 250x180 DIP).
+    /// Applies the reference size-profile card dimensions (228x154 / 250x180 DIP).
     pub fn set_card_size(&mut self, width_dips: f32, height_dips: f32) {
         if width_dips.is_finite() && width_dips >= 120.0 {
             self.card_w_dips = width_dips;
@@ -1069,7 +1069,7 @@ mod tests {
     }
 
     #[test]
-    fn peek_timing_matches_csharp() {
+    fn peek_timing_matches_reference() {
         assert_eq!(super::super::layout::PREVIEW_GRACE_MS, 250);
         assert_eq!(super::super::layout::PREVIEW_DELAY_MS, 500);
         assert_eq!(super::super::layout::PREVIEW_FADE_MS, 140);

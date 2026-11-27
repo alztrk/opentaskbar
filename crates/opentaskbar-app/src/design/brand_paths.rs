@@ -1,4 +1,4 @@
-//! Exact C# `Design/Icons/Brand.xaml` AI provider vector logos rendered natively via Direct2D
+//! Exact `Design/Icons/Brand.xaml` AI provider vector logos rendered natively via Direct2D
 //! `ID2D1PathGeometry` (zero external SVG crate dependencies, crisp at any DPI).
 
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -15,7 +15,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use super::Rgb;
 
-/// Exact WPF `StreamGeometry` path data from C# `Design/Icons/Brand.xaml`.
+/// Exact `StreamGeometry` path data from `Design/Icons/Brand.xaml`.
 pub fn brand_path_data(provider_id: &str) -> Option<&'static str> {
     match provider_id {
         "aiusage_claude" => Some(
@@ -406,7 +406,7 @@ unsafe fn build_path_geometry(factory: &ID2D1Factory1, data: &str) -> Result<ID2
     }
 }
 
-/// Draws the exact C# `Brand.xaml` vector silhouette uniformly centered inside `dest`.
+/// Draws the exact `Brand.xaml` vector silhouette uniformly centered inside `dest`.
 pub unsafe fn draw_brand_logo(
     factory: &ID2D1Factory1,
     dc: &ID2D1DeviceContext,
@@ -469,7 +469,7 @@ mod tests {
     use super::{brand_path_data, parse_stream_geometry};
 
     #[test]
-    fn all_seven_csharp_brand_logos_parse_cleanly() {
+    fn all_seven_reference_brand_logos_parse_cleanly() {
         let ids = [
             "aiusage_claude",
             "aiusage_codex",

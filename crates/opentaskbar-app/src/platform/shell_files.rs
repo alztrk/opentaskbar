@@ -1,6 +1,6 @@
 //! Shell tabanlı dosya işlemleri: Masaüstüne taşıma/kopyalama, Geri Dönüş Kutusu.
 //!
-//! C# referansı: `Services/Interop/DesktopFileTransfer.cs` ve `RecycleBin.cs`.
+//! Başvuru: `Services/Interop/DesktopFileTransfer.cs` ve `RecycleBin.cs`.
 //! `SHFileOperationW` kullanıldığı için Explorer'ın Geri Al (Ctrl+Z), ilerleme
 //! penceresi ve çakışma yeniden adlandırma davranışları korunur. Tüm çağrılar
 //! `hwnd = 0` ile yapılır; böylece arka planda çalışan bir iş parçacığı
@@ -277,7 +277,7 @@ pub fn empty_recycle_bin() -> bool {
 ///
 /// `FOF_ALLOWUNDO` kalıcı silme yerine geri dönüş kutusunu zorunlu kılar;
 /// `FOF_WANTNUKEWARNING` kutuya sığmayan dosyalarda uyarı gösterir.
-/// İptal (`aborted`) hata değil, `true` olarak raporlanır (C# `RecycleBin.Delete` ile aynı).
+/// İptal (`aborted`) hata değil, `true` olarak raporlanır (`RecycleBin.Delete` ile aynı).
 pub fn delete_to_recycle_bin(paths: &[String]) -> bool {
     let normalized: Vec<String> = paths.iter().filter_map(|p| normalize_path(p)).collect();
     if normalized.is_empty() {

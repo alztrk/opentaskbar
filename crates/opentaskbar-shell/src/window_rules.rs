@@ -74,7 +74,7 @@ pub fn extended_style(hwnd: usize) -> usize {
 }
 
 /// Full taskbar-button eligibility for a live HWND. This is the single check the
-/// running-window tracker uses, mirroring the C# `CollectWindowCore` order:
+/// running-window tracker uses, mirroring the `CollectWindowCore` order:
 /// `ITaskbarList::DeleteTab` + WS_EX rules, hidden DWM cloak (with the
 /// `CLOAKED_SHELL` virtual-desktop exception) and hidden immersive frames.
 ///
@@ -109,7 +109,7 @@ pub fn has_taskbar_button_for_hwnd(hwnd: usize, cloaked: u32) -> bool {
 mod tests {
     use super::*;
 
-    /// Ports every `TaskbarWindowRules` vector from C#
+    /// Ports every `TaskbarWindowRules` vector from reference
     /// `tests/OpenTaskbar.Tests/TaskbarWindowChecks.cs`.
     #[test]
     fn shell_rules_match_native_taskbar_eligibility() {

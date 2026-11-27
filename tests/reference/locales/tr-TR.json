@@ -542,7 +542,7 @@
   "LauncherTaskManager": "Görev Yöneticisi",
   "LauncherUninstall": "Kaldır",
   "ErrorUpdatePath": "Uygulama yolu bulunamadı.",
-  "ErrorUpdateDeveloperMode": "Geliştirici ortamında (dotnet run) otomatik güncelleme uygulanamaz.",
+  "ErrorUpdateDeveloperMode": "Geliştirici ortamında otomatik güncelleme uygulanamaz.",
   "ErrorUpdateBinaryMissing": "İndirilebilir uygulama bulunamadı; sürüm sayfası açıldı.",
   "ErrorUpdateHttp": "İndirme hatası: HTTP {0}",
   "ErrorUpdateSizeInvalid": "İndirilen dosya boyutu geçersiz.",

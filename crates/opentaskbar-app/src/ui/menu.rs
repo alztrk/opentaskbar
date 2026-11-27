@@ -276,7 +276,7 @@ fn encode_native_command(id: u32, system: bool) -> u32 {
     }
 }
 
-/// Reads the target window's own `GetMenu` / `GetSystemMenu` commands (C#
+/// Reads the target window's own `GetMenu` / `GetSystemMenu` commands (reference
 /// `ApplicationWindowMenu.cs`).
 ///
 /// Intentionally kept as a **public wrapper** with a stable name: no call site

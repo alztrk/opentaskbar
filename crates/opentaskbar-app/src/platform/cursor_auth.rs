@@ -1,6 +1,6 @@
 //! Cursor browser PKCE sign-in and DPAPI-encrypted OAuth token storage.
 //!
-//! C# parity: `Services/App/CursorAuthService.cs`.
+//! reference parity: `Services/App/CursorAuthService.cs`.
 //! - `sign_in_start()` -> PKCE verifier/challenge/uuid + browser URL (mode=login).
 //! - `sign_in_finish()` polls `api2.cursor.sh/auth/poll` every 2 s (up to 3 minutes) and
 //!   persists the access/refresh token pair with `CryptProtectData` + application entropy.
@@ -61,7 +61,7 @@ fn token_path() -> PathBuf {
         .unwrap_or_else(|| opentaskbar_core::paths::secrets_dir().join("cursor-auth.bin"))
 }
 
-/// C# `Guid.NewGuid().ToString("N")`: 32 lowercase hex digits. The CSPRNG
+/// `Guid.NewGuid().ToString("N")`: 32 lowercase hex digits. The CSPRNG
 /// fallback keeps the name unique even when BCryptGenRandom is unavailable.
 fn guid_n_token() -> String {
     let mut bytes = random_bytes::<16>().unwrap_or_else(|| {
@@ -83,7 +83,7 @@ fn guid_n_token() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Same atomic-write name as C# `path + "." + Guid.NewGuid().ToString("N") + ".tmp"`.
+/// Same atomic-write name as `path + "." + Guid.NewGuid().ToString("N") + ".tmp"`.
 fn tmp_path(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_os_string();
     name.push(format!(".{}.tmp", guid_n_token()));
@@ -572,7 +572,7 @@ pub fn token() -> Option<String> {
     load_tokens().0
 }
 
-/// Returns true when a JWT expires within five minutes (C# `IsExpiringSoon`).
+/// Returns true when a JWT expires within five minutes (`IsExpiringSoon`).
 #[allow(non_snake_case)]
 pub fn is_expiringSoon(jwt: &str) -> bool {
     let parts: Vec<&str> = jwt.split('.').collect();
@@ -818,13 +818,13 @@ mod tests {
     }
 
     #[test]
-    fn dpapi_constants_match_csharp_cursor_auth_service() {
+    fn dpapi_constants_match_reference_cursor_auth_service() {
         assert_eq!(ENTROPY, b"OpenTaskbar.CursorAuth.v1");
         assert_eq!(MAX_FILE_BYTES, 1 << 16);
     }
 
     #[test]
-    fn tmp_name_matches_csharp_guid_n_convention() {
+    fn tmp_name_matches_reference_guid_n_convention() {
         let path = Path::new("secrets").join("cursor-auth.bin");
         let tmp = tmp_path(&path);
         let name = tmp.file_name().unwrap().to_str().unwrap();
@@ -840,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn token_json_keeps_the_csharp_payload_shape() {
+    fn token_json_keeps_the_reference_payload_shape() {
         assert_eq!(
             token_json("acc", Some("ref")),
             r#"{"accessToken":"acc","refreshToken":"ref"}"#

@@ -1,6 +1,6 @@
 //! Native Win32 + DirectComposition Dynamic Island window & multi-display manager.
 //!
-//! Mirrors C# `Views/Windows/DynamicIslandManager.cs` and `DynamicIslandWindow.xaml.cs`:
+//! Mirrors `Views/Windows/DynamicIslandManager.cs` and `DynamicIslandWindow.xaml.cs`:
 //! - One top-edge floating island per connected display with assigned widgets
 //! - Horizontal paging via Prev/Next buttons, pointer drag/swipe, or Left/Right keys when hovered
 //! - Per-display widget ordering (`DynamicIslandWidgetOrders`), placement context menus,
@@ -36,7 +36,7 @@ use crate::platform::win32::{self, ForegroundProbe, MonitorInfo, WidgetContextAc
 use crate::ui::settings as settings_ui;
 use crate::widgets::{self, WidgetRuntime};
 
-// All geometry comes from the C# vectors in `opentaskbar_core::dynamic_island::geometry`.
+// All geometry comes from the reference vectors in `opentaskbar_core::dynamic_island::geometry`.
 use opentaskbar_core::dynamic_island::geometry as island_geo;
 
 const COMPACT_HEIGHT_DIPS: f32 = island_geo::COMPACT_HEIGHT_DIPS;
@@ -48,7 +48,7 @@ const LEFT_CONTROLS_DIPS: f32 = island_geo::LEFT_CONTROLS_DIPS;
 const CHIP_H_DIPS: f32 = 38.0;
 const SLIDE_DURATION_SECS: f32 = 0.190;
 /// `FlyoutEdge::Bottom` places the popup *above* the anchor. The island is on the
-/// top edge, so the anchor is shifted down by the C# expanded height to make the
+/// top edge, so the anchor is shifted down by the reference expanded height to make the
 /// popup appear just below the island instead of being clamped to the top margin.
 const FLYOUT_ANCHOR_OFFSET_DIPS: f32 = island_geo::EXPANDED_HEIGHT_DIPS;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -108,7 +108,7 @@ pub enum IslandClickAction {
     NextPage,
     /// Call `WidgetRuntime::open_widget_flyout` (the real widget flyout).
     OpenFlyout,
-    /// C# in-place `DetailsPanel` for timed widgets without a separate flyout.
+    /// reference in-place `DetailsPanel` for timed widgets without a separate flyout.
     ToggleDetails,
 }
 
@@ -134,7 +134,7 @@ pub fn has_real_widget_flyout(widget_id: &str) -> bool {
     ) || id.starts_with("aiusage_")
 }
 
-/// C# `Previous_Click` / `Next_Click` / `Expand_Click`: the expand chevron toggles
+/// `Previous_Click` / `Next_Click` / `Expand_Click`: the expand chevron toggles
 /// the island's in-place expanded details panel (`50 -> 246 DIP`), while clicking
 /// the center widget chip opens the full interactive flyout.
 pub fn island_button_click_action(button: IslandButton, _widget_id: &str) -> IslandClickAction {
@@ -145,7 +145,7 @@ pub fn island_button_click_action(button: IslandButton, _widget_id: &str) -> Isl
     }
 }
 
-/// C# `PageCount.Text` uses culture-aware `{0:00} / {1:00}` formatting. The
+/// `PageCount.Text` uses culture-aware `{0:00} / {1:00}` formatting. The
 /// catalog key is requested first; until WS-F adds it to all 14 locales the
 /// numeric fallback keeps the old behaviour instead of showing a raw key.
 pub fn page_count_text(current_page: usize, total_pages: usize) -> String {
@@ -164,7 +164,7 @@ pub fn page_count_text(current_page: usize, total_pages: usize) -> String {
     }
 }
 
-/// Approximates C# `_details.Measure(new Size(640, ...)).DesiredSize.Width`.
+/// Approximates `_details.Measure(new Size(640, ...)).DesiredSize.Width`.
 pub fn details_desired_width(details: &WidgetDetails) -> f32 {
     let longest = details
         .lines
@@ -177,7 +177,7 @@ pub fn details_desired_width(details: &WidgetDetails) -> f32 {
 }
 
 /// Screen anchor for a top-edge island flyout. `ui::flyout::FlyoutEdge::Bottom`
-/// places the popup above the anchor, so we offset by the C# expanded height to
+/// places the popup above the anchor, so we offset by the reference expanded height to
 /// land below the island. Horizontally centered on the island/monitor.
 pub fn island_flyout_anchor(
     monitor_left: i32,
@@ -423,7 +423,7 @@ impl DynamicIslandWindow {
         unsafe {
             let _ = viewport_node.visual.SetClip(&viewport_clip);
         }
-        // C# `IslandSurface` has CornerRadius="0,0,20,20" and ClipToBounds=true;
+        // `IslandSurface` has CornerRadius="0,0,20,20" and ClipToBounds=true;
         // use the same bottom radius on the page viewport clip so chips cannot bleed
         // through the rounded corners.
         DcompEngine::update_rounded_clip_rect(
@@ -526,7 +526,7 @@ impl DynamicIslandWindow {
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case(&self.monitor.device_name))
             .map(|(_, v)| v.as_slice());
-        // C# passes displayOrder, widgetOrder, defaultOrder and timedOrder. The
+        // reference passes displayOrder, widgetOrder, defaultOrder and timedOrder. The
         // timed widgets are already part of DEFAULT_WIDGET_ORDER; adding the
         // persisted widget order restores user reordering in the island.
         let ordered = policy::order_widgets(
@@ -599,7 +599,7 @@ impl DynamicIslandWindow {
         self.page_ids.get(self.current_page).map(String::as_str)
     }
 
-    /// C# `HasExpandableContent`: timed widgets plus Clock/Focus/SystemStats/
+    /// `HasExpandableContent`: timed widgets plus Clock/Focus/SystemStats/
     /// Weather/Media/Audio/NetSpeed/BluetoothBattery and every `AiUsage*` widget.
     fn has_expandable_content(id: Option<&str>) -> bool {
         let Some(id) = id else {
@@ -618,19 +618,19 @@ impl DynamicIslandWindow {
                 | "bluetoothbattery"
                 | "stopwatch"
                 | "countdown"
-        ) || id.starts_with("aiusage") // C#: id.StartsWith("AiUsage", OrdinalIgnoreCase)
+        ) || id.starts_with("aiusage") // reference: id.StartsWith("AiUsage", OrdinalIgnoreCase)
     }
 
     fn width_for_current_page(&self) -> f32 {
         // Ours: an island with no assigned widgets stays a compact chip instead
-        // of reserving the full C# widget estimate.
+        // of reserving the full reference widget estimate.
         if self.page_ids.is_empty() {
             let monitor_dips = self.monitor.width() as f32 / self.monitor.dpi_scale.max(0.5);
             return policy::clamp_window_width(220.0, monitor_dips, 180.0, MAX_WIDTH_DIPS, 16.0);
         }
-        // WS-C: C# `WidthForCurrentPage` uses `widget.FullWidthEstimate` and the
+        // WS-C: `WidthForCurrentPage` uses `widget.FullWidthEstimate` and the
         // measured details width. The Rust chip already carries 168-314 DIP of
-        // content, so the extra 112 DIP approximates the full WPF widget inside
+        // content, so the extra 112 DIP approximates the full reference widget inside
         // the island. Expansion is vertical (50 -> 246 DIP), never "width + 246".
         let chip_w = self
             .current_page_id()
@@ -663,7 +663,7 @@ impl DynamicIslandWindow {
     fn position_window(&mut self) {
         let dpi = self.monitor.dpi_scale;
         let w_px = (self.width_dips * dpi).ceil().max(1.0) as i32;
-        // C# expands the window HEIGHT from 50 to 246 DIP (not the width).
+        // reference expands the window HEIGHT from 50 to 246 DIP (not the width).
         let h_px = (policy::island_height_dips(self.island.expanded) * dpi)
             .ceil()
             .max(1.0) as i32;
@@ -798,7 +798,7 @@ impl DynamicIslandWindow {
             node.set_transform(1.0, 1.0, x_px.round(), top_px.round());
         }
 
-        // C# `DetailsPanel Padding="14,2,14,12"` inside a window that grows from
+        // `DetailsPanel Padding="14,2,14,12"` inside a window that grows from
         // 50 to 246 DIP. The details occupy the whole second row, not a 42 DIP
         // overlay squeezed into the header (the old port's geometry bug).
         if self.island.expanded {
@@ -1442,7 +1442,7 @@ impl DynamicIslandWindow {
                     widgets::DirectClickOutcome::Handled => {
                         // AI chips and a few others return Handled even when a
                         // full widget flyout exists. The island must still open
-                        // it on a chip click (C# island never showed a dead end).
+                        // it on a chip click (reference island never showed a dead end).
                         self.render_all();
                         if has_real_widget_flyout(&wid) {
                             self.open_current_flyout();
@@ -1686,9 +1686,9 @@ unsafe extern "system" fn island_wnd_proc(
 }
 
 // ---- WS-D expanded-details policy / state machine ------------------------------
-// C# `DynamicIslandPolicy`, `TimedWidgetTile.DetailsRequested`, `GetDetails()`.
+// `DynamicIslandPolicy`, `TimedWidgetTile.DetailsRequested`, `GetDetails()`.
 // Kept alongside the native Win32 island host above so both renderers share one API.
-/// C# `DynamicIslandVisibilityMode`.
+/// `DynamicIslandVisibilityMode`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IslandVisibility {
     Never,
@@ -1719,7 +1719,7 @@ impl DetailLine {
     }
 }
 
-/// Per-widget details provider result (C# `GetDetails()` on TimedWidgetTile / Clock / etc.).
+/// Per-widget details provider result (`GetDetails()` on TimedWidgetTile / Clock / etc.).
 #[derive(Clone, Debug, PartialEq)]
 pub struct WidgetDetails {
     pub widget_id: String,
@@ -1782,7 +1782,7 @@ const MEDIA_PAGE: PageWidth = PageWidth {
     expanded: 560.0,
 };
 
-/// `WidthForCurrentPage`: C# grows the island *height* to 246 DIP and picks an
+/// `WidthForCurrentPage`: reference grows the island *height* to 246 DIP and picks an
 /// expanded width of at least 540 DIP (560 for media), never "collapsed + 246".
 pub fn width_for_page(widget_id: &str, expanded: bool) -> f32 {
     let page = page_width(widget_id);
@@ -1801,7 +1801,7 @@ pub fn page_width(widget_id: &str) -> PageWidth {
     }
 }
 
-/// C# `DynamicIslandPolicy.ClampWindowWidth`.
+/// `DynamicIslandPolicy.ClampWindowWidth`.
 pub fn clamp_window_width(
     preferred: f32,
     monitor_width: f32,
@@ -1840,7 +1840,7 @@ pub fn should_show(
         }
 }
 
-/// C# `DynamicIslandPolicy.OrderWidgets(... timedOrder)` ΓÇö the Rust signature omitted
+/// `DynamicIslandPolicy.OrderWidgets(... timedOrder)` ΓÇö the Rust signature omitted
 /// `timedOrder`; this helper restores it.
 pub fn order_widgets(
     available: &[String],
@@ -1910,7 +1910,7 @@ impl IslandState {
         self.page_ids.get(self.page_index).map(String::as_str)
     }
 
-    /// C# `SetExpanded()`.
+    /// `SetExpanded()`.
     pub fn set_expanded(&mut self, expanded: bool) -> bool {
         if self.expanded == expanded {
             return false;
@@ -2021,7 +2021,7 @@ mod tests {
     }
 
     #[test]
-    fn csharp_246_expand_is_vertical_and_width_is_content_driven() {
+    fn reference_246_expand_is_vertical_and_width_is_content_driven() {
         assert_eq!(width_for_page("clock", false), 168.0);
         assert_eq!(width_for_page("clock", true), 540.0);
         assert_eq!(width_for_page("media", true), 560.0);
@@ -2169,7 +2169,7 @@ mod tests {
     }
 
     /// WS-C: no island click may dead-end. Prev/Next page, Expand opens a *real*
-    /// widget flyout when the widget has one, otherwise the C# in-place panel.
+    /// widget flyout when the widget has one, otherwise the reference in-place panel.
     #[test]
     fn island_click_dispatch_table() {
         assert_eq!(
@@ -2207,7 +2207,7 @@ mod tests {
     }
 
     #[test]
-    fn expandable_widget_set_matches_csharp() {
+    fn expandable_widget_set_matches_reference() {
         for id in [
             "clock",
             "focus",
@@ -2224,7 +2224,7 @@ mod tests {
         ] {
             assert!(
                 DynamicIslandWindow::has_expandable_content(Some(id)),
-                "{id} must have C# expandable content"
+                "{id} must have reference expandable content"
             );
         }
         for id in ["battery", "storage", "keyboard", "quicksettings"] {
@@ -2234,7 +2234,7 @@ mod tests {
     }
 
     #[test]
-    fn details_width_stays_within_csharp_measure_budget() {
+    fn details_width_stays_within_reference_measure_budget() {
         let details = WidgetDetails::new("clock", "Date and time")
             .line("Timezone", "Europe/Istanbul")
             .line("Format", "24h");

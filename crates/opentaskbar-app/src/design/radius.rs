@@ -1,4 +1,4 @@
-//! C# parity for `Services/Settings/RadiusManager.cs`.
+//! reference parity for `Services/Settings/RadiusManager.cs`.
 //!
 //! Concentric rule: a nested element inset by `d` keeps radius `r - d`. Theme packs supply the
 //! reference values so a pack with tighter corners stays tighter while following the user's
@@ -6,7 +6,7 @@
 
 use super::tokens::{CornerRadius, TokenMap, TokenValue};
 
-/// The nine radii C# `RadiusManager.Keys` derives from the dock radius.
+/// The nine radii `RadiusManager.Keys` derives from the dock radius.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NineKeys {
     pub dock_inner_radius: i32,
@@ -33,7 +33,7 @@ impl NineKeys {
         "WidgetQuickActionRadius",
     ];
 
-    /// Design-time radii at the reference dock radius (C# `Radii.xaml` defaults).
+    /// Design-time radii at the reference dock radius (`Radii.xaml` defaults).
     pub const REFERENCES: [(&'static str, i32); 9] = [
         ("DockInnerRadius", 19),
         ("DockRadius", 20),
@@ -112,7 +112,7 @@ impl RadiusManager {
         Self::new().derive_for(base)
     }
 
-    /// Production bridge: reads C# radius tokens from the resolved theme layer.
+    /// Production bridge: reads reference radius tokens from the resolved theme layer.
     /// A pack that authors `DockRadius: 18` shifts every derived radius with it.
     pub fn from_tokens(tokens: &TokenMap) -> Self {
         let mut references = RadiusReferences::new();
@@ -134,7 +134,7 @@ impl RadiusManager {
         Self::with_references(references)
     }
 
-    /// Single resolved radius by C# key, including `DockSheenRadius`.
+    /// Single resolved radius by reference key, including `DockSheenRadius`.
     pub fn value(&self, key: &str) -> Option<i32> {
         self.rebuild().get(key).map(|radius| radius.top_left)
     }
@@ -222,7 +222,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn concentric_rule_matches_csharp() {
+    fn concentric_rule_matches_reference() {
         assert_eq!(RadiusManager::derive_value(20, 20, 19), 19);
         assert_eq!(RadiusManager::derive_value(24, 20, 19), 23);
         assert_eq!(RadiusManager::derive_value(8, 20, 12), 0);

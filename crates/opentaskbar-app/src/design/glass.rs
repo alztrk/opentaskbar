@@ -1,4 +1,4 @@
-//! Real window backdrop engine (C# parity for `SettingsBackdrop.cs` / dock acrylic).
+//! Real window backdrop engine (reference parity for `SettingsBackdrop.cs` / dock acrylic).
 //!
 //! `apply_window_backdrop` is the single entry point for GPUI settings, dock, flyouts and
 //! menus: on Windows 11 it asks DWM for a real system-backed acrylic backdrop, on
@@ -396,7 +396,7 @@ mod win32 {
         0
     }
 
-    /// `HKCU\Control Panel\Accessibility\HighContrast\Flags & 1` (C# parity).
+    /// `HKCU\Control Panel\Accessibility\HighContrast\Flags & 1` (reference parity).
     pub(super) fn high_contrast_enabled() -> bool {
         const KEY: &str = "Control Panel\\Accessibility\\HighContrast";
         let path = wide(KEY);

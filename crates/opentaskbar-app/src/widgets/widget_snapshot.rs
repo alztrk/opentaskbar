@@ -15,7 +15,7 @@ use super::telemetry::{DriveSpace, active_keyboard_code, sample_drives};
 /// Sensor polling cadence shared with `WidgetRuntime::last_poll`.
 pub const POLL_TTL: Duration = Duration::from_secs(1);
 
-/// C# `StorageWidget`: `DriveType.Fixed && IsReady`. Filtering happens once per snapshot, never
+/// `StorageWidget`: `DriveType.Fixed && IsReady`. Filtering happens once per snapshot, never
 /// inside a chip renderer (which runs at VSync frequency).
 fn fixed_ready(drives: &[DriveSpace]) -> Vec<DriveSpace> {
     const DRIVE_FIXED: u32 = 3;

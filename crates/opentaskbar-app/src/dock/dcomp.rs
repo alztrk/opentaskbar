@@ -89,16 +89,16 @@ pub struct SystemStatColumn {
     pub warm_text: bool,
 }
 
-/// Exact C# 1-to-1 dock widget specs ported from `Widgets/*.xaml` and `Widgets/*.cs`.
+/// Exact reference 1-to-1 dock widget specs ported from `Widgets/*.xaml` and `Widgets/*.cs`.
 #[derive(Clone, Debug)]
 pub enum WidgetChipSpec {
-    /// C# `ClockWidget.xaml`: `[ClockIcon 15px] [15px Bold Time] [11.5px Date / 10.5px Weekday]`
+    /// `ClockWidget.xaml`: `[ClockIcon 15px] [15px Bold Time] [11.5px Date / 10.5px Weekday]`
     Clock {
         time: String,
         date: String,
         weekday: String,
     },
-    /// C# `WeatherWidget.cs`: `[Icon 20px] [18px Bold Temp] [Place / Condition] | [Today / High/Low]` or unavailable text
+    /// `WeatherWidget.cs`: `[Icon 20px] [18px Bold Temp] [Place / Condition] | [Today / High/Low]` or unavailable text
     Weather {
         available: bool,
         icon_color: Rgb,
@@ -108,13 +108,13 @@ pub enum WidgetChipSpec {
         condition: String,
         today_range: Option<String>,
     },
-    /// C# `DayProgressWidget.cs`: `[22px RingMeter (WidgetBlue)] [13px SemiBold %] [11.5px "day"]`
+    /// `DayProgressWidget.cs`: `[22px RingMeter (WidgetBlue)] [13px SemiBold %] [11.5px "day"]`
     DayProgress {
         ratio: f32,
         percent: String,
         unit: String,
     },
-    /// C# `TimedWidgetTile.xaml` & `FocusWidget.xaml`: `[Icon 16px] [13px Tabular Time] [26x26 Play/Pause]`
+    /// `TimedWidgetTile.xaml` & `FocusWidget.xaml`: `[Icon 16px] [13px Tabular Time] [26x26 Play/Pause]`
     Timed {
         is_focus: bool,
         running: bool,
@@ -129,14 +129,14 @@ pub enum WidgetChipSpec {
         down_history: Vec<f32>,
         up_history: Vec<f32>,
     },
-    /// C# `BatteryWidget.cs`: full-card horizontal liquid fill gradient + shadowed white `%` + bolt
+    /// `BatteryWidget.cs`: full-card horizontal liquid fill gradient + shadowed white `%` + bolt
     BatteryLiquid {
         present: bool,
         percent: u32,
         charging: bool,
         wave_phase: f32,
     },
-    /// C# `BluetoothBatteryWidget.cs`: horizontal connected device tiles (`device-kind icon + %`) or centered `—`
+    /// `BluetoothBatteryWidget.cs`: horizontal connected device tiles (`device-kind icon + %`) or centered `—`
     Bluetooth {
         /// `(kind, percent, low_warning, full_charge)`
         devices: Vec<(
@@ -146,40 +146,40 @@ pub enum WidgetChipSpec {
             bool,
         )>,
     },
-    /// C# `StorageWidget.cs`: `"C: 213 / 476 GB | D: 1.2 / 1.8 TB"` (clean typographic, no bars)
+    /// `StorageWidget.cs`: `"C: 213 / 476 GB | D: 1.2 / 1.8 TB"` (clean typographic, no bars)
     Storage { drives: Vec<(String, String)> },
-    /// C# `MediaWidget.xaml`: `[29x29 tinted Art] [Title / Artist] [Prev | PlayPause | Next] [Volume]`
+    /// `MediaWidget.xaml`: `[29x29 tinted Art] [Title / Artist] [Prev | PlayPause | Next] [Volume]`
     Media {
         title: String,
         artist: String,
         muted: bool,
     },
-    /// C# `AudioWidget.xaml`: `[Speaker 16px] [12.5px SemiBold 67%]` (scroll adjusts, click opens mixer)
+    /// `AudioWidget.xaml`: `[Speaker 16px] [12.5px SemiBold 67%]` (scroll adjusts, click opens mixer)
     Audio { volume: u32, muted: bool },
-    /// C# `QuickSettingsWidget.xaml`: 3 compact `27x27` toggle pills (`Wi-Fi`, `Bluetooth`, `Night Light/Focus`)
+    /// `QuickSettingsWidget.xaml`: 3 compact `27x27` toggle pills (`Wi-Fi`, `Bluetooth`, `Night Light/Focus`)
     QuickSettings { pills: [(String, bool); 3] },
-    /// C# `KeyboardLayoutWidget.cs`: `[Keyboard 13px] [12px SemiBold TR/EN]`
+    /// `KeyboardLayoutWidget.cs`: `[Keyboard 13px] [12px SemiBold TR/EN]`
     Keyboard { code: String },
-    /// C# `AiUsageWidget.cs` dual-bar layout (Claude, Codex, single-row Cursor) with real `Brand.xaml` logo
+    /// `AiUsageWidget.cs` dual-bar layout (Claude, Codex, single-row Cursor) with real `Brand.xaml` logo
     AiDual {
         provider_id: &'static str,
         brand_color: Option<Rgb>,
         /// `(short_label, used_01, bar_color, reset_text)`
         rows: Vec<AiQuotaRow>,
     },
-    /// C# `AiUsageWidget.cs` triple-column OpenCode layout (`1h | 7d | 30d`)
+    /// `AiUsageWidget.cs` triple-column OpenCode layout (`1h | 7d | 30d`)
     AiOpenCode {
         /// `(short_label, pct_text, used_01, bar_color, reset_text)`
         columns: Vec<(String, String, f32, Rgb, String)>,
     },
-    /// C# `AiUsageWidget.cs` Copilot inline layout (`Logo + Copilot | Value/Meta + 31x4 mini bar`)
+    /// `AiUsageWidget.cs` Copilot inline layout (`Logo + Copilot | Value/Meta + 31x4 mini bar`)
     AiCopilot {
         value_text: String,
         meta_text: String,
         used: f32,
         bar_color: Rgb,
     },
-    /// C# `AiUsageWidget.cs` DeepSeek / OpenRouter tinted balance card (`29x29 circular tinted well + Name / 16px Balance`)
+    /// `AiUsageWidget.cs` DeepSeek / OpenRouter tinted balance card (`29x29 circular tinted well + Name / 16px Balance`)
     AiBalance {
         provider_id: &'static str,
         name: &'static str,
@@ -206,7 +206,7 @@ impl WidgetChipSpec {
     }
 
     /// Text payload for the Dynamic Island's 246 DIP expanded details panel
-    /// (C# `GetDetails()` on each `TimedWidgetTile` / widget). Kept next to the
+    /// (`GetDetails()` on each `TimedWidgetTile` / widget). Kept next to the
     /// chip renderer so the panel never shows data the chip itself could not have.
     pub fn details_lines(&self) -> Vec<(String, String)> {
         // All user-visible island detail labels/values go through `loc::t`.
@@ -671,7 +671,7 @@ impl DcompEngine {
             let pad_v = (1.0 * dpi).max(1.0);
             let r = (radius_px - dpi).clamp(2.0, (h - pad_v * 2.0) * 0.5);
             // Clip a wider rounded rect to keep both left (`19,0,0,19`) and right (`0,19,19,0`)
-            // scroll overlays flush with the outer rounded corners of the dock pill (exact C# parity).
+            // scroll overlays flush with the outer rounded corners of the dock pill (exact reference parity).
             dc.PushAxisAlignedClip(
                 &D2D_RECT_F {
                     left: 0.0,
@@ -842,7 +842,7 @@ impl DcompEngine {
         }
     }
 
-    /// Renders one of the 1-to-1 C# dock widget modules at automatic `height_dips`
+    /// Renders one of the 1-to-1 reference dock widget modules at automatic `height_dips`
     /// derived from the live dock pill height, using Slate/Aurora tokens and Windows 11 Fluent icons.
     #[allow(clippy::too_many_arguments)]
     pub fn create_widget_chip_surface(
@@ -1689,7 +1689,7 @@ impl DcompEngine {
                     charging,
                     wave_phase,
                 } => {
-                    // Exact C# BatteryWidget.cs horizontal liquid-fill card with scrolling sinusoidal
+                    // Exact reference BatteryWidget.cs horizontal liquid-fill card with scrolling sinusoidal
                     // meniscus wave + -22deg skewed left-to-right charging sheen!
                     if !*present {
                         draw_chip_card(
@@ -2279,7 +2279,7 @@ impl DcompEngine {
                         border_width_dips,
                     )?;
                     if devices.is_empty() {
-                        // Exact C# BluetoothBatteryWidget.cs: centered "—" (`11.5px SemiBold TextSecondary`)
+                        // Exact reference BluetoothBatteryWidget.cs: centered "—" (`11.5px SemiBold TextSecondary`)
                         draw_text(
                             "—",
                             &fmt_115_b_c,
@@ -2316,7 +2316,7 @@ impl DcompEngine {
                             let val_col = if *low {
                                 pal.warning
                             } else if *full {
-                                (0x34, 0xd3, 0x99) // C# FullChargeBrush #34D399
+                                (0x34, 0xd3, 0x99) // reference FullChargeBrush #34D399
                             } else {
                                 pal.text_primary
                             };
@@ -2804,7 +2804,7 @@ impl DcompEngine {
                         border_rgb,
                         border_width_dips,
                     )?;
-                    // Exact C# `AiUsageWidget.cs` DualQuotaBars (Claude, Codex, single-row Cursor):
+                    // Exact `AiUsageWidget.cs` DualQuotaBars (Claude, Codex, single-row Cursor):
                     // Padding 10, [16x16 Brand Logo] + 8px + stacked rows (1 row for Cursor, 2 rows for Claude/Codex)
                     let logo_col = brand_color.unwrap_or(pal.text_primary);
                     design::brand_paths::draw_brand_logo(
@@ -2908,7 +2908,7 @@ impl DcompEngine {
                         border_rgb,
                         border_width_dips,
                     )?;
-                    // Exact C# `AiUsageWidget.cs` OpenCode: [Logo 16x16] [OpenCode 12px SemiBold] + 3 x 54px columns (`1h | 7d | 30d`)
+                    // Exact `AiUsageWidget.cs` OpenCode: [Logo 16x16] [OpenCode 12px SemiBold] + 3 x 54px columns (`1h | 7d | 30d`)
                     design::brand_paths::draw_brand_logo(
                         &self.d2d_factory,
                         dc,
@@ -3030,7 +3030,7 @@ impl DcompEngine {
                         border_rgb,
                         border_width_dips,
                     )?;
-                    // Exact C# `AiUsageWidget.cs` Copilot: [Logo 16x16] [Copilot 12px SemiBold] | [12px Val / 9.5px Meta] [31x4 track]
+                    // Exact `AiUsageWidget.cs` Copilot: [Logo 16x16] [Copilot 12px SemiBold] | [12px Val / 9.5px Meta] [31x4 track]
                     design::brand_paths::draw_brand_logo(
                         &self.d2d_factory,
                         dc,
@@ -3318,7 +3318,7 @@ impl DcompEngine {
         })
     }
 
-    /// Notification badge: red circular pill with a centered count (C# `TrackedWindow.HasNotification`).
+    /// Notification badge: red circular pill with a centered count (`TrackedWindow.HasNotification`).
     pub fn create_notification_badge_surface(
         &self,
         count: u32,
@@ -4088,7 +4088,7 @@ unsafe fn draw_chip_card(
     Ok(())
 }
 
-/// Exact C# `WidgetCardBorder` / `WidgetCardButton` hover/press-only overlay (transparent at rest,
+/// Exact `WidgetCardBorder` / `WidgetCardButton` hover/press-only overlay (transparent at rest,
 /// `#22FFFFFF` dark / `#18000000` light hover, `#38FFFFFF` / `#2A000000` press, `WidgetRadius = 12`).
 /// Used where a widget paints its own full-card surface (the liquid Battery card).
 unsafe fn draw_chip_overlay(

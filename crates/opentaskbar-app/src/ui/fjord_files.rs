@@ -1,7 +1,7 @@
-//! GPUI Fjord Files window (C# `Views/Windows/FjordFilesWindow.xaml.cs`).
+//! GPUI Fjord Files window (`Views/Windows/FjordFilesWindow.xaml.cs`).
 //!
 //! This PC + favourites + drives, asynchronous navigation with back/forward/up
-//! and breadcrumbs, culture-aware filtering, the C# keyboard shortcuts,
+//! and breadcrumbs, culture-aware filtering, the reference keyboard shortcuts,
 //! clipboard/reveal actions and a cancellable preview pane.
 //!
 //! NOTE: `ui/mod.rs` registration and the `main.rs` `--files` dispatch belong to
@@ -137,7 +137,7 @@ impl FjordFilesView {
             .and_then(|index| self.entries.get(*index))
     }
 
-    /// C# `Navigate`: cancel the previous read, resolve the path, update history.
+    /// `Navigate`: cancel the previous read, resolve the path, update history.
     fn navigate(&mut self, target: String, slot: Option<usize>, cx: &mut Context<Self>) {
         self.navigation_cancel.store(true, Ordering::SeqCst);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -211,7 +211,7 @@ impl FjordFilesView {
         }
     }
 
-    /// C# `ApplyFilter`, using the culture-aware fold from `fjord::files`.
+    /// `ApplyFilter`, using the culture-aware fold from `fjord::files`.
     fn apply_filter(&mut self) {
         let culture = loc::language();
         self.visible = self

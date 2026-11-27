@@ -1,6 +1,6 @@
 //! Shell flyout (Start / Search / Control Center) pozisyon journal'ı.
 //!
-//! C# referansı: `Services/Interop/ShellFlyoutPositionJournal.cs` ve
+//! Başvuru: `Services/Interop/ShellFlyoutPositionJournal.cs` ve
 //! `ShellFlyoutPositionRegistry.cs`. Normal çıkış journal'ı okuyup siler;
 //! sert kapanmada dosya kalır ve yerel watchdog geri yüklemeyi tamamlar.
 //!
@@ -31,7 +31,7 @@ pub struct FlyoutPosition {
     pub top: i32,
 }
 
-/// C# `ShellFlyoutPositionRegistry.Generation` and the per-record sequence.
+/// `ShellFlyoutPositionRegistry.Generation` and the per-record sequence.
 /// The native watchdog only consumes the first four fields of a position line,
 /// so these tokens are appended by the opt-in `write_all_to_with_meta` writer;
 /// the reader accepts both the legacy four-field form and the extended one.
@@ -41,7 +41,7 @@ pub struct JournalMeta {
     pub seq: u64,
 }
 
-/// The C# flyout kinds whose intent journal carries `generation`/`seq` tokens.
+/// The reference flyout kinds whose intent journal carries `generation`/`seq` tokens.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FlyoutKind {
     Start,
@@ -59,7 +59,7 @@ impl FlyoutKind {
     }
 }
 
-/// One `START generation=42 seq=7` style journal line (C# parity).
+/// One `START generation=42 seq=7` style journal line (reference parity).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FlyoutKindRecord {
     pub kind: FlyoutKind,
@@ -68,7 +68,7 @@ pub struct FlyoutKindRecord {
 }
 
 impl FlyoutKindRecord {
-    /// Serializes the C# wire form, e.g. `CONTROL_CENTER generation=9 seq=3`.
+    /// Serializes the reference wire form, e.g. `CONTROL_CENTER generation=9 seq=3`.
     pub fn to_line(self) -> String {
         format!(
             "{} generation={} seq={}",
@@ -78,7 +78,7 @@ impl FlyoutKindRecord {
         )
     }
 
-    /// Parses the C# wire form. Unknown keys, missing fields and extra tokens
+    /// Parses the reference wire form. Unknown keys, missing fields and extra tokens
     /// are rejected so a truncated journal line never restores stale metadata.
     #[must_use]
     pub fn from_line(line: &str) -> Option<Self> {
@@ -110,7 +110,7 @@ impl FlyoutKindRecord {
 const MAX_ENTRIES: usize = 16;
 
 /// Tag-keyed positions for our own flyouts (dock flyouts are not shell flyouts, so the
-/// HWND/PID journal above cannot describe them). Stored next to the C#-compatible journal.
+/// HWND/PID journal above cannot describe them). Stored next to the reference-compatible journal.
 fn tag_journal_path() -> PathBuf {
     journal_path().with_file_name("dock-flyout-positions.txt")
 }
@@ -165,7 +165,7 @@ pub fn read_tag(tag: &str) -> Option<(i32, i32)> {
         .map(|(_, left, top)| (left, top))
 }
 
-/// Separate file for the C#-style flyout intent lines. Keeping it apart from
+/// Separate file for the reference-style flyout intent lines. Keeping it apart from
 /// `flyout-positions.txt` preserves the native watchdog's four-field format.
 fn kind_journal_path() -> PathBuf {
     journal_path().with_file_name("flyout-kind-journal.txt")
@@ -198,7 +198,7 @@ pub fn write_kind_records_to(path: &Path, records: &[FlyoutKindRecord]) {
     }
 }
 
-/// Reads the C#-style flyout intent lines, skipping malformed ones.
+/// Reads the reference-style flyout intent lines, skipping malformed ones.
 #[must_use]
 pub fn read_kind_records() -> Vec<FlyoutKindRecord> {
     read_kind_records_from(&kind_journal_path())
@@ -216,13 +216,13 @@ pub fn read_kind_records_from(path: &Path) -> Vec<FlyoutKindRecord> {
         .collect()
 }
 
-/// Journal dosyasının yolu — C# ile aynı ortak klasör.
+/// Journal dosyasının yolu — referans ile aynı ortak klasör.
 pub fn journal_path() -> PathBuf {
     opentaskbar_core::paths::journal_path("flyout-positions.txt")
 }
 
 /// Shared atomic-write temp path (`flyout-positions.txt.tmp`). Both the
-/// C#-compatible writer and `flyout_writer` must use the exact same name so a
+/// reference-compatible writer and `flyout_writer` must use the exact same name so a
 /// stale temp cannot be mistaken for a newer journal by the watchdog.
 #[must_use]
 pub fn tmp_path(path: &Path) -> PathBuf {
@@ -373,11 +373,11 @@ fn parse_position_line(line: &str) -> Option<(FlyoutPosition, JournalMeta)> {
             _ => return None,
         }
     }
-    // A half-written metadata pair is as unusable as a truncated C# line.
+    // A half-written metadata pair is as unusable as a truncated reference line.
     if saw_generation != saw_seq {
         return None;
     }
-    // HWND 0 hiçbir zaman geri yüklenemez; C# journal'ı da bunu atar.
+    // HWND 0 hiçbir zaman geri yüklenemez; reference journal'ı da bunu atar.
     (handle != 0).then_some((
         FlyoutPosition {
             handle,
@@ -453,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn journal_and_tmp_paths_match_the_shared_csharp_contract() {
+    fn journal_and_tmp_paths_match_the_shared_reference_contract() {
         assert_eq!(
             journal_path(),
             opentaskbar_core::paths::journal_path("flyout-positions.txt")
@@ -587,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn kind_records_format_and_parse_all_three_c_sharp_lines() {
+    fn kind_records_format_and_parse_all_three_reference_lines() {
         for (line, kind, generation, seq) in [
             ("START generation=42 seq=7", FlyoutKind::Start, 42, 7),
             ("SEARCH generation=1 seq=2", FlyoutKind::Search, 1, 2),
@@ -598,7 +598,7 @@ mod tests {
                 3,
             ),
         ] {
-            let record = FlyoutKindRecord::from_line(line).expect("C# line must parse");
+            let record = FlyoutKindRecord::from_line(line).expect("reference line must parse");
             assert_eq!(record.kind, kind);
             assert_eq!((record.generation, record.seq), (generation, seq));
             assert_eq!(record.to_line(), line);
@@ -689,7 +689,7 @@ mod tests {
 
     #[test]
     fn flyout_kinds_are_shell_surfaces_only() {
-        // C# `ShellFlyoutPositionJournal` knows exactly three shell flyouts;
+        // `ShellFlyoutPositionJournal` knows exactly three shell flyouts;
         // no AI/provider kind may ever enter this journal.
         for (kind, label) in [
             (FlyoutKind::Start, "START"),

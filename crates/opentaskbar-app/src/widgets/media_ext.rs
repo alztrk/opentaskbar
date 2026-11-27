@@ -1,4 +1,4 @@
-//! Media widget extensions — C# `MediaWidget.xaml.cs` / `MediaTimeline.cs` / `LibreWolfMediaTimeline.cs` parity.
+//! Media widget extensions — `MediaWidget.xaml.cs` / `MediaTimeline.cs` / `LibreWolfMediaTimeline.cs` parity.
 //!
 //! Seek slider (`LiveEvent::Seek`), album cover (`FlyoutBlock::Image`) + tint, vertical volume
 //! popover, per-app audio sessions, dynamic-island expanded `GetDetails()` payload, the real UIA
@@ -31,7 +31,7 @@ use super::diagnostics;
 use super::telemetry::MediaSessionSnapshot;
 use super::uia_raw::{self, Automation, Element, ElementArray};
 
-/// C# `MediaWidget.GetDetails()` payload consumed by the island's 560px expanded panel.
+/// `MediaWidget.GetDetails()` payload consumed by the island's 560px expanded panel.
 #[derive(Clone, Debug, Default)]
 pub struct MediaDetails {
     pub title: String,
@@ -47,7 +47,7 @@ pub struct MediaDetails {
     pub muted: bool,
 }
 
-/// One per-app audio session (C# `AppAudioSessionMatcher`). `session_id` is the stable
+/// One per-app audio session (`AppAudioSessionMatcher`). `session_id` is the stable
 /// `"<pid>:<exe-stem>"` key used by the volume / mute setters.
 #[derive(Clone, Debug)]
 pub struct AudioAppSession {
@@ -59,7 +59,7 @@ pub struct AudioAppSession {
 }
 
 // ---------------------------------------------------------------------------
-// Timeline clock parsing / range validation (production copy of the C# helpers).
+// Timeline clock parsing / range validation (production copy of the reference helpers).
 // ---------------------------------------------------------------------------
 
 /// Parses `m:ss`, `mm:ss`, `h:mm:ss` (and a plain seconds value) into seconds.
@@ -100,7 +100,7 @@ pub fn parse_progress_label(label: &str) -> Option<(f64, f64)> {
     Some((parse_clock(position.trim())?, parse_clock(duration.trim())?))
 }
 
-/// C# `LibreWolfMediaTimeline.ReadRange`: a progress bar must have a zero minimum, a finite
+/// `LibreWolfMediaTimeline.ReadRange`: a progress bar must have a zero minimum, a finite
 /// positive duration and a position inside `[0, duration]`; otherwise it may be a volume slider.
 pub fn read_range(minimum: f64, duration: f64, position: f64) -> Option<(f64, f64)> {
     const MAX_SECONDS: f64 = 9.0e11; // TimeSpan.MaxValue.TotalSeconds
@@ -114,7 +114,7 @@ pub fn read_range(minimum: f64, duration: f64, position: f64) -> Option<(f64, f6
         .then_some((position, duration))
 }
 
-/// C# `LibreWolfMediaTimeline.ReadClockRange`: require the displayed clock to agree with the
+/// `LibreWolfMediaTimeline.ReadClockRange`: require the displayed clock to agree with the
 /// numeric range either in seconds or in milliseconds before accepting it.
 pub fn read_clock_range(
     minimum: f64,
@@ -144,7 +144,7 @@ pub fn url_host(address: &str) -> Option<&str> {
     Some(authority)
 }
 
-/// C# `LibreWolfMediaTimeline.MatchesDocument` — only the exact YouTube Music origin may use
+/// `LibreWolfMediaTimeline.MatchesDocument` — only the exact YouTube Music origin may use
 /// the named `progress-bar` control, and the tab title must contain the playing media title.
 pub fn matches_document(address: &str, document_title: &str, media_title: &str) -> Option<bool> {
     if media_title.trim().is_empty()
@@ -169,7 +169,7 @@ pub fn parse_uia_dump(dump: &str) -> Option<(String, f64, f64)> {
     Some((title.to_owned(), position, duration))
 }
 
-/// Pure counterpart of the UIA read used by `librewolf_timeline`; kept public so the C# parity
+/// Pure counterpart of the UIA read used by `librewolf_timeline`; kept public so the reference parity
 /// tests can exercise the real production parser without a browser process.
 pub fn librewolf_timeline_from_uia(
     address: &str,
@@ -184,7 +184,7 @@ pub fn librewolf_timeline_from_uia(
     read_range(0.0, duration, position)
 }
 
-/// C# `progress_ratio` / `seek_position` helpers used by the seek slider.
+/// `progress_ratio` / `seek_position` helpers used by the seek slider.
 pub fn progress_ratio(position: f64, duration: f64) -> f32 {
     if duration <= 0.0 {
         0.0
@@ -197,7 +197,7 @@ pub fn seek_position(ratio: f32, duration: u64) -> u64 {
     ((ratio.clamp(0.0, 1.0)) * duration as f32).round().max(0.0) as u64
 }
 
-/// Provider playback rates are clamped to a safe range (C# `apply_rate`). Pause is represented
+/// Provider playback rates are clamped to a safe range (`apply_rate`). Pause is represented
 /// separately by `MediaTimeline::update(rate = 0.0)`.
 pub fn apply_rate(rate: f64) -> f64 {
     if !rate.is_finite() {
@@ -213,7 +213,7 @@ pub fn is_stale(last_update: u64, now: u64, ttl_ms: u64) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Real UIA production reader (C# `LibreWolfMediaTimeline.Read`).
+// Real UIA production reader (`LibreWolfMediaTimeline.Read`).
 // ---------------------------------------------------------------------------
 
 struct ComInit {
@@ -335,7 +335,7 @@ unsafe fn window_app_id(hwnd: HWND) -> Option<String> {
             SHGetPropertyStoreForWindow(windows::Win32::Foundation::HWND(hwnd)).ok()?;
         let value = store.GetValue(&key).ok()?;
         let vt = value.vt().0;
-        // VT_LPWSTR / VT_BSTR are the string variants C# accepts.
+        // VT_LPWSTR / VT_BSTR are the string variants reference accepts.
         if vt != 31 && vt != 8 {
             return None;
         }
@@ -448,7 +448,7 @@ fn find_controls(
 }
 
 // ---------------------------------------------------------------------------
-// MediaTimeline state machine (C# `Widgets/MediaTimeline.cs`).
+// MediaTimeline state machine (`Widgets/MediaTimeline.cs`).
 // ---------------------------------------------------------------------------
 
 /// How long a confirmed seek suppresses a stale SMTC echo of the old position.
@@ -547,7 +547,7 @@ impl MediaTimeline {
         self.rate = rate;
     }
 
-    /// C# `ConfirmSeek`: anchors the new position immediately so a repeated old sample cannot
+    /// `ConfirmSeek`: anchors the new position immediately so a repeated old sample cannot
     /// rewind it, and opens a short hold window for the provider to catch up.
     pub fn confirm_seek(&mut self, seconds: f64, timestamp: f64) {
         self.anchor_position = seconds.clamp(0.0, self.duration());
@@ -607,7 +607,7 @@ pub fn aumid_match_score(
     crate::platform::core_audio::match_score(process_name, app_user_model_id, source_id, None)
 }
 
-/// Resolves the SMTC `SourceAppUserModelId` to a real WASAPI app session (C#
+/// Resolves the SMTC `SourceAppUserModelId` to a real WASAPI app session (reference
 /// `AppAudioSessionMatcher.Select`). Returns the display name of the best AUMID/executable match.
 pub fn match_aumid_app_name(source_id: &str) -> Option<String> {
     if source_id.trim().is_empty() {
@@ -641,7 +641,7 @@ pub fn get_details(snap: &MediaSessionSnapshot, volume: u32, muted: bool) -> Med
     }
 }
 
-/// C# `MediaWidget`缓存 album art under `%LOCALAPPDATA%\OpenTaskbar\Art` as
+/// `MediaWidget`缓存 album art under `%LOCALAPPDATA%\OpenTaskbar\Art` as
 /// `<artist>-<title>.jpg` (sanitized). Returns the first existing cached image.
 fn art_dir() -> PathBuf {
     opentaskbar_core::paths::shared_app_data_dir().join("Art")
@@ -672,7 +672,7 @@ pub fn find_cover_art(title: &str, artist: &str) -> Option<String> {
     None
 }
 
-/// Deterministic accent extracted from a cover path — C# uses the dominant pixel, which requires
+/// Deterministic accent extracted from a cover path — reference uses the dominant pixel, which requires
 /// a decoder we cannot call here; hashing gives a stable, tinted fallback.
 pub fn tint_from_path(path: &str) -> Rgb {
     let mut h: u32 = 2166136261;
@@ -695,7 +695,7 @@ pub fn format_time(secs: u64) -> String {
     }
 }
 
-/// Segoe Fluent Icons glyph for the transport button, matching C# playing state.
+/// Segoe Fluent Icons glyph for the transport button, matching reference playing state.
 pub fn playing_glyph(playing: bool) -> &'static str {
     if playing { "\u{E711}" } else { "\u{E768}" } // Pause / Play
 }
@@ -771,7 +771,7 @@ pub fn build_media_flyout(
         (3, loc::t("MediaNext"), false),
     ]));
 
-    // Vertical volume popover (C# `MediaWidget.VolumeFlyout`), stacked as an AudioSliderSection.
+    // Vertical volume popover (`MediaWidget.VolumeFlyout`), stacked as an AudioSliderSection.
     blocks.push(FlyoutBlock::Separator);
     blocks.push(FlyoutBlock::AudioSliderSection {
         label: loc::t("Volume"),
@@ -787,7 +787,7 @@ pub fn build_media_flyout(
         slider_id: 51,
     });
 
-    // Per-app session volumes (C# per-app mixer). Slider/mute ids start at 120 so they never
+    // Per-app session volumes (reference per-app mixer). Slider/mute ids start at 120 so they never
     // collide with the transport / master volume ids above.
     if !sessions.is_empty() {
         blocks.push(FlyoutBlock::Separator);
@@ -843,7 +843,7 @@ pub fn build_volume_popover(volume: u32, muted: bool, device_name: &str) -> Flyo
     }
 }
 
-/// Applies a mouse-wheel remainder: C# `AudioWidget` uses 120 delta = 10%.
+/// Applies a mouse-wheel remainder: `AudioWidget` uses 120 delta = 10%.
 /// Returns `(new_pct, remainder)` so callers keep the fractional step across events.
 pub fn volume_from_wheel(current_pct: u32, delta: i32, remainder: &mut i32) -> u32 {
     let total = *remainder + delta;
@@ -915,7 +915,7 @@ mod tests {
     use super::*;
     use crate::platform::core_audio::{AppAudioSession as CoreSession, AppAudioSessionState};
 
-    // --- Timeline clock parsing / C# parity helpers ---
+    // --- Timeline clock parsing / reference parity helpers ---
 
     #[test]
     fn cover_art_uses_the_shared_art_folder() {
@@ -1093,7 +1093,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_anchors_and_rate_changes_like_csharp() {
+    fn timeline_anchors_and_rate_changes_like_reference() {
         let mut timeline = MediaTimeline::default();
         let unstamped = sample("song", 0.0, 60.0, 0.0, None);
         timeline.update(unstamped.clone(), 1.0, 0.0, 0.0);

@@ -1,11 +1,11 @@
-//! Country/city catalogue and weather helpers (C# `CountryCityService.cs`, `CountryFlag.cs`,
+//! Country/city catalogue and weather helpers (`CountryCityService.cs`, `CountryFlag.cs`,
 //! `WeatherService.cs` parity).
 //!
 //! - `countries()` / `cities(country)` — countriesnow.space API with an offline fallback of
 //!   21 countries and all 81 Turkish provinces.
 //! - `find_cached_country_for_city()` — reverse lookup over the offline catalogue.
 //! - `fetch_cities()` — live API query with an on-disk cache under `%LOCALAPPDATA%\OpenTaskbar`.
-//! - Weather helpers: language normalisation, `dayCount` clamping (C# keeps 1..7),
+//! - Weather helpers: language normalisation, `dayCount` clamping (reference keeps 1..7),
 //!   `describe()` icon keys for the forecast rows.
 
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ use windows_sys::Win32::Networking::WinHttp::{
     WinHttpSetTimeouts,
 };
 
-/// `(ISO code, display name)` for the 21 C# fallback countries.
+/// `(ISO code, display name)` for the 21 reference fallback countries.
 pub const COUNTRIES: &[(&str, &str)] = &[
     ("TR", "Turkey"),
     ("US", "United States"),
@@ -44,7 +44,7 @@ pub const COUNTRIES: &[(&str, &str)] = &[
     ("GR", "Greece"),
 ];
 
-/// All 81 Turkish provinces (C# `CountryCityService.TurkeyFallback`).
+/// All 81 Turkish provinces (`CountryCityService.TurkeyFallback`).
 pub const TURKEY_CITIES: &[&str] = &[
     "Adana",
     "Adıyaman",
@@ -192,7 +192,7 @@ pub fn cities(country: &str) -> Vec<String> {
     GENERIC_CITIES.iter().map(|s| (*s).to_owned()).collect()
 }
 
-/// Reverse lookup used by the settings city picker (C# `FindCachedCountryForCity`).
+/// Reverse lookup used by the settings city picker (`FindCachedCountryForCity`).
 pub fn find_cached_country_for_city(city: &str) -> Option<&'static str> {
     let needle = city.trim().to_ascii_lowercase();
     if TURKEY_CITIES
@@ -595,7 +595,7 @@ pub fn weather_language(lang: &str) -> &'static str {
     }
 }
 
-/// C# `WeatherService` protects `dayCount` by clamping to 1..=7.
+/// `WeatherService` protects `dayCount` by clamping to 1..=7.
 pub fn clamp_day_count(n: i32) -> u8 {
     n.clamp(1, 7) as u8
 }

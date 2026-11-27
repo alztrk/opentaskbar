@@ -1,8 +1,8 @@
 //! Custom icon pack manifests and icon lookup.
 //!
-//! Windows-independent port of C# `IconPack`. A pack is a folder with `pack.json` at
+//! Windows-independent Rust implementation of `IconPack`. A pack is a folder with `pack.json` at
 //! its root and optional images; the manifest maps match keys to image paths relative
-//! to that folder. Lookup order matches C# exactly:
+//! to that folder. Lookup order matches reference exactly:
 //! special key ΓåÆ AUMID (and package name) ΓåÆ full exe path ΓåÆ exe file name ΓåÆ stem.
 //! No COM/GDI is used; this module only resolves paths.
 
@@ -67,7 +67,7 @@ pub type IconFallback = IconPackFallback;
 pub struct IconPackManifest {
     pub name: String,
     pub author: String,
-    /// Free-form pack description (WS-F C# parity).
+    /// Free-form pack description (WS-F reference parity).
     pub description: String,
     pub icons: BTreeMap<String, String>,
     pub fallback: Option<IconPackFallback>,
@@ -111,7 +111,7 @@ fn string_ci(value: &Value, key: &str) -> String {
         .to_string()
 }
 
-/// Accepts comments and trailing commas, as the C# serializer did, without touching
+/// Accepts comments and trailing commas, as the reference serializer did, without touching
 /// string contents.
 fn relaxed_json(input: &str) -> String {
     let chars: Vec<char> = input.chars().collect();
@@ -179,7 +179,7 @@ fn parse_shape(text: &str) -> IconPackShape {
 
 fn parse_fallback(object: &Map<String, Value>) -> IconPackFallback {
     let ci = |key: &str| object_get_ci(object, key);
-    // C# pack manifests allow either names or the numeric shape values.
+    // reference pack manifests allow either names or the numeric shape values.
     let shape = match ci("shape") {
         Some(Value::String(shape)) => IconPackShape::parse(shape).unwrap_or_default(),
         Some(Value::Number(number)) => match number.as_u64() {
@@ -204,7 +204,7 @@ fn parse_fallback(object: &Map<String, Value>) -> IconPackFallback {
         .filter(|text| !text.is_empty() && !text.eq_ignore_ascii_case("auto"))
         .map(str::to_owned)
         .unwrap_or_else(|| "auto".to_owned());
-    // C# `IconPack.Fallback` clamps the runtime scale to 0.1..=1.0.
+    // `IconPack.Fallback` clamps the runtime scale to 0.1..=1.0.
     let icon_scale = ci("iconScale")
         .and_then(Value::as_f64)
         .filter(|scale| scale.is_finite())
@@ -269,7 +269,7 @@ fn stem_of(name: &str) -> &str {
     }
 }
 
-/// Candidate keys in the same order as C# `IconPack.CandidateKeys`.
+/// Candidate keys in the same order as `IconPack.CandidateKeys`.
 fn candidate_keys(exe_path: &str, app_id: Option<&str>, special_key: Option<&str>) -> Vec<String> {
     let mut keys = Vec::new();
     if let Some(key) = special_key.map(str::trim).filter(|key| !key.is_empty()) {
@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn candidate_keys_follow_csharp_order() {
+    fn candidate_keys_follow_reference_order() {
         let keys = candidate_keys(
             r"C:\Apps\Firefox\firefox.exe",
             Some("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App"),
@@ -522,7 +522,7 @@ mod tests {
         let found = find_icon(&renamed, exe, None, None).expect("file name");
         assert!(found.ends_with("name.png"));
 
-        // C# CandidateKeys short-circuits on a special key: a mapping to a missing
+        // reference CandidateKeys short-circuits on a special key: a mapping to a missing
         // file yields no result instead of falling through to the AUMID candidate.
         let mut missing = manifest.clone();
         missing
@@ -567,7 +567,7 @@ mod tests {
     }
 }
 
-// ---- C# icon-pack parity (WS-F) ----
+// ---- reference icon-pack parity (WS-F) ----
 /// The square corner of a `Leaf` plate, or the first square corner of a `Petal` plate.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum IconPackCorner {
@@ -625,7 +625,7 @@ impl IconPackCorner {
     }
 }
 
-/// C# `IconPackFallback` with defaults and clamping applied on read.
+/// `IconPackFallback` with defaults and clamping applied on read.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IconPackFallback {
     pub shape: IconPackShape,
@@ -673,7 +673,7 @@ impl IconPackFallback {
         })
     }
 
-    /// Load-time normalization: radius 0..1, scale 0.1..1.0 (C# `IconPack.Fallback`).
+    /// Load-time normalization: radius 0..1, scale 0.1..1.0 (`IconPack.Fallback`).
     pub fn clamped(&self) -> Self {
         let finite = |v: f64, fallback: f64| if v.is_finite() { v } else { fallback };
         Self {
@@ -696,7 +696,7 @@ impl IconPackFallback {
 }
 
 impl IconPackManifest {
-    /// Parses a `pack.json` document (C# `IconPack` parity).
+    /// Parses a `pack.json` document (`IconPack` parity).
     pub fn from_str(text: &str) -> Result<Self, String> {
         let value = crate::design::widget_pack::parse_json_lenient(text)?;
         let Some(object) = value.as_object() else {
@@ -927,7 +927,7 @@ mod parity_tests {
     }
 
     #[test]
-    fn candidate_key_order_matches_csharp() {
+    fn candidate_key_order_matches_reference() {
         let keys = IconPack::candidate_keys(
             Some(r"C:\Apps\firefox.exe"),
             Some("FirefoxFirefox_1.0!app"),

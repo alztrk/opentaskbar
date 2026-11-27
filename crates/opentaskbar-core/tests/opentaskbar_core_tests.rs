@@ -1,8 +1,8 @@
-//! C# `SettingsAndAutoHideChecks` / `DockSettingsStore` parity (pure portion).
+//! `SettingsAndAutoHideChecks` / `DockSettingsStore` parity (pure portion).
 //!
 //! The cross-WS settings implementation lives in WS-A's `settings.rs` and is not
 //! part of this worktree's baseline. These tests therefore assert the *contract*
-//! (C1) directly: every C# `DockSettings` JSON key must survive a serde round-trip
+//! (C1) directly: every `DockSettings` JSON key must survive a serde round-trip
 //! and the mandatory `DockProfile` fields must not be dropped. No private or
 //! not-yet-existing API is referenced.
 
@@ -12,7 +12,7 @@ use opentaskbar_core::settings::{DockSettings, canonical_widget_setting_id};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-/// 118 public constructor properties of C# `Models/DockSettings.cs` (in source order).
+/// 118 public constructor properties of `Models/DockSettings.cs` (in source order).
 const CS_SETTINGS_KEYS: &[&str] = &[
     "Position",
     "PinOrder",
@@ -276,7 +276,7 @@ fn representative_value(key: &str) -> Value {
     if MAPS.contains(&key) {
         return json!({"a": "b"});
     }
-    // Strings and enums. Enum spellings chosen from the C# declarations so the
+    // Strings and enums. Enum spellings chosen from the reference declarations so the
     // value deserializes even after WS-A promotes these keys to typed fields.
     match key {
         "Position" | "ContentAlignment" => json!("Left"),
@@ -309,7 +309,7 @@ fn representative_value(key: &str) -> Value {
 }
 
 #[test]
-fn c1_contract_lists_all_118_csharp_keys() {
+fn c1_contract_lists_all_118_reference_keys() {
     assert_eq!(CS_SETTINGS_KEYS.len(), 118);
     let unique: BTreeSet<_> = CS_SETTINGS_KEYS.iter().copied().collect();
     assert_eq!(
@@ -320,20 +320,20 @@ fn c1_contract_lists_all_118_csharp_keys() {
 }
 
 #[test]
-fn core_settings_round_trip_preserves_every_csharp_key() {
+fn core_settings_round_trip_preserves_every_reference_key() {
     let mut input = Map::new();
     for key in CS_SETTINGS_KEYS {
         input.insert((*key).to_owned(), representative_value(key));
     }
 
     let settings: DockSettings = serde_json::from_value(Value::Object(input.clone()))
-        .expect("C# settings.json must deserialize into Rust DockSettings");
+        .expect("reference settings.json must deserialize into Rust DockSettings");
     let output = serde_json::to_value(&settings).expect("settings must serialize");
     let object = output
         .as_object()
         .expect("serialized settings must be an object");
 
-    // Six C# keys are serde aliases of typed fields; they round-trip under the
+    // Six reference keys are serde aliases of typed fields; they round-trip under the
     // port's canonical PascalCase names instead of the alias spelling.
     const ALIASED: &[(&str, &str)] = &[
         ("Widgets", "EnabledWidgets"),
@@ -349,7 +349,7 @@ fn core_settings_round_trip_preserves_every_csharp_key() {
             !object.contains_key(**key)
                 && !ALIASED
                     .iter()
-                    .any(|(csharp, port)| *csharp == **key && object.contains_key(*port))
+                    .any(|(reference, port)| *reference == **key && object.contains_key(*port))
         })
         .copied()
         .collect();
@@ -360,19 +360,19 @@ fn core_settings_round_trip_preserves_every_csharp_key() {
 fn unknown_future_keys_are_preserved_via_extra() {
     let raw = json!({
         "Position": "Left",
-        "FutureCSharpOnlySetting": {"nested": [1, 2, 3]},
+        "FutureReferenceOnlySetting": {"nested": [1, 2, 3]},
         "AnotherFutureKey": true
     });
     let settings: DockSettings = serde_json::from_value(raw).unwrap();
     let back = serde_json::to_value(&settings).unwrap();
-    assert_eq!(back["FutureCSharpOnlySetting"]["nested"][2], json!(3));
+    assert_eq!(back["FutureReferenceOnlySetting"]["nested"][2], json!(3));
     assert_eq!(back["AnotherFutureKey"], json!(true));
 }
 
 #[test]
 fn alias_keys_do_not_disappear() {
     // C1 aliases feed typed fields and are re-emitted under the port's canonical
-    // PascalCase names; the C# value must survive the round-trip either way.
+    // PascalCase names; the reference value must survive the round-trip either way.
     let raw = json!({
         "Widgets": ["clock", "audio"],
         "ShowClock": true,
@@ -382,7 +382,7 @@ fn alias_keys_do_not_disappear() {
     });
     let settings: DockSettings = serde_json::from_value(raw).unwrap();
     let back = serde_json::to_value(&settings).unwrap();
-    for (csharp_key, port_key) in [
+    for (reference_key, port_key) in [
         ("Widgets", "EnabledWidgets"),
         ("ShowClock", "ShowClockWidget"),
         ("Layout", "FullWidth"),
@@ -390,8 +390,8 @@ fn alias_keys_do_not_disappear() {
         ("PinnedTrayIcons", "UserPinnedBackgroundApps"),
     ] {
         assert!(
-            back.get(csharp_key).is_some() || back.get(port_key).is_some(),
-            "C# key {csharp_key} (port field {port_key}) was dropped"
+            back.get(reference_key).is_some() || back.get(port_key).is_some(),
+            "reference key {reference_key} (port field {port_key}) was dropped"
         );
     }
 }
@@ -424,7 +424,7 @@ fn dock_profile_mandatory_fields_survive_round_trip() {
     assert_eq!(object["SomeFutureProfileField"], json!("keep-me"));
 }
 
-/// C# `DockSettingsStore.IsValid()` rule subset (C1 §validate).
+/// `DockSettingsStore.IsValid()` rule subset (C1 §validate).
 fn validate_contract(values: &Map<String, Value>) -> Vec<&'static str> {
     let mut errors = Vec::new();
     if values.get("LauncherHotkey") == values.get("DockHotkey")
@@ -501,7 +501,7 @@ fn validate_accepts_a_well_formed_settings_object() {
 
 /// The subset rule itself is still enforced by `validate()`; only `load_from()`/`migrate_legacy()`
 /// repair it before validation. Keeping this contract test prevents a future "fix" from dropping
-/// the C# `IsValid()` rule entirely.
+/// the `IsValid()` rule entirely.
 #[test]
 fn validate_still_rejects_an_unrepaired_subset_violation() {
     let settings = DockSettings {
@@ -516,7 +516,7 @@ fn validate_still_rejects_an_unrepaired_subset_violation() {
 }
 
 #[test]
-fn widget_ids_are_canonicalized_to_the_csharp_catalog() {
+fn widget_ids_are_canonicalized_to_the_reference_catalog() {
     for (input, expected) in [
         ("clock", "Clock"),
         ("CLOCK", "Clock"),
@@ -549,7 +549,7 @@ fn focus_mode_and_widget_flags_keep_effective_state() {
 }
 
 #[test]
-fn display_care_fields_round_trip_with_csharp_pascal_case_names() {
+fn display_care_fields_round_trip_with_reference_pascal_case_names() {
     let raw = json!({
         "DockBackground": "TrueBlack",
         "OledReduceGlowEnabled": true,
@@ -582,7 +582,7 @@ fn display_care_fields_round_trip_with_csharp_pascal_case_names() {
 }
 
 #[test]
-fn display_care_validation_matches_csharp_ranges() {
+fn display_care_validation_matches_reference_ranges() {
     let mut bad = Map::new();
     bad.insert("BurnInShiftMinutes".into(), json!(4));
     bad.insert("OledLowBatteryThreshold".into(), json!(40));

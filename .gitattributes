@@ -1,12 +1,9 @@
 # Auto-detect text files and normalize line endings
 * text=auto
 
-# C# and WPF files (native Windows development)
-*.cs text diff=csharp eol=crlf
-*.xaml text diff=xml eol=crlf
-*.csproj text diff=xml eol=crlf
-*.sln text eol=crlf
-*.manifest text diff=xml eol=crlf
+# Rust sources and Cargo manifests
+*.rs text eol=lf
+*.toml text eol=lf
 
 # Scripts
 *.ps1 text eol=crlf

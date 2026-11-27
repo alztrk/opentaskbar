@@ -1,8 +1,8 @@
-//! C# `ShellRecoveryChecks` / `TaskbarRecoveryChecks` / flyout journal parity.
+//! `ShellRecoveryChecks` / `TaskbarRecoveryChecks` / flyout journal parity.
 //!
 //! These tests pin the wire format and retry policy. Bridge tests assert the
 //! same contract against the production shell modules that already exist,
-//! including the WS-2 watchdog argument form. The C#-style `generation`/`seq`
+//! including the WS-2 watchdog argument form. The reference-style `generation`/`seq`
 //! journal line is now written/read by `flyout_journal.rs` (in a separate file
 //! so the native watchdog's four-field position journal stays intact); the
 //! shell crate's own unit tests exercise the real file API.
@@ -267,7 +267,7 @@ fn production_watchdog_accepts_the_reference_arguments() {
     );
 }
 
-/// The C# flyout lines are now a real wire format in `flyout_journal.rs`:
+/// The reference flyout lines are now a real wire format in `flyout_journal.rs`:
 /// `FlyoutKindRecord::from_line` parses them and `to_line` writes them, with an
 /// atomic `*.tmp` + rename journal for all three kinds. The shell crate's unit
 /// tests round-trip the real file API; this bridge pins that API and the exact
@@ -293,7 +293,7 @@ fn production_flyout_journal_accepts_generation_and_seq() {
     common::assert_source_has(
         "crates/opentaskbar-shell/src/flyout_journal.rs",
         &[
-            "kind_records_format_and_parse_all_three_c_sharp_lines",
+            "kind_records_format_and_parse_all_three_reference_lines",
             "kind_journal_file_round_trips_generation_and_seq",
             "position_journal_meta_is_backward_compatible",
         ],

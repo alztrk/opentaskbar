@@ -1,5 +1,5 @@
 //! Native Win32 UI dialogs: a themed text prompt (for naming profiles/groups) and
-//! modern IFileDialog file/folder pickers (C# SaveFileDialog / OpenFileDialog /
+//! modern IFileDialog file/folder pickers (reference SaveFileDialog / OpenFileDialog /
 //! OpenFolderDialog parity) used by Settings backups, theme import/export and folder stacks.
 //!
 //! The pickers use the modern COM API so dark mode, Acrylic shell and per-monitor DPI of the
@@ -546,7 +546,7 @@ pub fn ask_name(
     out
 }
 
-// Native Windows file/folder pickers (C# Microsoft.Win32.SaveFileDialog / OpenFileDialog /
+// Native Windows file/folder pickers (reference Microsoft.Win32.SaveFileDialog / OpenFileDialog /
 // OpenFolderDialog parity) used by Settings backups, theme import/export and folder stacks.
 // Uses the modern IFileDialog COM API instead of the legacy common-dialog controls so the
 // dark mode, Acrylic shell and per-monitor DPI of the rest of the app are preserved.

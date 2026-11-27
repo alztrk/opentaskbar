@@ -97,7 +97,7 @@ pub fn supports_in_app_updates() -> bool {
 // MSIX StartupTask (real WinRT read/write)
 // ---------------------------------------------------------------------------
 
-/// `StartupTaskState` values that count as "registration enabled" (C# parity).
+/// `StartupTaskState` values that count as "registration enabled" (reference parity).
 pub fn is_enabled_startup_state(state: i32) -> bool {
     state == StartupTaskState::Enabled.0 || state == StartupTaskState::EnabledByPolicy.0
 }
@@ -117,7 +117,7 @@ fn with_com<T>(work: impl FnOnce() -> Option<T>) -> Option<T> {
 
 fn current_task() -> windows::core::Result<StartupTask> {
     // `IAsyncOperation<T>::get()` waits for the WinRT operation to complete;
-    // this mirrors C#'s `.AsTask().GetAwaiter().GetResult()`.
+    // this mirrors the reference `.AsTask().GetAwaiter().GetResult()`.
     StartupTask::GetAsync(&HSTRING::from(STARTUP_TASK_ID))?.get()
 }
 

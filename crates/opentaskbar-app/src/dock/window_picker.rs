@@ -1,6 +1,6 @@
 //! Native, keyboard-accessible application window picker grid (issue #174).
 //!
-//! Port of C# `Views/Popups/AppWindowPicker.cs`. A borderless topmost Win32 popup
+//! Rust implementation of `Views/Popups/AppWindowPicker.cs`. A borderless topmost Win32 popup
 //! is centred in the invoking monitor's *work area*, shows one live DWM thumbnail
 //! per matching window (3x3 paging at 1080p), and closes on deactivation.
 //!
@@ -91,11 +91,11 @@ use crate::window_picker::{
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
 
-/// Header band inside the frame (C# title row + its 14px bottom margin).
+/// Header band inside the frame (reference title row + its 14px bottom margin).
 const HEADER_DIPS: f32 = 58.0;
 /// Caption strip at the bottom of every card.
 const CAPTION_DIPS: f32 = 28.0;
-/// Paging row height (C# `43` in `BuildPage`).
+/// Paging row height (`43` in `BuildPage`).
 const PAGING_DIPS: f32 = 43.0;
 const PAGER_BUTTON_DIPS: f32 = 34.0;
 const INNER_PAD_DIPS: f32 = 6.0;
@@ -114,7 +114,7 @@ struct PickerState {
     dpi: f32,
     is_dark: bool,
     ordered: Vec<RunningWindow>,
-    /// Monitor whose windows are ranked first (same identity C# uses).
+    /// Monitor whose windows are ranked first (same identity reference uses).
     target_handle: usize,
     /// Executable identities of the app(s) that opened the picker. New windows
     /// are only added on refresh when they belong to one of them.
@@ -129,7 +129,7 @@ struct PickerState {
     monitor_area: RECT,
     page: usize,
     pages: usize,
-    /// Index inside the current page (C# `_visible` index, not the HWND).
+    /// Index inside the current page (`_visible` index, not the HWND).
     selected: usize,
     cards: Vec<Card>,
     hovered: Option<usize>,
@@ -245,7 +245,7 @@ fn state_ptr(hwnd: HWND) -> *mut PickerState {
     unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PickerState }
 }
 
-/// Same monitor identity as C# `DisplayService.GetWindowMonitor`: the `HMONITOR`
+/// Same monitor identity as `DisplayService.GetWindowMonitor`: the `HMONITOR`
 /// handle, which is what [`crate::window_picker::order_windows`] compares against.
 fn monitor_handle_for_window(hwnd: usize) -> usize {
     if hwnd == 0 {
@@ -299,7 +299,7 @@ fn release_thumbs(state: &mut PickerState) {
 
 /// Registers one live DWM thumbnail in `preview`, letterboxed to preserve aspect
 /// ratio. A failed registration leaves `thumb == 0` so the painter shows the
-/// icon/"Preview unavailable" fallback (C# `Visibility.Visible` on the fallback).
+/// icon/"Preview unavailable" fallback (`Visibility.Visible` on the fallback).
 fn register_thumbnail(state: &PickerState, card: &mut Card) {
     let mut thumb: isize = 0;
     let ok = unsafe { DwmRegisterThumbnail(state.hwnd, card.item.hwnd as HWND, &mut thumb) };
@@ -348,7 +348,7 @@ fn register_thumbnail(state: &PickerState, card: &mut Card) {
 
 /// Rebuilds the current page: releases every previous DWM registration, lays out
 /// the row-major grid in physical pixels and registers fresh thumbnails. Called
-/// on page changes and DPI changes (matching C# `BuildPage` + `QueueThumbnails`).
+/// on page changes and DPI changes (matching `BuildPage` + `QueueThumbnails`).
 fn build_page(state: &mut PickerState) {
     release_thumbs(state);
     state.cards.clear();
@@ -665,7 +665,7 @@ fn paint(state: &PickerState) {
                 unsafe { d2d.target.FillRectangle(&well, &bg) };
             }
             if card.thumb == 0 {
-                // C# fallback: app icon + "Preview unavailable".
+                // reference fallback: app icon + "Preview unavailable".
                 let icon_size = 36.0 * dip;
                 let cx = (card.preview.left + card.preview.right) as f32 / 2.0;
                 let cy = card.preview.top as f32 + icon_size * 0.85;
@@ -731,7 +731,7 @@ fn paint(state: &PickerState) {
                 }
             }
 
-            // Caption below the preview (C# `Dock.Bottom` text block).
+            // Caption below the preview (`Dock.Bottom` text block).
             if let Some(ref fmt) = caption_fmt
                 && let Ok(fg) = unsafe {
                     d2d.target
@@ -1231,7 +1231,7 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
         );
     }
 
-    // `monitor` is an index; C# orders by the HMONITOR of the invoking display,
+    // `monitor` is an index; reference orders by the HMONITOR of the invoking display,
     // so compare window monitors against the resolved monitor's handle.
     let ordered = crate::window_picker::order_windows(
         windows,
@@ -1317,14 +1317,14 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
     unsafe {
         SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
         ShowWindow(hwnd, SW_SHOW);
-        // C# `ShowActivated = true`: the popup must own the keyboard focus.
+        // `ShowActivated = true`: the popup must own the keyboard focus.
         AllowSetForegroundWindow(ASFW_ANY);
         SetForegroundWindow(hwnd);
         SetFocus(hwnd);
     }
     {
         // Register DWM thumbnails only after the destination window is visible,
-        // matching C# `ContentRendered` -> `QueueThumbnails`.
+        // matching `ContentRendered` -> `QueueThumbnails`.
         let state = unsafe { &mut *ptr };
         build_page(state);
         unsafe { InvalidateRect(hwnd, std::ptr::null(), 1) };
@@ -1372,7 +1372,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn page_label_formats_csharp_placeholders() {
+    fn page_label_formats_reference_placeholders() {
         // The catalog key may still be missing in worktrees where WS-2 has not
         // landed; `label` falls back to the English template in that case.
         let text = page_label(2, 4);
@@ -1380,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn picker_constants_follow_csharp_layout() {
+    fn picker_constants_follow_reference_layout() {
         assert_eq!(HEADER_DIPS, 58.0);
         assert_eq!(PAGING_DIPS, 43.0);
         assert_eq!(CORNER_DIPS, 10.0);

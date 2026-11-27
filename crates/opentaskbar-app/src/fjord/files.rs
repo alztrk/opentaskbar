@@ -1,6 +1,6 @@
 //! Fjord Files: This PC, favourites, drives, navigation history and entry I/O.
 //!
-//! C# reference: `Views/Windows/FjordFilesWindow.xaml.cs`. Everything above the
+//! reference: `Views/Windows/FjordFilesWindow.xaml.cs`. Everything above the
 //! `@pure-end` marker is standard-library only and is exercised by the tests at
 //! the bottom; the Win32 layer below it is deliberately thin.
 
@@ -16,7 +16,7 @@ const COMPUTER_CLSID: &str = "{20d04fe0-3aea-1069-a2d8-08002b30309d}";
 const TRAIL_SEPARATOR: &str = "   ›   ";
 const ELLIPSIS: &str = "…";
 
-/// Identifies all spellings of This PC accepted by the C# window.
+/// Identifies all spellings of This PC accepted by the reference window.
 pub fn is_computer_location(path: &str) -> bool {
     let value = path.trim().trim_matches('"');
     let lowered = value.to_ascii_lowercase();
@@ -27,7 +27,7 @@ pub fn is_computer_location(path: &str) -> bool {
         || lowered == format!("shell:::{}", COMPUTER_CLSID)
 }
 
-/// One row in the file list (`C# FileEntry` record).
+/// One row in the file list (`reference FileEntry` record).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileEntry {
     pub path: String,
@@ -280,7 +280,7 @@ pub fn navigation_target(raw: &str, base: Option<&str>, home: &str) -> Option<St
     normalize_path_text(&expanded, Some(base.unwrap_or(home)))
 }
 
-/// Back/forward stack with C# semantics: duplicate current entries are ignored
+/// Back/forward stack with reference semantics: duplicate current entries are ignored
 /// and navigating back truncates the redo branch.
 #[derive(Clone, Debug, Default)]
 pub struct History {
@@ -415,7 +415,7 @@ fn fallback_drives() -> Vec<FileEntry> {
         .collect()
 }
 
-/// The eight C# favourites. Labels are locale *keys*; the UI translates them.
+/// The eight reference favourites. Labels are locale *keys*; the UI translates them.
 pub fn favorites(home: &str) -> Vec<(&'static str, &'static str, String)> {
     let join = |name: &str| format!("{}\\{}", home.trim_end_matches(['\\', '/']), name);
     vec![
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn breadcrumb_shows_last_three_components() {
-        // C# adds the ellipsis once the third segment still has a parent.
+        // reference adds the ellipsis once the third segment still has a parent.
         assert_eq!(
             folder_trail(r"C:\Users\agnes\Downloads"),
             format!(

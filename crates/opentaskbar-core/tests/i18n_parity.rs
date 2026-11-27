@@ -2,7 +2,7 @@
 //! same key set, including the new feature keys consumed by the Rust port.
 //! This is the CI-visible half of the key-parity
 //! check; `scripts/check-locale-parity.ps1` performs the same check over source
-//! JSON (C# vs Rust) without compiling.
+//! JSON (reference vs Rust) without compiling.
 
 use opentaskbar_core::i18n::{self, DEFAULT_LANGUAGE};
 

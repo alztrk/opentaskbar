@@ -1,4 +1,4 @@
-//! GitHub release lookup and in-place updates (C# `UpdateChecker.cs` parity).
+//! GitHub release lookup and in-place updates (`UpdateChecker.cs` parity).
 //!
 //! Release metadata and the binary itself are fetched with WinHTTP. Installation is
 //! gated on a GitHub `sha256:` asset digest, file size, and the PE `MZ` magic before a
@@ -288,7 +288,7 @@ fn updater_script(source: &str, target: &str) -> Result<String, &'static str> {
     generate_updater_script(Path::new(source), Path::new(target))
 }
 
-/// C# `UpdateChecker` uses `%TEMP%\OpenTaskbar\update`, not LOCALAPPDATA.
+/// `UpdateChecker` uses `%TEMP%\OpenTaskbar\update`, not LOCALAPPDATA.
 /// NOTE (cross-WS): the `paths` contract has no updater helper yet; keep this
 /// literal until `opentaskbar_core::paths` exposes `update_dir()`.
 fn update_dir() -> PathBuf {
@@ -308,10 +308,6 @@ pub fn download_and_apply(release: &Release) -> Result<(), &'static str> {
     // be applied from the Settings UI, so we schedule it and let the caller
     // exit normally (see `exit_for_update`).
     let target = std::env::current_exe().map_err(|_| "ErrorUpdatePath")?;
-    let file_name = target.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if file_name.eq_ignore_ascii_case("dotnet.exe") {
-        return Err("ErrorUpdateDeveloperMode");
-    }
     // A read-only install directory forces the elevated updater path.
     let requires_elevation = target
         .parent()
@@ -419,7 +415,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn update_dir_matches_the_csharp_temp_folder() {
+    fn update_dir_matches_the_reference_temp_folder() {
         assert_eq!(
             update_dir(),
             std::env::temp_dir().join("OpenTaskbar").join("update")
@@ -471,7 +467,7 @@ mod tests {
     }
 }
 
-// ---- C# update-checker parity (WS-F) ----
+// ---- reference update-checker parity (WS-F) ----
 
 pub const USER_AGENT: &str = "OpenTaskbar";
 
@@ -480,7 +476,7 @@ pub fn releases_page() -> String {
     format!("https://github.com/{REPOSITORY}/releases/latest")
 }
 
-/// Semver-like version with the same normalization as C# `Version` (missing parts become 0).
+/// Semver-like version with the same normalization as `Version` (missing parts become 0).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Version {
     pub major: u32,
@@ -531,7 +527,7 @@ impl std::fmt::Display for Version {
     }
 }
 
-/// C# `Release` view: the same release with a parsed [`Version`] and an `i64` size.
+/// `Release` view: the same release with a parsed [`Version`] and an `i64` size.
 ///
 /// The canonical [`Release`] keeps the String version consumed by the settings UI; use
 /// `Release::from(detailed)` (or [`DetailedRelease`]) for the typed WS-F shape.
@@ -786,13 +782,6 @@ fn apply_update(release: &DetailedRelease, force_elevation: bool) -> UpdateOutco
     let Some(target) = get_executable_path() else {
         return UpdateOutcome::failure("ErrorUpdatePath", None);
     };
-    if target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("dotnet.exe"))
-    {
-        return UpdateOutcome::failure("ErrorUpdateDeveloperMode", None);
-    }
     let Some(url) = release.download_url.as_deref() else {
         let _ = std::process::Command::new("cmd.exe")
             .args(["/c", "start", "", &release.url])
@@ -879,7 +868,7 @@ pub fn is_valid_sha256_digest(digest: Option<&str>) -> bool {
     }
 }
 
-/// Rejects control characters, quotes and newlines in batch paths (C# `EscapeBatchValue`).
+/// Rejects control characters, quotes and newlines in batch paths (`EscapeBatchValue`).
 pub fn escape_batch_value(value: &str) -> Result<String, &'static str> {
     if value.trim().is_empty() {
         return Err("Updater path must not be empty.");
@@ -893,7 +882,7 @@ pub fn escape_batch_value(value: &str) -> Result<String, &'static str> {
     Ok(value.replace('%', "%%"))
 }
 
-/// C# `GenerateUpdaterScript`: no BOM (a BOM corrupts `@echo off` on line 1).
+/// `GenerateUpdaterScript`: no BOM (a BOM corrupts `@echo off` on line 1).
 pub fn generate_updater_script(temp_exe: &Path, target_exe: &Path) -> Result<String, &'static str> {
     let src = escape_batch_value(temp_exe.to_string_lossy().as_ref())?;
     let dst = escape_batch_value(target_exe.to_string_lossy().as_ref())?;

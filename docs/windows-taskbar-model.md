@@ -332,8 +332,8 @@ dizi/değerlerle simüle edilir.
 ### Komutlar
 
 ```powershell
-# Rust portu: biçim, lint ve workspace testleri (Rust-Port/ altında)
-cd Rust-Port
+# Rust: biçim, lint ve workspace testleri ( altında)
+
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace

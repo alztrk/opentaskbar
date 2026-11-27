@@ -676,7 +676,7 @@
   "LauncherTaskManager": "Task Manager",
   "LauncherUninstall": "Uninstall",
   "ErrorUpdatePath": "Application path not found.",
-  "ErrorUpdateDeveloperMode": "Automatic updates are unavailable when running from the developer environment (dotnet run).",
+  "ErrorUpdateDeveloperMode": "Automatic updates are unavailable when running from the developer environment.",
   "ErrorUpdateBinaryMissing": "No downloadable application was found; the release page was opened.",
   "ErrorUpdateHttp": "Download failed: HTTP {0}",
   "ErrorUpdateSizeInvalid": "The downloaded file size is invalid.",

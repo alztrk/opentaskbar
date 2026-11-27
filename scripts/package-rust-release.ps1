@@ -1,6 +1,6 @@
 # Packages the Rust portable EXEs into Rust-only tagged release artifacts.
 # Generates checksums.txt, release-manifest.json (schemaVersion 2) and
-# release-notes.md under OutputDir from scratch; no C# artifact is involved.
+# release-notes.md under OutputDir from scratch; no reference artifact is involved.
 #
 # Attestation notes: checksums.txt is the subject-checksums input of
 # actions/attest@v4 (SLSA provenance); the optional VirusTotal step in
@@ -144,7 +144,7 @@ foreach ($path in @($rustReadme, $license, $cargoManifest)) {
 $crateVersion = Get-CargoWorkspaceVersion -Path $cargoManifest
 
 # Remove only artifacts this script owns so repeated runs are reproducible.
-Get-ChildItem -LiteralPath $OutputDir -File -Filter "OpenTaskbar-Rust-$Tag-*" | Remove-Item -Force
+Get-ChildItem -LiteralPath $OutputDir -File -Filter "OpenTaskbar-$Tag-*" | Remove-Item -Force
 foreach ($name in @('checksums.txt', 'release-manifest.json', 'release-notes.md')) {
     $path = Join-Path $OutputDir $name
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
@@ -153,16 +153,16 @@ foreach ($name in @('checksums.txt', 'release-manifest.json', 'release-notes.md'
 $newEntries = [System.Collections.Generic.List[object]]::new()
 $watchdogByArch = [ordered]@{}
 foreach ($arch in @('x64', 'x86')) {
-    $builtExe = Join-Path $OutputDir "OpenTaskbar-Rust-$arch.exe"
+    $builtExe = Join-Path $OutputDir "OpenTaskbar-$arch.exe"
     if (-not (Test-Path -LiteralPath $builtExe -PathType Leaf)) {
-        throw "Missing Rust build output: $builtExe (run scripts/publish-rust-portable.ps1 first)."
+        throw "Missing Rust build output: $builtExe (run scripts/publish-portable.ps1 first)."
     }
 
     # The exact PE embedded by build.rs. A wrong-arch watchdog would silently
     # break crash recovery on 32-bit Windows, so fail the release instead.
     $watchdogPath = Join-Path $OutputDir "OpenTaskbarWatchdog-$arch.exe"
     if (-not (Test-Path -LiteralPath $watchdogPath -PathType Leaf)) {
-        throw "Missing $arch watchdog: $watchdogPath (run scripts/publish-rust-portable.ps1 first)."
+        throw "Missing $arch watchdog: $watchdogPath (run scripts/publish-portable.ps1 first)."
     }
     $expectedMachine = if ($arch -eq 'x86') { 0x014C } else { 0x8664 }
     $peMachine = Get-PeMachine -Path $watchdogPath
@@ -176,8 +176,8 @@ foreach ($arch in @('x64', 'x86')) {
         sha256       = $watchdogHash
     }
 
-    $exeName = "OpenTaskbar-Rust-$Tag-win-$arch.exe"
-    $zipName = "OpenTaskbar-Rust-$Tag-win-$arch.zip"
+    $exeName = "OpenTaskbar-$Tag-win-$arch.exe"
+    $zipName = "OpenTaskbar-$Tag-win-$arch.zip"
     $exePath = Join-Path $OutputDir $exeName
     $zipPath = Join-Path $OutputDir $zipName
     Copy-Item -LiteralPath $builtExe -Destination $exePath -Force
@@ -210,7 +210,7 @@ foreach ($arch in @('x64', 'x86')) {
     }
 }
 
-# Generate checksums.txt from the Rust assets only; no C# rows can survive.
+# Generate checksums.txt from the Rust assets only; no reference rows can survive.
 $checksumsPath = Join-Path $OutputDir 'checksums.txt'
 $checksumLines = @($newEntries | Sort-Object name | ForEach-Object { "$($_.sha256) *$($_.name)" })
 Write-Utf8NoBom -Path $checksumsPath -Text ($checksumLines -join "`n")

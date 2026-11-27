@@ -1,4 +1,4 @@
-//! C# `AudioMixerChecks` / `MediaVolumeChecks` / `AppAudioSessionMatcher` parity.
+//! `AudioMixerChecks` / `MediaVolumeChecks` / `AppAudioSessionMatcher` parity.
 //!
 //! Wheel accumulation and session scoring are kept as reference vectors; the
 //! bridge tests below assert the CoreAudio production surface and the real
@@ -43,7 +43,7 @@ struct Session {
     volume: f32,
 }
 
-/// C# matcher: a session belonging to the foreground process wins by a large
+/// reference matcher: a session belonging to the foreground process wins by a large
 /// margin; name and executable stems are weaker signals.
 fn score_session(session: &Session, foreground_pid: u32, target_name: &str) -> i64 {
     let mut score = 0i64;
@@ -71,7 +71,7 @@ fn score_session(session: &Session, foreground_pid: u32, target_name: &str) -> i
     score
 }
 
-/// Aggregate per-application sliders by executable path (C# keeps one row per
+/// Aggregate per-application sliders by executable path (reference keeps one row per
 /// executable and sums its sessions' volumes).
 fn aggregate_by_executable(sessions: &[Session]) -> Vec<(String, f32)> {
     let mut result: Vec<(String, f32)> = Vec::new();

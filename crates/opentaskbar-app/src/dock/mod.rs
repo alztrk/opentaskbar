@@ -133,7 +133,7 @@ const TIMER_WIDGET_ANIM: usize = 7;
 const TIMER_REVEALED_GUARD: usize = 8;
 const TIMER_DRAG_HOVER: usize = 9;
 const TIMER_HOVER_INTENT: usize = 10;
-/// C# `DockMetrics.AutoHideDelayMs`: delayed hide after the pointer leaves.
+/// `DockMetrics.AutoHideDelayMs`: delayed hide after the pointer leaves.
 const TIMER_HIDE_DELAY: usize = 11;
 const RESIZE_EDGE_DIPS: f32 = 8.0;
 const SCROLL_EDGE_W_DIPS: f32 = 28.0;
@@ -167,7 +167,7 @@ const FJORD_MENU_ID_BASE: u32 = 7700;
 const GROUP_FLYOUT_ROW_ID_BASE: u32 = 100;
 /// How long a standalone Windows-key press keeps an auto-hidden dock revealed.
 /// 1500 ms kept the dock pinned across ordinary keyboard shortcuts; 600 ms matches
-/// the Win-key grace window and C# `WinKeyRevealMonitor`.
+/// the Win-key grace window and `WinKeyRevealMonitor`.
 const WINKEY_REVEAL_MS: u64 = 600;
 
 /// Runtime-resolved settings applied once per settings load (never on the mouse
@@ -876,7 +876,7 @@ struct DockState {
     /// is foreground at press time is never stored as a restore target.
     start_restore_hwnd: usize,
     /// Foreground application captured before any flyout takes focus; restored
-    /// when the flyout is dismissed (C# `DockFlyout` focus lifecycle).
+    /// when the flyout is dismissed (`DockFlyout` focus lifecycle).
     flyout_focus_return: usize,
     /// Debounce stamp for the Start toggle (open + immediate close race).
     start_toggle_last: Option<Instant>,
@@ -952,7 +952,7 @@ fn exe_display_name(exe_path: &str, fallback_title: &str) -> String {
 }
 
 /// Tooltip suffix for a folder-stack pin: number of visible files that fit in
-/// the C# 4x2 preview grid (`.crdownload` / `.part` files are hidden).
+/// the reference 4x2 preview grid (`.crdownload` / `.part` files are hidden).
 fn folder_stack_preview_count(path: &str) -> Option<usize> {
     let dir = Path::new(path);
     if !dir.is_dir() {
@@ -1030,7 +1030,7 @@ fn update_background_pin(settings: &mut DockSettings, path: &str, pinned: bool) 
     }
 }
 
-/// Groups running windows the way C# `RunningAppProjection` does: by AUMID when
+/// Groups running windows the way `RunningAppProjection` does: by AUMID when
 /// available, falling back to the executable for shared hosts / missing AUMIDs.
 /// `AggregateByExecutablePath` forces executable grouping for every window.
 pub fn running_group_key(win: &RunningWindow, aggregate_by_exe: bool) -> String {
@@ -1281,7 +1281,7 @@ fn keep_closing_slots(
     }
 }
 
-/// Visible pill thickness. C# `DockMetrics.For(...).Shelf` = 48/58/66 DIP.
+/// Visible pill thickness. `DockMetrics.For(...).Shelf` = 48/58/66 DIP.
 fn pill_height_dips(settings: &DockSettings) -> f32 {
     layout::size_profile(settings).shelf
 }
@@ -1363,7 +1363,7 @@ fn compute_window_dips(settings: &DockSettings, slot_count: usize, mon_w_dips: f
     )
 }
 
-/// Fisheye extra-scale ceiling above 1.0: never above C# `DockMetrics.HoverScale - 1.0 = 0.5`.
+/// Fisheye extra-scale ceiling above 1.0: never above `DockMetrics.HoverScale - 1.0 = 0.5`.
 fn profile_peak(settings: &DockSettings) -> f32 {
     settings
         .fisheye_intensity
@@ -1396,7 +1396,7 @@ fn compute_window_rect_with(
     let mon_w_dips = monitor.width() as f32 / dpi;
     let (width_dips, height_dips) =
         compute_window_dips_with(settings, slot_count, mon_w_dips, effective);
-    // C# `DockMetrics.SideInset` for side docks; bottom gap is baked into the window's
+    // `DockMetrics.SideInset` for side docks; bottom gap is baked into the window's
     // internal `bottom_inset_dips()` so the HWND stays flush with `monitor.bottom` (never
     // doubling `VERTICAL_EDGE_GAP` and never clipping the bottom Clear Crystal shadow).
     let margin_px = (12.0 * dpi).round() as i32;
@@ -1581,7 +1581,7 @@ impl DockState {
         let profile = layout::size_profile(&settings);
         let base = profile.cell;
         let pill_h = pill_height_dips(&settings);
-        // C# `IconPack.CornerRadius` = 16/19/22 per profile; an explicit user
+        // `IconPack.CornerRadius` = 16/19/22 per profile; an explicit user
         // override in settings still wins.
         let radius = settings
             .dock_corner_radius
@@ -2054,7 +2054,7 @@ impl DockState {
     }
 
     fn ensure_animation(&mut self) {
-        // C# `EffectiveAnimationsEnabled` gate. With the toggle off (or in Focus
+        // `EffectiveAnimationsEnabled` gate. With the toggle off (or in Focus
         // Mode) the VSync producer must stay parked at its condvar, and auto-hide
         // must snap instantly instead of waiting for frames that never arrive.
         if !effective_animations_enabled(self.settings.animations_enabled, self.settings.focus_mode)
@@ -2461,7 +2461,7 @@ impl DockState {
     }
 
     /// Checks whether any visible non-minimized, non-cloaked application window overlaps
-    /// this monitor's dock shelf (C# `DockAutoHideController.EvaluateWindowOverlap`).
+    /// this monitor's dock shelf (`DockAutoHideController.EvaluateWindowOverlap`).
     /// Uses `DWMWA_EXTENDED_FRAME_BOUNDS` for the true visible frame and filters shell
     /// overlays (Start/Alt+Tab/Task View) via `platform::win32_ex::is_shell_overlay` parity.
     fn is_overlapped_by_window(&self) -> bool {
@@ -3016,7 +3016,7 @@ impl DockState {
         }
         self.running_windows = running.clone();
         let mut next = build_slots_for(&self.pins, &running, &self.slots, &self.settings);
-        // DComp close motion does not use WPF's client-area animation APIs, so the
+        // DComp close motion does not use the reference UI's client-area animation APIs, so the
         // OS `SPI_GETCLIENTAREAANIMATION` flag must not veto it (it is frequently
         // off in VMs / battery-saver even when the in-app toggle is on).
         if animate_closes
@@ -3217,7 +3217,7 @@ impl DockState {
         (w - gap * largest_fraction).max(0.0)
     }
 
-    /// C# `DockFisheyeLayout.ComputeSlotExtras`: each slot grows by at most 95% of
+    /// `DockFisheyeLayout.ComputeSlotExtras`: each slot grows by at most 95% of
     /// its growth delta and the whole arch is clamped to the free pill budget.
     fn slot_widths(&self, now: Instant) -> Vec<f32> {
         let profile = layout::size_profile(&self.settings);
@@ -3243,7 +3243,7 @@ impl DockState {
             .collect()
     }
 
-    /// C# `ComputeSafeLift` + launch bounce, capped at 1 DIP by `MAX_LIFT_DIPS`.
+    /// `ComputeSafeLift` + launch bounce, capped at 1 DIP by `MAX_LIFT_DIPS`.
     fn slot_lift(&self, slot: &DockSlot) -> f32 {
         let profile = layout::size_profile(&self.settings);
         let max_scale = profile_max_scale(&self.settings).min(self.session_max_scale);
@@ -3263,7 +3263,7 @@ impl DockState {
         pill_w: f32,
         now: Instant,
     ) -> ScrollMetrics {
-        // Flush with the outer rounded edges of the dock pill (matching C# `MainWindow.xaml`).
+        // Flush with the outer rounded edges of the dock pill (matching `MainWindow.xaml`).
         let vp_left = pill_left + 1.0;
         let vp_right = (pill_left + pill_w - 1.0).max(vp_left + 1.0);
         let apps_w = self.live_apps_width_dips_at(now);
@@ -3452,7 +3452,7 @@ impl DockState {
     ) {
         let (_, pill_top, _, pill_h) = self.live_pill_geometry();
         let sm = self.live_scroll_metrics();
-        // Widgets live in the same main strip right after the apps (matching C# `RebuildDockOrder`),
+        // Widgets live in the same main strip right after the apps (matching `RebuildDockOrder`),
         // while Background Apps (`tray`) and Recycle Bin (`bin`) stay pinned to the trailing edge.
         let apps_w = self.live_apps_width_dips();
         let mut wx = sm.apps_start_x + if apps_w > 0.0 { apps_w + 8.0 } else { 0.0 };
@@ -3694,7 +3694,7 @@ impl DockState {
         };
         let profile = layout::size_profile(&self.settings);
         let cell = profile.cell + slot_gap(&self.settings);
-        // C# `HoverScale = 1.5` is the ceiling; the expansion budget trims it to the
+        // `HoverScale = 1.5` is the ceiling; the expansion budget trims it to the
         // available pill space so neighbouring icons never overlap.
         let configured_max = profile_max_scale(&self.settings);
         let budget = capture_expansion_budget(
@@ -3763,7 +3763,7 @@ impl DockState {
 
         let slide_k = 1.0 - (-24.0 * dt).exp();
         let hide_k = 1.0 - (-16.0 * dt).exp();
-        // Continuous inertial scrolling matching C# DockScrollViewer (`tau = 0.045s`).
+        // Continuous inertial scrolling matching reference DockScrollViewer (`tau = 0.045s`).
         let scroll_k = 1.0 - (-dt / 0.045).exp();
         let mut moving = self.drag.is_some_and(|d| d.active);
 
@@ -3850,7 +3850,7 @@ impl DockState {
             self.hover_mouse_x = None;
             self.hovered_idx = None;
             self.hovered_shell = None;
-            // C# `MainWindow.DragDrop`: only an external file drag hovering a
+            // `MainWindow.DragDrop`: only an external file drag hovering a
             // running app for 450 ms brings that app forward.
             if layout::drag_hover_allowed(external_file_drag_active()) {
                 self.drag_hover_started = Some(Instant::now());
@@ -3899,7 +3899,7 @@ impl DockState {
     }
 
     /// Keeps a group's persisted member order in sync when a drag reorders two
-    /// slots that belong to the same app group (C# `MainWindow.Groups`).
+    /// slots that belong to the same app group (`MainWindow.Groups`).
     fn reorder_group_members(&mut self, from_idx: usize, to_idx: usize) {
         let Some((from_path, to_path)) = self
             .slots
@@ -4198,13 +4198,13 @@ impl DockState {
             let dragging_this = active_drag.is_some_and(|d| d.idx == idx);
             let pressed = self.pressed_idx == Some(idx) && !dragging_this;
             let press_factor = if pressed { 0.88 } else { 1.0 };
-            // Icon artwork is smaller than the cell (C# icon 28/34/38 vs cell 38/44/50).
+            // Icon artwork is smaller than the cell (reference icon 28/34/38 vs cell 38/44/50).
             let dim = icon_size * self.slots[idx].scale * press_factor;
             let bounce = bounce_offset_dips(self.slots[idx].bounce_started).unwrap_or(0.0);
             let lift =
                 (self.slot_lift(&self.slots[idx]) - if pressed { 2.0 } else { 0.0 }).max(0.0);
             let slide_x = self.slots[idx].slide_x;
-            // C# `ApplicationIconProvider.UseHoverIcon`: only swap when a hover
+            // `ApplicationIconProvider.UseHoverIcon`: only swap when a hover
             // variant actually exists and the icon is magnified by the pointer.
             let hover_key = icon_cache::hover_variant_key(&self.slots[idx].icon_source, true);
             let has_hover_variant = self
@@ -4356,7 +4356,7 @@ impl DockState {
             cursor_x += (slot_w + gap) * self.slots[idx].layout_fraction(now);
         }
 
-        // 4. Widgets inline right after apps (same main strip as C# `RebuildDockOrder`).
+        // 4. Widgets inline right after apps (same main strip as `RebuildDockOrder`).
         let widget_h = design::widget_height_dips(pill_h);
         let widget_top = pill_top + (pill_h - widget_h) * 0.5;
         let apps_w = self.live_apps_width_dips_at(now);
@@ -4766,7 +4766,7 @@ impl DockState {
         } else {
             1.0
         };
-        // C# `ComputePreviewClearance`: keep the thumbnail above the tallest
+        // `ComputePreviewClearance`: keep the thumbnail above the tallest
         // possible magnified icon, including the 1 DIP lift.
         let clearance = compute_preview_clearance(profile.icon, effective_max);
         let top_edge = (pill_top - clearance).min(pill_top);
@@ -4774,7 +4774,7 @@ impl DockState {
         let anchor_bottom_y = win_y + ((top_edge - 10.0) * self.dpi).round() as i32;
 
         if let Some(ref mut preview) = self.preview {
-            // C# size-profile card dimensions (228x154 / 250x180 DIP).
+            // reference size-profile card dimensions (228x154 / 250x180 DIP).
             preview.set_card_size(profile.preview_card.0, profile.preview_card.1);
             // Clear Crystal optical glass config (strictly active in Glass mode).
             preview.set_glass_config(
@@ -6525,7 +6525,7 @@ impl DockState {
         // WS-11: Fjord workspace commands are appended to the shared dock menu
         // with ids outside the dock's reserved range; dispatch them here before
         // the normal `ContextAction` mapping.
-        // C# writes a JSON bool; `extra_flag` only understood legacy 0/1 ints.
+        // reference writes a JSON bool; `extra_flag` only understood legacy 0/1 ints.
         let files_enabled = crate::fjord::activation::files_enabled(&self.settings);
         let bar_visible = crate::fjord::activation::bar_visible(&self.settings)
             || crate::ui::fjord_bar::is_fjord_bar_running();
@@ -6798,7 +6798,7 @@ impl DockState {
         self.evaluate_auto_hide();
     }
 
-    /// Session switch / lock resets all transient UI (C# `App.xaml.cs` SessionSwitch).
+    /// Session switch / lock resets all transient UI (`App.xaml.cs` SessionSwitch).
     fn reset_transient_ui(&mut self) {
         window_picker::request_close_all();
         self.island.reset_transient();
@@ -6908,7 +6908,7 @@ struct KbdLlHookStruct {
 }
 
 /// Detects a standalone Windows-key tap (Win up with no intervening key) and asks
-/// every dock window to reveal itself. Mirrors C# `WinKeyRevealMonitor` (#164).
+/// every dock window to reveal itself. Mirrors `WinKeyRevealMonitor` (#164).
 unsafe extern "system" fn win_key_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let msg = wparam as u32;
     if code >= 0
@@ -7196,7 +7196,7 @@ unsafe extern "system" {
     fn SHFileOperationW(op: *mut ShFileOpStructW) -> i32;
 }
 
-/// Moves dropped files to the Recycle Bin (C# `DesktopFileTransfer/Drop.cs`).
+/// Moves dropped files to the Recycle Bin (`DesktopFileTransfer/Drop.cs`).
 fn delete_files_to_recycle_bin(owner_hwnd: usize, paths: &[String]) -> bool {
     let mut from: Vec<u16> = Vec::new();
     for path in paths {
@@ -7519,7 +7519,7 @@ unsafe extern "system" fn wnd_proc(
             0
         }
         WM_TIMER if wparam == TIMER_HIDE_DELAY => {
-            // Pointer stayed outside for the full C# `AutoHideDelayMs` window.
+            // Pointer stayed outside for the full `AutoHideDelayMs` window.
             unsafe { KillTimer(hwnd, TIMER_HIDE_DELAY) };
             state.evaluate_auto_hide();
             0
@@ -7912,7 +7912,7 @@ pub fn run(settings: DockSettings) {
     }
 
     // The Settings UI is a separate `--settings` process; quitting the dock from the Exit
-    // menu must close it as C# MainWindow.Window_Closed does with
+    // menu must close it as reference MainWindow.Window_Closed does with
     // SettingsWindow.CloseForShutdown(), otherwise its window stays on screen.
     settings_ui::close_spawned_settings_windows();
     crate::ui::fjord_bar::close_fjord_bar();

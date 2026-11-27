@@ -34,7 +34,7 @@ static BOOL CALLBACK EnumSecondaryTrays(HWND hwnd, LPARAM lParam) {
 }
 
 // Returns Start/Search/Control Center to the positions recorded before the dock anchored them. The journal is
-// atomic (written via flyout-positions.txt.tmp by BOTH the C# writer and Rust flyout_writer) and PID-checked
+// atomic (written via flyout-positions.txt.tmp by BOTH the reference writer and Rust flyout_writer) and PID-checked
 // so a recycled HWND can never be moved by a stale entry. The four scanned fields are the shared wire format
 // "<hwnd> <pid> <left> <top>"; Rust may append generation/seq tokens, which fwscanf intentionally ignores.
 // Returns FALSE when an entry belongs to another process now, so the journal is kept for a later recovery pass.

@@ -1,4 +1,4 @@
-//! Focus / Break session engine — C# `FocusWidget.cs` parity.
+//! Focus / Break session engine — `FocusWidget.cs` parity.
 //!
 //! Adds the Break phase, Asterisk chime + visual pulse, session numbering and the
 //! `FocusMinutes` / `FocusBreakMinutes` / `FocusSessions` settings. `SharedFocusSession` lets the
@@ -15,7 +15,7 @@ use crate::ui::flyout::{BarTone, FlyoutBlock, FlyoutSpec};
 
 use super::catalog_ops::{setting_i64, setting_value};
 
-/// C# `FocusWidget.Phase`.
+/// `FocusWidget.Phase`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FocusPhase {
     Focus,
@@ -41,7 +41,7 @@ pub enum FocusEvent {
     CycleCompleted,
 }
 
-/// Duration of the C# pulse animation applied after a phase transition.
+/// Duration of the reference pulse animation applied after a phase transition.
 pub const PULSE_MS: u64 = 800;
 
 /// Core session state. Pure apart from `Instant`, so it is easy to test and share.
@@ -56,7 +56,7 @@ pub struct FocusSession {
     pub sessions_completed: u64,
     pub focus_minutes_total: u64,
     pub last_transition: Option<Instant>,
-    /// Number of the currently running/next session (1-based), matching C# UI.
+    /// Number of the currently running/next session (1-based), matching reference UI.
     pub session_number: u64,
 }
 
@@ -84,7 +84,7 @@ impl FocusSession {
         let focus = setting_i64(settings, "FocusMinutes", 25).clamp(1, 180) as u64;
         let break_mins = setting_i64(settings, "FocusBreakMinutes", 5).clamp(0, 60) as u64;
         let target = setting_i64(settings, "FocusSessions", 4).clamp(1, 20) as u64;
-        // Legacy alias used by some C# profiles before the rename.
+        // Legacy alias used by some reference profiles before the rename.
         let target = if setting_value(settings, "FocusSessions").is_none() {
             setting_i64(settings, "FocusBreakSessions", target as i64).clamp(1, 20) as u64
         } else {
@@ -235,9 +235,9 @@ impl SharedFocusSession {
     }
 }
 
-/// C# `SystemSounds.Asterisk.Play()` → `MessageBeep(MB_ICONASTERISK)`.
+/// `SystemSounds.Asterisk.Play()` → `MessageBeep(MB_ICONASTERISK)`.
 pub fn play_break_chime() {
-    // C# `SystemSounds.Asterisk.Play()` equivalent without a console window.
+    // `SystemSounds.Asterisk.Play()` equivalent without a console window.
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

@@ -1,7 +1,7 @@
-//! Exact C# `Design/Icons/*.xaml` Lucide StreamGeometry paths.
+//! Exact `Design/Icons/*.xaml` Lucide StreamGeometry paths.
 //! Generated from Actions (26), Status (43), Navigation (14), Media (8) plus two Lucide-style brand marks.
 
-/// 93 Lucide-compatible path data entries, keyed by the C# `x:Key` resource name.
+/// 93 Lucide-compatible path data entries, keyed by the `x:Key` resource name.
 pub static LUCIDE_PATHS: &[(&str, &str)] = &[
     (
         "IconPin",

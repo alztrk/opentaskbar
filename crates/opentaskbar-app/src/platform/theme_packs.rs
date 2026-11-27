@@ -1,6 +1,6 @@
 //! Folder-based theme packs: discovery, portable `.ottheme` export/import and deletion.
 //!
-//! Windows-independent port of C# `ThemePacks`, `ThemePackTransfer` and `WidgetPack`.
+//! Windows-independent Rust implementation of `ThemePacks`, `ThemePackTransfer` and `WidgetPack`.
 //! Themes are plain directories under a caller-supplied root; a shared file is a zip
 //! whose entries are relative to the theme folder (usually under a folder named after it).
 //! All archive and identifier handling is validated before anything is written to disk.
@@ -58,7 +58,7 @@ pub struct ThemeManifest {
 
 /// A discovered theme folder. `id` is the folder name.
 ///
-/// The optional `icons`/`widgets`/`problems` fields carry WS-F's richer C# parity view of a
+/// The optional `icons`/`widgets`/`problems` fields carry WS-F's richer reference parity view of a
 /// pack; the WIP discovery/export/import APIs keep using `id`, `directory` and `manifest`.
 #[derive(Clone, Debug, Default)]
 pub struct ThemePack {
@@ -95,7 +95,7 @@ pub fn is_safe_id(id: &str) -> bool {
 }
 
 /// Turns a display name into a safe, non-empty folder name, or `None` when nothing
-/// usable remains. Mirrors C# `ThemePackTransfer.Sanitize`.
+/// usable remains. Mirrors `ThemePackTransfer.Sanitize`.
 pub fn sanitize_id(name: &str) -> Option<String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -220,7 +220,7 @@ fn string_ci(value: &Value, key: &str) -> String {
         .to_string()
 }
 
-/// Accepts the two JSON relaxations the C# serializer used: comments and trailing
+/// Accepts the two JSON relaxations the reference serializer used: comments and trailing
 /// commas. String contents (including URLs such as `https://`) are left untouched.
 fn relaxed_json(input: &str) -> String {
     let chars: Vec<char> = input.chars().collect();
@@ -574,7 +574,7 @@ fn find_theme_dir(staging: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Validates the manifests the same way C# `ThemePackTransfer.Validate` does.
+/// Validates the manifests the same way `ThemePackTransfer.Validate` does.
 fn validate_theme(directory: &Path) -> Result<(), String> {
     let manifest = load_manifest(directory).ok_or("ErrorThemeInvalid")?;
     if manifest.author.chars().count() > 200 || manifest.description.chars().count() > 1000 {
@@ -886,7 +886,7 @@ mod tests {
     }
 }
 
-// ---- C# theme-pack parity (WS-F) ----
+// ---- reference theme-pack parity (WS-F) ----
 
 /// Converts WS-F's optional-string manifest view into the WIP String-based view.
 fn to_theme_manifest(value: &ThemePackManifest) -> ThemeManifest {
@@ -1097,7 +1097,7 @@ fn is_safe_relative(path: &Path) -> bool {
         && !path.to_string_lossy().contains("..")
 }
 
-/// Validates manifest field lengths (C# `ThemePackTransfer.Validate`).
+/// Validates manifest field lengths (`ThemePackTransfer.Validate`).
 pub fn validate_manifest(manifest: &ThemePackManifest) -> Option<&'static str> {
     if manifest
         .author
@@ -1251,7 +1251,7 @@ pub enum PlateShape {
     Rounded(CornerRadius),
 }
 
-/// C# `ThemePacks.CreateShape`: per-corner radii in pixels for a 128px plate.
+/// `ThemePacks.CreateShape`: per-corner radii in pixels for a 128px plate.
 pub fn plate_shape(fallback: &IconPackFallback, size: u32) -> PlateShape {
     let clamped = fallback.clamped();
     if clamped.shape == IconPackShape::Circle {
@@ -1349,7 +1349,7 @@ fn hex_or_auto(value: &str) -> Option<TokenRgba> {
     }
 }
 
-/// C# `ThemePacks.RenderPlate`: plates an arbitrary icon onto a shaped, shaded tile.
+/// `ThemePacks.RenderPlate`: plates an arbitrary icon onto a shaped, shaded tile.
 pub fn render_plate(icon: &RgbaImage, fallback: &IconPackFallback, is_dark: bool) -> RgbaImage {
     let size = RENDER_SIZE;
     let fallback = fallback.clamped();
@@ -1417,7 +1417,7 @@ pub fn render_plate(icon: &RgbaImage, fallback: &IconPackFallback, is_dark: bool
     out
 }
 
-/// C# `ThemePacks.PlateIcon`: default macOS-style squircle plate.
+/// `ThemePacks.PlateIcon`: default macOS-style squircle plate.
 pub fn plate_icon(icon: &RgbaImage, is_dark: bool) -> RgbaImage {
     let fallback = IconPackFallback {
         shape: IconPackShape::Rounded,

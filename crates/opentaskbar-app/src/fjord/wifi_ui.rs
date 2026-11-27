@@ -1,16 +1,16 @@
-//! Wi-Fi flyout data model and UI state (C# `FjordBarWindow.Wifi.cs` +
+//! Wi-Fi flyout data model and UI state (`FjordBarWindow.Wifi.cs` +
 //! `Services/Interop/WifiNetworks.cs`).
 //!
 //! The backend is `crate::platform::wifi::{scan_networks, connect, disconnect}`.
 //! [`NetworkView::from_platform`] is the only place that maps its `WifiNetwork`
 //! (SSID, signal, security, saved-profile flag and real BSS availability) onto
-//! the C#-style view model fields (`authentication`, `cipher`, `has_profile`, ...).
+//! the reference-style view model fields (`authentication`, `cipher`, `has_profile`, ...).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 // @pure-start
-/// Signal buckets used by the C# strength text/percentage display.
+/// Signal buckets used by the reference strength text/percentage display.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SignalClass {
     None,
@@ -262,7 +262,7 @@ pub fn disconnect() {
 }
 
 impl NetworkView {
-    /// Field names mirror the C# `WifiNetworks.Network` record. Security codes
+    /// Field names mirror the `WifiNetworks.Network` record. Security codes
     /// come from the real `WifiSecurity`, and profile / connectable come from the
     /// scan (saved WLAN profile + BSS availability), never from constants.
     pub fn from_platform(network: crate::platform::wifi::WifiNetwork) -> Self {

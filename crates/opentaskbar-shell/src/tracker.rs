@@ -71,7 +71,7 @@ pub struct RunningWindow {
     pub title: String,
     pub exe_path: String,
     /// Packaged-app AppUserModelID, empty for classic Win32 processes. Mirrors
-    /// the C# `TrackedWindow.AppUserModelId` used for AUMID-aware pin matching.
+    /// the `TrackedWindow.AppUserModelId` used for AUMID-aware pin matching.
     pub aumid: String,
     pub is_foreground: bool,
 }
@@ -110,7 +110,7 @@ fn has_app_window_style(hwnd: HWND) -> bool {
 
 /// AppUserModelID of a packaged process via `GetApplicationUserModelId`.
 /// Classic Win32 processes (and handles we cannot query) return an empty
-/// string, matching the C# `GetProcessPackagedAppId` fallback behaviour.
+/// string, matching the `GetProcessPackagedAppId` fallback behaviour.
 fn process_aumid(handle: HANDLE) -> String {
     // SAFETY: null buffer with a length out-parameter is the documented
     // "query required size" call; it writes length and returns

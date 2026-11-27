@@ -1,8 +1,8 @@
-//! Persisted settings compatible with OpenTaskbar's C# `settings.json`.
+//! Persisted settings compatible with OpenTaskbar's `settings.json`.
 //!
-//! Every C# `DockSettings` property has either a typed field here or a serde alias that feeds one.
-//! Unknown fields (and all C# profile properties that the port does not consume) are preserved in
-//! `extra`/`DockProfile::extra` so switching between the C# and Rust builds never drops data.
+//! Every `DockSettings` property has either a typed field here or a serde alias that feeds one.
+//! Unknown fields (and all reference profile properties that the port does not consume) are preserved in
+//! `extra`/`DockProfile::extra` so switching between the reference and Rust builds never drops data.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
@@ -76,7 +76,7 @@ pub fn clear_crystal_tint_alpha(surface_opacity: f64, is_dark: bool) -> f32 {
     (op * scale).clamp(0.0, 0.65)
 }
 
-/// C# `SystemMeters` is written as `"Cpu, Memory, Gpu"` by `JsonStringEnumConverter`, while older
+/// `SystemMeters` is written as `"Cpu, Memory, Gpu"` by `JsonStringEnumConverter`, while older
 /// builds used a numeric bitmask. Accept both; keep the retired CPU-temperature bit slot unused.
 fn deserialize_stats_meters<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
     #[derive(Deserialize)]
@@ -110,7 +110,7 @@ fn deserialize_stats_meters<'de, D: Deserializer<'de>>(deserializer: D) -> Resul
     })
 }
 
-/// Accepts C# `AppLanguageConverter` values: BCP 47 strings, legacy English names and numeric codes.
+/// Accepts `AppLanguageConverter` values: BCP 47 strings, legacy English names and numeric codes.
 fn deserialize_language<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
     let value = Value::deserialize(deserializer)?;
     let candidate = match value {
@@ -144,10 +144,10 @@ where
 
 pub const DYNAMIC_ISLAND_ALL_DISPLAYS: &str = "*";
 
-/// C# property names that the port exposes under a different Rust field name. `save_to` writes
-/// both spellings so a settings.json written by Rust is readable by the C# build as well; the
-/// C#-facing spelling wins when both appear in a file that is loaded again (that is the key the
-/// C# build owns, so a conflict must not silently reverse a value written by C#).
+/// reference property names that the port exposes under a different Rust field name. `save_to` writes
+/// both spellings so a settings.json written by Rust is readable by the reference build as well; the
+/// reference-facing spelling wins when both appear in a file that is loaded again (that is the key the
+/// reference build owns, so a conflict must not silently reverse a value written by reference).
 const SETTINGS_ALIAS_PAIRS: [(&str, &str); 6] = [
     ("EnabledWidgets", "Widgets"),
     ("ShowClockWidget", "ShowClock"),
@@ -159,14 +159,14 @@ const SETTINGS_ALIAS_PAIRS: [(&str, &str); 6] = [
 
 /// Collapses the double-spelled keys written by `save_to`. Serde rejects a JSON object that maps
 /// two keys onto the same struct field, so exactly one spelling is kept before deserialization.
-/// The C#-facing key wins: `settings.json` is a shared file and C# writes that spelling.
+/// The reference-facing key wins: `settings.json` is a shared file and reference writes that spelling.
 fn dedupe_written_aliases(map: &mut Map<String, Value>) {
-    for (canonical, csharp) in SETTINGS_ALIAS_PAIRS {
-        if map.contains_key(csharp) {
+    for (canonical, reference) in SETTINGS_ALIAS_PAIRS {
+        if map.contains_key(reference) {
             map.remove(canonical);
         }
     }
-    // `FullWidth` is a bool in Rust; C# persists the same value as the `DockLayout` enum name.
+    // `FullWidth` is a bool in Rust; reference persists the same value as the `DockLayout` enum name.
     if map.contains_key("Layout") {
         map.remove("FullWidth");
     }
@@ -385,7 +385,7 @@ pub enum AiUsageRing {
     Weekly,
 }
 
-/// C# `DockMetrics`: the single source of truth for dock geometry (all values DIPs).
+/// `DockMetrics`: the single source of truth for dock geometry (all values DIPs).
 pub mod dock_metrics {
     use super::{DockGapUnit, DockHeightMode, DockSize};
 
@@ -394,15 +394,15 @@ pub mod dock_metrics {
     pub const SIDE_INSET: f32 = 12.0;
     pub const FULL_WIDTH_SIDE_INSET: f32 = 6.0;
     pub const MAX_ICON_PADDING: f32 = 12.0;
-    /// C# `MainWindow.Resizing`: `DockCellSize` (52) plus the horizontal frame chrome (10 + 10).
+    /// `MainWindow.Resizing`: `DockCellSize` (52) plus the horizontal frame chrome (10 + 10).
     pub const MIN_DOCK_SURFACE_WIDTH: f32 = 72.0;
-    /// Extent used by the extent-free helpers; C# resolves against the target monitor.
+    /// Extent used by the extent-free helpers; reference resolves against the target monitor.
     pub const DEFAULT_MONITOR_EXTENT: f32 = 1920.0;
-    /// C# `DockMetrics.WidgetDesignHeight`.
+    /// `DockMetrics.WidgetDesignHeight`.
     pub const WIDGET_DESIGN_HEIGHT: f32 = 46.0;
     pub const WIDGET_MIN_CARD_HEIGHT: f32 = 34.0;
 
-    /// C# `DockSizeProfile`.
+    /// `DockSizeProfile`.
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct SizeProfile {
         pub shelf: f32,
@@ -425,18 +425,18 @@ pub mod dock_metrics {
             }
         }
 
-        /// C# `DockSizeProfile.SurfaceHeight`: cell + 2 * vertical padding + 2 px border.
+        /// `DockSizeProfile.SurfaceHeight`: cell + 2 * vertical padding + 2 px border.
         pub fn surface_height(self) -> f32 {
             self.effective_cell_height() + self.vertical_padding * 2.0 + 2.0
         }
 
-        /// C# `DockSizeProfile.WidgetScale`.
+        /// `DockSizeProfile.WidgetScale`.
         pub fn widget_scale(self) -> f32 {
             ((self.effective_cell_height() - 2.0) / WIDGET_DESIGN_HEIGHT).clamp(0.45, 1.35)
         }
     }
 
-    /// C# `DockMetrics.For(size, scale, padding)`. Compact/Medium/Large shelves are 48/58/66
+    /// `DockMetrics.For(size, scale, padding)`. Compact/Medium/Large shelves are 48/58/66
     /// and their resting icon sizes are 28/34/38 DIPs at 100% scale.
     pub fn for_size(size: DockSize, scale: f64, padding: i32) -> SizeProfile {
         let scale = if scale.is_finite() {
@@ -505,7 +505,7 @@ pub mod dock_metrics {
         }
     }
 
-    /// C# `DockMetrics.ResolveGap`.
+    /// `DockMetrics.ResolveGap`.
     pub fn resolve_gap(unit: DockGapUnit, pixels: i32, percent: i32, extent: f32) -> f32 {
         let requested = match unit {
             DockGapUnit::Pixels => pixels as f32,
@@ -514,7 +514,7 @@ pub mod dock_metrics {
         requested.max(0.0)
     }
 
-    /// C# `DockMetrics.ResolveHeight`; `Auto`/`Fill` are handled by the caller.
+    /// `DockMetrics.ResolveHeight`; `Auto`/`Fill` are handled by the caller.
     pub fn resolve_height(
         mode: DockHeightMode,
         pixels: i32,
@@ -530,7 +530,7 @@ pub mod dock_metrics {
     }
 }
 
-/// C# `SystemMeters` flags. Bit 8 (CpuTemperature) and bit 4 (Battery) are retired but their
+/// `SystemMeters` flags. Bit 8 (CpuTemperature) and bit 4 (Battery) are retired but their
 /// numeric values must stay stable in existing settings files.
 pub mod stats_meters {
     pub const NONE: u64 = 0;
@@ -541,7 +541,7 @@ pub mod stats_meters {
     pub const ALL: u64 = CPU | MEMORY | GPU | GPU_TEMPERATURE;
 }
 
-/// C# `AiProviders` flags; the retired single "AiUsage" widget is split by these bits.
+/// `AiProviders` flags; the retired single "AiUsage" widget is split by these bits.
 /// Bit 4 belonged to a provider removed from both builds and stays unused so older numeric
 /// settings values keep their meaning for every other bit.
 pub mod ai_providers {
@@ -556,7 +556,7 @@ pub mod ai_providers {
     /// Bit retired together with the removed provider; still masked out on load.
     pub const RETIRED_BIT: u32 = 4;
 
-    /// Widget IDs in the same order as C# `DockWidgetService.AiUsageWidgets`.
+    /// Widget IDs in the same order as `DockWidgetService.AiUsageWidgets`.
     pub const WIDGETS: [(u32, &str); 7] = [
         (CLAUDE, "AiUsageClaude"),
         (CODEX, "AiUsageCodex"),
@@ -568,7 +568,7 @@ pub mod ai_providers {
     ];
 }
 
-/// C# `AiProviders` flag spellings shared by serde and legacy migration.
+/// `AiProviders` flag spellings shared by serde and legacy migration.
 const AI_PROVIDER_NAMES: [(u32, &str); 7] = [
     (ai_providers::CLAUDE, "Claude"),
     (ai_providers::CODEX, "Codex"),
@@ -603,7 +603,7 @@ fn is_retired_ai_provider_widget(id: &str) -> bool {
         })
 }
 
-/// All C# `DockWidgetService` IDs, including the hidden legacy aliases `Date` and `ShowDesktop`.
+/// All `DockWidgetService` IDs, including the hidden legacy aliases `Date` and `ShowDesktop`.
 pub const SUPPORTED_WIDGET_IDS: [&str; 24] = [
     "Clock",
     "Weather",
@@ -631,7 +631,7 @@ pub const SUPPORTED_WIDGET_IDS: [&str; 24] = [
     "ShowDesktop",
 ];
 
-/// Catalog cards only (C# `CatalogDescriptors`): used by island placement limits.
+/// Catalog cards only (`CatalogDescriptors`): used by island placement limits.
 pub const CATALOG_WIDGET_COUNT: usize = 22;
 
 const RETIRED_WIDGET_IDS: [&str; 4] = ["Memory", "Search", "Desktops", "Tray"];
@@ -647,7 +647,7 @@ pub fn is_supported_widget_id(id: &str) -> bool {
         .any(|known| known.eq_ignore_ascii_case(id))
 }
 
-/// Maps a UI catalog ID or legacy alias to the exact ID persisted by C#
+/// Maps a UI catalog ID or legacy alias to the exact ID persisted by reference
 /// `DockWidgetService` (`Widgets` / `InstalledWidgets` are validated against case-sensitive
 /// PascalCase IDs). The Rust settings page uses snake_case catalog IDs such as `stats`,
 /// `aiusage_claude` and `keyboard`; writing those verbatim made the next `load_from()` reject
@@ -704,7 +704,7 @@ pub struct DockAppGroup {
     pub executable_paths: Vec<String>,
 }
 
-/// A C# `DockProfile` snapshot. All C# properties are typed with defaults, and any future
+/// A `DockProfile` snapshot. All reference properties are typed with defaults, and any future
 /// property is preserved in `extra` for a lossless round-trip.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase", default)]
@@ -713,7 +713,7 @@ pub struct DockProfile {
     pub position: DockPosition,
     pub size: DockSize,
     pub auto_hide: AutoHideMode,
-    /// C# calls this `Widgets`; the port's historic name is `EnabledWidgets`.
+    /// reference calls this `Widgets`; the port's historic name is `EnabledWidgets`.
     #[serde(alias = "Widgets", deserialize_with = "null_as_empty")]
     pub enabled_widgets: Vec<String>,
     #[serde(deserialize_with = "null_as_empty")]
@@ -788,7 +788,7 @@ pub struct DockSettings {
     pub animation_fps: Option<u32>,
     pub magnification_enabled: bool,
     /// Whether the magnified icon may push its neighbours aside and grow the dock surface.
-    /// C# feature request #182: older builds only scaled icons in place.
+    /// reference feature request #182: older builds only scaled icons in place.
     #[serde(default = "default_true")]
     pub magnification_expands_dock: bool,
     #[serde(default)]
@@ -801,7 +801,7 @@ pub struct DockSettings {
     pub show_tray_button: bool,
     pub show_on_all_monitors: bool,
     pub show_desktop_button: bool,
-    /// C# persists `Layout` as the `DockLayout` enum string; the port stores a bool.
+    /// reference persists `Layout` as the `DockLayout` enum string; the port stores a bool.
     #[serde(alias = "Layout", deserialize_with = "deserialize_layout_bool")]
     pub full_width: bool,
     pub dock_custom_width_dips: Option<f32>,
@@ -809,7 +809,7 @@ pub struct DockSettings {
     pub current_desktop_only: bool,
 
     // ---- WIP settings kept from the pre-integration port ----
-    /// BCP 47 UI culture. C# `AppLanguageConverter` values are normalized on load.
+    /// BCP 47 UI culture. `AppLanguageConverter` values are normalized on load.
     #[serde(
         default = "default_language",
         deserialize_with = "deserialize_language"
@@ -826,7 +826,7 @@ pub struct DockSettings {
     pub date_style: ClockDateStyle,
     pub date_format: ClockDateFormat,
     pub clock_date_layout: ClockDateLayout,
-    /// C# `SystemMeters` bit flags: Cpu=1, Memory=2, Gpu=16, GpuTemperature=32.
+    /// `SystemMeters` bit flags: Cpu=1, Memory=2, Gpu=16, GpuTemperature=32.
     #[serde(deserialize_with = "deserialize_stats_meters")]
     pub stats_meters: u32,
     pub global_widget_density: WidgetDensityMode,
@@ -867,12 +867,12 @@ pub struct DockSettings {
     pub dynamic_island_visibility: DynamicIslandVisibilityMode,
     #[serde(default = "default_true")]
     pub dynamic_island_hide_in_fullscreen: bool,
-    /// C# writes `DynamicIslandEnabled`; the port's historic spelling is `DynamicIslandEnable`.
+    /// reference writes `DynamicIslandEnabled`; the port's historic spelling is `DynamicIslandEnable`.
     #[serde(alias = "DynamicIslandEnabled", default = "default_true")]
     pub dynamic_island_enable: bool,
     pub dynamic_island_auto_hide: bool,
     pub dynamic_island_background: SurfaceBackground,
-    /// C# `DynamicIslandBackgroundColor` (`#RRGGBB`). Kept as text so an invalid value from an
+    /// `DynamicIslandBackgroundColor` (`#RRGGBB`). Kept as text so an invalid value from an
     /// older build is preserved; `dynamic_island_background_hex()` validates before use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic_island_background_color: Option<String>,
@@ -891,7 +891,7 @@ pub struct DockSettings {
     pub show_clock_widget: bool,
     #[serde(alias = "ShowSystemStats")]
     pub show_system_stats_widget: bool,
-    /// Explicitly enabled widget IDs. C# writes this key as `Widgets`.
+    /// Explicitly enabled widget IDs. reference writes this key as `Widgets`.
     #[serde(alias = "Widgets", deserialize_with = "null_as_empty")]
     pub enabled_widgets: Vec<String>,
     pub weather_city: String,
@@ -907,7 +907,7 @@ pub struct DockSettings {
     pub user_pinned_apps: Vec<String>,
     #[serde(deserialize_with = "null_as_empty")]
     pub user_unpinned_apps: Vec<String>,
-    /// C# persistent tray pins (`PinnedTrayIcons`) map onto this historic port field.
+    /// reference persistent tray pins (`PinnedTrayIcons`) map onto this historic port field.
     #[serde(
         alias = "PinnedTrayIcons",
         deserialize_with = "null_as_empty",
@@ -915,7 +915,7 @@ pub struct DockSettings {
     )]
     pub user_pinned_background_apps: Vec<String>,
 
-    // ---- 49 C# properties added for full settings parity ----
+    // ---- 49 reference properties added for full settings parity ----
     pub previews_enabled: bool,
     pub notification_badges_enabled: bool,
     pub menu_opacity: f64,
@@ -976,18 +976,18 @@ pub struct DockSettings {
     pub wireless_battery_listen_only: bool,
     pub weather_unit: TemperatureUnit,
     pub mirror_main_dock: bool,
-    /// C# `show_fjord_files_button`: dock visibility of the Fjord Files button. The dock host
+    /// `show_fjord_files_button`: dock visibility of the Fjord Files button. The dock host
     /// consumes this key in a separate workstream; the schema and Settings UI already own it.
     #[serde(default)]
     pub show_fjord_files_button: bool,
 
-    // Hotkeys are needed by `validate()` (C# `IsValid` rejects launcher/dock conflicts).
+    // Hotkeys are needed by `validate()` (`IsValid` rejects launcher/dock conflicts).
     pub launcher_hotkey: HotkeyChoice,
     pub dock_hotkey: HotkeyChoice,
     pub custom_launcher_hotkey: Option<String>,
     pub custom_dock_hotkey: Option<String>,
 
-    // ---- OLED / display care (C# DockSettings tail properties) ----
+    // ---- OLED / display care (reference DockSettings tail properties) ----
     /// Suppresses the spatial glass edge glow and cursor light on OLED panels.
     #[serde(default)]
     pub oled_reduce_glow_enabled: bool,
@@ -1170,7 +1170,7 @@ impl Default for DockSettings {
     }
 }
 
-// ---- serde helpers: C# writes `null` for unset lists/maps and `Layout` as an enum string ----
+// ---- serde helpers: reference writes `null` for unset lists/maps and `Layout` as an enum string ----
 
 fn null_as_empty<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
@@ -1227,7 +1227,7 @@ where
     impl<'de> Visitor<'de> for LayoutVisitor {
         type Value = bool;
         fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("a bool or C# DockLayout string (Floating/FullWidth)")
+            f.write_str("a bool or reference DockLayout string (Floating/FullWidth)")
         }
         fn visit_bool<E: DeError>(self, value: bool) -> Result<bool, E> {
             Ok(value)
@@ -1248,7 +1248,7 @@ where
     deserializer.deserialize_any(LayoutVisitor)
 }
 
-// C# `JsonStringEnumConverter` writes `[Flags]` enums as "None", "All" or "A, B"; older files
+// `JsonStringEnumConverter` writes `[Flags]` enums as "None", "All" or "A, B"; older files
 // sometimes carry raw integers. Both representations must round-trip.
 fn parse_flag_names<'de, D>(
     deserializer: D,
@@ -1399,7 +1399,7 @@ impl DockSettings {
             .or_else(|| HotkeyBinding::from_choice(self.dock_hotkey))
     }
 
-    /// Effective island background colour (C# `DynamicIslandBackgroundColor`). The typed field
+    /// Effective island background colour (`DynamicIslandBackgroundColor`). The typed field
     /// wins; older builds kept the hex string in `extra`, so that key is the fallback. Invalid
     /// values are ignored rather than being handed to a renderer as a colour.
     pub fn dynamic_island_background_hex(&self) -> Option<&str> {
@@ -1418,7 +1418,7 @@ impl DockSettings {
 
     pub fn is_widget_enabled(&self, id: &str) -> bool {
         let id = canonical_widget_setting_id(id);
-        // C# `WidgetCoordinator.Apply` deactivates every widget while Focus Mode is on. Clock and
+        // `WidgetCoordinator.Apply` deactivates every widget while Focus Mode is on. Clock and
         // Focus stay available in this port because the focus timer is the mode's visible control.
         if self.focus_mode && !id.eq_ignore_ascii_case("Focus") && !id.eq_ignore_ascii_case("Clock")
         {
@@ -1431,7 +1431,7 @@ impl DockSettings {
             return true;
         }
         // Compare canonical IDs so files written by older port builds (lowercase/snake_case) and
-        // files written by C# (PascalCase) both resolve to the same widget.
+        // files written by reference (PascalCase) both resolve to the same widget.
         self.enabled_widgets
             .iter()
             .any(|w| canonical_widget_setting_id(w).eq_ignore_ascii_case(id))
@@ -1450,7 +1450,7 @@ impl DockSettings {
             if !self.enabled_widgets.iter().any(is_same) {
                 self.enabled_widgets.push(id.to_owned());
             }
-            // C# keeps a widget installed when only its switch is turned off, so enabling one
+            // reference keeps a widget installed when only its switch is turned off, so enabling one
             // must also add it to `InstalledWidgets` or the next `Validate()` rejects the file
             // and `load_from()` resets every setting to defaults.
             if !self.installed_widgets.iter().any(is_same) {
@@ -1485,7 +1485,7 @@ impl DockSettings {
         }
     }
 
-    /// C# `DockMetrics.For` for the current size/scale/icon-padding settings.
+    /// `DockMetrics.For` for the current size/scale/icon-padding settings.
     pub fn size_profile(&self) -> dock_metrics::SizeProfile {
         dock_metrics::for_size(self.size, self.dock_scale, self.dock_icon_padding)
     }
@@ -1528,14 +1528,14 @@ impl DockSettings {
         widget_density_for(self, id)
     }
 
-    /// Applies every profile-scoped field at once (C# `DockProfileService.ApplyProfile`).
+    /// Applies every profile-scoped field at once (`DockProfileService.ApplyProfile`).
     pub fn apply_full_profile(&mut self, profile: &DockProfile) {
         apply_full_profile(self, profile);
     }
 }
 
 /// Resolves the dock width in DIPs. `Auto` uses the content-fitted width when one was saved,
-/// `Fill` spans the whole monitor, and fixed modes clamp to the C# minimum/maximum.
+/// `Fill` spans the whole monitor, and fixed modes clamp to the reference minimum/maximum.
 pub fn effective_width(settings: &DockSettings, monitor_w: f32) -> f32 {
     let extent = monitor_w.max(0.0);
     let maximum = extent.max(dock_metrics::MIN_DOCK_SURFACE_WIDTH);
@@ -1607,7 +1607,7 @@ pub fn effective_bottom_gap_for(settings: &DockSettings, extent: f32) -> i32 {
     .max(0.0) as i32
 }
 
-/// C# `WidgetCoordinator.ResolveWidgetDensity`: override first, global mode otherwise.
+/// `WidgetCoordinator.ResolveWidgetDensity`: override first, global mode otherwise.
 pub fn resolve_widget_density(settings: &DockSettings, id: &str) -> WidgetDensityMode {
     settings
         .widget_density_overrides
@@ -1625,7 +1625,7 @@ pub fn widget_density_for(settings: &DockSettings, id: &str) -> f32 {
     }
 }
 
-/// C# `DockWidget.ShrinkPriority`: lower values are compacted first when the dock overflows.
+/// `DockWidget.ShrinkPriority`: lower values are compacted first when the dock overflows.
 /// 100 is the `DockWidget` base value for widgets without a specific priority.
 pub fn widget_shrink_priority(id: &str) -> u8 {
     let compact: String = id
@@ -1660,8 +1660,8 @@ fn canonical_widget_list(ids: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Applies all profile-scoped fields (the 15 C# `DockProfile` properties). A profile whose
-/// scoped fields are all unset only activates its name, matching C#'s legacy-profile guard.
+/// Applies all profile-scoped fields (the 15 `DockProfile` properties). A profile whose
+/// scoped fields are all unset only activates its name, matching the reference legacy-profile guard.
 pub fn apply_full_profile(settings: &mut DockSettings, profile: &DockProfile) {
     let legacy = profile.enabled_widgets.is_empty()
         && profile.installed_widgets.is_empty()
@@ -1754,7 +1754,7 @@ pub fn apply_full_profile(settings: &mut DockSettings, profile: &DockProfile) {
     );
 }
 
-// ---- Legacy migration (C# DockSettingsStore.NormalizeLegacyJson + Migrate*) ----
+// ---- Legacy migration (reference DockSettingsStore.NormalizeLegacyJson + Migrate*) ----
 
 fn is_retired_widget(id: &str) -> bool {
     RETIRED_WIDGET_IDS
@@ -1821,7 +1821,7 @@ fn is_retired_list_widget(id: &str) -> bool {
 }
 
 fn migrate_widget_lists(map: &mut Map<String, Value>) {
-    // Remember what the legacy widget meant before removing it (C# mirrors these into buttons).
+    // Remember what the legacy widget meant before removing it (reference mirrors these into buttons).
     let mentioned = |id: &str| {
         [
             "Widgets",
@@ -2062,14 +2062,14 @@ fn migrate_pinned_tray_icons(map: &mut Map<String, Value>) {
     *items = result;
 }
 
-/// Applies C# `DockSettingsStore` legacy rewrites to raw JSON before deserialization.
+/// Applies `DockSettingsStore` legacy rewrites to raw JSON before deserialization.
 /// Unknown future keys are left untouched.
 pub fn normalize_legacy_json(raw: &str) -> String {
     let Ok(Value::Object(mut root)) = serde_json::from_str::<Value>(raw) else {
         return raw.to_owned();
     };
 
-    // Files saved by this port carry both the Rust key and the C# alias for the same value.
+    // Files saved by this port carry both the Rust key and the reference alias for the same value.
     dedupe_written_aliases(&mut root);
 
     // v0.2.x bottom gap: DockBottomGap -> DockBottomGapPixels.
@@ -2136,8 +2136,7 @@ fn replace_ai_usage_in(list: &mut Vec<String>, replacement: &[String]) {
     *list = next;
 }
 
-/// Canonicalizes saved widget IDs and drops case-insensitive duplicates, matching C#'s
-/// `Distinct(StringComparer.OrdinalIgnoreCase)` on widget lists.
+/// Canonicalizes saved widget IDs and drops case-insensitive duplicates, matching the reference /// `Distinct(StringComparer.OrdinalIgnoreCase)` on widget lists.
 fn normalize_widget_ids(list: &mut Vec<String>) {
     let mut seen = BTreeSet::new();
     let mut next = Vec::with_capacity(list.len());
@@ -2150,7 +2149,7 @@ fn normalize_widget_ids(list: &mut Vec<String>) {
     *list = next;
 }
 
-/// Repairs `enabled ⊆ installed` by deriving installed from enabled, mirroring C#
+/// Repairs `enabled ⊆ installed` by deriving installed from enabled, mirroring reference
 /// `DockProfileService.MergeInstalledWidgets`. Rejecting the whole settings file for this one
 /// legacy inconsistency destroyed every other preference; a union preserves them all.
 fn repair_widget_lists(enabled: &mut Vec<String>, installed: &mut Vec<String>) {
@@ -2195,7 +2194,7 @@ fn canonicalize_placements(map: &mut HashMap<String, String>) {
 }
 
 impl DockSettings {
-    /// Normalizes every widget-keyed collection to the IDs C# validates, so a
+    /// Normalizes every widget-keyed collection to the IDs reference validates, so a
     /// settings.json written by either build uses the same spellings. Called on
     /// load (repair) and on save (before serialization).
     pub fn canonicalize_widget_keys(&mut self) {
@@ -2345,13 +2344,13 @@ impl DockSettings {
             self.ai_usage_providers = 0;
         }
 
-        // C# treats an absent InstalledWidgets list as "exactly the enabled widgets" and merges
+        // reference treats an absent InstalledWidgets list as "exactly the enabled widgets" and merges
         // enabled IDs into it when applying a profile. Older port builds wrote only the enabled
         // list (and snake_case IDs), leaving files that `Validate()` rejected wholesale. Repair
         // the invariant here instead of resetting every setting to defaults.
         self.canonicalize_widget_keys();
 
-        // Tray pins: trim, drop invalid/duplicate keys, cap at the C# limit.
+        // Tray pins: trim, drop invalid/duplicate keys, cap at the reference limit.
         let mut seen = BTreeSet::new();
         self.user_pinned_background_apps.retain(|key| {
             let trimmed = key.trim();
@@ -2364,7 +2363,7 @@ impl DockSettings {
     }
 }
 
-// ---- C# DockSettingsStore.IsValid() parity ----
+// ---- reference DockSettingsStore.IsValid() parity ----
 
 fn is_finite(value: f64) -> bool {
     value.is_finite()
@@ -2418,7 +2417,7 @@ fn is_border_valid(thickness: f64, color: Option<&str>) -> bool {
         })
 }
 
-/// Key used by C# `StringComparer.OrdinalIgnoreCase` (invariant simple uppercase, no culture).
+/// Key used by `StringComparer.OrdinalIgnoreCase` (invariant simple uppercase, no culture).
 fn ordinal_ignore_case_key(value: &str) -> String {
     let mut key = String::with_capacity(value.len());
     for c in value.chars() {
@@ -2439,10 +2438,10 @@ fn has_duplicate_keys_ignore_case<'a>(mut keys: impl Iterator<Item = &'a String>
     keys.any(|key| !seen.insert(ordinal_ignore_case_key(key)))
 }
 
-/// Key used by C# `StringComparer.CurrentCultureIgnoreCase`. The full culture table is not
+/// Key used by `StringComparer.CurrentCultureIgnoreCase`. The full culture table is not
 /// available in `core`, so the persisted UI language selects the one casing rule that changes
 /// equality decisions: Turkish (`i`/`İ` and `I`/`ı` pairs). Everything else uses invariant
-/// uppercase, matching the ordinal comparer C# uses for the remaining settings.
+/// uppercase, matching the ordinal comparer reference uses for the remaining settings.
 fn culture_ignore_case_key(value: &str, turkish: bool) -> String {
     let mut key = String::with_capacity(value.len());
     for c in value.chars() {
@@ -2492,12 +2491,12 @@ impl DockSettings {
         }
     }
 
-    /// Returns one stable code per violated C# validation rule; empty means valid.
+    /// Returns one stable code per violated reference validation rule; empty means valid.
     pub fn validate(&self) -> Vec<&'static str> {
         let mut errors: Vec<&'static str> = Vec::new();
         let turkish = self.language.trim().to_ascii_lowercase().starts_with("tr");
 
-        // Width / height / spacing ranges (C# sliders).
+        // Width / height / spacing ranges (reference sliders).
         if !(100..=5000).contains(&self.dock_width_pixels) {
             errors.push("DockWidthPixelsOutOfRange");
         }
@@ -2534,7 +2533,7 @@ impl DockSettings {
             errors.push("FocusSessionsOutOfRange");
         }
 
-        // Surface opacity/border rules. The WIP port has typed fields; C# JSON values that were
+        // Surface opacity/border rules. The WIP port has typed fields; reference JSON values that were
         // not claimed by a typed field remain in `extra` and are checked there as well.
         let surface_opacity = if self.extra.contains_key("SurfaceOpacity") {
             self.extra_f64("SurfaceOpacity", 0.9)
@@ -2593,7 +2592,7 @@ impl DockSettings {
             errors.push("PinOrderInvalid");
         }
 
-        // Widget subset invariant: enabled Γèå installed, both from the C# supported catalog.
+        // Widget subset invariant: enabled Γèå installed, both from the reference supported catalog.
         if self
             .enabled_widgets
             .iter()
@@ -2745,7 +2744,7 @@ impl DockSettings {
         if ![0, 10, 20, 30].contains(&self.wireless_battery_low_threshold) {
             errors.push("WirelessThresholdInvalid");
         }
-        // C# DockSettingsStore.IsValid(): display-care values must stay inside the
+        // reference DockSettingsStore.IsValid(): display-care values must stay inside the
         // exact slider/dropdown ranges, otherwise the whole file falls back to defaults.
         if !(5..=120).contains(&self.burn_in_shift_minutes) {
             errors.push("BurnInShiftMinutesOutOfRange");
@@ -2820,8 +2819,7 @@ impl DockSettings {
             errors.push("DateFormatInvalid");
         }
 
-        // Dynamic Island order/placement maps (keys must be catalog widgets, unique under C#'s
-        // OrdinalIgnoreCase comparer — `"Clock"` and `"clock"` are the same placement).
+        // Dynamic Island order/placement maps (keys must be catalog widgets, unique under the reference // OrdinalIgnoreCase comparer — `"Clock"` and `"clock"` are the same placement).
         let typed_placements_invalid = self.dynamic_island_placements.len() > CATALOG_WIDGET_COUNT
             || has_duplicate_keys_ignore_case(self.dynamic_island_placements.keys())
             || self.dynamic_island_placements.iter().any(|(id, display)| {
@@ -2891,7 +2889,7 @@ impl DockSettings {
     }
 }
 
-/// Application data directory: `%LOCALAPPDATA%\OpenTaskbar` (shared with C#).
+/// Application data directory: `%LOCALAPPDATA%\OpenTaskbar` (shared with reference).
 /// Kept here as a facade because every Rust consumer already calls this name.
 pub fn app_data_dir() -> PathBuf {
     crate::paths::shared_app_data_dir()
@@ -2901,10 +2899,10 @@ pub fn settings_path() -> PathBuf {
     crate::paths::settings_path()
 }
 
-/// C# `FullBackupArchive.CurrentVersion`. Any other manifest version is unsupported.
+/// `FullBackupArchive.CurrentVersion`. Any other manifest version is unsupported.
 pub const BACKUP_MANIFEST_VERSION: u64 = 1;
 
-/// Backs up an unusable settings file without replacing the original, like C#
+/// Backs up an unusable settings file without replacing the original, like reference
 /// `DockSettingsStore.BackupInvalidSettingsFile`.
 fn backup_invalid_settings(path: &Path) {
     let stamp = SystemTime::now()
@@ -2915,9 +2913,9 @@ fn backup_invalid_settings(path: &Path) {
     let _ = fs::copy(path, backup);
 }
 
-/// Mirrors the C# `FullBackupArchive` manifest gate: `inspect_backup` must reject archives whose
-/// `manifest.json` carries a `Version` other than 1 (C# rejects the v99 probe archive).
-/// `None` means the entry is missing. C# deserializes the manifest case-insensitively.
+/// Mirrors the `FullBackupArchive` manifest gate: `inspect_backup` must reject archives whose
+/// `manifest.json` carries a `Version` other than 1 (reference rejects the v99 probe archive).
+/// `None` means the entry is missing. reference deserializes the manifest case-insensitively.
 pub fn backup_manifest_version_supported(manifest: Option<&[u8]>) -> bool {
     let Some(raw) = manifest else {
         return false;
@@ -2932,7 +2930,7 @@ pub fn backup_manifest_version_supported(manifest: Option<&[u8]>) -> bool {
         == Some(BACKUP_MANIFEST_VERSION)
 }
 
-/// Loads settings from `path`. Corrupt JSON and settings that fail the C# `IsValid()` rules both
+/// Loads settings from `path`. Corrupt JSON and settings that fail the `IsValid()` rules both
 /// fall back to defaults and leave a timestamped backup of the rejected file behind.
 pub fn load_from(path: &Path) -> DockSettings {
     let Ok(raw) = fs::read_to_string(path) else {
@@ -2976,8 +2974,8 @@ pub fn load_from(path: &Path) -> DockSettings {
     }
 }
 
-/// Writes the six C#-facing alias keys next to their Rust canonical keys so a settings.json
-/// produced by the port loses nothing when the C# build reads it. Profiles use `Widgets` as their
+/// Writes the six reference-facing alias keys next to their Rust canonical keys so a settings.json
+/// produced by the port loses nothing when the reference build reads it. Profiles use `Widgets` as their
 /// only alias in `DockProfile`.
 fn write_settings_aliases(root: &mut Map<String, Value>, settings: &DockSettings) {
     root.insert("EnabledWidgets".to_owned(), json!(settings.enabled_widgets));
@@ -3031,7 +3029,7 @@ fn write_settings_aliases(root: &mut Map<String, Value>, settings: &DockSettings
 
 static TMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// Unique temporary file name for one write. The C# build uses the same
+/// Unique temporary file name for one write. The reference build uses the same
 /// `<file>.<guid>.tmp` scheme; a fixed `settings.json.tmp` would let two
 /// processes race on the same file and corrupt the shared settings.json.
 fn unique_settings_tmp(path: &Path) -> PathBuf {
@@ -3098,7 +3096,7 @@ fn write_settings_to(path: &Path, settings: &DockSettings) -> std::io::Result<()
     result
 }
 
-/// Atomically writes settings to `path`, including the C# alias spellings of aliased keys.
+/// Atomically writes settings to `path`, including the reference alias spellings of aliased keys.
 /// Failures are logged instead of being silently swallowed by callers using `let _ = save_to(...)`.
 pub fn save_to(path: &Path, settings: &DockSettings) -> std::io::Result<()> {
     write_settings_to(path, settings).inspect_err(|error| {
@@ -3130,7 +3128,7 @@ mod tests {
             "Theme": "Dark",
             "AutoHide": "Smart",
             "DockOpacity": 0.75,
-            "CustomCSharpField": "keep-me"
+            "CustomReferenceField": "keep-me"
         }"#;
         fs::write(&path, raw).unwrap();
 
@@ -3142,7 +3140,7 @@ mod tests {
         assert_eq!(
             loaded
                 .extra
-                .get("CustomCSharpField")
+                .get("CustomReferenceField")
                 .and_then(Value::as_str),
             Some("keep-me")
         );
@@ -3152,7 +3150,7 @@ mod tests {
         assert_eq!(
             reloaded
                 .extra
-                .get("CustomCSharpField")
+                .get("CustomReferenceField")
                 .and_then(Value::as_str),
             Some("keep-me")
         );
@@ -3205,7 +3203,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_match_csharp() {
+    fn defaults_match_reference() {
         let s = DockSettings::default();
         assert_eq!(s.dock_opacity, 0.9);
         assert_eq!(s.dock_bottom_gap_pixels, 6);
@@ -3227,7 +3225,7 @@ mod tests {
     }
 
     #[test]
-    fn oled_settings_round_trip_with_csharp_names() {
+    fn oled_settings_round_trip_with_reference_names() {
         let raw = json!({
             "DockBackground": "TrueBlack",
             "OledReduceGlowEnabled": true,
@@ -3269,7 +3267,7 @@ mod tests {
     }
 
     #[test]
-    fn csharp_aliases_are_read() {
+    fn reference_aliases_are_read() {
         let dir = temp_dir("cfg-aliases");
         let path = dir.join("settings.json");
         fs::write(
@@ -3300,7 +3298,7 @@ mod tests {
     }
 
     #[test]
-    fn csharp_profile_fields_survive_round_trip() {
+    fn reference_profile_fields_survive_round_trip() {
         let dir = temp_dir("cfg-profile");
         let path = dir.join("settings.json");
         fs::write(
@@ -3323,7 +3321,7 @@ mod tests {
                     "DockHotkey": "CtrlAltD",
                     "CustomLauncherHotkey": "Ctrl+Alt+L",
                     "CustomDockHotkey": "Ctrl+Alt+K",
-                    "FutureCSharpProfileKey": {"keep": true}
+                    "FutureReferenceProfileKey": {"keep": true}
                 }]
             }"#,
         )
@@ -3349,7 +3347,7 @@ mod tests {
         assert_eq!(
             profile
                 .extra
-                .get("FutureCSharpProfileKey")
+                .get("FutureReferenceProfileKey")
                 .and_then(Value::as_object)
                 .and_then(|o| o.get("keep")),
             Some(&Value::Bool(true))
@@ -3362,7 +3360,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_reports_csharp_rules() {
+    fn validate_reports_reference_rules() {
         let mut s = DockSettings {
             dock_width_pixels: 10,
             dock_width_percent: 200,
@@ -3464,7 +3462,7 @@ mod tests {
             Some(&WidgetDensityMode::Compact)
         );
         assert!(!s.widget_density_overrides.contains_key("Memory"));
-        // The WIP port has a typed `stats_meters` field, so the C# string is decoded there
+        // The WIP port has a typed `stats_meters` field, so the reference string is decoded there
         // instead of being left in `extra` (the raw normalization above still drops the
         // retired flags).
         assert_eq!(s.stats_meters, 1 | 2);
@@ -3515,7 +3513,7 @@ mod tests {
     }
 
     #[test]
-    fn language_round_trips_with_the_csharp_json_key() {
+    fn language_round_trips_with_the_reference_json_key() {
         let dir = temp_dir("cfg-language");
         let path = dir.join("settings.json");
 
@@ -3538,7 +3536,7 @@ mod tests {
     }
 
     #[test]
-    fn csharp_settings_fields_round_trip() {
+    fn reference_settings_fields_round_trip() {
         let dir = temp_dir("cfg-deep");
         let path = dir.join("settings.json");
         fs::write(
@@ -3595,8 +3593,8 @@ mod tests {
     }
 
     #[test]
-    fn csharp_profile_and_string_flags_do_not_reset_settings() {
-        let dir = temp_dir("cfg-csharp-migrate");
+    fn reference_profile_and_string_flags_do_not_reset_settings() {
+        let dir = temp_dir("cfg-reference-migrate");
         let path = dir.join("settings.json");
         let raw = r#"{
             "Position": "Left",
@@ -3617,7 +3615,7 @@ mod tests {
         assert_eq!(
             loaded.position,
             DockPosition::Left,
-            "C# settings must still load"
+            "reference settings must still load"
         );
         assert_eq!(loaded.stats_meters, 1 | 2 | 16 | 32);
         assert_eq!(loaded.profiles.len(), 1);
@@ -3629,7 +3627,7 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_island_settings_round_trip_with_csharp_keys() {
+    fn dynamic_island_settings_round_trip_with_reference_keys() {
         let dir = temp_dir("cfg-island");
         let path = dir.join("settings.json");
         fs::write(
@@ -3658,7 +3656,7 @@ mod tests {
         assert!(!loaded.dynamic_island_hide_in_fullscreen);
         assert!(
             !loaded.dynamic_island_enable,
-            "C# alias must override the default"
+            "reference alias must override the default"
         );
         assert!(loaded.dynamic_island_auto_hide);
         assert_eq!(loaded.dynamic_island_background, SurfaceBackground::Solid);
@@ -3707,8 +3705,8 @@ mod tests {
     }
 
     #[test]
-    fn dynamic_island_enable_default_and_csharp_alias_agree() {
-        // An absent C# key must keep the default; the C# spelling must override it.
+    fn dynamic_island_enable_default_and_reference_alias_agree() {
+        // An absent reference key must keep the default; the reference spelling must override it.
         assert!(DockSettings::default().dynamic_island_enable);
         assert!(
             serde_json::from_str::<DockSettings>(r#"{"DynamicIslandEnabled":true}"#)
@@ -3720,7 +3718,7 @@ mod tests {
                 .unwrap()
                 .dynamic_island_enable
         );
-        // The C#-facing spelling wins a conflict because settings.json is shared.
+        // The reference-facing spelling wins a conflict because settings.json is shared.
         let both = r#"{"DynamicIslandEnable":true,"DynamicIslandEnabled":false}"#;
         let deduped = normalize_legacy_json(both);
         let deduped: Value = serde_json::from_str(&deduped).unwrap();
@@ -3784,7 +3782,7 @@ mod tests {
     fn invalid_settings_fall_back_to_defaults_and_are_backed_up() {
         let dir = temp_dir("cfg-invalid");
         let path = dir.join("settings.json");
-        // Both values are outside the C# slider ranges; the JSON itself is perfectly valid.
+        // Both values are outside the reference slider ranges; the JSON itself is perfectly valid.
         fs::write(&path, r#"{"FocusMinutes":0,"DockWidthPixels":10}"#).unwrap();
 
         let loaded = load_from(&path);
@@ -3818,7 +3816,7 @@ mod tests {
     }
 
     #[test]
-    fn save_writes_csharp_aliases_next_to_canonical_keys() {
+    fn save_writes_reference_aliases_next_to_canonical_keys() {
         let dir = temp_dir("cfg-alias-write");
         let path = dir.join("settings.json");
         let settings = DockSettings {
@@ -3927,7 +3925,7 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_aliases_prefer_the_csharp_spelling() {
+    fn conflicting_aliases_prefer_the_reference_spelling() {
         let dir = temp_dir("cfg-alias-conflict");
         let path = dir.join("settings.json");
         fs::write(
@@ -4024,7 +4022,7 @@ mod tests {
     }
 
     #[test]
-    fn backup_manifest_version_gate_matches_csharp() {
+    fn backup_manifest_version_gate_matches_reference() {
         assert!(backup_manifest_version_supported(Some(
             br#"{"Format":"OpenTaskbarFullBackup","Version":1,"CreatedUtc":"2026-01-01T00:00:00Z"}"#
         )));

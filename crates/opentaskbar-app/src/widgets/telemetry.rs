@@ -97,7 +97,7 @@ unsafe extern "system" {
     fn GetTimeZoneInformation(info: *mut WinTimeZoneInformation) -> u32;
 }
 
-/// Standard/daylight display name for the current timezone (C# `TimeZoneInfo` parity).
+/// Standard/daylight display name for the current timezone (`TimeZoneInfo` parity).
 pub fn timezone_display_name() -> String {
     let mut info: WinTimeZoneInformation = unsafe { std::mem::zeroed() };
     let id = unsafe { GetTimeZoneInformation(&mut info) };
@@ -115,7 +115,7 @@ pub fn timezone_display_name() -> String {
     }
 }
 
-/// Culture's first day of week, `0 = Sunday .. 6 = Saturday` (C# `FirstDayOfWeek`).
+/// Culture's first day of week, `0 = Sunday .. 6 = Saturday` (`FirstDayOfWeek`).
 pub fn first_day_of_week() -> u32 {
     let mut buf = [0u16; 4];
     let len = unsafe {
@@ -259,7 +259,7 @@ fn ft_to_u64(ft: FILETIME) -> u64 {
     (u64::from(ft.dwHighDateTime) << 32) | u64::from(ft.dwLowDateTime)
 }
 
-/// Fixed-capacity ring buffer storing `[0.0, 1.0]` telemetry samples (matching C# `MetricRingBuffer`).
+/// Fixed-capacity ring buffer storing `[0.0, 1.0]` telemetry samples (matching `MetricRingBuffer`).
 #[derive(Clone, Debug)]
 pub struct MetricHistory {
     samples: VecDeque<f32>,
@@ -293,7 +293,7 @@ pub struct SystemStatsSampler {
     prev_user: u64,
     pub cpu_history: MetricHistory,
     pub ram_history: MetricHistory,
-    /// Real GPU utilisation history (45 samples), matching C# `SystemStatsWidget.gpuSparkline`.
+    /// Real GPU utilisation history (45 samples), matching `SystemStatsWidget.gpuSparkline`.
     pub gpu_history: MetricHistory,
 }
 
@@ -355,7 +355,7 @@ pub fn sample_ram_info() -> (u32, f32, f32) {
     }
 }
 
-/// Top real processes ordered by Working Set memory (matches C# `SystemStats.SampleTopProcesses`).
+/// Top real processes ordered by Working Set memory (matches `SystemStats.SampleTopProcesses`).
 pub fn sample_top_processes(limit: usize) -> Vec<(String, u64)> {
     let mut pids = vec![0u32; 1024];
     let mut needed = 0u32;
@@ -605,7 +605,7 @@ impl PdhGpu {
                         entry.0 += value;
                     }
                 }
-                // C# reports the busiest engine of the busiest GPU: sum per engine node, then max.
+                // reference reports the busiest engine of the busiest GPU: sum per engine node, then max.
                 if let Some((_, (value, engine))) = by_engine
                     .into_iter()
                     .max_by(|a, b| (a.1).0.total_cmp(&(b.1).0))
@@ -678,7 +678,7 @@ fn sample_gpu_pdh() -> Option<(f32, String)> {
     ratio.is_finite().then(|| (ratio.clamp(0.0, 1.0), best.1))
 }
 
-/// Busiest GPU engine load in `[0.0, 1.0]`, matching C# `SystemSensors.SampleGpuUsage`.
+/// Busiest GPU engine load in `[0.0, 1.0]`, matching `SystemSensors.SampleGpuUsage`.
 ///
 /// Reads the PDH wildcard counter `\GPU Engine(*)\Utilization Percentage`. Returns `None` when the
 /// counter is unavailable or no sample can be collected; a valid but idle GPU yields `Some(0.0)`.
@@ -693,7 +693,7 @@ pub fn sample_gpu_engine_name() -> Option<String> {
 }
 
 // NVML is resolved on demand from System32: no link-time dependency, and a rogue DLL placed next to
-// the executable cannot replace the driver library (matches C#'s System32-only DllImport search).
+// the executable cannot replace the driver library (matches the reference System32-only DllImport search).
 
 type NvmlInitFn = unsafe extern "C" fn() -> i32;
 type NvmlShutdownFn = unsafe extern "C" fn() -> i32;
@@ -782,7 +782,7 @@ fn nvml_lib() -> Option<&'static NvmlLib> {
 
 static NVML: OnceLock<Option<NvmlLib>> = OnceLock::new();
 
-// --- WDDM adapter temperature (vendor-agnostic, C# `SystemSensors` parity) ---
+// --- WDDM adapter temperature (vendor-agnostic, `SystemSensors` parity) ---
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -1320,7 +1320,7 @@ pub fn local_clock_info() -> LocalClockInfo {
 }
 
 #[allow(dead_code)]
-/// Applies C# `Clock24Hour`, `ClockShowSeconds`, `DateStyle` and `DateFormat`
+/// Applies `Clock24Hour`, `ClockShowSeconds`, `DateStyle` and `DateFormat`
 /// to the dock chip text. Returns `(time, date)`.
 pub fn format_clock(info: &LocalClockInfo, settings: &DockSettings) -> (String, String) {
     let time = if settings.clock_24_hour {
@@ -1349,7 +1349,7 @@ pub fn format_clock(info: &LocalClockInfo, settings: &DockSettings) -> (String, 
             let m = info.month;
             let d = info.day;
             let y = info.year;
-            // Every enum style has a distinct C#-matching layout (`FormatDate` in ClockWidget).
+            // Every enum style has a distinct reference-matching layout (`FormatDate` in ClockWidget).
             match settings.date_format {
                 ClockDateFormat::DdMmYyyy => format!("{d:02}/{m:02}/{y:04}"),
                 ClockDateFormat::DdMmYy => format!("{d:02}/{m:02}/{:02}", y % 100),
@@ -1809,7 +1809,7 @@ pub struct BluetoothBatteryCache {
     pub loading: bool,
 }
 
-/// Non-blocking PnP Bluetooth battery query matching C# `{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2`.
+/// Non-blocking PnP Bluetooth battery query matching `{104EA319-6EE2-4701-BD47-8DDBF425BBE5} 2`.
 pub fn refresh_bluetooth_battery(cache: &Arc<Mutex<BluetoothBatteryCache>>, force: bool) {
     let should = if let Ok(mut g) = cache.lock() {
         let stale = g.last_fetch.is_none_or(|t| t.elapsed().as_secs() >= 60);
@@ -1896,8 +1896,8 @@ pub fn culture_number(value: f64, decimals: usize) -> String {
 }
 
 impl DriveSpace {
-    /// Formats `"213 / 476 GB"` or `"1.2 / 1.8 TB"` matching C# `StorageWidget.FormatCapacityPair`.
-    /// The C# TB cutoff is 972.8 GiB (= 0.95 TiB), not 972.0 GiB.
+    /// Formats `"213 / 476 GB"` or `"1.2 / 1.8 TB"` matching `StorageWidget.FormatCapacityPair`.
+    /// The reference TB cutoff is 972.8 GiB (= 0.95 TiB), not 972.0 GiB.
     pub fn format_capacity_pair(&self) -> String {
         if self.total_gb >= 972.8 {
             format!(
@@ -1984,7 +1984,7 @@ pub fn active_keyboard_code() -> String {
     }
 }
 
-/// Returns `(hkl, short_code, localized_display_name)` matching C# `KeyboardLayoutWidget`.
+/// Returns `(hkl, short_code, localized_display_name)` matching `KeyboardLayoutWidget`.
 pub fn installed_keyboard_layouts() -> Vec<(isize, String, String)> {
     let mut list = [std::ptr::null_mut(); 16];
     let count = unsafe { GetKeyboardLayoutList(list.len() as i32, list.as_mut_ptr()) };
@@ -2166,7 +2166,7 @@ fn winhttp_get(host: &str, path: &str, extra_headers: &[(&str, &str)]) -> Option
     }
 }
 
-// --- Windows Night Light Control (exact C# `NightLightControl.cs`) ---
+// --- Windows Night Light Control (exact `NightLightControl.cs`) ---
 
 const NIGHT_LIGHT_REG_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current\default$windows.data.bluelightreduction.bluelightreductionstate\windows.data.bluelightreduction.bluelightreductionstate";
 
@@ -2185,7 +2185,7 @@ struct NightLightState {
     header_size: usize,
 }
 
-/// Reads one CompactBinary CloudStore record exactly like C# `NightLightControl.TryRead`,
+/// Reads one CompactBinary CloudStore record exactly like `NightLightControl.TryRead`,
 /// including the optional `ExplicitUsable` flag.
 fn decode_night_light_state(data: &[u8]) -> Option<NightLightState> {
     let header_size = if data.len() >= NL_STORE_HEADER_SIZE && data.starts_with(&[2, 0, 0, 0]) {
@@ -2448,14 +2448,14 @@ mod night_light_tests {
         assert_eq!(decode_night_light_on(&on), Some(true));
         assert_eq!(decode_night_light_on(&off), Some(false));
 
-        // C# writes an empty-envelope sentinel when Night Light was never enabled.
+        // reference writes an empty-envelope sentinel when Night Light was never enabled.
         const EMPTY_ENVELOPE: [u8; 13] = [0x43, 0x42, 1, 0, 0x0A, 2, 1, 0, 0x2A, 0x2A, 0, 0, 0];
         assert_eq!(decode_night_light_on(&EMPTY_ENVELOPE), Some(false));
         assert_eq!(decode_night_light_on(b"not a CloudStore blob"), None);
     }
 }
 
-// --- Weather (exact C# `WeatherService.cs` Open-Meteo API) ---
+// --- Weather (exact `WeatherService.cs` Open-Meteo API) ---
 
 #[derive(Clone, Default)]
 pub struct WeatherCache {
@@ -2533,7 +2533,7 @@ impl WeatherCache {
         }
     }
 
-    /// Wind speed in the active unit: mph for °F, km/h for °C (C# `WeatherUnit` parity).
+    /// Wind speed in the active unit: mph for °F, km/h for °C (`WeatherUnit` parity).
     pub fn formatted_wind(&self, unit: opentaskbar_core::settings::TemperatureUnit) -> String {
         if let Some(kmh) = self.wind_kmh_val {
             match unit {
@@ -2935,7 +2935,7 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
         });
 }
 
-// --- AI Provider Usage & Balance (exact C# `AiSecretStore.cs` DPAPI + `AiUsageService.cs`) ---
+// --- AI Provider Usage & Balance (exact `AiSecretStore.cs` DPAPI + `AiUsageService.cs`) ---
 
 pub struct AiProviderMeta {
     pub id: &'static str,
@@ -3023,10 +3023,10 @@ pub struct AiUsageCache {
     pub providers: HashMap<String, AiUsageSnapshot>,
 }
 
-/// C# `AiSecretStore.EntropyBytes` — must never change or old blobs become unreadable.
+/// `AiSecretStore.EntropyBytes` — must never change or old blobs become unreadable.
 const AI_SECRET_ENTROPY: &[u8; 28] = b"OpenTaskbar.AiSecretStore.v1";
 
-/// Reads an encrypted per-user DPAPI secret stored by C# `AiSecretStore.cs` (never logged).
+/// Reads an encrypted per-user DPAPI secret stored by `AiSecretStore.cs` (never logged).
 fn read_dpapi_secret(secret_key: &str) -> Option<String> {
     let path = secret_file_path(secret_key)?;
     let mut enc = std::fs::read(&path).ok()?;
@@ -3070,7 +3070,7 @@ fn read_dpapi_secret(secret_key: &str) -> Option<String> {
     }
 }
 
-/// Same sanitizer as C# `AiSecretStore.SecretPath` (letters/digits/`-`/`_`, rest `_`).
+/// Same sanitizer as `AiSecretStore.SecretPath` (letters/digits/`-`/`_`, rest `_`).
 fn sanitize_secret_key(secret_key: &str) -> Option<String> {
     let trimmed = secret_key.trim();
     if trimmed.is_empty() {
@@ -3095,7 +3095,7 @@ fn secret_file_path(secret_key: &str) -> Option<PathBuf> {
     Some(opentaskbar_core::paths::secrets_dir().join(format!("{sanitized}.bin")))
 }
 
-/// C# `AiSecretStore.Set` writes `<key>.bin.<guid-N>.tmp` and moves it into place.
+/// `AiSecretStore.Set` writes `<key>.bin.<guid-N>.tmp` and moves it into place.
 fn guid_tmp_path(path: &Path) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -3118,7 +3118,7 @@ fn guid_tmp_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Encrypts and stores an API key with the same per-user DPAPI format the C# app reads.
+/// Encrypts and stores an API key with the same per-user DPAPI format the reference app reads.
 pub fn save_dpapi_secret(secret_key: &str, value: &str) -> bool {
     let Some(path) = secret_file_path(secret_key) else {
         return false;
@@ -3194,7 +3194,7 @@ pub fn has_dpapi_secret(secret_key: &str) -> bool {
         .is_some_and(|path| std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0))
 }
 
-/// DPAPI-backed API keys are supported by these providers (C# `AiSecretStore.cs` parity).
+/// DPAPI-backed API keys are supported by these providers (`AiSecretStore.cs` parity).
 pub fn ai_api_key_providers() -> &'static [(&'static str, &'static str)] {
     &[
         ("aiusage_deepseek", "api-key:deepseek"),
@@ -3204,7 +3204,7 @@ pub fn ai_api_key_providers() -> &'static [(&'static str, &'static str)] {
 }
 
 /// Reads a token from an environment override. Environment variables always win over stored
-/// credentials so a user can rotate a key without touching the DPAPI store (C# `AiUsageService`).
+/// credentials so a user can rotate a key without touching the DPAPI store (`AiUsageService`).
 fn env_token(names: &[&str]) -> Option<String> {
     names
         .iter()
@@ -3721,7 +3721,7 @@ mod tests {
     }
 
     #[test]
-    fn ai_secret_entropy_matches_csharp_ai_secret_store() {
+    fn ai_secret_entropy_matches_reference_ai_secret_store() {
         assert_eq!(AI_SECRET_ENTROPY, b"OpenTaskbar.AiSecretStore.v1");
         assert_eq!(AI_SECRET_ENTROPY.len(), 28);
         // 64 KiB guard, same as `AiSecretStore.MaxSecretFileBytes`.
@@ -3729,14 +3729,14 @@ mod tests {
     }
 
     #[test]
-    fn ai_secret_tmp_name_matches_csharp_guid_convention() {
+    fn ai_secret_tmp_name_matches_reference_guid_convention() {
         let path = Path::new("secret").join("api-key_deepseek.bin");
         let tmp = guid_tmp_path(&path);
         let name = tmp.file_name().unwrap().to_str().unwrap();
         let token = name
             .strip_prefix("api-key_deepseek.bin.")
             .and_then(|s| s.strip_suffix(".tmp"))
-            .expect("C#-style .<guid>.tmp suffix");
+            .expect("reference-style .<guid>.tmp suffix");
         assert_eq!(token.len(), 32);
         assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
         assert_ne!(guid_tmp_path(&path), tmp);
@@ -3791,10 +3791,10 @@ fn forecast_describe_wmo(code: i64) -> (&'static str, bool) {
 }
 
 // ============================================================================================
-// Full AI detail (C# `AiUsageService.Parse` parity — used by WS-C's AI flyout).
+// Full AI detail (`AiUsageService.Parse` parity — used by WS-C's AI flyout).
 // ============================================================================================
 
-/// Pay-as-you-go spend block (C# `AiUsageSpend`).
+/// Pay-as-you-go spend block (`AiUsageSpend`).
 #[derive(Clone, Debug, Default)]
 pub struct AiSpend {
     pub used: f64,
@@ -3803,14 +3803,14 @@ pub struct AiSpend {
     pub used_01: Option<f32>,
 }
 
-/// One non-zero Claude weekly surface share (C# `AiUsageShare`).
+/// One non-zero Claude weekly surface share (`AiUsageShare`).
 #[derive(Clone, Debug, Default)]
 pub struct AiUsageShare {
     pub name: String,
     pub used: f32,
 }
 
-/// Complete parsed usage for a single provider (C# `AiUsageReport` flattened for WS-C).
+/// Complete parsed usage for a single provider (`AiUsageReport` flattened for WS-C).
 #[derive(Clone, Debug, Default)]
 pub struct AiFullDetail {
     pub provider_id: String,
@@ -4277,7 +4277,7 @@ fn winhttp_json(
         if session.is_null() {
             return None;
         }
-        // C# `AiUsageService`: 15 s DNS/connect/send/receive budget; a full-detail payload never
+        // `AiUsageService`: 15 s DNS/connect/send/receive budget; a full-detail payload never
         // needs more than 1 MiB. A stalled provider must not pin the widget refresh thread.
         let _ = WinHttpSetTimeouts(session, 15_000, 15_000, 15_000, 15_000);
         let connect = WinHttpConnect(session, host_w.as_ptr(), 443, 0);
@@ -4571,7 +4571,7 @@ pub fn ai_full_windows(detail: &AiFullDetail) -> Vec<(&str, f32, &str)> {
 }
 
 // ============================================================================================
-// GPU meter (C# `SystemSensors` GPU Engine counter + WMI thermal zone).
+// GPU meter (`SystemSensors` GPU Engine counter + WMI thermal zone).
 // ============================================================================================
 
 /// Parses the numeric value from a PowerShell `Get-Counter` `\GPU Engine(*)\Utilization Percentage`

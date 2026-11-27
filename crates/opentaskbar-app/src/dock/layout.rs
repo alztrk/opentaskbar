@@ -1,4 +1,4 @@
-//! Pure dock geometry, ordering and interaction policy (C# `DockMetrics`,
+//! Pure dock geometry, ordering and interaction policy (`DockMetrics`,
 //! `DockFisheyeLayout`, `DockItemOrdering`, `MainWindow.Orientation` parity).
 //!
 //! Everything in this module is side-effect free so it can be unit tested without a
@@ -32,7 +32,7 @@ use opentaskbar_core::settings::{
 
 use crate::platform::win32::MonitorInfo;
 
-// C# `DockMetrics` constants.
+// `DockMetrics` constants.
 pub const HEADROOM_DIPS: f32 = 24.0;
 pub const BOTTOM_GAP_DIPS: f32 = 6.0;
 pub const SIDE_INSET_DIPS: f32 = 12.0;
@@ -44,7 +44,7 @@ pub const HOVER_SCALE: f32 = 1.5;
 pub const INFLUENCE_RADIUS_DIPS: f32 = 135.0;
 pub const PREVIEW_GAP_DIPS: f32 = 18.0;
 
-// Motion / gesture timings in milliseconds (C# `DockMetrics`, `WidgetHoverCoordinator`,
+// Motion / gesture timings in milliseconds (`DockMetrics`, `WidgetHoverCoordinator`,
 // `WindowThumbnailPreview`, `MainWindow.DragDrop`).
 pub const REVEAL_MS: u64 = 220;
 pub const HIDE_MS: u64 = 220;
@@ -64,7 +64,7 @@ pub const PREVIEW_FADE_MS: u64 = 140;
 pub const ISLAND_ANIM_MS: u64 = 180;
 pub const DETAILS_PANEL_WIDTH_DIPS: f32 = 246.0;
 
-// C# `DockMetrics.For` size profiles: Compact / Medium / Large at 100% scale.
+// `DockMetrics.For` size profiles: Compact / Medium / Large at 100% scale.
 // (Shelf, Cell, Icon, Radius) = (48/58/66, 38/44/50, 28/34/38, 16/19/22).
 pub const PROFILE_SHELF_DIPS: [f32; 3] = [48.0, 58.0, 66.0];
 pub const PROFILE_CELL_DIPS: [f32; 3] = [38.0, 44.0, 50.0];
@@ -126,7 +126,7 @@ pub fn legacy_magnification_expands_dock(settings: &DockSettings) -> Option<bool
         .and_then(serde_json::Value::as_bool)
 }
 
-/// C# `RunningAppProjection.AggregateByExecutablePath`: merge all windows of a
+/// `RunningAppProjection.AggregateByExecutablePath`: merge all windows of a
 /// shared host into one executable-keyed slot instead of grouping by AUMID.
 pub fn aggregate_by_executable_path(settings: &DockSettings) -> bool {
     if let Some(value) = settings
@@ -146,7 +146,7 @@ pub fn aggregate_by_executable_path(settings: &DockSettings) -> bool {
         .unwrap_or(false)
 }
 
-/// C# `DockMetrics.For(size, scale, padding)` — scaled profile with a fixed extra
+/// `DockMetrics.For(size, scale, padding)` — scaled profile with a fixed extra
 /// gap that widens cells horizontally but never grows the dock vertically.
 pub fn size_profile(settings: &DockSettings) -> SizeProfile {
     let i = profile_index(settings.size);
@@ -160,7 +160,7 @@ pub fn size_profile(settings: &DockSettings) -> SizeProfile {
     let cell_h = (PROFILE_CELL_DIPS[i] * scale).round().max(24.0);
     let radius = (PROFILE_RADIUS_DIPS[i] * scale).round().clamp(10.0, 30.0);
     let secondary_shelf = (PROFILE_SECONDARY_SHELF_DIPS[i] * scale).round();
-    // C# `WindowHeight = Headroom + Shelf`. When magnification is allowed to expand
+    // `WindowHeight = Headroom + Shelf`. When magnification is allowed to expand
     // the dock itself, the extra headroom strip is no longer reserved.
     let headroom = if magnification_expands_dock(settings) {
         0.0
@@ -209,7 +209,7 @@ pub fn has_scroll_overflow(max_scroll: f32) -> bool {
     max_scroll > OVERFLOW_THRESHOLD_DIPS
 }
 
-// C# `DockFisheyeLayout` constants.
+// `DockFisheyeLayout` constants.
 pub const SLOT_EXPANSION_FACTOR: f32 = 0.95;
 pub const MAX_LIFT_DIPS: f32 = 1.0;
 pub const MIN_NO_OVERLAP_GAP_DIPS: f32 = 4.0;
@@ -235,7 +235,7 @@ pub fn live_tray_host_enabled(settings: &DockSettings) -> bool {
     )
 }
 
-/// C# `DockSettings.NotificationBadgesEnabled` (default on). The value is a
+/// `DockSettings.NotificationBadgesEnabled` (default on). The value is a
 /// typed settings field; an unknown `extra` key must never override it.
 pub fn notification_badges_enabled(settings: &DockSettings) -> bool {
     settings.notification_badges_enabled
@@ -390,7 +390,7 @@ pub fn cross_extent(edge: DockEdge, rect: (i32, i32, i32, i32)) -> (i32, i32) {
     if is_vertical(edge) { (x, w) } else { (y, h) }
 }
 
-/// Wheel delta resolution along the dock's main axis. C# `DockScrollViewer` always
+/// Wheel delta resolution along the dock's main axis. `DockScrollViewer` always
 /// applies `offset -= delta / 120 * cell * 2`, independent of the dock edge: a wheel-up
 /// notch moves content toward the start on both bottom and side docks. Only the
 /// horizontal wheel on a bottom dock keeps the +delta convention (Shift+wheel there
@@ -442,7 +442,7 @@ pub fn is_at_edge_trigger(edge: DockEdge, monitor: MonitorInfo, x: i32, y: i32, 
     }
 }
 
-/// Height of a side dock derived from content count (C# `ResizeSideDockToContent`).
+/// Height of a side dock derived from content count (`ResizeSideDockToContent`).
 pub fn side_dock_height_dips(
     item_count: usize,
     cell_dips: f32,
@@ -560,7 +560,7 @@ pub fn is_full_screen_on_monitor(
         && y + h >= monitor.bottom - tolerance_px
 }
 
-/// Whether the secondary monitor needs its own AppBar shelf (C# `SecondaryDockWindow.NeedsOwnShelf`).
+/// Whether the secondary monitor needs its own AppBar shelf (`SecondaryDockWindow.NeedsOwnShelf`).
 pub fn needs_own_shelf(existing_shelf_px: i32, dpi: f32, shelf_dips: f32) -> bool {
     needed_shelf_px(shelf_dips, dpi) > existing_shelf_px
 }
@@ -585,7 +585,7 @@ pub fn appbar_position_flags(edge: DockEdge) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
-// Magnification: raised cosine + critically damped spring (C# DockFisheyeLayout).
+// Magnification: raised cosine + critically damped spring (reference DockFisheyeLayout).
 // ---------------------------------------------------------------------------
 
 pub fn influence_radius_for_cell(cell_size: f32, constrained: bool) -> f32 {
@@ -828,14 +828,14 @@ pub fn is_axis_in_non_magnified_rest_span(
     axis_position < rest_start || axis_position > rest_end
 }
 
-/// C# `ApplicationIconProvider.UseHoverIcon`: only swap to the hover variant when
+/// `ApplicationIconProvider.UseHoverIcon`: only swap to the hover variant when
 /// one exists and the icon is actually magnified.
 pub fn use_hover_icon(hovered: bool, magnified: bool, has_hover_variant: bool) -> bool {
     hovered && magnified && has_hover_variant
 }
 
 // ---------------------------------------------------------------------------
-// Ordering (C# DockItemOrdering).
+// Ordering (reference DockItemOrdering).
 // ---------------------------------------------------------------------------
 
 pub const PINNED_LEAD_TOKENS: [&str; 3] = ["start", "search", "taskview"];
@@ -1017,7 +1017,7 @@ pub fn move_visible_item(
 // Drag & drop / stacks / tray identity.
 // ---------------------------------------------------------------------------
 
-/// Windows `CommandLineToArgvW`-compatible quoting (C# `BuildQuotedArguments`).
+/// Windows `CommandLineToArgvW`-compatible quoting (`BuildQuotedArguments`).
 pub fn build_quoted_arguments(args: &[String]) -> String {
     args.iter()
         .map(|arg| {
@@ -1065,7 +1065,7 @@ pub struct TrayPinKey {
     pub value: String,
 }
 
-/// Parses the C# `TrayPinIdentity` string form (`guid:{...}`, `uid:42|{GUID}`,
+/// Parses the `TrayPinIdentity` string form (`guid:{...}`, `uid:42|{GUID}`,
 /// `path:C:\...`, `path:*TrayIcon*`).
 pub fn parse_tray_pin_key(raw: &str) -> TrayPinKey {
     let raw = raw.trim();
@@ -1098,7 +1098,7 @@ pub fn parse_tray_pin_key(raw: &str) -> TrayPinKey {
     }
 }
 
-/// Wildcard pin keys (`|*...*|` in C#) compare by glob segment.
+/// Wildcard pin keys (`|*...*|` in reference) compare by glob segment.
 pub fn tray_pin_matches(key: &TrayPinKey, guid: &str, uid: u32, path: &str) -> bool {
     match key.kind {
         TrayPinKeyKind::Guid => key.value == guid.to_ascii_lowercase(),
@@ -1116,7 +1116,7 @@ pub fn drop_targets_recycle_bin(hit_bin: bool, paths: &[String]) -> bool {
     hit_bin && !paths.is_empty() && paths.iter().all(|p| !p.trim().is_empty())
 }
 
-/// Positions of the first `count` files in a C# `DockStack` 4-column / 2-row preview.
+/// Positions of the first `count` files in a `DockStack` 4-column / 2-row preview.
 pub fn folder_stack_preview_cells(count: usize) -> Vec<(usize, usize)> {
     (0..count.min(8)).map(|i| (i % 4, i / 4)).collect()
 }
@@ -1129,7 +1129,7 @@ pub fn stack_badge_text(new_items: usize) -> String {
     }
 }
 
-/// C# `MainWindow.Groups`: live member count shown on a group icon.
+/// `MainWindow.Groups`: live member count shown on a group icon.
 pub fn group_live_count(members: &[String], running_executables: &[String]) -> usize {
     members
         .iter()
@@ -1169,7 +1169,7 @@ pub fn is_stack_visible_file(name: &str) -> bool {
 // Auto-hide / hover / keyboard policy helpers.
 // ---------------------------------------------------------------------------
 
-/// C# `CubicEase.EaseOut` / `EaseInOut` as plain functions.
+/// `CubicEase.EaseOut` / `EaseInOut` as plain functions.
 pub fn cubic_ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t.clamp(0.0, 1.0)).powi(3)
 }
@@ -1183,7 +1183,7 @@ pub fn cubic_ease_in_out(t: f32) -> f32 {
     }
 }
 
-/// `RevealedGuardTimer` decision core (C# `DockAutoHideController.ShouldHide`).
+/// `RevealedGuardTimer` decision core (`DockAutoHideController.ShouldHide`).
 pub fn revealed_guard_should_hide(
     mode: AutoHideMode,
     pointer_over_dock: bool,
@@ -1225,7 +1225,7 @@ pub fn escape_closes_transient(flyout_open: bool, stack_open: bool, island_expan
     flyout_open || stack_open || island_expanded
 }
 
-/// Where focus goes after a flyout/stack closes (C# focus-return handling).
+/// Where focus goes after a flyout/stack closes (reference focus-return handling).
 pub fn focus_return_target(flyout_open: bool, dock_item: Option<usize>) -> Option<usize> {
     if flyout_open { dock_item } else { None }
 }
@@ -1271,7 +1271,7 @@ pub fn overlap_scan_due(
     min_age_met && (dirty || periodic_due)
 }
 
-/// C# `DockSettings.EffectiveAnimationsEnabled`: the app toggle plus Focus Mode.
+/// `DockSettings.EffectiveAnimationsEnabled`: the app toggle plus Focus Mode.
 pub fn effective_animations_enabled(animations_enabled: bool, focus_mode: bool) -> bool {
     animations_enabled && !focus_mode
 }
@@ -1279,7 +1279,7 @@ pub fn effective_animations_enabled(animations_enabled: bool, focus_mode: bool) 
 /// Whether the VSync producer should keep posting frames.
 ///
 /// The dock renders with DirectComposition transforms, which are *not* governed by
-/// `SPI_GETCLIENTAREAANIMATION`. That OS flag only gates WPF/OS-native transitions;
+/// `SPI_GETCLIENTAREAANIMATION`. That OS flag only gates OS-native transitions;
 /// consulting it here made the whole dock freeze when the OS flag was off while the
 /// in-app toggle was on (the reported bug). Core motion therefore depends only on
 /// the effective setting, and `moving` must be true to keep the producer awake.
@@ -1334,7 +1334,7 @@ pub fn take_deferred_reload(pending: &mut bool) -> bool {
 // decision table and every gate is unit-testable without a desktop session.
 // ---------------------------------------------------------------------------
 
-/// C# `DwmEnableAeroPeek`: the REG_DWORD is absent by default (enabled). Only an
+/// `DwmEnableAeroPeek`: the REG_DWORD is absent by default (enabled). Only an
 /// explicit `0` disables Aero Peek; any other value (including REG_SZ garbage
 /// coerced to a number by the caller) keeps the feature on.
 pub fn aero_peek_enabled(registry_value: Option<u32>) -> bool {
@@ -1553,12 +1553,12 @@ mod tests {
     }
 
     #[test]
-    fn wheel_scroll_direction_matches_c_sharp_on_every_edge() {
+    fn wheel_scroll_direction_matches_reference_on_every_edge() {
         let step = 40.0;
         assert!(wheel_to_axis_delta(120, false, DockEdge::Bottom, step) < 0.0);
         assert!(wheel_to_axis_delta(120, false, DockEdge::Left, step) < 0.0);
         assert!(wheel_to_axis_delta(120, false, DockEdge::Right, step) < 0.0);
-        // C# applies `offset -= delta / 120 * cell * 2` for both wheel axes.
+        // reference applies `offset -= delta / 120 * cell * 2` for both wheel axes.
         assert!(wheel_to_axis_delta(120, true, DockEdge::Left, step) < 0.0);
     }
 
@@ -1734,7 +1734,7 @@ mod tests {
     }
 
     #[test]
-    fn secondary_shelf_reservation_matches_csharp() {
+    fn secondary_shelf_reservation_matches_reference() {
         assert!(needs_own_shelf(0, 1.0, 66.0));
         assert!(!needs_own_shelf(66, 1.0, 66.0));
         assert!(needs_own_shelf(66, 2.0, 66.0));
@@ -1945,10 +1945,10 @@ mod tests {
         );
     }
 
-    /// C# `DockLayoutChecks` vectors driven through the shipped function, not
+    /// `DockLayoutChecks` vectors driven through the shipped function, not
     /// through a local copy of the grouping rule.
     #[test]
-    fn c_sharp_pinned_group_vectors_call_the_production_function() {
+    fn reference_pinned_group_vectors_call_the_production_function() {
         let mut settings = DockSettings {
             show_tray_button: true,
             show_recycle_bin: true,
@@ -2226,7 +2226,7 @@ mod tests {
         let table = [
             (true, false, true, true),   // normal fisheye/spring/bounce
             (true, false, false, false), // at rest: producer parks (0 CPU)
-            (true, true, true, false), // focus mode suppresses motion (C# EffectiveAnimationsEnabled)
+            (true, true, true, false), // focus mode suppresses motion (reference EffectiveAnimationsEnabled)
             (false, false, true, false), // toggle off: no VSync wake-ups
             (false, true, true, false),
         ];
@@ -2394,7 +2394,7 @@ mod tests {
     }
 
     #[test]
-    fn c_sharp_size_profile_vectors_are_exact() {
+    fn reference_size_profile_vectors_are_exact() {
         let expected = [
             (48.0, 38.0, 28.0, 16.0, 52.0, 76.0),
             (58.0, 44.0, 34.0, 19.0, 60.0, 84.0),
@@ -2440,7 +2440,7 @@ mod tests {
     #[test]
     fn magnification_expands_dock_removes_headroom() {
         let settings = DockSettings::default();
-        // C# #182 default: magnification may expand the dock surface.
+        // reference #182 default: magnification may expand the dock surface.
         assert!(magnification_expands_dock(&settings));
         assert_eq!(size_profile(&settings).headroom, 0.0);
         let mut fixed = settings.clone();
@@ -2475,7 +2475,7 @@ mod tests {
     }
 
     #[test]
-    fn wheel_direction_and_step_match_c_sharp() {
+    fn wheel_direction_and_step_match_reference() {
         let step = wheel_scroll_step(38.0, 9.0);
         assert_eq!(step, 94.0);
         for edge in [DockEdge::Bottom, DockEdge::Left, DockEdge::Right] {

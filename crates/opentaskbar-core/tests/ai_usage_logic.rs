@@ -1,4 +1,4 @@
-//! C# `AiUsageChecks` parity.
+//! `AiUsageChecks` parity.
 //!
 //! The deterministic logic (JWT expiry, quota/pace/reset and severity) is kept
 //! as reference vectors. The bridge test below compares those vectors against
@@ -64,7 +64,7 @@ fn make_token(exp: i64, extra: &str) -> String {
     format!("{}.{}.signature", header, b64url_encode(payload.as_bytes()))
 }
 
-/// Expiry epoch seconds from a JWT, without verifying the signature (the C#
+/// Expiry epoch seconds from a JWT, without verifying the signature (the reference
 /// helper only needs the timestamp to decide whether to refresh).
 fn jwt_expiry(token: &str) -> Option<i64> {
     let payload = token.split('.').nth(1)?;
@@ -167,7 +167,7 @@ fn severity_tracks_remaining_quota() {
 }
 
 /// Production bridge: the provider bits are real core constants and must agree
-/// with the C# flag-string serialization.
+/// with the reference flag-string serialization.
 #[test]
 fn production_provider_flags_are_consistent() {
     assert_eq!(

@@ -1,6 +1,6 @@
 //! Reading and invoking Windows Jump Lists.
 //!
-//! Standalone Rust counterpart of the C# `ApplicationJumpListService` and
+//! Standalone Rust implementation of the `ApplicationJumpListService` and
 //! `NativeJumpListSession`. Everything this module needs (COM entry points,
 //! vtable dispatch, owned data) lives in this file; nothing is imported from
 //! other crate modules.
@@ -11,16 +11,16 @@
 //!   CLSID `77f10cf0-3db5-4966-b520-b7c54fd35ed6`) can only *write* jump lists.
 //!   Windows 0.61 does not expose `GetAppIDList`/`GetTasks`, so reading uses the
 //!   private destination interface (`507101cd-f6ad-46c8-8e20-eeb9e6bac47f`) and
-//!   the automatic destination list used by the C# implementation. Methods are
+//!   the automatic destination list used by the reference implementation. Methods are
 //!   called directly through their vtable slots, exactly like
-//!   `ShellComObject.Method<T>(slot)` does in C#.
+//!   `ShellComObject.Method<T>(slot)` does in reference.
 //! * COM objects never leave this module. A session stores plain, owned launch
 //!   descriptors (`target`, `arguments`, `working directory`), so
 //!   `invoke_command` is safe on any thread and does not depend on the STA
 //!   apartment that created the list.
 //! * `invoke_command` uses `ShellExecuteExW` with the target application window
 //!   as activation-context owner. This is the documented approximation of the
-//!   C# `IContextMenu::InvokeCommand` path (which additionally handles
+//!   `IContextMenu::InvokeCommand` path (which additionally handles
 //!   activation contexts of packaged apps).
 //!
 //! Callers should invoke these functions from a worker thread: each call does
@@ -111,7 +111,7 @@ const MAX_GROUP_ENTRIES: usize = 40;
 const MAX_COMMANDS: i32 = 100;
 const MAX_SESSIONS: usize = 8;
 
-// Class / interface IDs, verified against windows 0.61 metadata and the C#
+// Class / interface IDs, verified against windows 0.61 metadata and the reference
 // implementation. The documentation-only CLSID is
 // 77f10cf0-3db5-4966-b520-b7c54fd35ed6; the private interface below is the
 // read side used by Explorer.
@@ -1095,7 +1095,7 @@ fn read_launch(item: &ComPtr, store: Option<&ComPtr>) -> Launch {
         }
     }
 
-    // The C# reference uses vtable slots 9/11 for arguments/working directory,
+    // The reference uses vtable slots 9/11 for arguments/working directory,
     // which are actually setters; the real getters (10/8) are used above. Keep
     // the property-store fallback for tasks that publish their switches there.
     if args.trim().is_empty()
@@ -1329,7 +1329,7 @@ pub fn split_arguments(args: &str) -> Vec<String> {
     out
 }
 
-/// Quotes an argument for a jump-list command line (C# `BuildQuotedArguments`).
+/// Quotes an argument for a jump-list command line (`BuildQuotedArguments`).
 pub fn quote_argument(arg: &str) -> String {
     if !arg.is_empty() && !arg.chars().any(|c| c.is_whitespace() || c == '"') {
         return arg.to_owned();

@@ -1,4 +1,4 @@
-//! `WidgetHoverCoordinator` — C# `WidgetHoverCoordinator.cs` parity.
+//! `WidgetHoverCoordinator` — `WidgetHoverCoordinator.cs` parity.
 //!
 //! Owns hover-to-expand intent (350 ms), inline widget expansion, slider pointer capture,
 //! cursor verification against the widget rectangle, and post-click suppression (300 ms).
@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{POINT, RECT};
 
-/// C# `WidgetHoverCoordinator.HoverIntentDelayMs`.
+/// `WidgetHoverCoordinator.HoverIntentDelayMs`.
 pub const HOVER_INTENT_MS: u64 = 350;
-/// C# `WidgetPanelHost` suppression window after a flyout is dismissed.
+/// `WidgetPanelHost` suppression window after a flyout is dismissed.
 pub const SUPPRESS_MS: u64 = 300;
 
 /// What changed after a coordinator tick. WS-D uses this to call `update_visuals()`.
@@ -93,7 +93,7 @@ impl WidgetHoverCoordinator {
         self.last_cursor = POINT { x, y };
     }
 
-    /// C# `WidgetHoverCoordinator.Enter`: arm the 350 ms intent timer.
+    /// `WidgetHoverCoordinator.Enter`: arm the 350 ms intent timer.
     /// Returns `true` when the widget was already expanded (no visual change needed).
     ///
     /// WS-1: this is also called on every `WM_MOUSEMOVE` while the pointer stays on
@@ -122,7 +122,7 @@ impl WidgetHoverCoordinator {
         false
     }
 
-    /// C# `WidgetHoverCoordinator.Leave`: cancel pending intent. An expanded widget is kept
+    /// `WidgetHoverCoordinator.Leave`: cancel pending intent. An expanded widget is kept
     /// expanded until `verify_cursor` proves the pointer left its rect (avoids flicker when the
     /// pointer crosses a gap between inline sub-buttons).
     pub fn on_leave(&mut self, id: &str, now: Instant) -> HoverChange {
@@ -155,7 +155,7 @@ impl WidgetHoverCoordinator {
         HoverChange::None
     }
 
-    /// C# `WidgetHoverCoordinator.VerifyCursor`: collapse if the cursor is no longer inside the
+    /// `WidgetHoverCoordinator.VerifyCursor`: collapse if the cursor is no longer inside the
     /// expanded widget rectangle. Returns `true` when still inside.
     pub fn verify_cursor(&mut self, rect: RECT, cursor: POINT) -> bool {
         self.last_cursor = cursor;
@@ -189,7 +189,7 @@ impl WidgetHoverCoordinator {
         }
     }
 
-    /// C# slider pointer capture: while a flyout/inline slider is dragged, hover-leave and cursor
+    /// reference slider pointer capture: while a flyout/inline slider is dragged, hover-leave and cursor
     /// verification must not collapse the widget (otherwise the drag target disappears).
     pub fn begin_slider_capture(&mut self, id: &str, slider_id: u32) {
         self.captured = Some((id.to_owned(), slider_id));
@@ -207,7 +207,7 @@ impl WidgetHoverCoordinator {
         HoverChange::None
     }
 
-    /// C# `WidgetHoverCoordinator.Suppress`: ignore hover for this widget for a short window
+    /// `WidgetHoverCoordinator.Suppress`: ignore hover for this widget for a short window
     /// (called after a flyout is dismissed so the pointer landing back on the card doesn't
     /// immediately re-open it).
     pub fn suppress(&mut self, id: &str, now: Instant) {

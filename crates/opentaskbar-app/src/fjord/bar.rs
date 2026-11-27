@@ -1,4 +1,4 @@
-//! Per-monitor Fjord top bar (C# `FjordBarHost` + `FjordBarWindow` +
+//! Per-monitor Fjord top bar (`FjordBarHost` + `FjordBarWindow` +
 //! `FjordBarNative`).
 //!
 //! One session-scoped mutex guards the host. Each monitor owns an AppBar
@@ -16,7 +16,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 // @pure-start
-/// C# bar height in DIPs, snapped to physical pixels by monitor DPI.
+/// reference bar height in DIPs, snapped to physical pixels by monitor DPI.
 pub const BAR_HEIGHT_DIP: f32 = 32.0;
 /// Fullscreen detection tolerance in physical pixels (`FjordBarNative.IsFullscreen`).
 pub const FULLSCREEN_TOLERANCE: i32 = 2;
@@ -68,7 +68,7 @@ pub fn pixel_bounds(bounds: Rect, scale: f32) -> Rect {
     )
 }
 
-/// Top-edge strip reserved for the bar, height rounded up like C# `Math.Ceiling`.
+/// Top-edge strip reserved for the bar, height rounded up like `Math.Ceiling`.
 pub fn bar_rect(monitor: Rect, scale: f32, height_dip: f32) -> Rect {
     let height = ((height_dip as f64 * scale as f64).ceil() as i32).max(1);
     Rect::new(
@@ -93,7 +93,7 @@ pub fn pin_to_edge(requested: Rect, monitor: Rect) -> Rect {
     )
 }
 
-/// C# `FjordBarNative.IsFullscreen` geometry rule.
+/// `FjordBarNative.IsFullscreen` geometry rule.
 pub fn covers_monitor(window: Rect, monitor: Rect, tolerance: i32) -> bool {
     window.left <= monitor.left + tolerance
         && window.top <= monitor.top + tolerance
@@ -294,7 +294,7 @@ impl AppBar {
         self.registered
     }
 
-    /// Two-step ABM_QUERYPOS/ABM_SETPOS with the edge pinning C# performs.
+    /// Two-step ABM_QUERYPOS/ABM_SETPOS with the edge pinning reference performs.
     pub fn position(&mut self, monitor: Rect, scale: f32) -> Option<Rect> {
         let requested = pin_to_edge(bar_rect(monitor, scale, BAR_HEIGHT_DIP), monitor);
         let committed = if self.registered {

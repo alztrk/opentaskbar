@@ -1,6 +1,6 @@
 //! Persistent raw-BGRA icon disk cache + short-lived out-of-process icon worker.
 //!
-//! Mirrors C# `ApplicationIconProvider`:
+//! Mirrors `ApplicationIconProvider`:
 //! - For `.exe`/`.ico`/`.dll` (with optional `,index`): extracts native 64x64 icons directly via
 //!   `PrivateExtractIconsW` (zero Explorer backplate, pure straight alpha).
 //! - For `shell:AppsFolder\<AUMID>` (Store/MSIX apps) and fallback items: uses
@@ -257,7 +257,7 @@ pub fn extract_recycle_bin_icon(full: bool) -> Option<RawIcon> {
     extract_private_icon(&spec)
 }
 
-/// Extracts directly from `.exe` / `.ico` / `.dll` via `PrivateExtractIconsW` (mirrors C# `GetExecutableIcon`).
+/// Extracts directly from `.exe` / `.ico` / `.dll` via `PrivateExtractIconsW` (mirrors `GetExecutableIcon`).
 fn extract_private_icon(spec: &str) -> Option<RawIcon> {
     let (path, index) = split_icon_location(spec);
     let lower = path.to_lowercase();
@@ -528,10 +528,10 @@ fn fetch_from_worker(worker: &mut Option<Worker>, spec: &str) -> Option<RawIcon>
 }
 
 // ============================================================================================
-// ApplicationIconProvider (C# `Services/App/ApplicationIconProvider.cs` parity)
+// ApplicationIconProvider (`Services/App/ApplicationIconProvider.cs` parity)
 // ============================================================================================
 
-/// Canonical icon sizes used by C# `SnappedSize` (12..256 px).
+/// Canonical icon sizes used by `SnappedSize` (12..256 px).
 pub const ICON_SIZES: &[u32] = &[12, 16, 20, 24, 32, 40, 48, 64, 96, 128, 256];
 
 /// Snaps a requested DIP size to the nearest supported rasterisation size, clamped to 12..256.
@@ -572,7 +572,7 @@ pub fn premultiplied_to_straight(pixels: &mut [u8]) {
     }
 }
 
-/// Key for a hover icon variant (C# `ConditionalWeakTable` replacement).
+/// Key for a hover icon variant (`ConditionalWeakTable` replacement).
 pub fn hover_variant_key(spec: &str, hovered: bool) -> String {
     if hovered {
         format!("{spec}#hover")
@@ -581,7 +581,7 @@ pub fn hover_variant_key(spec: &str, hovered: bool) -> String {
     }
 }
 
-/// Resolves the display name of a shell item (C# `GetShellItemDisplayName`).
+/// Resolves the display name of a shell item (`GetShellItemDisplayName`).
 pub fn shell_item_display_name(parsing_name: &str) -> Option<String> {
     use windows::Win32::UI::Shell::{IShellItem, SIGDN_NORMALDISPLAY};
     // SAFETY: COM apartment is initialised by the icon worker; IShellItem is released on drop.
@@ -692,7 +692,7 @@ mod icon_provider_tests {
     use super::*;
 
     #[test]
-    fn snaps_sizes_to_csharp_ladder() {
+    fn snaps_sizes_to_reference_ladder() {
         assert_eq!(snap_icon_size(0), 12);
         assert_eq!(snap_icon_size(13), 12);
         assert_eq!(snap_icon_size(30), 32);

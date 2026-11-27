@@ -75,10 +75,10 @@ jobs:
       - name: Build and verify Rust portable executables (x64 + x86)
         shell: pwsh
         run: |
-          & "scripts/publish-rust-portable.ps1" -Runtime win-x64 -OutputDir release
-          & "scripts/check-rust-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-Rust-x64.exe
-          & "scripts/publish-rust-portable.ps1" -Runtime win-x86 -OutputDir release
-          & "scripts/check-rust-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-Rust-x86.exe
+          & "scripts/publish-portable.ps1" -Runtime win-x64 -OutputDir release
+          & "scripts/check-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-x64.exe
+          & "scripts/publish-portable.ps1" -Runtime win-x86 -OutputDir release
+          & "scripts/check-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-x86.exe
 
       - name: Package Rust release artifacts, notes, checksums and manifest
         shell: pwsh
@@ -94,8 +94,8 @@ jobs:
         with:
           name: release-assets
           path: |
-            release/OpenTaskbar-Rust-v*-win-*.exe
-            release/OpenTaskbar-Rust-v*-win-*.zip
+            release/OpenTaskbar-v*-win-*.exe
+            release/OpenTaskbar-v*-win-*.zip
             release/checksums.txt
             release/release-manifest.json
             release/release-notes.md
@@ -136,7 +136,7 @@ jobs:
               throw "Missing release asset: $name"
             }
           }
-          if (-not (Get-ChildItem -LiteralPath release -Filter 'OpenTaskbar-Rust-*.zip' -File)) {
+          if (-not (Get-ChildItem -LiteralPath release -Filter 'OpenTaskbar-*.zip' -File)) {
             throw 'No Rust release ZIPs were downloaded.'
           }
 
@@ -151,7 +151,7 @@ jobs:
         if: ${{ env.VIRUSTOTAL_API_KEY != '' }}
         shell: pwsh
         run: |
-          foreach ($file in Get-ChildItem -LiteralPath release -Filter 'OpenTaskbar-Rust-*.zip' -File) {
+          foreach ($file in Get-ChildItem -LiteralPath release -Filter 'OpenTaskbar-*.zip' -File) {
             try {
               $response = & curl -sS -F "file=@$($file.FullName)" -H "x-apikey: $env:VIRUSTOTAL_API_KEY" `
                 'https://www.virustotal.com/api/v3/files' | ConvertFrom-Json
@@ -172,8 +172,8 @@ jobs:
           generate_release_notes: false
           overwrite_files: true
           files: |
-            release/OpenTaskbar-Rust-v*-win-*.exe
-            release/OpenTaskbar-Rust-v*-win-*.zip
+            release/OpenTaskbar-v*-win-*.exe
+            release/OpenTaskbar-v*-win-*.zip
             release/checksums.txt
             release/release-manifest.json
 
@@ -187,10 +187,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Could not read release assets for $env:RELEASE_TAG." }
 
           $expected = @(
-            "OpenTaskbar-Rust-$env:RELEASE_TAG-win-x64.exe",
-            "OpenTaskbar-Rust-$env:RELEASE_TAG-win-x64.zip",
-            "OpenTaskbar-Rust-$env:RELEASE_TAG-win-x86.exe",
-            "OpenTaskbar-Rust-$env:RELEASE_TAG-win-x86.zip",
+            "OpenTaskbar-$env:RELEASE_TAG-win-x64.exe",
+            "OpenTaskbar-$env:RELEASE_TAG-win-x64.zip",
+            "OpenTaskbar-$env:RELEASE_TAG-win-x86.exe",
+            "OpenTaskbar-$env:RELEASE_TAG-win-x86.zip",
             'checksums.txt',
             'release-manifest.json'
           )

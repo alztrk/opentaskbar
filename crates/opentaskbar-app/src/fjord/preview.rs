@@ -1,4 +1,4 @@
-//! Cancellable file previews (C# `FjordFilePreview`): images, PDF first page,
+//! Cancellable file previews (`FjordFilePreview`): images, PDF first page,
 //! bounded text and friendly fallbacks.
 //!
 //! The pure helpers above `@pure-end` have no dependencies outside `std` and
@@ -38,7 +38,7 @@ pub enum PreviewKind {
     Unsupported,
 }
 
-/// Extension classifier, case-insensitive like the C# `HashSet`s.
+/// Extension classifier, case-insensitive like the `HashSet`s.
 pub fn classify(name: &str, is_folder: bool) -> PreviewKind {
     if is_folder {
         return PreviewKind::Folder;
@@ -183,7 +183,7 @@ pub fn build(entry: Option<&FileEntry>, token: &AtomicBool) -> Preview {
         }
         PreviewKind::Pdf => {
             // NOTE(WS-orchestrator): first-page rasterisation needs the WinRT
-            // `Windows.Data.Pdf` API (C# `PdfDocument.LoadFromFileAsync`). The
+            // `Windows.Data.Pdf` API (`PdfDocument.LoadFromFileAsync`). The
             // workspace does not enable `Data_Pdf`, so no local shim is used.
             let Some(header) = read(MAX_PDF_HEADER) else {
                 return Preview::Failed;
@@ -228,7 +228,7 @@ mod tests {
         assert_eq!(classify("report.PDF", false), PreviewKind::Pdf);
         assert_eq!(classify("app.exe", false), PreviewKind::Unsupported);
         assert_eq!(classify("folder", true), PreviewKind::Folder);
-        // `Path.GetExtension(".txt")` is empty in C# too: a bare dotfile is unsupported.
+        // `Path.GetExtension(".txt")` is empty in reference too: a bare dotfile is unsupported.
         assert_eq!(classify(".txt", false), PreviewKind::Unsupported);
     }
 

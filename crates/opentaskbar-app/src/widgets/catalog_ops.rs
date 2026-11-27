@@ -1,4 +1,4 @@
-//! Widget catalog operations — C# `DockWidgetService` / `DockWidgetOption` parity.
+//! Widget catalog operations — `DockWidgetService` / `DockWidgetOption` parity.
 //!
 //! Provides: alias widget IDs (`Date`, `ShowDesktop`), `HasSettings` + live-preview flags,
 //! per-widget density overrides and shrink priority, hardware-availability hiding, and the
@@ -10,7 +10,7 @@ use opentaskbar_core::settings::DockSettings;
 
 use super::{ALL_WIDGETS, WidgetDescriptor};
 
-/// `(alias, canonical_id)` pairs accepted by C# `DockWidgetService.ResolveId`.
+/// `(alias, canonical_id)` pairs accepted by `DockWidgetService.ResolveId`.
 pub const WIDGET_ALIASES: &[(&str, &str)] = &[
     ("date", "clock"),
     ("showdesktop", "showdesktop"),
@@ -42,7 +42,7 @@ pub fn canonical_widget_id(id: &str) -> &str {
     {
         return canonical;
     }
-    // C# writes `AiUsageClaude` / `KeyboardLayout` while the catalog uses `aiusage_claude` /
+    // reference writes `AiUsageClaude` / `KeyboardLayout` while the catalog uses `aiusage_claude` /
     // `keyboard`; ignore word separators so both spellings resolve to the same card.
     let compact: String = lower.chars().filter(|c| *c != '_' && *c != '-').collect();
     ALL_WIDGETS
@@ -70,7 +70,7 @@ pub fn catalog() -> Vec<&'static WidgetDescriptor> {
     ALL_WIDGETS.iter().collect()
 }
 
-/// Per-widget density matching C# `WidgetDensity` (`Compact` / `Normal` / `Comfortable`).
+/// Per-widget density matching `WidgetDensity` (`Compact` / `Normal` / `Comfortable`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WidgetDensity {
     Compact,
@@ -87,7 +87,7 @@ impl WidgetDensity {
         }
     }
 
-    /// Width multiplier relative to the C# `FullWidthEstimate` baseline.
+    /// Width multiplier relative to the `FullWidthEstimate` baseline.
     pub fn width_scale(self) -> f32 {
         match self {
             Self::Compact => 0.82,
@@ -97,7 +97,7 @@ impl WidgetDensity {
     }
 }
 
-/// C# `DockWidgetOption.ShrinkPriority` — lower values shrink first when the dock overflows.
+/// `DockWidgetOption.ShrinkPriority` — lower values shrink first when the dock overflows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ShrinkPriority {
     First = 0,
@@ -107,12 +107,12 @@ pub enum ShrinkPriority {
     Never = 4,
 }
 
-/// C# `DockWidgetOption` metadata consumed by the settings catalog and the dock layout.
+/// `DockWidgetOption` metadata consumed by the settings catalog and the dock layout.
 #[derive(Clone, Copy, Debug)]
 pub struct WidgetOption {
     pub descriptor: &'static WidgetDescriptor,
     pub has_settings: bool,
-    /// C# `LivePreview` — settings catalog shows a live chip render.
+    /// `LivePreview` — settings catalog shows a live chip render.
     pub live_preview: bool,
     pub shrink_priority: ShrinkPriority,
     pub hardware_dependent: bool,
@@ -201,7 +201,7 @@ pub fn setting_value(settings: &DockSettings, key: &str) -> Option<serde_json::V
     if let Some(v) = root.get(key) {
         return Some(v.clone());
     }
-    // Serialized C#-style keys are PascalCase; callers may use snake_case or lowercase aliases.
+    // Serialized reference-style keys are PascalCase; callers may use snake_case or lowercase aliases.
     root.as_object().and_then(|m| {
         m.iter()
             .find(|(k, _)| keys_match(k, key))
@@ -261,8 +261,8 @@ pub fn setting_string_list(settings: &DockSettings, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// C# `InstalledWidgets` IDs normalized to the lowercase catalog space used by `ALL_WIDGETS`
-/// and `active_widgets`. `InstalledWidgets` is written in C# PascalCase (`SystemStats`,
+/// `InstalledWidgets` IDs normalized to the lowercase catalog space used by `ALL_WIDGETS`
+/// and `active_widgets`. `InstalledWidgets` is written in reference PascalCase (`SystemStats`,
 /// `AiUsageClaude`, ...), so comparing it directly with a catalog ID would always report a
 /// widget as missing even after the settings page installed it.
 pub fn installed_catalog_widget_ids(settings: &DockSettings) -> Vec<String> {
@@ -289,7 +289,7 @@ pub struct WidgetLayout {
     pub visible: bool,
 }
 
-/// Resolves `WidgetDensityOverrides` (C# `Dictionary<string, string>`) plus hardware gating.
+/// Resolves `WidgetDensityOverrides` (`Dictionary<string, string>`) plus hardware gating.
 pub fn widget_layout(id: &str, settings: &DockSettings, hardware_available: bool) -> WidgetLayout {
     let option = WidgetOption::for_id(id);
     let density = setting_value(settings, "WidgetDensityOverrides")
@@ -316,7 +316,7 @@ pub fn widget_layout(id: &str, settings: &DockSettings, hardware_available: bool
     }
 }
 
-/// C# `DockWidgetService.IsHardwareAvailable`: capability-based visibility gating. The caller
+/// `DockWidgetService.IsHardwareAvailable`: capability-based visibility gating. The caller
 /// supplies the live probes so this stays a pure function.
 pub fn hardware_available(id: &str, network: bool, battery: bool, audio: bool, bt: bool) -> bool {
     match canonical_widget_id(id) {
@@ -404,7 +404,7 @@ mod tests {
             "an installed+enabled widget must be active in the dock"
         );
 
-        // Disabling keeps it installed, exactly like the C# widget option switch.
+        // Disabling keeps it installed, exactly like the reference widget option switch.
         s.set_widget_enabled("aiusage_claude", false);
         assert!(is_widget_installed("aiusage_claude", &s));
         assert!(

@@ -1,4 +1,4 @@
-//! Global hotkey parsing/validation compatible with the C# `HotkeyBinding`.
+//! Global hotkey parsing/validation compatible with the `HotkeyBinding`.
 //!
 //! The Win key is deliberately never accepted: a lost key-up across a lock or secure-desktop
 //! transition can leave Windows believing Win is still held down.
@@ -11,7 +11,7 @@ pub const MOD_CONTROL: u32 = 0x2;
 pub const MOD_SHIFT: u32 = 0x4;
 pub const MOD_NOREPEAT: u32 = 0x4000;
 
-/// C# persisted values that explicitly mean "no binding" in the WIP settings UI.
+/// reference persisted values that explicitly mean "no binding" in the WIP settings UI.
 pub fn is_disabled_hotkey(text: &str) -> bool {
     let value = text.trim();
     value.is_empty()
@@ -21,7 +21,7 @@ pub fn is_disabled_hotkey(text: &str) -> bool {
         || value.eq_ignore_ascii_case("Escape")
 }
 
-/// Modifier bits used by Win32 `RegisterHotKey` and by the C# `HotkeyBinding`.
+/// Modifier bits used by Win32 `RegisterHotKey` and by the `HotkeyBinding`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(transparent)]
 pub struct Modifiers(pub u8);
@@ -42,7 +42,7 @@ impl Modifiers {
     }
 }
 
-/// The preset choices persisted by C# as `LauncherHotkey` / `DockHotkey`.
+/// The preset choices persisted by reference as `LauncherHotkey` / `DockHotkey`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HotkeyChoice {
     #[default]
@@ -57,7 +57,7 @@ pub enum HotkeyChoice {
 /// A validated global hotkey combination (modifiers + Win32 virtual key + canonical display text).
 ///
 /// `modifiers`/`virtual_key` use the WIP `u32` widths so the Win32 call sites can pass them straight
-/// to `RegisterHotKey`; `display` is the historic field name kept alongside the C# `display_text`.
+/// to `RegisterHotKey`; `display` is the historic field name kept alongside the `display_text`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct HotkeyBinding {
@@ -117,7 +117,7 @@ pub enum HotkeyError {
 }
 
 impl HotkeyError {
-    /// Localization key reported by the C# hotkey capture UI.
+    /// Localization key reported by the reference hotkey capture UI.
     pub const fn error_key(self) -> &'static str {
         match self {
             Self::WinNotAllowed => "HotkeyWinNotAllowed",
@@ -393,7 +393,7 @@ fn is_valid_virtual_key(vk: u32) -> bool {
         && !(VK_LSHIFT..=VK_RMENU).contains(&vk)
 }
 
-/// Parses the wide token set used by C#, including punctuation, PageUp/Prior and Back.
+/// Parses the wide token set used by reference, including punctuation, PageUp/Prior and Back.
 pub fn parse_key_token(token: &str) -> Option<u32> {
     if token.is_empty() {
         return None;
@@ -465,7 +465,7 @@ pub fn parse_key_token(token: &str) -> Option<u32> {
             {
                 return Some(0x60 + n);
             }
-            // Raw numeric strings would otherwise look like enum values to C#'s Enum.TryParse.
+            // Raw numeric strings would otherwise look like enum values to the reference Enum.TryParse.
             return None;
         }
     };
@@ -588,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn key_event_and_resolution_match_csharp() {
+    fn key_event_and_resolution_match_reference() {
         let event = KeyEvent {
             modifiers: Modifiers::CONTROL.union(Modifiers::ALT),
             virtual_key: 0x44,

@@ -28,7 +28,7 @@ All new keys are translated in every catalog. A missing key resolves to the key 
 
 ## Tests — scope caveat
 
-`crates/opentaskbar-core/tests/*.rs` are **self-contained reference tests** for the deterministic C# logic. Cross-WS platform code (`widgets`, `platform`, `ui`, live `settings` validation) is absent from this worktree's baseline, so the tests intentionally do not bind to private or not-yet-existing APIs. When merging WS-A…G, consider re-pointing these tests at the real implementations and deleting the local helper functions:
+`crates/opentaskbar-core/tests/*.rs` are **self-contained reference tests** for the deterministic reference logic. Cross-WS platform code (`widgets`, `platform`, `ui`, live `settings` validation) is absent from this worktree's baseline, so the tests intentionally do not bind to private or not-yet-existing APIs. When merging WS-A…G, consider re-pointing these tests at the real implementations and deleting the local helper functions:
 
 | Test file | Intended live owner |
 |---|---|

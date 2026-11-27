@@ -1,6 +1,6 @@
 //! Pure, bounded state-machine logic for taskbar replacement/recovery.
 //!
-//! Mirrors the important constants and decisions of C#
+//! Mirrors the important constants and decisions of reference
 //! `TaskbarReplacementSession`: hide retries (20 normal / 40 startup-settle
 //! attempts with 2 / 10 consecutive clean passes), a 45-attempt degraded
 //! reconcile budget, `TaskbarCreated` reconciliation, side-dock work-area
@@ -221,7 +221,7 @@ pub fn compute_side_reservation(edge: i32, screen_width: i32, dock_width: i32) -
     }
 }
 
-/// Pure restore-streak update. C# `RestoreWithVerification` only declares
+/// Pure restore-streak update. `RestoreWithVerification` only declares
 /// success after two consecutive clean passes (a transient re-hide resets it).
 #[must_use]
 pub const fn restore_observation(visible: bool, consecutive: u32) -> (u32, bool) {
@@ -255,7 +255,7 @@ pub fn verify_restored_with(tray: usize, attempts: u32, mut restore_once: impl F
             }
             secondaries_ok &= unsafe { IsWindowVisible(secondary.hwnd as HWND) != 0 };
         }
-        // SAFETY: checking the windows we just revealed (C# IsNativeTaskbarVisible).
+        // SAFETY: checking the windows we just revealed (reference IsNativeTaskbarVisible).
         let visible = secondaries_ok && unsafe { IsWindowVisible(tray) != 0 };
         let (next, verified) = restore_observation(visible, consecutive);
         consecutive = next;
@@ -375,7 +375,7 @@ pub fn configure_replacement(dock_hwnd: usize, auto_hide: bool, desired_total_px
 }
 
 /// Drops the HWND/PID bound to the *old* Explorer instance. A recycled HWND
-/// must never be treated as a still-valid registration (C# `MarkUnregistered`).
+/// must never be treated as a still-valid registration (`MarkUnregistered`).
 pub fn clear_cached_taskbar_identity() -> (usize, u32) {
     let mut state = runtime();
     let identity = (state.registered_hwnd, state.registered_pid);
@@ -399,7 +399,7 @@ pub const fn reset_budgets(_degraded_attempts: u32, _hide_attempts: u32) -> (u32
 
 /// `TaskbarCreated` / tray-show path: clear the caches tied to the old taskbar,
 /// reset the 45-attempt degraded budget, then run the two bounded reconcile
-/// passes C# uses so a secondary tray recreated mid-pass is caught too.
+/// passes reference uses so a secondary tray recreated mid-pass is caught too.
 pub fn reconcile_after_taskbar_created() -> bool {
     let config = {
         let mut state = runtime();
@@ -820,7 +820,7 @@ mod tests {
     }
 
     #[test]
-    fn hide_budgets_match_the_c_sharp_session() {
+    fn hide_budgets_match_the_reference_session() {
         assert_eq!(NORMAL_HIDE_MAX_ATTEMPTS, 20);
         assert_eq!(STARTUP_SETTLE_MAX_ATTEMPTS, 40);
         assert_eq!(MAX_DEGRADED_RECONCILE_ATTEMPTS, 45);

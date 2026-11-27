@@ -1,5 +1,5 @@
 # Builds OpenTaskbar as a portable, self-contained Rust EXE per architecture.
-# Builds from the root Cargo.toml; no .NET SDK or C# artifacts are involved.
+# Builds from the root Cargo.toml; no external SDK or reference artifacts are involved.
 param (
     [ValidateSet('win-x64', 'win-x86')]
     [string]$Runtime = 'win-x64',
@@ -35,7 +35,7 @@ if (-not (Test-Path -LiteralPath $built -PathType Leaf)) {
     throw "Expected Rust binary not found: $built"
 }
 
-$finalExe = Join-Path $OutputDir "OpenTaskbar-Rust-$arch.exe"
+$finalExe = Join-Path $OutputDir "OpenTaskbar-$arch.exe"
 Copy-Item -LiteralPath $built -Destination $finalExe -Force
 
 # build.rs compiled the watchdog into OUT_DIR for this exact target and embedded

@@ -676,7 +676,7 @@
   "LauncherTaskManager": "タスク マネージャー",
   "LauncherUninstall": "アンインストール",
   "ErrorUpdatePath": "アプリケーションのパスが見つかりません。",
-  "ErrorUpdateDeveloperMode": "開発環境 (dotnet run) から実行している場合、自動更新は利用できません。",
+  "ErrorUpdateDeveloperMode": "開発環境 から実行している場合、自動更新は利用できません。",
   "ErrorUpdateBinaryMissing": "ダウンロードできるアプリケーションが見つからなかったため、リリース ページを開きました。",
   "ErrorUpdateHttp": "ダウンロードに失敗しました: HTTP {0}",
   "ErrorUpdateSizeInvalid": "ダウンロードしたファイルのサイズが無効です。",

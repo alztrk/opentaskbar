@@ -1,11 +1,11 @@
 //! Core Audio (WASAPI) endpoint discovery, default-device switching and per-app sessions.
 //!
-//! C# parity: `Services/Interop/CoreAudio.cs`.
+//! reference parity: `Services/Interop/CoreAudio.cs`.
 //! - `list_devices(is_recording)` -> `Vec<(id, name)>` of active endpoints.
 //! - `set_default_device(id)` -> bool via the undocumented `PolicyConfigClient`
 //!   (`SetDefaultEndpoint` for Console/Multimedia/Communications roles).
 //! - `subscribe()` -> shared ref-counted `AudioEndpointMonitor` with an `IMMNotificationClient`
-//!   feeding `take_events()`; `AudioEndpointMonitor::acquire_shared()` mirrors the C# ref-count.
+//!   feeding `take_events()`; `AudioEndpointMonitor::acquire_shared()` mirrors the reference ref-count.
 //! - `AppAudioSessionMatcher::score` + `find_app_session` for per-app mixer targeting.
 //!
 //! NOTE for lead/WS-B: `platform::win32_ex::set_default_audio_device(id)` currently forwards to
@@ -365,10 +365,10 @@ pub fn list_devices_named(is_recording: bool) -> Vec<(String, String)> {
 // Shared monitor / ref-count
 // ---------------------------------------------------------------------------------------------
 
-/// Shared, ref-counted endpoint monitor (C# `AudioEndpointMonitor.AcquireShared`).
+/// Shared, ref-counted endpoint monitor (`AudioEndpointMonitor.AcquireShared`).
 ///
 /// The COM enumerator + notification client are registered once and kept alive for the
-/// process lifetime; the Arc handle only implements the C# ref-count semantics.
+/// process lifetime; the Arc handle only implements the reference ref-count semantics.
 #[derive(Debug)]
 pub struct AudioEndpointMonitor;
 
@@ -422,7 +422,7 @@ pub fn has_pending_events() -> bool {
 }
 
 // ---------------------------------------------------------------------------------------------
-// App session matcher (C# `AppAudioSessionMatcher`)
+// App session matcher (`AppAudioSessionMatcher`)
 // ---------------------------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -528,7 +528,7 @@ pub fn find_app_session(sessions: &[AppAudioSession], source_id: &str) -> Option
 }
 
 // ---------------------------------------------------------------------------------------------
-// Real WASAPI app sessions (C# `CoreAudio.ListAppSessions` / `AppAudioSessionMatcher`)
+// Real WASAPI app sessions (`CoreAudio.ListAppSessions` / `AppAudioSessionMatcher`)
 // ---------------------------------------------------------------------------------------------
 
 /// Stable mixer id shared with the widget/dock layers: `"<pid>:<exe-stem>"`.

@@ -73,7 +73,7 @@ impl WifiSecurity {
         self != Self::Open
     }
 
-    /// C# `WifiNetworks.Security` numeric authentication code used by the flyout
+    /// `WifiNetworks.Security` numeric authentication code used by the flyout
     /// (`WLAN_AUTH_ALGORITHM`-style values: open, WPAPSK, WPA2PSK, WPA3-SAE).
     pub fn authentication_code(self) -> u32 {
         match self {
@@ -84,7 +84,7 @@ impl WifiSecurity {
         }
     }
 
-    /// C# `WifiNetworks.Security` numeric cipher code (`none`, TKIP, AES).
+    /// `WifiNetworks.Security` numeric cipher code (`none`, TKIP, AES).
     pub fn cipher_code(self) -> u32 {
         match self {
             Self::Open => 0,

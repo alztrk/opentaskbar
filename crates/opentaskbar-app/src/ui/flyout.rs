@@ -1,11 +1,11 @@
-//! Shared C#-parity `DockFlyout` window rendered with Slate Neutral + Aurora design tokens.
+//! Shared reference parity `DockFlyout` window rendered with Slate Neutral + Aurora design tokens.
 //!
 //! Used across Background Apps (System Tray), Folder Stacks, App Groups, and all 23 Dock Widgets.
 //! Supports:
-//! - Exact C# `DockFlyout.cs` visuals (`#252B37` dark / `#FFFFFF` light, `14px` padding, 190ms ease-out)
+//! - Exact `DockFlyout.cs` visuals (`#252B37` dark / `#FFFFFF` light, `14px` padding, 190ms ease-out)
 //! - In-place live interactive updates (`show_flyout_live`) for Calendar month/year navigation,
 //!   Audio Output/Input continuous slider drag & mute, and Focus/Stopwatch/Countdown timers
-//! - Full C# widget blocks: `CalendarGrid`, `Slider`, `Sparkline`, `MetricTiles`, `BadgeRow`,
+//! - Full reference widget blocks: `CalendarGrid`, `Slider`, `Sparkline`, `MetricTiles`, `BadgeRow`,
 //!   `StatusHeader`, `Hero`, `ToggleGrid`, `ProgressBar`, `StatRow`, `ActionRow`, `AppRow`, `ButtonBar`
 //! - Mouse-wheel vertical scrolling + thin scrollbar thumb + toggle-close suppression.
 
@@ -101,7 +101,7 @@ const LIVE_TICK_MS: u32 = 1000;
 const DISMISS_POLL_MS: u32 = 45;
 const HOVER_LEAVE_GRACE: Duration = Duration::from_millis(240);
 /// A flyout that just closed must not immediately reopen from the same click that
-/// dismissed it. 350 ms covers the release side of a double-click and the C#
+/// dismissed it. 350 ms covers the release side of a double-click and the reference
 /// `DockFlyout` toggle-close window without swallowing a genuine later click.
 const REOPEN_SUPPRESSION_WINDOW: Duration = Duration::from_millis(350);
 const OPEN_ANIM_MS: f32 = 175.0;
@@ -143,7 +143,7 @@ fn flyout_anim_interval_ms() -> u32 {
     anim_interval_for_fps(FLYOUT_TARGET_FPS.load(Ordering::Relaxed))
 }
 
-/// C# `DockFlyout.RetainForExternalContextMenu`: keep the flyout alive while the target
+/// `DockFlyout.RetainForExternalContextMenu`: keep the flyout alive while the target
 /// application's own native context menu (#32768) is on screen.
 #[allow(dead_code)] // invoked by WS-D dock windows after merge
 pub fn retain_for_external_context_menu(active: bool) {
@@ -165,7 +165,7 @@ pub enum FlyoutEdge {
     Right,
 }
 
-/// Optional C# `DockFlyout` lifecycle / placement behavior. Existing constructors keep their
+/// Optional `DockFlyout` lifecycle / placement behavior. Existing constructors keep their
 /// defaults so widget call sites are unaffected.
 #[derive(Clone, Copy, Debug)]
 pub struct FlyoutOptions {
@@ -414,7 +414,7 @@ pub enum BarTone {
     Level,
 }
 
-/// Declarative content block rendered inside the shared C#-parity `DockFlyout`.
+/// Declarative content block rendered inside the shared reference parity `DockFlyout`.
 #[derive(Clone, Debug)]
 pub enum FlyoutBlock {
     /// Prominent hero metric (Clock 28px, Focus 44px, Weather 24px) with optional right metadata.
@@ -433,7 +433,7 @@ pub enum FlyoutBlock {
         subtitle: Option<String>,
         right_value: Option<String>,
     },
-    /// C# `ClockWidget.BuildCalendar`: interactive month/year nav + 7-col calendar grid.
+    /// `ClockWidget.BuildCalendar`: interactive month/year nav + 7-col calendar grid.
     CalendarGrid {
         year: i32,
         month: u32,
@@ -447,7 +447,7 @@ pub enum FlyoutBlock {
         /// Clickable day cell IDs are `day_id_base + cell_index` (`0..42`).
         day_id_base: u32,
     },
-    /// C# `AudioWidget` Output/Input mixer section: label + `%`, device pill + mute btn, draggable slider.
+    /// `AudioWidget` Output/Input mixer section: label + `%`, device pill + mute btn, draggable slider.
     AudioSliderSection {
         label: String,
         device_name: String,
@@ -457,7 +457,7 @@ pub enum FlyoutBlock {
         mute_id: u32,
         slider_id: u32,
     },
-    /// C# `SystemStatsWidget` telemetry row with 45-sample vector sparkline.
+    /// `SystemStatsWidget` telemetry row with 45-sample vector sparkline.
     Sparkline {
         label: String,
         value_text: String,
@@ -465,16 +465,16 @@ pub enum FlyoutBlock {
         samples: Vec<f32>,
         color: Rgb,
     },
-    /// C# `WeatherWidget` / `NetSpeedWidget` 2-column metric tiles (`SurfaceSelected`, `r=8`).
+    /// `WeatherWidget` / `NetSpeedWidget` 2-column metric tiles (`SurfaceSelected`, `r=8`).
     MetricTiles(Vec<(String, String)>),
-    /// C# `KeyboardLayoutWidget` selectable row: short-code badge pill + full display name.
+    /// `KeyboardLayoutWidget` selectable row: short-code badge pill + full display name.
     BadgeRow {
         id: u32,
         code: String,
         title: String,
         active: bool,
     },
-    /// C# `AiUsageWidget.SectionHeader`: title + status dot + right dashboard button.
+    /// `AiUsageWidget.SectionHeader`: title + status dot + right dashboard button.
     StatusHeader {
         title: String,
         status_label: String,
@@ -1569,7 +1569,7 @@ pub fn show_flyout_with_border(
     }
 }
 
-/// Shows an interactive flyout that updates in place on clicks and slider drags (C# WPF parity).
+/// Shows an interactive flyout that updates in place on clicks and slider drags (reference UI parity).
 #[allow(dead_code)] // kept for call sites that have no DockSettings in scope
 pub fn show_flyout_live(
     tag: &str,
@@ -1881,7 +1881,7 @@ fn external_menu_at(point: POINT) -> bool {
     is_menu
 }
 
-/// WH_MOUSE_LL observer for clicks (C# `DockFlyout` + `RetainForExternalContextMenu`).
+/// WH_MOUSE_LL observer for clicks (`DockFlyout` + `RetainForExternalContextMenu`).
 ///
 /// Deliberately minimal: it only reads the system-provided point and posts a
 /// private message to our own flyout. All `WindowFromPoint`/`GetClassNameW`
@@ -1925,7 +1925,7 @@ fn show_flyout_impl<'a>(
         return None;
     }
 
-    // C# `DockFlyout` parity: remember the window that owned focus before the
+    // `DockFlyout` parity: remember the window that owned focus before the
     // popup took it, so closing the flyout hands focus back to the dock widget.
     let previous_foreground = unsafe { GetForegroundWindow() };
 
@@ -2938,7 +2938,7 @@ impl FlyoutState<'_> {
                         );
                         y += nav_h + s(8.0);
 
-                        // Weekday headers follow the user's culture (C# `FirstDayOfWeek`),
+                        // Weekday headers follow the user's culture (`FirstDayOfWeek`),
                         // not a hard-coded Monday-first column order.
                         let cell_w = content_w / 7;
                         let first_day = telemetry::first_day_of_week();

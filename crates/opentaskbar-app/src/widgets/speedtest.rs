@@ -1,4 +1,4 @@
-//! NetSpeed multi-stream throughput test — C# `NetSpeedWidget` speed-test parity.
+//! NetSpeed multi-stream throughput test — `NetSpeedWidget` speed-test parity.
 //!
 //! Six parallel HTTP streams + a TCP connect-latency probe, with cancel / retry / restart and a
 //! per-stream result grid. All network work runs on detached worker threads behind an
@@ -16,7 +16,7 @@ use opentaskbar_core::i18n as loc;
 use crate::design;
 use crate::ui::flyout::{BarTone, FlyoutBlock, FlyoutSpec};
 
-/// C# `NetSpeedWidget.StreamCount`.
+/// `NetSpeedWidget.StreamCount`.
 pub const STREAM_COUNT: usize = 6;
 /// Measurement window per stream.
 pub const TEST_WINDOW_MS: u64 = 5_000;
@@ -24,7 +24,7 @@ const TEST_HOST: &str = "speed.cloudflare.com";
 const TEST_PORT: u16 = 80;
 const CONNECT_TIMEOUT_MS: u64 = 2_000;
 
-/// Lifecycle of a speed test, mirroring C# `NetSpeedWidget.SpeedTestState`.
+/// Lifecycle of a speed test, mirroring `NetSpeedWidget.SpeedTestState`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SpeedTestState {
     #[default]
@@ -100,7 +100,7 @@ impl SpeedTestController {
         self.runs_completed
     }
 
-    /// Starts a fresh 6-stream test (C# `StartSpeedTest`).
+    /// Starts a fresh 6-stream test (`StartSpeedTest`).
     pub fn start(&mut self) {
         self.cancel();
         let cancel = Arc::new(AtomicBool::new(false));
@@ -113,7 +113,7 @@ impl SpeedTestController {
         self.state = SpeedTestState::MeasuringPing;
     }
 
-    /// C# `CancelSpeedTest`: flips the flag; workers check it every 64 KB.
+    /// `CancelSpeedTest`: flips the flag; workers check it every 64 KB.
     pub fn cancel(&mut self) {
         if let Some(run) = self.running.take() {
             run.cancel.store(true, Ordering::Release);
@@ -126,12 +126,12 @@ impl SpeedTestController {
         }
     }
 
-    /// C# `RetrySpeedTest`: restart with the same settings.
+    /// `RetrySpeedTest`: restart with the same settings.
     pub fn retry(&mut self) {
         self.start();
     }
 
-    /// C# `RestartSpeedTest`: drop prior result counters and start clean.
+    /// `RestartSpeedTest`: drop prior result counters and start clean.
     pub fn restart(&mut self) {
         self.result = None;
         self.runs_completed = 0;
@@ -216,7 +216,7 @@ fn resolve_host(host: &str, port: u16) -> Option<std::net::SocketAddr> {
         .and_then(|mut iter| iter.next())
 }
 
-/// TCP connect latency in milliseconds (C# `NetSpeedWidget.MeasurePing`).
+/// TCP connect latency in milliseconds (`NetSpeedWidget.MeasurePing`).
 pub fn measure_ping(cancel: &AtomicBool) -> Option<u32> {
     let addr = resolve_host(TEST_HOST, TEST_PORT)?;
     let started = Instant::now();
@@ -261,7 +261,7 @@ fn download_stream(index: usize, cancel: Arc<AtomicBool>, deadline: Instant) -> 
     (total as f64 / secs) as u64
 }
 
-/// Formats throughput in C# style (`Mbit/s` above 1 Mbit, else `kbit/s`).
+/// Formats throughput in reference style (`Mbit/s` above 1 Mbit, else `kbit/s`).
 pub fn format_throughput(bps: u64) -> String {
     let mbit = bps as f64 * 8.0 / 1_000_000.0;
     if mbit >= 1.0 {
@@ -275,7 +275,7 @@ pub fn format_ping(ping_ms: Option<u32>) -> String {
     ping_ms.map_or("—".to_owned(), |ms| format!("{ms} ms"))
 }
 
-/// Builds the C# result-grid flyout (ping, aggregate, per-stream bars, retry/cancel/restart).
+/// Builds the reference result-grid flyout (ping, aggregate, per-stream bars, retry/cancel/restart).
 pub fn build_speedtest_flyout(
     state: SpeedTestState,
     result: Option<&SpeedTestResult>,

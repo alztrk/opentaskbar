@@ -4,7 +4,7 @@
 
 //! Fjord: a lightweight file manager, a per-monitor top bar and a Wi-Fi flyout.
 //!
-//! Port of the C# `FjordFilesWindow`, `FjordBarWindow`, `FjordFilesActivation`,
+//! Rust implementation of `FjordFilesWindow`, `FjordBarWindow`, `FjordFilesActivation`,
 //! `FjordFilesAvailability`, `FjordFilePreview` and `WifiNetworks` services.
 //!
 //! Wiring notes (cross-workstream contracts):
@@ -28,7 +28,7 @@ pub mod preview;
 pub mod wifi_ui;
 
 /// Settings-change / monitor-reconciliation cadence from `FjordBarHost` and
-/// `FjordFilesAvailability` (750 ms in the C# original).
+/// `FjordFilesAvailability` (750 ms in the reference original).
 pub const POLL_MS: u64 = 750;
 
 /// Named-pipe prefix. The session id is appended by `activation`.

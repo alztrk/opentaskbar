@@ -47,7 +47,7 @@ fn clamp_unit(value: f32) -> f32 {
     }
 }
 
-/// Stable session key: `"<pid>:<exe-stem>"` (C# used `pid:hwn?`, which is not stable across restarts).
+/// Stable session key: `"<pid>:<exe-stem>"` (reference used `pid:hwn?`, which is not stable across restarts).
 fn session_id(pid: u32, exe_stem: &str) -> String {
     format!("{pid}:{}", sanitize_stem(exe_stem))
 }
@@ -455,7 +455,7 @@ impl SessionRegistry {
         self.rollbacks.remove(&slider_id);
     }
 
-    /// Releases the COM session held by a slider. Idempotent (C# `Dispose` guard).
+    /// Releases the COM session held by a slider. Idempotent (`Dispose` guard).
     pub fn release(&mut self, slider_id: u32) -> bool {
         self.sessions.remove(&slider_id).is_some()
     }

@@ -1,5 +1,5 @@
 //! Flyout position journal writer with a generation counter and PID-checked
-//! restore. Mirrors C# `ShellFlyoutPositionRegistry` +
+//! restore. Mirrors `ShellFlyoutPositionRegistry` +
 //! `ShellFlyoutPositionJournal`: the dock records where Windows placed Start,
 //! Search and Control Center *before* it anchors them, and restores those
 //! positions on shutdown or hard-kill recovery.

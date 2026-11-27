@@ -1,12 +1,12 @@
 //! Typed design token values shared by the Windows accent palette, theme packs and
-//! the widget-pack resolver. Mirrors the WPF types (`Brush`, `Color`, `CornerRadius`,
-//! `Thickness`, `double`, `FontFamily`) used by C# `WidgetPack.Convert`.
+//! the widget-pack resolver. Mirrors the UI types (`Brush`, `Color`, `CornerRadius`,
+//! `Thickness`, `double`, `FontFamily`) used by `WidgetPack.Convert`.
 
 #![allow(dead_code)] // Public C5/C4 API surface; consumed by other workstreams after merge.
 
 use std::collections::BTreeMap;
 
-/// RGBA color; `a` is 255 for opaque colors. Byte order matches WPF `Color.FromArgb`.
+/// RGBA color; `a` is 255 for opaque colors. Byte order matches `Color.FromArgb`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rgba {
     pub r: u8,
@@ -24,7 +24,7 @@ impl Rgba {
         Self::new(r, g, b, 255)
     }
 
-    /// Parses WPF/CSS colour literals: `#RGB`, `#ARGB`, `#RRGGBB`, `#AARRGGBB`
+    /// Parses CSS colour literals: `#RGB`, `#ARGB`, `#RRGGBB`, `#AARRGGBB`
     /// (case-insensitive, leading `#` optional) or a named colour such as `Transparent`.
     pub fn from_hex(text: &str) -> Option<Self> {
         let value = text.trim().trim_start_matches('#');
@@ -60,7 +60,7 @@ impl Rgba {
         }
     }
 
-    /// Win32 `COLORREF` / WPF `Color` packed as `0xAARRGGBB`.
+    /// Win32 `COLORREF` / `Color` packed as `0xAARRGGBB`.
     pub const fn to_argb(self) -> u32 {
         ((self.a as u32) << 24) | ((self.r as u32) << 16) | ((self.g as u32) << 8) | self.b as u32
     }
@@ -129,7 +129,7 @@ impl Rgba {
     }
 }
 
-/// Named colours accepted by WPF `ColorConverter` (the subset used by C# themes).
+/// Named colours accepted by `ColorConverter` (the subset used by reference themes).
 pub fn named_color(text: &str) -> Option<Rgba> {
     let rgb = |r, g, b| Rgba::from_rgb(r, g, b);
     let value = match text.trim().to_ascii_lowercase().as_str() {
@@ -181,7 +181,7 @@ impl CornerRadius {
         }
     }
 
-    /// WPF-style `left,top,right,bottom` / `left,top` parsing (values are DIPs or px).
+    /// UI-style `left,top,right,bottom` / `left,top` parsing (values are DIPs or px).
     pub fn parse(text: &str) -> Option<Self> {
         let parts: Vec<f64> = text
             .split(',')
@@ -256,7 +256,7 @@ pub struct Gradient {
 }
 
 impl Gradient {
-    /// Two-stop vertical gradient, the C# default for `WidgetAccentFill` / materials.
+    /// Two-stop vertical gradient, the reference default for `WidgetAccentFill` / materials.
     pub fn vertical(start: Rgba, end: Rgba) -> Self {
         Self {
             stops: vec![
@@ -288,7 +288,7 @@ impl Gradient {
         }
     }
 
-    /// Gradient from stops and a C#/`WidgetPack.Convert` theme angle.
+    /// Gradient from stops and a reference/`WidgetPack.Convert` theme angle.
     pub fn angled(stops: Vec<GradientStop>, angle_deg: f64) -> Self {
         let (start, end) = gradient_endpoints(angle_deg);
         Self { stops, start, end }
@@ -297,7 +297,7 @@ impl Gradient {
 
 /// The one source of truth for gradient angle → endpoints conversion.
 ///
-/// Theme angle follows C# `WidgetPack.ParseBrush` / `ThemePropertyEditor.BrushToNode`:
+/// Theme angle follows `WidgetPack.ParseBrush` / `ThemePropertyEditor.BrushToNode`:
 /// `0° = bottom→top`, `90° = left→right`, `180° = top→bottom`.
 pub fn gradient_endpoints(angle_deg: f64) -> ((f64, f64), (f64, f64)) {
     let radians = angle_deg.rem_euclid(360.0).to_radians();
@@ -318,7 +318,7 @@ pub fn theme_to_picker_angle(angle_deg: f64) -> f64 {
     (angle_deg - 90.0).rem_euclid(360.0)
 }
 
-/// C# `RadialGradientBrush` (used by `IconHoverGlow` / `WidgetIsland`) data.
+/// `RadialGradientBrush` (used by `IconHoverGlow` / `WidgetIsland`) data.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RadialGradient {
     pub stops: Vec<GradientStop>,
@@ -460,7 +460,7 @@ pub enum TokenKind {
 
 impl TokenKind {
     /// Best-effort key-based inference used when a theme pack is loaded without a
-    /// WPF resource tree (Rust has no `Application.Current.Resources[key]`).
+    /// resource tree (Rust has no `Application.Current.Resources[key]`).
     pub fn for_key(key: &str) -> Self {
         if let Some(kind) = editor_token_kind(key) {
             return kind;
@@ -497,7 +497,7 @@ impl TokenKind {
     }
 }
 
-/// A key the C# theme editor (`Views/ThemePropertyEditor.cs`) or a bundled theme pack
+/// A key the reference theme editor (`Views/ThemePropertyEditor.cs`) or a bundled theme pack
 /// can legitimately override. Unknown keys must be rejected, not silently accepted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EditorToken {
@@ -505,8 +505,8 @@ pub struct EditorToken {
     pub kind: TokenKind,
 }
 
-/// Type registry: the 51 editor keys plus the advanced/pack keys C# ships in its
-/// palettes and `pack.json` manifests. This is what replaces WPF's
+/// Type registry: the 51 editor keys plus the advanced/pack keys reference ships in its
+/// palettes and `pack.json` manifests. This is what replaces the reference UI's
 /// `Application.Current.Resources[key]` type lookup on the Rust side.
 pub static EDITOR_TOKENS: &[EditorToken] = &[
     // ThemePropertyEditor sections (51 keys).
@@ -938,7 +938,7 @@ pub fn editor_token_kind(key: &str) -> Option<TokenKind> {
         .map(|token| token.kind)
 }
 
-/// Number of registered editor tokens (51 C# editor keys + advanced/pack keys).
+/// Number of registered editor tokens (51 reference editor keys + advanced/pack keys).
 pub const fn editor_token_count() -> usize {
     EDITOR_TOKENS.len()
 }
@@ -976,7 +976,7 @@ mod tests {
     }
 
     #[test]
-    fn editor_token_registry_covers_the_csharp_editor_and_pack_keys() {
+    fn editor_token_registry_covers_the_reference_editor_and_pack_keys() {
         assert!(editor_token_count() >= 45);
         assert_eq!(
             editor_token_kind("DockBackgroundMode"),
@@ -1001,7 +1001,7 @@ mod tests {
 
     #[test]
     fn gradient_angle_convention_has_one_source() {
-        // C#: 0 = bottom→top, 90 = left→right, 180 = top→bottom.
+        // reference: 0 = bottom→top, 90 = left→right, 180 = top→bottom.
         let (start, end) = gradient_endpoints(0.0);
         assert!((start.1 - 1.0).abs() < 1e-9 && (end.1 - 0.0).abs() < 1e-9);
         let (start, end) = gradient_endpoints(90.0);

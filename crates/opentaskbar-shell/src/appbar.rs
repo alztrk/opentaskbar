@@ -176,7 +176,7 @@ pub fn get_state(reason: &str) -> u32 {
 }
 
 /// True when Explorer reports the requested state (only the two supported bits
-/// are compared, matching C# `SetTaskbarState`'s `SupportedTaskbarState` mask).
+/// are compared, matching `SetTaskbarState`'s `SupportedTaskbarState` mask).
 #[must_use]
 pub const fn state_matches(requested: u32, observed: u32) -> bool {
     (observed & SUPPORTED_STATE_MASK) == (requested & SUPPORTED_STATE_MASK)
@@ -210,7 +210,7 @@ pub fn set_and_verify_state(state: u32, reason: &str) -> bool {
 
 /// Runs the two-step reservation protocol and returns the rectangle Explorer
 /// actually assigned. `pin_edge = true` pins the QUERYPOS result to the
-/// requested edge before SETPOS (C#'s `PositionAdjustment` callback).
+/// requested edge before SETPOS (the reference `PositionAdjustment` callback).
 pub fn set_position(
     hwnd: usize,
     edge: u32,

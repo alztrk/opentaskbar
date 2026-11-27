@@ -66,7 +66,7 @@ pub fn software_requested() -> bool {
     preference().is_software()
 }
 
-/// Persists the preference to `render-mode.json` (C# parity).
+/// Persists the preference to `render-mode.json` (reference parity).
 pub fn set_software(value: bool) {
     OVERRIDE.store(if value { 1 } else { 0 }, Ordering::Relaxed);
     let path = preference_path();

@@ -108,22 +108,22 @@ fn parse_watchdog_arg(arg: &str) -> Option<(u32, String)> {
     let rest = arg.strip_prefix("--watchdog=")?;
     let (pid, token) = rest.split_once(':')?;
     let pid = pid.parse::<u32>().ok()?;
-    // Both the legacy 16-hex token and C# GUID "N" (32 hex) are valid.
-    if pid == 0 || !(is_hex_token(token) || is_c_sharp_guid_token(token)) {
+    // Both the legacy 16-hex token and reference GUID "N" (32 hex) are valid.
+    if pid == 0 || !(is_hex_token(token) || is_reference_guid_token(token)) {
         return None;
     }
     Some((pid, token.to_owned()))
 }
 
 /// Hex token check shared by the Rust armer and the C watchdog parser. Accepts
-/// both the historical 16-hex token and C# `Guid.NewGuid().ToString("N")`'s
+/// both the historical 16-hex token and `Guid.NewGuid().ToString("N")`'s
 /// 32-hex token; no other character may ever reach a named-event path.
 fn is_hex_token(token: &str) -> bool {
     !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-/// True for a C# GUID "N" token (exactly 32 hex digits, e.g. `0f3a9c1122334455aabbccddeeff0011`).
-fn is_c_sharp_guid_token(token: &str) -> bool {
+/// True for a reference GUID "N" token (exactly 32 hex digits, e.g. `0f3a9c1122334455aabbccddeeff0011`).
+fn is_reference_guid_token(token: &str) -> bool {
     token.len() == 32 && is_hex_token(token)
 }
 
@@ -143,7 +143,7 @@ fn create_event(name: &str, manual_reset: bool) -> Option<EventHandle> {
 }
 
 /// Byte-exact update check. A file with the right length but different bytes is
-/// stale/corrupt and must be rewritten (C# `SequenceEqual` parity).
+/// stale/corrupt and must be rewritten (`SequenceEqual` parity).
 fn needs_watchdog_refresh(existing: Option<&[u8]>, expected: &[u8]) -> bool {
     existing != Some(expected)
 }
@@ -228,7 +228,7 @@ pub fn arm() {
         return;
     };
     let pid = std::process::id();
-    // C# `Guid.NewGuid().ToString("N")` parity: a 32-hex token. The random
+    // `Guid.NewGuid().ToString("N")` parity: a 32-hex token. The random
     // seed prevents a stale event from a recycled PID from keeping us "alive".
     let hasher = RandomState::new();
     let high = hasher.hash_one(pid);
@@ -353,15 +353,15 @@ mod tests {
             parse_watchdog_arg(&arg),
             Some((4242, "0f3a9c1122334455".to_owned()))
         );
-        // C# Guid.NewGuid().ToString("N") must be accepted too.
+        // reference Guid.NewGuid().ToString("N") must be accepted too.
         let guid = "0f3a9c1122334455aabbccddeeff0011";
-        assert!(is_c_sharp_guid_token(guid));
+        assert!(is_reference_guid_token(guid));
         assert_eq!(
             parse_watchdog_arg(&watchdog_arg(99, guid)),
             Some((99, guid.to_owned()))
         );
-        assert!(!is_c_sharp_guid_token(&guid[..31]));
-        assert!(!is_c_sharp_guid_token(&format!("{guid}0")));
+        assert!(!is_reference_guid_token(&guid[..31]));
+        assert!(!is_reference_guid_token(&format!("{guid}0")));
         // Accepts upper/lower-case hex, but nothing else.
         assert!(parse_watchdog_arg("--watchdog=1:ABCDEF").is_some());
         for bad in [

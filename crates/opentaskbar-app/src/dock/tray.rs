@@ -246,7 +246,7 @@ pub(super) fn open_pinned_app(owner_hwnd: usize, path: &str) {
     }
 }
 
-/// Middle-click on a pinned tray icon closes that app (C# `PinnedTrayStrip` orientation/middle click).
+/// Middle-click on a pinned tray icon closes that app (`PinnedTrayStrip` orientation/middle click).
 pub(super) fn close_pinned_app(owner_hwnd: usize, path: &str) {
     if let Some(app) = enumerate_background_apps()
         .into_iter()
@@ -447,7 +447,7 @@ pub(super) fn open_background_apps_flyout(
             MenuEntry::Separator,
             MenuEntry::destructive(3, MenuIcon::Power, loc::t("Terminate")),
         ];
-        // Expose the target's own `GetMenu` / `GetSystemMenu` commands (C#
+        // Expose the target's own `GetMenu` / `GetSystemMenu` commands (reference
         // `ApplicationWindowMenu`) as a submenu of this row's context menu.
         let (native_commands, native_items) =
             remap_native_menu_entries(menu::native_app_menu_entries(app.hwnd));

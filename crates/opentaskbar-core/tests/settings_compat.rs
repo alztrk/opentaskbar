@@ -1,4 +1,4 @@
-//! C# `settings.json` compatibility checks against the public core API.
+//! `settings.json` compatibility checks against the public core API.
 
 use std::fs;
 use std::path::PathBuf;
@@ -22,7 +22,7 @@ fn temp_settings(name: &str) -> (PathBuf, PathBuf) {
 }
 
 #[test]
-fn csharp_settings_file_survives_load_save_load() {
+fn reference_settings_file_survives_load_save_load() {
     let (dir, path) = temp_settings("roundtrip");
     let raw = r#"{
   "Position": "Center",
@@ -141,7 +141,7 @@ fn csharp_settings_file_survives_load_save_load() {
   "DynamicIslandVisibility": "Always",
   "DynamicIslandHideInFullscreen": true,
   "DynamicIslandWidgetOrders": null,
-  "FutureCSharpOnlySetting": {"enabled": true}
+  "FutureReferenceOnlySetting": {"enabled": true}
 }
 "#;
     fs::write(&path, raw).unwrap();
@@ -184,15 +184,15 @@ fn csharp_settings_file_survives_load_save_load() {
             .and_then(|value| value.as_u64()),
         Some(42)
     );
-    assert!(first.extra.get("FutureCSharpOnlySetting").is_some());
+    assert!(first.extra.get("FutureReferenceOnlySetting").is_some());
     assert!(first.validate().is_empty(), "{:?}", first.validate());
 
     save_to(&path, &first).unwrap();
     let second = load_from(&path);
     assert_eq!(second, first);
     assert!(
-        second.extra.get("FutureCSharpOnlySetting").is_some(),
-        "unknown C# keys must survive a save/load cycle"
+        second.extra.get("FutureReferenceOnlySetting").is_some(),
+        "unknown reference keys must survive a save/load cycle"
     );
     assert!(
         second.profiles[0]
@@ -205,10 +205,10 @@ fn csharp_settings_file_survives_load_save_load() {
 }
 
 #[test]
-fn enabling_a_widget_installs_it_and_uses_csharp_ids() {
+fn enabling_a_widget_installs_it_and_uses_reference_ids() {
     let mut settings = DockSettings::default();
 
-    // The settings page passes its snake_case catalog IDs; C# validates PascalCase IDs.
+    // The settings page passes its snake_case catalog IDs; reference validates PascalCase IDs.
     settings.set_widget_enabled("aiusage_claude", true);
     assert!(settings.is_widget_enabled("aiusage_claude"));
     assert!(settings.is_widget_enabled("AiUsageClaude"));
@@ -222,7 +222,7 @@ fn enabling_a_widget_installs_it_and_uses_csharp_ids() {
     assert_eq!(settings.enabled_widgets, ["AiUsageClaude"]);
     assert_eq!(settings.installed_widgets, ["AiUsageClaude"]);
 
-    // Turning the switch off deactivates but never uninstalls (C# keeps `InstalledWidgets`).
+    // Turning the switch off deactivates but never uninstalls (reference keeps `InstalledWidgets`).
     settings.set_widget_enabled("aiusage_claude", false);
     assert!(!settings.is_widget_enabled("aiusage_claude"));
     assert!(settings.enabled_widgets.is_empty());
@@ -360,7 +360,7 @@ fn adding_three_widgets_survives_a_reload() {
 }
 
 #[test]
-fn focus_mode_hides_widgets_like_csharp() {
+fn focus_mode_hides_widgets_like_reference() {
     let mut settings = DockSettings::default();
     settings.set_widget_enabled("weather", true);
     settings.set_widget_enabled("focus", true);
@@ -368,7 +368,7 @@ fn focus_mode_hides_widgets_like_csharp() {
     settings.focus_mode = true;
     assert!(
         !settings.is_widget_enabled("weather"),
-        "C# WidgetCoordinator deactivates widgets in Focus Mode"
+        "reference WidgetCoordinator deactivates widgets in Focus Mode"
     );
     assert!(
         settings.is_widget_enabled("focus"),
@@ -381,7 +381,7 @@ fn focus_mode_hides_widgets_like_csharp() {
 }
 
 #[test]
-fn all_new_csharp_properties_deserialize() {
+fn all_new_reference_properties_deserialize() {
     let raw = r#"{
         "PreviewsEnabled": false,
         "NotificationBadgesEnabled": false,
@@ -472,7 +472,7 @@ fn magnification_expands_dock_defaults_to_true_and_round_trips() {
 }
 
 #[test]
-fn dock_metrics_and_effective_layout_helpers_match_csharp() {
+fn dock_metrics_and_effective_layout_helpers_match_reference() {
     let compact = dock_metrics::for_size(DockSize::Compact, 1.0, 0);
     let medium = dock_metrics::for_size(DockSize::Medium, 1.0, 0);
     let large = dock_metrics::for_size(DockSize::Large, 1.0, 0);
@@ -482,7 +482,7 @@ fn dock_metrics_and_effective_layout_helpers_match_csharp() {
     assert_eq!(compact.surface_height(), 44.0);
 
     let mut settings = DockSettings::default();
-    // Auto has no saved content width: the C# minimum surface width is used.
+    // Auto has no saved content width: the reference minimum surface width is used.
     assert_eq!(
         settings.effective_width(1920.0),
         dock_metrics::MIN_DOCK_SURFACE_WIDTH
@@ -661,12 +661,12 @@ fn struct_migration_drops_retired_provider_data() {
 }
 
 #[test]
-fn shared_paths_point_at_the_csharp_folder() {
+fn shared_paths_point_at_the_reference_folder() {
     assert_eq!(paths::APP_DATA_FOLDER_NAME, "OpenTaskbar");
     assert_eq!(paths::settings_path().file_name().unwrap(), "settings.json");
     assert_eq!(
         paths::rust_log_path().file_name().unwrap(),
-        "opentaskbar-rust.log"
+        "opentaskbar.log"
     );
     assert_eq!(paths::theme_root().file_name().unwrap(), "Themes");
     assert_eq!(paths::secrets_dir().file_name().unwrap(), "secrets");
@@ -699,9 +699,9 @@ fn shared_paths_point_at_the_csharp_folder() {
 }
 
 #[test]
-fn csharp_save_preserves_rust_only_keys_across_a_rust_round_trip() {
-    // Shape of a settings.json after C# `[JsonExtensionData]` has written it back.
-    let (dir, path) = temp_settings("csharp-extension-data");
+fn reference_save_preserves_rust_only_keys_across_a_rust_round_trip() {
+    // Shape of a settings.json after `[JsonExtensionData]` has written it back.
+    let (dir, path) = temp_settings("reference-extension-data");
     let raw = r#"{
         "Widgets": ["Clock", "Media"],
         "InstalledWidgets": ["Clock", "Media"],
@@ -715,7 +715,7 @@ fn csharp_save_preserves_rust_only_keys_across_a_rust_round_trip() {
         "ShowStartButton": true,
         "DynamicIslandEnable": true,
         "DynamicIslandEnabled": true,
-        "FutureCSharpSwitch": {"on": true}
+        "FutureReferenceSwitch": {"on": true}
     }"#;
     fs::write(&path, raw).unwrap();
 
@@ -723,7 +723,7 @@ fn csharp_save_preserves_rust_only_keys_across_a_rust_round_trip() {
     assert_eq!(loaded.animation_fps, Some(45));
     assert_eq!(loaded.ui_font_family, "Segoe UI");
     assert!(loaded.extra.get("ThemeTokens").is_some());
-    assert!(loaded.extra.get("FutureCSharpSwitch").is_some());
+    assert!(loaded.extra.get("FutureReferenceSwitch").is_some());
 
     save_to(&path, &loaded).unwrap();
     let written: serde_json::Value =
@@ -738,9 +738,12 @@ fn csharp_save_preserves_rust_only_keys_across_a_rust_round_trip() {
         "ShowStartButton",
         "DynamicIslandEnable",
         "DynamicIslandEnabled",
-        "FutureCSharpSwitch",
+        "FutureReferenceSwitch",
     ] {
-        assert!(written.get(key).is_some(), "Rust dropped C# key {key}");
+        assert!(
+            written.get(key).is_some(),
+            "Rust dropped reference key {key}"
+        );
     }
     let reloaded = load_from(&path);
     assert_eq!(reloaded, loaded);
@@ -748,8 +751,8 @@ fn csharp_save_preserves_rust_only_keys_across_a_rust_round_trip() {
 }
 
 #[test]
-fn rust_save_emits_the_keys_the_csharp_loader_needs() {
-    let (dir, path) = temp_settings("rust-to-csharp");
+fn rust_save_emits_the_keys_the_reference_loader_needs() {
+    let (dir, path) = temp_settings("rust-to-reference");
     let mut settings = DockSettings::default();
     settings.set_widget_enabled("stats", true);
     settings.full_width = true;
@@ -772,7 +775,7 @@ fn rust_save_emits_the_keys_the_csharp_loader_needs() {
     assert_eq!(root["DynamicIslandEnable"], false);
     assert!(root["DynamicIslandPlacements"].get("Clock").is_some());
 
-    // The C# loader repairs and validates the same object without resetting it.
+    // The reference loader repairs and validates the same object without resetting it.
     let reloaded = load_from(&path);
     assert!(reloaded.validate().is_empty(), "{:?}", reloaded.validate());
     assert!(reloaded.full_width && reloaded.focus_mode);
@@ -873,7 +876,7 @@ fn concurrent_saves_use_unique_temporary_files_and_keep_valid_json() {
     let _ = fs::remove_dir_all(&dir);
 }
 #[test]
-fn display_care_settings_survive_csharp_load_save_load() {
+fn display_care_settings_survive_reference_load_save_load() {
     let (dir, path) = temp_settings("display-care");
     fs::write(
         &path,

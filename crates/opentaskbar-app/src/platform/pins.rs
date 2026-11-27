@@ -1,5 +1,4 @@
-//! Reads Windows taskbar pinned shortcuts (`.lnk`), mirroring OpenTaskbar C#'s
-//! `WindowsTaskbarPinImporter`: resolves `PKEY_AppUserModel_ID`,
+//! Reads Windows taskbar pinned shortcuts (`.lnk`), mirroring OpenTaskbar the reference //! `WindowsTaskbarPinImporter`: resolves `PKEY_AppUserModel_ID`,
 //! `PKEY_Link_TargetParsingPath` (`::{4234d49b-0245-4df3-b780-3893943456e1}\<AUMID>`),
 //! `IShellLinkW::GetIconLocation`, and `IShellLinkW::GetPath`.
 
@@ -225,7 +224,7 @@ fn expand_env_vars(input: &str) -> String {
 }
 
 /// Resolves a `WindowsApps\<PackageFullName>\...` executable path to a packaged app ID.
-/// Mirrors C# `ApplicationIconProvider.TryResolvePackagedAppUserModelId`.
+/// Mirrors `ApplicationIconProvider.TryResolvePackagedAppUserModelId`.
 pub fn resolve_windowsapps_aumid(exe_path: &str) -> Option<String> {
     let exe = Path::new(exe_path);
     let package_root = exe.ancestors().skip(1).find(|dir| {
@@ -274,7 +273,7 @@ fn manifest_app_id(xml: &str, relative_exe: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Windows 11 packaged pins (Explorer Taskband\Favorites, C# parity)
+// Windows 11 packaged pins (Explorer Taskband\Favorites, reference parity)
 // ---------------------------------------------------------------------------
 
 const TASKBAND_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband";
@@ -373,7 +372,7 @@ fn is_resource_reference(value: &str) -> bool {
 
 /// AUMID → readable exe + icon source. Packaged apps with ACL-protected or
 /// virtual executables fall back to `shell:AppsFolder\<AUMID>` for both launch
-/// and icon (C# `WindowsTaskbarPinImporter.TryResolvePackagedApp`).
+/// and icon (`WindowsTaskbarPinImporter.TryResolvePackagedApp`).
 pub fn resolve_packaged_app(aumid: &str) -> Option<PinnedApp> {
     let (family, app) = aumid.split_once('!')?;
     let (package, publisher) = family.rsplit_once('_')?;
@@ -484,7 +483,7 @@ pub fn load_pins() -> Vec<PinnedApp> {
                     .and_then(resolve_windowsapps_aumid)
             });
 
-            // Mirror C# ApplicationIconProvider.GetForPinnedApp priority:
+            // Mirror reference ApplicationIconProvider.GetForPinnedApp priority:
             // 1. Custom shortcut IconLocation (e.g. PWA .ico or custom resource index)
             // 2. Packaged Store app via shell:AppsFolder\<AUMID>
             // 3. Resolved target executable

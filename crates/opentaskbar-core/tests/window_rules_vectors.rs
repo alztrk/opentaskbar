@@ -1,4 +1,4 @@
-//! C# `TaskbarWindowChecks` vectors against the production `window_rules`
+//! `TaskbarWindowChecks` vectors against the production `window_rules`
 //! module (WS-2). The shell crate already ships `window_rules.rs`, but it is a
 //! separate crate with no dev-dependency path back from `opentaskbar-core`, so
 //! the executable vectors live here and a source bridge pins the production
@@ -43,7 +43,7 @@ fn is_native_taskbar(class_name: &str) -> bool {
 }
 
 #[test]
-fn csharp_taskbar_button_vectors() {
+fn reference_taskbar_button_vectors() {
     // tests/OpenTaskbar.Tests/TaskbarWindowChecks.cs, lines 18-37.
     assert!(has_taskbar_button(0, false, false));
     assert!(!has_taskbar_button(WS_EX_TOOLWINDOW, false, false));
@@ -70,7 +70,7 @@ fn csharp_taskbar_button_vectors() {
 }
 
 #[test]
-fn csharp_cloak_and_immersive_frame_vectors() {
+fn reference_cloak_and_immersive_frame_vectors() {
     // TaskbarWindowChecks.cs, lines 39-51.
     assert!(is_hidden_cloak(1));
     assert!(is_hidden_cloak(4));
@@ -86,7 +86,7 @@ fn csharp_cloak_and_immersive_frame_vectors() {
 }
 
 #[test]
-fn csharp_native_taskbar_class_vectors() {
+fn reference_native_taskbar_class_vectors() {
     // Issue #152 vectors from TaskbarWindowChecks.cs, lines 53-67.
     assert!(is_native_taskbar("Shell_TrayWnd"));
     assert!(is_native_taskbar("shell_traywnd"));
@@ -139,11 +139,11 @@ fn production_window_rule_constants_match_the_vectors() {
 }
 
 /// The live `has_taskbar_button_for_hwnd` needs a real HWND and lives in the
-/// shell crate (no core dev-dependency path), so the ten C# vectors stay in
+/// shell crate (no core dev-dependency path), so the ten reference vectors stay in
 /// the local helper while this bridge pins the shipped public entry point and
 /// the style constants it consumes.
 #[test]
-fn production_has_taskbar_button_matches_the_csharp_vectors() {
+fn production_has_taskbar_button_matches_the_reference_vectors() {
     assert!(!has_taskbar_button(WS_EX_APPWINDOW, true, true));
     common::assert_source_has(
         "crates/opentaskbar-shell/src/window_rules.rs",

@@ -1,4 +1,4 @@
-//! Embedded UI localization catalogs (14 languages, C# `LanguageCatalog` parity).
+//! Embedded UI localization catalogs (14 languages, `LanguageCatalog` parity).
 //!
 //! The JSON files live in `crates/opentaskbar-core/locales` and are compiled into
 //! the binary, so no loose resource files are needed at runtime. Lookup order
@@ -6,8 +6,8 @@
 //! two-letter language code, then `en-US`, then the key itself. Product names,
 //! keyboard shortcuts, URI schemes and OS identifiers stay untranslated.
 //!
-//! The catalogs intentionally mirror the C# `Services/Localization/Languages` files.
-//! Not every key is consumed by the Rust dock yet (theme packs, launcher, C#-only
+//! The catalogs intentionally mirror the `Services/Localization/Languages` files.
+//! Not every key is consumed by the Rust dock yet (theme packs, launcher, legacy-only
 //! dialogs, etc.); unused keys are kept for parity and for the en-US fallback chain,
 //! so they must not be pruned just because no Rust call site references them.
 
@@ -353,7 +353,7 @@ mod tests {
             "WidgetDensityCompact",
             "WidgetDensityFull",
             "AiUsageRingLabel",
-            // Rust-port feature keys (C3 prefixes).
+            // Rust workspace feature keys (C3 prefixes).
             "SpeedTestDownload",
             "SpeedTestUpload",
             "SpeedTestJitter",

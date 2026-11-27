@@ -1,4 +1,4 @@
-//! C# parity for `Services/App/WidgetPack.cs`: typed design-token overrides from
+//! reference parity for `Services/App/WidgetPack.cs`: typed design-token overrides from
 //! `widgets/pack.json`. `Tokens` apply to both themes; `Dark` / `Light` layer on top.
 
 use std::collections::BTreeMap;
@@ -125,7 +125,7 @@ impl WidgetPackManifest {
     }
 }
 
-/// Parses C#-style JSON: `//` and `/* … */` comments and trailing commas are allowed (matches
+/// Parses reference-style JSON: `//` and `/* … */` comments and trailing commas are allowed (matches
 /// `JsonSerializerOptions { ReadCommentHandling.Skip, AllowTrailingCommas = true }`).
 pub fn parse_json_lenient(text: &str) -> Result<Value, String> {
     let chars: Vec<char> = text.chars().collect();
@@ -209,7 +209,7 @@ pub fn parse_json_lenient(text: &str) -> Result<Value, String> {
 }
 
 /// C5 API: resolves typed tokens for a theme. `current` reports a token's existing type so
-/// replacements are interpreted like WPF does; unknown tokens and bad values go to `problems`.
+/// replacements are interpreted like the reference parser does; unknown tokens and bad values go to `problems`.
 pub fn resolve_widget_tokens<F>(
     manifest: &WidgetPackManifest,
     theme: AppTheme,
@@ -227,7 +227,7 @@ where
         return result;
     }
     for (key, value) in raw {
-        // C# `WidgetPack.Resolve` rejects keys the current resource tree does not know.
+        // `WidgetPack.Resolve` rejects keys the current resource tree does not know.
         // Rust's registry replaces `Application.Current.Resources[key]`; a heuristic
         // guess must never turn an unknown key into a live override.
         let Some(kind) = current(key).or_else(|| editor_token_kind(key)) else {
@@ -316,7 +316,7 @@ pub fn convert(value: &Value, kind: TokenKind) -> Option<TokenValue> {
 }
 
 /// Brushes accept a named/`#RGB`… colour, a linear gradient object, or a
-/// `{"type":"radial",…}` object (C# `RadialGradientBrush` such as `IconHoverGlow`).
+/// `{"type":"radial",…}` object (`RadialGradientBrush` such as `IconHoverGlow`).
 pub fn parse_brush(value: &Value) -> Option<TokenValue> {
     if let Value::String(text) = value {
         return Rgba::from_hex(text).map(TokenValue::Solid);

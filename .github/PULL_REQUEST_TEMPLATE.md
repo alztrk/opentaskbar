@@ -24,7 +24,7 @@
 
 <!-- Describe the tests and verification steps you ran to verify your changes. -->
 
-- [ ] Automated tests: `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings` (in `Rust-Port/`)
+- [ ] Automated tests: `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings`
 - [ ] Manual verification on Windows 10 / Windows 11
 - [ ] Multi-monitor verification (if applicable)
 - [ ] Different DPI scale factors tested (100%, 125%, 150%) (if applicable)

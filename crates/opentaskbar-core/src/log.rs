@@ -13,8 +13,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_LOG_BYTES: u64 = 512 * 1024;
-/// Rotation suffix shared with the C# build's log naming convention.
-pub const RUST_LOG_BACKUP_FILE_NAME: &str = "opentaskbar-rust.log.old";
+/// Rotation suffix shared with the reference build's log naming convention.
+pub const RUST_LOG_BACKUP_FILE_NAME: &str = "opentaskbar.log.old";
 
 static LOG_PATH: OnceLock<Mutex<PathBuf>> = OnceLock::new();
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -40,8 +40,8 @@ pub fn init(path: PathBuf) {
     let _ = LOG_PATH.set(Mutex::new(path));
 }
 
-/// Rotation destination. The file is always `opentaskbar-rust.log.old`, never
-/// the C# `log.old.txt`, even when a caller supplies a legacy log path.
+/// Rotation destination. The file is always `opentaskbar.log.old`, never
+/// the `log.old.txt`, even when a caller supplies a legacy log path.
 fn rotated_log_path(path: &Path) -> PathBuf {
     let is_rust_log = path.file_name().is_some_and(|name| {
         name.eq_ignore_ascii_case(crate::paths::RUST_LOG_FILE_NAME)
@@ -95,14 +95,14 @@ pub fn debug(message: impl AsRef<str>) {
 // ---- Structured shell telemetry -------------------------------------------------
 
 /// Monotonically increasing per-process event/broadcast sequence (never 0).
-/// Mirrors C# `ShellTelemetry.NextSequence()` so a broadcast we sent ourselves
+/// Mirrors `ShellTelemetry.NextSequence()` so a broadcast we sent ourselves
 /// can be distinguished from a real Explorer restart during log correlation.
 pub fn next_sequence() -> u64 {
     SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 /// Writes a shell event with named fields in `key=value` form.
-/// Use the `shell_event!` macro for the C#-style `EVENT name key=value` sugar.
+/// Use the `shell_event!` macro for the reference-style `EVENT name key=value` sugar.
 pub fn event(name: &str, fields: &[(&str, String)]) {
     if fields.is_empty() {
         info(format!("EVENT {name}"));
@@ -116,7 +116,7 @@ pub fn event(name: &str, fields: &[(&str, String)]) {
 }
 
 /// Logs a reconciliation/repair result with reason, success, verification and
-/// optional extra fields. Mirrors C# `ShellTelemetry.Result(...)`.
+/// optional extra fields. Mirrors `ShellTelemetry.Result(...)`.
 pub fn result(operation: &str, reason: &str, ok: bool, verified: bool, fields: &[(&str, String)]) {
     let mut all = Vec::with_capacity(fields.len() + 3);
     all.push(("reason", reason.to_owned()));
@@ -131,7 +131,7 @@ pub fn elapsed_ms(start: Instant) -> u128 {
     start.elapsed().as_millis()
 }
 
-/// Builds `EVENT name key=value` fields with the same shape as C# `ShellTelemetry`.
+/// Builds `EVENT name key=value` fields with the same shape as `ShellTelemetry`.
 #[macro_export]
 macro_rules! shell_event {
     ($name:expr $(, $key:ident = $value:expr)* $(,)?) => {{
@@ -151,7 +151,7 @@ macro_rules! shell_result {
 
 // ---- Failure reporting ----------------------------------------------------------
 
-/// Resolves a localization key the way C# `AppLog.ResolveMessage` does. The
+/// Resolves a localization key the way `AppLog.ResolveMessage` does. The
 /// locale catalog is owned by WS-H; core deliberately falls back to the key
 /// itself (and substitutes `{0}`-style arguments) so logging never depends on
 /// a UI crate or throws on a missing key.
@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn rust_log_rotation_uses_the_shared_backup_name() {
-        let log = Path::new(r"C:\Users\Test\AppData\Local\OpenTaskbar\opentaskbar-rust.log");
+        let log = Path::new(r"C:\Users\Test\AppData\Local\OpenTaskbar\opentaskbar.log");
         assert_eq!(
             rotated_log_path(log),
             log.with_file_name(RUST_LOG_BACKUP_FILE_NAME)

@@ -1,4 +1,4 @@
-//! C# telemetry/locale completeness parity. Complements `i18n_parity.rs` by
+//! reference telemetry/locale completeness parity. Complements `i18n_parity.rs` by
 //! checking that every locale can actually *render* the AI-usage, speed-test,
 //! focus and media labels emitted by the Rust widgets — a missing key would
 //! otherwise surface as a raw key name in the flyout.

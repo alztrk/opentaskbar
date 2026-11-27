@@ -1,5 +1,5 @@
 ﻿# Locale key-parity gate (WS-H / §C3).
-# Compares the 14 frozen C# reference catalogs at tests/reference/locales with
+# Compares the 14 frozen reference catalogs at tests/reference/locales with
 # the 14 embedded Rust catalogs and fails when key counts or key sets drift
 # within a family. Mirrors the Rust integration test tests/i18n_parity.rs but
 # needs no Rust toolchain, so CI can run it as a cheap preflight.
@@ -13,8 +13,8 @@ $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 $langs = @('de-DE','en-US','es-ES','fr-FR','it-IT','ja-JP','ko-KR','nl-NL','pl-PL','pt-BR','ru-RU','tr-TR','uk-UA','zh-CN')
 # Hard gate numbers after the shared-folder integration union and the removal
-# of the retired AI-provider labels: 14 frozen C# reference catalogs x 1046 keys
-# and 14 Rust catalogs x 1423 keys. The C# union keeps master's 994 baseline plus the
+# of the retired AI-provider labels: 14 frozen reference catalogs x 1046 keys
+# and 14 Rust catalogs x 1423 keys. The reference union keeps master's 994 baseline plus the
 # Dynamic Island / window-picker / Fjord / Wi-Fi / preview labels and the 17
 # OLED/display-care keys carried by both families; the five provider-specific
 # labels (two widget title/description, one group selector and two model-group
@@ -29,8 +29,8 @@ $langs = @('de-DE','en-US','es-ES','fr-FR','it-IT','ja-JP','ko-KR','nl-NL','pl-P
 $expectedLanguages = 14
 $expectedCsKeys = 1046
 $expectedRustKeys = 1423
-# The C# source tree was removed in the Rust-only cleanup; these 14 catalogs
-# are the frozen reference snapshot of the last C# release, kept for key parity.
+# The legacy source tree was removed in the Rust-only cleanup; these 14 catalogs
+# are the frozen reference snapshot of the last legacy release, kept for key parity.
 $csDir = Join-Path $RepoRoot 'tests\reference\locales'
 $rustDir = Join-Path $RepoRoot 'crates\opentaskbar-core\locales'
 
@@ -45,7 +45,7 @@ $required = @(
     'SearchNoResults','ContentAlignStart','ContentAlignCenter','ContentAlignEnd',
     'PreviewDisabledHint','FocusMinutesLabel','FocusBreakMinutesLabel','FocusSessionsLabel',
     'WidgetDensityCompact','WidgetDensityFull','AiUsageRingLabel',
-    # New Rust-port feature keys.
+    # New Rust workspace feature keys.
     'SpeedTestDownload','SpeedTestUpload','SpeedTestJitter','SpeedTestResult','SpeedTestRunning',
     'FocusBreakTitle','FocusBreakStart','FocusBreakSkip','FocusBreakCountdown','FocusBreakComplete','FocusSession',
     'RadioWifi','RadioBluetooth','RadioOn','RadioOff',
@@ -91,13 +91,13 @@ if (@($langs).Count -ne $expectedLanguages) {
 
 foreach ($lang in $langs) {
     if (@($csSets[$lang]).Count -ne $expectedCsKeys) {
-        $failures.Add("Frozen C# reference catalog $lang has $(@($csSets[$lang]).Count) keys; expected $expectedCsKeys.")
+        $failures.Add("Frozen reference catalog $lang has $(@($csSets[$lang]).Count) keys; expected $expectedCsKeys.")
     }
     if (@($rustSets[$lang]).Count -ne $expectedRustKeys) {
         $failures.Add("Rust catalog $lang has $(@($rustSets[$lang]).Count) keys; expected $expectedRustKeys.")
     }
     if ((@($csSets[$lang] | Sort-Object) -join "`n") -ne ($referenceCs -join "`n")) {
-        $failures.Add("Frozen C# reference key set differs for $lang")
+        $failures.Add("Frozen reference key set differs for $lang")
     }
     if ((@($rustSets[$lang] | Sort-Object) -join "`n") -ne ($referenceRust -join "`n")) {
         $failures.Add("Rust key set differs for $lang")
@@ -105,8 +105,8 @@ foreach ($lang in $langs) {
     foreach ($key in $required) {
         if ($rustSets[$lang] -notcontains $key) { $failures.Add("$lang missing required key $key") }
     }
-    # C# and Rust catalogs intentionally diverge: Rust carries the feature keys
-    # listed above, while the frozen C# reference catalogs keep their own legacy keys. Parity is
+    # reference and Rust catalogs intentionally diverge: Rust carries the feature keys
+    # listed above, while the frozen reference catalogs keep their own legacy keys. Parity is
     # enforced per family (exact count + identical key set) plus the $required
     # keys that the Rust UI actually consumes.
 }
@@ -117,5 +117,5 @@ if ($failures.Count -gt 0) {
 }
 
 if (-not $Quiet) {
-    Write-Host "Locale parity OK: $($langs.Count) frozen C# reference catalogs x $($referenceCs.Count) keys; $($langs.Count) Rust catalogs x $($referenceRust.Count) keys; $($required.Count) new keys present everywhere." -ForegroundColor Green
+    Write-Host "Locale parity OK: $($langs.Count) frozen reference catalogs x $($referenceCs.Count) keys; $($langs.Count) Rust catalogs x $($referenceRust.Count) keys; $($required.Count) new keys present everywhere." -ForegroundColor Green
 }

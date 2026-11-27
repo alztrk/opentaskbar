@@ -24,7 +24,7 @@ fn single_instance_mutex_allows_one_process_and_releases_on_drop() {
     use opentaskbar_core::single_instance::{MUTEX_NAME, SingleInstance};
 
     assert_eq!(
-        MUTEX_NAME, r"Local\OpenTaskBar-Rust.SingleInstance",
+        MUTEX_NAME, r"Local\OpenTaskbar.SingleInstance",
         "mutex name is a cross-process contract"
     );
     let nanos = std::time::SystemTime::now()

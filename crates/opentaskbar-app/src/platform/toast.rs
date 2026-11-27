@@ -1,4 +1,4 @@
-//! Native Windows toast notifications for update availability (C# `NotificationService` parity).
+//! Native Windows toast notifications for update availability (`NotificationService` parity).
 //!
 //! Registers the `OpenTaskbar` AppUserModelId under HKCU so unpackaged builds can show
 //! Action Center notifications, then renders a `ToastGeneric` XML template. The action
@@ -194,7 +194,7 @@ fn lock() -> std::sync::MutexGuard<'static, ToastStateStore> {
     store().lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Creates the C# toast XML (`action=update` launch argument for update toasts).
+/// Creates the reference toast XML (`action=update` launch argument for update toasts).
 pub fn build_toast_xml(
     kind: ToastKind,
     title: &str,

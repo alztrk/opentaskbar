@@ -1,4 +1,4 @@
-//! C# `WirelessBatteryChecks` / `BluetoothBatteryChecks` parity.
+//! `WirelessBatteryChecks` / `BluetoothBatteryChecks` parity.
 //!
 //! Each vendor parser below is a reference implementation of its report format,
 //! tested with valid and malformed payloads. Bridge tests compare the VID

@@ -1,4 +1,4 @@
-//! Per-session single-instance activation for `--files <path>` (C#
+//! Per-session single-instance activation for `--files <path>` (reference
 //! `FjordFilesActivation` + `FjordFilesAvailability`).
 //!
 //! A named pipe `OpenTaskbar.FjordFiles.<SessionId>` routes the request to the
@@ -20,11 +20,11 @@ use opentaskbar_core::settings::DockSettings;
 use super::files::{self, COMPUTER_LOCATION};
 
 // @pure-start
-/// 128 KiB, identical to the C# `MaximumPathBytes`.
+/// 128 KiB, identical to the `MaximumPathBytes`.
 pub const MAX_PATH_BYTES: usize = 128 * 1024;
-/// Canonical C# key (the Settings UI writes a JSON **bool**, not an int).
+/// Canonical reference key (the Settings UI writes a JSON **bool**, not an int).
 pub const KEY_FILES_ENABLED: &str = "FjordFilesEnabled";
-/// C# `FjordBarVisible` is also a JSON bool written by the in-app Settings UI.
+/// `FjordBarVisible` is also a JSON bool written by the in-app Settings UI.
 pub const KEY_BAR_VISIBLE: &str = "FjordBarVisible";
 const LEGACY_SETTINGS_KEYS: [&str; 3] = [
     KEY_FILES_ENABLED,
@@ -33,7 +33,7 @@ const LEGACY_SETTINGS_KEYS: [&str; 3] = [
 ];
 const BAR_SETTINGS_KEYS: [&str; 2] = [KEY_BAR_VISIBLE, "fjord_bar_visible"];
 
-/// Bool-aware reader for `settings.extra`: C# writes `true` / `false`, while the
+/// Bool-aware reader for `settings.extra`: reference writes `true` / `false`, while the
 /// legacy Rust settings UI wrote `1` / `0`. Both (and common string spellings)
 /// must resolve to the same value so a saved bool is never mistaken for "off".
 fn coerce_bool(value: &serde_json::Value) -> Option<bool> {
@@ -111,7 +111,7 @@ pub fn decode_frame(frame: &[u8]) -> Result<Option<String>, FrameError> {
         .map_err(|_| FrameError::InvalidUtf8)
 }
 
-/// Resolves a shortcut target without touching the filesystem (C#
+/// Resolves a shortcut target without touching the filesystem (reference
 /// `GetExplorerFallbackLocation` before its `Directory.Exists` check).
 pub fn resolve_fallback_location(path: Option<&str>) -> Option<String> {
     let input = path?.trim().trim_matches('"');
@@ -130,7 +130,7 @@ pub fn resolve_fallback_location(path: Option<&str>) -> Option<String> {
     Path::new(&resolved).is_absolute().then_some(resolved)
 }
 
-/// Explorer argument quoting: drive roots and This PC stay unquoted (C# parity).
+/// Explorer argument quoting: drive roots and This PC stay unquoted (reference parity).
 pub fn format_explorer_argument(location: &str) -> String {
     let is_root = location.len() == 3
         && location.as_bytes().get(1) == Some(&b':')
@@ -759,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn dock_settings_reads_csharp_bool_flags() {
+    fn dock_settings_reads_reference_bool_flags() {
         let mut settings = DockSettings::default();
         assert!(!files_enabled(&settings));
         assert!(!bar_visible(&settings));

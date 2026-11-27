@@ -1,6 +1,6 @@
 //! Sistem tepsisi keşfi, sabit pin kimliği ve `TaskbarCreated` yayını.
 //!
-//! C# referansları: `TrayHost.cs`, `TrayIconSource.cs`, `TrayIcons.cs`,
+//! Başvurular: `TrayHost.cs`, `TrayIconSource.cs`, `TrayIcons.cs`,
 //! `TrayPinIdentity.cs`.
 //!
 //! Tamamlanan kısım: `HKCU\Control Panel\NotifyIconSettings` altındaki ikon
@@ -10,7 +10,7 @@
 //! (GUID, path, UID) bazında tekrar ayıklamak ve sabit pin anahtarı üretmek.
 //!
 //! TODO (bilinçli olarak güvenli no-op): gerçek `Shell_NotifyIcon` host'u.
-//! C# tarafı ManagedShell ile görünmez/topmost `Shell_TrayWnd` penceresi
+//! referans tarafı ManagedShell ile görünmez/topmost `Shell_TrayWnd` penceresi
 //! açıp bildirim ikonu mesajlarını yakalar, UIPI izinlerini kontrol edip
 //! tıklamaları sahiplerine iletir ve ABM paylaşımlı bellek çağrılarını
 //! Explorer'a yönlendirir. Rust tarafında bu, ayrı bir Win32 mesaj pompası
@@ -293,7 +293,7 @@ fn normalize_guid(raw: &str) -> Option<String> {
 
 /// Bir kayıtlı pin anahtarını üretir: GUID varsa `guid:<D>`, yoksa `path:<küçük yol>`.
 ///
-/// C# `TrayPinIdentity.KeyFor` path tabanlı anahtara `|uid` ekler; burada
+/// `TrayPinIdentity.KeyFor` path tabanlı anahtara `|uid` ekler; burada
 /// istenen biçim korunur ve UID yalnızca `matches_pin()` içinde eski
 /// `path:<yol>|<uid>` / `path:<yol>|*` anahtarlarıyla karşılaştırmada kullanılır.
 pub fn pin_key(guid: Option<&str>, path: Option<&str>, uid: Option<u32>) -> String {
@@ -311,7 +311,7 @@ pub fn pin_key(guid: Option<&str>, path: Option<&str>, uid: Option<u32>) -> Stri
 /// Kayıtlı bir pin anahtarının bu ikona ait olup olmadığını söyler.
 ///
 /// GUID'li bir ikon, registry fallback'inden gelen path anahtarıyla da eşleşir
-/// (C# `TrayPinIdentity.Matches` davranışı); eski UID'li anahtarlar desteklenir.
+/// (`TrayPinIdentity.Matches` davranışı); eski UID'li anahtarlar desteklenir.
 pub fn matches_pin(info: &TrayIconInfo, key: &str) -> bool {
     let key = key.trim();
     if key.is_empty() {
@@ -370,7 +370,7 @@ fn clean_title(raw: Option<&str>, path: &str) -> String {
 /// `NotifyIconSettings` kayıtlarından çalışan/çalışmayan tüm arka plan ikonlarını okur.
 ///
 /// Canlı `Shell_NotifyIcon` host'u olmadığı için ikonları çalışan süreçlerle
-/// eşleştirme (C# `TrayIcons.RunningApps`) bu sürümde yoktur; kayıt defteri
+/// eşleştirme (`TrayIcons.RunningApps`) bu sürümde yoktur; kayıt defteri
 /// anlık görüntüsü döndürülür. Tekrarlar (GUID, küçük yol, UID) üzerinden ayıklanır.
 pub fn enumerate_tray_icons() -> Vec<TrayIconInfo> {
     let Some(root) = open_key(SETTINGS_KEY) else {
@@ -459,7 +459,7 @@ fn next_sequence() -> i64 {
     NEXT_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-/// Tüm pencerelere `TaskbarCreated` yayınlar (C# `TrayHost.BroadcastTaskbarCreated`).
+/// Tüm pencerelere `TaskbarCreated` yayınlar (`TrayHost.BroadcastTaskbarCreated`).
 ///
 /// `wParam = 1` kendi yayınımızı, `lParam` içerilen sıra numarasını taşır;
 /// `is_own_broadcast()` bu sıra ile kendi yayınımızı ayırt eder. İletim

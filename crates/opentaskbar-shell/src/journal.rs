@@ -2,14 +2,14 @@
 //! Uses `%LOCALAPPDATA%\OpenTaskbar\taskbar-state.txt` so the native C
 //! `OpenTaskbarWatchdog.exe` reads the exact same file on crash/kill recovery.
 //!
-//! Wire format is C# `TaskbarReplacementSession.WriteJournal` parity: a single
+//! Wire format is `TaskbarReplacementSession.WriteJournal` parity: a single
 //! decimal number with **no trailing newline**, containing only the two
 //! supported AppBar state bits (`ABS_AUTOHIDE | ABS_ALWAYSONTOP`).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// `ABS_AUTOHIDE | ABS_ALWAYSONTOP` — C# `SupportedTaskbarState`.
+/// `ABS_AUTOHIDE | ABS_ALWAYSONTOP` — `SupportedTaskbarState`.
 pub const SUPPORTED_STATE_MASK: u32 = 0x03;
 /// A missing/damaged journal must restore a *visible* taskbar, never a guessed hidden state.
 pub const DEFAULT_STATE: u32 = 0;
@@ -22,7 +22,7 @@ pub fn has_pending() -> bool {
     journal_path().exists()
 }
 
-/// Parses the C# wire form. Anything outside the two supported bits is invalid,
+/// Parses the reference wire form. Anything outside the two supported bits is invalid,
 /// exactly like `TaskbarReplacementSession.ParseJournal` (`state & ~0x03 != 0`).
 #[must_use]
 pub fn parse_state(text: &str) -> Option<u32> {
@@ -39,7 +39,7 @@ fn write_state_to(path: &Path, state: u32) -> std::io::Result<()> {
         fs::create_dir_all(parent)?;
     }
     let tmp = path.with_extension("txt.tmp");
-    // No trailing newline: C# `File.WriteAllText(state.ToString(InvariantCulture))`.
+    // No trailing newline: `File.WriteAllText(state.ToString(InvariantCulture))`.
     fs::write(&tmp, format!("{}", state & SUPPORTED_STATE_MASK))?;
     match fs::rename(&tmp, path) {
         Ok(()) => Ok(()),
@@ -69,7 +69,7 @@ pub fn read_state_valid() -> Option<u32> {
     read_state()
 }
 
-/// C# `ForceRestore` stale-journal rule: when the taskbar is already visible
+/// `ForceRestore` stale-journal rule: when the taskbar is already visible
 /// with a *different* state, the journal belongs to a previous session and
 /// must be ignored instead of overwriting the user's current state.
 #[must_use]
@@ -113,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn journal_uses_the_shared_csharp_path() {
+    fn journal_uses_the_shared_reference_path() {
         assert_eq!(
             journal_path(),
             opentaskbar_core::paths::journal_path("taskbar-state.txt")
@@ -130,7 +130,7 @@ mod tests {
         assert_eq!(parse_state("0"), Some(0));
         assert_eq!(parse_state(" 3 "), Some(3));
         assert_eq!(parse_state("2"), Some(2));
-        // Bits outside ABS_AUTOHIDE | ABS_ALWAYSONTOP are invalid (C# ParseJournal).
+        // Bits outside ABS_AUTOHIDE | ABS_ALWAYSONTOP are invalid (reference ParseJournal).
         for bad in [
             "4",
             "0x2",

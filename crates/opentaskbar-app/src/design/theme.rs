@@ -1,4 +1,4 @@
-//! C# parity for `Services/Settings/ThemeManager.cs`.
+//! reference parity for `Services/Settings/ThemeManager.cs`.
 //!
 //! Owns four independently styled surfaces (dock / menu / widget / settings). Override layers
 //! are applied in order **base palette < Windows accent < theme pack**, so an explicitly selected
@@ -210,7 +210,7 @@ impl ThemeState {
             .unwrap_or_else(|| self.brush(key))
     }
 
-    /// Every C# editor token, resolved through the real layer stack. This is the
+    /// Every reference editor token, resolved through the real layer stack. This is the
     /// snapshot handed to GPUI/DComp consumers via `ThemeManager::materials`.
     fn editor_tokens(&self) -> TokenMap {
         super::tokens::EDITOR_TOKENS
@@ -514,14 +514,14 @@ fn default_palette(dark: bool) -> TokenMap {
             Rgba::from_rgb(p.elevated.0, p.elevated.1, p.elevated.2),
         )),
     );
-    add_csharp_editor_defaults(&mut map, dark);
+    add_reference_editor_defaults(&mut map, dark);
     map
 }
 
-/// Seeds every C# editor token from `Design/Palettes/{Dark,Light}.xaml` and
+/// Seeds every reference editor token from `Design/Palettes/{Dark,Light}.xaml` and
 /// `Design/Theme.xaml` so `ThemeManager::resolve()` always has a typed value,
 /// even before a pack or the theme editor overrides it.
-fn add_csharp_editor_defaults(map: &mut TokenMap, dark: bool) {
+fn add_reference_editor_defaults(map: &mut TokenMap, dark: bool) {
     let solid = |map: &mut TokenMap, key: &str, hex: &str| {
         if let Some(color) = Rgba::from_hex(hex) {
             map.entry(key.to_owned())
@@ -644,7 +644,7 @@ fn add_csharp_editor_defaults(map: &mut TokenMap, dark: bool) {
     add_editor_remainder_defaults(map, dark);
 }
 
-/// Defaults for the advanced keys exposed in the C# editor's "Advanced" tab.
+/// Defaults for the advanced keys exposed in the reference editor's "Advanced" tab.
 fn add_editor_remainder_defaults(map: &mut TokenMap, dark: bool) {
     let solid = |map: &mut TokenMap, key: &str, hex: &str| {
         if let Some(color) = Rgba::from_hex(hex) {
@@ -1020,7 +1020,7 @@ impl ThemeManager {
         Ok(())
     }
 
-    /// Settings window opacity (clamped to 0.6..1 in C# `SetSettingsOpacity`).
+    /// Settings window opacity (clamped to 0.6..1 in `SetSettingsOpacity`).
     pub fn set_settings_opacity(opacity: f64) -> Result<(), &'static str> {
         if !opacity.is_finite() || !(0.6..=1.0).contains(&opacity) {
             return Err("settings opacity out of range");
@@ -1067,7 +1067,7 @@ impl ThemeManager {
         lock().generated.get(&kind).cloned().unwrap_or_default()
     }
 
-    /// Concentric radius value for a C# radius key (`DockRadius`, `PopupRadius`, …).
+    /// Concentric radius value for a reference radius key (`DockRadius`, `PopupRadius`, …).
     pub fn radius(key: &str) -> Option<i32> {
         lock().radii.value(key)
     }
@@ -1117,7 +1117,7 @@ pub fn apply_token_overrides(values: TokenMap) {
     ThemeManager::notify_all();
 }
 
-/// Production bridge for the settings UI / theme packs: pushes resolved C# tokens
+/// Production bridge for the settings UI / theme packs: pushes resolved reference tokens
 /// into the **real** palette (not a preview swatch) and rebuilds every surface.
 /// Accepts an owned map or a borrow of one.
 pub fn apply_pack_tokens_to_palette(tokens: impl Borrow<TokenMap>) {
@@ -1151,7 +1151,7 @@ pub fn token_overrides_from_json(map: &serde_json::Map<String, Value>) -> TokenM
     let mut out = TokenMap::new();
     for (key, value) in map {
         // Unknown keys are ignored (never smuggled into the live palette with a
-        // guessed type), matching C# `WidgetPack.Resolve`'s "Unknown token" rule.
+        // guessed type), matching `WidgetPack.Resolve`'s "Unknown token" rule.
         let Some(kind) = editor_token_kind(key) else {
             continue;
         };
@@ -1271,7 +1271,7 @@ fn style_from_settings(
     style
 }
 
-/// Helper for consumers that need to convert a token to the C#-style mode name.
+/// Helper for consumers that need to convert a token to the reference-style mode name.
 pub fn mode_name(value: &TokenValue) -> Option<&str> {
     match value {
         TokenValue::Mode(mode) => Some(mode),
@@ -1279,7 +1279,7 @@ pub fn mode_name(value: &TokenValue) -> Option<&str> {
     }
 }
 
-/// Parses a `#RRGGBB` / `#AARRGGBB` user border color with the same rules as C#.
+/// Parses a `#RRGGBB` / `#AARRGGBB` user border color with the same rules as reference.
 pub fn parse_border_color(text: &str) -> Option<Rgba> {
     Rgba::from_hex(text)
 }
