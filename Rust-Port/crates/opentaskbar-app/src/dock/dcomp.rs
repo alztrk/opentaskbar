@@ -3424,6 +3424,7 @@ impl DcompEngine {
     /// Includes a subtle vertical depth gradient and a top-edge specular inner highlight.
     /// `flat` paints `SurfaceBackground::TrueBlack`: opaque black with no gradient sheen,
     /// no rim highlight and no border. Existing glass/solid callers pass `false`.
+    #[allow(clippy::too_many_arguments)]
     pub fn create_pill_nodes(
         &self,
         radius_px: f32,
