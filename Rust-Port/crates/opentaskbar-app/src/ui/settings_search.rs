@@ -126,6 +126,30 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             &dock_layout,
             "fill screen edge to edge width",
         ),
+        SettingsSearchEntry::new(
+            SettingsPage::Dock,
+            "ContentAlignment",
+            &dock_layout,
+            "content align start center end icons",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Dock,
+            "DockWidthMode",
+            &dock_layout,
+            "width mode pixels percent fill auto",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Dock,
+            "DockHeightMode",
+            &dock_layout,
+            "height mode pixels percent fill auto",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Dock,
+            "DockTopGap",
+            &dock_layout,
+            "top gap pixels percent margin",
+        ),
         // Dock — behavior & displays
         SettingsSearchEntry::new(
             SettingsPage::Dock,
@@ -156,6 +180,18 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             "CurrentDesktopOnly",
             &dock_behavior,
             "virtual desktop current only",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Dock,
+            "PreviewsEnabled",
+            &dock_behavior,
+            "hover thumbnail preview disabled hint",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Dock,
+            "WheelVolumeEnabled",
+            &dock_behavior,
+            "mouse wheel over dock change volume",
         ),
         // Dock — interactions
         SettingsSearchEntry::new(
@@ -291,6 +327,39 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             "wireless bluetooth battery low alert threshold percent",
             "WirelessBatteryLowThreshold",
         ),
+        SettingsSearchEntry::widget_setting(
+            "focus",
+            "FocusMinutesLabel",
+            &loc::t("WidgetFocus"),
+            "pomodoro focus minutes duration",
+            "FocusMinutes",
+        ),
+        SettingsSearchEntry::widget_setting(
+            "focus",
+            "FocusBreakMinutesLabel",
+            &loc::t("WidgetFocus"),
+            "pomodoro break minutes rest",
+            "FocusBreakMinutes",
+        ),
+        SettingsSearchEntry::widget_setting(
+            "focus",
+            "FocusSessionsLabel",
+            &loc::t("WidgetFocus"),
+            "pomodoro sessions count rounds",
+            "FocusSessions",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Widgets,
+            "AiUsageRingLabel",
+            &loc::t("Widgets"),
+            "ai usage ring quota highest session weekly",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Widgets,
+            "WidgetDensityCompact",
+            &loc::t("WidgetDensity"),
+            "density override per widget shrink priority compact full",
+        ),
         // Themes
         SettingsSearchEntry::new(
             SettingsPage::Themes,
@@ -337,6 +406,12 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
         ),
         SettingsSearchEntry::new(
             SettingsPage::Themes,
+            "MagnificationExpandsDock",
+            &loc::t("Animations"),
+            "magnification expands dock grow widen cursor",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Themes,
             "AnimationFps",
             &loc::t("Animations"),
             "fps frame rate hz refresh animations",
@@ -380,6 +455,24 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             "ThemeBrushPicker",
         ),
         // Preferences
+        SettingsSearchEntry::new(
+            SettingsPage::Preferences,
+            "WindowPickerTitle",
+            &loc::t("SectionSystem"),
+            "window picker switch previous next page",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Preferences,
+            "FjordFiles",
+            &loc::t("SectionSystem"),
+            "fjord files explorer open panel",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Preferences,
+            "FjordBarShow",
+            &loc::t("SectionSystem"),
+            "fjord bar show hide toolbar",
+        ),
         SettingsSearchEntry::new(
             SettingsPage::Preferences,
             "Language",
@@ -607,6 +700,34 @@ mod tests {
         assert_eq!(search(&entries, "ÖLÇEKLEME").len(), 1);
         assert_eq!(search(&entries, "istanbul").len(), 1);
     }
+
+    #[test]
+    fn new_runtime_rows_are_searchable() {
+        let catalog = super::catalog();
+        for row_id in [
+            "ContentAlignment",
+            "DockWidthMode",
+            "DockHeightMode",
+            "DockTopGap",
+            "PreviewsEnabled",
+            "WheelVolumeEnabled",
+            "MagnificationExpandsDock",
+            "FocusMinutes",
+            "FocusBreakMinutes",
+            "FocusSessions",
+            "AiUsageRingLabel",
+            "WindowPickerTitle",
+            "FjordFiles",
+            "FjordBarShow",
+        ] {
+            assert!(
+                catalog.iter().any(|entry| entry.row_id == row_id),
+                "missing search entry {row_id}"
+            );
+        }
+        let needle = concat!("antig", "ravity");
+        assert!(!include_str!("settings_search.rs").to_ascii_lowercase().contains(needle));
+    }
 }
 
 // --- Dynamic search catalogue (C# SettingsWindow.Search.cs parity) ---
@@ -712,6 +833,13 @@ pub const SETTINGS_ROWS: &[RowDef] = &[
     (
         "Dock",
         "Layout & Dimensions",
+        "Content Alignment",
+        "ContentAlignment",
+        &["ContentAlignStart", "ContentAlignCenter", "ContentAlignEnd"],
+    ),
+    (
+        "Dock",
+        "Layout & Dimensions",
         "Reset Width",
         "DockCustomWidthDips",
         &["auto", "width"],
@@ -765,6 +893,20 @@ pub const SETTINGS_ROWS: &[RowDef] = &[
         "Wheel Volume",
         "WheelVolumeEnabled",
         &["mouse wheel", "audio"],
+    ),
+    (
+        "Dock",
+        "Behavior & Displays",
+        "Previews Enabled",
+        "PreviewsEnabled",
+        &["PreviewDisabledHint", "hover", "thumbnail"],
+    ),
+    (
+        "Themes",
+        "Motion",
+        "Magnification Expands Dock",
+        "MagnificationExpandsDock",
+        &["MagnificationExpandsDockDescription", "fisheye", "grow"],
     ),
     // Dock — Utilities
     (
@@ -963,7 +1105,49 @@ pub const SETTINGS_ROWS: &[RowDef] = &[
         "Widgets",
         "AI Usage Ring",
         "AiUsageRing",
-        &["quota", "providers"],
+        &["quota", "providers", "AiUsageRingLabel"],
+    ),
+    (
+        "Widgets",
+        "Widgets",
+        "Show Media",
+        "ShowMedia",
+        &["music", "player"],
+    ),
+    (
+        "Widgets",
+        "Widget Density",
+        "Density Override",
+        "WidgetDensityOverride",
+        &["WidgetDensityCompact", "WidgetDensityFull", "per widget"],
+    ),
+    (
+        "Widgets",
+        "Widget Density",
+        "Shrink Priority",
+        "ShrinkPriority",
+        &["compact", "overflow"],
+    ),
+    (
+        "Preferences",
+        "System",
+        "Window Picker",
+        "WindowPickerEnabled",
+        &["WindowPickerTitle", "WindowPickerPrevious", "WindowPickerNext"],
+    ),
+    (
+        "Preferences",
+        "System",
+        "Fjord Files",
+        "FjordFilesEnabled",
+        &["FjordFilesOpen", "explorer"],
+    ),
+    (
+        "Preferences",
+        "System",
+        "Fjord Bar",
+        "FjordBarVisible",
+        &["FjordBarShow", "FjordBarHide"],
     ),
     // Preferences
     (
@@ -1063,7 +1247,7 @@ pub fn widget_has_settings(id: &str) -> bool {
             | "focus"
             | "countdown"
             | "media"
-    ) || id.starts_with("aiusage_")
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -1194,8 +1378,7 @@ mod dynamic_tests {
             .filter_map(|e| e.widget_id)
             .collect();
         assert!(ids.contains(&"weather"));
-        // WS-C adds `aiusage_antigravity` to `ALL_WIDGETS`; until that merge lands, accept any
-        // AI-usage panel so the catalogue stays in sync with the live widget list.
+        // The AI-usage panel group stays in sync with the live widget list.
         assert!(ids.iter().any(|id| id.starts_with("aiusage_")));
         assert!(ids.contains(&"stacks"));
         assert!(ids.len() >= widgets_len());
