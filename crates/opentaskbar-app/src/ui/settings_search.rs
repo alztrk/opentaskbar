@@ -194,6 +194,19 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
             "mouse wheel over dock change volume",
         ),
         // Dock — interactions
+        // These row_ids must stay identical to the `target_row` ids in `ui/settings.rs`.
+        SettingsSearchEntry::new(
+            SettingsPage::Dock,
+            "ShowSearchButton",
+            &loc::t("SectionInteractions"),
+            "search button show hide ara gizle",
+        ),
+        SettingsSearchEntry::new(
+            SettingsPage::Dock,
+            "ShowTaskViewButton",
+            &loc::t("SectionInteractions"),
+            "task view virtual desktop gizle gorev gorunumu",
+        ),
         SettingsSearchEntry::new(
             SettingsPage::Dock,
             "TrayApps",
@@ -618,6 +631,10 @@ fn normalize(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn hit_ids<'a>(entries: &[&'a SettingsSearchEntry]) -> Vec<&'a str> {
+        entries.iter().map(|entry| entry.row_id.as_str()).collect()
+    }
+
     fn fixture() -> Vec<SettingsSearchEntry> {
         vec![
             SettingsSearchEntry::new(
@@ -729,12 +746,36 @@ mod tests {
             "FocusSessions",
             "AiUsageRingLabel",
             "WindowPickerTitle",
+            "ShowSearchButton",
+            "ShowTaskViewButton",
         ] {
             assert!(
                 catalog.iter().any(|entry| entry.row_id == row_id),
                 "missing search entry {row_id}"
             );
         }
+        let hits = search(&catalog, "ara");
+        assert!(
+            hits.iter().any(|entry| entry.row_id == "ShowSearchButton"),
+            "'ara' must find the search-button hide setting: {:?}",
+            hit_ids(&hits)
+        );
+        let hits = search(&catalog, "gizle");
+        assert!(
+            hits.iter().any(|entry| entry.row_id == "ShowSearchButton")
+                && hits
+                    .iter()
+                    .any(|entry| entry.row_id == "ShowTaskViewButton"),
+            "'gizle' must find both hide settings: {:?}",
+            hit_ids(&hits)
+        );
+        let hits = search(&catalog, "task view");
+        assert!(
+            hits.iter()
+                .any(|entry| entry.row_id == "ShowTaskViewButton"),
+            "'task view' must find the task-view-button hide setting: {:?}",
+            hit_ids(&hits)
+        );
         let needle = concat!("antig", "ravity");
         assert!(
             !include_str!("settings_search.rs")
