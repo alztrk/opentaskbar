@@ -668,6 +668,16 @@ pub fn delete_theme(root: &Path, id: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn theme_root_is_the_shared_uppercase_themes_folder() {
+        assert_eq!(root(), opentaskbar_core::paths::theme_root());
+        assert_eq!(root().file_name().unwrap(), "Themes");
+        assert_eq!(
+            root().parent(),
+            Some(opentaskbar_core::paths::shared_app_data_dir().as_path())
+        );
+    }
+
     struct TempDir(PathBuf);
 
     impl TempDir {
@@ -1032,12 +1042,9 @@ impl ThemePack {
     }
 }
 
-/// User theme folder (`%LOCALAPPDATA%\OpenTaskbar\Themes`).
+/// User theme folder (`%LOCALAPPDATA%\OpenTaskbar\Themes`, uppercase T).
 pub fn root() -> PathBuf {
-    let local = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("C:\\Users\\Default\\AppData\\Local"));
-    local.join("OpenTaskbar").join("Themes")
+    opentaskbar_core::paths::theme_root()
 }
 
 /// Copies bundled themes into the user themes folder on first launch. Returns the number of

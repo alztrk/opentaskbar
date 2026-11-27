@@ -216,13 +216,9 @@ pub fn read_kind_records_from(path: &Path) -> Vec<FlyoutKindRecord> {
         .collect()
 }
 
-/// Journal dosyasının yolu (`LOCALAPPDATA` yoksa geçici dizin).
+/// Journal dosyasının yolu — C# ile aynı ortak klasör.
 pub fn journal_path() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("OpenTaskbar")
-        .join("flyout-positions.txt")
+    opentaskbar_core::paths::journal_path("flyout-positions.txt")
 }
 
 /// Shared atomic-write temp path (`flyout-positions.txt.tmp`). Both the
@@ -454,6 +450,22 @@ mod tests {
             "ot-flyout-journal-{}-{tag}-{id}.txt",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn journal_and_tmp_paths_match_the_shared_csharp_contract() {
+        assert_eq!(
+            journal_path(),
+            opentaskbar_core::paths::journal_path("flyout-positions.txt")
+        );
+        assert_eq!(journal_path().file_name().unwrap(), "flyout-positions.txt");
+        assert_eq!(
+            journal_path().parent(),
+            Some(opentaskbar_core::paths::shared_app_data_dir().as_path())
+        );
+        let tmp = tmp_path(&journal_path());
+        assert_eq!(tmp.file_name().unwrap(), "flyout-positions.txt.tmp");
+        assert_eq!(tmp.parent(), journal_path().parent());
     }
 
     #[test]

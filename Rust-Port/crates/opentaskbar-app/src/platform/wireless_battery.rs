@@ -92,6 +92,75 @@ impl WirelessReading {
     }
 }
 
+/// Reads either this port's snake_case cache key or the C# PascalCase
+/// `WirelessDeviceReading` property of the same name.
+fn cache_field<'a>(
+    value: &'a serde_json::Value,
+    snake: &str,
+    pascal: &str,
+) -> Option<&'a serde_json::Value> {
+    value.get(snake).or_else(|| value.get(pascal))
+}
+
+/// Days from 1970-01-01 (Howard Hinnant's civil-from-days inverse).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = year - i64::from(month <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+/// Parses the `DateTimeOffset` text C# writes for `SampledAt` into Unix seconds.
+/// Fractional seconds are irrelevant at the 30-minute stale threshold.
+fn csharp_timestamp_secs(text: &str) -> Option<u64> {
+    let digits = |at: usize, len: usize| -> Option<i64> { text.get(at..at + len)?.parse().ok() };
+    let (year, month, day) = (digits(0, 4)?, digits(5, 2)?, digits(8, 2)?);
+    let (hour, minute, second) = (digits(11, 2)?, digits(14, 2)?, digits(17, 2)?);
+    let mut secs = days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second;
+    if let Some(offset_at) = text[19..].find(['+', '-']) {
+        let sign_at = 19 + offset_at;
+        let offset = &text[sign_at..];
+        let offset_hour = offset.get(1..3)?.parse::<i64>().ok()?;
+        let offset_minute = offset.get(4..6)?.parse::<i64>().ok()?;
+        // Local time = UTC + offset, therefore UTC = local - offset.
+        if offset.starts_with('-') {
+            secs += offset_hour * 3_600 + offset_minute * 60;
+        } else {
+            secs -= offset_hour * 3_600 + offset_minute * 60;
+        }
+    }
+    u64::try_from(secs).ok()
+}
+
+/// Inverse of [`days_from_civil`] — used to emit C# `DateTimeOffset` text.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (y + i64::from(month <= 2), month, day)
+}
+
+fn unix_secs_to_rfc3339(secs: u64) -> String {
+    let secs = secs as i64;
+    let (year, month, day) = civil_from_days(secs.div_euclid(86_400));
+    let time = secs.rem_euclid(86_400);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        time / 3600,
+        (time % 3600) / 60,
+        time % 60
+    )
+}
+
 /// XInput yalnızca kaba seviye verir; yüzde üretmek yerine arayüz bu metni göstermelidir.
 pub fn coarse_level_text(source: BatterySource, level_01: f32) -> Option<&'static str> {
     if source != BatterySource::XInput {
@@ -2887,6 +2956,76 @@ mod tests {
     use super::*;
 
     #[test]
+    fn disk_cache_path_is_the_shared_csharp_file() {
+        let aggregator = WirelessBatteryAggregator::new(AggregatorSettings::default());
+        assert_eq!(
+            aggregator.cache_path.as_deref(),
+            Some(
+                opentaskbar_core::paths::shared_app_data_dir()
+                    .join("wireless-battery-cache.json")
+                    .as_path()
+            )
+        );
+    }
+
+    #[test]
+    fn reads_csharp_bom_and_pascalcase_cache_fields() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "ot-wb-csharp-cache-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("wireless-battery-cache.json");
+        let sampled = unix_secs_to_rfc3339(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs()
+                - 30,
+        );
+        let document = format!(
+            "\u{feff}{{\"csharp-key\":{{\"Id\":\"hid:046D:C52B\",\"Name\":\"Mouse\",\"BatteryLevel\":72,\"IsCharging\":true,\"Source\":2,\"SampledAt\":\"{sampled}\"}}}}"
+        );
+        std::fs::write(&path, document).expect("C#-format cache fixture must be writable");
+        let mut aggregator = WirelessBatteryAggregator::new(AggregatorSettings::default())
+            .with_cache_path(path.clone());
+        aggregator.ensure_loaded(Instant::now());
+        let cached = aggregator
+            .cache
+            .get("csharp-key")
+            .expect("BOM + PascalCase entry must load");
+        assert_eq!(cached.name, "Mouse");
+        assert_eq!(cached.level, 72);
+        assert!(cached.charging);
+        assert_eq!(cached.source, BatterySource::SteelSeriesHid);
+        assert!(cached.stale);
+
+        aggregator.save(Instant::now());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.starts_with('\u{feff}'), "C# writes a UTF-8 BOM");
+        assert!(saved.contains("\"BatteryLevel\":72"));
+        assert!(saved.contains("\"SampledAt\":"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn csharp_timestamp_parser_handles_offsets() {
+        assert_eq!(
+            csharp_timestamp_secs("2026-11-27T12:34:56+00:00"),
+            csharp_timestamp_secs("2026-11-27T12:34:56Z")
+        );
+        assert_eq!(
+            csharp_timestamp_secs("2026-11-27T12:34:56.1234567+03:00"),
+            csharp_timestamp_secs("2026-11-27T09:34:56Z")
+        );
+        assert_eq!(csharp_timestamp_secs("bad"), None);
+    }
+
+    #[test]
     fn xinput_coarse_levels_map_without_fake_percent() {
         assert_eq!(xinput_level_01(0), Some(0.25));
         assert_eq!(xinput_level_01(1), Some(0.50));
@@ -4125,9 +4264,10 @@ pub struct WirelessBatteryAggregator {
 
 impl WirelessBatteryAggregator {
     pub fn new(settings: AggregatorSettings) -> Self {
-        let cache_path = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .map(|p| p.join("OpenTaskbar").join("wireless-battery-cache.json"));
+        // Same file name and folder as C# `WirelessBatteryAggregator`.
+        let cache_path = Some(
+            opentaskbar_core::paths::shared_app_data_dir().join("wireless-battery-cache.json"),
+        );
         Self {
             settings,
             cache: HashMap::new(),
@@ -4140,6 +4280,12 @@ impl WirelessBatteryAggregator {
     pub fn with_cache_path(mut self, path: PathBuf) -> Self {
         self.cache_path = Some(path);
         self
+    }
+
+    /// C# writes JSON with `Encoding.UTF8`, which emits a BOM. `.NET` readers
+    /// strip it, so the Rust reader has to tolerate both forms.
+    fn cache_json(raw: &str) -> Option<serde_json::Value> {
+        serde_json::from_str(raw.strip_prefix('\u{feff}').unwrap_or(raw)).ok()
     }
 
     fn ensure_loaded(&mut self, now: Instant) {
@@ -4159,7 +4305,7 @@ impl WirelessBatteryAggregator {
         let Ok(json) = std::fs::read_to_string(path) else {
             return;
         };
-        let Ok(root) = serde_json::from_str::<serde_json::Value>(&json) else {
+        let Some(root) = Self::cache_json(&json) else {
             return;
         };
         let Some(map) = root.as_object() else {
@@ -4175,25 +4321,42 @@ impl WirelessBatteryAggregator {
             if self.cache.len() >= 64 {
                 break;
             }
-            let level = value.get("level").and_then(|x| x.as_i64()).unwrap_or(-1) as i32;
+            let level = cache_field(value, "level", "BatteryLevel")
+                .and_then(|x| x.as_i64())
+                .unwrap_or(-1) as i32;
             if !(-1..=100).contains(&level) {
                 continue;
             }
-            let source_id = value.get("source").and_then(|x| x.as_u64()).unwrap_or(0) as u8;
-            let age_secs = value
-                .get("written_at")
+            let source_id = cache_field(value, "source", "Source")
                 .and_then(|x| x.as_u64())
-                .map(|written| wall_now.saturating_sub(written))
-                .unwrap_or_else(|| value.get("age_secs").and_then(|x| x.as_u64()).unwrap_or(0));
+                .unwrap_or(0) as u8;
+            let age_secs = if let Some(written) =
+                cache_field(value, "written_at", "WrittenAt").and_then(|x| x.as_u64())
+            {
+                wall_now.saturating_sub(written)
+            } else if let Some(sampled) = value
+                .get("SampledAt")
+                .and_then(|x| x.as_str())
+                .and_then(csharp_timestamp_secs)
+            {
+                wall_now.saturating_sub(sampled)
+            } else {
+                cache_field(value, "age_secs", "AgeSecs")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0)
+            };
             if Duration::from_secs(age_secs) > STALE_WINDOW {
                 continue;
             }
             let mut reading = BatteryReading::new(
-                value.get("id").and_then(|x| x.as_str()).unwrap_or(key),
-                value.get("name").and_then(|x| x.as_str()).unwrap_or(""),
+                cache_field(value, "id", "Id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or(key),
+                cache_field(value, "name", "Name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or(""),
                 level.max(0) as u32,
-                value
-                    .get("charging")
+                cache_field(value, "charging", "IsCharging")
                     .and_then(|x| x.as_bool())
                     .unwrap_or(false),
                 source_from_id(source_id),
@@ -4202,7 +4365,11 @@ impl WirelessBatteryAggregator {
                 // A cached -1 means "level unknown"; promote it to an explicit
                 // override instead of presenting a false 0% reading to the UI.
                 reading.level = -1;
-                reading.level_override = Some("-1".to_owned());
+                let override_text = cache_field(value, "level_override", "LevelOverrideText")
+                    .and_then(|x| x.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("-1");
+                reading.level_override = Some(override_text.to_owned());
             }
             reading.stale = true;
             reading.sampled_at = now - Duration::from_secs(age_secs.min(1800));
@@ -4223,6 +4390,10 @@ impl WirelessBatteryAggregator {
             .as_secs();
         let mut root = serde_json::Map::new();
         for (key, r) in &self.cache {
+            let age_secs = now.saturating_duration_since(r.sampled_at).as_secs();
+            let sampled = wall_now.saturating_sub(age_secs.min(wall_now));
+            // Both spellings are written: snake_case for this port's existing
+            // readers, PascalCase for C# `WirelessDeviceReading` deserialization.
             root.insert(
                 key.clone(),
                 serde_json::json!({
@@ -4231,8 +4402,15 @@ impl WirelessBatteryAggregator {
                     "level": r.level,
                     "charging": r.charging,
                     "source": r.source as u8,
-                    "age_secs": now.saturating_duration_since(r.sampled_at).as_secs(),
+                    "age_secs": age_secs,
                     "written_at": wall_now,
+                    "Id": r.id,
+                    "Name": r.name,
+                    "BatteryLevel": r.level,
+                    "IsCharging": r.charging,
+                    "Source": r.source as u8,
+                    "SampledAt": unix_secs_to_rfc3339(sampled),
+                    "LevelOverrideText": r.level_override,
                 }),
             );
         }
@@ -4240,7 +4418,9 @@ impl WirelessBatteryAggregator {
         // Write to a sibling temporary file then rename: readers never observe a
         // half-written JSON document when the dock restarts mid-save.
         let temp = path.with_extension("json.tmp");
-        if std::fs::write(&temp, json.as_bytes()).is_err() {
+        // C# `File.WriteAllText(..., Encoding.UTF8)` emits a UTF-8 BOM.
+        let with_bom = format!("\u{feff}{json}");
+        if std::fs::write(&temp, with_bom.as_bytes()).is_err() {
             let _ = std::fs::remove_file(&temp);
             return;
         }

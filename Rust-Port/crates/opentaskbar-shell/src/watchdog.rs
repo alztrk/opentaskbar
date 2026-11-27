@@ -162,10 +162,10 @@ fn app_dir_watchdog() -> Option<PathBuf> {
 }
 
 fn ensure_watchdog_exe() -> Option<PathBuf> {
-    let data_dir = opentaskbar_core::settings::app_data_dir();
-    let data_path = data_dir.join("OpenTaskbarWatchdog.exe");
+    let data_dir = opentaskbar_core::paths::shared_app_data_dir();
+    let data_path = opentaskbar_core::paths::watchdog_path();
     let path = select_watchdog_path(app_dir_watchdog(), data_path);
-    if path == data_dir.join("OpenTaskbarWatchdog.exe") {
+    if path == opentaskbar_core::paths::watchdog_path() {
         let _ = fs::create_dir_all(&data_dir);
         let existing = fs::read(&path).ok();
         if needs_watchdog_refresh(existing.as_deref(), WATCHDOG_BYTES) {
@@ -305,6 +305,16 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     static TEST_ID: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn watchdog_copy_uses_the_shared_appdata_folder() {
+        let path = opentaskbar_core::paths::watchdog_path();
+        assert_eq!(path.file_name().unwrap(), "OpenTaskbarWatchdog.exe");
+        assert_eq!(
+            path.parent(),
+            Some(opentaskbar_core::paths::shared_app_data_dir().as_path())
+        );
+    }
 
     fn test_event(tag: &str, manual_reset: bool) -> EventHandle {
         let id = TEST_ID.fetch_add(1, Ordering::Relaxed);

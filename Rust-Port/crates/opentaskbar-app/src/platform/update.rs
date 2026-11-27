@@ -288,12 +288,11 @@ fn updater_script(source: &str, target: &str) -> Result<String, &'static str> {
     generate_updater_script(Path::new(source), Path::new(target))
 }
 
+/// C# `UpdateChecker` uses `%TEMP%\OpenTaskbar\update`, not LOCALAPPDATA.
+/// NOTE (cross-WS): the `paths` contract has no updater helper yet; keep this
+/// literal until `opentaskbar_core::paths` exposes `update_dir()`.
 fn update_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("OpenTaskbar")
-        .join("update")
+    std::env::temp_dir().join("OpenTaskbar").join("update")
 }
 
 fn split_url(url: &str) -> Option<(&str, &str)> {
@@ -418,6 +417,18 @@ fn hex_to_bytes(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_dir_matches_the_csharp_temp_folder() {
+        assert_eq!(
+            update_dir(),
+            std::env::temp_dir().join("OpenTaskbar").join("update")
+        );
+        assert_ne!(
+            update_dir(),
+            opentaskbar_core::paths::shared_app_data_dir().join("update")
+        );
+    }
 
     #[test]
     fn parses_newer_release_and_selects_arch_asset() {

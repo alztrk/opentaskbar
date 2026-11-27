@@ -15,11 +15,7 @@ pub const SUPPORTED_STATE_MASK: u32 = 0x03;
 pub const DEFAULT_STATE: u32 = 0;
 
 fn journal_path() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("OpenTaskbar")
-        .join("taskbar-state.txt")
+    opentaskbar_core::paths::journal_path("taskbar-state.txt")
 }
 
 pub fn has_pending() -> bool {
@@ -114,6 +110,19 @@ mod tests {
             "ot-taskbar-journal-{}-{tag}-{id}.txt",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn journal_uses_the_shared_csharp_path() {
+        assert_eq!(
+            journal_path(),
+            opentaskbar_core::paths::journal_path("taskbar-state.txt")
+        );
+        assert_eq!(journal_path().file_name().unwrap(), "taskbar-state.txt");
+        assert_eq!(
+            journal_path().parent(),
+            Some(opentaskbar_core::paths::shared_app_data_dir().as_path())
+        );
     }
 
     #[test]

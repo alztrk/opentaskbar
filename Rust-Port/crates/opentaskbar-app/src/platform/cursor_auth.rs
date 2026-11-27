@@ -9,9 +9,10 @@
 //!
 //! No token is ever written to settings/log/argv.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Networking::WinHttp::{
@@ -54,14 +55,39 @@ pub struct RefreshResult {
 }
 
 fn token_path() -> PathBuf {
-    FILE_OVERRIDE.get().cloned().unwrap_or_else(|| {
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("OpenTaskbar")
-            .join("secrets")
-            .join("cursor-auth.bin")
-    })
+    FILE_OVERRIDE
+        .get()
+        .cloned()
+        .unwrap_or_else(|| opentaskbar_core::paths::secrets_dir().join("cursor-auth.bin"))
+}
+
+/// C# `Guid.NewGuid().ToString("N")`: 32 lowercase hex digits. The CSPRNG
+/// fallback keeps the name unique even when BCryptGenRandom is unavailable.
+fn guid_n_token() -> String {
+    let mut bytes = random_bytes::<16>().unwrap_or_else(|| {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let mixed = nanos.rotate_left(17) ^ u64::from(std::process::id()).rotate_left(41);
+        let seed = mixed ^ mixed.rotate_left(29);
+        [seed, seed ^ mixed]
+            .into_iter()
+            .flat_map(u64::to_le_bytes)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap_or([0; 16])
+    });
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Same atomic-write name as C# `path + "." + Guid.NewGuid().ToString("N") + ".tmp"`.
+fn tmp_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(format!(".{}.tmp", guid_n_token()));
+    PathBuf::from(name)
 }
 
 /// Test hook: replaces the token file location.
@@ -503,10 +529,14 @@ pub fn save_tokens(access: &str, refresh: Option<&str>) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
-    std::fs::write(&tmp, &encrypted).map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
-    Ok(())
+    let tmp = tmp_path(&path);
+    let result = std::fs::write(&tmp, &encrypted)
+        .map_err(|e| e.to_string())
+        .and_then(|()| std::fs::rename(&tmp, &path).map_err(|e| e.to_string()));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Reads the decrypted token pair. Never panics; malformed blobs are ignored.
@@ -775,6 +805,49 @@ pub fn refresh(refresh_token: &str) -> RefreshResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_path_uses_the_shared_secrets_folder() {
+        assert_eq!(
+            opentaskbar_core::paths::secrets_dir().join("cursor-auth.bin"),
+            opentaskbar_core::paths::shared_app_data_dir()
+                .join("secrets")
+                .join("cursor-auth.bin")
+        );
+        assert!(FILE_OVERRIDE.get().is_none());
+    }
+
+    #[test]
+    fn dpapi_constants_match_csharp_cursor_auth_service() {
+        assert_eq!(ENTROPY, b"OpenTaskbar.CursorAuth.v1");
+        assert_eq!(MAX_FILE_BYTES, 1 << 16);
+    }
+
+    #[test]
+    fn tmp_name_matches_csharp_guid_n_convention() {
+        let path = Path::new("secrets").join("cursor-auth.bin");
+        let tmp = tmp_path(&path);
+        let name = tmp.file_name().unwrap().to_str().unwrap();
+        let suffix = name.strip_prefix("cursor-auth.bin.").unwrap();
+        let token = suffix.strip_suffix(".tmp").unwrap();
+        assert_eq!(token.len(), 32);
+        assert!(
+            token
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        );
+        assert_ne!(tmp_path(&path), tmp, "each write needs its own GUID temp");
+    }
+
+    #[test]
+    fn token_json_keeps_the_csharp_payload_shape() {
+        assert_eq!(
+            token_json("acc", Some("ref")),
+            r#"{"accessToken":"acc","refreshToken":"ref"}"#
+        );
+        assert_eq!(token_json("acc", None), r#"{"accessToken":"acc"}"#);
+        assert_eq!(token_json("acc", Some("  ")), r#"{"accessToken":"acc"}"#);
+    }
 
     #[test]
     fn pkce_challenge_matches_rfc7636_vector() {
