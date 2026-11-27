@@ -1,7 +1,7 @@
 {
   // Add images to this folder (or a nested folder) and map them below.
   // An image named after the executable (example.png) needs no mapping.
-  // Paths must stay inside this icons folder; see docs/themes.md for every option.
+  // Paths must stay inside this icons folder; see docs/guides/themes.md for every option.
   "icons": {
     // "example.exe": "icons/example.png",
     // "Microsoft.WindowsTerminal": "icons/terminal.png",

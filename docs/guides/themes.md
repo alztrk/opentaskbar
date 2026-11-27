@@ -1,6 +1,6 @@
 # Themes
 
-A theme changes OpenTaskbar's colors, fonts and widget looks. Six themes come with the app: Catppuccin Mocha, Gruvbox Material, Nord, Prism, Solarized and Tokyo Night. They leave your normal Windows and app icons alone — changing icons is optional. On first launch the Rust app installs the bundled themes from the repository's `themes/` folder into `%LOCALAPPDATA%\OpenTaskbar\Themes`.
+A theme changes OpenTaskbar's colors, fonts and widget looks. Six themes come with the app: Catppuccin Mocha, Gruvbox Material, Nord, Prism, Solarized and Tokyo Night. They leave your normal Windows and app icons alone — changing icons is optional. On first launch the Rust app installs the bundled themes from the repository's `resources/themes/` folder into `%LOCALAPPDATA%\OpenTaskbar\Themes`.
 
 ## Choose a theme
 
@@ -19,7 +19,7 @@ my-theme\
     └── pack.json       ← optional widget design tokens
 ```
 
-Both optional folders are picked up automatically. A starter example is in [theme-template](theme-template); the shipped packs are in [themes](../themes). A `theme.json` can set `"preserveOriginalIcons": true` to keep native icons even when an icon pack exists — all six bundled themes do this.
+Both optional folders are picked up automatically. A starter example is in [theme-template](theme-template); the shipped packs are in [themes](../../resources/themes). A `theme.json` can set `"preserveOriginalIcons": true` to keep native icons even when an icon pack exists — all six bundled themes do this.
 
 ## Change app icons
 
@@ -106,7 +106,7 @@ Custom widgets install their own optional `icon.png`, but a theme can override i
 }
 ```
 
-A per-widget override set from **Settings → Widgets → the card's Icons button** (`CustomWidgetIcons` in `settings.json`) wins over the theme; otherwise the widget's own `icon.png` or a default glyph is used. Paths are confined to the pack directory. See [docs/custom-widgets.md](custom-widgets.md) for the full resolution order.
+A per-widget override set from **Settings → Widgets → the card's Icons button** (`CustomWidgetIcons` in `settings.json`) wins over the theme; otherwise the widget's own `icon.png` or a default glyph is used. Paths are confined to the pack directory. See [custom-widgets.md](custom-widgets.md) for the full resolution order.
 
 ## Sharing themes
 

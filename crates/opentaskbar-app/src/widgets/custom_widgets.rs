@@ -534,12 +534,14 @@ fn ensure_child(id: &str, spec: &CustomWidgetSpec, state: &mut SidecarState) -> 
     let program = Path::new(&spec.exec[0]);
     let program = if program.is_absolute() {
         program.to_path_buf()
-    } else {
+    } else if program.components().count() > 1 || spec.root.join(program).is_file() {
+        // Explicit relative path: resolve against the widget folder, because
+        // CreateProcess resolves it against the *parent's* cwd on Windows.
         spec.root.join(program)
+    } else {
+        // A bare program name is resolved through PATH (powershell.exe, python, …).
+        program.to_path_buf()
     };
-    if !program.is_file() {
-        return Err(format!("executable not found: {}", program.display()));
-    }
     let mut command = Command::new(program);
     command
         .args(&spec.exec[1..])
@@ -619,8 +621,8 @@ fn request(
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
-                let secret =
-                    crate::widgets::telemetry::read_dpapi_secret_for_widget(&name).unwrap_or_default();
+                let secret = crate::widgets::telemetry::read_dpapi_secret_for_widget(&name)
+                    .unwrap_or_default();
                 let answer = serde_json::json!({
                     "cmd": "secretResult",
                     "name": name,
@@ -1032,32 +1034,6 @@ pub fn click_widget(id: &str, action_id: u32, settings: &DockSettings) {
         });
 }
 
-/// Requests a DPAPI secret from the host without exposing it on the command line.
-pub fn request_secret(id: &str, name: &str, settings: &DockSettings) {
-    if !is_approved(id, settings) {
-        return;
-    }
-    let Some(spec) = spec(id) else {
-        return;
-    };
-    let sidecar = sidecar(id);
-    let worker_id = id.to_owned();
-    let secret_name = name.to_owned();
-    let _ = std::thread::Builder::new()
-        .name(format!("otb-widget-secret-{id}"))
-        .spawn(move || {
-            let value = crate::widgets::telemetry::read_dpapi_secret_for_widget(&secret_name)
-                .unwrap_or_default();
-            let reply = request(
-                &worker_id,
-                &spec,
-                &sidecar,
-                &serde_json::json!({"cmd": "secretResult", "name": secret_name, "value": value}),
-            );
-            apply_reply(&worker_id, reply, &sidecar);
-        });
-}
-
 pub fn chip(id: &str) -> Option<CustomChip> {
     sidecar(id).snapshot.read().ok()?.chip.clone()
 }
@@ -1184,6 +1160,59 @@ mod tests {
         assert!(is_custom("CUSTOM:x"));
         assert!(!is_custom("clock"));
         assert!(!is_custom("custom:"));
+    }
+
+    #[test]
+    fn sidecar_secret_handshake() {
+        const SECRET_NAME: &str = "widget-test-secret";
+        assert!(crate::widgets::telemetry::save_dpapi_secret(
+            SECRET_NAME,
+            "secret-value"
+        ));
+        let dir = std::env::temp_dir().join(format!("otb-secret-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("secret.ps1");
+        std::fs::write(
+            &script,
+            r#"while (($line = [Console]::In.ReadLine()) -ne $null) {
+    $msg = $line | ConvertFrom-Json
+    if ($msg.cmd -eq 'poll') {
+        '{"cmd":"secret","name":"widget-test-secret","seq":99,"protocol":1}'
+        $answer = [Console]::In.ReadLine() | ConvertFrom-Json
+        '{"protocol":1,"seq":' + $msg.seq + ',"chip":{"label":"S","value":"' + $answer.value + '"}}'
+    }
+}
+"#,
+        )
+        .unwrap();
+        let spec = CustomWidgetSpec {
+            id: "custom:secret-test".to_owned(),
+            slug: "secret-test".to_owned(),
+            name: "Secret".to_owned(),
+            names: HashMap::new(),
+            category: "Productivity",
+            width: 120.0,
+            poll_seconds: 5,
+            exec: vec![
+                "powershell.exe".to_owned(),
+                "-NoProfile".to_owned(),
+                "-NonInteractive".to_owned(),
+                "-File".to_owned(),
+                script.to_string_lossy().into_owned(),
+            ],
+            root: dir.clone(),
+            manifest_hash: "test".to_owned(),
+        };
+        let id = spec.id.clone();
+        let state = sidecar(&id);
+        let reply = request(&id, &spec, &state, &serde_json::json!({"cmd":"poll"})).unwrap();
+        assert_eq!(chip_from_value(&reply).unwrap().value, "secret-value");
+        if let Ok(mut guard) = state.state.lock() {
+            terminate(&mut guard);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = crate::widgets::telemetry::clear_dpapi_secret(SECRET_NAME);
     }
 
     #[test]

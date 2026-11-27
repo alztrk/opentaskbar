@@ -45,7 +45,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-locale-parit
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1 -Tag v0.4.0
 ```
 
-Ensure all checks pass before submitting a pull request. Live Windows shell behavior still needs a manual smoke run; see `docs/windows-reliability-audit.md` and `docs/windows-taskbar-model.md`.
+Ensure all checks pass before submitting a pull request. Live Windows shell behavior still needs a manual smoke run; see `docs/development/windows-reliability-audit.md` and `docs/development/windows-taskbar-model.md`.
 
 ## Development Guidelines
 

@@ -1,6 +1,6 @@
 # Windows görev çubuğu çalışma modeli ve OpenTaskbar güvenilirliği
 
-> Bu döküman, `docs/windows-reliability-audit.md` (doğrulama matrisi) ile birlikte kullanılmalıdır.
+> Bu döküman, `docs/development/windows-reliability-audit.md` (doğrulama matrisi) ile birlikte kullanılmalıdır.
 > Audit "hangi senaryoları test etmeliyiz?" sorusunu cevaplar; bu döküman "Windows gerçekte nasıl çalışıyor ve
 > Rust uygulaması hangi mekanizmalara dayanıyor?" sorusunu cevaplar.
 >
@@ -213,7 +213,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-release-vers
 ### Canlı smoke kontrol listesi
 
 Her satır gerçek Windows oturumunda çalıştırılmalı; başlangıç durumu **not run**'dur.
-Ayrıntılı senaryolar ve pass koşulları `docs/windows-reliability-audit.md` içindedir.
+Ayrıntılı senaryolar ve pass koşulları `docs/development/windows-reliability-audit.md` içindedir.
 
 | # | Senaryo | Kısa adım |
 | :--- | :--- | :--- |

@@ -9,4 +9,4 @@ It styles the dock, menus, settings and widgets **without replacing Windows or a
 1. Select **Prism** in **Settings → Appearance → Theme pack**.
 2. Restart OpenTaskbar to apply the font and corner-size changes.
 
-See [Theme Packs](../../docs/themes.md) for custom theme options.
+See [Theme Packs](../../../docs/guides/themes.md) for custom theme options.
