@@ -25,6 +25,7 @@ public partial class App : Application
     private DevReloadService? _devReload;
     private WindowsPaletteListener? _paletteListener;
     private WindowsTaskbarPinMonitor? _taskbarPinMonitor;
+    private DisplayCareController? _displayCareController;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -67,6 +68,7 @@ public partial class App : Application
         UiText.Current.SetLanguage(Preferences.Current.Language);
         ThemeManager.Apply(Preferences.Current.Theme, Preferences.Current);
         ApplyWindowsPalette();
+        AnimationFrameLimiter.Apply(Preferences.Current.AnimationFpsCap);
         _instanceMutex = new Mutex(initiallyOwned: true,
             name: IsDev ? "Local\\OpenTaskbar.Dev" : "Local\\OpenTaskbar.Singleton", out var createdNew);
         if (!createdNew)
@@ -79,6 +81,7 @@ public partial class App : Application
         }
         _ownsSingletonMutex = true;
         _taskbarPinMonitor = new WindowsTaskbarPinMonitor();
+        _displayCareController = new DisplayCareController(Preferences);
         new StartupRegistration().SyncOnStartup(IsDev, IsInspection);
 
 #if !DEBUG
@@ -167,6 +170,8 @@ public partial class App : Application
     {
         // A saved theme change rebuilds the palette; re-derive the Windows colors for the new mode.
         Dispatcher.BeginInvoke(new Action(ApplyWindowsPalette));
+        AnimationFrameLimiter.Apply(Preferences.Current.AnimationFpsCap);
+        _displayCareController?.Refresh();
     }
 
     private void PaletteListener_Changed(object? sender, EventArgs e)
@@ -211,6 +216,8 @@ public partial class App : Application
             SystemEvents.UserPreferenceChanged -= SystemEvents_UserPreferenceChanged;
             _taskbarPinMonitor?.Dispose();
             _taskbarPinMonitor = null;
+            _displayCareController?.Dispose();
+            _displayCareController = null;
             AppLog.Shutdown();
             base.OnExit(e);
             return;
@@ -228,6 +235,8 @@ public partial class App : Application
         SystemEvents.UserPreferenceChanged -= SystemEvents_UserPreferenceChanged;
         _taskbarPinMonitor?.Dispose();
         _taskbarPinMonitor = null;
+        _displayCareController?.Dispose();
+        _displayCareController = null;
         var error = (MainWindow as OpenTaskbar.MainWindow)?.RestoreWindowsTaskbar();
         if (error is not null)
         {

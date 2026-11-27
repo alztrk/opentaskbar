@@ -289,7 +289,10 @@ impl ThemeState {
         } else {
             1.0
         };
-        let border_material = if background == SurfaceBackground::None {
+        let border_material = if matches!(
+            background,
+            SurfaceBackground::None | SurfaceBackground::TrueBlack
+        ) {
             transparent()
         } else if let Some(color) = style.border_color {
             TokenValue::Solid(color)
@@ -302,12 +305,14 @@ impl ThemeState {
         if kind == SurfaceKind::Settings {
             let source = self.brush("SettingsSidebarOverlay");
             sidebar = Some(match background {
-                SurfaceBackground::None => transparent(),
+                SurfaceBackground::None | SurfaceBackground::TrueBlack => transparent(),
                 SurfaceBackground::Solid => source.with_alpha(255),
                 SurfaceBackground::Glass => source.with_alpha(scaled_alpha(style.opacity)),
             });
             content = Some(match background {
                 SurfaceBackground::Solid => self.brush("SettingsBackground").with_alpha(255),
+                // TrueBlack must never pick up the themed (accent-tinted) content brush.
+                SurfaceBackground::TrueBlack => TokenValue::Solid(Rgba::new(0, 0, 0, 255)),
                 // SettingsFrame already paints behind the window: avoid double stacking.
                 _ => transparent(),
             });
@@ -348,7 +353,10 @@ impl ThemeState {
             sheen,
             border_material,
             border_thickness: thickness,
-            shadow_opacity: if background == SurfaceBackground::None {
+            shadow_opacity: if matches!(
+                background,
+                SurfaceBackground::None | SurfaceBackground::TrueBlack
+            ) {
                 0.0
             } else {
                 0.45
@@ -382,13 +390,14 @@ pub fn clamp_opacity(opacity: f64) -> f64 {
     opacity.clamp(0.0, 1.0)
 }
 
-/// Decides Glass / Solid / None from the effective per-surface opacity.
-/// An explicit `Solid` or `None` request is honoured; `Glass` becomes `None`
-/// at zero opacity and `Solid` at full opacity.
+/// Decides Glass / Solid / None / TrueBlack from the effective per-surface opacity.
+/// An explicit `Solid`, `TrueBlack` or `None` request is honoured; `Glass` becomes
+/// `None` at zero opacity and `Solid` at full opacity.
 pub fn background_for_opacity(requested: SurfaceBackground, opacity: f64) -> SurfaceBackground {
     match requested {
         SurfaceBackground::None => SurfaceBackground::None,
         SurfaceBackground::Solid => SurfaceBackground::Solid,
+        SurfaceBackground::TrueBlack => SurfaceBackground::TrueBlack,
         SurfaceBackground::Glass => {
             let opacity = clamp_opacity(opacity);
             if opacity <= 0.0 {
@@ -405,13 +414,18 @@ pub fn background_for_opacity(requested: SurfaceBackground, opacity: f64) -> Sur
 fn apply_fill(source: TokenValue, style: SurfaceStyle) -> TokenValue {
     match style.background {
         SurfaceBackground::None => transparent(),
+        // Opaque black only: no accent tint, no themed source colour.
+        SurfaceBackground::TrueBlack => TokenValue::Solid(Rgba::new(0, 0, 0, 255)),
         SurfaceBackground::Solid => source.with_alpha(255),
         SurfaceBackground::Glass => source.with_alpha(scaled_alpha(style.opacity)),
     }
 }
 
 fn apply_stroke(source: TokenValue, style: SurfaceStyle) -> TokenValue {
-    if style.background == SurfaceBackground::None {
+    if matches!(
+        style.background,
+        SurfaceBackground::None | SurfaceBackground::TrueBlack
+    ) {
         transparent()
     } else {
         source
@@ -1188,6 +1202,7 @@ fn style_from_settings(
             Some("Solid") => SurfaceBackground::Solid,
             Some("None") => SurfaceBackground::None,
             Some("Glass") => SurfaceBackground::Glass,
+            Some("TrueBlack") => SurfaceBackground::TrueBlack,
             _ => typed,
         }
     };
@@ -1329,10 +1344,30 @@ mod tests {
                 panic!("expected solid fill")
             };
             assert_eq!(color.a, expected_a, "{mode:?}");
-            if mode != SurfaceBackground::None {
+            if mode != SurfaceBackground::None && mode != SurfaceBackground::TrueBlack {
                 assert_eq!((color.r, color.g, color.b), (10, 20, 30));
             }
         }
+    }
+
+    #[test]
+    fn true_black_is_opaque_black_without_stroke_sheen_or_shadow() {
+        let state = ThemeState::default();
+        let style = SurfaceStyle::new(SurfaceBackground::TrueBlack, 0.9, 3.0, None);
+        let m = state.build_with_style(SurfaceKind::Dock, style);
+        assert_eq!(
+            m.fill,
+            TokenValue::Solid(Rgba::new(0, 0, 0, 255)),
+            "TrueBlack must not inherit the accent-tinted dock material"
+        );
+        assert_eq!(m.stroke, transparent());
+        assert_eq!(m.sheen, transparent());
+        assert_eq!(m.border_material, transparent());
+        assert_eq!(m.shadow_opacity, 0.0);
+        assert_eq!(
+            background_for_opacity(SurfaceBackground::TrueBlack, 0.0),
+            SurfaceBackground::TrueBlack
+        );
     }
 
     #[test]

@@ -1404,5 +1404,22 @@
   "WlanStopped": "Служба WLAN остановлена",
   "Wpa2Personal": "WPA2-Личный",
   "Wpa3Personal": "WPA3-Личный",
-  "WpaPersonal": "WPA-Личный"
+  "WpaPersonal": "WPA-Личный",
+  "SectionDisplayCare": "Уход за OLED и экраном",
+  "SurfaceTrueBlack": "Истинный чёрный (OLED)",
+  "OledReduceGlow": "Уменьшить свечение и тени",
+  "OledReduceGlowHelp": "Скрывает блики, свечение по краям и тени, создавая плоский и энергосберегающий вид.",
+  "BurnInShift": "Сдвиг против выгорания",
+  "BurnInShiftHelp": "Время от времени сдвигает панель на один-два пикселя, чтобы уменьшить сохранение статичного изображения.",
+  "BurnInShiftInterval": "Интервал сдвига",
+  "OledAutoTrigger": "Автоматический OLED при низком заряде",
+  "OledAutoTriggerHelp": "Временно переключает поверхности на истинный чёрный, когда заряд батареи низкий.",
+  "OledLowBatteryThreshold": "Порог низкого заряда батареи",
+  "OledAutoOnNightLight": "Следовать ночному свету",
+  "OledAutoOnNightLightHelp": "Применяет временный OLED-вид, пока включён ночной свет Windows.",
+  "AmbientMode": "Фоновый экран",
+  "AmbientModeHelp": "Через 5 минут без действий показывает только часы и заряд батареи на тонкой чёрной полосе.",
+  "AnimationFpsCap": "Ограничение кадров анимации",
+  "AnimationFpsCapHelp": "Ограничивает анимации, использующие ресурсы, для экономии энергии на OLED-панелях с высокой частотой обновления.",
+  "FpsUnlimited": "Без ограничений"
 }

@@ -1404,5 +1404,22 @@
   "WlanStopped": "WLAN サービスが停止しています",
   "Wpa2Personal": "WPA2-個人用",
   "Wpa3Personal": "WPA3-個人用",
-  "WpaPersonal": "WPA-個人用"
+  "WpaPersonal": "WPA-個人用",
+  "SectionDisplayCare": "OLEDとディスプレイのケア",
+  "SurfaceTrueBlack": "トゥルーブラック (OLED)",
+  "OledReduceGlow": "グローと影を抑える",
+  "OledReduceGlowHelp": "光沢、縁の発光、ドロップシャドウを非表示にし、フラットで省電力な表示にします。",
+  "BurnInShift": "焼き付き防止移動",
+  "BurnInShiftHelp": "静的な画像の残像を減らすため、タスクバーをときどき1〜2ピクセル移動します。",
+  "BurnInShiftInterval": "移動間隔",
+  "OledAutoTrigger": "低電力時にOLEDを自動切り替え",
+  "OledAutoTriggerHelp": "バッテリー残量が少ないとき、一時的に表面をトゥルーブラックに切り替えます。",
+  "OledLowBatteryThreshold": "低バッテリーしきい値",
+  "OledAutoOnNightLight": "ナイトライトに追従",
+  "OledAutoOnNightLightHelp": "Windowsのナイトライトがオンの間、一時的なOLED表示を適用します。",
+  "AmbientMode": "アンビエント表示",
+  "AmbientModeHelp": "入力がない状態が5分続くと、細い黒い帯に時計とバッテリーだけを表示します。",
+  "AnimationFpsCap": "アニメーションのフレーム制限",
+  "AnimationFpsCapHelp": "リフレッシュレートの高いOLEDパネルで電力を節約するため、リソースベースのアニメーションを制限します。",
+  "FpsUnlimited": "無制限"
 }

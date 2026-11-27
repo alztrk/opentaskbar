@@ -992,5 +992,22 @@
   "StatsTopProcessesEmpty": "Keine Prozessdaten verfügbar",
   "StatsSamplingProcesses": "Prozesse werden gelesen…",
   "ResourceMonitor": "Ressourcenmonitor",
-  "WidgetKeyboardLayoutDescription": "Zeigt die aktive Eingabesprache an und wechselt das Tastaturlayout direkt vom Dock."
+  "WidgetKeyboardLayoutDescription": "Zeigt die aktive Eingabesprache an und wechselt das Tastaturlayout direkt vom Dock.",
+  "SectionDisplayCare": "OLED- und Displaypflege",
+  "SurfaceTrueBlack": "Tiefschwarz (OLED)",
+  "OledReduceGlow": "Glow und Schatten reduzieren",
+  "OledReduceGlowHelp": "Verbirgt Glanz, Randglow und Schlagschatten für ein flaches, energiesparendes Aussehen.",
+  "BurnInShift": "Einbrenn-Verschiebung",
+  "BurnInShiftHelp": "Verschiebt die Taskleiste von Zeit zu Zeit um ein oder zwei Pixel, um Einbrennen statischer Bilder zu reduzieren.",
+  "BurnInShiftInterval": "Verschiebungsintervall",
+  "OledAutoTrigger": "Automatisch OLED bei niedrigem Akkustand",
+  "OledAutoTriggerHelp": "Stellt die Oberflächen bei niedrigem Akkustand vorübergehend auf Tiefschwarz um.",
+  "OledLowBatteryThreshold": "Schwellenwert für niedrigen Akkustand",
+  "OledAutoOnNightLight": "Nachtlicht folgen",
+  "OledAutoOnNightLightHelp": "Wendet das vorübergehende OLED-Aussehen an, solange die Windows-Nachtbeleuchtung aktiv ist.",
+  "AmbientMode": "Umgebungsanzeige",
+  "AmbientModeHelp": "Zeigt nach 5 Minuten ohne Eingabe nur Uhr und Akkustand auf einem schmalen schwarzen Streifen.",
+  "AnimationFpsCap": "Animations-Bildratenlimit",
+  "AnimationFpsCapHelp": "Begrenzt ressourcenbasierte Animationen, um auf OLED-Panels mit hoher Bildwiederholrate Energie zu sparen.",
+  "FpsUnlimited": "Unbegrenzt"
 }

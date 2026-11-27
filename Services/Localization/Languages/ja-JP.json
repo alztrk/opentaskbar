@@ -992,5 +992,22 @@
   "StatsTopProcessesEmpty": "プロセス情報がありません",
   "StatsSamplingProcesses": "プロセスを取得中…",
   "ResourceMonitor": "リソース モニター",
-  "WidgetKeyboardLayoutDescription": "現在の入力言語を表示し、ドックからキーボード レイアウトを切り替えます。"
+  "WidgetKeyboardLayoutDescription": "現在の入力言語を表示し、ドックからキーボード レイアウトを切り替えます。",
+  "SectionDisplayCare": "OLEDとディスプレイのケア",
+  "SurfaceTrueBlack": "トゥルーブラック (OLED)",
+  "OledReduceGlow": "グローと影を抑える",
+  "OledReduceGlowHelp": "光沢、縁の発光、ドロップシャドウを非表示にし、フラットで省電力な表示にします。",
+  "BurnInShift": "焼き付き防止移動",
+  "BurnInShiftHelp": "静的な画像の残像を減らすため、タスクバーをときどき1〜2ピクセル移動します。",
+  "BurnInShiftInterval": "移動間隔",
+  "OledAutoTrigger": "低電力時にOLEDを自動切り替え",
+  "OledAutoTriggerHelp": "バッテリー残量が少ないとき、一時的に表面をトゥルーブラックに切り替えます。",
+  "OledLowBatteryThreshold": "低バッテリーしきい値",
+  "OledAutoOnNightLight": "ナイトライトに追従",
+  "OledAutoOnNightLightHelp": "Windowsのナイトライトがオンの間、一時的なOLED表示を適用します。",
+  "AmbientMode": "アンビエント表示",
+  "AmbientModeHelp": "入力がない状態が5分続くと、細い黒い帯に時計とバッテリーだけを表示します。",
+  "AnimationFpsCap": "アニメーションのフレーム制限",
+  "AnimationFpsCapHelp": "リフレッシュレートの高いOLEDパネルで電力を節約するため、リソースベースのアニメーションを制限します。",
+  "FpsUnlimited": "無制限"
 }

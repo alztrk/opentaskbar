@@ -1404,5 +1404,22 @@
   "WlanStopped": "WLAN 서비스가 중지되었습니다",
   "Wpa2Personal": "WPA2-개인용",
   "Wpa3Personal": "WPA3-개인용",
-  "WpaPersonal": "WPA-개인용"
+  "WpaPersonal": "WPA-개인용",
+  "SectionDisplayCare": "OLED 및 디스플레이 관리",
+  "SurfaceTrueBlack": "트루 블랙 (OLED)",
+  "OledReduceGlow": "글로우 및 그림자 줄이기",
+  "OledReduceGlowHelp": "광택, 가장자리 글로우, 그림자 효과를 숨겨 평면적이고 절전형 외관으로 만듭니다.",
+  "BurnInShift": "번인 방지 이동",
+  "BurnInShiftHelp": "정지 영상 잔상을 줄이기 위해 독을 때때로 1~2픽셀씩 이동합니다.",
+  "BurnInShiftInterval": "이동 간격",
+  "OledAutoTrigger": "배터리 부족 시 OLED 자동 전환",
+  "OledAutoTriggerHelp": "배터리가 부족하면 표면을 일시적으로 트루 블랙으로 전환합니다.",
+  "OledLowBatteryThreshold": "배터리 부족 임계값",
+  "OledAutoOnNightLight": "야간 조명 따라가기",
+  "OledAutoOnNightLightHelp": "Windows 야간 조명이 켜져 있는 동안 일시적인 OLED 외관을 적용합니다.",
+  "AmbientMode": "앰비언트 디스플레이",
+  "AmbientModeHelp": "입력이 없는 지 5분이 지나면 얇은 검은 막대에 시계와 배터리만 표시합니다.",
+  "AnimationFpsCap": "애니메이션 프레임 제한",
+  "AnimationFpsCapHelp": "고주사율 OLED 패널에서 전력을 절약하기 위해 리소스 기반 애니메이션을 제한합니다.",
+  "FpsUnlimited": "무제한"
 }

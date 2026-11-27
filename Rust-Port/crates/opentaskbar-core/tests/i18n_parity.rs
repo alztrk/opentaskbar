@@ -11,7 +11,7 @@ const LANGS: &[&str] = &[
     "ru-RU", "tr-TR", "uk-UA", "zh-CN",
 ];
 
-const EXPECTED_KEY_COUNT: usize = 1406;
+const EXPECTED_KEY_COUNT: usize = 1423;
 
 const C3_NEW_KEYS: &[&str] = &[
     // Window picker, magnification and Fjord labels.
@@ -91,6 +91,24 @@ const C3_NEW_KEYS: &[&str] = &[
     "GlassSaturationLabel",
     "GlassEdgeGlowLabel",
     "GlassPointerLightLabel",
+    // OLED and display care.
+    "SectionDisplayCare",
+    "SurfaceTrueBlack",
+    "OledReduceGlow",
+    "OledReduceGlowHelp",
+    "BurnInShift",
+    "BurnInShiftHelp",
+    "BurnInShiftInterval",
+    "OledAutoTrigger",
+    "OledAutoTriggerHelp",
+    "OledLowBatteryThreshold",
+    "OledAutoOnNightLight",
+    "OledAutoOnNightLightHelp",
+    "AmbientMode",
+    "AmbientModeHelp",
+    "AnimationFpsCap",
+    "AnimationFpsCapHelp",
+    "FpsUnlimited",
     // Fjord / Wi-Fi / preview labels consumed by the ported UI.
     "Connected",
     "Copied",

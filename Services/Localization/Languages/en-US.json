@@ -992,5 +992,22 @@
   "StatsTopProcessesEmpty": "No process data available",
   "StatsSamplingProcesses": "Sampling processes…",
   "ResourceMonitor": "Resource Monitor",
-  "WidgetKeyboardLayoutDescription": "Show the active input language and switch keyboard layouts from the dock."
+  "WidgetKeyboardLayoutDescription": "Show the active input language and switch keyboard layouts from the dock.",
+  "SectionDisplayCare": "OLED & display care",
+  "SurfaceTrueBlack": "True black (OLED)",
+  "OledReduceGlow": "Reduce glow & shadows",
+  "OledReduceGlowHelp": "Hides sheen, edge glow and drop shadows for a flat, power-saving look.",
+  "BurnInShift": "Burn-in shift",
+  "BurnInShiftHelp": "Moves the dock a pixel or two from time to time to reduce static image retention.",
+  "BurnInShiftInterval": "Shift interval",
+  "OledAutoTrigger": "Automatic OLED on low power",
+  "OledAutoTriggerHelp": "Temporarily switches the surfaces to true black when the battery is low.",
+  "OledLowBatteryThreshold": "Low battery threshold",
+  "OledAutoOnNightLight": "Follow Night Light",
+  "OledAutoOnNightLightHelp": "Applies the temporary OLED look while Windows Night Light is on.",
+  "AmbientMode": "Ambient display",
+  "AmbientModeHelp": "After 5 minutes without input, shows only the clock and battery on a slim black strip.",
+  "AnimationFpsCap": "Animation frame limit",
+  "AnimationFpsCapHelp": "Caps resource-based animations to save power on high-refresh OLED panels.",
+  "FpsUnlimited": "Unlimited"
 }

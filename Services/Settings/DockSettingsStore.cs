@@ -434,6 +434,9 @@ public sealed class DockSettingsStore
         && (settings.DockCornerRadius is null || settings.DockCornerRadius is >= 0 and <= 48)
         && settings.WirelessBatteryPollSeconds is >= 15 and <= 300
         && settings.WirelessBatteryLowThreshold is 0 or 10 or 20 or 30
+        && settings.BurnInShiftMinutes is >= 5 and <= 120
+        && settings.OledLowBatteryThreshold is 0 or 10 or 20 or 30 or 50
+        && settings.AnimationFpsCap is 0 or 30 or 60 or 120
         && IsValidIgnoredWirelessDevices(settings.IgnoredWirelessDevices)
         && IsValidWirelessDeviceAliases(settings.WirelessDeviceAliases)
         && IsValidDynamicIslandPlacements(settings.DynamicIslandPlacements)

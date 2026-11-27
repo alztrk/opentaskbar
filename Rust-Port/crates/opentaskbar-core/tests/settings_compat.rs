@@ -6,9 +6,9 @@ use std::path::PathBuf;
 use opentaskbar_core::hotkey::HotkeyChoice;
 use opentaskbar_core::settings::{
     AppTheme, AutoHideMode, DockGapUnit, DockHeightMode, DockPosition, DockProfile, DockSettings,
-    DockSize, DockWidthMode, WidgetDensityMode, apply_full_profile, dock_metrics,
-    effective_bottom_gap, effective_bottom_gap_for, effective_height_for, effective_top_gap,
-    effective_top_gap_for, effective_width, is_supported_widget_id, load_from,
+    DockSize, DockWidthMode, SurfaceBackground, WidgetDensityMode, apply_full_profile,
+    dock_metrics, effective_bottom_gap, effective_bottom_gap_for, effective_height_for,
+    effective_top_gap, effective_top_gap_for, effective_width, is_supported_widget_id, load_from,
     normalize_legacy_json, resolve_widget_density, save_to, widget_density_for,
     widget_shrink_priority,
 };
@@ -657,4 +657,112 @@ fn struct_migration_drops_retired_provider_data() {
     assert_eq!(settings.installed_widgets, ["Clock"]);
     assert_eq!(settings.ai_usage_providers & 4, 0);
     assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+}
+
+#[test]
+fn display_care_settings_survive_csharp_load_save_load() {
+    let (dir, path) = temp_settings("display-care");
+    fs::write(
+        &path,
+        r#"{
+          "DockBackground": "TrueBlack",
+          "OledReduceGlowEnabled": true,
+          "BurnInShiftEnabled": true,
+          "BurnInShiftMinutes": 60,
+          "OledAutoTriggerEnabled": true,
+          "OledLowBatteryThreshold": 20,
+          "OledAutoOnNightLight": true,
+          "AmbientModeEnabled": true,
+          "AnimationFpsCap": 60,
+          "FutureDisplayCareKey": "keep-me"
+        }"#,
+    )
+    .unwrap();
+
+    let first = load_from(&path);
+    assert_eq!(first.dock_background, SurfaceBackground::TrueBlack);
+    assert!(first.oled_reduce_glow_enabled);
+    assert!(first.burn_in_shift_enabled);
+    assert_eq!(first.burn_in_shift_minutes, 60);
+    assert!(first.oled_auto_trigger_enabled);
+    assert_eq!(first.oled_low_battery_threshold, 20);
+    assert!(first.oled_auto_on_night_light);
+    assert!(first.ambient_mode_enabled);
+    assert_eq!(first.animation_fps_cap, 60);
+    assert!(first.validate().is_empty(), "{:?}", first.validate());
+    assert_eq!(
+        first
+            .extra
+            .get("FutureDisplayCareKey")
+            .and_then(|value| value.as_str()),
+        Some("keep-me")
+    );
+
+    save_to(&path, &first).unwrap();
+    let saved = fs::read_to_string(&path).unwrap();
+    for key in [
+        "DockBackground",
+        "OledReduceGlowEnabled",
+        "BurnInShiftEnabled",
+        "BurnInShiftMinutes",
+        "OledAutoTriggerEnabled",
+        "OledLowBatteryThreshold",
+        "OledAutoOnNightLight",
+        "AmbientModeEnabled",
+        "AnimationFpsCap",
+    ] {
+        assert!(saved.contains(&format!("\"{key}\"")), "{key} was not saved");
+    }
+
+    let second = load_from(&path);
+    assert_eq!(second, first);
+    assert!(second.extra.contains_key("FutureDisplayCareKey"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn invalid_display_care_values_fall_back_to_defaults() {
+    for (name, key, value) in [
+        ("minutes-low", "BurnInShiftMinutes", "4"),
+        ("minutes-high", "BurnInShiftMinutes", "121"),
+        ("threshold", "OledLowBatteryThreshold", "15"),
+        ("fps-cap", "AnimationFpsCap", "90"),
+    ] {
+        let (dir, path) = temp_settings(name);
+        fs::write(&path, format!(r#"{{"Theme":"Dark","{key}":{value}}}"#)).unwrap();
+        let loaded = load_from(&path);
+        assert_eq!(
+            loaded,
+            DockSettings::default(),
+            "{key}={value} was accepted"
+        );
+        assert!(
+            fs::read_dir(&dir).unwrap().flatten().any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("settings.json.invalid-")),
+            "an invalid {key} must back up the rejected file"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
+#[test]
+fn boundary_display_care_values_are_accepted() {
+    let (dir, path) = temp_settings("display-care-bounds");
+    fs::write(
+        &path,
+        r#"{
+          "BurnInShiftMinutes": 5,
+          "OledLowBatteryThreshold": 50,
+          "AnimationFpsCap": 120
+        }"#,
+    )
+    .unwrap();
+    let loaded = load_from(&path);
+    assert_eq!(loaded.burn_in_shift_minutes, 5);
+    assert_eq!(loaded.oled_low_battery_threshold, 50);
+    assert_eq!(loaded.animation_fps_cap, 120);
+    assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
+    let _ = fs::remove_dir_all(&dir);
 }

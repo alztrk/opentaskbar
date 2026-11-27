@@ -34,7 +34,8 @@ OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replaceme
 - **Aurora Visual Language:** Dark (Midnight Obsidian) and Light glass materials with top specular sheen, 1px optical bevel, and soft ambient drop shadows.
 - **Dock Edge Placement:** Position the dock at the Bottom, Left, or Right edge of your primary screen, with independent alignment (Center, Left, Right, or Full-Width).
 - **Size, Scale & Corner Radius:** Choose between Compact (48 DIP), Medium (58 DIP), and Large (66 DIP) presets, fine-tune scale from 75% to 150%, and customize frame corner radius from 0 px (sharp) to 32 px while screen edge spacing adjusts automatically from the active profile.
-- **Per-Surface Materials:** Configure the dock, menus, widgets and Settings window independently. Each surface has Glass (translucent), Solid (fully opaque) or None (background, rim and shadow completely removed) with its own 0–100% opacity and live preview.
+- **Per-Surface Materials:** Configure the dock, menus, widgets and Settings window independently. Each surface has Glass (translucent), Solid (fully opaque), True black (OLED, opaque `#000000` with no rim or shadow) or None (background, rim and shadow completely removed) with its own 0–100% opacity and live preview.
+- **OLED / Display Care:** Reduce glow and shadows, drift the dock a pixel or two on a configurable interval to discourage burn-in, apply a temporary true-black look on low battery or Night Light, collapse to a minimal clock/battery strip after five minutes idle, and cap resource-based animations at 30/60/120 FPS. Every option is independent and lives in Settings → Appearance.
 - **Two-Sided Dock Resizing & Edge Scrolling:** Drag either outer border to narrow or expand the dock while keeping widgets at full width. Overflowing items scroll smoothly via mouse wheel, middle-click panning, or clickable edge chevrons with directional gradient scrims aligned to the outer dock borders.
 
 ### Theme Packs

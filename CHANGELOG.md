@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### OLED / display care
+
+- Added a fourth per-surface material, **True black (OLED)**: opaque `#000000` with no rim, sheen or shadow on the dock, menus, widgets and Settings window. Available independently for each surface in Settings → Appearance, with live preview.
+- Added independent display-care settings: reduce glow & shadows, burn-in shift (5–120 minute interval), automatic OLED look on low battery and/or Night Light, ambient display (minimal clock + battery strip after 5 minutes idle), and an animation frame limit (unlimited/30/60/120 FPS). Burn-in shift uses a tiny in-pill transform so layout and geometry stay untouched; the automatic trigger never rewrites saved settings.
+- All new settings and the TrueBlack material are mirrored in the Rust port (schema, validation, glass/dock rendering and Settings UI), with 17 new locale keys translated in all 14 C# and Rust catalogs. Numeric parity gates moved to **1011 C# / 1423 Rust** keys.
+
 ### Rust port — test/CI/docs/packaging parity
 
 - Removed five retired AI-provider grouping keys and added 27 window-picker, magnification, Fjord, Wi-Fi, search, alignment, preview, focus, density and AI-ring keys (24 newly added; three already shipped in every catalog) to all 14 Rust catalogs. The C# catalogs now hold **994 keys** and every Rust catalog and numeric gate sits at **1406 keys** (40 Fjord/Wi-Fi/preview labels added for the ported UI).

@@ -71,7 +71,8 @@ public enum DockHeightMode { Auto, Pixels, Percent, Fill }
 public enum DockGapUnit { Pixels, Percent }
 
 /// <summary>How a translucent UI surface is filled. None removes the fill, its rim and its shadow.</summary>
-public enum SurfaceBackground { Glass, Solid, None }
+/// <remarks>TrueBlack is an opaque, pure-black fill with no rim, sheen or shadow for OLED panels.</remarks>
+public enum SurfaceBackground { Glass, Solid, None, TrueBlack }
 
 /// <summary>The independently configurable parts of the application.</summary>
 public enum SurfaceKind { Dock, Menu, Widget, Settings }
@@ -263,7 +264,16 @@ public sealed record DockSettings(
     bool MirrorMainDock = false,
     DynamicIslandVisibilityMode DynamicIslandVisibility = DynamicIslandVisibilityMode.Always,
     bool DynamicIslandHideInFullscreen = true,
-    IReadOnlyDictionary<string, IReadOnlyList<string>>? DynamicIslandWidgetOrders = null)
+    IReadOnlyDictionary<string, IReadOnlyList<string>>? DynamicIslandWidgetOrders = null,
+    // OLED / display care. Appended so older settings files and positional constructor calls keep working.
+    bool OledReduceGlowEnabled = false,
+    bool BurnInShiftEnabled = false,
+    int BurnInShiftMinutes = 30,
+    bool OledAutoTriggerEnabled = false,
+    int OledLowBatteryThreshold = 0,
+    bool OledAutoOnNightLight = false,
+    bool AmbientModeEnabled = false,
+    int AnimationFpsCap = 0)
 {
     public const string DynamicIslandAllDisplays = "*";
     /// <summary>Effective animation state, suppressed while focus mode is active.</summary>

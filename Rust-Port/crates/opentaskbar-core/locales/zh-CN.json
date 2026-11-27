@@ -1404,5 +1404,22 @@
   "WlanStopped": "WLAN 服务已停止",
   "Wpa2Personal": "WPA2-个人",
   "Wpa3Personal": "WPA3-个人",
-  "WpaPersonal": "WPA-个人"
+  "WpaPersonal": "WPA-个人",
+  "SectionDisplayCare": "OLED 与显示器养护",
+  "SurfaceTrueBlack": "纯黑 (OLED)",
+  "OledReduceGlow": "减少光晕与阴影",
+  "OledReduceGlowHelp": "隐藏光泽、边缘发光和投影，呈现平整且节能的外观。",
+  "BurnInShift": "防烧屏位移",
+  "BurnInShiftHelp": "不时将任务栏移动一两个像素，以减少静态图像残留。",
+  "BurnInShiftInterval": "位移间隔",
+  "OledAutoTrigger": "低电量时自动启用 OLED",
+  "OledAutoTriggerHelp": "电量不足时，临时将界面表面切换为纯黑。",
+  "OledLowBatteryThreshold": "低电量阈值",
+  "OledAutoOnNightLight": "跟随夜间模式",
+  "OledAutoOnNightLightHelp": "在 Windows 夜间模式开启期间应用临时 OLED 外观。",
+  "AmbientMode": "环境显示",
+  "AmbientModeHelp": "无操作 5 分钟后，在纤细的黑色条带上仅显示时钟和电量。",
+  "AnimationFpsCap": "动画帧数限制",
+  "AnimationFpsCapHelp": "限制基于资源的动画，以在高刷新率 OLED 面板上节省电量。",
+  "FpsUnlimited": "无限制"
 }

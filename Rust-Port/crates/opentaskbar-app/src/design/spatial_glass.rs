@@ -8,7 +8,8 @@
 //!   (unlit rim pixels contribute `(0,0,0)` so bright wallpapers never show a dark outline)
 //! - Crisp static 1 px top-left architectural glass cut + subtle top sheen
 //! - Dual-depth soft GPU `DropShadow` (wide lift + close contact)
-//! - Strictly hidden whenever the surface background mode is not `SurfaceBackground::Glass`.
+//! - Strictly hidden whenever the surface background mode is not `SurfaceBackground::Glass`,
+//!   including `SurfaceBackground::TrueBlack` (an opaque black OLED-care fill).
 
 use opentaskbar_core::settings::{DockSettings, SurfaceBackground, clear_crystal_tint_alpha};
 
@@ -42,7 +43,7 @@ impl SpatialGlassConfig {
         }
     }
 
-    /// Disabled glass configuration for Solid / None modes.
+    /// Disabled glass configuration for Solid / None / TrueBlack modes.
     pub fn disabled(is_dark: bool) -> Self {
         Self {
             enabled: false,
@@ -75,11 +76,18 @@ impl SpatialGlassConfig {
         } else {
             1.32
         };
-        let edge_glow = if settings.glass_edge_glow.is_finite() {
+        let mut edge_glow = if settings.glass_edge_glow.is_finite() {
             settings.glass_edge_glow.clamp(0.0, 1.0) as f32
         } else {
             0.88
         };
+        let mut pointer_light = settings.glass_pointer_light;
+        // OLED glow reduction removes both the 1 px optical rim and the cursor-tracking
+        // point light while leaving the rest of the Clear Crystal glass effect intact.
+        if settings.oled_reduce_glow_enabled {
+            edge_glow = 0.0;
+            pointer_light = false;
+        }
         Self {
             enabled,
             is_dark,
@@ -87,7 +95,7 @@ impl SpatialGlassConfig {
             saturation,
             tint_alpha: clear_crystal_tint_alpha(surface_opacity, is_dark),
             edge_glow,
-            pointer_light: settings.glass_pointer_light,
+            pointer_light,
             top_flush,
         }
     }
@@ -1393,6 +1401,23 @@ mod tests {
             !SpatialGlassConfig::from_settings(&s, SurfaceBackground::None, 0.9, true, false)
                 .enabled
         );
+        assert!(
+            !SpatialGlassConfig::from_settings(&s, SurfaceBackground::TrueBlack, 0.9, true, false)
+                .enabled
+        );
+    }
+
+    #[test]
+    fn oled_glow_reduction_disables_rim_and_pointer_light() {
+        let s = DockSettings {
+            oled_reduce_glow_enabled: true,
+            ..DockSettings::default()
+        };
+        let cfg = SpatialGlassConfig::from_settings(&s, SurfaceBackground::Glass, 0.9, true, false);
+        assert!(cfg.enabled, "glow reduction must not turn glass off");
+        assert_eq!(cfg.edge_glow, 0.0);
+        assert!(!cfg.pointer_light);
+        assert!(cfg.tint_alpha > 0.0, "the glass body tint stays intact");
     }
 
     #[test]

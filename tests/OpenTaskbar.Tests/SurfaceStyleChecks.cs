@@ -126,6 +126,45 @@ internal static class SurfaceStyleChecks
             ThemeManager.Apply(AppTheme.Light, new DockSettings(WidgetBackground: SurfaceBackground.Solid, WidgetOpacity: 1.0));
             Check(Alpha(app, "WidgetHoverMaterial") == 0x18 && Alpha(app, "WidgetPressedMaterial") == 0x2A,
                 "Light palette must provide distinct WidgetHoverMaterial and WidgetPressedMaterial.");
+
+            // TrueBlack is an opaque pure-black fill with no rim, sheen or shadow on any surface.
+            ThemeManager.Apply(AppTheme.Dark, new DockSettings(
+                DockBackground: SurfaceBackground.TrueBlack,
+                MenuBackground: SurfaceBackground.TrueBlack,
+                WidgetBackground: SurfaceBackground.TrueBlack,
+                SettingsBackground: SurfaceBackground.TrueBlack,
+                DockBorderColor: "#FFFFFFFF"));
+            Check((app.FindResource("DockMaterial") as SolidColorBrush)?.Color == Colors.Black,
+                "TrueBlack dock fill must be pure black.");
+            Check(Alpha(app, "DockBorderMaterial") == 0 && Alpha(app, "MenuSheenMaterial") == 0,
+                "TrueBlack must remove the rim and sheen even with a user border color.");
+            Check((app.FindResource("DockShadow") as DropShadowEffect)?.Opacity == 0,
+                "TrueBlack must remove the dock shadow.");
+            Check((app.FindResource("SettingsSidebarGlass") as SolidColorBrush)?.Color == Colors.Black
+                && (app.FindResource("SettingsContentGlass") as SolidColorBrush)?.Color == Colors.Black,
+                "TrueBlack Settings must paint both background layers pure black.");
+
+            // Forced display care (low battery / Night Light) applies the same look without touching saved styles.
+            ThemeManager.Apply(AppTheme.Dark, new DockSettings(DockBackground: SurfaceBackground.Glass));
+            ThemeManager.SetForcedDisplayCare(true);
+            Check((app.FindResource("DockMaterial") as SolidColorBrush)?.Color == Colors.Black,
+                "Forced display care must temporarily force a pure-black dock fill.");
+            Check(ThemeManager.GetSurface(SurfaceKind.Dock).Background == SurfaceBackground.Glass,
+                "Forced display care must not rewrite the saved surface style.");
+            ThemeManager.SetForcedDisplayCare(false);
+            Check((app.FindResource("DockMaterial") is not SolidColorBrush forced
+                    || forced.Color != Colors.Black),
+                "Clearing forced display care must restore the saved surface style.");
+
+            // Reduce-glow flattens gradient glow tokens while keeping the accent hue.
+            ThemeManager.SetReduceGlow(true);
+            Check(app.FindResource("WidgetAccentFill") is SolidColorBrush,
+                "Reduce glow must flatten WidgetAccentFill to a solid brush.");
+            Check(Alpha(app, "IconHoverGlow") == 0 && Alpha(app, "DockHighlight") == 0,
+                "Reduce glow must remove the radial hover glow and dock highlight.");
+            ThemeManager.SetReduceGlow(false);
+            Check(app.FindResource("WidgetAccentFill") is GradientBrush,
+                "Turning reduce-glow off must restore the themed gradient.");
         }
         finally
         {

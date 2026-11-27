@@ -1404,5 +1404,22 @@
   "WlanStopped": "WLAN-service is gestopt",
   "Wpa2Personal": "WPA2-Persoonlijk",
   "Wpa3Personal": "WPA3-Persoonlijk",
-  "WpaPersonal": "WPA-Persoonlijk"
+  "WpaPersonal": "WPA-Persoonlijk",
+  "SectionDisplayCare": "OLED- en schermverzorging",
+  "SurfaceTrueBlack": "Echt zwart (OLED)",
+  "OledReduceGlow": "Gloed en schaduwen verminderen",
+  "OledReduceGlowHelp": "Verbergt glans, randgloed en schaduwen voor een vlakke, energiezuinige uitstraling.",
+  "BurnInShift": "Inbrand-verschuiving",
+  "BurnInShiftHelp": "Verplaatst de taakbalk af en toe een of twee pixels om retentie van statische beelden te verminderen.",
+  "BurnInShiftInterval": "Verschuvinterval",
+  "OledAutoTrigger": "Automatisch OLED bij lage batterij",
+  "OledAutoTriggerHelp": "Schakelt de oppervlakken tijdelijk naar echt zwart als de batterij laag is.",
+  "OledLowBatteryThreshold": "Drempelwaarde lage batterij",
+  "OledAutoOnNightLight": "Nachtlicht volgen",
+  "OledAutoOnNightLightHelp": "Past de tijdelijke OLED-uitstraling toe zolang Windows-nachtlicht actief is.",
+  "AmbientMode": "Omgevingsweergave",
+  "AmbientModeHelp": "Toont na 5 minuten zonder invoer alleen de klok en batterij op een smalle zwarte balk.",
+  "AnimationFpsCap": "Animatie-framelimiet",
+  "AnimationFpsCapHelp": "Beperkt op resources gebaseerde animaties om energie te besparen op OLED-schermen met hoge verversingssnelheid.",
+  "FpsUnlimited": "Onbeperkt"
 }

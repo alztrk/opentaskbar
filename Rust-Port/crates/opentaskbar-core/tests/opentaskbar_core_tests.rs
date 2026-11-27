@@ -12,7 +12,7 @@ use opentaskbar_core::settings::{DockSettings, canonical_widget_setting_id};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-/// 110 public constructor properties of C# `Models/DockSettings.cs` (in source order).
+/// 118 public constructor properties of C# `Models/DockSettings.cs` (in source order).
 const CS_SETTINGS_KEYS: &[&str] = &[
     "Position",
     "PinOrder",
@@ -124,6 +124,14 @@ const CS_SETTINGS_KEYS: &[&str] = &[
     "DynamicIslandVisibility",
     "DynamicIslandHideInFullscreen",
     "DynamicIslandWidgetOrders",
+    "OledReduceGlowEnabled",
+    "BurnInShiftEnabled",
+    "BurnInShiftMinutes",
+    "OledAutoTriggerEnabled",
+    "OledLowBatteryThreshold",
+    "OledAutoOnNightLight",
+    "AmbientModeEnabled",
+    "AnimationFpsCap",
 ];
 
 /// Mandatory `DockProfile` fields from C1 (all defaulted, none may be lost).
@@ -176,6 +184,11 @@ fn representative_value(key: &str) -> Value {
         "RevealDockOnWinKey",
         "MirrorMainDock",
         "DynamicIslandHideInFullscreen",
+        "OledReduceGlowEnabled",
+        "BurnInShiftEnabled",
+        "OledAutoTriggerEnabled",
+        "OledAutoOnNightLight",
+        "AmbientModeEnabled",
     ];
     const NUMBERS: &[&str] = &[
         "FocusMinutes",
@@ -194,6 +207,9 @@ fn representative_value(key: &str) -> Value {
         "DockHeightPercent",
         "WirelessBatteryPollSeconds",
         "WirelessBatteryLowThreshold",
+        "BurnInShiftMinutes",
+        "OledLowBatteryThreshold",
+        "AnimationFpsCap",
     ];
     const DECIMALS: &[&str] = &[
         "SurfaceOpacity",
@@ -293,8 +309,8 @@ fn representative_value(key: &str) -> Value {
 }
 
 #[test]
-fn c1_contract_lists_all_110_csharp_keys() {
-    assert_eq!(CS_SETTINGS_KEYS.len(), 110);
+fn c1_contract_lists_all_118_csharp_keys() {
+    assert_eq!(CS_SETTINGS_KEYS.len(), 118);
     let unique: BTreeSet<_> = CS_SETTINGS_KEYS.iter().copied().collect();
     assert_eq!(
         unique.len(),
@@ -435,6 +451,23 @@ fn validate_contract(values: &Map<String, Value>) -> Vec<&'static str> {
     {
         errors.push("wireless poll out of range");
     }
+    if let Some(n) = values.get("BurnInShiftMinutes").and_then(Value::as_i64)
+        && !(5..=120).contains(&n)
+    {
+        errors.push("burn-in interval out of range");
+    }
+    if let Some(n) = values
+        .get("OledLowBatteryThreshold")
+        .and_then(Value::as_i64)
+        && ![0, 10, 20, 30, 50].contains(&n)
+    {
+        errors.push("invalid low battery threshold");
+    }
+    if let Some(n) = values.get("AnimationFpsCap").and_then(Value::as_i64)
+        && ![0, 30, 60, 120].contains(&n)
+    {
+        errors.push("invalid animation fps cap");
+    }
     if values.get("StartPlacement").and_then(Value::as_str) == Some("InWidgets")
         && values.get("StartWidgetIndex").and_then(Value::as_i64) == Some(-1)
     {
@@ -513,4 +546,87 @@ fn focus_mode_and_widget_flags_keep_effective_state() {
 
     settings.focus_mode = false;
     assert!(settings.is_widget_enabled("media"));
+}
+
+#[test]
+fn display_care_fields_round_trip_with_csharp_pascal_case_names() {
+    let raw = json!({
+        "DockBackground": "TrueBlack",
+        "OledReduceGlowEnabled": true,
+        "BurnInShiftEnabled": true,
+        "BurnInShiftMinutes": 120,
+        "OledAutoTriggerEnabled": true,
+        "OledLowBatteryThreshold": 50,
+        "OledAutoOnNightLight": true,
+        "AmbientModeEnabled": true,
+        "AnimationFpsCap": 120
+    });
+    let settings: DockSettings = serde_json::from_value(raw).unwrap();
+    let back = serde_json::to_value(&settings).unwrap();
+    assert_eq!(back["DockBackground"], json!("TrueBlack"));
+    for (key, expected) in [
+        ("OledReduceGlowEnabled", json!(true)),
+        ("BurnInShiftEnabled", json!(true)),
+        ("BurnInShiftMinutes", json!(120)),
+        ("OledAutoTriggerEnabled", json!(true)),
+        ("OledLowBatteryThreshold", json!(50)),
+        ("OledAutoOnNightLight", json!(true)),
+        ("AmbientModeEnabled", json!(true)),
+        ("AnimationFpsCap", json!(120)),
+    ] {
+        assert_eq!(back[key], expected, "key {key} was lost or renamed");
+    }
+    // Typed keys must not leak into the unknown-key bag.
+    assert!(settings.extra.is_empty(), "{:?}", settings.extra);
+    assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+}
+
+#[test]
+fn display_care_validation_matches_csharp_ranges() {
+    let mut bad = Map::new();
+    bad.insert("BurnInShiftMinutes".into(), json!(4));
+    bad.insert("OledLowBatteryThreshold".into(), json!(40));
+    bad.insert("AnimationFpsCap".into(), json!(90));
+    let errors = validate_contract(&bad);
+    assert_eq!(errors.len(), 3, "{errors:?}");
+
+    let mut settings = DockSettings {
+        burn_in_shift_minutes: 121,
+        oled_low_battery_threshold: 25,
+        animation_fps_cap: 144,
+        ..DockSettings::default()
+    };
+    let errors = settings.validate();
+    for code in [
+        "BurnInShiftMinutesOutOfRange",
+        "OledLowBatteryThresholdInvalid",
+        "AnimationFpsCapInvalid",
+    ] {
+        assert!(errors.contains(&code), "missing {code}: {errors:?}");
+    }
+
+    for minutes in [5, 120] {
+        settings.burn_in_shift_minutes = minutes;
+        assert!(
+            !settings
+                .validate()
+                .contains(&"BurnInShiftMinutesOutOfRange")
+        );
+    }
+    for threshold in [0, 10, 20, 30, 50] {
+        settings.oled_low_battery_threshold = threshold;
+        assert!(
+            !settings
+                .validate()
+                .contains(&"OledLowBatteryThresholdInvalid")
+        );
+    }
+    for cap in [0, 30, 60, 120] {
+        settings.animation_fps_cap = cap;
+        assert!(!settings.validate().contains(&"AnimationFpsCapInvalid"));
+    }
+    settings.burn_in_shift_minutes = 30;
+    settings.oled_low_battery_threshold = 0;
+    settings.animation_fps_cap = 0;
+    assert!(settings.validate().is_empty(), "{:?}", settings.validate());
 }

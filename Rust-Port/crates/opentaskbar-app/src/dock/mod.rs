@@ -1626,13 +1626,17 @@ impl DockState {
         let has_custom_border = settings.dock_border_color.is_some()
             || (settings.dock_border_thickness - 1.0).abs() > 0.05;
 
+        let true_black = settings.dock_background == SurfaceBackground::TrueBlack;
         let bg_alpha = match settings.dock_background {
             SurfaceBackground::None => 0.0_f32,
             SurfaceBackground::Solid => 0.98_f32,
             SurfaceBackground::Glass if glass_host_active => 0.0_f32,
             SurfaceBackground::Glass => (settings.dock_opacity.clamp(0.1, 1.0) * 0.88) as f32,
+            // OLED care: a fully opaque black capsule with no tint, rim or shadow.
+            SurfaceBackground::TrueBlack => 1.0_f32,
         };
         let bd_alpha = if settings.dock_background == SurfaceBackground::None
+            || true_black
             || (glass_host_active && !has_custom_border)
         {
             0.0
@@ -1644,13 +1648,19 @@ impl DockState {
             .as_deref()
             .and_then(design::parse_hex_rgb)
             .unwrap_or((bd_rgb.0, bd_rgb.1, bd_rgb.2));
+        let pill_bg = if true_black {
+            (0_u8, 0_u8, 0_u8)
+        } else {
+            (pill_rgb.0, pill_rgb.1, pill_rgb.2)
+        };
         let pill = dcomp.create_pill_nodes(
             radius * dpi,
             pill_h * dpi,
-            (pill_rgb.0, pill_rgb.1, pill_rgb.2, bg_alpha),
+            (pill_bg.0, pill_bg.1, pill_bg.2, bg_alpha),
             (user_bd.0, user_bd.1, user_bd.2, bd_alpha),
             dpi,
             settings.dock_border_thickness.clamp(0.0, 8.0) as f32,
+            true_black,
         )?;
 
         let shell_px = (base * dpi).ceil() as u32;
@@ -2586,13 +2596,16 @@ impl DockState {
         let has_custom_border = self.settings.dock_border_color.is_some()
             || (self.settings.dock_border_thickness - 1.0).abs() > 0.05;
 
+        let true_black = self.settings.dock_background == SurfaceBackground::TrueBlack;
         let bg_alpha = match self.settings.dock_background {
             SurfaceBackground::None => 0.0_f32,
             SurfaceBackground::Solid => 0.98_f32,
             SurfaceBackground::Glass if glass_host_active => 0.0_f32,
             SurfaceBackground::Glass => (self.settings.dock_opacity.clamp(0.1, 1.0) * 0.88) as f32,
+            SurfaceBackground::TrueBlack => 1.0_f32,
         };
         let bd_alpha = if self.settings.dock_background == SurfaceBackground::None
+            || true_black
             || (glass_host_active && !has_custom_border)
         {
             0.0
@@ -2605,13 +2618,19 @@ impl DockState {
             .as_deref()
             .and_then(design::parse_hex_rgb)
             .unwrap_or((bd_rgb.0, bd_rgb.1, bd_rgb.2));
+        let pill_bg = if true_black {
+            (0_u8, 0_u8, 0_u8)
+        } else {
+            (pill_rgb.0, pill_rgb.1, pill_rgb.2)
+        };
         if let Ok(pill) = self.dcomp.create_pill_nodes(
             radius * dpi,
             pill_h * dpi,
-            (pill_rgb.0, pill_rgb.1, pill_rgb.2, bg_alpha),
+            (pill_bg.0, pill_bg.1, pill_bg.2, bg_alpha),
             (user_bd.0, user_bd.1, user_bd.2, bd_alpha),
             dpi,
             self.settings.dock_border_thickness.clamp(0.0, 8.0) as f32,
+            true_black,
         ) {
             self.pill = pill;
         }

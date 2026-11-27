@@ -1404,5 +1404,22 @@
   "WlanStopped": "Usługa WLAN jest zatrzymana",
   "Wpa2Personal": "WPA2-Osobiste",
   "Wpa3Personal": "WPA3-Osobiste",
-  "WpaPersonal": "WPA-Osobiste"
+  "WpaPersonal": "WPA-Osobiste",
+  "SectionDisplayCare": "Pielęgnacja OLED i ekranu",
+  "SurfaceTrueBlack": "Głęboka czerń (OLED)",
+  "OledReduceGlow": "Zmniejsz poświatę i cienie",
+  "OledReduceGlowHelp": "Ukrywa połysk, poświatę krawędzi i cienie, aby uzyskać płaski, energooszczędny wygląd.",
+  "BurnInShift": "Przesunięcie przeciw wypaleniu",
+  "BurnInShiftHelp": "Co jakiś czas przesuwa pasek o jeden lub dwa piksele, by ograniczyć zatrzymywanie statycznego obrazu.",
+  "BurnInShiftInterval": "Interwał przesuwania",
+  "OledAutoTrigger": "Automatyczny OLED przy niskim poziomie baterii",
+  "OledAutoTriggerHelp": "Tymczasowo przełącza powierzchnie na głęboką czerń, gdy poziom naładowania baterii jest niski.",
+  "OledLowBatteryThreshold": "Próg niskiego poziomu baterii",
+  "OledAutoOnNightLight": "Podążaj za trybem nocnym",
+  "OledAutoOnNightLightHelp": "Stosuje tymczasowy wygląd OLED, gdy włączony jest tryb nocny Windows.",
+  "AmbientMode": "Wyświetlanie otoczenia",
+  "AmbientModeHelp": "Po 5 minutach bez wprowadzania danych pokazuje tylko zegar i baterię na wąskim czarnym pasku.",
+  "AnimationFpsCap": "Limit klatek animacji",
+  "AnimationFpsCapHelp": "Ogranicza animacje oparte na zasobach, aby oszczędzać energię na panelach OLED o wysokiej częstotliwości odświeżania.",
+  "FpsUnlimited": "Bez ograniczeń"
 }

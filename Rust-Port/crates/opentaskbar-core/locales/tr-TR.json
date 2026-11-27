@@ -1404,5 +1404,22 @@
   "WlanStopped": "WLAN hizmeti durduruldu",
   "Wpa2Personal": "WPA2-Kişisel",
   "Wpa3Personal": "WPA3-Kişisel",
-  "WpaPersonal": "WPA-Kişisel"
+  "WpaPersonal": "WPA-Kişisel",
+  "SectionDisplayCare": "OLED ve ekran bakımı",
+  "SurfaceTrueBlack": "Gerçek siyah (OLED)",
+  "OledReduceGlow": "Parlamayı ve gölgeleri azalt",
+  "OledReduceGlowHelp": "Düz ve enerji tasarruflu bir görünüm için parlaklığı, kenar ışımasını ve gölgeleri gizler.",
+  "BurnInShift": "Yanma önleme kaydırması",
+  "BurnInShiftHelp": "Statik görüntü kalıcılığını azaltmak için rafı ara sıra bir veya iki piksel kaydırır.",
+  "BurnInShiftInterval": "Kaydırma aralığı",
+  "OledAutoTrigger": "Düşük güçte otomatik OLED",
+  "OledAutoTriggerHelp": "Pil düşük olduğunda yüzeyleri geçici olarak gerçek siyaha geçirir.",
+  "OledLowBatteryThreshold": "Düşük pil eşiği",
+  "OledAutoOnNightLight": "Gece Işığını takip et",
+  "OledAutoOnNightLightHelp": "Windows Gece Işığı açıkken geçici OLED görünümünü uygular.",
+  "AmbientMode": "Ortam ekranı",
+  "AmbientModeHelp": "5 dakika girdi olmadığında ince siyah bir şeritte yalnızca saati ve pili gösterir.",
+  "AnimationFpsCap": "Animasyon kare sınırı",
+  "AnimationFpsCapHelp": "Yüksek yenileme hızlı OLED panellerde güç tasarrufu için kaynak tabanlı animasyonları sınırlar.",
+  "FpsUnlimited": "Sınırsız"
 }

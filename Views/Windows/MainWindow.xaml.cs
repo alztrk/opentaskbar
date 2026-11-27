@@ -49,6 +49,10 @@ public partial class MainWindow : Window
     private readonly DynamicIslandManager _dynamicIslandManager;
     private readonly WidgetPanelHost _widgetPanel;
     private readonly DispatcherTimer _timedWidgetRefreshTimer;
+    private readonly DispatcherTimer _displayCareTimer;
+    private DateTime _lastBurnInShift;
+    private int _burnInStep;
+    private bool _ambientActive;
     private readonly HashSet<string> _exitingRunningPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly ApplicationPreferences _preferences = ((App)Application.Current).Preferences;
     private SettingsWindow? _settingsWindow;
@@ -207,6 +211,11 @@ public partial class MainWindow : Window
             Interval = TimeSpan.FromSeconds(1)
         };
         _timedWidgetRefreshTimer.Tick += TimedWidgetRefreshTimer_Tick;
+        _displayCareTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+        {
+            Interval = TimeSpan.FromSeconds(1)
+        };
+        _displayCareTimer.Tick += DisplayCareTimer_Tick;
         // WinEvents are not raised for every focus transition (minimize, alt-tab,
         // desktop switches). Poll lightly so indicator dots never stay stale.
         _foregroundPollTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
@@ -302,8 +311,10 @@ public partial class MainWindow : Window
         {
             ThemePacks.Changed -= ThemePacks_Changed;
             _magnificationScrollResetTimer?.Stop();
+            _displayCareTimer.Stop();
         };
         UpdatePreferredIconPixels();
+        ApplyDisplayCareSettings();
         // Pinned apps, the start logo and shell thumbnails are populated after the first paint by
         // PopulateDockContent; none of their COM/file work belongs on the first-paint critical path.
         if (_preferences.LoadError is not null)
@@ -2561,6 +2572,7 @@ public partial class MainWindow : Window
         if (_mirrorOf is null) _dynamicIslandManager.Apply(_preferences.Current, _islandWidgetItems);
         ApplyExtrasSettings();
         ApplyFeatureSettings();
+        ApplyDisplayCareSettings();
         RefreshPinnedTrayStrip();
         ApplyHeadroom();
         ApplySizeProfile();
@@ -2605,6 +2617,62 @@ public partial class MainWindow : Window
             _replacementSession.EnsureReservationSynced();
         }
         _appliedDockGeometry = geometry;
+    }
+
+    private static readonly TimeSpan AmbientIdleThreshold = TimeSpan.FromMinutes(5);
+
+    /// <summary>Starts/stops the display-care ticker and clears visuals when both features are off.</summary>
+    private void ApplyDisplayCareSettings()
+    {
+        var settings = _preferences.Current;
+        if (!settings.BurnInShiftEnabled && !settings.AmbientModeEnabled)
+        {
+            _displayCareTimer.Stop();
+            _burnInStep = 0;
+            DockBurnInShift.X = 0;
+            SetAmbientState(false, force: true);
+            return;
+        }
+        _lastBurnInShift = DateTime.UtcNow;
+        SetAmbientState(
+            settings.AmbientModeEnabled && UserIdleMonitor.IdleTime() >= AmbientIdleThreshold,
+            force: true);
+        if (!_displayCareTimer.IsEnabled) _displayCareTimer.Start();
+    }
+
+    private void DisplayCareTimer_Tick(object? sender, EventArgs e)
+    {
+        var settings = _preferences.Current;
+        if (settings.BurnInShiftEnabled
+            && DateTime.UtcNow - _lastBurnInShift >= TimeSpan.FromMinutes(settings.BurnInShiftMinutes))
+        {
+            _lastBurnInShift = DateTime.UtcNow;
+            _burnInStep = (_burnInStep + 1) % 4;
+            DockBurnInShift.X = _burnInStep switch { 1 => 1, 2 => 2, 3 => 1, _ => 0 };
+        }
+        SetAmbientState(
+            settings.AmbientModeEnabled && UserIdleMonitor.IdleTime() >= AmbientIdleThreshold,
+            force: false);
+    }
+
+    private void SetAmbientState(bool active, bool force)
+    {
+        if (active == _ambientActive && !force) return;
+        var changed = active != _ambientActive;
+        _ambientActive = active;
+        DockFrameRoot.Visibility = active ? Visibility.Collapsed : Visibility.Visible;
+        AmbientPanel.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+        if (active) UpdateAmbientText();
+        if (changed) ResizeDockToContent();
+    }
+
+    private void UpdateAmbientText()
+    {
+        var settings = _preferences.Current;
+        AmbientClockText.Text = DateTime.Now.ToString(
+            settings.Clock24Hour ? "HH:mm" : "h:mm tt", settings.Language.Culture);
+        var battery = SystemStats.SampleBattery();
+        AmbientBatteryText.Text = battery.Present ? $"{battery.Percent}%" : string.Empty;
     }
 
     /// <summary>Subtle settle animation when a new size/scale profile is committed.</summary>

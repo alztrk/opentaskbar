@@ -739,6 +739,7 @@
                                             <ComboBoxItem Content="{local:Loc SurfaceGlass}" Tag="Glass" />
                                             <ComboBoxItem Content="{local:Loc SurfaceSolid}" Tag="Solid" />
                                             <ComboBoxItem Content="{local:Loc SurfaceNone}" Tag="None" />
+                                            <ComboBoxItem Content="{local:Loc SurfaceTrueBlack}" Tag="TrueBlack" />
                                         </ComboBox>
                                         <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                                             <Slider x:Name="DockOpacitySlider" Tag="Dock" Width="174" Minimum="0" Maximum="100" Value="90" TickFrequency="5"
@@ -761,6 +762,7 @@
                                             <ComboBoxItem Content="{local:Loc SurfaceGlass}" Tag="Glass" />
                                             <ComboBoxItem Content="{local:Loc SurfaceSolid}" Tag="Solid" />
                                             <ComboBoxItem Content="{local:Loc SurfaceNone}" Tag="None" />
+                                            <ComboBoxItem Content="{local:Loc SurfaceTrueBlack}" Tag="TrueBlack" />
                                         </ComboBox>
                                         <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                                             <Slider x:Name="MenuOpacitySlider" Tag="Menu" Width="174" Minimum="0" Maximum="100" Value="90" TickFrequency="5"
@@ -783,6 +785,7 @@
                                             <ComboBoxItem Content="{local:Loc SurfaceGlass}" Tag="Glass" />
                                             <ComboBoxItem Content="{local:Loc SurfaceSolid}" Tag="Solid" />
                                             <ComboBoxItem Content="{local:Loc SurfaceNone}" Tag="None" />
+                                            <ComboBoxItem Content="{local:Loc SurfaceTrueBlack}" Tag="TrueBlack" />
                                         </ComboBox>
                                         <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                                             <Slider x:Name="WidgetOpacitySlider" Tag="Widget" Width="174" Minimum="0" Maximum="100" Value="90" TickFrequency="5"
@@ -805,6 +808,7 @@
                                             <ComboBoxItem Content="{local:Loc SurfaceGlass}" Tag="Glass" />
                                             <ComboBoxItem Content="{local:Loc SurfaceSolid}" Tag="Solid" />
                                             <ComboBoxItem Content="{local:Loc SurfaceNone}" Tag="None" />
+                                            <ComboBoxItem Content="{local:Loc SurfaceTrueBlack}" Tag="TrueBlack" />
                                         </ComboBox>
                                         <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
                                             <Slider x:Name="SettingsOpacitySlider" Tag="Settings" Width="174" Minimum="0" Maximum="100" Value="90" TickFrequency="5"
@@ -833,6 +837,102 @@
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
                                         <TextBlock Text="{local:Loc BorderStyleLabel}" Style="{StaticResource SettingsRowLabel}" />
                                         <TextBlock Text="{local:Loc BorderStyleHelp}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+                            </StackPanel></Border>
+
+                            <!-- OLED / display care -->
+                            <TextBlock Text="{local:Loc SectionDisplayCare}" Style="{StaticResource SettingsSectionHeading}" />
+                            <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <CheckBox x:Name="OledReduceGlowToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              AutomationProperties.Name="{local:Loc OledReduceGlow}" />
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc OledReduceGlow}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc OledReduceGlowHelp}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <CheckBox x:Name="BurnInShiftToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              AutomationProperties.Name="{local:Loc BurnInShift}" />
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc BurnInShift}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc BurnInShiftHelp}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <ComboBox x:Name="BurnInShiftIntervalBox" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
+                                              SelectionChanged="SegmentChoice_SelectionChanged"
+                                              AutomationProperties.Name="{local:Loc BurnInShiftInterval}">
+                                        <ComboBoxItem Tag="5" />
+                                        <ComboBoxItem Tag="15" />
+                                        <ComboBoxItem Tag="30" />
+                                        <ComboBoxItem Tag="60" />
+                                        <ComboBoxItem Tag="120" />
+                                    </ComboBox>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc BurnInShiftInterval}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc BurnInShiftHelp}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <CheckBox x:Name="OledAutoTriggerToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              AutomationProperties.Name="{local:Loc OledAutoTrigger}" />
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc OledAutoTrigger}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc OledAutoTriggerHelp}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <ComboBox x:Name="OledLowBatteryThresholdBox" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
+                                              SelectionChanged="SegmentChoice_SelectionChanged"
+                                              AutomationProperties.Name="{local:Loc OledLowBatteryThreshold}">
+                                        <ComboBoxItem Tag="0" />
+                                        <ComboBoxItem Tag="10" />
+                                        <ComboBoxItem Tag="20" />
+                                        <ComboBoxItem Tag="30" />
+                                        <ComboBoxItem Tag="50" />
+                                    </ComboBox>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc OledLowBatteryThreshold}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc OledAutoTriggerHelp}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <CheckBox x:Name="OledAutoOnNightLightToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              AutomationProperties.Name="{local:Loc OledAutoOnNightLight}" />
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc OledAutoOnNightLight}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc OledAutoOnNightLightHelp}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <CheckBox x:Name="AmbientModeToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              AutomationProperties.Name="{local:Loc AmbientMode}" />
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc AmbientMode}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc AmbientModeHelp}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+
+                                <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
+                                    <ComboBox x:Name="AnimationFpsCapBox" DockPanel.Dock="Right" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center"
+                                              SelectionChanged="SegmentChoice_SelectionChanged"
+                                              AutomationProperties.Name="{local:Loc AnimationFpsCap}">
+                                        <ComboBoxItem Tag="0" />
+                                        <ComboBoxItem Tag="30" />
+                                        <ComboBoxItem Tag="60" />
+                                        <ComboBoxItem Tag="120" />
+                                    </ComboBox>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc AnimationFpsCap}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc AnimationFpsCapHelp}" Style="{StaticResource SettingsRowDescription}" />
                                     </StackPanel>
                                 </DockPanel></Border>
                             </StackPanel></Border>

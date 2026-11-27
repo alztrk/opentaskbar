@@ -174,6 +174,7 @@ public partial class SettingsWindow : Window
         PreviewsToggle.IsChecked = _applied.PreviewsEnabled;
         SelectChoice(AutoHideBox, _applied.AutoHide.ToString());
         LoadSurfaceStyles(_applied);
+        LoadDisplayCare(_applied);
         MagnificationToggle.IsChecked = _applied.MagnificationEnabled;
         SelectChoice(SizeBox, _applied.Size.ToString());
         DockIconPaddingSlider.Value = _applied.DockIconPadding;
@@ -235,6 +236,9 @@ public partial class SettingsWindow : Window
             }
         box.SelectedIndex = -1;
     }
+
+    private static int IntChoice(ComboBox box, int fallback) =>
+        int.TryParse(Choice(box), out var value) ? value : fallback;
 
     // Scope RadioButton.GroupName per window instance so closing one SettingsWindow cannot uncheck
     // another instance's radio buttons via WPF's global group registry.
@@ -375,6 +379,7 @@ public partial class SettingsWindow : Window
             UpdateHotkeyControls();
             UpdateCursorAuthUi();
             RefreshSettingsSearchIfActive();
+            RefreshDisplayCareLabels();
         }
         var themeGalleryDirty = _applied.Theme != _preferences.Current.Theme
             || !string.Equals(_applied.ThemePack, _preferences.Current.ThemePack, StringComparison.OrdinalIgnoreCase)
@@ -509,6 +514,14 @@ public partial class SettingsWindow : Window
             SettingsOpacity = Math.Round(_surfaceSliders[SurfaceKind.Settings].Value) / 100,
             SettingsBorderThickness = BorderThicknessSlider.Value,
             SettingsBorderColor = _borderColor,
+            OledReduceGlowEnabled = OledReduceGlowToggle.IsChecked == true,
+            BurnInShiftEnabled = BurnInShiftToggle.IsChecked == true,
+            BurnInShiftMinutes = IntChoice(BurnInShiftIntervalBox, 30),
+            OledAutoTriggerEnabled = OledAutoTriggerToggle.IsChecked == true,
+            OledLowBatteryThreshold = IntChoice(OledLowBatteryThresholdBox, 0),
+            OledAutoOnNightLight = OledAutoOnNightLightToggle.IsChecked == true,
+            AmbientModeEnabled = AmbientModeToggle.IsChecked == true,
+            AnimationFpsCap = IntChoice(AnimationFpsCapBox, 0),
             Widgets = enabledWidgets,
             InstalledWidgets = installedWidgets,
             DynamicIslandVisibility = Enum.TryParse<DynamicIslandVisibilityMode>(Choice(DynamicIslandVisibilityBox), out var islandVisibility)
@@ -2563,6 +2576,7 @@ public partial class SettingsWindow : Window
         PreviewsToggle.IsChecked = settings.PreviewsEnabled;
         SelectChoice(AutoHideBox, settings.AutoHide.ToString());
         LoadSurfaceStyles(settings);
+        LoadDisplayCare(settings);
         MagnificationToggle.IsChecked = settings.MagnificationEnabled;
         SelectChoice(SizeBox, settings.Size.ToString());
         DockIconPaddingSlider.Value = settings.DockIconPadding;
@@ -2610,6 +2624,7 @@ public partial class SettingsWindow : Window
             RevealOnWinKeyToggle.IsChecked = defaults.RevealDockOnWinKey;
             UpdateAutoHideControls();
             AnimationsToggle.IsChecked = defaults.AnimationsEnabled;
+            LoadDisplayCare(defaults);
             MagnificationToggle.IsChecked = defaults.MagnificationEnabled;
             PreviewsToggle.IsChecked = defaults.PreviewsEnabled;
             SelectChoice(DynamicIslandVisibilityBox, defaults.DynamicIslandVisibility.ToString());
@@ -2821,8 +2836,38 @@ public partial class SettingsWindow : Window
     {
         SelectChoice(_surfaceBoxes[kind], background.ToString());
         _surfaceSliders[kind].Value = Math.Clamp(opacity * 100, 0, 100);
-        _surfaceSliders[kind].IsEnabled = background != SurfaceBackground.None;
+        _surfaceSliders[kind].IsEnabled = background is not (SurfaceBackground.None or SurfaceBackground.TrueBlack);
         _surfaceValues[kind].Text = UiText.Format("OpacityPercent", (int)Math.Round(_surfaceSliders[kind].Value));
+    }
+
+    private void LoadDisplayCare(DockSettings settings)
+    {
+        OledReduceGlowToggle.IsChecked = settings.OledReduceGlowEnabled;
+        BurnInShiftToggle.IsChecked = settings.BurnInShiftEnabled;
+        OledAutoTriggerToggle.IsChecked = settings.OledAutoTriggerEnabled;
+        OledAutoOnNightLightToggle.IsChecked = settings.OledAutoOnNightLight;
+        AmbientModeToggle.IsChecked = settings.AmbientModeEnabled;
+        SelectChoice(BurnInShiftIntervalBox, settings.BurnInShiftMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        SelectChoice(OledLowBatteryThresholdBox, settings.OledLowBatteryThreshold.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        SelectChoice(AnimationFpsCapBox, settings.AnimationFpsCap.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        RefreshDisplayCareLabels();
+    }
+
+    /// <summary>Combo labels carry localized values, so they need refreshing when the UI language changes.</summary>
+    private void RefreshDisplayCareLabels()
+    {
+        SetNumberLabels(BurnInShiftIntervalBox, UiText.Get("MinutesShort"));
+        SetNumberLabels(OledLowBatteryThresholdBox, "{0}%");
+        var items = AnimationFpsCapBox.Items.OfType<ComboBoxItem>().ToArray();
+        foreach (var item in items)
+            item.Content = item.Tag as string == "0" ? UiText.Get("FpsUnlimited") : item.Tag as string;
+    }
+
+    private static void SetNumberLabels(ComboBox box, string format)
+    {
+        foreach (var item in box.Items.OfType<ComboBoxItem>())
+            if (int.TryParse(item.Tag as string, out var value))
+                item.Content = string.Format(UiText.Current.Language.Culture, format, value);
     }
 
     private void SegmentChoice_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -2845,7 +2890,7 @@ public partial class SettingsWindow : Window
         if (_initializing) return;
         var kind = SurfaceOf(sender);
         var background = SurfaceBackgroundOf(kind);
-        _surfaceSliders[kind].IsEnabled = background != SurfaceBackground.None;
+        _surfaceSliders[kind].IsEnabled = background is not (SurfaceBackground.None or SurfaceBackground.TrueBlack);
         _hasUnappliedThemePreview = true;
         ThemeManager.SetSurface(kind, background, Math.Round(_surfaceSliders[kind].Value) / 100);
         if (kind == SurfaceKind.Settings) UpdateBackdrop();

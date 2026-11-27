@@ -20,9 +20,24 @@ public static class ThemeManager
     private static readonly ResourceDictionary SystemOverrides = new();
     // Theme pack brushes; merged last so they win over the palette and Windows colors.
     private static readonly ResourceDictionary Overrides = new();
+    // OLED/display-care replacements; merged after theme packs so "reduce glow" always wins.
+    private static readonly ResourceDictionary OledOverrides = new();
     private static readonly Dictionary<string, Brush> MaterialSources = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, Brush> SystemMaterialSources = new(StringComparer.Ordinal);
     private static readonly Dictionary<SurfaceKind, SurfaceStyle> Styles = new();
+    private static readonly SolidColorBrush TrueBlackBrush = CreateTrueBlackBrush();
+
+    private static SolidColorBrush CreateTrueBlackBrush()
+    {
+        var brush = new SolidColorBrush(Colors.Black);
+        brush.Freeze();
+        return brush;
+    }
+
+    /// <summary>True for an opaque pure-black fill: an explicit TrueBlack surface or a forced OLED state.</summary>
+    private static bool IsTrueBlack(SurfaceStyle style) =>
+        style.Background != SurfaceBackground.None
+        && (style.Background == SurfaceBackground.TrueBlack || _forceDisplayCare);
     // Resource key prefixes for each surface's generated stroke thickness/color, e.g. "MenuStrokeThickness".
     private static string StrokePrefix(SurfaceKind kind) => kind switch
     {
@@ -39,6 +54,10 @@ public static class ThemeManager
     // Legacy single-opacity state (pr-62 theme editor). The four-surface Styles below remain authoritative.
     private static double _opacity = 0.9;
     private static double _settingsOpacity = 0.95;
+    private static bool _reduceGlow;
+    private static bool _forceDisplayCare;
+    /// <summary>True while the automatic low-power trigger is temporarily applying the OLED look.</summary>
+    public static bool IsDisplayCareForced => _forceDisplayCare;
     public static AppTheme EffectiveTheme { get; private set; } = AppTheme.Dark;
 
     internal static AppTheme WindowsTheme()
@@ -75,10 +94,13 @@ public static class ThemeManager
         dictionaries.Remove(Materials);
         dictionaries.Remove(SystemOverrides);
         dictionaries.Remove(Overrides);
+        dictionaries.Remove(OledOverrides);
         dictionaries.Add(Materials);
         dictionaries.Add(SystemOverrides);
         dictionaries.Add(Overrides);
+        dictionaries.Add(OledOverrides);
         RadiusManager.Initialize();
+        _reduceGlow = settings?.OledReduceGlowEnabled ?? false;
 
         if (settings is null)
         {
@@ -94,6 +116,7 @@ public static class ThemeManager
             Styles[SurfaceKind.Settings] = new SurfaceStyle(settings.SettingsBackground, settings.SettingsOpacity, settings.SettingsBorderThickness, settings.SettingsBorderColor);
         }
 
+        RebuildOledOverrides();
         foreach (var kind in Enum.GetValues<SurfaceKind>()) Rebuild(kind);
         _opacity = Styles.TryGetValue(SurfaceKind.Dock, out var dock) ? dock.Opacity : 0.9;
         _settingsOpacity = Styles.TryGetValue(SurfaceKind.Settings, out var settingsStyle) ? settingsStyle.Opacity : 0.95;
@@ -107,12 +130,14 @@ public static class ThemeManager
         && GetSurface(SurfaceKind.Dock) == new SurfaceStyle(settings.DockBackground, settings.DockOpacity, settings.DockBorderThickness, settings.DockBorderColor)
         && GetSurface(SurfaceKind.Menu) == new SurfaceStyle(settings.MenuBackground, settings.MenuOpacity, settings.MenuBorderThickness, settings.MenuBorderColor)
         && GetSurface(SurfaceKind.Widget) == new SurfaceStyle(settings.WidgetBackground, settings.WidgetOpacity, settings.WidgetBorderThickness, settings.WidgetBorderColor)
-        && GetSurface(SurfaceKind.Settings) == new SurfaceStyle(settings.SettingsBackground, settings.SettingsOpacity, settings.SettingsBorderThickness, settings.SettingsBorderColor);
+        && GetSurface(SurfaceKind.Settings) == new SurfaceStyle(settings.SettingsBackground, settings.SettingsOpacity, settings.SettingsBorderThickness, settings.SettingsBorderColor)
+        && _reduceGlow == settings.OledReduceGlowEnabled;
 
     /// <summary>True for the dictionaries this class owns, which theme packs must not treat as token definitions.</summary>
     internal static bool IsManagedDictionary(ResourceDictionary dictionary) =>
         ReferenceEquals(dictionary, _palette) || ReferenceEquals(dictionary, Materials)
         || ReferenceEquals(dictionary, SystemOverrides) || ReferenceEquals(dictionary, Overrides)
+        || ReferenceEquals(dictionary, OledOverrides)
         || ReferenceEquals(dictionary, RadiusManager.Dictionary);
 
     /// <summary>
@@ -133,7 +158,10 @@ public static class ThemeManager
             SystemOverrides["SurfaceHoverColor"] = systemHover.Color;
 
         if (_palette is not null)
+        {
+            RebuildOledOverrides();
             foreach (var kind in Enum.GetValues<SurfaceKind>()) Rebuild(kind);
+        }
         RadiusManager.Rebuild();
         if (_palette is not null) NotifyThemeChanged();
     }
@@ -160,10 +188,70 @@ public static class ThemeManager
         }
         if (_palette is not null)
         {
+            RebuildOledOverrides();
             foreach (var kind in Enum.GetValues<SurfaceKind>()) Rebuild(kind);
             RadiusManager.Rebuild();
             NotifyThemeChanged();
         }
+    }
+
+    /// <summary>Live preview of the "reduce glow and shadows" switch from Settings.</summary>
+    public static void SetReduceGlow(bool enabled)
+    {
+        if (_reduceGlow == enabled) return;
+        _reduceGlow = enabled;
+        if (_palette is not null)
+        {
+            RebuildOledOverrides();
+            foreach (var kind in Enum.GetValues<SurfaceKind>()) Rebuild(kind);
+            NotifyThemeChanged();
+        }
+    }
+
+    /// <summary>
+    /// Temporarily forces the pure-black, glow-free look without changing saved settings. Used by the
+    /// automatic low-power trigger; the saved theme stays authoritative once this is cleared.
+    /// </summary>
+    public static void SetForcedDisplayCare(bool enabled)
+    {
+        if (_forceDisplayCare == enabled) return;
+        _forceDisplayCare = enabled;
+        if (_palette is not null)
+        {
+            RebuildOledOverrides();
+            foreach (var kind in Enum.GetValues<SurfaceKind>()) Rebuild(kind);
+            NotifyThemeChanged();
+        }
+    }
+
+    private static bool FlatOled => _reduceGlow || _forceDisplayCare;
+
+    /// <summary>
+    /// Replaces the gradient glow tokens with flat equivalents. These keys are consumed directly as
+    /// DynamicResources, so they cannot be handled by the generated per-surface materials alone.
+    /// </summary>
+    private static void RebuildOledOverrides()
+    {
+        OledOverrides.Clear();
+        if (!FlatOled || _palette is null) return;
+
+        var transparent = Brushes.Transparent;
+        OledOverrides["IconHoverGlow"] = transparent;
+        OledOverrides["DockHighlight"] = transparent;
+        OledOverrides["DockInnerBevelMaterial"] = transparent;
+
+        // Keep the accent color, but drop the gradient so no lit pixel is wasted on a decorative fill.
+        var accent = ResolveBrush("AccentBrush") is SolidColorBrush solid
+            ? solid.Color
+            : Colors.LightSkyBlue;
+        var flat = new SolidColorBrush(accent);
+        flat.Freeze();
+        OledOverrides["WidgetAccentFill"] = flat;
+
+        var noShadow = new DropShadowEffect { Opacity = 0 };
+        noShadow.Freeze();
+        OledOverrides["ShadowDock"] = noShadow;
+        OledOverrides["ShadowMenu"] = noShadow;
     }
 
     public static SurfaceStyle GetSurface(SurfaceKind kind) =>
@@ -238,20 +326,24 @@ public static class ThemeManager
                 Materials["WidgetPressedMaterial"] = WidgetStateBrush(ResolveWidgetPressedSource(), style);
                 break;
             case SurfaceKind.Settings:
+                var oledBlack = IsTrueBlack(style);
                 Materials["SettingsGlassMaterial"] = Fill(ResolveBrush("SettingsBackground"), style);
                 Materials["SettingsStrokeMaterial"] = Stroke(ResolveBrush("MenuStroke"), style);
-                Materials["SettingsSidebarGlass"] = style.Background switch
-                {
-                    SurfaceBackground.None => Brushes.Transparent,
-                    SurfaceBackground.Solid => WithAlpha(ResolveBrush("SettingsSidebarOverlay"), 255),
-                    // Scale sidebar tint with SettingsOpacity so Glass 0% is truly transparent acrylic.
-                    _ => WithAlpha(ResolveBrush("SettingsSidebarOverlay"), (byte)Math.Round(style.Opacity * 255))
-                };
+                Materials["SettingsSidebarGlass"] = style.Background == SurfaceBackground.None
+                    ? Brushes.Transparent
+                    : oledBlack
+                        ? TrueBlackBrush
+                        : style.Background == SurfaceBackground.Solid
+                            ? WithAlpha(ResolveBrush("SettingsSidebarOverlay"), 255)
+                            // Scale sidebar tint with SettingsOpacity so Glass 0% is truly transparent acrylic.
+                            : WithAlpha(ResolveBrush("SettingsSidebarOverlay"), (byte)Math.Round(style.Opacity * 255));
                 // SettingsFrame already paints SettingsGlassMaterial behind the entire window, so keep the
                 // content pane transparent in Glass/None to avoid double-stacking or blocking 0% Glass / None.
-                Materials["SettingsContentGlass"] = style.Background == SurfaceBackground.Solid
-                    ? WithAlpha(ResolveBrush("SettingsBackground"), 255)
-                    : Brushes.Transparent;
+                Materials["SettingsContentGlass"] = oledBlack
+                    ? TrueBlackBrush
+                    : style.Background == SurfaceBackground.Solid
+                        ? WithAlpha(ResolveBrush("SettingsBackground"), 255)
+                        : Brushes.Transparent;
                 break;
         }
 
@@ -260,7 +352,7 @@ public static class ThemeManager
         var prefix = StrokePrefix(kind);
         var thickness = Math.Clamp(double.IsFinite(style.BorderThickness) ? style.BorderThickness : 1.0, 0.0, 12.0);
         Materials[prefix + "Thickness"] = new Thickness(thickness);
-        if (style.Background == SurfaceBackground.None)
+        if (style.Background == SurfaceBackground.None || IsTrueBlack(style))
         {
             Materials[prefix + "Material"] = Brushes.Transparent;
         }
@@ -284,7 +376,7 @@ public static class ThemeManager
                 ShadowDepth = 4,
                 Direction = 270,
                 Color = shadowColor,
-                Opacity = style.Background == SurfaceBackground.None ? 0 : shadowOpacity
+                Opacity = style.Background == SurfaceBackground.None || IsTrueBlack(style) || FlatOled ? 0 : shadowOpacity
             };
             shadow.Freeze();
             Materials["DockShadowMaterial"] = shadow;
@@ -369,6 +461,7 @@ public static class ThemeManager
         // Glass mode scales the theme token's configured alpha by WidgetOpacity; Solid and None
         // preserve the theme token's configured color and alpha at 100% so dock widgets keep clear feedback.
         var scale = style.Background == SurfaceBackground.Glass ? style.Opacity : 1.0;
+        if (FlatOled) scale *= 0.5;
         return WithScaledAlpha(source, scale);
     }
 
@@ -422,16 +515,18 @@ public static class ThemeManager
         : SystemMaterialSources.TryGetValue(key, out var system) ? system
         : (Brush)_palette![key];
 
-    private static Brush Fill(Brush source, SurfaceStyle style) => style.Background switch
+    private static Brush Fill(Brush source, SurfaceStyle style)
     {
-        SurfaceBackground.None => Brushes.Transparent,
-        SurfaceBackground.Solid => WithAlpha(source, 255),
-        _ => WithAlpha(source, (byte)Math.Round(style.Opacity * 255))
-    };
+        if (style.Background == SurfaceBackground.None) return Brushes.Transparent;
+        if (IsTrueBlack(style)) return TrueBlackBrush;
+        return style.Background == SurfaceBackground.Solid
+            ? WithAlpha(source, 255)
+            : WithAlpha(source, (byte)Math.Round(style.Opacity * 255));
+    }
 
     private static Brush Stroke(Brush source, SurfaceStyle style)
     {
-        if (style.Background == SurfaceBackground.None) return Brushes.Transparent;
+        if (style.Background == SurfaceBackground.None || IsTrueBlack(style)) return Brushes.Transparent;
         var brush = source.Clone();
         brush.Freeze();
         return brush;
@@ -439,7 +534,7 @@ public static class ThemeManager
 
     private static Brush Sheen(Brush source, SurfaceStyle style)
     {
-        if (style.Background == SurfaceBackground.None) return Brushes.Transparent;
+        if (style.Background == SurfaceBackground.None || IsTrueBlack(style) || FlatOled) return Brushes.Transparent;
         var brush = source.Clone();
         brush.Freeze();
         return brush;
@@ -450,7 +545,7 @@ public static class ThemeManager
         var source = Application.Current?.Resources[key] as DropShadowEffect;
         if (source is null) return new DropShadowEffect { Opacity = 0 };
         var effect = (DropShadowEffect)source.Clone();
-        if (style.Background == SurfaceBackground.None) effect.Opacity = 0;
+        if (style.Background == SurfaceBackground.None || IsTrueBlack(style) || FlatOled) effect.Opacity = 0;
         effect.Freeze();
         return effect;
     }

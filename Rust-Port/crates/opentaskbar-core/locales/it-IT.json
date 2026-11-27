@@ -1404,5 +1404,22 @@
   "WlanStopped": "Servizio WLAN arrestato",
   "Wpa2Personal": "WPA2-Personal",
   "Wpa3Personal": "WPA3-Personal",
-  "WpaPersonal": "WPA-Personal"
+  "WpaPersonal": "WPA-Personal",
+  "SectionDisplayCare": "Cura OLED e del display",
+  "SurfaceTrueBlack": "Nero profondo (OLED)",
+  "OledReduceGlow": "Riduci alone e ombre",
+  "OledReduceGlowHelp": "Nasconde riflessi, alone sui bordi e ombre per un aspetto piatto e a risparmio energetico.",
+  "BurnInShift": "Spostamento anti-ritenzione",
+  "BurnInShiftHelp": "Sposta la barra di uno o due pixel di tanto in tanto per ridurre la permanenza di immagini statiche.",
+  "BurnInShiftInterval": "Intervallo di spostamento",
+  "OledAutoTrigger": "OLED automatico con batteria bassa",
+  "OledAutoTriggerHelp": "Passa temporaneamente le superfici al nero profondo quando la batteria è bassa.",
+  "OledLowBatteryThreshold": "Soglia batteria bassa",
+  "OledAutoOnNightLight": "Segui la luce notturna",
+  "OledAutoOnNightLightHelp": "Applica l'aspetto OLED temporaneo quando la luce notturna di Windows è attiva.",
+  "AmbientMode": "Display ambientale",
+  "AmbientModeHelp": "Dopo 5 minuti senza input, mostra solo l'ora e la batteria su una sottile striscia nera.",
+  "AnimationFpsCap": "Limite fotogrammi animazione",
+  "AnimationFpsCapHelp": "Limita le animazioni basate sulle risorse per risparmiare energia sui pannelli OLED ad alto refresh rate.",
+  "FpsUnlimited": "Illimitato"
 }

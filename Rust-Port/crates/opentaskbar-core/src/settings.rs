@@ -37,6 +37,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_burn_in_shift_minutes() -> i32 {
+    30
+}
+
 fn default_dynamic_island_opacity() -> f64 {
     0.9
 }
@@ -219,6 +223,8 @@ pub enum SurfaceBackground {
     Glass,
     Solid,
     None,
+    /// Opaque, pure-black fill with no rim, sheen or shadow (OLED display care).
+    TrueBlack,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -964,6 +970,31 @@ pub struct DockSettings {
     pub custom_launcher_hotkey: Option<String>,
     pub custom_dock_hotkey: Option<String>,
 
+    // ---- OLED / display care (C# DockSettings tail properties) ----
+    /// Suppresses the spatial glass edge glow and cursor light on OLED panels.
+    #[serde(default)]
+    pub oled_reduce_glow_enabled: bool,
+    /// Periodically nudges static content to reduce burn-in.
+    #[serde(default)]
+    pub burn_in_shift_enabled: bool,
+    /// Interval between burn-in shifts in minutes (`5..=120`, default `30`).
+    /// Field-level `serde(default)` must use this helper: a bare `i32::default()` is `0`.
+    #[serde(default = "default_burn_in_shift_minutes")]
+    pub burn_in_shift_minutes: i32,
+    #[serde(default)]
+    pub oled_auto_trigger_enabled: bool,
+    /// Battery level that automatically enables OLED care; `0` disables the trigger.
+    #[serde(default)]
+    pub oled_low_battery_threshold: i32,
+    #[serde(default)]
+    pub oled_auto_on_night_light: bool,
+    #[serde(default)]
+    pub ambient_mode_enabled: bool,
+    /// Separate animation frame cap (`0` = unlimited, `30`/`60`/`120` FPS).
+    /// `animation_fps` above is the older VSync-relative setting and stays independent.
+    #[serde(default)]
+    pub animation_fps_cap: i32,
+
     /// Unknown keys from other OpenTaskbar builds preserved on round-trip save.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -1107,6 +1138,16 @@ impl Default for DockSettings {
             dock_hotkey: HotkeyChoice::CtrlAltD,
             custom_launcher_hotkey: None,
             custom_dock_hotkey: None,
+
+            oled_reduce_glow_enabled: false,
+            burn_in_shift_enabled: false,
+            burn_in_shift_minutes: 30,
+            oled_auto_trigger_enabled: false,
+            oled_low_battery_threshold: 0,
+            oled_auto_on_night_light: false,
+            ambient_mode_enabled: false,
+            animation_fps_cap: 0,
+
             extra: Map::new(),
         }
     }
@@ -2645,6 +2686,17 @@ impl DockSettings {
         if ![0, 10, 20, 30].contains(&self.wireless_battery_low_threshold) {
             errors.push("WirelessThresholdInvalid");
         }
+        // C# DockSettingsStore.IsValid(): display-care values must stay inside the
+        // exact slider/dropdown ranges, otherwise the whole file falls back to defaults.
+        if !(5..=120).contains(&self.burn_in_shift_minutes) {
+            errors.push("BurnInShiftMinutesOutOfRange");
+        }
+        if ![0, 10, 20, 30, 50].contains(&self.oled_low_battery_threshold) {
+            errors.push("OledLowBatteryThresholdInvalid");
+        }
+        if ![0, 30, 60, 120].contains(&self.animation_fps_cap) {
+            errors.push("AnimationFpsCapInvalid");
+        }
         if self.ignored_wireless_devices.len() > 128
             || contains_blank(&self.ignored_wireless_devices)
             || self
@@ -3043,7 +3095,57 @@ mod tests {
         assert_eq!(s.dock_width_pixels, 900);
         assert_eq!(s.dock_height_percent, 7);
         assert!(s.magnification_expands_dock);
+        assert!(!s.oled_reduce_glow_enabled);
+        assert!(!s.burn_in_shift_enabled);
+        assert_eq!(s.burn_in_shift_minutes, 30);
+        assert!(!s.oled_auto_trigger_enabled);
+        assert_eq!(s.oled_low_battery_threshold, 0);
+        assert!(!s.oled_auto_on_night_light);
+        assert!(!s.ambient_mode_enabled);
+        assert_eq!(s.animation_fps_cap, 0);
         assert!(s.validate().is_empty(), "{:?}", s.validate());
+    }
+
+    #[test]
+    fn oled_settings_round_trip_with_csharp_names() {
+        let raw = json!({
+            "DockBackground": "TrueBlack",
+            "OledReduceGlowEnabled": true,
+            "BurnInShiftEnabled": true,
+            "BurnInShiftMinutes": 120,
+            "OledAutoTriggerEnabled": true,
+            "OledLowBatteryThreshold": 50,
+            "OledAutoOnNightLight": true,
+            "AmbientModeEnabled": true,
+            "AnimationFpsCap": 120,
+            "UnknownFutureKey": 7
+        });
+        let settings: DockSettings = serde_json::from_value(raw).unwrap();
+        assert_eq!(settings.dock_background, SurfaceBackground::TrueBlack);
+        assert!(settings.oled_reduce_glow_enabled);
+        assert!(settings.burn_in_shift_enabled);
+        assert_eq!(settings.burn_in_shift_minutes, 120);
+        assert!(settings.oled_auto_trigger_enabled);
+        assert_eq!(settings.oled_low_battery_threshold, 50);
+        assert!(settings.oled_auto_on_night_light);
+        assert!(settings.ambient_mode_enabled);
+        assert_eq!(settings.animation_fps_cap, 120);
+        let back = serde_json::to_value(&settings).unwrap();
+        for key in [
+            "DockBackground",
+            "OledReduceGlowEnabled",
+            "BurnInShiftEnabled",
+            "BurnInShiftMinutes",
+            "OledAutoTriggerEnabled",
+            "OledLowBatteryThreshold",
+            "OledAutoOnNightLight",
+            "AmbientModeEnabled",
+            "AnimationFpsCap",
+            "UnknownFutureKey",
+        ] {
+            assert!(back.get(key).is_some(), "missing serialized key {key}");
+        }
+        assert!(settings.validate().is_empty(), "{:?}", settings.validate());
     }
 
     #[test]
@@ -3155,6 +3257,9 @@ mod tests {
             focus_sessions: 99,
             wireless_battery_poll_seconds: 5,
             wireless_battery_low_threshold: 15,
+            burn_in_shift_minutes: 4,
+            oled_low_battery_threshold: 15,
+            animation_fps_cap: 45,
             dock_scale: 2.0,
             widget_order: vec!["Clock".to_owned(), "Clock".to_owned()],
             weather_city: "x".repeat(81),
@@ -3176,6 +3281,9 @@ mod tests {
             "FocusSessionsOutOfRange",
             "WirelessPollOutOfRange",
             "WirelessThresholdInvalid",
+            "BurnInShiftMinutesOutOfRange",
+            "OledLowBatteryThresholdInvalid",
+            "AnimationFpsCapInvalid",
             "DockScaleOutOfRange",
             "StatsMetersInvalid",
             "WidgetOrderInvalid",

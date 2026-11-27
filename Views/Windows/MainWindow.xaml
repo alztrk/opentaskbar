@@ -233,6 +233,10 @@
                     BorderThickness="{DynamicResource DockBorderThickness}" CornerRadius="{DynamicResource DockRadius}"
                     AllowDrop="True" DragOver="DockFrame_DragOver" Drop="DockFrame_Drop">
                 <Grid x:Name="DockFrameRoot">
+                    <Grid.RenderTransform>
+                        <!-- Burn-in shift never affects layout; only a tiny visual drift inside the pill. -->
+                        <TranslateTransform x:Name="DockBurnInShift" X="0" Y="0" />
+                    </Grid.RenderTransform>
                     <Grid x:Name="DockLayoutRoot">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition x:Name="LeadColumn" Width="Auto" />
@@ -414,6 +418,15 @@
                     <Border x:Name="DockSheen" Visibility="Collapsed" IsHitTestVisible="False" />
                     <Border x:Name="DockDynamicGlintBorder" Visibility="Collapsed" IsHitTestVisible="False" />
                     <Border x:Name="DockDynamicGlowBorder" Visibility="Collapsed" IsHitTestVisible="False" />
+                    <StackPanel x:Name="AmbientPanel" Orientation="Horizontal" VerticalAlignment="Center"
+                                HorizontalAlignment="Center" Visibility="Collapsed" IsHitTestVisible="False"
+                                Margin="14,0">
+                        <TextBlock x:Name="AmbientClockText" FontSize="16" FontWeight="SemiBold"
+                                   Foreground="{DynamicResource TextPrimary}" VerticalAlignment="Center" />
+                        <Rectangle Width="1" Height="14" Fill="{DynamicResource StrokeSubtle}" Margin="10,0" VerticalAlignment="Center" />
+                        <TextBlock x:Name="AmbientBatteryText" FontSize="12"
+                                   Foreground="{DynamicResource TextSecondary}" VerticalAlignment="Center" />
+                    </StackPanel>
                 </Grid>
             </Border>
             <Button x:Name="ShowDesktopButton" Style="{StaticResource DockButton}" Width="6"

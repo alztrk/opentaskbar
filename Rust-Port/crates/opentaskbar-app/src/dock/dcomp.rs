@@ -3422,6 +3422,8 @@ impl DcompEngine {
     /// Creates a 3-piece horizontal pill (left cap, 1px stretchable center, right cap) so
     /// widening/narrowing the dock pill during fisheye never redraws any GPU texture.
     /// Includes a subtle vertical depth gradient and a top-edge specular inner highlight.
+    /// `flat` paints `SurfaceBackground::TrueBlack`: opaque black with no gradient sheen,
+    /// no rim highlight and no border. Existing glass/solid callers pass `false`.
     pub fn create_pill_nodes(
         &self,
         radius_px: f32,
@@ -3430,6 +3432,7 @@ impl DcompEngine {
         border: (u8, u8, u8, f32),
         dpi: f32,
         border_width_dips: f32,
+        flat: bool,
     ) -> Result<PillNodes> {
         let h = pill_h_px.ceil().max(4.0) as u32;
         let r = radius_px.clamp(2.0, pill_h_px * 0.5);
@@ -3438,15 +3441,21 @@ impl DcompEngine {
         let stroke_w = (border_width_dips * dpi).max(0.0);
         let half_bw = bw * 0.5;
         let is_dark = (u16::from(bg.0) + u16::from(bg.1) + u16::from(bg.2)) < 384;
-        let top_bg = color_rgba(
-            bg.0.saturating_add(if is_dark { 10 } else { 6 }),
-            bg.1.saturating_add(if is_dark { 10 } else { 6 }),
-            bg.2.saturating_add(if is_dark { 12 } else { 6 }),
-            bg.3,
-        );
+        let top_bg = if flat {
+            color_rgba(bg.0, bg.1, bg.2, bg.3)
+        } else {
+            color_rgba(
+                bg.0.saturating_add(if is_dark { 10 } else { 6 }),
+                bg.1.saturating_add(if is_dark { 10 } else { 6 }),
+                bg.2.saturating_add(if is_dark { 12 } else { 6 }),
+                bg.3,
+            )
+        };
         let bot_bg = color_rgba(bg.0, bg.1, bg.2, bg.3);
         let bd_col = color_rgba(border.0, border.1, border.2, border.3);
-        let spec_col = if is_dark {
+        let spec_col = if flat {
+            color_rgba(0xff, 0xff, 0xff, 0.0)
+        } else if is_dark {
             color_rgba(0xff, 0xff, 0xff, 0.14)
         } else {
             color_rgba(0xff, 0xff, 0xff, 0.72)
@@ -4250,10 +4259,16 @@ impl DcompEngine {
             } else {
                 (0xf7_u8, 0xf7_u8, 0xfa_u8)
             };
-            let fill_rgb = if use_theme { pal.dock_pill } else { neutral_pill };
+            let fill_rgb = if background == SurfaceBackground::TrueBlack {
+                (0_u8, 0_u8, 0_u8)
+            } else if use_theme {
+                pal.dock_pill
+            } else {
+                neutral_pill
+            };
             let fill_alpha = match background {
                 SurfaceBackground::None => 0.0,
-                SurfaceBackground::Solid => 1.0,
+                SurfaceBackground::Solid | SurfaceBackground::TrueBlack => 1.0,
                 SurfaceBackground::Glass if glass_host_active => 0.0,
                 SurfaceBackground::Glass => opacity.clamp(0.1, 1.0),
             };
@@ -4280,6 +4295,7 @@ impl DcompEngine {
                 dc.FillRoundedRectangle(&pill_rect, &bg_brush);
             }
             if background != SurfaceBackground::None
+                && background != SurfaceBackground::TrueBlack
                 && !(glass_host_active && background == SurfaceBackground::Glass)
             {
                 dc.DrawRoundedRectangle(&pill_rect, &bd_brush, stroke, None);

@@ -992,5 +992,22 @@
   "StatsTopProcessesEmpty": "Sem dados de processos",
   "StatsSamplingProcesses": "Lendo processos…",
   "ResourceMonitor": "Monitor de Recursos",
-  "WidgetKeyboardLayoutDescription": "Mostra o idioma de entrada ativo e permite alternar layouts de teclado pelo dock."
+  "WidgetKeyboardLayoutDescription": "Mostra o idioma de entrada ativo e permite alternar layouts de teclado pelo dock.",
+  "SectionDisplayCare": "Cuidado com OLED e tela",
+  "SurfaceTrueBlack": "Preto puro (OLED)",
+  "OledReduceGlow": "Reduzir brilho e sombras",
+  "OledReduceGlowHelp": "Oculta o brilho, o halo nas bordas e as sombras para uma aparência plana e econômica.",
+  "BurnInShift": "Deslocamento anti-retenção",
+  "BurnInShiftHelp": "Move a barra um ou dois pixels de tempos em tempos para reduzir a retenção de imagens estáticas.",
+  "BurnInShiftInterval": "Intervalo de deslocamento",
+  "OledAutoTrigger": "OLED automático com bateria baixa",
+  "OledAutoTriggerHelp": "Muda temporariamente as superfícies para preto puro quando a bateria está baixa.",
+  "OledLowBatteryThreshold": "Limiar de bateria baixa",
+  "OledAutoOnNightLight": "Seguir a luz noturna",
+  "OledAutoOnNightLightHelp": "Aplica a aparência OLED temporária enquanto a luz noturna do Windows estiver ativada.",
+  "AmbientMode": "Tela ambiente",
+  "AmbientModeHelp": "Após 5 minutos sem entrada, mostra apenas o relógio e a bateria em uma faixa preta fina.",
+  "AnimationFpsCap": "Limite de quadros de animação",
+  "AnimationFpsCapHelp": "Limita as animações baseadas em recursos para economizar energia em painéis OLED de alta taxa de atualização.",
+  "FpsUnlimited": "Ilimitado"
 }

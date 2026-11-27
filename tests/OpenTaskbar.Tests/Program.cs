@@ -557,6 +557,26 @@ void WidgetRegistryChecks()
     Check(DockSettingsStore.Validate(new DockSettings(Widgets: ["ShowDesktop"], InstalledWidgets: ["ShowDesktop"])),
         "Saved settings with the retired ShowDesktop widget must remain valid.");
 
+    // OLED / display-care settings are validated independently and round-trip through the saved schema.
+    var oledSettings = new DockSettings(
+        DockBackground: SurfaceBackground.TrueBlack,
+        OledReduceGlowEnabled: true, BurnInShiftEnabled: true, BurnInShiftMinutes: 15,
+        OledAutoTriggerEnabled: true, OledLowBatteryThreshold: 50,
+        OledAutoOnNightLight: true, AmbientModeEnabled: true, AnimationFpsCap: 120);
+    Check(DockSettingsStore.Validate(oledSettings) && Enum.IsDefined(SurfaceBackground.TrueBlack),
+        "TrueBlack surfaces and all display-care settings must validate.");
+    Check(!DockSettingsStore.Validate(oledSettings with { BurnInShiftMinutes = 4 })
+        && !DockSettingsStore.Validate(oledSettings with { BurnInShiftMinutes = 121 }),
+        "Burn-in shift interval must stay within 5-120 minutes.");
+    Check(!DockSettingsStore.Validate(oledSettings with { OledLowBatteryThreshold = 15 })
+        && !DockSettingsStore.Validate(oledSettings with { AnimationFpsCap = 45 }),
+        "Low-battery threshold and FPS cap must only accept the exposed choices.");
+    var oledJson = System.Text.Json.JsonSerializer.Serialize(oledSettings, DockSettingsStore.SerializerOptions);
+    var oledRoundTrip = System.Text.Json.JsonSerializer.Deserialize<DockSettings>(oledJson, DockSettingsStore.SerializerOptions);
+    Check(oledRoundTrip == oledSettings, "Display-care settings must round-trip through settings.json.");
+    Check(UiText.GetTranslations("SectionDisplayCare").Count == LanguageCatalog.Languages.Count,
+        "Every display-care label must be translated in all bundled languages.");
+
     // Capability flags decide live previews instead of a second hard-coded ID list.
     Check(catalog.Where(descriptor => descriptor.SupportsLivePreview)
             .All(descriptor => live.Any(item => string.Equals(item.Id, descriptor.Id, StringComparison.OrdinalIgnoreCase))),

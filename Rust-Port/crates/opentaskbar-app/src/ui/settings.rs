@@ -4981,6 +4981,7 @@ impl SettingsView {
             (loc::t("SurfaceGlass"), SurfaceBackground::Glass),
             (loc::t("SurfaceSolid"), SurfaceBackground::Solid),
             (loc::t("SurfaceNone"), SurfaceBackground::None),
+            (loc::t("SurfaceTrueBlack"), SurfaceBackground::TrueBlack),
         ]
         .into_iter()
         .map(|(text, background)| {
@@ -6020,6 +6021,7 @@ impl SettingsView {
                 (loc::t("SurfaceGlass"), SurfaceBackground::Glass),
                 (loc::t("SurfaceSolid"), SurfaceBackground::Solid),
                 (loc::t("SurfaceNone"), SurfaceBackground::None),
+                (loc::t("SurfaceTrueBlack"), SurfaceBackground::TrueBlack),
             ]
             .into_iter()
             .map(|(label, bg)| {
@@ -6237,6 +6239,206 @@ impl SettingsView {
                 .into_any_element(),
             );
         }
+
+        // OLED / display care. True black itself is selected per surface in the
+        // materials dropdowns above; these rows tune the associated power-saving behaviour.
+        let threshold_options: Vec<(String, i32)> = [0, 10, 20, 30, 50]
+            .into_iter()
+            .map(|value| {
+                let label = if value == 0 {
+                    format!("{} · 0%", loc::t("WirelessBatteryAlertOff"))
+                } else {
+                    loc::t_fmt("OpacityPercent", &[&value.to_string()])
+                };
+                (label, value)
+            })
+            .collect();
+        let fps_cap_options: Vec<(String, i32)> = [0, 30, 60, 120]
+            .into_iter()
+            .map(|value| {
+                let label = if value == 0 {
+                    loc::t("FpsUnlimited")
+                } else {
+                    loc::t_fmt("AnimationFpsValue", &[&value.to_string()])
+                };
+                (label, value)
+            })
+            .collect();
+        let shift_minutes = self.settings.burn_in_shift_minutes.clamp(5, 120);
+        out.push(
+            section_card(
+                t,
+                loc::t("SectionDisplayCare"),
+                vec![
+                    self.mark_target(
+                        "SurfaceTrueBlack",
+                        t,
+                        div()
+                            .w_full()
+                            .px(px(16.0))
+                            .py(px(10.0))
+                            .text_size(px(fonts::scaled_size(12.0)))
+                            .text_color(rgba(t.text_secondary))
+                            .child(loc::t("SurfaceTrueBlack")),
+                    )
+                    .into_any_element(),
+                    setting_row_desc(
+                        t,
+                        Some("\u{E706}"),
+                        loc::t("OledReduceGlow"),
+                        loc::t("OledReduceGlowHelp"),
+                        ios_switch(
+                            "sw-oled-reduce-glow",
+                            t,
+                            self.settings.oled_reduce_glow_enabled,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.oled_reduce_glow_enabled =
+                                    !this.settings.oled_reduce_glow_enabled;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    setting_row_desc(
+                        t,
+                        Some("\u{EC4A}"),
+                        loc::t("BurnInShift"),
+                        loc::t("BurnInShiftHelp"),
+                        ios_switch(
+                            "sw-burn-in-shift",
+                            t,
+                            self.settings.burn_in_shift_enabled,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.burn_in_shift_enabled =
+                                    !this.settings.burn_in_shift_enabled;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        !self.settings.burn_in_shift_enabled,
+                        setting_row_desc(
+                            t,
+                            Some("\u{EC4A}"),
+                            loc::t("BurnInShiftInterval"),
+                            loc::t("BurnInShiftHelp"),
+                            live_slider(
+                                "burn-in-interval",
+                                t,
+                                (shift_minutes - 5) as f32 / 115.0,
+                                116,
+                                loc::t_fmt("MinutesShort", &[&shift_minutes.to_string()]),
+                                |i| {
+                                    let entity = cx.entity().downgrade();
+                                    std::rc::Rc::new(move |_win, app| {
+                                        let _ = entity.update(app, |this, cx| {
+                                            let next = (5 + i as i32).clamp(5, 120);
+                                            if this.settings.burn_in_shift_minutes != next {
+                                                this.settings.burn_in_shift_minutes = next;
+                                                this.auto_save(cx);
+                                            }
+                                        });
+                                    })
+                                },
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    setting_row_desc(
+                        t,
+                        Some("\u{E81E}"),
+                        loc::t("OledAutoTrigger"),
+                        loc::t("OledAutoTriggerHelp"),
+                        ios_switch(
+                            "sw-oled-auto-trigger",
+                            t,
+                            self.settings.oled_auto_trigger_enabled,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.oled_auto_trigger_enabled =
+                                    !this.settings.oled_auto_trigger_enabled;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        !self.settings.oled_auto_trigger_enabled,
+                        setting_row_desc(
+                            t,
+                            Some("\u{E81E}"),
+                            loc::t("OledLowBatteryThreshold"),
+                            loc::t("OledAutoTriggerHelp"),
+                            self.enum_dropdown(
+                                "oled-low-battery-threshold",
+                                t,
+                                threshold_options,
+                                self.settings.oled_low_battery_threshold,
+                                |this, value, cx| {
+                                    this.settings.oled_low_battery_threshold = value;
+                                    this.auto_save(cx);
+                                },
+                                cx,
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    setting_row_desc(
+                        t,
+                        Some("\u{E706}"),
+                        loc::t("OledAutoOnNightLight"),
+                        loc::t("OledAutoOnNightLightHelp"),
+                        ios_switch(
+                            "sw-oled-night-light",
+                            t,
+                            self.settings.oled_auto_on_night_light,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.oled_auto_on_night_light =
+                                    !this.settings.oled_auto_on_night_light;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    setting_row_desc(
+                        t,
+                        Some("\u{E81E}"),
+                        loc::t("AmbientMode"),
+                        loc::t("AmbientModeHelp"),
+                        ios_switch(
+                            "sw-ambient-mode",
+                            t,
+                            self.settings.ambient_mode_enabled,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.ambient_mode_enabled =
+                                    !this.settings.ambient_mode_enabled;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+                    setting_row_desc(
+                        t,
+                        Some("\u{E945}"),
+                        loc::t("AnimationFpsCap"),
+                        loc::t("AnimationFpsCapHelp"),
+                        self.enum_dropdown(
+                            "animation-fps-cap",
+                            t,
+                            fps_cap_options,
+                            self.settings.animation_fps_cap,
+                            |this, value, cx| {
+                                this.settings.animation_fps_cap = value;
+                                this.auto_save(cx);
+                            },
+                            cx,
+                        ),
+                    )
+                    .into_any_element(),
+                ],
+            )
+            .into_any_element(),
+        );
 
         out.extend([
             section_card(
@@ -7964,6 +8166,7 @@ impl SettingsView {
                                     (loc::t("SurfaceGlass"), SurfaceBackground::Glass),
                                     (loc::t("SurfaceSolid"), SurfaceBackground::Solid),
                                     (loc::t("SurfaceNone"), SurfaceBackground::None),
+                                    (loc::t("SurfaceTrueBlack"), SurfaceBackground::TrueBlack),
                                 ]
                                 .into_iter()
                                 .map(|(label, bg)| {
