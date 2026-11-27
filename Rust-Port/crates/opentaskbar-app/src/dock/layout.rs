@@ -26,7 +26,8 @@
 use std::time::{Duration, Instant};
 
 use opentaskbar_core::settings::{
-    AutoHideMode, DockEdge, DockPosition, DockSettings, SecondaryAppScope, StartButtonPlacement,
+    AutoHideMode, DockContentAlignment, DockEdge, DockPosition, DockSettings, DockSize,
+    SecondaryAppScope, StartButtonPlacement,
 };
 
 use crate::platform::win32::MonitorInfo;
@@ -62,6 +63,140 @@ pub const PREVIEW_DELAY_MS: u64 = 500;
 pub const PREVIEW_FADE_MS: u64 = 140;
 pub const ISLAND_ANIM_MS: u64 = 180;
 pub const DETAILS_PANEL_WIDTH_DIPS: f32 = 246.0;
+
+// C# `DockMetrics.For` size profiles: Compact / Medium / Large at 100% scale.
+// (Shelf, Cell, Icon, Radius) = (48/58/66, 38/44/50, 28/34/38, 16/19/22).
+pub const PROFILE_SHELF_DIPS: [f32; 3] = [48.0, 58.0, 66.0];
+pub const PROFILE_CELL_DIPS: [f32; 3] = [38.0, 44.0, 50.0];
+pub const PROFILE_ICON_DIPS: [f32; 3] = [28.0, 34.0, 38.0];
+pub const PROFILE_RADIUS_DIPS: [f32; 3] = [16.0, 19.0, 22.0];
+/// Secondary light-strip shelf reservation per profile (`SecondaryDockWindow`).
+pub const PROFILE_SECONDARY_SHELF_DIPS: [f32; 3] = [52.0, 60.0, 68.0];
+/// Full dock window height (headroom + shelf) per profile.
+pub const PROFILE_HEADROOM_DIPS: [f32; 3] = [76.0, 84.0, 92.0];
+/// `DockMetrics.HoverScale` ceiling — magnification never exceeds 1.5x.
+pub const MAX_FISHEYE_SCALE: f32 = 1.5;
+/// `DockMetrics.AutoHideDelayMs`: delayed hide after the pointer leaves the dock.
+pub const AUTOHIDE_DELAY_MS: u64 = 400;
+/// `DockScrollViewer`: one wheel notch advances two cells.
+pub const SCROLL_STEP_CELLS: f32 = 2.0;
+/// An overflow smaller than half a DIP is just scroll-settling noise.
+pub const OVERFLOW_THRESHOLD_DIPS: f32 = 0.5;
+/// Thumbnail card size (`Design/Tokens/Layout.xaml` PreviewWidth/PreviewHeight).
+pub const PREVIEW_CARD_DIPS: (f32, f32) = (228.0, 154.0);
+/// Enlarged card used for the Large profile / expanded preview strip.
+pub const PREVIEW_CARD_LARGE_DIPS: (f32, f32) = (250.0, 180.0);
+
+/// Resolved geometry for one dock size profile. All values are DIPs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SizeProfile {
+    pub shelf: f32,
+    pub cell: f32,
+    pub icon: f32,
+    pub radius: f32,
+    pub secondary_shelf: f32,
+    pub headroom: f32,
+    pub preview_card: (f32, f32),
+}
+
+/// Compact=0, Medium=1, Large=2. Unknown values clamp to Compact.
+pub fn profile_index(size: DockSize) -> usize {
+    match size {
+        DockSize::Compact => 0,
+        DockSize::Medium => 1,
+        DockSize::Large => 2,
+    }
+}
+
+/// `MagnificationExpandsDock` lives in `DockSettings.extra` in older builds and is a
+/// typed field in newer ones. Reading it through `serde_json` works for both without
+/// depending on a cross-WS field name at compile time.
+pub fn magnification_expands_dock(settings: &DockSettings) -> bool {
+    if let Some(value) = settings.extra.get("MagnificationExpandsDock").and_then(|v| v.as_bool()) {
+        return value;
+    }
+    serde_json::to_value(settings)
+        .ok()
+        .and_then(|value| value.get("MagnificationExpandsDock").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
+/// C# `RunningAppProjection.AggregateByExecutablePath`: merge all windows of a
+/// shared host into one executable-keyed slot instead of grouping by AUMID.
+pub fn aggregate_by_executable_path(settings: &DockSettings) -> bool {
+    if let Some(value) = settings
+        .extra
+        .get("AggregateByExecutablePath")
+        .and_then(|v| v.as_bool())
+    {
+        return value;
+    }
+    serde_json::to_value(settings)
+        .ok()
+        .and_then(|value| value.get("AggregateByExecutablePath").and_then(|v| v.as_bool()))
+        .unwrap_or(false)
+}
+
+/// C# `DockMetrics.For(size, scale, padding)` — scaled profile with a fixed extra
+/// gap that widens cells horizontally but never grows the dock vertically.
+pub fn size_profile(settings: &DockSettings) -> SizeProfile {
+    let i = profile_index(settings.size);
+    let scale = if settings.dock_scale.is_finite() {
+        settings.dock_scale.clamp(0.75, 1.5) as f32
+    } else {
+        1.0
+    };
+    let pad = settings.dock_icon_padding.clamp(0, 12) as f32;
+    let shelf = PROFILE_SHELF_DIPS[i];
+    let cell_h = (PROFILE_CELL_DIPS[i] * scale).round().max(24.0);
+    let radius = (PROFILE_RADIUS_DIPS[i] * scale).round().clamp(10.0, 30.0);
+    let secondary_shelf = (PROFILE_SECONDARY_SHELF_DIPS[i] * scale).round();
+    // C# `WindowHeight = Headroom + Shelf`. When magnification is allowed to expand
+    // the dock itself, the extra headroom strip is no longer reserved.
+    let headroom = if magnification_expands_dock(settings) {
+        0.0
+    } else {
+        (PROFILE_HEADROOM_DIPS[i] - shelf + shelf * scale).round().max(0.0)
+    };
+    SizeProfile {
+        shelf: (shelf * scale).round(),
+        cell: cell_h + pad,
+        icon: (PROFILE_ICON_DIPS[i] * scale).round().max(20.0),
+        radius,
+        secondary_shelf,
+        headroom,
+        preview_card: if i == 2 {
+            PREVIEW_CARD_LARGE_DIPS
+        } else {
+            PREVIEW_CARD_DIPS
+        },
+    }
+}
+
+/// `content_alignment` decides where the content strip sits inside a wide pill.
+pub fn content_alignment_offset(available: f32, used: f32, alignment: DockContentAlignment) -> f32 {
+    let slack = (available - used).max(0.0);
+    match alignment {
+        DockContentAlignment::Left => 0.0,
+        DockContentAlignment::Center => (slack * 0.5).round(),
+        DockContentAlignment::Right => slack.round(),
+    }
+}
+
+/// The 450 ms bring-to-front gesture is for *external* shell file drags only.
+/// Reordering a dock icon must never activate an unrelated application.
+pub fn drag_hover_allowed(external_file_drag: bool) -> bool {
+    external_file_drag
+}
+
+/// Plain wheel step for an overflowing dock (two cells per notch, C parity).
+pub fn wheel_scroll_step(cell: f32, gap: f32) -> f32 {
+    (cell + gap) * SCROLL_STEP_CELLS
+}
+
+pub fn has_scroll_overflow(max_scroll: f32) -> bool {
+    max_scroll > OVERFLOW_THRESHOLD_DIPS
+}
 
 // C# `DockFisheyeLayout` constants.
 pub const SLOT_EXPANSION_FACTOR: f32 = 0.95;
@@ -246,8 +381,11 @@ pub fn cross_extent(edge: DockEdge, rect: (i32, i32, i32, i32)) -> (i32, i32) {
     if is_vertical(edge) { (x, w) } else { (y, h) }
 }
 
-/// Wheel delta resolution along the dock's main axis. Side docks scroll vertically,
-/// so a vertical wheel notch advances content instead of shrinking it.
+/// Wheel delta resolution along the dock's main axis. C# `DockScrollViewer` always
+/// applies `offset -= delta / 120 * cell * 2`, independent of the dock edge: a wheel-up
+/// notch moves content toward the start on both bottom and side docks. Only the
+/// horizontal wheel on a bottom dock keeps the +delta convention (Shift+wheel there
+/// stands in for a horizontal swipe).
 pub fn wheel_to_axis_delta(delta: i16, horizontal: bool, edge: DockEdge, step: f32) -> f32 {
     let dist = f32::from(delta) / 120.0 * step;
     match edge {
@@ -258,13 +396,7 @@ pub fn wheel_to_axis_delta(delta: i16, horizontal: bool, edge: DockEdge, step: f
                 -dist
             }
         }
-        DockEdge::Left | DockEdge::Right => {
-            if horizontal {
-                -dist
-            } else {
-                dist
-            }
-        }
+        DockEdge::Left | DockEdge::Right => -dist,
     }
 }
 
@@ -1235,6 +1367,9 @@ pub fn resolved_start_widget_index(settings: &DockSettings, widget_count: usize)
 /// Mirroring wins over the light-strip default: `mirror_main_dock` explicitly
 /// asks for a full clone on every monitor. Otherwise the secondary policy applies.
 pub fn secondary_dock_layout(settings: &DockSettings, is_primary: bool) -> SecondaryLayout {
+    // Mirroring wins over the light-strip default. `show_on_all_monitors = false`
+    // still keeps the single-monitor policy here; `run()` targets every monitor
+    // when `mirror_main_dock` is set, so the mirror path remains a full clone.
     if !is_primary && settings.mirror_main_dock && settings.show_on_all_monitors {
         SecondaryLayout::PrimaryDock
     } else {
@@ -1409,10 +1544,12 @@ mod tests {
     }
 
     #[test]
-    fn wheel_scroll_direction_flips_on_side_docks() {
+    fn wheel_scroll_direction_matches_c_sharp_on_every_edge() {
         let step = 40.0;
         assert!(wheel_to_axis_delta(120, false, DockEdge::Bottom, step) < 0.0);
-        assert!(wheel_to_axis_delta(120, false, DockEdge::Left, step) > 0.0);
+        assert!(wheel_to_axis_delta(120, false, DockEdge::Left, step) < 0.0);
+        assert!(wheel_to_axis_delta(120, false, DockEdge::Right, step) < 0.0);
+        // C# applies `offset -= delta / 120 * cell * 2` for both wheel axes.
         assert!(wheel_to_axis_delta(120, true, DockEdge::Left, step) < 0.0);
     }
 
@@ -2245,5 +2382,129 @@ mod tests {
             Some(now - WIDGET_REFRESH_MIN_INTERVAL),
             now
         ));
+    }
+
+    #[test]
+    fn c_sharp_size_profile_vectors_are_exact() {
+        let expected = [
+            (48.0, 38.0, 28.0, 16.0, 52.0, 76.0),
+            (58.0, 44.0, 34.0, 19.0, 60.0, 84.0),
+            (66.0, 50.0, 38.0, 22.0, 68.0, 92.0),
+        ];
+        for (size, vector) in [DockSize::Compact, DockSize::Medium, DockSize::Large]
+            .into_iter()
+            .zip(expected)
+        {
+            let settings = DockSettings {
+                size,
+                ..DockSettings::default()
+            };
+            let profile = size_profile(&settings);
+            assert_eq!(
+                (
+                    profile.shelf,
+                    profile.cell,
+                    profile.icon,
+                    profile.radius,
+                    profile.secondary_shelf,
+                    profile.headroom
+                ),
+                vector
+            );
+            assert_eq!(
+                profile.preview_card,
+                if size == DockSize::Large {
+                    PREVIEW_CARD_LARGE_DIPS
+                } else {
+                    PREVIEW_CARD_DIPS
+                }
+            );
+        }
+        let large = DockSettings {
+            size: DockSize::Large,
+            ..DockSettings::default()
+        };
+        assert_eq!(size_profile(&large).preview_card, PREVIEW_CARD_LARGE_DIPS);
+    }
+
+    #[test]
+    fn magnification_expands_dock_removes_headroom() {
+        let settings = DockSettings::default();
+        assert!(!magnification_expands_dock(&settings));
+        assert!(size_profile(&settings).headroom > 0.0);
+        let mut expanded = settings.clone();
+        expanded
+            .extra
+            .insert("MagnificationExpandsDock".into(), serde_json::json!(true));
+        assert!(magnification_expands_dock(&expanded));
+        assert_eq!(size_profile(&expanded).headroom, 0.0);
+    }
+
+    #[test]
+    fn wheel_direction_and_step_match_c_sharp() {
+        let step = wheel_scroll_step(38.0, 9.0);
+        assert_eq!(step, 94.0);
+        for edge in [DockEdge::Bottom, DockEdge::Left, DockEdge::Right] {
+            assert_eq!(wheel_to_axis_delta(120, false, edge, step), -step);
+            assert_eq!(wheel_to_axis_delta(-120, false, edge, step), step);
+        }
+        assert_eq!(wheel_to_axis_delta(120, true, DockEdge::Bottom, step), step);
+        assert!(has_scroll_overflow(0.6));
+        assert!(!has_scroll_overflow(0.4));
+    }
+
+    #[test]
+    fn content_alignment_and_gesture_toggles_are_decided_by_policy() {
+        assert_eq!(
+            content_alignment_offset(500.0, 300.0, DockContentAlignment::Left),
+            0.0
+        );
+        assert_eq!(
+            content_alignment_offset(500.0, 300.0, DockContentAlignment::Center),
+            100.0
+        );
+        assert_eq!(
+            content_alignment_offset(500.0, 300.0, DockContentAlignment::Right),
+            200.0
+        );
+        assert_eq!(
+            content_alignment_offset(300.0, 500.0, DockContentAlignment::Center),
+            0.0
+        );
+        assert!(drag_hover_allowed(true));
+        assert!(!drag_hover_allowed(false));
+        assert!(use_hover_icon(true, true, true));
+        assert!(!use_hover_icon(true, false, true));
+        assert!(!use_hover_icon(true, true, false));
+    }
+
+    #[test]
+    fn mirror_dock_overrides_light_strip_but_not_single_monitor_policy() {
+        let mut settings = DockSettings {
+            show_on_all_monitors: false,
+            mirror_main_dock: true,
+            ..DockSettings::default()
+        };
+        assert_eq!(
+            secondary_dock_layout(&settings, false),
+            SecondaryLayout::Hidden
+        );
+        settings.show_on_all_monitors = true;
+        assert_eq!(
+            secondary_dock_layout(&settings, false),
+            SecondaryLayout::PrimaryDock
+        );
+        settings.mirror_main_dock = false;
+        assert_eq!(
+            secondary_dock_layout(&settings, false),
+            SecondaryLayout::LightStrip
+        );
+        settings
+            .extra
+            .insert("secondary_light_strip".into(), serde_json::json!(false));
+        assert_eq!(
+            secondary_dock_layout(&settings, false),
+            SecondaryLayout::PrimaryDock
+        );
     }
 }
