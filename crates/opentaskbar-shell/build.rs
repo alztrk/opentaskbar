@@ -41,7 +41,7 @@ fn main() {
     };
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let script = manifest_dir.join("../../../tools/watchdog/build.ps1");
+    let script = manifest_dir.join("../../tools/watchdog/build.ps1");
     // std::path::absolute (unlike canonicalize) does not add a `\\?\` prefix,
     // which powershell.exe -File would otherwise fail to resolve ($PSScriptRoot).
     let script = std::path::absolute(&script)
@@ -49,7 +49,7 @@ fn main() {
     if !script.is_file() {
         panic!("Missing watchdog build script: {}", script.display());
     }
-    let source = std::path::absolute(manifest_dir.join("../../../tools/watchdog/watchdog.c"))
+    let source = std::path::absolute(manifest_dir.join("../../tools/watchdog/watchdog.c"))
         .expect("Bad watchdog source path");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let output_dir = out_dir.join("watchdog");

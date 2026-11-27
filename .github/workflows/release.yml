@@ -70,7 +70,6 @@ jobs:
           rustup target add x86_64-pc-windows-msvc i686-pc-windows-msvc
 
       - name: Run Rust workspace tests
-        working-directory: Rust-Port
         run: cargo test --workspace
 
       - name: Build and verify Rust portable executables (x64 + x86)

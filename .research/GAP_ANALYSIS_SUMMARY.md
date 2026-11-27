@@ -1,6 +1,6 @@
 # Gap Analizi Özeti — Subagent Referansı
 
-C# tarafında var, Rust portında olmayan/eksik olan maddeler. Detaylı kaynak: bu dosyanın maddelerini `D:\projects\OpenTaskbar\<dosya yolu>` üzerinden okuyarak doğrula. Rust karşılığı: `D:\projects\OpenTaskbar\Rust-Port\crates\...`.
+C# tarafında var, Rust portında olmayan/eksik olan maddeler. Detaylı kaynak: bu dosyanın maddelerini `D:\projects\OpenTaskbar\<dosya yolu>` üzerinden okuyarak doğrula. Rust karşılığı: `D:\projects\OpenTaskbar\crates\...`.
 
 > NOT: Dosya adı eşleşmesi yeterli değil; içeriği oku. Birçok Rust dosyası stub/no-op.
 
@@ -148,5 +148,5 @@ Mevcut: live drag, temel fisheye, island sayfalama, arama, TextPrompt, scroll vi
 - **Flags/**: 14 PNG — Rust'ta yok
 - **Locale**: C# 14×999 ↔ Rust 14×1071; C# fazlası 5 kullanımdan kaldırılmış anahtar; Rust fazlası 77 (DI/takvim/font)
 - **Release**: publish/package/check script'leri, checksums.txt, release-manifest, SLSA/VirusTotal, MSIX AppxManifest + 5 logo, CodeQL(csharp), dependabot nuget — Rust'ta yok; rust-ci sadece rust-port branch'inde
-- **Docs**: Rust-Port/README.md 15 satır; CHANGELOG/PRIVACY/docs/*/Design README yok
+- **Docs**: README.md 15 satır; CHANGELOG/PRIVACY/docs/*/Design README yok
 - **Test**: C# 31 dosya ~1935 Check (gerçek pencere + sentetik input + görsel ağaç); Rust 93 #[test] saf fonksiyon. En büyük boşluklar: AiUsageChecks(151), FeatureAndMemoryChecks(221, .otbackup), DockLayoutChecks(286), WirelessBatteryChecks(106), MediaVolume/AudioMixer, ShellRecovery/TaskbarRecovery/flyout pozisyon, per-app mixer, telemetry locale parity.

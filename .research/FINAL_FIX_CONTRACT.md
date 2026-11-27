@@ -14,7 +14,7 @@ Kaynak: 8 denetim subagentının bulguları. Hedef: parite + hata + performans +
 | 6 | fix-widgets | `opentaskbar-app/src/widgets/**` (tümü) |
 | 7 | fix-ui | `opentaskbar-app/src/ui/**` + `opentaskbar-app/src/design/**` |
 | 8 | fix-dock | `opentaskbar-app/src/dock/**` |
-| 9 | fix-tests | `.github/**`, `scripts/**`, `packaging/**`, `docs/**`, `README.md`, `CHANGELOG.md`, `PRIVACY.md`, `Rust-Port/README.md`, `opentaskbar-core/tests/**`, `opentaskbar-core/src/i18n.rs`, `opentaskbar-core/locales/**` |
+| 9 | fix-tests | `.github/**`, `scripts/**`, `packaging/**`, `docs/**`, `README.md`, `CHANGELOG.md`, `PRIVACY.md`, `opentaskbar-core/tests/**`, `opentaskbar-core/src/i18n.rs`, `opentaskbar-core/locales/**` |
 
 `main.rs` ve tüm `Cargo.toml` **orchestrator'da** — mod satırlarını ve wiring'i o ekler.
 

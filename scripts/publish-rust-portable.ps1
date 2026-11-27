@@ -1,5 +1,5 @@
 # Builds OpenTaskbar as a portable, self-contained Rust EXE per architecture.
-# Builds from Rust-Port/Cargo.toml; no .NET SDK or C# artifacts are involved.
+# Builds from the root Cargo.toml; no .NET SDK or C# artifacts are involved.
 param (
     [ValidateSet('win-x64', 'win-x86')]
     [string]$Runtime = 'win-x64',
@@ -12,7 +12,7 @@ $ErrorActionPreference = 'Stop'
 $arch = ($Runtime -split '-')[-1]
 $target = if ($arch -eq 'x64') { 'x86_64-pc-windows-msvc' } else { 'i686-pc-windows-msvc' }
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
-$manifest = Join-Path $repoRoot 'Rust-Port\Cargo.toml'
+$manifest = Join-Path $repoRoot 'Cargo.toml'
 
 if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw "Missing Cargo manifest: $manifest" }
 if (-not (Test-Path -LiteralPath $OutputDir -PathType Container)) {
@@ -30,7 +30,7 @@ Write-Host "Building OpenTaskbar Rust port for $Runtime..." -ForegroundColor Cya
 & cargo build --manifest-path $manifest --release --target $target
 if ($LASTEXITCODE -ne 0) { throw "Rust release build failed for $Runtime." }
 
-$built = Join-Path $repoRoot "Rust-Port\target\$target\release\OpenTaskBar.exe"
+$built = Join-Path $repoRoot "target\$target\release\OpenTaskBar.exe"
 if (-not (Test-Path -LiteralPath $built -PathType Leaf)) {
     throw "Expected Rust binary not found: $built"
 }
@@ -41,7 +41,7 @@ Copy-Item -LiteralPath $built -Destination $finalExe -Force
 # build.rs compiled the watchdog into OUT_DIR for this exact target and embedded
 # it into the EXE. Keep a named copy beside the portable EXE so the release
 # manifest can record its architecture and SHA-256 (and CI can re-verify it).
-$buildRoot = Join-Path $repoRoot "Rust-Port\target\$target\release\build"
+$buildRoot = Join-Path $repoRoot "target\$target\release\build"
 $watchdogExe = Get-ChildItem -LiteralPath $buildRoot -Directory -Filter 'opentaskbar-shell-*' -ErrorAction SilentlyContinue |
     ForEach-Object { Join-Path $_.FullName 'out\watchdog\OpenTaskbarWatchdog.exe' } |
     Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |

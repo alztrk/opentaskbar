@@ -2,7 +2,7 @@
 
 ## §C3 locale contract — delivered
 
-- 14 Rust catalogs at `Rust-Port/crates/opentaskbar-core/locales/*.json` now have **1406 keys each, identical key sets** (verified by `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`).
+- 14 Rust catalogs at `crates/opentaskbar-core/locales/*.json` now have **1406 keys each, identical key sets** (verified by `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`).
 - The final key-contract sweep removed five retired AI-grouping keys and added 27 window-picker, magnification, Fjord, Wi-Fi, search, alignment, preview, focus, density and AI-ring keys (24 newly added; `WidgetDensityCompact`, `WidgetDensityFull` and `AiUsageRingLabel` already shipped) with real translations in all 14 languages.
 - 32 additional feature keys cover the C3 prefixes: `SpeedTestDownload/Upload/Jitter/Result/Running`, `FocusBreakTitle/Start/Skip/Countdown/Complete`, `FocusSession`, `RadioWifi/Bluetooth/On/Off`, `FullBackupInspect/Contents`, `ThemeEditorTitle/Save/Reset/Token/Advanced/Autosave`, `SeekTo/Label/Duration/Unavailable`, `HardwareUnavailable`, `StartMenuOpen/Close/Toggle`, `ProfileHiddenApps`.
 
@@ -23,12 +23,12 @@ All new keys are translated in every catalog. A missing key resolves to the key 
 ## Merge / union requests
 
 - `opentaskbar-core/src/lib.rs`: I added exactly one line, `pub mod i18n;`. This is lead-owned — take the union, don't drop it (i18n.rs will not compile otherwise).
-- `Rust-Port/Cargo.toml`: added `ApplicationModel` and `Devices_Radios` to the shared `windows` crate features per the WS-B note. These are valid `windows` 0.61 features (`windows-sys` has neither), and `cargo check --workspace` is clean with them.
+- `Cargo.toml`: added `ApplicationModel` and `Devices_Radios` to the shared `windows` crate features per the WS-B note. These are valid `windows` 0.61 features (`windows-sys` has neither), and `cargo check --workspace` is clean with them.
 - `opentaskbar-core/src/i18n.rs` + `locales/**` are new files in my ownership. I copied the baseline catalogs from the main repo working tree (1071 keys) because this worktree's base commit predates them; the main repo had them untracked. No other WS file was touched.
 
 ## Tests — scope caveat
 
-`Rust-Port/crates/opentaskbar-core/tests/*.rs` are **self-contained reference tests** for the deterministic C# logic. Cross-WS platform code (`widgets`, `platform`, `ui`, live `settings` validation) is absent from this worktree's baseline, so the tests intentionally do not bind to private or not-yet-existing APIs. When merging WS-A…G, consider re-pointing these tests at the real implementations and deleting the local helper functions:
+`crates/opentaskbar-core/tests/*.rs` are **self-contained reference tests** for the deterministic C# logic. Cross-WS platform code (`widgets`, `platform`, `ui`, live `settings` validation) is absent from this worktree's baseline, so the tests intentionally do not bind to private or not-yet-existing APIs. When merging WS-A…G, consider re-pointing these tests at the real implementations and deleting the local helper functions:
 
 | Test file | Intended live owner |
 |---|---|

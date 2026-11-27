@@ -134,9 +134,9 @@ function Get-ReleaseNotes([string]$ChangelogPath, [string]$Version, [string]$Tag
     return "## OpenTaskbar $TagName`n`nNo changelog entry found for this version; see the commit history."
 }
 
-$rustReadme = Join-Path $RepoRoot 'Rust-Port\README.md'
+$rustReadme = Join-Path $RepoRoot 'README.md'
 $license = Join-Path $RepoRoot 'LICENSE'
-$cargoManifest = Join-Path $RepoRoot 'Rust-Port\Cargo.toml'
+$cargoManifest = Join-Path $RepoRoot 'Cargo.toml'
 $changelog = Join-Path $RepoRoot 'CHANGELOG.md'
 foreach ($path in @($rustReadme, $license, $cargoManifest)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing packaging input: $path" }
@@ -183,9 +183,9 @@ foreach ($arch in @('x64', 'x86')) {
     Copy-Item -LiteralPath $builtExe -Destination $exePath -Force
 
     $entries = [ordered]@{
-        'OpenTaskBar.exe'     = $builtExe
-        'Rust-Port/README.md' = $rustReadme
-        'LICENSE'             = $license
+        'OpenTaskBar.exe' = $builtExe
+        'README.md'       = $rustReadme
+        'LICENSE'         = $license
     }
     New-DeterministicZip -Destination $zipPath -Entries $entries
     Assert-ZipEntryHash -ZipPath $zipPath -EntryName 'OpenTaskBar.exe' `
@@ -241,7 +241,7 @@ $manifest = [ordered]@{
     checksumsFile  = 'checksums.txt'
     assets         = @($newEntries)
     rustPort       = [ordered]@{
-        manifest     = 'Rust-Port/Cargo.toml'
+        manifest     = 'Cargo.toml'
         crateVersion = $crateVersion
         locales      = 14
         keyParity    = $true

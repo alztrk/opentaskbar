@@ -5,7 +5,7 @@
 param (
     [string]$Tag = '',
     [string]$RepoRoot = $PSScriptRoot,
-    # Bump together with Rust-Port/Cargo.toml, the Rust MSIX manifest and the release tag.
+    # Bump together with Cargo.toml, the Rust MSIX manifest and the release tag.
     [string]$ExpectedVersion = '0.4.0',
     [switch]$Quiet
 )
@@ -35,7 +35,7 @@ function Get-CargoWorkspaceVersion {
     return $match.Groups[1].Value
 }
 
-$cargoPath = Join-Path $RepoRoot 'Rust-Port\Cargo.toml'
+$cargoPath = Join-Path $RepoRoot 'Cargo.toml'
 $msixPath = Join-Path $RepoRoot 'packaging\msix\AppxManifest.Rust.xml'
 foreach ($path in @($cargoPath, $msixPath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing version source: $path" }
@@ -50,7 +50,7 @@ if ($tagVersion -ne $ExpectedVersion) {
     $failures.Add("Tag $Tag carries $tagVersion; expected $ExpectedVersion.")
 }
 if ($cargoVersion -ne $ExpectedVersion) {
-    $failures.Add("Rust-Port/Cargo.toml workspace version $cargoVersion != $ExpectedVersion.")
+    $failures.Add("Cargo.toml workspace version $cargoVersion != $ExpectedVersion.")
 }
 if ($tagVersion -ne $cargoVersion) {
     $failures.Add("Tag version $tagVersion does not match Cargo workspace version $cargoVersion.")

@@ -17,7 +17,7 @@ Not: eski sağlayıcı adı **hiçbir yerde** kalmamalı (`git grep -i <eski-ad>
 | WS | Worktree | Sahip dosyalar |
 |---|---|---|
 | 1 | sweep-cfg | `opentaskbar-core/src/{settings.rs,dynamic_island.rs,hotkey.rs}`, `opentaskbar-core/tests/{settings_compat.rs,opentaskbar_core_tests.rs}` |
-| 2 | sweep-i18n | `opentaskbar-core/src/i18n.rs`, `locales/**`, `tests/{i18n_parity.rs,telemetry_parity.rs}`, `scripts/check-locale-parity.ps1`, `README.md`, `CHANGELOG.md`, `PRIVACY.md`, `docs/**`, `Rust-Port/README.md` |
+| 2 | sweep-i18n | `opentaskbar-core/src/i18n.rs`, `locales/**`, `tests/{i18n_parity.rs,telemetry_parity.rs}`, `scripts/check-locale-parity.ps1`, `README.md`, `CHANGELOG.md`, `PRIVACY.md`, `docs/**` |
 | 3 | sweep-shell | `opentaskbar-shell/src/**` |
 | 4 | sweep-platform | `opentaskbar-app/src/platform/**` |
 | 5 | sweep-design | `opentaskbar-app/src/design/**` |

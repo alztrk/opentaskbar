@@ -16,9 +16,6 @@ jobs:
   build-and-test:
     name: Build & Test (Windows x64)
     runs-on: windows-latest
-    defaults:
-      run:
-        working-directory: Rust-Port
 
     steps:
       - name: Check out repository
@@ -31,8 +28,6 @@ jobs:
 
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: Rust-Port
 
       - name: Check formatting
         run: cargo fmt --all -- --check
