@@ -20,8 +20,9 @@ use gpui::{
 use opentaskbar_core::hotkey;
 use opentaskbar_core::i18n::{self as loc, LANGUAGES};
 use opentaskbar_core::settings::{
-    self, AppTheme, AutoHideMode, ClockDateFormat, ClockDateLayout, ClockDateStyle, DockPosition,
-    DockSettings, DockSize, DynamicIslandVisibilityMode, FisheyeIntensity, MiddleClickAction,
+    self, AiUsageRing, AppTheme, AutoHideMode, ClockDateFormat, ClockDateLayout, ClockDateStyle,
+    DockContentAlignment, DockGapUnit, DockHeightMode, DockPosition, DockSettings, DockSize,
+    DockWidthMode, DynamicIslandVisibilityMode, FisheyeIntensity, MiddleClickAction,
     StartButtonPlacement, SurfaceBackground, TemperatureUnit, WidgetDensityMode,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -38,11 +39,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::design::brush::{BrushSpec, GradientSpec, Hsv, MAX_GRADIENT_STOPS};
 use crate::design::fonts;
 use crate::design::theme::{
-    SurfaceKind, ThemeManager, apply_token_overrides, token_overrides_from_json,
+    SurfaceKind, ThemeManager, apply_pack_tokens_to_palette, apply_token_overrides,
+    token_overrides_from_json,
 };
 use crate::dock::dcomp::{SystemStatColumn, WidgetChipSpec};
 use crate::platform::cursor_auth;
-use crate::platform::{country_city, pins, theme_packs, toast, update, win32};
+use crate::platform::{
+    country_city, pins, startup_registration, theme_packs, toast, update, win32,
+};
 use crate::ui::components::{
     ButtonVariant, DropdownOption, DropdownSelectHandler, SearchableDropdownHandlers,
     SearchableDropdownState, UiTheme, badge, button, dim_when, dropdown, dropdown_labeled,
@@ -65,6 +69,10 @@ const WIN_H: f32 = 740.0;
 const SIDEBAR_BREAKPOINT: f32 = 680.0;
 const SIDEBAR_WIDTH: f32 = 196.0;
 const WIDGET_COLUMNS_BREAKPOINT: f32 = 520.0;
+/// Focus timer bounds exposed for the Widgets page steppers and their regression tests.
+const FOCUS_MINUTES_MAX: i32 = 90;
+const FOCUS_BREAK_MINUTES_MAX: i32 = 30;
+const FOCUS_SESSIONS_MAX: i32 = 8;
 
 actions!(settings_navigation, [TabNext, TabPrevious]);
 actions!(settings_panels, [CloseWidgetPanel, ToggleFlyoutPreview]);
@@ -282,7 +290,8 @@ fn country_flag_path(country: &str) -> Option<SharedString> {
 }
 
 fn widget_has_inline_settings(id: &str) -> bool {
-    matches!(id, "clock" | "weather" | "stats" | "bluetoothbattery") || id.starts_with("aiusage_")
+    // AI usage widgets no longer have per-provider account panels.
+    matches!(id, "clock" | "weather" | "stats" | "bluetoothbattery" | "focus")
 }
 
 // ---------------------------------------------------------------------------
@@ -750,6 +759,35 @@ fn set_extra_number(settings: &mut DockSettings, key: &str, value: i32) {
     settings.extra.insert(key.to_owned(), json!(value));
 }
 
+/// Snapshot the full profile contract (19 fields incl. name, i.e. the 15+ payload fields the
+/// C# profile service persists) so creating/saving a profile never drops layout, widget,
+/// theme or hotkey state. Applying is delegated to the cfg workstream's
+/// `settings::apply_full_profile`, which is the single authoritative mapper.
+fn snapshot_profile(settings: &DockSettings, name: String) -> opentaskbar_core::settings::DockProfile {
+    opentaskbar_core::settings::DockProfile {
+        name,
+        position: settings.position,
+        size: settings.size,
+        auto_hide: settings.auto_hide,
+        enabled_widgets: settings.enabled_widgets.clone(),
+        hidden_apps: settings.user_unpinned_apps.clone(),
+        installed_widgets: settings.installed_widgets.clone(),
+        widget_order: settings.widget_order.clone(),
+        dock_item_order: settings.dock_item_order.clone(),
+        dock_width_mode: Some(settings.dock_width_mode),
+        dock_width_pixels: Some(settings.dock_width_pixels),
+        dock_width_percent: Some(settings.dock_width_percent),
+        theme: Some(settings.theme),
+        theme_pack: Some(settings.theme_pack.clone()),
+        theme_application_icons: Some(settings.theme_application_icons),
+        launcher_hotkey: Some(settings.launcher_hotkey),
+        dock_hotkey: Some(settings.dock_hotkey),
+        custom_launcher_hotkey: settings.custom_launcher_hotkey.clone(),
+        custom_dock_hotkey: settings.custom_dock_hotkey.clone(),
+        extra: settings.extra.clone(),
+    }
+}
+
 /// Maps a cell of the 2D saturation/value field to HSV (x = saturation, y = 1 - value).
 fn field_cell_hsv(hue: f64, col: usize, row: usize, cols: usize, rows: usize) -> Hsv {
     Hsv::new(
@@ -864,7 +902,6 @@ fn ai_cli_sign_in_command(provider_id: &str) -> Option<(&'static str, Vec<&'stat
         "aiusage_codex" => Some(("codex", vec!["codex", "login"])),
         "aiusage_copilot" => Some(("gh", vec!["gh", "auth", "login"])),
         "aiusage_opencode" => Some(("opencode", vec!["opencode", "auth", "login"])),
-        "aiusage_antigravity" => Some(("agy", vec!["agy"])),
         _ => None,
     }
 }
@@ -927,8 +964,13 @@ fn brush_to_json(spec: &BrushSpec) -> Value {
 }
 
 /// Persists tokens under `ThemeTokens` **and** applies them to the live palette.
+///
+/// Editor overrides win, then the active theme pack's tokens are painted on top of the
+/// base palette (WS-5). Without the second call a saved token changed JSON but the
+/// visible colours stayed stale.
 fn persist_theme_tokens(settings: &mut DockSettings, map: Map<String, Value>) {
     apply_token_overrides(token_overrides_from_json(&map));
+    apply_pack_tokens_to_palette();
     settings
         .extra
         .insert("ThemeTokens".to_owned(), Value::Object(map));
@@ -997,7 +1039,6 @@ struct SettingsView {
     font_page: usize,
     hotkey_status: String,
     theme_status: String,
-    api_key_status: String,
     weather_suggestions: Vec<widgets::telemetry::GeoLocationMatch>,
     weather_search_status: String,
     /// A burst of slider/toggle events collapses into one disk write + dock broadcast.
@@ -1077,8 +1118,10 @@ impl SettingsView {
             .iter()
             .position(|c| c.eq_ignore_ascii_case(city_name))
             .unwrap_or(0);
-        // Apply saved editor tokens to the live palette on startup.
+        // Apply saved editor tokens to the live palette on startup, then paint the
+        // active theme pack on top (WS-5 palette hook).
         crate::design::theme::apply_saved_token_overrides(&settings);
+        apply_pack_tokens_to_palette();
         let accent = crate::design::palette(is_dark).accent;
         let brush_color = crate::design::tokens::Rgba::from_rgb(accent.0, accent.1, accent.2);
         let mut view = Self {
@@ -1092,7 +1135,7 @@ impl SettingsView {
             widget_filter: "All",
             expanded_widget: None,
             open_dropdown: None,
-            startup_enabled: win32::is_startup_enabled(),
+            startup_enabled: startup_registration::read().0,
             scroll_handle: ScrollHandle::new(),
             highlight_row: None,
             scroll_anchor: None,
@@ -1100,7 +1143,6 @@ impl SettingsView {
             font_page: 0,
             hotkey_status: String::new(),
             theme_status: String::new(),
-            api_key_status: String::new(),
             weather_suggestions: Vec::new(),
             weather_search_status: String::new(),
             save_pending: false,
@@ -1277,6 +1319,89 @@ impl SettingsView {
                 cx.notify();
             });
         })
+    }
+
+    /// Builds a dropdown for a copyable enum without repeating the entity/closure boilerplate.
+    /// Used by the newly wired runtime rows (content alignment, width/height/gap modes, density,
+    /// AI ring) so every one of them auto-saves and closes the menu consistently.
+    fn enum_dropdown<T, F>(
+        &self,
+        id: impl Into<String>,
+        t: &UiTheme,
+        options: Vec<(String, T)>,
+        current: T,
+        on_select: F,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div
+    where
+        T: Copy + Eq + 'static,
+        F: Fn(&mut Self, T, &mut Context<Self>) + 'static,
+    {
+        let entity = cx.entity().downgrade();
+        let callback = std::rc::Rc::new(on_select);
+        let opts = options
+            .into_iter()
+            .map(|(label, value)| {
+                let entity = entity.clone();
+                let callback = callback.clone();
+                DropdownOption {
+                    label: SharedString::from(label),
+                    flag_path: None,
+                    glyph: None,
+                    selected: current == value,
+                    on_select: std::rc::Rc::new(move |_win, app| {
+                        let callback = callback.clone();
+                        let entity = entity.clone();
+                        let _ = entity.update(app, move |this, app| {
+                            this.open_dropdown = None;
+                            callback(this, value, app);
+                        });
+                    }),
+                }
+            })
+            .collect();
+        self.make_dropdown(id, t, opts, cx)
+    }
+
+    /// Bounded integer stepper with one debounced save per click. Bounds are inclusive and
+    /// the read/write pair keeps each row tied to its own `DockSettings` field.
+    fn number_stepper(
+        &self,
+        id: &'static str,
+        t: &UiTheme,
+        value: i32,
+        min: i32,
+        max: i32,
+        read: impl Fn(&DockSettings) -> i32 + 'static,
+        write: impl Fn(&mut DockSettings, i32) + 'static,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let read = std::rc::Rc::new(read);
+        let write = std::rc::Rc::new(write);
+        let minus_read = read.clone();
+        let minus_write = write.clone();
+        let plus_read = read;
+        let plus_write = write;
+        stepper(
+            SharedString::from(format!("{id}-minus")),
+            SharedString::from(format!("{id}-plus")),
+            t,
+            SharedString::from(value.to_string()),
+            cx.listener(move |this, _, _, cx| {
+                let next = (minus_read(&this.settings) - 1).max(min);
+                if next != minus_read(&this.settings) {
+                    minus_write(&mut this.settings, next);
+                    this.auto_save(cx);
+                }
+            }),
+            cx.listener(move |this, _, _, cx| {
+                let next = (plus_read(&this.settings) + 1).min(max);
+                if next != plus_read(&this.settings) {
+                    plus_write(&mut this.settings, next);
+                    this.auto_save(cx);
+                }
+            }),
+        )
     }
 
     /// Compact `...` action menu: one trigger instead of a row of separate buttons.
@@ -2078,7 +2203,7 @@ impl SettingsView {
     fn render_ai_auth(&self, t: &UiTheme, cx: &mut Context<Self>) -> Vec<AnyElement> {
         // The badge reflects the encrypted token file, not a stale settings slot.
         let signed_in = cursor_auth::has_session();
-        let mut rows = vec![
+        let rows = vec![
             setting_row(
                 t,
                 Some("\u{E99A}"),
@@ -2147,35 +2272,7 @@ impl SettingsView {
             )
             .into_any_element(),
         ];
-        // C# `TryLaunchSignIn`: one button per CLI-backed AI provider.
-        for meta in widgets::telemetry::AI_PROVIDERS
-            .iter()
-            .filter(|provider| ai_cli_sign_in_command(provider.id).is_some())
-        {
-            let provider_id = meta.id;
-            rows.push(
-                setting_row(
-                    t,
-                    Some("\u{E99A}"),
-                    loc::t_fmt("AiCliProvider", &[meta.short]),
-                    button(
-                        SharedString::from(format!("btn-ai-cli-{provider_id}")),
-                        t,
-                        loc::t("AiUsageCursorSignIn"),
-                        ButtonVariant::Secondary,
-                        cx.listener(move |this, _, _, cx| {
-                            if launch_ai_cli_sign_in(provider_id) {
-                                this.ai_status = loc::t_fmt("AiCliSignInLaunched", &[provider_id]);
-                            } else {
-                                this.ai_status = loc::t_fmt("AiCliNotFound", &[provider_id]);
-                            }
-                            cx.notify();
-                        }),
-                    ),
-                )
-                .into_any_element(),
-            );
-        }
+        // Per-provider CLI account rows were removed; only the Cursor PKCE row stays.
         rows
     }
 
@@ -3090,25 +3187,6 @@ impl SettingsView {
                 brand_color: None,
                 rows: vec![("30d".to_owned(), 0.61, pal.widget_accent, "12d".to_owned())],
             },
-            "aiusage_antigravity" => WidgetChipSpec::AiAntigravity {
-                columns: vec![
-                    (
-                        "Gemini".to_owned(),
-                        vec![
-                            ("5h".to_owned(), 0.42, pal.widget_accent, "2h".to_owned()),
-                            ("7d".to_owned(), 0.68, pal.widget_accent, "4d".to_owned()),
-                        ],
-                    ),
-                    (
-                        "Claude".to_owned(),
-                        vec![("7d".to_owned(), 0.54, pal.widget_blue, "3d".to_owned())],
-                    ),
-                    (
-                        "Argon".to_owned(),
-                        vec![("7d".to_owned(), 0.31, pal.success, "6d".to_owned())],
-                    ),
-                ],
-            },
             "aiusage_opencode" => WidgetChipSpec::AiOpenCode {
                 columns: vec![
                     (
@@ -3898,36 +3976,6 @@ impl SettingsView {
                         )),
                 )
             }
-            WidgetChipSpec::AiAntigravity { columns } => {
-                chip(div().flex().items_center().gap(px(7.0)).children(
-                    columns.into_iter().take(3).map(|(header, rows)| {
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .child(
-                                div()
-                                    .text_size(px(fonts::scaled_size(9.0)))
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgba(t.dock_preview_sub))
-                                    .child(header),
-                            )
-                            .children(rows.into_iter().take(2).map(|(lbl, used, col, _)| {
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(3.0))
-                                    .child(
-                                        div()
-                                            .text_size(px(fonts::scaled_size(9.0)))
-                                            .text_color(rgba(t.dock_preview_fg))
-                                            .child(lbl),
-                                    )
-                                    .child(mini_bar(used, col, 28.0))
-                            }))
-                    }),
-                ))
-            }
             WidgetChipSpec::AiOpenCode { columns } => {
                 chip(div().flex().items_center().gap(px(7.0)).children(
                     columns.into_iter().take(3).map(|(lbl, val, used, col, _)| {
@@ -4055,6 +4103,9 @@ impl SettingsView {
                             ),
                     ),
             ),
+            // Retired provider-specific chip specs (removed from the catalog) still
+            // exist in older `dock::dcomp` builds; render a harmless placeholder.
+            _ => chip(div().text_size(px(fonts::scaled_size(9.0)))),
         }
     }
 
@@ -4359,30 +4410,6 @@ impl SettingsView {
         self.auto_save(cx);
     }
 
-    fn edit_ai_api_key(&mut self, secret_key: &'static str, cx: &mut Context<Self>) {
-        let title = loc::t("AiUsageApiKeyLabel");
-        let hint = loc::t("AiUsageApiKeyPlaceholder");
-        let is_dark = self.is_dark();
-        let Some(text) = prompt::ask_name(0, is_dark, &title, &hint, "") else {
-            return;
-        };
-        let value = text.trim();
-        self.api_key_status = loc::t(if value.is_empty() {
-            "ErrorAiUsageApiKey"
-        } else if widgets::telemetry::save_dpapi_secret(secret_key, value) {
-            "AiUsageApiKeySaved"
-        } else {
-            "ErrorAiUsageApiKey"
-        });
-        cx.notify();
-    }
-
-    fn clear_ai_api_key(&mut self, secret_key: &'static str, cx: &mut Context<Self>) {
-        widgets::telemetry::clear_dpapi_secret(secret_key);
-        self.api_key_status.clear();
-        cx.notify();
-    }
-
     /// Native paged font picker: Windows has hundreds of installed families, so the
     /// list is shown 24 at a time with Previous/Next entries instead of one huge menu.
     fn choose_font(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4608,15 +4635,26 @@ impl SettingsView {
         }
         self.settings
             .profiles
-            .push(opentaskbar_core::settings::DockProfile {
-                name: name.clone(),
-                position: self.settings.position,
-                size: self.settings.size,
-                auto_hide: self.settings.auto_hide,
-                enabled_widgets: self.settings.enabled_widgets.clone(),
-                ..Default::default()
-            });
+            .push(snapshot_profile(&self.settings, name.clone()));
         self.settings.active_profile = Some(name);
+        self.auto_save(cx);
+    }
+
+    /// Overwrite the active profile with the current layout/widget/theme/hotkey state.
+    fn save_active_profile(&mut self, cx: &mut Context<Self>) {
+        let Some(active) = self.settings.active_profile.clone() else {
+            return;
+        };
+        let Some(index) = self
+            .settings
+            .profiles
+            .iter()
+            .position(|p| p.name == active)
+        else {
+            return;
+        };
+        let snapshot = snapshot_profile(&self.settings, active);
+        self.settings.profiles[index] = snapshot;
         self.auto_save(cx);
     }
 
@@ -4680,7 +4718,7 @@ impl SettingsView {
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async { update::find_newer() })
+                .spawn(async { update::find_newer_packaged_guard() })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 match result {
@@ -4710,7 +4748,7 @@ impl SettingsView {
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { update::download_and_apply(&task_release) })
+                .spawn(async move { update::apply_with_elevation(&task_release) })
                 .await;
             let _ = this.update(cx, |view, cx| {
                 match result {
@@ -4722,7 +4760,13 @@ impl SettingsView {
                         // Release this process's lock so the updater can replace the executable.
                         std::process::exit(0);
                     }
-                    Err(key) => view.update_status = loc::t(key),
+                    Err(key) => {
+                        view.update_status = if key.is_empty() {
+                            loc::t("UpdateFailed")
+                        } else {
+                            loc::t(key)
+                        };
+                    }
                 }
                 cx.notify();
             });
@@ -4857,6 +4901,155 @@ impl SettingsView {
             |w| format!("{} ({:.0}px)", loc::t("DockWidthPixels"), w),
         );
 
+        // Runtime layout modes (WS-1 fields). These feed `dock::apply_runtime_settings`
+        // through the saved `DockSettings`, so no dock restart is needed.
+        let content_align = self.enum_dropdown(
+            "dock-content-align",
+            t,
+            vec![
+                (loc::t("ContentAlignStart"), DockContentAlignment::Left),
+                (loc::t("ContentAlignCenter"), DockContentAlignment::Center),
+                (loc::t("ContentAlignEnd"), DockContentAlignment::Right),
+            ],
+            self.settings.content_alignment,
+            |this, value, cx| {
+                this.settings.content_alignment = value;
+                this.auto_save(cx);
+            },
+            cx,
+        );
+        let width_mode = self.enum_dropdown(
+            "dock-width-mode",
+            t,
+            vec![
+                (loc::t("Auto"), DockWidthMode::Auto),
+                (loc::t("Pixels"), DockWidthMode::Pixels),
+                (loc::t("Percent"), DockWidthMode::Percent),
+                (loc::t("DockWidthFill"), DockWidthMode::Fill),
+            ],
+            self.settings.dock_width_mode,
+            |this, value, cx| {
+                this.settings.dock_width_mode = value;
+                this.auto_save(cx);
+            },
+            cx,
+        );
+        let height_mode = self.enum_dropdown(
+            "dock-height-mode",
+            t,
+            vec![
+                (loc::t("Auto"), DockHeightMode::Auto),
+                (loc::t("Pixels"), DockHeightMode::Pixels),
+                (loc::t("Percent"), DockHeightMode::Percent),
+                (loc::t("DockHeightFill"), DockHeightMode::Fill),
+            ],
+            self.settings.dock_height_mode,
+            |this, value, cx| {
+                this.settings.dock_height_mode = value;
+                this.auto_save(cx);
+            },
+            cx,
+        );
+        let top_gap_unit = self.enum_dropdown(
+            "dock-top-gap-unit",
+            t,
+            vec![
+                (loc::t("Pixels"), DockGapUnit::Pixels),
+                (loc::t("Percent"), DockGapUnit::Percent),
+            ],
+            self.settings.dock_top_gap_unit,
+            |this, value, cx| {
+                this.settings.dock_top_gap_unit = value;
+                this.auto_save(cx);
+            },
+            cx,
+        );
+        let width_value_label = match self.settings.dock_width_mode {
+            DockWidthMode::Pixels => loc::t("DockWidthPixels"),
+            DockWidthMode::Percent => loc::t("DockWidthPercent"),
+            _ => loc::t("DockWidthMode"),
+        };
+        let width_value = self.number_stepper(
+            "dock-width-value",
+            t,
+            match self.settings.dock_width_mode {
+                DockWidthMode::Percent => self.settings.dock_width_percent,
+                _ => self.settings.dock_width_pixels,
+            },
+            0,
+            100,
+            |s| {
+                if s.dock_width_mode == DockWidthMode::Percent {
+                    s.dock_width_percent
+                } else {
+                    s.dock_width_pixels
+                }
+            },
+            |s, value| {
+                if s.dock_width_mode == DockWidthMode::Percent {
+                    s.dock_width_percent = value;
+                } else {
+                    s.dock_width_pixels = value;
+                }
+            },
+            cx,
+        );
+        let height_value_label = match self.settings.dock_height_mode {
+            DockHeightMode::Pixels => loc::t("Pixels"),
+            DockHeightMode::Percent => loc::t("Percent"),
+            _ => loc::t("DockHeightMode"),
+        };
+        let height_value = self.number_stepper(
+            "dock-height-value",
+            t,
+            match self.settings.dock_height_mode {
+                DockHeightMode::Percent => self.settings.dock_height_percent,
+                _ => self.settings.dock_height_pixels,
+            },
+            0,
+            100,
+            |s| {
+                if s.dock_height_mode == DockHeightMode::Percent {
+                    s.dock_height_percent
+                } else {
+                    s.dock_height_pixels
+                }
+            },
+            |s, value| {
+                if s.dock_height_mode == DockHeightMode::Percent {
+                    s.dock_height_percent = value;
+                } else {
+                    s.dock_height_pixels = value;
+                }
+            },
+            cx,
+        );
+        let top_gap_value = self.number_stepper(
+            "dock-top-gap-value",
+            t,
+            match self.settings.dock_top_gap_unit {
+                DockGapUnit::Percent => self.settings.dock_top_gap_percent,
+                DockGapUnit::Pixels => self.settings.dock_top_gap_pixels,
+            },
+            0,
+            100,
+            |s| {
+                if s.dock_top_gap_unit == DockGapUnit::Percent {
+                    s.dock_top_gap_percent
+                } else {
+                    s.dock_top_gap_pixels
+                }
+            },
+            |s, value| {
+                if s.dock_top_gap_unit == DockGapUnit::Percent {
+                    s.dock_top_gap_percent = value;
+                } else {
+                    s.dock_top_gap_pixels = value;
+                }
+            },
+            cx,
+        );
+
         let out = vec![
             section_card(
                 t,
@@ -4868,6 +5061,55 @@ impl SettingsView {
                         Some("\u{E8E3}"),
                         loc::t("DockAlignment"),
                         align_dd,
+                    ),
+                    self.target_row(
+                        "ContentAlignment",
+                        t,
+                        Some("\u{E8E3}"),
+                        loc::t("ContentAlignment"),
+                        content_align,
+                    ),
+                    self.target_row(
+                        "DockWidthMode",
+                        t,
+                        Some("\u{E740}"),
+                        loc::t("DockWidthMode"),
+                        width_mode,
+                    ),
+                    self.target_row(
+                        "DockWidthValue",
+                        t,
+                        Some("\u{E740}"),
+                        width_value_label,
+                        width_value,
+                    ),
+                    self.target_row(
+                        "DockHeightMode",
+                        t,
+                        Some("\u{E740}"),
+                        loc::t("DockHeightMode"),
+                        height_mode,
+                    ),
+                    self.target_row(
+                        "DockHeightValue",
+                        t,
+                        Some("\u{E740}"),
+                        height_value_label,
+                        height_value,
+                    ),
+                    self.target_row(
+                        "DockTopGap",
+                        t,
+                        Some("\u{E96F}"),
+                        loc::t("DockTopGap"),
+                        top_gap_unit,
+                    ),
+                    self.target_row(
+                        "DockTopGapValue",
+                        t,
+                        Some("\u{E96F}"),
+                        loc::t("DockTopGap"),
+                        top_gap_value,
                     ),
                     self.target_row("DockSize", t, Some("\u{E9A6}"), loc::t("DockSize"), size_dd),
                     self.target_row(
@@ -5050,6 +5292,42 @@ impl SettingsView {
                         ),
                     )
                     .into_any_element(),
+                    self.target_row_desc(
+                        "PreviewsEnabled",
+                        t,
+                        Some("\u{E7C4}"),
+                        loc::t("PreviewsEnabled"),
+                        if self.settings.previews_enabled {
+                            SharedString::from("")
+                        } else {
+                            SharedString::from(loc::t("PreviewDisabledHint"))
+                        },
+                        ios_switch(
+                            "sw-previews",
+                            t,
+                            self.settings.previews_enabled,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.previews_enabled = !this.settings.previews_enabled;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
+                    self.target_row(
+                        "WheelVolumeEnabled",
+                        t,
+                        Some("\u{E767}"),
+                        loc::t("WheelVolumeEnabled"),
+                        ios_switch(
+                            "sw-wheel-volume",
+                            t,
+                            self.settings.wheel_volume_enabled,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.wheel_volume_enabled =
+                                    !this.settings.wheel_volume_enabled;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
                     self.target_row(
                         "FocusMode",
                         t,
@@ -5538,6 +5816,27 @@ impl SettingsView {
                                 cx.listener(|this, _, _, cx| {
                                     this.settings.magnification_enabled =
                                         !this.settings.magnification_enabled;
+                                    this.auto_save(cx);
+                                }),
+                            ),
+                        ),
+                    )
+                    .into_any_element(),
+                    dim_when(
+                        !self.settings.magnification_enabled,
+                        self.target_row_desc(
+                            "MagnificationExpandsDock",
+                            t,
+                            Some("\u{E71E}"),
+                            loc::t("MagnificationExpandsDock"),
+                            loc::t("MagnificationExpandsDockDescription"),
+                            ios_switch(
+                                "sw-mag-expands-dock",
+                                t,
+                                self.settings.magnification_expands_dock,
+                                cx.listener(|this, _, _, cx| {
+                                    this.settings.magnification_expands_dock =
+                                        !this.settings.magnification_expands_dock;
                                     this.auto_save(cx);
                                 }),
                             ),
@@ -6100,14 +6399,7 @@ impl SettingsView {
             } else {
                 format!("≤ {}%", self.settings.wireless_battery_low_threshold)
             }),
-            other if other.starts_with("aiusage_") => {
-                let detected = widgets::telemetry::ai_provider_detected(other);
-                Some(loc::t(if detected {
-                    "AiUsageAccountConnected"
-                } else {
-                    "AiUsageAccountSignInRequired"
-                }))
-            }
+            // Per-provider account/status rows were removed; AI usage is global.
             _ => None,
         }
     }
@@ -6395,96 +6687,58 @@ impl SettingsView {
                     ),
                 ),
             ],
-            other if other.starts_with("aiusage_") => {
-                let mut rows = Vec::new();
-                if let Some(provider) = widgets::telemetry::AI_PROVIDERS
-                    .iter()
-                    .find(|p| p.id == other)
-                {
-                    let detected = widgets::telemetry::ai_provider_detected(provider.id);
-                    let status = loc::t(if detected {
-                        "AiUsageAccountConnected"
-                    } else {
-                        "AiUsageAccountSignInRequired"
-                    });
-                    let url = provider.dashboard_url.to_owned();
-                    let hint = format!(
-                        "{}: {}",
-                        loc::t("AiUsageCliSignInLabel"),
-                        provider.signin_hint
-                    );
-                    rows.push(
-                        setting_row_desc(
-                            t,
-                            Some("\u{E99A}"),
-                            provider.name,
-                            hint,
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(badge(t, status, detected))
-                                .child(button(
-                                    SharedString::from(format!("btn-ai-dash-{}", provider.id)),
-                                    t,
-                                    loc::t("AiUsageOpenDashboard"),
-                                    ButtonVariant::Secondary,
-                                    move |_, _, _| {
-                                        pins::launch(url.clone());
-                                    },
-                                )),
-                        )
-                        .into_any_element(),
-                    );
-                    if let Some((_, secret_key)) = widgets::telemetry::ai_api_key_providers()
-                        .iter()
-                        .find(|(pid, _)| *pid == provider.id)
-                    {
-                        let saved = widgets::telemetry::has_dpapi_secret(secret_key);
-                        let value = if saved {
-                            loc::t("AiUsageApiKeySaved")
-                        } else {
-                            loc::t("AiUsageApiKeyPlaceholder")
-                        };
-                        let key = *secret_key;
-                        rows.push(
-                            setting_row_desc(
-                                t,
-                                Some("\u{E8D7}"),
-                                loc::t("AiUsageApiKeyLabel"),
-                                value,
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .child(button(
-                                        SharedString::from(format!("btn-api-key-{}", provider.id)),
-                                        t,
-                                        loc::t("AiUsageApiKeySave"),
-                                        ButtonVariant::Secondary,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.edit_ai_api_key(key, cx)
-                                        }),
-                                    ))
-                                    .child(button(
-                                        SharedString::from(format!(
-                                            "btn-api-key-clear-{}",
-                                            provider.id
-                                        )),
-                                        t,
-                                        loc::t("AiUsageApiKeyClear"),
-                                        ButtonVariant::Secondary,
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.clear_ai_api_key(key, cx)
-                                        }),
-                                    )),
-                            )
-                            .into_any_element(),
-                        );
-                    }
-                }
-                rows
-            }
+            "focus" => vec![
+                self.target_row(
+                    "FocusMinutes",
+                    t,
+                    Some("\u{E7C8}"),
+                    loc::t("FocusMinutesLabel"),
+                    self.number_stepper(
+                        "focus-minutes",
+                        t,
+                        self.settings.focus_minutes,
+                        1,
+                        FOCUS_MINUTES_MAX,
+                        |s| s.focus_minutes,
+                        |s, value| s.focus_minutes = value,
+                        cx,
+                    ),
+                ),
+                self.target_row(
+                    "FocusBreakMinutes",
+                    t,
+                    Some("\u{E7C8}"),
+                    loc::t("FocusBreakMinutesLabel"),
+                    self.number_stepper(
+                        "focus-break-minutes",
+                        t,
+                        self.settings.focus_break_minutes,
+                        1,
+                        FOCUS_BREAK_MINUTES_MAX,
+                        |s| s.focus_break_minutes,
+                        |s, value| s.focus_break_minutes = value,
+                        cx,
+                    ),
+                ),
+                self.target_row(
+                    "FocusSessions",
+                    t,
+                    Some("\u{E7C8}"),
+                    loc::t("FocusSessionsLabel"),
+                    self.number_stepper(
+                        "focus-sessions",
+                        t,
+                        self.settings.focus_sessions,
+                        1,
+                        FOCUS_SESSIONS_MAX,
+                        |s| s.focus_sessions,
+                        |s, value| s.focus_sessions = value,
+                        cx,
+                    ),
+                ),
+            ],
+            // Provider account rows were removed. AI usage options are global
+            // (see the Widgets page); there is no per-provider account panel any more.
             _ => Vec::new(),
         }
     }
@@ -6926,6 +7180,76 @@ impl SettingsView {
         })
         .collect();
 
+        let density_choices = || {
+            vec![
+                (loc::t("WidgetDensityAuto"), WidgetDensityMode::Auto),
+                (loc::t("WidgetDensityCompact"), WidgetDensityMode::Compact),
+                (loc::t("WidgetDensityFull"), WidgetDensityMode::Full),
+            ]
+        };
+        let density_override_rows: Vec<AnyElement> = ["clock", "weather", "stats"]
+            .into_iter()
+            .map(|id| {
+                let current = self
+                    .settings
+                    .widget_density_overrides
+                    .get(id)
+                    .copied()
+                    .unwrap_or(WidgetDensityMode::Auto);
+                let row_id = match id {
+                    "clock" => "WidgetDensityOverrideClock",
+                    "weather" => "WidgetDensityOverrideWeather",
+                    _ => "WidgetDensityOverrideStats",
+                };
+                self.target_row(
+                    row_id,
+                    t,
+                    Some("\u{E80A}"),
+                    loc::t(id),
+                    self.enum_dropdown(
+                        format!("widget-density-{id}"),
+                        t,
+                        density_choices(),
+                        current,
+                        move |this, value, cx| {
+                            if value == WidgetDensityMode::Auto {
+                                this.settings.widget_density_overrides.remove(id);
+                            } else {
+                                this.settings.widget_density_overrides.insert(id.to_owned(), value);
+                            }
+                            this.auto_save(cx);
+                        },
+                        cx,
+                    ),
+                )
+            })
+            .collect();
+        let ai_ring = self.enum_dropdown(
+            "ai-usage-ring",
+            t,
+            vec![
+                (loc::t("AiUsageRingHighest"), AiUsageRing::Highest),
+                (loc::t("AiUsageRingSession"), AiUsageRing::Session),
+                (loc::t("AiUsageRingWeekly"), AiUsageRing::Weekly),
+            ],
+            self.settings.ai_usage_ring,
+            |this, value, cx| {
+                this.settings.ai_usage_ring = value;
+                this.auto_save(cx);
+            },
+            cx,
+        );
+        let shrink_priority = self.number_stepper(
+            "shrink-priority",
+            t,
+            extra_number(&self.settings, "ShrinkPriority", 0),
+            0,
+            8,
+            |s| extra_number(s, "ShrinkPriority", 0),
+            |s, value| set_extra_number(s, "ShrinkPriority", value),
+            cx,
+        );
+
         out.push(
             section_card(
                 t,
@@ -6945,7 +7269,39 @@ impl SettingsView {
                         self.make_dropdown("widget-density", t, density_opts, cx),
                     )
                     .into_any_element(),
-                ],
+                    setting_row(
+                        t,
+                        Some("\u{E80A}"),
+                        loc::t("ShrinkPriority"),
+                        shrink_priority,
+                    )
+                    .into_any_element(),
+                    self.target_row(
+                        "AiUsageRing",
+                        t,
+                        Some("\u{E99A}"),
+                        loc::t("AiUsageRingLabel"),
+                        ai_ring,
+                    ),
+                    self.target_row(
+                        "ShowMedia",
+                        t,
+                        Some("\u{E8D6}"),
+                        loc::t("ShowMedia"),
+                        ios_switch(
+                            "sw-show-media",
+                            t,
+                            self.settings.show_media,
+                            cx.listener(|this, _, _, cx| {
+                                this.settings.show_media = !this.settings.show_media;
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
+                ]
+                .into_iter()
+                .chain(density_override_rows)
+                .collect(),
             )
             .into_any_element(),
         );
@@ -7383,8 +7739,24 @@ impl SettingsView {
                                         .cursor_pointer()
                                         .child(label)
                                         .on_click(cx.listener(move |this, _, _, cx| {
+                                            if let Some(profile) = this
+                                                .settings
+                                                .profiles
+                                                .iter()
+                                                .find(|p| p.name == profile_name)
+                                                .cloned()
+                                            {
+                                                settings::apply_full_profile(
+                                                    &mut this.settings,
+                                                    &profile,
+                                                );
+                                            }
                                             this.settings.active_profile =
                                                 Some(profile_name.clone());
+                                            fonts::apply_settings(&this.settings);
+                                            loc::set_language(&this.settings.language);
+                                            apply_pack_tokens_to_palette();
+                                            this.widget_runtime.tick(&this.settings);
                                             this.auto_save(cx);
                                         }))
                                 }),
@@ -7401,6 +7773,13 @@ impl SettingsView {
                             loc::t("ProfileNew"),
                             ButtonVariant::Secondary,
                             cx.listener(|this, _, _, cx| this.new_profile(cx)),
+                        ))
+                        .child(button(
+                            "btn-profile-save",
+                            t,
+                            loc::t("Apply"),
+                            ButtonVariant::Secondary,
+                            cx.listener(|this, _, _, cx| this.save_active_profile(cx)),
                         ))
                         .children(self.settings.profiles.iter().enumerate().take(12).map(
                             |(index, profile)| {
@@ -7496,13 +7875,75 @@ impl SettingsView {
                             self.startup_enabled,
                             cx.listener(|this, _, _, cx| {
                                 let next = !this.startup_enabled;
-                                win32::set_startup_enabled(next);
-                                this.startup_enabled = win32::is_startup_enabled();
+                                // One call syncs both the portable Run key (honouring
+                                // StartupApproved) and the MSIX StartupTask.
+                                let _ = startup_registration::sync_all(next);
+                                this.startup_enabled = startup_registration::read().0;
                                 cx.notify();
                             }),
                         ),
                     )
                     .into_any_element(),
+                    // Window picker (WS-10) and Fjord (WS-11) toggles are persisted in
+                    // `extra`; the dock reads these keys when those workstreams land.
+                    // No WS-10/11 toggle API exists in this worktree yet.
+                    self.target_row_desc(
+                        "WindowPickerEnabled",
+                        t,
+                        Some("\u{E7C4}"),
+                        loc::t("WindowPickerTitle"),
+                        loc::t("WindowPickerPage"),
+                        ios_switch(
+                            "sw-window-picker",
+                            t,
+                            extra_number(&self.settings, "WindowPickerEnabled", 0) != 0,
+                            cx.listener(|this, _, _, cx| {
+                                let next =
+                                    extra_number(&this.settings, "WindowPickerEnabled", 0) == 0;
+                                set_extra_number(&mut this.settings, "WindowPickerEnabled", i32::from(next));
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
+                    self.target_row_desc(
+                        "FjordFilesEnabled",
+                        t,
+                        Some("\u{E838}"),
+                        loc::t("FjordFiles"),
+                        loc::t("FjordFilesOpen"),
+                        ios_switch(
+                            "sw-fjord-files",
+                            t,
+                            extra_number(&self.settings, "FjordFilesEnabled", 0) != 0,
+                            cx.listener(|this, _, _, cx| {
+                                let next =
+                                    extra_number(&this.settings, "FjordFilesEnabled", 0) == 0;
+                                set_extra_number(&mut this.settings, "FjordFilesEnabled", i32::from(next));
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
+                    self.target_row(
+                        "FjordBarVisible",
+                        t,
+                        Some("\u{E838}"),
+                        loc::t(if extra_number(&self.settings, "FjordBarVisible", 0) != 0 {
+                            "FjordBarHide"
+                        } else {
+                            "FjordBarShow"
+                        }),
+                        ios_switch(
+                            "sw-fjord-bar",
+                            t,
+                            extra_number(&self.settings, "FjordBarVisible", 0) != 0,
+                            cx.listener(|this, _, _, cx| {
+                                let next =
+                                    extra_number(&this.settings, "FjordBarVisible", 0) == 0;
+                                set_extra_number(&mut this.settings, "FjordBarVisible", i32::from(next));
+                                this.auto_save(cx);
+                            }),
+                        ),
+                    ),
                 ],
             )
             .into_any_element(),
@@ -8488,10 +8929,6 @@ mod tests {
             ai_cli_sign_in_command("aiusage_opencode"),
             Some(("opencode", vec!["opencode", "auth", "login"]))
         );
-        assert_eq!(
-            ai_cli_sign_in_command("aiusage_antigravity"),
-            Some(("agy", vec!["agy"]))
-        );
         // API-key providers have no CLI sign-in command.
         assert!(ai_cli_sign_in_command("aiusage_deepseek").is_none());
         assert!(ai_cli_sign_in_command("aiusage_cursor").is_none());
@@ -8579,6 +9016,109 @@ mod tests {
         assert_eq!(gradient_stop_at(0.0, 16), 0);
         assert_eq!(gradient_stop_at(1.0, 16), 15);
         assert_eq!(gradient_stop_at(0.5, 16), 8);
+    }
+
+    #[test]
+    fn retired_ai_provider_ui_is_gone() {
+        let settings_src = include_str!("settings.rs");
+        let search_src = include_str!("settings_search.rs");
+        // Split needle so this regression test does not reintroduce the token it forbids.
+        let needle = concat!("antig", "ravity");
+        assert!(!settings_src.to_ascii_lowercase().contains(needle));
+        assert!(!search_src.to_ascii_lowercase().contains(needle));
+        assert!(!settings_src.contains(concat!("AI_PRO", "VIDERS")));
+        assert!(!settings_src.contains(concat!("ai_provider_", "detected")));
+    }
+
+    #[test]
+    fn new_runtime_setting_rows_are_wired() {
+        let src = include_str!("settings.rs");
+        for key in [
+            "MagnificationExpandsDock",
+            "MagnificationExpandsDockDescription",
+            "ContentAlignStart",
+            "ContentAlignCenter",
+            "ContentAlignEnd",
+            "PreviewsEnabled",
+            "PreviewDisabledHint",
+            "WheelVolumeEnabled",
+            "FocusMinutesLabel",
+            "FocusBreakMinutesLabel",
+            "FocusSessionsLabel",
+            "WidgetDensityCompact",
+            "WidgetDensityFull",
+            "AiUsageRingLabel",
+            "FjordFiles",
+            "FjordFilesOpen",
+            "FjordBarShow",
+            "FjordBarHide",
+            "WindowPickerTitle",
+            "WindowPickerPage",
+        ] {
+            assert!(
+                src.contains(&format!("\"{key}\"")),
+                "missing setting row key {key}"
+            );
+        }
+        for field in [
+            "content_alignment",
+            "previews_enabled",
+            "wheel_volume_enabled",
+            "focus_minutes",
+            "focus_break_minutes",
+            "focus_sessions",
+            "widget_density_overrides",
+            "ai_usage_ring",
+            "show_media",
+            "dock_width_mode",
+            "dock_height_mode",
+            "dock_top_gap_unit",
+            "magnification_expands_dock",
+        ] {
+            assert!(src.contains(field), "missing setting field {field}");
+        }
+        assert_eq!(super::FOCUS_MINUTES_MAX, 90);
+        assert_eq!(super::FOCUS_BREAK_MINUTES_MAX, 30);
+        assert_eq!(super::FOCUS_SESSIONS_MAX, 8);
+        assert!(src.contains("FOCUS_MINUTES_MAX,"));
+        assert!(src.contains("FOCUS_BREAK_MINUTES_MAX,"));
+        assert!(src.contains("FOCUS_SESSIONS_MAX,"));
+    }
+
+    #[test]
+    fn profile_snapshot_covers_full_field_contract() {
+        use opentaskbar_core::settings::{DockPosition, DockWidthMode};
+
+        let mut settings = DockSettings::default();
+        settings.position = DockPosition::Right;
+        settings.enabled_widgets = vec!["clock".to_owned()];
+        settings.user_unpinned_apps = vec!["hidden.exe".to_owned()];
+        settings.dock_width_mode = DockWidthMode::Pixels;
+        settings.dock_width_pixels = 240;
+        settings.theme_pack = "catppuccin".to_owned();
+        let profile = super::snapshot_profile(&settings, "Work".to_owned());
+        assert_eq!(profile.position, DockPosition::Right);
+        assert_eq!(profile.hidden_apps, ["hidden.exe"]);
+        assert_eq!(profile.dock_width_pixels, Some(240));
+        assert_eq!(profile.theme_pack.as_deref(), Some("catppuccin"));
+        assert!(profile.launcher_hotkey.is_some() && profile.dock_hotkey.is_some());
+        assert!(profile.theme_application_icons.is_some());
+        assert!(profile.dock_item_order.is_empty());
+
+        let mut target = DockSettings::default();
+        opentaskbar_core::settings::apply_full_profile(&mut target, &profile);
+        assert_eq!(target.position, DockPosition::Right);
+        assert_eq!(target.enabled_widgets, ["clock"]);
+        assert_eq!(target.dock_width_pixels, 240);
+    }
+
+    #[test]
+    fn update_startup_and_theme_use_wired_apis() {
+        let src = include_str!("settings.rs");
+        assert!(src.contains("update::find_newer_packaged_guard()"));
+        assert!(src.contains("update::apply_with_elevation("));
+        assert!(src.contains("startup_registration::sync_all(next)"));
+        assert!(src.contains("apply_pack_tokens_to_palette()"));
     }
 }
 
