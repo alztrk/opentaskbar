@@ -28,16 +28,16 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     BS_OWNERDRAW, CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, ES_AUTOHSCROLL, GWLP_USERDATA, GetCursorPos, GetMessageW, GetWindowLongPtrW,
-    GetWindowTextLengthW, GetWindowTextW, IDC_ARROW, IsDialogMessageW, LoadCursorW, MSG,
-    RegisterClassExW, SW_SHOW, SendMessageW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow,
-    TranslateMessage, WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
-    WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_PAINT, WM_SETFONT, WNDCLASSEXW, WS_CAPTION,
+    ES_AUTOHSCROLL, GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW, GetWindowTextLengthW,
+    GetWindowTextW, IsDialogMessageW, SW_SHOW, SendMessageW, SetForegroundWindow,
+    SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_COMMAND, WM_CTLCOLORBTN, WM_CTLCOLOREDIT,
+    WM_CTLCOLORSTATIC, WM_DRAWITEM, WM_ERASEBKGND, WM_KEYDOWN, WM_PAINT, WM_SETFONT, WS_CAPTION,
     WS_CHILD, WS_EX_DLGMODALFRAME, WS_EX_TOPMOST, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
 use crate::design::{self, Rgb};
 use crate::platform::win32;
+use crate::ui::{ModalStep, modal_loop, register_popup_class};
 
 const DWMWCP_ROUND: u32 = 2;
 const ID_EDIT: usize = 101;
@@ -273,18 +273,12 @@ pub fn ask_name(
 ) -> Option<String> {
     let class_name = wide("OpenTaskBarNamePrompt");
     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
-    let wc = WNDCLASSEXW {
-        cbSize: size_of::<WNDCLASSEXW>() as u32,
-        style: CS_HREDRAW | CS_VREDRAW,
-        lpfnWndProc: Some(prompt_wnd_proc),
-        hInstance: hinstance,
-        hCursor: unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) },
-        lpszClassName: class_name.as_ptr(),
-        ..unsafe { std::mem::zeroed() }
-    };
-    unsafe {
-        RegisterClassExW(&wc);
-    }
+    register_popup_class(
+        "OpenTaskBarNamePrompt",
+        prompt_wnd_proc,
+        hinstance,
+        CS_HREDRAW | CS_VREDRAW,
+    );
 
     let dpi = win32::dpi_scale(owner_hwnd);
     let s = |dips: f32| -> i32 { (dips * dpi).round() as i32 };
@@ -500,31 +494,31 @@ pub fn ask_name(
         SendMessageW(edit_hwnd, EM_SETSEL, 0, -1);
     }
 
-    let mut msg: MSG = unsafe { std::mem::zeroed() };
-    while !done.get() {
-        let ret = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
-        if ret <= 0 {
-            break;
+    modal_loop(|msg| {
+        if done.get() {
+            return ModalStep::Break;
         }
-        if msg.message == WM_KEYDOWN && msg.wParam as u16 == VK_RETURN {
+        // Only keys delivered to this prompt (or its edit control) may confirm
+        // or cancel it. Another window on the same thread must not steer it.
+        if msg.message == WM_KEYDOWN
+            && (msg.hwnd == hwnd || msg.hwnd == edit_hwnd)
+            && matches!(msg.wParam as u16, VK_RETURN | VK_ESCAPE)
+        {
+            let command = if msg.wParam as u16 == VK_RETURN {
+                ID_OK
+            } else {
+                ID_CANCEL
+            };
             unsafe {
-                SendMessageW(hwnd, WM_COMMAND, ID_OK, 0);
+                SendMessageW(hwnd, WM_COMMAND, command, 0);
             }
-            continue;
+            return ModalStep::Skip;
         }
-        if msg.message == WM_KEYDOWN && msg.wParam as u16 == VK_ESCAPE {
-            unsafe {
-                SendMessageW(hwnd, WM_COMMAND, ID_CANCEL, 0);
-            }
-            continue;
+        if unsafe { IsDialogMessageW(hwnd, msg) } != 0 {
+            return ModalStep::Skip;
         }
-        unsafe {
-            if IsDialogMessageW(hwnd, &msg) == 0 {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        }
-    }
+        ModalStep::Continue
+    });
 
     let out = state.result.take();
     unsafe {
@@ -575,13 +569,11 @@ fn init_com() {
 fn result_path(dialog: &IFileDialog) -> Option<PathBuf> {
     let item: IShellItem = unsafe { dialog.GetResult().ok()? };
     let path: PWSTR = unsafe { item.GetDisplayName(SIGDN_FILESYSPATH).ok()? };
-    let text = unsafe { path.to_string().ok()?.to_string() };
+    // Free the COM-allocated string on every path, including conversion failure.
+    let text = unsafe { path.to_string().ok().map(|text| text.to_string()) };
     unsafe { CoTaskMemFree(Some(path.0.cast())) };
-    if text.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(text))
-    }
+    let text = text?;
+    (!text.is_empty()).then(|| PathBuf::from(text))
 }
 
 fn set_filter(dialog: &IFileDialog, name: &str, pattern: &str) -> Option<Vec<HSTRING>> {

@@ -39,18 +39,19 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_SPACE, VK_UP,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetCursorPos,
-    GetMenu, GetMenuItemCount, GetMenuItemID, GetMenuStringW, GetMessageW, GetSystemMenu,
-    GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LoadCursorW, MF_BYPOSITION, MSG,
-    RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW, SetCursor,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-    WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SYSCOMMAND, WNDCLASSEXW, WS_EX_NOACTIVATE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetCursorPos, GetMenu,
+    GetMenuItemCount, GetMenuItemID, GetMenuStringW, GetSystemMenu, GetWindowLongPtrW,
+    HWND_TOPMOST, IDC_ARROW, IDC_HAND, LoadCursorW, MF_BYPOSITION, SW_SHOW, SWP_NOACTIVATE,
+    SWP_SHOWWINDOW, SendMessageW, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
+    ShowWindow, WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SYSCOMMAND, WS_EX_NOACTIVATE,
     WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use opentaskbar_core::settings::{DockSettings, SurfaceBackground, clear_crystal_tint_alpha};
 
+use super::components::{StepMode, step_index};
+use super::{ModalStep, modal_loop, register_popup_class};
 use crate::design::fonts;
 use crate::design::icons::{self, AppIcon};
 use crate::design::spatial_glass::{
@@ -264,10 +265,9 @@ impl BorderStyle {
 }
 
 /// High bit marks a command as `WM_SYSCOMMAND` (target application's system menu).
-#[allow(dead_code)] // consumed by dock/window menus after WS-B `win32_ex` lands
+/// Consumed by `dock::tray` and the window picker through the public APIs below.
 pub const NATIVE_SYS_COMMAND_FLAG: u32 = 0x8000_0000;
 
-#[allow(dead_code)]
 fn encode_native_command(id: u32, system: bool) -> u32 {
     if system {
         id | NATIVE_SYS_COMMAND_FLAG
@@ -279,10 +279,7 @@ fn encode_native_command(id: u32, system: bool) -> u32 {
 /// Reads the target window's own `GetMenu` / `GetSystemMenu` commands (reference
 /// `ApplicationWindowMenu.cs`).
 ///
-/// Intentionally kept as a **public wrapper** with a stable name: no call site
-/// exists in this worktree yet, and WS-6 dock will wire it to the window picker
-/// / system menu without needing to reach into this module's internals.
-#[allow(dead_code)] // consumed by WS-6 dock after its menu work lands
+/// Public entry point used by `dock::tray`, the window picker and their tests.
 pub fn native_app_menu_entries(target_hwnd: usize) -> Vec<MenuEntry> {
     if target_hwnd == 0 {
         return Vec::new();
@@ -338,7 +335,7 @@ pub fn native_app_menu_entries(target_hwnd: usize) -> Vec<MenuEntry> {
 }
 
 /// Executes a native menu command on the target window via `WM_COMMAND` / `WM_SYSCOMMAND`.
-#[allow(dead_code)] // consumed by dock/window menus after WS-B `win32_ex` lands
+/// Used by the same dock/window-picker call sites as [`native_app_menu_entries`].
 pub fn invoke_native_app_command(target_hwnd: usize, command_id: u32) -> bool {
     if target_hwnd == 0 {
         return false;
@@ -508,8 +505,7 @@ fn keyboard_step(entries: &[MenuEntry], current: Option<usize>, delta: isize) ->
             rows[insertion.min(len - 1)]
         });
     };
-    let next = (position as isize + delta).rem_euclid(len as isize);
-    Some(rows[next as usize])
+    Some(rows[step_index(position, len, delta, StepMode::Wrap)])
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -942,17 +938,7 @@ pub fn show_popup_menu_with_border(
     }
     let class_name = wide("OpenTaskBarContextMenu");
     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
-    let wc = WNDCLASSEXW {
-        cbSize: size_of::<WNDCLASSEXW>() as u32,
-        lpfnWndProc: Some(menu_wnd_proc),
-        hInstance: hinstance,
-        hCursor: unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) },
-        lpszClassName: class_name.as_ptr(),
-        ..unsafe { std::mem::zeroed() }
-    };
-    unsafe {
-        RegisterClassExW(&wc);
-    }
+    register_popup_class("OpenTaskBarContextMenu", menu_wnd_proc, hinstance, 0);
 
     let dpi = win32::dpi_scale(owner_hwnd);
     let (menu_w, menu_h, _) = measure_entries(&entries, MENU_W_DIPS, dpi);
@@ -987,17 +973,13 @@ pub fn show_popup_menu_with_border(
     let mut root = create_pane_window(session_info, entries, MENU_W_DIPS, x, y, false)?;
     session.root = (&mut *root) as *mut MenuPane;
 
-    let mut msg: MSG = unsafe { std::mem::zeroed() };
-    while !session.done.load(Ordering::Acquire) {
-        let ret = unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) };
-        if ret <= 0 {
-            break;
+    modal_loop(|_| {
+        if session.done.load(Ordering::Acquire) {
+            ModalStep::Break
+        } else {
+            ModalStep::Continue
         }
-        unsafe {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
+    });
 
     let selected = session.selected_id;
     if let Some(mut sub) = session.submenu.take() {

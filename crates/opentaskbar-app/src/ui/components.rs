@@ -135,6 +135,12 @@ impl UiTheme {
 
 /// Crisp native Windows 11 Segoe Fluent Icons glyph.
 pub fn icon_glyph(glyph: &'static str, size_px: f32, color: u32) -> Div {
+    icon_glyph_owned(glyph, size_px, color)
+}
+
+/// Same as [`icon_glyph`] for dynamically built glyph strings (e.g. a glyph
+/// code point read from a custom widget manifest).
+pub fn icon_glyph_owned(glyph: impl Into<SharedString>, size_px: f32, color: u32) -> Div {
     div()
         .font_family("Segoe Fluent Icons")
         .text_size(px(size_px))
@@ -143,7 +149,7 @@ pub fn icon_glyph(glyph: &'static str, size_px: f32, color: u32) -> Div {
         .items_center()
         .justify_center()
         .flex_shrink_0()
-        .child(glyph)
+        .child(glyph.into())
 }
 
 /// iOS grouped inset section header + rounded container card with hairline dividers.
@@ -405,7 +411,6 @@ pub fn badge(theme: &UiTheme, text: impl Into<SharedString>, accent: bool) -> Di
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ButtonVariant {
-    #[allow(dead_code)]
     Primary,
     Secondary,
     Destructive,
@@ -463,6 +468,89 @@ pub fn button(
         .child(label.into())
 }
 
+/// Settings widget-card pill: glyph + label with the card click suppressed.
+pub fn card_button(
+    id: impl Into<SharedString>,
+    theme: &UiTheme,
+    glyph: Option<&'static str>,
+    label: impl Into<SharedString>,
+    selected: bool,
+    on_press: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<Div> {
+    let id: SharedString = id.into();
+    let bg = if selected {
+        theme.accent_soft
+    } else {
+        theme.surface_muted
+    };
+    let border = if selected { theme.accent } else { theme.border };
+    let fg = if selected {
+        theme.accent
+    } else {
+        theme.text_secondary
+    };
+    let hover = if selected {
+        theme.accent_soft
+    } else {
+        theme.surface_hover
+    };
+    let mut row = div()
+        .id(id)
+        .h(px(28.0))
+        .px(px(9.0))
+        .rounded(px(7.0))
+        .bg(rgba(bg))
+        .border_1()
+        .border_color(rgba(border))
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .cursor_pointer()
+        .hover(move |s| s.bg(rgba(hover)))
+        .on_mouse_down(MouseButton::Left, on_press);
+    if let Some(g) = glyph {
+        row = row.child(icon_glyph(g, 11.5, fg));
+    }
+    row.child(
+        div()
+            .whitespace_nowrap()
+            .text_size(px(fonts::scaled_size(11.5)))
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .text_color(rgba(fg))
+            .child(label.into()),
+    )
+}
+
+/// Text-only card action (Approve / Folder / Edit / Remove).
+pub fn compact_card_button(
+    id: impl Into<SharedString>,
+    theme: &UiTheme,
+    label: impl Into<SharedString>,
+    accent: bool,
+    on_press: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
+) -> gpui::Stateful<Div> {
+    let id: SharedString = id.into();
+    let (bg, fg) = if accent {
+        (theme.accent_soft, theme.accent)
+    } else {
+        (theme.surface_muted, theme.text_secondary)
+    };
+    div()
+        .id(id)
+        .px(px(7.0))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .bg(rgba(bg))
+        .cursor_pointer()
+        .on_mouse_down(MouseButton::Left, on_press)
+        .child(
+            div()
+                .text_size(px(fonts::scaled_size(10.5)))
+                .text_color(rgba(fg))
+                .child(label.into()),
+        )
+}
+
 /// Callback invoked when a dropdown option is selected.
 pub type DropdownSelectHandler = std::rc::Rc<dyn Fn(&mut gpui::Window, &mut gpui::App)>;
 
@@ -474,6 +562,110 @@ pub struct DropdownOption {
     pub glyph: Option<&'static str>,
     pub selected: bool,
     pub on_select: DropdownSelectHandler,
+}
+
+/// One popover row shared by all three dropdown builders. `min_h`/`gap` are the
+/// only visual differences between the standard, action-menu and searchable
+/// variants; event plumbing (`stop_propagation`, select, optional close) is
+/// identical and therefore lives here exactly once.
+#[allow(clippy::too_many_arguments)]
+fn dropdown_option_row(
+    id: &str,
+    theme: &UiTheme,
+    opt_index: usize,
+    opt: &DropdownOption,
+    is_active: bool,
+    accent: u32,
+    min_h: f32,
+    gap: f32,
+    close: Option<DropdownSelectHandler>,
+) -> gpui::Stateful<Div> {
+    let opt_bg = if is_active {
+        theme.accent_soft
+    } else {
+        0x00000000
+    };
+    let opt_fg = if is_active {
+        theme.accent
+    } else {
+        theme.text_primary
+    };
+    let opt_hover = if is_active {
+        theme.accent_soft
+    } else {
+        theme.surface_hover
+    };
+    let cb = opt.on_select.clone();
+    let mut left = div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .min_w_0()
+        .overflow_hidden();
+    if let Some(path) = &opt.flag_path {
+        left = left.child(
+            img(path.clone())
+                .w(px(18.0))
+                .h(px(13.0))
+                .rounded(px(2.5))
+                .flex_shrink_0(),
+        );
+    } else if let Some(glyph) = opt.glyph {
+        left = left.child(icon_glyph(glyph, 12.0, opt_fg));
+    }
+    left = left.child(
+        div()
+            .text_size(px(fonts::scaled_size(12.0)))
+            .font_weight(if is_active {
+                gpui::FontWeight::SEMIBOLD
+            } else {
+                gpui::FontWeight::MEDIUM
+            })
+            .text_color(rgba(opt_fg))
+            .overflow_hidden()
+            .child(opt.label.clone()),
+    );
+
+    div()
+        .id(SharedString::from(format!("{id}-{opt_index}")))
+        .w_full()
+        .min_h(px(min_h))
+        .px(px(9.0))
+        .py(px(5.0))
+        .rounded(px(6.0))
+        .bg(rgba(opt_bg))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(gap))
+        .cursor_pointer()
+        .hover(move |s| s.bg(rgba(opt_hover)))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            cb(window, cx);
+            if let Some(close) = &close {
+                close(window, cx);
+            }
+        })
+        .child(left)
+        .when(opt.selected, |row| {
+            row.child(icon_glyph("\u{E73E}", 11.0, accent))
+        })
+}
+
+/// Shared deferred popover shell: all builders anchor it below the trigger and
+/// let clicks inside it stop propagating to the owner card.
+fn dropdown_popover(menu: impl IntoElement, top: f32) -> AnyElement {
+    deferred(
+        div()
+            .occlude()
+            .absolute()
+            .top(px(top))
+            .right_0()
+            .child(menu),
+    )
+    .with_priority(1)
+    .into_any_element()
 }
 
 /// Custom desktop dropdown replacing `segmented_track` with optional country flag images
@@ -606,89 +798,21 @@ pub fn dropdown_labeled(
                 cx.stop_propagation();
             });
 
-        for (idx, opt) in options.into_iter().enumerate() {
-            let opt_bg = if opt.selected {
-                theme.accent_soft
-            } else {
-                0x00000000
-            };
-            let opt_fg = if opt.selected {
-                theme.accent
-            } else {
-                theme.text_primary
-            };
-            let opt_hover = if opt.selected {
-                theme.accent_soft
-            } else {
-                theme.surface_hover
-            };
-            let cb = opt.on_select;
-            let mut left = div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .min_w_0()
-                .overflow_hidden();
-            if let Some(path) = opt.flag_path {
-                left = left.child(
-                    img(path)
-                        .w(px(18.0))
-                        .h(px(13.0))
-                        .rounded(px(2.5))
-                        .flex_shrink_0(),
-                );
-            } else if let Some(g) = opt.glyph {
-                left = left.child(icon_glyph(g, 12.0, opt_fg));
-            }
-            left = left.child(
-                div()
-                    .text_size(px(fonts::scaled_size(12.0)))
-                    .font_weight(if opt.selected {
-                        gpui::FontWeight::SEMIBOLD
-                    } else {
-                        gpui::FontWeight::MEDIUM
-                    })
-                    .text_color(rgba(opt_fg))
-                    .overflow_hidden()
-                    .child(opt.label),
-            );
-
-            menu_list = menu_list.child(
-                div()
-                    .id(SharedString::from(format!("dd-opt-{id}-{idx}")))
-                    .w_full()
-                    .min_h(px(30.0))
-                    .px(px(9.0))
-                    .py(px(5.0))
-                    .rounded(px(6.0))
-                    .bg(rgba(opt_bg))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(10.0))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(rgba(opt_hover)))
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        cx.stop_propagation();
-                        cb(window, cx);
-                    })
-                    .child(left)
-                    .when(opt.selected, |row| {
-                        row.child(icon_glyph("\u{E73E}", 11.0, accent))
-                    }),
-            );
+        for (idx, opt) in options.iter().enumerate() {
+            menu_list = menu_list.child(dropdown_option_row(
+                &format!("dd-opt-{id}"),
+                theme,
+                idx,
+                opt,
+                opt.selected,
+                accent,
+                30.0,
+                10.0,
+                None,
+            ));
         }
 
-        let popover = deferred(
-            div()
-                .occlude()
-                .absolute()
-                .top(px(36.0))
-                .right_0()
-                .child(menu_list),
-        )
-        .with_priority(1);
-        wrap = wrap.child(popover);
+        wrap = wrap.child(dropdown_popover(menu_list, 36.0));
     }
 
     wrap
@@ -772,78 +896,21 @@ pub fn icon_action_menu(
                 cx.stop_propagation();
             });
 
-        for (idx, opt) in options.into_iter().enumerate() {
-            let opt_bg = if opt.selected {
-                theme.accent_soft
-            } else {
-                0x00000000
-            };
-            let opt_fg = if opt.selected {
-                theme.accent
-            } else {
-                theme.text_primary
-            };
-            let opt_hover = if opt.selected {
-                theme.accent_soft
-            } else {
-                theme.surface_hover
-            };
-            let cb = opt.on_select;
-            let mut left = div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .min_w_0()
-                .overflow_hidden();
-            if let Some(g) = opt.glyph {
-                left = left.child(icon_glyph(g, 12.0, opt_fg));
-            }
-            left = left.child(
-                div()
-                    .text_size(px(fonts::scaled_size(12.0)))
-                    .font_weight(if opt.selected {
-                        gpui::FontWeight::SEMIBOLD
-                    } else {
-                        gpui::FontWeight::MEDIUM
-                    })
-                    .text_color(rgba(opt_fg))
-                    .overflow_hidden()
-                    .child(opt.label),
-            );
-
-            menu_list = menu_list.child(
-                div()
-                    .id(SharedString::from(format!("icon-act-opt-{id}-{idx}")))
-                    .w_full()
-                    .min_h(px(30.0))
-                    .px(px(9.0))
-                    .py(px(5.0))
-                    .rounded(px(6.0))
-                    .bg(rgba(opt_bg))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.0))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(rgba(opt_hover)))
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        cx.stop_propagation();
-                        cb(window, cx);
-                    })
-                    .child(left),
-            );
+        for (idx, opt) in options.iter().enumerate() {
+            menu_list = menu_list.child(dropdown_option_row(
+                &format!("icon-act-opt-{id}"),
+                theme,
+                idx,
+                opt,
+                opt.selected,
+                accent,
+                30.0,
+                8.0,
+                None,
+            ));
         }
 
-        let popover = deferred(
-            div()
-                .occlude()
-                .absolute()
-                .top(px(34.0))
-                .right_0()
-                .child(menu_list),
-        )
-        .with_priority(1);
-        wrap = wrap.child(popover);
+        wrap = wrap.child(dropdown_popover(menu_list, 34.0));
     }
 
     wrap
@@ -889,6 +956,48 @@ pub fn filter_dropdown_options(options: &[DropdownOption], query: &str) -> Vec<u
         .collect()
 }
 
+/// Navigation policy shared by the popup menu (wrap) and searchable dropdowns (clamp).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepMode {
+    Wrap,
+    Clamp,
+}
+
+/// Moves an index by `delta` over `len` rows according to `mode`.
+#[must_use]
+pub fn step_index(current: usize, len: usize, delta: isize, mode: StepMode) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let next = (current.min(len - 1) as isize).saturating_add(delta);
+    match mode {
+        StepMode::Wrap => next.rem_euclid(len as isize) as usize,
+        StepMode::Clamp => next.clamp(0, len as isize - 1) as usize,
+    }
+}
+
+/// Lightweight content signature: a same-length replacement list (locale
+/// change, reloaded cities, changed selection) must invalidate the filter cache.
+#[must_use]
+fn options_fingerprint(options: &[DropdownOption]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    for option in options {
+        option.label.hash(&mut hash);
+        option.flag_path.hash(&mut hash);
+        option.glyph.hash(&mut hash);
+        option.selected.hash(&mut hash);
+    }
+    hash.finish()
+}
+
+/// Single scroll bound for both the keyboard and wheel handlers.
+#[must_use]
+fn clamp_scroll_top(top: usize, len: usize, viewport: usize) -> usize {
+    top.min(len.saturating_sub(viewport))
+}
+
 /// State of a [`searchable_dropdown`]. Kept outside the component so the owning entity can
 /// update it from GPUI key events and share it with the filter logic in tests.
 #[derive(Clone, Debug, Default)]
@@ -915,19 +1024,7 @@ impl SearchableDropdownState {
 
     /// Clamps the highlighted row inside `len`, wrapping neither end.
     pub fn move_active(&mut self, delta: isize, len: usize) {
-        if len == 0 {
-            self.active = 0;
-            return;
-        }
-        let current = self.active.min(len - 1) as isize;
-        let next = current + delta;
-        self.active = if next < 0 {
-            0
-        } else if next >= len as isize {
-            len - 1
-        } else {
-            next as usize
-        };
+        self.active = step_index(self.active, len, delta, StepMode::Clamp);
     }
 
     pub fn filtered_indices(&self, options: &[DropdownOption]) -> Vec<usize> {
@@ -944,6 +1041,10 @@ impl SearchableDropdownState {
 pub type SearchableDropdownKeyHandler =
     std::rc::Rc<dyn Fn(&KeyDownEvent, &mut gpui::Window, &mut gpui::App)>;
 
+/// Reads the active row from the owner, so two arrow keys in one frame advance
+/// two steps instead of both reusing the value captured at render time.
+pub type SearchableDropdownActiveHandler = std::rc::Rc<dyn Fn(&mut gpui::App) -> usize>;
+
 /// Callbacks supplied by the owning entity for a [`searchable_dropdown`].
 pub struct SearchableDropdownHandlers {
     pub on_toggle: DropdownSelectHandler,
@@ -951,6 +1052,7 @@ pub struct SearchableDropdownHandlers {
     /// filtered list) are forwarded here so the owner can update its text buffer.
     pub on_key_down: SearchableDropdownKeyHandler,
     pub on_close: DropdownSelectHandler,
+    pub active: SearchableDropdownActiveHandler,
 }
 
 /// Half-open range of filtered rows that should be materialised by the
@@ -1029,7 +1131,7 @@ impl SearchDebounce {
     #[must_use]
     pub fn settled(&self, now: Instant) -> bool {
         self.last_change
-            .is_none_or(|at| now.duration_since(at) >= self.interval)
+            .is_none_or(|at| now.saturating_duration_since(at) >= self.interval)
     }
 }
 
@@ -1040,7 +1142,7 @@ struct VirtualList {
     debounce: SearchDebounce,
     cached: Vec<usize>,
     cached_query: String,
-    cached_options: usize,
+    cached_fingerprint: u64,
     scroll_top: usize,
 }
 
@@ -1058,7 +1160,6 @@ fn no_results_message() -> SharedString {
 
 /// Single row builder, reused for every virtualized row (recycling): the element
 /// tree only ever holds `viewport + 2 * overscan` instances of this shape.
-#[allow(clippy::too_many_arguments)]
 fn searchable_row(
     id: &str,
     theme: &UiTheme,
@@ -1068,75 +1169,17 @@ fn searchable_row(
     accent: u32,
     close: DropdownSelectHandler,
 ) -> gpui::Stateful<Div> {
-    let opt_bg = if is_active {
-        theme.accent_soft
-    } else {
-        0x00000000
-    };
-    let opt_fg = if is_active {
-        theme.accent
-    } else {
-        theme.text_primary
-    };
-    let opt_hover = if is_active {
-        theme.accent_soft
-    } else {
-        theme.surface_hover
-    };
-    let cb = opt.on_select.clone();
-    let mut left = div()
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .min_w_0()
-        .overflow_hidden();
-    if let Some(path) = &opt.flag_path {
-        left = left.child(
-            img(path.clone())
-                .w(px(18.0))
-                .h(px(13.0))
-                .rounded(px(2.5))
-                .flex_shrink_0(),
-        );
-    } else if let Some(glyph) = opt.glyph {
-        left = left.child(icon_glyph(glyph, 12.0, opt_fg));
-    }
-    left = left.child(
-        div()
-            .text_size(px(fonts::scaled_size(12.0)))
-            .font_weight(if is_active {
-                gpui::FontWeight::SEMIBOLD
-            } else {
-                gpui::FontWeight::MEDIUM
-            })
-            .text_color(rgba(opt_fg))
-            .overflow_hidden()
-            .child(opt.label.clone()),
-    );
-
-    div()
-        .id(SharedString::from(format!("sdd-opt-{id}-{opt_index}")))
-        .w_full()
-        .min_h(px(SEARCH_ROW_H_PX))
-        .px(px(9.0))
-        .py(px(5.0))
-        .rounded(px(6.0))
-        .bg(rgba(opt_bg))
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(10.0))
-        .cursor_pointer()
-        .hover(move |s| s.bg(rgba(opt_hover)))
-        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-            cx.stop_propagation();
-            cb(window, cx);
-            close(window, cx);
-        })
-        .child(left)
-        .when(opt.selected, |row| {
-            row.child(icon_glyph("\u{E73E}", 11.0, accent))
-        })
+    dropdown_option_row(
+        &format!("sdd-opt-{id}"),
+        theme,
+        opt_index,
+        opt,
+        is_active,
+        accent,
+        SEARCH_ROW_H_PX,
+        10.0,
+        Some(close),
+    )
 }
 
 /// Dropdown with a text field pinned above the option list. Filtering is pure
@@ -1160,6 +1203,7 @@ pub fn searchable_dropdown(
         on_toggle,
         on_key_down,
         on_close,
+        active: read_active,
     } = handlers;
 
     let current = options
@@ -1249,6 +1293,7 @@ pub fn searchable_dropdown(
         // slice below is ever turned into GPUI elements.
         let now = Instant::now();
         let scroll_id = id.clone();
+        let fingerprint = options_fingerprint(options);
         let (filtered, range) = SEARCH_LISTS.with(|lists| {
             let mut lists = lists.borrow_mut();
             let slot = lists.entry(scroll_id.clone()).or_default();
@@ -1257,15 +1302,19 @@ pub fn searchable_dropdown(
                 slot.scroll_top = 0;
             }
             let settled = !changed && slot.debounce.settled(now);
-            if !settled || slot.cached_query != state.query || slot.cached_options != options.len()
+            if !settled
+                || slot.cached_query != state.query
+                || slot.cached_fingerprint != fingerprint
             {
                 slot.cached = state.filtered_indices(options);
                 slot.cached_query = state.query.clone();
-                slot.cached_options = options.len();
+                slot.cached_fingerprint = fingerprint;
             }
-            slot.scroll_top =
-                scroll_top_for_active(state.active, slot.scroll_top, SEARCH_VIEWPORT_ROWS)
-                    .min(slot.cached.len().saturating_sub(1));
+            slot.scroll_top = clamp_scroll_top(
+                scroll_top_for_active(state.active, slot.scroll_top, SEARCH_VIEWPORT_ROWS),
+                slot.cached.len(),
+                SEARCH_VIEWPORT_ROWS,
+            );
             (
                 slot.cached.clone(),
                 visible_row_range(
@@ -1284,7 +1333,6 @@ pub fn searchable_dropdown(
         let input_close = on_close.clone();
         let wheel_id = id.clone();
         let key_scroll_id = id.clone();
-        let key_active = state.active;
         let key_handler =
             move |event: &KeyDownEvent, window: &mut gpui::Window, cx: &mut gpui::App| {
                 match event.keystroke.key.as_str() {
@@ -1309,16 +1357,16 @@ pub fn searchable_dropdown(
                                 .get(&key_scroll_id)
                                 .map_or(0, |slot| slot.cached.len())
                         });
-                        let next_active = if event.keystroke.key == "down" {
-                            (key_active + 1).min(len.saturating_sub(1))
-                        } else {
-                            key_active.saturating_sub(1)
-                        };
+                        let next_active = read_active(cx).min(len.saturating_sub(1));
                         SEARCH_LISTS.with(|lists| {
                             if let Some(slot) = lists.borrow_mut().get_mut(&key_scroll_id) {
-                                slot.scroll_top = scroll_top_for_active(
-                                    next_active,
-                                    slot.scroll_top,
+                                slot.scroll_top = clamp_scroll_top(
+                                    scroll_top_for_active(
+                                        next_active,
+                                        slot.scroll_top,
+                                        SEARCH_VIEWPORT_ROWS,
+                                    ),
+                                    slot.cached.len(),
                                     SEARCH_VIEWPORT_ROWS,
                                 );
                             }
@@ -1369,10 +1417,11 @@ pub fn searchable_dropdown(
             let rows = (delta / SEARCH_ROW_H_PX).round() as isize;
             SEARCH_LISTS.with(|lists| {
                 if let Some(slot) = lists.borrow_mut().get_mut(&wheel_id) {
-                    let max = slot.cached.len().saturating_sub(SEARCH_VIEWPORT_ROWS);
-                    slot.scroll_top = (slot.scroll_top as isize + rows)
-                        .clamp(0, max as isize)
-                        .max(0) as usize;
+                    slot.scroll_top = clamp_scroll_top(
+                        (slot.scroll_top as isize + rows).max(0) as usize,
+                        slot.cached.len(),
+                        SEARCH_VIEWPORT_ROWS,
+                    );
                 }
             });
             cx.refresh_windows();
@@ -1797,8 +1846,8 @@ pub fn sidebar_nav_item(
 mod tests {
     use super::{
         DropdownOption, Duration, Instant, SearchDebounce, SearchableDropdownState, SharedString,
-        filter_dropdown_options, fold_search_text, no_results_message, scroll_top_for_active,
-        visible_row_range,
+        StepMode, clamp_scroll_top, filter_dropdown_options, fold_search_text, no_results_message,
+        options_fingerprint, scroll_top_for_active, step_index, visible_row_range,
     };
 
     fn options(labels: &[&str]) -> Vec<DropdownOption> {
@@ -1882,6 +1931,35 @@ mod tests {
         let message = no_results_message();
         assert_eq!(&message[..], super::loc::t("SearchNoResults"));
         assert!(!message.is_empty());
+    }
+
+    #[test]
+    fn index_stepping_preserves_wrap_and_clamp_policies() {
+        assert_eq!(step_index(0, 5, -1, StepMode::Wrap), 4);
+        assert_eq!(step_index(4, 5, 1, StepMode::Wrap), 0);
+        assert_eq!(step_index(0, 5, -1, StepMode::Clamp), 0);
+        assert_eq!(step_index(4, 5, 1, StepMode::Clamp), 4);
+        assert_eq!(step_index(2, 0, 1, StepMode::Wrap), 0);
+    }
+
+    #[test]
+    fn option_fingerprint_detects_same_length_replacement() {
+        let before = options(&["Ankara", "Izmir"]);
+        let mut after = options(&["Ankara", "Izmir"]);
+        assert_eq!(options_fingerprint(&before), options_fingerprint(&after));
+        after[1].label = SharedString::from("İzmir".to_owned());
+        assert_ne!(options_fingerprint(&before), options_fingerprint(&after));
+        let mut selected = options(&["Ankara", "Izmir"]);
+        selected[0].selected = true;
+        assert_ne!(options_fingerprint(&before), options_fingerprint(&selected));
+    }
+
+    #[test]
+    fn scroll_top_uses_one_bound_for_keyboard_and_wheel() {
+        assert_eq!(clamp_scroll_top(50, 100, 8), 50);
+        assert_eq!(clamp_scroll_top(120, 100, 8), 92);
+        assert_eq!(clamp_scroll_top(3, 5, 8), 0);
+        assert_eq!(clamp_scroll_top(0, 0, 8), 0);
     }
 
     #[test]

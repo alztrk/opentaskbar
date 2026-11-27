@@ -48,7 +48,7 @@ fn clamp_unit(value: f32) -> f32 {
 }
 
 /// Stable session key: `"<pid>:<exe-stem>"` (reference used `pid:hwn?`, which is not stable across restarts).
-fn session_id(pid: u32, exe_stem: &str) -> String {
+pub(crate) fn session_id(pid: u32, exe_stem: &str) -> String {
     format!("{pid}:{}", sanitize_stem(exe_stem))
 }
 
@@ -69,7 +69,7 @@ fn sanitize_stem(stem: &str) -> String {
 }
 
 /// File-name stem without the `.exe` suffix (case-insensitive).
-fn exe_stem(path: &str) -> &str {
+pub(crate) fn exe_stem(path: &str) -> &str {
     let name = path.rsplit(['\\', '/']).next().unwrap_or(path).trim();
     if name.len() >= 4 && name[name.len() - 4..].eq_ignore_ascii_case(".exe") {
         &name[..name.len() - 4]
@@ -416,7 +416,7 @@ impl VolumeRollback {
             session_key: session_key.to_owned(),
             previous_volume,
             previous_mute,
-            requested_volume: requested.clamp(0.0, 1.0),
+            requested_volume: clamp_unit(requested),
             committed: false,
         }
     }
@@ -456,8 +456,12 @@ impl SessionRegistry {
     }
 
     /// Releases the COM session held by a slider. Idempotent (`Dispose` guard).
+    /// Any pending optimistic rollback is dropped with the session so a reused
+    /// slider cannot apply a stale level from a previous owner.
     pub fn release(&mut self, slider_id: u32) -> bool {
-        self.sessions.remove(&slider_id).is_some()
+        let removed = self.sessions.remove(&slider_id).is_some();
+        self.rollbacks.remove(&slider_id);
+        removed
     }
 
     pub fn release_all(&mut self) {
@@ -485,6 +489,10 @@ impl SessionRegistry {
     /// Completes a volume change: on failure the original level is restored in the snapshot.
     pub fn finish_volume_change(&mut self, slider_id: u32, write_ok: bool) -> Option<f32> {
         let mut rollback = self.rollbacks.remove(&slider_id)?;
+        // The session may have been released while the write was in flight.
+        if !self.sessions.contains_key(&slider_id) {
+            return None;
+        }
         let shown = rollback.commit(write_ok);
         if !write_ok {
             if let Some(session) = self.sessions.get_mut(&slider_id) {
@@ -573,6 +581,27 @@ mod ws_g_tests {
         assert!(reg.release(1));
         assert!(!reg.release(1));
         assert_eq!(reg.active_count(), 0);
+    }
+
+    #[test]
+    fn rollback_is_dropped_when_a_session_is_released() {
+        let mut reg = SessionRegistry::default();
+        reg.attach(3, session(10, "spotify", 0.4));
+        assert!(reg.begin_volume_change(3, 0.9).is_some());
+        assert!(reg.release(3));
+        assert!(reg.rollbacks.is_empty());
+        // Reattaching a new session must not inherit the stale rollback.
+        reg.attach(3, session(11, "chrome", 0.2));
+        assert!(reg.rollbacks.is_empty());
+        assert_eq!(reg.finish_volume_change(3, true), None);
+    }
+
+    #[test]
+    fn non_finite_requested_volume_becomes_zero() {
+        let rollback = VolumeRollback::begin("app", 0.5, false, f32::NAN);
+        assert_eq!(rollback.requested_volume, 0.0);
+        let mut rollback = rollback;
+        assert_eq!(rollback.commit(true), 0.0);
     }
 
     #[test]

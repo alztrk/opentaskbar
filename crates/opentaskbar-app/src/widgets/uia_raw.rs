@@ -50,15 +50,20 @@ struct UnknownVtbl {
     release: unsafe extern "system" fn(ComPtr) -> u32,
 }
 
-/// IUIAutomation vtable: only slots 5 (`ElementFromHandle`) and 22
-/// (`CreatePropertyCondition`) are used.
+/// IUIAutomation vtable (0-based slots, `IUnknown` occupies 0..2).
+///
+/// SDK order: 3 `CompareElements`, 4 `CompareRuntimeIds`, 5 `GetRootElement`,
+/// 6 `ElementFromHandle`, …, 21 `CreateTrueCondition`, 22 `CreateFalseCondition`,
+/// 23 `CreatePropertyCondition`. The previously used slots (5 / 22) pointed at
+/// `GetRootElement` / `CreateFalseCondition`, which wrote through the caller's
+/// arguments as if they were COM out-parameters and could crash the process.
 #[repr(C)]
 struct AutomationVtbl {
     base: UnknownVtbl,
     _p3: usize,
     _p4: usize,
+    get_root_element: unsafe extern "system" fn(ComPtr, *mut ComPtr) -> i32,
     element_from_handle: unsafe extern "system" fn(ComPtr, ComPtr, *mut ComPtr) -> i32,
-    _p6: usize,
     _p7: usize,
     _p8: usize,
     _p9: usize,
@@ -74,18 +79,25 @@ struct AutomationVtbl {
     _p19: usize,
     _p20: usize,
     _p21: usize,
+    _p22: usize,
     create_property_condition: unsafe extern "system" fn(ComPtr, i32, VARIANT, *mut ComPtr) -> i32,
 }
 
-/// IUIAutomationElement vtable: slots 5 (`FindAll`), 15 (`GetCurrentPattern`) and 21
-/// (`CurrentName`) are used.
+/// IUIAutomationElement vtable (0-based slots, `IUnknown` occupies 0..2).
+///
+/// SDK order: 3 `SetFocus`, 4 `GetRuntimeId`, 5 `FindFirst`, 6 `FindAll`,
+/// 14 `GetCurrentPatternAs`, 15 `GetCachedPatternAs`, 16 `GetCurrentPattern`,
+/// 20 `CurrentProcessId`, 21 `CurrentControlType`, 22 `CurrentLocalizedControlType`,
+/// 23 `CurrentName`. Slots 5/15/21 previously called `FindFirst` /
+/// `GetCachedPatternAs` / `CurrentControlType`, producing empty results or a
+/// bogus BSTR pointer.
 #[repr(C)]
 struct ElementVtbl {
     base: UnknownVtbl,
     _p3: usize,
     _p4: usize,
+    _p5: usize,
     find_all: unsafe extern "system" fn(ComPtr, i32, ComPtr, *mut ComPtr) -> i32,
-    _p6: usize,
     _p7: usize,
     _p8: usize,
     _p9: usize,
@@ -94,12 +106,14 @@ struct ElementVtbl {
     _p12: usize,
     _p13: usize,
     _p14: usize,
+    _p15: usize,
     get_current_pattern: unsafe extern "system" fn(ComPtr, i32, *mut ComPtr) -> i32,
-    _p16: usize,
     _p17: usize,
     _p18: usize,
     _p19: usize,
     _p20: usize,
+    _p21: usize,
+    _p22: usize,
     current_name: unsafe extern "system" fn(ComPtr, *mut *mut u16) -> i32,
 }
 
@@ -110,21 +124,33 @@ struct ArrayVtbl {
     get_element: unsafe extern "system" fn(ComPtr, i32, *mut ComPtr) -> i32,
 }
 
+/// `IUIAutomationRangeValuePattern`: 3 `SetValue`, 4 `CurrentValue`,
+/// 5 `CurrentIsReadOnly`, 6 `CurrentMaximum`, 7 `CurrentMinimum`.
 #[repr(C)]
 struct RangeValueVtbl {
     base: UnknownVtbl,
     _set_value: usize,
     value: unsafe extern "system" fn(ComPtr, *mut f64) -> i32,
+    _is_read_only: usize,
     maximum: unsafe extern "system" fn(ComPtr, *mut f64) -> i32,
     minimum: unsafe extern "system" fn(ComPtr, *mut f64) -> i32,
 }
 
+/// `IUIAutomationValuePattern`: 3 `SetValue`, 4 `CurrentValue`.
 #[repr(C)]
 struct ValueVtbl {
     base: UnknownVtbl,
     _set_value: usize,
     value: unsafe extern "system" fn(ComPtr, *mut *mut u16) -> i32,
 }
+
+// Compile-time ABI guards: every vtable entry is pointer-sized, so a wrong
+// placeholder count would shift every subsequent method call at runtime.
+const _: () = assert!(size_of::<AutomationVtbl>() == 24 * size_of::<usize>());
+const _: () = assert!(size_of::<ElementVtbl>() == 24 * size_of::<usize>());
+const _: () = assert!(size_of::<ArrayVtbl>() == 5 * size_of::<usize>());
+const _: () = assert!(size_of::<RangeValueVtbl>() == usize::BITS as usize);
+const _: () = assert!(size_of::<ValueVtbl>() == 5 * size_of::<usize>());
 
 unsafe fn vtable<T>(ptr: ComPtr) -> &'static T {
     // SAFETY: `ptr` is a live COM object whose first field points at its vtable.
@@ -188,6 +214,16 @@ impl Automation {
         } else {
             None
         }
+    }
+
+    /// `IUIAutomation::GetRootElement` (slot 5) — the desktop root element.
+    pub fn root_element(&self) -> Option<Com> {
+        let mut out: ComPtr = ptr::null_mut();
+        // SAFETY: `self.0.0` is live; `out` receives one reference on success.
+        let hr = unsafe {
+            (vtable::<AutomationVtbl>(self.0.as_ptr()).get_root_element)(self.0.as_ptr(), &mut out)
+        };
+        if hr >= 0 { Com::from_ptr(out) } else { None }
     }
 
     pub fn element_from_handle(&self, hwnd: ComPtr) -> Option<Com> {
@@ -349,5 +385,74 @@ impl ElementArray {
             }
         }
         Some(elements)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::offset_of;
+
+    use super::*;
+
+    /// Static guard for the ABI offsets. The ignored COM test below exercises the
+    /// real objects; this one catches accidental placeholder drift on every build.
+    #[test]
+    fn vtable_slots_match_sdk_method_order() {
+        assert_eq!(
+            offset_of!(AutomationVtbl, get_root_element),
+            5 * size_of::<usize>()
+        );
+        assert_eq!(
+            offset_of!(AutomationVtbl, element_from_handle),
+            6 * size_of::<usize>()
+        );
+        assert_eq!(
+            offset_of!(AutomationVtbl, create_property_condition),
+            23 * size_of::<usize>()
+        );
+        assert_eq!(offset_of!(ElementVtbl, find_all), 6 * size_of::<usize>());
+        assert_eq!(
+            offset_of!(ElementVtbl, get_current_pattern),
+            16 * size_of::<usize>()
+        );
+        assert_eq!(
+            offset_of!(ElementVtbl, current_name),
+            23 * size_of::<usize>()
+        );
+        assert_eq!(offset_of!(RangeValueVtbl, value), 4 * size_of::<usize>());
+        assert_eq!(offset_of!(RangeValueVtbl, maximum), 6 * size_of::<usize>());
+        assert_eq!(offset_of!(RangeValueVtbl, minimum), 7 * size_of::<usize>());
+    }
+
+    /// Real-object smoke test. Ignored by default because it needs an interactive
+    /// desktop and a working UIA service; run explicitly with
+    /// `cargo test -p opentaskbar-app uia_raw::tests::com_smoke -- --ignored`.
+    #[test]
+    #[ignore = "requires an interactive desktop UIA session"]
+    fn com_smoke_test_root_and_property_condition() {
+        use windows::Win32::System::Com::{
+            COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetDesktopWindow;
+
+        let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+        {
+            let automation = Automation::new().expect("CUIAutomation must be creatable");
+            let condition = automation
+                .property_condition_i32(UIA_CONTROL_TYPE_PROPERTY_ID, UIA_DOCUMENT_CONTROL_TYPE_ID)
+                .expect("CreatePropertyCondition must return a condition");
+            let root = Element::from_com(automation.root_element().expect("root element"));
+            // CurrentName returns a BSTR; a bogus slot would either fail or crash here.
+            let _ = root.current_name();
+            if let Some(com) =
+                automation.element_from_handle(unsafe { GetDesktopWindow() } as ComPtr)
+            {
+                let _ = Element::from_com(com).current_name();
+            }
+            drop(condition);
+        }
+        if initialized {
+            unsafe { CoUninitialize() };
+        }
     }
 }

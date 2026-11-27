@@ -98,7 +98,9 @@ pub fn from_telemetry(full: &super::telemetry::AiFullDetail) -> AiFullDetail {
         reset_countdown,
         unlimited_credits: full.unlimited_credits,
         limit_reached: full.limit_reached,
-        severity: severity_for_usage(peak, full.limit_reached),
+        // A 429 retry-after is a hard limit in telemetry's full-detail model;
+        // apply the same severity rule on this path.
+        severity: severity_for_usage(peak, full.limit_reached || full.retry_after_secs.is_some()),
         retry_after_secs: full.retry_after_secs.map(u64::from),
     }
 }
@@ -148,20 +150,8 @@ pub fn parse_reset_countdown(iso: &str, now_epoch: u64) -> Option<String> {
         let delta = oh * 3600 + om * 60;
         ts = if sign == b'-' { ts + delta } else { ts - delta };
     }
-    let remaining = ts.saturating_sub(now_epoch as i64);
-    if remaining <= 0 {
-        return Some(loc::t("Expired"));
-    }
-    let (days_left, rem) = (remaining / 86_400, remaining % 86_400);
-    let (hours, rem) = (rem / 3600, rem % 3600);
-    let mins = rem / 60;
-    if days_left > 0 {
-        Some(format!("{days_left}d {hours}h"))
-    } else if hours > 0 {
-        Some(format!("{hours}h {mins}m"))
-    } else {
-        Some(format!("{mins}m"))
-    }
+    // Countdown formatting has a single source: telemetry::countdown_from_unix.
+    super::telemetry::countdown_from_unix(ts, now_epoch)
 }
 
 pub fn now_epoch() -> u64 {
@@ -200,7 +190,6 @@ pub fn build_ai_flyout(
     let pal = design::palette(is_dark);
     let ai = ai_provider_meta(id);
     let name = ai.map_or(id, |m| m.name).to_owned();
-    let dashboard = ai.map_or("", |m| m.dashboard_url).to_owned();
     let has_data = snap.balance_text.is_some() || !snap.windows.is_empty();
 
     let mut blocks = Vec::new();
@@ -311,74 +300,11 @@ pub fn build_ai_flyout(
         (3, loc::t("AiUsageFullRefresh"), false),
         (1, loc::t("AiUsageOpenDashboard"), true),
     ]));
-    let _ = &dashboard; // dashboard URL is consumed by the caller's Click(1) handler.
     FlyoutSpec {
         title: String::new(),
         subtitle: None,
         width_dips: 292.0,
         blocks,
-    }
-}
-
-/// Converts raw provider JSON (from `ai_fetch_full`) into the rich detail layout. Pure function.
-pub fn parse_full_detail(body: &str) -> AiFullDetail {
-    let Ok(root) = serde_json::from_str::<serde_json::Value>(body) else {
-        return AiFullDetail::default();
-    };
-    let get_str = |keys: &[&str]| -> Option<String> {
-        keys.iter()
-            .find_map(|k| root.get(*k).and_then(|v| v.as_str()))
-            .map(str::to_owned)
-    };
-    let now = now_epoch();
-    let plan = get_str(&["plan", "subscriptionType", "tier"]);
-    let unlimited = root
-        .get("unlimitedCredits")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let limit_reached = root
-        .get("limitReached")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let reset_countdown = get_str(&["resetsAt", "resets_at", "resetAt"])
-        .and_then(|iso| parse_reset_countdown(&iso, now));
-    let retry_after_secs = root
-        .get("retryAfter")
-        .or_else(|| root.get("retry_after"))
-        .and_then(|v| v.as_u64());
-
-    let read_pairs = |key: &str| -> Vec<(String, String)> {
-        root.get(key)
-            .and_then(|v| v.as_object())
-            .map(|m| {
-                m.iter()
-                    .filter_map(|(k, v)| {
-                        let val = match v {
-                            serde_json::Value::String(s) => s.clone(),
-                            serde_json::Value::Number(n) => n.to_string(),
-                            _ => return None,
-                        };
-                        Some((k.clone(), val))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let spend = read_pairs("spend");
-    let breakdown = read_pairs("breakdown");
-    let severity = severity_for_usage(
-        if limit_reached { 1.0 } else { 0.0 },
-        limit_reached || retry_after_secs.is_some(),
-    );
-    AiFullDetail {
-        plan,
-        spend,
-        breakdown,
-        reset_countdown,
-        unlimited_credits: unlimited,
-        limit_reached,
-        severity,
-        retry_after_secs,
     }
 }
 
@@ -389,16 +315,19 @@ mod tests {
 
     #[test]
     fn parses_reset_countdown_hours_and_minutes() {
-        // 2030-01-01T00:00:00Z is safely in the future relative to the test clock.
+        // 2030-01-01T00:00:00Z in Unix seconds; the test clock is one hour before it.
         let target = 1_893_456_000u64;
         assert_eq!(
-            parse_reset_countdown("2030-01-01T00:00:00Z", target),
-            Some("Expired".to_owned())
+            parse_reset_countdown("2030-01-01T00:00:00Z", target - 3600),
+            Some("1h 0m".to_owned())
         );
-        assert!(
-            parse_reset_countdown("2030-01-01T00:00:00Z", 0)
-                .unwrap()
-                .contains('h')
+        assert_eq!(
+            parse_reset_countdown("2030-01-01T00:00:00Z", target),
+            Some(loc::t("Expired"))
+        );
+        assert_eq!(
+            parse_reset_countdown("2030-01-01T00:00:00Z", target - 90),
+            Some("1m".to_owned())
         );
     }
 
@@ -411,14 +340,14 @@ mod tests {
     }
 
     #[test]
-    fn full_detail_parses_spend_and_plan() {
-        let body = r#"{"plan":"Pro","spend":{"today":"$1.20","month":"$9.80"},"breakdown":{"requests":"142"},"unlimitedCredits":false,"limitReached":true,"retryAfter":30}"#;
-        let d = parse_full_detail(body);
-        assert_eq!(d.plan.as_deref(), Some("Pro"));
-        assert_eq!(d.spend.len(), 2);
-        assert!(d.limit_reached);
-        assert_eq!(d.retry_after_secs, Some(30));
-        assert_eq!(d.severity, AiSeverity::Critical);
+    fn retry_after_alone_raises_adapter_severity() {
+        let mut full = crate::widgets::telemetry::AiFullDetail {
+            used: 0.2,
+            ..Default::default()
+        };
+        assert_eq!(from_telemetry(&full).severity, AiSeverity::Info);
+        full.retry_after_secs = Some(30);
+        assert_eq!(from_telemetry(&full).severity, AiSeverity::Critical);
     }
 
     #[test]
@@ -451,7 +380,11 @@ mod tests {
         assert_eq!(d.spend.len(), 2);
         assert_eq!(d.breakdown[0].0, "Opus");
         assert_eq!(d.retry_after_secs, Some(12));
-        assert_eq!(d.severity, AiSeverity::Info);
+        assert_eq!(
+            d.severity,
+            AiSeverity::Critical,
+            "a 429 retry-after must raise severity on the flyout path too"
+        );
 
         let snap = crate::widgets::telemetry::AiUsageSnapshot::default();
         let s = DockSettings::default();

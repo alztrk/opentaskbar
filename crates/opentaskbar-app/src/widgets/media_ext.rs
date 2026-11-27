@@ -238,10 +238,7 @@ impl Drop for ComInit {
 }
 
 fn executable_stem(value: &str) -> &str {
-    let name = value.trim().rsplit(['\\', '/']).next().unwrap_or(value);
-    name.strip_suffix(".exe")
-        .or_else(|| name.strip_suffix(".EXE"))
-        .unwrap_or(name)
+    diagnostics::exe_stem(value)
 }
 
 /// Maps live LibreWolf process ids to their executable stem.
@@ -474,6 +471,10 @@ pub struct MediaTimeline {
     anchor_timestamp: f64,
     rate: f64,
     seek_hold_until: Option<f64>,
+    /// Last stale position rejected during a seek hold. Keeping this separate
+    /// from `sample` prevents the stale echo from becoming the new comparison
+    /// baseline (which could extend the hold or swallow real progress).
+    last_rejected_position: Option<f64>,
 }
 
 impl MediaTimeline {
@@ -496,8 +497,11 @@ impl MediaTimeline {
 
     pub fn reset(&mut self) {
         self.sample = None;
+        self.anchor_position = 0.0;
+        self.anchor_timestamp = 0.0;
         self.rate = 0.0;
         self.seek_hold_until = None;
+        self.last_rejected_position = None;
     }
 
     /// Applies an SMTC sample. A repeated sample does not restart the clock; a rate change freezes
@@ -520,9 +524,10 @@ impl MediaTimeline {
         {
             let expected = self.position_at(timestamp);
             if (sample.position_secs - expected).abs() > SEEK_STALE_TOLERANCE_SECS {
-                self.sample = Some(sample);
+                self.last_rejected_position = Some(sample.position_secs);
                 return;
             }
+            self.last_rejected_position = None;
         }
 
         let same = self.sample.as_ref() == Some(&sample);
@@ -553,6 +558,7 @@ impl MediaTimeline {
         self.anchor_position = seconds.clamp(0.0, self.duration());
         self.anchor_timestamp = timestamp;
         self.seek_hold_until = Some(timestamp + SEEK_HOLD_SECS);
+        self.last_rejected_position = None;
     }
 
     pub fn rate(&self) -> f64 {
@@ -688,11 +694,7 @@ pub fn tint_from_path(path: &str) -> Rgb {
 }
 
 pub fn format_time(secs: u64) -> String {
-    if secs >= 3600 {
-        format!("{}:{:02}:{:02}", secs / 3600, (secs % 3600) / 60, secs % 60)
-    } else {
-        format!("{}:{:02}", secs / 60, secs % 60)
-    }
+    format_clock(secs)
 }
 
 /// Segoe Fluent Icons glyph for the transport button, matching reference playing state.
@@ -704,7 +706,7 @@ pub fn seek_ratio(position: u64, duration: u64) -> f32 {
     if duration == 0 {
         0.0
     } else {
-        (position as f32 / duration as f32).clamp(0.0, 1.0)
+        progress_ratio(position as f64, duration as f64)
     }
 }
 
@@ -713,7 +715,7 @@ pub fn seek_ratio(position: u64, duration: u64) -> f32 {
 pub fn build_media_flyout(
     details: &MediaDetails,
     sessions: &[AudioAppSession],
-    settings: &DockSettings,
+    _settings: &DockSettings,
 ) -> FlyoutSpec {
     let mut blocks = Vec::new();
     if let Some(ref path) = details.cover_path {
@@ -812,7 +814,6 @@ pub fn build_media_flyout(
             });
         }
     }
-    let _ = settings;
     FlyoutSpec {
         title: loc::t("DynamicIslandShortMedia"),
         subtitle: None,
@@ -856,9 +857,8 @@ pub fn volume_from_wheel(current_pct: u32, delta: i32, remainder: &mut i32) -> u
 // Per-app audio sessions.
 // ---------------------------------------------------------------------------
 
-/// Maps a real WS-4 `core_audio::AppAudioSession` into the widget-facing session. Kept as a
-/// pure adapter so the orchestrator can swap the data source at merge time without touching any
-/// flyout code.
+/// Maps a `core_audio::AppAudioSession` into the widget-facing session using the
+/// same stable id format as the mixer registry.
 pub fn session_from_core(
     session: &crate::platform::core_audio::AppAudioSession,
 ) -> AudioAppSession {
@@ -869,9 +869,9 @@ pub fn session_from_core(
         0
     };
     let pid = session.process_id;
-    let stem = executable_stem(&session.name).replace([':', '\\', '/'], "_");
+    let stem = executable_stem(&session.name);
     AudioAppSession {
-        session_id: format!("{pid}:{stem}"),
+        session_id: diagnostics::session_id(pid, stem),
         app_name: session.name.clone(),
         volume,
         muted: session.muted || session.state == AppAudioSessionState::Unavailable,
@@ -879,14 +879,8 @@ pub fn session_from_core(
     }
 }
 
-/// Lists per-app audio sessions from the real WASAPI enumerator in `widgets::diagnostics`.
-///
-/// NOTE (WS-6 / WS-4 contract): `platform::core_audio::list_app_sessions() ->
-/// Vec<core_audio::AppAudioSession>` has not landed in this worktree yet. When it does, replace
-/// the body with `diagnostics::list_app_audio_sessions().iter().map(...)` →
-/// `crate::platform::core_audio::list_app_sessions().iter().map(session_from_core)`; the public
-/// signature and every caller stay unchanged. `set_app_volume` / `set_app_mute` below are the
-/// matching contract calls (`core_audio::set_app_volume` / `core_audio::set_app_mute`).
+/// Lists per-app audio sessions from the canonical WASAPI enumerator in `diagnostics`.
+/// Volume is clamped through the same finite-value guard as the mixer registry.
 pub fn list_app_sessions() -> Vec<AudioAppSession> {
     diagnostics::list_app_audio_sessions()
         .iter()
@@ -1184,16 +1178,28 @@ mod tests {
         timeline.update(snapshot.clone(), 1.0, 0.0, 0.0);
         confirm_seek(&mut timeline, 40.0, 10.0);
         assert_eq!(timeline.position_at(10.0), 40.0);
-        // Provider still reports the pre-seek position within the hold window.
-        timeline.update(snapshot.clone(), 1.0, 11.0, 11.0);
+        // Provider still reports the pre-seek position within the hold window,
+        // and keeps echoing it on several consecutive ticks.
+        for tick in 0..3 {
+            let now = 11.0 + tick as f64 * 0.25;
+            timeline.update(snapshot.clone(), 1.0, now, now);
+            assert_eq!(
+                timeline.position_at(now),
+                40.0 + now - 10.0,
+                "stale echo must not rewind the seek"
+            );
+        }
+        // Real progress from the same item is accepted immediately afterwards.
+        let progressed = sample("song", 0.0, 100.0, 44.0, Some(44.0));
+        timeline.update(progressed.clone(), 1.0, 14.0, 14.0);
         assert_eq!(
-            timeline.position_at(11.0),
-            41.0,
-            "stale echo must not rewind the seek"
+            timeline.position_at(14.0),
+            44.0,
+            "real progress after a stale echo must not be treated as 'same'"
         );
         // A genuinely different item is accepted even inside the hold window.
-        timeline.update(sample("other", 0.0, 100.0, 0.0, None), 1.0, 11.5, 11.5);
-        assert_eq!(timeline.position_at(11.5), 0.0);
+        timeline.update(sample("other", 0.0, 100.0, 0.0, None), 1.0, 15.0, 15.0);
+        assert_eq!(timeline.position_at(15.0), 0.0);
     }
 
     #[test]
