@@ -59,9 +59,7 @@ pub struct TrayIconInfo {
     pub uid: Option<u32>,
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use crate::platform::win32_helpers::wide;
 
 fn open_key(path: &str) -> Option<HKEY> {
     let path = wide(path);

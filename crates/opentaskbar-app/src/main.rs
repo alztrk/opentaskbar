@@ -6,14 +6,13 @@
 //! - `--restore`: restores Explorer's taskbar from the recovery journal and exits.
 //! - default: acquires single-instance lock, loads settings, and runs the native dock.
 //!
-//! NOTE (cross-WS): all data locations go through the `opentaskbar_core::paths`
-//! contract (`SHARED_DATA_INTEGRATION_PLAN.md`, Faz 1). That module is owned by
-//! the settings/cfg workstream; until it lands in this branch, these calls need
-//! that workstream's `core/paths.rs` + `core/lib.rs` registration to compile.
+//! All data locations go through the `opentaskbar_core::paths` contract; the
+//! settings/cfg workstream's shared `%LOCALAPPDATA%\OpenTaskbar` layout is now
+//! compiled into this crate.
 #![cfg_attr(windows, windows_subsystem = "windows")]
-// The merged reference parity modules expose a deliberately broad public API (hardware
-// vendors, theme tokens, flyout blocks, shell helpers). Individual call sites are
-// wired incrementally; keep the surface warning-clean without deleting code.
+// The merged reference-parity modules expose a broad public API (hardware
+// vendors, theme tokens, flyout blocks, shell helpers) that is not wired to
+// every call site yet; keep the shared surface warning-clean.
 #![allow(dead_code)]
 
 // Bundled resource paths, anchored to the crate manifest instead of a chain of

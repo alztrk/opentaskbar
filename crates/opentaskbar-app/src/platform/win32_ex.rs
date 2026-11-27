@@ -46,9 +46,7 @@ unsafe extern "system" {
     fn ProcessIdToSessionId(process_id: u32, session_id: *mut u32) -> i32;
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use crate::platform::win32_helpers::wide;
 
 /// Pure class-list membership. Callers that may see a `CoreWindow` must use
 /// `is_shell_overlay_for_class` (or `is_shell_overlay*`) with host validation;

@@ -27,9 +27,7 @@ const EXECUTABLE_FILE_NAME: &str = "OpenTaskbar.exe";
 const MAX_COMMAND_LENGTH: usize = 1024;
 const ENABLED_STARTUP_APPROVED_BYTES: [u8; 12] = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use crate::platform::win32_helpers::wide;
 
 fn wide_name(name: &str) -> Vec<u16> {
     name.encode_utf16().chain(Some(0)).collect()
@@ -414,10 +412,17 @@ fn is_startup_path(executable: &str) -> bool {
     let Some(name) = Path::new(executable).file_stem().and_then(|n| n.to_str()) else {
         return false;
     };
-    const BASE: &str = "OpenTaskbar";
-    name.len() >= BASE.len()
-        && name[..BASE.len()].eq_ignore_ascii_case(BASE)
-        && (name.len() == BASE.len() || name.as_bytes()[BASE.len()] == b'-')
+    const BASE: &[u8] = b"OpenTaskbar";
+    // Compare bytes rather than slicing `name`: a multi-byte character can
+    // straddle byte 11 (e.g. `OpenTaskbağ.exe`), which would panic on a char
+    // boundary while validating a malformed Run registration at startup.
+    name.as_bytes()
+        .get(..BASE.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(BASE))
+        && name
+            .as_bytes()
+            .get(BASE.len())
+            .is_none_or(|next| *next == b'-')
 }
 
 pub fn is_valid_startup_executable(path: &str, disallowed_root: Option<&str>) -> bool {
@@ -716,13 +721,9 @@ pub fn sync_startup_folder_shortcuts(folder: &Path, current_executable: &str) ->
     else {
         return 0;
     };
-    // SAFETY: COM STA for IShellLinkW on this thread.
-    let initialized = unsafe {
-        windows::Win32::System::Com::CoInitializeEx(
-            None,
-            windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
-        )
-    };
+    // COM STA for IShellLinkW on this thread; the shared guard balances the
+    // initialization and tolerates a thread already in another apartment.
+    let _com = super::com::ComApartment::sta();
     let mut updated = 0usize;
     for entry in entries.flatten() {
         let path = entry.path();
@@ -793,10 +794,6 @@ pub fn sync_startup_folder_shortcuts(folder: &Path, current_executable: &str) ->
                 log::info(format!("Updated startup shortcut '{link_path}'."));
             }
         }
-    }
-    if initialized.is_ok() {
-        // SAFETY: balances the successful initialization above.
-        unsafe { windows::Win32::System::Com::CoUninitialize() };
     }
     updated
 }
@@ -910,5 +907,17 @@ mod tests {
         assert!(!is_startup_approved_enabled(Some(&[3, 0, 0, 0])));
         assert!(is_startup_path(r"C:\Apps\OpenTaskbar-1.exe"));
         assert!(!is_startup_path(r"C:\Apps\Other.exe"));
+    }
+
+    #[test]
+    fn startup_paths_with_multibyte_stems_do_not_panic() {
+        // `ğ` occupies bytes 10..12, so a naive `name[..11]` slice panics here.
+        assert!(!is_startup_path(r"C:\Apps\OpenTaskbağ.exe"));
+        assert!(!is_startup_path(r"C:\Apps\OpenTaskbarğ.exe"));
+        assert!(!is_startup_path(r"C:\Apps\OpenTaskb.exe"));
+        assert!(!is_startup_path("C:\\Apps\\OpenTaskba\u{0131}.exe"));
+        assert!(is_startup_path(r"C:\Apps\OPENTASKBAR.exe"));
+        assert!(is_startup_path(r"C:\Apps\OpenTaskbar-2.exe"));
+        assert!(!is_startup_path(r"C:\Apps\OpenTaskbarX.exe"));
     }
 }

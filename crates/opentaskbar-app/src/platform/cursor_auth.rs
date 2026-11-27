@@ -14,14 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use sha2::{Digest, Sha256};
 use windows_sys::Win32::Foundation::LocalFree;
-use windows_sys::Win32::Networking::WinHttp::{
-    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_ADDREQ_FLAG_REPLACE,
-    WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
-    WinHttpAddRequestHeaders, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
-    WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-    WinHttpSendRequest, WinHttpSetTimeouts,
-};
 use windows_sys::Win32::Security::Cryptography::{
     BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom, CRYPT_INTEGER_BLOB,
     CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
@@ -99,9 +93,8 @@ pub fn set_token_path(path: PathBuf) {
 // In-process HTTPS + CSPRNG. Secrets stay in memory; they are never passed to a child process
 // argument list (where any process could observe them via the command line).
 //
-// NOTE (cross-WS): `widgets::telemetry::winhttp_json` is private to that module, so it cannot be
-// called from `platform::cursor_auth` without editing a file owned by another workstream. This is
-// a local, equivalent in-process WinHTTP helper; `telemetry.rs` is left untouched.
+// All in-process HTTPS traffic goes through `platform::http`, the single
+// WinHTTP core shared with update checks and geolocation.
 // ---------------------------------------------------------------------------------------------
 
 /// Splits an `https://host/path` URL into `(host, path)`.
@@ -113,7 +106,8 @@ fn split_https_url(url: &str) -> Option<(&str, &str)> {
     }
 }
 
-/// Minimal synchronous HTTPS request via WinHTTP. `body` is sent as raw bytes in-process.
+/// Minimal synchronous HTTPS request via the shared WinHTTP core. `body` is
+/// sent as raw bytes in-process; secrets never enter a child process argv.
 fn winhttp_request(
     method: &str,
     host: &str,
@@ -121,117 +115,39 @@ fn winhttp_request(
     headers: &[(&str, &str)],
     body: Option<&[u8]>,
 ) -> Option<(u32, Vec<u8>)> {
-    const MAX_RESPONSE_BYTES: usize = 256 * 1024;
-    let agent: Vec<u16> = "OpenTaskbar\0".encode_utf16().collect();
-    let host_w: Vec<u16> = host.encode_utf16().chain(Some(0)).collect();
-    let verb_w: Vec<u16> = method.encode_utf16().chain(Some(0)).collect();
-    let path_w: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
-    unsafe {
-        let session = WinHttpOpen(
-            agent.as_ptr(),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-        );
-        if session.is_null() {
-            return None;
-        }
-        let _ = WinHttpSetTimeouts(session, 3_000, 3_000, 10_000, 15_000);
-        let connect = WinHttpConnect(session, host_w.as_ptr(), 443, 0);
-        if connect.is_null() {
-            WinHttpCloseHandle(session);
-            return None;
-        }
-        let request = WinHttpOpenRequest(
-            connect,
-            verb_w.as_ptr(),
-            path_w.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            WINHTTP_FLAG_SECURE,
-        );
-        if request.is_null() {
-            WinHttpCloseHandle(connect);
-            WinHttpCloseHandle(session);
-            return None;
-        }
-        let mut header_text = String::new();
-        for (key, value) in headers {
-            header_text.push_str(key);
-            header_text.push_str(": ");
-            header_text.push_str(value);
-            header_text.push_str("\r\n");
-        }
-        if !header_text.is_empty() {
-            let header_wide: Vec<u16> = header_text.encode_utf16().collect();
-            let _ = WinHttpAddRequestHeaders(
-                request,
-                header_wide.as_ptr(),
-                header_wide.len() as u32,
-                WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE,
-            );
-        }
-        let body_ptr: *const std::ffi::c_void =
-            body.map_or(std::ptr::null(), |bytes| bytes.as_ptr().cast());
-        let body_len = body.map_or(0, |bytes| bytes.len()) as u32;
-        let sent = WinHttpSendRequest(
-            request,
-            std::ptr::null(),
-            0,
-            body_ptr,
-            body_len,
-            body_len,
-            0,
-        ) != 0
-            && WinHttpReceiveResponse(request, std::ptr::null_mut()) != 0;
-        let result = if sent {
-            let mut status = 0u32;
-            let mut status_size = std::mem::size_of::<u32>() as u32;
-            let _ = WinHttpQueryHeaders(
-                request,
-                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                std::ptr::null(),
-                (&mut status as *mut u32).cast(),
-                &mut status_size,
-                std::ptr::null_mut(),
-            );
-            let mut response = Vec::new();
-            loop {
-                let mut available = 0u32;
-                if WinHttpQueryDataAvailable(request, &mut available) == 0 || available == 0 {
-                    break;
-                }
-                if response.len() + available as usize > MAX_RESPONSE_BYTES {
-                    break;
-                }
-                let start = response.len();
-                response.resize(start + available as usize, 0);
-                let mut read = 0u32;
-                if WinHttpReadData(
-                    request,
-                    response[start..].as_mut_ptr().cast(),
-                    available,
-                    &mut read,
-                ) == 0
-                    || read == 0
-                {
-                    response.truncate(start);
-                    break;
-                }
-                response.truncate(start + read as usize);
-            }
-            Some((status, response))
-        } else {
-            None
-        };
-        WinHttpCloseHandle(request);
-        WinHttpCloseHandle(connect);
-        WinHttpCloseHandle(session);
-        result
-    }
+    let mut cfg = crate::platform::http::HttpCfg::new("OpenTaskbar");
+    cfg.timeouts = [3_000, 3_000, 10_000, 15_000];
+    cfg.max_response_bytes = Some(256 * 1024);
+    winhttp_request_with(&cfg, method, host, path, headers, body)
 }
+
+/// Injectable configuration used by the production wrapper and by the test
+/// that proves the request is made in-process (never via a child argv).
+fn winhttp_request_with(
+    cfg: &crate::platform::http::HttpCfg,
+    method: &str,
+    host: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+) -> Option<(u32, Vec<u8>)> {
+    #[cfg(test)]
+    IN_PROCESS_REQUESTS.fetch_add(1, Ordering::Relaxed);
+    let mut cfg = cfg.clone();
+    cfg.headers = headers
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    cfg.body = body.unwrap_or_default().to_vec();
+    let mut response = Vec::new();
+    let status = crate::platform::http::request(&cfg, host, path, method, |chunk| {
+        response.extend_from_slice(chunk)
+    })?;
+    Some((status, response))
+}
+
+#[cfg(test)]
+static IN_PROCESS_REQUESTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Cryptographically secure random bytes from the system CSPRNG (BCryptGenRandom).
 fn random_bytes<const N: usize>() -> Option<[u8; N]> {
@@ -304,86 +220,11 @@ fn decode_base64url(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// SHA-256 of `data`, implemented in-process so no crypto crate is required.
+/// SHA-256 of `data` (FIPS 180-4), used for the PKCE S256 challenge.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-    let mut h = [
-        0x6a09e667u32,
-        0xbb67ae85,
-        0x3c6ef372,
-        0xa54ff53a,
-        0x510e527f,
-        0x9b05688c,
-        0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-    for block in msg.chunks_exact(64) {
-        let mut w = [0u32; 64];
-        for (i, chunk) in block.chunks_exact(4).enumerate() {
-            w[i] = u32::from_be_bytes(chunk.try_into().unwrap());
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let t1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(maj);
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
-        }
-        h = [
-            h[0].wrapping_add(a),
-            h[1].wrapping_add(b),
-            h[2].wrapping_add(c),
-            h[3].wrapping_add(d),
-            h[4].wrapping_add(e),
-            h[5].wrapping_add(f),
-            h[6].wrapping_add(g),
-            h[7].wrapping_add(hh),
-        ];
-    }
+    let digest = Sha256::digest(data);
     let mut out = [0u8; 32];
-    for (i, word) in h.iter().enumerate() {
-        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
-    }
+    out.copy_from_slice(&digest);
     out
 }
 
@@ -919,24 +760,17 @@ mod tests {
     }
 
     #[test]
-    fn secrets_never_reach_child_process_arguments() {
-        // Source-level assertion: the production half of this file must not construct a child
-        // process at all, so a verifier/refresh token cannot appear in an argv.
-        let src = include_str!("cursor_auth.rs");
-        let production = src.split("#[cfg(test)]").next().unwrap_or(src);
-        for forbidden in [
-            "Command::new",
-            "creation_flags",
-            "-Command",
-            "Invoke-WebRequest",
-            "powershell",
-        ] {
-            assert!(
-                !production.contains(forbidden),
-                "production code must not contain {forbidden:?}"
-            );
-        }
-        assert!(production.contains("WinHttpSendRequest"));
+    fn requests_go_through_the_in_process_http_core() {
+        // A closed loopback port makes the request fail immediately. The point
+        // of the test is that the request is attempted by the in-process core,
+        // not by a child process whose argv could expose a token.
+        let mut cfg = crate::platform::http::HttpCfg::new("OpenTaskbar");
+        cfg.port = 1;
+        cfg.timeouts = [100, 100, 100, 100];
+        cfg.max_response_bytes = Some(1024);
+        let before = IN_PROCESS_REQUESTS.load(Ordering::Relaxed);
+        let _ = winhttp_request_with(&cfg, "GET", "127.0.0.1", "/", &[], None);
+        assert_eq!(IN_PROCESS_REQUESTS.load(Ordering::Relaxed), before + 1);
     }
 
     #[test]

@@ -1,20 +1,20 @@
 //! WinRT `Windows.Devices.Radios.Radio` bridge for the Quick Settings widget.
 //!
-//! The typed `windows::Devices::Radios` bindings require the `Devices_Radios`
-//! Cargo feature, which lives in the lead-owned workspace `Cargo.toml`. To keep
-//! this worktree buildable without touching that file, the small set of WinRT
-//! interfaces we need is activated and called directly through their COM
-//! vtables (`RoGetActivationFactory` + `RequestAccessAsync` +
-//! `GetRadiosAsync` + `SetStateAsync`). A background refresh thread keeps the
-//! cached Wi-Fi/Bluetooth state current; typed `StateChanged` handlers can be
-//! layered on by the lead once the feature is available.
+//! The `Devices_Radios` Cargo feature is enabled in the workspace root, but the
+//! small set of WinRT interfaces we need is still activated directly through
+//! their COM vtables (`RoGetActivationFactory` + `RequestAccessAsync` +
+//! `GetRadiosAsync` + `SetStateAsync`) to avoid extra SDK dependencies. A
+//! background refresh thread keeps the cached Wi-Fi/Bluetooth state current.
 //!
 //! C4 API: `state(kind: &str) -> bool`, `set(kind: &str, on: bool) -> bool`.
+//! `set` reports whether the request was *accepted*; the eventual WinRT result
+//! is published through `take_last_set_failure()`, and the cache is rolled back
+//! on failure so callers never keep showing an optimistic, false "on".
 
 use std::ffi::c_void;
 use std::ptr;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicI8, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use windows::core::{GUID, HSTRING};
@@ -33,7 +33,7 @@ const RADIO_STATE_DISABLED: i32 = 3;
 const RADIO_KIND_WIFI: i32 = 1;
 const RADIO_KIND_BLUETOOTH: i32 = 3;
 const RO_INIT_MULTITHREADED: i32 = 1;
-// WS-4: bound the whole SetStateAsync/GetRadiosAsync/RequestAccessAsync chain to
+// Bound the whole SetStateAsync/GetRadiosAsync/RequestAccessAsync chain to
 // ~2 s (3 * 600 ms) so a UI toggle never needs the Settings fallback.
 const ASYNC_POLL_LIMIT: usize = 300; // 600 ms at 2 ms
 const ASYNC_POLL_INTERVAL: Duration = Duration::from_millis(2);
@@ -171,6 +171,12 @@ static MONITOR_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::Atomi
 static LAST_REFRESH: Mutex<Option<std::time::Instant>> = Mutex::new(None);
 /// Coalesces fire-and-forget refresh requests so a UI click cannot pile up COM workers.
 static REFRESH_IN_FLIGHT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Result of the most recent asynchronous `set()` request, consumed by callers
+/// that want to show a real error instead of the optimistic chip state.
+static LAST_SET_FAILURE: Mutex<Option<&'static str>> = Mutex::new(None);
+/// Cancellation flag for the background monitor loop.
+static MONITOR_STOP: Mutex<bool> = Mutex::new(false);
+static MONITOR_WAKE: Condvar = Condvar::new();
 
 #[cfg(test)]
 static REFRESH_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -178,7 +184,50 @@ static REFRESH_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::Atomic
 static TEST_SUPPRESS_WRITES: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 #[cfg(test)]
+static TEST_SUPPRESS_REFRESH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+static TEST_REFRESH_PANIC: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
 static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn record_set_failure(error: &'static str) {
+    if let Ok(mut last) = LAST_SET_FAILURE.lock() {
+        *last = Some(error);
+    }
+}
+
+/// Error key for the last completed asynchronous `set()` request, if it failed.
+/// The failure stays visible until `take_last_set_failure()` consumes it.
+pub fn last_set_failure() -> Option<&'static str> {
+    *LAST_SET_FAILURE.lock().ok()?
+}
+
+/// Consumes the last asynchronous set failure (error key suitable for i18n).
+pub fn take_last_set_failure() -> Option<&'static str> {
+    LAST_SET_FAILURE.lock().ok()?.take()
+}
+
+/// Clears the in-flight flag even if the refresh worker panics or cannot spawn.
+struct RefreshInFlightGuard;
+
+impl Drop for RefreshInFlightGuard {
+    fn drop(&mut self) {
+        REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+    }
+}
+
+/// Waits one refresh interval; returns `true` when the monitor was asked to stop.
+fn monitor_wait_interval() -> bool {
+    let Ok(stop) = MONITOR_STOP.lock() else {
+        return false;
+    };
+    let Ok((stop, _)) = MONITOR_WAKE.wait_timeout(stop, REFRESH_INTERVAL) else {
+        return false;
+    };
+    *stop
+}
 
 fn vtbl<T>(object: *mut c_void) -> Option<*const T> {
     if object.is_null() {
@@ -426,15 +475,21 @@ pub fn refresh_async() {
     if REFRESH_IN_FLIGHT.swap(true, Ordering::SeqCst) {
         return;
     }
-    let spawned = std::thread::Builder::new()
+    // The guard owns the flag: a panic inside the worker (or a failed spawn)
+    // can no longer leave refreshes coalesced out forever.
+    let guard = RefreshInFlightGuard;
+    // On a failed spawn the builder drops the closure (and its guard), which
+    // clears the flag without a second, explicit store here.
+    let _spawned = std::thread::Builder::new()
         .name("opentaskbar-radio-refresh".into())
-        .spawn(|| {
+        .spawn(move || {
+            #[cfg(test)]
+            if TEST_REFRESH_PANIC.swap(false, Ordering::Relaxed) {
+                panic!("test: refresh worker panic");
+            }
             refresh_cache();
-            REFRESH_IN_FLIGHT.store(false, Ordering::Release);
+            drop(guard);
         });
-    if spawned.is_err() {
-        REFRESH_IN_FLIGHT.store(false, Ordering::Release);
-    }
 }
 
 /// Normalizes a kind string from the Quick Settings widget.
@@ -463,9 +518,9 @@ pub fn state(kind: &str) -> bool {
 }
 
 /// Real WinRT write in the calling COM/MTA apartment. `SetStateAsync` returns
-/// `IAsyncOperation<RadioAccessStatus>`: we poll `IAsyncInfo::Status` (via
-/// `wait_async_completed`) and read the enum result; `IAsyncAction::GetResults`
-/// is intentionally never called for a void action.
+/// `IAsyncOperation<RadioAccessStatus>`: `wait_async_completed` polls
+/// `IAsyncInfo::Status` and `wait_async_enum` reads the enum via `GetResults`.
+/// There is no void `IAsyncAction` on this path.
 fn set_in_apartment(kind_value: i32, target: i32) -> bool {
     #[cfg(test)]
     if TEST_SUPPRESS_WRITES.load(Ordering::Relaxed) {
@@ -513,13 +568,16 @@ fn set_in_apartment(kind_value: i32, target: i32) -> bool {
     any
 }
 
-fn cache_toggle(kind_value: i32, on: bool) {
-    let value = if on { 1i8 } else { 0 };
+fn cache_set(kind_value: i32, value: i8) {
     match kind_value {
         RADIO_KIND_WIFI => WIFI_STATE.store(value, Ordering::Relaxed),
         RADIO_KIND_BLUETOOTH => BLUETOOTH_STATE.store(value, Ordering::Relaxed),
         _ => {}
     }
+}
+
+fn cache_toggle(kind_value: i32, on: bool) {
+    cache_set(kind_value, if on { 1 } else { 0 });
 }
 
 /// Blocking variant for background callers and tests: performs the real WinRT
@@ -537,37 +595,67 @@ pub fn set_blocking(kind: &str, on: bool) -> bool {
     changed
 }
 
+/// Tests suppress network refresh while simulating failed writes; production
+/// always refreshes after a completed toggle attempt.
+fn should_refresh_after_set() -> bool {
+    #[cfg(test)]
+    {
+        !TEST_SUPPRESS_REFRESH.load(Ordering::Relaxed)
+    }
+    #[cfg(not(test))]
+    {
+        true
+    }
+}
+
 /// UI-thread API. Never spawns+joins here: the WinRT write and the state refresh
-/// both run on detached workers, while the cached state is updated optimistically
-/// so the Quick Settings chip flips immediately. Returns `false` only for an
-/// unknown kind or if a worker could not be started.
+/// both run on detached workers. The cache flips optimistically for a responsive
+/// chip, but a failed write rolls it back to "unknown" and publishes an error
+/// key via `take_last_set_failure()`. Returns `false` for an unknown kind or if
+/// the worker could not be started.
 pub fn set(kind: &str, on: bool) -> bool {
     let Some(kind_value) = normalize_kind(kind) else {
+        record_set_failure("RadioUnknownKind");
         return false;
     };
+    if let Ok(mut last) = LAST_SET_FAILURE.lock() {
+        *last = None;
+    }
     let target = if on { RADIO_STATE_ON } else { RADIO_STATE_OFF };
+    // Update before spawning so the worker's failure rollback cannot race with
+    // an optimistic write from this thread.
+    cache_toggle(kind_value, on);
     let spawned = std::thread::Builder::new()
         .name("opentaskbar-radio-set".into())
         .spawn(move || {
             if set_in_apartment(kind_value, target) {
-                refresh_async();
+                if should_refresh_after_set() {
+                    refresh_async();
+                }
+            } else {
+                cache_set(kind_value, -1);
+                record_set_failure("RadioWriteFailed");
+                if should_refresh_after_set() {
+                    refresh_async();
+                }
             }
         });
     if spawned.is_err() {
+        cache_set(kind_value, -1);
+        record_set_failure("RadioWorkerFailed");
         return false;
     }
-    cache_toggle(kind_value, on);
     true
 }
 
-/// Starts a background state-refresh loop. reference uses WinRT `StateChanged`;
-/// polling at 4 s keeps the same cache freshness without needing a typed
-/// delegate. The apartment is initialized once and the loop never spawns or
-/// joins a helper thread (WS-4: remove the per-tick thread churn).
+/// Starts a background state-refresh loop. Polling at 4 s keeps the cache
+/// fresh without a typed `StateChanged` delegate. The apartment is initialized
+/// once; `stop_state_monitor()` cancels the loop without joining it.
 pub fn install_state_monitor() {
     if MONITOR_STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
+    reset_monitor_stop();
     let spawned = std::thread::Builder::new()
         .name("opentaskbar-radio-watch".into())
         .spawn(|| {
@@ -581,14 +669,36 @@ pub fn install_state_monitor() {
                 if let Ok(mut last) = LAST_REFRESH.lock() {
                     *last = Some(std::time::Instant::now());
                 }
-                std::thread::sleep(REFRESH_INTERVAL);
+                if monitor_wait_interval() {
+                    break;
+                }
             }
+            // SAFETY: balances the RoInitialize above before the thread exits.
+            if let Some(api) = api {
+                unsafe { (api.uninitialize)() };
+            }
+            MONITOR_STARTED.store(false, Ordering::SeqCst);
         });
     if spawned.is_err() {
         MONITOR_STARTED.store(false, Ordering::SeqCst);
         return;
     }
     log::info("Radio state monitor started.");
+}
+
+fn reset_monitor_stop() {
+    if let Ok(mut stop) = MONITOR_STOP.lock() {
+        *stop = false;
+    }
+}
+
+/// Asks the background monitor to exit after its current refresh. Safe to call
+/// more than once; a later `install_state_monitor()` restarts the loop.
+pub fn stop_state_monitor() {
+    if let Ok(mut stop) = MONITOR_STOP.lock() {
+        *stop = true;
+    }
+    MONITOR_WAKE.notify_all();
 }
 
 /// Last successful refresh timestamp (telemetry/diagnostics).
@@ -624,22 +734,77 @@ mod tests {
         let _ = state("bluetooth");
     }
 
+    fn wait_for_last_set_failure() -> Option<&'static str> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(error) = take_last_set_failure() {
+                return Some(error);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
-    fn set_is_non_blocking_and_updates_cache_optimistically() {
+    fn set_is_non_blocking_and_rolls_back_optimistic_cache_on_failure() {
         let _guard = TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Tests must never flip the developer's actual Wi-Fi adapter.
         TEST_SUPPRESS_WRITES.store(true, Ordering::Relaxed);
+        TEST_SUPPRESS_REFRESH.store(true, Ordering::Relaxed);
         assert!(!set("nightlight", true), "unknown kinds must be rejected");
+        assert_eq!(take_last_set_failure(), Some("RadioUnknownKind"));
+
         WIFI_STATE.store(-1, Ordering::Relaxed);
         assert!(set("wifi", true), "a valid toggle must not report failure");
-        assert_eq!(WIFI_STATE.load(Ordering::Relaxed), 1);
+        assert_eq!(WIFI_STATE.load(Ordering::Relaxed), 1, "chip flips at once");
+        assert_eq!(
+            wait_for_last_set_failure(),
+            Some("RadioWriteFailed"),
+            "a denied WinRT write must reach the caller"
+        );
+        assert_eq!(
+            WIFI_STATE.load(Ordering::Relaxed),
+            -1,
+            "a failed write must not leave a false 'on' in the cache"
+        );
+
         assert!(set("wi-fi", false));
-        assert_eq!(WIFI_STATE.load(Ordering::Relaxed), 0);
+        assert_eq!(wait_for_last_set_failure(), Some("RadioWriteFailed"));
         WIFI_STATE.store(-1, Ordering::Relaxed);
         assert!(!set_blocking("nightlight", true));
         TEST_SUPPRESS_WRITES.store(false, Ordering::Relaxed);
+        TEST_SUPPRESS_REFRESH.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn refresh_flag_is_cleared_when_the_worker_panics() {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while REFRESH_IN_FLIGHT.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!REFRESH_IN_FLIGHT.load(Ordering::Acquire));
+        TEST_REFRESH_PANIC.store(true, Ordering::Relaxed);
+        refresh_async();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while REFRESH_IN_FLIGHT.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !REFRESH_IN_FLIGHT.load(Ordering::Acquire),
+            "a panicking refresh worker must not block all future refreshes"
+        );
+    }
+
+    #[test]
+    fn monitor_stop_flag_can_be_raised_and_reset() {
+        stop_state_monitor();
+        assert!(*MONITOR_STOP.lock().unwrap());
+        reset_monitor_stop();
+        assert!(!*MONITOR_STOP.lock().unwrap());
     }
 
     #[test]

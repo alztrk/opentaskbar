@@ -349,9 +349,7 @@ impl MonitorInfo {
     }
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use crate::platform::win32_helpers::wide;
 
 /// Pure Win32->`MonitorInfo` conversion shared by `EnumDisplayMonitors` and the
 /// single-monitor fallback. Kept side-effect free so signed virtual-desktop
@@ -1256,74 +1254,22 @@ pub fn trim_working_set() {
     }
 }
 
-/// Checks whether OpenTaskBar is registered under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`.
+/// Compatibility wrapper for the canonical startup state.
+///
+/// Reads through [`super::startup_registration::read`] so MSIX `StartupTask`
+/// policies and the `StartupApproved\Run` opt-out flag are honoured; the old
+/// direct `HKCU\...\Run` probe reported enabled state that Windows ignored.
 pub fn is_startup_enabled() -> bool {
-    use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
-    };
-    let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0"
-        .encode_utf16()
-        .collect();
-    let name: Vec<u16> = "OpenTaskbar\0".encode_utf16().collect();
-    unsafe {
-        let mut hkey: HKEY = std::ptr::null_mut();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey.as_ptr(), 0, KEY_READ, &mut hkey) != 0 {
-            return false;
-        }
-        let mut size = 0u32;
-        let ok = RegQueryValueExW(
-            hkey,
-            name.as_ptr(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            &mut size,
-        ) == 0
-            && size > 2;
-        RegCloseKey(hkey);
-        ok
-    }
+    super::startup_registration::read().0
 }
 
-/// Enables or disables automatic launch at Windows sign-in (`HKCU\...\Run`).
+/// Compatibility wrapper for the canonical startup setter.
+///
+/// Delegates to [`super::startup_registration::set_enabled`]; the old copy
+/// wrote the forbidden `Run` key even in MSIX installs and used a lossy
+/// `display()` conversion for the executable path.
 pub fn set_startup_enabled(enabled: bool) {
-    use windows_sys::Win32::System::Registry::{
-        HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW,
-        RegOpenKeyExW, RegSetValueExW,
-    };
-    let subkey: Vec<u16> = "Software\\Microsoft\\Windows\\CurrentVersion\\Run\0"
-        .encode_utf16()
-        .collect();
-    let name: Vec<u16> = "OpenTaskbar\0".encode_utf16().collect();
-    unsafe {
-        let mut hkey: HKEY = std::ptr::null_mut();
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            subkey.as_ptr(),
-            0,
-            KEY_SET_VALUE,
-            &mut hkey,
-        ) != 0
-        {
-            return;
-        }
-        if enabled {
-            if let Ok(exe) = std::env::current_exe() {
-                let cmd: Vec<u16> = format!("\"{}\"\0", exe.display()).encode_utf16().collect();
-                let _ = RegSetValueExW(
-                    hkey,
-                    name.as_ptr(),
-                    0,
-                    REG_SZ,
-                    cmd.as_ptr().cast(),
-                    (cmd.len() * 2) as u32,
-                );
-            }
-        } else {
-            let _ = RegDeleteValueW(hkey, name.as_ptr());
-        }
-        RegCloseKey(hkey);
-    }
+    let _ = super::startup_registration::set_enabled(enabled);
 }
 
 #[cfg(test)]

@@ -47,9 +47,7 @@ static CHANGE_COUNT: AtomicU64 = AtomicU64::new(0);
 static WATCH_THREAD: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 static STOP_EVENT: Mutex<Option<usize>> = Mutex::new(None);
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use crate::platform::win32_helpers::wide;
 
 /// Raw Win32 handles are safe to move to the single watch thread; this wrapper
 /// makes that explicit to the type system.

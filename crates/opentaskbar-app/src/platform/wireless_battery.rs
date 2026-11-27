@@ -50,6 +50,27 @@ pub enum BatterySource {
     LogitechGHub,
 }
 
+/// All providers served by `run_probe`. `read_all` polls every one of them;
+/// keeping the list next to the enum prevents new variants from being silently
+/// left out of live discovery (they would otherwise only come from disk cache).
+pub const ALL_SOURCES: [BatterySource; 15] = [
+    BatterySource::SteelSeriesHid,
+    BatterySource::LogitechHidPlusPlus,
+    BatterySource::RazerHid,
+    BatterySource::XInput,
+    BatterySource::StandardHid,
+    BatterySource::Bluetooth,
+    BatterySource::BluetoothGatt,
+    BatterySource::AsusRogHid,
+    BatterySource::CorsairHid,
+    BatterySource::GamepadHid,
+    BatterySource::HyperXHid,
+    BatterySource::CompxAtkVxe,
+    BatterySource::Keyboard24gHid,
+    BatterySource::LogitechGHub,
+    BatterySource::SteelSeriesGg,
+];
+
 impl BatterySource {
     /// Widget etiketi (`WirelessDeviceReading.GetSourceLabel` karşılığı).
     pub fn label(self) -> &'static str {
@@ -452,9 +473,7 @@ unsafe extern "system" {
 // Küçük yardımcılar (saf wrapper'lar)
 // ---------------------------------------------------------------------------
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use crate::platform::win32_helpers::wide;
 
 fn ascii_z(text: &str) -> Vec<u8> {
     text.bytes().chain(Some(0)).collect()
@@ -583,23 +602,7 @@ fn canonical_key(reading: &WirelessReading) -> String {
 }
 
 fn source_priority(source: BatterySource) -> u8 {
-    match source {
-        BatterySource::SteelSeriesHid => 0,
-        BatterySource::CompxAtkVxe => 1,
-        BatterySource::LogitechHidPlusPlus => 2,
-        BatterySource::RazerHid => 3,
-        BatterySource::HyperXHid => 3,
-        BatterySource::CorsairHid => 3,
-        BatterySource::AsusRogHid => 3,
-        BatterySource::Keyboard24gHid => 3,
-        BatterySource::GamepadHid => 3,
-        BatterySource::StandardHid => 4,
-        BatterySource::BluetoothGatt => 6,
-        BatterySource::XInput => 7,
-        BatterySource::SteelSeriesGg => 8,
-        BatterySource::LogitechGHub => 9,
-        BatterySource::Bluetooth => 5,
-    }
+    source.priority()
 }
 
 fn prefer(candidate: &WirelessReading, existing: &WirelessReading) -> bool {
@@ -2621,33 +2624,6 @@ fn probe_ghub_loopback(cancel: &AtomicBool) -> Vec<WirelessReading> {
         .collect()
 }
 
-/// One bounded HTTP/1.0 GET against a validated loopback endpoint.
-fn loopback_get(authority: &str, path: &str) -> Option<String> {
-    let mut stream = TcpStream::connect_timeout(
-        &authority.to_socket_addrs().ok()?.next()?,
-        Duration::from_millis(300),
-    )
-    .ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(400)));
-    let request = format!("GET {path} HTTP/1.0\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes()).ok()?;
-    let mut body = Vec::new();
-    let mut chunk = [0u8; 8192];
-    while body.len() < 256 * 1024 {
-        let read = stream.read(&mut chunk).ok()?;
-        if read == 0 {
-            break;
-        }
-        body.extend_from_slice(&chunk[..read]);
-    }
-    let split = body.windows(4).position(|w| w == b"\r\n\r\n")?;
-    let head = String::from_utf8_lossy(&body[..split]);
-    if !head.starts_with("HTTP/1.") || !head.lines().next()?.contains(" 200 ") {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&body[split + 4..]).into_owned())
-}
-
 fn probe_steelseries_loopback(cancel: &AtomicBool) -> Vec<WirelessReading> {
     let program_data = std::env::var_os("ProgramData")
         .map(PathBuf::from)
@@ -2672,7 +2648,7 @@ fn probe_steelseries_loopback(cancel: &AtomicBool) -> Vec<WirelessReading> {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
-        let Some(body) = loopback_get(&authority, relative) else {
+        let Some(body) = crate::platform::http::loopback_get(&authority, relative) else {
             continue;
         };
         let readings = parse_steelseries_gg_json(&body);
@@ -2880,24 +2856,7 @@ pub fn read_all() -> Vec<WirelessReading> {
         return cached_snapshot();
     };
     let devices = Arc::new(enumerate_hid_devices());
-    let sources = [
-        BatterySource::SteelSeriesHid,
-        BatterySource::LogitechHidPlusPlus,
-        BatterySource::RazerHid,
-        BatterySource::XInput,
-        BatterySource::StandardHid,
-        // WS-4: the passive PnP Bluetooth registry reader must feed the same
-        // aggregator as the HID transports, otherwise BT-only headsets never
-        // appear in the widget when no BLE GATT interface is exposed.
-        BatterySource::Bluetooth,
-        BatterySource::BluetoothGatt,
-        BatterySource::AsusRogHid,
-        BatterySource::CorsairHid,
-        BatterySource::GamepadHid,
-        BatterySource::HyperXHid,
-        BatterySource::CompxAtkVxe,
-        BatterySource::Keyboard24gHid,
-    ];
+    let sources = ALL_SOURCES;
     let (sender, receiver) = mpsc::channel::<Vec<WirelessReading>>();
     let mut cancellations = Vec::with_capacity(sources.len());
     let mut threads = Vec::with_capacity(sources.len());
@@ -2954,6 +2913,34 @@ pub fn read_all() -> Vec<WirelessReading> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_polling_covers_every_probe_provider() {
+        // The loopback providers used to exist only in `run_probe`, so they
+        // could never appear in a live snapshot. Guard the complete list.
+        for source in [
+            BatterySource::XInput,
+            BatterySource::LogitechHidPlusPlus,
+            BatterySource::RazerHid,
+            BatterySource::SteelSeriesHid,
+            BatterySource::StandardHid,
+            BatterySource::BluetoothGatt,
+            BatterySource::AsusRogHid,
+            BatterySource::CorsairHid,
+            BatterySource::GamepadHid,
+            BatterySource::HyperXHid,
+            BatterySource::CompxAtkVxe,
+            BatterySource::Keyboard24gHid,
+            BatterySource::Bluetooth,
+            BatterySource::LogitechGHub,
+            BatterySource::SteelSeriesGg,
+        ] {
+            assert!(
+                ALL_SOURCES.contains(&source),
+                "{source:?} must be polled by read_all()"
+            );
+        }
+    }
 
     #[test]
     fn disk_cache_path_is_the_shared_reference_file() {
@@ -3985,25 +3972,18 @@ pub fn privacy_diagnostic_summary(descriptors: &[HidInterfaceDescriptor]) -> Str
     }
 }
 
-fn ws_g_normalize_name(name: &str) -> String {
-    name.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_lowercase()
-}
-
 /// Dedup by name (canonical, shared across providers), falling back to `source:id`.
 pub fn deduplicate(readings: Vec<BatteryReading>) -> Vec<BatteryReading> {
     let mut by_key: HashMap<String, BatteryReading> = HashMap::new();
     let mut counts: HashMap<(BatterySource, String), usize> = HashMap::new();
     for r in &readings {
-        let n = ws_g_normalize_name(&r.name);
+        let n = normalize_name(&r.name);
         if !n.is_empty() {
             *counts.entry((r.source, n)).or_insert(0) += 1;
         }
     }
     for r in readings {
-        let n = ws_g_normalize_name(&r.name);
+        let n = normalize_name(&r.name);
         let collision =
             !n.is_empty() && counts.get(&(r.source, n.clone())).copied().unwrap_or(0) > 1;
         let key = if !n.is_empty() && !collision {

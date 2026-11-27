@@ -3,7 +3,7 @@
 //! Windows-independent Rust implementation of `IconPack`. A pack is a folder with `pack.json` at
 //! its root and optional images; the manifest maps match keys to image paths relative
 //! to that folder. Lookup order matches reference exactly:
-//! special key ΓåÆ AUMID (and package name) ΓåÆ full exe path ΓåÆ exe file name ΓåÆ stem.
+//! special key → AUMID (and package name) → full exe path → exe file name → stem.
 //! No COM/GDI is used; this module only resolves paths.
 
 use std::collections::BTreeMap;
@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock};
 
 use serde_json::{Map, Value};
+
+use super::json_ext::{json_get_ci, object_get_ci, relaxed_json, string_ci};
 
 static ACTIVE_PACK: OnceLock<RwLock<Option<IconPackManifest>>> = OnceLock::new();
 
@@ -88,83 +90,6 @@ impl IconPackManifest {
     pub fn directory(&self) -> &Path {
         &self.directory
     }
-}
-
-fn object_get_ci<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
-    object
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(key))
-        .map(|(_, value)| value)
-}
-
-fn json_get_ci<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
-    value
-        .as_object()
-        .and_then(|object| object_get_ci(object, key))
-}
-
-fn string_ci(value: &Value, key: &str) -> String {
-    json_get_ci(value, key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string()
-}
-
-/// Accepts comments and trailing commas, as the reference serializer did, without touching
-/// string contents.
-fn relaxed_json(input: &str) -> String {
-    let chars: Vec<char> = input.chars().collect();
-    let mut out = String::with_capacity(input.len());
-    let mut i = 0;
-    let mut in_string = false;
-    let mut escaped = false;
-    while i < chars.len() {
-        let c = chars[i];
-        if in_string {
-            out.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == '"' {
-            in_string = true;
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        if c == '/' && chars.get(i + 1) == Some(&'/') {
-            i += 2;
-            while i < chars.len() && chars[i] != '\n' && chars[i] != '\r' {
-                i += 1;
-            }
-            continue;
-        }
-        if c == '/' && chars.get(i + 1) == Some(&'*') {
-            i += 2;
-            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
-                i += 1;
-            }
-            i = (i + 2).min(chars.len());
-            continue;
-        }
-        if c == ','
-            && let Some(next) = chars[i + 1..].iter().find(|next| !next.is_whitespace())
-            && (*next == '}' || *next == ']')
-        {
-            i += 1;
-            continue;
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
 }
 
 fn parse_shape(text: &str) -> IconPackShape {

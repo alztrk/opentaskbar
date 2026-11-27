@@ -1,9 +1,9 @@
 //! Reading and invoking Windows Jump Lists.
 //!
 //! Standalone Rust implementation of the `ApplicationJumpListService` and
-//! `NativeJumpListSession`. Everything this module needs (COM entry points,
-//! vtable dispatch, owned data) lives in this file; nothing is imported from
-//! other crate modules.
+//! `NativeJumpListSession`. COM entry points, vtable dispatch and owned data
+//! live in this file; only the apartment guard is shared with other platform
+//! modules via [`super::com`].
 //!
 //! # Design notes
 //!
@@ -23,9 +23,9 @@
 //!   `IContextMenu::InvokeCommand` path (which additionally handles
 //!   activation contexts of packaged apps).
 //!
-//! Callers should invoke these functions from a worker thread: each call does
-//! its own `CoInitializeEx(COINIT_APARTMENTTHREADED)` / `CoUninitialize()`,
-//! tolerating a thread that is already initialized (`RPC_E_CHANGED_MODE`).
+//! Callers should invoke these functions from a worker thread: each call takes
+//! a shared `ComApartment::sta()` guard, which balances its own initialization
+//! and tolerates a thread that is already initialized (`RPC_E_CHANGED_MODE`).
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -44,8 +44,6 @@ use windows::core::GUID;
 
 #[link(name = "ole32")]
 unsafe extern "system" {
-    fn CoInitializeEx(reserved: *mut c_void, coinit: u32) -> i32;
-    fn CoUninitialize();
     fn CoCreateInstance(
         class_id: *const GUID,
         outer: *mut c_void,
@@ -87,10 +85,8 @@ unsafe extern "system" {
 // Constants
 // ---------------------------------------------------------------------------
 
-const COINIT_APARTMENTTHREADED: u32 = 0x2;
 const CLSCTX_INPROC_SERVER: u32 = 0x1;
 
-const RPC_E_CHANGED_MODE: i32 = 0x8001_0106u32 as i32;
 const E_NOINTERFACE: i32 = 0x8000_4002u32 as i32;
 const E_FAIL: i32 = 0x8000_4005u32 as i32;
 const E_UNEXPECTED: i32 = 0x8000_ffffu32 as i32;
@@ -209,7 +205,7 @@ pub fn read_jump_list(
 
     // Declared first so it is dropped last: every COM object created below is
     // released before CoUninitialize.
-    let Some(_sta) = StaGuard::new() else {
+    let Some(_sta) = super::com::ComApartment::sta() else {
         return Some(finish(
             session_id,
             JumpListStatus::Unavailable,
@@ -262,7 +258,7 @@ pub fn invoke_command(session_id: i64, command_id: i32, owner_hwnd: usize) -> bo
 
     // ShellExecuteExW does not require COM, but a valid apartment makes shell
     // extensions and activation contexts behave consistently.
-    let _sta = StaGuard::new();
+    let _sta = super::com::ComApartment::sta();
 
     let target = wide(&launch.target);
     let arguments = if launch.args.is_empty() {
@@ -368,32 +364,6 @@ fn finish(
         session_id,
         status,
         groups,
-    }
-}
-
-/// COM apartment token. Only calls `CoUninitialize` when this module actually
-/// initialized the apartment, and tolerates threads already initialized.
-struct StaGuard {
-    owns: bool,
-}
-
-impl StaGuard {
-    fn new() -> Option<Self> {
-        // SAFETY: standard COM initialization; no objects are live yet.
-        let hr = unsafe { CoInitializeEx(null_mut(), COINIT_APARTMENTTHREADED) };
-        if hr < 0 && hr != RPC_E_CHANGED_MODE {
-            return None;
-        }
-        Some(Self { owns: hr >= 0 })
-    }
-}
-
-impl Drop for StaGuard {
-    fn drop(&mut self) {
-        if self.owns {
-            // SAFETY: matching CoInitializeEx above.
-            unsafe { CoUninitialize() };
-        }
     }
 }
 
@@ -551,9 +521,7 @@ struct ShellExecuteInfoW {
 // String helpers
 // ---------------------------------------------------------------------------
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
-}
+use crate::platform::win32_helpers::wide;
 
 fn from_wide(ptr: *const u16) -> String {
     if ptr.is_null() {

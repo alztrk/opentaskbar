@@ -13,12 +13,6 @@ use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 
-use windows_sys::Win32::Networking::WinHttp::{
-    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE, WinHttpCloseHandle, WinHttpConnect,
-    WinHttpOpen, WinHttpOpenRequest, WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest,
-    WinHttpSetTimeouts,
-};
-
 /// `(ISO code, display name)` for the 21 reference fallback countries.
 pub const COUNTRIES: &[(&str, &str)] = &[
     ("TR", "Turkey"),
@@ -237,74 +231,14 @@ pub fn parse_cities_payload(json: &str) -> Vec<String> {
 }
 
 fn winhttp_get(host: &str, path: &str) -> Option<String> {
-    let agent: Vec<u16> = "OpenTaskbar/1.0\0".encode_utf16().collect();
-    let host_w: Vec<u16> = host.encode_utf16().chain(Some(0)).collect();
-    let path_w: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
-    let verb_w: Vec<u16> = "GET\0".encode_utf16().collect();
-    unsafe {
-        let session = WinHttpOpen(
-            agent.as_ptr(),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-        );
-        if session.is_null() {
-            return None;
-        }
-        let _ = WinHttpSetTimeouts(session, 2000, 2000, 3000, 4000);
-        let connect = WinHttpConnect(session, host_w.as_ptr(), 443, 0);
-        if connect.is_null() {
-            WinHttpCloseHandle(session);
-            return None;
-        }
-        let req = WinHttpOpenRequest(
-            connect,
-            verb_w.as_ptr(),
-            path_w.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            WINHTTP_FLAG_SECURE,
-        );
-        if req.is_null() {
-            WinHttpCloseHandle(connect);
-            WinHttpCloseHandle(session);
-            return None;
-        }
-        let sent = WinHttpSendRequest(req, std::ptr::null(), 0, std::ptr::null(), 0, 0, 0) != 0
-            && WinHttpReceiveResponse(req, std::ptr::null_mut()) != 0;
-        let mut body = Vec::new();
-        if sent {
-            loop {
-                let mut avail: u32 = 0;
-                if windows_sys::Win32::Networking::WinHttp::WinHttpQueryDataAvailable(
-                    req, &mut avail,
-                ) == 0
-                    || avail == 0
-                {
-                    break;
-                }
-                if body.len() + avail as usize > 256 * 1024 {
-                    break;
-                }
-                let start = body.len();
-                body.resize(start + avail as usize, 0);
-                let mut read = 0u32;
-                if WinHttpReadData(req, body[start..].as_mut_ptr().cast(), avail, &mut read) == 0
-                    || read == 0
-                {
-                    body.truncate(start);
-                    break;
-                }
-                body.truncate(start + read as usize);
-            }
-        }
-        WinHttpCloseHandle(req);
-        WinHttpCloseHandle(connect);
-        WinHttpCloseHandle(session);
-        sent.then(|| String::from_utf8_lossy(&body).into_owned())
-    }
+    let mut cfg = crate::platform::http::HttpCfg::new("OpenTaskbar/1.0");
+    cfg.timeouts = [2_000, 2_000, 3_000, 4_000];
+    cfg.max_response_bytes = Some(256 * 1024);
+    let mut body = Vec::new();
+    crate::platform::http::request(&cfg, host, path, "GET", |chunk| {
+        body.extend_from_slice(chunk)
+    })?;
+    Some(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// Live countriesnow.space lookup, cached in memory and on disk.

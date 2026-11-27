@@ -79,9 +79,7 @@ static HOST_HWND: AtomicUsize = AtomicUsize::new(0);
 static HOST_STOP: AtomicBool = AtomicBool::new(false);
 static HOST_JOIN: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use crate::platform::win32_helpers::wide;
 
 unsafe extern "system" fn host_wnd_proc(
     hwnd: HWND,
