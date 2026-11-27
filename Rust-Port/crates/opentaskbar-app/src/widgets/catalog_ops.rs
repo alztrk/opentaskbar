@@ -2,7 +2,7 @@
 //!
 //! Provides: alias widget IDs (`Date`, `ShowDesktop`), `HasSettings` + live-preview flags,
 //! per-widget density overrides and shrink priority, hardware-availability hiding, and the
-//! complete 24-widget catalog plus settings-access helpers that are resilient to WS-A moving a
+//! complete 22-widget catalog plus settings-access helpers that are resilient to WS-A moving a
 //! key from `DockSettings.extra` into a typed field.
 
 use opentaskbar_core::i18n as loc;
@@ -26,7 +26,6 @@ pub const WIDGET_ALIASES: &[(&str, &str)] = &[
     ("quicksettings", "quicksettings"),
     ("claude", "aiusage_claude"),
     ("codex", "aiusage_codex"),
-    ("antigravity", "aiusage_antigravity"),
     ("opencode", "aiusage_opencode"),
     ("copilot", "aiusage_copilot"),
     ("deepseek", "aiusage_deepseek"),
@@ -65,8 +64,8 @@ pub const SHOW_DESKTOP_WIDGET: WidgetDescriptor = WidgetDescriptor {
     width_dips: 58.0,
 };
 
-/// The complete C# 24-widget catalog (23 baseline + Antigravity). `ShowDesktop` is a shell alias
-/// resolved through `canonical_widget_id`, not an additional catalog entry.
+/// The complete 22-widget catalog. `ShowDesktop` is a shell alias resolved through
+/// `canonical_widget_id`, not an additional catalog entry.
 pub fn catalog() -> Vec<&'static WidgetDescriptor> {
     ALL_WIDGETS.iter().collect()
 }
@@ -342,8 +341,8 @@ mod tests {
     }
 
     #[test]
-    fn catalog_has_23_entries() {
-        assert_eq!(catalog().len(), 23);
+    fn catalog_has_22_entries() {
+        assert_eq!(catalog().len(), 22);
         assert!(WidgetOption::for_id("showdesktop").is_some());
         assert!(WidgetOption::for_id("clock").unwrap().has_settings);
         assert!(!WidgetOption::for_id("netspeed").unwrap().has_settings);

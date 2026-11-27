@@ -598,6 +598,24 @@ pub fn displayed_position(
 // Flyout / cover / volume helpers.
 // ---------------------------------------------------------------------------
 
+/// Pure AUMID scoring used by the media flyout matcher (2 = AUMID, 1 = executable, 0 = none).
+pub fn aumid_match_score(process_name: &str, app_user_model_id: Option<&str>, source_id: &str) -> u8 {
+    crate::platform::core_audio::match_score(process_name, app_user_model_id, source_id, None)
+}
+
+/// Resolves the SMTC `SourceAppUserModelId` to a real WASAPI app session (C#
+/// `AppAudioSessionMatcher.Select`). Returns the display name of the best AUMID/executable match.
+pub fn match_aumid_app_name(source_id: &str) -> Option<String> {
+    if source_id.trim().is_empty() {
+        return None;
+    }
+    crate::platform::core_audio::find_app_session(
+        &crate::platform::core_audio::list_app_sessions(),
+        source_id,
+    )
+    .map(|session| session.name)
+}
+
 /// Builds the island expanded details payload from the SMTC snapshot + current audio state.
 pub fn get_details(snap: &MediaSessionSnapshot, volume: u32, muted: bool) -> MediaDetails {
     let cover_path = find_cover_art(&snap.title, &snap.artist);
@@ -608,7 +626,7 @@ pub fn get_details(snap: &MediaSessionSnapshot, volume: u32, muted: bool) -> Med
         title: snap.title.clone(),
         artist: snap.artist.clone(),
         album: String::new(),
-        app_name: String::new(),
+        app_name: match_aumid_app_name(&snap.source_app_id).unwrap_or_default(),
         position_secs: snap.position_secs,
         duration_secs: snap.duration_secs,
         playing: snap.playing,

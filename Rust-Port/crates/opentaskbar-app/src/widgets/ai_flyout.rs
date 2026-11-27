@@ -1,10 +1,10 @@
 //! Full AI quota flyout — C# `AiUsageWidget.BuildFlyout` + `AiUsageService` parity.
 //!
 //! Adds the spend header, Usage breakdown, reset countdown, plan/status chips, severity dot and
-//! a live refresh action on top of the existing window bars. Antigravity is the 8th provider and
-//! uses the `AntigravityGroups` setting to split its usage into Gemini / Claude / Argon pools.
+//! a live refresh action on top of the existing window bars.
 //!
-//! The full provider payload is obtained through the C4 API `widgets::telemetry::ai_fetch_full`.
+//! The full provider payload is obtained through `widgets::telemetry::ai_fetch_full`, cached in
+//! `WidgetRuntime::ai_full` and passed to [`build_ai_flyout`] on every render.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,7 +14,6 @@ use opentaskbar_core::settings::DockSettings;
 use crate::design::{self, Rgb};
 use crate::ui::flyout::{BarTone, FlyoutBlock, FlyoutSpec};
 
-use super::catalog_ops::setting_value;
 use super::telemetry::{AiUsageSnapshot, ai_provider_meta};
 
 /// C# `AiUsageService.Severity` — drives the status dot color in the flyout header.
@@ -37,16 +36,7 @@ impl AiSeverity {
     }
 }
 
-/// One Antigravity pool / group row (C# `AiUsageGroup`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct AiPoolGroup {
-    pub name: String,
-    pub label: String,
-    pub used: f32,
-    pub reset_text: String,
-}
-
-/// Rich provider detail assembled from the C4 full fetch plus the cached chip snapshot.
+/// Rich provider detail assembled from the full fetch plus the cached chip snapshot.
 #[derive(Clone, Debug, Default)]
 pub struct AiFullDetail {
     pub plan: Option<String>,
@@ -57,7 +47,61 @@ pub struct AiFullDetail {
     pub limit_reached: bool,
     pub severity: AiSeverity,
     pub retry_after_secs: Option<u64>,
-    pub groups: Vec<AiPoolGroup>,
+}
+
+/// Adapts the cached `telemetry::AiFullDetail` (the result of `ai_fetch_full`) into the flyout's
+/// presentation model. The flyout must always show the fetched spend / breakdown / reset / plan /
+/// limit / credit data instead of an empty `AiFullDetail::default()`.
+pub fn from_telemetry(full: &super::telemetry::AiFullDetail) -> AiFullDetail {
+    let now = now_epoch();
+    let reset_countdown = full
+        .reset_unix_ms
+        .filter(|ms| *ms > 0)
+        .and_then(|ms| super::telemetry::countdown_from_unix(ms / 1000, now))
+        .or_else(|| {
+            (!full.reset_text.is_empty() && full.reset_text != "—")
+                .then(|| full.reset_text.clone())
+        });
+    let peak = std::iter::once(full.used)
+        .chain(full.breakdown.iter().map(|s| s.used))
+        .fold(0.0f32, f32::max);
+    let mut spend = Vec::new();
+    if let Some(s) = &full.spend {
+        let symbol = match s.currency.as_str() {
+            "USD" => "$",
+            "EUR" => "€",
+            "TRY" | "TL" => "₺",
+            _ => "",
+        };
+        let money = |v: f64| -> String {
+            if symbol.is_empty() {
+                format!("{v:.2} {}", s.currency)
+            } else {
+                format!("{symbol}{v:.2}")
+            }
+        };
+        spend.push((loc::t("AiUsageExtra"), money(s.used)));
+        if let Some(limit) = s.limit {
+            spend.push((loc::t("AiUsageQuota"), money(limit)));
+        }
+    } else if let Some(credits) = full.credits {
+        spend.push((loc::t("AiUsageRemainingCredits"), format!("{credits:.2}")));
+    }
+    AiFullDetail {
+        plan: full.plan.clone(),
+        spend,
+        breakdown: full
+            .breakdown
+            .iter()
+            .filter(|s| !s.name.is_empty())
+            .map(|s| (s.name.clone(), format!("{:.0}%", s.used * 100.0)))
+            .collect(),
+        reset_countdown,
+        unlimited_credits: full.unlimited_credits,
+        limit_reached: full.limit_reached,
+        severity: severity_for_usage(peak, full.limit_reached),
+        retry_after_secs: full.retry_after_secs.map(u64::from),
+    }
 }
 
 /// Parses an ISO-8601 reset timestamp into a concise local countdown relative to `now_epoch`.
@@ -127,108 +171,6 @@ pub fn now_epoch() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Reads the `AntigravityGroups` setting. C# stores either a `string[]` of group names or an
-/// array of `{ name, pool }` objects; both map to the same normalized group list.
-pub fn antigravity_groups(settings: &DockSettings) -> Vec<String> {
-    let defaults = ["Gemini", "Claude", "Argon"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let Some(v) = setting_value(settings, "AntigravityGroups") else {
-        return defaults;
-    };
-    let arr = match v {
-        serde_json::Value::Array(a) => a,
-        serde_json::Value::Object(m) => m.values().cloned().collect(),
-        // The merged core settings type serializes this flag set as `"All"` / `"Gemini, ..."`;
-        // older JSON files may store the raw bitmask as a number.
-        serde_json::Value::String(s) if s.eq_ignore_ascii_case("All") => return defaults,
-        serde_json::Value::Number(n) => {
-            use opentaskbar_core::settings::antigravity_groups as groups;
-            let bits = n.as_u64().unwrap_or(0) as u32;
-            let mut named = Vec::new();
-            if bits & groups::GEMINI != 0 {
-                named.push("Gemini".to_owned());
-            }
-            if bits & groups::CLAUDE != 0 {
-                named.push("Claude".to_owned());
-            }
-            if bits & groups::ARGON != 0 {
-                named.push("Argon".to_owned());
-            }
-            return if named.is_empty() { defaults } else { named };
-        }
-        other => return vec![other.as_str().unwrap_or("Gemini").to_owned()],
-    };
-    let groups: Vec<String> = arr
-        .iter()
-        .filter_map(|item| match item {
-            serde_json::Value::String(s) => Some(s.clone()),
-            serde_json::Value::Object(o) => o
-                .get("name")
-                .or_else(|| o.get("group"))
-                .or_else(|| o.get("label"))
-                .and_then(|s| s.as_str())
-                .map(str::to_owned),
-            _ => None,
-        })
-        .filter(|s| !s.is_empty())
-        .collect();
-    if groups.is_empty() { defaults } else { groups }
-}
-
-/// Parses an Antigravity pool/group usage JSON object into normalized pool rows. Accepts both
-/// `{"groups":[...]}` and a bare array, and maps `usedPercent` / `utilization` / `used_percent`.
-pub fn parse_antigravity_pools(body: &str) -> Vec<AiPoolGroup> {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
-        return Vec::new();
-    };
-    let array = value
-        .get("groups")
-        .or_else(|| value.get("pools"))
-        .and_then(|v| v.as_array())
-        .or_else(|| value.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let now = now_epoch();
-    array
-        .iter()
-        .map(|entry| {
-            let name = entry
-                .get("name")
-                .or_else(|| entry.get("group"))
-                .or_else(|| entry.get("pool"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("Pool")
-                .to_owned();
-            let used = entry
-                .get("usedPercent")
-                .or_else(|| entry.get("utilization"))
-                .or_else(|| entry.get("used_percent"))
-                .and_then(|v| v.as_f64())
-                .map(|n| (if n > 1.0 { n / 100.0 } else { n }).clamp(0.0, 1.0) as f32)
-                .unwrap_or(0.0);
-            let label = entry
-                .get("label")
-                .and_then(|v| v.as_str())
-                .unwrap_or("5h")
-                .to_owned();
-            let reset_text = entry
-                .get("resetsAt")
-                .or_else(|| entry.get("resets_at"))
-                .and_then(|v| v.as_str())
-                .and_then(|iso| parse_reset_countdown(iso, now))
-                .unwrap_or_else(|| format!("{:.0}%", used * 100.0));
-            AiPoolGroup {
-                name,
-                label,
-                used,
-                reset_text,
-            }
-        })
-        .collect()
-}
-
 /// Derives severity from a peak utilization value (C# `AiUsageService.SeverityFor`).
 pub fn severity_for_usage(peak: f32, limit_reached: bool) -> AiSeverity {
     if limit_reached || peak >= 0.98 {
@@ -253,7 +195,7 @@ pub fn build_ai_flyout(
     id: &str,
     snap: &AiUsageSnapshot,
     detail: &AiFullDetail,
-    settings: &DockSettings,
+    _settings: &DockSettings,
     is_dark: bool,
 ) -> FlyoutSpec {
     let pal = design::palette(is_dark);
@@ -357,29 +299,6 @@ pub fn build_ai_flyout(
         }
     }
 
-    // Antigravity group/pool split (C# `AiUsageAntigravityGroupsLabel`).
-    if id.eq_ignore_ascii_case("aiusage_antigravity") {
-        let groups = antigravity_groups(settings);
-        if !groups.is_empty() {
-            blocks.push(FlyoutBlock::Separator);
-            for group in &groups {
-                let pool = detail
-                    .groups
-                    .iter()
-                    .find(|g| g.name.eq_ignore_ascii_case(group));
-                blocks.push(FlyoutBlock::ProgressBar {
-                    label: group.clone(),
-                    value_text: pool.map_or_else(
-                        || "—".to_owned(),
-                        |g| format!("{:.0}% · {}", g.used * 100.0, g.reset_text),
-                    ),
-                    ratio: pool.map_or(0.0, |g| g.used),
-                    tone: BarTone::Usage,
-                });
-            }
-        }
-    }
-
     if detail.limit_reached {
         blocks.push(FlyoutBlock::Note(loc::t("AiUsageLimitReached")));
     }
@@ -448,9 +367,10 @@ pub fn parse_full_detail(body: &str) -> AiFullDetail {
     };
     let spend = read_pairs("spend");
     let breakdown = read_pairs("breakdown");
-    let groups = parse_antigravity_pools(body);
-    let peak = groups.iter().map(|g| g.used).fold(0.0f32, f32::max);
-    let severity = severity_for_usage(peak, limit_reached);
+    let severity = severity_for_usage(
+        if limit_reached { 1.0 } else { 0.0 },
+        limit_reached || retry_after_secs.is_some(),
+    );
     AiFullDetail {
         plan,
         spend,
@@ -460,7 +380,6 @@ pub fn parse_full_detail(body: &str) -> AiFullDetail {
         limit_reached,
         severity,
         retry_after_secs,
-        groups,
     }
 }
 
@@ -485,12 +404,9 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_pool_parsing_and_severity() {
-        let body = r#"{"groups":[{"name":"Gemini","label":"5h","usedPercent":92,"resetsAt":"2030-01-01T00:00:00Z"},{"name":"Claude","label":"7d","used_percent":0.4}]}"#;
-        let groups = parse_antigravity_pools(body);
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].name, "Gemini");
-        assert!((groups[0].used - 0.92).abs() < 0.001);
+    fn severity_thresholds_match_csharp() {
+        assert_eq!(severity_for_usage(0.0, false), AiSeverity::None);
+        assert_eq!(severity_for_usage(0.2, false), AiSeverity::Info);
         assert_eq!(severity_for_usage(0.92, false), AiSeverity::Warning);
         assert_eq!(severity_for_usage(1.0, true), AiSeverity::Critical);
     }
@@ -507,14 +423,63 @@ mod tests {
     }
 
     #[test]
-    fn antigravity_groups_setting_defaults() {
+    fn fetched_full_detail_is_mapped_into_flyout_blocks() {
+        let full = crate::widgets::telemetry::AiFullDetail {
+            provider_id: "aiusage_claude".to_owned(),
+            plan: Some("Max 20x".to_owned()),
+            used: 0.81,
+            label: "7d".to_owned(),
+            reset_text: "11-30 12:00".to_owned(),
+            reset_unix_ms: Some(1_893_456_000_000),
+            spend: Some(crate::widgets::telemetry::AiSpend {
+                used: 12.34,
+                limit: Some(50.0),
+                currency: "USD".to_owned(),
+                used_01: Some(0.25),
+            }),
+            breakdown: vec![crate::widgets::telemetry::AiUsageShare {
+                name: "Opus".to_owned(),
+                used: 0.31,
+            }],
+            limit_reached: false,
+            retry_after_secs: Some(12),
+            credits: None,
+            unlimited_credits: false,
+            error: None,
+        };
+        let d = from_telemetry(&full);
+        assert_eq!(d.plan.as_deref(), Some("Max 20x"));
+        assert_eq!(d.spend.len(), 2);
+        assert_eq!(d.breakdown[0].0, "Opus");
+        assert_eq!(d.retry_after_secs, Some(12));
+        assert_eq!(d.severity, AiSeverity::Info);
+
+        let snap = crate::widgets::telemetry::AiUsageSnapshot::default();
         let s = DockSettings::default();
-        assert_eq!(antigravity_groups(&s), vec!["Gemini", "Claude", "Argon"]);
+        let spec = build_ai_flyout("aiusage_claude", &snap, &d, &s, true);
+        assert!(spec.blocks.iter().any(|b| matches!(
+            b,
+            FlyoutBlock::StatRow { label, .. } if label == "Opus"
+        )));
     }
 
     #[test]
-    fn provider_count_is_eight() {
-        assert_eq!(AI_PROVIDERS.len(), 8);
-        assert!(AI_PROVIDERS.iter().any(|p| p.id == "aiusage_antigravity"));
+    fn provider_catalog_has_seven_named_providers() {
+        assert_eq!(AI_PROVIDERS.len(), 7);
+        let ids: Vec<&str> = AI_PROVIDERS.iter().map(|p| p.id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "aiusage_claude",
+                "aiusage_codex",
+                "aiusage_opencode",
+                "aiusage_copilot",
+                "aiusage_deepseek",
+                "aiusage_openrouter",
+                "aiusage_cursor"
+            ]
+        );
+        assert!(AI_PROVIDERS.iter().any(|p| p.id == "aiusage_cursor"));
+        assert!(AI_PROVIDERS.iter().any(|p| p.id == "aiusage_claude"));
     }
 }
