@@ -201,6 +201,105 @@ fn placeholders(value: &str) -> Vec<&str> {
     found
 }
 
+/// User-visible labels that are already translated in every non-English catalog. They must
+/// never regress to the en-US text (a C3-style catalog merge once did exactly that).
+const TRANSLATED_EVERYWHERE: &[&str] = &[
+    "Settings",
+    "WindowPickerTitle",
+    "WindowPickerPrevious",
+    "WindowPickerNext",
+    "WindowPickerPage",
+    "MagnificationExpandsDock",
+    "MagnificationExpandsDockDescription",
+    "SearchNoResults",
+    "ContentAlignCenter",
+    "ContentAlignEnd",
+    "PreviewDisabledHint",
+    "FocusMinutesLabel",
+    "FocusBreakMinutesLabel",
+    "WidgetDensityCompact",
+    "WidgetDensityFull",
+    "AiUsageRingLabel",
+    "SectionGlassEffect",
+    "GlassBlurLabel",
+    "GlassSaturationLabel",
+    "GlassEdgeGlowLabel",
+    "GlassPointerLightLabel",
+    "SectionDisplayCare",
+    "SurfaceTrueBlack",
+    "OledReduceGlow",
+    "OledReduceGlowHelp",
+    "BurnInShift",
+    "BurnInShiftHelp",
+    "BurnInShiftInterval",
+    "OledAutoTrigger",
+    "OledAutoTriggerHelp",
+    "OledLowBatteryThreshold",
+    "OledAutoOnNightLight",
+    "OledAutoOnNightLightHelp",
+    "AmbientMode",
+    "AmbientModeHelp",
+    "AnimationFpsCap",
+    "AnimationFpsCapHelp",
+    "FpsUnlimited",
+    "PlacementInWidgets",
+    "OpenLocation",
+    "GpuEngine",
+    "DropdownSearchPlaceholder",
+    "DropdownNoResults",
+    "WeatherLocationUsed",
+];
+
+/// Baseline number of values that are byte-identical to en-US in each catalog. This is a
+/// regression budget, not a translation mandate: legacy debt keys (notably the Rust-only C3
+/// feature labels) are intentionally unchanged here. A mass overwrite with English text raises
+/// the count and fails the gate; adding a real translation only lowers it.
+const ENGLISH_IDENTICAL_BUDGET: &[(&str, usize)] = &[
+    ("de-DE", 203),
+    ("es-ES", 232),
+    ("fr-FR", 252),
+    ("it-IT", 242),
+    ("ja-JP", 221),
+    ("ko-KR", 220),
+    ("nl-NL", 260),
+    ("pl-PL", 232),
+    ("pt-BR", 241),
+    ("ru-RU", 211),
+    ("tr-TR", 21),
+    ("uk-UA", 210),
+    ("zh-CN", 218),
+];
+
+#[test]
+fn high_visibility_labels_stay_translated_in_every_language() {
+    for tag in LANGS {
+        if *tag == DEFAULT_LANGUAGE {
+            continue;
+        }
+        for key in TRANSLATED_EVERYWHERE {
+            assert_ne!(
+                i18n::tr(tag, key),
+                i18n::tr(DEFAULT_LANGUAGE, key),
+                "{tag}/{key} regressed to the en-US text",
+            );
+        }
+    }
+}
+
+#[test]
+fn no_catalog_regresses_to_more_english_identical_values() {
+    for (tag, budget) in ENGLISH_IDENTICAL_BUDGET {
+        let identical = i18n::keys(DEFAULT_LANGUAGE)
+            .iter()
+            .filter(|key| i18n::tr(tag, key) == i18n::tr(DEFAULT_LANGUAGE, key))
+            .count();
+        assert!(
+            identical <= *budget,
+            "{tag} has {identical} en-US-identical values (budget {budget})",
+        );
+    }
+}
+
 #[test]
 fn no_catalog_has_empty_values_or_lost_placeholders() {
     for tag in LANGS {

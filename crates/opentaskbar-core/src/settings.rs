@@ -579,28 +579,31 @@ const AI_PROVIDER_NAMES: [(u32, &str); 7] = [
     (ai_providers::CURSOR, "Cursor"),
 ];
 
+/// Single comparison key for legacy ID spellings: keep ASCII alphanumerics and lowercase them.
+///
+/// Non-ASCII characters (and separators such as `_`, `-` and `:`) are dropped deliberately so a
+/// localized or user-created slug can never alias a catalog widget. This is only used for
+/// comparisons; persisted IDs keep their original slug via `canonical_widget_setting_id`.
+fn compact_id(id: &str) -> String {
+    id.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
 /// A per-provider widget ID that is not one of the seven catalogued providers is retired data,
 /// even when an old file still lists it. Comparing the compact form also covers aliases written
 /// by earlier port builds (`aiusage_*`, `widget:AiUsage*`).
 fn is_retired_ai_provider_widget(id: &str) -> bool {
-    let compact: String = id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect();
+    let compact = compact_id(id);
     let compact = compact.strip_prefix("widget").unwrap_or(&compact);
     let Some(rest) = compact.strip_prefix("aiusage") else {
         return false;
     };
     !rest.is_empty()
-        && !AI_PROVIDER_NAMES.iter().any(|(_, name)| {
-            let known: String = name
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric())
-                .flat_map(char::to_lowercase)
-                .collect();
-            known == rest
-        })
+        && !AI_PROVIDER_NAMES
+            .iter()
+            .any(|(_, name)| compact_id(name) == rest)
 }
 
 /// All `DockWidgetService` IDs, including the hidden legacy aliases `Date` and `ShowDesktop`.
@@ -631,29 +634,46 @@ pub const SUPPORTED_WIDGET_IDS: [&str; 24] = [
     "ShowDesktop",
 ];
 
-/// Catalog cards only (`CatalogDescriptors`): used by island placement limits.
-pub const CATALOG_WIDGET_COUNT: usize = 22;
+/// Catalog cards only (`CatalogDescriptors`): the two hidden legacy IDs (`Date`,
+/// `ShowDesktop`) are deliberately excluded. Kept for reference parity; island limits use the
+/// dedicated caps below because custom widgets are valid IDs too.
+pub const CATALOG_WIDGET_COUNT: usize = SUPPORTED_WIDGET_IDS.len() - 2;
+
+/// Safety caps for persisted Dynamic Island maps. They bound memory/disk usage and are
+/// intentionally larger than the catalog count: `custom:` IDs and the hidden legacy widgets are
+/// valid placements/order entries as well.
+pub const MAX_ISLAND_PLACEMENTS: usize = 64;
+pub const MAX_ISLAND_ORDER_IDS: usize = 64;
+pub const MAX_ISLAND_MONITOR_ORDERS: usize = 32;
 
 const RETIRED_WIDGET_IDS: [&str; 4] = ["Memory", "Search", "Desktops", "Tray"];
 const MAX_PINNED_TRAY_ICONS: usize = 64;
 const MAX_PINNED_TRAY_KEY_LEN: usize = 512;
 const MAX_ICON_PADDING: i32 = 12;
 
+/// Validates and returns the slug of a user-created widget ID. The prefix is ASCII
+/// case-insensitive so older files written as `CUSTOM:...` stay supported; the slug itself is
+/// preserved verbatim (including its case) by the canonicalizer.
+fn custom_widget_slug(id: &str) -> Option<&str> {
+    const PREFIX: &str = "custom:";
+    let slug = id
+        .get(..PREFIX.len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
+        .map(|_| &id[PREFIX.len()..])?;
+    (!slug.is_empty()
+        && slug.len() <= 128
+        && slug
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+    .then_some(slug)
+}
+
 pub fn is_supported_widget_id(id: &str) -> bool {
     let id = id.trim();
     // User-created widgets live in the `custom:<slug>` namespace. The slug is
     // validated here so a settings file can never smuggle a path or a shell token.
-    const PREFIX: &str = "custom:";
-    if let Some(slug) = id
-        .get(..PREFIX.len())
-        .filter(|prefix| prefix.eq_ignore_ascii_case(PREFIX))
-        .map(|_| &id[PREFIX.len()..])
-    {
-        return !slug.is_empty()
-            && slug.len() <= 128
-            && slug
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if custom_widget_slug(id).is_some() {
+        return true;
     }
     // Retired provider IDs are deliberately absent from the catalog, so old files that still
     // mention one are rejected here instead of being silently accepted by an alias lookup.
@@ -669,33 +689,35 @@ pub fn is_supported_widget_id(id: &str) -> bool {
 /// the whole file as `UnsupportedWidgetId`, which is the "widgets vanished after adding a few"
 /// failure. Normalizing every ID at the settings boundary keeps both builds reading the same
 /// file and keeps `validate()`'s `enabled ⊆ installed` rule satisfiable.
-pub fn canonical_widget_setting_id(id: &str) -> &str {
+///
+/// Custom IDs always get the lowercase `custom:` prefix: two spellings of the same custom
+/// widget would otherwise become two distinct map keys and trip the case-insensitive duplicate
+/// check in `validate()`, resetting the whole file on the next load.
+pub fn canonical_widget_setting_id(id: &str) -> String {
     let id = id.trim();
     if let Some(canonical) = SUPPORTED_WIDGET_IDS
         .iter()
         .find(|known| known.eq_ignore_ascii_case(id))
     {
-        return canonical;
+        return (*canonical).to_owned();
     }
-    let compact: String = id
-        .chars()
-        .filter(|c| *c != '_' && *c != '-')
-        .flat_map(char::to_lowercase)
-        .collect();
-    if let Some(canonical) = SUPPORTED_WIDGET_IDS.iter().find(|known| {
-        known
-            .chars()
-            .filter(|c| *c != '_' && *c != '-')
-            .flat_map(char::to_lowercase)
-            .eq(compact.chars())
-    }) {
-        return canonical;
+    let compact = compact_id(id);
+    if let Some(canonical) = SUPPORTED_WIDGET_IDS
+        .iter()
+        .find(|known| compact_id(known) == compact)
+    {
+        return (*canonical).to_owned();
     }
+    // Historic snake_case spellings that do not compact to a catalog ID.
     match compact.as_str() {
-        "stats" => "SystemStats",
-        "keyboard" => "KeyboardLayout",
-        _ => id,
+        "stats" => return "SystemStats".to_owned(),
+        "keyboard" => return "KeyboardLayout".to_owned(),
+        _ => {}
     }
+    if let Some(slug) = custom_widget_slug(id) {
+        return format!("custom:{slug}");
+    }
+    id.to_owned()
 }
 
 /// Canonicalizes a free-form dock-order item. Only `widget:` tokens carry a widget
@@ -1260,6 +1282,26 @@ where
 
 // `JsonStringEnumConverter` writes `[Flags]` enums as "None", "All" or "A, B"; older files
 // sometimes carry raw integers. Both representations must round-trip.
+/// Parses a `[Flags]` enum string such as `"Claude, Codex"`. Shared by serde and by the raw
+/// legacy-JSON migration so both paths recognize the same comma-separated spellings.
+fn parse_flag_names_text(text: &str, names: &[(u32, &str)], all: u32) -> Option<u32> {
+    let mut bits = 0u32;
+    for token in text.split(',').map(str::trim) {
+        if token.is_empty() || token.eq_ignore_ascii_case("None") {
+            continue;
+        }
+        if token.eq_ignore_ascii_case("All") {
+            bits |= all;
+            continue;
+        }
+        let (bit, _) = names
+            .iter()
+            .find(|(_, name)| name.eq_ignore_ascii_case(token))?;
+        bits |= *bit;
+    }
+    Some(bits)
+}
+
 fn parse_flag_names<'de, D>(
     deserializer: D,
     names: &[(u32, &str)],
@@ -1269,28 +1311,13 @@ where
     D: Deserializer<'de>,
 {
     match Value::deserialize(deserializer)? {
-        Value::Number(number) => Ok(number.as_u64().unwrap_or(0) as u32),
-        Value::Null => Ok(0),
-        Value::String(text) => {
-            let mut bits = 0u32;
-            for token in text.split(',').map(str::trim) {
-                if token.is_empty() || token.eq_ignore_ascii_case("None") {
-                    continue;
-                }
-                if token.eq_ignore_ascii_case("All") {
-                    bits |= all;
-                    continue;
-                }
-                match names
-                    .iter()
-                    .find(|(_, name)| name.eq_ignore_ascii_case(token))
-                {
-                    Some((bit, _)) => bits |= *bit,
-                    None => return Err(D::Error::custom("unknown flag name in settings")),
-                }
-            }
-            Ok(bits)
+        // Saturate instead of truncating: `1 + (1 << 32)` must not become a valid Claude bit.
+        Value::Number(number) => {
+            Ok(u32::try_from(number.as_u64().unwrap_or(0)).unwrap_or(u32::MAX))
         }
+        Value::Null => Ok(0),
+        Value::String(text) => parse_flag_names_text(&text, names, all)
+            .ok_or_else(|| D::Error::custom("unknown flag name in settings")),
         _ => Err(D::Error::custom("flags must be a number or enum string")),
     }
 }
@@ -1444,7 +1471,7 @@ impl DockSettings {
         // files written by reference (PascalCase) both resolve to the same widget.
         self.enabled_widgets
             .iter()
-            .any(|w| canonical_widget_setting_id(w).eq_ignore_ascii_case(id))
+            .any(|w| canonical_widget_setting_id(w).eq_ignore_ascii_case(&id))
     }
 
     pub fn set_widget_enabled(&mut self, id: &str, enabled: bool) {
@@ -1455,16 +1482,16 @@ impl DockSettings {
         if id.eq_ignore_ascii_case("SystemStats") {
             self.show_system_stats_widget = enabled;
         }
-        let is_same = |w: &String| canonical_widget_setting_id(w).eq_ignore_ascii_case(id);
+        let is_same = |w: &String| canonical_widget_setting_id(w).eq_ignore_ascii_case(&id);
         if enabled {
             if !self.enabled_widgets.iter().any(is_same) {
-                self.enabled_widgets.push(id.to_owned());
+                self.enabled_widgets.push(id.clone());
             }
             // reference keeps a widget installed when only its switch is turned off, so enabling one
             // must also add it to `InstalledWidgets` or the next `Validate()` rejects the file
             // and `load_from()` resets every setting to defaults.
             if !self.installed_widgets.iter().any(is_same) {
-                self.installed_widgets.push(id.to_owned());
+                self.installed_widgets.push(id.clone());
             }
         } else {
             self.enabled_widgets.retain(|w| !is_same(w));
@@ -1619,10 +1646,11 @@ pub fn effective_bottom_gap_for(settings: &DockSettings, extent: f32) -> i32 {
 
 /// `WidgetCoordinator.ResolveWidgetDensity`: override first, global mode otherwise.
 pub fn resolve_widget_density(settings: &DockSettings, id: &str) -> WidgetDensityMode {
+    let canonical = canonical_widget_setting_id(id);
     settings
         .widget_density_overrides
         .iter()
-        .find(|(key, _)| key.eq_ignore_ascii_case(id))
+        .find(|(key, _)| canonical_widget_setting_id(key) == canonical)
         .map(|(_, mode)| *mode)
         .unwrap_or(settings.global_widget_density)
 }
@@ -1638,11 +1666,7 @@ pub fn widget_density_for(settings: &DockSettings, id: &str) -> f32 {
 /// `DockWidget.ShrinkPriority`: lower values are compacted first when the dock overflows.
 /// 100 is the `DockWidget` base value for widgets without a specific priority.
 pub fn widget_shrink_priority(id: &str) -> u8 {
-    let compact: String = id
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect();
+    let compact = compact_id(id);
     match compact.as_str() {
         "media" => 10,
         "weather" => 15,
@@ -1665,7 +1689,7 @@ pub fn widget_shrink_priority(id: &str) -> u8 {
 fn canonical_widget_list(ids: &[String]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     ids.iter()
-        .map(|id| canonical_widget_setting_id(id).to_owned())
+        .map(|id| canonical_widget_setting_id(id))
         .filter(|id| seen.insert(ordinal_ignore_case_key(id)))
         .collect()
 }
@@ -1729,7 +1753,10 @@ pub fn apply_full_profile(settings: &mut DockSettings, profile: &DockProfile) {
     if let Some(theme) = profile.theme {
         settings.theme = theme;
     }
-    settings.theme_pack = profile.theme_pack.clone().unwrap_or_default();
+    // A profile without an explicit theme pack must not erase the current one.
+    if let Some(pack) = &profile.theme_pack {
+        settings.theme_pack = pack.clone();
+    }
     if let Some(icons) = profile.theme_application_icons {
         settings.theme_application_icons = icons;
     }
@@ -1809,12 +1836,14 @@ fn array_mentions(value: Option<&Value>, needle: &str) -> bool {
 
 fn ai_bits(root: &Map<String, Value>) -> u32 {
     match root.get("AiUsageProviders") {
-        Some(Value::Number(number)) => number.as_u64().unwrap_or(0) as u32,
-        Some(Value::String(text)) => ai_providers::WIDGETS
-            .iter()
-            .filter(|(_, id)| text.eq_ignore_ascii_case(id))
-            .map(|(bit, _)| *bit)
-            .fold(0, |a, b| a | b),
+        Some(Value::Number(number)) => {
+            u32::try_from(number.as_u64().unwrap_or(0)).unwrap_or(u32::MAX)
+        }
+        // The reference persists [Flags] values as "Claude, Codex"; matching the whole string
+        // against one widget id silently dropped every provider but one (or none).
+        Some(Value::String(text)) => {
+            parse_flag_names_text(text, &AI_PROVIDER_NAMES, ai_providers::ALL).unwrap_or(0)
+        }
         _ => 0,
     }
 }
@@ -2151,7 +2180,7 @@ fn normalize_widget_ids(list: &mut Vec<String>) {
     let mut seen = BTreeSet::new();
     let mut next = Vec::with_capacity(list.len());
     for id in list.drain(..) {
-        let canonical = canonical_widget_setting_id(&id).to_owned();
+        let canonical = canonical_widget_setting_id(&id);
         if seen.insert(ordinal_ignore_case_key(&canonical)) {
             next.push(canonical);
         }
@@ -2189,7 +2218,7 @@ fn normalize_widget_tokens(list: &mut Vec<String>) {
 fn canonicalize_density_map(map: &mut BTreeMap<String, WidgetDensityMode>) {
     let previous = std::mem::take(map);
     for (key, value) in previous {
-        let canonical = canonical_widget_setting_id(&key).to_owned();
+        let canonical = canonical_widget_setting_id(&key);
         map.entry(canonical).or_insert(value);
     }
 }
@@ -2198,8 +2227,18 @@ fn canonicalize_placements(map: &mut HashMap<String, String>) {
     let mut previous: Vec<_> = std::mem::take(map).into_iter().collect();
     previous.sort_by(|a, b| a.0.cmp(&b.0));
     for (key, value) in previous {
-        let canonical = canonical_widget_setting_id(&key).to_owned();
+        let canonical = canonical_widget_setting_id(&key);
         map.entry(canonical).or_insert(value);
+    }
+}
+
+/// Island order values are widget IDs (not free-form tokens): normalize them with the same
+/// canonicalizer as every other widget list. Monitor keys are device names and stay untouched.
+fn canonicalize_island_orders(map: &mut HashMap<String, Vec<String>>) {
+    let previous = std::mem::take(map);
+    for (monitor, mut ids) in previous {
+        normalize_widget_ids(&mut ids);
+        map.entry(monitor).or_insert(ids);
     }
 }
 
@@ -2213,6 +2252,7 @@ impl DockSettings {
         normalize_widget_tokens(&mut self.dock_item_order);
         canonicalize_density_map(&mut self.widget_density_overrides);
         canonicalize_placements(&mut self.dynamic_island_placements);
+        canonicalize_island_orders(&mut self.dynamic_island_widget_orders);
         for profile in &mut self.profiles {
             repair_widget_lists(&mut profile.enabled_widgets, &mut profile.installed_widgets);
             normalize_widget_ids(&mut profile.widget_order);
@@ -2429,11 +2469,7 @@ fn is_border_valid(thickness: f64, color: Option<&str>) -> bool {
 
 /// Key used by `StringComparer.OrdinalIgnoreCase` (invariant simple uppercase, no culture).
 fn ordinal_ignore_case_key(value: &str) -> String {
-    let mut key = String::with_capacity(value.len());
-    for c in value.chars() {
-        key.extend(c.to_uppercase());
-    }
-    key
+    culture_ignore_case_key(value, false)
 }
 
 fn has_duplicates_ignore_case(values: &[String]) -> bool {
@@ -2829,15 +2865,18 @@ impl DockSettings {
             errors.push("DateFormatInvalid");
         }
 
-        // Dynamic Island order/placement maps (keys must be catalog widgets, unique under the reference // OrdinalIgnoreCase comparer — `"Clock"` and `"clock"` are the same placement).
-        let typed_placements_invalid = self.dynamic_island_placements.len() > CATALOG_WIDGET_COUNT
+        // Dynamic Island order/placement maps: keys/values must be supported widget IDs
+        // (catalog widgets, hidden legacy aliases or `custom:<slug>`), unique under the reference
+        // OrdinalIgnoreCase comparer — `"Clock"` and `"clock"` are the same placement. The caps
+        // are safety limits, not the catalog card count.
+        let typed_placements_invalid = self.dynamic_island_placements.len() > MAX_ISLAND_PLACEMENTS
             || has_duplicate_keys_ignore_case(self.dynamic_island_placements.keys())
             || self.dynamic_island_placements.iter().any(|(id, display)| {
                 !is_supported_widget_id(id) || display.trim().is_empty() || display.len() > 32
             });
         let extra_placements_invalid = match self.extra.get("DynamicIslandPlacements") {
             Some(Value::Object(placements)) => {
-                placements.len() > CATALOG_WIDGET_COUNT
+                placements.len() > MAX_ISLAND_PLACEMENTS
                     || has_duplicate_keys_ignore_case(placements.keys())
                     || placements.iter().any(|(id, display)| {
                         !is_supported_widget_id(id)
@@ -2852,22 +2891,23 @@ impl DockSettings {
             errors.push("IslandPlacementInvalid");
         }
 
-        let typed_orders_invalid = self.dynamic_island_widget_orders.len() > 32
+        let typed_orders_invalid = self.dynamic_island_widget_orders.len()
+            > MAX_ISLAND_MONITOR_ORDERS
             || self.dynamic_island_widget_orders.iter().any(|(key, ids)| {
                 key.trim().is_empty()
                     || key.len() > 32
-                    || ids.len() > CATALOG_WIDGET_COUNT
+                    || ids.len() > MAX_ISLAND_ORDER_IDS
                     || ids.iter().any(|id| !is_supported_widget_id(id))
                     || has_duplicates_ignore_case(ids)
             });
         let extra_orders_invalid = match self.extra.get("DynamicIslandWidgetOrders") {
             Some(Value::Object(orders)) => {
-                orders.len() > 32
+                orders.len() > MAX_ISLAND_MONITOR_ORDERS
                     || orders.iter().any(|(key, value)| {
                         key.trim().is_empty()
                             || key.len() > 32
                             || !value.as_array().is_some_and(|ids| {
-                                ids.len() <= CATALOG_WIDGET_COUNT
+                                ids.len() <= MAX_ISLAND_ORDER_IDS
                                     && ids
                                         .iter()
                                         .all(|id| id.as_str().is_some_and(is_supported_widget_id))
@@ -2915,10 +2955,13 @@ pub const BACKUP_MANIFEST_VERSION: u64 = 1;
 /// Backs up an unusable settings file without replacing the original, like reference
 /// `DockSettingsStore.BackupInvalidSettingsFile`.
 fn backup_invalid_settings(path: &Path) {
+    // Millisecond resolution plus a sequence keeps two rejects in the same second from
+    // overwriting each other's backup.
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    let backup = path.with_file_name(format!("settings.json.invalid-{stamp}"));
+        .map_or(0, |d| d.as_millis() as u64);
+    let sequence = INVALID_BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let backup = path.with_file_name(format!("settings.json.invalid-{stamp}-{sequence}"));
     // Keep the original in place: one malformed field must not destroy the only copy.
     let _ = fs::copy(path, backup);
 }
@@ -3038,6 +3081,7 @@ fn write_settings_aliases(root: &mut Map<String, Value>, settings: &DockSettings
 }
 
 static TMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static INVALID_BACKUP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Unique temporary file name for one write. The reference build uses the same
 /// `<file>.<guid>.tmp` scheme; a fixed `settings.json.tmp` would let two
@@ -3072,7 +3116,12 @@ fn unique_settings_tmp(path: &Path) -> PathBuf {
 }
 
 fn write_settings_to(path: &Path, settings: &DockSettings) -> std::io::Result<()> {
-    let errors = settings.validate();
+    // Validate the data that will actually be written. Validating the caller's raw spellings
+    // first rejected repairable IDs (`"stats"` vs `"SystemStats"`, lowercase island orders,
+    // case variants of `custom:` IDs) even though canonicalization fixes them one line later.
+    let mut canonical = settings.clone();
+    canonical.canonicalize_widget_keys();
+    let errors = canonical.validate();
     if !errors.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -3082,8 +3131,6 @@ fn write_settings_to(path: &Path, settings: &DockSettings) -> std::io::Result<()
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut canonical = settings.clone();
-    canonical.canonicalize_widget_keys();
     let mut value = serde_json::to_value(&canonical)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     if let Value::Object(root) = &mut value {
@@ -3511,6 +3558,39 @@ mod tests {
     }
 
     #[test]
+    fn disabled_hotkey_values_survive_load_validate_and_save_round_trip() {
+        let dir = temp_dir("cfg-disabled-hotkeys");
+        let path = dir.join("settings.json");
+        for value in ["Esc", "Escape", "Backspace", "", "Disabled"] {
+            fs::write(
+                &path,
+                format!(
+                    r#"{{"LauncherHotkey":"AltSpace","CustomLauncherHotkey":"{value}","DockHotkey":"CtrlSpace","CustomDockHotkey":"{value}"}}"#
+                ),
+            )
+            .unwrap();
+            let loaded = load_from(&path);
+            assert_eq!(
+                loaded.custom_launcher_hotkey.as_deref(),
+                Some(value),
+                "{value} must not reset the file"
+            );
+            assert!(
+                loaded.validate().is_empty(),
+                "{value}: {:?}",
+                loaded.validate()
+            );
+            assert!(loaded.launcher_binding().is_none(), "{value}");
+            assert!(loaded.dock_binding().is_none(), "{value}");
+            save_to(&path, &loaded).unwrap();
+            let reloaded = load_from(&path);
+            assert_eq!(reloaded.custom_launcher_hotkey.as_deref(), Some(value));
+            assert!(reloaded.validate().is_empty(), "{value}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn legacy_numeric_and_retired_stats_flags_are_sanitized() {
         assert_eq!(
             deserialize_stats_meters(&serde_json::json!(51)).unwrap(),
@@ -3519,6 +3599,16 @@ mod tests {
         assert_eq!(
             deserialize_stats_meters(&serde_json::json!("Cpu, CpuTemperature, Battery")).unwrap(),
             1 | 4
+        );
+    }
+
+    #[test]
+    fn oversized_flag_numbers_do_not_truncate_into_valid_bits() {
+        let raw = normalize_legacy_json(r#"{"AiUsageProviders":4294967297}"#);
+        let settings: DockSettings = serde_json::from_str(&raw).unwrap();
+        assert!(
+            settings.validate().contains(&"AiUsageProvidersInvalid"),
+            "a u64 overflow must not truncate to the Claude bit"
         );
     }
 
@@ -3679,12 +3769,14 @@ mod tests {
                 .map(String::as_str),
             Some("*")
         );
+        // Island order values are widget IDs: lowercase legacy spellings are canonicalized
+        // on load instead of tripping `IslandOrderInvalid` on the next save.
         assert_eq!(
             loaded
                 .dynamic_island_widget_orders
                 .get(r"\\.\DISPLAY1")
                 .map(Vec::as_slice),
-            Some(["media".to_owned(), "clock".to_owned()].as_slice())
+            Some(["Media".to_owned(), "Clock".to_owned()].as_slice())
         );
 
         save_to(&path, &loaded).unwrap();
@@ -3900,6 +3992,118 @@ mod tests {
         assert_eq!(loaded.profiles[0].enabled_widgets, ["Clock"]);
         assert!(loaded.extra.is_empty(), "aliases must not leak into extra");
         assert!(loaded.profiles[0].extra.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_canonicalizes_repairable_settings_before_validating() {
+        let dir = temp_dir("cfg-canonicalize-before-validate");
+        let path = dir.join("settings.json");
+        let mut settings = DockSettings {
+            enabled_widgets: vec!["stats".to_owned()],
+            installed_widgets: vec!["SystemStats".to_owned()],
+            widget_density_overrides: BTreeMap::from([(
+                "stats".to_owned(),
+                WidgetDensityMode::Compact,
+            )]),
+            dynamic_island_placements: HashMap::from([(
+                "CUSTOM:Usd-Try".to_owned(),
+                "*".to_owned(),
+            )]),
+            dynamic_island_widget_orders: HashMap::from([(
+                "DISPLAY1".to_owned(),
+                vec!["systemstats".to_owned()],
+            )]),
+            ..DockSettings::default()
+        };
+        assert!(!settings.validate().is_empty(), "raw spellings are invalid");
+        // The caller did not canonicalize; save must do it before checking validity.
+        save_to(&path, &settings).unwrap();
+        settings.canonicalize_widget_keys();
+        assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+
+        let loaded = load_from(&path);
+        assert!(loaded.validate().is_empty(), "{:?}", loaded.validate());
+        assert_eq!(loaded.enabled_widgets, ["SystemStats"]);
+        assert_eq!(loaded.installed_widgets, ["SystemStats"]);
+        assert_eq!(
+            loaded.widget_density_overrides.get("SystemStats"),
+            Some(&WidgetDensityMode::Compact)
+        );
+        assert_eq!(
+            loaded
+                .dynamic_island_placements
+                .get("custom:Usd-Try")
+                .map(String::as_str),
+            Some("*")
+        );
+        assert_eq!(
+            loaded.dynamic_island_widget_orders.get("DISPLAY1").unwrap(),
+            &vec!["SystemStats".to_owned()]
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn island_limits_are_not_tied_to_the_catalog_card_count() {
+        let mut placements = HashMap::new();
+        for index in 0..CATALOG_WIDGET_COUNT + 8 {
+            placements.insert(
+                format!("custom:card-{index}"),
+                DYNAMIC_ISLAND_ALL_DISPLAYS.to_owned(),
+            );
+        }
+        let mut settings = DockSettings {
+            dynamic_island_placements: placements,
+            dynamic_island_widget_orders: HashMap::from([(
+                "DISPLAY1".to_owned(),
+                (0..CATALOG_WIDGET_COUNT + 4)
+                    .map(|i| format!("custom:card-{i}"))
+                    .collect(),
+            )]),
+            ..DockSettings::default()
+        };
+        assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+        settings
+            .dynamic_island_placements
+            .insert("Clock".to_owned(), "*".to_owned());
+        assert!(settings.validate().is_empty(), "{:?}", settings.validate());
+
+        let mut too_many = settings.clone();
+        for index in 0..MAX_ISLAND_PLACEMENTS + 1 {
+            too_many
+                .dynamic_island_placements
+                .insert(format!("custom:extra-{index}"), "*".to_owned());
+        }
+        assert!(too_many.validate().contains(&"IslandPlacementInvalid"));
+        let mut too_many = settings;
+        too_many.dynamic_island_widget_orders.insert(
+            "DISPLAY2".to_owned(),
+            (0..MAX_ISLAND_ORDER_IDS + 1)
+                .map(|i| format!("custom:order-{i}"))
+                .collect(),
+        );
+        assert!(too_many.validate().contains(&"IslandOrderInvalid"));
+    }
+
+    #[test]
+    fn invalid_backups_never_overwrite_each_other() {
+        let dir = temp_dir("cfg-invalid-backup-unique");
+        let path = dir.join("settings.json");
+        fs::write(&path, r#"{"FocusMinutes":0}"#).unwrap();
+        backup_invalid_settings(&path);
+        backup_invalid_settings(&path);
+        let backups: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.json.invalid-")
+            })
+            .collect();
+        assert_eq!(backups.len(), 2, "{backups:?}");
         let _ = fs::remove_dir_all(&dir);
     }
 

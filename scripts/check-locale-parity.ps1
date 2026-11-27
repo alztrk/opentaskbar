@@ -65,11 +65,41 @@ function Get-Catalog([string]$Path) {
     @($json.PSObject.Properties.Name)
 }
 
+function Get-CatalogValues([string]$Path) {
+    $json = Get-Content -Raw -Encoding UTF8 -LiteralPath $Path | ConvertFrom-Json
+    $values = @{}
+    foreach ($property in $json.PSObject.Properties) { $values[$property.Name] = [string]$property.Value }
+    $values
+}
+
+# Translation-quality gate (no mass edits): high-visibility labels that are already
+# translated in all 13 non-English catalogs must never regress to the en-US text.
+# Legacy debt (including the Rust-only C3 feature labels) is bounded by the budget below.
+$highVisibilityKeys = @(
+    'Settings','WindowPickerTitle','WindowPickerPrevious','WindowPickerNext',
+    'WindowPickerPage','MagnificationExpandsDock','MagnificationExpandsDockDescription','SearchNoResults',
+    'ContentAlignCenter','ContentAlignEnd','PreviewDisabledHint','FocusMinutesLabel',
+    'FocusBreakMinutesLabel','WidgetDensityCompact','WidgetDensityFull','AiUsageRingLabel',
+    'SectionGlassEffect','GlassBlurLabel','GlassSaturationLabel','GlassEdgeGlowLabel',
+    'GlassPointerLightLabel','SectionDisplayCare','SurfaceTrueBlack','OledReduceGlow',
+    'OledReduceGlowHelp','BurnInShift','BurnInShiftHelp','BurnInShiftInterval',
+    'OledAutoTrigger','OledAutoTriggerHelp','OledLowBatteryThreshold','OledAutoOnNightLight',
+    'OledAutoOnNightLightHelp','AmbientMode','AmbientModeHelp','AnimationFpsCap',
+    'AnimationFpsCapHelp','FpsUnlimited','PlacementInWidgets','OpenLocation',
+    'GpuEngine','DropdownSearchPlaceholder','DropdownNoResults','WeatherLocationUsed'
+)
+$englishIdenticalBudget = @{
+    'de-DE'=203; 'es-ES'=232; 'fr-FR'=252; 'it-IT'=242; 'ja-JP'=221; 'ko-KR'=220;
+    'nl-NL'=260; 'pl-PL'=232; 'pt-BR'=241; 'ru-RU'=211; 'tr-TR'=21; 'uk-UA'=210; 'zh-CN'=218
+}
+
 $csSets = @{}
 $rustSets = @{}
+$rustValues = @{}
 foreach ($lang in $langs) {
     $csSets[$lang] = Get-Catalog (Join-Path $csDir "$lang.json")
     $rustSets[$lang] = Get-Catalog (Join-Path $rustDir "$lang.json")
+    $rustValues[$lang] = Get-CatalogValues (Join-Path $rustDir "$lang.json")
 }
 
 $referenceCs = @($csSets['en-US'] | Sort-Object)
@@ -96,6 +126,22 @@ foreach ($lang in $langs) {
     foreach ($key in $required) {
         if ($rustSets[$lang] -notcontains $key) { $failures.Add("$lang missing required key $key") }
     }
+    if ($lang -ne 'en-US') {
+        foreach ($key in $highVisibilityKeys) {
+            if ($rustValues[$lang][$key] -ceq $rustValues['en-US'][$key]) {
+                $failures.Add("$lang high-visibility key $key regressed to the en-US text")
+            }
+        }
+        $identical = 0
+        foreach ($key in $rustValues['en-US'].Keys) {
+            if ($rustValues[$lang].ContainsKey($key) -and $rustValues[$lang][$key] -ceq $rustValues['en-US'][$key]) {
+                $identical++
+            }
+        }
+        if ($identical -gt $englishIdenticalBudget[$lang]) {
+            $failures.Add("$lang has $identical en-US-identical values; budget is $($englishIdenticalBudget[$lang])")
+        }
+    }
     # reference and Rust catalogs intentionally diverge: Rust carries the feature keys
     # listed above, while the frozen reference catalogs keep their own legacy keys. Parity is
     # enforced per family (exact count + identical key set) plus the $required
@@ -108,5 +154,5 @@ if ($failures.Count -gt 0) {
 }
 
 if (-not $Quiet) {
-    Write-Host "Locale parity OK: $($langs.Count) frozen reference catalogs x $($referenceCs.Count) keys; $($langs.Count) Rust catalogs x $($referenceRust.Count) keys; $($required.Count) new keys present everywhere." -ForegroundColor Green
+    Write-Host "Locale parity OK: $($langs.Count) frozen reference catalogs x $($referenceCs.Count) keys; $($langs.Count) Rust catalogs x $($referenceRust.Count) keys; $($required.Count) required keys present everywhere; $($highVisibilityKeys.Count) high-visibility labels translated." -ForegroundColor Green
 }
