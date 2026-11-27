@@ -107,6 +107,28 @@ impl FocusSession {
         }
     }
 
+    /// Synchronizes duration & target settings into this session whenever it is idle so
+    /// edits made in Settings take effect immediately without clobbering an active timer.
+    pub fn sync_from_settings(&mut self, settings: &DockSettings) {
+        if self.running {
+            return;
+        }
+        let fresh = Self::from_settings(settings);
+        let at_start = self.phase == FocusPhase::Focus
+            && self.remaining_secs == self.focus_minutes.saturating_mul(60);
+        let break_at_start = self.phase == FocusPhase::Break
+            && self.remaining_secs == self.break_minutes.saturating_mul(60);
+        self.focus_minutes = fresh.focus_minutes;
+        self.break_minutes = fresh.break_minutes;
+        self.sessions_target = fresh.sessions_target;
+        if at_start {
+            self.remaining_secs = self.focus_minutes.saturating_mul(60);
+        } else if break_at_start {
+            self.remaining_secs = self.break_minutes.saturating_mul(60);
+        }
+        self.session_number = (self.sessions_completed % self.sessions_target.max(1)) + 1;
+    }
+
     pub fn phase_duration_secs(&self) -> u64 {
         match self.phase {
             FocusPhase::Focus => self.focus_minutes.saturating_mul(60),
@@ -240,26 +262,23 @@ impl SharedFocusSession {
     }
 }
 
-/// `SystemSounds.Asterisk.Play()` → `MessageBeep(MB_ICONASTERISK)`.
+/// `SystemSounds.Asterisk.Play()` → native Win32 `MessageBeep(MB_ICONASTERISK)`.
 pub fn play_break_chime() {
-    // `SystemSounds.Asterisk.Play()` equivalent without a console window.
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        let _ = std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "[console]::beep(880,120)",
-            ])
-            .creation_flags(0x0800_0000)
-            .spawn();
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBeep(u_type: u32) -> i32;
+        }
+        // SAFETY: `MessageBeep(MB_ICONASTERISK)` is a stateless Win32 sound call.
+        unsafe {
+            let _ = MessageBeep(0x0000_0040);
+        }
     }
 }
 
 /// Builds the redesigned live focus flyout with localized phase/session status and presets.
-pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
+pub fn build_focus_flyout(session: &FocusSession, is_dark: bool) -> FlyoutSpec {
     let ratio = session.progress_ratio();
     let is_break = session.phase == FocusPhase::Break;
     let phase_label = loc::t(if is_break { "Break" } else { "Focus" });
@@ -268,7 +287,6 @@ pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
     } else {
         session.focus_minutes
     };
-    // WS-E: keep the localized per-phase summary keys alongside the redesigned glyph row.
     let total_label = match session.phase {
         FocusPhase::Focus => {
             loc::t_fmt("FocusMinutesSummary", &[&session.focus_minutes.to_string()])
@@ -280,18 +298,13 @@ pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
     let duration_label = loc::t_fmt("MinutesShort", &[&phase_mins.to_string()]);
     let session_progress = format!("{}/{}", session.session_number, session.sessions_target);
     let session_badge = loc::t_fmt("FocusSession", &[&session_progress]);
-    let completed_sessions = loc::t_fmt(
-        "FocusSessionsCount",
-        &[&session.sessions_completed.to_string()],
-    );
-    let completed_mins = loc::t_fmt("MinutesShort", &[&session.focus_minutes_total.to_string()]);
-    let pal = design::DARK;
+    let pal = design::palette(is_dark);
     let phase_color = if is_break {
         pal.success
     } else {
         pal.widget_accent
     };
-    let phase_glyph = if is_break { 0xE708 } else { 0xE916 };
+    let phase_glyph = if is_break { 0xE708 } else { 0xE7C8 };
 
     FlyoutSpec {
         title: String::new(),
@@ -305,11 +318,6 @@ pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
                 detail: Some(duration_label),
                 value: session_badge,
             },
-            // WS-E: `FocusSessionProgress` via `session_label()`.
-            FlyoutBlock::StatRow {
-                label: loc::t("Focus"),
-                value: session.session_label(),
-            },
             FlyoutBlock::Hero {
                 value: format_mm_secs(session.remaining_secs),
                 caption: Some(format!("{} · {}", session.phase.label(), total_label)),
@@ -319,7 +327,7 @@ pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
             },
             FlyoutBlock::ProgressBar {
                 label: phase_label,
-                value_text: format!("{:.0}%", ratio * 100.0),
+                value_text: super::format_percent((ratio * 100.0).round() as u32),
                 ratio,
                 tone: if is_break {
                     BarTone::Level
@@ -327,11 +335,6 @@ pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
                     BarTone::Accent
                 },
             },
-            FlyoutBlock::StatRow {
-                label: loc::t("FocusSessionCount"),
-                value: format!("{completed_sessions} · {completed_mins}"),
-            },
-            // WS-E: combined completion summary keys.
             FlyoutBlock::StatRow {
                 label: loc::t("FocusCompleted"),
                 value: loc::t_fmt(
@@ -496,5 +499,48 @@ mod tests {
         assert_eq!(snap.sessions_completed, 3);
         shared.with_mut(|s| s.sessions_completed = 4);
         assert_eq!(snap.sessions_completed, 3);
+    }
+
+    #[test]
+    fn sync_from_settings_updates_when_idle_and_preserves_running() {
+        let mut s = FocusSession::default();
+        let mut settings = DockSettings::default();
+        settings
+            .extra
+            .insert("FocusMinutes".into(), serde_json::json!(40));
+        settings
+            .extra
+            .insert("FocusBreakMinutes".into(), serde_json::json!(8));
+        settings
+            .extra
+            .insert("FocusSessions".into(), serde_json::json!(5));
+        s.sync_from_settings(&settings);
+        assert_eq!(s.focus_minutes, 40);
+        assert_eq!(s.break_minutes, 8);
+        assert_eq!(s.sessions_target, 5);
+        assert_eq!(s.remaining_secs, 40 * 60);
+
+        s.running = true;
+        s.remaining_secs = 123;
+        settings
+            .extra
+            .insert("FocusMinutes".into(), serde_json::json!(15));
+        s.sync_from_settings(&settings);
+        assert_eq!(s.focus_minutes, 40);
+        assert_eq!(s.remaining_secs, 123);
+    }
+
+    #[test]
+    fn build_focus_flyout_respects_theme_and_removes_duplicates() {
+        let s = FocusSession::default();
+        let dark = build_focus_flyout(&s, true);
+        let light = build_focus_flyout(&s, false);
+        let stat_rows = dark
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, FlyoutBlock::StatRow { .. }))
+            .count();
+        assert_eq!(stat_rows, 1, "duplicated focus stat rows must be removed");
+        assert_eq!(dark.blocks.len(), light.blocks.len());
     }
 }

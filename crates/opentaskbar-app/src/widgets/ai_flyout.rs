@@ -93,7 +93,12 @@ pub fn from_telemetry(full: &super::telemetry::AiFullDetail) -> AiFullDetail {
             .breakdown
             .iter()
             .filter(|s| !s.name.is_empty())
-            .map(|s| (s.name.clone(), format!("{:.0}%", s.used * 100.0)))
+            .map(|s| {
+                (
+                    s.name.clone(),
+                    super::format_percent((s.used * 100.0).round() as u32),
+                )
+            })
             .collect(),
         reset_countdown,
         unlimited_credits: full.unlimited_credits,
@@ -213,18 +218,8 @@ pub fn build_ai_flyout(
         action_label: Some(loc::t("Open")),
     });
 
-    // Plan chip (BadgeRow gives the rounded pill reference uses for subscription tier).
-    if let Some(plan) = detail.plan.as_ref().or(snap.plan.as_ref()) {
-        blocks.push(FlyoutBlock::BadgeRow {
-            id: 20,
-            code: if detail.unlimited_credits {
-                "∞".to_owned()
-            } else {
-                loc::t("AiUsagePlan")
-            },
-            title: plan.clone(),
-            active: false,
-        });
+    if detail.unlimited_credits {
+        blocks.push(FlyoutBlock::Note(loc::t("AiUsageCreditsUnlimited")));
     }
 
     // Spend header.
@@ -264,9 +259,21 @@ pub fn build_ai_flyout(
 
     // Usage window bars from the cached chip snapshot.
     for w in &snap.windows {
+        let pct_val = (w.used * 100.0).round() as u32;
+        let pct_str = super::format_percent(pct_val);
+        let reset_trimmed = w.reset_text.trim();
+        let reset_is_dup = reset_trimmed.is_empty()
+            || reset_trimmed == "—"
+            || reset_trimmed == pct_str
+            || reset_trimmed == format!("{pct_val}%");
+        let value_text = if reset_is_dup {
+            pct_str
+        } else {
+            format!("{pct_str} · {reset_trimmed}")
+        };
         blocks.push(FlyoutBlock::ProgressBar {
             label: w.label.clone(),
-            value_text: format!("{:.0}% · {}", w.used * 100.0, w.reset_text),
+            value_text,
             ratio: w.used,
             tone: BarTone::Usage,
         });
@@ -298,12 +305,16 @@ pub fn build_ai_flyout(
     blocks.push(FlyoutBlock::ButtonBar(vec![
         (2, loc::t("AiUsageRefresh"), false),
         (3, loc::t("AiUsageFullRefresh"), false),
-        (1, loc::t("AiUsageOpenDashboard"), true),
     ]));
+    blocks.push(FlyoutBlock::ButtonBar(vec![(
+        1,
+        loc::t("AiUsageOpenDashboard"),
+        true,
+    )]));
     FlyoutSpec {
         title: String::new(),
         subtitle: None,
-        width_dips: 292.0,
+        width_dips: 312.0,
         blocks,
     }
 }

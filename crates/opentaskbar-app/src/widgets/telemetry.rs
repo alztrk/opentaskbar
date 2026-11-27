@@ -24,7 +24,10 @@ use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{
     EDataFlow, IMMDeviceEnumerator, MMDeviceEnumerator, eCapture, eMultimedia, eRender,
 };
-use windows::Win32::System::Com::{CLSCTX_ALL, CoCreateInstance, STGM_READ};
+use windows::Win32::System::Com::{
+    CLSCTX_ALL, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+    STGM_READ,
+};
 use windows_sys::Win32::Foundation::{
     CloseHandle, FARPROC, FILETIME, FreeLibrary, HMODULE, LocalFree, SYSTEMTIME,
 };
@@ -692,10 +695,15 @@ pub fn sample_gpu_usage() -> Option<f32> {
     sample_gpu_pdh().map(|(usage, _)| usage)
 }
 
-/// Engine kind of the busiest GPU engine in the latest PDH sample (e.g. `"3D"`,
-/// `"Video Decode"`). Returns `None` when no sample can be collected.
+/// Engine kind of the busiest GPU engine from the latest background PDH sample
+/// (e.g. `"3D"`, `"Video Decode"`). Never invokes `PdhCollectQueryData` synchronously
+/// on the UI thread; reads the value cached by `sample_gpu_temp()`'s worker.
 pub fn sample_gpu_engine_name() -> Option<String> {
-    sample_gpu_pdh().map(|(_, engine)| engine)
+    GPU_SAMPLE
+        .lock()
+        .ok()
+        .and_then(|g| g.2.clone())
+        .filter(|s| !s.is_empty())
 }
 
 // NVML is resolved on demand from System32: no link-time dependency, and a rogue DLL placed next to
@@ -1232,6 +1240,25 @@ fn short_name(full: String) -> String {
     }
 }
 
+/// Locale-aware short weekday label (`0 = Sunday .. 6 = Saturday`).
+/// Avoids Turkish 3-char collisions (`Pazar`/`Pazartesi` -> `Paz`/`Pzt`, `Cuma`/`Cumartesi` -> `Cum`/`Cmt`).
+pub fn weekday_short_name(index: u32) -> String {
+    let idx = index % 7;
+    if loc::language().to_ascii_lowercase().starts_with("tr") {
+        return match idx {
+            0 => "Paz",
+            1 => "Pzt",
+            2 => "Sal",
+            3 => "Çar",
+            4 => "Per",
+            5 => "Cum",
+            _ => "Cmt",
+        }
+        .to_owned();
+    }
+    short_name(weekday_name(idx))
+}
+
 /// Short weekday for Monday-first calendar headers (`0 = Monday`).
 pub fn weekday_short_monday_first(index: usize) -> String {
     let sunday_index = match index {
@@ -1243,7 +1270,7 @@ pub fn weekday_short_monday_first(index: usize) -> String {
         5 => 6,
         _ => 0,
     };
-    short_name(weekday_name(sunday_index))
+    weekday_short_name(sunday_index)
 }
 
 /// Returns `(year, month, day)` -> days in that Gregorian month.
@@ -1286,7 +1313,7 @@ pub fn local_clock_info() -> LocalClockInfo {
         GetLocalTime(&mut lt);
         GetSystemTime(&mut ut);
     }
-    let dow_s = short_name(weekday_name(u32::from(lt.wDayOfWeek)));
+    let dow_s = weekday_short_name(u32::from(lt.wDayOfWeek));
     let dow_f = weekday_name(u32::from(lt.wDayOfWeek));
     let mon_s = short_name(loc::t(month_key(u32::from(lt.wMonth))));
     let mon_f = loc::t(month_key(u32::from(lt.wMonth)));
@@ -1315,7 +1342,7 @@ pub fn local_clock_info() -> LocalClockInfo {
         second: u32::from(lt.wSecond),
         short_date: format!("{} {mon_s}", lt.wDay),
         weekday_short: dow_s,
-        full_date: format!("{dow_f}, {} {mon_f}", lt.wDay),
+        full_date: format!("{dow_f}, {} {mon_f} {}", lt.wDay, lt.wYear),
         tz_label,
         tz_name: timezone_display_name(),
         first_day_of_week: first_day_of_week(),
@@ -1362,7 +1389,26 @@ pub fn format_clock(info: &LocalClockInfo, settings: &DockSettings) -> (String, 
                 ClockDateFormat::MmDdYyyy => format!("{m:02}/{d:02}/{y:04}"),
                 ClockDateFormat::YyyyMmDd => format!("{y:04}-{m:02}-{d:02}"),
                 ClockDateFormat::DdMmYyyyDots => format!("{d:02}.{m:02}.{y:04}"),
-                ClockDateFormat::System => info.short_date.clone(),
+                ClockDateFormat::System => {
+                    let lang = loc::language().to_ascii_lowercase();
+                    if lang.starts_with("en-us") {
+                        format!("{m:02}/{d:02}/{y:04}")
+                    } else if lang.starts_with("ja")
+                        || lang.starts_with("ko")
+                        || lang.starts_with("zh")
+                    {
+                        format!("{y:04}-{m:02}-{d:02}")
+                    } else if lang.starts_with("tr")
+                        || lang.starts_with("de")
+                        || lang.starts_with("ru")
+                        || lang.starts_with("uk")
+                        || lang.starts_with("pl")
+                    {
+                        format!("{d:02}.{m:02}.{y:04}")
+                    } else {
+                        format!("{d:02}/{m:02}/{y:04}")
+                    }
+                }
             }
         }
     };
@@ -1420,6 +1466,28 @@ pub fn empty_recycle_bin() {
 
 // --- Core Audio (Output & Microphone Input) ---
 
+struct AudioComGuard {
+    initialized: bool,
+}
+
+impl AudioComGuard {
+    fn new() -> Self {
+        // SAFETY: no out-pointer; if the thread already initialized COM in another apartment
+        // (`RPC_E_CHANGED_MODE`), `is_ok()` is false so `CoUninitialize` is skipped.
+        let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok() };
+        Self { initialized }
+    }
+}
+
+impl Drop for AudioComGuard {
+    fn drop(&mut self) {
+        if self.initialized {
+            // SAFETY: paired with the successful `CoInitializeEx` in `new()`.
+            unsafe { CoUninitialize() };
+        }
+    }
+}
+
 fn endpoint_volume_for(flow: EDataFlow) -> Option<IAudioEndpointVolume> {
     unsafe {
         let en: IMMDeviceEnumerator =
@@ -1430,6 +1498,7 @@ fn endpoint_volume_for(flow: EDataFlow) -> Option<IAudioEndpointVolume> {
 }
 
 pub fn default_audio_device_name(capture: bool) -> Option<String> {
+    let _com = AudioComGuard::new();
     let flow = if capture { eCapture } else { eRender };
     unsafe {
         let en: IMMDeviceEnumerator =
@@ -1443,6 +1512,7 @@ pub fn default_audio_device_name(capture: bool) -> Option<String> {
 }
 
 pub fn get_audio_state() -> (u32, bool) {
+    let _com = AudioComGuard::new();
     let Some(ep) = endpoint_volume_for(eRender) else {
         return (0, false);
     };
@@ -1457,6 +1527,7 @@ pub fn get_audio_state() -> (u32, bool) {
 }
 
 pub fn get_mic_state() -> Option<(u32, bool)> {
+    let _com = AudioComGuard::new();
     let ep = endpoint_volume_for(eCapture)?;
     unsafe {
         let vol = ep
@@ -1469,6 +1540,7 @@ pub fn get_mic_state() -> Option<(u32, bool)> {
 }
 
 pub fn adjust_audio_volume(delta_pct: i32) {
+    let _com = AudioComGuard::new();
     let Some(ep) = endpoint_volume_for(eRender) else {
         return;
     };
@@ -1482,20 +1554,28 @@ pub fn adjust_audio_volume(delta_pct: i32) {
     }
 }
 
-pub fn set_audio_volume(pct: u32) {
+/// Sets output volume (`0..=100`). When `unmute_if_increasing` is `false` (e.g. scrolling down
+/// while muted), lowers the level without unmuting the endpoint.
+pub fn set_audio_volume_preserving_mute(pct: u32, unmute_if_increasing: bool) {
+    let _com = AudioComGuard::new();
     let Some(ep) = endpoint_volume_for(eRender) else {
         return;
     };
     let scalar = (pct.min(100) as f32) / 100.0;
     unsafe {
         let _ = ep.SetMasterVolumeLevelScalar(scalar, std::ptr::null());
-        if pct > 0 {
+        if unmute_if_increasing && pct > 0 {
             let _ = ep.SetMute(false, std::ptr::null());
         }
     }
 }
 
+pub fn set_audio_volume(pct: u32) {
+    set_audio_volume_preserving_mute(pct, true);
+}
+
 pub fn toggle_audio_mute() {
+    let _com = AudioComGuard::new();
     let Some(ep) = endpoint_volume_for(eRender) else {
         return;
     };
@@ -1506,6 +1586,7 @@ pub fn toggle_audio_mute() {
 }
 
 pub fn set_mic_volume(pct: u32) {
+    let _com = AudioComGuard::new();
     let Some(ep) = endpoint_volume_for(eCapture) else {
         return;
     };
@@ -1519,6 +1600,7 @@ pub fn set_mic_volume(pct: u32) {
 }
 
 pub fn toggle_mic_mute() {
+    let _com = AudioComGuard::new();
     let Some(ep) = endpoint_volume_for(eCapture) else {
         return;
     };
@@ -1594,30 +1676,68 @@ fn read_total_net_bytes() -> (u64, u64, String) {
         }
         let rows =
             std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
-        let (mut rx, mut tx) = (0u64, 0u64);
-        let mut best_traffic = 0u64;
-        let mut best_name = String::new();
+        let alias_of = |r: &windows_sys::Win32::NetworkManagement::IpHelper::MIB_IF_ROW2| {
+            let end = r
+                .Alias
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(r.Alias.len());
+            String::from_utf16_lossy(&r.Alias[..end]).trim().to_owned()
+        };
+        // Prefer physical hardware, non-filter interfaces so WFP/NDIS filter layers do not
+        // double-count every packet. Fall back to non-filter non-loopback interfaces when a
+        // VM/VPN-only host has no hardware NIC marked `HardwareInterface`.
+        let mut hw_rx = 0u64;
+        let mut hw_tx = 0u64;
+        let mut hw_best_traffic = 0u64;
+        let mut hw_best_name = String::new();
+        let mut hw_count = 0usize;
+
+        let mut fb_rx = 0u64;
+        let mut fb_tx = 0u64;
+        let mut fb_best_traffic = 0u64;
+        let mut fb_best_name = String::new();
+
         for r in rows {
-            if r.OperStatus == IfOperStatusUp && r.Type != 24 {
-                rx = rx.saturating_add(r.InOctets);
-                tx = tx.saturating_add(r.OutOctets);
-                let total = r.InOctets.saturating_add(r.OutOctets);
-                if total >= best_traffic {
-                    best_traffic = total;
-                    let end = r
-                        .Alias
-                        .iter()
-                        .position(|&c| c == 0)
-                        .unwrap_or(r.Alias.len());
-                    let alias = String::from_utf16_lossy(&r.Alias[..end]).trim().to_owned();
+            if r.OperStatus != IfOperStatusUp || r.Type == 24 || r.Type == 131 {
+                continue;
+            }
+            let flags = r.InterfaceAndOperStatusFlags._bitfield;
+            let is_hardware = (flags & 0x01) != 0;
+            let is_filter = (flags & 0x02) != 0;
+            if is_filter {
+                continue;
+            }
+            let total = r.InOctets.saturating_add(r.OutOctets);
+            if is_hardware {
+                hw_count += 1;
+                hw_rx = hw_rx.saturating_add(r.InOctets);
+                hw_tx = hw_tx.saturating_add(r.OutOctets);
+                if total >= hw_best_traffic {
+                    hw_best_traffic = total;
+                    let alias = alias_of(r);
                     if !alias.is_empty() {
-                        best_name = alias;
+                        hw_best_name = alias;
+                    }
+                }
+            } else {
+                fb_rx = fb_rx.saturating_add(r.InOctets);
+                fb_tx = fb_tx.saturating_add(r.OutOctets);
+                if total >= fb_best_traffic {
+                    fb_best_traffic = total;
+                    let alias = alias_of(r);
+                    if !alias.is_empty() {
+                        fb_best_name = alias;
                     }
                 }
             }
         }
         FreeMibTable(table.cast());
-        (rx, tx, best_name)
+        if hw_count > 0 {
+            (hw_rx, hw_tx, hw_best_name)
+        } else {
+            (fb_rx, fb_tx, fb_best_name)
+        }
     }
 }
 
@@ -1978,16 +2098,23 @@ fn hkl_display_name(hkl: isize) -> String {
     }
 }
 
-pub fn active_keyboard_code() -> String {
+pub fn active_keyboard_hkl(target_hwnd: Option<usize>) -> isize {
     unsafe {
-        let fg = GetForegroundWindow();
-        let tid = if !fg.is_null() {
-            GetWindowThreadProcessId(fg, std::ptr::null_mut())
+        let hwnd = target_hwnd
+            .filter(|&h| h != 0)
+            .map(|h| h as _)
+            .unwrap_or_else(|| GetForegroundWindow());
+        let tid = if !hwnd.is_null() {
+            GetWindowThreadProcessId(hwnd, std::ptr::null_mut())
         } else {
             0
         };
-        hkl_iso_code(GetKeyboardLayout(tid) as isize)
+        GetKeyboardLayout(tid) as isize
     }
+}
+
+pub fn active_keyboard_code() -> String {
+    hkl_iso_code(active_keyboard_hkl(None))
 }
 
 /// Returns `(hkl, short_code, localized_display_name)` matching `KeyboardLayoutWidget`.
@@ -2031,10 +2158,14 @@ pub fn cycle_keyboard_layout(forward: bool, target_hwnd: Option<usize>) -> Optio
     if layouts.len() < 2 {
         return None;
     }
-    let active = active_keyboard_code();
+    let active_hkl = active_keyboard_hkl(target_hwnd);
     let idx = layouts
         .iter()
-        .position(|(_, code, _)| code == &active)
+        .position(|(hkl, _, _)| *hkl == active_hkl)
+        .or_else(|| {
+            let code = hkl_iso_code(active_hkl);
+            layouts.iter().position(|(_, c, _)| c == &code)
+        })
         .unwrap_or(0);
     let next = if forward {
         (idx + 1) % layouts.len()
@@ -2051,25 +2182,49 @@ pub fn cycle_keyboard_layout(forward: bool, target_hwnd: Option<usize>) -> Optio
 
 // --- Day Progress ---
 
+/// Pure helper computing `(day, week, year, remaining_hours)` for exact calendar dates
+/// including leap years and culture `first_day_of_week`.
+pub fn day_progress_for(
+    year: i32,
+    month: u32,
+    day: u32,
+    day_of_week: u32,
+    hour: u32,
+    minute: u32,
+    first_dow: u32,
+) -> (f32, f32, f32, u32) {
+    let mins = hour.min(23) * 60 + minute.min(59);
+    let day_frac = (mins as f32 / 1440.0).clamp(0.0, 1.0);
+    let dow_offset = (day_of_week % 7 + 7 - first_dow % 7) % 7;
+    let week = ((dow_offset as f32 + day_frac) / 7.0).clamp(0.0, 1.0);
+    let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+    let days_in_year = if is_leap { 366.0_f32 } else { 365.0_f32 };
+    let prior_days: u32 = (1..month.clamp(1, 12))
+        .map(|m| days_in_month(year, m))
+        .sum();
+    let day_idx = prior_days.saturating_add(day.saturating_sub(1));
+    let year_frac = ((day_idx as f32 + day_frac) / days_in_year).clamp(0.0, 1.0);
+    (
+        day_frac,
+        week,
+        year_frac,
+        (1440u32.saturating_sub(mins)) / 60,
+    )
+}
+
 pub fn day_progress_metrics() -> (f32, f32, f32, u32) {
     let mut st: SYSTEMTIME = unsafe { std::mem::zeroed() };
     unsafe {
         GetLocalTime(&mut st);
     }
-    let mins = u32::from(st.wHour) * 60 + u32::from(st.wMinute);
-    let day = (mins as f32 / 1440.0).clamp(0.0, 1.0);
-    let dow = if st.wDayOfWeek == 0 {
-        6
-    } else {
-        u32::from(st.wDayOfWeek - 1)
-    };
-    let week = ((dow as f32 + day) / 7.0).clamp(0.0, 1.0);
-    let doy = (u32::from(st.wMonth.saturating_sub(1)) * 30 + u32::from(st.wDay)).min(365);
-    (
-        day,
-        week,
-        (doy as f32 / 365.0).clamp(0.0, 1.0),
-        (1440u32.saturating_sub(mins)) / 60,
+    day_progress_for(
+        i32::from(st.wYear),
+        u32::from(st.wMonth),
+        u32::from(st.wDay),
+        u32::from(st.wDayOfWeek),
+        u32::from(st.wHour),
+        u32::from(st.wMinute),
+        first_day_of_week(),
     )
 }
 
@@ -2167,13 +2322,10 @@ fn winhttp_request(cfg: &HttpCfg<'_>) -> Option<HttpReply> {
                 WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE,
             );
         }
-        // UTF-16 body; the terminating NUL is not part of the wire length.
-        let body_wide = cfg
-            .body
-            .map(|b| b.encode_utf16().chain(Some(0)).collect::<Vec<_>>());
-        let (body_ptr, body_len) = body_wide
-            .as_ref()
-            .map(|b| (b.as_ptr().cast(), (b.len().saturating_sub(1)) * 2))
+        // UTF-8 wire payload (JSON / OAuth POST bodies must never be UTF-16).
+        let body_bytes = cfg.body.map(str::as_bytes);
+        let (body_ptr, body_len) = body_bytes
+            .map(|b| (b.as_ptr().cast(), b.len()))
             .unwrap_or((std::ptr::null(), 0));
         let sent = WinHttpSendRequest(
             req,
@@ -2280,7 +2432,7 @@ fn winhttp_get(host: &str, path: &str, extra_headers: &[(&str, &str)]) -> Option
     .map(|reply| (reply.status, reply.body))
 }
 
-/// Arbitrary method with optional UTF-16 body and `Retry-After` (AI full-detail requests).
+/// Arbitrary method with optional UTF-8 body and `Retry-After` (AI full-detail requests).
 fn winhttp_json(
     method: &str,
     host: &str,
@@ -2591,6 +2743,58 @@ mod night_light_tests {
 
 // --- Weather (exact `WeatherService.cs` Open-Meteo API) ---
 
+/// Five semantic weather categories shared by chip badges, flyout headers, and forecast rows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WeatherKind {
+    #[default]
+    Clear,
+    Cloudy,
+    Rain,
+    Snow,
+    Storm,
+}
+
+pub fn weather_kind_from_wmo(code: i64) -> WeatherKind {
+    match code {
+        0 => WeatherKind::Clear,
+        1..=3 | 45 | 48 => WeatherKind::Cloudy,
+        71..=77 | 85 | 86 => WeatherKind::Snow,
+        95..=99 => WeatherKind::Storm,
+        51..=82 => WeatherKind::Rain,
+        _ => WeatherKind::Cloudy,
+    }
+}
+
+pub fn weather_kind_from_condition(condition: &str, is_rain: bool) -> WeatherKind {
+    let c = condition.to_lowercase();
+    if c.contains("thunder") || c.contains("storm") || c.contains("fırtına") || c.contains("gök")
+    {
+        WeatherKind::Storm
+    } else if c.contains("snow") || c.contains("kar") || c.contains("sleet") || c.contains("ice") {
+        WeatherKind::Snow
+    } else if c.contains("rain")
+        || c.contains("shower")
+        || c.contains("drizzle")
+        || c.contains("yağmur")
+        || c.contains("sağanak")
+    {
+        WeatherKind::Rain
+    } else if c.contains("fog")
+        || c.contains("mist")
+        || c.contains("haze")
+        || c.contains("sis")
+        || c.contains("cloud")
+        || c.contains("overcast")
+        || c.contains("bulut")
+    {
+        WeatherKind::Cloudy
+    } else if is_rain {
+        WeatherKind::Rain
+    } else {
+        WeatherKind::Clear
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct WeatherCache {
     /// Display name resolved by the API; kept separate from the user's requested city so a
@@ -2601,6 +2805,7 @@ pub struct WeatherCache {
     pub temp_c_val: Option<f64>,
     pub condition: String,
     pub is_rain: bool,
+    pub kind: WeatherKind,
     pub feels_like: String,
     pub feels_like_c_val: Option<f64>,
     pub humidity: String,
@@ -2910,11 +3115,17 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
     }
     let cache = Arc::clone(cache);
     let city_owned = city.to_owned();
+    let lang_prefix = loc::language()
+        .split(['-', '_'])
+        .next()
+        .filter(|s| s.len() == 2)
+        .unwrap_or("en")
+        .to_ascii_lowercase();
     let _ = std::thread::Builder::new()
         .name("opentaskbar-weather".into())
         .spawn(move || {
             let geo_path = format!(
-                "/v1/search?count=1&format=json&language=en&name={}",
+                "/v1/search?count=1&format=json&language={lang_prefix}&name={}",
                 urlencode_query(&city_owned)
             );
             let geo = winhttp_get("geocoding-api.open-meteo.com", &geo_path, &[])
@@ -2960,6 +3171,7 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
                     .and_then(|v| v.as_i64())
                     .unwrap_or(0);
                 let (cond, is_rain) = describe_wmo(code);
+                let kind = weather_kind_from_wmo(code);
 
                 let daily = root.get("daily");
                 let times = daily
@@ -2995,8 +3207,8 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
                             && let (Ok(yi), Ok(mi), Ok(di)) =
                                 (y.parse::<i32>(), m.parse::<u32>(), d.parse::<u32>())
                         {
-                            let wd = weekday_of(yi, mi, di) as usize;
-                            short_name(weekday_name(wd as u32))
+                            let wd = weekday_of(yi, mi, di);
+                            weekday_short_name(wd)
                         } else {
                             date_str.to_owned()
                         };
@@ -3014,6 +3226,7 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
                     temp,
                     cond,
                     is_rain,
+                    kind,
                     format!("{}°", feels.round() as i32),
                     feels,
                     format!("{}%", hum.round() as i32),
@@ -3036,6 +3249,7 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
                     temp_val,
                     cond,
                     is_rain,
+                    kind,
                     feels,
                     feels_val,
                     hum,
@@ -3054,6 +3268,7 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
                     g.temp_c_val = Some(temp_val);
                     g.condition = cond;
                     g.is_rain = is_rain;
+                    g.kind = kind;
                     g.feels_like = feels;
                     g.feels_like_c_val = Some(feels_val);
                     g.humidity = hum;
@@ -3147,6 +3362,8 @@ pub struct AiUsageSnapshot {
     pub balance_text: Option<String>,
     pub plan: Option<String>,
     pub windows: Vec<AiWindowData>,
+    /// Remaining credit fraction in `[0.0, 1.0]` for credit-based providers (e.g. OpenRouter).
+    pub credit_ratio: Option<f32>,
     pub last_fetch: Option<Instant>,
     pub loading: bool,
     pub has_cred: bool,
@@ -3578,12 +3795,14 @@ fn read_provider_token(provider_id: &str) -> Option<(String, Option<String>)> {
             }
             gh_cli_token().map(|tok| (tok, None))
         }
-        "aiusage_cursor" => env_token(&["CURSOR_API_KEY"]).map(|tok| (tok, None)),
+        "aiusage_cursor" => crate::platform::cursor_auth::token()
+            .or_else(|| env_token(&["CURSOR_API_KEY"]))
+            .map(|tok| (tok, None)),
         _ => None,
     }
 }
 
-/// Concise local countdown for a Unix-seconds reset timestamp (used by the AI flyout header).
+/// Concise local countdown for a Unix-seconds reset timestamp (used by AI chips & flyout headers).
 pub fn countdown_from_unix(reset_secs: i64, now_secs: u64) -> Option<String> {
     let remaining = reset_secs.saturating_sub(now_secs as i64);
     if remaining <= 0 {
@@ -3592,7 +3811,16 @@ pub fn countdown_from_unix(reset_secs: i64, now_secs: u64) -> Option<String> {
     let (days, rem) = (remaining / 86_400, remaining % 86_400);
     let (hours, rem) = (rem / 3600, rem % 3600);
     let mins = rem / 60;
-    Some(if days > 0 {
+    let is_tr = loc::language().to_ascii_lowercase().starts_with("tr");
+    Some(if is_tr {
+        if days > 0 {
+            format!("{days}g {hours}s")
+        } else if hours > 0 {
+            format!("{hours}s {mins}dk")
+        } else {
+            format!("{mins}dk")
+        }
+    } else if days > 0 {
         format!("{days}d {hours}h")
     } else if hours > 0 {
         format!("{hours}h {mins}m")
@@ -3602,7 +3830,14 @@ pub fn countdown_from_unix(reset_secs: i64, now_secs: u64) -> Option<String> {
 }
 
 fn format_reset_iso(iso: &str) -> String {
-    // Extract concise local-friendly time or date from ISO-8601 (`2026-11-25T16:30:00Z` -> `11-25 16:30`).
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    if let Some(ms) = parse_reset_ms(Some(iso))
+        && let Some(countdown) = countdown_from_unix(ms / 1000, now_secs)
+    {
+        return countdown;
+    }
     if let Some((date_part, time_part)) = iso.split_once('T') {
         let hm: String = time_part.chars().take(5).collect();
         if date_part.len() >= 10 {
@@ -3611,6 +3846,16 @@ fn format_reset_iso(iso: &str) -> String {
         return hm;
     }
     "—".to_owned()
+}
+
+fn format_reset_from_ms_or_dash(ms: Option<i64>) -> String {
+    let Some(ms) = ms.filter(|&v| v > 0) else {
+        return "—".to_owned();
+    };
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    countdown_from_unix(ms / 1000, now_secs).unwrap_or_else(|| "—".to_owned())
 }
 
 fn parse_pct_01(v: &serde_json::Value) -> Option<f32> {
@@ -3686,6 +3931,7 @@ fn fetch_ai_snapshot(provider_id: &str) -> AiUsageSnapshot {
                 let rem = (total - usage).max(0.0);
                 snap.balance_text = Some(format!("${rem:.2}"));
                 snap.plan = Some(loc::t_fmt("AiUsageBalanceLeft", &[&format!("${rem:.2}")]));
+                snap.credit_ratio = (total > 0.0).then(|| (rem / total).clamp(0.0, 1.0) as f32);
             }
         }
         "aiusage_claude" => {
@@ -3707,7 +3953,7 @@ fn fetch_ai_snapshot(provider_id: &str) -> AiUsageSnapshot {
                             .get("resets_at")
                             .and_then(|v| v.as_str())
                             .map(format_reset_iso)
-                            .unwrap_or_else(|| format!("{:.0}%", used * 100.0));
+                            .unwrap_or_else(|| "—".to_owned());
                         snap.windows.push(AiWindowData {
                             label: lbl.to_owned(),
                             used,
@@ -3732,10 +3978,25 @@ fn fetch_ai_snapshot(provider_id: &str) -> AiUsageSnapshot {
                     if let Some(w) = rl.get(key)
                         && let Some(used) = w.get("used_percent").and_then(parse_pct_01)
                     {
+                        let ms = full_unix_ms(w, &["reset_at", "resets_at", "resetTime"]).or_else(
+                            || {
+                                full_num(w, "reset_after_seconds")
+                                    .map(|s| now_unix_ms() + (s * 1000.0) as i64)
+                            },
+                        );
+                        let reset_text = if ms.is_some() {
+                            format_reset_from_ms_or_dash(ms)
+                        } else {
+                            w.get("reset_at")
+                                .or_else(|| w.get("resets_at"))
+                                .and_then(|v| v.as_str())
+                                .map(format_reset_iso)
+                                .unwrap_or_else(|| "—".to_owned())
+                        };
                         snap.windows.push(AiWindowData {
                             label: lbl.to_owned(),
                             used,
-                            reset_text: format!("{:.0}%", used * 100.0),
+                            reset_text,
                         });
                     }
                 }
@@ -3761,10 +4022,24 @@ fn fetch_ai_snapshot(provider_id: &str) -> AiUsageSnapshot {
                                 .or_else(|| obj.get("utilization"))
                                 .and_then(parse_pct_01)
                         {
+                            let ms = full_unix_ms(obj, &["resetsAt", "reset_at", "resetTime"])
+                                .or_else(|| {
+                                    full_num(obj, "resetInSec")
+                                        .map(|s| now_unix_ms() + (s * 1000.0) as i64)
+                                });
+                            let reset_text = if ms.is_some() {
+                                format_reset_from_ms_or_dash(ms)
+                            } else {
+                                obj.get("resetsAt")
+                                    .or_else(|| obj.get("reset_at"))
+                                    .and_then(|v| v.as_str())
+                                    .map(format_reset_iso)
+                                    .unwrap_or_else(|| "—".to_owned())
+                            };
                             snap.windows.push(AiWindowData {
                                 label: lbl.to_owned(),
                                 used,
-                                reset_text: format!("{:.0}%", used * 100.0),
+                                reset_text,
                             });
                             break;
                         }
@@ -3792,11 +4067,33 @@ fn fetch_ai_snapshot(provider_id: &str) -> AiUsageSnapshot {
                     .get("quota_reset_date_utc")
                     .and_then(|v| v.as_str())
                     .map(format_reset_iso)
-                    .unwrap_or_else(|| "Monthly".to_owned());
+                    .unwrap_or_else(|| loc::t("AiUsageMonthly"));
                 snap.windows.push(AiWindowData {
-                    label: "Monthly".to_owned(),
+                    label: loc::t("AiUsageMonthly"),
                     used,
                     reset_text: reset,
+                });
+            }
+        }
+        "aiusage_cursor" => {
+            let headers = [
+                ("Authorization", auth_hdr.as_str()),
+                ("Connect-Protocol-Version", "1"),
+                ("Content-Type", "application/json"),
+            ];
+            if let Some((200, body, _)) = winhttp_json(
+                "POST",
+                "api2.cursor.sh",
+                "/aiserver.v1.DashboardService/GetCurrentPeriodUsage",
+                &headers,
+                Some("{}"),
+            ) && let Some(detail) = parse_full_detail(&body, "aiusage_cursor")
+            {
+                snap.plan = detail.plan;
+                snap.windows.push(AiWindowData {
+                    label: detail.label,
+                    used: detail.used,
+                    reset_text: format_reset_from_ms_or_dash(detail.reset_unix_ms),
                 });
             }
         }
@@ -3865,7 +4162,11 @@ pub fn ai_provider_detected(provider_id: &str) -> bool {
         "aiusage_openrouter" => {
             has_dpapi("api-key_openrouter") || std::env::var_os("OPENROUTER_API_KEY").is_some()
         }
-        "aiusage_cursor" => appdata.is_some_and(|d| d.join("Cursor").exists()),
+        "aiusage_cursor" => {
+            crate::platform::cursor_auth::token().is_some()
+                || std::env::var_os("CURSOR_API_KEY").is_some()
+                || appdata.is_some_and(|d| d.join("Cursor").exists())
+        }
         _ => false,
     }
 }
@@ -4635,10 +4936,10 @@ pub fn parse_gpu_temperature_kelvin(raw: &str) -> Option<u32> {
     (c.is_finite() && (0.0..=125.0).contains(&c)).then(|| c.round() as u32)
 }
 
-/// Cached `(utilisation %, optional temperature °C)` sample and its timestamp.
-type GpuSample = (Option<(u32, Option<u32>)>, Option<Instant>);
+/// Cached `(utilisation %, optional temperature °C)`, its timestamp, and the busiest GPU engine name.
+type GpuSample = (Option<(u32, Option<u32>)>, Option<Instant>, Option<String>);
 
-static GPU_SAMPLE: std::sync::Mutex<GpuSample> = std::sync::Mutex::new((None, None));
+static GPU_SAMPLE: std::sync::Mutex<GpuSample> = std::sync::Mutex::new((None, None, None));
 static GPU_SAMPLE_IN_FLIGHT: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -4655,8 +4956,11 @@ pub fn sample_gpu_temp() -> Option<(u32, Option<u32>)> {
         let spawned = std::thread::Builder::new()
             .name("opentaskbar-gpu".to_owned())
             .spawn(|| {
-                let usage =
-                    sample_gpu_usage().map(|r| (r * 100.0).round().clamp(0.0, 100.0) as u32);
+                let pdh = sample_gpu_pdh();
+                let usage = pdh
+                    .as_ref()
+                    .map(|(r, _)| (r * 100.0).round().clamp(0.0, 100.0) as u32);
+                let engine = pdh.map(|(_, name)| name).filter(|name| !name.is_empty());
                 let temp = sample_gpu_temperature()
                     .filter(|c| c.is_finite() && *c > 0.0 && *c < 150.0)
                     .map(|c| c.round() as u32);
@@ -4666,7 +4970,7 @@ pub fn sample_gpu_temp() -> Option<(u32, Option<u32>)> {
                     None
                 };
                 if let Ok(mut g) = GPU_SAMPLE.lock() {
-                    *g = (result, Some(Instant::now()));
+                    *g = (result, Some(Instant::now()), engine.or_else(|| g.2.clone()));
                 }
                 GPU_SAMPLE_IN_FLIGHT.store(false, std::sync::atomic::Ordering::Release);
             })
@@ -5020,5 +5324,49 @@ mod sweep_parity_tests {
     fn ai_reset_countdown_handles_epoch_seconds() {
         assert_eq!(countdown_from_unix(0, 100), Some(loc::t("Expired")));
         assert_eq!(countdown_from_unix(3700, 100).as_deref(), Some("1h 0m"));
+    }
+
+    #[test]
+    fn day_progress_respects_leap_year_and_first_day_of_week() {
+        // 2024 is a leap year (366 days). Dec 31 noon = (365 + 0.5) / 366.
+        let (day, _, year_leap, left) = day_progress_for(2024, 12, 31, 2, 12, 0, 1);
+        assert!((day - 0.5).abs() < 0.001);
+        assert!((year_leap - 365.5 / 366.0).abs() < 0.001);
+        assert_eq!(left, 12);
+        // 2025 is non-leap (365 days). Mar 1 midnight = (31 + 28) / 365.
+        let (_, _, year_non_leap, _) = day_progress_for(2025, 3, 1, 6, 0, 0, 1);
+        assert!((year_non_leap - 59.0 / 365.0).abs() < 0.001);
+        // Sunday (0) on a Sunday-first locale is day 0 of week; on Monday-first it is day 6.
+        let (_, week_sun, _, _) = day_progress_for(2026, 11, 29, 0, 0, 0, 0);
+        let (_, week_mon, _, _) = day_progress_for(2026, 11, 29, 0, 0, 0, 1);
+        assert!((week_sun - 0.0).abs() < 0.001);
+        assert!((week_mon - 6.0 / 7.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn numeric_system_date_is_numeric_not_text_month() {
+        let settings = DockSettings {
+            date_style: ClockDateStyle::NumericDate,
+            date_format: ClockDateFormat::System,
+            ..Default::default()
+        };
+        let (_, date) = format_clock(&clock(), &settings);
+        assert!(
+            date.contains("2026"),
+            "system numeric date must contain year: {date}"
+        );
+        assert!(
+            !date.contains("Nov"),
+            "system numeric date must not use text month: {date}"
+        );
+    }
+
+    #[test]
+    fn weather_kind_classifies_five_states() {
+        assert_eq!(weather_kind_from_wmo(0), WeatherKind::Clear);
+        assert_eq!(weather_kind_from_wmo(2), WeatherKind::Cloudy);
+        assert_eq!(weather_kind_from_wmo(61), WeatherKind::Rain);
+        assert_eq!(weather_kind_from_wmo(73), WeatherKind::Snow);
+        assert_eq!(weather_kind_from_wmo(95), WeatherKind::Storm);
     }
 }
