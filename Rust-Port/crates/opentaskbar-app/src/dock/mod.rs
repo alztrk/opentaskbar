@@ -35,8 +35,8 @@ use std::time::{Duration, Instant};
 
 use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::{
-    self, AppTheme, AutoHideMode, DockContentAlignment, DockSettings, MiddleClickAction,
-    StartButtonAction, StartButtonPlacement, SurfaceBackground,
+    self, AppTheme, AutoHideMode, DockContentAlignment, DockHeightMode, DockSettings,
+    DockWidthMode, MiddleClickAction, StartButtonAction, StartButtonPlacement, SurfaceBackground,
 };
 use opentaskbar_shell::flyout_reposition::FlyoutKind;
 use opentaskbar_shell::tracker::{self, RunningWindow};
@@ -192,13 +192,32 @@ impl EffectiveMetrics {
                 widget_densities.insert(wd.id.to_owned(), density);
             }
         }
+        // Only override content-fitted dimensions when the user selected an explicit
+        // fixed/fill mode; `Auto` lets `resting_pill_width` / `pill_height_dips` size
+        // the dock naturally so icons and widgets never trigger false scrollbars.
+        let width_dips = if settings.dock_width_mode == DockWidthMode::Auto {
+            None
+        } else {
+            positive(settings::effective_width(settings, mon_w_dips))
+        };
+        let height_dips = match settings.dock_height_mode {
+            DockHeightMode::Pixels | DockHeightMode::Percent => {
+                positive(settings::effective_height(settings))
+            }
+            DockHeightMode::Auto | DockHeightMode::Fill => None,
+        };
         Self {
-            width_dips: positive(settings::effective_width(settings, mon_w_dips)),
-            height_dips: positive(settings::effective_height(settings)),
+            width_dips,
+            height_dips,
             top_gap_dips: Some(settings::effective_top_gap(settings)),
             bottom_gap_dips: Some(settings::effective_bottom_gap(settings)),
             widget_densities,
         }
+    }
+
+    fn bottom_inset_dips(&self) -> f32 {
+        self.bottom_gap_dips
+            .map_or(VERTICAL_EDGE_GAP, |gap| gap.max(0) as f32)
     }
 
     fn widget_density(&self, id: &str) -> f32 {
@@ -208,6 +227,15 @@ impl EffectiveMetrics {
             .unwrap_or(1.0)
             .clamp(0.45, 1.35)
     }
+}
+
+/// Vertically centers app icons inside the dock pill (matching shell buttons), while reserving
+/// clean room at the bottom for the running/active indicator dot inside the pill clip.
+fn app_icon_vertical_metrics(pill_top: f32, pill_h: f32, icon_size: f32) -> (f32, f32, f32) {
+    let top = pill_top + ((pill_h - icon_size) * 0.5 - 1.5).max(4.0);
+    let bottom = top + icon_size;
+    let dot_top = (bottom + 3.0).min(pill_top + pill_h - 5.5);
+    (top, bottom, dot_top)
 }
 
 /// Registered `WM_APP_SETTINGS_RELOAD` value, shared by every dock window.
@@ -1302,15 +1330,15 @@ fn compute_window_dips_with(
     } else {
         MAG_HEADROOM
     };
-    let mut width_dips = (resting_w + mag_extra + 24.0).min(mon_w_dips).ceil();
-    if let Some(w) = effective.width_dips {
-        width_dips = w.clamp(160.0, mon_w_dips).ceil();
-    }
+    let width_dips = (resting_w + mag_extra + 24.0)
+        .clamp(160.0, mon_w_dips)
+        .ceil();
     let mut pill_h = pill_height_dips(settings);
     if let Some(h) = effective.height_dips {
         pill_h = h;
     }
-    let height_dips = (pill_h + TOOLTIP_HEADROOM + mag_headroom + VERTICAL_EDGE_GAP).ceil();
+    let bottom_inset = effective.bottom_inset_dips();
+    let height_dips = (pill_h + TOOLTIP_HEADROOM + mag_headroom + bottom_inset).ceil();
     (width_dips, height_dips)
 }
 
@@ -1351,13 +1379,10 @@ fn compute_window_rect_with(
     let mon_w_dips = monitor.width() as f32 / dpi;
     let (width_dips, height_dips) =
         compute_window_dips_with(settings, slot_count, mon_w_dips, effective);
-    // C# `DockMetrics.SideInset` for side docks; the bottom gap is applied to
-    // the Y position below instead of the horizontal inset.
+    // C# `DockMetrics.SideInset` for side docks; bottom gap is baked into the window's
+    // internal `bottom_inset_dips()` so the HWND stays flush with `monitor.bottom` (never
+    // doubling `VERTICAL_EDGE_GAP` and never clipping the bottom Clear Crystal shadow).
     let margin_px = (12.0 * dpi).round() as i32;
-    let bottom_gap_px = effective
-        .bottom_gap_dips
-        .map(|gap| ((gap.max(0) as f32) * dpi).round() as i32)
-        .unwrap_or(0);
     let edge = effective_edge(settings);
     if layout::is_vertical(edge) {
         // Side docks: the strip length runs along Y, thickness along X. Height is content
@@ -1396,12 +1421,10 @@ fn compute_window_rect_with(
         margin_px,
         false,
     );
-    // `effective_top_gap` is only meaningful for a top dock (not supported by the
-    // port); the bottom gap raises the floating strip off the screen edge.
     let y = if effective.top_gap_dips.unwrap_or(0) > 0 && y == monitor_top {
         y + ((effective.top_gap_dips.unwrap_or(0).max(0) as f32) * dpi).round() as i32
     } else {
-        y - bottom_gap_px
+        y
     };
     (x, y, w, h)
 }
@@ -2786,7 +2809,9 @@ impl DockState {
         }
         if self.monitor.is_primary {
             let auto_hide = self.settings.auto_hide != AutoHideMode::Disabled;
-            let desired_total_dips = pill_height_dips(&self.settings) + VERTICAL_EDGE_GAP * 2.0;
+            let desired_total_dips = pill_height_dips(&self.settings)
+                + self.effective.bottom_inset_dips()
+                + VERTICAL_EDGE_GAP;
             let desired_total_px = (desired_total_dips * self.dpi).ceil() as i32;
             opentaskbar_shell::taskbar::update_appbar_height(
                 self.hwnd,
@@ -3042,28 +3067,23 @@ impl DockState {
     }
 
     fn live_pill_geometry_at(&self, now: Instant) -> (f32, f32, f32, f32) {
-        let base = layout::size_profile(&self.settings).cell;
-        let gap = slot_gap(&self.settings);
         let mon_w = self.mon_w_dips();
         let (win_w, win_h) =
             compute_window_dips_with(&self.settings, self.slots.len(), mon_w, &self.effective);
+        let max_w = (mon_w - 16.0).max(200.0);
         let pill_w = if self.settings.full_width {
-            (mon_w - 16.0).max(200.0)
+            max_w
+        } else if let Some(fixed_w) = self.effective.width_dips {
+            fixed_w.min(win_w).min(max_w)
         } else {
-            let mut icons_w = 0.0;
-            let mut largest_fraction = 0.0_f32;
-            for slot in &self.slots {
-                let fraction = slot.layout_fraction(now);
-                icons_w += (base * slot.scale + gap) * fraction;
-                largest_fraction = largest_fraction.max(fraction);
-            }
-            icons_w -= gap * largest_fraction;
-            let live_content = (shell_section_width(&self.settings)
+            // Match `scroll_metrics_for_pill_at` exactly (`shell_lead_width + apps_w + widgets + trail + 30.0`)
+            // so a dock that fits on the monitor never triggers false scroll overflow chevrons.
+            let icons_w = self.live_apps_width_dips_at(now);
+            let live_content = (shell_lead_width(&self.settings)
                 + icons_w
                 + self.live_widgets_section_width()
                 + 30.0)
                 .max(160.0);
-            let max_w = (mon_w - 16.0).max(200.0);
             let floor_w = scroll_min_pill_width(&self.settings).min(live_content);
             let target = self
                 .settings
@@ -3071,9 +3091,12 @@ impl DockState {
                 .map_or(live_content, |custom| custom.max(floor_w));
             target.min(win_w).min(max_w)
         };
-        let pill_h = pill_height_dips(&self.settings);
+        let pill_h = self
+            .effective
+            .height_dips
+            .unwrap_or_else(|| pill_height_dips(&self.settings));
         let pill_left = (win_w - pill_w) * 0.5;
-        let pill_top = win_h - VERTICAL_EDGE_GAP - pill_h;
+        let pill_top = win_h - self.effective.bottom_inset_dips() - pill_h;
         (pill_left, pill_top, pill_w, pill_h)
     }
 
@@ -3515,9 +3538,8 @@ impl DockState {
         if mx < sm.vp_left || mx > sm.vp_right {
             return false;
         }
-        let base = layout::size_profile(&self.settings).cell;
         let icon_size = layout::size_profile(&self.settings).icon;
-        let icon_base_bottom = pill_top + 7.5 + base;
+        let (_, icon_base_bottom, _) = app_icon_vertical_metrics(pill_top, pill_h, icon_size);
         let centers = self.slot_centers(&sm, false);
         for (idx, slot) in self.slots.iter().enumerate() {
             if slot.is_exiting() {
@@ -4007,9 +4029,7 @@ impl DockState {
             .right
             .set_transform(1.0, 1.0, pill_left_px + pill_w_px - cap_w_px, pill_top_px);
 
-        let icon_base_top = pill_top + 7.5;
-        let icon_base_bottom = icon_base_top + base;
-        let dot_top = icon_base_bottom + 4.5;
+        let (_, icon_base_bottom, dot_top) = app_icon_vertical_metrics(pill_top, pill_h, icon_size);
         let sm = self.scroll_metrics_for_pill_at(pill_left, pill_w, now);
 
         // 2. Shell buttons + divider share the horizontally clipped content coordinate space.
@@ -7697,7 +7717,9 @@ pub fn run(settings: DockSettings) {
                 }
                 created.push((hwnd, ptr));
                 if is_primary {
-                    let desired_total_dips = pill_height_dips(&settings) + VERTICAL_EDGE_GAP * 2.0;
+                    let desired_total_dips = pill_height_dips(&settings)
+                        + (settings::effective_bottom_gap(&settings).max(0) as f32)
+                        + VERTICAL_EDGE_GAP;
                     let desired_total_px = (desired_total_dips * dpi_scale).ceil() as i32;
                     opentaskbar_shell::taskbar::begin_replacement(
                         hwnd_val,
@@ -8445,5 +8467,44 @@ mod tests {
         assert!(arm.contains("shell_shortcuts_ex::release_stuck_modifiers()"));
         assert!(arm.contains("register_global_hotkeys(hwnd, &state.settings)"));
         assert!(arm.contains("resync_foreground_after_session()"));
+    }
+
+    #[test]
+    fn auto_width_mode_does_not_clamp_dock_to_min_surface_width() {
+        let settings = DockSettings::default();
+        let eff = EffectiveMetrics::for_monitor(&settings, 1920.0);
+        assert!(
+            eff.width_dips.is_none(),
+            "Auto width mode must let the dock size to its icons/widgets"
+        );
+        assert!(
+            eff.height_dips.is_none(),
+            "Auto height mode must use the profile shelf height"
+        );
+        let (win_w, _) = compute_window_dips_with(&settings, 8, 1920.0, &eff);
+        let natural = content_min_pill_width(&settings, 8, 1920.0);
+        assert!(
+            win_w >= natural,
+            "window width ({win_w}) must cover natural content width ({natural}) without false scrollbars"
+        );
+    }
+
+    #[test]
+    fn app_icons_are_vertically_centered_and_dots_stay_inside_pill() {
+        for (pill_h, icon_size) in [(48.0_f32, 28.0_f32), (58.0, 34.0), (66.0, 38.0)] {
+            let pill_top = 100.0;
+            let (top, bottom, dot_top) = app_icon_vertical_metrics(pill_top, pill_h, icon_size);
+            let top_margin = top - pill_top;
+            let bottom_margin = (pill_top + pill_h) - bottom;
+            assert!(
+                top_margin >= 4.0 && bottom_margin >= 8.0,
+                "icon ({icon_size}px in {pill_h}px pill) must sit centered with clean margins: top={top_margin}, bottom={bottom_margin}"
+            );
+            assert!(
+                dot_top >= bottom + 2.0 && dot_top <= pill_top + pill_h - 5.0,
+                "indicator dot ({dot_top}) must remain visible inside pill ({pill_top}..{})",
+                pill_top + pill_h
+            );
+        }
     }
 }
