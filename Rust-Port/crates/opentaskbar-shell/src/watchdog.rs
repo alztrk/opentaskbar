@@ -106,33 +106,76 @@ fn parse_watchdog_arg(arg: &str) -> Option<(u32, String)> {
     let rest = arg.strip_prefix("--watchdog=")?;
     let (pid, token) = rest.split_once(':')?;
     let pid = pid.parse::<u32>().ok()?;
-    if pid == 0 || token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    // Both the legacy 16-hex token and C# GUID "N" (32 hex) are valid.
+    if pid == 0 || !(is_hex_token(token) || is_c_sharp_guid_token(token)) {
         return None;
     }
     Some((pid, token.to_owned()))
 }
 
-fn create_event(name: &str) -> Option<EventHandle> {
+/// Hex token check shared by the Rust armer and the C watchdog parser. Accepts
+/// both the historical 16-hex token and C# `Guid.NewGuid().ToString("N")`'s
+/// 32-hex token; no other character may ever reach a named-event path.
+fn is_hex_token(token: &str) -> bool {
+    !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// True for a C# GUID "N" token (exactly 32 hex digits, e.g. `0f3a9c1122334455aabbccddeeff0011`).
+fn is_c_sharp_guid_token(token: &str) -> bool {
+    token.len() == 32 && is_hex_token(token)
+}
+
+/// Creates a named event. The heartbeat MUST be auto-reset: `watchdog.c` waits
+/// with a 4 s timeout and counts timeouts, and a manual-reset event that stayed
+/// signalled after the first pulse would disable crash recovery entirely.
+/// Clean-exit stays manual-reset so the signal cannot be consumed by a stray wait.
+fn create_event(name: &str, manual_reset: bool) -> Option<EventHandle> {
     let wide: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
-    // SAFETY: manual-reset, initially unsignalled named event matching `watchdog.c`.
-    let handle = unsafe { CreateEventW(std::ptr::null(), 1, 0, wide.as_ptr()) };
+    // SAFETY: fixed name, explicit reset mode, initially unsignalled.
+    let handle = unsafe { CreateEventW(std::ptr::null(), i32::from(manual_reset), 0, wide.as_ptr()) };
     (!handle.is_null()).then(|| EventHandle {
         raw: handle,
         _owner: Arc::new(EventOwner::new(handle)),
     })
 }
 
+/// Byte-exact update check. A file with the right length but different bytes is
+/// stale/corrupt and must be rewritten (C# `SequenceEqual` parity).
+fn needs_watchdog_refresh(existing: Option<&[u8]>, expected: &[u8]) -> bool {
+    existing != Some(expected)
+}
+
+/// App-directory priority: a deployed/packaged watchdog is already signed and
+/// must be launched directly instead of a copy in `%LOCALAPPDATA%`.
+fn select_watchdog_path(app_dir_candidate: Option<PathBuf>, data_dir_path: PathBuf) -> PathBuf {
+    app_dir_candidate.filter(|path| path.exists()).unwrap_or(data_dir_path)
+}
+
+fn app_dir_watchdog() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|dir| dir.join("OpenTaskbarWatchdog.exe"))
+}
+
 fn ensure_watchdog_exe() -> Option<PathBuf> {
-    let dir = opentaskbar_core::settings::app_data_dir();
-    let _ = fs::create_dir_all(&dir);
-    let path = dir.join("OpenTaskbarWatchdog.exe");
-    let up_to_date = fs::metadata(&path)
-        .ok()
-        .is_some_and(|m| m.len() == WATCHDOG_BYTES.len() as u64);
-    if !up_to_date {
-        let tmp = path.with_extension("exe.tmp");
-        if fs::write(&tmp, WATCHDOG_BYTES).is_ok() {
-            let _ = fs::rename(&tmp, &path);
+    let data_dir = opentaskbar_core::settings::app_data_dir();
+    let data_path = data_dir.join("OpenTaskbarWatchdog.exe");
+    let path = select_watchdog_path(app_dir_watchdog(), data_path);
+    if path == data_dir.join("OpenTaskbarWatchdog.exe") {
+        let _ = fs::create_dir_all(&data_dir);
+        let existing = fs::read(&path).ok();
+        if needs_watchdog_refresh(existing.as_deref(), WATCHDOG_BYTES) {
+            // A kill mid-write must not leave a truncated watchdog behind.
+            let tmp = path.with_extension("exe.tmp");
+            if fs::write(&tmp, WATCHDOG_BYTES).is_ok() {
+                if fs::rename(&tmp, &path).is_err()
+                    && path.exists()
+                    && fs::remove_file(&path).is_ok()
+                {
+                    let _ = fs::rename(&tmp, &path);
+                }
+            }
         }
     }
     path.exists().then_some(path)
@@ -181,11 +224,16 @@ pub fn arm() {
         return;
     };
     let pid = std::process::id();
-    let token = format!("{:016x}", RandomState::new().hash_one(pid));
-    let Some(clean_exit) = create_event(&format!("{EVENT_PREFIX}{pid}.{token}")) else {
+    // C# `Guid.NewGuid().ToString("N")` parity: a 32-hex token. The random
+    // seed prevents a stale event from a recycled PID from keeping us "alive".
+    let hasher = RandomState::new();
+    let high = hasher.hash_one(pid);
+    let low = hasher.hash_one(high ^ u64::from(pid));
+    let token = format!("{high:016x}{low:016x}");
+    let Some(clean_exit) = create_event(&format!("{EVENT_PREFIX}{pid}.{token}"), true) else {
         return;
     };
-    let Some(heartbeat) = create_event(&format!("{HEARTBEAT_PREFIX}{pid}.{token}")) else {
+    let Some(heartbeat) = create_event(&format!("{HEARTBEAT_PREFIX}{pid}.{token}"), false) else {
         return;
     };
     let arg = watchdog_arg(pid, &token);
@@ -256,13 +304,13 @@ mod tests {
 
     static TEST_ID: AtomicUsize = AtomicUsize::new(0);
 
-    fn test_event(tag: &str) -> EventHandle {
+    fn test_event(tag: &str, manual_reset: bool) -> EventHandle {
         let id = TEST_ID.fetch_add(1, Ordering::Relaxed);
         let name = format!(
             r"Local\OpenTaskbar.WatchdogTest.{tag}.{}.{id}",
             std::process::id()
         );
-        create_event(&name).expect("named test event must be created")
+        create_event(&name, manual_reset).expect("named test event must be created")
     }
 
     fn is_signalled(event: &EventHandle) -> bool {
@@ -291,6 +339,15 @@ mod tests {
             parse_watchdog_arg(&arg),
             Some((4242, "0f3a9c1122334455".to_owned()))
         );
+        // C# Guid.NewGuid().ToString("N") must be accepted too.
+        let guid = "0f3a9c1122334455aabbccddeeff0011";
+        assert!(is_c_sharp_guid_token(guid));
+        assert_eq!(
+            parse_watchdog_arg(&watchdog_arg(99, guid)),
+            Some((99, guid.to_owned()))
+        );
+        assert!(!is_c_sharp_guid_token(&guid[..31]));
+        assert!(!is_c_sharp_guid_token(&format!("{guid}0")));
         // Accepts upper/lower-case hex, but nothing else.
         assert!(parse_watchdog_arg("--watchdog=1:ABCDEF").is_some());
         for bad in [
@@ -309,22 +366,60 @@ mod tests {
     }
 
     #[test]
-    fn named_event_signals_and_resets() {
-        let event = test_event("signal");
-        assert!(!is_signalled(&event));
-        assert!(event.signal());
-        assert!(is_signalled(&event));
-        assert!(reset_event(&event));
-        assert!(!is_signalled(&event));
-        // Manual-reset stays signalled until explicitly reset.
-        assert!(event.signal());
-        assert!(event.signal());
-        assert!(is_signalled(&event));
+    fn clean_exit_is_manual_reset_but_heartbeat_is_auto_reset() {
+        let manual = test_event("manual", true);
+        assert!(!is_signalled(&manual));
+        assert!(manual.signal());
+        assert!(is_signalled(&manual));
+        assert!(is_signalled(&manual), "manual event stays signalled");
+        assert!(reset_event(&manual));
+        assert!(!is_signalled(&manual));
+
+        let auto = test_event("auto", false);
+        assert!(!is_signalled(&auto));
+        assert!(auto.signal());
+        assert!(wait_signalled(&auto, Duration::from_millis(20)));
+        // Auto-reset is consumed by the wait: a second wait times out. The C
+        // watchdog relies on this to detect missed heartbeats.
+        assert!(!wait_signalled(&auto, Duration::from_millis(20)));
+        assert!(auto.signal());
+        assert!(is_signalled(&auto));
+        assert!(!is_signalled(&auto), "consumed by the liveness check");
+    }
+
+    #[test]
+    fn watchdog_binary_refresh_is_byte_exact_and_app_dir_wins() {
+        assert!(needs_watchdog_refresh(None, WATCHDOG_BYTES));
+        assert!(!needs_watchdog_refresh(Some(WATCHDOG_BYTES), WATCHDOG_BYTES));
+        let mut same_length = WATCHDOG_BYTES.to_vec();
+        if let Some(byte) = same_length.first_mut() {
+            *byte ^= 0xFF;
+        }
+        assert!(needs_watchdog_refresh(
+            Some(&same_length),
+            WATCHDOG_BYTES
+        ));
+
+        let unique = format!("ot-watchdog-select-{}", TEST_ID.fetch_add(1, Ordering::Relaxed));
+        let app_exe = std::env::temp_dir().join(format!("{unique}-app.exe"));
+        let missing = std::env::temp_dir().join(format!("{unique}-missing.exe"));
+        let data_exe = std::env::temp_dir().join(format!("{unique}-data.exe"));
+        fs::write(&app_exe, b"app").expect("temp app-dir exe must be writable");
+        assert_eq!(
+            select_watchdog_path(Some(app_exe.clone()), data_exe.clone()),
+            app_exe
+        );
+        // A missing app-dir binary falls back to the materialized copy.
+        assert_eq!(
+            select_watchdog_path(Some(missing), data_exe.clone()),
+            data_exe
+        );
+        let _ = fs::remove_file(&app_exe);
     }
 
     #[test]
     fn heartbeat_thread_pulses_until_stopped() {
-        let heartbeat = test_event("heartbeat");
+        let heartbeat = test_event("heartbeat", false);
         let stop = Arc::new(AtomicBool::new(false));
         let thread = spawn_heartbeat(
             heartbeat.clone(),
@@ -337,7 +432,8 @@ mod tests {
             wait_signalled(&heartbeat, Duration::from_secs(5)),
             "heartbeat must signal the named event"
         );
-        assert!(reset_event(&heartbeat));
+        // Auto-reset: the C watchdog's timeout loop sees a fresh pulse each time.
+        assert!(!is_signalled(&heartbeat), "pulse was consumed by the wait");
         stop.store(true, Ordering::Relaxed);
         thread.join().expect("heartbeat thread must stop cleanly");
 
@@ -347,8 +443,8 @@ mod tests {
 
     #[test]
     fn clean_exit_stops_heartbeat_before_signalling() {
-        let heartbeat = test_event("clean-hb");
-        let clean_exit = test_event("clean-exit");
+        let heartbeat = test_event("clean-hb", false);
+        let clean_exit = test_event("clean-exit", true);
         let stop = Arc::new(AtomicBool::new(false));
         let thread = spawn_heartbeat(
             heartbeat.clone(),

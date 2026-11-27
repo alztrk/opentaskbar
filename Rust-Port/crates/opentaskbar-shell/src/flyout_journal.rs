@@ -225,7 +225,11 @@ pub fn journal_path() -> PathBuf {
         .join("flyout-positions.txt")
 }
 
-fn tmp_path(path: &Path) -> PathBuf {
+/// Shared atomic-write temp path (`flyout-positions.txt.tmp`). Both the
+/// C#-compatible writer and `flyout_writer` must use the exact same name so a
+/// stale temp cannot be mistaken for a newer journal by the watchdog.
+#[must_use]
+pub fn tmp_path(path: &Path) -> PathBuf {
     let mut file_name = path
         .file_name()
         .map(|name| name.to_os_string())
@@ -669,6 +673,21 @@ mod tests {
         write_all_to(&path, &[*position]);
         assert_eq!(fs::read_to_string(&path).unwrap(), "1234 56 -320 17\n");
         clear_from(&path);
+    }
+
+    #[test]
+    fn flyout_kinds_are_shell_surfaces_only() {
+        // C# `ShellFlyoutPositionJournal` knows exactly three shell flyouts;
+        // no AI/provider kind may ever enter this journal.
+        for (kind, label) in [
+            (FlyoutKind::Start, "START"),
+            (FlyoutKind::Search, "SEARCH"),
+            (FlyoutKind::ControlCenter, "CONTROL_CENTER"),
+        ] {
+            assert_eq!(kind.as_str(), label);
+            assert!(!label.to_ascii_lowercase().contains("ai"));
+        }
+        assert!(FlyoutKindRecord::from_line("AI generation=1 seq=1").is_none());
     }
 
     #[test]

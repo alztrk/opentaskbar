@@ -19,8 +19,24 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use crate::{appbar, flyout_writer, journal, modifiers, native_tray, session, watchdog};
 
 const APPBAR_CALLBACK_MSG: u32 = WM_APP + 0x52;
+/// C# `TrayHost.SelfBroadcastWParam` / `RestoreBroadcastWParam`: the dock must
+/// not mistake its own restore broadcast for an icon-collection ping.
+const SELF_BROADCAST_WPARAM: usize = 1;
+const RESTORE_BROADCAST_WPARAM: usize = 2;
 
 static REGISTERED_APPBAR: AtomicUsize = AtomicUsize::new(0);
+static BROADCAST_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+
+/// `TaskbarCreated` broadcasts carry a source tag in `wParam`, matching C#
+/// `TrayHost.BroadcastTaskbarCreated(source)`.
+#[must_use]
+pub fn broadcast_wparam(source: &str) -> usize {
+    if source.eq_ignore_ascii_case("restore") {
+        RESTORE_BROADCAST_WPARAM
+    } else {
+        SELF_BROADCAST_WPARAM
+    }
+}
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
@@ -49,17 +65,33 @@ fn set_secondary_trays_visible(visible: bool) {
 }
 
 pub fn get_taskbar_state() -> u32 {
-    appbar::get_state("GetState")
+    appbar::get_state("GetState") & appbar::SUPPORTED_STATE_MASK
+}
+
+/// C# `IsNativeTaskbarVisible`: primary *and* every secondary tray must be
+/// visible before a journal may be deleted.
+fn native_taskbar_is_visible() -> bool {
+    let Some(tray) = native_tray::try_acquire() else {
+        return false;
+    };
+    // SAFETY: lease-validated Explorer taskbar.
+    if unsafe { IsWindowVisible(tray.hwnd as HWND) } == 0 {
+        return false;
+    }
+    native_tray::find_secondary_leases()
+        .iter()
+        .all(|lease| !lease.is_valid() || unsafe { IsWindowVisible(lease.hwnd as HWND) } != 0)
+}
+
+/// Journal + live shell state, applying stale-journal detection. This replaces
+/// the old `unwrap_or(2)` guess: default state is 0 (visible taskbar).
+pub fn active_state() -> u32 {
+    journal::effective_state(get_taskbar_state(), native_taskbar_is_visible())
 }
 
 pub fn set_taskbar_state(state: u32) {
-    let tray = find_primary_tray();
-    if tray.is_null() {
-        return;
-    }
-    let mut data = appbar::create_data(tray as usize);
-    data.lParam = state as isize;
-    appbar::send(appbar::ABM_SETSTATE, &mut data, "SetState");
+    // GetState -> SETSTATE -> GetState, no fake HWND fallback when Explorer is absent.
+    let _ = appbar::set_and_verify_state(state, "SetState");
 }
 
 /// Returns Explorer's currently reserved bottom taskbar strip height in physical pixels.
@@ -141,7 +173,10 @@ pub fn ensure_hidden() -> bool {
 }
 
 pub fn begin_replacement(dock_hwnd: usize, auto_hide: bool, desired_total_px: i32) {
-    let prev = journal::read_state().unwrap_or_else(get_taskbar_state);
+    let prev = active_state();
+    // Arm the shell-hook drivers used by the 20/40 hide budget and the
+    // 45-attempt degraded budget before any Explorer state is changed.
+    session::configure_replacement(dock_hwnd, auto_hide, desired_total_px);
     if !journal::has_pending() {
         let _ = journal::write_state(prev);
     }
@@ -163,20 +198,25 @@ pub fn begin_replacement(dock_hwnd: usize, auto_hide: bool, desired_total_px: i3
         register_bottom_appbar(dock_hwnd, desired_total_px, prev);
         ensure_hidden();
     }
+    // Bounded startup settle: 40 attempts / 10 consecutive clean passes.
+    session::start_hide_retry(true);
 }
 
 pub fn restore_from_journal() {
     unregister_appbar();
     // Flyouts are hosted by long-lived shell processes, so put them back first.
     flyout_writer::restore_from_journal();
-    let prev = journal::read_state().unwrap_or(2); // ABS_ALWAYSONTOP default
+    // Default state 0, stale journal ignored when the tray is already visible
+    // with a different state (C# ForceRestore).
+    let prev = active_state();
     let tray = find_primary_tray();
     if tray.is_null() {
         return;
     }
-    // Mirror `watchdog.c` RestoreNativeTaskbars: 3 retries of ABM_SETSTATE +
-    // SW_SHOW + SetWindowPos, then verify visibility before ever clearing the journal.
-    for _ in 0..session::RESTORE_ATTEMPTS {
+    // Mirror `watchdog.c` RestoreNativeTaskbars: at most 3 rounds of
+    // ABM_SETSTATE + SW_SHOW + SetWindowPos, requiring two consecutive visible
+    // observations. There is NO sleep after the final round.
+    let verified = session::verify_restored_with(tray as usize, session::RESTORE_ATTEMPTS, || {
         set_taskbar_state(prev);
         // SAFETY: restoring Explorer's primary taskbar window with SWP_SHOWWINDOW | SWP_FRAMECHANGED.
         unsafe {
@@ -197,9 +237,7 @@ pub fn restore_from_journal() {
             );
         }
         set_secondary_trays_visible(true);
-        std::thread::sleep(std::time::Duration::from_millis(60));
-    }
-    let verified = session::verify_restored(tray as usize, session::RESTORE_ATTEMPTS);
+    });
     opentaskbar_core::shell_result!("Restore", "Journal", true, verified, ms = 0);
     // Never drop the only recovery clue while Explorer is still re-hiding the tray.
     if !verified {
@@ -209,16 +247,22 @@ pub fn restore_from_journal() {
     // A clean restore is the point where the watchdog must stop watching us.
     // `end_replacement` also calls this, but it is idempotent.
     watchdog::notify_clean_exit();
-    broadcast_taskbar_created();
+    broadcast_taskbar_created("restore");
 }
 
-fn broadcast_taskbar_created() {
+fn broadcast_taskbar_created(source: &str) {
     let msg_name = wide("TaskbarCreated");
     // SAFETY: notifying apps to re-register tray icons with Explorer.
     unsafe {
         let msg = RegisterWindowMessageW(msg_name.as_ptr());
         if msg != 0 {
-            SendNotifyMessageW(HWND_BROADCAST, msg, 0, 0);
+            let sequence = BROADCAST_SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1;
+            SendNotifyMessageW(
+                HWND_BROADCAST,
+                msg,
+                broadcast_wparam(source),
+                sequence as isize,
+            );
         }
     }
 }
@@ -233,7 +277,57 @@ pub fn handle_taskbar_created(dock_hwnd: usize, auto_hide: bool, desired_total_p
             ("state", "reconcile".to_owned()),
         ],
     );
-    session::reconcile_once(dock_hwnd, auto_hide, desired_total_px, "TaskbarCreated");
+    let _ = (dock_hwnd, auto_hide, desired_total_px);
+    // Two passes, cache/identity reset and degraded-budget reset in one place.
+    let _ = session::reconcile_after_taskbar_created();
+}
+
+/// Clears the stale work-area reservation registered against a taskbar that no
+/// longer exists. Called by `TaskbarCreated` before the fresh registration.
+pub fn clear_appbar_registration() {
+    let hwnd = REGISTERED_APPBAR.swap(0, Ordering::SeqCst);
+    if hwnd == 0 {
+        return;
+    }
+    let mut abd = appbar::create_data(hwnd);
+    // Zero-thickness SETPOS releases the old strip before ABM_REMOVE.
+    abd.rc = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    appbar::send(appbar::ABM_SETPOS, &mut abd, "ClearRegistration/SETPOS");
+    appbar::send(appbar::ABM_REMOVE, &mut abd, "ClearRegistration/REMOVE");
+}
+
+/// Pure classification of one hide-enforcement observation.
+#[must_use]
+pub const fn classify_hide_observation(
+    has_taskbar: bool,
+    was_visible: bool,
+    hid: bool,
+) -> session::HideObservation {
+    if !has_taskbar {
+        session::HideObservation::MissingTaskbar
+    } else if !was_visible {
+        session::HideObservation::AlreadyHidden
+    } else if hid {
+        session::HideObservation::HidVisible
+    } else {
+        session::HideObservation::StillVisible
+    }
+}
+
+/// Live observation consumed by `session::run_hide_retry_step`.
+pub fn hide_observation() -> session::HideObservation {
+    let Some(tray) = native_tray::try_acquire() else {
+        return session::HideObservation::MissingTaskbar;
+    };
+    // SAFETY: lease-validated Explorer taskbar; `ensure_hidden` revalidates.
+    let was_visible = unsafe { IsWindowVisible(tray.hwnd as HWND) != 0 };
+    let hid = was_visible && ensure_hidden();
+    classify_hide_observation(true, was_visible, hid)
 }
 
 pub fn end_replacement() {
@@ -372,7 +466,7 @@ pub fn update_appbar_height(dock_hwnd: usize, auto_hide: bool, desired_total_px:
         unregister_appbar();
         return;
     }
-    let prev = journal::read_state().unwrap_or(2);
+    let prev = active_state();
     let prev_was_autohide = (prev & ABS_AUTOHIDE) != 0;
     let native_h = if prev_was_autohide {
         0
@@ -469,5 +563,36 @@ mod tests {
             assert_eq!(down.Anonymous.ki.wVk, VK_LWIN);
             assert_eq!(plain.Anonymous.ki.dwFlags, 0);
         }
+    }
+
+    #[test]
+    fn restore_broadcast_is_tagged_and_own_broadcast_is_not() {
+        assert_eq!(broadcast_wparam("restore"), 2);
+        assert_eq!(broadcast_wparam("RESTORE"), 2);
+        assert_eq!(broadcast_wparam("self"), 1);
+        assert_eq!(broadcast_wparam(""), 1);
+        assert_eq!(SELF_BROADCAST_WPARAM, 1);
+        assert_eq!(RESTORE_BROADCAST_WPARAM, 2);
+    }
+
+    #[test]
+    fn hide_observation_distinguishes_missing_hidden_and_visible_trays() {
+        use session::HideObservation;
+        assert_eq!(
+            classify_hide_observation(false, false, false),
+            HideObservation::MissingTaskbar
+        );
+        assert_eq!(
+            classify_hide_observation(true, false, false),
+            HideObservation::AlreadyHidden
+        );
+        assert_eq!(
+            classify_hide_observation(true, true, true),
+            HideObservation::HidVisible
+        );
+        assert_eq!(
+            classify_hide_observation(true, true, false),
+            HideObservation::StillVisible
+        );
     }
 }
