@@ -96,40 +96,37 @@ impl UiTheme {
         }
     }
 
-    /// Settings window theme: opaque in Solid/None modes, smoked-obsidian / frosted-crystal
-    /// glass with WCAG-AA text contrast over bright and dark wallpapers strictly when
-    /// `glass_mode` is true.
+    /// Settings window theme: opaque in Solid/None modes; in Glass mode lets the EXACT same
+    /// unified Clear Crystal `SpatialGlassHost` shine cleanly across the whole window (zero
+    /// opaque titlebar/sidebar slabs) with crisp glass cards and high-contrast ink.
     pub fn for_settings(is_dark: bool, glass_mode: bool) -> Self {
         let mut t = Self::new(is_dark);
         if !glass_mode {
             return t;
         }
         if is_dark {
-            // Smoked obsidian glass scrim keeps every label crisp even over bright white skies
-            // while letting the blurred wallpaper glow vividly underneath.
-            t.canvas_bg = 0x0b0f_17a0;
-            t.sidebar_bg = 0x080b_11bd;
-            t.surface = 0x151a_2496;
-            t.surface_muted = 0xffff_ff1a;
-            t.surface_hover = 0xffff_ff2a;
-            t.popover_bg = 0x1317_20f5;
-            t.border = 0xffff_ff28;
-            t.separator = 0xffff_ff1a;
-            t.text_primary = 0xf8fa_fcff;
-            t.text_secondary = 0xcbd5_e1f2;
-            t.switch_off = 0xffff_ff38;
+            t.canvas_bg = 0x0000_0000;
+            t.sidebar_bg = 0x0000_001e;
+            t.surface = 0xffff_ff0f;
+            t.surface_muted = 0xffff_ff18;
+            t.surface_hover = 0xffff_ff28;
+            t.popover_bg = 0x1216_20f2;
+            t.border = 0xffff_ff26;
+            t.separator = 0xffff_ff18;
+            t.text_primary = 0xffff_ffff;
+            t.text_secondary = 0xe2e8_f0dc;
+            t.switch_off = 0xffff_ff36;
         } else {
-            // Frosted bright crystal keeps dark ink legible even over pitch-black wallpapers.
-            t.canvas_bg = 0xf4f7_fbb4;
-            t.sidebar_bg = 0xebf0_f6ca;
-            t.surface = 0xffff_ffac;
+            t.canvas_bg = 0x0000_0000;
+            t.sidebar_bg = 0xffff_ff28;
+            t.surface = 0xffff_ff4c;
             t.surface_muted = 0x0000_0010;
             t.surface_hover = 0x0000_001b;
             t.popover_bg = 0xf8fa_fcf5;
             t.border = 0x0000_001f;
             t.separator = 0x0000_0015;
             t.text_primary = 0x0f17_2aff;
-            t.text_secondary = 0x3341_55f2;
+            t.text_secondary = 0x2632_45eb;
             t.switch_off = 0x0000_002e;
         }
         t

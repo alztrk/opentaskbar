@@ -761,7 +761,7 @@ mod imp {
         fn rebuild_glass_brush(&mut self) -> WinResult<()> {
             let p = self.config;
             let tint_rgb = if p.is_dark {
-                ui_color(255, 14, 16, 22)
+                ui_color(255, 8, 11, 16)
             } else {
                 ui_color(255, 246, 248, 252)
             };
@@ -786,7 +786,16 @@ mod imp {
             })
             .cast()?;
 
-            let a = p.tint_alpha.clamp(0.0, 0.85);
+            // Unified polarized Clear Crystal curve shared by Taskbar, Dynamic Island, Menus,
+            // Flyouts, and Settings: keeps `c2 + c3 == 1.0` (zero unblurred alpha bleed) while
+            // attenuating blindingly bright wallpapers enough for crisp white/dark text contrast
+            // without turning any surface into an opaque slab.
+            let raw_a = p.tint_alpha.clamp(0.0, 0.85);
+            let a = if p.is_dark {
+                (0.32 + raw_a * 0.90).clamp(0.28, 0.72)
+            } else {
+                (0.42 + raw_a * 0.75).clamp(0.40, 0.78)
+            };
             let tinted_glass: IGraphicsEffect = IGraphicsEffect::from(ArithmeticCompositeEffect {
                 name: RefCell::new(HSTRING::from("GlassBody")),
                 c1: 0.0,

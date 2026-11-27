@@ -4229,6 +4229,7 @@ impl DcompEngine {
         has_prev_next: bool,
         page_count_text: &str,
         has_expand: bool,
+        expanded: bool,
         hovered_btn: Option<IslandButton>,
         pressed_btn: Option<IslandButton>,
         border_rgb: Rgb,
@@ -4332,10 +4333,14 @@ impl DcompEngine {
                 )
             };
 
-            draw_btn(IslandButton::Prev, 3.0, "\u{E76B}", has_prev_next)?;
+            if has_prev_next {
+                draw_btn(IslandButton::Prev, 3.0, "\u{E76B}", true)?;
+            }
             let right_total = 38.0 + 56.0 + 38.0;
             let next_x = width_dips - right_total;
-            draw_btn(IslandButton::Next, next_x + 3.0, "\u{E76C}", has_prev_next)?;
+            if has_prev_next {
+                draw_btn(IslandButton::Next, next_x + 3.0, "\u{E76C}", true)?;
+            }
 
             if !page_count_text.is_empty() {
                 let count_rect = D2D_RECT_F {
@@ -4382,7 +4387,8 @@ impl DcompEngine {
 
             if has_expand {
                 let expand_x = width_dips - 35.0;
-                draw_btn(IslandButton::Expand, expand_x, "\u{E70D}", true)?;
+                let glyph = if expanded { "\u{E70E}" } else { "\u{E70D}" };
+                draw_btn(IslandButton::Expand, expand_x, glyph, true)?;
             }
 
             Ok(())

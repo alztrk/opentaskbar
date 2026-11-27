@@ -221,11 +221,6 @@ impl BorderStyle {
             is_dark,
             false,
         );
-        // Text-heavy menus need a readable smoked/frosted floor on bright/dark wallpapers.
-        if style.glass_config.enabled {
-            let min_tint = if is_dark { 0.34 } else { 0.42 };
-            style.glass_config.tint_alpha = style.glass_config.tint_alpha.max(min_tint);
-        }
         style
     }
 
@@ -245,10 +240,6 @@ impl BorderStyle {
             is_dark,
             false,
         );
-        if style.glass_config.enabled {
-            let min_tint = if is_dark { 0.34 } else { 0.42 };
-            style.glass_config.tint_alpha = style.glass_config.tint_alpha.max(min_tint);
-        }
         style
     }
 

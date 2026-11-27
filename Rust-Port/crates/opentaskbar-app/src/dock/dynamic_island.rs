@@ -134,18 +134,14 @@ pub fn has_real_widget_flyout(widget_id: &str) -> bool {
     ) || id.starts_with("aiusage_")
 }
 
-/// C# `Previous_Click` / `Next_Click` / `Expand_Click` plus the WS-C flyout fix.
-pub fn island_button_click_action(button: IslandButton, widget_id: &str) -> IslandClickAction {
+/// C# `Previous_Click` / `Next_Click` / `Expand_Click`: the expand chevron toggles
+/// the island's in-place expanded details panel (`50 -> 246 DIP`), while clicking
+/// the center widget chip opens the full interactive flyout.
+pub fn island_button_click_action(button: IslandButton, _widget_id: &str) -> IslandClickAction {
     match button {
         IslandButton::Prev => IslandClickAction::PrevPage,
         IslandButton::Next => IslandClickAction::NextPage,
-        IslandButton::Expand => {
-            if has_real_widget_flyout(widget_id) {
-                IslandClickAction::OpenFlyout
-            } else {
-                IslandClickAction::ToggleDetails
-            }
-        }
+        IslandButton::Expand => IslandClickAction::ToggleDetails,
     }
 }
 
@@ -729,7 +725,7 @@ impl DynamicIslandWindow {
             .is_some_and(design::spatial_glass::SpatialGlassHost::is_enabled);
         if let Ok(surf) = self.dcomp.create_island_chrome_surface(
             self.width_dips,
-            COMPACT_HEIGHT_DIPS,
+            policy::island_height_dips(self.island.expanded),
             dpi,
             self.is_dark,
             self.settings.dynamic_island_opacity as f32,
@@ -738,6 +734,7 @@ impl DynamicIslandWindow {
             has_prev_next,
             &count_text,
             has_expand,
+            self.island.expanded,
             self.hovered_btn,
             self.pressed_btn,
             self.settings
@@ -835,7 +832,13 @@ impl DynamicIslandWindow {
                 (panel_w * dpi).ceil() as u32,
                 (panel_h * dpi).ceil() as u32,
                 island_geo::CHIP_RADIUS_DIPS * dpi,
-                if self.is_dark {
+                if glass_host_active {
+                    if self.is_dark {
+                        (0xff, 0xff, 0xff, 0.08)
+                    } else {
+                        (0x00, 0x00, 0x00, 0.06)
+                    }
+                } else if self.is_dark {
                     (0x1b, 0x21, 0x2d, 0.97)
                 } else {
                     (0xf2, 0xf4, 0xfa, 0.97)
@@ -1102,7 +1105,8 @@ impl DynamicIslandWindow {
                 if unsafe { GetCursorPos(&mut pt) } != 0 {
                     let dpi = self.monitor.dpi_scale.max(0.5);
                     let w_px = (self.width_dips * dpi).ceil() as i32;
-                    let h_px = (COMPACT_HEIGHT_DIPS * dpi).ceil() as i32;
+                    let h_px =
+                        (policy::island_height_dips(self.island.expanded) * dpi).ceil() as i32;
                     let left = self.monitor.left + (self.monitor.width() - w_px) / 2;
                     let pad_x = (24.0 * dpi).round() as i32;
                     let in_x = pt.x >= left - pad_x && pt.x <= left + w_px + pad_x;
@@ -1300,6 +1304,9 @@ impl DynamicIslandWindow {
         let dpi = self.monitor.dpi_scale;
         let mx = mx_px / dpi;
         let my = my_px / dpi;
+        if let Some(ref mut glass) = self.spatial_glass {
+            glass.set_pointer(mx_px, my_px);
+        }
 
         if self.is_dragging {
             let dx_px = mx_px - self.drag_start_x;
@@ -1335,6 +1342,9 @@ impl DynamicIslandWindow {
         let dpi = self.monitor.dpi_scale;
         let mx = mx_px / dpi;
         let my = my_px / dpi;
+        if let Some(ref mut glass) = self.spatial_glass {
+            glass.set_pointer(mx_px, my_px);
+        }
         unsafe {
             SetCapture(self.hwnd as HWND);
         }
@@ -1364,6 +1374,9 @@ impl DynamicIslandWindow {
         let dpi = self.monitor.dpi_scale;
         let mx = mx_px / dpi;
         let my = my_px / dpi;
+        if let Some(ref mut glass) = self.spatial_glass {
+            glass.set_pointer(mx_px, my_px);
+        }
 
         if self.is_dragging {
             self.is_dragging = false;
@@ -1397,6 +1410,11 @@ impl DynamicIslandWindow {
                     }
                 }
             }
+            return;
+        }
+
+        if self.page_ids.is_empty() {
+            settings_ui::spawn_settings_window();
             return;
         }
 
@@ -2170,15 +2188,10 @@ mod tests {
             "audio",
             "timer",
         ] {
-            let expected = if has_real_widget_flyout(id) {
-                IslandClickAction::OpenFlyout
-            } else {
-                IslandClickAction::ToggleDetails
-            };
             assert_eq!(
                 island_button_click_action(IslandButton::Expand, id),
-                expected,
-                "Expand on {id}"
+                IslandClickAction::ToggleDetails,
+                "Expand chevron on {id} must toggle in-place Dynamic Island expansion"
             );
         }
         assert!(has_real_widget_flyout("Clock")); // case-insensitive
