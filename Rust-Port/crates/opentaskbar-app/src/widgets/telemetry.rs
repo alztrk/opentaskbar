@@ -63,8 +63,8 @@ use windows_sys::Win32::System::Threading::{
     QueryFullProcessImageNameW,
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    ActivateKeyboardLayout, GetKeyboardLayout, GetKeyboardLayoutList, INPUT, INPUT_0,
-    INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
+    GetKeyboardLayout, GetKeyboardLayoutList, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYEVENTF_KEYUP, SendInput,
 };
 use windows_sys::Win32::UI::Shell::{
     SHERB_NOCONFIRMATION, SHERB_NOPROGRESSUI, SHERB_NOSOUND, SHEmptyRecycleBinW, SHQUERYRBINFO,
@@ -76,6 +76,62 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const SPARKLINE_CAPACITY: usize = 45;
+/// `LOCALE_IFIRSTDAYOFWEEK`: 0 = Monday .. 6 = Sunday.
+const LOCALE_IFIRSTDAYOFWEEK: u32 = 0x0000_100C;
+const LOCALE_USER_DEFAULT: u32 = 0x0400;
+
+/// Native `TIME_ZONE_INFORMATION` (the `Win32_System_Time` feature is not enabled in this crate).
+#[repr(C)]
+struct WinTimeZoneInformation {
+    bias: i32,
+    standard_name: [u16; 32],
+    standard_date: SYSTEMTIME,
+    standard_bias: i32,
+    daylight_name: [u16; 32],
+    daylight_date: SYSTEMTIME,
+    daylight_bias: i32,
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetTimeZoneInformation(info: *mut WinTimeZoneInformation) -> u32;
+}
+
+/// Standard/daylight display name for the current timezone (C# `TimeZoneInfo` parity).
+pub fn timezone_display_name() -> String {
+    let mut info: WinTimeZoneInformation = unsafe { std::mem::zeroed() };
+    let id = unsafe { GetTimeZoneInformation(&mut info) };
+    let name = if id == 2 { info.daylight_name } else { info.standard_name };
+    let len = name.iter().position(|c| *c == 0).unwrap_or(name.len());
+    let value = String::from_utf16_lossy(&name[..len]).trim().to_owned();
+    if value.is_empty() {
+        "Local".to_owned()
+    } else {
+        value
+    }
+}
+
+/// Culture's first day of week, `0 = Sunday .. 6 = Saturday` (C# `FirstDayOfWeek`).
+pub fn first_day_of_week() -> u32 {
+    let mut buf = [0u16; 4];
+    let len = unsafe {
+        GetLocaleInfoW(
+            LOCALE_USER_DEFAULT,
+            LOCALE_IFIRSTDAYOFWEEK,
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        )
+    };
+    if len <= 1 {
+        return 0;
+    }
+    let raw = String::from_utf16_lossy(&buf[..(len - 1) as usize])
+        .trim()
+        .parse::<u32>()
+        .unwrap_or(0);
+    // Win32 reports Monday = 0; .NET DayOfWeek reports Sunday = 0.
+    (raw + 1) % 7
+}
 
 // PKEY_Device_FriendlyName = {a45c254e-df1c-4efd-8020-67d146a850e0}, pid 14
 const PKEY_DEVICE_FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY {
@@ -233,6 +289,8 @@ pub struct SystemStatsSampler {
     prev_user: u64,
     pub cpu_history: MetricHistory,
     pub ram_history: MetricHistory,
+    /// Real GPU utilisation history (45 samples), matching C# `SystemStatsWidget.gpuSparkline`.
+    pub gpu_history: MetricHistory,
 }
 
 impl SystemStatsSampler {
@@ -1112,6 +1170,10 @@ pub struct LocalClockInfo {
     pub weekday_short: String,
     pub full_date: String,
     pub tz_label: String,
+    /// Standard/daylight timezone display name from `GetTimeZoneInformation`.
+    pub tz_name: String,
+    /// Culture first day of week (`0 = Sunday`).
+    pub first_day_of_week: u32,
     pub year: i32,
     pub month: u32,
     pub day: u32,
@@ -1236,6 +1298,8 @@ pub fn local_clock_info() -> LocalClockInfo {
         weekday_short: dow_s,
         full_date: format!("{dow_f}, {} {mon_f}", lt.wDay),
         tz_label,
+        tz_name: timezone_display_name(),
+        first_day_of_week: first_day_of_week(),
         year: i32::from(lt.wYear),
         month: u32::from(lt.wMonth),
         day: u32::from(lt.wDay),
@@ -1272,9 +1336,10 @@ pub fn format_clock(info: &LocalClockInfo, settings: &DockSettings) -> (String, 
             let m = info.month;
             let d = info.day;
             let y = info.year;
+            // Every enum style has a distinct C#-matching layout (`FormatDate` in ClockWidget).
             match settings.date_format {
-                ClockDateFormat::DdMmYyyy => format!("{d:02}.{m:02}.{y:04}"),
-                ClockDateFormat::DdMmYy => format!("{d:02}.{m:02}.{:02}", y % 100),
+                ClockDateFormat::DdMmYyyy => format!("{d:02}/{m:02}/{y:04}"),
+                ClockDateFormat::DdMmYy => format!("{d:02}/{m:02}/{:02}", y % 100),
                 ClockDateFormat::MmDdYyyy => format!("{m:02}/{d:02}/{y:04}"),
                 ClockDateFormat::YyyyMmDd => format!("{y:04}-{m:02}-{d:02}"),
                 ClockDateFormat::DdMmYyyyDots => format!("{d:02}.{m:02}.{y:04}"),
@@ -1698,9 +1763,30 @@ pub fn classify_bluetooth_device(name: &str, instance_id: &str) -> BluetoothDevi
 
 #[derive(Clone, Debug)]
 pub struct BluetoothBatteryDevice {
+    pub id: String,
     pub name: String,
     pub percent: u32,
     pub kind: BluetoothDeviceKind,
+    /// `WirelessDeviceReading.GetSourceLabel()` equivalent (HID++, BLE GATT, XInput, ...).
+    pub source_label: String,
+    pub charging: bool,
+    pub stale: bool,
+    pub sampled_at: Option<Instant>,
+}
+
+impl BluetoothBatteryDevice {
+    fn new(name: String, percent: u32, kind: BluetoothDeviceKind) -> Self {
+        Self {
+            id: String::new(),
+            name,
+            percent,
+            kind,
+            source_label: "Bluetooth".to_owned(),
+            charging: false,
+            stale: false,
+            sampled_at: None,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1763,11 +1849,7 @@ pub fn refresh_bluetooth_battery(cache: &Arc<Mutex<BluetoothBatteryCache>>, forc
                             }
                             existing.percent = val;
                         } else {
-                            found.push(BluetoothBatteryDevice {
-                                name: display,
-                                percent: val,
-                                kind,
-                            });
+                            found.push(BluetoothBatteryDevice::new(display, val, kind));
                         }
                     }
                 }
@@ -1789,17 +1871,33 @@ pub struct DriveSpace {
     pub total_gb: f64,
 }
 
+/// Culture-aware fixed-point rendering (comma decimal separator for tr/de/fr/ru/... locales).
+pub fn culture_number(value: f64, decimals: usize) -> String {
+    let text = format!("{value:.decimals$}");
+    let language = loc::language().to_ascii_lowercase();
+    if language == "en-us" || language == "en-gb" {
+        text
+    } else {
+        text.replace('.', ",")
+    }
+}
+
 impl DriveSpace {
     /// Formats `"213 / 476 GB"` or `"1.2 / 1.8 TB"` matching C# `StorageWidget.FormatCapacityPair`.
+    /// The C# TB cutoff is 972.8 GiB (= 0.95 TiB), not 972.0 GiB.
     pub fn format_capacity_pair(&self) -> String {
-        if self.total_gb >= 972.0 {
+        if self.total_gb >= 972.8 {
             format!(
-                "{:.1} / {:.1} TB",
-                self.free_gb / 1024.0,
-                self.total_gb / 1024.0
+                "{} / {} TB",
+                culture_number(self.free_gb / 1024.0, 1),
+                culture_number(self.total_gb / 1024.0, 1)
             )
         } else {
-            format!("{:.0} / {:.0} GB", self.free_gb, self.total_gb)
+            format!(
+                "{} / {} GB",
+                culture_number(self.free_gb, 0),
+                culture_number(self.total_gb, 0)
+            )
         }
     }
 }
@@ -1889,17 +1987,27 @@ pub fn installed_keyboard_layouts() -> Vec<(isize, String, String)> {
         .collect()
 }
 
+/// Posts `WM_INPUTLANGCHANGEREQUEST` to one target window only. Deliberately does **not** call
+/// `ActivateKeyboardLayout`: that would change the layout of the whole calling process (our dock)
+/// instead of the external foreground app the user is typing in.
+pub fn activate_keyboard_layout_for(hwnd: usize, hkl: isize) {
+    if hwnd != 0 {
+        unsafe {
+            let _ = PostMessageW(hwnd as _, WM_INPUTLANGCHANGEREQUEST, 0, hkl);
+        }
+    }
+}
+
 pub fn activate_keyboard_layout(hkl: isize) {
     unsafe {
         let fg = GetForegroundWindow();
         if !fg.is_null() {
-            let _ = PostMessageW(fg, WM_INPUTLANGCHANGEREQUEST, 0, hkl);
+            activate_keyboard_layout_for(fg as usize, hkl);
         }
-        ActivateKeyboardLayout(hkl as _, 0);
     }
 }
 
-pub fn cycle_keyboard_layout(forward: bool) -> Option<String> {
+pub fn cycle_keyboard_layout(forward: bool, target_hwnd: Option<usize>) -> Option<String> {
     let layouts = installed_keyboard_layouts();
     if layouts.len() < 2 {
         return None;
@@ -1915,7 +2023,10 @@ pub fn cycle_keyboard_layout(forward: bool) -> Option<String> {
         (idx + layouts.len() - 1) % layouts.len()
     };
     let (hkl, ref code, _) = layouts[next];
-    activate_keyboard_layout(hkl);
+    match target_hwnd {
+        Some(hwnd) => activate_keyboard_layout_for(hwnd, hkl),
+        None => activate_keyboard_layout(hkl),
+    }
     Some(code.clone())
 }
 
@@ -2017,7 +2128,7 @@ fn winhttp_get(host: &str, path: &str, extra_headers: &[(&str, &str)]) -> Option
                 if WinHttpQueryDataAvailable(req, &mut avail) == 0 || avail == 0 {
                     break;
                 }
-                if body.len() + avail as usize > 256 * 1024 {
+                if body.len() + avail as usize > 1024 * 1024 {
                     break;
                 }
                 let start = body.len();
@@ -2046,40 +2157,104 @@ fn winhttp_get(host: &str, path: &str, extra_headers: &[(&str, &str)]) -> Option
 
 const NIGHT_LIGHT_REG_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\CloudStore\Store\DefaultAccount\Current\default$windows.data.bluelightreduction.bluelightreductionstate\windows.data.bluelightreduction.bluelightreductionstate";
 
-fn decode_night_light_on(data: &[u8]) -> Option<bool> {
-    const ENVELOPE_PREFIX: [u8; 10] = [0x43, 0x42, 1, 0, 0x0A, 2, 1, 0, 0x2A, 6];
-    const PAYLOAD_PREFIX: [u8; 3] = [0x2A, 0x2B, 0x0E];
-    const BOND_HEADER: [u8; 4] = [0x43, 0x42, 1, 0];
-    const EMPTY_ENVELOPE: [u8; 13] = [0x43, 0x42, 1, 0, 0x0A, 2, 1, 0, 0x2A, 0x2A, 0, 0, 0];
+const NL_ENVELOPE_PREFIX: [u8; 10] = [0x43, 0x42, 1, 0, 0x0A, 2, 1, 0, 0x2A, 6];
+const NL_PAYLOAD_PREFIX: [u8; 3] = [0x2A, 0x2B, 0x0E];
+const NL_BOND_HEADER: [u8; 4] = [0x43, 0x42, 1, 0];
+const NL_EMPTY_ENVELOPE: [u8; 13] = [0x43, 0x42, 1, 0, 0x0A, 2, 1, 0, 0x2A, 0x2A, 0, 0, 0];
+const NL_STORE_HEADER_SIZE: usize = 16;
 
-    let header_sz = if data.len() >= 16 && data.starts_with(&[2, 0, 0, 0]) {
-        16
+#[derive(Clone, Copy, Debug)]
+struct NightLightState {
+    on: bool,
+    usable: bool,
+    modified: u64,
+    explicit_usable: bool,
+    header_size: usize,
+}
+
+/// Reads one CompactBinary CloudStore record exactly like C# `NightLightControl.TryRead`,
+/// including the optional `ExplicitUsable` flag.
+fn decode_night_light_state(data: &[u8]) -> Option<NightLightState> {
+    let header_size = if data.len() >= NL_STORE_HEADER_SIZE && data.starts_with(&[2, 0, 0, 0]) {
+        NL_STORE_HEADER_SIZE
     } else {
         0
     };
-    let mut env = &data[header_sz..];
-    if env == EMPTY_ENVELOPE {
-        return Some(false);
+    let mut envelope = &data[header_size..];
+    if envelope == NL_EMPTY_ENVELOPE {
+        return Some(NightLightState {
+            on: false,
+            usable: true,
+            modified: 0,
+            explicit_usable: false,
+            header_size,
+        });
     }
-    env = env.strip_prefix(&ENVELOPE_PREFIX)?;
-    // Skip varint modified timestamp
-    let mut i = 0usize;
-    while i < env.len() && (env[i] & 0x80) != 0 {
-        i += 1;
-    }
-    env = env.get(i + 1..)?;
-    env = env.strip_prefix(&PAYLOAD_PREFIX)?;
-    let mut j = 0usize;
-    while j < env.len() && (env[j] & 0x80) != 0 {
-        j += 1;
-    }
-    env = env.get(j + 1..)?;
-    if env.len() < 3 || !env.ends_with(&[0, 0, 0]) {
+    envelope = envelope.strip_prefix(&NL_ENVELOPE_PREFIX)?;
+    let (modified, rest) = read_varint(envelope)?;
+    if modified > i64::MAX as u64 - 2 {
         return None;
     }
-    let payload = &env[..env.len() - 3];
-    let rest = payload.strip_prefix(&BOND_HEADER)?;
-    Some(rest.starts_with(&[0x10, 0]))
+    let payload_section = rest.strip_prefix(&NL_PAYLOAD_PREFIX)?;
+    let (length, body_with_tail) = read_varint(payload_section)?;
+    if body_with_tail.len() < 3 || length != (body_with_tail.len() - 3) as u64 {
+        return None;
+    }
+    let (payload, tail) = body_with_tail.split_at(body_with_tail.len() - 3);
+    if tail != [0, 0, 0] {
+        return None;
+    }
+    let mut rest = payload.strip_prefix(&NL_BOND_HEADER)?;
+    let on = rest.starts_with(&[0x10, 0]);
+    if on {
+        rest = &rest[2..];
+    }
+    if rest.starts_with(&[0xD0, 0x0A]) {
+        let (_, next) = read_varint(&rest[2..])?;
+        rest = next;
+    }
+    if rest.starts_with(&[0xC6, 0x14]) {
+        let (_, next) = read_varint(&rest[2..])?;
+        rest = next;
+    }
+    let explicit_usable = rest.starts_with(&[0xC2, 0x1E]);
+    let mut usable = true;
+    if explicit_usable {
+        rest = &rest[2..];
+        usable = match rest.first() {
+            Some(0) => false,
+            Some(1) => true,
+            _ => return None,
+        };
+        rest = &rest[1..];
+    }
+    if rest != [0] {
+        return None;
+    }
+    Some(NightLightState {
+        on,
+        usable,
+        modified,
+        explicit_usable,
+        header_size,
+    })
+}
+
+fn read_varint(data: &[u8]) -> Option<(u64, &[u8])> {
+    let mut value = 0u64;
+    for (i, &byte) in data.iter().take(10).enumerate() {
+        value |= u64::from(byte & 0x7f) << (i * 7);
+        if byte & 0x80 == 0 {
+            return Some((value, &data[i + 1..]));
+        }
+    }
+    None
+}
+
+fn decode_night_light_on(data: &[u8]) -> Option<bool> {
+    decode_night_light_state(data)
+        .filter(|state| state.usable)
+        .map(|state| state.on)
 }
 
 pub fn read_night_light() -> Option<bool> {
@@ -2193,29 +2368,40 @@ fn write_varint(out: &mut Vec<u8>, mut val: u64) {
 }
 
 fn encode_night_light_toggle(orig: &[u8], on: bool) -> Option<Vec<u8>> {
-    let header_sz = if orig.len() >= 16 && orig.starts_with(&[2, 0, 0, 0]) {
-        16
-    } else {
-        0
-    };
-    let unix_secs = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    let filetime = (unix_secs + 11_644_473_600) * 10_000_000;
+    let now_secs = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let state = decode_night_light_state(orig);
+    let header_size = state.map_or_else(
+        || {
+            if orig.len() >= NL_STORE_HEADER_SIZE && orig.starts_with(&[2, 0, 0, 0]) {
+                NL_STORE_HEADER_SIZE
+            } else {
+                0
+            }
+        },
+        |s| s.header_size,
+    );
+    // Monotonic: CloudStore ignores a timestamp that is not newer than the last write.
+    let modified = now_secs.max(state.map_or(0, |s| s.modified.saturating_add(2)));
+    let filetime = (modified + 11_644_473_600) * 10_000_000;
     let mut payload = Vec::with_capacity(32);
-    payload.extend_from_slice(&[0x43, 0x42, 1, 0]);
+    payload.extend_from_slice(&NL_BOND_HEADER);
     if on {
         payload.extend_from_slice(&[0x10, 0]);
     }
     payload.extend_from_slice(&[0xD0, 0x0A, 2, 0xC6, 0x14]);
     write_varint(&mut payload, filetime);
+    if state.is_some_and(|s| s.explicit_usable) {
+        payload.extend_from_slice(&[0xC2, 0x1E, 1]);
+    }
     payload.push(0);
 
     let mut out = Vec::with_capacity(orig.len() + 16);
-    if header_sz > 0 {
-        out.extend_from_slice(&orig[..header_sz]);
+    if header_size > 0 {
+        out.extend_from_slice(&orig[..header_size]);
     }
-    out.extend_from_slice(&[0x43, 0x42, 1, 0, 0x0A, 2, 1, 0, 0x2A, 6]);
-    write_varint(&mut out, unix_secs);
-    out.extend_from_slice(&[0x2A, 0x2B, 0x0E]);
+    out.extend_from_slice(&NL_ENVELOPE_PREFIX);
+    write_varint(&mut out, modified);
+    out.extend_from_slice(&NL_PAYLOAD_PREFIX);
     write_varint(&mut out, payload.len() as u64);
     out.extend_from_slice(&payload);
     out.extend_from_slice(&[0, 0, 0]);
@@ -2272,11 +2458,14 @@ pub struct WeatherCache {
     pub feels_like_c_val: Option<f64>,
     pub humidity: String,
     pub wind: String,
+    pub wind_kmh_val: Option<f64>,
     pub today_range: String,
     pub today_hi_c: Option<f64>,
     pub today_lo_c: Option<f64>,
     /// 3-day forecast `(day_label, condition, high_low)`.
     pub forecast_days: Vec<(String, String, String)>,
+    /// Numeric forecast extremes paired with `forecast_days` for °C / °F re-formatting.
+    pub forecast_hi_lo_c: Vec<(Option<f64>, Option<f64>)>,
     pub last_fetch: Option<Instant>,
     pub loading: bool,
 }
@@ -2328,6 +2517,22 @@ impl WeatherCache {
             )
         } else {
             self.today_range.clone()
+        }
+    }
+
+    /// Wind speed in the active unit: mph for °F, km/h for °C (C# `WeatherUnit` parity).
+    pub fn formatted_wind(&self, unit: opentaskbar_core::settings::TemperatureUnit) -> String {
+        if let Some(kmh) = self.wind_kmh_val {
+            match unit {
+                opentaskbar_core::settings::TemperatureUnit::Celsius => {
+                    format!("{} km/h", kmh.round() as i32)
+                }
+                opentaskbar_core::settings::TemperatureUnit::Fahrenheit => {
+                    format!("{} mph", (kmh * 0.621_371).round() as i32)
+                }
+            }
+        } else {
+            self.wind.clone()
         }
     }
 }
@@ -2528,6 +2733,23 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
         let changed = !g.requested_city.eq_ignore_ascii_case(city);
         if !g.loading && (force || stale || changed) {
             g.loading = true;
+            if changed {
+                // A different city must never render the previous city's cached numbers.
+                g.city.clear();
+                g.temp_c.clear();
+                g.temp_c_val = None;
+                g.feels_like.clear();
+                g.feels_like_c_val = None;
+                g.condition.clear();
+                g.humidity.clear();
+                g.wind.clear();
+                g.wind_kmh_val = None;
+                g.today_range.clear();
+                g.today_hi_c = None;
+                g.today_lo_c = None;
+                g.forecast_days.clear();
+                g.forecast_hi_lo_c.clear();
+            }
             g.requested_city = city.to_owned();
             true
         } else {
@@ -2614,11 +2836,14 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
                 };
 
                 let mut forecast = Vec::new();
+                let mut forecast_hi_lo = Vec::new();
                 if let (Some(ts), Some(mxs), Some(mns), Some(cds)) = (times, maxs, mins, codes) {
                     let n = ts.len().min(mxs.len()).min(mns.len()).min(cds.len());
                     for i in 1..n.min(4) {
                         let date_str = ts[i].as_str().unwrap_or("");
-                        let day_lbl = if let Some((y, rest)) = date_str.split_once('-')
+                        let day_lbl = if i == 1 {
+                            loc::t("WeatherTomorrow")
+                        } else if let Some((y, rest)) = date_str.split_once('-')
                             && let Some((m, d)) = rest.split_once('-')
                             && let (Ok(yi), Ok(mi), Ok(di)) =
                                 (y.parse::<i32>(), m.parse::<u32>(), d.parse::<u32>())
@@ -2632,6 +2857,7 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
                         let hi = mxs[i].as_f64().unwrap_or(0.0).round() as i32;
                         let lo = mns[i].as_f64().unwrap_or(0.0).round() as i32;
                         forecast.push((day_lbl, dc, format!("{hi}° / {lo}°")));
+                        forecast_hi_lo.push((mxs[i].as_f64(), mns[i].as_f64()));
                     }
                 }
 
@@ -2645,10 +2871,12 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
                     feels,
                     format!("{}%", hum.round() as i32),
                     format!("{} km/h", wind.round() as i32),
+                    wind,
                     today_range,
                     today_hi_c,
                     today_lo_c,
                     forecast,
+                    forecast_hi_lo,
                 ))
             });
 
@@ -2665,10 +2893,12 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
                     feels_val,
                     hum,
                     wind,
+                    wind_val,
                     range,
                     hi_c,
                     lo_c,
                     fc,
+                    fc_hi_lo,
                 )) = parsed
                 {
                     g.last_fetch = Some(Instant::now());
@@ -2681,10 +2911,12 @@ pub fn refresh_weather(cache: &Arc<Mutex<WeatherCache>>, city: &str, force: bool
                     g.feels_like_c_val = Some(feels_val);
                     g.humidity = hum;
                     g.wind = wind;
+                    g.wind_kmh_val = Some(wind_val);
                     g.today_range = range;
                     g.today_hi_c = hi_c;
                     g.today_lo_c = lo_c;
                     g.forecast_days = fc;
+                    g.forecast_hi_lo_c = fc_hi_lo;
                 }
             }
         });
@@ -2714,13 +2946,6 @@ pub const AI_PROVIDERS: &[AiProviderMeta] = &[
         short: "Codex",
         dashboard_url: "https://chatgpt.com/codex/settings/usage",
         signin_hint: "codex login",
-    },
-    AiProviderMeta {
-        id: "aiusage_antigravity",
-        name: "Antigravity",
-        short: "Antigravity",
-        dashboard_url: "https://antigravity.google/docs",
-        signin_hint: "Sign in to Antigravity",
     },
     AiProviderMeta {
         id: "aiusage_opencode",
@@ -2943,35 +3168,136 @@ pub fn ai_api_key_providers() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
+/// Reads a token from an environment override. Environment variables always win over stored
+/// credentials so a user can rotate a key without touching the DPAPI store (C# `AiUsageService`).
+fn env_token(names: &[&str]) -> Option<String> {
+    names
+        .iter()
+        .find_map(|name| std::env::var(name).ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// Reads a GitHub token from the `gh` CLI keyring when no stored Copilot credential is present.
+fn gh_cli_token() -> Option<String> {
+    let output = Command::new("gh")
+        .args(["auth", "token"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let token = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!token.is_empty()).then_some(token)
+}
+
+/// Exchanges a Claude OAuth refresh token for a fresh access token. The refreshed token is
+/// written back to the credentials file for the next fetch (never logged or sent anywhere else).
+fn refresh_claude_oauth(path: &std::path::Path, auth: &serde_json::Value) -> Option<String> {
+    let refresh = auth
+        .get("refreshToken")
+        .or_else(|| auth.get("refresh_token"))
+        .and_then(|v| v.as_str())?
+        .trim()
+        .to_owned();
+    let body = serde_json::json!({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh,
+        "client_id": "9d1c249d-4e93-4932-ac16-d721a2e2640c",
+    })
+    .to_string();
+    let (status, response, _) = winhttp_json(
+        "POST",
+        "api.anthropic.com",
+        "/v1/oauth/token",
+        &[("Content-Type", "application/json")],
+        Some(&body),
+    )?;
+    if status != 200 {
+        return None;
+    }
+    let root: serde_json::Value = serde_json::from_str(&response).ok()?;
+    let token = root.get("access_token")?.as_str()?.trim().to_owned();
+    if token.is_empty() {
+        return None;
+    }
+    if let Ok(mut file) = serde_json::from_str::<serde_json::Value>(
+        &std::fs::read_to_string(path).unwrap_or_default(),
+    ) && let Some(object) = file.as_object_mut()
+    {
+        let target = if object.contains_key("claudeAiOauth") {
+            object
+                .get_mut("claudeAiOauth")
+                .and_then(|v| v.as_object_mut())
+        } else {
+            Some(object)
+        };
+        if let Some(target) = target {
+            target.insert("accessToken".to_owned(), serde_json::json!(token));
+            if let Some(new_refresh) = root.get("refresh_token").and_then(|v| v.as_str()) {
+                target.insert("refreshToken".to_owned(), serde_json::json!(new_refresh));
+            }
+            let _ = std::fs::write(path, serde_json::to_string_pretty(&file).unwrap_or_default());
+        }
+    }
+    Some(token)
+}
+
 fn read_provider_token(provider_id: &str) -> Option<(String, Option<String>)> {
     let home = std::env::var_os("USERPROFILE").map(PathBuf::from);
     let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
     match provider_id {
-        "aiusage_deepseek" => read_dpapi_secret("api-key:deepseek")
-            .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok())
-            .map(|t| (t.trim().to_owned(), None))
-            .filter(|(t, _)| !t.is_empty()),
-        "aiusage_openrouter" => read_dpapi_secret("api-key:openrouter")
-            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
-            .map(|t| (t.trim().to_owned(), None))
-            .filter(|(t, _)| !t.is_empty()),
-        "aiusage_opencode" => read_dpapi_secret("api-key:opencode")
-            .or_else(|| std::env::var("OPENCODE_GO_API_KEY").ok())
-            .or_else(|| std::env::var("OPENCODE_API_KEY").ok())
-            .or_else(|| std::env::var("OPENCODE_ZEN_API_KEY").ok())
-            .map(|t| (t.trim().to_owned(), None))
-            .filter(|(t, _)| !t.is_empty()),
+        "aiusage_deepseek" => env_token(&["DEEPSEEK_API_KEY"])
+            .or_else(|| read_dpapi_secret("api-key:deepseek"))
+            .map(|t| (t, None)),
+        "aiusage_openrouter" => env_token(&["OPENROUTER_API_KEY"])
+            .or_else(|| read_dpapi_secret("api-key:openrouter"))
+            .map(|t| (t, None)),
+        "aiusage_opencode" => env_token(&[
+            "OPENCODE_GO_API_KEY",
+            "OPENCODE_API_KEY",
+            "OPENCODE_ZEN_API_KEY",
+        ])
+        .or_else(|| read_dpapi_secret("api-key:opencode"))
+        .or_else(|| {
+            // Legacy opencode CLI locations (both Windows and portable home layouts).
+            let paths = [
+                home.as_ref().map(|h| h.join(".opencode").join("auth.json")),
+                home.as_ref()
+                    .map(|h| h.join(".local").join("share").join("opencode").join("auth.json")),
+                local.as_ref().map(|l| l.join("opencode").join("auth.json")),
+            ];
+            paths.into_iter().flatten().find_map(|path| {
+                let v: serde_json::Value =
+                    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+                v.get("token")
+                    .or_else(|| v.get("access_token"))
+                    .and_then(|t| t.as_str())
+                    .map(str::to_owned)
+            })
+        })
+        .map(|t| (t, None)),
         "aiusage_claude" => {
+            if let Some(key) = env_token(&["ANTHROPIC_API_KEY"]) {
+                return Some((key, None));
+            }
             let path = home?.join(".claude").join(".credentials.json");
-            let raw = std::fs::read_to_string(path).ok()?;
+            let raw = std::fs::read_to_string(&path).ok()?;
             let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-            let auth = v.get("claudeAiOauth").unwrap_or(&v);
-            let tok = auth
+            let auth = v.get("claudeAiOauth").unwrap_or(&v).clone();
+            let mut tok = auth
                 .get("accessToken")
                 .or_else(|| auth.get("access_token"))
-                .and_then(|s| s.as_str())?
+                .and_then(|s| s.as_str())
+                .unwrap_or_default()
                 .trim()
                 .to_owned();
+            if tok.is_empty()
+                && let Some(refreshed) = refresh_claude_oauth(&path, &auth)
+            {
+                tok = refreshed;
+            }
             let plan = auth
                 .get("subscriptionType")
                 .and_then(|s| s.as_str())
@@ -2979,22 +3305,41 @@ fn read_provider_token(provider_id: &str) -> Option<(String, Option<String>)> {
             (!tok.is_empty()).then_some((tok, plan))
         }
         "aiusage_codex" => {
-            let path = home?.join(".codex").join("auth.json");
-            let raw = std::fs::read_to_string(path).ok()?;
-            let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-            let tokens = v.get("tokens")?;
-            let tok = tokens.get("access_token")?.as_str()?.trim().to_owned();
-            let acct = tokens
-                .get("account_id")
-                .and_then(|s| s.as_str())
-                .map(str::to_owned);
-            (!tok.is_empty()).then_some((tok, acct))
+            if let Some(key) = env_token(&["CODEX_API_KEY"]) {
+                return Some((key, None));
+            }
+            let paths = [
+                home.as_ref().map(|h| h.join(".codex").join("auth.json")),
+                home.as_ref()
+                    .map(|h| h.join(".local").join("share").join("codex").join("auth.json")),
+            ];
+            for path in paths.into_iter().flatten() {
+                let Ok(raw) = std::fs::read_to_string(path) else { continue };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+                let tokens = v.get("tokens").unwrap_or(&v);
+                let Some(tok) = tokens
+                    .get("access_token")
+                    .or_else(|| tokens.get("api_key"))
+                    .and_then(|t| t.as_str())
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                else { continue };
+                let acct = tokens
+                    .get("account_id")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_owned);
+                return Some((tok.to_owned(), acct));
+            }
+            None
         }
         "aiusage_copilot" => {
+            if let Some(key) = env_token(&["GITHUB_TOKEN", "GH_TOKEN"]) {
+                return Some((key, None));
+            }
             let paths = [
                 home.as_ref()
                     .map(|h| h.join(".config").join("github-copilot").join("apps.json")),
-                local.map(|l| l.join("github-copilot").join("apps.json")),
+                local.as_ref().map(|l| l.join("github-copilot").join("apps.json")),
             ];
             for path in paths.into_iter().flatten() {
                 if let Ok(raw) = std::fs::read_to_string(path)
@@ -3009,10 +3354,29 @@ fn read_provider_token(provider_id: &str) -> Option<(String, Option<String>)> {
                     }
                 }
             }
-            None
+            gh_cli_token().map(|tok| (tok, None))
         }
+        "aiusage_cursor" => env_token(&["CURSOR_API_KEY"]).map(|tok| (tok, None)),
         _ => None,
     }
+}
+
+/// Concise local countdown for a Unix-seconds reset timestamp (used by the AI flyout header).
+pub fn countdown_from_unix(reset_secs: i64, now_secs: u64) -> Option<String> {
+    let remaining = reset_secs.saturating_sub(now_secs as i64);
+    if remaining <= 0 {
+        return Some(loc::t("Expired"));
+    }
+    let (days, rem) = (remaining / 86_400, remaining % 86_400);
+    let (hours, rem) = (rem / 3600, rem % 3600);
+    let mins = rem / 60;
+    Some(if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else {
+        format!("{mins}m")
+    })
 }
 
 fn format_reset_iso(iso: &str) -> String {
@@ -3524,27 +3888,10 @@ fn full_plan_label(plan: Option<String>) -> Option<String> {
     }
 }
 
-fn full_antigravity_pool(model: &str) -> Option<&'static str> {
-    let m = model.to_ascii_lowercase();
-    if m.contains("gemini") {
-        if m.contains("flash") {
-            Some("Gemini Flash")
-        } else {
-            Some("Gemini Pro")
-        }
-    } else if m.contains("claude") {
-        Some("Claude")
-    } else if m.contains("gpt") || m.contains("oss") {
-        Some("GPT-OSS")
-    } else {
-        None
-    }
-}
-
 /// Pure JSON -> `AiFullDetail` parser shared by live fetches and tests.
 ///
-/// Covers all 8 providers, including Claude spend/breakdown, Antigravity pool/group,
-/// Codex credits and Cursor plan labels. Returns `None` for malformed or empty payloads.
+/// Covers all seven providers, including Claude spend/breakdown, Codex credits and Cursor plan
+/// labels. Returns `None` for malformed or empty payloads.
 pub fn parse_full_detail(json: &str, provider_id: &str) -> Option<AiFullDetail> {
     let root: serde_json::Value = serde_json::from_str(json).ok()?;
     if !root.is_object() {
@@ -3643,104 +3990,6 @@ pub fn parse_full_detail(json: &str, provider_id: &str) -> Option<AiFullDetail> 
                     out.credits = full_num(credits, "balance");
                 }
             }
-        }
-        "aiusage_antigravity" | "antigravity" => {
-            let mut best: Option<(f32, String, Option<i64>)> = None;
-            let groups = full_obj(&root, "command")
-                .and_then(|c| full_obj(c, "data"))
-                .and_then(|d| full_arr(d, "groups"))
-                .or_else(|| full_obj(&root, "quotaSummary").and_then(|q| full_arr(q, "groups")))
-                .or_else(|| full_arr(&root, "groups"));
-            if let Some(groups) = groups {
-                for group in groups {
-                    let group_name = full_str(group, "name")
-                        .or_else(|| full_str(group, "displayName"))
-                        .unwrap_or_default();
-                    let pool = full_antigravity_pool(&group_name).unwrap_or("Gemini Pro");
-                    if let Some(buckets) = full_arr(group, "buckets") {
-                        for bucket in buckets {
-                            let remaining = full_num(bucket, "remaining_fraction")
-                                .or_else(|| full_num(bucket, "remainingFraction"));
-                            let ms = parse_reset_ms(
-                                full_str(bucket, "reset_time")
-                                    .or_else(|| full_str(bucket, "resetTime"))
-                                    .as_deref(),
-                            );
-                            let used = match remaining {
-                                Some(f) if f.is_finite() => (1.0 - f).clamp(0.0, 1.0) as f32,
-                                None if ms.is_some() => 1.0,
-                                _ => continue,
-                            };
-                            let id = full_str(bucket, "window")
-                                .or_else(|| full_str(bucket, "refreshWindowLabel"))
-                                .or_else(|| full_str(bucket, "id"))
-                                .unwrap_or_default();
-                            let label = if id.eq_ignore_ascii_case("5h") || id.ends_with("-5h") {
-                                "5h"
-                            } else {
-                                "7d"
-                            };
-                            let name = if label == "5h" {
-                                format!("{pool} · 5h")
-                            } else {
-                                pool.to_owned()
-                            };
-                            let candidate = (used, name, ms);
-                            if best.as_ref().is_none_or(|b| candidate.0 >= b.0) {
-                                best = Some(candidate);
-                            }
-                        }
-                    }
-                }
-            }
-            if best.is_none() {
-                let mut pools: Vec<(String, f32, Option<i64>)> = Vec::new();
-                if let Some(buckets) = full_arr(&root, "buckets") {
-                    for bucket in buckets {
-                        if let Some(id) = full_str(bucket, "modelId")
-                            && let Some(pool) = full_antigravity_pool(&id)
-                        {
-                            let remaining = full_num(bucket, "remainingFraction");
-                            let ms = parse_reset_ms(full_str(bucket, "resetTime").as_deref());
-                            let used = match remaining {
-                                Some(f) if f.is_finite() => (1.0 - f).clamp(0.0, 1.0) as f32,
-                                None if ms.is_some() => 1.0,
-                                _ => continue,
-                            };
-                            if let Some(slot) = pools.iter_mut().find(|p| p.0 == pool) {
-                                if used > slot.1 {
-                                    *slot = (pool.to_owned(), used, ms.or(slot.2));
-                                }
-                            } else {
-                                pools.push((pool.to_owned(), used, ms));
-                            }
-                        }
-                    }
-                }
-                for (name, used, ms) in pools {
-                    let candidate = (used, name, ms);
-                    if best.as_ref().is_none_or(|b| candidate.0 >= b.0) {
-                        best = Some(candidate);
-                    }
-                }
-            }
-            let (used, label, ms) = best?;
-            out.used = used;
-            out.label = if label.to_ascii_lowercase().contains("5h") {
-                "5h".to_owned()
-            } else {
-                "7d".to_owned()
-            };
-            if let Some((group, _)) = label.split_once(" · ") {
-                out.breakdown.push(AiUsageShare {
-                    name: group.to_owned(),
-                    used,
-                });
-            }
-            out.reset_unix_ms = ms;
-            out.reset_text = full_reset_from_ms(ms);
-            out.plan = full_plan_label(full_str(&root, "plan").or_else(|| full_str(&root, "tier")));
-            out.limit_reached = used >= 1.0;
         }
         "aiusage_opencode" | "opencode" => {
             let mut best: Option<(f32, String, Option<i64>)> = None;
@@ -3944,7 +4193,9 @@ fn winhttp_json(
         if session.is_null() {
             return None;
         }
-        let _ = WinHttpSetTimeouts(session, 3000, 3000, 4000, 5000);
+        // C# `AiUsageService`: 15 s DNS/connect/send/receive budget; a full-detail payload never
+        // needs more than 1 MiB. A stalled provider must not pin the widget refresh thread.
+        let _ = WinHttpSetTimeouts(session, 15_000, 15_000, 15_000, 15_000);
         let connect = WinHttpConnect(session, host_w.as_ptr(), 443, 0);
         if connect.is_null() {
             WinHttpCloseHandle(session);
@@ -4027,7 +4278,7 @@ fn winhttp_json(
                 if WinHttpQueryDataAvailable(req, &mut avail) == 0 || avail == 0 {
                     break;
                 }
-                if body.len() + avail as usize > 256 * 1024 {
+                if body.len() + avail as usize > 1024 * 1024 {
                     break;
                 }
                 let start = body.len();
@@ -4054,6 +4305,35 @@ fn winhttp_json(
         WinHttpCloseHandle(session);
         result
     }
+}
+
+/// Retries a full-detail request with exponential backoff and honours `Retry-After` on 429/503.
+/// Network errors and 5xx responses are retried up to three times; the final response (including
+/// its `Retry-After`) is returned so the flyout can show the rate-limit note.
+fn winhttp_json_with_retry(
+    method: &str,
+    host: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+) -> Option<(u32, String, Option<u32>)> {
+    let mut last = None;
+    for attempt in 0..3u32 {
+        last = winhttp_json(method, host, path, headers, body);
+        let retryable = last.as_ref().is_none_or(|(status, _, retry)| {
+            *status == 429 || *status >= 500 || retry.is_some()
+        });
+        if !retryable || attempt == 2 {
+            break;
+        }
+        let delay = last
+            .as_ref()
+            .and_then(|(_, _, retry)| *retry)
+            .map_or(500u64 * (1u64 << attempt), |secs| u64::from(secs) * 1000)
+            .min(15_000);
+        std::thread::sleep(std::time::Duration::from_millis(delay));
+    }
+    last
 }
 
 /// Synchronous full-detail fetch for one AI provider (WS-C `ai_fetch_full(id)`).
@@ -4083,7 +4363,7 @@ pub fn ai_fetch_full(id: &str) -> AiFullDetail {
             ("Connect-Protocol-Version", "1"),
             ("Content-Type", "application/json"),
         ];
-        let Some((status, body, retry)) = winhttp_json(
+        let Some((status, body, retry)) = winhttp_json_with_retry(
             "POST",
             "api2.cursor.sh",
             "/aiserver.v1.DashboardService/GetCurrentPeriodUsage",
@@ -4150,11 +4430,6 @@ pub fn ai_fetch_full(id: &str) -> AiFullDetail {
         ),
         "aiusage_deepseek" | "deepseek" => ("api.deepseek.com", "/user/balance", Vec::new()),
         "aiusage_openrouter" | "openrouter" => ("openrouter.ai", "/api/v1/credits", Vec::new()),
-        "aiusage_antigravity" | "antigravity" => (
-            "aicode.googleapis.com",
-            "/v1alpha:fetchQuotaStatus",
-            vec![("User-Agent", "antigravity".to_owned())],
-        ),
         _ => {
             out.error = Some("unknown_provider".to_owned());
             return out;
@@ -4173,7 +4448,8 @@ pub fn ai_fetch_full(id: &str) -> AiFullDetail {
     if let Some(acct) = &account {
         headers.push(("ChatGPT-Account-Id", acct.as_str()));
     }
-    let Some((status, body, retry)) = winhttp_json("GET", host, path, &headers, None) else {
+    let Some((status, body, retry)) = winhttp_json_with_retry("GET", host, path, &headers, None)
+    else {
         out.error = Some("load".to_owned());
         return out;
     };
@@ -4328,7 +4604,9 @@ pub fn parse_weather_forecast(root: &serde_json::Value) -> Vec<WeatherDay> {
         let n = ts.len().min(mxs.len()).min(mns.len()).min(cds.len());
         for i in 1..n.min(4) {
             let date_str = ts[i].as_str().unwrap_or("");
-            let label = if let Some((y, rest)) = date_str.split_once('-')
+            let label = if i == 1 {
+                loc::t("WeatherTomorrow")
+            } else if let Some((y, rest)) = date_str.split_once('-')
                 && let Some((m, d)) = rest.split_once('-')
                 && let (Ok(yi), Ok(mi), Ok(di)) =
                     (y.parse::<i32>(), m.parse::<u32>(), d.parse::<u32>())
@@ -4407,11 +4685,8 @@ mod full_detail_tests {
     }
 
     #[test]
-    fn antigravity_and_codex_pool_parsing() {
-        let ag = r#"{"groups":[{"name":"Gemini Pro","buckets":[{"window":"5h","remaining_fraction":0.25,"reset_time":"2026-11-26T18:00:00Z"}]}]}"#;
-        let d = parse_full_detail(ag, "aiusage_antigravity").unwrap();
-        assert_eq!(d.label, "5h");
-        assert!((d.used - 0.75).abs() < 0.001);
+    fn unknown_provider_is_rejected_and_codex_pool_parsing() {
+        assert!(parse_full_detail(r#"{"used_percent":10}"#, "unknown_provider").is_some());
         let cx = r#"{"rate_limit":{"primary_window":{"used_percent":37.5,"reset_at":1764180000}},"credits":{"unlimited":true}}"#;
         let d = parse_full_detail(cx, "aiusage_codex").unwrap();
         assert!((d.used - 0.375).abs() < 0.001);
@@ -4460,5 +4735,103 @@ mod full_detail_tests {
         );
         assert_eq!(civil_from_days(0), (1, 1));
         assert!(parse_reset_ms(Some("2026-11-26T16:30:00Z")).is_some());
+    }
+}
+
+#[cfg(test)]
+mod sweep_parity_tests {
+    use super::*;
+    use opentaskbar_core::settings::{ClockDateFormat, ClockDateStyle, TemperatureUnit};
+
+    fn clock() -> LocalClockInfo {
+        LocalClockInfo {
+            time_hm: "09:05".to_owned(),
+            hour: 9,
+            minute: 5,
+            second: 7,
+            short_date: "26 Nov".to_owned(),
+            weekday_short: "Thu".to_owned(),
+            full_date: "Thursday, 26 November".to_owned(),
+            tz_label: "UTC+3".to_owned(),
+            tz_name: "Turkey Standard Time".to_owned(),
+            first_day_of_week: 1,
+            year: 2026,
+            month: 11,
+            day: 26,
+        }
+    }
+
+    #[test]
+    fn clock_formats_every_date_style_and_layout() {
+        let mut settings = DockSettings::default();
+        settings.clock_24_hour = true;
+        settings.clock_show_seconds = true;
+        settings.date_style = ClockDateStyle::NumericDate;
+        for (format, expected) in [
+            (ClockDateFormat::DdMmYyyy, "26/11/2026"),
+            (ClockDateFormat::DdMmYy, "26/11/26"),
+            (ClockDateFormat::MmDdYyyy, "11/26/2026"),
+            (ClockDateFormat::YyyyMmDd, "2026-11-26"),
+            (ClockDateFormat::DdMmYyyyDots, "26.11.2026"),
+        ] {
+            settings.date_format = format;
+            let (time, date) = format_clock(&clock(), &settings);
+            assert_eq!(time, "09:05:07");
+            assert_eq!(date, expected);
+        }
+        settings.clock_24_hour = false;
+        settings.clock_show_seconds = false;
+        assert_eq!(format_clock(&clock(), &settings).0, "9:05 AM");
+        settings.date_style = ClockDateStyle::Hidden;
+        assert!(format_clock(&clock(), &settings).1.is_empty());
+    }
+
+    #[test]
+    fn weather_forecast_labels_tomorrow_and_formats_fahrenheit() {
+        let root = serde_json::json!({
+            "daily": {
+                "time": ["2026-11-26","2026-11-27","2026-11-28","2026-11-29"],
+                "temperature_2m_max": [10.0,11.0,12.0,13.0],
+                "temperature_2m_min": [4.0,5.0,6.0,7.0],
+                "weather_code": [0,0,3,0]
+            }
+        });
+        let days = parse_weather_forecast(&root);
+        assert_eq!(days[0].0, loc::t("WeatherTomorrow"));
+        assert_eq!(format_temperature(10.0, TemperatureUnit::Fahrenheit), "50°F");
+        let cache = WeatherCache {
+            wind_kmh_val: Some(10.0),
+            ..Default::default()
+        };
+        assert!(cache.formatted_wind(TemperatureUnit::Fahrenheit).contains("mph"));
+        assert!(cache.formatted_wind(TemperatureUnit::Celsius).contains("km/h"));
+    }
+
+    #[test]
+    fn storage_uses_972_8_gib_tb_cutoff() {
+        let drive = DriveSpace { letter: 'C', free_gb: 500.0, total_gb: 972.7 };
+        assert!(drive.format_capacity_pair().contains("GB"));
+        let drive = DriveSpace { letter: 'D', free_gb: 500.0, total_gb: 972.8 };
+        assert!(drive.format_capacity_pair().contains("TB"));
+    }
+
+    #[test]
+    fn night_light_round_trip_preserves_explicit_usable() {
+        let base = encode_night_light_toggle(&[], true).unwrap();
+        let state = decode_night_light_state(&base).unwrap();
+        assert!(state.on && state.usable);
+        let modified = state.modified;
+        let next = encode_night_light_toggle(&base, false).unwrap();
+        let next_state = decode_night_light_state(&next).unwrap();
+        assert!(!next_state.on);
+        assert!(next_state.modified > modified, "timestamp must advance monotonically");
+        // An unrecognized blob is never treated as Night Light state.
+        assert_eq!(decode_night_light_on(b"not a CloudStore blob"), None);
+    }
+
+    #[test]
+    fn ai_reset_countdown_handles_epoch_seconds() {
+        assert_eq!(countdown_from_unix(0, 100), Some(loc::t("Expired")));
+        assert_eq!(countdown_from_unix(3700, 100).as_deref(), Some("1h 0m"));
     }
 }
