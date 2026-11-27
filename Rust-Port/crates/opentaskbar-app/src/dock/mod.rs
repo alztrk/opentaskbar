@@ -252,6 +252,14 @@ pub fn apply_runtime_settings() {
             let _ = PostMessageW(HWND_BROADCAST, msg, 0, 0);
         }
     }
+    // Settings can be written by another process while the picker's nested
+    // modal loop owns this process's dispatcher. Broadcast the close signal so
+    // the picker HWND receives it directly (registered messages only reach our
+    // own windows; WM_APP+9 is private to this app family).
+    unsafe {
+        let _ = PostMessageW(HWND_BROADCAST, window_picker::PICKER_CLOSE_MSG, 0, 0);
+    }
+    window_picker::set_picker_enabled(settings.previews_enabled);
     // Keep the application language in sync even when no dock is currently open.
     loc::set_language(&settings.language);
 }
@@ -791,6 +799,9 @@ struct DockState {
     is_secondary: bool,
     light_strip: bool,
     appbar_registered: bool,
+    /// Reason/tag passed to `appbar::register` so shutdown removes the same
+    /// AppBar instance (light shelf vs #178 mirror dock).
+    appbar_reason: &'static str,
     dcomp: DcompEngine,
     spatial_glass: Option<design::spatial_glass::SpatialGlassHost>,
     pill: PillNodes,
@@ -891,9 +902,10 @@ struct DockState {
     last_overlap_scan: Option<Instant>,
     cached_overlap: bool,
     /// Cached result of the throttled fullscreen scan used to hide a secondary
-    /// dock while a game owns another monitor.
+    /// dock while a game owns **its own** monitor (#179). A fullscreen window on
+    /// a different display must never hide this dock.
     last_fullscreen_scan: Option<Instant>,
-    fullscreen_on_other_monitor: bool,
+    fullscreen_on_own_monitor: bool,
     /// Cached `flyout_reposition::is_anchored()` answer (>=2 s TTL). The 200 ms
     /// guard tick reads the cache instead of validating the Start process.
     cached_anchored: Option<(Instant, bool)>,
@@ -1491,34 +1503,61 @@ fn remap_native_app_menu_entries(entries: Vec<MenuEntry>) -> (Vec<(u32, u32)>, V
     (commands, items)
 }
 
-/// Fjord workspace commands appended to the dock context menu (WS-11).
+/// Fjord workspace commands appended to the dock context menu (WS-11). Wi-Fi is
+/// index 2: the original `menu_command` only covers Files/CloseBar, so the dock
+/// owns the extra command and its dispatch through `fjord::wifi_ui`.
 fn fjord_bar_menu_entries(files_enabled: bool) -> Vec<(u32, MenuEntry)> {
     fjord_bar_menu_entries_for(files_enabled, files_enabled)
 }
 
 fn fjord_bar_menu_entries_for(files_enabled: bool, bar_visible: bool) -> Vec<(u32, MenuEntry)> {
-    (0..2)
+    (0..3)
         .filter_map(|index| {
-            let command = crate::fjord::bar::menu_command(index, files_enabled)?;
+            let command = fjord_command_for_index(index, files_enabled)?;
+            // Temporarily disabled: never surface the Show/Hide Fjord Bar item.
+            if !crate::ui::fjord_bar::FJORD_BAR_ENABLED
+                && matches!(command, crate::fjord::bar::BarCommand::CloseBar)
+            {
+                return None;
+            }
             let id = FJORD_MENU_ID_BASE + index as u32;
-            let label = match command {
-                crate::fjord::bar::BarCommand::OpenFiles => loc::t("FjordFilesOpen"),
-                crate::fjord::bar::BarCommand::CloseBar => loc::t(if bar_visible {
-                    "FjordBarHide"
-                } else {
-                    "FjordBarShow"
-                }),
-                crate::fjord::bar::BarCommand::ToggleWifi => return None,
+            let (icon, label) = match command {
+                crate::fjord::bar::BarCommand::OpenFiles => {
+                    (MenuIcon::Folder, loc::t("FjordFilesOpen"))
+                }
+                crate::fjord::bar::BarCommand::CloseBar => (
+                    MenuIcon::Close,
+                    loc::t(if bar_visible {
+                        "FjordBarHide"
+                    } else {
+                        "FjordBarShow"
+                    }),
+                ),
+                crate::fjord::bar::BarCommand::ToggleWifi => {
+                    (MenuIcon::Activity, loc::t("WifiNetworks"))
+                }
             };
-            Some((id, MenuEntry::item(id, MenuIcon::Folder, label)))
+            Some((id, MenuEntry::item(id, icon, label)))
         })
         .collect()
+}
+
+fn fjord_command_for_index(
+    index: usize,
+    files_enabled: bool,
+) -> Option<crate::fjord::bar::BarCommand> {
+    crate::fjord::bar::menu_command(index, files_enabled)
+        .filter(|command| {
+            crate::ui::fjord_bar::FJORD_BAR_ENABLED
+                || !matches!(command, crate::fjord::bar::BarCommand::CloseBar)
+        })
+        .or_else(|| (index == 2).then_some(crate::fjord::bar::BarCommand::ToggleWifi))
 }
 
 fn fjord_command_for_id(chosen: u32, files_enabled: bool) -> Option<crate::fjord::bar::BarCommand> {
     chosen
         .checked_sub(FJORD_MENU_ID_BASE)
-        .and_then(|index| crate::fjord::bar::menu_command(index as usize, files_enabled))
+        .and_then(|index| fjord_command_for_index(index as usize, files_enabled))
 }
 
 impl DockState {
@@ -1812,6 +1851,7 @@ impl DockState {
             is_secondary,
             light_strip,
             appbar_registered: false,
+            appbar_reason: "secondary-light-strip",
             dcomp,
             spatial_glass,
             pill,
@@ -1892,7 +1932,7 @@ impl DockState {
             last_overlap_scan: None,
             cached_overlap: false,
             last_fullscreen_scan: None,
-            fullscreen_on_other_monitor: false,
+            fullscreen_on_own_monitor: false,
             cached_anchored: None,
             last_anchor_pending: false,
             last_start_menu_open: false,
@@ -2288,9 +2328,9 @@ impl DockState {
         self.cached_anchored.is_some_and(|(_, value)| value)
     }
 
-    /// Secondary strips must not float over a fullscreen game on another monitor.
-    /// Scans are throttled with the same 1 s budget as the overlap scan and never
-    /// run from the 200 ms revealed-guard tick.
+    /// A secondary strip hides only for a fullscreen game on **its own** monitor
+    /// (#179). Scans are throttled with the same 1 s budget as the overlap scan
+    /// and never run from the 200 ms revealed-guard tick.
     fn refresh_fullscreen_state(&mut self, now: Instant) {
         if !self.is_secondary {
             return;
@@ -2300,10 +2340,12 @@ impl DockState {
             .is_none_or(|t| now.saturating_duration_since(t) >= layout::OVERLAP_SCAN_MIN_INTERVAL)
         {
             self.last_fullscreen_scan = Some(now);
-            self.fullscreen_on_other_monitor = self.all_monitors.iter().any(|monitor| {
-                monitor.handle != self.monitor.handle
-                    && win32::is_any_fullscreen_on_monitor(monitor)
-            });
+            let was_hidden = self.fullscreen_on_own_monitor;
+            self.fullscreen_on_own_monitor = win32::is_any_fullscreen_on_monitor(&self.monitor);
+            if self.fullscreen_on_own_monitor && !was_hidden {
+                // A modal picker covers the game while its window is alive.
+                window_picker::request_close_all();
+            }
         }
     }
 
@@ -2372,7 +2414,7 @@ impl DockState {
         // If the shell's reposition attempt finished without anchoring Start,
         // hiding the dock is the only way to guarantee no overlap remains.
         // While the attempt is pending the dock must stay put (no ~800 ms flicker).
-        let should_hide = self.fullscreen_on_other_monitor
+        let should_hide = self.fullscreen_on_own_monitor
             || start_menu_hide_fallback(
                 start_menu_open,
                 anchored,
@@ -2741,11 +2783,15 @@ impl DockState {
     }
 
     fn reload_settings_live(&mut self) {
+        // A settings change may disable previews or reorder the dock: close any
+        // modal picker instead of leaving a stale snapshot on screen.
+        window_picker::request_close_all();
         let next = settings::load_from(&settings::settings_path());
         // Re-resolve WS-1 effective geometry/density for this monitor before any
         // rebuild; the cached values feed every subsequent hot-path frame.
         self.effective = EffectiveMetrics::for_monitor(&next, self.mon_w_dips());
         self.settings = next;
+        window_picker::set_picker_enabled(self.settings.previews_enabled);
         set_win_key_reveal_gate(&self.settings);
         crate::apply_native_flyout_reposition(&self.settings);
         self.refresh_shell_button_anchors();
@@ -4797,7 +4843,11 @@ impl DockState {
     /// instead of blindly toggling the first window. Reached from the primary
     /// app-click path and, unchanged, from the secondary dock's mirror slot.
     fn show_picker_for_windows(&self, previews: &[PreviewItem], launch_path: &str) -> bool {
-        if previews.len() < 2 || !extra_flag(&self.settings, "WindowPickerEnabled", true) {
+        if previews.len() < 2
+            || !self.settings.previews_enabled
+            || !window_picker::enabled()
+            || !extra_flag(&self.settings, "WindowPickerEnabled", true)
+        {
             return false;
         }
         let windows = self.picker_windows(previews, launch_path);
@@ -4916,6 +4966,8 @@ impl DockState {
                         })
                         .collect();
                     if previews.len() >= 2
+                        && self.settings.previews_enabled
+                        && window_picker::enabled()
                         && extra_flag(&self.settings, "WindowPickerEnabled", true)
                     {
                         let windows = self.picker_windows(&previews, &path);
@@ -4954,7 +5006,20 @@ impl DockState {
                     crate::fjord::activation::close_all_windows();
                 }
             }
-            crate::fjord::bar::BarCommand::ToggleWifi => {}
+            crate::fjord::bar::BarCommand::ToggleWifi => {
+                // Wi-Fi writes use WinRT; never run them on the dock UI thread.
+                // The `wifi_ui` bridge re-scans afterwards so the flyout state
+                // matches the radio we just toggled.
+                let _ = std::thread::Builder::new()
+                    .name("opentaskbar-fjord-wifi".into())
+                    .spawn(|| {
+                        let target = !crate::platform::radio::state("wifi");
+                        if !crate::platform::radio::set("wifi", target) {
+                            opentaskbar_core::log::warn("Fjord Wi-Fi toggle was rejected.");
+                        }
+                        let _ = crate::fjord::wifi_ui::scan_networks();
+                    });
+            }
         }
     }
 
@@ -6441,8 +6506,9 @@ impl DockState {
         // WS-11: Fjord workspace commands are appended to the shared dock menu
         // with ids outside the dock's reserved range; dispatch them here before
         // the normal `ContextAction` mapping.
-        let files_enabled = extra_flag(&self.settings, "FjordFilesEnabled", false);
-        let bar_visible = extra_flag(&self.settings, "FjordBarVisible", false)
+        // C# writes a JSON bool; `extra_flag` only understood legacy 0/1 ints.
+        let files_enabled = crate::fjord::activation::files_enabled(&self.settings);
+        let bar_visible = crate::fjord::activation::bar_visible(&self.settings)
             || crate::ui::fjord_bar::is_fjord_bar_running();
         let fjord_entries = fjord_bar_menu_entries_for(files_enabled, bar_visible);
         let (chosen, act) = win32::show_dock_context_menu_with_entries(
@@ -6715,6 +6781,7 @@ impl DockState {
 
     /// Session switch / lock resets all transient UI (C# `App.xaml.cs` SessionSwitch).
     fn reset_transient_ui(&mut self) {
+        window_picker::request_close_all();
         self.island.reset_transient();
         self.keyboard_idx = None;
         self.drag = None;
@@ -7590,6 +7657,7 @@ pub fn run(settings: DockSettings) {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     }
+    window_picker::set_picker_enabled(settings.previews_enabled);
 
     let auto_hide = settings.auto_hide != AutoHideMode::Disabled;
     let initial_pins = load_effective_pins(&settings);
@@ -7728,6 +7796,26 @@ pub fn run(settings: DockSettings) {
                         );
                         state.appbar_registered = true;
                     }
+                } else if !is_primary && settings.mirror_main_dock {
+                    // #178: a mirror dock is a full-size secondary taskbar, so
+                    // Explorer must reserve its edge too. Without this the
+                    // mirrored strip overlaps maximised windows on that monitor.
+                    let reason = "secondary-mirror-dock";
+                    let registered = opentaskbar_shell::appbar::register(hwnd_val, 0, reason);
+                    if registered != 0 {
+                        let edge = layout::appbar_position_flags(layout::effective_edge(&settings));
+                        let requested = RECT {
+                            left: rect.0,
+                            top: rect.1,
+                            right: rect.0 + rect.2,
+                            bottom: rect.1 + rect.3,
+                        };
+                        opentaskbar_shell::appbar::set_position_pinned(
+                            hwnd_val, edge, requested, reason,
+                        );
+                        state.appbar_registered = true;
+                        state.appbar_reason = reason;
+                    }
                 }
                 let ptr = Box::into_raw(Box::new(state));
                 unsafe {
@@ -7838,7 +7926,7 @@ pub fn run(settings: DockSettings) {
     for (hwnd, ptr) in created {
         unsafe {
             if (*ptr).appbar_registered {
-                opentaskbar_shell::appbar::unregister(hwnd as usize, "secondary-light-strip");
+                opentaskbar_shell::appbar::unregister(hwnd as usize, (*ptr).appbar_reason);
             }
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             DestroyWindow(hwnd);
@@ -8402,13 +8490,34 @@ mod tests {
         for needle in [
             "layout::size_profile(&settings).secondary_shelf",
             "layout::needs_own_shelf(0, dpi_scale, shelf_dips)",
-            "win32::is_any_fullscreen_on_monitor(monitor)",
+            "win32::is_any_fullscreen_on_monitor(&self.monitor)",
             "!self.settings.mirror_main_dock",
+            "self.fullscreen_on_own_monitor",
         ] {
             assert!(
                 src.contains(needle),
                 "secondary path must contain {needle:?}"
             );
+        }
+        // #179: no "any monitor except mine" predicate may remain. Build the
+        // needles so this test's own source cannot satisfy its assertion.
+        let stale_flag = format!("fullscreen_on_other{}", "_monitor");
+        let stale_predicate = format!("monitor.handle != self.monitor.{}", "handle");
+        assert!(!src.contains(&stale_flag));
+        assert!(!src.contains(&stale_predicate));
+    }
+
+    #[test]
+    fn mirror_dock_registers_and_releases_its_own_appbar() {
+        let src = include_str!("mod.rs");
+        for needle in [
+            "} else if !is_primary && settings.mirror_main_dock {",
+            "opentaskbar_shell::appbar::register(hwnd_val, 0, reason)",
+            "opentaskbar_shell::appbar::set_position_pinned(",
+            "\"secondary-mirror-dock\"",
+            "opentaskbar_shell::appbar::unregister(hwnd as usize, (*ptr).appbar_reason)",
+        ] {
+            assert!(src.contains(needle), "mirror dock must contain {needle:?}");
         }
     }
 
@@ -8463,23 +8572,76 @@ mod tests {
         ] {
             assert!(src.contains(needle), "Fjord menu must contain {needle:?}");
         }
+        let bar_enabled = crate::ui::fjord_bar::FJORD_BAR_ENABLED;
         let enabled = fjord_bar_menu_entries(true);
-        assert_eq!(enabled.len(), 2);
+        let mut expected_ids = vec![FJORD_MENU_ID_BASE];
+        if bar_enabled {
+            expected_ids.push(FJORD_MENU_ID_BASE + 1);
+        }
+        expected_ids.push(FJORD_MENU_ID_BASE + 2);
+        assert_eq!(enabled.len(), expected_ids.len());
         assert_eq!(
             enabled.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
-            vec![FJORD_MENU_ID_BASE, FJORD_MENU_ID_BASE + 1]
+            expected_ids
         );
         assert_eq!(
             fjord_command_for_id(FJORD_MENU_ID_BASE, true),
             Some(crate::fjord::bar::BarCommand::OpenFiles)
         );
         assert_eq!(
-            fjord_command_for_id(FJORD_MENU_ID_BASE, false),
-            Some(crate::fjord::bar::BarCommand::CloseBar)
+            fjord_command_for_id(FJORD_MENU_ID_BASE + 1, true),
+            bar_enabled.then_some(crate::fjord::bar::BarCommand::CloseBar)
         );
         assert_eq!(fjord_command_for_id(0, true), None);
         let disabled = fjord_bar_menu_entries(false);
-        assert_eq!(disabled.len(), 1);
+        assert_eq!(disabled.len(), if bar_enabled { 2 } else { 1 });
+    }
+
+    #[test]
+    fn fjord_wifi_command_is_in_the_menu_and_dispatched_through_wifi_ui() {
+        let src = include_str!("mod.rs");
+        assert_eq!(
+            fjord_command_for_id(FJORD_MENU_ID_BASE + 2, true),
+            Some(crate::fjord::bar::BarCommand::ToggleWifi)
+        );
+        for needle in [
+            "crate::fjord::bar::BarCommand::ToggleWifi => {",
+            "crate::platform::radio::state(\"wifi\")",
+            "crate::platform::radio::set(\"wifi\", target)",
+            "crate::fjord::wifi_ui::scan_networks()",
+        ] {
+            assert!(
+                src.contains(needle),
+                "Wi-Fi dispatch must contain {needle:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dock_files_command_prefers_the_pipe_over_explorer() {
+        let src = include_str!("mod.rs");
+        assert!(src.contains("crate::fjord::activation::files_enabled(&self.settings)"));
+        assert!(src.contains("crate::fjord::activation::handle_cli(&home)"));
+        let stale_read = format!("extra_flag(&self.settings, \"Fjord{}Enabled\"", "Files");
+        assert!(!src.contains(&stale_read));
+    }
+
+    #[test]
+    fn picker_is_gated_and_closed_on_session_settings_and_fullscreen() {
+        let src = include_str!("mod.rs");
+        for needle in [
+            "window_picker::set_picker_enabled(settings.previews_enabled)",
+            "window_picker::set_picker_enabled(self.settings.previews_enabled)",
+            "!self.settings.previews_enabled",
+            "window_picker::request_close_all()",
+            "window_picker::PICKER_CLOSE_MSG",
+            "self.fullscreen_on_own_monitor && !was_hidden",
+        ] {
+            assert!(
+                src.contains(needle),
+                "picker wiring must contain {needle:?}"
+            );
+        }
     }
 
     #[test]

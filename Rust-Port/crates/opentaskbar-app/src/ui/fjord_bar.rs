@@ -39,8 +39,17 @@ use crate::ui::menu::{self, MenuEntry, MenuIcon};
 
 pub const FJORD_BAR_ARG: &str = "--fjord-bar";
 
+/// Temporary kill-switch for the Fjord top bar.
+///
+/// While this is `false` the bar process is never spawned, the dock no longer
+/// offers the Show/Hide Fjord Bar command, and launch arguments for the bar host
+/// are ignored. Fjord Files and Wi-Fi are unaffected. Set this back to `true`
+/// (and revert the gated call sites in `main.rs` / `dock/mod.rs`) to restore it.
+pub const FJORD_BAR_ENABLED: bool = false;
+
 const MENU_FILES: u32 = 1;
 const MENU_CLOSE_BAR: u32 = 2;
+const MENU_TOGGLE_WIFI: u32 = 3;
 const WIFI_PANEL_W: f32 = 320.0;
 
 static FJORD_BAR_CHILDREN: Mutex<Vec<std::process::Child>> = Mutex::new(Vec::new());
@@ -56,6 +65,9 @@ pub fn is_fjord_bar_running() -> bool {
 
 /// Spawns the Fjord top-bar GPUI process if not already running.
 pub fn spawn_fjord_bar() {
+    if !FJORD_BAR_ENABLED {
+        return;
+    }
     if is_fjord_bar_running() {
         return;
     }
@@ -109,6 +121,9 @@ pub fn close_fjord_bar() {
 
 /// Synchronizes the Fjord top bar process with `FjordBarVisible`.
 pub fn sync_fjord_bar(visible: bool) {
+    if !FJORD_BAR_ENABLED {
+        return;
+    }
     if visible {
         spawn_fjord_bar();
     } else {
@@ -142,8 +157,14 @@ fn persist_bar_hidden(path: &std::path::Path) {
     crate::dock::apply_runtime_settings();
 }
 
+/// Process argument used by the C# `FjordBarHost` to launch this host process.
+pub const BAR_ARG: &str = "--fjord-bar";
+
 /// Starts the bar host. Returns immediately if another host owns the session.
 pub fn run_bar_host(files_enabled: bool, settings_path: PathBuf) {
+    if !FJORD_BAR_ENABLED {
+        return;
+    }
     let Some(_instance) = bar::SingleInstance::acquire() else {
         return;
     };
@@ -452,6 +473,11 @@ impl FjordBarView {
                 loc::t("FjordFilesOpen"),
             ));
         }
+        entries.push(MenuEntry::item(
+            MENU_TOGGLE_WIFI,
+            MenuIcon::Activity,
+            loc::t("WifiNetworks"),
+        ));
         entries.push(MenuEntry::destructive(
             MENU_CLOSE_BAR,
             MenuIcon::Close,
@@ -463,10 +489,11 @@ impl FjordBarView {
                 if activation::try_send("") {
                     // A running dock received the This PC request.
                 } else {
-                    // Local fallback opens the manager in this process.
-                    super::fjord_files::run_files_window(None);
+                    // No pipe server: open the real GPUI file manager off-thread.
+                    activation::spawn_files_window(None);
                 }
             }
+            Some(MENU_TOGGLE_WIFI) => self.toggle_wifi(cx),
             Some(MENU_CLOSE_BAR) => {
                 self.shutdown(cx);
                 persist_bar_hidden(&settings::settings_path());
@@ -766,5 +793,22 @@ impl Render for FjordBarView {
             root = root.child(self.wifi_panel(cx));
         }
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bar_cli_and_files_command_are_wired_to_real_windows() {
+        let src = include_str!("fjord_bar.rs");
+        for needle in [
+            "pub const BAR_ARG: &str = \"--fjord-bar\"",
+            "activation::try_send(\"\")",
+            "activation::spawn_files_window(None)",
+            "Some(MENU_TOGGLE_WIFI) => self.toggle_wifi(cx)",
+            "wifi_ui::scan_networks()",
+        ] {
+            assert!(src.contains(needle), "bar host must contain {needle:?}");
+        }
     }
 }
