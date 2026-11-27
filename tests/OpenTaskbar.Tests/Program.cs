@@ -575,7 +575,11 @@ void WidgetRegistryChecks()
         "Low-battery threshold and FPS cap must only accept the exposed choices.");
     var oledJson = System.Text.Json.JsonSerializer.Serialize(oledSettings, DockSettingsStore.SerializerOptions);
     var oledRoundTrip = System.Text.Json.JsonSerializer.Deserialize<DockSettings>(oledJson, DockSettingsStore.SerializerOptions);
-    Check(oledRoundTrip == oledSettings, "Display-care settings must round-trip through settings.json.");
+    // JsonExtensionData is a transport bag (it carries other builds' keys), not part of
+    // the settings identity; compare the modelled fields while keeping the bag out of it.
+    Check(oledRoundTrip is not null
+          && (oledRoundTrip with { Extra = oledSettings.Extra }) == oledSettings,
+        "Display-care settings must round-trip through settings.json.");
     Check(UiText.GetTranslations("SectionDisplayCare").Count == LanguageCatalog.Languages.Count,
         "Every display-care label must be translated in all bundled languages.");
 
