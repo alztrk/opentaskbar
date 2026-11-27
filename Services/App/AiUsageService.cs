@@ -321,7 +321,7 @@ public static class AiUsageService
                     AiProviders.Copilot => ParseCopilot(json, credential.Plan),
                     AiProviders.DeepSeek => ParseDeepSeek(json, credential.Plan),
                     AiProviders.OpenRouter => ParseOpenRouter(json, credential.Plan),
-                    _ => (null, "ErrorAiUsageLoad")
+                    _ => ((AiUsageReport?)null, "ErrorAiUsageLoad")
                 };
                 return new(report, error);
             }
@@ -356,7 +356,7 @@ public static class AiUsageService
             AiProviders.OpenCode => ("OPENCODE_CONFIG_DIR", Path.Combine(".local", "share", "opencode"), "auth.json"),
             AiProviders.DeepSeek => ("DEEPSEEK_CONFIG_DIR", ".deepseek", "auth.json"),
             AiProviders.OpenRouter => ("OPENROUTER_CONFIG_DIR", ".openrouter", "auth.json"),
-            _ => ("OPENAI_CONFIG_DIR", ".config", "auth.json")
+            _ => ("CLAUDE_CONFIG_DIR", ".claude", ".credentials.json")
         };
         var directory = Environment.GetEnvironmentVariable(envVar);
         if (string.IsNullOrWhiteSpace(directory))
@@ -429,7 +429,7 @@ public static class AiUsageService
             AiProviders.Copilot => "https://api.github.com/copilot_internal/user",
             AiProviders.DeepSeek => "https://api.deepseek.com/user/balance",
             AiProviders.OpenRouter => "https://openrouter.ai/api/v1/credits",
-            _ => throw new ArgumentOutOfRangeException(nameof(provider))
+            _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, null)
         });
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", credential.Token);
         if (provider == AiProviders.Claude) request.Headers.Add("anthropic-beta", "oauth-2025-04-20");

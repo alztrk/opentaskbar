@@ -471,17 +471,6 @@ public static class CursorAuthService
         uint dwFlags,
         out DATA_BLOB pDataOut);
 
-    [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CryptUnprotectData(
-        ref DATA_BLOB pDataIn,
-        nint ppszDataDescr,
-        nint pOptionalEntropy,
-        nint pvReserved,
-        nint pPromptStruct,
-        uint dwFlags,
-        out DATA_BLOB pDataOut);
-
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern nint LocalFree(nint hMem);
 }

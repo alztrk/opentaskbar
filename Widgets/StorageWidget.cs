@@ -5,6 +5,7 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Media;
 using OpenTaskbar.Services;
+using OpenTaskbar.Views.Widgets;
 
 namespace OpenTaskbar.Widgets;
 
@@ -36,6 +37,26 @@ public sealed class StorageWidget : DockWidget
     public override bool SupportsStaticPreview => true;
     public override double FullWidthEstimate => Math.Max(110, Math.Max(1, _drives.Count) * 108);
     public override double CompactWidthEstimate => 78;
+
+    public override UIElement BuildDynamicIslandExpandedContent()
+    {
+        if (_drives.Count == 0)
+        {
+            return DynamicIslandStatusPanel.Create(
+                UiText.Get("WidgetStorage"), "—", UiText.Get("SystemDataUnavailable"), null,
+                Color.FromRgb(0xBB, 0xD3, 0xFA));
+        }
+
+        var culture = Settings.Language.Culture;
+        var rows = _drives.Select(drive => new DynamicIslandStatusRow(
+            drive.Letter,
+            FormatCapacityPair(Math.Max(0, drive.TotalBytes - drive.FreeBytes), drive.TotalBytes, culture),
+            FormatFreeCapacity(drive.FreeBytes, drive.TotalBytes, culture),
+            drive.TotalBytes <= 0 ? 0 : Math.Clamp((double)(drive.TotalBytes - drive.FreeBytes) / drive.TotalBytes, 0, 1)))
+            .ToArray();
+        return DynamicIslandStatusPanel.CreateRows(
+            UiText.Get("WidgetStorage"), rows, Color.FromRgb(0xBB, 0xD3, 0xFA));
+    }
 
     public StorageWidget()
     {

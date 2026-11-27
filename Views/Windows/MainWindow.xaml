@@ -21,6 +21,7 @@
         WindowStartupLocation="Manual"
         Closing="Window_Closing"
         SourceInitialized="Window_SourceInitialized"
+        SizeChanged="Window_SizeChanged"
         Closed="Window_Closed">
     <Window.Resources>
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
@@ -52,6 +53,7 @@
             <MenuItem Header="{local:Loc CheckForUpdates}" Icon="{StaticResource IconRefresh}" Tag="UpdateMenu" Click="CheckUpdates_Click" />
             <MenuItem Header="{local:Loc TaskManager}" Icon="{StaticResource IconTaskManager}" Click="OpenTaskManager_Click" />
             <Separator />
+            <MenuItem Header="{local:FjordLoc Title}" Icon="{StaticResource IconFolder}" Tag="FjordFilesMenu" Click="OpenFjordFiles_Click" />
             <MenuItem Header="{local:Loc OpenFileExplorer}" Icon="{StaticResource IconFolder}" Click="OpenFileExplorer_Click" />
             <MenuItem Header="{local:Loc OpenRunDialog}" Icon="{StaticResource IconSearch}" Click="OpenRunDialog_Click" />
             <MenuItem Header="{local:Loc OpenTerminal}" Icon="{StaticResource IconTerminal}" Click="OpenTerminal_Click" />
@@ -209,7 +211,7 @@
         <Grid x:Name="DockSurface" Grid.Row="1" HorizontalAlignment="Stretch"
               Margin="{StaticResource DockInset}" VerticalAlignment="Bottom" RenderTransformOrigin="0.5,1"
               ContextMenu="{StaticResource DockContextMenu}"
-              PreviewMouseMove="DockSurface_PreviewMouseMove"
+              SizeChanged="DockSurface_SizeChanged"
               MouseEnter="DockSurface_MouseEnter" MouseMove="DockSurface_MouseMove" MouseLeave="DockSurface_MouseLeave"
               MouseWheel="DockSurface_MouseWheel">
             <Grid.RenderTransform>
@@ -219,15 +221,19 @@
                 </TransformGroup>
             </Grid.RenderTransform>
             <!-- Keep DropShadowEffect on a sibling pill behind DockFrame so magnifying icons protruding above
-                 DockFrame never force WPF to resize/resample an offscreen Effect bitmap containing Start and widgets. -->
+                 DockFrame never force WPF to resize/resample an offscreen Effect bitmap containing Start and widgets.
+                 Explicit BitmapCache keeps the blur-36 shadow raster cached on GPU across hover frames. -->
             <Border x:Name="DockShadowLayer"
                     Background="{DynamicResource DockMaterial}"
                     BorderBrush="{DynamicResource DockBorderMaterial}"
                     BorderThickness="{DynamicResource DockBorderThickness}"
                     CornerRadius="{Binding CornerRadius, ElementName=DockFrame}"
                     Effect="{DynamicResource DockShadow}"
-                    CacheMode="BitmapCache"
-                    IsHitTestVisible="False" />
+                    IsHitTestVisible="False">
+                <Border.CacheMode>
+                    <BitmapCache EnableClearType="False" RenderAtScale="1" SnapsToDevicePixels="True" />
+                </Border.CacheMode>
+            </Border>
             <Border x:Name="DockFrame" Padding="{StaticResource DockPadding}"
                     Background="Transparent" BorderBrush="Transparent"
                     BorderThickness="{DynamicResource DockBorderThickness}" CornerRadius="{DynamicResource DockRadius}"
@@ -287,6 +293,21 @@
                                     <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconSearch}"
                                                     Width="{DynamicResource DockUtilityGlyphSize}"
                                                     Height="{DynamicResource DockUtilityGlyphSize}"
+                                                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                    Foreground="{DynamicResource TextPrimary}" />
+                                </Grid>
+                            </Button>
+                            <Button x:Name="FjordFilesButton" Style="{StaticResource ShellDockButton}" Click="OpenFjordFiles_Click"
+                                    AutomationProperties.Name="{local:FjordLoc Title}" ToolTip="{local:FjordLoc Title}">
+                                <Grid Width="{DynamicResource DockIconSize}" Height="{DynamicResource DockIconSize}" RenderTransformOrigin="0.5,0.5">
+                                    <Grid.RenderTransform>
+                                        <TransformGroup>
+                                            <ScaleTransform ScaleX="1" ScaleY="1" />
+                                            <TranslateTransform Y="0" />
+                                        </TransformGroup>
+                                    </Grid.RenderTransform>
+                                    <ContentControl Style="{StaticResource WidgetIcon}" Content="{StaticResource IconFolder}"
+                                                    Width="{DynamicResource DockUtilityGlyphSize}" Height="{DynamicResource DockUtilityGlyphSize}"
                                                     HorizontalAlignment="Center" VerticalAlignment="Center"
                                                     Foreground="{DynamicResource TextPrimary}" />
                                 </Grid>
@@ -373,7 +394,7 @@
                         </views:DockScrollViewer>
                         <StackPanel x:Name="DockTrailControls" Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center"
                                     Margin="0,0,3,0" AllowDrop="True" DragOver="DockTrailControls_DragOver" Drop="DockTrailControls_Drop">
-                            <Button x:Name="RecycleBinButton" Style="{StaticResource DockButton}" Click="RecycleBin_Click"
+                            <Button x:Name="RecycleBinButton" Style="{StaticResource ShellDockButton}" Click="RecycleBin_Click"
                                     AllowDrop="True" DragOver="RecycleBin_DragOver" Drop="RecycleBin_Drop"
                                     AutomationProperties.Name="{local:Loc RecycleBin}" ToolTip="{local:Loc RecycleBin}" ToolTipService.InitialShowDelay="650">
                                 <Button.ContextMenu>

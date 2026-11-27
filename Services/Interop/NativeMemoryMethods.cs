@@ -17,15 +17,21 @@ internal static class NativeMemoryMethods
 
     private static long _lastTrimTicks;
     private static readonly TimeSpan MinTrimInterval = TimeSpan.FromSeconds(20);
+    private static readonly object IdleTrimLock = new();
     private static CancellationTokenSource? _idleTrimCts;
 
     public static void ScheduleIdleTrim(TimeSpan? delay = null)
     {
-        _idleTrimCts?.Cancel();
-        _idleTrimCts?.Dispose();
-        var cts = new CancellationTokenSource();
-        _idleTrimCts = cts;
-        var token = cts.Token;
+        CancellationTokenSource cts;
+        CancellationToken token;
+        lock (IdleTrimLock)
+        {
+            _idleTrimCts?.Cancel();
+            _idleTrimCts?.Dispose();
+            cts = new CancellationTokenSource();
+            _idleTrimCts = cts;
+            token = cts.Token;
+        }
         Task.Delay(delay ?? TimeSpan.FromSeconds(2), token).ContinueWith(_ =>
         {
             if (!token.IsCancellationRequested)
@@ -37,16 +43,20 @@ internal static class NativeMemoryMethods
 
     public static void CancelIdleTrim()
     {
-        _idleTrimCts?.Cancel();
-        _idleTrimCts?.Dispose();
-        _idleTrimCts = null;
+        lock (IdleTrimLock)
+        {
+            _idleTrimCts?.Cancel();
+            _idleTrimCts?.Dispose();
+            _idleTrimCts = null;
+        }
     }
 
     public static void TrimWorkingSet(bool force = false)
     {
         var now = Stopwatch.GetTimestamp();
-        if (!force && _lastTrimTicks != 0 && Stopwatch.GetElapsedTime(_lastTrimTicks, now) < MinTrimInterval) return;
-        _lastTrimTicks = now;
+        var last = Volatile.Read(ref _lastTrimTicks);
+        if (!force && last != 0 && Stopwatch.GetElapsedTime(last, now) < MinTrimInterval) return;
+        Volatile.Write(ref _lastTrimTicks, now);
 
         try
         {

@@ -176,7 +176,18 @@
                         <ContentControl Content="{Binding PreviewFlyoutContent}" Focusable="False"
                                         IsHitTestVisible="False" />
                     </Border>
-                    <ContentControl Content="{Binding SettingsView}" Focusable="False" Margin="0,2,0,0"/>
+                    <DockPanel Margin="0,2,0,0">
+                        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,14">
+                            <TextBlock Text="{local:Loc DynamicIslandWidgetLocation}" Style="{StaticResource SettingsRowLabel}" Margin="0,0,0,6" />
+                            <ComboBox ItemsSource="{Binding DynamicIslandPlacementChoices}"
+                                      DisplayMemberPath="Label" SelectedValuePath="Value"
+                                      IsEnabled="{Binding IsHardwareAvailable}"
+                                      SelectedValue="{Binding DynamicIslandPlacementValue, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      AutomationProperties.Name="{local:Loc DynamicIslandWidgetLocation}"
+                                      AutomationProperties.HelpText="{local:Loc DynamicIslandWidgetLocationDescription}" />
+                        </StackPanel>
+                        <ContentControl Content="{Binding SettingsView}" Focusable="False" />
+                    </DockPanel>
                 </StackPanel>
             </Border>
         </StackPanel>

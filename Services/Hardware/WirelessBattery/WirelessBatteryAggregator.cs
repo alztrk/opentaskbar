@@ -227,23 +227,45 @@ internal sealed class WirelessBatteryAggregator
         CancellationToken outerToken)
     {
         var softTimeoutMs = Math.Max(80.0, _providerTimeout.TotalMilliseconds * 0.8);
-        using var softCts = CancellationTokenSource.CreateLinkedTokenSource(outerToken);
+        var softCts = CancellationTokenSource.CreateLinkedTokenSource(outerToken);
         softCts.CancelAfter(TimeSpan.FromMilliseconds(softTimeoutMs));
 
         using var hardCts = CancellationTokenSource.CreateLinkedTokenSource(outerToken);
         hardCts.CancelAfter(_providerTimeout);
+        Task<IReadOnlyList<WirelessDeviceReading>>? probeTask = null;
+        var handedOffToContinuation = false;
         try
         {
-            var probeTask = Task.Run(() => probe(softCts.Token), CancellationToken.None);
+            probeTask = Task.Run(() => probe(softCts.Token), CancellationToken.None);
             var completed = await Task.WhenAny(probeTask, Task.Delay(_providerTimeout, hardCts.Token)).ConfigureAwait(false);
             if (completed != probeTask)
+            {
+                // Keep softCts alive until the timed-out probe finishes so it never hits ObjectDisposedException,
+                // and observe any faulted exception once it completes.
+                handedOffToContinuation = true;
+                _ = probeTask.ContinueWith(
+                    static (t, state) =>
+                    {
+                        _ = t.Exception;
+                        ((CancellationTokenSource)state!).Dispose();
+                    },
+                    softCts,
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
                 return [];
+            }
 
             return await probeTask.ConfigureAwait(false) ?? [];
         }
         catch
         {
             return [];
+        }
+        finally
+        {
+            if (!handedOffToContinuation)
+                softCts.Dispose();
         }
     }
 

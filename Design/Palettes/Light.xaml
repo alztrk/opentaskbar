@@ -92,6 +92,8 @@
     <SolidColorBrush x:Key="WidgetCardHover" Color="#18000000" />
     <SolidColorBrush x:Key="WidgetCardPressed" Color="#2A000000" />
     <SolidColorBrush x:Key="WidgetCardStroke" Color="#00000000" />
+    <SolidColorBrush x:Key="DynamicIslandMaterial" Color="#FFF4F5F7" />
+    <SolidColorBrush x:Key="DynamicIslandStroke" Color="#26000000" />
     <SolidColorBrush x:Key="WidgetGlassCard" Color="#00000000" />
     <SolidColorBrush x:Key="WidgetGlassCardHover" Color="#12000000" />
     <SolidColorBrush x:Key="WidgetGlassCardStroke" Color="#00000000" />

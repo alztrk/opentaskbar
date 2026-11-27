@@ -185,25 +185,7 @@ public partial class SystemStatsWidget : DockWidget
         _lastProcessSampleTickMs = 0;
     }
 
-    protected override void OnDisposed()
-    {
-        _flyout.Closed -= Flyout_Closed;
-        _flyout.Close(restoreFocus: false);
-        CancelProcessSampling();
-        _clickFlyout = null;
-        _hoverFlyout = null;
-
-        var generation = Interlocked.Increment(ref _sensorGeneration);
-        _ = Task.Run(() =>
-        {
-            lock (_sensorGate)
-            {
-                if (generation != Volatile.Read(ref _sensorGeneration)) return;
-                _sensors?.Dispose();
-                _sensors = null;
-            }
-        });
-    }
+    protected override void OnDisposed() => _flyout.Closed -= Flyout_Closed;
 
     protected override void OnSettingsChanged()
     {
@@ -587,55 +569,64 @@ public partial class SystemStatsWidget : DockWidget
         var container = new Border { Width = 296, Child = root };
 
         var uptimeText = CreateValueText();
+        uptimeText.FontSize = 11;
+        uptimeText.FontWeight = FontWeights.Normal;
         uptimeText.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
         uptimeText.ToolTip = UiText.Get("StatsUptime");
-        var header = CreateMetricLine(UiText.Get("WidgetSystemStats"), uptimeText);
-        header.Margin = new Thickness(0, 0, 0, 12);
-        root.Children.Add(header);
+        root.Children.Add(DockFlyout.Header(UiText.Get("WidgetSystemStats"), uptimeText));
 
         var cpuValue = CreateValueText();
-        var cpuSparkline = CreateSparkline("WidgetBlue", 22);
+        var cpuSparkline = CreateSparkline("WidgetBlue", 14);
         root.Children.Add(CreateMetricSection(UiText.Get("Cpu"), cpuValue, cpuSparkline));
 
         var ramValue = CreateValueText();
         var ramPair = CreateValueText();
+        ramPair.FontSize = 11;
+        ramPair.FontWeight = FontWeights.Normal;
         ramPair.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
-        var ramSparkline = CreateSparkline("WidgetAccent", 22);
+        var ramSparkline = CreateSparkline("WidgetAccent", 14);
         root.Children.Add(CreateMetricSection(UiText.Get("Memory"), ramValue, ramSparkline, ramPair));
 
         var gpuValue = CreateValueText();
         var gpuTemp = CreateValueText();
         gpuTemp.ToolTip = UiText.Get("GpuTemperature");
-        var gpuSparkline = CreateSparkline("AccentBrush", 22);
+        var gpuSparkline = CreateSparkline("AccentBrush", 14);
         var gpuSection = CreateMetricSection(UiText.Get("Gpu"), gpuValue, gpuSparkline, gpuTemp);
         root.Children.Add(gpuSection);
 
+        root.Children.Add(DockFlyout.Divider(6));
+
         var processColumn = CreateValueText();
         processColumn.Text = UiText.Get("Memory");
+        processColumn.FontSize = 11;
+        processColumn.FontWeight = FontWeights.Normal;
         processColumn.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
         var processHeader = CreateMetricLine(UiText.Get("StatsTopProcesses"), processColumn);
-        processHeader.Margin = new Thickness(0, 8, 0, 4);
+        processHeader.Margin = new Thickness(0, 0, 0, 4);
         root.Children.Add(processHeader);
 
         var processesList = new StackPanel();
         root.Children.Add(processesList);
 
-        var footer = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
-        var taskManager = CreateFooterActionButton(UiText.Get("TaskManager"), new Thickness(0, 0, 8, 0));
+        var taskManagerLabel = UiText.Get("TaskManager");
+        var taskManager = new Button { Content = taskManagerLabel };
+        taskManager.SetResourceReference(StyleProperty, "WidgetFlyoutActionButton");
+        AutomationProperties.SetName(taskManager, taskManagerLabel);
         taskManager.Click += (_, _) =>
         {
             _flyout.Close(restoreFocus: false);
             OpenTaskManagerAction();
         };
-        var resourceMonitor = CreateFooterActionButton(UiText.Get("ResourceMonitor"), new Thickness(0));
+        var resourceMonitorLabel = UiText.Get("ResourceMonitor");
+        var resourceMonitor = new Button { Content = resourceMonitorLabel };
+        resourceMonitor.SetResourceReference(StyleProperty, "WidgetFlyoutActionButton");
+        AutomationProperties.SetName(resourceMonitor, resourceMonitorLabel);
         resourceMonitor.Click += (_, _) =>
         {
             _flyout.Close(restoreFocus: false);
             OpenResourceMonitorAction();
         };
-        footer.Children.Add(taskManager);
-        footer.Children.Add(resourceMonitor);
-        root.Children.Add(footer);
+        root.Children.Add(DockFlyout.FooterBar(taskManager, resourceMonitor));
 
         var view = new TelemetryFlyoutView
         {
@@ -1015,21 +1006,6 @@ public partial class SystemStatsWidget : DockWidget
         section.Children.Add(CreateMetricLine(label, value, detail));
         section.Children.Add(history);
         return section;
-    }
-
-    private static Button CreateFooterActionButton(string label, Thickness margin)
-    {
-        var button = new Button
-        {
-            Content = label,
-            Margin = margin,
-            Padding = new Thickness(4, 0, 4, 0),
-            Background = Brushes.Transparent,
-            BorderThickness = new Thickness(0)
-        };
-        button.SetResourceReference(StyleProperty, "WidgetFlyoutActionButton");
-        AutomationProperties.SetName(button, label);
-        return button;
     }
 
     private static TextBlock CreateValueText()

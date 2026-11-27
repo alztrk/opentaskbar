@@ -286,6 +286,8 @@ internal static class TaskbarRecoveryWatchdog
 
     private static void Cleanup()
     {
+        _heartbeatTimer?.Dispose();
+        _heartbeatTimer = null;
         _cleanExit?.Dispose();
         _cleanExit = null;
         _heartbeat?.Dispose();

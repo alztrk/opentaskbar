@@ -24,12 +24,8 @@ public sealed class AiUsageWidget : DockWidget
     private DateTime? _signInStamp;
     private int _failures;
     private DateTimeOffset? _lastLoadAt;
-    // The click flyout and the compact hover flyout can coexist, so each keeps its own countdowns.
-    private readonly List<(TextBlock Block, DateTimeOffset Reset)> _countdowns = [];
     private readonly List<(TextBlock Block, DateTimeOffset Reset)> _hoverCountdowns = [];
-    private readonly ContentControl _flyoutHost = new();
     private readonly Card _card;
-    private readonly DockFlyout _flyout = new();
     private CancellationTokenSource? _loading;
     private int _renderedMinute = -1;
 
@@ -87,7 +83,6 @@ public sealed class AiUsageWidget : DockWidget
     private static bool HidesName(AiProviders provider) => provider is AiProviders.Codex or AiProviders.Claude or AiProviders.Cursor;
 
     private static readonly SolidColorBrush ClaudeBrandBrush = FreezeBrush(Color.FromRgb(0xD9, 0x77, 0x57));
-    private static readonly SolidColorBrush CodexBrandBrush = FreezeBrush(Color.FromRgb(0x8D, 0x99, 0xFF));
     private static readonly SolidColorBrush DeepSeekBrandBrush = FreezeBrush(Color.FromRgb(0x4D, 0x6B, 0xFE));
     private static readonly SolidColorBrush OpenRouterBrandBrush = FreezeBrush(Color.FromRgb(0xB7, 0x9B, 0xF8));
     private static readonly SolidColorBrush CopilotBrandBrush = FreezeBrush(Color.FromRgb(0x9F, 0x9F, 0xF2));
@@ -118,7 +113,6 @@ public sealed class AiUsageWidget : DockWidget
         _provider = provider;
         _loader = loader;
         _card = AddCard();
-        _flyout.Closed += (_, _) => _countdowns.Clear();
         Content = _card.Button;
         Render();
     }
@@ -168,17 +162,6 @@ public sealed class AiUsageWidget : DockWidget
             CursorAuthService.RefreshRequested -= CursorAuthService_RefreshRequested;
         }
         Clear();
-        _flyout.Close();
-    }
-
-    protected override void OnDisposed()
-    {
-        AiUsageService.CredentialsChanged -= OnCredentialsChanged;
-        if (_provider == AiProviders.Cursor)
-        {
-            CursorAuthService.SessionChanged -= CursorAuthService_SessionChanged;
-            CursorAuthService.RefreshRequested -= CursorAuthService_RefreshRequested;
-        }
     }
 
     private void OnCredentialsChanged(AiProviders provider)
@@ -287,7 +270,7 @@ public sealed class AiUsageWidget : DockWidget
         if (now.Minute != _renderedMinute) Render();
         if (_card.Bars is not null) UpdateDualCountdowns();
         if (!IsHoverFlyoutOpen) _hoverCountdowns.Clear();
-        foreach (var (block, reset) in _countdowns.Concat(_hoverCountdowns)) block.Text = ResetText(reset);
+        foreach (var (block, reset) in _hoverCountdowns) block.Text = ResetText(reset);
     }
 
     private void UpdateDualCountdowns()
@@ -306,12 +289,7 @@ public sealed class AiUsageWidget : DockWidget
         }
     }
 
-    /// <summary>Re-renders the card and, when our click flyout is open, swaps its content in place without reopening it.</summary>
-    private void Refresh()
-    {
-        Render();
-        if (_flyout.IsOpen) _flyoutHost.Content = BuildFlyout(_countdowns);
-    }
+    private void Refresh() => Render();
 
     private static bool IsStale(AiUsageReport report) => DateTimeOffset.UtcNow - report.FetchedAt > TimeSpan.FromMinutes(10);
 
@@ -397,7 +375,7 @@ public sealed class AiUsageWidget : DockWidget
         AiProviders.DeepSeek => "DeepSeek",
         AiProviders.OpenRouter => "OpenRouter",
         AiProviders.Cursor => "Cursor",
-        _ => "Unknown"
+        _ => provider.ToString()
     };
     private string ErrorText(AiProviders provider, string key) => key == "ErrorAiUsageSignIn"
         ? provider == AiProviders.Cursor
@@ -410,12 +388,11 @@ public sealed class AiUsageWidget : DockWidget
                 AiProviders.Copilot => "gh auth login",
                 AiProviders.DeepSeek => "DEEPSEEK_API_KEY",
                 AiProviders.OpenRouter => "OPENROUTER_API_KEY",
-                _ => "Unknown"
+                _ => string.Empty
             })
         : UiText.Get(key);
     private CultureInfo Culture => Settings.Language.Culture;
     private static bool IsModel(AiUsageWindow window) => window.LabelKey.StartsWith("AiUsageWeeklyModel:", StringComparison.Ordinal);
-    private static bool IsPool(AiUsageWindow window) => window.LabelKey.StartsWith("AiUsagePool:", StringComparison.Ordinal);
     private static bool IsLimitReached(AiUsageReport report) => report.LimitReached
         || report.Windows.Any(window => window.Used >= 1 && !IsModel(window));
     private static string Percent(double value) => UiText.Format("Percent",
@@ -480,17 +457,12 @@ public sealed class AiUsageWidget : DockWidget
 
     private string Label(AiUsageWindow window)
     {
-        if (IsPool(window)) return window.LabelKey[12..];
         if (!IsModel(window)) return UiText.Get(window.LabelKey);
         var model = window.LabelKey.Split(':', 2)[1].Replace('_', ' ');
         return UiText.Format("AiUsageWeeklyModel", model.Length == 0 ? model : char.ToUpper(model[0], Culture) + model[1..]);
     }
 
-    private static string GroupLabel(string group) =>
-        group.StartsWith("AiUsageGroup", StringComparison.Ordinal) ? UiText.Get(group) : group;
-
-    private string SummaryWindowLabel(AiUsageWindow window) =>
-        window.Group is { Length: > 0 } group ? $"{GroupLabel(group)} ({Label(window)})" : Label(window);
+    private string SummaryWindowLabel(AiUsageWindow window) => Label(window);
 
     // "h:mm" reads as a clock time once it nears a day, so longer spans show the local weekday and time instead.
     private static readonly TimeSpan RelativeLimit = TimeSpan.FromHours(6);
@@ -549,7 +521,7 @@ public sealed class AiUsageWidget : DockWidget
         AiProviders.DeepSeek => "LogoDeepSeek",
         AiProviders.OpenRouter => "LogoOpenRouter",
         AiProviders.Cursor => "LogoCursor",
-        _ => "LogoCursor"
+        _ => "Logo" + provider
     };
 
     private Card AddCard()
@@ -733,7 +705,7 @@ public sealed class AiUsageWidget : DockWidget
         var defaultRow = new StackPanel { Orientation = Orientation.Horizontal, Children = { logo, label, ring } };
         var defaultButton = new Button { Content = defaultRow, Cursor = System.Windows.Input.Cursors.Arrow };
         defaultButton.SetResourceReference(StyleProperty, "WidgetCardButton");
-        return new(defaultButton, logo, label, ring, null, null);
+        return new(defaultButton, logo, label, ring, null);
     }
 
     private static (StackPanel Column, TextBlock Label, TextBlock Percent, Border Fill, TextBlock Reset) CreateInlineQuotaColumn(string shortLabel)
@@ -1089,7 +1061,7 @@ public sealed class AiUsageWidget : DockWidget
     {
         countdowns.Clear();
         var now = DateTimeOffset.UtcNow;
-        var root = new StackPanel { Width = 280 };
+        var root = new StackPanel { Width = 296 };
         root.Children.Add(SectionHeader(_provider, _report));
         if (_error is not null)
         {
@@ -1100,24 +1072,8 @@ public sealed class AiUsageWidget : DockWidget
         if (_report is { } report)
         {
             var pace = PaceWindow(report, now);
-            string? currentGroup = null;
             foreach (var window in report.Windows)
             {
-                if (window.Group is { Length: > 0 } group && !string.Equals(group, currentGroup, StringComparison.Ordinal))
-                {
-                    var isFirstGroup = currentGroup is null;
-                    currentGroup = group;
-                    var groupHeader = Text(GroupLabel(group), 11.5, "TextPrimary",
-                        new Thickness(0, isFirstGroup ? 0 : 4, 0, window.GroupModels is null ? 4 : 1));
-                    groupHeader.FontWeight = FontWeights.SemiBold;
-                    root.Children.Add(groupHeader);
-                    if (window.GroupModels is { Length: > 0 } models)
-                    {
-                        var subtitle = Text(models, 10, "TextSecondary", new Thickness(0, 0, 0, 5));
-                        subtitle.TextWrapping = TextWrapping.Wrap;
-                        root.Children.Add(subtitle);
-                    }
-                }
                 root.Children.Add(WindowRow(window, now, window == pace, countdowns));
             }
             if (report.Spend is { } spend) root.Children.Add(SpendRow(spend));
@@ -1128,7 +1084,7 @@ public sealed class AiUsageWidget : DockWidget
             if (report.ResetCredits > 0) extras.Add(UiText.Format("AiUsageResetCredits", report.ResetCredits.ToString(Culture)));
             if (extras.Count > 0) root.Children.Add(Text(string.Join(" · ", extras), 11, "TextSecondary", new Thickness(0, 0, 0, 6)));
         }
-        root.Children.Add(Divider());
+        root.Children.Add(DockFlyout.Divider(6));
         root.Children.Add(Footer());
         return root;
     }
@@ -1205,24 +1161,23 @@ public sealed class AiUsageWidget : DockWidget
 
     private UIElement BreakdownTiles(IReadOnlyList<AiUsageShare> rows)
     {
-        var panel = new StackPanel { Margin = new Thickness(0, 0, 0, 6) };
-        var heading = Text(UiText.Get("AiUsageBreakdown"), 11, "TextSecondary", new Thickness(0, 0, 0, 4));
-        heading.FontWeight = FontWeights.SemiBold;
-        panel.Children.Add(heading);
-        var grid = new UniformGrid { Columns = Math.Min(3, rows.Count), Margin = new Thickness(-2, 0, -2, 0) };
+        var panel = new StackPanel { Margin = new Thickness(0, 2, 0, 6) };
+        panel.Children.Add(DockFlyout.SectionLabel(UiText.Get("AiUsageBreakdown"), new Thickness(0, 0, 0, 4)));
         foreach (var share in rows)
         {
-            var tile = new Border { CornerRadius = new CornerRadius(8), Padding = new Thickness(8, 5, 8, 5), Margin = new Thickness(2) };
-            tile.SetResourceReference(Border.BackgroundProperty, "SurfaceSelected");
-            var value = Text(Percent(share.Used), 12.5, "TextPrimary");
+            var row = new DockPanel { Margin = new Thickness(0, 2, 0, 2) };
+            var value = Text(Percent(share.Used), 12, "TextPrimary");
             value.FontWeight = FontWeights.SemiBold;
             Typography.SetNumeralAlignment(value, FontNumeralAlignment.Tabular);
-            var label = Text(share.Name, 10.5, "TextSecondary");
+            DockPanel.SetDock(value, Dock.Right);
+            row.Children.Add(value);
+
+            var label = Text(share.Name, 11, "TextSecondary");
             label.TextTrimming = TextTrimming.CharacterEllipsis;
-            tile.Child = new StackPanel { Children = { label, value } };
-            grid.Children.Add(tile);
+            label.Margin = new Thickness(0, 0, 8, 0);
+            row.Children.Add(label);
+            panel.Children.Add(row);
         }
-        panel.Children.Add(grid);
         return panel;
     }
 
@@ -1299,13 +1254,6 @@ public sealed class AiUsageWidget : DockWidget
         return grid;
     }
 
-    private static Border Divider()
-    {
-        var divider = new Border { Height = 1, Margin = new Thickness(0, 2, 0, 10) };
-        divider.SetResourceReference(Border.BackgroundProperty, "MenuDivider");
-        return divider;
-    }
-
     private static TextBlock Text(string text, double size, string brush, Thickness margin = default, double? lineHeight = null)
     {
         var block = new TextBlock { Text = text, FontSize = size, Margin = margin, VerticalAlignment = VerticalAlignment.Center };
@@ -1343,7 +1291,7 @@ public sealed class AiUsageWidget : DockWidget
                 AiProviders.DeepSeek => "https://platform.deepseek.com/usage",
                 AiProviders.OpenRouter => "https://openrouter.ai/settings/credits",
                 AiProviders.Cursor => "https://cursor.com/dashboard?tab=usage",
-                _ => throw new ArgumentOutOfRangeException(nameof(provider))
+                _ => throw new InvalidOperationException($"Unsupported AI provider: {provider}")
             };
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
         }

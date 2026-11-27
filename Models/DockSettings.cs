@@ -99,8 +99,7 @@ public enum SystemMeters
     All = Cpu | Memory | Gpu | GpuTemperature
 }
 
-// Bit 4 was retired together with a removed provider; it stays unused so older numeric
-// settings values keep their meaning for every other bit.
+// Bit 4 belonged to a retired provider; kept unused so persisted numeric values stay stable.
 [Flags]
 public enum AiProviders { None = 0, Claude = 1, Codex = 2, OpenCode = 8, Copilot = 16, DeepSeek = 32, OpenRouter = 64, Cursor = 128, All = Claude | Codex | OpenCode | Copilot | DeepSeek | OpenRouter | Cursor }
 
@@ -172,6 +171,7 @@ public sealed record DockSettings(
     DockContentAlignment ContentAlignment = DockContentAlignment.Center,
     DockSize Size = DockSize.Compact,
     bool MagnificationEnabled = true,
+    bool MagnificationExpandsDock = true,
     bool ShowClock = false,
     bool ShowMedia = false,
     bool ShowSystemStats = false,
@@ -214,7 +214,7 @@ public sealed record DockSettings(
     bool ThemeApplicationIcons = true,
     WidgetDensityMode GlobalWidgetDensity = WidgetDensityMode.Auto,
     IReadOnlyDictionary<string, WidgetDensityMode>? WidgetDensityOverrides = null,
-    // Free-form dock order: "start", "search", "taskview", "tray", "peek", "app:<path>", "stack:<path>", "widget:<id>", "bin".
+    // Free-form dock order: "start", "search", "fjord-files", "taskview", "tray", "peek", "app:<path>", "stack:<path>", "widget:<id>", "bin".
     // Null keeps the legacy grouped layout until the user drags an item.
     IReadOnlyList<string>? DockItemOrder = null,
     // Custom taskbar corner radius override (null = auto from size profile).
@@ -226,6 +226,7 @@ public sealed record DockSettings(
     IReadOnlyList<DockAppGroup>? AppGroups = null,
     // Shows the Search button beside Start. Search used to be a widget; the setting keeps the same opt-out.
     bool ShowSearchButton = true,
+    bool ShowFjordFilesButton = false,
     // Permanent shell buttons that used to be (or would have been) widgets.
     bool ShowTaskViewButton = true,
     bool ShowTrayButton = true,
@@ -284,7 +285,12 @@ public sealed record DockSettings(
     bool AmbientModeEnabled = false,
     int AnimationFpsCap = 0,
     // Real C# property so the Rust alias is not dropped into Extra and can be edited here too.
-    bool DynamicIslandEnabled = true)
+    // Kept opt-in by default; DockSettingsStore migrates legacy assignments to enabled.
+    bool DynamicIslandEnabled = false,
+    string? DynamicIslandBackgroundColor = null,
+    double DynamicIslandOpacity = 1.0,
+    bool DynamicIslandAutoHide = false,
+    bool FjordFilesEnabled = true)
 {
     public const string DynamicIslandAllDisplays = "*";
 
@@ -301,6 +307,9 @@ public sealed record DockSettings(
     /// <summary>Effective notification badge state, suppressed while focus mode is active.</summary>
     [JsonIgnore]
     public bool EffectiveNotificationBadgesEnabled => NotificationBadgesEnabled && !FocusModeEnabled;
+
+    [JsonIgnore]
+    public bool IsFjordFilesButtonVisible => FjordFilesEnabled && ShowFjordFilesButton;
 
     /// <summary>
     /// Parsed view of <see cref="PinnedTrayIcons"/>. Legacy <c>guid:</c>/<c>path:</c> strings and structured JSON

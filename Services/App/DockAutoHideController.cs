@@ -17,7 +17,6 @@ public sealed class DockAutoHideController : IDisposable
     private static readonly CubicEase EaseOut = CreateFrozenEase(EasingMode.EaseOut);
     private static readonly CubicEase EaseInOut = CreateFrozenEase(EasingMode.EaseInOut);
 
-    private readonly Window _window;
     private readonly nint _windowHandle;
     private readonly TranslateTransform _dockTranslate;
     private readonly FrameworkElement _dockSurface;
@@ -86,7 +85,6 @@ public sealed class DockAutoHideController : IDisposable
         FrameworkElement dockSurface,
         Func<bool> isInteractionLocked)
     {
-        _window = window;
         _windowHandle = windowHandle;
         _dockTranslate = dockTranslate;
         _dockSurface = dockSurface;

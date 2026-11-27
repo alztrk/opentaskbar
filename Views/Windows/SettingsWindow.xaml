@@ -326,6 +326,15 @@
                                     </StackPanel>
                                 </DockPanel></Border>
                                 <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <CheckBox x:Name="MagnificationExpandsDockToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              IsEnabled="{Binding IsChecked, ElementName=MagnificationToggle}"
+                                              AutomationProperties.Name="{local:Loc MagnificationExpandsDock}" AutomationProperties.HelpText="{local:Loc MagnificationExpandsDockDescription}" />
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc MagnificationExpandsDock}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc MagnificationExpandsDockDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
                                     <CheckBox x:Name="PreviewsToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
                                               AutomationProperties.Name="{local:Loc Previews}" AutomationProperties.HelpText="{local:Loc PreviewsDescription}" />
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
@@ -363,6 +372,23 @@
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
                                         <TextBlock Text="{local:Loc WidgetLauncher}" Style="{StaticResource SettingsRowLabel}" />
                                         <TextBlock Text="{local:Loc WidgetLauncherDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <CheckBox x:Name="FjordFilesEnabledToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              AutomationProperties.Name="{local:FjordLoc EnableFjordFiles}" AutomationProperties.HelpText="{local:FjordLoc EnableFjordFilesDescription}" />
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:FjordLoc EnableFjordFiles}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:FjordLoc EnableFjordFilesDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <CheckBox x:Name="FjordFilesButtonToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              IsEnabled="{Binding IsChecked, ElementName=FjordFilesEnabledToggle}"
+                                              AutomationProperties.Name="{local:FjordLoc ShowDockButton}" AutomationProperties.HelpText="{local:FjordLoc DockDescription}" />
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:FjordLoc ShowDockButton}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:FjordLoc DockDescription}" Style="{StaticResource SettingsRowDescription}" />
                                     </StackPanel>
                                 </DockPanel></Border>
                                 <Border Style="{StaticResource SettingsRow}"><DockPanel>
@@ -450,29 +476,6 @@
                                 <TextBlock Text="{local:Loc Widgets}" Style="{StaticResource SettingsHeading}" />
                                 <TextBlock Text="{local:Loc WidgetsDescription}" Style="{StaticResource SettingsPageSubtitle}" />
                             </StackPanel>
-
-                            <TextBlock Text="{local:Loc DynamicIslandTitle}" Style="{StaticResource SettingsSectionHeading}" Margin="0,0,0,8" />
-                            <Border Style="{StaticResource SettingsRowsGroup}" Margin="0,0,0,18"><StackPanel>
-                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
-                                    <ComboBox x:Name="DynamicIslandVisibilityBox" DockPanel.Dock="Right" MinWidth="170" MaxWidth="260" Width="Auto" VerticalAlignment="Center"
-                                              AutomationProperties.Name="{local:Loc DynamicIslandVisibility}" SelectionChanged="SegmentChoice_SelectionChanged">
-                                        <ComboBoxItem Content="{local:Loc DynamicIslandVisibilityAlways}" Tag="Always" />
-                                        <ComboBoxItem Content="{local:Loc DynamicIslandVisibilityDesktopOnly}" Tag="DesktopOnly" />
-                                    </ComboBox>
-                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
-                                        <TextBlock Text="{local:Loc DynamicIslandVisibility}" Style="{StaticResource SettingsRowLabel}" />
-                                        <TextBlock Text="{local:Loc DynamicIslandVisibilityDescription}" Style="{StaticResource SettingsRowDescription}" />
-                                    </StackPanel>
-                                </DockPanel></Border>
-                                <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
-                                    <CheckBox x:Name="DynamicIslandHideFullscreenToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
-                                              AutomationProperties.Name="{local:Loc DynamicIslandHideFullscreen}" />
-                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
-                                        <TextBlock Text="{local:Loc DynamicIslandHideFullscreen}" Style="{StaticResource SettingsRowLabel}" />
-                                        <TextBlock Text="{local:Loc DynamicIslandHideFullscreenDescription}" Style="{StaticResource SettingsRowDescription}" />
-                                    </StackPanel>
-                                </DockPanel></Border>
-                            </StackPanel></Border>
 
                             <ItemsControl x:Name="WidgetOptionsList" ItemTemplate="{StaticResource SettingsWidgetOptionTemplate}"
                                           HorizontalAlignment="Stretch">
@@ -651,6 +654,55 @@
                                     </StackPanel>
                                 </Border>
                             </Grid>
+                        </StackPanel>
+                    </ScrollViewer>
+                </TabItem>
+                <TabItem x:Name="DynamicIslandTab" Header="{local:Loc DynamicIslandTitle}" Tag="{StaticResource IconLayers}">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False" HorizontalContentAlignment="Stretch">
+                        <StackPanel Margin="{StaticResource SettingsPageInset}" MaxWidth="{StaticResource SettingsReadingWidth}" HorizontalAlignment="Stretch">
+                            <StackPanel Margin="0,0,0,22">
+                                <TextBlock Text="{local:Loc DynamicIslandTitle}" Style="{StaticResource SettingsHeading}" />
+                                <TextBlock Text="{local:Loc DynamicIslandEnableDescription}" Style="{StaticResource SettingsPageSubtitle}" />
+                            </StackPanel>
+
+                            <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <CheckBox x:Name="DynamicIslandEnabledToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              AutomationProperties.Name="{local:Loc DynamicIslandEnable}" Checked="DynamicIslandEnabled_Changed"
+                                              Unchecked="DynamicIslandEnabled_Changed" />
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc DynamicIslandEnable}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc DynamicIslandEnableDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <ComboBox x:Name="DynamicIslandVisibilityBox" DockPanel.Dock="Right" MinWidth="170" MaxWidth="260" Width="Auto" VerticalAlignment="Center"
+                                              AutomationProperties.Name="{local:Loc DynamicIslandVisibility}" SelectionChanged="SegmentChoice_SelectionChanged">
+                                        <ComboBoxItem Content="{local:Loc DynamicIslandVisibilityAlways}" Tag="Always" />
+                                        <ComboBoxItem Content="{local:Loc DynamicIslandVisibilityDesktopOnly}" Tag="DesktopOnly" />
+                                    </ComboBox>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc DynamicIslandVisibility}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc DynamicIslandVisibilityDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <CheckBox x:Name="DynamicIslandHideFullscreenToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              AutomationProperties.Name="{local:Loc DynamicIslandHideFullscreen}" />
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc DynamicIslandHideFullscreen}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc DynamicIslandHideFullscreenDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+                                <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
+                                    <CheckBox x:Name="DynamicIslandAutoHideToggle" DockPanel.Dock="Right" Style="{StaticResource SettingsSwitch}"
+                                              AutomationProperties.Name="{local:Loc DynamicIslandAutoHide}" />
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc DynamicIslandAutoHide}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc DynamicIslandAutoHideDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+                            </StackPanel></Border>
                         </StackPanel>
                     </ScrollViewer>
                 </TabItem>
@@ -933,6 +985,41 @@
                                     <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
                                         <TextBlock Text="{local:Loc AnimationFpsCap}" Style="{StaticResource SettingsRowLabel}" />
                                         <TextBlock Text="{local:Loc AnimationFpsCapHelp}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+                            </StackPanel></Border>
+
+                            <!-- Dynamic Island surface appearance -->
+                            <TextBlock Text="{local:Loc DynamicIslandTitle}" Style="{StaticResource SettingsSectionHeading}" />
+                            <Border Style="{StaticResource SettingsRowsGroup}"><StackPanel>
+                                <Border Style="{StaticResource SettingsRow}"><DockPanel>
+                                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                                        <Button x:Name="DynamicIslandBackgroundButton" Width="34" Height="28" Click="DynamicIslandBackgroundButton_Click"
+                                                AutomationProperties.Name="{local:Loc DynamicIslandBackground}" ToolTip="{local:Loc DynamicIslandBackground}">
+                                            <Border x:Name="DynamicIslandBackgroundSwatch" Width="22" Height="16" CornerRadius="4"
+                                                    BorderThickness="1" BorderBrush="{DynamicResource StrokeSubtle}"
+                                                    Background="{DynamicResource DynamicIslandMaterial}" />
+                                        </Button>
+                                        <Button x:Name="DynamicIslandUseThemeButton" Content="{local:Loc DynamicIslandUseTheme}" Margin="8,0,0,0"
+                                                Padding="10,0" MinHeight="28" Click="DynamicIslandUseTheme_Click"
+                                                AutomationProperties.Name="{local:Loc DynamicIslandUseTheme}" />
+                                    </StackPanel>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc DynamicIslandBackground}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc DynamicIslandBackgroundDescription}" Style="{StaticResource SettingsRowDescription}" />
+                                    </StackPanel>
+                                </DockPanel></Border>
+                                <Border Style="{StaticResource SettingsRowLast}"><DockPanel>
+                                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" MinWidth="150" MaxWidth="230" Width="Auto" VerticalAlignment="Center">
+                                        <Slider x:Name="DynamicIslandOpacitySlider" Width="174" Minimum="0" Maximum="100" Value="100" TickFrequency="1"
+                                                IsSnapToTickEnabled="True" SmallChange="1" LargeChange="5" Style="{StaticResource SettingsOpacitySlider}"
+                                                AutomationProperties.Name="{local:Loc SurfaceOpacityLabel}" ValueChanged="DynamicIslandOpacitySlider_ValueChanged" />
+                                        <TextBlock x:Name="DynamicIslandOpacityValue" Width="42" TextAlignment="Right"
+                                                   Foreground="{DynamicResource TextSecondary}" FontSize="11.5" VerticalAlignment="Center" Margin="6,0,0,0" />
+                                    </StackPanel>
+                                    <StackPanel VerticalAlignment="Center" Margin="0,0,18,0">
+                                        <TextBlock Text="{local:Loc SurfaceOpacityLabel}" Style="{StaticResource SettingsRowLabel}" />
+                                        <TextBlock Text="{local:Loc DynamicIslandOpacityDescription}" Style="{StaticResource SettingsRowDescription}" />
                                     </StackPanel>
                                 </DockPanel></Border>
                             </StackPanel></Border>

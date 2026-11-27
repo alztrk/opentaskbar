@@ -313,7 +313,8 @@ public sealed class WidgetHoverCoordinator : IDisposable
         while (current is not null)
         {
             if (ReferenceEquals(current, root)) return true;
-            current = VisualTreeHelper.GetParent(current) ?? LogicalTreeHelper.GetParent(current);
+            current = (current is Visual or System.Windows.Media.Media3D.Visual3D ? VisualTreeHelper.GetParent(current) : null)
+                ?? LogicalTreeHelper.GetParent(current);
         }
         return false;
     }

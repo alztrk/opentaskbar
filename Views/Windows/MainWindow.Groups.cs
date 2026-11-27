@@ -264,8 +264,8 @@ public partial class MainWindow
 
     private UIElement BuildGroupFlyoutContent(DockAppGroup group)
     {
-        var panel = new StackPanel { MinWidth = 220, MaxWidth = 320 };
-        panel.Children.Add(DockFlyout.Heading(group.Name));
+        var panel = new StackPanel { Width = 240 };
+        panel.Children.Add(DockFlyout.Header(group.Name, bottomMargin: 6));
         if (group.ExecutablePaths.Count == 0)
         {
             panel.Children.Add(DockFlyout.Caption(UiText.Get("GroupEmptyHint")));
@@ -289,7 +289,7 @@ public partial class MainWindow
             DockPanel.SetDock(icon, Dock.Left);
             row.Children.Add(icon);
 
-            var label = new TextBlock { Text = name.Replace("_", "__"), VerticalAlignment = VerticalAlignment.Center };
+            var label = new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center };
             label.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
             row.Children.Add(label);
 
@@ -302,10 +302,11 @@ public partial class MainWindow
             row.ContextMenu = menu;
 
             var capturedPathForLaunch = path;
-            var button = DockFlyout.FlatButton(row, (_, _) =>
+            var button = DockFlyout.FlatButton(row, (sender, _) =>
             {
                 var targetApp = app ?? new DockApp(name, capturedPathForLaunch);
-                ActivateDockApp(targetApp);
+                if (sender is not FrameworkElement anchor || !TryShowWindowPicker(targetApp, anchor))
+                    ActivateDockApp(targetApp);
                 _groupFlyout?.Close(restoreFocus: false);
             }, name);
             button.HorizontalContentAlignment = HorizontalAlignment.Left;

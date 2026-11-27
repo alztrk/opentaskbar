@@ -39,8 +39,21 @@ internal static class RunningAppChecks
         cache.Get(Desktop, 1);
         Check(resourceCalls == 1, "Executable resources must be extracted once per executable.");
 
-        Check(ReferenceEquals(cache.Get(Packaged, 2), settings), "A packaged executable without resources must use its AppsFolder icon.");
+        Check(ReferenceEquals(cache.Get(Packaged, 2), settings), "A packaged executable must use its AppsFolder icon.");
         Check(!cache.HasPendingLookups, "A resolved identity icon must not schedule retries.");
+
+        // Packaged WindowsApps executables (such as Electron Store apps) may embed a different raw .exe icon than
+        // their AppxManifest/AppsFolder taskbar icon; AppsFolder must win over the raw executable resource.
+        var packagedWithResource = new RunningAppIconCache(
+            _ => resource,
+            window => appIds.GetValueOrDefault(window),
+            appId => shellIcons.GetValueOrDefault(appId),
+            _ => generic,
+            new TestClock());
+        Check(ReferenceEquals(packagedWithResource.Get(Packaged, 2), settings),
+            "A packaged WindowsApps executable with an embedded resource icon must still prefer its AppsFolder icon.");
+        Check(ReferenceEquals(packagedWithResource.Get(Desktop, 1), resource),
+            "A classic non-packaged executable must still prefer its embedded resource icon.");
 
         Check(ReferenceEquals(cache.Get(FrameHost, 3), settings) && ReferenceEquals(cache.Get(FrameHost, 4), calculator),
             "Hosted Store apps must not share an icon through their common host executable.");
@@ -115,10 +128,8 @@ internal static class RunningAppChecks
         Check(loaded == 1 && !background.IsLoading && ReferenceEquals(background.Get(Desktop, 1), resource),
             "A finished load must notify the caller and then serve the icon from the cache.");
 
-        Check(background.Get(Packaged, 2) is null, "The resource lookup of a new executable runs in the background.");
-        FinishLoads();
         Check(background.Get(Packaged, 2) is null && background.IsLoading,
-            "Without executable resources the Start menu image is loaded next, still in the background.");
+            "For a packaged executable the Start menu image is loaded first in the background.");
         Check(background.IsLoadingFor(Packaged, 2) && !background.IsLoadingFor(Desktop, 1),
             "A pending lookup must only hold back the icon of its own app.");
         // The dock refreshes (and prunes the cache with Retain) whenever a load finishes; a Store app such as
@@ -331,6 +342,128 @@ internal static class RunningAppChecks
                 Check(projectedWithAumidExclude.Count == 1
                       && string.Equals(projectedWithAumidExclude[0].AppUserModelId, settingsAumid, StringComparison.OrdinalIgnoreCase),
                     "RunningAppProjection must exclude already-pinned packaged apps by AUMID while keeping other hosted UWP apps.");
+
+                // #173: a stale/unactivatable window must launch instead of silently doing nothing on a dock click.
+                var launches = 0;
+                var warnings = 0;
+                Check(OpenTaskbar.MainWindow.HandleActivationResult(true, () => launches++, _ => warnings++)
+                      && launches == 0 && warnings == 0,
+                    "A successful activation must keep the current window and launch nothing.");
+                Check(!OpenTaskbar.MainWindow.HandleActivationResult(false, () => launches++, _ => warnings++)
+                      && launches == 1 && warnings == 1,
+                    "A failed activation must launch exactly one new instance and log one warning.");
+
+                // Issue #167: Inbox system UWP packages (C:\Windows\ImmersiveControlPanel\SystemSettings.exe and
+                // C:\Windows\SystemApps\*) must resolve their packaged AUMID and route through shell:AppsFolder\<AUMID>
+                // instead of falling back to the generic .exe icon.
+                Check(ApplicationIconProvider.ComputePublisherId("CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US") == "cw5n1h2txyewy",
+                    "ComputePublisherId must match Windows' AppX PublisherId for Microsoft Windows.");
+                Check(ApplicationIconProvider.ComputePublisherId("CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US") == "8wekyb3d8bbwe",
+                    "ComputePublisherId must match Windows' AppX PublisherId for Microsoft Corporation.");
+
+                var immersiveDir = System.IO.Path.Combine(fakeRoot, "Windows", "ImmersiveControlPanel");
+                System.IO.Directory.CreateDirectory(immersiveDir);
+                System.IO.File.WriteAllText(System.IO.Path.Combine(immersiveDir, "AppxManifest.xml"), """
+                    <?xml version="1.0" encoding="utf-8"?>
+                    <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+                      <Identity Name="windows.immersivecontrolpanel" Publisher="CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" Version="10.0.8.1000" />
+                      <Properties><DisplayName>Settings</DisplayName></Properties>
+                      <Applications>
+                        <Application Id="microsoft.windows.immersivecontrolpanel" Executable="SystemSettings.exe" EntryPoint="AppObject.EntryPoint" />
+                      </Applications>
+                    </Package>
+                    """);
+                var fakeSettingsExe = System.IO.Path.Combine(immersiveDir, "SystemSettings.exe");
+                System.IO.File.WriteAllBytes(fakeSettingsExe, []);
+                Check(string.Equals(ApplicationIconProvider.TryResolvePackagedAppUserModelId(fakeSettingsExe), settingsAumid, StringComparison.OrdinalIgnoreCase),
+                    "TryResolvePackagedAppUserModelId must resolve Windows Settings AUMID from ImmersiveControlPanel\\AppxManifest.xml.");
+
+                var systemAppDir = System.IO.Path.Combine(fakeRoot, "Windows", "SystemApps", "Microsoft.Windows.ShellExperienceHost_cw5n1h2txyewy");
+                System.IO.Directory.CreateDirectory(systemAppDir);
+                System.IO.File.WriteAllText(System.IO.Path.Combine(systemAppDir, "AppxManifest.xml"), """
+                    <?xml version="1.0" encoding="utf-8"?>
+                    <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+                      <Identity Name="Microsoft.Windows.ShellExperienceHost" Publisher="CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" Version="10.0.0.0" />
+                      <Properties><DisplayName>Shell Experience</DisplayName></Properties>
+                      <Applications>
+                        <Application Id="App" Executable="ShellExperienceHost.exe" EntryPoint="ShellExperienceHost.App" />
+                      </Applications>
+                    </Package>
+                    """);
+                var fakeShellHostExe = System.IO.Path.Combine(systemAppDir, "ShellExperienceHost.exe");
+                System.IO.File.WriteAllBytes(fakeShellHostExe, []);
+                Check(string.Equals(ApplicationIconProvider.TryResolvePackagedAppUserModelId(fakeShellHostExe), "Microsoft.Windows.ShellExperienceHost_cw5n1h2txyewy!App", StringComparison.OrdinalIgnoreCase),
+                    "TryResolvePackagedAppUserModelId must resolve SystemApps 2-part package folder AUMIDs.");
+
+                // Pure UWP/AppContainer EntryPoint with a readable .exe must still resolve to shell:AppsFolder\<AUMID>,
+                // whereas Windows.FullTrustApplication keeps its readable desktop bridge executable.
+                var uwpAppContainerDir = System.IO.Path.Combine(fakeRoot, "WindowsApps", "windows.immersivecontrolpanel_10.0.8.1000_neutral_neutral_cw5n1h2txyewy");
+                System.IO.Directory.CreateDirectory(uwpAppContainerDir);
+                System.IO.File.WriteAllText(System.IO.Path.Combine(uwpAppContainerDir, "AppxManifest.xml"), """
+                    <?xml version="1.0" encoding="utf-8"?>
+                    <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+                      <Identity Name="windows.immersivecontrolpanel" Publisher="CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" Version="10.0.8.1000" />
+                      <Properties><DisplayName>Settings</DisplayName></Properties>
+                      <Applications>
+                        <Application Id="microsoft.windows.immersivecontrolpanel" Executable="SystemSettings.exe" EntryPoint="AppObject.EntryPoint" />
+                      </Applications>
+                    </Package>
+                    """);
+                System.IO.File.WriteAllBytes(System.IO.Path.Combine(uwpAppContainerDir, "SystemSettings.exe"), []);
+                var resolvedSettingsPkg = WindowsTaskbarPinImporter.TryResolvePackagedApp(
+                    settingsAumid,
+                    System.IO.Path.Combine(fakeRoot, "WindowsApps"));
+                Check(resolvedSettingsPkg is { DisplayName: "Settings" }
+                      && string.Equals(resolvedSettingsPkg.Value.ExecutablePath, $"shell:AppsFolder\\{settingsAumid}", StringComparison.OrdinalIgnoreCase),
+                    "TryResolvePackagedApp must emit shell:AppsFolder\\<AUMID> for AppContainer UWP EntryPoints even when the raw .exe is readable.");
+
+                var fullTrustDir = System.IO.Path.Combine(fakeRoot, "WindowsApps", "Vendor.FullTrust_1.0.0.0_x64__8wekyb3d8bbwe");
+                System.IO.Directory.CreateDirectory(fullTrustDir);
+                System.IO.File.WriteAllText(System.IO.Path.Combine(fullTrustDir, "AppxManifest.xml"), """
+                    <?xml version="1.0" encoding="utf-8"?>
+                    <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10">
+                      <Identity Name="Vendor.FullTrust" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" Version="1.0.0.0" />
+                      <Properties><DisplayName>FullTrust App</DisplayName></Properties>
+                      <Applications>
+                        <Application Id="App" Executable="FullTrust.exe" EntryPoint="Windows.FullTrustApplication" />
+                      </Applications>
+                    </Package>
+                    """);
+                var fullTrustExe = System.IO.Path.Combine(fullTrustDir, "FullTrust.exe");
+                System.IO.File.WriteAllBytes(fullTrustExe, []);
+                var resolvedFullTrust = WindowsTaskbarPinImporter.TryResolvePackagedApp(
+                    "Vendor.FullTrust_8wekyb3d8bbwe!App",
+                    System.IO.Path.Combine(fakeRoot, "WindowsApps"));
+                Check(resolvedFullTrust is { DisplayName: "FullTrust App" }
+                      && string.Equals(resolvedFullTrust.Value.ExecutablePath, fullTrustExe, StringComparison.OrdinalIgnoreCase),
+                    "TryResolvePackagedApp must keep the readable executable for Windows.FullTrustApplication desktop bridges.");
+
+                // Legacy .lnk pointing directly to ImmersiveControlPanel\SystemSettings.exe without PKEY_AppUserModel_ID
+                // must upgrade to shell:AppsFolder\<settingsAumid> and preserve the Settings AUMID.
+                var settingsPinViaRawExe = WindowsTaskbarPinImporter.ResolveShortcutEntry(
+                    "Ayarlar",
+                    System.IO.Path.Combine(fakeRoot, "Ayarlar.lnk"),
+                    fakeSettingsExe,
+                    string.Empty,
+                    string.Empty,
+                    metadata: null,
+                    windowsAppsRoot: System.IO.Path.Combine(fakeRoot, "WindowsApps"));
+                Check(settingsPinViaRawExe is not null
+                      && string.Equals(settingsPinViaRawExe.ExecutablePath, $"shell:AppsFolder\\{settingsAumid}", StringComparison.OrdinalIgnoreCase)
+                      && string.Equals(settingsPinViaRawExe.AppUserModelId, settingsAumid, StringComparison.OrdinalIgnoreCase),
+                    "ResolveShortcutEntry must upgrade ImmersiveControlPanel\\SystemSettings.exe pins to shell:AppsFolder\\<AUMID>.");
+
+                Check(DockApp.IsPackagedInstallPath(fakeSettingsExe)
+                      && DockApp.IsSystemPackagedInstallPath(fakeSettingsExe)
+                      && DockApp.IsPackagedInstallPath(fakeShellHostExe)
+                      && DockApp.IsPackagedInstallPath(mainExe)
+                      && !DockApp.IsSystemPackagedInstallPath(mainExe)
+                      && !DockApp.IsPackagedInstallPath(Desktop),
+                    "DockApp packaged install path helpers must classify WindowsApps, SystemApps, ImmersiveControlPanel, and classic desktop paths.");
+                Check(DockApp.IsSelfExecutable(@"C:\Program Files\OpenTaskbar\OpenTaskbar.exe", @"C:\Program Files\OpenTaskbar\OpenTaskbar.exe")
+                      && DockApp.IsSelfExecutable(@"D:\Other\OpenTaskbar.exe", @"C:\Program Files\OpenTaskbar\OpenTaskbar.exe")
+                      && !DockApp.IsSelfExecutable(Desktop, @"C:\Program Files\OpenTaskbar\OpenTaskbar.exe"),
+                    "DockApp.IsSelfExecutable must identify OpenTaskbar's own executable without matching unrelated apps.");
             }
             finally
             {

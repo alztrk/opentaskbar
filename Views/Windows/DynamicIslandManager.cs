@@ -28,7 +28,8 @@ public sealed class DynamicIslandManager : IDisposable
     }
 
     public bool IsWidgetPlacedOnConnectedDisplay(DockSettings settings, string widgetId) =>
-        !settings.FocusModeEnabled
+        settings.DynamicIslandEnabled
+        && !settings.FocusModeEnabled
         && settings.Widgets?.Contains(widgetId, StringComparer.OrdinalIgnoreCase) == true
         && DynamicIslandPolicy.IsAssignedToAnyDisplay(settings.DynamicIslandPlacements, widgetId, _displays);
 
@@ -44,14 +45,18 @@ public sealed class DynamicIslandManager : IDisposable
     {
         if (_disposed) return;
         RefreshDisplays();
+        if (!DynamicIslandPolicy.ShouldCreateWindow(settings.DynamicIslandEnabled, settings.FocusModeEnabled))
+        {
+            foreach (var window in _windows.Values) window.Dispose();
+            _windows.Clear();
+            return;
+        }
         var selected = new HashSet<string>(settings.Widgets ?? [], StringComparer.OrdinalIgnoreCase);
         var placements = settings.DynamicIslandPlacements ?? new Dictionary<string, string>();
         var desired = _displays.ToDictionary(
             display => display.DeviceName,
             display => DynamicIslandPolicy.WidgetsForDisplay(selected, placements, display.DeviceName),
             StringComparer.OrdinalIgnoreCase);
-        foreach (var empty in desired.Where(pair => pair.Value.Count == 0).Select(pair => pair.Key).ToArray())
-            desired.Remove(empty);
 
         foreach (var stale in _windows.Keys.Where(deviceName => !desired.ContainsKey(deviceName)).ToArray())
         {

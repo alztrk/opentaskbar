@@ -29,6 +29,8 @@
     "StrokeFocus": "#FFC4B5FD",
     "DockMaterial": { "stops": ["#FF1C1B29", "#FF15141F", "#FF0E0D16"] },
     "MenuMaterial": { "stops": ["#FF1C1B29", "#FF15141F", "#FF0E0D16"] },
+    "DynamicIslandMaterial": { "stops": ["#FF1C1B29", "#FF15141F", "#FF0E0D16"] },
+    "DynamicIslandStroke": "#268B7CF6",
     "DockBorderMaterial": { "stops": ["#80C4B5FD", "#2A8B7CF6", "#0AFFFFFF", "#5A000000"] },
     "DockHighlight": { "stops": ["#22A78BFA", "#08A78BFA", "#00A78BFA"] },
     "WidgetCard": "#168B7CF6",
@@ -53,6 +55,8 @@
   "light": {
     "DockMaterial": { "stops": ["#FFF7F5FF", "#FFEFEBFF", "#FFE6E1FA"] },
     "MenuMaterial": { "stops": ["#FFF7F5FF", "#FFEFEBFF", "#FFE6E1FA"] },
+    "DynamicIslandMaterial": { "stops": ["#FFF7F5FF", "#FFEFEBFF", "#FFE6E1FA"] },
+    "DynamicIslandStroke": "#227C3AED",
     "StrokeFocus": "#FF7C3AED",
     "WidgetAccent": "#FF7C3AED",
     "WidgetCard": "#147C3AED",

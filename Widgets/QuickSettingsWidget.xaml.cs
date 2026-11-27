@@ -38,6 +38,7 @@ public partial class QuickSettingsWidget : DockWidget
     private static Task<RadioAccessStatus>? _radioAccess;
 
     private readonly Dictionary<Setting, ChangeResult> _errors = [];
+    private readonly DockFlyout _flyout = new();
     private IReadOnlyList<Radio> _radios = [];
     private CancellationTokenSource? _activation;
     private bool? _nightLightOn;
@@ -156,6 +157,7 @@ public partial class QuickSettingsWidget : DockWidget
 
     protected override void OnDeactivated()
     {
+        _flyout.Close();
         _activation?.Cancel();
         _activation?.Dispose();
         _activation = null;
@@ -385,26 +387,106 @@ public partial class QuickSettingsWidget : DockWidget
         return ReadNightLight() == on ? ChangeResult.Applied : ChangeResult.Failed;
     }
 
+    private sealed record ShortcutSpec(string LabelKey, string IconKey, Func<FrameworkElement, string?> Action);
+
+    private static readonly ShortcutSpec[] InlineShortcuts =
+    [
+        new("QuickAvailableNetworks", "IconSearch", ShellShortcuts.OpenAvailableNetworks),
+        new("QuickCast", "IconCast", _ => ShellShortcuts.OpenCast()),
+        new("QuickOpenWindowsPanel", "IconSliders", ShellShortcuts.OpenQuickSettings)
+    ];
+
+    private static readonly ShortcutSpec[] FlyoutShortcuts =
+    [
+        new("QuickBluetoothSettings", "IconBluetooth", _ => ShellShortcuts.OpenUri("ms-settings:bluetooth")),
+        new("QuickNightLightSettings", "IconMoon", _ => ShellShortcuts.OpenUri("ms-settings:nightlight")),
+        new("QuickAirplaneMode", "IconAirplane", _ => ShellShortcuts.OpenUri("ms-settings:network-airplanemode")),
+        new("QuickCellular", "IconCellular", _ => ShellShortcuts.OpenUri("ms-settings:network-cellular")),
+        new("QuickBrightness", "IconSun", _ => ShellShortcuts.OpenUri("ms-settings:display")),
+        new("QuickRotationLock", "IconRotate", _ => ShellShortcuts.OpenUri("ms-settings:screenrotation")),
+        new("QuickEnergySaver", "IconBattery", _ => ShellShortcuts.OpenUri("ms-settings:batterysaver")),
+        new("QuickNearbySharing", "IconLink", _ => ShellShortcuts.OpenUri("ms-settings:crossdevice")),
+        new("QuickLiveCaptions", "IconCaptions", _ => ShellShortcuts.OpenUri("ms-settings:easeofaccess-closedcaptioning")),
+        new("QuickNotificationMode", "IconBellOff", _ => ShellShortcuts.OpenUri("ms-settings:quiethours")),
+        new("QuickStudioEffects", "IconMonitor", ShellShortcuts.OpenQuickSettings),
+        new("QuickHearingDevices", "IconHeadphones", _ => ShellShortcuts.OpenUri("ms-settings:easeofaccess-hearingaids")),
+        new("QuickMobileHotspot", "IconHotspot", _ => ShellShortcuts.OpenUri("ms-settings:network-mobilehotspot")),
+        new("QuickAccessibility", "IconAccessibility", _ => ShellShortcuts.OpenUri("ms-settings:easeofaccess"))
+    ];
+
     private void AddShortcuts()
     {
-        AddShortcut("QuickAvailableNetworks", "IconSearch", ShellShortcuts.OpenAvailableNetworks);
-        AddShortcut("QuickBluetoothSettings", "IconBluetooth", _ => ShellShortcuts.OpenUri("ms-settings:bluetooth"));
-        AddShortcut("QuickNightLightSettings", "IconMoon", _ => ShellShortcuts.OpenUri("ms-settings:nightlight"));
-        AddShortcut("QuickAirplaneMode", "IconAirplane", _ => ShellShortcuts.OpenUri("ms-settings:network-airplanemode"));
-        AddShortcut("QuickCellular", "IconCellular", _ => ShellShortcuts.OpenUri("ms-settings:network-cellular"));
-        AddShortcut("QuickBrightness", "IconSun", _ => ShellShortcuts.OpenUri("ms-settings:display"));
-        AddShortcut("QuickRotationLock", "IconRotate", _ => ShellShortcuts.OpenUri("ms-settings:screenrotation"));
-        AddShortcut("QuickEnergySaver", "IconBattery", _ => ShellShortcuts.OpenUri("ms-settings:batterysaver"));
-        AddShortcut("QuickNearbySharing", "IconLink", _ => ShellShortcuts.OpenUri("ms-settings:crossdevice"));
-        AddShortcut("QuickLiveCaptions", "IconCaptions", _ => ShellShortcuts.OpenUri("ms-settings:easeofaccess-closedcaptioning"));
-        AddShortcut("QuickNotificationMode", "IconBellOff", _ => ShellShortcuts.OpenUri("ms-settings:quiethours"));
-        AddShortcut("QuickStudioEffects", "IconMonitor", ShellShortcuts.OpenQuickSettings);
-        AddShortcut("QuickHearingDevices", "IconHeadphones", _ => ShellShortcuts.OpenUri("ms-settings:easeofaccess-hearingaids"));
-        AddShortcut("QuickCast", "IconCast", _ => ShellShortcuts.OpenCast());
-        AddShortcut("QuickMobileHotspot", "IconHotspot", _ => ShellShortcuts.OpenUri("ms-settings:network-mobilehotspot"));
-        AddShortcut("QuickAccessibility", "IconAccessibility", _ => ShellShortcuts.OpenUri("ms-settings:easeofaccess"));
-        AddShortcut("QuickOpenWindowsPanel", "IconSliders", ShellShortcuts.OpenQuickSettings);
+        foreach (var shortcut in InlineShortcuts)
+            AddShortcut(shortcut.LabelKey, shortcut.IconKey, shortcut.Action);
+
+        var moreIcon = new ContentControl();
+        moreIcon.SetResourceReference(StyleProperty, "WidgetIcon");
+        moreIcon.SetResourceReference(ContentControl.ContentProperty, "IconChevronUp");
+        var more = new Button
+        {
+            Name = "MoreButton",
+            Content = moreIcon,
+            Width = ButtonSize,
+            Height = ButtonSize
+        };
+        more.SetResourceReference(StyleProperty, "WidgetIconButton");
+        var moreLabel = new Binding("[WidgetQuickSettings]") { Source = UiText.Current };
+        more.SetBinding(ToolTipProperty, moreLabel);
+        more.SetBinding(AutomationProperties.NameProperty, moreLabel);
+        more.Click += (_, _) => _flyout.Toggle(more, BuildMoreFlyoutContent);
+        ControlsStrip.Children.Add(more);
     }
+
+    internal UIElement BuildMoreFlyoutContent()
+    {
+        var root = new StackPanel { Width = 320 };
+        root.Children.Add(DockFlyout.Header(UiText.Get("WidgetQuickSettings"), bottomMargin: 8));
+
+        var grid = new UniformGrid { Columns = 2 };
+        foreach (var shortcut in FlyoutShortcuts)
+        {
+            var icon = new ContentControl
+            {
+                Width = 14,
+                Height = 14,
+                Margin = new Thickness(0, 0, 8, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            icon.SetResourceReference(StyleProperty, "WidgetIcon");
+            icon.SetResourceReference(ContentControl.ContentProperty, shortcut.IconKey);
+            icon.SetResourceReference(ForegroundProperty, "TextSecondary");
+
+            var labelText = UiText.Get(shortcut.LabelKey);
+            var text = new TextBlock
+            {
+                Text = labelText,
+                FontSize = 12,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            text.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+
+            var row = new DockPanel();
+            DockPanel.SetDock(icon, Dock.Left);
+            row.Children.Add(icon);
+            row.Children.Add(text);
+
+            var action = shortcut.Action;
+            var item = DockFlyout.FlatButton(row, (s, _) =>
+            {
+                _flyout.Close();
+                if (s is FrameworkElement el) Report(action(el));
+            }, labelText);
+            item.Padding = new Thickness(8, 6, 8, 6);
+            item.Margin = new Thickness(1);
+            grid.Children.Add(item);
+        }
+
+        root.Children.Add(grid);
+        return root;
+    }
+
+    public override UIElement? BuildPreviewFlyoutContent() => BuildMoreFlyoutContent();
 
     private void AddShortcut(string labelKey, string iconKey, Func<FrameworkElement, string?> action)
     {

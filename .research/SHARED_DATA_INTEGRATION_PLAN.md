@@ -98,7 +98,7 @@ Yönlendirilecek dosyalar:
 
 1. **Push + tag (önce güvenlik):** `git push origin rust-port` (187 commit FF), backup tag `pre-shared-data-20261127`, mevcut `v0.3.4` korunur.
 2. **master sync:** `git switch master && git pull --ff-only origin master` (9 commit).
-3. **Entegrasyon PR:** `origin/master` ↔ `rust-port` → **14 çakışma**: `CHANGELOG.md`, `Widgets/AiUsageWidget.cs`, 12 dil kataloğu. Çözüm: CHANGELOG union, AI widget theirs(master), locale anahtar union + Antigravity 5 anahtarı C#'ta tut/Rust'a ekleme + `check-locale-parity.ps1` sabitleri (C# 1034 / Rust 1406). Kapı: cargo fmt/clippy/test/release build + dotnet build + headless test + locale parity.
+3. **Entegrasyon PR:** `origin/master` ↔ `rust-port` → **14 çakışma**: `CHANGELOG.md`, `Widgets/AiUsageWidget.cs`, 12 dil kataloğu. Çözüm: CHANGELOG union, AI widget theirs(master), locale anahtar union + `check-locale-parity.ps1` sabitleri (son değerler C# 1046 / Rust 1423). Kapı: cargo fmt/clippy/test/release build + dotnet build + headless test + locale parity.
 4. **x86 watchdog:** yeni `build.rs` → `CARGO_CFG_TARGET_ARCH` ile `build.ps1 -Architecture x86 -Force -NoFallback`, `OT_WATCHDOG_EXE` env, `watchdog.rs` `include_bytes!(env!(...))`; PE machine x86=0x014C / x64=0x8664 doğrulaması; rust-ci path filtrelerine `tools/watchdog/**`, Rust scriptleri, `packaging/msix/AppxManifest.Rust.xml`, `release.yml` ekle; yeni `watchdog-arch` job'u.
 5. **Sürüm kapısı:** `scripts/check-release-version.ps1` — tag ↔ csproj 0.3.5 ↔ Cargo (0.1.0 açıkça kayıt veya eşit) ↔ MSIX `0.3.5.0`; `publish-rust-msix.ps1` hardcoded 0.3.2 kaldır.
 6. **Çift artifact release v0.3.5:** checksums + manifest `rustPort.crateVersion` + watchdog arch/sha alanları + SLSA/VT doğrulama; C# binary geri dönüş için kalır.

@@ -25,7 +25,6 @@ public partial class SettingsWindow : Window
     private readonly ApplicationPreferences _preferences;
     private readonly StartupRegistration _startup = new();
     private readonly ObservableCollection<DockWidgetOption> _widgetOptions = [];
-    private readonly ObservableCollection<WidgetCategoryGroup> _widgetGroups = [];
     private readonly List<ComboBox> _aiRingBoxes = [];
     private readonly List<Action> _aiAccountRefreshers = [];
     private readonly Action<AiProviders> _credentialsChangedHandler;
@@ -72,6 +71,7 @@ public partial class SettingsWindow : Window
     private Button? _cursorSignOutButton;
     private bool _cursorSignInTimedOut;
     private bool _cursorAuthSubscribed;
+    private string? _dynamicIslandBackgroundColor;
 
     internal bool IsClosingOrClosed => _isClosing || _closed;
     internal int LivePreviewWidgetCount => _livePreviewWidgets.Count;
@@ -99,7 +99,9 @@ public partial class SettingsWindow : Window
         foreach (var option in _widgetPreviewService.CreateOptions(_applied.InstalledWidgets, _applied.Widgets))
         {
             _widgetOptions.Add(option);
+            option.PropertyChanged += WidgetOption_PropertyChanged;
         }
+        LoadDynamicIslandPlacementChoices(_applied);
         AttachWidgetSettingsPanels();
         // Live widget previews are attached lazily when WidgetsTab is first selected in UpdateWidgetPreviewRefresh.
         CustomThemeEditor.ThemeSaved += CustomThemeEditor_ThemeSaved;
@@ -153,8 +155,9 @@ public partial class SettingsWindow : Window
                 .Where(o => o.NativePreview is OpenTaskbar.Widgets.DockWidget)
                 .Select(o => (OpenTaskbar.Widgets.DockWidget)o.NativePreview!))
                 preview.Dispose();
+            foreach (var option in _widgetOptions)
+                option.PropertyChanged -= WidgetOption_PropertyChanged;
             _widgetOptions.Clear();
-            _widgetGroups.Clear();
             _aiRingBoxes.Clear();
             _aiAccountRefreshers.Clear();
             WeatherCountryBox.ItemsSource = null;
@@ -176,6 +179,7 @@ public partial class SettingsWindow : Window
         LoadSurfaceStyles(_applied);
         LoadDisplayCare(_applied);
         MagnificationToggle.IsChecked = _applied.MagnificationEnabled;
+        MagnificationExpandsDockToggle.IsChecked = _applied.MagnificationExpandsDock;
         SelectChoice(SizeBox, _applied.Size.ToString());
         DockIconPaddingSlider.Value = _applied.DockIconPadding;
         UpdateDockIconPaddingLabel();
@@ -374,7 +378,6 @@ public partial class SettingsWindow : Window
                 option.RefreshInstallLabels();
             }
             RefreshWidgetPreviews();
-            foreach (var group in _widgetGroups) group.RefreshLabel();
             foreach (var refresh in _aiAccountRefreshers) refresh();
             UpdateHotkeyControls();
             UpdateCursorAuthUi();
@@ -480,6 +483,15 @@ public partial class SettingsWindow : Window
     {
         var enabledWidgets = _widgetOptions.Where(option => option.IsInstalled && option.IsEnabled).Select(option => option.Id).ToArray();
         var installedWidgets = _widgetOptions.Where(option => option.IsInstalled).Select(option => option.Id).ToArray();
+        var islandPlacements = new Dictionary<string, string>(
+            _preferences.Current.DynamicIslandPlacements ?? new Dictionary<string, string>(), StringComparer.OrdinalIgnoreCase);
+        foreach (var option in _widgetOptions)
+        {
+            if (string.Equals(option.DynamicIslandPlacementValue, "dock", StringComparison.OrdinalIgnoreCase))
+                islandPlacements.Remove(option.Id);
+            else
+                islandPlacements[option.Id] = option.DynamicIslandPlacementValue;
+        }
         bool IsEnabled(string id) => enabledWidgets.Contains(id, StringComparer.OrdinalIgnoreCase);
         return _preferences.Current with
         {
@@ -524,10 +536,16 @@ public partial class SettingsWindow : Window
             AnimationFpsCap = IntChoice(AnimationFpsCapBox, 0),
             Widgets = enabledWidgets,
             InstalledWidgets = installedWidgets,
+            DynamicIslandEnabled = DynamicIslandEnabledToggle.IsChecked == true,
+            DynamicIslandPlacements = islandPlacements.Count == 0 ? null : islandPlacements,
             DynamicIslandVisibility = Enum.TryParse<DynamicIslandVisibilityMode>(Choice(DynamicIslandVisibilityBox), out var islandVisibility)
                 ? islandVisibility : _preferences.Current.DynamicIslandVisibility,
             DynamicIslandHideInFullscreen = DynamicIslandHideFullscreenToggle.IsChecked == true,
+            DynamicIslandAutoHide = DynamicIslandAutoHideToggle.IsChecked == true,
+            DynamicIslandBackgroundColor = _dynamicIslandBackgroundColor,
+            DynamicIslandOpacity = Math.Round(DynamicIslandOpacitySlider.Value) / 100,
             MagnificationEnabled = MagnificationToggle.IsChecked == true,
+            MagnificationExpandsDock = MagnificationExpandsDockToggle.IsChecked == true,
             Layout = Choice(PositionBox) == "FullWidth" ? DockLayout.FullWidth : DockLayout.Floating,
             Size = Enum.TryParse<DockSize>(Choice(SizeBox), out var size) ? size : DockSize.Compact,
             DockIconPadding = (int)Math.Round(DockIconPaddingSlider.Value),
@@ -564,6 +582,8 @@ public partial class SettingsWindow : Window
             FocusSessions = (int)Math.Round(FocusSessionsSlider.Value),
             ShowRecycleBin = RecycleBinToggle.IsChecked == true,
             ShowSearchButton = SearchButtonToggle.IsChecked == true,
+            FjordFilesEnabled = FjordFilesEnabledToggle.IsChecked == true,
+            ShowFjordFilesButton = FjordFilesButtonToggle.IsChecked == true,
             ShowTaskViewButton = TaskViewButtonToggle.IsChecked == true,
             ShowTrayButton = TrayButtonToggle.IsChecked == true,
             ShowDesktopButton = ShowDesktopButtonToggle.IsChecked == true,
@@ -646,6 +666,115 @@ public partial class SettingsWindow : Window
         MirrorMainDockRow.IsEnabled = allMonitors;
         SecondaryAppsRow.IsEnabled = allMonitors;
         SecondaryWidgetsRow.IsEnabled = allMonitors && MirrorMainDockToggle.IsChecked != true;
+    }
+
+    private void DynamicIslandEnabled_Changed(object sender, RoutedEventArgs e) => UpdateDynamicIslandControls();
+
+    private void UpdateDynamicIslandControls()
+    {
+        var enabled = DynamicIslandEnabledToggle.IsChecked == true;
+        DynamicIslandVisibilityBox.IsEnabled = enabled;
+        DynamicIslandHideFullscreenToggle.IsEnabled = enabled;
+        DynamicIslandAutoHideToggle.IsEnabled = enabled;
+        DynamicIslandBackgroundButton.IsEnabled = enabled;
+        DynamicIslandUseThemeButton.IsEnabled = enabled;
+        DynamicIslandOpacitySlider.IsEnabled = enabled;
+    }
+
+    private void LoadDynamicIslandAppearance(DockSettings settings)
+    {
+        _dynamicIslandBackgroundColor = settings.DynamicIslandBackgroundColor;
+        DynamicIslandOpacitySlider.Value = Math.Clamp(settings.DynamicIslandOpacity * 100, 0, 100);
+        DynamicIslandOpacityValue.Text = UiText.Format("OpacityPercent", (int)Math.Round(DynamicIslandOpacitySlider.Value));
+        UpdateDynamicIslandBackgroundSwatch();
+    }
+
+    private void UpdateDynamicIslandBackgroundSwatch()
+    {
+        if (_dynamicIslandBackgroundColor is not null
+            && ThemeManager.TryParseColor(_dynamicIslandBackgroundColor, out var color))
+        {
+            DynamicIslandBackgroundSwatch.Background = new SolidColorBrush(color);
+            return;
+        }
+
+        DynamicIslandBackgroundSwatch.SetResourceReference(Border.BackgroundProperty, "DynamicIslandMaterial");
+    }
+
+    private void DynamicIslandOpacitySlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (DynamicIslandOpacityValue is null) return;
+        DynamicIslandOpacityValue.Text = UiText.Format("OpacityPercent", (int)Math.Round(e.NewValue));
+        if (_initializing) return;
+        _hasUnappliedThemePreview = true;
+        ThemeManager.SetDynamicIslandStyle(_dynamicIslandBackgroundColor, Math.Round(e.NewValue) / 100);
+        PreferenceEdited(sender, e);
+    }
+
+    private void DynamicIslandBackgroundButton_Click(object sender, RoutedEventArgs e)
+    {
+        var source = ThemeManager.GetDynamicIslandBackgroundSource();
+        var picker = new ThemeBrushPicker(source) { Owner = this };
+        if (picker.ShowDialog() != true || ThemeBrushPicker.BrushToHex(picker.Result) is not { } color) return;
+
+        _dynamicIslandBackgroundColor = color;
+        UpdateDynamicIslandBackgroundSwatch();
+        _hasUnappliedThemePreview = true;
+        ThemeManager.SetDynamicIslandStyle(_dynamicIslandBackgroundColor, DynamicIslandOpacitySlider.Value / 100);
+        PreferenceEdited(sender, e);
+    }
+
+    private void DynamicIslandUseTheme_Click(object sender, RoutedEventArgs e)
+    {
+        _dynamicIslandBackgroundColor = null;
+        UpdateDynamicIslandBackgroundSwatch();
+        _hasUnappliedThemePreview = true;
+        ThemeManager.SetDynamicIslandStyle(null, DynamicIslandOpacitySlider.Value / 100);
+        PreferenceEdited(sender, e);
+    }
+
+    private void LoadDynamicIslandPlacementChoices(DockSettings settings)
+    {
+        IReadOnlyList<DynamicIslandPlacementChoice> choices =
+        [
+            new("dock", UiText.Get("DynamicIslandDock")),
+            new(DockSettings.DynamicIslandAllDisplays, UiText.Get("DynamicIslandTitle"))
+        ];
+
+        foreach (var option in _widgetOptions)
+        {
+            option.DynamicIslandPlacementChoices = choices;
+            option.DynamicIslandPlacementValue = settings.DynamicIslandPlacements?.ContainsKey(option.Id) == true
+                ? DockSettings.DynamicIslandAllDisplays
+                : "dock";
+        }
+    }
+
+    private void WidgetOption_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName != nameof(DockWidgetOption.DynamicIslandPlacementValue) || _initializing || _closed) return;
+        if (sender is DockWidgetOption option
+            && !string.Equals(option.DynamicIslandPlacementValue, "dock", StringComparison.OrdinalIgnoreCase))
+        {
+            if (option.IsHardwareAvailable && (!option.IsInstalled || !option.IsEnabled))
+            {
+                var prev = _initializing;
+                _initializing = true;
+                option.IsInstalled = true;
+                option.IsEnabled = true;
+                _initializing = prev;
+                UpdateWidgetOptionState();
+            }
+            if (DynamicIslandEnabledToggle.IsChecked != true)
+            {
+                var prev = _initializing;
+                _initializing = true;
+                DynamicIslandEnabledToggle.IsChecked = true;
+                _initializing = prev;
+                UpdateDynamicIslandControls();
+            }
+        }
+        TriggerAutoSave(immediate: true);
     }
 
     private void UpdateAutoHideControls()
@@ -1218,6 +1347,7 @@ public partial class SettingsWindow : Window
             {
                 SettingsSearchBox.Text = string.Empty;
             }
+            ClearAutoFocusedPageControl();
             UpdateWidgetPreviewRefresh();
             if (_preferences.Current.EffectiveAnimationsEnabled && SettingsTabs.Template?.FindName("PART_SelectedContentHost", SettingsTabs) is ContentPresenter host)
             {
@@ -1240,6 +1370,24 @@ public partial class SettingsWindow : Window
                 transform.BeginAnimation(TranslateTransform.YProperty, slide);
             }
         }
+    }
+
+    // Switching TabControl pages disconnects the previously focused element and causes WPF to
+    // auto-focus the first focusable button/input on the newly shown page. Clear that incidental
+    // content focus while keeping intentional TabItem keyboard navigation intact.
+    private void ClearAutoFocusedPageControl()
+    {
+        void ClearIfContentControl()
+        {
+            if (_closed) return;
+            if (Keyboard.FocusedElement is TabItem) return;
+            if (ReferenceEquals(Keyboard.FocusedElement, SettingsSearchBox)) return;
+            Keyboard.ClearFocus();
+            FocusManager.SetFocusedElement(this, null);
+        }
+
+        ClearIfContentControl();
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, ClearIfContentControl);
     }
 
     private void UpdateWidgetPreviewRefresh()
@@ -1381,43 +1529,6 @@ public partial class SettingsWindow : Window
         }
     }
 
-    /// <summary>A localized category label followed by the widgets that belong to it.</summary>
-    internal sealed class WidgetCategoryGroup : INotifyPropertyChanged
-    {
-        public WidgetCategoryGroup(DockWidgetCategory category, IReadOnlyList<DockWidgetOption> widgets)
-        {
-            Category = category;
-            Widgets = widgets;
-        }
-
-        public DockWidgetCategory Category { get; }
-        public IReadOnlyList<DockWidgetOption> Widgets { get; }
-
-        public string Label => Category switch
-        {
-            DockWidgetCategory.TimeAndWeather => UiText.Get("WidgetCategoryTime"),
-            DockWidgetCategory.SystemAndHardware => UiText.Get("WidgetCategorySystem"),
-            DockWidgetCategory.AiQuotas => UiText.Get("WidgetCategoryAi"),
-            DockWidgetCategory.MediaAndControls => UiText.Get("WidgetCategoryMedia"),
-            DockWidgetCategory.Productivity => UiText.Get("WidgetCategoryProductivity"),
-            _ => string.Empty
-        };
-
-        public event PropertyChangedEventHandler? PropertyChanged;
-
-        public void RefreshLabel() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Label)));
-    }
-
-    private void RebuildWidgetGroups()
-    {
-        _widgetGroups.Clear();
-        foreach (var category in Enum.GetValues<DockWidgetCategory>())
-        {
-            var widgets = _widgetOptions.Where(option => option.CategoryEnum == category).ToList();
-            if (widgets.Count > 0) _widgetGroups.Add(new WidgetCategoryGroup(category, widgets));
-        }
-    }
-
     private void WidgetInstallation_Click(object sender, RoutedEventArgs e)
     {
         if (e.OriginalSource is not FrameworkElement { DataContext: DockWidgetOption option }) return;
@@ -1520,6 +1631,8 @@ public partial class SettingsWindow : Window
     {
         RecycleBinToggle.IsChecked = settings.ShowRecycleBin;
         SearchButtonToggle.IsChecked = settings.ShowSearchButton;
+        FjordFilesEnabledToggle.IsChecked = settings.FjordFilesEnabled;
+        FjordFilesButtonToggle.IsChecked = settings.ShowFjordFilesButton;
         TaskViewButtonToggle.IsChecked = settings.ShowTaskViewButton;
         TrayButtonToggle.IsChecked = settings.ShowTrayButton;
         ShowDesktopButtonToggle.IsChecked = settings.ShowDesktopButton;
@@ -1535,8 +1648,13 @@ public partial class SettingsWindow : Window
         CurrentDesktopToggle.IsChecked = settings.CurrentDesktopOnly;
         UpdatesToggle.IsChecked = settings.CheckUpdates;
         FocusModeToggle.IsChecked = settings.FocusModeEnabled;
+        DynamicIslandEnabledToggle.IsChecked = settings.DynamicIslandEnabled;
+        LoadDynamicIslandPlacementChoices(settings);
         SelectChoice(DynamicIslandVisibilityBox, settings.DynamicIslandVisibility.ToString());
         DynamicIslandHideFullscreenToggle.IsChecked = settings.DynamicIslandHideInFullscreen;
+        DynamicIslandAutoHideToggle.IsChecked = settings.DynamicIslandAutoHide;
+        LoadDynamicIslandAppearance(settings);
+        UpdateDynamicIslandControls();
         SelectChoice(EdgeBox, settings.Edge.ToString());
         SelectChoice(ClockFormatBox, settings.Clock24Hour ? "24" : "12");
         ClockSecondsToggle.IsChecked = settings.ClockShowSeconds;
@@ -2325,11 +2443,14 @@ public partial class SettingsWindow : Window
         }
     }
 
+    private int _weatherCityRequestVersion;
+
     private async void WeatherCountryBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (_initializing || _initializingWeather) return;
         if (WeatherCountryBox.SelectedItem is not string country) return;
-        await OnCountrySelectedAsync(country);
+        try { await OnCountrySelectedAsync(country); }
+        catch (Exception ex) { AppLog.Warning($"Weather city load failed: {ex.Message}"); }
     }
 
     private async void WeatherCountryBox_KeyUp(object sender, System.Windows.Input.KeyEventArgs e)
@@ -2337,12 +2458,14 @@ public partial class SettingsWindow : Window
         if (e.Key is System.Windows.Input.Key.Enter or System.Windows.Input.Key.Tab)
         {
             var country = WeatherCountryBox.Text.Trim();
-            await OnCountrySelectedAsync(country);
+            try { await OnCountrySelectedAsync(country); }
+            catch (Exception ex) { AppLog.Warning($"Weather city load failed: {ex.Message}"); }
         }
     }
 
     private async Task OnCountrySelectedAsync(string country)
     {
+        var requestVersion = ++_weatherCityRequestVersion;
         if (string.IsNullOrWhiteSpace(country))
         {
             var wasInit = _initializing;
@@ -2364,7 +2487,7 @@ public partial class SettingsWindow : Window
 
         WeatherCityContainer.Visibility = Visibility.Visible;
         var cities = await CountryCityService.GetCitiesAsync(country);
-        if (_closed) return;
+        if (_closed || requestVersion != _weatherCityRequestVersion) return;
         var previousCity = WeatherCityBox.Text;
         var wasInitializing = _initializing;
         _initializing = true;
@@ -2578,6 +2701,7 @@ public partial class SettingsWindow : Window
         LoadSurfaceStyles(settings);
         LoadDisplayCare(settings);
         MagnificationToggle.IsChecked = settings.MagnificationEnabled;
+        MagnificationExpandsDockToggle.IsChecked = settings.MagnificationExpandsDock;
         SelectChoice(SizeBox, settings.Size.ToString());
         DockIconPaddingSlider.Value = settings.DockIconPadding;
         DockScaleSlider.Value = Math.Round(settings.DockScale * 100);
@@ -2626,12 +2750,20 @@ public partial class SettingsWindow : Window
             AnimationsToggle.IsChecked = defaults.AnimationsEnabled;
             LoadDisplayCare(defaults);
             MagnificationToggle.IsChecked = defaults.MagnificationEnabled;
+            MagnificationExpandsDockToggle.IsChecked = defaults.MagnificationExpandsDock;
             PreviewsToggle.IsChecked = defaults.PreviewsEnabled;
+            DynamicIslandEnabledToggle.IsChecked = defaults.DynamicIslandEnabled;
             SelectChoice(DynamicIslandVisibilityBox, defaults.DynamicIslandVisibility.ToString());
             DynamicIslandHideFullscreenToggle.IsChecked = defaults.DynamicIslandHideInFullscreen;
+            DynamicIslandAutoHideToggle.IsChecked = defaults.DynamicIslandAutoHide;
+            LoadDynamicIslandAppearance(defaults);
+            LoadDynamicIslandPlacementChoices(defaults);
+            UpdateDynamicIslandControls();
             RecycleBinToggle.IsChecked = defaults.ShowRecycleBin;
             CurrentDesktopToggle.IsChecked = defaults.CurrentDesktopOnly;
             SearchButtonToggle.IsChecked = defaults.ShowSearchButton;
+            FjordFilesEnabledToggle.IsChecked = defaults.FjordFilesEnabled;
+            FjordFilesButtonToggle.IsChecked = defaults.ShowFjordFilesButton;
             TaskViewButtonToggle.IsChecked = defaults.ShowTaskViewButton;
             TrayButtonToggle.IsChecked = defaults.ShowTrayButton;
             ShowDesktopButtonToggle.IsChecked = defaults.ShowDesktopButton;

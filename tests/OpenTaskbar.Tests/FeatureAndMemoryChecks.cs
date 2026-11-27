@@ -511,8 +511,8 @@ internal static class FeatureAndMemoryChecks
             PumpDispatcher(app.Dispatcher, 120);
 
             var indexed = window.CollectSearchEntries();
-            Check(indexed.Select(entry => entry.TabIndex).Distinct().Count() == 6,
-                "Settings search must index rows from all 6 tabs.");
+            Check(indexed.Select(entry => entry.TabIndex).Distinct().Count() == 7,
+                "Settings search must index rows from all 7 tabs.");
             Check(indexed.Count > 0 && indexed.All(entry => !string.IsNullOrWhiteSpace(entry.PageName) && !string.IsNullOrWhiteSpace(entry.Title)),
                 "Every indexed settings row must have a page name and a title.");
 
@@ -538,7 +538,7 @@ internal static class FeatureAndMemoryChecks
             Check(window.SettingsSearchResultsPanel.Children.Count > 0, "An opacity query must populate search results.");
             Check(window.SettingsSearchEmptyText.Visibility != Visibility.Visible, "An opacity query must hide the empty-search message.");
             var opacityTabs = opacityHits.Select(entry => entry.TabIndex).ToHashSet();
-            Check(window.SettingsTabs.Items.Count == 6, "Settings must keep 6 tabs while search is active.");
+            Check(window.SettingsTabs.Items.Count == 7, "Settings must keep 7 tabs while search is active.");
             for (var i = 0; i < window.SettingsTabs.Items.Count; i++)
             {
                 var tab = (TabItem)window.SettingsTabs.Items[i]!;
@@ -553,7 +553,7 @@ internal static class FeatureAndMemoryChecks
             for (var i = 0; i < window.SettingsTabs.Items.Count; i++)
             {
                 Check(((TabItem)window.SettingsTabs.Items[i]!).Visibility == Visibility.Collapsed,
-                    "A no-match query must collapse all 6 tabs.");
+                    "A no-match query must collapse all 7 tabs.");
             }
 
             window.SettingsSearchBox.Text = string.Empty;
@@ -561,7 +561,7 @@ internal static class FeatureAndMemoryChecks
             for (var i = 0; i < window.SettingsTabs.Items.Count; i++)
             {
                 Check(((TabItem)window.SettingsTabs.Items[i]!).Visibility == Visibility.Visible,
-                    "Clearing search must restore all 6 tabs.");
+                    "Clearing search must restore all 7 tabs.");
             }
 
             UiText.Current.SetLanguage(AppLanguage.Turkish);

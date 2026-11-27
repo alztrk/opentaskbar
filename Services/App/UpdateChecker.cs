@@ -122,7 +122,8 @@ public static class UpdateChecker
         if (!string.IsNullOrEmpty(processPath) && File.Exists(processPath))
             return Path.GetFullPath(processPath);
 
-        var modulePath = Process.GetCurrentProcess().MainModule?.FileName;
+        using var currentProcess = Process.GetCurrentProcess();
+        var modulePath = currentProcess.MainModule?.FileName;
         if (!string.IsNullOrEmpty(modulePath) && File.Exists(modulePath))
             return Path.GetFullPath(modulePath);
 

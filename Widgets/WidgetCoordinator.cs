@@ -16,8 +16,6 @@ namespace OpenTaskbar.Widgets;
 /// </summary>
 public sealed class WidgetCoordinator : IDisposable
 {
-    public sealed record WidgetItem(string Id, string LabelKey, DockWidget Widget, Func<DockSettings, bool> IsEnabled);
-
     /// <summary>Dock slots come from the single widget registry in its explicit DockOrder.</summary>
     public static readonly string[] DefaultWidgetOrder =
         DockWidgetService.LiveDescriptors.Select(descriptor => descriptor.Id).ToArray();

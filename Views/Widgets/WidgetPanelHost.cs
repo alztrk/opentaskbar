@@ -73,13 +73,42 @@ public sealed class WidgetPanelHost : IDisposable
         _restoreFocus = true;
         _frame.Heading = heading;
         _frame.Body = body;
-        var gap = DockMetrics.FlyoutGap;
+        var gap = ComputeVerticalGap(anchor);
         _popup.VerticalOffset = -gap;
-        _frame.MaxWidth = Math.Max(1, SystemParameters.WorkArea.Width - gap * 2);
-        _frame.MaxHeight = Math.Max(1, SystemParameters.WorkArea.Height - gap * 2);
+        _frame.MaxWidth = Math.Max(1, SystemParameters.WorkArea.Width - 16);
+        _frame.MaxHeight = Math.Max(1, SystemParameters.WorkArea.Height - 16);
         _popup.HorizontalOffset = (anchor.ActualWidth - Math.Min(_frame.Width, _frame.MaxWidth)) / 2;
         _popup.PlacementTarget = anchor;
         _popup.IsOpen = true;
+    }
+
+    private static double ComputeVerticalGap(FrameworkElement anchor)
+    {
+        const double desiredGapDip = 8.0;
+        DependencyObject? current = anchor;
+        FrameworkElement? dockFrame = null;
+        while (current is not null)
+        {
+            if (current is FrameworkElement fe && string.Equals(fe.Name, "DockFrame", StringComparison.Ordinal))
+            {
+                dockFrame = fe;
+                break;
+            }
+            current = System.Windows.Media.VisualTreeHelper.GetParent(current) ?? LogicalTreeHelper.GetParent(current);
+        }
+
+        if (dockFrame is null || !anchor.IsLoaded || dockFrame.ActualHeight <= 0)
+            return desiredGapDip;
+
+        try
+        {
+            var topInset = Math.Max(0, anchor.TranslatePoint(new Point(0, 0), dockFrame).Y);
+            return topInset + desiredGapDip;
+        }
+        catch (InvalidOperationException)
+        {
+            return desiredGapDip;
+        }
     }
 
     public void Close(bool restoreFocus = true)

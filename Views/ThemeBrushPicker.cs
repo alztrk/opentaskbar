@@ -24,7 +24,9 @@ public sealed class ThemeBrushPicker : Window
     }
 
     private readonly List<Stop> _stops = [];
-    private readonly ListBox _stopList = new() { MinHeight = 82, MaxHeight = 130 };
+    private int _selectedStopIndex = -1;
+    private Slider? _stopPositionSlider;
+    private TextBlock? _stopPositionValue;
     private readonly StackPanel _stopChoices = new();
     private readonly Border _preview = new() { Height = 38, CornerRadius = new CornerRadius(5), Margin = new Thickness(0, 12, 0, 10) };
     private readonly Slider[] _channels = new Slider[3];
@@ -89,17 +91,6 @@ public sealed class ThemeBrushPicker : Window
         FontSize = 13;
         _hueSlider.SetResourceReference(FrameworkElement.StyleProperty, "SettingsOpacitySlider");
         _angle.SetResourceReference(FrameworkElement.StyleProperty, "SettingsOpacitySlider");
-        _stopList.SetResourceReference(Control.BackgroundProperty, "SettingsControl");
-        _stopList.SetResourceReference(Control.ForegroundProperty, "TextPrimary");
-        _stopList.SetResourceReference(Control.BorderBrushProperty, "StrokeSubtle");
-        var stopItemStyle = new Style(typeof(ListBoxItem));
-        stopItemStyle.Setters.Add(new Setter(Control.ForegroundProperty, new DynamicResourceExtension("TextPrimary")));
-        stopItemStyle.Setters.Add(new Setter(Control.BackgroundProperty, Brushes.Transparent));
-        stopItemStyle.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(4, 2, 4, 2)));
-        var selectedStop = new Trigger { Property = ListBoxItem.IsSelectedProperty, Value = true };
-        selectedStop.Setters.Add(new Setter(Control.BackgroundProperty, new DynamicResourceExtension("SurfaceSelected")));
-        stopItemStyle.Triggers.Add(selectedStop);
-        _stopList.ItemContainerStyle = stopItemStyle;
 
         _solid = source is SolidColorBrush single ? single.Color : Colors.SlateGray;
         if (source is LinearGradientBrush gradient)
@@ -153,10 +144,6 @@ public sealed class ThemeBrushPicker : Window
 
         var grad = new StackPanel { Margin = new Thickness(7) };
         grad.Children.Add(new TextBlock { Text = UiText.Get("ColorSelectStop"), Margin = new Thickness(0, 8, 0, 8) });
-        _stopList.SelectionChanged += (_, _) =>
-        {
-            if (!_updating) SyncChannels();
-        };
         grad.Children.Add(_stopChoices);
         var tools = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 7, 0, 9) };
         var add = Button(UiText.Get("ColorAddStop"));
@@ -164,17 +151,15 @@ public sealed class ThemeBrushPicker : Window
         {
             if (_stops.Count >= 16) return;
             _stops.Add(new Stop(CurrentColor(), .5));
-            RefreshStops();
-            _stopList.SelectedIndex = _stops.Count - 1;
+            SelectStop(_stops.Count - 1);
         };
         var remove = Button(UiText.Get("ColorRemove"));
         remove.Margin = new Thickness(8, 0, 0, 0);
         remove.Click += (_, _) =>
         {
-            if (_stops.Count <= 2 || _stopList.SelectedIndex < 0) return;
-            _stops.RemoveAt(_stopList.SelectedIndex);
-            RefreshStops();
-            _stopList.SelectedIndex = 0;
+            if (_stops.Count <= 2 || _selectedStopIndex < 0) return;
+            _stops.RemoveAt(_selectedStopIndex);
+            SelectStop(0);
         };
         tools.Children.Add(add);
         tools.Children.Add(remove);
@@ -183,22 +168,15 @@ public sealed class ThemeBrushPicker : Window
         position.SetResourceReference(FrameworkElement.StyleProperty, "SettingsOpacitySlider");
         var positionValue = new TextBlock { Width = 42, TextAlignment = TextAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
         positionValue.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+        _stopPositionSlider = position;
+        _stopPositionValue = positionValue;
         position.ValueChanged += (_, _) =>
         {
-            if (_updating || _stopList.SelectedIndex < 0) return;
-            _stops[_stopList.SelectedIndex].Offset = position.Value / 100;
+            if (_updating || _selectedStopIndex < 0) return;
+            _stops[_selectedStopIndex].Offset = position.Value / 100;
             positionValue.Text = Math.Round(position.Value).ToString(CultureInfo.InvariantCulture) + "%";
-            RefreshStops(_stopList.SelectedIndex);
-            UpdatePreview();
-        };
-        _stopList.SelectionChanged += (_, _) =>
-        {
             UpdateStopChoices();
-            if (_stopList.SelectedIndex < 0) return;
-            _updating = true;
-            position.Value = _stops[_stopList.SelectedIndex].Offset * 100;
-            positionValue.Text = Math.Round(position.Value).ToString(CultureInfo.InvariantCulture) + "%";
-            _updating = false;
+            UpdatePreview();
         };
         grad.Children.Add(new TextBlock { Text = UiText.Get("ColorStopPosition"), Margin = new Thickness(0, 3, 0, 5) });
         var positionRow = new DockPanel();
@@ -329,8 +307,7 @@ public sealed class ThemeBrushPicker : Window
         _hex.SetResourceReference(Control.ForegroundProperty, "TextPrimary");
         _hex.SetResourceReference(Control.BorderBrushProperty, "StrokeSubtle");
         body.Children.Add(hexRow);
-        RefreshStops();
-        _stopList.SelectedIndex = 0;
+        SelectStop(0);
         SyncChannels();
         UpdatePreview();
     }
@@ -376,8 +353,8 @@ public sealed class ThemeBrushPicker : Window
         return template;
     }
 
-    private Color CurrentColor() => _tabs.SelectedIndex == 1 && _stopList.SelectedIndex >= 0
-        ? _stops[_stopList.SelectedIndex].Color : _solid;
+    private Color CurrentColor() => _tabs.SelectedIndex == 1 && _selectedStopIndex >= 0
+        ? _stops[_selectedStopIndex].Color : _solid;
 
     private void SetChannel(int channel, byte value)
     {
@@ -390,12 +367,12 @@ public sealed class ThemeBrushPicker : Window
 
     private void SetColor(Color value)
     {
-        if (_tabs.SelectedIndex == 1 && _stopList.SelectedIndex >= 0)
-            _stops[_stopList.SelectedIndex].Color = value;
+        if (_tabs.SelectedIndex == 1 && _selectedStopIndex >= 0)
+            _stops[_selectedStopIndex].Color = value;
         else
             _solid = value;
         SyncChannels();
-        RefreshStops(_stopList.SelectedIndex);
+        UpdateStopChoices();
         UpdatePreview();
     }
 
@@ -426,27 +403,19 @@ public sealed class ThemeBrushPicker : Window
         RefreshColorField();
     }
 
-    private void RefreshStops(int selected = -1)
+    private void SelectStop(int index)
     {
-        var wasUpdating = _updating;
-        _updating = true;
-        try
+        _selectedStopIndex = index >= 0 && index < _stops.Count ? index : -1;
+        UpdateStopChoices();
+        if (_selectedStopIndex >= 0 && _stopPositionSlider is not null && _stopPositionValue is not null)
         {
-            _stopList.ItemsSource = null;
-            _stopList.Items.Clear();
-            foreach (var stop in _stops)
-            {
-                var label = new TextBlock { Text = $"{stop.Color} · {stop.Offset * 100:0}%", Margin = new Thickness(6, 3, 6, 3) };
-                label.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
-                _stopList.Items.Add(new ListBoxItem { Content = label, HorizontalContentAlignment = HorizontalAlignment.Stretch });
-            }
-            if (selected >= 0 && selected < _stops.Count) _stopList.SelectedIndex = selected;
-        }
-        finally
-        {
+            var wasUpdating = _updating;
+            _updating = true;
+            _stopPositionSlider.Value = _stops[_selectedStopIndex].Offset * 100;
+            _stopPositionValue.Text = Math.Round(_stopPositionSlider.Value).ToString(CultureInfo.InvariantCulture) + "%";
             _updating = wasUpdating;
         }
-        UpdateStopChoices();
+        if (!_updating) SyncChannels();
     }
 
     private void UpdateStopChoices()
@@ -459,10 +428,10 @@ public sealed class ThemeBrushPicker : Window
             button.HorizontalAlignment = HorizontalAlignment.Stretch;
             button.HorizontalContentAlignment = HorizontalAlignment.Left;
             button.Margin = new Thickness(0, 0, 0, 5);
-            if (index == _stopList.SelectedIndex)
+            if (index == _selectedStopIndex)
                 button.SetResourceReference(Control.BackgroundProperty, "SurfaceSelectedStrong");
             var selectedIndex = index;
-            button.Click += (_, _) => _stopList.SelectedIndex = selectedIndex;
+            button.Click += (_, _) => SelectStop(selectedIndex);
             _stopChoices.Children.Add(button);
         }
     }

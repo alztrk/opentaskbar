@@ -87,33 +87,33 @@ internal static class QuickSettingsChecks
             var strip = widget.FindName("ControlsStrip") as StackPanel
                 ?? throw new InvalidOperationException("Quick Settings must expose its inline controls.");
             var shortcuts = strip.Children.OfType<Button>().ToArray();
-            string[] shortcutKeys =
+            string[] inlineKeys =
             [
-                "QuickAvailableNetworks", "QuickBluetoothSettings", "QuickNightLightSettings",
-                "QuickAirplaneMode", "QuickCellular", "QuickBrightness", "QuickRotationLock",
-                "QuickEnergySaver", "QuickNearbySharing", "QuickLiveCaptions", "QuickNotificationMode",
-                "QuickStudioEffects", "QuickHearingDevices", "QuickCast", "QuickMobileHotspot",
-                "QuickAccessibility", "QuickOpenWindowsPanel"
+                "QuickAvailableNetworks", "QuickCast", "QuickOpenWindowsPanel", "WidgetQuickSettings"
             ];
-            var expectedNames = shortcutKeys.Select(UiText.Get).ToHashSet(StringComparer.CurrentCulture);
-            var actualNames = shortcuts.Select(AutomationProperties.GetName).ToHashSet(StringComparer.CurrentCulture);
-            Check(shortcuts.Length == shortcutKeys.Length && actualNames.SetEquals(expectedNames) && shortcuts.All(button => button.IsEnabled
+            var expectedInlineNames = inlineKeys.Select(UiText.Get).ToHashSet(StringComparer.CurrentCulture);
+            var actualInlineNames = shortcuts.Select(AutomationProperties.GetName).ToHashSet(StringComparer.CurrentCulture);
+            Check(shortcuts.Length == inlineKeys.Length && actualInlineNames.SetEquals(expectedInlineNames) && shortcuts.All(button => button.IsEnabled
                 && button.Content is ContentControl { Content: Geometry }
                 && !string.IsNullOrWhiteSpace(AutomationProperties.GetName(button))),
-                "All native Quick Settings shortcuts must have a visible icon and an accessible name.");
+                "The 3 core inline shortcuts plus the More flyout button must have visible icons and accessible names.");
+
+            var flyoutPanel = widget.BuildMoreFlyoutContent() as StackPanel
+                ?? throw new InvalidOperationException("Quick Settings More flyout must return a StackPanel.");
+            var flyoutGrid = flyoutPanel.Children.OfType<UniformGrid>().FirstOrDefault()
+                ?? throw new InvalidOperationException("Quick Settings More flyout must contain a UniformGrid.");
+            var flyoutButtons = flyoutGrid.Children.OfType<Button>().ToArray();
+            Check(flyoutButtons.Length == 14,
+                "All 14 extra Quick Settings shortcuts must be hosted in the More flyout.");
 
             host.UpdateLayout();
             var first = strip.Children[0];
             var last = shortcuts[^1];
             var firstOrigin = first.TranslatePoint(default, strip);
             var lastOrigin = last.TranslatePoint(default, strip);
-            Check(widget.FindName("MoreButton") is null && strip.Orientation == Orientation.Horizontal
+            Check(strip.Orientation == Orientation.Horizontal
                 && firstOrigin.X < lastOrigin.X && Math.Abs(firstOrigin.Y - lastOrigin.Y) <= 2,
-                "All Quick Settings controls must share a row with no flyout trigger.");
-            scroll.ScrollToRightEnd();
-            host.UpdateLayout();
-            Check(scroll.HorizontalOffset > 0 && scroll.HorizontalOffset >= scroll.ScrollableWidth - 1,
-                "A narrow dock must scroll to reveal the last Quick Settings shortcut.");
+                "Core Quick Settings controls and the More button must share a single row.");
 
             scroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
             scroll.VerticalScrollBarVisibility = ScrollBarVisibility.Hidden;

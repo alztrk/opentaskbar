@@ -36,10 +36,17 @@ public sealed class NativeWindowTracker : IDisposable
     private static readonly string WindowsSystemAppsDirectory = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.Windows), "SystemApps") + Path.DirectorySeparatorChar;
 
+    private const int ScanIdle = 0;
+    private const int ScanRunning = 1;
+    private const int ScanRunningWithPending = 2;
+
     private readonly Dispatcher _dispatcher;
     private readonly DispatcherTimer _refreshTimer;
     private readonly DispatcherTimer _locationTimer;
     private readonly WinEventDelegate _eventCallback;
+    private readonly Func<Func<ScanResult>, Task<ScanResult>> _scanScheduler;
+    private readonly Func<ScanContext, CancellationToken, ScanResult> _scanWorker;
+    private readonly object _stateLock = new();
     // HWND + PID: a recycled handle must not inherit a previous window's notification badge.
     private readonly Dictionary<nint, uint> _notificationWindows = [];
 
@@ -54,6 +61,8 @@ public sealed class NativeWindowTracker : IDisposable
     private readonly HashSet<nint> _snapshotHandles = [];
     private readonly Dictionary<nint, TrackedWindow> _previousByHandle = [];
     private readonly Dictionary<nint, uint> _previousPidByHandle = [];
+    private IReadOnlyList<TrackedWindow> _snapshot = Array.Empty<TrackedWindow>();
+    private CancellationTokenSource? _scanCts = new();
     private nint _windowHook;
     private nint _locationHook;
     private nint _nameChangeHook;
@@ -65,9 +74,14 @@ public sealed class NativeWindowTracker : IDisposable
     private bool _foregroundPublished;
     private int _refreshQueued;
     private int _urgentRefresh;
-    private bool _disposed;
-    private bool _scanInFlight;
-    private bool _rescanPending;
+    private int _disposed;
+    private int _scanState;
+    private long _runGeneration;
+    private long _pendingGeneration = -1;
+
+    private bool IsDisposed => Volatile.Read(ref _disposed) != 0;
+
+    internal bool IsRefreshTimerEnabled => _refreshTimer.IsEnabled;
 
     /// <summary>Per-scan state: the background worker never touches the tracker's shared collections.</summary>
     private sealed class ScanContext
@@ -76,15 +90,67 @@ public sealed class NativeWindowTracker : IDisposable
         public Dictionary<nint, TrackedWindow> Previous = [];
         public Dictionary<nint, uint> PreviousPids = [];
         public Dictionary<nint, uint> Notifications = [];
+        public List<nint> ExistingQuiet = [];
         public HashSet<nint> QuietFound = [];
+        public List<nint> DeadQuiet = [];
+        public List<(nint Handle, uint Pid)> StaleNotifications = [];
         public List<TrackedWindow> Pending = [];
+        public Dictionary<nint, uint> PendingPids = [];
         public readonly char[] TitleBuffer = new char[1024];
         public readonly char[] ClassBuffer = new char[256];
     }
 
+    internal sealed class ScanResult(
+        IReadOnlyList<TrackedWindow> snapshot,
+        Dictionary<nint, uint> pendingPids,
+        HashSet<nint> quietFound,
+        List<nint> deadQuiet,
+        List<(nint Handle, uint Pid)> staleNotifications)
+    {
+        public static readonly ScanResult Empty = new(Array.Empty<TrackedWindow>(), [], [], [], []);
+        public IReadOnlyList<TrackedWindow> Snapshot { get; } = snapshot;
+        public Dictionary<nint, uint> PendingPids { get; } = pendingPids;
+        public HashSet<nint> QuietFound { get; } = quietFound;
+        public List<nint> DeadQuiet { get; } = deadQuiet;
+        public List<(nint Handle, uint Pid)> StaleNotifications { get; } = staleNotifications;
+    }
+
     public NativeWindowTracker(Dispatcher dispatcher)
+        : this(dispatcher, StaTask.RunScan, null)
+    {
+    }
+
+    internal NativeWindowTracker(
+        Dispatcher dispatcher,
+        Func<CancellationToken, IReadOnlyList<TrackedWindow>> customScanner,
+        Func<Func<ScanResult>, Task<ScanResult>>? scanScheduler = null)
+        : this(
+            dispatcher,
+            scanScheduler ?? (work => Task.Run(work)),
+            (_, cancellationToken) =>
+            {
+                var scanned = customScanner(cancellationToken);
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    return ScanResult.Empty;
+                }
+
+                IReadOnlyList<TrackedWindow> snapshot = scanned.Count == 0
+                    ? Array.Empty<TrackedWindow>()
+                    : Array.AsReadOnly(scanned.ToArray());
+                return new ScanResult(snapshot, [], [], [], []);
+            })
+    {
+    }
+
+    private NativeWindowTracker(
+        Dispatcher dispatcher,
+        Func<Func<ScanResult>, Task<ScanResult>> scanScheduler,
+        Func<ScanContext, CancellationToken, ScanResult>? scanWorker)
     {
         _dispatcher = dispatcher;
+        _scanScheduler = scanScheduler;
+        _scanWorker = scanWorker ?? RunNativeScan;
         // Enumeration does ~10 interop calls per window and can take 50-128 ms. Running it at Input priority made
         // clicks wait behind it; Background lets real input and rendering preempt the scan (#128 finding 6).
         _refreshTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher)
@@ -104,13 +170,13 @@ public sealed class NativeWindowTracker : IDisposable
 
     public event Action<nint>? ForegroundWindowChanged;
 
-    public IReadOnlyList<TrackedWindow> Snapshot { get; private set; } = [];
+    public IReadOnlyList<TrackedWindow> Snapshot => Volatile.Read(ref _snapshot);
 
     public bool NotificationsAvailable => _systemEventHook != 0;
 
     public void Start(nint excludedWindow)
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         if (_windowHook != 0) return;
         _excludedWindow = excludedWindow;
         _windowHook = SetWinEventHook(EventObjectCreate, EventObjectHide, 0, _eventCallback, 0, 0, WinEventFlags);
@@ -173,7 +239,7 @@ public sealed class NativeWindowTracker : IDisposable
 
     private void HandleWinEvent(uint eventType, nint windowHandle, int objectId, int childId)
     {
-        if (_disposed) return;
+        if (IsDisposed) return;
 
         if (eventType == EventObjectLocationChange)
         {
@@ -198,7 +264,11 @@ public sealed class NativeWindowTracker : IDisposable
             var target = NormalizeRootWindow(windowHandle);
             if (target != 0 && target != _excludedWindow && IsWindowVisible(target) && GetWindow(target, WindowOwner) == 0)
             {
-                _notificationWindows[target] = PidOf(target);
+                var pid = PidOf(target);
+                lock (_stateLock)
+                {
+                    _notificationWindows[target] = pid;
+                }
                 QueueRefresh();
             }
             return;
@@ -207,8 +277,11 @@ public sealed class NativeWindowTracker : IDisposable
         if (eventType == EventSystemForeground)
         {
             var target = windowHandle != 0 ? NormalizeRootWindow(windowHandle) : 0;
-            _notificationWindows.Remove(windowHandle);
-            _notificationWindows.Remove(target);
+            lock (_stateLock)
+            {
+                _notificationWindows.Remove(windowHandle);
+                _notificationWindows.Remove(target);
+            }
             _locationTimer.Stop();
             QueueRefresh(urgent: true);
             PublishForeground(target);
@@ -222,53 +295,76 @@ public sealed class NativeWindowTracker : IDisposable
             return;
         }
 
-        if (eventType is EventObjectCreate or EventObjectDestroy)
+        bool isKnownSnapshotHandle;
+        lock (_stateLock)
         {
-            _quietWindows.Remove(windowHandle);
-        }
-        else if (_quietWindows.Contains(windowHandle) && eventType == EventObjectNameChange)
-        {
-            return;
+            if (eventType is EventObjectCreate or EventObjectDestroy)
+            {
+                _quietWindows.Remove(windowHandle);
+            }
+            else if (_quietWindows.Contains(windowHandle) && eventType == EventObjectNameChange)
+            {
+                return;
+            }
+
+            isKnownSnapshotHandle = _snapshotHandles.Contains(windowHandle);
         }
 
         QueueRefresh(urgent: eventType is EventObjectShow or EventObjectDestroy or EventObjectCloaked or EventObjectUncloaked
-            || (eventType == EventObjectNameChange && !_snapshotHandles.Contains(windowHandle)));
+            || (eventType == EventObjectNameChange && !isKnownSnapshotHandle));
     }
 
     private void LocationTimer_Tick(object? sender, EventArgs e)
     {
         _locationTimer.Stop();
-        if (_disposed) return;
+        if (IsDisposed) return;
         var foreground = GetForegroundWindow();
         var target = foreground != 0 ? NormalizeRootWindow(foreground) : _pendingLocationForeground;
         _pendingLocationForeground = 0;
         if (target != 0 && IsWindow(target)) PublishForeground(target, force: true);
     }
 
-    private void QueueRefresh(bool urgent = false)
+    internal void QueueRefresh(bool urgent = false)
     {
+        if (IsDisposed) return;
+        var generation = Volatile.Read(ref _runGeneration);
         if (urgent) Interlocked.Exchange(ref _urgentRefresh, 1);
         if (Interlocked.Exchange(ref _refreshQueued, 1) != 0)
         {
             return;
         }
 
-        _dispatcher.InvokeAsync(() =>
+        if (_dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
         {
             Interlocked.Exchange(ref _refreshQueued, 0);
-            if (!_disposed)
+            return;
+        }
+
+        var operation = _dispatcher.InvokeAsync(() =>
+        {
+            Interlocked.Exchange(ref _refreshQueued, 0);
+            if (IsDisposed || generation != Volatile.Read(ref _runGeneration))
             {
-                if (Interlocked.Exchange(ref _urgentRefresh, 0) != 0)
-                {
-                    FlushRefresh();
-                }
-                else if (!_refreshTimer.IsEnabled)
-                {
-                    // Bound the wait from the first event; later events must not postpone discovery.
-                    _refreshTimer.Start();
-                }
+                Interlocked.Exchange(ref _urgentRefresh, 0);
+                return;
+            }
+
+            if (Interlocked.Exchange(ref _urgentRefresh, 0) != 0)
+            {
+                FlushRefresh();
+            }
+            else if (!_refreshTimer.IsEnabled)
+            {
+                // Bound the wait from the first event; later events must not postpone discovery.
+                _refreshTimer.Start();
             }
         }, DispatcherPriority.Background);
+
+        operation.Aborted += (_, _) => Interlocked.Exchange(ref _refreshQueued, 0);
+        if (operation.Status == DispatcherOperationStatus.Aborted)
+        {
+            Interlocked.Exchange(ref _refreshQueued, 0);
+        }
     }
 
     private void RefreshTimer_Tick(object? sender, EventArgs e)
@@ -282,6 +378,7 @@ public sealed class NativeWindowTracker : IDisposable
     /// </summary>
     public void ResyncForeground()
     {
+        if (IsDisposed) return;
         _refreshTimer.Stop();
         _locationTimer.Stop();
         _pendingLocationForeground = 0;
@@ -296,82 +393,267 @@ public sealed class NativeWindowTracker : IDisposable
         PublishForeground(NormalizedForeground());
     }
 
-    private void RefreshWindows()
+    internal void RefreshWindows()
     {
-        if (_disposed) return;
-        if (_scanInFlight)
+        while (true)
         {
-            _rescanPending = true;
+            if (IsDisposed) return;
+            var generation = Volatile.Read(ref _runGeneration);
+            var state = Volatile.Read(ref _scanState);
+            if (state == ScanRunningWithPending)
+            {
+                Volatile.Write(ref _pendingGeneration, generation);
+                if (Volatile.Read(ref _scanState) == ScanRunningWithPending)
+                {
+                    return;
+                }
+                continue;
+            }
+
+            if (state == ScanRunning)
+            {
+                Volatile.Write(ref _pendingGeneration, generation);
+                if (Interlocked.CompareExchange(ref _scanState, ScanRunningWithPending, ScanRunning) == ScanRunning)
+                {
+                    return;
+                }
+                continue;
+            }
+
+            if (Interlocked.CompareExchange(ref _scanState, ScanRunning, ScanIdle) == ScanIdle)
+            {
+                break;
+            }
+        }
+
+        LaunchScan();
+    }
+
+    private void LaunchScan(long? requiredGeneration = null)
+    {
+        var generation = Volatile.Read(ref _runGeneration);
+        if (IsDisposed
+            || _dispatcher.HasShutdownStarted
+            || _dispatcher.HasShutdownFinished
+            || (requiredGeneration.HasValue && generation != requiredGeneration.Value))
+        {
+            Interlocked.Exchange(ref _scanState, ScanIdle);
             return;
         }
 
-        // The 50-128 ms EnumWindows + per-window COM scan used to run on the UI dispatcher. Run it on the
-        // dedicated background STA worker instead and publish the result back here (#128 finding 6).
-        _scanInFlight = true;
-        _rescanPending = false;
-        var context = new ScanContext
-        {
-            ExcludedWindow = _excludedWindow,
-            Previous = new Dictionary<nint, TrackedWindow>(_previousByHandle),
-            PreviousPids = new Dictionary<nint, uint>(_previousPidByHandle),
-            Notifications = new Dictionary<nint, uint>(_notificationWindows)
-        };
-        foreach (var item in Snapshot) context.Previous[item.Handle] = item;
+        // The 50-128 ms EnumWindows + per-window Win32/DWM/COM scan runs on the dedicated background worker
+        // and dispatches only the finalized immutable snapshot back to the UI dispatcher (#128 finding 6).
+        var cancellationToken = GetCurrentScanToken();
+        var context = CaptureScanContext();
 
-        _ = StaTask.RunScan(() =>
+        Task<ScanResult> scanTask;
+        try
         {
-            EnumWindows((handle, _) => CollectWindow(handle, context), 0);
-            return context;
-        }).ContinueWith(task =>
+            scanTask = _scanScheduler(() => _scanWorker(context, cancellationToken));
+        }
+        catch (Exception ex)
         {
-            _scanInFlight = false;
-            if (task.IsFaulted)
-            {
-                AppLog.Warning($"Window scan failed: {task.Exception?.GetBaseException().Message}");
-            }
-            else if (!_disposed)
-            {
-                ApplyScan(task.Result);
-            }
+            AppLog.Warning($"Failed to schedule window scan: {ex.Message}");
+            Interlocked.Exchange(ref _scanState, ScanIdle);
+            return;
+        }
 
-            if (!_disposed && _rescanPending)
-            {
-                _rescanPending = false;
-                RefreshWindows();
-            }
-        }, TaskScheduler.FromCurrentSynchronizationContext());
+        _ = scanTask.ContinueWith(
+            task => OnScanCompleted(task, generation),
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously,
+            TaskScheduler.Default);
     }
 
-    /// <summary>Publishes a completed background scan on the UI thread.</summary>
-    private void ApplyScan(ScanContext context)
+    private ScanContext CaptureScanContext()
     {
-        foreach (var handle in context.QuietFound) _quietWindows.Add(handle);
-        _quietWindows.RemoveWhere(windowHandle => !IsWindow(windowHandle));
-
-        foreach (var stale in _notificationWindows.Keys
-            .Where(handle => !IsWindow(handle)
-                || (!_notificationWindows.TryGetValue(handle, out var pid) || PidOf(handle) != pid)).ToList())
+        var currentSnapshot = Snapshot;
+        lock (_stateLock)
         {
-            _notificationWindows.Remove(stale);
+            var context = new ScanContext
+            {
+                ExcludedWindow = _excludedWindow,
+                Previous = new Dictionary<nint, TrackedWindow>(_previousByHandle),
+                PreviousPids = new Dictionary<nint, uint>(_previousPidByHandle),
+                Notifications = new Dictionary<nint, uint>(_notificationWindows),
+                ExistingQuiet = [.. _quietWindows]
+            };
+            for (var i = 0; i < currentSnapshot.Count; i++)
+            {
+                var item = currentSnapshot[i];
+                context.Previous[item.Handle] = item;
+            }
+            return context;
+        }
+    }
+
+    private CancellationToken GetCurrentScanToken()
+    {
+        lock (_stateLock)
+        {
+            return _scanCts?.Token ?? new CancellationToken(canceled: true);
+        }
+    }
+
+    private void CancelAndRotateScanCts(bool disposing)
+    {
+        CancellationTokenSource? previous;
+        lock (_stateLock)
+        {
+            previous = _scanCts;
+            _scanCts = disposing ? null : new CancellationTokenSource();
         }
 
-        if (Snapshot.SequenceEqual(context.Pending)) return;
-
-        var next = context.Pending.ToArray();
-        _previousByHandle.Clear();
-        _previousPidByHandle.Clear();
-        _snapshotHandles.Clear();
-        for (var i = 0; i < next.Length; i++)
+        if (previous is not null)
         {
-            var item = next[i];
-            _previousByHandle[item.Handle] = item;
-            var pid = PidOf(item.Handle);
-            if (pid != 0) _previousPidByHandle[item.Handle] = pid;
-            _snapshotHandles.Add(item.Handle);
+            try { previous.Cancel(); } catch (ObjectDisposedException) { }
+            previous.Dispose();
+        }
+    }
+
+    private ScanResult RunNativeScan(ScanContext context, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return ScanResult.Empty;
         }
 
-        Snapshot = next;
-        WindowsChanged?.Invoke(this, next);
+        EnumWindows((handle, _) =>
+        {
+            if (cancellationToken.IsCancellationRequested) return false;
+            return CollectWindow(handle, context);
+        }, 0);
+
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return ScanResult.Empty;
+        }
+
+        foreach (var quietHandle in context.ExistingQuiet)
+        {
+            if (cancellationToken.IsCancellationRequested) return ScanResult.Empty;
+            if (!IsWindow(quietHandle)) context.DeadQuiet.Add(quietHandle);
+        }
+
+        foreach (var (notificationHandle, expectedPid) in context.Notifications)
+        {
+            if (cancellationToken.IsCancellationRequested) return ScanResult.Empty;
+            if (!IsWindow(notificationHandle) || PidOf(notificationHandle) != expectedPid)
+            {
+                context.StaleNotifications.Add((notificationHandle, expectedPid));
+            }
+        }
+
+        IReadOnlyList<TrackedWindow> snapshot = context.Pending.Count == 0
+            ? Array.Empty<TrackedWindow>()
+            : Array.AsReadOnly(context.Pending.ToArray());
+        return new ScanResult(snapshot, context.PendingPids, context.QuietFound, context.DeadQuiet, context.StaleNotifications);
+    }
+
+    private void OnScanCompleted(Task<ScanResult> task, long generation)
+    {
+        if (IsDisposed || _dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
+        {
+            Interlocked.Exchange(ref _scanState, ScanIdle);
+            return;
+        }
+
+        if (task.IsFaulted)
+        {
+            AppLog.Warning($"Window scan failed: {task.Exception?.GetBaseException().Message}");
+        }
+
+        var result = !task.IsFaulted && !task.IsCanceled && generation == Volatile.Read(ref _runGeneration)
+            ? task.Result
+            : null;
+
+        var operation = _dispatcher.InvokeAsync(() =>
+        {
+            try
+            {
+                if (result is not null && !IsDisposed && generation == Volatile.Read(ref _runGeneration))
+                {
+                    ApplyScanResult(result);
+                }
+            }
+            finally
+            {
+                CompleteScanCycle();
+            }
+        }, DispatcherPriority.Background);
+
+        operation.Aborted += (_, _) => Interlocked.Exchange(ref _scanState, ScanIdle);
+        if (operation.Status == DispatcherOperationStatus.Aborted)
+        {
+            Interlocked.Exchange(ref _scanState, ScanIdle);
+        }
+    }
+
+    private void CompleteScanCycle()
+    {
+        if (Interlocked.CompareExchange(ref _scanState, ScanIdle, ScanRunning) == ScanRunning)
+        {
+            return;
+        }
+
+        var pendingGeneration = Volatile.Read(ref _pendingGeneration);
+        if (IsDisposed
+            || _dispatcher.HasShutdownStarted
+            || _dispatcher.HasShutdownFinished
+            || pendingGeneration != Volatile.Read(ref _runGeneration))
+        {
+            Interlocked.Exchange(ref _scanState, ScanIdle);
+            return;
+        }
+
+        // Keep the active slot occupied while launching the single coalesced follow-up scan.
+        Interlocked.Exchange(ref _scanState, ScanRunning);
+        LaunchScan(pendingGeneration);
+    }
+
+    /// <summary>Publishes a completed background scan's immutable snapshot on the UI thread without Win32 calls.</summary>
+    private void ApplyScanResult(ScanResult result)
+    {
+        var next = result.Snapshot;
+        var changed = false;
+        lock (_stateLock)
+        {
+            foreach (var handle in result.QuietFound) _quietWindows.Add(handle);
+            foreach (var dead in result.DeadQuiet) _quietWindows.Remove(dead);
+
+            foreach (var (staleHandle, stalePid) in result.StaleNotifications)
+            {
+                if (_notificationWindows.TryGetValue(staleHandle, out var currentPid) && currentPid == stalePid)
+                {
+                    _notificationWindows.Remove(staleHandle);
+                }
+            }
+
+            if (!Snapshot.SequenceEqual(next))
+            {
+                changed = true;
+                _previousByHandle.Clear();
+                _previousPidByHandle.Clear();
+                _snapshotHandles.Clear();
+                for (var i = 0; i < next.Count; i++)
+                {
+                    var item = next[i];
+                    _previousByHandle[item.Handle] = item;
+                    if (result.PendingPids.TryGetValue(item.Handle, out var pid) && pid != 0)
+                    {
+                        _previousPidByHandle[item.Handle] = pid;
+                    }
+                    _snapshotHandles.Add(item.Handle);
+                }
+
+                Volatile.Write(ref _snapshot, next);
+            }
+        }
+
+        if (changed)
+        {
+            WindowsChanged?.Invoke(this, next);
+        }
     }
 
     // EnumWindows invokes this delegate from native code; never let an exception cross that boundary.
@@ -448,7 +730,11 @@ public sealed class NativeWindowTracker : IDisposable
         }
 
         var hasNotification = context.Notifications.TryGetValue(windowHandle, out var notificationPid)
-            && PidOf(windowHandle) == notificationPid;
+            && processId == notificationPid;
+        if (processId != 0)
+        {
+            context.PendingPids[windowHandle] = processId;
+        }
         if (previous is not null)
         {
             var title = trimmedSpan.SequenceEqual(previous.Title) ? previous.Title : trimmedSpan.ToString();
@@ -596,18 +882,70 @@ public sealed class NativeWindowTracker : IDisposable
         return IsWindow(windowHandle) && PostMessage(windowHandle, WmSysCommand, (nint)ScClose, 0);
     }
 
-    public void Dispose()
+    /// <summary>
+    /// Stops WinEvent hooks and timers and cancels any in-flight background scan while keeping the tracker reusable via <see cref="Start"/>.
+    /// </summary>
+    public void Stop()
     {
-        if (_disposed)
+        if (IsDisposed)
         {
             return;
         }
 
-        _disposed = true;
-        _refreshTimer.Stop();
-        _refreshTimer.Tick -= RefreshTimer_Tick;
-        _locationTimer.Stop();
-        _locationTimer.Tick -= LocationTimer_Tick;
+        Interlocked.Increment(ref _runGeneration);
+        CancelAndRotateScanCts(disposing: false);
+        Interlocked.Exchange(ref _refreshQueued, 0);
+        Interlocked.Exchange(ref _urgentRefresh, 0);
+        StopTimersAndHooks(detachHandlers: false);
+        ClearTrackingState();
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
+        Interlocked.Increment(ref _runGeneration);
+        CancelAndRotateScanCts(disposing: true);
+        Interlocked.Exchange(ref _refreshQueued, 0);
+        Interlocked.Exchange(ref _urgentRefresh, 0);
+        StopTimersAndHooks(detachHandlers: true);
+        ClearTrackingState();
+        Volatile.Write(ref _snapshot, Array.Empty<TrackedWindow>());
+    }
+
+    private void StopTimersAndHooks(bool detachHandlers)
+    {
+        void StopCore()
+        {
+            _refreshTimer.Stop();
+            _locationTimer.Stop();
+            if (detachHandlers)
+            {
+                _refreshTimer.Tick -= RefreshTimer_Tick;
+                _locationTimer.Tick -= LocationTimer_Tick;
+            }
+            UnhookAll();
+        }
+
+        if (_dispatcher.CheckAccess())
+        {
+            StopCore();
+        }
+        else if (!_dispatcher.HasShutdownStarted && !_dispatcher.HasShutdownFinished)
+        {
+            _dispatcher.Invoke(StopCore);
+        }
+        else
+        {
+            UnhookAll();
+        }
+    }
+
+    private void UnhookAll()
+    {
         if (_windowHook != 0)
         {
             UnhookWinEvent(_windowHook);
@@ -637,16 +975,22 @@ public sealed class NativeWindowTracker : IDisposable
             UnhookWinEvent(_systemEventHook);
             _systemEventHook = 0;
         }
+    }
 
-        _notificationWindows.Clear();
-        _quietWindows.Clear();
-        _snapshotHandles.Clear();
-        _previousByHandle.Clear();
+    private void ClearTrackingState()
+    {
+        lock (_stateLock)
+        {
+            _notificationWindows.Clear();
+            _quietWindows.Clear();
+            _snapshotHandles.Clear();
+            _previousByHandle.Clear();
+            _previousPidByHandle.Clear();
+        }
         _excludedWindow = 0;
         _lastForegroundWindow = 0;
         _pendingLocationForeground = 0;
         _foregroundPublished = false;
-        Snapshot = [];
     }
 
     private delegate void WinEventDelegate(nint hook, uint eventType, nint windowHandle, int objectId, int childId, uint eventThread, uint eventTime);

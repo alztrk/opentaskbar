@@ -85,6 +85,10 @@
                         ToolTip="{local:Loc Volume}" AutomationProperties.Name="{local:Loc MuteToggle}">
                     <ContentControl x:Name="VolumeIcon" Style="{StaticResource WidgetIcon}" Content="{StaticResource IconVolume}" Width="14" Height="14" />
                 </Button>
+                <Slider x:Name="IslandVolumeSlider" Width="46" Height="28" Visibility="Collapsed"
+                        Minimum="0" Maximum="100" VerticalAlignment="Center" HorizontalAlignment="Center"
+                        Style="{StaticResource WidgetSlider}" ValueChanged="IslandCompactVolumeSlider_ValueChanged"
+                        AutomationProperties.Name="{local:Loc Volume}" />
                 <Popup x:Name="VolumePopup" PlacementTarget="{Binding ElementName=VolumePanel}" Placement="Custom"
                        AllowsTransparency="True" StaysOpen="True" PopupAnimation="Fade">
                     <Border x:Name="VolumePopoverSurface" Width="62" Padding="8,11,8,11" CornerRadius="12" BorderThickness="{DynamicResource MenuStrokeThickness}"

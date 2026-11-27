@@ -13,7 +13,7 @@ namespace OpenTaskbar.Services;
 public static class ThemeManager
 {
     // Theme packs replace these sources instead of the generated materials (see the comment below).
-    private static readonly string[] MaterialKeys = ["DockMaterial", "MenuMaterial"];
+    private static readonly string[] MaterialKeys = ["DockMaterial", "MenuMaterial", "DynamicIslandMaterial"];
     private static ResourceDictionary? _palette;
     private static readonly ResourceDictionary Materials = new();
     // Windows-derived brushes; a selected theme pack still wins over these.
@@ -38,6 +38,9 @@ public static class ThemeManager
     private static bool IsTrueBlack(SurfaceStyle style) =>
         style.Background != SurfaceBackground.None
         && (style.Background == SurfaceBackground.TrueBlack || _forceDisplayCare);
+
+    private static string? _dynamicIslandBackgroundColor;
+    private static double _dynamicIslandOpacity = 1.0;
     // Resource key prefixes for each surface's generated stroke thickness/color, e.g. "MenuStrokeThickness".
     private static string StrokePrefix(SurfaceKind kind) => kind switch
     {
@@ -115,15 +118,18 @@ public static class ThemeManager
             Styles[SurfaceKind.Widget] = new SurfaceStyle(settings.WidgetBackground, settings.WidgetOpacity, settings.WidgetBorderThickness, settings.WidgetBorderColor);
             Styles[SurfaceKind.Settings] = new SurfaceStyle(settings.SettingsBackground, settings.SettingsOpacity, settings.SettingsBorderThickness, settings.SettingsBorderColor);
         }
+        _dynamicIslandBackgroundColor = settings?.DynamicIslandBackgroundColor;
+        _dynamicIslandOpacity = settings?.DynamicIslandOpacity ?? 1.0;
 
         RebuildOledOverrides();
         foreach (var kind in Enum.GetValues<SurfaceKind>()) Rebuild(kind);
+        RebuildDynamicIsland();
         _opacity = Styles.TryGetValue(SurfaceKind.Dock, out var dock) ? dock.Opacity : 0.9;
         _settingsOpacity = Styles.TryGetValue(SurfaceKind.Settings, out var settingsStyle) ? settingsStyle.Opacity : 0.95;
         NotifyThemeChanged();
     }
 
-    /// <summary>True when the active theme and all four surface styles already match the saved settings.</summary>
+    /// <summary>True when the active theme and its surface styles already match the saved settings.</summary>
     public static bool IsApplied(DockSettings settings) =>
         _palette is not null
         && Current == settings.Theme
@@ -131,7 +137,9 @@ public static class ThemeManager
         && GetSurface(SurfaceKind.Menu) == new SurfaceStyle(settings.MenuBackground, settings.MenuOpacity, settings.MenuBorderThickness, settings.MenuBorderColor)
         && GetSurface(SurfaceKind.Widget) == new SurfaceStyle(settings.WidgetBackground, settings.WidgetOpacity, settings.WidgetBorderThickness, settings.WidgetBorderColor)
         && GetSurface(SurfaceKind.Settings) == new SurfaceStyle(settings.SettingsBackground, settings.SettingsOpacity, settings.SettingsBorderThickness, settings.SettingsBorderColor)
-        && _reduceGlow == settings.OledReduceGlowEnabled;
+        && _reduceGlow == settings.OledReduceGlowEnabled
+        && _dynamicIslandBackgroundColor == settings.DynamicIslandBackgroundColor
+        && _dynamicIslandOpacity == settings.DynamicIslandOpacity;
 
     /// <summary>True for the dictionaries this class owns, which theme packs must not treat as token definitions.</summary>
     internal static bool IsManagedDictionary(ResourceDictionary dictionary) =>
@@ -161,6 +169,7 @@ public static class ThemeManager
         {
             RebuildOledOverrides();
             foreach (var kind in Enum.GetValues<SurfaceKind>()) Rebuild(kind);
+            RebuildDynamicIsland();
         }
         RadiusManager.Rebuild();
         if (_palette is not null) NotifyThemeChanged();
@@ -190,6 +199,7 @@ public static class ThemeManager
         {
             RebuildOledOverrides();
             foreach (var kind in Enum.GetValues<SurfaceKind>()) Rebuild(kind);
+            RebuildDynamicIsland();
             RadiusManager.Rebuild();
             NotifyThemeChanged();
         }
@@ -256,6 +266,33 @@ public static class ThemeManager
 
     public static SurfaceStyle GetSurface(SurfaceKind kind) =>
         Styles.TryGetValue(kind, out var style) ? style : new SurfaceStyle(SurfaceBackground.Glass, 0.9);
+
+    /// <summary>Live preview of the Dynamic Island's theme material or user-selected color and opacity.</summary>
+    internal static void SetDynamicIslandStyle(string? backgroundColor, double opacity)
+    {
+        if (!double.IsFinite(opacity) || opacity is < 0 or > 1)
+            throw new ArgumentOutOfRangeException(nameof(opacity));
+        if (backgroundColor is not null && !TryParseColor(backgroundColor, out _))
+            throw new ArgumentException("The Dynamic Island background color must be #AARRGGBB or #RRGGBB.", nameof(backgroundColor));
+        if (_palette is null) throw new InvalidOperationException("The theme must be initialized before its materials.");
+        _dynamicIslandBackgroundColor = backgroundColor;
+        _dynamicIslandOpacity = opacity;
+        RebuildDynamicIsland();
+        NotifyThemeChanged();
+    }
+
+    internal static Brush GetDynamicIslandBackgroundSource()
+    {
+        if (_dynamicIslandBackgroundColor is not null
+            && TryParseColor(_dynamicIslandBackgroundColor, out var customColor))
+            return new SolidColorBrush(customColor);
+        return MaterialSource("DynamicIslandMaterial");
+    }
+
+    private static void RebuildDynamicIsland()
+    {
+        Materials["DynamicIslandMaterial"] = WithScaledAlpha(GetDynamicIslandBackgroundSource(), _dynamicIslandOpacity);
+    }
 
     /// <summary>Live preview of one surface from the Settings window.</summary>
     public static void SetSurface(SurfaceKind kind, SurfaceBackground background, double opacity)

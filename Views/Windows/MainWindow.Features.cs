@@ -116,6 +116,8 @@ public partial class MainWindow
     /// <summary>Visibility for the permanent shell buttons; their position comes from the unified dock order.</summary>
     private void ApplyShellButtons()
     {
+        FjordFilesButton.Visibility = _preferences.Current.IsFjordFilesButtonVisible
+            ? Visibility.Visible : Visibility.Collapsed;
         TaskViewButton.Visibility = _preferences.Current.ShowTaskViewButton
             ? Visibility.Visible : Visibility.Collapsed;
         TrayButton.Visibility = _preferences.Current.ShowTrayButton
@@ -233,6 +235,13 @@ public partial class MainWindow
     // ---- Native Start-menu tools, available from the dock context menu (#124) ----
 
     private void OpenFileExplorer_Click(object sender, RoutedEventArgs e) => ReportResult(ShellShortcuts.OpenSystemTool("explorer.exe"));
+
+    private void OpenFjordFiles_Click(object sender, RoutedEventArgs e)
+    {
+        if (!_preferences.Current.FjordFilesEnabled) return;
+        var display = _source is null ? null : DisplayService.GetDisplay(DisplayService.GetWindowMonitor(_source.Handle));
+        FjordFilesWindow.Open(null, display);
+    }
     private void OpenRunDialog_Click(object sender, RoutedEventArgs e) => ReportResult(ShellShortcuts.OpenRunDialog());
     private void OpenTerminal_Click(object sender, RoutedEventArgs e) => ReportResult(ShellShortcuts.OpenSystemTool("wt.exe"));
     private void OpenTerminalAdmin_Click(object sender, RoutedEventArgs e) => ReportResult(ShellShortcuts.OpenSystemToolElevated("wt.exe"));
@@ -628,7 +637,8 @@ public partial class MainWindow
 
         foreach (var dock in _secondaryDocks)
         {
-            dock.Configure(_preferences.Current.SecondaryApps, showSecondaryWidgets);
+            dock.Configure(_preferences.Current.SecondaryApps, showSecondaryWidgets,
+                SecondaryDockWindow.AppsAlignment(settings.Layout, settings.Position, settings.ContentAlignment));
             dock.ApplyShelfHeight(effectiveShelf, DockSurfaceHeight);
             dock.PositionOnMonitor();
         }

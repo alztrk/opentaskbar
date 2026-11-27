@@ -39,6 +39,10 @@
 
 - Redesigned the Rust port's Settings and Background Apps panels with coordinated light and dark themes, responsive Settings navigation, and inline dock pin and window close controls.
 
+- Merged origin/master's Dynamic Island, window-picker and AI-provider labels into all 14 C# catalogs; after removing the retired provider labels the numeric parity gates are **1046 C# / 1423 Rust** keys.
+
+- Applied the active theme and theme pack tokens to the Dynamic Island, with per-user background color and opacity controls.
+
 - Read playback progress from the matching LibreWolf tab when Windows omits the timeline and the browser exposes a verifiable player position and duration. Show an unavailable-duration status when neither source has a usable timeline.
 
 - Added transition and error states to Wi-Fi and Bluetooth controls, waited for Windows to confirm radio changes (#161), and placed direct Night Light control and Windows quick settings shortcuts side by side in the dock.
@@ -109,7 +113,7 @@
 
 - Gave the permanent Search, Task View and tray buttons a quiet rounded surface with hover/press feedback via a dedicated `ShellDockButton` style, so they remain readable next to the deliberately transparent app icons and widgets without changing the normal app-button baseline.
 
-- Removed the `--preview` launch mode. The dock now always runs in replacement mode with full journaling and watchdog protection.
+- Removed the `--preview` launch mode. The dock now always runs in replacement mode with full journaling and watchdog protection; `--inspect` remains for visual inspection with the dock visible in the taskbar.
 - Fixed logoff teardown leaving the dock broken when another application vetoes the shutdown: restore is deferred to application exit, with the watchdog still armed in the meantime.
 - Added a staleness check so a leftover taskbar journal cannot overwrite a taskbar state the user changed since, and made the managed watchdog require three consecutive missed heartbeats before treating the dock as hung.
 

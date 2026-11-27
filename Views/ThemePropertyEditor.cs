@@ -26,7 +26,7 @@ public sealed class ThemePropertyEditor : UserControl
                   "DockRadius", "DockInnerRadius", "DockWidgetPadding", "DockShadowBlur", "DockShadowOpacity", "DockShadowColor"]),
         ("Widgets", ["WidgetCard", "WidgetCardHover", "WidgetCardPressed", "WidgetCardStroke", "WidgetTrack", "WidgetAccent",
                      "DockWidgetSurface", "DockWidgetRadius"]),
-        ("Windows & Popups", ["MenuMaterial", "MenuDivider", "SurfacePopup", "MenuLabelWidth", "PopupRadius", "PopupInnerRadius",
+        ("Windows & Popups", ["MenuMaterial", "DynamicIslandMaterial", "MenuDivider", "SurfacePopup", "MenuLabelWidth", "PopupRadius", "PopupInnerRadius",
                                "SettingsBackground", "SettingsBackgroundOpacity", "SettingsControl", "SettingsControlHover", "SettingsSidebarOverlay"]),
         ("Icons", ["IconForeground", "WindowsLogoBrush", "IconHoverGlow", "StartTileBackground",
                    "StartTileStroke", "StartTileHover", "WidgetWarning", "WidgetFocusAccent"]),
@@ -378,6 +378,7 @@ public sealed class ThemePropertyEditor : UserControl
         ["SettingsControlHover"] = "Control hover surface",
         ["SettingsSidebarOverlay"] = "Sidebar surface",
         ["MenuMaterial"] = "Menu background",
+        ["DynamicIslandMaterial"] = "Dynamic Island background",
         ["MenuDivider"] = "Menu divider",
         ["SurfacePopup"] = "Popup surface",
         ["MenuLabelWidth"] = "Menu label width",
@@ -409,13 +410,6 @@ public sealed class ThemePropertyEditor : UserControl
         Grid.SetColumn(field, 1);
         row.Children.Add(field);
         return field;
-    }
-
-    private void AddTextTokenField(string key, string initial)
-    {
-        var field = AddTextField(key, initial);
-        field.Tag = key;
-        field.LostFocus += (_, _) => UpdateToken(key, JsonValue.Create(field.Text));
     }
 
     /// <summary>Shows "Inter" for a pack URI such as pack://application:,,,/Fonts/#Inter.</summary>

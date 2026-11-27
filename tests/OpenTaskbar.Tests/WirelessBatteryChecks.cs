@@ -1397,8 +1397,8 @@ internal static class WirelessBatteryChecks
         var flyout = widget.BuildHoverFlyoutContent();
         LocalCheck(flyout is StackPanel, "Hover flyout root must remain a StackPanel.");
         var allTexts = CollectTextBlocks((DependencyObject)flyout!).Select(t => t.Text).ToList();
-        LocalCheck(allTexts.Contains("ATK/VXE") && allTexts.Contains("SteelSeries") && allTexts.Contains("XInput"),
-            "Hover flyout must display protocol source badges for each wireless device.");
+        LocalCheck(allTexts.Contains("ATK A9 Ultra") && allTexts.Contains("Arctis Nova Pro Wireless") && allTexts.Contains("Xbox Wireless Controller (1)"),
+            "Hover flyout must display all wireless devices cleanly without protocol badge clutter.");
         LocalCheck(allTexts.Any(t => t.Contains("100", StringComparison.Ordinal)),
             "Hover flyout must display spare dock battery badge and percentages.");
         LocalCheck(allTexts.Contains(UiText.Get("WirelessBatteryCopyDiagnostics")),

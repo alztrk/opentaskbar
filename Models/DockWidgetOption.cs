@@ -5,6 +5,8 @@ using OpenTaskbar.Services;
 
 namespace OpenTaskbar.Models;
 
+public sealed record DynamicIslandPlacementChoice(string Value, string Label);
+
 public sealed class DockWidgetOption(
     string id,
     string label,
@@ -16,6 +18,8 @@ public sealed class DockWidgetOption(
 {
     private bool _isInstalled = isInstalled;
     private bool _isEnabled = isEnabled;
+    private string _dynamicIslandPlacementValue = "dock";
+    private IReadOnlyList<DynamicIslandPlacementChoice> _dynamicIslandPlacementChoices = [];
     private string _label = label;
     private string _description = description;
     private bool _isSettingsExpanded;
@@ -40,6 +44,22 @@ public sealed class DockWidgetOption(
     public string Label => _label;
     public string Description => _description;
     public DockWidgetItem Preview { get; } = preview;
+
+    public IReadOnlyList<DynamicIslandPlacementChoice> DynamicIslandPlacementChoices
+    {
+        get => _dynamicIslandPlacementChoices;
+        set
+        {
+            _dynamicIslandPlacementChoices = value;
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(DynamicIslandPlacementChoices)));
+        }
+    }
+
+    public string DynamicIslandPlacementValue
+    {
+        get => _dynamicIslandPlacementValue;
+        set => Set(ref _dynamicIslandPlacementValue, value ?? "dock", nameof(DynamicIslandPlacementValue));
+    }
 
     private FrameworkElement? _livePreview;
 
@@ -165,6 +185,8 @@ public sealed class DockWidgetOption(
         culture.CompareInfo.IndexOf(Label, query, CompareOptions.IgnoreCase) >= 0
         || culture.CompareInfo.IndexOf(Description, query, CompareOptions.IgnoreCase) >= 0;
 
+    private AppLanguage _lastCategoryLanguage = UiText.Current.Language;
+
     public void UpdateText(string label, string description)
     {
         var changed = false;
@@ -181,8 +203,10 @@ public sealed class DockWidgetOption(
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Description)));
             changed = true;
         }
-        if (changed)
+        var currentLanguage = UiText.Current.Language;
+        if (changed || _lastCategoryLanguage != currentLanguage)
         {
+            _lastCategoryLanguage = currentLanguage;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CategoryLabel)));
         }
     }
@@ -213,9 +237,9 @@ public sealed class DockWidgetOption(
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    private void Set(ref bool field, bool value, string propertyName)
+    private void Set<T>(ref T field, T value, string propertyName)
     {
-        if (field == value) return;
+        if (EqualityComparer<T>.Default.Equals(field, value)) return;
         field = value;
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }

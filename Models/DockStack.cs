@@ -27,25 +27,35 @@ public sealed class DockStack : INotifyPropertyChanged, IDisposable
             _watcher.Created += (_, args) =>
             {
                 // Browsers create temporary download files first; ignore those until they are renamed.
-                if (IsTemporary(args.Name)) return;
+                if (_disposed || IsTemporary(args.Name)) return;
                 dispatcher.BeginInvoke(() =>
                 {
+                    if (_disposed) return;
                     HasNewItems = true;
                     ContentsChanged?.Invoke();
                 });
             };
             _watcher.Renamed += (_, args) =>
             {
-                if (!IsTemporary(args.Name))
+                if (!_disposed && !IsTemporary(args.Name))
                 {
                     dispatcher.BeginInvoke(() =>
                     {
+                        if (_disposed) return;
                         HasNewItems = true;
                         ContentsChanged?.Invoke();
                     });
                 }
             };
-            _watcher.Deleted += (_, _) => dispatcher.BeginInvoke(() => ContentsChanged?.Invoke());
+            _watcher.Deleted += (_, _) =>
+            {
+                if (_disposed) return;
+                dispatcher.BeginInvoke(() =>
+                {
+                    if (_disposed) return;
+                    ContentsChanged?.Invoke();
+                });
+            };
         }
         catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
         {
@@ -107,5 +117,11 @@ public sealed class DockStack : INotifyPropertyChanged, IDisposable
     private void OnPropertyChanged([CallerMemberName] string? name = null) =>
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 
-    public void Dispose() => _watcher?.Dispose();
+    private volatile bool _disposed;
+
+    public void Dispose()
+    {
+        _disposed = true;
+        _watcher?.Dispose();
+    }
 }

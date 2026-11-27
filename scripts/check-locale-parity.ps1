@@ -12,26 +12,23 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path -LiteralPath $RepoRoot).Path
 
 $langs = @('de-DE','en-US','es-ES','fr-FR','it-IT','ja-JP','ko-KR','nl-NL','pl-PL','pt-BR','ru-RU','tr-TR','uk-UA','zh-CN')
-# Hard gate numbers. Current repo (shared-folder integration branch): 14 C#
-# catalogs x 1011 keys and 14 Rust catalogs x 1423 keys; the 412 extra Rust keys
-# are port-only feature keys (DI/calendar/font, C3 widget features, 207 UI
+# Hard gate numbers after the shared-folder integration union and the removal
+# of the retired AI-provider labels: 14 C# catalogs x 1046 keys and 14 Rust
+# catalogs x 1423 keys. The C# union keeps master's 994 baseline plus the
+# Dynamic Island / window-picker / Fjord / Wi-Fi / preview labels and the 17
+# OLED/display-care keys carried by both families; the five provider-specific
+# labels (two widget title/description, one group selector and two model-group
+# names) were removed from every catalog. The 372 extra Rust keys are
+# port-only feature keys (DI/calendar/font, C3 widget features, 207 UI
 # localization keys, 27 picker/Fjord/Wi-Fi/settings labels — three of which
 # already shipped — the 3 keys replacing the last English literals, the 3
-# searchable-location keys, the 40 Fjord/Wi-Fi/preview labels and the 17
-# OLED/display-care keys carried by both families).
-#
-# Post-integration union target (ops branch c5eb91a): 14 x 1034 C# keys (994
-# original C# keys plus the 40 Fjord/Wi-Fi/preview labels now shared by both
-# builds) and 14 x 1406 Rust keys, i.e. 372 extra Rust keys. TODO: the shared
-# folder integration PR has not merged the C# catalogs with origin/master
-# (1034) yet, so keep the 1011 / 1423 carve-out above until that lands; then
-# switch the gates to 1034 / 1406 and drop this carve-out.
+# searchable-location keys and the 40 Fjord/Wi-Fi/preview labels).
 #
 # Each family must stay identical across languages. These numbers are a hard
 # gate, not just a display string.
 $expectedLanguages = 14
-$expectedCsKeys = 1011          # current repo; integration target: 1034
-$expectedRustKeys = 1423        # current repo; integration target: 1406
+$expectedCsKeys = 1046
+$expectedRustKeys = 1423
 $csDir = Join-Path $RepoRoot 'Services\Localization\Languages'
 $rustDir = Join-Path $RepoRoot 'Rust-Port\crates\opentaskbar-core\locales'
 

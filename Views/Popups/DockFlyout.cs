@@ -9,6 +9,7 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using OpenTaskbar.Models;
 using OpenTaskbar.Services;
+using OpenTaskbar.Views.Windows;
 
 namespace OpenTaskbar;
 
@@ -72,7 +73,7 @@ public sealed class DockFlyout
     private bool _restoreFocus;
 
     private readonly Popup _popup;
-    private readonly Grid _root;
+    private readonly Border _root;
     private readonly Border _frame;
     private readonly Border _innerBevel;
 
@@ -129,30 +130,17 @@ public sealed class DockFlyout
         _innerBevel = new Border
         {
             BorderThickness = new Thickness(0),
-            CornerRadius = new CornerRadius(15),
-            Padding = new Thickness(14),
+            CornerRadius = new CornerRadius(11),
+            Padding = new Thickness(12),
             Background = Brushes.Transparent
         };
 
-        var topSheen = new Border
-        {
-            Height = 36,
-            VerticalAlignment = VerticalAlignment.Top,
-            CornerRadius = new CornerRadius(15, 15, 0, 0),
-            IsHitTestVisible = false
-        };
-        topSheen.SetResourceReference(Border.BackgroundProperty, "MenuSheenMaterial");
-
-        var bodyGrid = new Grid();
-        bodyGrid.Children.Add(topSheen);
-        bodyGrid.Children.Add(_innerBevel);
-
         _frame = new Border
         {
-            CornerRadius = new CornerRadius(16),
+            CornerRadius = new CornerRadius(12),
             Padding = new Thickness(0),
             ClipToBounds = true,
-            Child = bodyGrid
+            Child = _innerBevel
         };
         _frame.SetResourceReference(Border.BorderThicknessProperty, "MenuStrokeThickness");
         _frame.SetResourceReference(Border.BackgroundProperty, "MenuMaterial");
@@ -161,18 +149,21 @@ public sealed class DockFlyout
         _frame.SetResourceReference(TextElement.FontFamilyProperty, "InterfaceFont");
 
         var contentHost = new Grid();
-        AttachSoftShadow(contentHost, 16);
+        AttachSoftShadow(contentHost, 12);
         contentHost.Children.Add(_frame);
 
         var scale = new ScaleTransform(1, 1);
         var translate = new TranslateTransform();
         var transformGroup = new TransformGroup { Children = { scale, translate } };
-        _root = new Grid
+        // Use Border.Padding instead of Margin on the Popup root: WPF excludes Popup.Child.Margin from
+        // CustomPopupPlacementCallback's popupSize, which previously shifted every flyout downward into the dock.
+        _root = new Border
         {
-            Margin = new Thickness(10, 8, 10, DockMetrics.FlyoutContentInset),
+            Padding = new Thickness(10, 8, 10, DockMetrics.FlyoutContentInset),
+            Background = Brushes.Transparent,
             RenderTransform = transformGroup,
             RenderTransformOrigin = new Point(0.5, 0.5),
-            Children = { contentHost }
+            Child = contentHost
         };
         _popup = new Popup
         {
@@ -214,7 +205,7 @@ public sealed class DockFlyout
         };
         _root.AddHandler(FrameworkElement.ContextMenuOpeningEvent, new ContextMenuEventHandler((_, e) =>
         {
-            _popup.StaysOpen = true;
+            if (e.Handled) return;
             ContextMenu? cm = null;
             if (e.Source is FrameworkElement fe && fe.ContextMenu is not null)
                 cm = fe.ContextMenu;
@@ -225,11 +216,13 @@ public sealed class DockFlyout
                 {
                     if (cur is FrameworkElement el && el.ContextMenu is not null)
                         cm = el.ContextMenu;
-                    cur = VisualTreeHelper.GetParent(cur) ?? LogicalTreeHelper.GetParent(cur);
+                    cur = (cur is Visual or System.Windows.Media.Media3D.Visual3D ? VisualTreeHelper.GetParent(cur) : null)
+                        ?? LogicalTreeHelper.GetParent(cur);
                 }
             }
             if (cm is not null)
             {
+                _popup.StaysOpen = true;
                 RoutedEventHandler? onClosed = null;
                 onClosed = (_, _) =>
                 {
@@ -319,6 +312,7 @@ public sealed class DockFlyout
 
     public void RetainForExternalContextMenu(nint appHwnd = 0)
     {
+        if (!_popup.IsOpen) return;
         _popup.StaysOpen = true;
         if (appHwnd != 0)
         {
@@ -548,13 +542,19 @@ public sealed class DockFlyout
 
     public void Show(UIElement target, UIElement content, bool animate = true, bool focusable = false)
     {
+        if (Window.GetWindow(target) is DynamicIslandWindow)
+        {
+            if (_popup.IsOpen) Close(restoreFocus: false);
+            return;
+        }
+
         UnhookMouse();
         _isOpenState = true;
         _explicitClose = false;
         _suppressNextClick = false;
         _closedTarget = null;
         var inset = DockMetrics.FlyoutContentInset;
-        _root.Margin = Edge switch
+        _root.Padding = Edge switch
         {
             DockEdge.Left => new Thickness(10, 8, 12, inset),
             DockEdge.Right => new Thickness(12, 8, 10, inset),
@@ -562,7 +562,7 @@ public sealed class DockFlyout
         };
         _innerBevel.Child = content;
         _popup.StaysOpen = false;
-        _popup.PopupAnimation = animate && SystemParameters.ClientAreaAnimation ? PopupAnimation.Fade : PopupAnimation.None;
+        _popup.PopupAnimation = PopupAnimation.None;
         CleanRegistry();
         for (var i = 0; i < FlyoutRegistry.Count; i++)
         {
@@ -653,10 +653,11 @@ public sealed class DockFlyout
         _popup.IsOpen = false;
     }
 
-    private static CustomPopupPlacement[] Place(Size popupSize, Size targetSize, Point offset)
+    private CustomPopupPlacement[] Place(Size popupSize, Size targetSize, Point offset)
     {
-        // Gap is derived from the current dock profile, keeping the visible flyout ~5–10 px off the dock edge.
-        var gap = DockMetrics.FlyoutGap;
+        // Measure the anchor's actual distance to the outer DockFrame edge so every flyout sits
+        // exactly DesiredFlyoutGap (7 DIP) outside the visible taskbar regardless of button height or dock size.
+        var gap = ComputePlacementGap(targetSize);
         return Edge switch
         {
             DockEdge.Left =>
@@ -677,6 +678,68 @@ public sealed class DockFlyout
         };
     }
 
+    private double ComputePlacementGap(Size targetSize)
+    {
+        const double desiredGapDip = 8.0;
+        var target = (_currentTarget ?? _popup.PlacementTarget) as FrameworkElement;
+        if (target is null || !target.IsLoaded) return DockMetrics.FlyoutGap;
+
+        var source = PresentationSource.FromVisual(target);
+        var dpiX = source?.CompositionTarget?.TransformToDevice.M11 ?? 1.0;
+        var dpiY = source?.CompositionTarget?.TransformToDevice.M22 ?? 1.0;
+
+        var dockFrame = FindAncestorByName(target, "DockFrame");
+        if (dockFrame is null || dockFrame.ActualWidth <= 0 || dockFrame.ActualHeight <= 0)
+        {
+            var scale = Edge == DockEdge.Bottom ? dpiY : dpiX;
+            return Math.Max(0, desiredGapDip * scale);
+        }
+
+        try
+        {
+            // CustomPopupPlacementCallback operates in physical device pixels, so measure both the target and
+            // DockFrame in screen pixels and scale the desired DIP gap + popup margin by the monitor DPI.
+            var targetTopLeftPx = target.PointToScreen(new Point(0, 0));
+            var targetBottomRightPx = target.PointToScreen(new Point(target.ActualWidth, target.ActualHeight));
+            var dockTopLeftPx = dockFrame.PointToScreen(new Point(0, 0));
+            var dockBottomRightPx = dockFrame.PointToScreen(new Point(dockFrame.ActualWidth, dockFrame.ActualHeight));
+
+            var (anchorInsetPx, desiredGapPx, contentMarginPx) = Edge switch
+            {
+                DockEdge.Left => (
+                    Math.Max(0, dockBottomRightPx.X - targetBottomRightPx.X),
+                    desiredGapDip * dpiX,
+                    _root.Padding.Left * dpiX),
+                DockEdge.Right => (
+                    Math.Max(0, targetTopLeftPx.X - dockTopLeftPx.X),
+                    desiredGapDip * dpiX,
+                    _root.Padding.Right * dpiX),
+                _ => (
+                    Math.Max(0, targetTopLeftPx.Y - dockTopLeftPx.Y),
+                    desiredGapDip * dpiY,
+                    _root.Padding.Bottom * dpiY)
+            };
+            return anchorInsetPx + desiredGapPx - contentMarginPx;
+        }
+        catch (InvalidOperationException)
+        {
+            var scale = Edge == DockEdge.Bottom ? dpiY : dpiX;
+            return DockMetrics.FlyoutGap * scale;
+        }
+    }
+
+    private static FrameworkElement? FindAncestorByName(DependencyObject start, string name)
+    {
+        var current = start;
+        while (current is not null)
+        {
+            if (current is FrameworkElement fe && string.Equals(fe.Name, name, StringComparison.Ordinal))
+                return fe;
+            current = VisualTreeHelper.GetParent(current) ?? LogicalTreeHelper.GetParent(current);
+        }
+        return null;
+    }
+
     /// <summary>Flat, borderless button used for flyout rows and tiles.</summary>
     public static Button FlatButton(object content, RoutedEventHandler click, string? toolTip = null)
     {
@@ -689,14 +752,83 @@ public sealed class DockFlyout
 
     public static TextBlock Heading(string text)
     {
-        var block = new TextBlock { Text = text, FontWeight = FontWeights.SemiBold, FontSize = 12.5, Margin = new Thickness(4, 0, 4, 8) };
+        var block = new TextBlock { Text = text, FontWeight = FontWeights.SemiBold, FontSize = 13, Margin = new Thickness(0, 0, 0, 8) };
         block.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
         return block;
     }
 
+    public static DockPanel Header(string title, UIElement? trailing = null, double bottomMargin = 10)
+    {
+        var row = new DockPanel { LastChildFill = true, Margin = new Thickness(0, 0, 0, bottomMargin) };
+        if (trailing is not null)
+        {
+            DockPanel.SetDock(trailing, Dock.Right);
+            row.Children.Add(trailing);
+        }
+        var label = new TextBlock
+        {
+            Text = title,
+            FontSize = 13,
+            FontWeight = FontWeights.SemiBold,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        label.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
+        row.Children.Add(label);
+        return row;
+    }
+
+    public static TextBlock SectionLabel(string text, Thickness? margin = null)
+    {
+        var block = new TextBlock
+        {
+            Text = text,
+            FontSize = 11,
+            FontWeight = FontWeights.SemiBold,
+            Margin = margin ?? new Thickness(0, 0, 0, 6)
+        };
+        block.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+        return block;
+    }
+
+    public static Border Divider(double verticalMargin = 8)
+    {
+        var line = new Border
+        {
+            Height = 1,
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Margin = new Thickness(0, verticalMargin, 0, verticalMargin)
+        };
+        line.SetResourceReference(Border.BorderBrushProperty, "StrokeSubtle");
+        return line;
+    }
+
+    public static Border FooterBar(params UIElement[] actions)
+    {
+        var grid = new UniformGrid { Columns = Math.Max(1, actions.Length) };
+        for (var i = 0; i < actions.Length; i++)
+        {
+            if (actions[i] is FrameworkElement fe)
+            {
+                fe.Margin = new Thickness(i == 0 ? 0 : 4, 0, i == actions.Length - 1 ? 0 : 4, 0);
+            }
+            grid.Children.Add(actions[i]);
+        }
+
+        var bar = new Border
+        {
+            BorderThickness = new Thickness(0, 1, 0, 0),
+            Margin = new Thickness(0, 10, 0, 0),
+            Padding = new Thickness(0, 8, 0, 0),
+            Child = grid
+        };
+        bar.SetResourceReference(Border.BorderBrushProperty, "StrokeSubtle");
+        return bar;
+    }
+
     public static TextBlock Caption(string text)
     {
-        var block = new TextBlock { Text = text, FontSize = 11, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(4, 2, 4, 2) };
+        var block = new TextBlock { Text = text, FontSize = 11, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 2, 0, 2) };
         block.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
         return block;
     }

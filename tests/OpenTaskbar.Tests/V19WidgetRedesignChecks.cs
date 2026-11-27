@@ -95,22 +95,28 @@ internal static class V19WidgetRedesignChecks
                   && flyoutTexts.Contains("19° / 13°") && flyoutTexts.Contains("17° / 12°") && flyoutTexts.Contains("16° / 11°"),
                 "WeatherWidget click flyout must display feels-like, humidity, and 3-day forecast.");
 
-            // Bug #14: Detail tiles must bind to the valid SurfaceSelected theme token in both Dark and Light themes.
+            // Flat 2x2 metric grid must render 4 detail metrics bound to theme text tokens in both Dark and Light themes.
             var metricsGrid = LogicalDescendants<System.Windows.Controls.Primitives.UniformGrid>(flyout).Single();
-            var detailTiles = metricsGrid.Children.OfType<Border>().ToList();
-            Check(detailTiles.Count == 4, "WeatherWidget click flyout must render 4 detail metric tiles.");
+            var detailCells = metricsGrid.Children.OfType<DockPanel>().ToList();
+            Check(detailCells.Count == 4, "WeatherWidget click flyout must render 4 detail metric items.");
             try
             {
                 foreach (var theme in new[] { AppTheme.Dark, AppTheme.Light })
                 {
                     ThemeManager.Apply(theme);
-                    var expectedSurface = app.TryFindResource("SurfaceSelected") as Brush;
-                    Check(expectedSurface is not null, $"SurfaceSelected resource must exist in {theme} theme.");
+                    var expectedPrimary = app.TryFindResource("TextPrimary") as Brush;
+                    var expectedSecondary = app.TryFindResource("TextSecondary") as Brush;
+                    Check(expectedPrimary is not null && expectedSecondary is not null,
+                        $"TextPrimary and TextSecondary resources must exist in {theme} theme.");
                     var themedFlyout = weather.BuildFlyoutContent();
-                    var themedTiles = LogicalDescendants<System.Windows.Controls.Primitives.UniformGrid>(themedFlyout)
-                        .Single().Children.OfType<Border>().ToList();
-                    Check(themedTiles.Count == 4 && themedTiles.All(tile => ReferenceEquals(tile.Background, expectedSurface)),
-                        $"WeatherWidget detail tiles must resolve to SurfaceSelected in {theme} theme.");
+                    var themedGrid = LogicalDescendants<System.Windows.Controls.Primitives.UniformGrid>(themedFlyout).Single();
+                    var themedCells = themedGrid.Children.OfType<DockPanel>().ToList();
+                    Check(themedCells.Count == 4
+                          && !themedGrid.Children.OfType<Border>().Any()
+                          && themedCells.All(cell => cell.Children.OfType<TextBlock>().ToList() is [var val, var lbl]
+                              && ReferenceEquals(val.Foreground, expectedPrimary)
+                              && ReferenceEquals(lbl.Foreground, expectedSecondary)),
+                        $"WeatherWidget detail metrics must use flat themed text tokens in {theme} theme.");
                 }
             }
             finally
@@ -179,7 +185,9 @@ internal static class V19WidgetRedesignChecks
             focus.Activate();
             var flyout = focus.BuildFocusFlyout();
             var buttonLabels = LogicalDescendants<Button>(flyout).Select(b => b.Content?.ToString()).ToList();
-            Check(buttonLabels.Contains("15 min") && buttonLabels.Contains("25 min") && buttonLabels.Contains("50 min"),
+            Check(buttonLabels.Contains(UiText.Format("MinutesShort", 15))
+                  && buttonLabels.Contains(UiText.Format("MinutesShort", 25))
+                  && buttonLabels.Contains(UiText.Format("MinutesShort", 50)),
                 "Focus flyout must provide 15/25/50 minute presets.");
         }
 

@@ -632,7 +632,8 @@ public sealed class AudioEndpointMonitor : IDisposable
     private void ReleaseVolume()
     {
         if (_volume is null) return;
-        _volume.UnregisterControlChangeNotify(_volumeCallback);
+        try { _volume.UnregisterControlChangeNotify(_volumeCallback); }
+        catch (COMException) { }
         Marshal.ReleaseComObject(_volume);
         _volume = null;
     }
@@ -640,7 +641,8 @@ public sealed class AudioEndpointMonitor : IDisposable
     private void ReleaseMicVolume()
     {
         if (_micVolume is null) return;
-        _micVolume.UnregisterControlChangeNotify(_micVolumeCallback);
+        try { _micVolume.UnregisterControlChangeNotify(_micVolumeCallback); }
+        catch (COMException) { }
         Marshal.ReleaseComObject(_micVolume);
         _micVolume = null;
     }
@@ -674,7 +676,8 @@ public sealed class AudioEndpointMonitor : IDisposable
         _disposed = true;
         ReleaseVolume();
         ReleaseMicVolume();
-        _enumerator.UnregisterEndpointNotificationCallback(_notificationClient);
+        try { _enumerator.UnregisterEndpointNotificationCallback(_notificationClient); }
+        catch (COMException) { }
         Marshal.ReleaseComObject(_enumerator);
     }
 

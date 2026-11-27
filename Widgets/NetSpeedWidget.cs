@@ -203,7 +203,6 @@ public sealed class NetSpeedWidget : DockWidget
 
     protected override void OnActivated()
     {
-        UiText.Current.PropertyChanged += UiText_PropertyChanged;
         Localize();
         // A sample from a previous activation would otherwise skip the first tick and then land with reset baselines.
         _sampleGeneration++;
@@ -216,7 +215,6 @@ public sealed class NetSpeedWidget : DockWidget
 
     protected override void OnDeactivated()
     {
-        UiText.Current.PropertyChanged -= UiText_PropertyChanged;
         _sampleGeneration++;
         _sampleInFlight = false;
         CancelSpeedTest();
@@ -238,7 +236,7 @@ public sealed class NetSpeedWidget : DockWidget
         _hoverTotalSentText = null;
     }
 
-    private void UiText_PropertyChanged(object? sender, PropertyChangedEventArgs e) => Localize();
+    protected override void OnLanguageChanged() => Localize();
 
     private void Localize()
     {
@@ -331,9 +329,9 @@ public sealed class NetSpeedWidget : DockWidget
             if (_hoverDownloadText is not null) _hoverDownloadText.Text = downloadSpeed;
             if (_hoverUploadText is not null) _hoverUploadText.Text = uploadSpeed;
             if (_hoverTotalReceivedText is not null)
-                _hoverTotalReceivedText.Text = $"{UiText.Get("NetworkTotalReceived")}:\n{FormatBytes(_sessionDownloadedBytes)}";
+                _hoverTotalReceivedText.Text = $"{UiText.Get("NetworkTotalReceived")}: {FormatBytes(_sessionDownloadedBytes)}";
             if (_hoverTotalSentText is not null)
-                _hoverTotalSentText.Text = $"{UiText.Get("NetworkTotalSent")}:\n{FormatBytes(_sessionUploadedBytes)}";
+                _hoverTotalSentText.Text = $"{UiText.Get("NetworkTotalSent")}: {FormatBytes(_sessionUploadedBytes)}";
         }
 
         var speedStatus = $"↓ {downloadSpeed} · ↑ {uploadSpeed}";
@@ -345,182 +343,118 @@ public sealed class NetSpeedWidget : DockWidget
         _flyout.Toggle(_cardButton, BuildClickFlyoutContent, focusable: true);
     }
 
-    public override UIElement? BuildHoverFlyoutContent()
+    public override UIElement? BuildHoverFlyoutContent() =>
+        BuildLiveStatsPanel(
+            bottomGridMargin: 2,
+            out _hoverDownloadText,
+            out _hoverTotalReceivedText,
+            out _hoverUploadText,
+            out _hoverTotalSentText);
+
+    internal UIElement BuildClickFlyoutContent()
     {
-        var panel = new StackPanel { Width = 240 };
-        panel.Children.Add(DockFlyout.Heading(UiText.Get("WidgetNetSpeed")));
+        _flyoutPanel = BuildLiveStatsPanel(
+            bottomGridMargin: 4,
+            out _flyoutDownloadText,
+            out _flyoutTotalReceivedText,
+            out _flyoutUploadText,
+            out _flyoutTotalSentText);
+
+        _flyoutPanel.Children.Add(DockFlyout.Divider(8));
+
+        // Speed Test Section Container
+        _speedTestContainer = new StackPanel { Margin = new Thickness(0, 2, 0, 2) };
+        UpdateSpeedTestView();
+        _flyoutPanel.Children.Add(_speedTestContainer);
+
+        // Unified footer bar with Settings action.
+        var settingsButton = new Button { Content = UiText.Get("NetworkSettings") };
+        settingsButton.SetResourceReference(StyleProperty, "WidgetFlyoutActionButton");
+        settingsButton.Click += (_, _) => OpenSettingsAction();
+        _flyoutPanel.Children.Add(DockFlyout.FooterBar(settingsButton));
+
+        return _flyoutPanel;
+    }
+
+    private StackPanel BuildLiveStatsPanel(
+        double bottomGridMargin,
+        out TextBlock downloadText,
+        out TextBlock totalReceivedText,
+        out TextBlock uploadText,
+        out TextBlock totalSentText)
+    {
+        var panel = new StackPanel { Width = 296 };
+        panel.Children.Add(DockFlyout.Header(UiText.Get("WidgetNetSpeed"), bottomMargin: 4));
 
         if (!string.IsNullOrEmpty(_primaryInterfaceName))
         {
-            panel.Children.Add(DockFlyout.Caption($"{UiText.Get("NetworkAdapter")}: {_primaryInterfaceName}"));
+            panel.Children.Add(DockFlyout.Caption(_primaryInterfaceName));
         }
 
-        var speedGrid = new Grid { Margin = new Thickness(0, 8, 0, 8) };
+        panel.Children.Add(DockFlyout.Divider(6));
+
+        var speedGrid = new Grid { Margin = new Thickness(0, 2, 0, bottomGridMargin) };
         speedGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         speedGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-        var downCol = new StackPanel { Margin = new Thickness(0, 0, 4, 0) };
-        downCol.Children.Add(new TextBlock
-        {
-            Text = $"↓ {UiText.Get("NetworkDownload")}",
-            FontSize = 11,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = (Brush)FindResource("WidgetAccent")
-        });
-        _hoverDownloadText = new TextBlock
-        {
-            Text = FormatSpeed(_downloadBytesPerSec),
-            FontSize = 13,
-            FontWeight = FontWeights.Bold,
-            Typography = { NumeralAlignment = FontNumeralAlignment.Tabular }
-        };
-        downCol.Children.Add(_hoverDownloadText);
-        _hoverTotalReceivedText = new TextBlock
-        {
-            Text = $"{UiText.Get("NetworkTotalReceived")}:\n{FormatBytes(_sessionDownloadedBytes)}",
-            FontSize = 10,
-            Foreground = (Brush)FindResource("TextSecondary"),
-            Margin = new Thickness(0, 4, 0, 0)
-        };
-        downCol.Children.Add(_hoverTotalReceivedText);
+        var downCol = BuildSpeedColumn(
+            UiText.Get("NetworkDownload"), "WidgetAccent",
+            FormatSpeed(_downloadBytesPerSec),
+            $"{UiText.Get("NetworkTotalReceived")}: {FormatBytes(_sessionDownloadedBytes)}",
+            new Thickness(0, 0, 6, 0),
+            out downloadText, out totalReceivedText);
 
-        var upCol = new StackPanel { Margin = new Thickness(4, 0, 0, 0) };
-        upCol.Children.Add(new TextBlock
-        {
-            Text = $"↑ {UiText.Get("NetworkUpload")}",
-            FontSize = 11,
-            FontWeight = FontWeights.SemiBold,
-            Foreground = (Brush)FindResource("TextSecondary")
-        });
-        _hoverUploadText = new TextBlock
-        {
-            Text = FormatSpeed(_uploadBytesPerSec),
-            FontSize = 13,
-            FontWeight = FontWeights.Bold,
-            Typography = { NumeralAlignment = FontNumeralAlignment.Tabular }
-        };
-        upCol.Children.Add(_hoverUploadText);
-        _hoverTotalSentText = new TextBlock
-        {
-            Text = $"{UiText.Get("NetworkTotalSent")}:\n{FormatBytes(_sessionUploadedBytes)}",
-            FontSize = 10,
-            Foreground = (Brush)FindResource("TextSecondary"),
-            Margin = new Thickness(0, 4, 0, 0)
-        };
-        upCol.Children.Add(_hoverTotalSentText);
+        var upCol = BuildSpeedColumn(
+            UiText.Get("NetworkUpload"), "TextSecondary",
+            FormatSpeed(_uploadBytesPerSec),
+            $"{UiText.Get("NetworkTotalSent")}: {FormatBytes(_sessionUploadedBytes)}",
+            new Thickness(6, 0, 0, 0),
+            out uploadText, out totalSentText);
 
         Grid.SetColumn(downCol, 0);
         Grid.SetColumn(upCol, 1);
         speedGrid.Children.Add(downCol);
         speedGrid.Children.Add(upCol);
         panel.Children.Add(speedGrid);
-
         return panel;
     }
 
-    internal UIElement BuildClickFlyoutContent()
+    private StackPanel BuildSpeedColumn(
+        string heading,
+        string headingBrushKey,
+        string speedText,
+        string totalText,
+        Thickness margin,
+        out TextBlock speedBlock,
+        out TextBlock totalBlock)
     {
-        _flyoutPanel = new StackPanel { Width = 280 };
-        _flyoutPanel.Children.Add(DockFlyout.Heading(UiText.Get("WidgetNetSpeed")));
-
-        if (!string.IsNullOrEmpty(_primaryInterfaceName))
+        var col = new StackPanel { Margin = margin };
+        col.Children.Add(new TextBlock
         {
-            _flyoutPanel.Children.Add(DockFlyout.Caption($"{UiText.Get("NetworkAdapter")}: {_primaryInterfaceName}"));
-        }
-
-        // Live stats grid
-        var speedGrid = new Grid { Margin = new Thickness(0, 6, 0, 8) };
-        speedGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        speedGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-        var downCol = new StackPanel { Margin = new Thickness(0, 0, 4, 0) };
-        downCol.Children.Add(new TextBlock
-        {
-            Text = $"↓ {UiText.Get("NetworkDownload")}",
+            Text = heading,
             FontSize = 11,
             FontWeight = FontWeights.SemiBold,
-            Foreground = (Brush)FindResource("WidgetAccent")
+            Foreground = (Brush)FindResource(headingBrushKey)
         });
-        _flyoutDownloadText = new TextBlock
+        speedBlock = new TextBlock
         {
-            Text = FormatSpeed(_downloadBytesPerSec),
-            FontSize = 13,
-            FontWeight = FontWeights.Bold,
-            Typography = { NumeralAlignment = FontNumeralAlignment.Tabular }
-        };
-        downCol.Children.Add(_flyoutDownloadText);
-        _flyoutTotalReceivedText = new TextBlock
-        {
-            Text = $"{UiText.Get("NetworkTotalReceived")}: {FormatBytes(_sessionDownloadedBytes)}",
-            FontSize = 9.5,
-            Foreground = (Brush)FindResource("TextSecondary"),
-            Margin = new Thickness(0, 2, 0, 0)
-        };
-        downCol.Children.Add(_flyoutTotalReceivedText);
-
-        var upCol = new StackPanel { Margin = new Thickness(4, 0, 0, 0) };
-        upCol.Children.Add(new TextBlock
-        {
-            Text = $"↑ {UiText.Get("NetworkUpload")}",
-            FontSize = 11,
+            Text = speedText,
+            FontSize = 14,
             FontWeight = FontWeights.SemiBold,
-            Foreground = (Brush)FindResource("TextSecondary")
-        });
-        _flyoutUploadText = new TextBlock
-        {
-            Text = FormatSpeed(_uploadBytesPerSec),
-            FontSize = 13,
-            FontWeight = FontWeights.Bold,
+            Margin = new Thickness(0, 2, 0, 0),
             Typography = { NumeralAlignment = FontNumeralAlignment.Tabular }
         };
-        upCol.Children.Add(_flyoutUploadText);
-        _flyoutTotalSentText = new TextBlock
+        col.Children.Add(speedBlock);
+        totalBlock = new TextBlock
         {
-            Text = $"{UiText.Get("NetworkTotalSent")}: {FormatBytes(_sessionUploadedBytes)}",
-            FontSize = 9.5,
+            Text = totalText,
+            FontSize = 11,
             Foreground = (Brush)FindResource("TextSecondary"),
-            Margin = new Thickness(0, 2, 0, 0)
+            Margin = new Thickness(0, 3, 0, 0),
+            TextTrimming = TextTrimming.CharacterEllipsis
         };
-        upCol.Children.Add(_flyoutTotalSentText);
-
-        Grid.SetColumn(downCol, 0);
-        Grid.SetColumn(upCol, 1);
-        speedGrid.Children.Add(downCol);
-        speedGrid.Children.Add(upCol);
-        _flyoutPanel.Children.Add(speedGrid);
-
-        // Divider
-        _flyoutPanel.Children.Add(CreateDivider());
-
-        // Speed Test Section Container
-        _speedTestContainer = new StackPanel { Margin = new Thickness(0, 4, 0, 4) };
-        UpdateSpeedTestView();
-        _flyoutPanel.Children.Add(_speedTestContainer);
-
-        // Divider
-        _flyoutPanel.Children.Add(CreateDivider());
-
-        // Settings link
-        var settingsButton = DockFlyout.FlatButton(
-            new TextBlock { Text = UiText.Get("NetworkSettings"), FontSize = 11.5, FontWeight = FontWeights.SemiBold },
-            (_, _) => OpenSettingsAction(),
-            UiText.Get("NetworkSettings")
-        );
-        settingsButton.Margin = new Thickness(0, 2, 0, 0);
-        _flyoutPanel.Children.Add(settingsButton);
-
-        return _flyoutPanel;
-    }
-
-    private Border CreateDivider()
-    {
-        var border = new Border
-        {
-            Height = 1,
-            Margin = new Thickness(0, 6, 0, 6)
-        };
-        border.SetResourceReference(Border.BackgroundProperty, "MenuStroke");
-        return border;
+        col.Children.Add(totalBlock);
+        return col;
     }
 
     private void UpdateSpeedTestView()

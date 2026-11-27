@@ -73,6 +73,7 @@ OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replaceme
 - **Productivity Widgets:** Focus Pomodoro timer, Stopwatch, Countdown timer, Storage drive usage, Network Speed, and Day Progress bar.
 - **System Tray Management:** Background tray apps manager with native tray context menus, window restore, and confirmed process termination.
 - **Interactive Catalog:** Built-in widget catalog grouped under inline category headings with live widget previews and expandable configuration drawers with instant auto-save.
+- **Optional Dynamic Island:** When enabled, the top-attached island remains visible on every connected display, even before widgets are assigned. Assign each widget to the dock or a chosen display's island; assigned widgets move off that display's dock. The island supports per-display paging, visibility rules, and full-screen hiding.
 
 ### Extras and Integration
 - **Search Button:** A Start-adjacent dock button that opens the native Windows Search flyout (Win+S), with the same cell size as app icons and a Settings toggle.
@@ -169,6 +170,14 @@ dotnet run --project tests/OpenTaskbar.Tests/OpenTaskbar.Tests.csproj -- --headl
 ```
 
 The full suite verifies WPF controls and therefore needs a Windows desktop session. The `--headless` mode skips those visual checks and runs the fast, side-effect-free logic tests.
+
+### Fjord top bar
+
+To open the optional top bar, run `OpenTaskbar.exe --fjord-bar` or `dotnet run --project OpenTaskbar.csproj -- --fjord-bar`. The bar opens on each display and can be closed from its desktop menu. The same menu opens Fjord Files.
+
+Use **Settings → Dock → Enable Fjord Files** to control the file browser. Turning it off closes any open Fjord Files windows and removes its entries from the dock and the top bar. A `--files` shortcut with an explicit folder or This PC target then opens in Windows File Explorer. A shortcut with no target simply exits.
+
+Click the Wi-Fi icon to scan, connect, or disconnect. For a new network, **Remember network** saves a per-user Windows Wi-Fi profile after a successful connection. Saved profiles support manual reconnection with the stored credentials. On Windows versions that restrict nearby Wi-Fi access, the panel reports when Windows location permissions block the scan.
 
 ---
 

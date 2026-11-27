@@ -21,6 +21,8 @@ public sealed class DockSettingsStore
     private readonly string _path;
     private readonly AppLanguage _defaultLanguage;
 
+    internal string SettingsPath => _path;
+
     public DockSettingsStore(string? path = null, CultureInfo? defaultCulture = null)
     {
         _defaultLanguage = LanguageCatalog.FromCulture(defaultCulture ?? CultureInfo.CurrentUICulture);
@@ -43,6 +45,9 @@ public sealed class DockSettingsStore
             var normalizedJson = NormalizeLegacyJson(rawJson);
             using var document = JsonDocument.Parse(normalizedJson);
             var settings = document.RootElement.Deserialize<DockSettings>(JsonOptions);
+            // Preserve the pre-toggle behavior for users who already assigned widgets to an island.
+            if (settings is not null && !document.RootElement.TryGetProperty(nameof(DockSettings.DynamicIslandEnabled), out _))
+                settings = settings with { DynamicIslandEnabled = settings.DynamicIslandPlacements?.Count > 0 };
             // Older files without a language follow the same system-language rule as a first launch.
             if (settings is not null && !document.RootElement.TryGetProperty(nameof(DockSettings.Language), out _))
                 settings = settings with { Language = _defaultLanguage };
@@ -707,6 +712,9 @@ public sealed class DockSettingsStore
         && Enum.IsDefined(settings.DateStyle) && Enum.IsDefined(settings.DateFormat)
         && Enum.IsDefined(settings.WeatherUnit)
         && Enum.IsDefined(settings.DynamicIslandVisibility)
+        && double.IsFinite(settings.DynamicIslandOpacity) && settings.DynamicIslandOpacity is >= 0 and <= 1
+        && (settings.DynamicIslandBackgroundColor is null
+            || ThemeManager.TryParseColor(settings.DynamicIslandBackgroundColor, out _))
         && (settings.StatsMeters & ~SystemMeters.All) == 0
         && (settings.AiUsageProviders & ~AiProviders.All) == 0
         && Enum.IsDefined(settings.AiUsageRing)

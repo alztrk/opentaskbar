@@ -466,12 +466,31 @@ internal static class Win32HidTransport
             public readonly DeferredRawEventWaitHandle Handle = handle;
             public readonly nint OverlappedPtr = overlappedPtr;
             public readonly nint BufferPtr = bufferPtr;
-            public RegisteredWaitHandle? Registered;
+            private RegisteredWaitHandle? _registered;
+            private int _callbackCompleted;
             private int _unregistered;
 
-            public void TryUnregister()
+            public void AttachRegistration(RegisteredWaitHandle registered)
             {
-                if (Registered is { } reg && Interlocked.Exchange(ref _unregistered, 1) == 0)
+                Volatile.Write(ref _registered, registered);
+                // If the callback already ran before AttachRegistration completed, unregister now.
+                if (Volatile.Read(ref _callbackCompleted) != 0)
+                    TryUnregister();
+            }
+
+            public void CompleteAndFree()
+            {
+                Volatile.Write(ref _callbackCompleted, 1);
+                TryUnregister();
+                try { Handle.Dispose(); } catch { }
+                CloseHandle(Handle.DangerousRawHandle);
+                Marshal.FreeHGlobal(OverlappedPtr);
+                Marshal.FreeHGlobal(BufferPtr);
+            }
+
+            private void TryUnregister()
+            {
+                if (Volatile.Read(ref _registered) is { } reg && Interlocked.Exchange(ref _unregistered, 1) == 0)
                 {
                     try { reg.Unregister(null); } catch { }
                 }
@@ -486,27 +505,11 @@ internal static class Win32HidTransport
                 var state = new DeferredCleanupState(waitHandle, overlappedPtr, bufferPtr);
                 var registered = ThreadPool.RegisterWaitForSingleObject(
                     waitHandle,
-                    static (rawState, _) =>
-                    {
-                        var ctx = (DeferredCleanupState)rawState!;
-                        ctx.TryUnregister();
-                        try { ctx.Handle.Dispose(); } catch { }
-                        CloseHandle(ctx.Handle.DangerousRawHandle);
-                        Marshal.FreeHGlobal(ctx.OverlappedPtr);
-                        Marshal.FreeHGlobal(ctx.BufferPtr);
-                    },
+                    static (rawState, _) => ((DeferredCleanupState)rawState!).CompleteAndFree(),
                     state,
                     Timeout.Infinite,
                     executeOnlyOnce: true);
-                state.Registered = registered;
-                try
-                {
-                    if (waitHandle.WaitOne(0))
-                        state.TryUnregister();
-                }
-                catch
-                {
-                }
+                state.AttachRegistration(registered);
             }
             catch
             {

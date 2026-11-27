@@ -187,13 +187,7 @@ public sealed class BluetoothBatteryWidget : DockWidget
         CancelDeviceChangeDebounce();
     }
 
-    protected override void OnDisposed()
-    {
-        _disposed = true;
-        _activeFlyoutPanel = null;
-        DetachDeviceChangeHook();
-        CancelDeviceChangeDebounce();
-    }
+    protected override void OnDisposed() => _disposed = true;
 
     protected override void OnSettingsChanged()
     {
@@ -920,7 +914,7 @@ public sealed class BluetoothBatteryWidget : DockWidget
 
     public override UIElement? BuildHoverFlyoutContent()
     {
-        var panel = new StackPanel { Width = 276 };
+        var panel = new StackPanel { Width = 296 };
         _activeFlyoutPanel = new WeakReference<StackPanel>(panel);
         PopulateHoverFlyoutPanel(panel);
         return panel;
@@ -930,32 +924,19 @@ public sealed class BluetoothBatteryWidget : DockWidget
     {
         panel.Children.Clear();
 
-        var headerGrid = new Grid { Margin = new Thickness(0, 0, 0, 4) };
-        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-        var heading = DockFlyout.Heading(UiText.Get("WidgetBluetoothBattery"));
-        heading.Margin = new Thickness(4, 0, 4, 0);
-        heading.VerticalAlignment = VerticalAlignment.Center;
-        Grid.SetColumn(heading, 0);
-        headerGrid.Children.Add(heading);
-
         var refreshLabel = UiText.Get("WirelessBatteryRefresh");
         var refreshBtn = DockFlyout.FlatButton(
             new TextBlock
             {
                 Text = refreshLabel,
-                FontSize = 10.5,
+                FontSize = 11,
                 FontWeight = FontWeights.SemiBold
             },
             (_, _) => RefreshBatteries(),
             refreshLabel);
         refreshBtn.Padding = new Thickness(7, 3, 7, 3);
         refreshBtn.VerticalAlignment = VerticalAlignment.Center;
-        Grid.SetColumn(refreshBtn, 1);
-        headerGrid.Children.Add(refreshBtn);
-
-        panel.Children.Add(headerGrid);
+        panel.Children.Add(DockFlyout.Header(UiText.Get("WidgetBluetoothBattery"), refreshBtn, bottomMargin: 6));
 
         if (_devices.Count == 0)
         {
@@ -964,7 +945,7 @@ public sealed class BluetoothBatteryWidget : DockWidget
             return;
         }
 
-        var listPanel = new StackPanel { Margin = new Thickness(0, 4, 0, 4) };
+        var listPanel = new StackPanel { Margin = new Thickness(0, 2, 0, 2) };
         foreach (var device in _devices)
         {
             var capturedDevice = device;
@@ -972,8 +953,9 @@ public sealed class BluetoothBatteryWidget : DockWidget
 
             var rowStack = new StackPanel
             {
-                Margin = new Thickness(4, 4, 4, 6),
-                Opacity = device.IsStale ? 0.65 : 1.0
+                Margin = new Thickness(0, 4, 0, 6),
+                Opacity = device.IsStale ? 0.65 : 1.0,
+                ToolTip = string.IsNullOrWhiteSpace(device.SourceLabel) ? device.Name : $"{device.Name} · {device.SourceLabel}"
             };
 
             var itemGrid = new Grid();
@@ -985,72 +967,34 @@ public sealed class BluetoothBatteryWidget : DockWidget
             Grid.SetColumn(icon, 0);
             itemGrid.Children.Add(icon);
 
-            var nameStack = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(7, 0, 6, 0) };
+            var nameStack = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(8, 0, 8, 0) };
 
-            var titleWrap = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            titleWrap.Children.Add(new TextBlock
+            nameStack.Children.Add(new TextBlock
             {
                 Text = device.Name,
-                FontSize = 11.5,
+                FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = (Brush)FindResource("TextPrimary"),
                 TextTrimming = TextTrimming.CharacterEllipsis,
-                MaxWidth = 120,
                 VerticalAlignment = VerticalAlignment.Center
             });
 
-            if (!string.IsNullOrWhiteSpace(device.SourceLabel))
+            var subtitleText = BuildDeviceSubtitle(device);
+            if (device.SecondaryBatteryLevel is >= 0 and <= 100)
             {
-                var sourceBadge = new Border
-                {
-                    CornerRadius = new CornerRadius(4),
-                    Padding = new Thickness(4, 1, 4, 1),
-                    Margin = new Thickness(5, 0, 0, 0),
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Background = (Brush)FindResource("SurfaceSelected")
-                };
-                sourceBadge.Child = new TextBlock
-                {
-                    Text = device.SourceLabel,
-                    FontSize = 9,
-                    FontWeight = FontWeights.SemiBold,
-                    Foreground = (Brush)FindResource("TextSecondary")
-                };
-                titleWrap.Children.Add(sourceBadge);
+                subtitleText += " · " + UiText.Format("WirelessBatterySpareDock", device.SecondaryBatteryLevel.Value);
             }
-            nameStack.Children.Add(titleWrap);
-
-            var subtitleRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 1, 0, 0) };
-            subtitleRow.Children.Add(new TextBlock
+            nameStack.Children.Add(new TextBlock
             {
-                Text = BuildDeviceSubtitle(device),
-                FontSize = 10,
+                Text = subtitleText,
+                FontSize = 11,
+                Margin = new Thickness(0, 1, 0, 0),
+                TextTrimming = TextTrimming.CharacterEllipsis,
                 Foreground = device.IsCharging || (device.IsConnected && !device.IsStale)
                     ? (Brush)FindResource("WidgetAccent")
                     : (Brush)FindResource("TextSecondary")
             });
 
-            if (device.SecondaryBatteryLevel is >= 0 and <= 100)
-            {
-                var spareBadge = new Border
-                {
-                    CornerRadius = new CornerRadius(4),
-                    Padding = new Thickness(4, 0, 4, 0),
-                    Margin = new Thickness(6, 0, 0, 0),
-                    VerticalAlignment = VerticalAlignment.Center,
-                    Background = (Brush)FindResource("SurfaceSelected")
-                };
-                spareBadge.Child = new TextBlock
-                {
-                    Text = UiText.Format("WirelessBatterySpareDock", device.SecondaryBatteryLevel.Value),
-                    FontSize = 9.5,
-                    FontWeight = FontWeights.Medium,
-                    Foreground = (Brush)FindResource("TextPrimary")
-                };
-                subtitleRow.Children.Add(spareBadge);
-            }
-
-            nameStack.Children.Add(subtitleRow);
             Grid.SetColumn(nameStack, 1);
             itemGrid.Children.Add(nameStack);
 

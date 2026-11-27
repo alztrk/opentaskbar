@@ -46,6 +46,20 @@ internal static class SecondaryDockAndInteropChecks
             && !secondary[1].IsForeground,
             "Unpinned running apps must remain included after pinned apps in Z-order.");
 
+        var pickerApp = new DockApp("Editor", PinnedPath) { AppUserModelId = "Editor!App" };
+        TrackedWindow[] pickerWindows =
+        [
+            new(7, "Other monitor", PinnedPath, AppUserModelId: "Editor!App"),
+            new(8, "Same monitor", UnpinnedPath, AppUserModelId: "editor!app"),
+            new(8, "Duplicate", UnpinnedPath, AppUserModelId: "editor!app"),
+            new(9, "Shared host", PinnedPath, AppUserModelId: "Different!App"),
+            new(10, "Unidentified classic window", PinnedPath),
+            new(0, "Invalid window", PinnedPath)
+        ];
+        var ordered = AppWindowPicker.OrderWindows(pickerWindows, pickerApp, 2, handle => handle == 8 ? 2 : 1);
+        Check(ordered.Select(window => window.Handle).SequenceEqual(new nint[] { 8, 7, 10 }),
+            "The picker must prefer the invoking monitor, deduplicate live windows and separate packaged apps sharing one host.");
+
         // PR #163: Shared widget provider requests across mirrored docks.
         var reads = new OpenTaskbar.Widgets.SharedWidgetRequest<string, int>(TimeSpan.FromMinutes(1));
         var pendingRead = new TaskCompletionSource<int>();
@@ -180,6 +194,35 @@ internal static class SecondaryDockAndInteropChecks
         Check(exitChanged && !suppressed && lastPos is null
             && events.SequenceEqual(["show:4", "reposition", "notify:False"]),
             "Exiting fullscreen must invalidate cached HWND_BOTTOM position, show without activation, reposition to HWND_TOPMOST, and notify.");
+
+        // Secondary docks must follow the primary dock's alignment instead of always left-aligning their apps.
+        Check(SecondaryDockWindow.AppsAlignment(DockLayout.Floating, DockPosition.Center, DockContentAlignment.Left)
+                == System.Windows.HorizontalAlignment.Center,
+            "A centered floating dock must center the secondary dock apps.");
+        Check(SecondaryDockWindow.AppsAlignment(DockLayout.Floating, DockPosition.Left, DockContentAlignment.Center)
+                == System.Windows.HorizontalAlignment.Left,
+            "A left floating dock must left-align the secondary dock apps.");
+        Check(SecondaryDockWindow.AppsAlignment(DockLayout.FullWidth, DockPosition.Center, DockContentAlignment.Right)
+                == System.Windows.HorizontalAlignment.Right,
+            "A full-width dock must use its content alignment for the secondary dock apps.");
+
+        // A full-screen video on a secondary display must keep that display's dock hidden after focus moves to
+        // another monitor; previously only the foreground window was checked, so the dock covered the video.
+        const nint videoMonitor = 0x100;
+        const nint otherMonitor = 0x200;
+        const nint videoWindow = 0x300;
+        const nint focusedWindowElsewhere = 0x400;
+        bool ForegroundFullScreen(nint window, nint monitor) => window == videoWindow && monitor == videoMonitor;
+        bool AnyFullScreen(nint monitor) => monitor == videoMonitor;
+        bool NoFullScreen(nint _) => false;
+        Check(SecondaryDockWindow.ShouldHideForFullScreen(videoMonitor, focusedWindowElsewhere, ForegroundFullScreen, AnyFullScreen),
+            "A secondary dock must stay hidden behind a full-screen window on its display when another display has focus.");
+        Check(SecondaryDockWindow.ShouldHideForFullScreen(videoMonitor, videoWindow, ForegroundFullScreen, NoFullScreen),
+            "A full-screen foreground window on the dock's display must hide the secondary dock even if the monitor scan skips it.");
+        Check(!SecondaryDockWindow.ShouldHideForFullScreen(otherMonitor, videoWindow, ForegroundFullScreen, AnyFullScreen),
+            "A full-screen window on another display must not hide this secondary dock.");
+        Check(!SecondaryDockWindow.ShouldHideForFullScreen(0, videoWindow, ForegroundFullScreen, AnyFullScreen),
+            "A secondary dock without a monitor handle must never report full-screen suppression.");
 
         // Bug #11: Own-process focus (menus / flyouts / keyboard nav) must preserve the external foreground handle,
         // while a genuine empty foreground (0) or new external window must still update it.

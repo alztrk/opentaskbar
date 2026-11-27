@@ -63,7 +63,6 @@ internal static class WidgetViewChecks
             checks += NetSpeedChecks.Run(app);
             checks += BluetoothBatteryChecks.Run(app);
             checks += SystemStatsAvailabilityChecks.Run(app);
-            checks += V19WidgetRedesignChecks.Run(app);
 
             // Weather pickers use a custom ComboBox template: glyph in its own column and live filtering.
             {
@@ -81,6 +80,17 @@ internal static class WidgetViewChecks
                     .Cast<object>().ToArray();
                 Check(visible.Length == 1 && Equals(visible[0], "Turkey"),
                     "SearchableComboBox must filter its items while the user types.");
+                picker.IsDropDownOpen = false;
+
+                // City lists hold thousands of names; a non-virtualized list rebuilt on every keystroke hung Settings (#176).
+                var cities = Enumerable.Range(0, 5000).Select(i => $"City {i:D4}").ToList();
+                picker.ItemsSource = cities;
+                picker.IsDropDownOpen = true;
+                ((System.Windows.Controls.Primitives.Popup)picker.Template.FindName("PART_Popup", picker)).Child.UpdateLayout();
+                var realized = Enumerable.Range(0, picker.Items.Count)
+                    .Count(index => picker.ItemContainerGenerator.ContainerFromIndex(index) is not null);
+                Check(picker.Items.Count == cities.Count && realized is > 0 and < 100,
+                    $"SearchableComboBox must virtualize its dropdown items (items={picker.Items.Count}, realized={realized}).");
                 picker.IsDropDownOpen = false;
                 host.Close();
             }
@@ -297,7 +307,8 @@ internal static class WidgetViewChecks
             details.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Check(detailRequests == 2, "The value area must open details independently of the quick action.");
             Check(Descendants<TextBox>(timerTile).Count() == 0, "The dock tile must contain no duration form.");
-            Check(Descendants<Button>(timerTile).Count() == 2, "The dock tile must offer one detail target and one quick action.");
+            Check(Descendants<Button>(timerTile).Count(button => button.Visibility == Visibility.Visible) == 2,
+                "The dock tile must offer one detail target and one quick action.");
             Check(action.ActualWidth >= 36 && action.ActualHeight >= 36, "The quick action must keep its pointer target.");
             Check(timerHost.DesiredSize.Width < 200 && timerHost.DesiredSize.Height < 60, "The compact timer must fit within the dock shelf.");
 
@@ -534,9 +545,15 @@ internal static class WidgetViewChecks
                     Check(SelectedTag("AutoHideBox") == "Disabled", "Auto-hide dropdown must reflect the default mode.");
                     Check(SelectedTag("PositionBox") == "Center", "Dock alignment dropdown must reflect the default position.");
                     Check(SelectedTag("DockSurfaceBox") == "Glass", "Surface dropdown must reflect the loaded material.");
+                    var islandEnabled = RequiredName<CheckBox>(settings, "DynamicIslandEnabledToggle");
+                    Check(islandEnabled.IsChecked == false,
+                        "The optional Dynamic Island must be disabled for a fresh settings profile.");
                     Check(SelectedTag("DynamicIslandVisibilityBox") == DynamicIslandVisibilityMode.Always.ToString()
                         && RequiredName<CheckBox>(settings, "DynamicIslandHideFullscreenToggle").IsChecked == true,
                         "Dynamic Island visibility controls must reflect the stored defaults.");
+                    islandEnabled.IsChecked = true;
+                    Check(preferences.Current.DynamicIslandEnabled,
+                        "Enabling the Dynamic Island setting must save immediately.");
                     var islandVisibility = RequiredName<ComboBox>(settings, "DynamicIslandVisibilityBox");
                     var hideIslandFullscreen = RequiredName<CheckBox>(settings, "DynamicIslandHideFullscreenToggle");
                     islandVisibility.SelectedIndex = 1;
@@ -587,6 +604,21 @@ internal static class WidgetViewChecks
                     Check(clockOption.IsSettingsExpanded, "Clicking the widget row must expand it inline.");
                     Check(RequiredName<FrameworkElement>(settings, "ClockOptions").Visibility == Visibility.Visible,
                         "An expanded clock row must show its native settings.");
+                    var islandPlacement = Descendants<ComboBox>(clockCard).Single(combo =>
+                        AutomationProperties.GetName(combo) == UiText.Get("DynamicIslandWidgetLocation"));
+                    Check(string.Equals(islandPlacement.SelectedValue as string, "dock", StringComparison.OrdinalIgnoreCase)
+                        && clockOption.DynamicIslandPlacementChoices.Any(choice => choice.Value == DockSettings.DynamicIslandAllDisplays),
+                        "Every widget settings drawer must expose dock, display, and all-display locations.");
+                    islandPlacement.SelectedValue = DockSettings.DynamicIslandAllDisplays;
+                    Check(preferences.Current.DynamicIslandPlacements?.GetValueOrDefault(clockOption.Id)
+                            == DockSettings.DynamicIslandAllDisplays,
+                        "Choosing an island display for a widget must save its exclusive location.");
+                    islandPlacement.SelectedValue = "dock";
+                    Check(preferences.Current.DynamicIslandPlacements?.ContainsKey(clockOption.Id) != true,
+                        "Moving a widget back to the dock must remove its island assignment.");
+                    islandEnabled.IsChecked = false;
+                    Check(!preferences.Current.DynamicIslandEnabled,
+                        "Disabling the optional Dynamic Island must save immediately.");
 
                     var secondsToggle = RequiredName<CheckBox>(settings, "ClockSecondsToggle");
                     secondsToggle.IsChecked = true;
@@ -624,16 +656,16 @@ internal static class WidgetViewChecks
 
                     // Categories are section labels with their widgets underneath, not tabs/filters.
                     Layout(settings);
-                    Check(selections.Length == 23, "All 23 widgets must be listed.");
+                    Check(selections.Length == 22, "All 22 widgets must be listed.");
                     Check(selections.Select(option => option.CategoryEnum).Distinct().OrderBy(c => c).SequenceEqual(
                             Enum.GetValues<DockWidgetCategory>().OrderBy(c => c)),
                         "All five widget categories must be represented.");
-                    Check(selections.Count(option => option.CategoryEnum == DockWidgetCategory.AiQuotas) == 8,
-                        "The AI category must contain all 8 AI widgets.");
+                    Check(selections.Count(option => option.CategoryEnum == DockWidgetCategory.AiQuotas) == 7,
+                        "The AI category must contain all 7 AI widgets.");
                     Check(selections.Count(option => option.CategoryEnum == DockWidgetCategory.SystemAndHardware) == 5,
                         "The system category must contain all 5 system widgets.");
                     var allCards = Descendants<WidgetCatalogItem>(list).ToArray();
-                    Check(allCards.Length == 23, "All 23 widgets must be visible at once without any category filter.");
+                    Check(allCards.Length == 22, "All 22 widgets must be visible at once without any category filter.");
                     Check(settings.FindName("WidgetCategoryAiRadio") is null,
                         "Widget categories must be labels, not a segmented tab filter.");
 
@@ -681,6 +713,7 @@ internal static class WidgetViewChecks
                     if (File.Exists(settingsPath)) File.Delete(settingsPath);
                 }
             }
+            checks += V19WidgetRedesignChecks.Run(app);
             return checks;
         }
         finally

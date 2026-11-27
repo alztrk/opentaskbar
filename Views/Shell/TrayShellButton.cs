@@ -76,7 +76,12 @@ public sealed class TrayShellButton : Button
         Click += Button_Click;
         // Warm the list while the pointer approaches, so a click can show it at once.
         MouseEnter += (_, _) => _ = RefreshAppsQuietlyAsync();
-        Loaded += (_, _) => SubscribeSharedSnapshot();
+        Loaded += (_, _) =>
+        {
+            SubscribeSharedSnapshot();
+            UiText.Current.PropertyChanged -= UiText_PropertyChanged;
+            UiText.Current.PropertyChanged += UiText_PropertyChanged;
+        };
         Unloaded += (_, _) =>
         {
             UiText.Current.PropertyChanged -= UiText_PropertyChanged;
@@ -152,7 +157,10 @@ public sealed class TrayShellButton : Button
         TerminateApplicationRequested += terminateApplication;
     }
 
-    private void Report(string? message) => _reportError?.Invoke(message ?? string.Empty);
+    private void Report(string? message)
+    {
+        if (!string.IsNullOrEmpty(message)) _reportError?.Invoke(message);
+    }
 
     /// <summary>
     /// One enumeration at a time. The default reader is the shared <see cref="TrayIconSource"/>; a test seam reader

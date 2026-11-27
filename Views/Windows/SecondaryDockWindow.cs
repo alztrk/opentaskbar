@@ -23,12 +23,14 @@ public sealed class SecondaryDockWindow : Window
     private const uint AbmSetPos = 0x00000003;
     private const uint AbeBottom = 3;
 
-    private sealed class AppSlot(string path, BitmapSource? icon, nint targetHandle, string title, bool isForeground, System.Windows.Shapes.Ellipse dot)
+    private sealed class AppSlot(string path, BitmapSource? icon, nint targetHandle, string title, string? appUserModelId,
+        bool isForeground, System.Windows.Shapes.Ellipse dot)
     {
         public string Path { get; } = path;
         public BitmapSource? Icon { get; } = icon;
         public nint TargetHandle { get; set; } = targetHandle;
         public string Title { get; set; } = title;
+        public string? AppUserModelId { get; set; } = appUserModelId;
         public bool IsForeground { get; set; } = isForeground;
         public System.Windows.Shapes.Ellipse Dot { get; } = dot;
     }
@@ -43,7 +45,6 @@ public sealed class SecondaryDockWindow : Window
     private readonly RunningAppIconCache _icons;
     private readonly List<AppSlot> _slots = [];
     private SecondaryAppScope _scope;
-    private bool _showWidgets;
     private double _shelfHeight = DockMetrics.ShelfHeight;
     private string _lastClockText = string.Empty;
     private nint _handle;
@@ -59,7 +60,6 @@ public sealed class SecondaryDockWindow : Window
         _monitor = monitor;
         _icons = iconCache;
         _scope = scope;
-        _showWidgets = showWidgets;
         Title = UiText.Get("SecondaryDockTitle");
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
@@ -88,10 +88,14 @@ public sealed class SecondaryDockWindow : Window
         _widgetsArea.Children.Add(_quickSettingsButton);
         _widgetsArea.Children.Add(_clockButton);
 
-        var row = new DockPanel { LastChildFill = false };
-        DockPanel.SetDock(_widgetsArea, Dock.Right);
-        row.Children.Add(_widgetsArea);
+        // One cell: the widgets stay at the right edge while the app strip follows the primary dock's alignment,
+        // so a centered dock gives centered icons on every display instead of a left-aligned strip.
+        _widgetsArea.HorizontalAlignment = HorizontalAlignment.Right;
+        _apps.HorizontalAlignment = HorizontalAlignment.Center;
+        _widgetsArea.SizeChanged += (_, _) => UpdateAppsMargin();
+        var row = new Grid();
         row.Children.Add(_apps);
+        row.Children.Add(_widgetsArea);
         var surface = new Border
         {
             Child = row,
@@ -283,12 +287,41 @@ public sealed class SecondaryDockWindow : Window
         RegisterAppBar();
     }
 
-    public void Configure(SecondaryAppScope scope, bool showWidgets)
+    public void Configure(SecondaryAppScope scope, bool showWidgets, HorizontalAlignment appsAlignment = HorizontalAlignment.Center)
     {
         _scope = scope;
-        _showWidgets = showWidgets;
         _quickSettingsButton.Visibility = showWidgets ? Visibility.Visible : Visibility.Collapsed;
+        _apps.HorizontalAlignment = appsAlignment;
+        UpdateAppsMargin();
     }
+
+    /// <summary>
+    /// Maps the primary dock's placement to the secondary app strip: a floating dock uses its screen position,
+    /// a full-width dock uses its content alignment.
+    /// </summary>
+    internal static HorizontalAlignment AppsAlignment(DockLayout layout, DockPosition position, DockContentAlignment contentAlignment)
+    {
+        var side = layout == DockLayout.FullWidth
+            ? contentAlignment switch
+            {
+                DockContentAlignment.Left => DockPosition.Left,
+                DockContentAlignment.Right => DockPosition.Right,
+                _ => DockPosition.Center
+            }
+            : position;
+        return side switch
+        {
+            DockPosition.Left => HorizontalAlignment.Left,
+            DockPosition.Right => HorizontalAlignment.Right,
+            _ => HorizontalAlignment.Center
+        };
+    }
+
+    // Right-aligned apps end where the widgets begin rather than underneath them.
+    private void UpdateAppsMargin() =>
+        _apps.Margin = _apps.HorizontalAlignment == HorizontalAlignment.Right
+            ? new Thickness(0, 0, _widgetsArea.ActualWidth + 8, 0)
+            : new Thickness(0);
 
     /// <summary>Current shelf in DIPs, derived from the active size + scale profile.</summary>
     public double ShelfHeight => _shelfHeight;
@@ -339,7 +372,8 @@ public sealed class SecondaryDockWindow : Window
             mine.Add((app.ExecutablePath, windows, _icons.Get(app.ExecutablePath, windows[0].Handle)));
         }
         // Captionless windows covering the display (games, video) hide this dock like the main one.
-        _fullScreen = foreground != 0 && MonitorFromWindow(foreground, 2) == _monitor && IsFullScreen(foreground);
+        _fullScreen = ShouldHideForFullScreen(_monitor, foreground, IsFullScreenOnMonitor,
+            TaskbarReplacementSession.IsAnyFullScreenOnMonitor);
         ApplyVisibility();
 
         var icons = mine.Select(entry => entry.Icon).ToList();
@@ -367,6 +401,7 @@ public sealed class SecondaryDockWindow : Window
                 var active = entry.Windows.FirstOrDefault(window => window.Handle == foreground) ?? first;
                 var isForeground = active.Handle == foreground;
                 slot.TargetHandle = active.Handle;
+                slot.AppUserModelId = first.AppUserModelId;
                 if (!string.Equals(slot.Title, first.Title, StringComparison.Ordinal))
                 {
                     slot.Title = first.Title;
@@ -406,8 +441,15 @@ public sealed class SecondaryDockWindow : Window
             var cell = new StackPanel();
             cell.Children.Add(image);
             cell.Children.Add(dot);
-            var slot = new AppSlot(path, icon, active.Handle, first.Title, isForeground, dot);
-            var button = DockFlyout.FlatButton(cell, (_, _) => NativeWindowTracker.ToggleActivation(slot.TargetHandle, slot.Path), first.Title);
+            var slot = new AppSlot(path, icon, active.Handle, first.Title, first.AppUserModelId, isForeground, dot);
+            var button = DockFlyout.FlatButton(cell, (sender, _) =>
+            {
+                var app = new DockApp(slot.Title, slot.Path) { AppUserModelId = slot.AppUserModelId, Icon = slot.Icon };
+                if (sender is FrameworkElement anchor
+                    && Application.Current?.MainWindow is MainWindow primary
+                    && primary.TryShowWindowPicker(app, anchor)) return;
+                NativeWindowTracker.ToggleActivation(slot.TargetHandle, slot.Path);
+            }, first.Title);
             button.Padding = new Thickness(6, 2, 6, 0);
             System.Windows.Automation.AutomationProperties.SetName(button, first.Title);
             _slots.Add(slot);
@@ -415,8 +457,22 @@ public sealed class SecondaryDockWindow : Window
         }
     }
 
-    private bool IsFullScreen(nint window)
-        => IsFullScreenOnMonitor(window, _monitor);
+    /// <summary>
+    /// True when a full-screen window covers this dock's display. Checking only the foreground window is not
+    /// enough: a full-screen video stays on its display after focus moves to another monitor, and the topmost
+    /// dock would then be drawn over it. The foreground check still covers full-screen windows the monitor scan
+    /// skips (for example games without a taskbar button).
+    /// </summary>
+    internal static bool ShouldHideForFullScreen(
+        nint monitor,
+        nint foreground,
+        Func<nint, nint, bool> isForegroundFullScreenOnMonitor,
+        Func<nint, bool> isAnyFullScreenOnMonitor)
+    {
+        if (monitor == 0) return false;
+        if (foreground != 0 && isForegroundFullScreenOnMonitor(foreground, monitor)) return true;
+        return isAnyFullScreenOnMonitor(monitor);
+    }
 
     internal static bool IsWindowOnMonitor(nint window, nint monitor)
     {
@@ -467,11 +523,6 @@ public sealed class SecondaryDockWindow : Window
         public NativeRect rc;
         public nint lParam;
     }
-    private delegate bool MonitorEnumProc(nint monitor, nint hdc, nint rect, nint data);
-
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool EnumDisplayMonitors(nint hdc, nint clip, MonitorEnumProc callback, nint data);
     [DllImport("user32.dll", EntryPoint = "GetMonitorInfoW")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetMonitorInfo(nint monitor, ref MonitorInfo info);

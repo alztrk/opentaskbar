@@ -51,4 +51,11 @@ public static class RestoreCoordinator
         if (!TaskbarReplacementSession.HasPendingRecovery) return null;
         return Restore(reason);
     }
+
+    /// <summary>
+    /// The out-of-process watchdog must stay armed until both restore paths succeeded and the journal is gone.
+    /// #173: signalling a clean exit before verification can leave the taskbar hidden after a restart.
+    /// </summary>
+    internal static bool CanSignalCleanExit(string? restoreError, bool journalPending) =>
+        restoreError is null && !journalPending;
 }

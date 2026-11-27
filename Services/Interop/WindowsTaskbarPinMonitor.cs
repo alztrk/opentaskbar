@@ -33,11 +33,11 @@ public sealed class WindowsTaskbarPinMonitor : IDisposable
             var watchKey = Registry.CurrentUser.OpenSubKey(TaskbandKey);
             if (watchKey is null) return;
             var changeEvent = new AutoResetEvent(false);
+            _key = watchKey;
+            _changeEvent = changeEvent;
             var status = RegNotifyChangeKeyValue(watchKey.Handle, true, RegistryNotifyFilter,
                 changeEvent.SafeWaitHandle, true);
             if (status != 0) throw new Win32Exception(status);
-            _key = watchKey;
-            _changeEvent = changeEvent;
             _waitHandle = ThreadPool.RegisterWaitForSingleObject(changeEvent, OnChanged, null,
                 Timeout.Infinite, executeOnlyOnce: false);
         }
@@ -56,16 +56,25 @@ public sealed class WindowsTaskbarPinMonitor : IDisposable
         {
             using var key = Registry.CurrentUser.OpenSubKey(TaskbandKey);
             current = ReadAumids(key);
+            string[] added;
+            string[] removed;
             lock (_gate)
             {
                 if (_disposed) return;
-                var added = current.Except(_aumids, StringComparer.OrdinalIgnoreCase).ToArray();
-                var removed = _aumids.Except(current, StringComparer.OrdinalIgnoreCase).ToArray();
+                added = current.Except(_aumids, StringComparer.OrdinalIgnoreCase).ToArray();
+                removed = _aumids.Except(current, StringComparer.OrdinalIgnoreCase).ToArray();
                 _aumids = current;
-                foreach (var aumid in added) RaisePinChanged(new(TaskbarPinChangeKind.Pinned, aumid));
-                foreach (var aumid in removed) RaisePinChanged(new(TaskbarPinChangeKind.Unpinned, aumid));
             }
-            PinsChanged?.Invoke(this, EventArgs.Empty);
+            foreach (var aumid in added) RaisePinChanged(new(TaskbarPinChangeKind.Pinned, aumid));
+            foreach (var aumid in removed) RaisePinChanged(new(TaskbarPinChangeKind.Unpinned, aumid));
+            try
+            {
+                PinsChanged?.Invoke(this, EventArgs.Empty);
+            }
+            catch (Exception ex)
+            {
+                AppLog.Warning($"Taskbar pin monitor subscriber failed: {ex.Message}");
+            }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {

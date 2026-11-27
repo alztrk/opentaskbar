@@ -37,20 +37,7 @@ public partial class MainWindow
         ApplyExtrasSettings();
     }
 
-    private static readonly Brush StackTileBrush = CreateFrozenStackBrush(Color.FromArgb(0x35, 0xFF, 0xFF, 0xFF));
-    private static readonly Brush StackTileStroke = CreateFrozenStackBrush(Color.FromArgb(0x55, 0xFF, 0xFF, 0xFF));
     private static readonly Brush CardShadowBrush1 = CreateFrozenStackBrush(Color.FromArgb(0x40, 0x00, 0x00, 0x00));
-    private static readonly Brush CardShadowBrush2 = CreateFrozenStackBrush(Color.FromArgb(0x55, 0x00, 0x00, 0x00));
-    private static readonly Brush CardDeckBackBrush = CreateFrozenStackBrush(Color.FromArgb(0x35, 0x1E, 0x24, 0x30));
-    private static readonly Brush CardDeckBackStroke = CreateFrozenStackBrush(Color.FromArgb(0x35, 0xFF, 0xFF, 0xFF));
-    private static readonly Brush CardDeckMidBrush = CreateFrozenStackBrush(Color.FromArgb(0x3C, 0xFF, 0xFF, 0xFF));
-    private static readonly Brush CardDeckMidStroke = CreateFrozenStackBrush(Color.FromArgb(0x50, 0xFF, 0xFF, 0xFF));
-    private static readonly Brush CardDeckFrontBrush = CreateFrozenStackBrush(Color.FromArgb(0x50, 0xFF, 0xFF, 0xFF));
-    private static readonly Brush CardDeckFrontStroke = CreateFrozenStackBrush(Color.FromArgb(0x75, 0xFF, 0xFF, 0xFF));
-    private static readonly Brush BadgeBackdropBrush = CreateFrozenStackBrush(Color.FromArgb(0xEB, 0x0F, 0x17, 0x2A));
-    private static readonly Brush BadgeStrokeBrush = CreateFrozenStackBrush(Color.FromArgb(0x60, 0x38, 0xBD, 0xF8));
-    private static readonly Brush BadgeIconBrush = CreateFrozenStackBrush(Color.FromArgb(0xFF, 0x38, 0xBD, 0xF8));
-
     private static readonly Brush FolderTabBrush = CreateFrozenStackBrush(Color.FromArgb(0xFF, 0x02, 0x84, 0xC7));
     private static readonly Brush FolderBackBrush = CreateFrozenStackBrush(Color.FromArgb(0xFF, 0x03, 0x69, 0xA1));
     private static readonly Brush FolderPaperBrush = CreateFrozenStackBrush(Color.FromArgb(0xD8, 0xF0, 0xF9, 0xFF));
@@ -117,15 +104,6 @@ public partial class MainWindow
     private IReadOnlyList<string> ConfiguredStackFolders() => _preferences.Current.StackFolders ?? [DownloadsFolder];
 
     private int ExtraButtonCount => _stacks.Count + (RecycleBinButton.Visibility == Visibility.Visible ? 1 : 0);
-
-    private static readonly Geometry FolderBadgeGeometry = CreateFrozenGeometry("M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2z");
-
-    private static Geometry CreateFrozenGeometry(string pathData)
-    {
-        var geom = Geometry.Parse(pathData);
-        geom.Freeze();
-        return geom;
-    }
 
     private static bool IsDownloadsFolder(string? path)
     {

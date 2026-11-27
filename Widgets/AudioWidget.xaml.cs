@@ -62,10 +62,13 @@ public partial class AudioWidget : DockWidget
 
     protected override void OnCompactChanged(bool compact) => ApplyDensityLayout();
     protected override void OnHoverExpandedChanged(bool expanded) => ApplyDensityLayout();
+    protected override void OnDynamicIslandChanged(bool dynamicIsland) => ApplyDensityLayout();
 
     private void ApplyDensityLayout()
     {
         var compact = IsCompact && !IsHoverExpanded;
+        ComboButton.Visibility = IsDynamicIsland ? Visibility.Collapsed : Visibility.Visible;
+        IslandPanel.Visibility = IsDynamicIsland ? Visibility.Visible : Visibility.Collapsed;
         VolumeText.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         OutputIcon.Margin = compact ? new Thickness(0) : new Thickness(0, 0, 7, 0);
         UpdateDeviceTooltip();
@@ -83,7 +86,7 @@ public partial class AudioWidget : DockWidget
 
     public UIElement BuildFlyoutContent()
     {
-        var container = new Border { Width = 314 };
+        var container = new Border { Width = 296 };
         _flyoutContainer = container;
         container.Unloaded += (_, _) =>
         {
@@ -109,24 +112,16 @@ public partial class AudioWidget : DockWidget
         ReleaseAppSessions();
         var root = new StackPanel();
 
-        // Top title bar
-        var title = new TextBlock
-        {
-            Text = UiText.Get("WidgetAudio"),
-            FontWeight = FontWeights.Bold,
-            FontSize = 12.5,
-            Margin = new Thickness(0, 0, 0, 10)
-        };
-        title.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
-        root.Children.Add(title);
+        // Unified top header
+        root.Children.Add(DockFlyout.Header(UiText.Get("WidgetAudio")));
 
         // 1. Output section (vertical)
         root.Children.Add(BuildOutputSection());
-        root.Children.Add(CreateSectionDivider());
+        root.Children.Add(DockFlyout.Divider(11));
 
         // 2. Input section (vertical, stacked directly below Output)
         root.Children.Add(BuildInputSection());
-        root.Children.Add(CreateSectionDivider());
+        root.Children.Add(DockFlyout.Divider(11));
 
         // 3. Applications section
         root.Children.Add(BuildApplicationsSection());
@@ -136,160 +131,106 @@ public partial class AudioWidget : DockWidget
 
     private StackPanel BuildOutputSection()
     {
-        var section = new StackPanel();
-        var outDevices = _monitor?.GetPlaybackDevices() ?? [];
-        var activeOutDev = outDevices.FirstOrDefault(d => d.IsDefault) ?? (outDevices.Count > 0 ? outDevices[0] : null);
-        var hasOutDevice = _monitor?.HasDevice == true;
-        var outLevel = hasOutDevice ? (int)Math.Round(_monitor!.Volume * 100) : 0;
-        var outMuted = _monitor?.Muted == true;
+        var devices = _monitor?.GetPlaybackDevices() ?? [];
+        var active = devices.FirstOrDefault(d => d.IsDefault) ?? (devices.Count > 0 ? devices[0] : null);
+        var hasDevice = _monitor?.HasDevice == true;
+        var level = hasDevice ? (int)Math.Round(_monitor!.Volume * 100) : 0;
+        var muted = _monitor?.Muted == true;
+        var headingIconKey = IsHeadphoneDevice(active?.Name) ? "IconHeadphones" : "IconVolume";
+        var muteIconKey = muted || level == 0 ? "IconVolumeMute" : level < 50 ? "IconVolumeLow" : "IconVolume";
 
-        // Heading row: icon + "Output" + live percentage
-        var headingRow = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
-        var outLevelText = new TextBlock
-        {
-            Text = hasOutDevice ? (outMuted ? "0%" : UiText.Format("Percent", outLevel)) : "—",
-            FontSize = 11.5,
-            FontWeight = FontWeights.SemiBold,
-            VerticalAlignment = VerticalAlignment.Center,
-            Typography = { NumeralAlignment = FontNumeralAlignment.Tabular }
-        };
-        outLevelText.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
-        DockPanel.SetDock(outLevelText, Dock.Right);
-        headingRow.Children.Add(outLevelText);
-
-        var headingLeft = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        var headingIcon = new ContentControl
-        {
-            Width = 15,
-            Height = 15,
-            Content = FindResource(IsHeadphoneDevice(activeOutDev?.Name) ? "IconHeadphones" : "IconVolume"),
-            Margin = new Thickness(0, 0, 7, 0),
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        headingIcon.SetResourceReference(StyleProperty, "WidgetIcon");
-        headingIcon.SetResourceReference(ForegroundProperty, "TextSecondary");
-
-        var headingLabel = new TextBlock
-        {
-            Text = UiText.Get("AudioOutput"),
-            FontSize = 12,
-            FontWeight = FontWeights.SemiBold,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        headingLabel.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
-        headingLeft.Children.Add(headingIcon);
-        headingLeft.Children.Add(headingLabel);
-        headingRow.Children.Add(headingLeft);
-        section.Children.Add(headingRow);
-
-        // Control row: single-chevron ComboBox selector + mute button
-        var controlRow = new Grid { Margin = new Thickness(0, 0, 0, 8) };
-        controlRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        controlRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-        var outCombo = new ComboBox
-        {
-            IsEnabled = outDevices.Count > 0,
-            Margin = new Thickness(0, 0, 8, 0)
-        };
-        outCombo.SetResourceReference(StyleProperty, "WidgetComboBox");
-        AutomationProperties.SetName(outCombo, UiText.Get("AudioOutputDevices"));
-
-        if (outDevices.Count == 0)
-        {
-            outCombo.Items.Add(new ComboBoxItem { Content = UiText.Get("NoAudioDevice"), IsSelected = true });
-        }
-        else
-        {
-            var selectedIdx = 0;
-            for (var i = 0; i < outDevices.Count; i++)
+        return BuildEndpointSection(
+            devices, active, hasDevice, level, muted,
+            headingIconKey, "AudioOutput", "AudioOutputDevices", "NoAudioDevice", muteIconKey, "MuteToggle",
+            onDeviceSelected: devId =>
             {
-                var dev = outDevices[i];
-                outCombo.Items.Add(new ComboBoxItem { Content = dev.Name, Tag = dev.Id });
-                if (dev.IsDefault) selectedIdx = i;
-            }
-            outCombo.SelectedIndex = selectedIdx;
-        }
-
-        outCombo.SelectionChanged += (_, _) =>
-        {
-            if (_monitor is null || outCombo.SelectedItem is not ComboBoxItem { Tag: string devId }) return;
-            if (activeOutDev is not null && string.Equals(activeOutDev.Id, devId, StringComparison.Ordinal)) return;
-            _monitor.SelectDefaultDevice(devId);
-            _monitor.BindDefaultDevice();
-            Render();
-            if (_flyoutContainer is not null) PopulateFlyout(_flyoutContainer);
-        };
-
-        var outIconKey = outMuted || outLevel == 0 ? "IconVolumeMute" : outLevel < 50 ? "IconVolumeLow" : "IconVolume";
-        var outMuteIcon = new ContentControl { Width = 15, Height = 15, Content = FindResource(outIconKey) };
-        outMuteIcon.SetResourceReference(StyleProperty, "WidgetIcon");
-
-        var outMuteBtn = CreateMuteButton(outMuteIcon, outMuted, hasOutDevice, UiText.Get("MuteToggle"));
-        outMuteBtn.Click += MuteButton_Click;
-
-        Grid.SetColumn(outCombo, 0);
-        Grid.SetColumn(outMuteBtn, 1);
-        controlRow.Children.Add(outCombo);
-        controlRow.Children.Add(outMuteBtn);
-        section.Children.Add(controlRow);
-
-        // Output volume slider
-        var outSlider = new Slider
-        {
-            Minimum = 0,
-            Maximum = 100,
-            Value = outMuted ? 0 : outLevel,
-            IsEnabled = hasOutDevice,
-            VerticalAlignment = VerticalAlignment.Center
-        };
-        outSlider.SetResourceReference(StyleProperty, "WidgetSlider");
-        AutomationProperties.SetName(outSlider, UiText.Get("AudioOutput"));
-        outSlider.ValueChanged += (_, args) =>
-        {
-            if (_updating || _monitor is null) return;
-            if (_monitor.SetVolume((float)(args.NewValue / 100.0))) Render();
-            else Report(UiText.Get("ErrorVolumeChange"));
-        };
-        section.Children.Add(outSlider);
-
-        _flyoutMuteIcon = outMuteIcon;
-        _flyoutMuteButton = outMuteBtn;
-        _flyoutSlider = outSlider;
-        _flyoutLevelText = outLevelText;
-
-        return section;
+                _monitor!.SelectDefaultDevice(devId);
+                _monitor.BindDefaultDevice();
+                Render();
+                if (_flyoutContainer is not null) PopulateFlyout(_flyoutContainer);
+            },
+            onMuteClick: MuteButton_Click,
+            onVolumeChanged: value =>
+            {
+                if (_updating || _monitor is null) return;
+                if (_monitor.SetVolume(value)) Render();
+                else Report(UiText.Get("ErrorVolumeChange"));
+            },
+            out _flyoutMuteIcon, out _flyoutMuteButton, out _flyoutSlider, out _flyoutLevelText);
     }
 
     private StackPanel BuildInputSection()
     {
-        var section = new StackPanel();
-        var inDevices = _monitor?.GetRecordingDevices() ?? [];
-        var activeInDev = inDevices.FirstOrDefault(d => d.IsDefault) ?? (inDevices.Count > 0 ? inDevices[0] : null);
-        var hasMic = _monitor?.HasMicDevice == true;
-        var micLevel = hasMic ? (int)Math.Round(_monitor!.MicVolume * 100) : 0;
-        var micMuted = _monitor?.MicMuted == true;
+        var devices = _monitor?.GetRecordingDevices() ?? [];
+        var active = devices.FirstOrDefault(d => d.IsDefault) ?? (devices.Count > 0 ? devices[0] : null);
+        var hasDevice = _monitor?.HasMicDevice == true;
+        var level = hasDevice ? (int)Math.Round(_monitor!.MicVolume * 100) : 0;
+        var muted = _monitor?.MicMuted == true;
 
-        // Heading row: mic icon + "Input" + live percentage
+        return BuildEndpointSection(
+            devices, active, hasDevice, level, muted,
+            "IconMic", "AudioInput", "AudioInputDevices", "NoMicDevice", muted ? "IconMicMute" : "IconMic", "MicMuteToggle",
+            onDeviceSelected: devId =>
+            {
+                _monitor!.SelectDefaultDevice(devId);
+                _monitor.BindDefaultMicDevice();
+                RenderMic();
+                Render();
+                if (_flyoutContainer is not null) PopulateFlyout(_flyoutContainer);
+            },
+            onMuteClick: (_, _) =>
+            {
+                if (_monitor is null) return;
+                if (_monitor.ToggleMicMute()) RenderMic();
+            },
+            onVolumeChanged: value =>
+            {
+                if (_updatingMic || _monitor is null) return;
+                if (_monitor.SetMicVolume(value)) RenderMic();
+            },
+            out _flyoutMicMuteIcon, out _flyoutMicMuteButton, out _flyoutMicSlider, out _flyoutMicLevelText);
+    }
+
+    private StackPanel BuildEndpointSection(
+        IReadOnlyList<AudioDeviceInfo> devices,
+        AudioDeviceInfo? activeDevice,
+        bool hasDevice,
+        int level,
+        bool muted,
+        string headingIconKey,
+        string titleKey,
+        string devicesLabelKey,
+        string emptyDeviceKey,
+        string muteIconKey,
+        string muteToggleKey,
+        Action<string> onDeviceSelected,
+        RoutedEventHandler onMuteClick,
+        Action<float> onVolumeChanged,
+        out ContentControl muteIconOut,
+        out Button muteButtonOut,
+        out Slider sliderOut,
+        out TextBlock levelTextOut)
+    {
+        var section = new StackPanel();
         var headingRow = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
-        var micLevelText = new TextBlock
+        var levelText = new TextBlock
         {
-            Text = hasMic ? (micMuted ? "0%" : UiText.Format("Percent", micLevel)) : "—",
+            Text = hasDevice ? (muted ? "0%" : UiText.Format("Percent", level)) : "—",
             FontSize = 11.5,
             FontWeight = FontWeights.SemiBold,
             VerticalAlignment = VerticalAlignment.Center,
             Typography = { NumeralAlignment = FontNumeralAlignment.Tabular }
         };
-        micLevelText.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
-        DockPanel.SetDock(micLevelText, Dock.Right);
-        headingRow.Children.Add(micLevelText);
+        levelText.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
+        DockPanel.SetDock(levelText, Dock.Right);
+        headingRow.Children.Add(levelText);
 
         var headingLeft = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
         var headingIcon = new ContentControl
         {
             Width = 15,
             Height = 15,
-            Content = FindResource("IconMic"),
+            Content = FindResource(headingIconKey),
             Margin = new Thickness(0, 0, 7, 0),
             VerticalAlignment = VerticalAlignment.Center
         };
@@ -298,7 +239,7 @@ public partial class AudioWidget : DockWidget
 
         var headingLabel = new TextBlock
         {
-            Text = UiText.Get("AudioInput"),
+            Text = UiText.Get(titleKey),
             FontSize = 12,
             FontWeight = FontWeights.SemiBold,
             VerticalAlignment = VerticalAlignment.Center
@@ -309,85 +250,70 @@ public partial class AudioWidget : DockWidget
         headingRow.Children.Add(headingLeft);
         section.Children.Add(headingRow);
 
-        // Control row: single-chevron ComboBox selector + mic mute button
         var controlRow = new Grid { Margin = new Thickness(0, 0, 0, 8) };
         controlRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         controlRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
 
-        var inCombo = new ComboBox
+        var combo = new ComboBox
         {
-            IsEnabled = inDevices.Count > 0,
+            IsEnabled = devices.Count > 0,
             Margin = new Thickness(0, 0, 8, 0)
         };
-        inCombo.SetResourceReference(StyleProperty, "WidgetComboBox");
-        AutomationProperties.SetName(inCombo, UiText.Get("AudioInputDevices"));
+        combo.SetResourceReference(StyleProperty, "WidgetComboBox");
+        AutomationProperties.SetName(combo, UiText.Get(devicesLabelKey));
 
-        if (inDevices.Count == 0)
+        if (devices.Count == 0)
         {
-            inCombo.Items.Add(new ComboBoxItem { Content = UiText.Get("NoMicDevice"), IsSelected = true });
+            combo.Items.Add(new ComboBoxItem { Content = UiText.Get(emptyDeviceKey), IsSelected = true });
         }
         else
         {
             var selectedIdx = 0;
-            for (var i = 0; i < inDevices.Count; i++)
+            for (var i = 0; i < devices.Count; i++)
             {
-                var dev = inDevices[i];
-                inCombo.Items.Add(new ComboBoxItem { Content = dev.Name, Tag = dev.Id });
+                var dev = devices[i];
+                combo.Items.Add(new ComboBoxItem { Content = dev.Name, Tag = dev.Id });
                 if (dev.IsDefault) selectedIdx = i;
             }
-            inCombo.SelectedIndex = selectedIdx;
+            combo.SelectedIndex = selectedIdx;
         }
 
-        inCombo.SelectionChanged += (_, _) =>
+        combo.SelectionChanged += (_, _) =>
         {
-            if (_monitor is null || inCombo.SelectedItem is not ComboBoxItem { Tag: string devId }) return;
-            if (activeInDev is not null && string.Equals(activeInDev.Id, devId, StringComparison.Ordinal)) return;
-            _monitor.SelectDefaultDevice(devId);
-            _monitor.BindDefaultMicDevice();
-            RenderMic();
-            Render();
-            if (_flyoutContainer is not null) PopulateFlyout(_flyoutContainer);
+            if (_monitor is null || combo.SelectedItem is not ComboBoxItem { Tag: string devId }) return;
+            if (activeDevice is not null && string.Equals(activeDevice.Id, devId, StringComparison.Ordinal)) return;
+            onDeviceSelected(devId);
         };
 
-        var micIcon = new ContentControl { Width = 15, Height = 15, Content = FindResource(micMuted ? "IconMicMute" : "IconMic") };
-        micIcon.SetResourceReference(StyleProperty, "WidgetIcon");
+        var muteIcon = new ContentControl { Width = 15, Height = 15, Content = FindResource(muteIconKey) };
+        muteIcon.SetResourceReference(StyleProperty, "WidgetIcon");
 
-        var micMuteBtn = CreateMuteButton(micIcon, micMuted, hasMic, UiText.Get("MicMuteToggle"));
-        micMuteBtn.Click += (_, _) =>
-        {
-            if (_monitor is null) return;
-            if (_monitor.ToggleMicMute()) RenderMic();
-        };
+        var muteBtn = CreateMuteButton(muteIcon, muted, hasDevice, UiText.Get(muteToggleKey));
+        muteBtn.Click += onMuteClick;
 
-        Grid.SetColumn(inCombo, 0);
-        Grid.SetColumn(micMuteBtn, 1);
-        controlRow.Children.Add(inCombo);
-        controlRow.Children.Add(micMuteBtn);
+        Grid.SetColumn(combo, 0);
+        Grid.SetColumn(muteBtn, 1);
+        controlRow.Children.Add(combo);
+        controlRow.Children.Add(muteBtn);
         section.Children.Add(controlRow);
 
-        // Input volume slider
-        var micSlider = new Slider
+        var slider = new Slider
         {
             Minimum = 0,
             Maximum = 100,
-            Value = micMuted ? 0 : micLevel,
-            IsEnabled = hasMic,
+            Value = muted ? 0 : level,
+            IsEnabled = hasDevice,
             VerticalAlignment = VerticalAlignment.Center
         };
-        micSlider.SetResourceReference(StyleProperty, "WidgetSlider");
-        AutomationProperties.SetName(micSlider, UiText.Get("AudioInput"));
-        micSlider.ValueChanged += (_, args) =>
-        {
-            if (_updatingMic || _monitor is null) return;
-            if (_monitor.SetMicVolume((float)(args.NewValue / 100.0))) RenderMic();
-        };
-        section.Children.Add(micSlider);
+        slider.SetResourceReference(StyleProperty, "WidgetSlider");
+        AutomationProperties.SetName(slider, UiText.Get(titleKey));
+        slider.ValueChanged += (_, args) => onVolumeChanged((float)(args.NewValue / 100.0));
+        section.Children.Add(slider);
 
-        _flyoutMicMuteIcon = micIcon;
-        _flyoutMicMuteButton = micMuteBtn;
-        _flyoutMicSlider = micSlider;
-        _flyoutMicLevelText = micLevelText;
-
+        muteIconOut = muteIcon;
+        muteButtonOut = muteBtn;
+        sliderOut = slider;
+        levelTextOut = levelText;
         return section;
     }
 
@@ -601,17 +527,6 @@ public partial class AudioWidget : DockWidget
         button.SetResourceReference(BackgroundProperty, muted ? "WidgetDangerHover" : "SurfaceSelected");
     }
 
-    private static Border CreateSectionDivider()
-    {
-        var divider = new Border
-        {
-            Height = 1,
-            Margin = new Thickness(0, 11, 0, 11)
-        };
-        divider.SetResourceReference(Border.BackgroundProperty, "StrokeSubtle");
-        return divider;
-    }
-
     private static bool IsHeadphoneDevice(string? name) => name is not null && (
         name.Contains("headphone", StringComparison.OrdinalIgnoreCase)
         || name.Contains("kulaklık", StringComparison.OrdinalIgnoreCase)
@@ -628,7 +543,6 @@ public partial class AudioWidget : DockWidget
 
     protected override void OnActivated()
     {
-        UiText.Current.PropertyChanged += UiText_PropertyChanged;
         try
         {
             _monitor = AudioEndpointMonitor.AcquireShared();
@@ -652,7 +566,6 @@ public partial class AudioWidget : DockWidget
     {
         _flyout.Close();
         ReleaseAppSessions();
-        UiText.Current.PropertyChanged -= UiText_PropertyChanged;
         if (_monitor is null) return;
         _monitor.VolumeChanged -= Monitor_VolumeChanged;
         _monitor.DefaultDeviceChanged -= Monitor_DefaultDeviceChanged;
@@ -664,11 +577,11 @@ public partial class AudioWidget : DockWidget
 
     protected override void OnDisposed()
     {
-        _flyout.Close();
+        _flyout.Close(restoreFocus: false);
         ReleaseAppSessions();
     }
 
-    private void UiText_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    protected override void OnLanguageChanged()
     {
         Render();
         RenderMic();
@@ -733,7 +646,11 @@ public partial class AudioWidget : DockWidget
         var lang = UiText.Current.Language;
         if (!hasDevice)
         {
-            if (_lastHasDevice == false && _lastLanguage == lang) return;
+            if (_lastHasDevice == false && _lastLanguage == lang)
+            {
+                UpdateIslandOutputSlider(hasDevice: false, level: 0);
+                return;
+            }
             _lastHasDevice = false;
             _lastLanguage = lang;
             _lastLevel = -1;
@@ -744,6 +661,7 @@ public partial class AudioWidget : DockWidget
             if (_flyoutSlider is not null) _flyoutSlider.IsEnabled = false;
             if (_flyoutLevelText is not null) _flyoutLevelText.Text = "—";
             if (_flyoutMuteIcon is not null) _flyoutMuteIcon.Content = FindResource("IconVolumeMute");
+            UpdateIslandOutputSlider(hasDevice: false, level: 0);
             return;
         }
 
@@ -771,6 +689,7 @@ public partial class AudioWidget : DockWidget
         SetOutputIcon(iconKey);
 
         _updating = true;
+        UpdateIslandOutputSlider(hasDevice: true, level: muted ? 0 : level);
         if (_flyoutSlider is not null)
         {
             _flyoutSlider.IsEnabled = true;
@@ -782,6 +701,14 @@ public partial class AudioWidget : DockWidget
             _flyoutMuteIcon.Content = FindResource(iconKey);
         }
         if (_flyoutMuteButton is not null) ApplyMuteButtonVisual(_flyoutMuteButton, muted);
+        _updating = false;
+    }
+
+    private void UpdateIslandOutputSlider(bool hasDevice, int level)
+    {
+        _updating = true;
+        IslandOutputSlider.IsEnabled = hasDevice;
+        IslandOutputSlider.Value = level;
         _updating = false;
     }
 
@@ -802,6 +729,13 @@ public partial class AudioWidget : DockWidget
     private void ComboButton_Click(object sender, RoutedEventArgs e)
     {
         _flyout.Toggle(ComboButton, BuildFlyoutContent, animate: true, focusable: false);
+    }
+
+    private void IslandOutputSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_updating || _monitor is null) return;
+        if (_monitor.SetVolume((float)(e.NewValue / 100.0))) Render();
+        else Report(UiText.Get("ErrorVolumeChange"));
     }
 
     private void AudioWidget_PreviewMouseWheel(object sender, MouseWheelEventArgs e)

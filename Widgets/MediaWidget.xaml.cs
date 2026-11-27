@@ -68,6 +68,7 @@ public partial class MediaWidget : DockWidget
     private TextBlock? _islandTotalText;
     private Slider? _islandProgressSlider;
     private Slider? _islandVolumeSlider;
+    private Slider? _islandCompactVolumeSlider;
     private Button? _islandMuteButton;
     private ContentControl? _islandPlayPauseGlyph;
     private ContentControl? _islandVolumeGlyph;
@@ -85,6 +86,7 @@ public partial class MediaWidget : DockWidget
     public MediaWidget()
     {
         InitializeComponent();
+        _islandCompactVolumeSlider = IslandVolumeSlider;
         VolumePopup.CustomPopupPlacementCallback = PlaceVolumePopover;
         VolumePopup.Opened += VolumePopup_Opened;
         _volumeHoverCloseTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
@@ -97,45 +99,106 @@ public partial class MediaWidget : DockWidget
 
     protected override void OnCompactChanged(bool compact) => ApplyDensityLayout();
     protected override void OnHoverExpandedChanged(bool expanded) => ApplyDensityLayout();
+    protected override void OnDynamicIslandChanged(bool dynamicIsland) => ApplyDensityLayout();
 
     private void ApplyDensityLayout()
     {
         var compact = IsCompact && !IsHoverExpanded;
+        if (IsDynamicIsland)
+        {
+            Card.Padding = new Thickness(4, 0, 4, 0);
+            ArtFrame.Visibility = Visibility.Visible;
+            ArtFrame.Width = 22;
+            ArtFrame.Height = 22;
+            ArtImage.Width = 22;
+            ArtImage.Height = 22;
+            InfoPanel.Width = 82;
+            InfoPanel.Margin = new Thickness(0, 0, 5, 0);
+            ArtistText.Visibility = Visibility.Collapsed;
+            ProgressPanel.MinWidth = 34;
+            ProgressPanel.Margin = new Thickness(0, 0, 5, 0);
+            ProgressPanel.Visibility = Visibility.Visible;
+            PreviousButton.Visibility = Visibility.Visible;
+            NextButton.Visibility = Visibility.Visible;
+            PreviousButton.Width = 23;
+            PlayPauseButton.Width = 25;
+            NextButton.Width = 23;
+            PreviousButton.Height = 25;
+            PlayPauseButton.Height = 25;
+            NextButton.Height = 25;
+            TransportPanel.Margin = new Thickness(0);
+            VolumePanel.Visibility = Visibility.Visible;
+            VolumePanel.Width = 48;
+            MuteButton.Visibility = Visibility.Collapsed;
+            IslandVolumeSlider.Visibility = Visibility.Visible;
+            ElapsedText.Visibility = Visibility.Collapsed;
+            TotalText.Visibility = Visibility.Collapsed;
+            if (VolumePopup.IsOpen) CloseVolumePopover();
+            UpdateProgressUI();
+            UpdateIslandVolumeControls();
+            RaiseContentWidthChanged();
+            return;
+        }
+
+        ArtFrame.Visibility = Visibility.Visible;
+        ArtFrame.Width = 29;
+        ArtFrame.Height = 29;
+        ArtImage.Width = 29;
+        ArtImage.Height = 29;
+        ElapsedText.Visibility = Visibility.Visible;
+        TotalText.Visibility = Visibility.Visible;
         Card.Padding = compact ? new Thickness(6, 0, 6, 0) : new Thickness(9, 0, 9, 0);
         InfoPanel.Width = compact ? 76 : 96;
         InfoPanel.Margin = compact ? new Thickness(7, 0, 6, 0) : new Thickness(9, 0, 10, 0);
+        ProgressPanel.MinWidth = 138;
+        ProgressPanel.Margin = new Thickness(0, 0, 8, 0);
         TransportPanel.Margin = compact ? new Thickness(0) : new Thickness(0, 0, 4, 0);
         ArtistText.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         ProgressPanel.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         PreviousButton.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         NextButton.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
         VolumePanel.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
+        VolumePanel.Width = double.NaN;
+        MuteButton.Visibility = Visibility.Visible;
+        IslandVolumeSlider.Visibility = Visibility.Collapsed;
+        PreviousButton.Width = 25;
+        PlayPauseButton.Width = 27;
+        NextButton.Width = 25;
+        PreviousButton.Height = 27;
+        PlayPauseButton.Height = 27;
+        NextButton.Height = 27;
         if (compact && VolumePopup.IsOpen) CloseVolumePopover();
+        UpdateProgressUI();
+        UpdateIslandVolumeControls();
         RaiseContentWidthChanged();
     }
 
     // V19: Media widget uses its own compact hover volume popover and does not open a large generic flyout.
     public override UIElement? BuildHoverFlyoutContent() => null;
 
-    public UIElement BuildDynamicIslandExpandedContent()
+    public override UIElement BuildDynamicIslandExpandedContent()
     {
-        var surface = new Border { Width = 560, Padding = new Thickness(16), CornerRadius = new CornerRadius(14) };
-        surface.SetResourceReference(Border.BackgroundProperty, "WidgetGlassCard");
-        surface.SetResourceReference(Border.BorderBrushProperty, "WidgetGlassCardStroke");
-        surface.BorderThickness = new Thickness(1);
+        var surface = new Border
+        {
+            Width = 384,
+            Padding = new Thickness(12),
+            CornerRadius = new CornerRadius(9),
+            Background = new LinearGradientBrush(
+                Color.FromRgb(0x35, 0x23, 0x36), Color.FromRgb(0x1C, 0x1A, 0x24), 140)
+        };
 
         var layout = new Grid();
         layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var top = new Grid { Margin = new Thickness(0, 0, 0, 12), MinHeight = 58 };
-        top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(58) });
+        top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(56) });
         top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(116) });
 
-        var artFrame = new Border { Width = 58, Height = 58, CornerRadius = new CornerRadius(10), ClipToBounds = true };
+        var artFrame = new Border { Width = 56, Height = 56, CornerRadius = new CornerRadius(10), ClipToBounds = true };
         artFrame.SetResourceReference(Border.BackgroundProperty, "WidgetSelectedFill");
-        var art = new Image { Width = 58, Height = 58, Stretch = Stretch.UniformToFill };
+        var art = new Image { Width = 56, Height = 56, Stretch = Stretch.UniformToFill };
         _islandArtImage = art;
         artFrame.Child = art;
         top.Children.Add(artFrame);
@@ -264,6 +327,11 @@ public partial class MediaWidget : DockWidget
         if (!_updatingIslandVolume) SetMediaVolume((float)(e.NewValue / 100.0));
     }
 
+    private void IslandCompactVolumeSlider_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (!_updatingIslandVolume) SetMediaVolume((float)(e.NewValue / 100.0));
+    }
+
     private void IslandProgressSlider_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (_islandProgressSlider is { IsMouseOver: true, IsHitTestVisible: true })
@@ -320,6 +388,16 @@ public partial class MediaWidget : DockWidget
             _updatingIslandVolume = false;
         }
 
+        if (_islandCompactVolumeSlider is not null)
+        {
+            _updatingIslandVolume = true;
+            _islandCompactVolumeSlider.IsEnabled = _mediaVolumeSession is not null;
+            _islandCompactVolumeSlider.Value = _mediaVolumeSession is null || _mediaVolumeMuted
+                ? 0
+                : Math.Clamp(_mediaVolumeLevel * 100, 0, 100);
+            _updatingIslandVolume = false;
+        }
+
         if (_islandMuteButton is not null)
             _islandMuteButton.IsEnabled = _mediaVolumeSession is not null;
         if (_islandVolumeGlyph is not null && _lastAudioIconKey is not null)
@@ -356,7 +434,6 @@ public partial class MediaWidget : DockWidget
     private async Task ActivateAsync()
     {
         var activationVersion = ++_activationVersion;
-        UiText.Current.PropertyChanged += UiText_PropertyChanged;
 
         try
         {
@@ -401,7 +478,6 @@ public partial class MediaWidget : DockWidget
     {
         _activationVersion++;
         CloseVolumePopover();
-        UiText.Current.PropertyChanged -= UiText_PropertyChanged;
         BindSession(null);
         if (_manager is not null)
         {
@@ -468,7 +544,7 @@ public partial class MediaWidget : DockWidget
         RenderVolume();
     }
 
-    private void UiText_PropertyChanged(object? sender, PropertyChangedEventArgs e) => RenderVolume();
+    protected override void OnLanguageChanged() => RenderVolume();
 
     private void InvalidateAudioCache()
     {
@@ -614,6 +690,7 @@ public partial class MediaWidget : DockWidget
 
     private void VolumeTrigger_MouseEnter(object sender, MouseEventArgs e)
     {
+        if (IsDynamicIsland) return;
         BindMediaVolumeSession();
         RenderVolume();
         if (_mediaVolumeSession is null) return;
@@ -669,7 +746,8 @@ public partial class MediaWidget : DockWidget
         {
             if (ReferenceEquals(current, VolumePopoverSurface) || ReferenceEquals(current, VolumeSlider))
                 return true;
-            current = VisualTreeHelper.GetParent(current) ?? LogicalTreeHelper.GetParent(current);
+            current = (current is Visual or System.Windows.Media.Media3D.Visual3D ? VisualTreeHelper.GetParent(current) : null)
+                ?? LogicalTreeHelper.GetParent(current);
         }
         return false;
     }
@@ -1026,7 +1104,7 @@ public partial class MediaWidget : DockWidget
         var totalText = available ? FormatTime(TimeSpan.FromSeconds(duration)) : string.Empty;
 
         _updatingProgress = true;
-        TimelineControls.Visibility = available ? Visibility.Visible : Visibility.Collapsed;
+        TimelineControls.Visibility = available || IsDynamicIsland ? Visibility.Visible : Visibility.Collapsed;
         ProgressSlider.Maximum = available ? duration : 100;
         ProgressSlider.Value = elapsed;
         ProgressSlider.IsEnabled = available;

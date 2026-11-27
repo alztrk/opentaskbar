@@ -81,7 +81,7 @@ internal sealed class StartMenuState : IDisposable
         if (pressTimestamp == 0 || _closedAt == long.MinValue) return false;
         // If closed within 60ms around this specific pointer press, it was dismissed by the press itself.
         var delta = _closedAt - pressTimestamp;
-        var deltaMs = delta * 1000.0 / Stopwatch.Frequency;
+        var deltaMs = delta * 1000.0 / _clock.TimestampFrequency;
         return deltaMs >= -60 && deltaMs <= 150;
     }
 
@@ -101,7 +101,7 @@ internal sealed class StartMenuState : IDisposable
     {
         if (!_isOpen) return;
         _isOpen = false;
-        _closedAt = Stopwatch.GetTimestamp();
+        _closedAt = _clock.GetTimestamp();
     }
 
     // Invoked from a native WinEvent hook: an escaping exception crosses the unmanaged boundary

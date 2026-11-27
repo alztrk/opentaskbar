@@ -27,7 +27,7 @@ public partial class WidgetCatalogItem : UserControl
 
     private void Preview_Click(object sender, RoutedEventArgs e)
     {
-        if (DataContext is DockWidgetOption option && option.IsHardwareAvailable)
+        if (DataContext is DockWidgetOption)
             RaiseEvent(new RoutedEventArgs(SettingsRequestedEvent, this));
     }
 

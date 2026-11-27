@@ -278,12 +278,12 @@ public sealed class TrayIconSource : IDisposable
                 }
 
                 var changeEvent = new AutoResetEvent(false);
+                _watchKey = key;
+                _changeEvent = changeEvent;
                 var status = RegNotifyChangeKeyValue(key.Handle, true, RegistryNotifyFilter,
                     changeEvent.SafeWaitHandle, true);
                 if (status != 0) throw new Win32Exception(status);
 
-                _watchKey = key;
-                _changeEvent = changeEvent;
                 _waitHandle = ThreadPool.RegisterWaitForSingleObject(changeEvent, OnRegistryChanged, null,
                     Timeout.Infinite, executeOnlyOnce: false);
                 _watcherArmed = true;

@@ -42,7 +42,8 @@ internal static class RunningAppProjection
         nint foreground,
         bool notificationBadgesEnabled,
         Func<string, bool> fileExists,
-        ISet<string>? excludedAppUserModelIds = null)
+        ISet<string>? excludedAppUserModelIds = null,
+        Func<TrackedWindow, bool>? excludedWindow = null)
     {
         var groups = new Dictionary<string, List<TrackedWindow>>(StringComparer.OrdinalIgnoreCase);
         var order = new List<string>();
@@ -54,6 +55,7 @@ internal static class RunningAppProjection
                 || excludedPaths.Contains(path)
                 || (!string.IsNullOrWhiteSpace(window.AppUserModelId)
                     && excludedAppUserModelIds?.Contains(window.AppUserModelId) == true)
+                || (excludedWindow?.Invoke(window) ?? false)
                 || !fileExists(path))
                 continue;
             // Windows groups taskbar buttons by AppUserModelID, not by executable: a single app can

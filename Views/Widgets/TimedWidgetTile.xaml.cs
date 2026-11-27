@@ -7,6 +7,8 @@ namespace OpenTaskbar.Views.Widgets;
 
 public partial class TimedWidgetTile : UserControl
 {
+    public static readonly DependencyProperty IsDynamicIslandProperty = DependencyProperty.Register(
+        nameof(IsDynamicIsland), typeof(bool), typeof(TimedWidgetTile), new PropertyMetadata(false));
     public static readonly DependencyProperty TitleProperty = DependencyProperty.Register(
         nameof(Title), typeof(string), typeof(TimedWidgetTile), new PropertyMetadata(string.Empty));
     public static readonly RoutedEvent DetailsRequestedEvent = EventManager.RegisterRoutedEvent(
@@ -20,6 +22,7 @@ public partial class TimedWidgetTile : UserControl
     }
 
     public string Title { get => (string)GetValue(TitleProperty); set => SetValue(TitleProperty, value); }
+    public bool IsDynamicIsland { get => (bool)GetValue(IsDynamicIslandProperty); set => SetValue(IsDynamicIslandProperty, value); }
     public event RoutedEventHandler DetailsRequested
     {
         add => AddHandler(DetailsRequestedEvent, value);
@@ -42,6 +45,11 @@ public partial class TimedWidgetTile : UserControl
         if (DataContext is not ITimedDockWidget widget) return;
         if (widget.CanToggle) widget.Toggle();
         else RequestDetails();
+    }
+
+    private void Reset_Click(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is ITimedDockWidget widget) widget.Reset();
     }
 
     private void RequestDetails() => RaiseEvent(new RoutedEventArgs(DetailsRequestedEvent, this));

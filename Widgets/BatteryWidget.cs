@@ -9,6 +9,7 @@ using System.Windows.Shapes;
 using OpenTaskbar.Models;
 using OpenTaskbar.Services;
 using OpenTaskbar.Views;
+using OpenTaskbar.Views.Widgets;
 
 namespace OpenTaskbar.Widgets;
 
@@ -64,6 +65,23 @@ public sealed class BatteryWidget : DockWidget
     public override int ShrinkPriority => 36;
     public override double FullWidthEstimate => MinCardWidth + 4;
     public override double CompactWidthEstimate => CompactCardWidth + 4;
+
+    public override UIElement BuildDynamicIslandExpandedContent()
+    {
+        var status = _hasSample ? _status : BatteryReader();
+        if (!status.Present)
+        {
+            return DynamicIslandStatusPanel.Create(
+                UiText.Get("WidgetBattery"), "—", UiText.Get("SystemDataUnavailable"), null,
+                Color.FromRgb(0xA7, 0xE5, 0xBA));
+        }
+
+        var percent = Math.Clamp(status.Percent, 0, 100);
+        var detail = UiText.Get(status.Charging ? "BatteryCharging" : "Battery");
+        return DynamicIslandStatusPanel.Create(
+            UiText.Get("WidgetBattery"), UiText.Format("Percent", percent), detail, percent / 100d,
+            Color.FromRgb(0xA7, 0xE5, 0xBA));
+    }
 
     public BatteryWidget()
     {
@@ -301,11 +319,6 @@ public sealed class BatteryWidget : DockWidget
     protected override void OnDockVisibilityChanged(bool visible)
     {
         UpdateLiquidGeometry(forceAnimationRestart: false);
-    }
-
-    protected override void OnDisposed()
-    {
-        StopChargingAnimation();
     }
 
     protected override void OnSettingsChanged()

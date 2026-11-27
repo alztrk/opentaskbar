@@ -32,10 +32,7 @@ public static class AppLog
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(LogPath)!);
                 // Rotation is handled on the first Write below (the stream must be open first).
-                var stream = new FileStream(LogPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-                // BOM on new files lets Notepad and Windows PowerShell read Turkish text correctly.
-                var encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: stream.Length == 0);
-                _writer = new StreamWriter(stream, encoding) { AutoFlush = true };
+                _writer = OpenWriter();
                 Info($"OpenTaskbar {typeof(AppLog).Assembly.GetName().Version} started.");
             }
             catch (IOException) { _writer = null; }
@@ -43,19 +40,25 @@ public static class AppLog
         }
     }
 
+    private static StreamWriter OpenWriter()
+    {
+        var stream = new FileStream(LogPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
+        // BOM on new files lets Notepad and Windows PowerShell read Turkish text correctly.
+        var encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: stream.Length == 0);
+        return new StreamWriter(stream, encoding) { AutoFlush = true };
+    }
+
     private static void RotateIfNeeded()
     {
         try
         {
-            if (!File.Exists(LogPath) || new FileInfo(LogPath).Length <= MaxBytes) return;
+            if (_writer is null || _writer.BaseStream.Length <= MaxBytes) return;
             // The current FileStream keeps the file locked; close it before moving, then reopen.
-            _writer?.Flush();
-            _writer?.Dispose();
+            _writer.Flush();
+            _writer.Dispose();
             _writer = null;
             File.Move(LogPath, Path.ChangeExtension(LogPath, ".old.txt"), overwrite: true);
-            var stream = new FileStream(LogPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-            var encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: stream.Length == 0);
-            _writer = new StreamWriter(stream, encoding) { AutoFlush = true };
+            _writer = OpenWriter();
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }
@@ -63,12 +66,7 @@ public static class AppLog
         {
             if (_writer is null)
             {
-                try
-                {
-                    var stream = new FileStream(LogPath, FileMode.Append, FileAccess.Write, FileShare.ReadWrite);
-                    var encoding = new UTF8Encoding(encoderShouldEmitUTF8Identifier: stream.Length == 0);
-                    _writer = new StreamWriter(stream, encoding) { AutoFlush = true };
-                }
+                try { _writer = OpenWriter(); }
                 catch (IOException) { }
                 catch (UnauthorizedAccessException) { }
             }
@@ -91,6 +89,7 @@ public static class AppLog
             try
             {
                 RotateIfNeeded(); // runtime rotation, not just on startup
+                if (_writer is null) return;
                 var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{level,-5}][T{Environment.CurrentManagedThreadId,2}] {message}";
                 _writer.WriteLine(line);
             }

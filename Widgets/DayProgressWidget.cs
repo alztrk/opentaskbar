@@ -2,7 +2,9 @@ using System.Globalization;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Media;
 using OpenTaskbar.Services;
+using OpenTaskbar.Views.Widgets;
 
 namespace OpenTaskbar.Widgets;
 
@@ -87,6 +89,16 @@ public sealed class DayProgressWidget : DockWidget
 
     protected override void OnCompactChanged(bool compact) => ApplyDensityLayout();
     protected override void OnHoverExpandedChanged(bool expanded) => ApplyDensityLayout();
+
+    public override UIElement BuildDynamicIslandExpandedContent()
+    {
+        var now = DateTime.Now;
+        var fraction = Math.Clamp(now.TimeOfDay.TotalSeconds / TimeSpan.FromDays(1).TotalSeconds, 0, 1);
+        var value = fraction.ToString("P0", Settings.Language.Culture);
+        var detail = now.ToString("t", Settings.Language.Culture);
+        return DynamicIslandStatusPanel.Create(
+            UiText.Get("WidgetDayProgress"), value, detail, fraction, Color.FromRgb(0x91, 0xDE, 0xDC));
+    }
 
     private void ApplyDensityLayout()
     {

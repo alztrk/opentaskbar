@@ -49,6 +49,7 @@ public class DockWidget : UserControl, IDisposable
     public virtual double FullWidthEstimate => Math.Max(0, DesiredSize.Width);
     public virtual double CompactWidthEstimate => FullWidthEstimate;
     public bool IsCompact { get; private set; }
+    public bool IsDynamicIsland { get; private set; }
     public bool IsHoverExpanded { get; private set; }
     public bool IsHoverFlyoutOpen { get; internal set; }
 
@@ -63,6 +64,13 @@ public class DockWidget : UserControl, IDisposable
             OnHoverExpandedChanged(false);
         }
         OnCompactChanged(compact);
+    }
+
+    internal void SetDynamicIslandState(bool dynamicIsland)
+    {
+        if (IsDynamicIsland == dynamicIsland) return;
+        IsDynamicIsland = dynamicIsland;
+        OnDynamicIslandChanged(dynamicIsland);
     }
 
     internal void SetHoverExpanded(bool expanded)
@@ -81,6 +89,9 @@ public class DockWidget : UserControl, IDisposable
     /// pointer and a separate window, neither of which the preview card provides).
     /// </summary>
     public virtual UIElement? BuildPreviewFlyoutContent() => BuildHoverFlyoutContent();
+
+    /// <summary>Optional live details rendered when this widget is expanded in the Dynamic Island.</summary>
+    public virtual UIElement? BuildDynamicIslandExpandedContent() => BuildPreviewFlyoutContent();
 
     /// <summary>Optional widget-specific context menu items shown before the standard remove action.</summary>
     public virtual IReadOnlyList<Control>? BuildContextMenuItems() => null;
@@ -104,6 +115,7 @@ public class DockWidget : UserControl, IDisposable
     public event EventHandler? HardwareAvailabilityChanged;
 
     protected virtual void OnCompactChanged(bool compact) { }
+    protected virtual void OnDynamicIslandChanged(bool dynamicIsland) { }
     protected virtual void OnHoverExpandedChanged(bool expanded) { }
 
     /// <summary>False hides the widget while active, e.g. media controls with no playing session.</summary>

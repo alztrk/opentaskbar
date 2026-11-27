@@ -100,6 +100,12 @@ internal static class ShellRecoveryChecks
         Check(log.Contains("EVENT TaskbarRestore") && log.Contains("reason=busy"),
             "The rejected restore attempts must be recorded as correlated telemetry.");
 
+        // #173: the watchdog must stay armed until restore is verified and the journal is gone.
+        Check(RestoreCoordinator.CanSignalCleanExit(null, false)
+              && !RestoreCoordinator.CanSignalCleanExit("ErrorTaskbarRestoreFailed", false)
+              && !RestoreCoordinator.CanSignalCleanExit(null, true),
+            "A clean exit may be signalled only after a verified restore with no pending recovery journal.");
+
         // Missing Explorer HWND degradation: the lease acquired for shell operations must never be a window
         // owned by this process, and an absent taskbar must leave an invalid lease (no self-fallback).
         var hasTaskbar = NativeTaskbarWindow.TryAcquire(out var taskbar);

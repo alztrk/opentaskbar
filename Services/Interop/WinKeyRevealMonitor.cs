@@ -96,7 +96,7 @@ internal sealed class WinKeyRevealMonitor : IDisposable
     {
         if (_hook != 0) return;
         _tracker.Reset();
-        var moduleHandle = GetModuleHandle(Process.GetCurrentProcess().MainModule?.ModuleName);
+        var moduleHandle = GetModuleHandle(null);
         _hook = SetWindowsHookEx(WhKeyboardLl, _hookProc, moduleHandle, 0);
         if (_hook == 0)
         {

@@ -6,9 +6,10 @@ using OpenTaskbar.Models;
 namespace OpenTaskbar.Services;
 
 /// <summary>
-/// Icons for running windows. Executable resources come first. Packaged apps and apps hosted by
-/// ApplicationFrameHost often have none, so the window's AppUserModelID selects the Start menu image
-/// (<c>shell:AppsFolder\{AUMID}</c>) before the generic file icon is used.
+/// Icons for running windows. Classic desktop executables use their embedded icon resources first, while packaged
+/// WindowsApps executables prefer their Start menu image (<c>shell:AppsFolder\{AUMID}</c>) so Store/MSIX apps match
+/// the Windows taskbar even when the raw executable embeds a different icon. Apps hosted by ApplicationFrameHost also
+/// resolve via <c>shell:AppsFolder\{AUMID}</c> before falling back to the generic file icon.
 /// </summary>
 /// <remarks>
 /// With an <c>offload</c> function the expensive lookups (icon resources, Start menu images, file icons) run off the
@@ -44,7 +45,7 @@ public sealed class RunningAppIconCache
             // and under the 1.5x magnification hover (#128 follow-up, Bitwarden icon quality).
             Guard<string, BitmapSource>(path => ApplicationIconProvider.GetForResource(
                 path, 0, Math.Max(64, ApplicationIconProvider.PreferredIconPixels))),
-            Guard<nint, string>(window => NativeJumpListSession.ReadWindowAppId(window) ?? NativeWindowTracker.GetPackagedAppId(window)),
+            Guard<nint, string>(window => NativeWindowTracker.GetPackagedAppId(window) ?? NativeJumpListSession.ReadWindowAppId(window)),
             Guard<string, BitmapSource>(appId => ApplicationIconProvider.GetForShellItem(@"shell:AppsFolder\" + appId, ApplicationIconProvider.PreferredIconPixels, iconOnly: true)),
             Guard<string, BitmapSource>(path => ApplicationIconProvider.GetForFile(path)),
             TimeProvider.System,
@@ -92,13 +93,27 @@ public sealed class RunningAppIconCache
 
     public BitmapSource? Get(string executablePath, nint window)
     {
-        if (!TryCached(_resourceIcons, "resource:", executablePath, _resourceIcon, out var icon)) return null;
+        BitmapSource? icon = null;
 
-        // Shell images are keyed by identity, never by executable: ApplicationFrameHost.exe hosts many apps.
-        if (icon is null)
+        if (IsPackagedAppPath(executablePath))
         {
+            // Packaged WindowsApps executables (e.g. Electron/MSIX apps) often embed a different raw .exe icon than
+            // their AppxManifest/AppsFolder taskbar icon. Prefer the AppsFolder identity icon first.
             icon = GetAppIcon(window, out var appIconLoading);
             if (appIconLoading) return null;
+
+            if (icon is null && !TryCached(_resourceIcons, "resource:", executablePath, _resourceIcon, out icon)) return null;
+        }
+        else
+        {
+            if (!TryCached(_resourceIcons, "resource:", executablePath, _resourceIcon, out icon)) return null;
+
+            // Shell images are keyed by identity, never by executable: ApplicationFrameHost.exe hosts many apps.
+            if (icon is null)
+            {
+                icon = GetAppIcon(window, out var appIconLoading);
+                if (appIconLoading) return null;
+            }
         }
 
         if (icon is null && !TryCached(_fileIcons, "file:", executablePath, _fileIcon, out icon)) return null;
@@ -106,6 +121,12 @@ public sealed class RunningAppIconCache
         // Application icons remain fixed to their native high-resolution system icons.
         return icon;
     }
+
+    private static bool IsPackagedAppPath(string executablePath) =>
+        !string.IsNullOrEmpty(executablePath)
+        && (executablePath.Contains(@"\WindowsApps\", StringComparison.OrdinalIgnoreCase)
+            || executablePath.Contains("/WindowsApps/", StringComparison.OrdinalIgnoreCase)
+            || executablePath.StartsWith(@"shell:AppsFolder\", StringComparison.OrdinalIgnoreCase));
 
     private int _generation;
 

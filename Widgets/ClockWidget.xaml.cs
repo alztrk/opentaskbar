@@ -242,33 +242,19 @@ public partial class ClockWidget : DockWidget
         var today = DateOnly.FromDateTime(now.Date);
         if (_shownMonth == default) _shownMonth = new DateOnly(today.Year, today.Month, 1);
 
-        var root = new StackPanel { Width = 312 };
+        var root = new StackPanel { Width = 320 };
 
-        // Top header: large live time + full date on left, actual system timezone on right.
-        var topRow = new DockPanel { Margin = new Thickness(2, 0, 2, 14) };
-
-        var zoneText = new TextBlock
-        {
-            Text = FormatLocalTimeZone(),
-            FontSize = 10.5,
-            VerticalAlignment = VerticalAlignment.Top,
-            Margin = new Thickness(8, 6, 0, 0),
-            TextTrimming = TextTrimming.CharacterEllipsis,
-            MaxWidth = 135
-        };
-        zoneText.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
-        DockPanel.SetDock(zoneText, Dock.Right);
-        topRow.Children.Add(zoneText);
+        // Top header: crisp live time + full date; timezone shown cleanly via tooltip without awkward right-edge clipping.
+        var topRow = new StackPanel { Margin = new Thickness(0, 0, 0, 10) };
 
         var timeFormat = Settings.Clock24Hour
             ? (Settings.ClockShowSeconds ? "HH:mm:ss" : "HH:mm")
             : (Settings.ClockShowSeconds ? "hh:mm:ss tt" : "hh:mm tt");
-        var timeStack = new StackPanel();
         var liveTime = new TextBlock
         {
             Text = now.ToString(timeFormat, culture),
-            FontSize = 28,
-            FontWeight = FontWeights.Bold,
+            FontSize = 26,
+            FontWeight = FontWeights.SemiBold,
             Typography = { NumeralAlignment = FontNumeralAlignment.Tabular }
         };
         liveTime.SetResourceReference(TextBlock.ForegroundProperty, "TextPrimary");
@@ -278,13 +264,14 @@ public partial class ClockWidget : DockWidget
         {
             Text = now.ToString("dddd, d MMMM", culture),
             FontSize = 12,
-            Margin = new Thickness(0, 1, 0, 0)
+            Margin = new Thickness(0, 1, 0, 0),
+            ToolTip = FormatLocalTimeZone()
         };
         fullDate.SetResourceReference(TextBlock.ForegroundProperty, "TextSecondary");
-        timeStack.Children.Add(liveTime);
-        timeStack.Children.Add(fullDate);
-        topRow.Children.Add(timeStack);
+        topRow.Children.Add(liveTime);
+        topRow.Children.Add(fullDate);
         root.Children.Add(topRow);
+        root.Children.Add(DockFlyout.Divider(6));
 
         // Month & year navigation bar.
         var nav = new Grid { Margin = new Thickness(0, 0, 0, 10) };

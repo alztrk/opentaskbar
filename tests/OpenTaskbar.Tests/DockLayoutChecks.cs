@@ -23,6 +23,14 @@ internal static class DockLayoutChecks
             checks++;
         }
 
+        // #176: dock-item drops save synchronously; the resulting preference applies must be deferred and
+        // coalesced so every dock does not rebuild the strip inside the nested drag loop.
+        Check(!OpenTaskbar.MainWindow.ShouldDeferPreferenceApply(false, false)
+              && OpenTaskbar.MainWindow.ShouldDeferPreferenceApply(true, false)
+              && !OpenTaskbar.MainWindow.ShouldDeferPreferenceApply(true, true)
+              && !OpenTaskbar.MainWindow.ShouldDeferPreferenceApply(false, true),
+            "Preference applies must defer only while a drop is active, and only once per drop.");
+
         // Edge-to-edge fill mode must be a valid width mode so users can span the dock across the whole screen.
         Check(Enum.IsDefined(DockWidthMode.Fill), "DockWidthMode.Fill must be a defined width mode.");
 
@@ -1377,6 +1385,219 @@ internal static class DockLayoutChecks
                 var withTopGap = MainWindow.ComputeEffectiveShelfHeight(compact, isVertical: false, borderThickness: 1, externalBottomGap: bottomGap, externalTopGap: 16);
                 Check(Math.Abs((withTopGap - requiredShelf) - 16) < 0.01,
                     $"Top gap (16 DIP) must increase the reserved shelf height by 16 DIP so maximized windows stop above the dock (#92, got {withTopGap - requiredShelf}).");
+            }
+
+            // Issue #167: OpenTaskbar's own executable must not be pinnable as an external app.
+            {
+                const string selfPath = @"C:\Program Files\OpenTaskbar\OpenTaskbar.exe";
+                Check(MainWindow.IsSelfExecutable(selfPath, selfPath),
+                    "Exact match against OpenTaskbar.exe must be detected as self.");
+                Check(MainWindow.IsSelfExecutable(@"c:\program files\opentaskbar\OPENTASKBAR.EXE", selfPath),
+                    "Case-insensitive match against OpenTaskbar.exe must be detected as self.");
+                Check(!MainWindow.IsSelfExecutable(@"C:\Windows\ImmersiveControlPanel\SystemSettings.exe", selfPath),
+                    "External apps such as Windows Settings must not be treated as self.");
+                Check(!MainWindow.IsSelfExecutable(@"appsfolder:windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel", selfPath),
+                    "AppsFolder URIs must not throw or match self.");
+                Check(!MainWindow.IsSelfExecutable(null, selfPath) && !MainWindow.IsSelfExecutable("", selfPath),
+                    "Null or empty executable paths must not match self.");
+            }
+
+            // Issue #167: Pinning a shared-host running app (e.g. Windows Settings) must replace its running token
+            // in DockItemOrder in-place without disturbing adjacent widgets, and unpinning must prune its token
+            // without touching sibling shared-host apps or PWAs.
+            {
+                const string runningSettingsKey = @"C:\Windows\System32\ApplicationFrameHost.exe|windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel";
+                const string pinnedSettingsKey = @"C:\Windows\ImmersiveControlPanel\SystemSettings.exe";
+                var initialOrder = new[]
+                {
+                    "start",
+                    @"app:C:\Apps\Code.exe",
+                    "app:" + runningSettingsKey,
+                    "widget:Clock",
+                    "widget:Audio",
+                    "tray"
+                };
+
+                var afterPin = MainWindow.UpdateDockItemOrderOnPin(initialOrder, runningSettingsKey, pinnedSettingsKey);
+                Check(afterPin is not null && afterPin.SequenceEqual([
+                        "start",
+                        @"app:C:\Apps\Code.exe",
+                        "app:" + pinnedSettingsKey,
+                        "widget:Clock",
+                        "widget:Audio",
+                        "tray"
+                    ]),
+                    "Pinning a shared-host app must replace its DockItemOrder token in place while preserving all widgets.");
+
+                var pinnedSettingsApp = new DockApp("Settings", pinnedSettingsKey)
+                {
+                    AppUserModelId = "windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel"
+                };
+                var afterUnpin = MainWindow.UpdateDockItemOrderOnUnpin(afterPin, pinnedSettingsApp);
+                Check(afterUnpin is not null && afterUnpin.SequenceEqual([
+                        "start",
+                        @"app:C:\Apps\Code.exe",
+                        "widget:Clock",
+                        "widget:Audio",
+                        "tray"
+                    ]),
+                    "Unpinning must remove the app's token from DockItemOrder so no empty gap or ghost slot remains.");
+
+                var pwaOrder = new[]
+                {
+                    @"app:C:\Program Files\Edge\msedge_proxy.exe|--app-id=alpha",
+                    @"app:C:\Program Files\Edge\msedge_proxy.exe|--app-id=beta",
+                    "widget:Clock"
+                };
+                var pwaAlpha = new DockApp("Alpha", @"C:\Program Files\Edge\msedge_proxy.exe") { LaunchArguments = "--app-id=alpha" };
+                var afterPwaUnpin = MainWindow.UpdateDockItemOrderOnUnpin(pwaOrder, pwaAlpha);
+                Check(afterPwaUnpin is not null && afterPwaUnpin.SequenceEqual([
+                        @"app:C:\Program Files\Edge\msedge_proxy.exe|--app-id=beta",
+                        "widget:Clock"
+                    ]),
+                    "Unpinning one PWA must not remove a sibling PWA sharing the same proxy executable.");
+            }
+
+            // Issue #128 Finding #3a: Floating dock layered host window must shrink tightly around dock + magnification
+            // headroom + shadow margin and stay centered, while preserving full-width, auto-hide, and multi-monitor bounds.
+            {
+                var blur36 = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 36, ShadowDepth = 4, Opacity = 0.45 };
+                Check(Math.Abs(MainWindow.ComputeShadowMarginPerSide(blur36) - 40.0) < 0.01,
+                    "Shadow margin per side must cover BlurRadius + ShadowDepth for visible DropShadowEffect.");
+                var hiddenShadow = new System.Windows.Media.Effects.DropShadowEffect { BlurRadius = 36, ShadowDepth = 4, Opacity = 0 };
+                Check(MainWindow.ComputeShadowMarginPerSide(hiddenShadow) == 0.0
+                    && MainWindow.ComputeShadowMarginPerSide(null) == 0.0,
+                    "Transparent or null shadow effect must require zero extra layered-window shadow margin.");
+
+                var centered = MainWindow.ComputeFloatingLayeredWindowBounds(
+                    monitorOffset: 0, monitorExtent: 1920, dockSurfaceExtent: 600,
+                    surfaceMarginStart: 8, surfaceMarginEnd: 8, magnificationHeadroom: 67,
+                    shadowMarginPerSide: 40, DockPosition.Center, isFullWidth: false, preserveFullEdgeForAutoHide: false);
+                Check(centered.IsShrunk && Math.Abs(centered.Extent - 763.0) < 0.01,
+                    $"Centered floating dock must shrink 1920 DIP layered window to 763 DIP (got {centered.Extent}).");
+                Check(Math.Abs((centered.Offset + centered.Extent / 2.0) - 960.0) < 0.01,
+                    "Shrunk centered floating layered window must stay centered on the monitor.");
+
+                var leftAligned = MainWindow.ComputeFloatingLayeredWindowBounds(
+                    monitorOffset: 0, monitorExtent: 1920, dockSurfaceExtent: 600,
+                    surfaceMarginStart: 8, surfaceMarginEnd: 8, magnificationHeadroom: 67,
+                    shadowMarginPerSide: 40, DockPosition.Left, isFullWidth: false, preserveFullEdgeForAutoHide: false);
+                Check(leftAligned.IsShrunk && leftAligned.Offset == 0 && Math.Abs(leftAligned.Extent - 723.0) < 0.01,
+                    "Left-aligned floating dock must anchor at monitor Left with single-side shadow margin.");
+
+                var rightAligned = MainWindow.ComputeFloatingLayeredWindowBounds(
+                    monitorOffset: 0, monitorExtent: 1920, dockSurfaceExtent: 600,
+                    surfaceMarginStart: 8, surfaceMarginEnd: 8, magnificationHeadroom: 67,
+                    shadowMarginPerSide: 40, DockPosition.Right, isFullWidth: false, preserveFullEdgeForAutoHide: false);
+                Check(rightAligned.IsShrunk && Math.Abs((rightAligned.Offset + rightAligned.Extent) - 1920.0) < 0.01
+                    && Math.Abs(rightAligned.Extent - 723.0) < 0.01,
+                    "Right-aligned floating dock must anchor at monitor Right with single-side shadow margin.");
+
+                var secondaryMonitor = MainWindow.ComputeFloatingLayeredWindowBounds(
+                    monitorOffset: 1920, monitorExtent: 2560, dockSurfaceExtent: 600,
+                    surfaceMarginStart: 8, surfaceMarginEnd: 8, magnificationHeadroom: 67,
+                    shadowMarginPerSide: 40, DockPosition.Center, isFullWidth: false, preserveFullEdgeForAutoHide: false);
+                Check(secondaryMonitor.IsShrunk
+                    && secondaryMonitor.Offset >= 1920
+                    && secondaryMonitor.Offset + secondaryMonitor.Extent <= 1920 + 2560
+                    && Math.Abs((secondaryMonitor.Offset + secondaryMonitor.Extent / 2.0) - (1920 + 1280)) < 0.01,
+                    "Secondary-monitor floating dock must remain centered within the secondary monitor bounds.");
+
+                var verticalDock = MainWindow.ComputeFloatingLayeredWindowBounds(
+                    monitorOffset: 0, monitorExtent: 1080, dockSurfaceExtent: 420,
+                    surfaceMarginStart: 8, surfaceMarginEnd: 8, magnificationHeadroom: 67,
+                    shadowMarginPerSide: 40, DockPosition.Center, isFullWidth: false, preserveFullEdgeForAutoHide: false);
+                Check(verticalDock.IsShrunk && verticalDock.Extent < 600
+                    && Math.Abs((verticalDock.Offset + verticalDock.Extent / 2.0) - 540.0) < 0.01,
+                    "Vertical centered floating dock must shrink tightly and remain vertically centered.");
+
+                var verticalTop = MainWindow.ComputeFloatingLayeredWindowBounds(
+                    monitorOffset: 0, monitorExtent: 1080, dockSurfaceExtent: 420,
+                    surfaceMarginStart: 8, surfaceMarginEnd: 8, magnificationHeadroom: 67,
+                    shadowMarginPerSide: 40, DockPosition.Left, isFullWidth: false, preserveFullEdgeForAutoHide: false);
+                Check(verticalTop.IsShrunk && verticalTop.Offset == 0 && Math.Abs(verticalTop.Extent - 543.0) < 0.01,
+                    "Vertical top-aligned (DockPosition.Left) floating dock must anchor at monitor Top.");
+
+                var verticalBottom = MainWindow.ComputeFloatingLayeredWindowBounds(
+                    monitorOffset: 0, monitorExtent: 1080, dockSurfaceExtent: 420,
+                    surfaceMarginStart: 8, surfaceMarginEnd: 8, magnificationHeadroom: 67,
+                    shadowMarginPerSide: 40, DockPosition.Right, isFullWidth: false, preserveFullEdgeForAutoHide: false);
+                Check(verticalBottom.IsShrunk && Math.Abs((verticalBottom.Offset + verticalBottom.Extent) - 1080.0) < 0.01
+                    && Math.Abs(verticalBottom.Extent - 543.0) < 0.01,
+                    "Vertical bottom-aligned (DockPosition.Right) floating dock must anchor at monitor Bottom.");
+
+                var fullWidth = MainWindow.ComputeFloatingLayeredWindowBounds(
+                    monitorOffset: 0, monitorExtent: 1920, dockSurfaceExtent: 600,
+                    surfaceMarginStart: 8, surfaceMarginEnd: 8, magnificationHeadroom: 67,
+                    shadowMarginPerSide: 40, DockPosition.Center, isFullWidth: true, preserveFullEdgeForAutoHide: false);
+                Check(!fullWidth.IsShrunk && fullWidth.Offset == 0 && fullWidth.Extent == 1920,
+                    "Full-width mode must preserve the full monitor layered-window span.");
+
+                var autoHide = MainWindow.ComputeFloatingLayeredWindowBounds(
+                    monitorOffset: 0, monitorExtent: 1920, dockSurfaceExtent: 600,
+                    surfaceMarginStart: 8, surfaceMarginEnd: 8, magnificationHeadroom: 67,
+                    shadowMarginPerSide: 40, DockPosition.Center, isFullWidth: false, preserveFullEdgeForAutoHide: true);
+                Check(!autoHide.IsShrunk && autoHide.Offset == 0 && autoHide.Extent == 1920,
+                    "Auto-hide mode must preserve the full monitor edge trigger span.");
+
+                var overflowed = MainWindow.ComputeFloatingLayeredWindowBounds(
+                    monitorOffset: 0, monitorExtent: 1920, dockSurfaceExtent: 1850,
+                    surfaceMarginStart: 8, surfaceMarginEnd: 8, magnificationHeadroom: 67,
+                    shadowMarginPerSide: 40, DockPosition.Center, isFullWidth: false, preserveFullEdgeForAutoHide: false);
+                Check(!overflowed.IsShrunk && overflowed.Offset == 0 && overflowed.Extent == 1920,
+                    "A floating dock whose needed span reaches the monitor width must clamp cleanly to the monitor.");
+            }
+
+            // Leaving the dock must release the magnified frame: a settled spring lands exactly on 1.0 instead of
+            // keeping a sub-0.0001 residue, and the frame shrinks with the decaying slots instead of snapping.
+            {
+                Check(MainWindow.ShouldWriteSpringScale(1.00009, 1.0, settled: true),
+                    "A settled spring must write its exact target even when the last step is below 0.0001.");
+                Check(!MainWindow.ShouldWriteSpringScale(1.00009, 1.00005, settled: false),
+                    "Mid-spring sub-0.0001 steps must still be skipped.");
+                Check(!MainWindow.ShouldWriteSpringScale(1.0, 1.0, settled: true),
+                    "A spring already at its target must not be rewritten.");
+
+                Span<double> residueExtras = stackalloc double[11];
+                ReadOnlySpan<double> residueScales = [1.00009, 1.00009, 1.00009, 1.00009, 1.00009, 1.00009, 1.00009, 1.00009, 1.00009, 1.00009, 1.00009];
+                ReadOnlySpan<double> residueBases = [48, 48, 48, 48, 48, 48, 48, 48, 48, 48, 48];
+                var residue = DockFisheyeLayout.ComputeSlotExtras(residueScales, residueBases, 200, residueExtras);
+                Check(residue > 0.01,
+                    "Residual 1.00009x scales across a dozen icons exceed the 0.01 clear threshold, which is why the exact settle write matters.");
+
+                Check(Math.Abs(MainWindow.ScaleDecayingSurfaceDelta(50, 40, 40) - 50) < 0.001,
+                    "The first decay frame must keep the full reserved delta.");
+                Check(Math.Abs(MainWindow.ScaleDecayingSurfaceDelta(50, 40, 20) - 25) < 0.001,
+                    "The frame delta must shrink in proportion to the remaining slot expansion.");
+                Check(MainWindow.ScaleDecayingSurfaceDelta(50, 40, 0) == 0,
+                    "The frame delta must reach zero when the slots are back at rest.");
+                Check(MainWindow.ScaleDecayingSurfaceDelta(30, 40, 35) >= 30,
+                    "The frame must never be narrower than the expansion the slots still need.");
+                Check(MainWindow.ScaleDecayingSurfaceDelta(50, 0, 0) == 50,
+                    "Without a decay baseline the reserved delta must be kept.");
+            }
+
+            // Issue #128 Finding #5: Magnification layout writes must skip sub-0.25 DIP churn mid-spring,
+            // while still clearing overrides on zero-extra decay and snapping cleanly on the final settled frame.
+            {
+                Check(!MainWindow.ShouldApplyLayoutDelta(50.0, 50.0),
+                    "Zero delta must skip magnification layout writes.");
+                Check(!MainWindow.ShouldApplyLayoutDelta(50.0, 50.24),
+                    "Sub-0.25 DIP deltas must skip magnification layout writes.");
+                Check(MainWindow.ShouldApplyLayoutDelta(50.0, 50.25)
+                    && MainWindow.ShouldApplyLayoutDelta(50.0, 49.75),
+                    "Deltas of at least 0.25 DIP must apply magnification layout writes.");
+                Check(MainWindow.ShouldApplyLayoutDelta(double.NaN, 50.0),
+                    "Unset (NaN) layout properties must still accept their initial magnification write.");
+
+                Check(!MainWindow.ShouldApplySlotLayoutWrite(50.0, 50.0, extra: 0.0, hasOverride: false, settled: false),
+                    "Unmagnified button without override must never be written.");
+                Check(MainWindow.ShouldApplySlotLayoutWrite(50.24, 50.0, extra: 0.0, hasOverride: true, settled: false),
+                    "Previously overridden button decaying to zero extra must clear its override even when within 0.24 DIP of BaseSize.");
+                Check(!MainWindow.ShouldApplySlotLayoutWrite(58.0, 58.18, extra: 8.18, hasOverride: true, settled: false),
+                    "Mid-spring sub-0.25 DIP slot delta must be skipped.");
+                Check(MainWindow.ShouldApplySlotLayoutWrite(58.0, 58.18, extra: 8.18, hasOverride: true, settled: true),
+                    "Final settled frame must bypass the 0.25 DIP threshold and snap to the exact converged slot width.");
             }
         }
 

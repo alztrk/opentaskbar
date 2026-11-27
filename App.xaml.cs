@@ -34,6 +34,7 @@ public partial class App : Application
     private WindowsPaletteListener? _paletteListener;
     private WindowsTaskbarPinMonitor? _taskbarPinMonitor;
     private DisplayCareController? _displayCareController;
+    private CancellationTokenSource? _fjordFilesActivation;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -135,6 +136,16 @@ public partial class App : Application
         StartupStopwatch.Mark("MainWindow constructed");
         MainWindow = mainWindow;
         mainWindow.Show();
+        if (!IsDev && !IsInspection)
+        {
+            _fjordFilesActivation = new CancellationTokenSource();
+            _ = FjordFilesActivation.Listen(path => Dispatcher.InvokeAsync(() =>
+            {
+                if (Preferences.Current.FjordFilesEnabled) FjordFilesWindow.Open(path);
+                else FjordFilesActivation.OpenExplorerFallback(path);
+            }),
+                _fjordFilesActivation.Token);
+        }
         StartupStopwatch.Mark("MainWindow shown (first paint pending)");
         if (themeInstallError is not null)
             AppLog.Error($"Built-in theme installation: {themeInstallError}");
@@ -177,7 +188,11 @@ public partial class App : Application
     private void Preferences_Changed(object? sender, EventArgs e)
     {
         // A saved theme change rebuilds the palette; re-derive the Windows colors for the new mode.
-        Dispatcher.BeginInvoke(new Action(ApplyWindowsPalette));
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!Preferences.Current.FjordFilesEnabled) FjordFilesWindow.CloseAll();
+            ApplyWindowsPalette();
+        }));
         AnimationFrameLimiter.Apply(Preferences.Current.AnimationFpsCap);
         _displayCareController?.Refresh();
     }
@@ -231,7 +246,8 @@ public partial class App : Application
             return;
         }
 
-        TaskbarRecoveryWatchdog.NotifyCleanExit();
+        _fjordFilesActivation?.Cancel();
+        _fjordFilesActivation?.Dispose();
         SystemEvents.SessionSwitch -= SystemEvents_SessionSwitch;
         Preferences.Changed -= Preferences_Changed;
         if (_paletteListener is not null)
@@ -254,15 +270,20 @@ public partial class App : Application
 
         // The window-level restore can fail while Explorer is restarting. A leftover journal is the reliable
         // signal that the taskbar may still be hidden, so try the journal-based path before shutting down.
-        if (TaskbarReplacementSession.HasPendingRecovery)
+        var recoveryError = TaskbarReplacementSession.HasPendingRecovery
+            ? RestoreCoordinator.Restore("exit-journal-heal")
+            : null;
+        if (recoveryError is not null)
         {
-            var recoveryError = RestoreCoordinator.Restore("exit-journal-heal");
-            if (recoveryError is not null)
-            {
-                AppLog.Error($"Exit taskbar self-heal failed: {recoveryError}");
-                e.ApplicationExitCode = 1;
-            }
+            AppLog.Error($"Exit taskbar self-heal failed: {recoveryError}");
+            e.ApplicationExitCode = 1;
         }
+
+        // Only disarm the watchdog after both restore paths are verified (#173).
+        if (RestoreCoordinator.CanSignalCleanExit(error, TaskbarReplacementSession.HasPendingRecovery))
+            TaskbarRecoveryWatchdog.NotifyCleanExit();
+        else
+            AppLog.Warning("Taskbar recovery journal pending; watchdog remains armed after exit.");
 
         _devReload?.Dispose();
         _devReload = null;
