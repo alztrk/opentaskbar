@@ -10,7 +10,7 @@
 
 ### Rust port — test/CI/docs/packaging parity
 
-- Removed five retired AI-provider grouping keys and added 27 window-picker, magnification, Fjord, Wi-Fi, search, alignment, preview, focus, density and AI-ring keys (24 newly added; three already shipped in every catalog) to all 14 Rust catalogs. The C# catalogs now hold **994 keys** and every Rust catalog and numeric gate sits at **1406 keys** (40 Fjord/Wi-Fi/preview labels added for the ported UI).
+- Removed five retired AI-provider grouping keys and added 27 window-picker, magnification, Fjord, Wi-Fi, search, alignment, preview, focus, density and AI-ring keys (24 newly added; three already shipped in every catalog) to all 14 Rust catalogs. After the integration union the C# catalogs hold **1034 keys** (994 original plus the 40 Fjord/Wi-Fi/preview labels) and every Rust catalog and numeric gate sits at **1406 keys**.
 - Added 32 new feature keys to all 14 Rust catalogs and enforced identical key sets with `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`.
 - Merged 202 new UI localization keys (Dynamic Island details, Settings/theme controls and widget labels) with the five widget/start-layout keys from the other branch, all with real translations in 14 Rust catalogs, raising every catalog from 1129 to **1336 keys**, and raised the numeric parity gates to match.
 - Restored the nine tr-TR labels that the merge overwrote with en-US or ASCII-only text (`FocusBreakTitle/Start/Skip/Countdown/Complete`, `FocusSession`, `RadioOn`, `RadioOff`, `DockBottomGap`) and added parity tests for translation regressions, empty values and placeholder retention. The key count stayed **1336** at that point in all 14 catalogs and every gate.
@@ -21,6 +21,15 @@
 - Rust CI now runs on every branch and also on C# locale changes; CodeQL analyses Rust on every branch/PR (C# stays master-only); Dependabot tracks Cargo.
 - Added Rust portable/MSIX packaging scripts and merged Rust artifacts into checksums, release manifest, SLSA attestation and optional VirusTotal scanning.
 - Expanded `Rust-Port/README.md` and updated localization/theme/reliability/privacy docs for the Rust port.
+
+### Rust port — architecture-aware watchdog, CI paths and release gate
+
+- Added `Rust-Port/crates/opentaskbar-shell/build.rs`: maps `CARGO_CFG_TARGET_ARCH` to x64/x86, runs `tools/watchdog/build.ps1 -Architecture <arch> -Force -NoFallback` into `OUT_DIR`, verifies the PE machine (x64 `0x8664` / x86 `0x014C`) and exports `OT_WATCHDOG_EXE`. `watchdog.rs` now embeds that architecture-specific PE with `include_bytes!(env!("OT_WATCHDOG_EXE"))`.
+- `tools/watchdog/build.ps1` gained `-NoFallback`, an architecture-aware skip condition (a wrong-arch PE is never treated as current) and a hard error when no 32-bit toolchain is available for a no-fallback build.
+- `rust-ci.yml` now triggers on watchdog sources, packaging scripts, the Rust MSIX manifest, csproj and workflow changes. Its new `watchdog-arch` job asserts x86 PE machine `0x014C`, builds the workspace for `i686-pc-windows-msvc` and re-verifies the x86 portable EXE.
+- Added `scripts/check-release-version.ps1` and run it before any release build: tag ↔ csproj `0.3.5` ↔ Cargo `0.1.0` (explicitly registered carve-out) ↔ Rust MSIX `0.3.5.0`. Bumped csproj and the Rust MSIX identity to 0.3.5, removed the hardcoded MSIX version default, and staged the architecture-matched watchdog inside the MSIX package.
+- `package-rust-release.ps1` records `rustPort.crateVersion` and per-artifact watchdog architecture/PE machine/SHA-256, verifies deterministic ZIP payloads and every `checksums.txt` row against disk before SLSA attestation, and documents the optional report-only VirusTotal scan.
+- Locale parity constants updated for the integration union (1034 C# / 1406 Rust). The smoke checklist and docs now reference the shared `%LOCALAPPDATA%\OpenTaskbar` folder and `opentaskbar-rust.log`.
 
 - Placed Rust Background Apps pins in a compact strip beside the Background Apps button, with overflow available in the flyout. Added a short dock closing animation that respects Windows and OpenTaskbar animation settings.
 

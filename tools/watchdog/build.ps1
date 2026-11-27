@@ -3,28 +3,15 @@ param (
     [ValidateSet('x64', 'x86')]
     [string]$Architecture = 'x64',
     [string]$OutputDir = $PSScriptRoot,
-    [switch]$Force
+    [switch]$Force,
+    # Release/Rust builds use this: never substitute an x64 PE for an x86 build.
+    [switch]$NoFallback
 )
 
 $ErrorActionPreference = "Stop"
 
 $source = Join-Path $PSScriptRoot "watchdog.c"
-if (-not (Test-Path -LiteralPath $OutputDir -PathType Container)) {
-    New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
-}
-$outputExe = Join-Path $OutputDir "OpenTaskbarWatchdog.exe"
-
-if (-not $Force -and (Test-Path -LiteralPath $outputExe) -and (Get-Item $outputExe).LastWriteTimeUtc -ge (Get-Item $source).LastWriteTimeUtc) {
-    Write-Host "Native watchdog binary ($Architecture) is up to date; skipping rebuild." -ForegroundColor DarkGray
-    exit 0
-}
-
 $expectedMachine = if ($Architecture -eq 'x86') { 0x014C } else { 0x8664 }
-$objectFile = Join-Path $env:TEMP ("opentaskbar-watchdog-{0}.obj" -f $Architecture)
-if (Test-Path -LiteralPath $objectFile) { Remove-Item -LiteralPath $objectFile -Force }
-# Keep the native helper byte-stable too: MinGW/binutils honours SOURCE_DATE_EPOCH,
-# MSVC uses /Brepro. Without this the managed deterministic build still changes hash.
-$env:SOURCE_DATE_EPOCH = '315532800' # 1980-01-01 UTC
 
 function Get-PeMachine {
     param ([string]$Path)
@@ -35,7 +22,7 @@ function Get-PeMachine {
         if ($reader.ReadUInt16() -ne 0x5A4D) { return 0 } # MZ
         $stream.Position = 0x3C
         $offset = $reader.ReadInt32()
-        if ($offset -le 0 -or $offset + 6 -ge $stream.Length) { return 0 }
+        if ($offset -le 0 -or ($offset + 6) -gt $stream.Length) { return 0 }
         $stream.Position = $offset
         if ($reader.ReadUInt32() -ne 0x00004550) { return 0 } # PE\0\0
         return $reader.ReadUInt16()
@@ -45,6 +32,26 @@ function Get-PeMachine {
         if ($stream) { $stream.Dispose() }
     }
 }
+
+if (-not (Test-Path -LiteralPath $OutputDir -PathType Container)) {
+    New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+}
+$outputExe = Join-Path $OutputDir "OpenTaskbarWatchdog.exe"
+
+# An existing binary of the wrong architecture must never be treated as current
+# (e.g. a checked-in x64 EXE sitting in an x86 OUT_DIR).
+if (-not $Force -and (Test-Path -LiteralPath $outputExe -PathType Leaf) `
+    -and (Get-PeMachine -Path $outputExe) -eq $expectedMachine `
+    -and (Get-Item $outputExe).LastWriteTimeUtc -ge (Get-Item $source).LastWriteTimeUtc) {
+    Write-Host "Native watchdog binary ($Architecture, 0x$('{0:X4}' -f $expectedMachine)) is up to date; skipping rebuild." -ForegroundColor DarkGray
+    exit 0
+}
+
+$objectFile = Join-Path $env:TEMP ("opentaskbar-watchdog-{0}.obj" -f $Architecture)
+if (Test-Path -LiteralPath $objectFile) { Remove-Item -LiteralPath $objectFile -Force }
+# Keep the native helper byte-stable too: MinGW/binutils honours SOURCE_DATE_EPOCH,
+# MSVC uses /Brepro. Without this the managed deterministic build still changes hash.
+$env:SOURCE_DATE_EPOCH = '315532800' # 1980-01-01 UTC
 
 function Test-CompiledBinary {
     if (-not (Test-Path -LiteralPath $outputExe -PathType Leaf)) { return $false }
@@ -68,7 +75,7 @@ function Invoke-Compiler {
             & $Compile
         }
         if ($LASTEXITCODE -eq 0 -and (Test-CompiledBinary)) {
-            Write-Host "Successfully compiled $outputExe ($((Get-Item $outputExe).Length) bytes)" -ForegroundColor Green
+            Write-Host "Successfully compiled $outputExe ($((Get-Item $outputExe).Length) bytes, machine 0x$('{0:X4}' -f $expectedMachine))" -ForegroundColor Green
             return $true
         }
     } catch {
@@ -131,9 +138,19 @@ if ($clCmd) {
 }
 
 if ($Architecture -eq 'x86') {
-    # An x64 watchdog still launches from an x86 process on 64-bit Windows (WOW64). Degrade
-    # gracefully instead of breaking the release when no 32-bit toolchain is available.
     $fallback = Join-Path $PSScriptRoot "OpenTaskbarWatchdog.exe"
+    if ($NoFallback) {
+        # A wrong-arch watchdog cannot restore taskbars on 32-bit Windows, so a
+        # release/CI build must stop here instead of shipping a WOW64 binary.
+        if (Test-Path -LiteralPath $fallback -PathType Leaf) {
+            Write-Error "No 32-bit toolchain available (GCC -m32 or MSVC x86.x64); refusing to substitute the x64 watchdog with -NoFallback."
+        } else {
+            Write-Error "Could not compile an x86 watchdog binary and no fallback binary exists."
+        }
+        exit 1
+    }
+    # Legacy C# path only: an x64 watchdog still launches from an x86 process on
+    # 64-bit Windows (WOW64). Degrade gracefully instead of breaking the release.
     if (Test-Path -LiteralPath $fallback -PathType Leaf) {
         Copy-Item -LiteralPath $fallback -Destination $outputExe -Force
         Write-Host "WARNING: no 32-bit toolchain available; using the x64 watchdog binary (WOW64 fallback)." -ForegroundColor Yellow

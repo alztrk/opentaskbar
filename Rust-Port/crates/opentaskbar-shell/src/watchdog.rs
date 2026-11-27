@@ -1,5 +1,6 @@
 //! Launches the native 26 KB C `OpenTaskbarWatchdog.exe` (`tools/watchdog/watchdog.c`)
 //! as a separate process (`OpenTaskbarWatchdog.exe --watchdog=<pid>:<token>`).
+//! The embedded PE is built for the exact target architecture by `build.rs`.
 //!
 //! Because it has its own process name, force-killing `OpenTaskBar.exe` never kills
 //! the watchdog, so Windows' native taskbar is always restored reliably.
@@ -37,7 +38,8 @@ unsafe extern "system" {
 #[cfg(test)]
 const WAIT_OBJECT_0: u32 = 0;
 
-const WATCHDOG_BYTES: &[u8] = include_bytes!("../../../../tools/watchdog/OpenTaskbarWatchdog.exe");
+// build.rs compiles the PE for this exact target arch and exports its path.
+const WATCHDOG_BYTES: &[u8] = include_bytes!(env!("OT_WATCHDOG_EXE"));
 const EVENT_PREFIX: &str = r"Local\OpenTaskbar.CleanExit.";
 const HEARTBEAT_PREFIX: &str = r"Local\OpenTaskbar.Heartbeat.";
 /// Well below the C watchdog's 4 s timeout / 3-miss budget.

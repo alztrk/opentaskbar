@@ -37,6 +37,31 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      # Gate before any build: tag <-> csproj <-> Cargo (0.1.0 carve-out) <-> Rust MSIX.
+      - name: Determine release tag and verify version gate
+        id: release_info
+        shell: pwsh
+        run: |
+          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $env:GITHUB_REF_NAME
+          } elseif ($env:GITHUB_REF_TYPE -eq 'branch' -and $env:GITHUB_REF_NAME -match '^release/(v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
+            $Matches[1]
+          } else {
+            "${{ inputs.tag_name }}"
+          }
+          if ($tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?<pre>-[0-9A-Za-z.-]+)?$') {
+            throw "Release tag must look like v0.3.5 or v0.3.5-rc.1."
+          }
+          $version = $Matches['base']
+          $isPre = -not [string]::IsNullOrEmpty($Matches['pre'])
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and "${{ inputs.prerelease }}" -eq 'true') {
+            $isPre = $true
+          }
+          & "scripts/check-release-version.ps1" -Tag $tag
+          "tag_name=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "is_prerelease=$($isPre.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
       - name: Set up .NET 10 SDK
         uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
         with:
@@ -64,34 +89,6 @@ jobs:
           & "scripts/check-rust-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-Rust-x64.exe
           & "scripts/publish-rust-portable.ps1" -Runtime win-x86 -OutputDir release
           & "scripts/check-rust-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-Rust-x86.exe
-
-      - name: Determine release tag
-        id: release_info
-        shell: pwsh
-        run: |
-          $tag = if ($env:GITHUB_REF_TYPE -eq 'tag') {
-            $env:GITHUB_REF_NAME
-          } elseif ($env:GITHUB_REF_TYPE -eq 'branch' -and $env:GITHUB_REF_NAME -match '^release/(v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$') {
-            $Matches[1]
-          } else {
-            "${{ inputs.tag_name }}"
-          }
-          if ($tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?<pre>-[0-9A-Za-z.-]+)?$') {
-            throw "Release tag must look like v0.3.2 or v0.3.2-rc.1."
-          }
-          $version = $Matches['base']
-          $isPre = -not [string]::IsNullOrEmpty($Matches['pre'])
-          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and "${{ inputs.prerelease }}" -eq 'true') {
-            $isPre = $true
-          }
-          [xml]$project = Get-Content "OpenTaskbar.csproj" -Raw
-          $projectTag = "v$($project.Project.PropertyGroup.Version)"
-          if ("v$version" -ne $projectTag) {
-            throw "Release tag $tag does not match project version $projectTag."
-          }
-          "tag_name=$tag" >> $env:GITHUB_OUTPUT
-          "version=$version" >> $env:GITHUB_OUTPUT
-          "is_prerelease=$($isPre.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
 
       - name: Package release artifacts
         shell: pwsh

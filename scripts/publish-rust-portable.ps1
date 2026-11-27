@@ -37,4 +37,29 @@ if (-not (Test-Path -LiteralPath $built -PathType Leaf)) {
 
 $finalExe = Join-Path $OutputDir "OpenTaskbar-Rust-$arch.exe"
 Copy-Item -LiteralPath $built -Destination $finalExe -Force
-Write-Host "Rust portable EXE ready: $finalExe" -ForegroundColor Green
+
+# build.rs compiled the watchdog into OUT_DIR for this exact target and embedded
+# it into the EXE. Keep a named copy beside the portable EXE so the release
+# manifest can record its architecture and SHA-256 (and CI can re-verify it).
+$buildRoot = Join-Path $repoRoot "Rust-Port\target\$target\release\build"
+$watchdogExe = Get-ChildItem -LiteralPath $buildRoot -Directory -Filter 'opentaskbar-shell-*' -ErrorAction SilentlyContinue |
+    ForEach-Object { Join-Path $_.FullName 'out\watchdog\OpenTaskbarWatchdog.exe' } |
+    Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+    Sort-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc } -Descending |
+    Select-Object -First 1
+if (-not $watchdogExe) {
+    throw "No architecture-specific watchdog produced by build.rs under $buildRoot"
+}
+$expectedMachine = if ($arch -eq 'x86') { 0x014C } else { 0x8664 }
+$bytes = [IO.File]::ReadAllBytes($watchdogExe)
+if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+    throw "Watchdog is not a valid PE executable: $watchdogExe"
+}
+$peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+$actualMachine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+if ($actualMachine -ne $expectedMachine) {
+    throw ("Watchdog PE machine 0x{0:X4} does not match {1} (0x{2:X4})." -f $actualMachine, $arch, $expectedMachine)
+}
+$watchdogCopy = Join-Path $OutputDir "OpenTaskbarWatchdog-$arch.exe"
+Copy-Item -LiteralPath $watchdogExe -Destination $watchdogCopy -Force
+Write-Host ("Rust portable EXE ready: {0} (watchdog {1}, PE 0x{2:X4})" -f $finalExe, $arch, $actualMachine) -ForegroundColor Green

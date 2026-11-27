@@ -5,13 +5,18 @@ param (
     [ValidateSet('win-x64', 'win-x86')]
     [string]$Runtime = 'win-x64',
     [string]$OutputDir = "$PSScriptRoot\..\release\msix-rust",
-    [string]$Version = '0.3.2.0',
+    # No hardcoded version: the app release version comes from OpenTaskbar.csproj.
+    [string]$Version = '',
     [switch]$SignForLocalTest
 )
 
 $ErrorActionPreference = 'Stop'
 $arch = ($Runtime -split '-')[-1]
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+if (-not $Version) {
+    [xml]$project = Get-Content -LiteralPath (Join-Path $repoRoot 'OpenTaskbar.csproj') -Raw
+    $Version = ($project.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1).Trim()
+}
 $manifestTemplate = Join-Path $repoRoot 'packaging\msix\AppxManifest.Rust.xml'
 $assetsDir = Join-Path $repoRoot 'packaging\msix\Assets'
 
@@ -39,6 +44,13 @@ if (Test-Path $stagingDir) { Remove-Item -LiteralPath $stagingDir -Recurse -Forc
 New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
 
 Copy-Item -LiteralPath $exe -Destination (Join-Path $stagingDir 'OpenTaskBar.exe') -Force
+# The Rust armer prefers an app-directory watchdog over a %LOCALAPPDATA% copy,
+# so the package must carry the architecture-correct PE next to the EXE.
+$archWatchdog = Join-Path $portableDir "OpenTaskbarWatchdog-$arch.exe"
+if (-not (Test-Path -LiteralPath $archWatchdog -PathType Leaf)) {
+    throw "Missing $arch watchdog beside the portable EXE: $archWatchdog"
+}
+Copy-Item -LiteralPath $archWatchdog -Destination (Join-Path $stagingDir 'OpenTaskbarWatchdog.exe') -Force
 Copy-Item -LiteralPath $assetsDir -Destination (Join-Path $stagingDir 'Assets') -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $repoRoot 'Rust-Port\README.md') -Destination (Join-Path $stagingDir 'Rust-Port-README.md') -Force
 
