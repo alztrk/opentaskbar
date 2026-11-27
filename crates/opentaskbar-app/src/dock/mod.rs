@@ -5424,93 +5424,94 @@ impl DockState {
         // Borrow text from existing state; allocate only when the surface actually changes.
         // Cow keeps borrowed label strings allocation-free; only localized strings whose source
         // is produced by `loc::t` need an owned buffer.
-        let tooltip_info: Option<(Cow<'_, str>, f32, f32)> = if active_drag.is_some() {
-            None
-        } else if let Some(is_next) = self.hovered_scroll {
-            let cx = if is_next {
-                sm.vp_right - SCROLL_EDGE_W_DIPS * 0.5
+        let tooltip_info: Option<(Cow<'_, str>, f32, f32)> =
+            if active_drag.is_some() || self.hover_flyout_open {
+                None
+            } else if let Some(is_next) = self.hovered_scroll {
+                let cx = if is_next {
+                    sm.vp_right - SCROLL_EDGE_W_DIPS * 0.5
+                } else {
+                    sm.vp_left + SCROLL_EDGE_W_DIPS * 0.5
+                };
+                Some((Cow::Owned(loc::t("ScrollDockHelp")), cx, pill_top - 8.0))
+            } else if self.hovered_bin {
+                let (_, bin_rc, _) = self.right_widget_rects_dips();
+                let cx = bin_rc.map_or(pill_left + pill_w - 60.0, |(l, _, r, _)| (l + r) * 0.5);
+                Some((Cow::Owned(loc::t("RecycleBin")), cx, pill_top - 8.0))
+            } else if self.hovered_tray {
+                let (tray_rc, _, _) = self.right_widget_rects_dips();
+                let cx = tray_rc.map_or(pill_left + pill_w - 110.0, |(l, _, r, _)| (l + r) * 0.5);
+                Some((Cow::Owned(loc::t("TrayApps")), cx, pill_top - 8.0))
+            } else if let Some(index) = self.hovered_tray_pin
+                && self
+                    .settings
+                    .user_pinned_background_apps
+                    .get(index)
+                    .is_some()
+                && let (Some(tray), _, _) = self.right_widget_rects_dips()
+            {
+                let (left, _, right, _) = tray_pin_rect(
+                    tray,
+                    tray_pin_cell(base),
+                    widget_gap(&self.settings),
+                    self.tray_pin_visuals.len(),
+                    index,
+                );
+                let label = self
+                    .tray_pin_visuals
+                    .get(index)
+                    .map_or("", |pin| pin.label.as_str());
+                let stack_count = self
+                    .settings
+                    .user_pinned_background_apps
+                    .get(index)
+                    .and_then(|path| folder_stack_preview_count(path));
+                let tooltip = stack_count.map_or_else(
+                    || Cow::Borrowed(label),
+                    |count| Cow::Owned(format!("{label} ({count})")),
+                );
+                Some((tooltip, (left + right) * 0.5, pill_top - 8.0))
+            } else if let Some(index) = self.hovered_stack
+                && let Some(text) = stack_tip
+            {
+                let rects = self.stack_rects_in(&sm, pill_top, pill_h);
+                let cx = rects
+                    .get(index)
+                    .map_or(pill_left + pill_w - 60.0, |(l, _, r, _)| (l + r) * 0.5);
+                let lift = self
+                    .stack_visuals
+                    .get(index)
+                    .map_or(0.0, |sv| icon_size * (sv.scale - 1.0).max(0.0));
+                Some((Cow::Owned(text), cx, (pill_top - lift).min(pill_top) - 8.0))
+            } else if let Some(wid) = self.hovered_widget {
+                let (_, _, wrects) = self.right_widget_rects_dips();
+                let cx = wrects
+                    .iter()
+                    .find(|(id, _)| *id == wid)
+                    .map_or(pill_left + pill_w - 60.0, |(_, (l, _, r, _))| (l + r) * 0.5);
+                let settings = &self.settings;
+                let label =
+                    self.widget_runtime
+                        .hover_tooltip(wid, self.hovered_widget_sub, settings);
+                Some((Cow::Borrowed(label), cx, pill_top - 8.0))
+            } else if let Some(shell) = self.hovered_shell {
+                Some((
+                    Cow::Owned(shell.label()),
+                    self.live_shell_center_x(shell),
+                    pill_top - 8.0,
+                ))
+            } else if let Some(idx) = self.hovered_idx
+                && let Some(slot) = self.slots.get(idx)
+                && preview_showing_for != Some(slot.key.as_str())
+            {
+                let lift = self.slot_lift(slot);
+                let icon_top = icon_base_bottom - lift - icon_size * slot.scale;
+                let top_edge = icon_top.min(pill_top);
+                let center_x = self.live_slot_center_x(idx);
+                Some((Cow::Borrowed(slot.label.as_str()), center_x, top_edge - 8.0))
             } else {
-                sm.vp_left + SCROLL_EDGE_W_DIPS * 0.5
+                None
             };
-            Some((Cow::Owned(loc::t("ScrollDockHelp")), cx, pill_top - 8.0))
-        } else if self.hovered_bin {
-            let (_, bin_rc, _) = self.right_widget_rects_dips();
-            let cx = bin_rc.map_or(pill_left + pill_w - 60.0, |(l, _, r, _)| (l + r) * 0.5);
-            Some((Cow::Owned(loc::t("RecycleBin")), cx, pill_top - 8.0))
-        } else if self.hovered_tray {
-            let (tray_rc, _, _) = self.right_widget_rects_dips();
-            let cx = tray_rc.map_or(pill_left + pill_w - 110.0, |(l, _, r, _)| (l + r) * 0.5);
-            Some((Cow::Owned(loc::t("TrayApps")), cx, pill_top - 8.0))
-        } else if let Some(index) = self.hovered_tray_pin
-            && self
-                .settings
-                .user_pinned_background_apps
-                .get(index)
-                .is_some()
-            && let (Some(tray), _, _) = self.right_widget_rects_dips()
-        {
-            let (left, _, right, _) = tray_pin_rect(
-                tray,
-                tray_pin_cell(base),
-                widget_gap(&self.settings),
-                self.tray_pin_visuals.len(),
-                index,
-            );
-            let label = self
-                .tray_pin_visuals
-                .get(index)
-                .map_or("", |pin| pin.label.as_str());
-            let stack_count = self
-                .settings
-                .user_pinned_background_apps
-                .get(index)
-                .and_then(|path| folder_stack_preview_count(path));
-            let tooltip = stack_count.map_or_else(
-                || Cow::Borrowed(label),
-                |count| Cow::Owned(format!("{label} ({count})")),
-            );
-            Some((tooltip, (left + right) * 0.5, pill_top - 8.0))
-        } else if let Some(index) = self.hovered_stack
-            && let Some(text) = stack_tip
-        {
-            let rects = self.stack_rects_in(&sm, pill_top, pill_h);
-            let cx = rects
-                .get(index)
-                .map_or(pill_left + pill_w - 60.0, |(l, _, r, _)| (l + r) * 0.5);
-            let lift = self
-                .stack_visuals
-                .get(index)
-                .map_or(0.0, |sv| icon_size * (sv.scale - 1.0).max(0.0));
-            Some((Cow::Owned(text), cx, (pill_top - lift).min(pill_top) - 8.0))
-        } else if let Some(wid) = self.hovered_widget {
-            let (_, _, wrects) = self.right_widget_rects_dips();
-            let cx = wrects
-                .iter()
-                .find(|(id, _)| *id == wid)
-                .map_or(pill_left + pill_w - 60.0, |(_, (l, _, r, _))| (l + r) * 0.5);
-            let settings = &self.settings;
-            let label = self
-                .widget_runtime
-                .hover_tooltip(wid, self.hovered_widget_sub, settings);
-            Some((Cow::Borrowed(label), cx, pill_top - 8.0))
-        } else if let Some(shell) = self.hovered_shell {
-            Some((
-                Cow::Owned(shell.label()),
-                self.live_shell_center_x(shell),
-                pill_top - 8.0,
-            ))
-        } else if let Some(idx) = self.hovered_idx
-            && let Some(slot) = self.slots.get(idx)
-            && preview_showing_for != Some(slot.key.as_str())
-        {
-            let lift = self.slot_lift(slot);
-            let icon_top = icon_base_bottom - lift - icon_size * slot.scale;
-            let top_edge = icon_top.min(pill_top);
-            let center_x = self.live_slot_center_x(idx);
-            Some((Cow::Borrowed(slot.label.as_str()), center_x, top_edge - 8.0))
-        } else {
-            None
-        };
 
         if let Some((text, center_x, bottom_y)) = tooltip_info {
             let needs_redraw = self
@@ -5820,9 +5821,18 @@ impl DockState {
         true
     }
 
+    fn hide_tooltip_for_flyout(&mut self) {
+        self.tooltip_node.hide();
+        self.tooltip_cache = None;
+        self.dcomp.commit();
+    }
+
     /// WS-10: a group flyout row with several live windows opens the picker
     /// keyed by the dock's own monitor; a single window launches directly.
     fn open_group_flyout(&mut self, group_index: usize, slot_path: &str) {
+        if self.hover_flyout_open {
+            return;
+        }
         let Some(group) = self.settings.app_groups.get(group_index).cloned() else {
             return;
         };
@@ -5868,6 +5878,8 @@ impl DockState {
             blocks,
         };
         let (anchor_x, anchor_y) = self.flyout_anchor_center_px();
+        self.hide_tooltip_for_flyout();
+        self.hover_flyout_open = true;
         let action = crate::ui::flyout::show_primary_with_options(
             self.hwnd,
             self.is_dark,
@@ -5877,6 +5889,7 @@ impl DockState {
             BorderStyle::from_menu_settings(self.is_dark, &self.settings),
             FlyoutOptions::stack().with_edge(self.dock_flyout_edge()),
         );
+        self.hover_flyout_open = false;
         match action {
             Some(1) => {
                 if let Some(member) = self.settings.app_groups.get_mut(group_index) {
@@ -5927,6 +5940,10 @@ impl DockState {
     /// the dock edge. The Keyboard flyout targets the last external foreground
     /// window, never the dock or one of our popups.
     fn open_widget_flyout_at(&mut self, id: &str, rc: DipRect) -> bool {
+        if self.hover_flyout_open {
+            return false;
+        }
+        self.hide_tooltip_for_flyout();
         self.note_external_foreground();
         if self.keyboard_target_hwnd != 0 {
             self.widget_runtime
@@ -5970,6 +5987,9 @@ impl DockState {
     /// visible subfolders (alphabetical) then recent files, capped at
     /// `STACK_FLYOUT_MAX_ITEMS`, with an "Open in File Explorer" footer.
     fn open_stack_flyout(&mut self, index: usize) {
+        if self.hover_flyout_open {
+            return;
+        }
         let Some(visual) = self.stack_visuals.get(index) else {
             return;
         };
@@ -6026,6 +6046,7 @@ impl DockState {
             || self.flyout_anchor_center_px(),
             |rc| self.flyout_anchor_px(rc),
         );
+        self.hide_tooltip_for_flyout();
         self.hover_flyout_open = true;
         let action = crate::ui::flyout::show_primary_with_options(
             self.hwnd,
@@ -6977,12 +6998,15 @@ impl DockState {
         if self.pressed_tray {
             self.pressed_tray = false;
             self.update_visuals();
-            if let Some(rc) = tray_rc
+            if !self.hover_flyout_open
+                && let Some(rc) = tray_rc
                 && Self::hit_rect_in_vp(&sm, Some(rc), mx, my)
             {
                 let (ax, ay) = self.flyout_anchor_px(rc);
                 let edge = self.dock_flyout_edge();
-                if let Some((path, pinned)) = tray::open_background_apps_flyout(
+                self.hide_tooltip_for_flyout();
+                self.hover_flyout_open = true;
+                let result = tray::open_background_apps_flyout(
                     self.hwnd,
                     self.is_dark,
                     &self.settings,
@@ -6990,9 +7014,13 @@ impl DockState {
                     ay,
                     edge,
                     &self.settings.user_pinned_background_apps,
-                ) {
+                );
+                self.hover_flyout_open = false;
+                if let Some((path, pinned)) = result {
                     self.set_background_pin(&path, pinned);
                 }
+                self.reconcile_pointer_after_interaction();
+                self.update_visuals();
             }
             return;
         }

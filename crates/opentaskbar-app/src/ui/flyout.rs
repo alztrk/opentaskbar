@@ -246,12 +246,12 @@ impl FlyoutOptions {
         }
     }
 
-    /// Folder stack / app group flyout: clicking a row launches an app and the
-    /// popup is expected to survive transient focus changes (WS-6 stacks).
+    /// Folder stack / app group flyout: clicking outside or re-clicking the
+    /// dock item dismisses the popup cleanly like any other dock flyout.
     #[must_use]
     pub fn stack() -> Self {
         Self {
-            stays_open: true,
+            stays_open: false,
             ..Self::default()
         }
     }
@@ -750,6 +750,7 @@ struct HitTarget {
 
 struct FlyoutState<'a> {
     hwnd: HWND,
+    tag: String,
     dpi: f32,
     is_dark: bool,
     spec: FlyoutSpec,
@@ -793,6 +794,7 @@ struct FlyoutState<'a> {
     hover_left_since: Option<Instant>,
     prev_buttons_mask: u8,
     selected: Option<FlyoutAction>,
+    recorded_close: bool,
     done: AtomicBool,
 }
 
@@ -2350,6 +2352,7 @@ fn show_flyout_impl<'a>(
     let tick_enabled = has_live_callback && live_tick_tag(tag);
     let mut state = Box::new(FlyoutState {
         hwnd,
+        tag: tag.to_owned(),
         dpi,
         is_dark,
         spec,
@@ -2385,6 +2388,7 @@ fn show_flyout_impl<'a>(
         hover_left_since: None,
         prev_buttons_mask: mouse_buttons_mask(),
         selected: None,
+        recorded_close: false,
         done: AtomicBool::new(false),
     });
     let ptr = (&mut *state) as *mut FlyoutState<'_> as isize;
@@ -2463,7 +2467,7 @@ fn show_flyout_impl<'a>(
             SetForegroundWindow(previous_foreground);
         }
     }
-    if selected.is_none() {
+    if selected.is_none() && !state.recorded_close {
         record_closed(tag);
     }
     selected
@@ -2604,6 +2608,12 @@ impl FlyoutState<'_> {
             return;
         }
         self.closing = true;
+        // Arm reopen suppression immediately when dismissal starts so a fast
+        // click releasing during `CLOSE_ANIM_MS` cannot reopen the flyout.
+        if self.selected.is_none() && !self.recorded_close {
+            record_closed(&self.tag);
+            self.recorded_close = true;
+        }
         if self.slide_px == 0 {
             self.done.store(true, Ordering::Release);
             return;
@@ -5232,7 +5242,7 @@ mod tests {
         // Presets for the WS-6 tray / folder-stack call sites.
         assert!(super::FlyoutOptions::tray().retain_for_external_context_menu);
         assert!(!super::FlyoutOptions::tray().stays_open);
-        assert!(super::FlyoutOptions::stack().stays_open);
+        assert!(!super::FlyoutOptions::stack().stays_open);
         assert_eq!(
             super::FlyoutOptions::default()
                 .with_edge(FlyoutEdge::Left)
@@ -5450,6 +5460,22 @@ mod tests {
         assert!(stays_open_for_external_menu(true, true));
         assert!(stays_open_for_external_menu(false, true));
         assert!(!stays_open_for_external_menu(false, false));
+    }
+
+    #[test]
+    fn stack_flyout_allows_outside_dismiss_and_suppresses_immediate_reopen() {
+        let stack_opts = FlyoutOptions::stack();
+        assert!(!stack_opts.stays_open);
+        assert!(!stays_open_for_external_menu(false, stack_opts.stays_open));
+
+        let tag = "stack-toggle-close-test";
+        assert!(!should_suppress_reopen(tag));
+        record_closed(tag);
+        assert!(
+            should_suppress_reopen(tag),
+            "closing a stack flyout must immediately suppress reopen for the same tag"
+        );
+        assert!(!should_suppress_reopen(tag));
     }
 
     #[test]
