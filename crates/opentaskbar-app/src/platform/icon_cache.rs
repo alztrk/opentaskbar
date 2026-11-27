@@ -202,7 +202,7 @@ fn hicon_to_bgra(hicon: HICON) -> Option<RawIcon> {
                         DIB_RGB_COLORS,
                     );
                     if rows != 0 {
-                        let has_alpha = pixels.chunks_exact(4).any(|p| p[3] != 0);
+                        let has_alpha = pixels.as_chunks::<4>().0.iter().any(|p| p[3] != 0);
                         if !has_alpha && !ii.hbmMask.is_null() {
                             let mut mask = vec![0u8; (width as usize) * (height as usize) * 4];
                             let mrows = GetDIBits(
@@ -215,7 +215,12 @@ fn hicon_to_bgra(hicon: HICON) -> Option<RawIcon> {
                                 DIB_RGB_COLORS,
                             );
                             if mrows != 0 {
-                                for (p, m) in pixels.chunks_exact_mut(4).zip(mask.chunks_exact(4)) {
+                                for (p, m) in pixels
+                                    .as_chunks_mut::<4>()
+                                    .0
+                                    .iter_mut()
+                                    .zip(mask.as_chunks::<4>().0)
+                                {
                                     // Mask white (0xFF) = transparent, black (0x00) = opaque.
                                     if m[0] != 0 {
                                         p[0] = 0;
@@ -229,7 +234,7 @@ fn hicon_to_bgra(hicon: HICON) -> Option<RawIcon> {
                             }
                         } else {
                             // Zero RGB on fully transparent pixels to prevent dark filter halos.
-                            for p in pixels.chunks_exact_mut(4) {
+                            for p in pixels.as_chunks_mut::<4>().0 {
                                 if p[3] == 0 {
                                     p[0] = 0;
                                     p[1] = 0;
@@ -347,7 +352,7 @@ fn from_shell_hbitmap(bitmap: HBITMAP) -> Option<RawIcon> {
                     pixels[row * width * 4..(row + 1) * width * 4]
                         .copy_from_slice(&src[src_row * stride..src_row * stride + width * 4]);
                 }
-                for p in pixels.chunks_exact_mut(4) {
+                for p in pixels.as_chunks_mut::<4>().0 {
                     let a = u16::from(p[3]);
                     if a == 0 {
                         p[0] = 0;
@@ -528,7 +533,7 @@ fn decode_pack_icon(path: &Path) -> Option<RawIcon> {
     let decoded = image::open(path).ok()?.to_rgba8();
     let (width, height) = decoded.dimensions();
     let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
-    for pixel in decoded.as_raw().chunks_exact(4) {
+    for pixel in decoded.as_raw().as_chunks::<4>().0 {
         pixels.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
     }
     Some(RawIcon {
@@ -597,7 +602,7 @@ pub fn snap_icon_size(requested: u32) -> u32 {
 
 /// Converts straight (unassociated) BGRA32 to premultiplied alpha in place.
 pub fn straight_to_premultiplied(pixels: &mut [u8]) {
-    for p in pixels.chunks_exact_mut(4) {
+    for p in pixels.as_chunks_mut::<4>().0 {
         let a = p[3] as u16;
         if a != 255 {
             p[0] = ((p[0] as u16 * a + 127) / 255) as u8;
@@ -609,7 +614,7 @@ pub fn straight_to_premultiplied(pixels: &mut [u8]) {
 
 /// Converts premultiplied BGRA32 back to straight alpha (clamped; loses information for a=0).
 pub fn premultiplied_to_straight(pixels: &mut [u8]) {
-    for p in pixels.chunks_exact_mut(4) {
+    for p in pixels.as_chunks_mut::<4>().0 {
         let a = p[3] as u16;
         if a == 0 {
             p[0] = 0;

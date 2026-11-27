@@ -163,7 +163,10 @@ fn version_name(path: &str) -> Option<String> {
     let mut translations = Vec::new();
     if let Some((ptr, bytes)) = query(r"\VarFileInfo\Translation") {
         // SAFETY: the translation value is `bytes` long and lives inside `data`.
-        for pair in unsafe { std::slice::from_raw_parts(ptr, bytes / 2) }.chunks_exact(2) {
+        for pair in unsafe { std::slice::from_raw_parts(ptr, bytes / 2) }
+            .as_chunks::<2>()
+            .0
+        {
             translations.push((pair[0], pair[1]));
         }
     }

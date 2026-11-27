@@ -5003,7 +5003,7 @@ impl DcompEngine {
     pub fn create_app_icon_surface(&self, raw: &RawIcon) -> Result<IDCompositionSurface> {
         // Convert straight BGRA32 to premultiplied BGRA32 once at upload time.
         let mut premul = raw.pixels.to_vec();
-        for px in premul.chunks_exact_mut(4) {
+        for px in premul.as_chunks_mut::<4>().0 {
             let a = u16::from(px[3]);
             if a == 0 {
                 px[0] = 0;

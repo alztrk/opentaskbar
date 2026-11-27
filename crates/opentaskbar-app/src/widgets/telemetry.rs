@@ -228,10 +228,10 @@ fn query_smtc_session() -> Option<(String, String, String, bool, u64, u64)> {
     };
     let manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
         .ok()?
-        .get()
+        .join()
         .ok()?;
     let session = manager.GetCurrentSession().ok()?;
-    let props = session.TryGetMediaPropertiesAsync().ok()?.get().ok()?;
+    let props = session.TryGetMediaPropertiesAsync().ok()?.join().ok()?;
     let title = props.Title().map(|s| s.to_string()).unwrap_or_default();
     let artist = props.Artist().map(|s| s.to_string()).unwrap_or_default();
     if title.is_empty() && artist.is_empty() {
@@ -5047,7 +5047,7 @@ pub fn parse_weather_forecast(root: &serde_json::Value) -> Vec<WeatherDay> {
 pub fn media_seek(secs: u64) -> bool {
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
     let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync()
-        .and_then(|op| op.get())
+        .and_then(|op| op.join())
     {
         Ok(m) => m,
         Err(_) => return false,
@@ -5059,7 +5059,7 @@ pub fn media_seek(secs: u64) -> bool {
     let ticks = (secs.min(u32::MAX as u64) as i64).saturating_mul(10_000_000);
     session
         .TryChangePlaybackPositionAsync(ticks)
-        .and_then(|op| op.get())
+        .and_then(|op| op.join())
         .unwrap_or(false)
 }
 

@@ -516,7 +516,7 @@ fn reading(
 
 fn utf16_from_bytes(bytes: &[u8]) -> String {
     let mut units = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let unit = u16::from_le_bytes([pair[0], pair[1]]);
         if unit == 0 {
             break;
@@ -2306,7 +2306,7 @@ fn ble_gatt_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
 
     let result = (|| -> windows::core::Result<Vec<WirelessReading>> {
         let selector = BluetoothLEDevice::GetDeviceSelector()?;
-        let devices = DeviceInformation::FindAllAsyncAqsFilter(&selector)?.get()?;
+        let devices = DeviceInformation::FindAllAsyncAqsFilter(&selector)?.join()?;
         let mut readings = Vec::new();
         for info in devices {
             if cancel.load(Ordering::Relaxed) {
@@ -2315,18 +2315,18 @@ fn ble_gatt_readings(cancel: &AtomicBool) -> Vec<WirelessReading> {
             let device_id = info.Id()?;
             let name = info.Name()?.to_string_lossy();
             let read = (|| -> windows::core::Result<Option<u8>> {
-                let device = BluetoothLEDevice::FromIdAsync(&device_id)?.get()?;
-                let services = device.GetGattServicesAsync()?.get()?;
+                let device = BluetoothLEDevice::FromIdAsync(&device_id)?.join()?;
+                let services = device.GetGattServicesAsync()?.join()?;
                 for service in services.Services()? {
                     if service.Uuid()? != BATTERY_SERVICE {
                         continue;
                     }
-                    let characteristics = service.GetCharacteristicsAsync()?.get()?;
+                    let characteristics = service.GetCharacteristicsAsync()?.join()?;
                     for characteristic in characteristics.Characteristics()? {
                         if characteristic.Uuid()? != BATTERY_LEVEL {
                             continue;
                         }
-                        let value = characteristic.ReadValueAsync()?.get()?;
+                        let value = characteristic.ReadValueAsync()?.join()?;
                         let buffer = value.Value()?;
                         let reader = DataReader::FromBuffer(&buffer)?;
                         return Ok(Some(reader.ReadByte()?));

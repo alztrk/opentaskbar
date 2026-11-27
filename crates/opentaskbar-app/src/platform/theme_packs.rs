@@ -419,7 +419,10 @@ fn extract_safe(archive: &mut ZipArchive<File>, destination: &Path) -> Result<()
         }
 
         // Backslashes are a path separator on Windows, so normalise before checking.
-        let raw = entry.name().replace('\\', "/");
+        let raw = entry
+            .name()
+            .map_err(|e| format!("ErrorThemeInvalid: {e}"))?
+            .replace('\\', "/");
         let parts: Vec<&str> = raw.split('/').collect();
         if raw.is_empty()
             || raw.starts_with('/')
@@ -732,7 +735,13 @@ mod tests {
 
         let mut zip = ZipArchive::new(File::open(&archive).expect("open zip")).expect("read zip");
         let names: Vec<String> = (0..zip.len())
-            .map(|index| zip.by_index(index).expect("entry").name().to_string())
+            .map(|index| {
+                zip.by_index(index)
+                    .expect("entry")
+                    .name()
+                    .expect("entry name")
+                    .to_string()
+            })
             .collect();
         assert!(names.iter().all(|name| name.starts_with("source/")));
         assert!(names.contains(&"source/theme.json".to_string()));

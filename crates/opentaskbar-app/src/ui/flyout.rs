@@ -1151,7 +1151,7 @@ impl FlyoutD2d {
         }
         // Direct2D expects premultiplied BGRA for `D2D1_ALPHA_MODE_PREMULTIPLIED`.
         let mut premul = Vec::with_capacity(icon.bgra.len());
-        for px in icon.bgra.chunks_exact(4) {
+        for px in icon.bgra.as_chunks::<4>().0 {
             let a = u16::from(px[3]);
             premul.push(((u16::from(px[0]) * a + 127) / 255) as u8);
             premul.push(((u16::from(px[1]) * a + 127) / 255) as u8);
@@ -1197,7 +1197,7 @@ impl FlyoutD2d {
             return None;
         }
         let mut premul = Vec::with_capacity(w as usize * h as usize * 4);
-        for px in img.as_raw().chunks_exact(4) {
+        for px in img.as_raw().as_chunks::<4>().0 {
             let a = u16::from(px[3]);
             premul.push(((u16::from(px[2]) * a + 127) / 255) as u8);
             premul.push(((u16::from(px[1]) * a + 127) / 255) as u8);
