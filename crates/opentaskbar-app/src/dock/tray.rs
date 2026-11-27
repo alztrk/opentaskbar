@@ -119,7 +119,102 @@ fn is_system_noise(exe_path: &str) -> bool {
         || lower.ends_with(r"\crashpad_handler.exe")
 }
 
+#[link(name = "version")]
+unsafe extern "system" {
+    fn GetFileVersionInfoSizeW(path: *const u16, handle: *mut u32) -> u32;
+    fn GetFileVersionInfoW(
+        path: *const u16,
+        handle: u32,
+        size: u32,
+        data: *mut std::ffi::c_void,
+    ) -> i32;
+    fn VerQueryValueW(
+        data: *const std::ffi::c_void,
+        key: *const u16,
+        value: *mut *mut std::ffi::c_void,
+        len: *mut u32,
+    ) -> i32;
+}
+
+/// Reads the PE `VERSIONINFO` `FileDescription` (then `ProductName`) for an
+/// executable, trying its own translation table before the en-US fallbacks.
+fn version_name(path: &str) -> Option<String> {
+    let path: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: `path` is a NUL-terminated UTF-16 buffer that outlives the call.
+    let size = unsafe { GetFileVersionInfoSizeW(path.as_ptr(), std::ptr::null_mut()) };
+    if size == 0 {
+        return None;
+    }
+    // `u32` storage keeps the version block 4-byte aligned for `VerQueryValueW`.
+    let mut data = vec![0u32; (size as usize).div_ceil(4)];
+    // SAFETY: `data` holds at least `size` bytes.
+    if unsafe { GetFileVersionInfoW(path.as_ptr(), 0, size, data.as_mut_ptr().cast()) } == 0 {
+        return None;
+    }
+    let query = |key: &str| {
+        let key: Vec<u16> = key.encode_utf16().chain(Some(0)).collect();
+        let mut value = std::ptr::null_mut();
+        let mut len = 0;
+        // SAFETY: `data` is a valid version block; the returned pointer points into it.
+        let ok =
+            unsafe { VerQueryValueW(data.as_ptr().cast(), key.as_ptr(), &mut value, &mut len) };
+        (ok != 0 && !value.is_null()).then_some((value.cast::<u16>(), len as usize))
+    };
+    let mut translations = Vec::new();
+    if let Some((ptr, bytes)) = query(r"\VarFileInfo\Translation") {
+        // SAFETY: the translation value is `bytes` long and lives inside `data`.
+        for pair in unsafe { std::slice::from_raw_parts(ptr, bytes / 2) }.chunks_exact(2) {
+            translations.push((pair[0], pair[1]));
+        }
+    }
+    translations.extend([(0x0409, 0x04b0), (0x0409, 0x04e4)]);
+    select_version_name(|field| {
+        translations.iter().find_map(|(lang, page)| {
+            let key = format!(r"\StringFileInfo\{lang:04X}{page:04X}\{field}");
+            let (ptr, len) = query(&key)?;
+            // SAFETY: string values are `len` UTF-16 units inside `data`.
+            let units = unsafe { std::slice::from_raw_parts(ptr, len) };
+            let name = String::from_utf16_lossy(units)
+                .trim_end_matches('\0')
+                .trim()
+                .to_owned();
+            (!name.is_empty()).then_some(name)
+        })
+    })
+}
+
+/// `FileDescription` wins over `ProductName`; blank values are skipped.
+fn select_version_name(mut lookup: impl FnMut(&str) -> Option<String>) -> Option<String> {
+    ["FileDescription", "ProductName"]
+        .into_iter()
+        .find_map(|key| lookup(key).filter(|s| !s.trim().is_empty()))
+}
+
+/// Friendly app name for tray rows and pinned tray icons: the executable's PE
+/// `FileDescription` / `ProductName`, cached per path, falling back to the
+/// capitalized file stem.
 pub(super) fn friendly_name(exe_path: &str) -> String {
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    static NAMES: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let names = NAMES.get_or_init(Default::default);
+    let key = exe_path.to_lowercase();
+    if let Some(name) = names
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+    {
+        return name.clone();
+    }
+    // Resolve outside the lock: version-info reads touch the disk.
+    let name = version_name(exe_path).unwrap_or_else(|| stem_name(exe_path));
+    names
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, name.clone());
+    name
+}
+
+fn stem_name(exe_path: &str) -> String {
     let stem = Path::new(exe_path)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -266,6 +361,7 @@ pub(super) fn show_pinned_app_menu(
     is_dark: bool,
     settings: &DockSettings,
     path: &str,
+    anchor: Option<menu::MenuAnchor>,
 ) -> bool {
     let entries = vec![
         MenuEntry::item(
@@ -275,11 +371,14 @@ pub(super) fn show_pinned_app_menu(
         ),
         MenuEntry::item(2, MenuIcon::Pin, loc::t("UnpinTrayIcon")),
     ];
-    match menu::show_popup_menu_with_border(
+    // The pinned icon lives on the dock pill: anchor the menu to the visible
+    // pill so it opens beside the dock instead of at the raw cursor position.
+    match menu::show_popup_menu_with_anchor(
         owner_hwnd,
         is_dark,
-        entries,
+        &entries,
         BorderStyle::from_menu_settings(is_dark, settings),
+        anchor,
     ) {
         Some(1) => open_pinned_app(owner_hwnd, path),
         Some(2) => return true,
@@ -335,6 +434,7 @@ pub(super) fn open_background_apps_flyout(
     settings: &DockSettings,
     anchor_center_x_px: i32,
     anchor_bottom_y_px: i32,
+    edge: flyout::FlyoutEdge,
     pinned_paths: &[String],
 ) -> Option<(String, bool)> {
     let apps = enumerate_background_apps();
@@ -459,11 +559,14 @@ pub(super) fn open_background_apps_flyout(
                 native_items,
             ));
         }
-        match menu::show_popup_menu_with_border(
+        // A row inside the flyout is not on the dock pill: `None` keeps this
+        // menu cursor-anchored next to the row that was right-clicked.
+        match menu::show_popup_menu_with_anchor(
             owner_hwnd,
             is_dark,
-            entries,
+            &entries,
             BorderStyle::from_menu_settings(is_dark, settings),
+            None,
         )
         .unwrap_or(0)
         {
@@ -501,7 +604,7 @@ pub(super) fn open_background_apps_flyout(
         spec,
         Some(&mut handle_right_click),
         BorderStyle::from_menu_settings(is_dark, settings),
-        FlyoutOptions::tray(),
+        FlyoutOptions::tray().with_edge(edge),
     );
     if let Some(app) = open_from_menu {
         activate_or_relaunch(app);
@@ -548,6 +651,35 @@ mod tests {
         assert!(!default.retain_for_external_context_menu);
         assert!(tray.retain_for_external_context_menu);
         assert!(!tray.stays_open);
+    }
+
+    #[test]
+    fn version_name_prefers_description_then_product() {
+        assert_eq!(
+            select_version_name(|k| Some(k.to_owned())).as_deref(),
+            Some("FileDescription")
+        );
+        assert_eq!(
+            select_version_name(|k| Some(
+                if k == "FileDescription" {
+                    " "
+                } else {
+                    "VMware Tools"
+                }
+                .to_owned()
+            ))
+            .as_deref(),
+            Some("VMware Tools")
+        );
+    }
+
+    #[test]
+    fn missing_version_name_uses_capitalized_stem() {
+        assert_eq!(select_version_name(|_| None), None);
+        assert_eq!(friendly_name(r"Z:\missing\vmtoolsd.exe"), "Vmtoolsd");
+        // Cached per path (case-insensitively) without changing the answer.
+        assert_eq!(friendly_name(r"Z:\MISSING\VMTOOLSD.EXE"), "Vmtoolsd");
+        assert_eq!(stem_name(""), "App");
     }
 
     #[test]

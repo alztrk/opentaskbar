@@ -31,7 +31,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::dcomp::{DcompEngine, IslandButton, VisualNode, WidgetInteraction};
-use super::layout::{ISLAND_ANIM_MS, cubic_ease_out, effective_animations_enabled};
+use super::layout::{
+    ISLAND_ANIM_MS, WheelDedup, WheelSource, cubic_ease_out, effective_animations_enabled,
+};
 use crate::design;
 use crate::platform::win32::{self, ForegroundProbe, MonitorInfo, WidgetContextAction};
 use crate::ui::settings as settings_ui;
@@ -48,11 +50,15 @@ const RIGHT_CONTROLS_DIPS: f32 = island_geo::RIGHT_CONTROLS_DIPS;
 const LEFT_CONTROLS_DIPS: f32 = island_geo::LEFT_CONTROLS_DIPS;
 const CHIP_H_DIPS: f32 = 38.0;
 const SLIDE_DURATION_SECS: f32 = 0.190;
-/// `FlyoutEdge::Bottom` places the popup *above* the anchor. The island is on the
-/// top edge, so the anchor is shifted down by the reference expanded height to make the
-/// popup appear just below the island instead of being clamped to the top margin.
-const FLYOUT_ANCHOR_OFFSET_DIPS: f32 = island_geo::EXPANDED_HEIGHT_DIPS;
+/// Gap between the island's bottom edge and a flyout opened below it
+/// (`FlyoutEdge::Top` opens downward directly from the anchor).
+const FLYOUT_GAP_DIPS: f32 = 8.0;
 const WM_MOUSELEAVE: u32 = 0x02A3;
+/// `WH_MOUSE_LL` wheel route for island windows (posted by `dock::mouse_wheel_hook`
+/// with the same payload as the dock's own route), so wheel input reaches the
+/// `WS_EX_NOACTIVATE` island even when "scroll inactive windows" is off.
+pub(super) const WM_APP_ISLAND_WHEEL_ROUTE: u32 =
+    windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 0x20;
 
 const TIMER_VISIBILITY: usize = 1;
 const TIMER_WIDGETS: usize = 2;
@@ -176,9 +182,9 @@ pub fn details_desired_width(details: &WidgetDetails) -> f32 {
     (longest as f32 * 7.0).clamp(0.0, 640.0)
 }
 
-/// Screen anchor for a top-edge island flyout. `ui::flyout::FlyoutEdge::Bottom`
-/// places the popup above the anchor, so we offset by the reference expanded height to
-/// land below the island. Horizontally centered on the island/monitor.
+/// Screen anchor for a top-edge island flyout. Flyouts open with
+/// `FlyoutEdge::Top` (downward from the anchor), so the anchor sits a small gap
+/// below the island's visible bottom edge, horizontally centered on the island.
 pub fn island_flyout_anchor(
     monitor_left: i32,
     monitor_width: i32,
@@ -186,7 +192,7 @@ pub fn island_flyout_anchor(
     dpi: f32,
 ) -> (i32, i32) {
     let x = monitor_left + monitor_width / 2;
-    let y = island_bottom_y + (FLYOUT_ANCHOR_OFFSET_DIPS * dpi.max(0.5)).round() as i32;
+    let y = island_bottom_y + (FLYOUT_GAP_DIPS * dpi.max(0.5)).round() as i32;
     (x, y)
 }
 
@@ -361,6 +367,8 @@ struct DynamicIslandWindow {
     island: IslandState,
     details_bg: VisualNode,
     details_node: VisualNode,
+    /// Pairs the hook-routed wheel notch with its `WM_MOUSEWHEEL` twin.
+    wheel_dedup: WheelDedup,
 }
 
 impl DynamicIslandWindow {
@@ -491,6 +499,7 @@ impl DynamicIslandWindow {
             island: IslandState::new(widget_ids.clone()),
             details_bg,
             details_node,
+            wheel_dedup: WheelDedup::default(),
         });
 
         let ptr = (&mut *boxed as *mut Self) as isize;
@@ -499,6 +508,9 @@ impl DynamicIslandWindow {
             SetTimer(hwnd, TIMER_VISIBILITY, 400, None);
             SetTimer(hwnd, TIMER_WIDGETS, 1000, None);
         }
+        // The island lives on the dock UI thread: let the dock's `WH_MOUSE_LL`
+        // hook route wheel notches here as well.
+        super::register_island_wheel_hwnd(hwnd_val);
 
         boxed.apply_internal(widget_ids, settings, is_dark);
         Some(boxed)
@@ -1244,29 +1256,101 @@ impl DynamicIslandWindow {
             return;
         }
         let dpi = self.monitor.dpi_scale;
-        let island_bottom_y = self.monitor.top
-            + (policy::island_height_dips(self.island.expanded) * dpi).ceil() as i32;
+        let visible = self.visible_island_rect();
         let (anchor_x, anchor_y) = island_flyout_anchor(
-            self.monitor.left,
-            self.monitor.width(),
-            island_bottom_y,
+            visible.left,
+            visible.right - visible.left,
+            visible.bottom,
             dpi,
         );
-        // Dispatches to the real `widgets::WidgetRuntime::open_widget_flyout`
-        // implementation (calendar, mixer, stats, AI quotas, ...). The old port
-        // only toggled the in-place details panel, so no flyout ever appeared.
-        let changed = self.widget_runtime.open_widget_flyout(
+        // Dispatches to the real `widgets::WidgetRuntime::open_widget_flyout_on_edge`
+        // implementation (calendar, mixer, stats, AI quotas, ...). `FlyoutEdge::Top`
+        // opens the popup downward, directly below the island.
+        let changed = self.widget_runtime.open_widget_flyout_on_edge(
             &wid,
             self.hwnd,
             self.is_dark,
             anchor_x,
             anchor_y,
+            crate::ui::flyout::FlyoutEdge::Top,
             &mut self.settings,
         );
         if changed {
             self.save_and_broadcast();
         } else {
             self.render_all();
+        }
+    }
+
+    /// Visible island rect in physical screen pixels: the window rect minus the
+    /// auto-hide slide (the content slides up while the HWND stays put).
+    fn visible_island_rect(&self) -> windows::Win32::Foundation::RECT {
+        let dpi = self.monitor.dpi_scale;
+        let w_px = (self.width_dips * dpi).ceil().max(1.0) as i32;
+        let h_px = (policy::island_height_dips(self.island.expanded) * dpi)
+            .ceil()
+            .max(1.0) as i32;
+        let mut rc = windows_sys::Win32::Foundation::RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        // SAFETY: `self.hwnd` is this island's live window handle.
+        let ok = unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect(self.hwnd as HWND, &mut rc)
+        } != 0;
+        if !ok || rc.right <= rc.left || rc.bottom <= rc.top {
+            rc.left = self.monitor.left + (self.monitor.width() - w_px) / 2;
+            rc.top = self.monitor.top;
+            rc.right = rc.left + w_px;
+            rc.bottom = rc.top + h_px;
+        }
+        let slide_h = (COMPACT_HEIGHT_DIPS + 6.0) * dpi.max(0.5);
+        let offset_y = (self.hide_progress * slide_h).round() as i32;
+        windows::Win32::Foundation::RECT {
+            left: rc.left,
+            top: rc.top - offset_y,
+            right: rc.right,
+            bottom: (rc.bottom - offset_y).max(rc.top),
+        }
+    }
+
+    /// Context menus open below the visible island (`MenuEdge::Top`).
+    fn island_menu_anchor(&self) -> Option<crate::ui::menu::MenuAnchor> {
+        Some(crate::ui::menu::MenuAnchor {
+            visible_rect: self.visible_island_rect(),
+            edge: Some(crate::ui::menu::MenuEdge::Top),
+        })
+    }
+
+    /// Wheel over the island: Audio/Media pages adjust the volume (always, the
+    /// `wheel_volume_enabled` toggle only governs dock-wide background wheel),
+    /// Keyboard cycles the input layout. The chip re-renders on the same frame.
+    fn handle_wheel(&mut self, delta: i16) {
+        if delta == 0 {
+            return;
+        }
+        let Some(wid) = self.current_page_id().map(str::to_owned) else {
+            return;
+        };
+        match registry::canonical_widget_id(&wid) {
+            "audio" | "media" => {
+                self.widget_runtime.adjust_volume_wheel(i32::from(delta));
+                self.render_all();
+            }
+            "keyboard" => {
+                let foreground =
+                    unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() }
+                        as usize;
+                if foreground != 0 && foreground != self.hwnd {
+                    self.widget_runtime.set_keyboard_target_hwnd(foreground);
+                }
+                self.widget_runtime.cycle_keyboard_layout(delta < 0);
+                self.widget_runtime.tick(&self.settings);
+                self.render_all();
+            }
+            _ => {}
         }
     }
 
@@ -1481,6 +1565,7 @@ impl DynamicIslandWindow {
             can_earlier,
             can_later,
             &self.settings,
+            self.island_menu_anchor(),
         ) {
             WidgetContextAction::PlaceAllDisplays => {
                 self.settings
@@ -1536,6 +1621,7 @@ impl DynamicIslandWindow {
     }
 
     fn destroy(self) {
+        super::unregister_island_wheel_hwnd(self.hwnd);
         unsafe {
             KillTimer(self.hwnd as HWND, TIMER_VISIBILITY);
             KillTimer(self.hwnd as HWND, TIMER_WIDGETS);
@@ -1623,12 +1709,30 @@ unsafe extern "system" fn island_wnd_proc(
         }
         WM_MOUSEWHEEL => {
             let delta = ((wparam >> 16) & 0xffff) as i16;
-            if let Some(wid) = state.current_page_id()
-                && (wid == "audio" || wid == "media")
+            if state
+                .wheel_dedup
+                .accept(WheelSource::Window, delta, false, Instant::now())
             {
-                widgets::adjust_audio_volume(if delta > 0 { 4 } else { -4 });
-                state.widget_runtime.tick(&state.settings);
-                state.render_all();
+                state.handle_wheel(delta);
+            }
+            0
+        }
+        WM_APP_ISLAND_WHEEL_ROUTE => {
+            // Same payload as the dock route: bit 0 = horizontal, the rest = delta.
+            let horizontal = (wparam & 1) != 0;
+            let delta = (wparam >> 1) as u32 as i16;
+            let (x, y) = super::layout::unpack_cursor_point(lparam);
+            let visible = state.visible_island_rect();
+            let inside =
+                x >= visible.left && x < visible.right && y >= visible.top && y < visible.bottom;
+            if !horizontal
+                && inside
+                && state.is_visible
+                && state
+                    .wheel_dedup
+                    .accept(WheelSource::Hook, delta, false, Instant::now())
+            {
+                state.handle_wheel(delta);
             }
             0
         }
@@ -2128,7 +2232,21 @@ mod tests {
         // Top-edge monitor at x=1920..3840, DPI=1.5, island bottom at y=75.
         let (x, y) = island_flyout_anchor(1920, 1920, 75, 1.5);
         assert_eq!(x, 2880);
-        assert_eq!(y, 75 + 369); // 246 DIP * 1.5
+        // `FlyoutEdge::Top` opens downward from the anchor: a small gap below the
+        // island, no longer the 246 DIP expanded-height workaround.
+        assert_eq!(y, 75 + 12); // 8 DIP * 1.5
+    }
+
+    #[test]
+    fn island_flyouts_and_menus_open_below_the_island() {
+        let src = include_str!("dynamic_island.rs");
+        let code = src.split("#[cfg(test)]").next().unwrap_or(src);
+        assert!(code.contains("open_widget_flyout_on_edge("));
+        assert!(code.contains("crate::ui::flyout::FlyoutEdge::Top"));
+        assert!(code.contains("crate::ui::menu::MenuEdge::Top"));
+        assert!(code.contains("self.island_menu_anchor()"));
+        assert!(!code.contains(&["adjust_audio", "_volume("].concat()));
+        assert!(code.contains("adjust_volume_wheel(i32::from(delta))"));
     }
 
     #[test]
