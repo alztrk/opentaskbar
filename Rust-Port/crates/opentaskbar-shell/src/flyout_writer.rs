@@ -10,8 +10,9 @@
 //! reposition loop can disturb Explorer; recovery reading always stays active.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use crate::flyout_journal;
 use std::sync::atomic::{AtomicI8, AtomicU64, Ordering};
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
@@ -168,10 +169,22 @@ fn persist(registry: &Registry) {
             position.hwnd, position.pid, position.left, position.top
         ));
     }
-    let tmp = path.with_extension("tmp");
-    if fs::write(&tmp, contents).is_ok() {
+    let tmp = temp_path(&path);
+    if fs::write(&tmp, contents).is_ok()
+        && fs::rename(&tmp, &path).is_err()
+        && path.exists()
+        && fs::remove_file(&path).is_ok()
+    {
         let _ = fs::rename(&tmp, &path);
     }
+}
+
+/// Must stay identical to `flyout_journal::tmp_path`: both writers target the
+/// same `flyout-positions.txt.tmp` file so a killed process leaves at most one
+/// partial journal that the next recovery pass can overwrite atomically.
+#[must_use]
+pub fn temp_path(path: &Path) -> PathBuf {
+    flyout_journal::tmp_path(path)
 }
 
 /// Reads the on-disk journal (also used after a hard kill, when the in-process
@@ -441,6 +454,15 @@ mod tests {
             r"C:\Temp\evil-searchhost.exe",
             SEARCH_EXES
         ));
+    }
+
+    #[test]
+    fn both_flyout_writers_use_the_same_temporary_file_name() {
+        let journal = journal_path();
+        assert_eq!(temp_path(&journal), flyout_journal::tmp_path(&journal));
+        assert!(temp_path(&journal)
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy() == "flyout-positions.txt.tmp"));
     }
 
     #[test]

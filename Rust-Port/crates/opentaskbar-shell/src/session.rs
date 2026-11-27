@@ -4,10 +4,13 @@
 //! `TaskbarReplacementSession`: hide retries (20 normal / 40 startup-settle
 //! attempts with 2 / 10 consecutive clean passes), a 45-attempt degraded
 //! reconcile budget, `TaskbarCreated` reconciliation, side-dock work-area
-//! reservation, and verified restore with three retries. The window-message
-//! loop stays in the app crate; this module exposes the decisions it must make
-//! so they can be unit-tested without a UI thread.
+//! reservation, and verified restore requiring two consecutive clean passes.
+//! The pure decisions stay unit-testable; this module also owns the bounded
+//! production drivers so the budgets are not left as dead constants.
 
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{HANDLE, HMODULE, HWND};
@@ -25,6 +28,8 @@ pub const STARTUP_SETTLE_REQUIRED_CLEAN_PASSES: u32 = 10;
 pub const NORMAL_HIDE_MAX_ATTEMPTS: u32 = 20;
 pub const STARTUP_SETTLE_MAX_ATTEMPTS: u32 = 40;
 pub const RESTORE_ATTEMPTS: u32 = 3;
+pub const RESTORE_REQUIRED_CLEAN_PASSES: u32 = 2;
+pub const RECONCILE_PASS_COUNT: u32 = 2;
 pub const HIDE_RETRY_SETTLE_SLEEP_MS: u64 = 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,19 +221,34 @@ pub fn compute_side_reservation(edge: i32, screen_width: i32, dock_width: i32) -
     }
 }
 
-/// Verifies that Explorer's taskbar really came back, with three bounded
-/// `SW_SHOW` retries after the first state/visibility pass (same as the C
-/// watchdog). The journal is only cleared by the caller when this returns true.
-pub fn verify_restored(tray: usize, attempts: u32) -> bool {
+/// Pure restore-streak update. C# `RestoreWithVerification` only declares
+/// success after two consecutive clean passes (a transient re-hide resets it).
+#[must_use]
+pub const fn restore_observation(visible: bool, consecutive: u32) -> (u32, bool) {
+    let next = if visible { consecutive + 1 } else { 0 };
+    (next, next >= RESTORE_REQUIRED_CLEAN_PASSES)
+}
+
+/// Reveals the tray and asks for verification in one bounded pass. This is the
+/// shared engine for [`verify_restored`] and the restore loop in `taskbar`.
+/// `restore_once` re-applies AppBar state/geometry before each observation.
+pub fn verify_restored_with(
+    tray: usize,
+    attempts: u32,
+    mut restore_once: impl FnMut(),
+) -> bool {
     let tray = tray as HWND;
-    for attempt in 0..attempts.max(1) {
+    let total = attempts.max(1);
+    let mut consecutive = 0u32;
+    for attempt in 0..total {
+        restore_once();
         // SAFETY: querying/revealing a validated Explorer taskbar window.
         unsafe {
-            if IsWindowVisible(tray) != 0 {
-                return true;
+            if IsWindowVisible(tray) == 0 {
+                ShowWindow(tray, SW_SHOW);
             }
-            ShowWindow(tray, SW_SHOW);
         }
+        let mut secondaries_ok = true;
         for secondary in native_tray::find_secondary_leases() {
             if !secondary.is_valid() {
                 continue;
@@ -237,13 +257,28 @@ pub fn verify_restored(tray: usize, attempts: u32) -> bool {
             unsafe {
                 ShowWindow(secondary.hwnd as HWND, SW_SHOW);
             }
+            secondaries_ok &= unsafe { IsWindowVisible(secondary.hwnd as HWND) != 0 };
         }
-        if attempt + 1 < attempts {
+        // SAFETY: checking the windows we just revealed (C# IsNativeTaskbarVisible).
+        let visible = secondaries_ok && unsafe { IsWindowVisible(tray) != 0 };
+        let (next, verified) = restore_observation(visible, consecutive);
+        consecutive = next;
+        if verified {
+            return true;
+        }
+        // Never sleep after the last round: shutdown must not pay a 60 ms tax
+        // for a pass that cannot change the answer.
+        if attempt + 1 < total {
             std::thread::sleep(Duration::from_millis(HIDE_RETRY_SETTLE_SLEEP_MS));
         }
     }
-    // SAFETY: final liveness/visibility check.
-    unsafe { IsWindowVisible(tray) != 0 }
+    false
+}
+
+/// Verifies that Explorer's taskbar really came back. Two consecutive visible
+/// observations are required before the caller may clear the journal.
+pub fn verify_restored(tray: usize, attempts: u32) -> bool {
+    verify_restored_with(tray, attempts, || {})
 }
 
 /// One bounded recovery attempt: re-assert AppBar state, enforce hiding and
@@ -256,14 +291,14 @@ pub fn reconcile_once(
     reason: &str,
 ) -> bool {
     let start = std::time::Instant::now();
-    let Some(tray) = native_tray::try_acquire() else {
+    if native_tray::try_acquire().is_none() {
         log::result("Reconcile", reason, false, false, &[]);
         return false;
     };
-    let previous = crate::journal::read_state().unwrap_or_else(taskbar::get_taskbar_state);
-    let mut state_data = appbar::create_data(tray.hwnd);
-    state_data.lParam = previous as isize;
-    appbar::send(appbar::ABM_SETSTATE, &mut state_data, reason);
+    let previous = taskbar::active_state();
+    // Verified state publication (GetState -> SETSTATE -> GetState) replaces the
+    // old blind send so a failed Explorer reply cannot silently leave auto-hide off.
+    let _ = appbar::set_and_verify_state(previous, &format!("{reason}/SetState"));
     if auto_hide {
         taskbar::set_taskbar_state(previous | 0x1);
     } else if dock_hwnd != 0 && desired_total_px > 0 {
@@ -278,6 +313,229 @@ pub fn reconcile_once(
         &[("ms", log::elapsed_ms(start).to_string())],
     );
     true
+}
+
+// ---- Bounded production drivers --------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ReplacementConfig {
+    dock_hwnd: usize,
+    auto_hide: bool,
+    desired_total_px: i32,
+}
+
+#[derive(Debug)]
+struct RuntimeState {
+    config: ReplacementConfig,
+    hide_attempts: u32,
+    hide_clean: u32,
+    hide_stable_settle: bool,
+    degraded_attempts: u32,
+    /// Identity of the AppBar registration bound to the previous Explorer tray.
+    registered_hwnd: usize,
+    registered_pid: u32,
+}
+
+impl RuntimeState {
+    const fn new() -> Self {
+        Self {
+            config: ReplacementConfig {
+                dock_hwnd: 0,
+                auto_hide: false,
+                desired_total_px: 0,
+            },
+            hide_attempts: 0,
+            hide_clean: 0,
+            hide_stable_settle: false,
+            degraded_attempts: 0,
+            registered_hwnd: 0,
+            registered_pid: 0,
+        }
+    }
+}
+
+static RUNTIME: Mutex<RuntimeState> = Mutex::new(RuntimeState::new());
+static HIDE_RETRY_ACTIVE: AtomicBool = AtomicBool::new(false);
+static DEGRADED_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+fn runtime() -> std::sync::MutexGuard<'static, RuntimeState> {
+    RUNTIME.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Records the live dock geometry when replacement starts so the hook-driven
+/// reconcile can re-assert it without app-crate wiring.
+pub fn configure_replacement(dock_hwnd: usize, auto_hide: bool, desired_total_px: i32) {
+    let mut state = runtime();
+    state.config = ReplacementConfig {
+        dock_hwnd,
+        auto_hide,
+        desired_total_px,
+    };
+    state.hide_attempts = 0;
+    state.hide_clean = 0;
+    state.degraded_attempts = 0;
+}
+
+/// Drops the HWND/PID bound to the *old* Explorer instance. A recycled HWND
+/// must never be treated as a still-valid registration (C# `MarkUnregistered`).
+pub fn clear_cached_taskbar_identity() -> (usize, u32) {
+    let mut state = runtime();
+    let identity = (state.registered_hwnd, state.registered_pid);
+    state.registered_hwnd = 0;
+    state.registered_pid = 0;
+    identity
+}
+
+pub fn note_taskbar_identity(hwnd: usize, pid: u32) {
+    let mut state = runtime();
+    state.registered_hwnd = hwnd;
+    state.registered_pid = pid;
+}
+
+/// Pure budget reset used by `TaskbarCreated`: one new shell instance means the
+/// degraded budget and the hide streak both start over.
+#[must_use]
+pub const fn reset_budgets(_degraded_attempts: u32, _hide_attempts: u32) -> (u32, u32) {
+    (0, 0)
+}
+
+/// `TaskbarCreated` / tray-show path: clear the caches tied to the old taskbar,
+/// reset the 45-attempt degraded budget, then run the two bounded reconcile
+/// passes C# uses so a secondary tray recreated mid-pass is caught too.
+pub fn reconcile_after_taskbar_created() -> bool {
+    let config = {
+        let mut state = runtime();
+        let (degraded, hide) = reset_budgets(state.degraded_attempts, state.hide_attempts);
+        state.degraded_attempts = degraded;
+        state.hide_attempts = hide;
+        state.hide_clean = 0;
+        state.hide_stable_settle = true;
+        state.config
+    };
+    let _ = clear_cached_taskbar_identity();
+    taskbar::clear_appbar_registration();
+    let mut succeeded = false;
+    for _ in 0..RECONCILE_PASS_COUNT {
+        succeeded = reconcile_once(
+            config.dock_hwnd,
+            config.auto_hide,
+            config.desired_total_px,
+            "TaskbarCreated",
+        ) || succeeded;
+    }
+    if let Some(tray) = native_tray::try_acquire() {
+        note_taskbar_identity(tray.hwnd, tray.pid);
+    }
+    succeeded
+}
+
+/// Executes one hide-enforcement step against the live taskbar and advances the
+/// 20/40-attempt budgets. Returns the decision so a timer can schedule the next
+/// delay; `stop_timer` means the streak settled or the budget ended.
+pub fn run_hide_retry_step() -> HideRetryStep {
+    let (attempt, clean, stable) = {
+        let state = runtime();
+        (
+            state.hide_attempts,
+            state.hide_clean,
+            state.hide_stable_settle,
+        )
+    };
+    let step = evaluate_hide_retry_step(
+        taskbar::hide_observation(),
+        attempt,
+        clean,
+        stable,
+    );
+    {
+        let mut state = runtime();
+        state.hide_clean = step.next_consecutive_clean;
+        if step.stop_timer || step.needs_degraded_reconcile {
+            state.hide_attempts = 0;
+            state.hide_stable_settle = false;
+        } else {
+            state.hide_attempts = attempt + 1;
+        }
+    }
+    if step.needs_degraded_reconcile {
+        start_degraded_reconcile("HideRetry");
+    }
+    step
+}
+
+/// Starts the bounded hide timer (250/500 ms initial delay). Idempotent: a
+/// second trigger while the worker is running only refreshes the config.
+pub fn start_hide_retry(require_stable_settle: bool) {
+    {
+        let mut state = runtime();
+        state.hide_attempts = 0;
+        state.hide_clean = 0;
+        state.hide_stable_settle = require_stable_settle;
+    }
+    if HIDE_RETRY_ACTIVE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if thread::Builder::new()
+        .name("opentaskbar-hide-retry".into())
+        .spawn(|| {
+            let initial = hide_retry_initial_delay_ms(runtime().hide_stable_settle);
+            std::thread::sleep(Duration::from_millis(u64::from(initial)));
+            loop {
+                let step = run_hide_retry_step();
+                if step.stop_timer {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(u64::from(step.next_delay_ms)));
+            }
+            HIDE_RETRY_ACTIVE.store(false, Ordering::Release);
+        })
+        .is_err()
+    {
+        HIDE_RETRY_ACTIVE.store(false, Ordering::Release);
+    }
+}
+
+/// One degraded reconcile attempt, bounded at 45 tries. When exhausted the
+/// worker stops (zero idle cost); the shell hooks remain armed and reset the
+/// budget on a new `TaskbarCreated`.
+pub fn run_degraded_reconcile_step() -> RetryDecision {
+    let (attempt, config) = {
+        let mut state = runtime();
+        state.degraded_attempts += 1;
+        (state.degraded_attempts, state.config)
+    };
+    let decision = evaluate_degraded_reconcile_retry(attempt);
+    if decision.should_retry {
+        let _ = reconcile_once(
+            config.dock_hwnd,
+            config.auto_hide,
+            config.desired_total_px,
+            "DegradedReconcile",
+        );
+    }
+    decision
+}
+
+fn start_degraded_reconcile(_reason: &str) {
+    if DEGRADED_ACTIVE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if thread::Builder::new()
+        .name("opentaskbar-degraded-reconcile".into())
+        .spawn(|| {
+            loop {
+                let decision = run_degraded_reconcile_step();
+                if !decision.should_retry {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(u64::from(decision.delay_ms)));
+            }
+            DEGRADED_ACTIVE.store(false, Ordering::Release);
+        })
+        .is_err()
+    {
+        DEGRADED_ACTIVE.store(false, Ordering::Release);
+    }
 }
 
 // ---- WinEvent shell hooks -------------------------------------------------------
@@ -315,10 +573,43 @@ fn set_shell_change_callback(callback: Option<fn()>) {
     }
 }
 
-/// Invokes the installed callback, containing any panic: unwinding across an
-/// `extern "system"` WinEvent callback is undefined behaviour and would abort
-/// the process, so the hook must swallow it.
+/// Default reaction to a tray create/show event: a new Explorer instance needs
+/// the full two-pass reconcile; a re-shown tray of the *same* instance only
+/// needs the bounded hide-retry timer (20/40 attempts).
+fn on_shell_tray_change() {
+    // Before `configure_replacement` (startup heal / --restore / tests) there is
+    // no dock to reconcile: do not arm any background budget.
+    if runtime().config.dock_hwnd == 0 {
+        return;
+    }
+    let Some(tray) = native_tray::try_acquire() else {
+        start_degraded_reconcile("ShellChange");
+        return;
+    };
+    let replaced = {
+        let state = runtime();
+        should_re_register_taskbar(
+            state.registered_hwnd != 0,
+            state.registered_hwnd,
+            state.registered_pid,
+            tray.hwnd,
+            tray.pid,
+        )
+    };
+    if replaced {
+        note_taskbar_identity(tray.hwnd, tray.pid);
+        let _ = reconcile_after_taskbar_created();
+    } else {
+        let stable = runtime().hide_stable_settle;
+        start_hide_retry(stable);
+    }
+}
+
+/// Invokes the built-in reconcile driver and the app callback, containing any
+/// panic: unwinding across an `extern "system"` WinEvent callback is undefined
+/// behaviour and would abort the process, so the hook must swallow it.
 fn invoke_shell_change_callback() {
+    let _ = std::panic::catch_unwind(on_shell_tray_change);
     let callback = SHELL_CHANGE_CALLBACK.lock().ok().and_then(|slot| *slot);
     if let Some(callback) = callback {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(callback));
@@ -403,6 +694,14 @@ pub fn install_shell_hooks(on_shell_change: fn()) {
 mod tests {
     use super::*;
 
+    /// The runtime config/identity cache is process-wide; tests that touch it
+    /// must not overlap with the shell-hook callback test.
+    static TEST_SERIAL: Mutex<()> = Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        TEST_SERIAL.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn degraded_budget_covers_45_attempts_then_exhausts() {
         for attempt in 1..=45 {
@@ -476,6 +775,7 @@ mod tests {
 
     #[test]
     fn shell_hook_callback_runs_and_its_panic_is_contained() {
+        let _serial = serial();
         CALLBACK_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
 
         set_shell_change_callback(Some(counting_callback));
@@ -493,5 +793,53 @@ mod tests {
         let result = std::panic::catch_unwind(invoke_shell_change_callback);
         assert!(result.is_ok(), "callback panic escaped catch_unwind");
         set_shell_change_callback(None);
+    }
+
+    #[test]
+    fn restore_verification_needs_two_consecutive_clean_passes() {
+        assert_eq!(restore_observation(false, 0), (0, false));
+        assert_eq!(restore_observation(true, 0), (1, false));
+        assert_eq!(restore_observation(true, 1), (2, true));
+        // A re-hide between two passes resets the streak.
+        assert_eq!(restore_observation(false, 1), (0, false));
+        assert_eq!(restore_observation(true, 0), (1, false));
+        assert_eq!(RESTORE_REQUIRED_CLEAN_PASSES, 2);
+    }
+
+    #[test]
+    fn taskbar_created_resets_both_budgets_and_identity_cache() {
+        let _serial = serial();
+        assert_eq!(reset_budgets(44, 19), (0, 0));
+        configure_replacement(0x1234, true, 72);
+        note_taskbar_identity(0xABCD, 4242);
+        assert_eq!(clear_cached_taskbar_identity(), (0xABCD, 4242));
+        assert_eq!(clear_cached_taskbar_identity(), (0, 0));
+        assert_eq!(
+            runtime().config,
+            ReplacementConfig {
+                dock_hwnd: 0x1234,
+                auto_hide: true,
+                desired_total_px: 72,
+            }
+        );
+        // Leave no dock configured for other tests / the shipped process.
+        configure_replacement(0, false, 0);
+    }
+
+    #[test]
+    fn hide_budgets_match_the_c_sharp_session() {
+        assert_eq!(NORMAL_HIDE_MAX_ATTEMPTS, 20);
+        assert_eq!(STARTUP_SETTLE_MAX_ATTEMPTS, 40);
+        assert_eq!(MAX_DEGRADED_RECONCILE_ATTEMPTS, 45);
+        assert_eq!(RECONCILE_PASS_COUNT, 2);
+        assert_eq!(hide_retry_initial_delay_ms(false), 250);
+        assert_eq!(hide_retry_initial_delay_ms(true), 500);
+        let exhausted = evaluate_hide_retry_step(
+            HideObservation::StillVisible,
+            STARTUP_SETTLE_MAX_ATTEMPTS,
+            0,
+            true,
+        );
+        assert!(exhausted.stop_timer && exhausted.exhausted && !exhausted.settled);
     }
 }
