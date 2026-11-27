@@ -58,11 +58,16 @@ use crate::design::{
 };
 use crate::platform::icon_cache::RawIcon;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChipIcon {
-    Folder,
-    Grid,
-    Sparkle,
+/// Icon payload for a dock widget chip. Built-ins use a Fluent glyph; user
+/// widgets can supply theme-tinted vector path data or a PNG asset.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WidgetIcon {
+    /// Segoe Fluent Icons code point (e.g. `0xE8B7` for Folder).
+    Glyph(u16),
+    /// Lucide-style `StreamGeometry` path data resolved through Direct2D.
+    PathData(String),
+    /// PNG file path, decoded and cached by `widgets::widget_icons`.
+    Asset(std::path::PathBuf),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -188,7 +193,7 @@ pub enum WidgetChipSpec {
     },
     /// Clean borderless icon + two-line helper (Stacks, Groups)
     Simple {
-        icon: ChipIcon,
+        icon: WidgetIcon,
         icon_color: Rgb,
         top: String,
         bottom: String,
@@ -3188,7 +3193,16 @@ impl DcompEngine {
                         border_rgb,
                         border_width_dips,
                     )?;
-                    draw_chip_icon(&self.dwrite_factory, dc, *icon, 18.0, cy, 15.0, *icon_color)?;
+                    draw_chip_icon(
+                        &self.dwrite_factory,
+                        &self.d2d_factory,
+                        dc,
+                        icon,
+                        18.0,
+                        cy,
+                        15.0,
+                        *icon_color,
+                    )?;
                     let mid = height_dips * 0.51;
                     draw_text(
                         top,
@@ -4190,36 +4204,69 @@ unsafe fn draw_fluent_glyph_d2d(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 unsafe fn draw_chip_icon(
     dwrite: &IDWriteFactory,
+    factory: &ID2D1Factory1,
     dc: &ID2D1DeviceContext,
-    icon: ChipIcon,
+    icon: &WidgetIcon,
     cx: f32,
     cy: f32,
     size_dips: f32,
     color: Rgb,
 ) -> Result<()> {
-    let app_icon = match icon {
-        ChipIcon::Folder => AppIcon::Folder,
-        ChipIcon::Grid => AppIcon::LayoutGrid,
-        ChipIcon::Sparkle => AppIcon::Layers,
-    };
     let half = size_dips * 0.6;
+    let dest = D2D_RECT_F {
+        left: cx - half,
+        top: cy - half,
+        right: cx + half,
+        bottom: cy + half,
+    };
     unsafe {
-        draw_fluent_glyph_d2d(
-            dwrite,
-            dc,
-            app_icon,
-            D2D_RECT_F {
-                left: cx - half,
-                top: cy - half,
-                right: cx + half,
-                bottom: cy + half,
-            },
-            size_dips,
-            color,
-            0.96,
-        )
+        match icon {
+            WidgetIcon::Glyph(code) => {
+                let glyph = char::from_u32(u32::from(*code)).unwrap_or('?').to_string();
+                draw_fluent_str_d2d(dwrite, dc, &glyph, dest, size_dips, color, 0.96)
+            }
+            WidgetIcon::PathData(data) => {
+                design::brand_paths::draw_path_data_logo(factory, dc, data, dest, color, 0.96)
+            }
+            WidgetIcon::Asset(path) => {
+                if let Some(decoded) = crate::widgets::widget_icons::load_bgra(path) {
+                    let (w, h, pixels) = &*decoded;
+                    let props = D2D1_BITMAP_PROPERTIES1 {
+                        pixelFormat: D2D1_PIXEL_FORMAT {
+                            format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                            alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                        },
+                        dpiX: 96.0,
+                        dpiY: 96.0,
+                        ..Default::default()
+                    };
+                    let bitmap = dc.CreateBitmap(
+                        D2D_SIZE_U {
+                            width: *w,
+                            height: *h,
+                        },
+                        Some(pixels.as_ptr().cast()),
+                        *w * 4,
+                        &props,
+                    )?;
+                    dc.DrawBitmap(
+                        &bitmap,
+                        Some(&dest),
+                        1.0,
+                        D2D1_INTERPOLATION_MODE_LINEAR,
+                        None,
+                        None,
+                    );
+                    Ok(())
+                } else {
+                    // A missing or malformed asset must never blank the chip.
+                    draw_fluent_str_d2d(dwrite, dc, "\u{E81E}", dest, size_dips, color, 0.96)
+                }
+            }
+        }
     }
 }
 

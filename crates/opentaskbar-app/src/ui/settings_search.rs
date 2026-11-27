@@ -573,7 +573,7 @@ pub(crate) fn catalog() -> Vec<SettingsSearchEntry> {
         "island hide fullscreen app display",
     ));
 
-    for widget in widgets::ALL_WIDGETS {
+    for widget in widgets::catalog_widgets() {
         entries.push(SettingsSearchEntry {
             page: SettingsPage::Widgets,
             title: widgets::widget_name(widget.id),
@@ -1309,8 +1309,7 @@ impl SearchCatalog {
             })
             .collect();
 
-        let widgets: Vec<&'static widgets::WidgetDescriptor> = widgets::ALL_WIDGETS
-            .iter()
+        let widgets: Vec<&'static widgets::WidgetDescriptor> = widgets::catalog_widgets()
             .chain([
                 widgets::widget_descriptor("stacks").unwrap(),
                 widgets::widget_descriptor("groups").unwrap(),
@@ -1417,7 +1416,7 @@ mod dynamic_tests {
     }
 
     fn widgets_len() -> usize {
-        crate::widgets::ALL_WIDGETS.len()
+        crate::widgets::catalog_widgets().count()
     }
 
     #[test]

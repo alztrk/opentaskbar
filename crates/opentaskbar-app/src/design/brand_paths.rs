@@ -418,6 +418,19 @@ pub unsafe fn draw_brand_logo(
     let Some(data) = brand_path_data(provider_id) else {
         return Ok(());
     };
+    unsafe { draw_path_data_logo(factory, dc, data, dest, color, alpha) }
+}
+
+/// Draws arbitrary `StreamGeometry` path data (Lucide-style `M… L… C… Z`) into `dest`.
+/// Used by built-in brand logos and by user-supplied widget icons; no SVG crate needed.
+pub unsafe fn draw_path_data_logo(
+    factory: &ID2D1Factory1,
+    dc: &ID2D1DeviceContext,
+    data: &str,
+    dest: D2D_RECT_F,
+    color: Rgb,
+    alpha: f32,
+) -> Result<()> {
     unsafe {
         let geom = build_path_geometry(factory, data)?;
         let bounds = geom.GetBounds(None)?;

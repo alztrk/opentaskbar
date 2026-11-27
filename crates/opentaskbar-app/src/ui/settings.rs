@@ -7720,8 +7720,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut out: Vec<AnyElement> = Vec::new();
-        let active_count = widgets::ALL_WIDGETS
-            .iter()
+        let active_count = widgets::catalog_widgets()
             .filter(|w| self.settings.is_widget_enabled(w.id))
             .count();
 
@@ -7765,7 +7764,7 @@ impl SettingsView {
                                 "WidgetsActiveCount",
                                 &[
                                     &active_count.to_string(),
-                                    &widgets::ALL_WIDGETS.len().to_string(),
+                                    &widgets::catalog_widgets().count().to_string(),
                                 ],
                             ),
                             active_count > 0,
@@ -7787,15 +7786,14 @@ impl SettingsView {
                 .into_any_element(),
         );
 
-        for &cat in widgets::WIDGET_CATEGORIES {
+        for &cat in widgets::WIDGET_CATEGORIES.iter() {
             if self.widget_filter != "All"
                 && self.widget_filter != "Active"
                 && self.widget_filter != cat
             {
                 continue;
             }
-            let items: Vec<&'static widgets::WidgetDescriptor> = widgets::ALL_WIDGETS
-                .iter()
+            let items: Vec<&'static widgets::WidgetDescriptor> = widgets::catalog_widgets()
                 .filter(|w| {
                     w.category == cat
                         && (self.widget_filter != "Active" || self.settings.is_widget_enabled(w.id))

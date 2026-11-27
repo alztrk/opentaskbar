@@ -18,9 +18,11 @@ pub mod diagnostics;
 pub mod focus_break;
 pub mod hover;
 pub mod media_ext;
+pub mod registry;
 pub mod speedtest;
 pub mod telemetry;
 pub mod uia_raw;
+pub mod widget_icons;
 pub mod widget_snapshot;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -34,7 +36,7 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 
 use crate::design::{self, Rgb};
-use crate::dock::dcomp::{ChipIcon, SystemStatColumn, WidgetChipSpec};
+use crate::dock::dcomp::{SystemStatColumn, WidgetChipSpec, WidgetIcon};
 use crate::platform::{pins, toast, wireless_battery};
 use crate::ui::flyout::{self, BarTone, FlyoutBlock, FlyoutSpec, LiveEvent, LiveOutcome};
 use crate::ui::menu::BorderStyle;
@@ -42,10 +44,8 @@ use telemetry::{BluetoothBatteryDevice, BluetoothDeviceKind};
 
 #[allow(unused_imports)]
 pub use catalog_ops::{
-    SHOW_DESKTOP_WIDGET, ShrinkPriority, WIDGET_ALIASES, WidgetDensity, WidgetLayout, WidgetOption,
-    canonical_widget_id, catalog, hardware_available, installed_catalog_widget_ids,
-    is_widget_installed, set_setting, setting_bool, setting_f64, setting_i64, setting_str,
-    setting_string_list, setting_value, widget_layout,
+    catalog, installed_catalog_widget_ids, is_widget_installed, set_setting, setting_bool,
+    setting_f64, setting_i64, setting_str, setting_string_list, setting_value,
 };
 #[allow(unused_imports)]
 pub use focus_break::{FocusEvent, FocusPhase, FocusSession, SharedFocusSession, play_break_chime};
@@ -58,6 +58,12 @@ pub use media_ext::{
     volume_from_wheel,
 };
 #[allow(unused_imports)]
+pub use registry::{
+    WIDGET_ALIASES, WIDGET_CATEGORIES, WidgetDensity, WidgetDescriptor, WidgetLayout, WidgetOption,
+    active_widgets, canonical_widget_id, catalog_widgets, hardware_available, widget_descriptor,
+    widget_has_flyout, widget_layout, widget_name,
+};
+#[allow(unused_imports)]
 pub use speedtest::{STREAM_COUNT, SpeedTestController, SpeedTestResult, SpeedTestState};
 #[allow(unused_imports)]
 pub use telemetry::{
@@ -67,72 +73,6 @@ pub use telemetry::{
 };
 #[allow(unused_imports)]
 pub use widget_snapshot::{POLL_TTL, WidgetPollSnapshot};
-
-pub const WIDGET_CATEGORIES: &[&str] = &[
-    "Time & Weather",
-    "System & Hardware",
-    "AI Quotas",
-    "Media & Controls",
-    "Productivity",
-];
-
-#[derive(Clone, Copy, Debug)]
-pub struct WidgetDescriptor {
-    pub id: &'static str,
-    pub name: &'static str,
-    pub category: &'static str,
-    pub width_dips: f32,
-}
-
-const fn wd(
-    id: &'static str,
-    name: &'static str,
-    category: &'static str,
-    width_dips: f32,
-) -> WidgetDescriptor {
-    WidgetDescriptor {
-        id,
-        name,
-        category,
-        width_dips,
-    }
-}
-
-/// All 23 catalog widgets in category order with their baseline Dock widths.
-pub const ALL_WIDGETS: &[WidgetDescriptor] = &[
-    // Time & Weather
-    wd("clock", "Clock & Date", "Time & Weather", 148.0),
-    wd("weather", "Weather", "Time & Weather", 240.0),
-    wd("dayprogress", "Day Progress", "Time & Weather", 96.0),
-    wd("stopwatch", "Stopwatch", "Time & Weather", 124.0),
-    wd("countdown", "Countdown", "Time & Weather", 124.0),
-    // System & Hardware
-    wd("stats", "System Stats", "System & Hardware", 114.0),
-    wd("netspeed", "Net Speed", "System & Hardware", 156.0),
-    wd("battery", "Battery", "System & Hardware", 96.0),
-    wd(
-        "bluetoothbattery",
-        "Bluetooth Battery",
-        "System & Hardware",
-        78.0,
-    ),
-    wd("storage", "Storage", "System & Hardware", 136.0),
-    // AI Quotas (7 individual provider widgets)
-    wd("aiusage_claude", "Claude", "AI Quotas", 184.0),
-    wd("aiusage_codex", "Codex", "AI Quotas", 184.0),
-    wd("aiusage_opencode", "OpenCode", "AI Quotas", 296.0),
-    wd("aiusage_copilot", "Copilot", "AI Quotas", 192.0),
-    wd("aiusage_deepseek", "DeepSeek", "AI Quotas", 139.0),
-    wd("aiusage_openrouter", "OpenRouter", "AI Quotas", 139.0),
-    wd("aiusage_cursor", "Cursor", "AI Quotas", 164.0),
-    // Media & Controls
-    wd("media", "Media", "Media & Controls", 256.0),
-    wd("audio", "Audio", "Media & Controls", 78.0),
-    wd("quicksettings", "Quick Settings", "Media & Controls", 112.0),
-    wd("keyboard", "Keyboard Layout", "Media & Controls", 58.0),
-    // Productivity
-    wd("focus", "Focus", "Productivity", 124.0),
-];
 
 pub fn ai_provider_color(id: &str) -> Rgb {
     match id {
@@ -153,104 +93,6 @@ pub enum DirectClickOutcome {
     Handled,
     SettingsChanged,
     OpenFlyout,
-}
-
-const STACKS_WIDGET: WidgetDescriptor = wd("stacks", "Folder Stacks", "System & Hardware", 98.0);
-const GROUPS_WIDGET: WidgetDescriptor = wd("groups", "App Groups", "System & Hardware", 98.0);
-
-/// Localized widget name for the settings catalog and widget menus.
-pub fn widget_name(id: &str) -> String {
-    match id {
-        "clock" => loc::t("WidgetClock"),
-        "weather" => loc::t("WidgetWeather"),
-        "dayprogress" => loc::t("WidgetDayProgress"),
-        "stopwatch" => loc::t("WidgetStopwatch"),
-        "countdown" => loc::t("WidgetCountdown"),
-        "stats" => loc::t("WidgetSystemStats"),
-        "netspeed" => loc::t("WidgetNetSpeed"),
-        "battery" => loc::t("WidgetBattery"),
-        "bluetoothbattery" => loc::t("WidgetBluetoothBattery"),
-        "storage" => loc::t("WidgetStorage"),
-        "aiusage_all" => loc::t("WidgetAiUsage"),
-        "aiusage_claude" => loc::t("WidgetAiUsageClaude"),
-        "aiusage_codex" => loc::t("WidgetAiUsageCodex"),
-        "aiusage_opencode" => loc::t("WidgetAiUsageOpenCode"),
-        "aiusage_copilot" => loc::t("WidgetAiUsageCopilot"),
-        "aiusage_deepseek" => loc::t("WidgetAiUsageDeepSeek"),
-        "aiusage_openrouter" => loc::t("WidgetAiUsageOpenRouter"),
-        "aiusage_cursor" => loc::t("WidgetAiUsageCursor"),
-        "media" => loc::t("WidgetMedia"),
-        "audio" => loc::t("WidgetAudio"),
-        "quicksettings" => loc::t("WidgetQuickSettings"),
-        "keyboard" => loc::t("WidgetKeyboardLayout"),
-        "focus" => loc::t("WidgetFocus"),
-        "showdesktop" => loc::t("WidgetShowDesktop"),
-        "stacks" => loc::t("FolderStacks"),
-        "groups" => loc::t("AppGroups"),
-        _ => widget_descriptor(id).map_or_else(|| id.to_owned(), |d| d.name.to_owned()),
-    }
-}
-
-/// Single source of truth for widgets that open a popup flyout.
-/// Used by the dock hover coordinator (WS-D) and by direct-click dispatch; kept in sync with the
-/// branches in [`WidgetRuntime::open_widget_flyout`] (including the WS-E flyouts).
-pub fn widget_has_flyout(id: &str) -> bool {
-    matches!(
-        id,
-        "clock"
-            | "weather"
-            | "stopwatch"
-            | "countdown"
-            | "focus"
-            | "audio"
-            | "quicksettings"
-            | "keyboard"
-            | "stacks"
-            | "groups"
-            | "stats"
-            | "netspeed"
-            | "bluetoothbattery"
-            | "storage"
-            | "dayprogress"
-            | "media"
-            | "aiusage_all"
-            | "aiusage_claude"
-            | "aiusage_codex"
-            | "aiusage_opencode"
-            | "aiusage_copilot"
-            | "aiusage_deepseek"
-            | "aiusage_openrouter"
-            | "aiusage_cursor"
-    )
-}
-
-pub fn widget_descriptor(id: &str) -> Option<&'static WidgetDescriptor> {
-    if id.eq_ignore_ascii_case("stacks") {
-        return Some(&STACKS_WIDGET);
-    }
-    if id.eq_ignore_ascii_case("groups") {
-        return Some(&GROUPS_WIDGET);
-    }
-    ALL_WIDGETS.iter().find(|w| w.id.eq_ignore_ascii_case(id))
-}
-
-/// Widgets currently rendered on the dock. This deliberately reads the *effective* enabled state
-/// from `DockSettings::is_widget_enabled` (not the raw `Widgets`/`InstalledWidgets` arrays): the
-/// core canonicalizes IDs and keeps those arrays consistent when a widget is toggled, so the dock
-/// sees a newly installed+enabled widget on the next settings reload. Focus Mode hides widgets
-/// here just as `WidgetCoordinator.Apply` does.
-pub fn active_widgets(settings: &DockSettings) -> Vec<&'static WidgetDescriptor> {
-    let mut out: Vec<&'static WidgetDescriptor> = ALL_WIDGETS
-        .iter()
-        .filter(|w| settings.is_widget_enabled(w.id))
-        .collect();
-    if !settings.stack_folders.is_empty() {
-        out.push(&STACKS_WIDGET);
-    }
-    if !settings.app_groups.is_empty() {
-        out.push(&GROUPS_WIDGET);
-    }
-    out
 }
 
 struct TooltipTextCache {
@@ -1658,20 +1500,27 @@ impl WidgetRuntime {
                     )
                 });
                 WidgetChipSpec::Simple {
-                    icon: ChipIcon::Sparkle,
+                    // AppIcon::Layers
+                    icon: widget_icons::resolve_widget_icon(
+                        id,
+                        settings,
+                        WidgetIcon::Glyph(0xE81E),
+                    ),
                     icon_color: pal.widget_accent,
                     top: loc::t_fmt("AiUsageActiveCount", &[&active_count.to_string()]),
                     bottom,
                 }
             }
             "stacks" => WidgetChipSpec::Simple {
-                icon: ChipIcon::Folder,
+                // AppIcon::Folder
+                icon: widget_icons::resolve_widget_icon(id, settings, WidgetIcon::Glyph(0xE8B7)),
                 icon_color: pal.warning,
                 top: loc::t("StacksShort"),
                 bottom: loc::t_fmt("FolderCount", &[&settings.stack_folders.len().to_string()]),
             },
             "groups" => WidgetChipSpec::Simple {
-                icon: ChipIcon::Grid,
+                // AppIcon::LayoutGrid
+                icon: widget_icons::resolve_widget_icon(id, settings, WidgetIcon::Glyph(0xF0E2)),
                 icon_color: pal.accent,
                 top: loc::t("GroupsShort"),
                 bottom: loc::t_fmt("GroupCount", &[&settings.app_groups.len().to_string()]),
@@ -4216,9 +4065,9 @@ mod tests {
 
     #[test]
     fn all_22_widgets_registered_with_valid_categories() {
-        assert_eq!(ALL_WIDGETS.len(), 22);
+        assert_eq!(catalog().len(), 22);
         let mut seen = std::collections::HashSet::new();
-        for w in ALL_WIDGETS {
+        for w in catalog() {
             assert!(seen.insert(w.id), "duplicate widget id {}", w.id);
             assert!(
                 WIDGET_CATEGORIES.contains(&w.category),
@@ -4477,12 +4326,12 @@ mod tests {
     #[test]
     fn catalog_and_ai_flyout_use_the_seven_remaining_providers() {
         assert!(
-            !ALL_WIDGETS
+            !catalog()
                 .iter()
                 .any(|w| w.id.eq_ignore_ascii_case("aiusage_ag"))
         );
         assert_eq!(
-            ALL_WIDGETS
+            catalog()
                 .iter()
                 .filter(|w| w.category == "AI Quotas")
                 .count(),
