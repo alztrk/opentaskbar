@@ -5,6 +5,7 @@
 //! and an `X` close button per card. Uses 0% 3D GPU overhead because DWM composites thumbnails
 //! directly into the desktop pass.
 
+use super::layout;
 use crate::design::{self, Rgb, fonts, gdi_rgb};
 use opentaskbar_shell::tracker;
 use std::cell::RefCell;
@@ -149,8 +150,10 @@ pub fn position_overlay_window(
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const DWMWCP_ROUND: u32 = 2;
 const MAX_CARDS: usize = 6;
-const CARD_W_DIPS: f32 = 236.0;
-const CARD_H_DIPS: f32 = 164.0;
+/// C# `Design/Tokens/Layout.xaml`: PreviewWidth/Height = 228x154 DIP.
+/// The Large profile uses 250x180 (set by the dock at show time).
+const CARD_W_DIPS: f32 = layout::PREVIEW_CARD_DIPS.0;
+const CARD_H_DIPS: f32 = layout::PREVIEW_CARD_DIPS.1;
 const HEADER_H_DIPS: f32 = 32.0;
 const CARD_GAP_DIPS: f32 = 8.0;
 const OUTER_PAD_DIPS: f32 = 8.0;
@@ -174,6 +177,8 @@ struct RegisteredCard {
 pub struct PreviewPopup {
     hwnd: HWND,
     dpi: f32,
+    card_w_dips: f32,
+    card_h_dips: f32,
     is_dark: bool,
     visible: bool,
     pointer_inside: bool,
@@ -309,6 +314,8 @@ impl PreviewPopup {
         let mut popup = Box::new(Self {
             hwnd,
             dpi,
+            card_w_dips: CARD_W_DIPS,
+            card_h_dips: CARD_H_DIPS,
             is_dark: true,
             visible: false,
             pointer_inside: false,
@@ -324,6 +331,16 @@ impl PreviewPopup {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr);
         }
         Some(popup)
+    }
+
+    /// Applies the C# size-profile card dimensions (228x154 / 250x180 DIP).
+    pub fn set_card_size(&mut self, width_dips: f32, height_dips: f32) {
+        if width_dips.is_finite() && width_dips >= 120.0 {
+            self.card_w_dips = width_dips;
+        }
+        if height_dips.is_finite() && height_dips >= 80.0 {
+            self.card_h_dips = height_dips;
+        }
     }
 
     pub fn is_visible(&self) -> bool {
@@ -413,8 +430,8 @@ impl PreviewPopup {
         self.dpi = win32::dpi_scale(self.hwnd as usize);
         let dpi = self.dpi;
 
-        let card_w = (CARD_W_DIPS * dpi).round() as i32;
-        let card_h = (CARD_H_DIPS * dpi).round() as i32;
+        let card_w = (self.card_w_dips * dpi).round() as i32;
+        let card_h = (self.card_h_dips * dpi).round() as i32;
         let header_h = (HEADER_H_DIPS * dpi).round() as i32;
         let gap = (CARD_GAP_DIPS * dpi).round() as i32;
         let pad = (OUTER_PAD_DIPS * dpi).round() as i32;
