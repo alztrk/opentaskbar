@@ -13,3 +13,12 @@ tmp/
 .notes/
 OpenTaskbar-*.zip
 checksums.txt
+
+# Rust workspace (repository root)
+/target
+**/*.rs.bk
+*.pdb
+
+# Local-only performance probe and its output
+/bench.ps1
+/.bench/

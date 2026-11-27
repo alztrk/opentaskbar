@@ -38,7 +38,6 @@ jobs:
           build-mode: manual
 
       - name: Build Rust workspace
-        working-directory: Rust-Port
         run: cargo build --workspace
 
       - name: Perform CodeQL analysis

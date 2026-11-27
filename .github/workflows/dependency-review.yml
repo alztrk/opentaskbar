@@ -4,8 +4,8 @@ on:
   pull_request:
     branches: [master]
     paths:
-      - 'Rust-Port/Cargo.toml'
-      - 'Rust-Port/Cargo.lock'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/**'
 
 permissions:

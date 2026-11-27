@@ -1,8 +1,11 @@
 area/core:
   - changed-files:
       - any-glob-to-any-file:
-          - 'Rust-Port/crates/**'
-          - 'Rust-Port/Cargo.toml'
+          - 'crates/**'
+          - 'Cargo.toml'
+          - 'Fonts/**'
+          - 'Assets/**'
+          - 'themes/**'
           - 'tools/watchdog/**'
 
 area/scripts:
@@ -27,5 +30,5 @@ area/docs:
 area/tests:
   - changed-files:
       - any-glob-to-any-file:
-          - 'Rust-Port/crates/**/tests/**'
+          - 'crates/**/tests/**'
           - 'scripts/check-*.ps1'

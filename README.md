@@ -8,7 +8,7 @@
 [![Runtime](https://img.shields.io/badge/Rust-stable-orange?style=flat-square&logo=rust)](https://github.com/alztrk/opentaskbar)
 [![Architecture](https://img.shields.io/badge/Architecture-x64%20%7C%20x86-blue?style=flat-square)](https://github.com/alztrk/opentaskbar)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-cargo%20test-brightgreen?style=flat-square)](Rust-Port/crates/opentaskbar-core/tests)
+[![Tests](https://img.shields.io/badge/Tests-cargo%20test-brightgreen?style=flat-square)](crates/opentaskbar-core/tests)
 
 <br />
 
@@ -127,7 +127,7 @@ OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replaceme
 
 - **Operating System:** Windows 10 (version 2004 / build 19041+) or Windows 11 (x64 or x86)
 - **Runtime:** None. The Rust binary is self-contained; the native watchdog is compiled into it.
-- **Building from source:** Rust stable toolchain (see `rust-version` in `Rust-Port/Cargo.toml`) and PowerShell 7+ for the packaging scripts.
+- **Building from source:** Rust stable toolchain (see `rust-version` in the root `Cargo.toml`) and PowerShell 7+ for the packaging scripts.
 
 ---
 
@@ -135,7 +135,7 @@ OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replaceme
 
 ### Portable Release
 
-Download `OpenTaskbar-Rust-v<version>-win-x64.exe` or `OpenTaskbar-Rust-v<version>-win-x86.exe` for your architecture from [GitHub Releases](https://github.com/alztrk/opentaskbar/releases) and launch it directly. No installer, administrator privileges or separate runtime required. Each release also ships a deterministic ZIP with the EXE, `Rust-Port/README.md` and `LICENSE`, plus `checksums.txt`, `release-manifest.json` and release notes. The in-app updater automatically picks the matching architecture.
+Download `OpenTaskbar-Rust-v<version>-win-x64.exe` or `OpenTaskbar-Rust-v<version>-win-x86.exe` for your architecture from [GitHub Releases](https://github.com/alztrk/opentaskbar/releases) and launch it directly. No installer, administrator privileges or separate runtime required. Each release also ships a deterministic ZIP with the EXE, `README.md` and `LICENSE`, plus `checksums.txt`, `release-manifest.json` and release notes. The in-app updater automatically picks the matching architecture.
 
 ### Build from Source
 
@@ -145,10 +145,10 @@ git clone https://github.com/alztrk/opentaskbar.git
 cd opentaskbar
 
 # Run directly from source (binary name is OpenTaskBar)
-cargo run --manifest-path Rust-Port/Cargo.toml --bin OpenTaskBar
+cargo run --bin OpenTaskBar
 
 # Run with the Settings window open on startup
-cargo run --manifest-path Rust-Port/Cargo.toml --bin OpenTaskBar -- --settings
+cargo run --bin OpenTaskBar -- --settings
 
 # Build self-contained portable executables into release\
 powershell -ExecutionPolicy Bypass -File ".\scripts\publish-rust-portable.ps1"
@@ -166,16 +166,17 @@ powershell -ExecutionPolicy Bypass -File ".\scripts\publish-rust-msix.ps1" -Runt
 powershell -ExecutionPolicy Bypass -File ".\scripts\package-rust-release.ps1" -Tag "v0.4.0"
 
 # Rust workspace checks (same commands as CI)
-cargo fmt --manifest-path Rust-Port/Cargo.toml --all -- --check
-cargo clippy --manifest-path Rust-Port/Cargo.toml --workspace --all-targets -- -D warnings
-cargo test --manifest-path Rust-Port/Cargo.toml --workspace
+cargo check --workspace
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
 `cargo test --workspace` runs the deterministic logic, i18n and settings-compatibility checks; live Windows shell behavior still needs the manual smoke list in [docs/windows-reliability-audit.md](docs/windows-reliability-audit.md).
 
 ### Fjord top bar
 
-To open the optional top bar, run `OpenTaskBar.exe --fjord-bar` or `cargo run --manifest-path Rust-Port/Cargo.toml --bin OpenTaskBar -- --fjord-bar`. The bar opens on each display and can be closed from its desktop menu. The same menu opens Fjord Files.
+To open the optional top bar, run `OpenTaskBar.exe --fjord-bar` or `cargo run --bin OpenTaskBar -- --fjord-bar`. The bar opens on each display and can be closed from its desktop menu. The same menu opens Fjord Files.
 
 Use **Settings → Dock → Enable Fjord Files** to control the file browser. Turning it off closes any open Fjord Files windows and removes its entries from the dock and the top bar. A `--files` shortcut with an explicit folder or This PC target then opens in Windows File Explorer. A shortcut with no target simply exits.
 
@@ -204,9 +205,125 @@ For in-depth documentation on OpenTaskbar's design tokens, materials, typography
 
 ## Source layout and release verification
 
-The application is implemented in Rust + GPUI under [`Rust-Port/`](Rust-Port/README.md): `crates/opentaskbar-core` (settings, i18n, paths, deterministic logic), `crates/opentaskbar-shell` (shell journal, taskbar/app-bar, native watchdog embedding) and `crates/opentaskbar-app` (GPUI dock, widgets and Win32 platform layer). Locale catalogs cover 14 languages, theme packs and the recovery journal live in the shared `%LOCALAPPDATA%\OpenTaskbar` folder, and diagnostics go to `opentaskbar-rust.log`.
+The application is implemented in Rust + GPUI in the root workspace: `crates/opentaskbar-core` (settings, i18n, paths, deterministic logic), `crates/opentaskbar-shell` (shell journal, taskbar/app-bar, native watchdog embedding) and `crates/opentaskbar-app` (GPUI dock, widgets and Win32 platform layer), with the bundled `Fonts/`, `Assets/` and `themes/` resources at the repository root. Locale catalogs cover 14 languages, theme packs and the recovery journal live in the shared `%LOCALAPPDATA%\OpenTaskbar` folder, and diagnostics go to `opentaskbar-rust.log`.
 
 `scripts/publish-rust-portable.ps1 -Runtime win-x64` (or `win-x86`) builds the portable EXE; `scripts/check-rust-portable.ps1` verifies its PE architecture, embedded watchdog and icon-worker startup. Release assets are generated by `scripts/package-rust-release.ps1` and include versioned x64/x86 EXEs and deterministic ZIPs, `checksums.txt`, a schemaVersion 2 `release-manifest.json` (`rustPort.crateVersion`, per-arch watchdog PE machine and SHA-256) and `release-notes.md`. They are covered by SLSA provenance via `actions/attest` and an optional report-only VirusTotal scan. `scripts/check-release-version.ps1` gates the release tag against the Cargo workspace version (`0.4.0`) and the Rust MSIX identity (`0.4.0.0`) before any build.
+
+---
+
+## Rust workspace reference
+
+This section collects the detailed setup, command-line, settings and verification reference for the Rust workspace at the repository root.
+
+### Crates
+
+| Crate | Responsibility |
+| :--- | :--- |
+| `opentaskbar-core` | PascalCase `settings.json` compatible with the original C#-era schema, hotkeys, structured logging, single-instance lock, and 14 embedded locale catalogs (`src/i18n.rs`, `locales/*.json`). |
+| `opentaskbar-shell` | Non-blocking Explorer taskbar hide/restore, recovery journal, watchdog process, running-window tracker. |
+| `opentaskbar-app` | GPUI settings window, transparent borderless Win32 dock bridge, fisheye magnification, icon cache with an `--extract-icons` worker, widgets, flyouts, platform adapters. |
+
+The workspace root also holds `Cargo.toml` / `Cargo.lock`, the bundled Inter fonts in `Fonts/`, flag images in `Assets/Flags/`, the six shipped theme packs in `themes/`, and the native watchdog helper in `tools/watchdog/`.
+
+### Install
+
+#### Portable (recommended for testing)
+
+```powershell
+# From the repository root, for the architecture you want:
+.\scripts\publish-rust-portable.ps1 -Runtime win-x64 -OutputDir release
+.\scripts\check-rust-portable.ps1  -OutputDir release -ExecutableName OpenTaskbar-Rust-x64.exe
+```
+
+The script installs the Rust target if needed, builds `--release`, and writes a single `OpenTaskbar-Rust-<arch>.exe` into `release/`. It has no sidecar DLLs; the icon worker is the same EXE launched with `--extract-icons`. `crates/opentaskbar-shell/build.rs` compiles the native watchdog for the target architecture into `OUT_DIR`, verifies its PE machine (x64 `0x8664` / x86 `0x014C`) and embeds it with `include_bytes!`; `-NoFallback` makes an x86 build fail rather than embed the checked-in x64 binary. An x86 build needs GCC multilib or the MSVC `VC Tools x86.x64` component. A copy named `OpenTaskbarWatchdog-<arch>.exe` is left beside the portable EXE for release metadata.
+
+#### From source
+
+```powershell
+# From the repository root (requires Rust 1.95+, edition 2024, and MSVC on Windows):
+cargo build --release
+cargo test --workspace
+```
+
+#### MSIX
+
+```powershell
+.\scripts\publish-rust-msix.ps1 -Runtime win-x64 [-Version 0.4.0.0] [-SignForLocalTest]
+```
+
+Uses `packaging/msix/AppxManifest.Rust.xml` and the visual assets in `packaging/msix/Assets`. There is no hardcoded version in the script: it reads the workspace version from the root `Cargo.toml` unless `-Version` is supplied, then stamps the four-part identity version. The architecture-matched watchdog is staged as `OpenTaskbarWatchdog.exe` next to `OpenTaskBar.exe` so the packaged app uses the signed in-package copy. The MSIX identity is `Alicanztrk.OpenTaskbar.Rust` with `runFullTrust` and `radios` capabilities.
+
+### Command-line arguments
+
+| Argument | Effect |
+| :--- | :--- |
+| *(none)* | Acquires the single-instance lock, restores a pending journal, loads settings and runs the dock. |
+| `--settings` | Opens only the GPUI Settings window; exits when it closes. |
+| `--restore` | Replays the flyout/taskbar recovery journal and exits. |
+| `--extract-icons` | Short-lived icon extractor worker driven over stdin/stdout. Used by the tray/dock; safe to run manually with stdin closed. |
+| `--fjord-bar` | Opens the optional on-demand Fjord top bar host on every display. |
+| `--files <path>` | Opens Fjord Files at the given folder or This PC target (Explorer fallback); with no target, exits. |
+| `--software-render` | Forces software rendering for this launch instead of the saved preference. |
+
+### Settings and shared data
+
+Settings live in `%LOCALAPPDATA%\OpenTaskbar\settings.json` using the PascalCase schema inherited from the original C# implementation (the pre-integration `%LOCALAPPDATA%\OpenTaskBar-Rust\` folder is retired). Unknown keys are preserved through Rust `#[serde(flatten)] extra`, and invalid JSON is backed up to `settings.json.invalid-<timestamp>` before defaults are restored. Per-profile data (hidden apps, widget order, dock order, widths, theme and hotkeys) is likewise preserved on round-trip, so no manual copy or folder migration is needed. Concurrent writes are serialized by `Local\OpenTaskbar.Settings.Lock` with a unique GUID temp file; use a full-backup import only to migrate preferences from an older separate-folder layout. Rust diagnostics go to `%LOCALAPPDATA%\OpenTaskbar\opentaskbar-rust.log` (rotated copy `opentaskbar-rust.log.old`) with independent log rotation.
+
+All other Rust data lives in that shared folder too: `render-mode.json`, `Themes/` (uppercase T), `secrets/*.bin`, `rust-cache/icon-cache/`, `country-city-cache.json`, `wireless-battery-cache.json`, `Art/`, the architecture-matched `OpenTaskbarWatchdog.exe`, `taskbar-state.txt` and `flyout-positions.txt` (both with `*.tmp` siblings). The updater keeps `%TEMP%\OpenTaskbar\update`, and toast helper scripts use `%TEMP%\OpenTaskbar`. Secrets use the legacy C# DPAPI entropy (`OpenTaskbar.AiSecretStore.v1` / `OpenTaskbar.CursorAuth.v1`), a 64 KiB guard and GUID temp files; the wireless cache tolerates the C# UTF-8 BOM and PascalCase fields. There is no separate `OpenTaskBar-Rust` data folder.
+
+Common groups: **General** (language, startup, updates), **Appearance** (theme packs, surfaces, radius, fonts), **Dock layout** (edge, width/height/gap units, magnification, auto-hide), **Behavior** (hotkeys, focus mode, desktop integration), **Widgets** (catalog, density, per-widget settings), **Background apps** (tray pins and live icon strip), **Profiles**.
+
+Validation mirrors the original `IsValid()` rules: hotkeys must differ, percentages stay in 10..100, wireless polling stays in 15..300 seconds, and island order/placement must be consistent.
+
+### Feature list (implementation notes)
+
+- **Dock:** horizontal and vertical edges, mirrored dock, secondary light strip, fisheye magnification with a critically damped spring and overlap guard, auto-hide with shell-overlay filtering, live drag/drop, folder stacks, app groups, Aero Peek, tray strip, Start/search/task view buttons.
+- **Widgets:** AI usage (per-provider quota widgets), weather with forecast and °F, media with seek/cover/per-app volume and LibreWolf timeline recovery, network speed test, focus sessions with break phase, audio mixer, Bluetooth/wireless battery, storage, keyboard layout, system stats with GPU meters, countdown/stopwatch with centiseconds, quick settings with real Wi-Fi/Bluetooth toggles.
+- **Flyouts:** settings window with searchable rows, theme editor, full backup (`.otbackup`), hotkey recording, country/city picker, AI account sign-in, dynamic island with expanded details.
+- **Reliability:** taskbar replacement session with retry/verify, flyout position journal with generation counter, architecture-matched watchdog with heartbeat and clean-exit signalling, overlay-aware auto-hide, per-app audio session matching, trusted release pipeline (checksums, SLSA attestation, optional VirusTotal scan).
+
+### Feature flags
+
+Every flag is read from `DockSettings.extra` (PascalCase aliases are accepted where noted). Defaults below match the code, not an aspirational safe list:
+
+| Flag | Default | Behaviour / fallback |
+| :--- | :--- | :--- |
+| `enable_live_tray_host` | `false` | Opt-in only: registry discovery and the light strip keep the native tray untouched. |
+| `native_flyout_reposition` | **`true`** | Both shell writers follow one switch (`NativeFlyoutReposition` alias accepted). Verified Start anchoring is generation-cancelled; Search/Control Center join the same worker in the final integration. `false` keeps journal restore and legacy positioning. |
+| `enable_vertical_dock` | `true` | Left/right edges are live; `false` degrades every edge to `Bottom`. |
+| `enable_vendor_battery_probes` | `false` (planned WS-4) | Generic HID capacity reading until vendor transports are enabled explicitly. |
+| `enable_theme_editor` | `false` (planned WS-7) | List/import/export only until token editing is enabled explicitly. |
+| `enable_ai_oauth` | `true` (planned WS-5/WS-7) | Cursor/AI sign-in flows; a missing token stays in the "Sign in" state. |
+
+### Live shell APIs
+
+Integration tests under `crates/opentaskbar-core/tests/` pin these production entry points, even where a case is `#[ignore]`d pending an owning workstream:
+
+- Start/flyout: `open_start_via_syscommand(owner_hwnd)` (non-blocking post), `close_start(hwnd)` with an HWND/token guard, `was_open_at_press()`, and `reposition_flyout(FlyoutKind, anchor, hwnd)` (`reposition_start` remains as the Start wrapper). `mark_opened()` only fires from the uncloaked hook, so a generation is counted once.
+- Shell/watchdog: `tracker::enumerate_windows_async(tx)`, `window_rules::has_taskbar_button` (ITaskbarList_Deleted, cloak and extended-style rules), `modifiers::{note_down, note_up, release_all}` with `finally` semantics, and a one-process watchdog with heartbeat/clean-exit verification.
+- Devices: `core_audio::list_app_sessions()` plus writable `set_app_volume/mute`, `radio::set(kind, on) -> bool` (completion-event wait, no `GetResults` on the Set operation, fire-and-forget refresh), and `wireless_battery::read_all_with_settings()`.
+- Media/Night Light: `media_ext::librewolf_timeline(source_app_id, title)`, `confirm_seek(...)` rejecting stale samples, and `telemetry::{read_night_light, toggle_night_light}` with the encoded registry payload.
+- Reliability: `single_instance::SingleInstance::acquire` (named mutex), `DockSettings::validate()` (theme ids, ranges, hotkeys), and `update::write_updater_script` (Unicode-safe, no BOM).
+
+### Localization
+
+14 cultures ship as embedded JSON: `de-DE`, `en-US`, `es-ES`, `fr-FR`, `it-IT`, `ja-JP`, `ko-KR`, `nl-NL`, `pl-PL`, `pt-BR`, `ru-RU`, `tr-TR`, `uk-UA`, `zh-CN`. Every catalog has the **same 1423 keys** — Rust-port additions include DI/calendar/font keys, C3 widget features, 207 UI localization keys for island details, Settings/theme and widgets, 27 window-picker/magnification/Fjord/Wi-Fi/settings labels (24 newly added; three already shipped), 3 keys covering the last English-literal fallbacks, 3 keys for searchable location pickers / geolocation status, the 40 Fjord/Wi-Fi/preview labels (`FjordFiles*`, `Connected`, `Saved`, `WifiNetworks`, `PdfPages`, `SelectPreview`, …) and 17 OLED/display-care keys. `opentaskbar_core::i18n::{t, tr, t_fmt}` resolve with exact → same-language → `en-US` → key-name fallback; a missing key never crashes. Key parity is enforced by `scripts/check-locale-parity.ps1` and `crates/opentaskbar-core/tests/i18n_parity.rs`, which also guard the nine restored tr-TR focus/radio/spacing labels and assert 0 empty values and 0 lost placeholders in every catalog. See [docs/localization.md](docs/localization.md).
+
+### Tests and CI
+
+```powershell
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+`crates/opentaskbar-core/tests/` ports the deterministic parts of the C# checks: settings key parity, AI usage/JWT/quota logic, `.otbackup` ZIP round-trip, wireless battery vendor parsing, media timeline/seek, shell recovery/journal, dock layout math, audio mixer scoring and locale completeness. Where the production API is a private function in another crate, a bridge test asserts the production source contract instead of duplicating it; cases that need a not-yet-landed cross-workstream API are `#[ignore]`d with the owning workstream named in the message. Core-owned behaviour (settings enums/validation, i18n, the single-instance mutex) is tested against the real production functions.
+
+`.github/workflows/rust-ci.yml` runs on every branch and also when Rust sources, locale catalogs, watchdog sources, packaging scripts or the Rust MSIX manifest change; its `watchdog-arch` job builds the x86 PE (`0x014C`) with `-NoFallback`, builds the workspace for `i686-pc-windows-msvc` and re-verifies the x86 portable EXE. `codeql.yml` scans the Rust workspace and the native C watchdog on every branch/PR; `dependabot.yml` tracks Cargo and GitHub Actions. `scripts/check-locale-parity.ps1` gates 14 × 1046 frozen reference keys and 14 × 1423 Rust keys, and `scripts/check-release-version.ps1` gates tag ↔ root Cargo workspace version (`0.4.0`) ↔ Rust MSIX identity (`0.4.0.0`) before release builds.
+
+### Privacy
+
+No analytics or telemetry. Network access is opt-in per feature (weather, AI usage, portable update checks). Credentials stay local. See [PRIVACY.md](PRIVACY.md).
 
 ---
 

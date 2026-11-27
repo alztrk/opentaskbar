@@ -17,18 +17,19 @@
 
 use std::path::{Path, PathBuf};
 
-/// `Rust-Port/` workspace root, derived from the core crate manifest.
-pub fn rust_port_root() -> PathBuf {
+/// Repository/workspace root, derived from the core crate manifest at
+/// `crates/opentaskbar-core` (two levels below the root).
+pub fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
         .canonicalize()
-        .expect("Rust-Port workspace root must exist")
+        .expect("workspace root must exist")
 }
 
-/// A production source file, relative to `Rust-Port/`.
+/// A production source file, relative to the repository root.
 pub fn source(relative_path: &str) -> String {
-    let path = rust_port_root().join(relative_path);
+    let path = workspace_root().join(relative_path);
     std::fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("missing production source {}: {error}", path.display()))
 }

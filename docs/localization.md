@@ -17,7 +17,7 @@ User-facing labels and errors belong in the locale JSON files. Product names, ke
 
 ## Rust port catalogs
 
-The Rust port embeds its own copies of the 14 catalogs at `Rust-Port/crates/opentaskbar-core/locales/*.json` and exposes them through `opentaskbar_core::i18n` (`t`, `tr`, `t_fmt`, `keys`, `key_count`). Lookup order is exact culture → another culture with the same two-letter language → `en-US` → the key name itself. A missing key returns the key name and is **not** a build error, so a widget added ahead of its translations still renders.
+The Rust port embeds its own copies of the 14 catalogs at `crates/opentaskbar-core/locales/*.json` and exposes them through `opentaskbar_core::i18n` (`t`, `tr`, `t_fmt`, `keys`, `key_count`). Lookup order is exact culture → another culture with the same two-letter language → `en-US` → the key name itself. A missing key returns the key name and is **not** a build error, so a widget added ahead of its translations still renders.
 
 Each Rust catalog currently contains **1423 keys**: Rust-port additions on top of the 1011 C# keys (dynamic island, calendar, fonts, widget features, 207 newer UI-localization keys, 3 keys replacing the last English literals and 3 searchable-location keys), minus five retired AI-grouping keys plus the 27 keys below. Three of those 27 (`WidgetDensityCompact`, `WidgetDensityFull`, `AiUsageRingLabel`) already shipped in every catalog, so the net increase is 24 keys.
 
@@ -42,7 +42,7 @@ The 17 OLED / display-care keys (`SectionDisplayCare`, `SurfaceTrueBlack`, `Oled
 .\scripts\check-locale-parity.ps1
 
 # Embedded-catalog check as part of the Rust test suite:
-cd Rust-Port; cargo test --workspace
+cargo test --workspace
 ```
 
 `check-locale-parity.ps1` asserts that all 14 C# catalogs and all 14 Rust catalogs each have an identical key set, that no C# key is missing from Rust, and that every required new key exists in every language. `tests/i18n_parity.rs` repeats the embedded-catalog assertions inside `cargo test`, so the contract is enforced in CI on every branch.

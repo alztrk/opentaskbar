@@ -5,18 +5,18 @@ Thank you for your interest in contributing to OpenTaskbar!
 ## Language Policy
 
 - **All issues, pull requests, commit messages, code comments, and documentation must be written in English.**
-- Localization files under `Rust-Port/crates/opentaskbar-core/locales/` naturally contain translated user-facing text, but metadata, keys, and pull request descriptions discussing those translations must still be in English.
+- Localization files under `crates/opentaskbar-core/locales/` naturally contain translated user-facing text, but metadata, keys, and pull request descriptions discussing those translations must still be in English.
 
 ## Getting Started
 
 ### Prerequisites
 - Windows 10 (version 19041 or higher) or Windows 11, x64 or x86
-- Rust stable toolchain (`rustup`); the minimum version is declared in `Rust-Port/Cargo.toml`
+- Rust stable toolchain (`rustup`); the minimum version is declared in `Cargo.toml`
 - PowerShell 7+ for the build/packaging scripts
 
 ### Building the Project
 ```pwsh
-cargo build --manifest-path Rust-Port/Cargo.toml --workspace
+cargo build --workspace
 ```
 
 To produce a portable EXE and verify it:
@@ -28,13 +28,13 @@ To produce a portable EXE and verify it:
 ### Running Tests
 The deterministic behavior, contract and i18n checks live in the Rust workspace:
 ```pwsh
-cargo test --manifest-path Rust-Port/Cargo.toml --workspace
+cargo test --workspace
 ```
 
 Before submitting a pull request, also run the same gates as CI:
 ```pwsh
-cargo fmt --manifest-path Rust-Port/Cargo.toml --all -- --check
-cargo clippy --manifest-path Rust-Port/Cargo.toml --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Ensure all checks pass before submitting a pull request. Live Windows shell behavior still needs a manual smoke run; see `docs/windows-reliability-audit.md`.
@@ -48,7 +48,7 @@ Ensure all checks pass before submitting a pull request. Live Windows shell beha
    - Use idiomatic Rust with workspace lint settings; keep platform P/Invoke code isolated in the app crate.
    - Write clear, meaningful comments in English explaining *why*, not just *what*.
    - Never commit credentials, personal data, or build artifacts.
-4. **Localization:** Keep all 14 locale catalogs in sync; `scripts/check-locale-parity.ps1` and `Rust-Port/crates/opentaskbar-core/tests/i18n_parity.rs` enforce key parity.
+4. **Localization:** Keep all 14 locale catalogs in sync; `scripts/check-locale-parity.ps1` and `crates/opentaskbar-core/tests/i18n_parity.rs` enforce key parity.
 
 ## Submitting a Pull Request
 

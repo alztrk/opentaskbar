@@ -32,7 +32,7 @@ $expectedRustKeys = 1423
 # The C# source tree was removed in the Rust-only cleanup; these 14 catalogs
 # are the frozen reference snapshot of the last C# release, kept for key parity.
 $csDir = Join-Path $RepoRoot 'tests\reference\locales'
-$rustDir = Join-Path $RepoRoot 'Rust-Port\crates\opentaskbar-core\locales'
+$rustDir = Join-Path $RepoRoot 'crates\opentaskbar-core\locales'
 
 $required = @(
     # Window picker, magnification and Fjord labels.

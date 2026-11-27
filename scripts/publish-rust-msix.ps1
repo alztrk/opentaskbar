@@ -5,7 +5,7 @@ param (
     [ValidateSet('win-x64', 'win-x86')]
     [string]$Runtime = 'win-x64',
     [string]$OutputDir = "$PSScriptRoot\..\release\msix-rust",
-    # No hardcoded version: the app release version comes from Rust-Port/Cargo.toml.
+    # No hardcoded version: the app release version comes from Cargo.toml.
     [string]$Version = '',
     [switch]$SignForLocalTest
 )
@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 $arch = ($Runtime -split '-')[-1]
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if (-not $Version) {
-    $cargoPath = Join-Path $repoRoot 'Rust-Port\Cargo.toml'
+    $cargoPath = Join-Path $repoRoot 'Cargo.toml'
     $text = Get-Content -Raw -LiteralPath $cargoPath
     $marker = '[workspace.package]'
     $start = $text.IndexOf($marker, [StringComparison]::Ordinal)
@@ -60,7 +60,7 @@ if (-not (Test-Path -LiteralPath $archWatchdog -PathType Leaf)) {
 }
 Copy-Item -LiteralPath $archWatchdog -Destination (Join-Path $stagingDir 'OpenTaskbarWatchdog.exe') -Force
 Copy-Item -LiteralPath $assetsDir -Destination (Join-Path $stagingDir 'Assets') -Recurse -Force
-Copy-Item -LiteralPath (Join-Path $repoRoot 'Rust-Port\README.md') -Destination (Join-Path $stagingDir 'Rust-Port-README.md') -Force
+Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination (Join-Path $stagingDir 'README.md') -Force
 
 $parts = $Version.Split('.')
 while ($parts.Length -lt 4) { $parts += '0' }

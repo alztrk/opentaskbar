@@ -1,13 +1,18 @@
 name: Rust Port CI
 
-# Runs on every branch (not just rust-port) so integration worktrees and feature
-# branches get the same gate as the eventual merge onto rust-port/master.
+# Runs on every branch (not just master) so integration worktrees and feature
+# branches get the same gate as the eventual merge onto master.
 on:
   push:
     paths:
-      - "Rust-Port/**"
-      # Locale catalogs are mirrored into Rust by include_str!, so a C#-only
-      # key change must trigger the Rust key-parity gate as well.
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Fonts/**"
+      - "Assets/**"
+      - "themes/**"
+      # Frozen locale reference catalogs are compared with the embedded Rust
+      # catalogs by scripts/check-locale-parity.ps1.
       - "tests/reference/locales/**"
       - "scripts/**"
       # The native helper is embedded via build.rs/include_bytes!, so a C-only
@@ -17,7 +22,12 @@ on:
       - ".github/workflows/**"
   pull_request:
     paths:
-      - "Rust-Port/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "Fonts/**"
+      - "Assets/**"
+      - "themes/**"
       - "tests/reference/locales/**"
       - "scripts/**"
       - "tools/watchdog/**"
@@ -27,10 +37,6 @@ on:
 
 permissions:
   contents: read
-
-defaults:
-  run:
-    working-directory: Rust-Port
 
 jobs:
   build:
@@ -42,8 +48,6 @@ jobs:
           rustup toolchain install stable --profile minimal --component clippy,rustfmt
           rustup default stable
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: Rust-Port
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -69,7 +73,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: Rust-Port
           key: x86-watchdog
 
       - name: Build x86 watchdog and assert PE machine 0x014C
@@ -97,7 +100,6 @@ jobs:
           Write-Host ("x86 watchdog PE machine OK: 0x{0:X4}" -f $machine) -ForegroundColor Green
 
       - name: Build Rust workspace for i686
-        working-directory: Rust-Port
         run: cargo build --workspace --target i686-pc-windows-msvc
 
       - name: Verify x86 portable EXE (embedded watchdog included)
