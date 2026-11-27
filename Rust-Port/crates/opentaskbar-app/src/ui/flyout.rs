@@ -65,15 +65,16 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GWLP_USERDATA, GetClassNameW, GetClientRect, GetCursorPos, GetMessageW, GetWindowLongPtrW,
-    GetWindowRect, HC_ACTION, HHOOK, HWND_TOPMOST, IDC_ARROW, IDC_HAND, KillTimer, LWA_ALPHA,
-    LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW, RegisterClassExW, SW_SHOW, SWP_NOACTIVATE,
-    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow,
-    SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW,
-    ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_ACTIVATE, WM_CHAR,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
-    WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
+    GWLP_USERDATA, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow, GetMessageW,
+    GetWindowLongPtrW, GetWindowRect, HC_ACTION, HHOOK, HWND_TOPMOST, IDC_ARROW, IDC_HAND,
+    IsWindow, KillTimer, LWA_ALPHA, LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW,
+    RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
+    SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
+    WH_MOUSE_LL, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
 };
 
 use super::menu::BorderStyle;
@@ -90,6 +91,10 @@ const TIMER_ANIM: usize = 1;
 const TIMER_DISMISS: usize = 2;
 const DISMISS_POLL_MS: u32 = 45;
 const HOVER_LEAVE_GRACE: Duration = Duration::from_millis(240);
+/// A flyout that just closed must not immediately reopen from the same click that
+/// dismissed it. 350 ms covers the release side of a double-click and the C#
+/// `DockFlyout` toggle-close window without swallowing a genuine later click.
+const REOPEN_SUPPRESSION_WINDOW: Duration = Duration::from_millis(350);
 const OPEN_ANIM_MS: f32 = 175.0;
 const CLOSE_ANIM_MS: f32 = 95.0;
 const SLIDE_OFFSET_DIPS: f32 = 7.0;
@@ -173,23 +178,61 @@ impl Default for FlyoutOptions {
     }
 }
 
-static LAST_CLOSED: OnceLock<Mutex<Option<(String, Instant)>>> = OnceLock::new();
+impl FlyoutOptions {
+    /// Tray / background-app flyout: each `AppRow` may open the target app's own
+    /// native context menu, so arm the #32768 retention hook (WS-6 `dock/tray.rs`).
+    #[must_use]
+    pub fn tray() -> Self {
+        Self {
+            retain_for_external_context_menu: true,
+            ..Self::default()
+        }
+    }
 
-fn last_closed_lock() -> &'static Mutex<Option<(String, Instant)>> {
-    LAST_CLOSED.get_or_init(|| Mutex::new(None))
+    /// Folder stack / app group flyout: clicking a row launches an app and the
+    /// popup is expected to survive transient focus changes (WS-6 stacks).
+    #[must_use]
+    pub fn stack() -> Self {
+        Self {
+            stays_open: true,
+            ..Self::default()
+        }
+    }
+
+    /// Fluent builder for side docks.
+    #[must_use]
+    pub const fn with_edge(mut self, edge: FlyoutEdge) -> Self {
+        self.edge = edge;
+        self
+    }
 }
 
+/// Per-target close timestamps. A global "last closed" slot wrongly suppresses
+/// a different widget opened right after another one closed (e.g. switching from
+/// the clock flyout to the tray flyout), so each tag owns its own one-shot entry.
+static LAST_CLOSED: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+fn last_closed_lock() -> &'static Mutex<HashMap<String, Instant>> {
+    LAST_CLOSED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Pure timing policy, kept separate from the global map so it can be tested with
+/// synthetic timestamps. The entry is *consumed* by the caller after a hit.
+#[must_use]
+fn suppression_window_hit(recorded_at: Option<Instant>, now: Instant) -> bool {
+    recorded_at.is_some_and(|at| now.duration_since(at) < REOPEN_SUPPRESSION_WINDOW)
+}
+
+/// Consumes the one-shot suppression entry for `tag`, if it is still fresh.
 fn should_suppress_reopen(tag: &str) -> bool {
     if tag.is_empty() {
         return false;
     }
-    if let Ok(mut guard) = last_closed_lock().lock()
-        && let Some((prev_tag, at)) = guard.as_ref()
-        && prev_tag == tag
-        && at.elapsed().as_millis() < 280
-    {
-        *guard = None;
-        return true;
+    let now = Instant::now();
+    if let Ok(mut guard) = last_closed_lock().lock() {
+        let hit = suppression_window_hit(guard.get(tag).copied(), now);
+        guard.remove(tag);
+        return hit;
     }
     false
 }
@@ -199,7 +242,33 @@ fn record_closed(tag: &str) {
         return;
     }
     if let Ok(mut guard) = last_closed_lock().lock() {
-        *guard = Some((tag.to_owned(), Instant::now()));
+        // Bound the map: drop entries that can no longer suppress anything.
+        guard.retain(|_, at| at.elapsed() < REOPEN_SUPPRESSION_WINDOW * 2);
+        guard.insert(tag.to_owned(), Instant::now());
+    }
+}
+
+/// An external native menu (#32768) owns focus while it is on screen. The flyout
+/// must stay open through that blur even when it was not opened with `stays_open`.
+#[must_use]
+fn stays_open_for_external_menu(menu_active: bool, base_stays_open: bool) -> bool {
+    menu_active || base_stays_open
+}
+
+/// Pure WM_CLOSE policy: close requests commit the in-place editor and start the
+/// close animation (which owns the modal-loop exit). A repeated close is ignored.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WmCloseAction {
+    Ignore,
+    BeginClose,
+}
+
+#[must_use]
+fn wm_close_action(msg: u32, already_closing: bool) -> WmCloseAction {
+    if msg == WM_CLOSE && !already_closing {
+        WmCloseAction::BeginClose
+    } else {
+        WmCloseAction::Ignore
     }
 }
 
@@ -456,7 +525,11 @@ struct FlyoutState<'a> {
     closing: bool,
     animating: bool,
     suppress_blur: bool,
+    /// Dynamic blur guard: `true` while an external native menu is visible.
+    /// Reset to `base_stays_open` when that menu closes.
     stays_open: bool,
+    /// The caller's `stays_open` preference, restored after external-menu retention.
+    base_stays_open: bool,
     hook: Option<HHOOK>,
     shadow_rings: u8,
     on_secondary: Option<&'a mut dyn FnMut(u32) -> bool>,
@@ -1512,7 +1585,7 @@ pub fn show_flyout_with_options(
     spec: FlyoutSpec,
     options: FlyoutOptions,
 ) -> Option<FlyoutAction> {
-    show_flyout_impl(
+    show_flyout_interactive_with_options(
         tag,
         owner_hwnd,
         is_dark,
@@ -1520,10 +1593,66 @@ pub fn show_flyout_with_options(
         anchor_bottom_y_px,
         spec,
         None,
-        None,
         BorderStyle::default_for(is_dark),
         options,
     )
+}
+
+/// Interactive flyout with both a secondary-click callback and explicit
+/// lifecycle options. This is the tray entry point for WS-6: `FlyoutOptions::tray()`
+/// keeps the popup alive while the app's own native context menu is on screen.
+#[allow(clippy::too_many_arguments)]
+pub fn show_flyout_interactive_with_options(
+    tag: &str,
+    owner_hwnd: usize,
+    is_dark: bool,
+    anchor_center_x_px: i32,
+    anchor_bottom_y_px: i32,
+    spec: FlyoutSpec,
+    on_secondary: Option<&mut dyn FnMut(u32) -> bool>,
+    border: BorderStyle,
+    options: FlyoutOptions,
+) -> Option<FlyoutAction> {
+    show_flyout_impl(
+        tag,
+        owner_hwnd,
+        is_dark,
+        anchor_center_x_px,
+        anchor_bottom_y_px,
+        spec,
+        on_secondary,
+        None,
+        border,
+        options,
+    )
+}
+
+/// Live-updating flyout with explicit lifecycle options (stacks / widget ticks).
+#[allow(clippy::too_many_arguments)]
+pub fn show_flyout_live_with_options(
+    tag: &str,
+    owner_hwnd: usize,
+    is_dark: bool,
+    anchor_center_x_px: i32,
+    anchor_bottom_y_px: i32,
+    spec: FlyoutSpec,
+    border: BorderStyle,
+    options: FlyoutOptions,
+    on_live: impl FnMut(LiveEvent) -> LiveOutcome,
+) {
+    let mut on_live = on_live;
+    let _ = show_flyout_impl(
+        tag,
+        owner_hwnd,
+        is_dark,
+        anchor_center_x_px,
+        anchor_bottom_y_px,
+        spec,
+        None,
+        Some(&mut on_live),
+        border,
+        options,
+    );
 }
 
 /// Screen coordinates are carried through the private message as `(wparam,
@@ -1704,6 +1833,10 @@ fn show_flyout_impl<'a>(
         return None;
     }
 
+    // C# `DockFlyout` parity: remember the window that owned focus before the
+    // popup took it, so closing the flyout hands focus back to the dock widget.
+    let previous_foreground = unsafe { GetForegroundWindow() };
+
     let class_name = wide("OpenTaskBarFlyout");
     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
     let wc = WNDCLASSEXW {
@@ -1844,6 +1977,7 @@ fn show_flyout_impl<'a>(
         animating: animate,
         suppress_blur: false,
         stays_open: options.stays_open,
+        base_stays_open: options.stays_open,
         hook: None,
         shadow_rings: options.shadow_rings.min(8),
         on_secondary,
@@ -1924,6 +2058,17 @@ fn show_flyout_impl<'a>(
         KillTimer(hwnd, TIMER_DISMISS);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
         DestroyWindow(hwnd);
+    }
+    // Focus return: best effort, only when the original window still exists.
+    // Foreground-lock may refuse the request; leaving focus alone is still
+    // preferable to stranding it on a destroyed popup HWND.
+    if !previous_foreground.is_null()
+        && previous_foreground != hwnd
+        && unsafe { IsWindow(previous_foreground) } != 0
+    {
+        unsafe {
+            SetForegroundWindow(previous_foreground);
+        }
     }
     if selected.is_none() {
         record_closed(tag);
@@ -4137,6 +4282,14 @@ unsafe extern "system" fn flyout_wnd_proc(
     }
     let state = unsafe { &mut *ptr };
     match msg {
+        // WM_CLOSE must never reach `DefWindowProcW`: that would destroy the HWND
+        // while the modal loop still owns a state pointer to it. Commit any open
+        // editor and let the close animation end the loop via `state.done`.
+        msg if wm_close_action(msg, state.closing) == WmCloseAction::BeginClose => {
+            state.commit_editing();
+            state.begin_close();
+            0
+        }
         WM_ERASEBKGND => 1,
         WM_PAINT => {
             state.paint();
@@ -4278,7 +4431,11 @@ unsafe extern "system" fn flyout_wnd_proc(
             // and is treated as an ordinary click.
             if external_menu_at(point) {
                 EXTERNAL_MENU_ACTIVE.store(true, Ordering::Release);
+                // The native menu owns focus now; keep the flyout alive through
+                // the resulting WM_KILLFOCUS instead of dismissing underneath it.
+                state.stays_open = stays_open_for_external_menu(true, state.base_stays_open);
             } else if EXTERNAL_MENU_ACTIVE.swap(false, Ordering::AcqRel) {
+                state.stays_open = stays_open_for_external_menu(false, state.base_stays_open);
                 state.begin_close();
             }
             0
@@ -4432,13 +4589,16 @@ unsafe extern "system" fn flyout_wnd_proc(
 #[cfg(test)]
 mod tests {
     use super::{
-        DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, FlyoutBlock, FlyoutEdge,
-        FlyoutOptions, FlyoutSpec, LiveEvent, MENU_CLASS_CACHE_TTL, MENU_CLASS_PROBE,
-        MenuClassProbe, POINT, RECT, WM_APP_MENU_CANDIDATE, anim_interval_for_fps, app_row_targets,
-        blend_rgb, draw_gdi_text, format_clock, is_native_menu_class, layout_flyout, pack_point,
-        post_menu_candidate, pt_in_rect, unpack_point,
+        DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, Duration, FlyoutBlock, FlyoutEdge,
+        FlyoutOptions, FlyoutSpec, Instant, LiveEvent, MENU_CLASS_CACHE_TTL, MENU_CLASS_PROBE,
+        MenuClassProbe, POINT, RECT, REOPEN_SUPPRESSION_WINDOW, WM_APP_MENU_CANDIDATE,
+        WmCloseAction, anim_interval_for_fps, app_row_targets, blend_rgb, draw_gdi_text,
+        format_clock, is_native_menu_class, layout_flyout, pack_point, post_menu_candidate,
+        pt_in_rect, record_closed, should_suppress_reopen, stays_open_for_external_menu,
+        suppression_window_hit, unpack_point, wm_close_action,
     };
     use windows_sys::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{WM_CLOSE, WM_KEYDOWN, WM_PAINT};
 
     #[test]
     fn draw_gdi_text_ignores_empty_strings_without_crashing() {
@@ -4559,6 +4719,16 @@ mod tests {
         assert!(!options.retain_for_external_context_menu);
         assert_eq!(options.edge, FlyoutEdge::Bottom);
         assert_eq!(options.shadow_rings, 4);
+        // Presets for the WS-6 tray / folder-stack call sites.
+        assert!(super::FlyoutOptions::tray().retain_for_external_context_menu);
+        assert!(!super::FlyoutOptions::tray().stays_open);
+        assert!(super::FlyoutOptions::stack().stays_open);
+        assert_eq!(
+            super::FlyoutOptions::default()
+                .with_edge(FlyoutEdge::Left)
+                .edge,
+            FlyoutEdge::Left
+        );
         assert_eq!(blend_rgb(0x000000, 0xffffff, 0.5), 0x808080);
     }
 
@@ -4669,6 +4839,47 @@ mod tests {
             anchor,
             8
         ));
+    }
+
+    #[test]
+    fn wm_close_commits_and_begins_close_but_is_not_double_applied() {
+        assert_eq!(wm_close_action(WM_CLOSE, false), WmCloseAction::BeginClose);
+        assert_eq!(wm_close_action(WM_CLOSE, true), WmCloseAction::Ignore);
+        assert_eq!(wm_close_action(WM_PAINT, false), WmCloseAction::Ignore);
+        assert_eq!(wm_close_action(WM_KEYDOWN, false), WmCloseAction::Ignore);
+    }
+
+    #[test]
+    fn suppression_window_is_350ms_and_one_shot_per_target() {
+        let now = Instant::now();
+        assert!(suppression_window_hit(
+            Some(now - REOPEN_SUPPRESSION_WINDOW / 2),
+            now
+        ));
+        assert!(!suppression_window_hit(
+            Some(now - REOPEN_SUPPRESSION_WINDOW - Duration::from_millis(1)),
+            now
+        ));
+        assert!(!suppression_window_hit(None, now));
+
+        let a = "sweep-flyout-suppress-a";
+        let b = "sweep-flyout-suppress-b";
+        assert!(!should_suppress_reopen(a));
+        record_closed(a);
+        assert!(should_suppress_reopen(a), "first close suppresses same target");
+        assert!(!should_suppress_reopen(a), "entry is consumed exactly once");
+        assert!(!should_suppress_reopen(b), "other target is unaffected");
+        record_closed(b);
+        assert!(should_suppress_reopen(b));
+        assert!(!should_suppress_reopen(a));
+    }
+
+    #[test]
+    fn external_menu_holds_flyout_open_until_it_closes() {
+        assert!(stays_open_for_external_menu(true, false));
+        assert!(stays_open_for_external_menu(true, true));
+        assert!(stays_open_for_external_menu(false, true));
+        assert!(!stays_open_for_external_menu(false, false));
     }
 
     #[test]

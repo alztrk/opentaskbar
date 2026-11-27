@@ -7,16 +7,32 @@
 //! - Grouped inset `section_card`, concise `setting_row`, `ios_switch`, `segmented_track`,
 //!   `stepper`, `button`, `badge`, `sidebar_nav_item`, and `scrollbar_overlay`.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::ops::Range;
+use std::time::{Duration, Instant};
+
 use gpui::{
     AnyElement, Div, FocusHandle, KeyDownEvent, MouseButton, ScrollAnchor, SharedString, deferred,
     div, img, prelude::*, px, rgba,
 };
+
+use opentaskbar_core::i18n as loc;
 
 use crate::design::{self, fonts, gpui_rgba};
 
 const PANEL_RADIUS: f32 = 14.0;
 const CONTROL_RADIUS: f32 = 8.0;
 const ROW_INSET: f32 = 16.0;
+
+/// Rows kept alive in a virtualized searchable dropdown at once. A 10 000-city
+/// list costs ~12 row elements per keystroke instead of 10 000.
+const SEARCH_VIEWPORT_ROWS: usize = 8;
+const SEARCH_OVERSCAN_ROWS: usize = 2;
+const SEARCH_ROW_H_PX: f32 = 30.0;
+/// While typing, re-filter every frame; once the query settles, reuse the cached
+/// index list across repaints and arrow-key navigation.
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(120);
 
 /// Unified neutral Zinc/Carbon palette for GPUI surfaces (shared with Dock & Flyout).
 #[derive(Clone, Copy)]
@@ -744,6 +760,191 @@ pub struct SearchableDropdownHandlers {
     pub on_close: DropdownSelectHandler,
 }
 
+/// Half-open range of filtered rows that should be materialised by the
+/// virtualized dropdown. Overscan is clamped at both ends so a short list never
+/// produces indices outside `0..total`.
+#[must_use]
+pub fn visible_row_range(
+    total: usize,
+    scroll_top: usize,
+    viewport: usize,
+    overscan: usize,
+) -> Range<usize> {
+    if total == 0 || viewport == 0 {
+        return 0..0;
+    }
+    let viewport = viewport.min(total);
+    let start = scroll_top.min(total - viewport);
+    let before = overscan.min(start);
+    let after = overscan.min(total - start - viewport);
+    (start - before)..(start + viewport + after)
+}
+
+/// Returns the scroll offset that keeps `active` inside the viewport, without
+/// moving the window when the active row is already visible.
+#[must_use]
+pub fn scroll_top_for_active(active: usize, scroll_top: usize, viewport: usize) -> usize {
+    if viewport == 0 {
+        return 0;
+    }
+    if active < scroll_top {
+        active
+    } else if active >= scroll_top.saturating_add(viewport) {
+        active + 1 - viewport
+    } else {
+        scroll_top
+    }
+}
+
+/// Coalesces repeated filter passes while the user types. This never serves a
+/// stale result: a query change always recomputes; once the query is settled the
+/// cached index list is reused across repaints / arrow navigation instead of
+/// re-scanning thousands of options on every frame.
+#[derive(Clone, Debug)]
+pub struct SearchDebounce {
+    interval: Duration,
+    last_query: String,
+    last_change: Option<Instant>,
+}
+
+impl Default for SearchDebounce {
+    fn default() -> Self {
+        Self::new(SEARCH_DEBOUNCE)
+    }
+}
+
+impl SearchDebounce {
+    pub fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_query: String::new(),
+            last_change: None,
+        }
+    }
+
+    /// Records a query observation. `true` means the query actually changed.
+    pub fn observe(&mut self, query: &str, now: Instant) -> bool {
+        if self.last_query == query {
+            return false;
+        }
+        self.last_query = query.to_owned();
+        self.last_change = Some(now);
+        true
+    }
+
+    /// True once the most recent query has been stable for `interval`.
+    #[must_use]
+    pub fn settled(&self, now: Instant) -> bool {
+        self.last_change.is_none_or(|at| now.duration_since(at) >= self.interval)
+    }
+}
+
+/// UI-thread state for one virtualized picker. Keyed by element id so the city
+/// and country pickers never share a scroll offset or debounce window.
+#[derive(Default)]
+struct VirtualList {
+    debounce: SearchDebounce,
+    cached: Vec<usize>,
+    cached_query: String,
+    cached_options: usize,
+    scroll_top: usize,
+}
+
+thread_local! {
+    static SEARCH_LISTS: RefCell<HashMap<SharedString, VirtualList>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Empty-state text comes from the shared `SearchNoResults` locale key (WS-2
+/// ships all 14 translations). The legacy per-caller message is retained in the
+/// signature for API compatibility but is deliberately not used.
+fn no_results_message() -> SharedString {
+    SharedString::from(loc::t("SearchNoResults"))
+}
+
+/// Single row builder, reused for every virtualized row (recycling): the element
+/// tree only ever holds `viewport + 2 * overscan` instances of this shape.
+#[allow(clippy::too_many_arguments)]
+fn searchable_row(
+    id: &str,
+    theme: &UiTheme,
+    opt_index: usize,
+    opt: &DropdownOption,
+    is_active: bool,
+    accent: u32,
+    close: DropdownSelectHandler,
+) -> gpui::Stateful<Div> {
+    let opt_bg = if is_active {
+        theme.accent_soft
+    } else {
+        0x00000000
+    };
+    let opt_fg = if is_active {
+        theme.accent
+    } else {
+        theme.text_primary
+    };
+    let opt_hover = if is_active {
+        theme.accent_soft
+    } else {
+        theme.surface_hover
+    };
+    let cb = opt.on_select.clone();
+    let mut left = div()
+        .flex()
+        .items_center()
+        .gap(px(8.0))
+        .min_w_0()
+        .overflow_hidden();
+    if let Some(path) = &opt.flag_path {
+        left = left.child(
+            img(path.clone())
+                .w(px(18.0))
+                .h(px(13.0))
+                .rounded(px(2.5))
+                .flex_shrink_0(),
+        );
+    } else if let Some(glyph) = opt.glyph {
+        left = left.child(icon_glyph(glyph, 12.0, opt_fg));
+    }
+    left = left.child(
+        div()
+            .text_size(px(fonts::scaled_size(12.0)))
+            .font_weight(if is_active {
+                gpui::FontWeight::SEMIBOLD
+            } else {
+                gpui::FontWeight::MEDIUM
+            })
+            .text_color(rgba(opt_fg))
+            .overflow_hidden()
+            .child(opt.label.clone()),
+    );
+
+    div()
+        .id(SharedString::from(format!("sdd-opt-{id}-{opt_index}")))
+        .w_full()
+        .min_h(px(SEARCH_ROW_H_PX))
+        .px(px(9.0))
+        .py(px(5.0))
+        .rounded(px(6.0))
+        .bg(rgba(opt_bg))
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(10.0))
+        .cursor_pointer()
+        .hover(move |s| s.bg(rgba(opt_hover)))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            cb(window, cx);
+            close(window, cx);
+        })
+        .child(left)
+        .when(opt.selected, |row| {
+            row.child(icon_glyph("\u{E73E}", 11.0, accent))
+        })
+}
+
 /// Dropdown with a text field pinned above the option list. Filtering is pure
 /// ([`filter_dropdown_options`]); keyboard navigation, Enter and Escape are handled here while
 /// text edits are delegated to `handlers.on_key_down`. The plain [`dropdown`] is untouched.
@@ -756,12 +957,11 @@ pub fn searchable_dropdown(
     focus: &FocusHandle,
     options: &[DropdownOption],
     placeholder: impl Into<SharedString>,
-    empty_message: impl Into<SharedString>,
+    _empty_message: impl Into<SharedString>,
     handlers: SearchableDropdownHandlers,
 ) -> Div {
     let id: SharedString = id.into();
     let placeholder: SharedString = placeholder.into();
-    let empty_message: SharedString = empty_message.into();
     let SearchableDropdownHandlers {
         on_toggle,
         on_key_down,
@@ -850,13 +1050,52 @@ pub fn searchable_dropdown(
     let mut wrap = div().relative().flex_shrink_0().child(trigger);
 
     if open {
-        let filtered = state.filtered_indices(options);
-        let active_handler = filtered
-            .get(state.active)
-            .and_then(|index| options.get(*index))
+        // Virtualized filter + debounce: recompute on every query change, then
+        // reuse the cached index list once the query settles. Only the visible
+        // slice below is ever turned into GPUI elements.
+        let now = Instant::now();
+        let scroll_id = id.clone();
+        let (filtered, range) = SEARCH_LISTS.with(|lists| {
+            let mut lists = lists.borrow_mut();
+            let slot = lists.entry(scroll_id.clone()).or_default();
+            let changed = slot.debounce.observe(&state.query, now);
+            if changed {
+                slot.scroll_top = 0;
+            }
+            let settled = !changed && slot.debounce.settled(now);
+            if !settled
+                || slot.cached_query != state.query
+                || slot.cached_options != options.len()
+            {
+                slot.cached = state.filtered_indices(options);
+                slot.cached_query = state.query.clone();
+                slot.cached_options = options.len();
+            }
+            slot.scroll_top = scroll_top_for_active(
+                state.active,
+                slot.scroll_top,
+                SEARCH_VIEWPORT_ROWS,
+            )
+            .min(slot.cached.len().saturating_sub(1));
+            (
+                slot.cached.clone(),
+                visible_row_range(
+                    slot.cached.len(),
+                    slot.scroll_top,
+                    SEARCH_VIEWPORT_ROWS,
+                    SEARCH_OVERSCAN_ROWS,
+                ),
+            )
+        });
+        let active_option_index = filtered.get(state.active).copied();
+        let active_handler = active_option_index
+            .and_then(|index| options.get(index))
             .map(|option| option.on_select.clone());
 
         let input_close = on_close.clone();
+        let wheel_id = id.clone();
+        let key_scroll_id = id.clone();
+        let key_active = state.active;
         let key_handler = move |event: &KeyDownEvent,
                                 window: &mut gpui::Window,
                                 cx: &mut gpui::App| {
@@ -871,6 +1110,31 @@ pub fn searchable_dropdown(
                     }
                     input_close(window, cx);
                     cx.stop_propagation();
+                }
+                "up" | "down" => {
+                    // The owning entity moves `active`; here we only keep the
+                    // virtual window paged so the new active row stays visible.
+                    on_key_down(event, window, cx);
+                    let len = SEARCH_LISTS.with(|lists| {
+                        lists
+                            .borrow()
+                            .get(&key_scroll_id)
+                            .map_or(0, |slot| slot.cached.len())
+                    });
+                    let next_active = if event.keystroke.key == "down" {
+                        (key_active + 1).min(len.saturating_sub(1))
+                    } else {
+                        key_active.saturating_sub(1)
+                    };
+                    SEARCH_LISTS.with(|lists| {
+                        if let Some(slot) = lists.borrow_mut().get_mut(&key_scroll_id) {
+                            slot.scroll_top = scroll_top_for_active(
+                                next_active,
+                                slot.scroll_top,
+                                SEARCH_VIEWPORT_ROWS,
+                            );
+                        }
+                    });
                 }
                 _ => on_key_down(event, window, cx),
             }
@@ -893,11 +1157,11 @@ pub fn searchable_dropdown(
                 .child(state.query.clone())
         };
 
-        let mut menu_list = div()
-            .id(SharedString::from(format!("sdd-menu-{id}")))
+        let menu_base = div()
             .w(px(240.0))
-            .max_h(px(304.0))
-            .overflow_y_scroll()
+            // Fixed viewport: only the virtualized slice exists in the tree.
+            .h(px(SEARCH_VIEWPORT_ROWS as f32 * SEARCH_ROW_H_PX + 36.0))
+            .overflow_hidden()
             .p(px(4.0))
             .rounded(px(10.0))
             .bg(rgba(theme.surface))
@@ -905,7 +1169,29 @@ pub fn searchable_dropdown(
             .border_color(rgba(theme.border))
             .flex()
             .flex_col()
-            .gap(px(2.0))
+            .gap(px(2.0));
+
+        // Wheel paging updates the virtual scroll offset instead of relying on
+        // a native scroll container that would need every row to exist.
+        let menu_base = menu_base.on_scroll_wheel(move |event, _window, cx| {
+            let delta: f32 = event.delta.pixel_delta(px(SEARCH_ROW_H_PX)).y.into();
+            if delta == 0.0 {
+                return;
+            }
+            let rows = (delta / SEARCH_ROW_H_PX).round() as isize;
+            SEARCH_LISTS.with(|lists| {
+                if let Some(slot) = lists.borrow_mut().get_mut(&wheel_id) {
+                    let max = slot.cached.len().saturating_sub(SEARCH_VIEWPORT_ROWS);
+                    slot.scroll_top = (slot.scroll_top as isize + rows)
+                        .clamp(0, max as isize)
+                        .max(0) as usize;
+                }
+            });
+            cx.refresh_windows();
+        });
+
+        let mut menu_list = menu_base
+            .id(SharedString::from(format!("sdd-menu-{id}")))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .child(
                 div()
@@ -936,87 +1222,26 @@ pub fn searchable_dropdown(
                     .py(px(8.0))
                     .text_size(px(fonts::scaled_size(12.0)))
                     .text_color(rgba(theme.text_secondary))
-                    .child(empty_message),
+                    .child(no_results_message()),
             );
         }
 
-        for (row, &opt_index) in filtered.iter().enumerate() {
+        // Recycle one row builder across the visible slice only. With thousands
+        // of cities a keystroke now creates ~12 rows instead of thousands.
+        for &opt_index in &filtered[range] {
             let Some(opt) = options.get(opt_index) else {
                 continue;
             };
-            let is_active = row == state.active;
-            let opt_bg = if is_active {
-                theme.accent_soft
-            } else {
-                0x00000000
-            };
-            let opt_fg = if is_active {
-                theme.accent
-            } else {
-                theme.text_primary
-            };
-            let opt_hover = if is_active {
-                theme.accent_soft
-            } else {
-                theme.surface_hover
-            };
-            let cb = opt.on_select.clone();
-            let close = on_close.clone();
-            let mut left = div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .min_w_0()
-                .overflow_hidden();
-            if let Some(path) = &opt.flag_path {
-                left = left.child(
-                    img(path.clone())
-                        .w(px(18.0))
-                        .h(px(13.0))
-                        .rounded(px(2.5))
-                        .flex_shrink_0(),
-                );
-            } else if let Some(glyph) = opt.glyph {
-                left = left.child(icon_glyph(glyph, 12.0, opt_fg));
-            }
-            left = left.child(
-                div()
-                    .text_size(px(fonts::scaled_size(12.0)))
-                    .font_weight(if is_active {
-                        gpui::FontWeight::SEMIBOLD
-                    } else {
-                        gpui::FontWeight::MEDIUM
-                    })
-                    .text_color(rgba(opt_fg))
-                    .overflow_hidden()
-                    .child(opt.label.clone()),
-            );
-
-            menu_list = menu_list.child(
-                div()
-                    .id(SharedString::from(format!("sdd-opt-{id}-{opt_index}")))
-                    .w_full()
-                    .min_h(px(30.0))
-                    .px(px(9.0))
-                    .py(px(5.0))
-                    .rounded(px(6.0))
-                    .bg(rgba(opt_bg))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(10.0))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(rgba(opt_hover)))
-                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                        cx.stop_propagation();
-                        cb(window, cx);
-                        close(window, cx);
-                    })
-                    .child(left)
-                    .when(opt.selected, |row| {
-                        row.child(icon_glyph("\u{E73E}", 11.0, accent))
-                    }),
-            );
+            let is_active = active_option_index == Some(opt_index);
+            menu_list = menu_list.child(searchable_row(
+                &id,
+                theme,
+                opt_index,
+                opt,
+                is_active,
+                accent,
+                on_close.clone(),
+            ));
         }
 
         let popover = deferred(
@@ -1383,8 +1608,9 @@ pub fn sidebar_nav_item(
 #[cfg(test)]
 mod tests {
     use super::{
-        DropdownOption, SearchableDropdownState, SharedString, filter_dropdown_options,
-        fold_search_text,
+        DropdownOption, Duration, Instant, SearchDebounce, SearchableDropdownState, SharedString,
+        filter_dropdown_options, fold_search_text, no_results_message, scroll_top_for_active,
+        visible_row_range,
     };
 
     fn options(labels: &[&str]) -> Vec<DropdownOption> {
@@ -1421,6 +1647,53 @@ mod tests {
         assert!(filter_dropdown_options(&opts, "ıstanbul").is_empty());
         assert_eq!(filter_dropdown_options(&opts, "istanbul"), vec![1]);
         assert!(filter_dropdown_options(&opts, "ısparta").is_empty());
+    }
+
+    #[test]
+    fn virtual_slice_covers_viewport_with_overscan_clamped_at_both_ends() {
+        assert_eq!(visible_row_range(0, 0, 8, 2), 0..0);
+        assert_eq!(visible_row_range(1000, 0, 8, 2), 0..10);
+        assert_eq!(visible_row_range(1000, 100, 8, 2), 98..110);
+        assert_eq!(visible_row_range(1000, 999, 8, 2), 990..1000);
+        assert_eq!(visible_row_range(5, 0, 8, 2), 0..5);
+        assert_eq!(visible_row_range(1000, 10, 0, 2), 0..0);
+        // Exhaustive invariants: bounded work regardless of list size or offset.
+        for total in [1usize, 8, 9, 100, 5000] {
+            for top in [0usize, 1, total / 2, total] {
+                let range = visible_row_range(total, top, 8, 2);
+                assert!(range.start <= range.end && range.end <= total);
+                assert!(range.end - range.start <= 12);
+            }
+        }
+    }
+
+    #[test]
+    fn virtual_scroll_tracks_active_row_without_jitter() {
+        assert_eq!(scroll_top_for_active(3, 0, 8), 0);
+        assert_eq!(scroll_top_for_active(8, 0, 8), 1);
+        assert_eq!(scroll_top_for_active(2, 5, 8), 2);
+        assert_eq!(scroll_top_for_active(5, 5, 8), 5);
+        assert_eq!(scroll_top_for_active(0, 0, 0), 0);
+    }
+
+    #[test]
+    fn search_debounce_settles_before_reusing_the_filter() {
+        let now = Instant::now();
+        let mut debounce = SearchDebounce::new(Duration::from_millis(120));
+        assert!(debounce.observe("a", now));
+        assert!(!debounce.observe("a", now + Duration::from_millis(10)));
+        assert!(!debounce.settled(now + Duration::from_millis(10)));
+        assert!(debounce.observe("an", now + Duration::from_millis(20)));
+        assert!(!debounce.settled(now + Duration::from_millis(139)));
+        assert!(debounce.settled(now + Duration::from_millis(140)));
+        assert!(!debounce.observe("an", now + Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn no_results_uses_the_shared_search_no_results_key() {
+        let message = no_results_message();
+        assert_eq!(&message[..], super::loc::t("SearchNoResults"));
+        assert!(!message.is_empty());
     }
 
     #[test]
