@@ -476,7 +476,8 @@ pub(crate) mod window_chrome {
         RemovePropW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_RESTORE, SWP_FRAMECHANGED,
         SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow,
         SetPropW, SetWindowPos, ShowWindow, WM_APP, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST,
-        WM_SETICON, WS_CAPTION, WS_POPUP, WS_THICKFRAME,
+        WM_SETICON, WS_BORDER, WS_CAPTION, WS_DLGFRAME, WS_MINIMIZEBOX, WS_POPUP, WS_SYSMENU,
+        WS_THICKFRAME,
     };
 
     use crate::design::glass::{GlassBackend, WindowsBackend, WindowsVersion, classify_windows};
@@ -544,21 +545,21 @@ pub(crate) mod window_chrome {
 
     /// GPUI creates non-resizable `WindowKind::Normal` HWNDs with `WS_SYSMENU | WS_MINIMIZEBOX`
     /// only (neither `WS_POPUP` nor `WS_CAPTION | WS_THICKFRAME`), which causes Windows 11 DWM
-    /// to ignore `DWMWCP_ROUND` and leave sharp 90-degree outer corners. Adding
-    /// `WS_CAPTION | WS_THICKFRAME` enables native Win11 DWM rounded corner clipping and shadow
-    /// while `WM_NCCALCSIZE` (returning 0) and `WM_NCHITTEST` (suppressing resize hits) keep
-    /// the window borderless and fixed-size.
+    /// to ignore `DWMWCP_ROUND` and leave sharp 90-degree outer corners. Switching the fixed-size
+    /// borderless dialog to `WS_POPUP | WS_SYSMENU | WS_MINIMIZEBOX` (clearing
+    /// `WS_CAPTION | WS_THICKFRAME | WS_BORDER | WS_DLGFRAME` while preserving `WS_VISIBLE` and
+    /// GPUI's `WS_EX_APPWINDOW | WS_EX_NOREDIRECTIONBITMAP`) enables native Win11 `DWMWCP_ROUND`
+    /// corner clipping and drop shadow while keeping taskbar, Alt-Tab, minimize, and titlebar
+    /// drag working cleanly just like `menu.rs`.
     fn ensure_roundable_style(hwnd: HWND) {
         // SAFETY: reading and updating the style flags of our own live window.
         let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
-        if (style & WS_POPUP) == 0
-            && (style & (WS_CAPTION | WS_THICKFRAME)) != (WS_CAPTION | WS_THICKFRAME)
-        {
-            set_window_long_ptr(
-                hwnd,
-                GWL_STYLE,
-                (style | WS_CAPTION | WS_THICKFRAME) as isize,
-            );
+        let updated = (style & !(WS_CAPTION | WS_THICKFRAME | WS_BORDER | WS_DLGFRAME))
+            | WS_POPUP
+            | WS_SYSMENU
+            | WS_MINIMIZEBOX;
+        if updated != style {
+            set_window_long_ptr(hwnd, GWL_STYLE, updated as isize);
         }
     }
 
@@ -4808,7 +4809,11 @@ impl SettingsView {
                         progress_ring(18.0, 2.4, 0.72, track_bg, ring_col).into_any_element()
                     } else {
                         icon_glyph(
-                            "\u{E916}",
+                            if id == "countdown" {
+                                "\u{EA8F}"
+                            } else {
+                                "\u{E916}"
+                            },
                             13.0,
                             if running {
                                 crate::design::gpui_rgba(pal.selected_fg, 0xff)
@@ -10779,9 +10784,12 @@ mod tests {
     #[test]
     fn settings_window_is_transparent_and_fits_small_work_areas() {
         let options = settings_window_options(None);
+        // Opaque tells GPUI to pass ACCENT_DISABLED directly (avoiding
+        // ACCENT_ENABLE_TRANSPARENTGRADIENT / 0x00000000 black corner bleed on Win11)
+        // while GPUI still keeps its DXGI_ALPHA_MODE_PREMULTIPLIED swapchain.
         assert!(matches!(
             options.window_background,
-            gpui::WindowBackgroundAppearance::Transparent
+            gpui::WindowBackgroundAppearance::Opaque
         ));
 
         // Unknown work area keeps the fixed dialog size.
@@ -11290,8 +11298,10 @@ fn settings_window_options(window_bounds: Option<WindowBounds>) -> WindowOptions
     WindowOptions {
         window_bounds,
         window_min_size: Some(min_size),
-        // Transparent so the anti-aliased rounded corners show the desktop, not a black square.
-        window_background: WindowBackgroundAppearance::Transparent,
+        // Opaque makes GPUI pass ACCENT_DISABLED directly instead of
+        // ACCENT_ENABLE_TRANSPARENTGRADIENT (0x00000000), while keeping GPUI's
+        // DXGI_ALPHA_MODE_PREMULTIPLIED swapchain so rounded corners never turn black.
+        window_background: WindowBackgroundAppearance::Opaque,
         // Resizing (edge/corner handle) stays off.
         is_resizable: false,
         titlebar: Some(TitlebarOptions {

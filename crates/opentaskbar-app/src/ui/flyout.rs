@@ -2256,6 +2256,25 @@ fn show_flyout_impl<'a>(
 
     let (spatial_glass, dcomp_fg) = if use_glass_backdrop {
         configure_host_backdrop_window(hwnd as usize, is_dark, true);
+        // Apply Windows 11 native rounded corners (with DWM border disabled so only
+        // SpatialGlassHost's crisp rim renders) to get clean OS drop shadow elevation
+        // and match the 8 DIP glass capsule cleanly with zero exposed corner gap.
+        unsafe {
+            let corner = DWMWCP_ROUND;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                (&corner as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+            let border_none = DWMWA_COLOR_NONE;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR as u32,
+                (&border_none as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+        }
         let mut host = SpatialGlassHost::attach(hwnd as usize, false, border.glass_config);
         if let Some(ref mut g) = host {
             g.sync_rect(
@@ -2263,7 +2282,7 @@ fn show_flyout_impl<'a>(
                 0.0,
                 width_px as f32,
                 height_px as f32,
-                (14.0 * dpi).round(),
+                (8.0 * dpi).round(),
                 dpi,
                 0.0,
                 0.0,
@@ -2714,7 +2733,7 @@ impl FlyoutState<'_> {
         let wf = w as f32;
         let use_spatial_glass = self.dcomp_fg.is_some() && self.border.glass_config.enabled;
         if let Some(ref mut glass) = self.spatial_glass {
-            glass.sync_rect(0.0, 0.0, wf, h as f32, sf(14.0).round(), dpi, 0.0, 0.0);
+            glass.sync_rect(0.0, 0.0, wf, h as f32, sf(8.0).round(), dpi, 0.0, 0.0);
         }
         let content_w = (w - pad - right_pad).max(s(120.0));
         let content_wf = content_w as f32;
@@ -2849,7 +2868,14 @@ impl FlyoutState<'_> {
             }
             unsafe {
                 d2d.target.BeginDraw();
-                d2d.target.Clear(Some(&surface_c));
+                if use_spatial_glass {
+                    d2d.target.Clear(Some(&d2d_rgba((0, 0, 0), 0.0)));
+                } else {
+                    d2d.target.Clear(Some(&surface_c));
+                }
+            }
+            if use_spatial_glass {
+                d2d.fill_rrect(0.0, 0.0, wf, h as f32, sf(8.0), surface_c);
             }
 
             // Crisp top specular highlight along the upper flyout rim.
