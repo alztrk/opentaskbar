@@ -65,6 +65,9 @@ public sealed class DockSettingsStore
                 settings = settings with { StatsMeters = settings.StatsMeters & SystemMeters.All };
             if (settings is not null)
                 settings = DockProfileService.EnsureDefaultProfile(settings);
+            // Repair fields individually: one bad widget subset or slider must not reset the file.
+            if (settings is not null)
+                settings = RepairLoaded(settings);
             if (settings is null || !IsValid(settings))
             {
                 BackupInvalidSettingsFile();
@@ -141,6 +144,291 @@ public sealed class DockSettingsStore
     }
 
     private DockSettings CreateDefaultSettings() => DockProfileService.EnsureDefaultProfile(new(Language: _defaultLanguage));
+
+    /// <summary>
+    /// Maps a stored widget ID (including the port's snake_case catalog IDs) onto the exact
+    /// PascalCase ID that C# validation expects. Unknown IDs are returned trimmed so callers
+    /// can decide whether to drop them or reject the file.
+    /// </summary>
+    public static string CanonicalizeWidgetId(string id)
+    {
+        var trimmed = (id ?? string.Empty).Trim();
+        var exact = DockWidgetService.SupportedIds.FirstOrDefault(
+            known => string.Equals(known, trimmed, StringComparison.OrdinalIgnoreCase));
+        if (exact is not null) return exact;
+
+        static string Compact(string value) => new(value
+            .Where(character => character is not ('_' or '-'))
+            .Select(char.ToLowerInvariant).ToArray());
+        var compact = Compact(trimmed);
+        return compact switch
+        {
+            "stats" => DockWidgetService.SystemStatsId,
+            "keyboard" => DockWidgetService.KeyboardLayoutId,
+            _ => DockWidgetService.SupportedIds.FirstOrDefault(known => Compact(known) == compact) ?? trimmed
+        };
+    }
+
+    /// <summary>Canonicalizes a free-form dock-order item; only <c>widget:</c> tokens carry an ID.</summary>
+    public static string CanonicalizeWidgetToken(string item)
+    {
+        var trimmed = (item ?? string.Empty).Trim();
+        var separator = trimmed.IndexOf(':');
+        if (separator <= 0
+            || !trimmed[..separator].Equals("widget", StringComparison.OrdinalIgnoreCase))
+        {
+            return trimmed;
+        }
+        return "widget:" + CanonicalizeWidgetId(trimmed[(separator + 1)..]);
+    }
+
+    private static IReadOnlyList<string> NormalizeWidgetList(
+        IReadOnlyList<string>? list,
+        bool dropUnknown = true)
+    {
+        if (list is null) return [];
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new List<string>(list.Count);
+        foreach (var id in list)
+        {
+            if (string.IsNullOrWhiteSpace(id)) continue;
+            var canonical = CanonicalizeWidgetId(id);
+            if (dropUnknown && !DockWidgetService.SupportedIds.Contains(canonical)) continue;
+            if (seen.Add(canonical)) result.Add(canonical);
+        }
+        return result;
+    }
+
+    private static IReadOnlyList<string> NormalizeWidgetTokens(IReadOnlyList<string>? list)
+    {
+        if (list is null) return [];
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new List<string>(list.Count);
+        foreach (var item in list)
+        {
+            if (string.IsNullOrWhiteSpace(item)) continue;
+            var canonical = CanonicalizeWidgetToken(item);
+            if (seen.Add(canonical)) result.Add(canonical);
+        }
+        return result;
+    }
+
+    private static IReadOnlyDictionary<string, TValue> CanonicalizeWidgetMap<TValue>(
+        IReadOnlyDictionary<string, TValue>? source,
+        Func<TValue, TValue>? normalizeValue = null,
+        int limit = 128)
+    {
+        if (source is null) return new Dictionary<string, TValue>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, TValue>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in source)
+        {
+            if (result.Count >= limit) break;
+            var key = CanonicalizeWidgetId(pair.Key);
+            if (!DockWidgetService.SupportedIds.Contains(key)) continue;
+            result.TryAdd(key, normalizeValue is null ? pair.Value : normalizeValue(pair.Value));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Field-by-field repair for a settings.json written by another build. One bad widget
+    /// subset or an out-of-range slider must not reset every unrelated preference to defaults.
+    /// </summary>
+    private DockSettings RepairLoaded(DockSettings settings)
+    {
+        static TEnum Defined<TEnum>(TEnum value, TEnum fallback) where TEnum : struct, Enum =>
+            Enum.IsDefined(value) ? value : fallback;
+        static int Clamp(int value, int min, int max, int fallback) =>
+            int.IsNegative(value) || value < min || value > max ? Math.Clamp(fallback, min, max) : value;
+        static double ClampDouble(double value, double min, double max, double fallback) =>
+            !double.IsFinite(value) || value < min || value > max ? Math.Clamp(fallback, min, max) : value;
+
+        var enabled = NormalizeWidgetList(settings.Widgets);
+        var installed = NormalizeWidgetList(settings.InstalledWidgets)
+            .Concat(enabled)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var profiles = settings.Profiles?
+            .Where(profile => profile is not null)
+            .Select(profile =>
+            {
+                var profileWidgets = NormalizeWidgetList(profile.Widgets);
+                var profileInstalled = NormalizeWidgetList(profile.InstalledWidgets)
+                    .Concat(profileWidgets)
+                    .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                return profile with
+                {
+                    Widgets = profileWidgets,
+                    InstalledWidgets = profileInstalled,
+                    WidgetOrder = NormalizeWidgetList(profile.WidgetOrder),
+                    DockItemOrder = NormalizeWidgetTokens(profile.DockItemOrder),
+                    DockWidthPixels = profile.DockWidthPixels is >= 100 and <= 5000 ? profile.DockWidthPixels : null,
+                    DockWidthPercent = profile.DockWidthPercent is >= 10 and <= 100 ? profile.DockWidthPercent : null
+                };
+            }).ToArray();
+
+        var orders = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
+        if (settings.DynamicIslandWidgetOrders is not null)
+        {
+            foreach (var pair in settings.DynamicIslandWidgetOrders)
+            {
+                var key = (pair.Key ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(key) || key.Length > 32 || orders.Count >= 32) continue;
+                orders[key] = NormalizeWidgetList(pair.Value);
+            }
+        }
+
+        var aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in settings.WirelessDeviceAliases ?? new Dictionary<string, string>())
+        {
+            if (!string.IsNullOrWhiteSpace(pair.Key) && pair.Key.Length <= 256
+                && !string.IsNullOrWhiteSpace(pair.Value) && pair.Value.Length <= 120
+                && aliases.Count < 128)
+            {
+                aliases.TryAdd(pair.Key.Trim(), pair.Value.Trim());
+            }
+        }
+
+        var pinned = new List<string>();
+        var seenPins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var key in settings.PinnedTrayIcons ?? [])
+        {
+            var trimmed = key?.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed) || trimmed.Length > TrayPinIdentity.MaxKeyLength) continue;
+            if (seenPins.Add(trimmed) && pinned.Count < TrayPinIdentity.MaxPinnedIcons) pinned.Add(trimmed);
+        }
+
+        var pinOrder = (settings.PinOrder ?? [])
+            .Where(item => !string.IsNullOrWhiteSpace(item))
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var repaired = settings with
+        {
+            Language = LanguageCatalog.IsSupported(settings.Language) ? settings.Language : _defaultLanguage,
+            Position = Defined(settings.Position, DockPosition.Center),
+            Edge = Defined(settings.Edge, DockEdge.Bottom),
+            Size = Defined(settings.Size, DockSize.Compact),
+            Theme = Defined(settings.Theme, AppTheme.System),
+            AutoHide = Defined(settings.AutoHide, AutoHideMode.Disabled),
+            Layout = Defined(settings.Layout, DockLayout.Floating),
+            DockWidthMode = Defined(settings.DockWidthMode, DockWidthMode.Auto),
+            DockHeightMode = Defined(settings.DockHeightMode, DockHeightMode.Auto),
+            DockWidthPixels = Clamp(settings.DockWidthPixels, 100, 5000, 900),
+            DockWidthPercent = Clamp(settings.DockWidthPercent, 10, 100, 60),
+            DockHeightPixels = Clamp(settings.DockHeightPixels, 24, 400, 48),
+            DockHeightPercent = Clamp(settings.DockHeightPercent, 2, 25, 7),
+            DockTopGapPixels = Clamp(settings.DockTopGapPixels, 0, 200, 0),
+            DockTopGapPercent = Clamp(settings.DockTopGapPercent, 0, 100, 0),
+            DockBottomGapPixels = Clamp(settings.DockBottomGapPixels, 0, 200, 6),
+            DockBottomGapPercent = Clamp(settings.DockBottomGapPercent, 0, 100, 0),
+            DockTopGapUnit = Defined(settings.DockTopGapUnit, DockGapUnit.Pixels),
+            DockBottomGapUnit = Defined(settings.DockBottomGapUnit, DockGapUnit.Pixels),
+            FocusMinutes = Clamp(settings.FocusMinutes, 1, 90, 25),
+            FocusBreakMinutes = Clamp(settings.FocusBreakMinutes, 1, 30, 5),
+            FocusSessions = Clamp(settings.FocusSessions, 1, 8, 4),
+            SurfaceOpacity = ClampDouble(settings.SurfaceOpacity, 0.6, 1, 0.9),
+            DockOpacity = ClampDouble(settings.DockOpacity, 0, 1, 0.9),
+            MenuOpacity = ClampDouble(settings.MenuOpacity, 0, 1, 0.9),
+            WidgetOpacity = ClampDouble(settings.WidgetOpacity, 0, 1, 0.9),
+            SettingsOpacity = ClampDouble(settings.SettingsOpacity, 0, 1, 0.9),
+            DockBorderThickness = ClampDouble(settings.DockBorderThickness, 0, 12, 1),
+            MenuBorderThickness = ClampDouble(settings.MenuBorderThickness, 0, 12, 1),
+            WidgetBorderThickness = ClampDouble(settings.WidgetBorderThickness, 0, 12, 1),
+            SettingsBorderThickness = ClampDouble(settings.SettingsBorderThickness, 0, 12, 1),
+            DockScale = ClampDouble(settings.DockScale, 0.75, 1.5, 1),
+            DockCornerRadius = settings.DockCornerRadius is >= 0 and <= 48 ? settings.DockCornerRadius : null,
+            DockBackground = Defined(settings.DockBackground, SurfaceBackground.Glass),
+            MenuBackground = Defined(settings.MenuBackground, SurfaceBackground.Glass),
+            WidgetBackground = Defined(settings.WidgetBackground, SurfaceBackground.Glass),
+            SettingsBackground = Defined(settings.SettingsBackground, SurfaceBackground.Glass),
+            ContentAlignment = Defined(settings.ContentAlignment, DockContentAlignment.Center),
+            StartAction = Defined(settings.StartAction, StartButtonAction.WindowsStart),
+            StartPlacement = Defined(settings.StartPlacement, StartButtonPlacement.Start),
+            DateStyle = Defined(settings.DateStyle, ClockDateStyle.DayAndShortDate),
+            DateFormat = Defined(settings.DateFormat, ClockDateFormat.System),
+            ClockDateLayout = Defined(settings.ClockDateLayout, ClockDateLayout.Beside),
+            WeatherUnit = Defined(settings.WeatherUnit, TemperatureUnit.Celsius),
+            DynamicIslandVisibility = Defined(settings.DynamicIslandVisibility, DynamicIslandVisibilityMode.Always),
+            AiUsageRing = Defined(settings.AiUsageRing, AiUsageRing.Highest),
+            LauncherHotkey = Defined(settings.LauncherHotkey, HotkeyChoice.AltSpace),
+            DockHotkey = Defined(settings.DockHotkey, HotkeyChoice.CtrlAltD),
+            StatsMeters = settings.StatsMeters & SystemMeters.All,
+            AiUsageProviders = settings.AiUsageProviders & AiProviders.All,
+            WeatherCity = (settings.WeatherCity ?? string.Empty).Trim(),
+            ThemePack = !string.IsNullOrWhiteSpace(settings.ThemePack)
+                && ThemePackTransfer.IsSafeId(settings.ThemePack.Trim())
+                    ? settings.ThemePack.Trim()
+                    : null,
+            PinOrder = pinOrder.Length == 0 ? null : pinOrder,
+            CustomLauncherHotkey = HotkeyBinding.IsValidCustomString(settings.CustomLauncherHotkey)
+                ? settings.CustomLauncherHotkey : null,
+            CustomDockHotkey = HotkeyBinding.IsValidCustomString(settings.CustomDockHotkey)
+                ? settings.CustomDockHotkey : null,
+            Widgets = enabled,
+            InstalledWidgets = installed,
+            WidgetOrder = NormalizeWidgetList(settings.WidgetOrder),
+            DockItemOrder = NormalizeWidgetTokens(settings.DockItemOrder),
+            StackFolders = settings.StackFolders?.Where(item => !string.IsNullOrWhiteSpace(item)).ToArray(),
+            WidgetDensityOverrides = CanonicalizeWidgetMap(settings.WidgetDensityOverrides, limit: 128),
+            DynamicIslandPlacements = CanonicalizeWidgetMap(settings.DynamicIslandPlacements, limit: 128),
+            DynamicIslandWidgetOrders = orders,
+            WirelessDeviceAliases = aliases,
+            PinnedTrayIcons = pinned.Count == 0 ? null : pinned,
+            WirelessBatteryPollSeconds = Clamp(settings.WirelessBatteryPollSeconds, 15, 300, 30),
+            WirelessBatteryLowThreshold = settings.WirelessBatteryLowThreshold is 0 or 10 or 20 or 30
+                ? settings.WirelessBatteryLowThreshold
+                : 0,
+            IgnoredWirelessDevices = settings.IgnoredWirelessDevices?
+                .Where(item => !string.IsNullOrWhiteSpace(item) && item.Length <= 256)
+                .Take(128).ToArray(),
+            Profiles = profiles
+        };
+        if (repaired.WeatherCity.Length > 80) repaired = repaired with { WeatherCity = repaired.WeatherCity[..80] };
+        if (HotkeysConflict(repaired))
+            repaired = repaired with { DockHotkey = HotkeyChoice.Disabled, CustomDockHotkey = null };
+        return DockProfileService.EnsureDefaultProfile(repaired);
+    }
+
+    /// <summary>
+    /// Canonical spellings only: a shared settings.json may carry snake_case widget IDs from the
+    /// port. Deliberately does not derive/install or deduplicate lists here so an explicitly
+    /// invalid C# edit is still reported by <see cref="Save"/>.
+    /// </summary>
+    private static DockSettings CanonicalizeForSave(DockSettings settings)
+    {
+        static IReadOnlyList<string>? Canon(IReadOnlyList<string>? list) =>
+            list?.Select(CanonicalizeWidgetId).ToArray();
+        static IReadOnlyList<string>? Tokens(IReadOnlyList<string>? list) =>
+            list?.Select(CanonicalizeWidgetToken).ToArray();
+        static IReadOnlyDictionary<string, TValue>? Map<TValue>(IReadOnlyDictionary<string, TValue>? map)
+        {
+            if (map is null) return null;
+            var result = new Dictionary<string, TValue>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pair in map) result[CanonicalizeWidgetId(pair.Key)] = pair.Value;
+            return result;
+        }
+
+        return settings with
+        {
+            Widgets = Canon(settings.Widgets),
+            InstalledWidgets = Canon(settings.InstalledWidgets),
+            WidgetOrder = Canon(settings.WidgetOrder),
+            DockItemOrder = Tokens(settings.DockItemOrder),
+            WidgetDensityOverrides = Map(settings.WidgetDensityOverrides),
+            DynamicIslandPlacements = Map(settings.DynamicIslandPlacements),
+            DynamicIslandWidgetOrders = settings.DynamicIslandWidgetOrders is null
+                ? null
+                : settings.DynamicIslandWidgetOrders.ToDictionary(
+                    pair => pair.Key,
+                    pair => (IReadOnlyList<string>)pair.Value.Select(CanonicalizeWidgetId).ToArray(),
+                    StringComparer.OrdinalIgnoreCase),
+            Profiles = settings.Profiles?.Select(profile => profile with
+            {
+                Widgets = Canon(profile.Widgets),
+                InstalledWidgets = Canon(profile.InstalledWidgets),
+                WidgetOrder = Canon(profile.WidgetOrder),
+                DockItemOrder = Tokens(profile.DockItemOrder)
+            }).ToArray()
+        };
+    }
 
     /// <summary>
     /// Drops identifiers for retired widgets from every setting that can carry one. Search stopped being a widget
@@ -333,6 +621,10 @@ public sealed class DockSettingsStore
 
     public string? Save(DockSettings settings)
     {
+        // Shared-file repair runs before validation: widget IDs written by the port are
+        // canonicalized and widget-keyed dictionaries use case-insensitive lookups at runtime.
+        // Value ranges still have to be valid so a bad UI edit cannot poison settings.json.
+        settings = CanonicalizeForSave(settings);
         if (!IsValid(settings))
             return "ErrorSettingsValuesInvalid";
         try

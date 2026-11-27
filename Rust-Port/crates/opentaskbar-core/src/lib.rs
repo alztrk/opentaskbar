@@ -4,6 +4,7 @@ pub mod dynamic_island;
 pub mod hotkey;
 pub mod i18n;
 pub mod log;
+pub mod paths;
 pub mod settings;
 #[cfg(windows)]
 pub mod single_instance;

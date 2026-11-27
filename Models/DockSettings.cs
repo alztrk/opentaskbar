@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using OpenTaskbar.Services;
 
@@ -123,7 +124,15 @@ public sealed record DockProfile(
     HotkeyChoice? DockHotkey = null,
     AutoHideMode? AutoHide = null,
     string? CustomLauncherHotkey = null,
-    string? CustomDockHotkey = null);
+    string? CustomDockHotkey = null)
+{
+    /// <summary>
+    /// Properties written by other OpenTaskbar builds (for example Rust-only settings).
+    /// Without this bag a C# save silently deletes every key it does not model.
+    /// </summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement> Extra { get; init; } = [];
+}
 
 /// <summary>A user-defined group of applications shown as a single dock icon with a flyout.</summary>
 public sealed record DockAppGroup(string Id, string Name, IReadOnlyList<string> ExecutablePaths);
@@ -263,9 +272,18 @@ public sealed record DockSettings(
     bool MirrorMainDock = false,
     DynamicIslandVisibilityMode DynamicIslandVisibility = DynamicIslandVisibilityMode.Always,
     bool DynamicIslandHideInFullscreen = true,
-    IReadOnlyDictionary<string, IReadOnlyList<string>>? DynamicIslandWidgetOrders = null)
+    IReadOnlyDictionary<string, IReadOnlyList<string>>? DynamicIslandWidgetOrders = null,
+    // Real C# property so the Rust alias is not dropped into Extra and can be edited here too.
+    bool DynamicIslandEnabled = true)
 {
     public const string DynamicIslandAllDisplays = "*";
+
+    /// <summary>
+    /// Unknown keys from the other build's settings.json. Serialization writes this bag back
+    /// verbatim so a C# save is never destructive for Rust-only preferences.
+    /// </summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement> Extra { get; init; } = [];
     /// <summary>Effective animation state, suppressed while focus mode is active.</summary>
     [JsonIgnore]
     public bool EffectiveAnimationsEnabled => AnimationsEnabled && !FocusModeEnabled;

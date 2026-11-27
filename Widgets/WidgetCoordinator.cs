@@ -672,11 +672,14 @@ public sealed class WidgetCoordinator : IDisposable
     {
         if (settings.WidgetDensityOverrides is { Count: > 0 } overrides)
         {
-            if (overrides.TryGetValue(widgetId, out var mode))
+            var id = DockSettingsStore.CanonicalizeWidgetId(widgetId);
+            if (overrides.TryGetValue(id, out var mode))
                 return mode;
+            // Older snapshots may still hold case-sensitive keys with snake_case IDs.
             foreach (var (k, v) in overrides)
             {
-                if (string.Equals(k, widgetId, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(DockSettingsStore.CanonicalizeWidgetId(k), id,
+                        StringComparison.OrdinalIgnoreCase))
                     return v;
             }
         }

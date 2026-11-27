@@ -19,6 +19,7 @@ use gpui::{
 };
 use opentaskbar_core::hotkey;
 use opentaskbar_core::i18n::{self as loc, LANGUAGES};
+use opentaskbar_core::paths;
 use opentaskbar_core::settings::{
     self, AiUsageRing, AppTheme, AutoHideMode, ClockDateFormat, ClockDateLayout, ClockDateStyle,
     DockContentAlignment, DockGapUnit, DockHeightMode, DockPosition, DockSettings, DockSize,
@@ -482,7 +483,7 @@ fn safe_backup_path(name: &str) -> Option<std::path::PathBuf> {
 }
 
 fn theme_folder() -> std::path::PathBuf {
-    settings::app_data_dir().join("themes")
+    paths::theme_root()
 }
 
 fn build_backup(settings: &DockSettings) -> Vec<u8> {
@@ -1162,7 +1163,7 @@ impl SettingsView {
         let glass_cfg = SpatialGlassConfig::from_settings(
             &settings,
             settings.settings_background,
-            extra_f64(&settings, "SettingsOpacity", 0.95),
+            settings.settings_opacity,
             is_dark,
             false,
         );
@@ -1514,7 +1515,7 @@ impl SettingsView {
         let glass_cfg = SpatialGlassConfig::from_settings(
             &self.settings,
             self.settings.settings_background,
-            extra_f64(&self.settings, "SettingsOpacity", 0.95),
+            self.settings.settings_opacity,
             is_dark,
             false,
         );
@@ -4711,11 +4712,7 @@ impl SettingsView {
     }
 
     fn themes_root() -> std::path::PathBuf {
-        std::env::var_os("LOCALAPPDATA")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join("OpenTaskbar")
-            .join("Themes")
+        paths::theme_root()
     }
 
     fn import_theme(&mut self, cx: &mut Context<Self>) {
@@ -5017,7 +5014,7 @@ impl SettingsView {
     /// NOTE(WS-D): WS-B adds `SurfaceStyle::set_opacity(kind, f64)`. Until that API lands in
     /// this worktree, the live preview goes through the existing per-surface
     /// `ThemeManager::set_surface(kind, background, opacity)`; persistence uses the matching
-    /// `DockSettings` field / `extra` key read by `design::theme::style_from_settings`.
+    /// `DockSettings` typed opacity field read by `design::theme::style_from_settings`.
     #[allow(clippy::too_many_arguments)]
     fn surface_opacity_row(
         &self,
@@ -5025,7 +5022,6 @@ impl SettingsView {
         cx: &mut Context<Self>,
         row_id: &'static str,
         slider_id: &'static str,
-        key: Option<&'static str>,
         kind: SurfaceKind,
         label: String,
         background: SurfaceBackground,
@@ -5056,19 +5052,24 @@ impl SettingsView {
                     std::rc::Rc::new(move |_win, app| {
                         let _ = entity.update(app, |this, cx| {
                             let next = (0.20 + (i as f64) * 0.05).clamp(0.20, 1.0);
-                            let changed = match key {
-                                None => {
-                                    let changed = (this.settings.dock_opacity - next).abs() > 0.001;
-                                    this.settings.dock_opacity = next;
-                                    changed
+                            let (old, target) = match kind {
+                                SurfaceKind::Dock => {
+                                    (this.settings.dock_opacity, &mut this.settings.dock_opacity)
                                 }
-                                Some(name) => {
-                                    let old = extra_f64(&this.settings, name, next);
-                                    let changed = (old - next).abs() > 0.001;
-                                    this.settings.extra.insert(name.to_owned(), json!(next));
-                                    changed
+                                SurfaceKind::Menu => {
+                                    (this.settings.menu_opacity, &mut this.settings.menu_opacity)
                                 }
+                                SurfaceKind::Widget => (
+                                    this.settings.widget_opacity,
+                                    &mut this.settings.widget_opacity,
+                                ),
+                                SurfaceKind::Settings => (
+                                    this.settings.settings_opacity,
+                                    &mut this.settings.settings_opacity,
+                                ),
                             };
+                            let changed = (old - next).abs() > 0.001;
+                            *target = next;
                             let _ = ThemeManager::set_surface(kind, background, next);
                             if changed {
                                 this.auto_save(cx);
@@ -6692,7 +6693,6 @@ impl SettingsView {
                         cx,
                         "SurfaceOpacityLabel:Dock",
                         "surf-op-dock",
-                        None,
                         SurfaceKind::Dock,
                         format!(
                             "{} · {}",
@@ -6707,7 +6707,6 @@ impl SettingsView {
                         cx,
                         "SurfaceOpacityLabel:Menu",
                         "surf-op-menu",
-                        Some("MenuOpacity"),
                         SurfaceKind::Menu,
                         format!(
                             "{} · {}",
@@ -6715,14 +6714,13 @@ impl SettingsView {
                             loc::t("SurfaceOpacityLabel")
                         ),
                         self.settings.menu_background,
-                        extra_f64(&self.settings, "MenuOpacity", 0.9),
+                        self.settings.menu_opacity,
                     ),
                     self.surface_opacity_row(
                         t,
                         cx,
                         "SurfaceOpacityLabel:Widget",
                         "surf-op-widget",
-                        Some("WidgetOpacity"),
                         SurfaceKind::Widget,
                         format!(
                             "{} · {}",
@@ -6730,14 +6728,13 @@ impl SettingsView {
                             loc::t("SurfaceOpacityLabel")
                         ),
                         self.settings.widget_background,
-                        extra_f64(&self.settings, "WidgetOpacity", 0.9),
+                        self.settings.widget_opacity,
                     ),
                     self.surface_opacity_row(
                         t,
                         cx,
                         "SurfaceOpacityLabel:Settings",
                         "surf-op-settings",
-                        Some("SettingsOpacity"),
                         SurfaceKind::Settings,
                         format!(
                             "{} · {}",
@@ -6745,7 +6742,7 @@ impl SettingsView {
                             loc::t("SurfaceOpacityLabel")
                         ),
                         self.settings.settings_background,
-                        extra_f64(&self.settings, "SettingsOpacity", 0.95),
+                        self.settings.settings_opacity,
                     ),
                 ],
             )
@@ -8612,10 +8609,7 @@ impl SettingsView {
 
     fn render_about(&self, t: &UiTheme) -> Vec<AnyElement> {
         let data_dir = settings::app_data_dir().to_string_lossy().into_owned();
-        let log_file = settings::app_data_dir()
-            .join("opentaskbar.log")
-            .to_string_lossy()
-            .into_owned();
+        let log_file = paths::rust_log_path().to_string_lossy().into_owned();
         vec![
             section_card(
                 t,

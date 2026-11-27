@@ -235,12 +235,10 @@ pub fn live_tray_host_enabled(settings: &DockSettings) -> bool {
     )
 }
 
-/// C# `DockSettings.NotificationBadgesEnabled` (default on).
+/// C# `DockSettings.NotificationBadgesEnabled` (default on). The value is a
+/// typed settings field; an unknown `extra` key must never override it.
 pub fn notification_badges_enabled(settings: &DockSettings) -> bool {
-    match settings.extra.get("NotificationBadgesEnabled") {
-        Some(serde_json::Value::Bool(v)) => *v,
-        _ => true,
-    }
+    settings.notification_badges_enabled
 }
 
 /// Secondary monitors get a light strip rather than a full clone by default.

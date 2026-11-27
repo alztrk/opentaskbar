@@ -7,21 +7,52 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_LOG_BYTES: u64 = 512 * 1024;
+/// Rotation suffix shared with the C# build's log naming convention.
+pub const RUST_LOG_BACKUP_FILE_NAME: &str = "opentaskbar-rust.log.old";
 
 static LOG_PATH: OnceLock<Mutex<PathBuf>> = OnceLock::new();
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub fn init(path: PathBuf) {
+    // Older callers still pass `opentaskbar.log` from the old Rust data folder.
+    // Redirect them to the shared, Rust-specific log so both builds can coexist.
+    let legacy_name = path
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(crate::paths::LEGACY_RUST_LOG_FILE_NAME));
+    let in_shared_folder = path
+        .parent()
+        .and_then(|parent| parent.file_name())
+        .is_some_and(|name| name.eq_ignore_ascii_case(crate::paths::APP_DATA_FOLDER_NAME));
+    let path = if legacy_name && in_shared_folder {
+        crate::paths::rust_log_path()
+    } else {
+        path
+    };
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
     let _ = LOG_PATH.set(Mutex::new(path));
+}
+
+/// Rotation destination. The file is always `opentaskbar-rust.log.old`, never
+/// the C# `log.old.txt`, even when a caller supplies a legacy log path.
+fn rotated_log_path(path: &Path) -> PathBuf {
+    let is_rust_log = path.file_name().is_some_and(|name| {
+        name.eq_ignore_ascii_case(crate::paths::RUST_LOG_FILE_NAME)
+            || name.eq_ignore_ascii_case(crate::paths::LEGACY_RUST_LOG_FILE_NAME)
+    });
+    if is_rust_log {
+        path.with_file_name(RUST_LOG_BACKUP_FILE_NAME)
+    } else {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        path.with_file_name(format!("{name}.old"))
+    }
 }
 
 fn write_line(level: &str, message: &str) {
@@ -32,7 +63,7 @@ fn write_line(level: &str, message: &str) {
         return;
     };
     if fs::metadata(&*path).is_ok_and(|m| m.len() > MAX_LOG_BYTES) {
-        let backup = path.with_extension("log.old");
+        let backup = rotated_log_path(&path);
         let _ = fs::rename(&*path, backup);
     }
     let ts = SystemTime::now()
@@ -146,6 +177,21 @@ pub fn report_error(message_key: &str, arguments: &[&str]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rust_log_rotation_uses_the_shared_backup_name() {
+        let log = Path::new(r"C:\Users\Test\AppData\Local\OpenTaskbar\opentaskbar-rust.log");
+        assert_eq!(
+            rotated_log_path(log),
+            log.with_file_name(RUST_LOG_BACKUP_FILE_NAME)
+        );
+        // Legacy callers get the same rotation name.
+        let legacy = log.with_file_name("opentaskbar.log");
+        assert_eq!(
+            rotated_log_path(&legacy),
+            log.with_file_name(RUST_LOG_BACKUP_FILE_NAME)
+        );
+    }
 
     #[test]
     fn telemetry_sequence_never_starts_at_zero() {
