@@ -10,6 +10,12 @@
 //! the Aero-Peek teardown used by the rest of the dock.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
 
 use windows::Win32::Foundation::RECT as WinRect;
 use windows::Win32::Graphics::Direct2D::Common::{
@@ -55,10 +61,23 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GWLP_USERDATA, GetClientRect, GetMessageW, GetWindowLongPtrW, HWND_TOPMOST,
     IDC_ARROW, IDC_HAND, IsWindow, LoadCursorW, MSG, PostMessageW, RegisterClassExW, SW_HIDE,
     SW_SHOW, SWP_NOACTIVATE, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    ShowWindow, TranslateMessage, WA_INACTIVE, WM_ACTIVATE, WM_APP, WM_CLOSE, WM_DESTROY,
+    WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR,
+    WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
+
+/// Modal picker close signal. Broadcast by the settings process and posted to
+/// each live picker HWND by [`request_close_all`] (fullscreen / session switch).
+pub const PICKER_CLOSE_MSG: u32 = WM_APP + 9;
+const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+
+#[link(name = "wtsapi32")]
+unsafe extern "system" {
+    #[link_name = "WTSRegisterSessionNotification"]
+    fn register_session_notification(hwnd: HWND, flags: u32) -> bool;
+    #[link_name = "WTSUnRegisterSessionNotification"]
+    fn unregister_session_notification(hwnd: HWND) -> bool;
+}
 
 use opentaskbar_shell::tracker::{self, RunningWindow};
 
@@ -95,6 +114,14 @@ struct PickerState {
     dpi: f32,
     is_dark: bool,
     ordered: Vec<RunningWindow>,
+    /// Monitor whose windows are ranked first (same identity C# uses).
+    target_handle: usize,
+    /// Executable identities of the app(s) that opened the picker. New windows
+    /// are only added on refresh when they belong to one of them.
+    allowed: HashSet<String>,
+    /// Periodic snapshot replies from the worker (never blocks the modal loop).
+    refresh_rx: mpsc::Receiver<(Vec<RunningWindow>, bool)>,
+    refresh_cancel: Arc<AtomicBool>,
     geometry: PickerGeometry,
     /// Client rect `(0, 0, w, h)` used for card layout and pager hit-testing.
     work_area: RECT,
@@ -122,6 +149,50 @@ struct PickerD2d {
 
 thread_local! {
     static PICKER_D2D: RefCell<Option<PickerD2d>> = const { RefCell::new(None) };
+}
+
+/// Global `previews_enabled` gate. The dock updates it at startup and on every
+/// settings reload; `show` refuses to open when previews are disabled, whatever
+/// call site requested it.
+static ENABLED: AtomicBool = AtomicBool::new(true);
+/// Live picker HWNDs. All posts are cross-thread safe `PostMessageW` calls.
+static ACTIVE: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+
+pub fn set_picker_enabled(enabled: bool) {
+    ENABLED.store(enabled, Ordering::SeqCst);
+    if !enabled {
+        request_close_all();
+    }
+}
+
+pub fn enabled() -> bool {
+    ENABLED.load(Ordering::SeqCst)
+}
+
+fn track(hwnd: usize) {
+    let mut guard = ACTIVE.lock().unwrap_or_else(|error| error.into_inner());
+    if !guard.contains(&hwnd) {
+        guard.push(hwnd);
+    }
+}
+
+fn untrack(hwnd: usize) {
+    let mut guard = ACTIVE.lock().unwrap_or_else(|error| error.into_inner());
+    guard.retain(|value| *value != hwnd);
+}
+
+/// Posts the modal close signal to every picker in this process. Safe to call
+/// from the settings watcher, a WinEvent hook or the dock UI thread.
+pub fn request_close_all() {
+    let hwnds = ACTIVE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    for hwnd in hwnds {
+        unsafe {
+            let _ = PostMessageW(hwnd as HWND, PICKER_CLOSE_MSG, 0, 0);
+        }
+    }
 }
 
 impl PickerD2d {
@@ -841,6 +912,52 @@ fn refresh_geometry(state: &mut PickerState) {
     unsafe { InvalidateRect(state.hwnd, std::ptr::null(), 1) };
 }
 
+/// Pure filter used by the periodic refresh. The dock already scoped the
+/// initial snapshot; only windows of the same executable identity may join it.
+fn belongs_to_app(window: &RunningWindow, allowed: &HashSet<String>) -> bool {
+    !window.exe_path.trim().is_empty()
+        && allowed.contains(&window.exe_path.to_ascii_lowercase())
+}
+
+fn same_window_list(left: &[RunningWindow], right: &[RunningWindow]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(a, b)| {
+            a.hwnd == b.hwnd && a.pid == b.pid && a.title == b.title
+        })
+}
+
+/// Applies a fresh snapshot while the modal picker is open. The previous
+/// selection is preserved by HWND/PID identity where possible.
+fn refresh_windows(state: &mut PickerState, fresh: Vec<RunningWindow>) {
+    let fresh: Vec<RunningWindow> = fresh
+        .into_iter()
+        .filter(|window| belongs_to_app(window, &state.allowed))
+        .collect();
+    let ordered = crate::window_picker::order_windows(
+        fresh,
+        &crate::window_picker::PickerApp::default(),
+        state.target_handle,
+        monitor_handle_for_window,
+    );
+    if same_window_list(&state.ordered, &ordered) {
+        return;
+    }
+    let selected = state
+        .cards
+        .get(state.selected)
+        .map(|card| (card.item.hwnd, card.item.pid));
+    state.ordered = ordered;
+    refresh_geometry(state);
+    if let Some(identity) = selected {
+        state.selected = state
+            .cards
+            .iter()
+            .position(|card| (card.item.hwnd, card.item.pid) == identity)
+            .unwrap_or(0);
+    }
+    unsafe { InvalidateRect(state.hwnd, std::ptr::null(), 1) };
+}
+
 unsafe extern "system" fn picker_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -898,8 +1015,22 @@ unsafe extern "system" fn picker_wnd_proc(
             close(state);
             0
         }
+        PICKER_CLOSE_MSG => {
+            close(state);
+            0
+        }
+        WM_WTSSESSION_CHANGE => {
+            // A secure-desktop switch must not leave a modal picker on screen.
+            close(state);
+            0
+        }
         WM_DESTROY => {
             release_thumbs(state);
+            state.refresh_cancel.store(true, Ordering::SeqCst);
+            untrack(hwnd as usize);
+            unsafe {
+                let _ = unregister_session_notification(hwnd);
+            }
             0
         }
         WM_DPICHANGED => {
@@ -1001,10 +1132,14 @@ impl Drop for PickerState {
 /// Shows the picker on the calling (UI) thread and pumps a nested modal loop
 /// until a card is selected, Escape is pressed or the popup loses activation.
 pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32, i32)) -> bool {
-    if windows.is_empty() {
+    if windows.is_empty() || !enabled() {
         return false;
     }
 
+    let allowed: HashSet<String> = windows
+        .iter()
+        .map(|window| window.exe_path.to_ascii_lowercase())
+        .collect();
     let (target, area) = work_area_for(monitor, anchor);
     let work_w = (area.right - area.left).max(1);
     let work_h = (area.bottom - area.top).max(1);
@@ -1057,6 +1192,12 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
     if hwnd.is_null() {
         return false;
     }
+    // Session lock/unlock is delivered while the nested modal loop owns the
+    // dispatcher, so the picker subscribes directly instead of waiting for the
+    // dock's message pump to resume.
+    unsafe {
+        let _ = register_session_notification(hwnd, 0);
+    }
 
     let is_dark = win32::read_system_is_dark();
     unsafe {
@@ -1099,15 +1240,44 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
         monitor_handle_for_window,
     );
     if ordered.is_empty() {
-        unsafe { DestroyWindow(hwnd) };
+        unsafe {
+            let _ = unregister_session_notification(hwnd);
+            DestroyWindow(hwnd);
+        }
         return false;
     }
+
+    // A background worker keeps the live window list fresh without blocking
+    // this nested modal loop. It also reports a fullscreen takeover (#179).
+    let (refresh_tx, refresh_rx) = mpsc::channel();
+    let refresh_cancel = Arc::new(AtomicBool::new(false));
+    let worker_cancel = Arc::clone(&refresh_cancel);
+    let worker_target = target.clone();
+    let _ = thread::Builder::new()
+        .name("opentaskbar-picker-refresh".into())
+        .spawn(move || {
+            while !worker_cancel.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(crate::fjord::POLL_MS));
+                if worker_cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+                let windows = tracker::enumerate_windows();
+                let fullscreen = win32::is_any_fullscreen_on_monitor(&worker_target);
+                if refresh_tx.send((windows, fullscreen)).is_err() {
+                    break;
+                }
+            }
+        });
 
     let state = Box::new(PickerState {
         hwnd,
         dpi: win32::dpi_scale(hwnd as usize),
         is_dark,
         ordered,
+        target_handle: target.handle,
+        allowed,
+        refresh_rx,
+        refresh_cancel,
         geometry,
         // Layout coordinates are relative to the client area.
         work_area: RECT {
@@ -1143,6 +1313,7 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr as isize);
     }
+    track(hwnd as usize);
     unsafe {
         SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
         ShowWindow(hwnd, SW_SHOW);
@@ -1161,8 +1332,19 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
 
     let mut msg: MSG = unsafe { std::mem::zeroed() };
     loop {
-        let closed = unsafe { (*ptr).closed };
-        if closed || unsafe { IsWindow(hwnd) } == 0 {
+        let state = unsafe { &mut *ptr };
+        if state.closed || unsafe { IsWindow(hwnd) } == 0 {
+            break;
+        }
+        // Drain refresh replies before blocking for the next message.
+        while let Ok((fresh, fullscreen)) = state.refresh_rx.try_recv() {
+            if fullscreen {
+                close(state);
+                break;
+            }
+            refresh_windows(state, fresh);
+        }
+        if state.closed {
             break;
         }
         let status = unsafe { GetMessageW(&mut msg, hwnd, 0, 0) };
@@ -1175,7 +1357,10 @@ pub fn show(monitor: usize, windows: Vec<RunningWindow>, anchor: (i32, i32, i32,
         }
     }
 
+    untrack(hwnd as usize);
     unsafe {
+        (*ptr).refresh_cancel.store(true, Ordering::SeqCst);
+        let _ = unregister_session_notification(hwnd);
         drop(Box::from_raw(ptr));
         preview::deactivate_live_preview();
     }
@@ -1199,5 +1384,55 @@ mod tests {
         assert_eq!(HEADER_DIPS, 58.0);
         assert_eq!(PAGING_DIPS, 43.0);
         assert_eq!(CORNER_DIPS, 10.0);
+    }
+
+    fn sample_window(hwnd: usize, exe: &str) -> RunningWindow {
+        RunningWindow {
+            hwnd,
+            pid: hwnd as u32 + 10,
+            title: format!("Window {hwnd}"),
+            exe_path: exe.to_owned(),
+            aumid: String::new(),
+            is_foreground: false,
+        }
+    }
+
+    #[test]
+    fn preview_gate_blocks_the_modal_picker() {
+        set_picker_enabled(false);
+        assert!(!enabled());
+        assert!(!show(0, vec![sample_window(1, "app.exe")], (0, 0, 100, 100)));
+        set_picker_enabled(true);
+        assert!(enabled());
+    }
+
+    #[test]
+    fn refresh_only_accepts_the_invoking_apps_windows() {
+        let allowed: HashSet<String> = ["app.exe".to_owned()].into_iter().collect();
+        assert!(belongs_to_app(&sample_window(1, "APP.EXE"), &allowed));
+        assert!(!belongs_to_app(&sample_window(2, "other.exe"), &allowed));
+        assert!(!belongs_to_app(&sample_window(3, ""), &allowed));
+        assert!(same_window_list(
+            &[sample_window(1, "app.exe")],
+            &[sample_window(1, "app.exe")]
+        ));
+        assert!(!same_window_list(
+            &[sample_window(1, "app.exe")],
+            &[sample_window(2, "app.exe")]
+        ));
+    }
+
+    #[test]
+    fn modal_picker_listens_for_close_and_session_signals() {
+        let src = include_str!("window_picker.rs");
+        assert!(src.contains("pub const PICKER_CLOSE_MSG: u32 = WM_APP + 9"));
+        assert!(src.contains("pub fn request_close_all()"));
+        assert!(src.contains("PICKER_CLOSE_MSG => {"));
+        assert!(src.contains("WM_WTSSESSION_CHANGE => {"));
+        assert!(src.contains("pub fn set_picker_enabled(enabled: bool)"));
+        assert!(src.contains("if fullscreen {"));
+        assert!(src.contains("fn refresh_windows("));
+        // Posting to an empty registry must be a harmless no-op.
+        request_close_all();
     }
 }

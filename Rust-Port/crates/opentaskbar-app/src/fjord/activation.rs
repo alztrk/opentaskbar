@@ -15,16 +15,56 @@ use std::time::{Duration, SystemTime};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 
+use opentaskbar_core::settings::DockSettings;
+
 use super::files::{self, COMPUTER_LOCATION};
 
 // @pure-start
 /// 128 KiB, identical to the C# `MaximumPathBytes`.
 pub const MAX_PATH_BYTES: usize = 128 * 1024;
+/// Canonical C# key (the Settings UI writes a JSON **bool**, not an int).
+pub const KEY_FILES_ENABLED: &str = "FjordFilesEnabled";
+/// C# `FjordBarVisible` is also a JSON bool written by the in-app Settings UI.
+pub const KEY_BAR_VISIBLE: &str = "FjordBarVisible";
 const LEGACY_SETTINGS_KEYS: [&str; 3] = [
-    "FjordFilesEnabled",
+    KEY_FILES_ENABLED,
     "fjord_files_enabled",
     "ShowFjordFilesButton",
 ];
+const BAR_SETTINGS_KEYS: [&str; 2] = [KEY_BAR_VISIBLE, "fjord_bar_visible"];
+
+/// Bool-aware reader for `settings.extra`: C# writes `true` / `false`, while the
+/// legacy Rust settings UI wrote `1` / `0`. Both (and common string spellings)
+/// must resolve to the same value so a saved bool is never mistaken for "off".
+fn coerce_bool(value: &serde_json::Value) -> Option<bool> {
+    match value {
+        serde_json::Value::Bool(value) => Some(*value),
+        serde_json::Value::Number(number) => Some(number.as_i64().unwrap_or(0) != 0),
+        serde_json::Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Some(true),
+            "false" | "0" | "no" | "off" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Reads the first present flag from `keys`; missing/invalid values use `default`.
+pub fn settings_flag(settings: &DockSettings, keys: &[&str], default: bool) -> bool {
+    keys.iter()
+        .find_map(|key| settings.extra.get(*key).and_then(coerce_bool))
+        .unwrap_or(default)
+}
+
+/// Whether the Fjord file manager feature is enabled for this dock process.
+pub fn files_enabled(settings: &DockSettings) -> bool {
+    settings_flag(settings, &LEGACY_SETTINGS_KEYS, false)
+}
+
+/// Whether the Fjord top bar should be shown (used by the `--fjord-bar` process).
+pub fn bar_visible(settings: &DockSettings) -> bool {
+    settings_flag(settings, &BAR_SETTINGS_KEYS, false)
+}
 
 /// Pipe base name for a session (the Win32 path is `\\.\pipe\<name>`).
 pub fn pipe_name(session_id: u32) -> String {
@@ -170,14 +210,14 @@ fn current_session_id() -> u32 {
     0
 }
 
-/// Sends one frame to the running dock. `true` means it was delivered.
-pub fn try_send(path: &str) -> bool {
+/// Sends one frame to a named pipe. `true` means it was delivered.
+pub fn send_to_pipe(name: &str, path: &str) -> bool {
     #[cfg(windows)]
     {
         let Some(frame) = encode_frame(path) else {
             return false;
         };
-        let name = wide(&format!(r"\\.\pipe\{}", pipe_name(current_session_id())));
+        let name = wide(&format!(r"\\.\pipe\{name}"));
         // SAFETY: all handles are closed below and buffers outlive the calls.
         unsafe {
             let handle = CreateFileW(
@@ -222,9 +262,34 @@ pub fn try_send(path: &str) -> bool {
     }
     #[cfg(not(windows))]
     {
-        let _ = path;
+        let _ = (name, path);
         false
     }
+}
+
+/// Sends one frame to the session's dock pipe. `true` means it was delivered.
+pub fn try_send(path: &str) -> bool {
+    send_to_pipe(&pipe_name(current_session_id()), path)
+}
+
+/// Opens the real GPUI file manager on its own thread. GPUI owns the calling
+/// thread's message loop, so the Fjord bar / dock UI thread must never call
+/// `run_files_window` inline.
+pub fn spawn_files_window(path: Option<String>) {
+    let initial = path.filter(|value| !value.trim().is_empty());
+    let _ = std::thread::Builder::new()
+        .name("opentaskbar-fjord-files".into())
+        .spawn(move || {
+            // The file manager reads known folders through Shell COM.
+            unsafe {
+                use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
+                let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+                crate::ui::fjord_files::run_files_window(initial);
+                if initialized {
+                    windows::Win32::System::Com::CoUninitialize();
+                }
+            }
+        });
 }
 
 /// CLI entry point called from `main.rs` for `--files <path>`.
@@ -245,14 +310,22 @@ pub fn handle_cli_arg(args: &[String]) -> Option<bool> {
     Some(handle_cli(path))
 }
 
-/// Server loop. `open` is invoked with `None` for a bare "This PC" request.
-pub fn listen(
-    open: impl Fn(Option<String>) + Send + 'static,
+/// Server loop on the session pipe. `open` is invoked with `None` for a bare
+/// "This PC" request. The cancel flag is only read, never latched: a transient
+/// Explorer/pipe error must not permanently kill the listener (see [`PipeServer`]).
+pub fn listen(open: impl Fn(Option<String>), cancel: Arc<AtomicBool>) -> io::Result<()> {
+    listen_named(&pipe_name(current_session_id()), open, cancel)
+}
+
+/// Server loop on an explicitly named pipe (also used by the lifecycle tests).
+pub fn listen_named(
+    name: &str,
+    open: impl Fn(Option<String>),
     cancel: Arc<AtomicBool>,
 ) -> io::Result<()> {
     #[cfg(windows)]
     {
-        let name = wide(&format!(r"\\.\pipe\{}", pipe_name(current_session_id())));
+        let name = wide(&format!(r"\\.\pipe\{name}"));
         // SAFETY: one server instance, correctly sized name; handle closed on exit.
         let handle = unsafe {
             CreateNamedPipeW(
@@ -269,18 +342,19 @@ pub fn listen(
         if handle == INVALID_HANDLE_VALUE {
             return Err(io::Error::last_os_error());
         }
-        let shared = Arc::new(std::sync::Mutex::new(handle));
+        let stop_cancel = Arc::new(AtomicBool::new(false));
         let stopper = {
-            let shared = Arc::clone(&shared);
-            let cancel = Arc::clone(&cancel);
+            let stop_cancel = Arc::clone(&stop_cancel);
+            let watch_cancel = Arc::clone(&cancel);
             std::thread::spawn(move || {
-                while !cancel.load(Ordering::SeqCst) {
+                while !stop_cancel.load(Ordering::SeqCst)
+                    && !watch_cancel.load(Ordering::SeqCst)
+                {
                     std::thread::sleep(Duration::from_millis(50));
                 }
-                let value = *shared.lock().expect("pipe handle mutex poisoned");
                 // SAFETY: disconnecting unblocks a synchronous ConnectNamedPipe.
                 unsafe {
-                    let _ = DisconnectNamedPipe(value);
+                    let _ = DisconnectNamedPipe(handle);
                 }
             })
         };
@@ -348,7 +422,7 @@ pub fn listen(
             }
             Ok(())
         })();
-        cancel.store(true, Ordering::SeqCst);
+        stop_cancel.store(true, Ordering::SeqCst);
         let _ = stopper.join();
         // SAFETY: the only handle to this pipe instance.
         unsafe {
@@ -358,8 +432,70 @@ pub fn listen(
     }
     #[cfg(not(windows))]
     {
-        let _ = (open, cancel);
+        let _ = (name, open, cancel);
         Ok(())
+    }
+}
+
+/// Owns the pipe listener thread and its cancel flag. A failed `listen` is
+/// retried after `POLL_MS` instead of leaving the dock unreachable for the rest
+/// of the session (a second instance or an Explorer restart can own the pipe
+/// temporarily). `stop()` is idempotent and `Drop` joins the worker.
+pub struct PipeServer {
+    cancel: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PipeServer {
+    /// Starts listening on the session pipe, naming it `name` (usually
+    /// [`pipe_name`] for the current session).
+    pub fn start_named(
+        name: String,
+        open: impl Fn(Option<String>) + Send + 'static,
+    ) -> Self {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let worker_cancel = Arc::clone(&cancel);
+        let worker = std::thread::Builder::new()
+            .name("opentaskbar-fjord-pipe".into())
+            .spawn(move || {
+                while !worker_cancel.load(Ordering::SeqCst) {
+                    match listen_named(&name, &open, Arc::clone(&worker_cancel)) {
+                        Ok(()) => break,
+                        Err(_) => {
+                            if worker_cancel.load(Ordering::SeqCst) {
+                                break;
+                            }
+                            std::thread::sleep(Duration::from_millis(super::POLL_MS));
+                        }
+                    }
+                }
+            });
+        Self {
+            cancel,
+            worker: worker.ok(),
+        }
+    }
+
+    /// Starts listening on this session's pipe.
+    pub fn start(open: impl Fn(Option<String>) + Send + 'static) -> Self {
+        Self::start_named(pipe_name(current_session_id()), open)
+    }
+
+    pub fn is_running(&self) -> bool {
+        !self.cancel.load(Ordering::SeqCst)
+    }
+
+    pub fn stop(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+    }
+}
+
+impl Drop for PipeServer {
+    fn drop(&mut self) {
+        self.stop();
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -625,5 +761,91 @@ mod tests {
         assert_eq!(enabled_from_json(r#"{"other":1}"#), None);
         assert!(enabled_changed(true, false));
         assert!(!enabled_changed(false, false));
+    }
+
+    #[test]
+    fn dock_settings_reads_csharp_bool_flags() {
+        let mut settings = DockSettings::default();
+        assert!(!files_enabled(&settings));
+        assert!(!bar_visible(&settings));
+        settings
+            .extra
+            .insert(KEY_FILES_ENABLED.into(), serde_json::json!(true));
+        settings
+            .extra
+            .insert(KEY_BAR_VISIBLE.into(), serde_json::json!(false));
+        assert!(files_enabled(&settings));
+        assert!(!bar_visible(&settings));
+        // Legacy ints still work, and bool wins over the legacy alias.
+        settings
+            .extra
+            .insert(KEY_BAR_VISIBLE.into(), serde_json::json!(1));
+        settings
+            .extra
+            .insert("fjord_bar_visible".into(), serde_json::json!(false));
+        assert!(bar_visible(&settings));
+        settings.extra.insert("fjord_files_enabled".into(), serde_json::json!(1));
+        assert!(files_enabled(&settings));
+        settings
+            .extra
+            .insert(KEY_FILES_ENABLED.into(), serde_json::json!(false));
+        assert!(!files_enabled(&settings));
+    }
+
+    #[test]
+    fn pipe_server_lifecycle_delivers_frames_and_stops_cleanly() {
+        let name = format!("OpenTaskbar.FjordFiles.Test.{}", std::process::id());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let server = PipeServer::start_named(name.clone(), move |path| {
+            let _ = tx.send(path);
+        });
+        assert!(server.is_running());
+
+        #[cfg(windows)]
+        {
+            let mut delivered = false;
+            for _ in 0..40 {
+                if send_to_pipe(&name, "C:\\Users\\agnes\\Documents") {
+                    delivered = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            assert!(delivered, "pipe server did not come up");
+            assert_eq!(
+                rx.recv_timeout(Duration::from_secs(3)).unwrap().as_deref(),
+                Some("C:\\Users\\agnes\\Documents")
+            );
+            assert!(send_to_pipe(&name, ""));
+            assert_eq!(rx.recv_timeout(Duration::from_secs(3)).unwrap(), None);
+        }
+
+        server.stop();
+        assert!(!server.is_running());
+        // A second stop must be harmless (Drop stops again).
+        server.stop();
+    }
+
+    #[test]
+    fn main_cli_wires_bar_host_and_the_session_pipe_server() {
+        let src = include_str!("../main.rs");
+        for needle in [
+            "ui::fjord_bar::BAR_ARG",
+            "ui::fjord_bar::run_bar_host(",
+            "fjord::activation::bar_visible(&settings)",
+            "fjord::activation::PipeServer::start(",
+        ] {
+            assert!(src.contains(needle), "main must contain {needle:?}");
+        }
+    }
+
+    #[test]
+    fn dock_files_command_is_routed_through_the_pipe_with_explorer_fallback() {
+        let src = include_str!("activation.rs");
+        assert!(src.contains("pub fn try_send(path: &str) -> bool"));
+        assert!(src.contains("open_explorer_fallback(Some(path))"));
+        assert!(src.contains("pub fn spawn_files_window("));
+        assert!(src.contains("crate::ui::fjord_files::run_files_window(initial)"));
+        assert!(src.contains("pub struct PipeServer"));
     }
 }

@@ -3,6 +3,8 @@
 //! Modes:
 //! - `--extract-icons`: short-lived icon extractor worker (zero log/mutex/UI).
 //! - `--settings`: on-demand GPUI Settings window (frees 100% RAM/VRAM on close).
+//! - `--fjord-bar`: on-demand GPUI Fjord top bar host (one per Windows session).
+//! - `--files <path>`: routes a folder request to the dock's Fjord pipe (Explorer fallback).
 //! - `--restore`: restores Explorer's taskbar from the recovery journal and exits.
 //! - default: acquires single-instance lock, loads settings, and runs the native dock.
 #![cfg_attr(windows, windows_subsystem = "windows")]
@@ -142,6 +144,26 @@ fn main() {
             return;
         }
         enable_dpi_awareness();
+        if args.iter().any(|a| a == ui::fjord_bar::BAR_ARG) {
+            opentaskbar_core::log::init(
+                opentaskbar_core::settings::app_data_dir().join("opentaskbar.log"),
+            );
+            std::panic::set_hook(Box::new(|info| {
+                opentaskbar_core::log::error(format!("FJORD BAR PANIC: {info}"));
+            }));
+            let settings =
+                opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
+            opentaskbar_core::i18n::init(Some(&settings.language));
+            design::fonts::apply_settings(&settings);
+            apply_startup_context(&settings);
+            if fjord::activation::bar_visible(&settings) {
+                ui::fjord_bar::run_bar_host(
+                    fjord::activation::files_enabled(&settings),
+                    opentaskbar_core::settings::settings_path(),
+                );
+            }
+            return;
+        }
         if args.iter().any(|a| a == ui::settings::SETTINGS_ARG) {
             opentaskbar_core::log::init(
                 opentaskbar_core::settings::app_data_dir().join("opentaskbar.log"),
@@ -226,6 +248,16 @@ fn main() {
                 }
             });
         }
+        // Fjord files activation: the dock is the single per-session pipe server.
+        // Keep the guard alive until the message loop exits; requests are gated
+        // by the current on-disk flag so disabling Fjord stops new windows.
+        let pipe_settings_path = opentaskbar_core::settings::settings_path();
+        let _fjord_pipe = fjord::activation::PipeServer::start(move |path| {
+            let snapshot = opentaskbar_core::settings::load_from(&pipe_settings_path);
+            if fjord::activation::files_enabled(&snapshot) {
+                fjord::activation::spawn_files_window(path);
+            }
+        });
         opentaskbar_core::log::info("Starting OpenTaskBar hybrid dock.");
         let panicked = std::panic::catch_unwind(|| dock::run(settings)).is_err();
         opentaskbar_shell::watchdog::notify_clean_exit();

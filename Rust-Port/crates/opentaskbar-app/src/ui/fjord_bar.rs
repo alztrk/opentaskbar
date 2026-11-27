@@ -30,7 +30,11 @@ use crate::ui::menu::{self, MenuEntry, MenuIcon};
 
 const MENU_FILES: u32 = 1;
 const MENU_CLOSE_BAR: u32 = 2;
+const MENU_TOGGLE_WIFI: u32 = 3;
 const WIFI_PANEL_W: f32 = 320.0;
+
+/// Process argument used by the C# `FjordBarHost` to launch this host process.
+pub const BAR_ARG: &str = "--fjord-bar";
 
 /// Starts the bar host. Returns immediately if another host owns the session.
 pub fn run_bar_host(files_enabled: bool, settings_path: PathBuf) {
@@ -281,6 +285,11 @@ impl FjordBarView {
                 loc::t("FjordFilesOpen"),
             ));
         }
+        entries.push(MenuEntry::item(
+            MENU_TOGGLE_WIFI,
+            MenuIcon::Activity,
+            loc::t("WifiNetworks"),
+        ));
         entries.push(MenuEntry::destructive(
             MENU_CLOSE_BAR,
             MenuIcon::Close,
@@ -292,10 +301,11 @@ impl FjordBarView {
                 if activation::try_send("") {
                     // A running dock received the This PC request.
                 } else {
-                    // Local fallback opens the manager in this process.
-                    super::fjord_files::run_files_window(None);
+                    // No pipe server: open the real GPUI file manager off-thread.
+                    activation::spawn_files_window(None);
                 }
             }
+            Some(MENU_TOGGLE_WIFI) => self.toggle_wifi(cx),
             Some(MENU_CLOSE_BAR) => {
                 self.shutdown(cx);
             }
@@ -587,5 +597,22 @@ impl Render for FjordBarView {
             root = root.child(self.wifi_panel(cx));
         }
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bar_cli_and_files_command_are_wired_to_real_windows() {
+        let src = include_str!("fjord_bar.rs");
+        for needle in [
+            "pub const BAR_ARG: &str = \"--fjord-bar\"",
+            "activation::try_send(\"\")",
+            "activation::spawn_files_window(None)",
+            "Some(MENU_TOGGLE_WIFI) => self.toggle_wifi(cx)",
+            "wifi_ui::scan_networks()",
+        ] {
+            assert!(src.contains(needle), "bar host must contain {needle:?}");
+        }
     }
 }
