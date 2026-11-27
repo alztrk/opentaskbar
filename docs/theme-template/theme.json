@@ -1,6 +1,8 @@
 {
-  // Copy this folder to %LOCALAPPDATA%\OpenTaskbar\Themes\<your-theme>, then pick it in Settings → Appearance.
+  // Copy this folder to %LOCALAPPDATA%\OpenTaskbar\Themes\<your-theme>, then pick it in Settings → Appearance → Theme pack.
+  // See docs/themes.md for every option.
   "name": "My Theme",
   "author": "",
-  "description": ""
+  "description": "",
+  "preserveOriginalIcons": true
 }

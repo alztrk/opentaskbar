@@ -24,7 +24,8 @@
 
 <!-- Describe the tests and verification steps you ran to verify your changes. -->
 
-- [ ] Automated tests: `cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings`
+- [ ] Automated tests: `cargo check --workspace && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all -- --check`
+- [ ] Locale / release gates when relevant: `scripts/check-locale-parity.ps1`, `scripts/check-release-version.ps1`
 - [ ] Manual verification on Windows 10 / Windows 11
 - [ ] Multi-monitor verification (if applicable)
 - [ ] Different DPI scale factors tested (100%, 125%, 150%) (if applicable)

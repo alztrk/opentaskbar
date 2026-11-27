@@ -33,11 +33,19 @@ cargo test --workspace
 
 Before submitting a pull request, also run the same gates as CI:
 ```pwsh
+cargo check --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
-Ensure all checks pass before submitting a pull request. Live Windows shell behavior still needs a manual smoke run; see `docs/windows-reliability-audit.md`.
+Locale and release changes have dedicated gates:
+```pwsh
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-locale-parity.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-release-version.ps1 -Tag v0.4.0
+```
+
+Ensure all checks pass before submitting a pull request. Live Windows shell behavior still needs a manual smoke run; see `docs/windows-reliability-audit.md` and `docs/windows-taskbar-model.md`.
 
 ## Development Guidelines
 

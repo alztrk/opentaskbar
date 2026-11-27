@@ -7,7 +7,7 @@
 All implementation paths are Rust-only; review them from the repository/workspace root.
 
 - `crates/opentaskbar-app/src/platform/win32.rs`: `enumerate_monitors`, monitor selection, physical-pixel/DIP conversion, negative virtual-screen origins and fallback when a selected display disappears.
-- `crates/opentaskbar-app/src/main.rs`: dock event loop, `WM_DISPLAYCHANGE`/work-area messages, auto-hide evaluation and shell state reconciliation.
+- `crates/opentaskbar-app/src/main.rs`: startup modes (`--settings`, `--restore`, `--extract-icons`, `--update*`, default dock), single-instance lock, journal repair before launch, watchdog arming and panic-triggered restore.
 - `crates/opentaskbar-shell/src/taskbar.rs` and `appbar.rs`: native taskbar hide/restore, crash-recovery journal and app-bar reservations.
 - `crates/opentaskbar-shell/src/journal.rs` and `session.rs`: journal line parsing, recovery retries and single-owner shell session.
 - `crates/opentaskbar-app/src/platform/win32_ex.rs`: current-desktop check; failure currently falls back to showing windows.
@@ -99,9 +99,27 @@ Record the exact OS build and app commit for each run. If a live test cannot be 
 
 For each case record: OS build, display topology, DPI, target monitor, taskbar edge, exact steps, expected/actual result, screenshot/video, logs, CPU/memory/handle measurements when applicable, and regression test reference. Do not mark any case passing based on static review alone. Implement P0 fixes before broad UI refactors; split fixes into narrowly scoped PRs.
 
-## Rust port parity controls
+Evidence record template (copy per case into the release review):
 
-The Rust port applies the same three regression classes above through its own deterministic test files under `crates/opentaskbar-core/tests/`:
+```text
+Case:            S3 (watchdog and clean exit)
+Commit:          <short sha>
+OS build:        <e.g. Windows 11 10.0.26100.xxxx>
+EXE arch:        x64 | x86
+Displays / DPI:  <count, layout, per-display scale>
+Steps:           <exact actions, including CLI flags used>
+Expected:        <pass condition from the table>
+Actual:          pass | fail | not run
+Artifacts:       <screenshot/video path, %LOCALAPPDATA%\OpenTaskbar\opentaskbar.log excerpt>
+Measurements:    <CPU / private bytes / handles if applicable>
+Automated link:  <test file or issue reference>
+```
+
+The same template applies to the Rust smoke list below; append the watchdog PE machine (`0x8664` / `0x014C`) for S3.
+
+## Rust implementation parity controls
+
+The Rust workspace applies the same three regression classes above through deterministic test files under `crates/opentaskbar-core/tests/`:
 
 | Risk class | Rust source-level check | Live Windows evidence still required |
 |---|---|---|
@@ -111,9 +129,9 @@ The Rust port applies the same three regression classes above through its own de
 
 The same caveat applies: a passing Rust source-level check is **not** live compatibility evidence. Keep the "Windows compatibility evidence" table above for the Rust build, and record the commit and OS build for each run.
 
-### Rust port live smoke list
+### Rust live smoke list
 
-Run every row on a real Windows session before signing off a release candidate. Record OS build, commit, EXE architecture, display topology, DPI, actual result and logs; **not run** is the only valid initial status. Collect logs from the shared data folder: `%LOCALAPPDATA%\OpenTaskbar\opentaskbar.log` (rotated copy `opentaskbar.log.old`), not the retired `%LOCALAPPDATA%\OpenTaskbar\` folder. The taskbar/flyout journals are read from that same shared `%LOCALAPPDATA%\OpenTaskbar` folder.
+Run every row on a real Windows session before signing off a release candidate. Record OS build, commit, EXE architecture, display topology, DPI, actual result and logs; **not run** is the only valid initial status. All diagnostics and journals live in the single shared data folder: `%LOCALAPPDATA%\OpenTaskbar\opentaskbar.log` (rotated copy `opentaskbar.log.old`), `taskbar-state.txt` and `flyout-positions.txt`. There is no second data folder.
 
 | # | Smoke case | Steps | Pass condition | Status |
 | :--- | :--- | :--- | :--- | :--- |
@@ -126,4 +144,4 @@ Run every row on a real Windows session before signing off a release candidate. 
 | S7 | Full backup | Export, inspect, then import on a temp profile; edit the manifest `Version` to `2` and retry; craft `../` and `.exe` theme entries. | Version 1 round-trips settings/pins/theme; other versions are rejected; traversal/`.exe` entries never leave staging. | not run |
 | S8 | Updater and single instance | Run the portable updater with a Unicode path containing `%`; launch a second dock process. | Script keeps the path intact, has no BOM, and replaces atomically; second instance exits via the named mutex. | not run |
 
-Reliability-related flags and their real defaults are documented in `README.md`. `enable_live_tray_host=false` keeps the native tray untouched; `native_flyout_reposition=true` is now the default because Start/Search/Control Center repositioning is generation-cancelled and journal-backed — set it to `false` to fall back to journal-read-only/legacy positioning if a live regression appears. Release-level reproducibility is enforced by generated `checksums.txt` (no stale rows are tracked in the repository), a schemaVersion 2 `release-manifest.json`, `actions/attest` SLSA provenance and the optional VirusTotal step in `.github/workflows/release.yml`, all covering the Rust-only artifacts.
+Reliability-related flags and their real defaults are documented in `README.md`. `enable_live_tray_host=false` keeps the native tray untouched; `native_flyout_reposition=true` is now the default because Start/Search/Control Center repositioning is generation-cancelled and journal-backed — set it to `false` to fall back to journal-read-only positioning if a live regression appears. Release-level reproducibility is enforced by generated `checksums.txt` (no stale rows are tracked in the repository), a schemaVersion 2 `release-manifest.json`, `actions/attest` SLSA provenance and the optional VirusTotal step in `.github/workflows/release.yml`, all covering the Rust-only artifacts.

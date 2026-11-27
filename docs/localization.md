@@ -1,48 +1,38 @@
 # Localization
 
-OpenTaskbar stores the selected UI language as a BCP 47 culture tag, such as `tr-TR`, `en-US`, or `ja-JP`. The language catalog reads embedded JSON files from `Services/Localization/Languages`. The file name is the culture tag and each JSON property is a localization key.
+OpenTaskbar stores the selected UI language as a BCP 47 culture tag (for example `tr-TR`, `en-US`, `ja-JP`). The 14 embedded catalogs live in `crates/opentaskbar-core/locales/<culture>.json`; each JSON property is a localization key.
 
-On first launch, the app selects a translation matching the Windows UI language. Regional variants keep their culture-specific date and number formatting while using the matching language translation. If the Windows UI language is not available, the app starts in English. A missing translation in another language uses the English entry; a missing English key raises an explicit error.
+Supported cultures: `de-DE`, `en-US`, `es-ES`, `fr-FR`, `it-IT`, `ja-JP`, `ko-KR`, `nl-NL`, `pl-PL`, `pt-BR`, `ru-RU`, `tr-TR`, `uk-UA`, `zh-CN`.
 
-## Add a language
+On first launch the Rust app follows the Windows UI language when a matching translation exists; otherwise it uses English. The lookup order in `opentaskbar_core::i18n` is exact culture → another culture with the same two-letter language → `en-US` → the key name. A missing key renders as its key name and is never a build error, so a new UI string can land before its translations. The public API is `t(key)`, `tr(culture, key)` and `t_fmt(key, args)`; `keys()` and `key_count(culture)` are used by the parity gates.
 
-1. Copy `en-US.json` to a file named with the new culture tag, such as `fr-FR.json`.
-2. Translate the values while keeping every symbolic key and any format placeholders such as `{0}` unchanged. Keys are stable identifiers and must not contain translated text.
-3. The project embeds JSON files in this folder automatically. The language picker uses the culture's native name, so no language enum, switch statement, or UI control needs editing.
-4. Keep error and status results as localization keys in services and resolve them in the UI. Translate launcher labels, errors, and status messages too. If a key is not ready yet, English is shown until its translation is added.
+## Key counts and frozen reference
 
-## Existing fixed text
+| Family | Location | Keys per catalog |
+| :--- | :--- | :--- |
+| Rust UI catalogs | `crates/opentaskbar-core/locales/*.json` | **1373** |
+| Frozen reference snapshots | `tests/reference/locales/*.json` | **1046** |
 
-User-facing labels and errors belong in the locale JSON files. Product names, keyboard shortcuts, file formats, protocol values, operating-system identifiers, and source data such as city names are not translated UI copy.
+The frozen snapshots are kept only as a key-parity reference for the shared settings-era catalogs; they are not loaded at runtime. Both families must have identical key sets across all 14 languages. Rust catalogs carry the additional feature keys (Dynamic Island, calendar/fonts, widget features, UI localization, window picker/magnification, OLED/display care and searchable location labels); the 50 removed panel-only keys are absent from both families.
 
-## Rust port catalogs
+## Add or change a key
 
-The Rust port embeds its own copies of the 14 catalogs at `crates/opentaskbar-core/locales/*.json` and exposes them through `opentaskbar_core::i18n` (`t`, `tr`, `t_fmt`, `keys`, `key_count`). Lookup order is exact culture → another culture with the same two-letter language → `en-US` → the key name itself. A missing key returns the key name and is **not** a build error, so a widget added ahead of its translations still renders.
+1. Add the key to all 14 Rust catalogs with exactly the same spelling. Keep format placeholders such as `{0}` / `{1}` unchanged; only their multiset is compared because their order can legitimately differ by language.
+2. Use real translations, never empty values. Product names, keyboard shortcuts, file formats, protocol values and source data such as city names are not translated UI copy.
+3. Resolve user-facing strings through `opentaskbar_core::i18n::{t, tr, t_fmt}` in the app crate; do not leave English literals in the UI.
+4. Add the key to the `$required` list in `scripts/check-locale-parity.ps1` and, for contract keys, to the `C3_NEW_KEYS` list in `crates/opentaskbar-core/tests/i18n_parity.rs`.
+5. Bump every numeric gate together (`crates/opentaskbar-core/src/i18n.rs`, `crates/opentaskbar-core/tests/i18n_parity.rs`, `crates/opentaskbar-core/tests/telemetry_parity.rs` and `scripts/check-locale-parity.ps1`) so no gate is left behind.
 
-Each Rust catalog currently contains **1373 keys**: Rust workspace additions on top of the reference keys (dynamic island, calendar, fonts, widget features, 207 newer UI-localization keys, 3 keys replacing the last English literals and 3 searchable-location keys), minus five retired AI-grouping keys and 50 panel-only keys, plus the 17 keys below. Three of those 17 (`WidgetDensityCompact`, `WidgetDensityFull`, `AiUsageRingLabel`) already shipped in every catalog, so the net increase is 14 keys.
+The parity tests also guard the nine restored Turkish labels (`FocusBreakTitle/Start/Skip/Countdown/Complete`, `FocusSession`, `RadioOn`, `RadioOff`, `DockBottomGap`) against en-US or ASCII-only regressions, and assert zero empty values and zero lost placeholders in every catalog. The en-US values of `Idle`, `Cancelled` and `Expired` intentionally equal their keys so the fallback rule keeps working.
 
-The current 17-key contract covers the window picker (`WindowPickerTitle`, `WindowPickerPrevious`, `WindowPickerNext`, `WindowPickerPage`), dock magnification (`MagnificationExpandsDock`, `MagnificationExpandsDockDescription`) and settings/widget labels (`SearchNoResults`, `ContentAlignStart`, `ContentAlignCenter`, `ContentAlignEnd`, `PreviewDisabledHint`, `FocusMinutesLabel`, `FocusBreakMinutesLabel`, `FocusSessionsLabel`, `WidgetDensityCompact`, `WidgetDensityFull`, `AiUsageRingLabel`). All values are genuine translations with no empty strings.
-
-The 32 additional feature keys cover `SpeedTest*`, `FocusBreak*`, `Radio*`, `FullBackup*`, `ThemeEditor*`, `Seek*`, `HardwareUnavailable`, `StartMenu*` and `ProfileHiddenApps`. The 207 UI-localization keys added later cover Dynamic Island detail rows (`WidgetDetail*`, `TrayAppsRunning*`), Settings/theme controls (`ThemeToken*`, `Brush*`, `Dock*Label`, `Unit*`) and widget labels (`AiUsage*`, `Battery*`, `WirelessBattery*`, `Weather*`, `Focus*`, `SpeedTest*`). All of them are translated in every language (the en-US values of `Idle`, `Cancelled` and `Expired` intentionally equal their keys so the fallback checks keep working); **key-set parity is mandatory** regardless of value language.
-
-A merge once replaced nine tr-TR values with en-US or ASCII-only text (`FocusBreakTitle`, `FocusBreakStart`, `FocusBreakSkip`, `FocusBreakCountdown`, `FocusBreakComplete`, `FocusSession`, `RadioOn`, `RadioOff`, `DockBottomGap`); they are genuine Turkish again. `tests/i18n_parity.rs` guards those values and asserts that every catalog has 0 empty values and 0 lost placeholders. Placeholder order may legitimately differ by language (`TerminatePrompt`), so only the placeholder multiset is compared. The 14 catalogs and all numeric gates remained at **1336 keys** at the time of that fix; no keys were added or removed by it.
-
-Three further keys — `PlacementInWidgets` (Start button placement option), `OpenLocation` (Jump List display-name fallback) and `GpuEngine` (unknown PDH counter label) — replaced the last user-visible English literals in `ui/settings.rs`, `platform/jumplist.rs` and `widgets/telemetry.rs`. They are translated in all 14 catalogs and raised every catalog and every numeric gate to **1339 keys**. Widget names/categories already resolve through `WidgetCategory*` and the existing widget-name keys (`FolderStacks`, `AppGroups`, `ShowDesktop`), so no extra category keys were needed. `SETTINGS_ROWS` in `ui/settings_search.rs` is test-only; the UI-facing `SettingsSearchEntry` catalog is fully localized. The en-US `Idle`/`Cancelled`/`Expired` key-echo rule is unchanged.
-
-`DropdownSearchPlaceholder` (search input hint), `DropdownNoResults` (empty filtered list) and `WeatherLocationUsed` (location was auto-detected) localize the new searchable country/city pickers and geolocation status. They are translated in all 14 catalogs and raised every catalog and every numeric gate to **1342 keys**; filtering folds ASCII `I` separately from Turkish dotted `İ` and dotless `ı`, which is a UI behaviour change, not a locale change.
-
-The 17 OLED / display-care keys (`SectionDisplayCare`, `SurfaceTrueBlack`, `OledReduceGlow`, `OledReduceGlowHelp`, `BurnInShift`, `BurnInShiftHelp`, `BurnInShiftInterval`, `OledAutoTrigger`, `OledAutoTriggerHelp`, `OledLowBatteryThreshold`, `OledAutoOnNightLight`, `OledAutoOnNightLightHelp`, `AmbientMode`, `AmbientModeHelp`, `AnimationFpsCap`, `AnimationFpsCapHelp`, `FpsUnlimited`) are translated in all 14 reference and all 14 Rust catalogs. They raise every catalog and every numeric gate to **1046 reference keys** and **1373 Rust keys** after the panel-key cleanup. `MinutesShort` was already present and was not duplicated. The new strings contain no placeholders; product/technology names such as OLED and Windows stay recognizable, while all values are genuine translations with no empty strings.
-
-### Checking parity
+## Checking parity
 
 ```powershell
-# Source-level check (no toolchain needed):
-.\scripts\check-locale-parity.ps1
+# From the workspace root; source-level check, no toolchain required:
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-locale-parity.ps1
 
 # Embedded-catalog check as part of the Rust test suite:
 cargo test --workspace
 ```
 
-`check-locale-parity.ps1` asserts that all 14 reference catalogs and all 14 Rust catalogs each have an identical key set, the documented key count, and every required contract key in each language. `tests/i18n_parity.rs` repeats the embedded-catalog assertions inside `cargo test`, so the contract is enforced in CI on every branch.
-
-When adding a key: add it to all 14 Rust files with the same spelling, keep `{0}`/`{1}` placeholders intact, add it to the `C3_NEW_KEYS` list in `tests/i18n_parity.rs` and the `$required` list in the parity script, and bump every numeric key-count gate (`i18n.rs`, `tests/i18n_parity.rs`, `tests/telemetry_parity.rs`, `scripts/check-locale-parity.ps1`) together so no gate is left behind.
+`check-locale-parity.ps1` asserts 14 × 1046 frozen reference keys, 14 × 1373 Rust keys, identical key sets per family and every required contract key. `crates/opentaskbar-core/tests/i18n_parity.rs` repeats the embedded-catalog assertions inside `cargo test`, so parity is enforced in CI on every branch.

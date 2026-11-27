@@ -1,12 +1,13 @@
 {
-  // Add images to this folder and map them below. An image named after the executable (firefox.png) needs no mapping.
-  // See docs/themes.md for every option.
+  // Add images to this folder (or a nested folder) and map them below.
+  // An image named after the executable (firefox.png) needs no mapping.
+  // Paths must stay inside this icons folder; see docs/themes.md.
   "icons": {
-    // "firefox.exe": "icons/firefox.png",
-    // "Microsoft.WindowsTerminal": "icons/terminal.png",
-    // "@start": "icons/start.png",
-    // "@recyclebin": "icons/trash.png",
-    // "@recyclebin-full": "icons/trash-full.png"
+    // "firefox.exe": "firefox.png",
+    // "Microsoft.WindowsTerminal": "terminal.png",
+    // "@start": "start.png",
+    // "@recyclebin": "trash.png",
+    // "@recyclebin-full": "trash-full.png"
   },
   "fallback": {
     "shape": "Petal",
