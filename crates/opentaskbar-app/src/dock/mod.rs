@@ -738,16 +738,24 @@ fn compute_scroll_metrics(
     let content_w = content_strip_width(shell_w, apps_w, right_w, 0.0);
     let max_scroll = (content_w - vp_w).max(0.0);
     let offset = scroll_offset.clamp(0.0, max_scroll);
-    // The leading shell group (and therefore Start) is pinned to the inner edge.
-    // `content_alignment` only shifts the *trailing* anchor, so growing spacing
-    // can never drag Start left. A scrolling strip always starts at the edge.
-    let shell_start_x = vp_left + CONTENT_EDGE_PAD_DIPS - offset;
+    // The strip is one contiguous run: `[shell][apps][widgets] | [trail]`.
+    // `content_alignment` positions that *whole* run inside a pill wider than
+    // its content (fixed/percent width, or a dragged custom width). Shifting
+    // only the trailing anchor split the slack into a bogus gap between the
+    // last widget and the trail divider plus a second gap right of the Recycle
+    // Bin. A content-fitted pill has no slack, so Start stays at the inner
+    // edge there; a scrolling strip always starts at the edge.
+    let strip_shift = if max_scroll > 0.5 {
+        0.0
+    } else {
+        content_alignment_offset(vp_w, content_w, alignment)
+    };
+    let shell_start_x = vp_left + CONTENT_EDGE_PAD_DIPS - offset + strip_shift;
     let apps_start_x = shell_start_x + shell_w;
-    let trailing_shift = content_alignment_offset(vp_w, content_w, alignment);
     let right_anchor_x = if max_scroll > 0.5 {
         vp_left + content_w - CONTENT_EDGE_PAD_DIPS - offset
     } else {
-        (vp_left + content_w - CONTENT_EDGE_PAD_DIPS - offset + trailing_shift)
+        (vp_left + content_w - CONTENT_EDGE_PAD_DIPS + strip_shift)
             .min(vp_right - CONTENT_EDGE_PAD_DIPS)
     };
     ScrollMetrics {
@@ -779,6 +787,45 @@ fn pill_viewport(pill_left: f32, pill_w: f32) -> (f32, f32) {
 fn scroll_min_pill_width(settings: &DockSettings) -> f32 {
     let base = layout::size_profile(settings).cell;
     (base * 2.5 + 36.0).max(160.0)
+}
+
+/// DIPs to exclude from the content clip on the left/right edge while the
+/// matching scroll chevron is visible (the chevron band is `SCROLL_EDGE_W_DIPS`).
+fn scroll_chevron_insets(can_scroll_left: bool, can_scroll_right: bool) -> (f32, f32) {
+    let band = |shown: bool| if shown { SCROLL_EDGE_W_DIPS } else { 0.0 };
+    (band(can_scroll_left), band(can_scroll_right))
+}
+
+/// Zeroes the corner radii on a clip edge that was inset for a scroll chevron.
+fn square_inset_clip_corners(clip: &IDCompositionRectangleClip, left: bool, right: bool) {
+    unsafe {
+        if left {
+            let _ = clip.SetTopLeftRadiusX2(0.0);
+            let _ = clip.SetTopLeftRadiusY2(0.0);
+            let _ = clip.SetBottomLeftRadiusX2(0.0);
+            let _ = clip.SetBottomLeftRadiusY2(0.0);
+        }
+        if right {
+            let _ = clip.SetTopRightRadiusX2(0.0);
+            let _ = clip.SetTopRightRadiusY2(0.0);
+            let _ = clip.SetBottomRightRadiusX2(0.0);
+            let _ = clip.SetBottomRightRadiusY2(0.0);
+        }
+    }
+}
+
+/// Folder-stack row title: the file name without a shortcut's `.lnk` / `.url`
+/// extension (case-insensitive). The row keeps the full path for launching.
+fn stack_entry_display_name(name: &str) -> String {
+    for ext in [".lnk", ".url"] {
+        if name.len() > ext.len()
+            && let Some(stem) = name.get(..name.len() - ext.len())
+            && name[stem.len()..].eq_ignore_ascii_case(ext)
+        {
+            return stem.to_owned();
+        }
+    }
+    name.to_owned()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2393,7 +2440,9 @@ impl DockState {
             * self.effective.widget_density(id)
     }
 
-    fn sync_widget_visuals(&mut self) {
+    /// Reconciles `widget_visuals` with the enabled widgets. Returns `true` when
+    /// the set changed (the visual tree was rebuilt), so callers re-size the window.
+    fn sync_widget_visuals(&mut self) -> bool {
         let active = self.ordered_dock_widgets();
         let same = self.widget_visuals.len() == active.len()
             && self
@@ -2402,7 +2451,7 @@ impl DockState {
                 .zip(active.iter())
                 .all(|(v, d)| v.id == d.id);
         if same {
-            return;
+            return false;
         }
         self.widget_visuals.clear();
         for wd in active {
@@ -2419,10 +2468,35 @@ impl DockState {
             }
         }
         self.rebuild_visual_tree();
+        true
+    }
+
+    /// `true` when `stack_visuals` no longer mirrors `settings.stack_folders`.
+    /// Stacks are only re-synced inside `rebuild_visual_tree`, so a settings
+    /// reload that adds/removes a folder must rebuild before sizing the window.
+    fn stack_visuals_stale(&self) -> bool {
+        let desired = if self.light_strip {
+            Vec::new()
+        } else {
+            self.settings
+                .stack_folders
+                .iter()
+                .map(|path| path.trim())
+                .filter(|path| !path.is_empty())
+                .collect::<Vec<_>>()
+        };
+        desired.len() != self.stack_visuals.len()
+            || desired
+                .iter()
+                .zip(self.stack_visuals.iter())
+                .any(|(path, sv)| sv.path != *path)
     }
 
     fn refresh_widgets(&mut self) -> bool {
-        self.sync_widget_visuals();
+        // A newly enabled/removed widget changes the strip width; the window
+        // must follow, or the pill stays clamped to the old window (bogus
+        // overflow + scroll chevrons) until some unrelated resize happens.
+        let structure_changed = self.sync_widget_visuals();
         self.widget_runtime.tick(&self.settings);
         if let Some(island) = &mut self.dynamic_island {
             island.tick();
@@ -2482,7 +2556,7 @@ impl DockState {
                 changed = true;
             }
         }
-        if width_changed {
+        if width_changed || structure_changed {
             self.sync_window_bounds();
         }
         if self.settings.show_recycle_bin {
@@ -3148,7 +3222,27 @@ impl DockState {
                 desired_total_px,
             );
         }
+        // The strip may have changed completely: start from the leading edge and
+        // drop hover/tooltip state that points at cells which moved or vanished.
+        self.scroll_offset = 0.0;
+        self.scroll_target = 0.0;
+        self.hovered_widget = None;
+        self.hovered_widget_sub = None;
+        self.hovered_stack = None;
+        self.hovered_idx = None;
+        self.hovered_scroll = None;
+        self.tooltip_cache = None;
+        self.tooltip_node.hide();
         self.sync_slots(false);
+        // Bring widget and folder-stack visuals in line with the new settings
+        // *before* sizing the window. Sizing first measured the previous
+        // widget/stack set, and the later `sync_widget_visuals` rebuild never
+        // re-sized, so enabling widgets left the window (and the pill clamped
+        // to it) at the old width with a scrolling strip.
+        let widgets_rebuilt = self.sync_widget_visuals();
+        if !widgets_rebuilt && self.stack_visuals_stale() {
+            self.rebuild_visual_tree();
+        }
         self.sync_window_bounds();
         // Settings reload is a deliberate full rebuild, not a hot-path wake-up.
         let _ = self.refresh_widgets();
@@ -4929,9 +5023,16 @@ impl DockState {
         self.scroll_target = self.scroll_target.clamp(0.0, sm.max_scroll);
         let clip_inset_px = (1.0 * dpi).max(1.0);
         let pill_h_px = (pill_h * dpi).round();
-        let clip_left_px = pill_left_px + clip_inset_px;
+        // While a `<` / `>` chevron is shown, its edge band is excluded from the
+        // content clip so scrolled widget text ("13°C", "C: %43") can never
+        // render underneath the translucent chevron scrim.
+        let (chevron_left_dips, chevron_right_dips) =
+            scroll_chevron_insets(sm.can_scroll_left, sm.can_scroll_right);
+        let clip_left_px = pill_left_px + clip_inset_px + (chevron_left_dips * dpi).round();
         let clip_top_px = pill_top_px + clip_inset_px;
-        let clip_right_px = (pill_left_px + pill_w_px - clip_inset_px).max(clip_left_px);
+        let clip_right_px =
+            (pill_left_px + pill_w_px - clip_inset_px - (chevron_right_dips * dpi).round())
+                .max(clip_left_px);
         let clip_bottom_px = (pill_top_px + pill_h_px - clip_inset_px).max(clip_top_px);
         let clip_radius_px = (self.settings.corner_radius_dips() * dpi - clip_inset_px)
             .clamp(0.0, (clip_bottom_px - clip_top_px) * 0.5);
@@ -4952,6 +5053,18 @@ impl DockState {
             clip_bottom_px,
             0.0,
             clip_radius_px,
+        );
+        // An inset edge sits inside the pill's straight section: give it a crisp
+        // vertical cut instead of a second rounded cap next to the chevron.
+        square_inset_clip_corners(
+            &self.pill_scroll_clip,
+            chevron_left_dips > 0.0,
+            chevron_right_dips > 0.0,
+        );
+        square_inset_clip_corners(
+            &self.scroll_clip,
+            chevron_left_dips > 0.0,
+            chevron_right_dips > 0.0,
         );
 
         // 3. Unified app slots (inside clipped scroll container).
@@ -5888,7 +6001,9 @@ impl DockState {
                 });
             blocks.push(FlyoutBlock::ActionRow {
                 id: STACK_FLYOUT_ROW_ID_BASE + offset as u32,
-                title: entry.name.clone(),
+                // `T3 Code (Beta).lnk` reads as `T3 Code (Beta)`; launching
+                // still uses `entry.path` (the full shortcut path).
+                title: stack_entry_display_name(&entry.name),
                 subtitle: entry.is_dir.then(|| loc::t("FolderLabel")),
                 badge: None,
                 icon,
@@ -10211,5 +10326,166 @@ mod tests {
         assert!(code.contains("open_widget_flyout_on_edge("));
         assert!(code.contains("handle_middle_click(wid, &self.settings)"));
         assert!(!code.contains("settings.show_media"));
+    }
+
+    /// QA `01_dock_rest`: a pill wider than its content must not open a gap
+    /// between the last widget and the trail divider (and a second one right
+    /// of the Recycle Bin). The whole strip moves as one contiguous run.
+    #[test]
+    fn wide_pill_keeps_widgets_flush_against_the_trail_group() {
+        let (shell_w, apps_w, widgets_w, trail_w) = (120.0, 300.0, 420.0, 160.0);
+        let content = content_strip_width(shell_w, apps_w + widgets_w, trail_w, 0.0);
+        let slack = 300.0;
+        let (vp_left, vp_right) = (100.0, 100.0 + content + slack);
+        for alignment in [
+            DockContentAlignment::Left,
+            DockContentAlignment::Center,
+            DockContentAlignment::Right,
+        ] {
+            let sm = compute_scroll_metrics(
+                vp_left,
+                vp_right,
+                apps_w + widgets_w,
+                trail_w,
+                shell_w,
+                0.0,
+                alignment,
+            );
+            assert_eq!(sm.max_scroll, 0.0);
+            let widgets_end = sm.apps_start_x + apps_w + widgets_w;
+            let trail_start = sm.right_anchor_x - trail_w;
+            assert!(
+                (trail_start - widgets_end).abs() < 0.01,
+                "{alignment:?}: bogus gap {} between widgets and trail",
+                trail_start - widgets_end
+            );
+            let left_gap = sm.shell_start_x - vp_left;
+            let right_gap = vp_right - sm.right_anchor_x;
+            assert!((left_gap + right_gap - (slack + 2.0 * CONTENT_EDGE_PAD_DIPS)).abs() < 0.01);
+            match alignment {
+                DockContentAlignment::Left => {
+                    assert!((left_gap - CONTENT_EDGE_PAD_DIPS).abs() < 0.01);
+                }
+                DockContentAlignment::Center => assert!((left_gap - right_gap).abs() < 1.0),
+                DockContentAlignment::Right => {
+                    assert!((right_gap - CONTENT_EDGE_PAD_DIPS).abs() < 0.01);
+                }
+            }
+        }
+        // A content-fitted pill has no slack: Start stays at the inner edge.
+        let fitted = compute_scroll_metrics(
+            vp_left,
+            vp_left + content,
+            apps_w + widgets_w,
+            trail_w,
+            shell_w,
+            0.0,
+            DockContentAlignment::Center,
+        );
+        assert_eq!(fitted.shell_start_x, vp_left + CONTENT_EDGE_PAD_DIPS);
+        assert_eq!(
+            fitted.right_anchor_x,
+            vp_left + content - CONTENT_EDGE_PAD_DIPS
+        );
+    }
+
+    /// QA `09_widgets_batch_a_and_folders`: an Auto dock grows to hold a large
+    /// live strip (many widgets + folder stacks) up to the monitor, instead of
+    /// staying at the width measured for the previous widget set.
+    #[test]
+    fn auto_width_grows_with_live_widgets_up_to_the_monitor() {
+        let mut settings = DockSettings::default();
+        for id in ["clock", "audio", "weather", "stats", "storage"] {
+            settings.set_widget_enabled(id, true);
+        }
+        settings.stack_folders = vec![r"C:\Users\Public\Downloads".to_owned()];
+        let mut eff = EffectiveMetrics::for_monitor(&settings, 1920.0);
+        assert!(eff.width_dips.is_none());
+        let live_content = 1500.0;
+        eff.live_rest_content_dips = Some(live_content);
+        let (win_w, _) = compute_window_dips_with(&settings, 6, 1920.0, &eff);
+        assert!(
+            win_w >= live_content + 24.0,
+            "window ({win_w}) must hold the live strip ({live_content}) without scrolling"
+        );
+        eff.live_rest_content_dips = Some(5000.0);
+        let (capped, _) = compute_window_dips_with(&settings, 6, 1920.0, &eff);
+        assert!((1920.0 - 16.0..=1920.0).contains(&capped));
+    }
+
+    /// Settings reload must size the window from the *new* widget/stack set,
+    /// and a widget-set change at runtime must re-size it too.
+    #[test]
+    fn settings_reload_syncs_widget_and_stack_visuals_before_sizing() {
+        let src = include_str!("mod.rs");
+        let code = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let reload = code
+            .find("fn reload_settings_live(")
+            .expect("reload handler");
+        let body = &code[reload..];
+        let body = &body[..body.find("\n    fn ").unwrap_or(body.len())];
+        let widgets = body
+            .find("self.sync_widget_visuals()")
+            .expect("widget sync");
+        let stacks = body.find("self.stack_visuals_stale()").expect("stack sync");
+        let bounds = body.find("self.sync_window_bounds()").expect("bounds");
+        assert!(widgets < bounds && stacks < bounds);
+        for reset in [
+            "self.scroll_offset = 0.0",
+            "self.scroll_target = 0.0",
+            "self.hovered_widget = None",
+            "self.hovered_stack = None",
+            "self.hovered_idx = None",
+            "self.tooltip_cache = None",
+            "self.tooltip_node.hide()",
+        ] {
+            assert!(body.contains(reset), "reload must reset `{reset}`");
+        }
+        let refresh = code.find("fn refresh_widgets(").expect("refresh");
+        let refresh_body = &code[refresh..];
+        let refresh_body =
+            &refresh_body[..refresh_body.find("\n    fn ").unwrap_or(refresh_body.len())];
+        assert!(refresh_body.contains("let structure_changed = self.sync_widget_visuals()"));
+        assert!(refresh_body.contains("if width_changed || structure_changed"));
+    }
+
+    #[test]
+    fn scroll_chevrons_inset_the_content_clip_only_while_shown() {
+        assert_eq!(scroll_chevron_insets(false, false), (0.0, 0.0));
+        assert_eq!(
+            scroll_chevron_insets(true, false),
+            (SCROLL_EDGE_W_DIPS, 0.0)
+        );
+        assert_eq!(
+            scroll_chevron_insets(false, true),
+            (0.0, SCROLL_EDGE_W_DIPS)
+        );
+        assert_eq!(
+            scroll_chevron_insets(true, true),
+            (SCROLL_EDGE_W_DIPS, SCROLL_EDGE_W_DIPS)
+        );
+    }
+
+    #[test]
+    fn stack_flyout_titles_drop_shortcut_extensions() {
+        assert_eq!(
+            stack_entry_display_name("T3 Code (Beta).lnk"),
+            "T3 Code (Beta)"
+        );
+        assert_eq!(
+            stack_entry_display_name("GitHub Copilot.LNK"),
+            "GitHub Copilot"
+        );
+        assert_eq!(stack_entry_display_name("Speedtest.lnk"), "Speedtest");
+        assert_eq!(stack_entry_display_name("Docs.Url"), "Docs");
+        assert_eq!(
+            stack_entry_display_name("Türkçe Kısayol.lnk"),
+            "Türkçe Kısayol"
+        );
+        // Other files and degenerate names are untouched.
+        assert_eq!(stack_entry_display_name("report.pdf"), "report.pdf");
+        assert_eq!(stack_entry_display_name("notes.lnk.txt"), "notes.lnk.txt");
+        assert_eq!(stack_entry_display_name(".lnk"), ".lnk");
+        assert_eq!(stack_entry_display_name("Sub"), "Sub");
     }
 }

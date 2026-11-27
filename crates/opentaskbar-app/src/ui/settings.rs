@@ -301,7 +301,7 @@ const WIDGET_GLYPHS: &[(&str, &str)] = &[
     ("weather", "\u{E753}"),
     ("dayprogress", "\u{E706}"),
     ("stopwatch", "\u{E916}"),
-    ("countdown", "\u{E916}"),
+    ("countdown", "\u{EA8F}"),
     ("stats", "\u{E9D9}"),
     ("netspeed", "\u{E8AB}"),
     ("battery", "\u{E850}"),
@@ -448,10 +448,11 @@ fn fit_settings_size(work: Option<gpui::Size<gpui::Pixels>>) -> gpui::Size<gpui:
 /// accent border, removal of GPUI's phantom non-client skirt, the real OpenTaskbar icon,
 /// screen-space anchor lookup and the cross-process single-instance Settings lookup.
 pub(crate) mod window_chrome {
+    use std::ffi::c_void;
     use std::sync::OnceLock;
 
     use windows_sys::Win32::Foundation::{
-        GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
+        FARPROC, GetLastError, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
     };
     use windows_sys::Win32::Graphics::Dwm::{
         DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
@@ -460,7 +461,7 @@ pub(crate) mod window_chrome {
     use windows_sys::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint,
     };
-    use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows_sys::Win32::System::Threading::GetCurrentProcessId;
     use windows_sys::Win32::UI::Controls::MARGINS;
     use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
@@ -468,15 +469,18 @@ pub(crate) mod window_chrome {
         DefSubclassProc, GetWindowSubclass, RemoveWindowSubclass, SetWindowSubclass,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, EnumWindows, GetPropW, GetSystemMetrics, GetWindowRect,
-        GetWindowThreadProcessId, ICON_BIG, ICON_SMALL, IMAGE_ICON, IsIconic, IsWindowVisible,
-        LR_DEFAULTCOLOR, LoadImageW, PostMessageW, RemovePropW, SM_CXICON, SM_CXSMICON, SM_CYICON,
-        SM_CYSMICON, SW_RESTORE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        SWP_NOZORDER, SendMessageW, SetForegroundWindow, SetPropW, SetWindowPos, ShowWindow,
-        WM_APP, WM_NCCALCSIZE, WM_NCDESTROY, WM_SETICON,
+        BringWindowToTop, EnumWindows, GWL_STYLE, GetPropW, GetSystemMetrics, GetWindowLongPtrW,
+        GetWindowRect, GetWindowThreadProcessId, HTBORDER, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT,
+        HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, ICON_BIG, ICON_SMALL, IMAGE_ICON,
+        IsIconic, IsWindowVisible, IsZoomed, LR_DEFAULTCOLOR, LoadImageW, PostMessageW,
+        RemovePropW, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_RESTORE, SWP_FRAMECHANGED,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SendMessageW, SetForegroundWindow,
+        SetPropW, SetWindowPos, ShowWindow, WM_APP, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST,
+        WM_SETICON, WS_CAPTION, WS_POPUP, WS_THICKFRAME,
     };
 
     use crate::design::glass::{GlassBackend, WindowsBackend, WindowsVersion, classify_windows};
+    use crate::platform::win32_helpers::set_window_long_ptr;
 
     /// Window property that marks the live Settings HWND (cross-process, via a global atom).
     const SETTINGS_WINDOW_PROP: &str = "OpenTaskbarSettingsWindow";
@@ -490,6 +494,26 @@ pub(crate) mod window_chrome {
     /// Application icon resource id embedded in `OpenTaskBar.exe` (`1 ICON "OpenTaskBar.ico"`).
     const APP_ICON_RESOURCE_ID: usize = 1;
     const ERROR_ALREADY_EXISTS: u32 = 183;
+    const WCA_ACCENT_POLICY: i32 = 19;
+    const ACCENT_DISABLED: u32 = 0;
+
+    #[repr(C)]
+    struct AccentPolicy {
+        state: u32,
+        flags: u32,
+        gradient_color: u32,
+        animation_id: u32,
+    }
+
+    #[repr(C)]
+    struct WindowCompositionAttributeData {
+        attribute: i32,
+        data: *mut c_void,
+        size: u32,
+    }
+
+    type SetWindowCompositionAttributeFn =
+        unsafe extern "system" fn(HWND, *mut WindowCompositionAttributeData) -> i32;
 
     // `windows-sys` gates `CreateMutexW` behind `Win32_Security` (not enabled), so bind it
     // directly; a null `SECURITY_ATTRIBUTES` pointer is all we ever pass.
@@ -518,10 +542,99 @@ pub(crate) mod window_chrome {
         })
     }
 
+    /// GPUI creates non-resizable `WindowKind::Normal` HWNDs with `WS_SYSMENU | WS_MINIMIZEBOX`
+    /// only (neither `WS_POPUP` nor `WS_CAPTION | WS_THICKFRAME`), which causes Windows 11 DWM
+    /// to ignore `DWMWCP_ROUND` and leave sharp 90-degree outer corners. Adding
+    /// `WS_CAPTION | WS_THICKFRAME` enables native Win11 DWM rounded corner clipping and shadow
+    /// while `WM_NCCALCSIZE` (returning 0) and `WM_NCHITTEST` (suppressing resize hits) keep
+    /// the window borderless and fixed-size.
+    fn ensure_roundable_style(hwnd: HWND) {
+        // SAFETY: reading and updating the style flags of our own live window.
+        let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+        if (style & WS_POPUP) == 0
+            && (style & (WS_CAPTION | WS_THICKFRAME)) != (WS_CAPTION | WS_THICKFRAME)
+        {
+            set_window_long_ptr(
+                hwnd,
+                GWL_STYLE,
+                (style | WS_CAPTION | WS_THICKFRAME) as isize,
+            );
+        }
+    }
+
+    /// Clears GPUI's `ACCENT_ENABLE_TRANSPARENTGRADIENT` (`gradient_color = 0x00000000`),
+    /// which on Windows 11 paints opaque black behind transparent `WS_EX_NOREDIRECTIONBITMAP`
+    /// swapchain pixels outside rounded corners when `HostBackdropBrush` is inactive.
+    fn disable_accent_policy(hwnd: HWND) {
+        let module_name = wide("user32.dll");
+        // SAFETY: `user32.dll` is loaded in this process and `SetWindowCompositionAttribute`
+        // is an ASCII null-terminated export name.
+        let module = unsafe { GetModuleHandleW(module_name.as_ptr()) };
+        if module.is_null() {
+            return;
+        }
+        let address: FARPROC =
+            unsafe { GetProcAddress(module, c"SetWindowCompositionAttribute".as_ptr().cast()) };
+        let Some(address) = address else {
+            return;
+        };
+        // SAFETY: matches the undocumented `SetWindowCompositionAttribute` Win32 ABI.
+        let function: SetWindowCompositionAttributeFn = unsafe { std::mem::transmute(address) };
+        let mut policy = AccentPolicy {
+            state: ACCENT_DISABLED,
+            flags: 0,
+            gradient_color: 0,
+            animation_id: 0,
+        };
+        let mut data = WindowCompositionAttributeData {
+            attribute: WCA_ACCENT_POLICY,
+            data: (&mut policy as *mut AccentPolicy).cast(),
+            size: size_of::<AccentPolicy>() as u32,
+        };
+        unsafe {
+            let _ = function(hwnd, &mut data);
+        }
+    }
+
+    /// Applies Windows 11 rounded corners, suppresses the DWM border, and extends the glass
+    /// frame across the whole client area so transparent swapchain corners never turn black.
+    fn apply_dwm_chrome(hwnd: HWND) {
+        if !is_windows_11() {
+            return;
+        }
+        let corner = DWMWCP_ROUND;
+        let border = DWMWA_COLOR_NONE;
+        // Sheet-of-glass margins: DWM never paints opaque black behind the anti-aliased
+        // rounded edges, even when the GPUI surface is Solid / True Black.
+        let margins = MARGINS {
+            cxLeftWidth: -1,
+            cxRightWidth: -1,
+            cyTopHeight: -1,
+            cyBottomHeight: -1,
+        };
+        // SAFETY: plain DWM attribute writes on a live HWND with correctly sized values.
+        unsafe {
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                (&corner as *const i32).cast(),
+                size_of::<i32>() as u32,
+            );
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR as u32,
+                (&border as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+        }
+    }
+
     /// GPUI's `WM_NCCALCSIZE` handler insets `frame_thickness` (~8 px) on the left, right and
     /// bottom even for non-resizable windows, exposing the class' black background brush as a
-    /// sharp skirt around the rounded surface. Returning 0 without touching `rgrc[0]` makes the
-    /// client area cover the full window rect.
+    /// sharp skirt around the rounded surface. Returning 0 without touching `rgrc[0]` (when not
+    /// maximized) makes the client area cover the full window rect; `WM_NCHITTEST` suppresses
+    /// `WS_THICKFRAME` resize borders so the dialog stays fixed-size.
     unsafe extern "system" fn nc_subclass_proc(
         hwnd: HWND,
         msg: u32,
@@ -531,11 +644,34 @@ pub(crate) mod window_chrome {
         _ref_data: usize,
     ) -> LRESULT {
         match msg {
-            WM_NCCALCSIZE if wparam != 0 => 0,
+            // SAFETY: `hwnd` is a live window on this thread.
+            WM_NCCALCSIZE if wparam != 0 && unsafe { IsZoomed(hwnd) } == 0 => 0,
+            WM_NCHITTEST => {
+                // SAFETY: forwarding to GPUI's window proc first preserves HTCAPTION drag
+                // regions while stripping resize edge hit-tests introduced by WS_THICKFRAME.
+                let hit = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+                if matches!(
+                    hit as u32,
+                    HTLEFT
+                        | HTRIGHT
+                        | HTTOP
+                        | HTTOPLEFT
+                        | HTTOPRIGHT
+                        | HTBOTTOM
+                        | HTBOTTOMLEFT
+                        | HTBOTTOMRIGHT
+                        | HTBORDER
+                ) {
+                    HTCLIENT as LRESULT
+                } else {
+                    hit
+                }
+            }
             WM_APP_REFRAME => {
                 // Runs from the Win32 message loop (outside any GPUI `App` borrow), so the
                 // WM_SIZE this triggers reaches GPUI's resize callback and the viewport grows
-                // to the full window rect.
+                // to the full window rect. Re-apply DWM attributes right after SWP_FRAMECHANGED
+                // so DWM picks up `DWMWCP_ROUND` against the updated `GWL_STYLE`.
                 // SAFETY: frame-only SetWindowPos on our own live window.
                 unsafe {
                     SetWindowPos(
@@ -548,6 +684,7 @@ pub(crate) mod window_chrome {
                         SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
                     );
                 }
+                apply_dwm_chrome(hwnd);
                 0
             }
             WM_NCDESTROY => {
@@ -591,37 +728,13 @@ pub(crate) mod window_chrome {
             return;
         }
         let hwnd = hwnd as HWND;
+        disable_accent_policy(hwnd);
+        if is_windows_11() {
+            ensure_roundable_style(hwnd);
+        }
         install_nc_subclass(hwnd);
-        if !is_windows_11() {
-            // Windows 10: square corners, no DWM border attribute; GPUI uses radius 0.
-            return;
-        }
-        let corner = DWMWCP_ROUND;
-        let border = DWMWA_COLOR_NONE;
-        // Sheet-of-glass margins: DWM never paints opaque black behind the anti-aliased
-        // rounded edges, even when the GPUI surface is Solid / True Black.
-        let margins = MARGINS {
-            cxLeftWidth: -1,
-            cxRightWidth: -1,
-            cyTopHeight: -1,
-            cyBottomHeight: -1,
-        };
-        // SAFETY: plain DWM attribute writes on a live HWND with correctly sized values.
-        unsafe {
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-                (&corner as *const i32).cast(),
-                size_of::<i32>() as u32,
-            );
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_BORDER_COLOR as u32,
-                (&border as *const u32).cast(),
-                size_of::<u32>() as u32,
-            );
-            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
-        }
+        // Windows 10: square corners, no DWM border attribute; GPUI uses radius 0.
+        apply_dwm_chrome(hwnd);
     }
 
     /// Sets the embedded OpenTaskbar icon (resource id 1) as the window's big and small icon.
@@ -10477,7 +10590,8 @@ mod tests {
     fn widget_glyphs_avoid_unassigned_codepoints() {
         // U+E917 has no glyph in Segoe Fluent Icons and rendered as a tofu box.
         assert_ne!(widget_glyph("countdown"), "\u{E917}");
-        assert_eq!(widget_glyph("countdown"), "\u{E916}");
+        assert_eq!(widget_glyph("countdown"), "\u{EA8F}");
+        assert_ne!(widget_glyph("countdown"), widget_glyph("stopwatch"));
     }
 
     #[test]

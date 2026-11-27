@@ -1995,18 +1995,28 @@ impl WidgetRuntime {
         }
         match id {
             "clock" => telemetry::local_clock_info().full_date,
-            "media" => match sub {
-                Some(0) => loc::t("MediaPrevious").to_owned(),
-                Some(1) => loc::t("MediaPlayPause").to_owned(),
-                Some(2) => loc::t("MediaNext").to_owned(),
-                Some(3) => if self.audio_muted {
-                    loc::t("AudioUnmute")
+            "media" => {
+                let has_media = !self.media_snapshot().title.is_empty();
+                if !has_media {
+                    match sub {
+                        Some(3) => loc::t("MediaPlay").to_owned(),
+                        _ => loc::t("DynamicIslandShortMedia").to_owned(),
+                    }
                 } else {
-                    loc::t("AudioMute")
+                    match sub {
+                        Some(0) => loc::t("MediaPrevious").to_owned(),
+                        Some(1) => loc::t("MediaPlayPause").to_owned(),
+                        Some(2) => loc::t("MediaNext").to_owned(),
+                        Some(3) => if self.audio_muted {
+                            loc::t("AudioUnmute")
+                        } else {
+                            loc::t("AudioMute")
+                        }
+                        .to_owned(),
+                        _ => loc::t("DynamicIslandShortMedia").to_owned(),
+                    }
                 }
-                .to_owned(),
-                _ => loc::t("DynamicIslandShortMedia").to_owned(),
-            },
+            }
             "quicksettings" => match sub {
                 Some(0) => loc::t_fmt(
                     "RadioWifiStatus",
@@ -2197,23 +2207,34 @@ impl WidgetRuntime {
         }
         match id {
             "media" => {
-                let controls_l = (width_dips - 116.0).max(0.0);
-                if rel_x_dips < controls_l {
-                    DirectClickOutcome::OpenFlyout
-                } else if rel_x_dips < controls_l + 26.0 {
-                    telemetry::send_media_vk(VK_MEDIA_PREV_TRACK);
-                    DirectClickOutcome::Handled
-                } else if rel_x_dips < controls_l + 55.0 {
-                    telemetry::send_media_vk(VK_MEDIA_PLAY_PAUSE);
-                    DirectClickOutcome::Handled
-                } else if rel_x_dips < controls_l + 82.0 {
-                    telemetry::send_media_vk(VK_MEDIA_NEXT_TRACK);
-                    DirectClickOutcome::Handled
+                let has_media = !self.media_snapshot().title.is_empty();
+                if !has_media {
+                    let play_l = (width_dips - 38.0).max(0.0);
+                    if rel_x_dips >= play_l {
+                        telemetry::send_media_vk(VK_MEDIA_PLAY_PAUSE);
+                        DirectClickOutcome::Handled
+                    } else {
+                        DirectClickOutcome::OpenFlyout
+                    }
                 } else {
-                    toggle_audio_mute();
-                    (self.audio_vol, self.audio_muted) = get_audio_state();
-                    self.tooltip_text = None;
-                    DirectClickOutcome::Handled
+                    let controls_l = (width_dips - 116.0).max(0.0);
+                    if rel_x_dips < controls_l {
+                        DirectClickOutcome::OpenFlyout
+                    } else if rel_x_dips < controls_l + 26.0 {
+                        telemetry::send_media_vk(VK_MEDIA_PREV_TRACK);
+                        DirectClickOutcome::Handled
+                    } else if rel_x_dips < controls_l + 55.0 {
+                        telemetry::send_media_vk(VK_MEDIA_PLAY_PAUSE);
+                        DirectClickOutcome::Handled
+                    } else if rel_x_dips < controls_l + 82.0 {
+                        telemetry::send_media_vk(VK_MEDIA_NEXT_TRACK);
+                        DirectClickOutcome::Handled
+                    } else {
+                        toggle_audio_mute();
+                        (self.audio_vol, self.audio_muted) = get_audio_state();
+                        self.tooltip_text = None;
+                        DirectClickOutcome::Handled
+                    }
                 }
             }
             "quicksettings" => {
@@ -2415,6 +2436,31 @@ impl WidgetRuntime {
         }
     }
 
+    fn compact_tz_badge(tz_name: &str, tz_label: &str) -> String {
+        let offset = tz_label.trim();
+        if !offset.is_empty() {
+            return offset.to_owned();
+        }
+        let name = tz_name.trim();
+        if !name.is_empty() && name.chars().count() <= 10 {
+            name.to_owned()
+        } else {
+            "UTC".to_owned()
+        }
+    }
+
+    fn friendly_app_session_name(app_name: &str) -> String {
+        let trimmed = app_name.trim();
+        if trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("SystemSounds")
+            || trimmed.eq_ignore_ascii_case("System Sounds")
+        {
+            loc::t("SystemSounds")
+        } else {
+            trimmed.to_owned()
+        }
+    }
+
     fn build_calendar_spec(
         shown_y: i32,
         shown_m: u32,
@@ -2432,7 +2478,7 @@ impl WidgetRuntime {
                     caption: Some(info.full_date.clone()),
                     centered: false,
                     large: false,
-                    right_meta: Some(format!("{} · {}", info.tz_name, info.tz_label)),
+                    right_meta: Some(Self::compact_tz_badge(&info.tz_name, &info.tz_label)),
                 },
                 FlyoutBlock::Separator,
                 FlyoutBlock::CalendarGrid {
@@ -2504,19 +2550,23 @@ impl WidgetRuntime {
                 slider_id: 4,
             },
         ];
-        // Per-app rows use a single clean AudioSliderSection without raw COM session IDs.
+        // Per-app rows populate `device_name` with the friendly app/session name (never raw session IDs or empty box).
         let sessions = media_ext::list_app_sessions();
         if !sessions.is_empty() {
             blocks.push(FlyoutBlock::Separator);
-            blocks.push(FlyoutBlock::StatRow {
-                label: loc::t("AudioApps"),
-                value: String::new(),
-            });
             for (index, session) in sessions.iter().take(6).enumerate() {
                 blocks.push(FlyoutBlock::AudioSliderSection {
-                    label: session.app_name.clone(),
-                    device_name: String::new(),
-                    value_text: format_percent(session.volume),
+                    label: if index == 0 {
+                        loc::t("AudioApps")
+                    } else {
+                        String::new()
+                    },
+                    device_name: Self::friendly_app_session_name(&session.app_name),
+                    value_text: if session.muted {
+                        format_percent(0)
+                    } else {
+                        format_percent(session.volume)
+                    },
                     ratio: session.volume as f32 / 100.0,
                     muted: session.muted,
                     mute_id: 100 + index as u32 * 2,
@@ -4216,41 +4266,17 @@ impl WidgetRuntime {
                                 slider_id: 10,
                             },
                             FlyoutBlock::Separator,
-                            // `QuickSettingsWidget.AddShortcuts`: 17 Control Center shortcuts.
+                            // 8 crisp Control Center shortcuts (2 neat rows of 4): only live stateful radios highlight ON.
                             FlyoutBlock::IconBar {
                                 buttons: vec![
-                                    (
-                                        100,
-                                        loc::t("QuickAvailableNetworks"),
-                                        0xE701,
-                                        runtime.wifi_on,
-                                    ),
-                                    (
-                                        101,
-                                        loc::t("QuickBluetoothSettings"),
-                                        0xE702,
-                                        runtime.bluetooth_on,
-                                    ),
-                                    (
-                                        102,
-                                        loc::t("QuickNightLightSettings"),
-                                        0xE708,
-                                        runtime.night_light_on,
-                                    ),
-                                    (103, loc::t("QuickAirplaneMode"), 0xF71D, true),
-                                    (104, loc::t("QuickCellular"), 0xE839, true),
-                                    (105, loc::t("QuickBrightness"), 0xE7F3, true),
-                                    (106, loc::t("QuickRotationLock"), 0xE7F9, true),
-                                    (107, loc::t("QuickEnergySaver"), 0xE7EF, true),
-                                    (108, loc::t("QuickNearbySharing"), 0xE8D2, true),
-                                    (109, loc::t("QuickLiveCaptions"), 0xF4B9, true),
-                                    (110, loc::t("QuickNotificationMode"), 0xE7ED, true),
-                                    (111, loc::t("QuickStudioEffects"), 0xE722, true),
-                                    (112, loc::t("QuickHearingDevices"), 0xE7F5, true),
-                                    (113, loc::t("QuickCast"), 0xEC15, true),
-                                    (114, loc::t("QuickMobileHotspot"), 0xE7B7, true),
-                                    (115, loc::t("QuickAccessibility"), 0xE7F7, true),
-                                    (116, loc::t("QuickOpenWindowsPanel"), 0xE7FC, true),
+                                    (100, loc::t("WiFi"), 0xE701, runtime.wifi_on),
+                                    (101, loc::t("Bluetooth"), 0xE702, runtime.bluetooth_on),
+                                    (102, loc::t("NightLight"), 0xE708, runtime.night_light_on),
+                                    (103, loc::t("QuickAirplaneMode"), 0xF71D, false),
+                                    (105, loc::t("QuickBrightness"), 0xE7F3, false),
+                                    (107, loc::t("Battery"), 0xE7EF, false),
+                                    (113, loc::t("QuickProject"), 0xEC15, false),
+                                    (110, loc::t("Focus"), 0xE7ED, false),
                                 ],
                             },
                             FlyoutBlock::ButtonBar(vec![

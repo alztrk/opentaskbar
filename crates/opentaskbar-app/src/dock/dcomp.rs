@@ -2079,45 +2079,71 @@ impl DcompEngine {
                             &color_rgba(warm_col.0, warm_col.1, warm_col.2, 0.98),
                             None,
                         )?;
-                        let bar_y = (height_dips - 8.5).max(height_dips * 0.72);
+                        let compact = height_dips < 36.0;
+                        let bar_h = if compact { 2.0_f32 } else { 2.5_f32 };
+                        let bar_r = bar_h * 0.5;
+                        let bar_y = if compact {
+                            (height_dips - bar_h - 2.0).max(height_dips * 0.80)
+                        } else {
+                            (height_dips - bar_h - 4.5).max(height_dips * 0.76)
+                        };
+                        let label_top = if compact { 2.5_f32 } else { 3.5_f32 };
+                        let label_bottom = (height_dips * 0.40).max(label_top + 9.0);
+                        let value_top = (height_dips * 0.38).max(label_bottom - 0.5);
+                        let value_bottom = (bar_y - 1.5).max(value_top + 10.5);
+                        let label_fmt = if height_dips < 33.0 {
+                            self.cached_text_format(design::fonts::scaled_size(8.5), false, 1)?
+                        } else if compact {
+                            fmt_9_l.clone()
+                        } else {
+                            fmt_10_l.clone()
+                        };
+                        let value_fmt = if height_dips < 33.0 {
+                            self.cached_text_format(design::fonts::scaled_size(10.5), true, 1)?
+                        } else if height_dips < 38.0 {
+                            fmt_11_b_l.clone()
+                        } else {
+                            fmt_12_b_l.clone()
+                        };
+                        let vdiv_h = (height_dips - 12.0).clamp(14.0, 20.0);
                         for (i, col) in columns.iter().take(4).enumerate() {
                             let cx_l = pad_x + i as f32 * (col_w + gap);
                             if i > 0 {
-                                draw_vdiv(cx_l - gap * 0.5, 20.0);
+                                draw_vdiv(cx_l - gap * 0.5, vdiv_h);
                             }
                             draw_text(
                                 &col.label,
-                                &fmt_10_l,
+                                &label_fmt,
                                 D2D_RECT_F {
                                     left: cx_l,
-                                    top: 4.5,
+                                    top: label_top,
                                     right: cx_l + col_w,
-                                    bottom: 16.0,
+                                    bottom: label_bottom,
                                 },
                                 &s_brush,
                             );
                             draw_text(
                                 &col.value_text,
-                                &fmt_12_b_l,
+                                &value_fmt,
                                 D2D_RECT_F {
                                     left: cx_l,
-                                    top: 15.0,
+                                    top: value_top,
                                     right: cx_l + col_w,
-                                    bottom: bar_y - 1.5,
+                                    bottom: value_bottom,
                                 },
                                 if col.warm_text { &warm_b } else { &p_brush },
                             );
-                            // Crisp 2.5px bottom rounded progress bar.
+                            // Crisp bottom rounded progress bar scaled cleanly for compact docks.
                             dc.FillRoundedRectangle(
                                 &D2D1_ROUNDED_RECT {
                                     rect: D2D_RECT_F {
                                         left: cx_l,
                                         top: bar_y,
                                         right: cx_l + col_w,
-                                        bottom: bar_y + 2.5,
+                                        bottom: bar_y + bar_h,
                                     },
-                                    radiusX: 1.25,
-                                    radiusY: 1.25,
+                                    radiusX: bar_r,
+                                    radiusY: bar_r,
                                 },
                                 &tr_brush,
                             );
@@ -2133,10 +2159,10 @@ impl DcompEngine {
                                             left: cx_l,
                                             top: bar_y,
                                             right: cx_l + fill_w,
-                                            bottom: bar_y + 2.5,
+                                            bottom: bar_y + bar_h,
                                         },
-                                        radiusX: 1.25,
-                                        radiusY: 1.25,
+                                        radiusX: bar_r,
+                                        radiusY: bar_r,
                                     },
                                     &fb,
                                 );
@@ -3421,77 +3447,44 @@ impl DcompEngine {
                     }
 
                     let info_l = 7.0 + art_sz + 8.0;
-                    let controls_l = (width_dips - 114.0).max(info_l + 24.0);
-                    let mid = height_dips * 0.50;
-                    if !hint.has_media || artist.is_empty() {
+                    let bh = 26.0_f32.min(height_dips - 8.0).max(20.0);
+                    let by = cy - bh * 0.5;
+                    if !hint.has_media {
+                        // Sleek idle layout: full untruncated status text + single subtle Play button on the right.
+                        let play_w = 26.0_f32;
+                        let play_x = (width_dips - play_w - 7.0).max(info_l + 24.0);
+                        let avail_w = (play_x - 6.0 - info_l).max(24.0);
+                        let idle_fmt = if measure_text_w(title, &fmt_11_l) <= avail_w {
+                            &fmt_11_l
+                        } else if measure_text_w(title, &fmt_10_l) <= avail_w {
+                            &fmt_10_l
+                        } else {
+                            &fmt_9_l
+                        };
                         draw_text(
                             title,
-                            if hint.has_media { &fmt_11_b_l } else { &fmt_11_l },
+                            idle_fmt,
                             D2D_RECT_F {
                                 left: info_l,
                                 top: 0.0,
-                                right: controls_l - 4.0,
+                                right: play_x - 6.0,
                                 bottom: height_dips,
-                            },
-                            if hint.has_media { &p_brush } else { &s_brush },
-                        );
-                    } else {
-                        draw_text(
-                            title,
-                            &fmt_11_b_l,
-                            D2D_RECT_F {
-                                left: info_l,
-                                top: (mid - 13.5).max(2.0),
-                                right: controls_l - 4.0,
-                                bottom: mid + 1.0,
-                            },
-                            &p_brush,
-                        );
-                        draw_text(
-                            artist,
-                            &fmt_10_l,
-                            D2D_RECT_F {
-                                left: info_l,
-                                top: mid - 0.5,
-                                right: controls_l - 4.0,
-                                bottom: (mid + 12.5).min(height_dips - 4.0),
                             },
                             &s_brush,
                         );
-                    }
-
-                    // 4 sub-buttons: 0=Prev, 1=Play/Pause (dynamic glyph), 2=Next, 3=Mute
-                    let play_glyph = if hint.playing { "\u{E769}" } else { "\u{E768}" };
-                    let btns: [(f32, f32, &str, bool); 4] = [
-                        (controls_l, 25.0, "\u{E892}", false),
-                        (controls_l + 27.0, 27.0, play_glyph, true),
-                        (controls_l + 56.0, 25.0, "\u{E893}", false),
-                        (
-                            controls_l + 83.0,
-                            25.0,
-                            if *muted { "\u{E74F}" } else { "\u{E767}" },
-                            true,
-                        ),
-                    ];
-                    let bh = 26.0_f32.min(height_dips - 8.0).max(20.0);
-                    let by = cy - bh * 0.5;
-                    for (i, (bx, bw, glyph, has_base_bg)) in btns.iter().enumerate() {
-                        let rect = D2D_RECT_F {
-                            left: *bx,
+                        let play_rect = D2D_RECT_F {
+                            left: play_x,
                             top: by,
-                            right: bx + bw,
+                            right: play_x + play_w,
                             bottom: by + bh,
                         };
-                        let rr = D2D1_ROUNDED_RECT {
-                            rect,
+                        let play_rr = D2D1_ROUNDED_RECT {
+                            rect: play_rect,
                             radiusX: 7.0,
                             radiusY: 7.0,
                         };
-                        let hov = active_sub == Some(i as u8);
-                        if i == 1 && hint.playing {
-                            dc.FillRoundedRectangle(&rr, &sel_fill_b);
-                            dc.DrawRoundedRectangle(&rr, &sel_stroke_b, 1.0, None);
-                        } else if hov {
+                        let play_hov = active_sub == Some(3);
+                        if play_hov {
                             let hb = dc.CreateSolidColorBrush(
                                 &if is_dark {
                                     color_rgba(0xff, 0xff, 0xff, 0.16)
@@ -3500,29 +3493,125 @@ impl DcompEngine {
                                 },
                                 None,
                             )?;
-                            dc.FillRoundedRectangle(&rr, &hb);
-                        } else if *has_base_bg {
-                            dc.FillRoundedRectangle(&rr, &surf_sel_b);
-                        }
-                        let glyph_col = if i == 1 && hint.playing {
-                            pal.selected_fg
-                        } else if i == 3 && *muted {
-                            pal.danger
+                            dc.FillRoundedRectangle(&play_rr, &hb);
                         } else {
-                            pal.text_primary
-                        };
+                            dc.FillRoundedRectangle(&play_rr, &surf_sel_b);
+                        }
                         draw_fluent_str_d2d(
                             &self.dwrite_factory,
                             dc,
-                            glyph,
-                            rect,
-                            if i == 1 || i == 3 { 12.0 } else { 10.5 },
-                            glyph_col,
-                            0.95,
+                            "\u{E768}",
+                            play_rect,
+                            11.5,
+                            if play_hov {
+                                pal.text_primary
+                            } else {
+                                pal.text_secondary
+                            },
+                            0.90,
                         )?;
-                    }
-                    if hint.has_media && hint.progress > 0.005 {
-                        draw_chip_ratio(hint.progress, pal.accent)?;
+                    } else {
+                        let controls_l = (width_dips - 114.0).max(info_l + 24.0);
+                        let mid = height_dips * 0.50;
+                        if artist.is_empty() {
+                            draw_text(
+                                title,
+                                &fmt_11_b_l,
+                                D2D_RECT_F {
+                                    left: info_l,
+                                    top: 0.0,
+                                    right: controls_l - 4.0,
+                                    bottom: height_dips,
+                                },
+                                &p_brush,
+                            );
+                        } else {
+                            draw_text(
+                                title,
+                                &fmt_11_b_l,
+                                D2D_RECT_F {
+                                    left: info_l,
+                                    top: (mid - 13.5).max(2.0),
+                                    right: controls_l - 4.0,
+                                    bottom: mid + 1.0,
+                                },
+                                &p_brush,
+                            );
+                            draw_text(
+                                artist,
+                                &fmt_10_l,
+                                D2D_RECT_F {
+                                    left: info_l,
+                                    top: mid - 0.5,
+                                    right: controls_l - 4.0,
+                                    bottom: (mid + 12.5).min(height_dips - 4.0),
+                                },
+                                &s_brush,
+                            );
+                        }
+
+                        // 4 sub-buttons: 0=Prev, 1=Play/Pause (dynamic glyph), 2=Next, 3=Mute
+                        let play_glyph = if hint.playing { "\u{E769}" } else { "\u{E768}" };
+                        let btns: [(f32, f32, &str, bool); 4] = [
+                            (controls_l, 25.0, "\u{E892}", false),
+                            (controls_l + 27.0, 27.0, play_glyph, true),
+                            (controls_l + 56.0, 25.0, "\u{E893}", false),
+                            (
+                                controls_l + 83.0,
+                                25.0,
+                                if *muted { "\u{E74F}" } else { "\u{E767}" },
+                                true,
+                            ),
+                        ];
+                        for (i, (bx, bw, glyph, has_base_bg)) in btns.iter().enumerate() {
+                            let rect = D2D_RECT_F {
+                                left: *bx,
+                                top: by,
+                                right: bx + bw,
+                                bottom: by + bh,
+                            };
+                            let rr = D2D1_ROUNDED_RECT {
+                                rect,
+                                radiusX: 7.0,
+                                radiusY: 7.0,
+                            };
+                            let hov = active_sub == Some(i as u8);
+                            if i == 1 && hint.playing {
+                                dc.FillRoundedRectangle(&rr, &sel_fill_b);
+                                dc.DrawRoundedRectangle(&rr, &sel_stroke_b, 1.0, None);
+                            } else if hov {
+                                let hb = dc.CreateSolidColorBrush(
+                                    &if is_dark {
+                                        color_rgba(0xff, 0xff, 0xff, 0.16)
+                                    } else {
+                                        color_rgba(0x00, 0x00, 0x00, 0.11)
+                                    },
+                                    None,
+                                )?;
+                                dc.FillRoundedRectangle(&rr, &hb);
+                            } else if *has_base_bg {
+                                dc.FillRoundedRectangle(&rr, &surf_sel_b);
+                            }
+                            let glyph_col = if i == 1 && hint.playing {
+                                pal.selected_fg
+                            } else if i == 3 && *muted {
+                                pal.danger
+                            } else {
+                                pal.text_primary
+                            };
+                            draw_fluent_str_d2d(
+                                &self.dwrite_factory,
+                                dc,
+                                glyph,
+                                rect,
+                                if i == 1 || i == 3 { 12.0 } else { 10.5 },
+                                glyph_col,
+                                0.95,
+                            )?;
+                        }
+                        if hint.progress > 0.005 {
+                            draw_chip_ratio(hint.progress, pal.accent)?;
+                        }
                     }
                 }
                 WidgetChipSpec::Audio { volume, muted } => {
@@ -4123,63 +4212,92 @@ impl DcompEngine {
                     )?;
                     draw_vdiv(32.0, 18.0);
                     let tx = 39.0;
-                    let bw = (width_dips * 0.24).clamp(24.0, 36.0);
-                    let bl = (width_dips - bw - 8.0).max(tx + 34.0);
-                    let mid = height_dips * 0.50;
-                    draw_text(
-                        value_text,
-                        &fmt_12_b_l,
-                        D2D_RECT_F {
-                            left: tx,
-                            top: (mid - 13.5).max(2.0),
-                            right: bl - 5.0,
-                            bottom: mid + 1.0,
-                        },
-                        &p_brush,
-                    );
-                    draw_text(
-                        meta_text,
-                        &fmt_10_l,
-                        D2D_RECT_F {
-                            left: tx,
-                            top: mid - 0.5,
-                            right: bl - 5.0,
-                            bottom: (mid + 12.5).min(height_dips - 2.0),
-                        },
-                        &s_brush,
-                    );
-                    dc.FillRoundedRectangle(
-                        &D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F {
-                                left: bl,
-                                top: cy - 2.0,
-                                right: bl + bw,
-                                bottom: cy + 2.0,
+                    let has_quota = !value_text.is_empty() && value_text != "—";
+                    if !has_quota {
+                        // Signed-out / unconfigured: hide unused quota bar and give status text the full right side.
+                        let status = if meta_text.is_empty() {
+                            value_text.as_str()
+                        } else {
+                            meta_text.as_str()
+                        };
+                        let avail_w = (width_dips - tx - 8.0).max(24.0);
+                        let status_fmt = if measure_text_w(status, &fmt_11_l) <= avail_w {
+                            &fmt_11_l
+                        } else if measure_text_w(status, &fmt_10_l) <= avail_w {
+                            &fmt_10_l
+                        } else {
+                            &fmt_9_l
+                        };
+                        draw_text(
+                            status,
+                            status_fmt,
+                            D2D_RECT_F {
+                                left: tx,
+                                top: 0.0,
+                                right: width_dips - 8.0,
+                                bottom: height_dips,
                             },
-                            radiusX: 2.0,
-                            radiusY: 2.0,
-                        },
-                        &tr_brush,
-                    );
-                    let fw = (bw * used.clamp(0.0, 1.0)).min(bw);
-                    if fw >= 1.0 {
-                        let fb = dc.CreateSolidColorBrush(
-                            &color_rgba(bar_color.0, bar_color.1, bar_color.2, 0.98),
-                            None,
-                        )?;
+                            &s_brush,
+                        );
+                    } else {
+                        let bw = (width_dips * 0.24).clamp(24.0, 36.0);
+                        let bl = (width_dips - bw - 8.0).max(tx + 34.0);
+                        let mid = height_dips * 0.50;
+                        draw_text(
+                            value_text,
+                            &fmt_12_b_l,
+                            D2D_RECT_F {
+                                left: tx,
+                                top: (mid - 13.5).max(2.0),
+                                right: bl - 5.0,
+                                bottom: mid + 1.0,
+                            },
+                            &p_brush,
+                        );
+                        draw_text(
+                            meta_text,
+                            &fmt_10_l,
+                            D2D_RECT_F {
+                                left: tx,
+                                top: mid - 0.5,
+                                right: bl - 5.0,
+                                bottom: (mid + 12.5).min(height_dips - 2.0),
+                            },
+                            &s_brush,
+                        );
                         dc.FillRoundedRectangle(
                             &D2D1_ROUNDED_RECT {
                                 rect: D2D_RECT_F {
                                     left: bl,
                                     top: cy - 2.0,
-                                    right: bl + fw,
+                                    right: bl + bw,
                                     bottom: cy + 2.0,
                                 },
                                 radiusX: 2.0,
                                 radiusY: 2.0,
                             },
-                            &fb,
+                            &tr_brush,
                         );
+                        let fw = (bw * used.clamp(0.0, 1.0)).min(bw);
+                        if fw >= 1.0 {
+                            let fb = dc.CreateSolidColorBrush(
+                                &color_rgba(bar_color.0, bar_color.1, bar_color.2, 0.98),
+                                None,
+                            )?;
+                            dc.FillRoundedRectangle(
+                                &D2D1_ROUNDED_RECT {
+                                    rect: D2D_RECT_F {
+                                        left: bl,
+                                        top: cy - 2.0,
+                                        right: bl + fw,
+                                        bottom: cy + 2.0,
+                                    },
+                                    radiusX: 2.0,
+                                    radiusY: 2.0,
+                                },
+                                &fb,
+                            );
+                        }
                     }
                 }
                 WidgetChipSpec::AiBalance {
@@ -4987,14 +5105,14 @@ impl DcompEngine {
         let wide: Vec<u16> = text.encode_utf16().collect();
         let layout = unsafe {
             self.dwrite_factory
-                .CreateTextLayout(&wide, &self.tooltip_format, 318.0, 28.0)?
+                .CreateTextLayout(&wide, &self.tooltip_format, 418.0, 28.0)?
         };
         let mut metrics = DWRITE_TEXT_METRICS::default();
         unsafe {
             layout.GetMetrics(&mut metrics)?;
         }
         let w_dips = (metrics.widthIncludingTrailingWhitespace + 22.0)
-            .clamp(48.0, 340.0)
+            .clamp(48.0, 440.0)
             .ceil();
         let h_dips = (metrics.height + 10.0).max(26.0).ceil();
         unsafe {

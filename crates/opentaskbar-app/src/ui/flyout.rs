@@ -66,17 +66,17 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     VK_SHIFT, VK_SPACE, VK_TAB,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CS_DROPSHADOW, CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow,
-    DispatchMessageW, GWLP_USERDATA, GetClassNameW, GetClientRect, GetCursorPos,
-    GetForegroundWindow, GetMessageW, GetWindowLongPtrW, GetWindowRect, HC_ACTION, HHOOK,
-    HWND_TOPMOST, IDC_ARROW, IDC_HAND, IsWindow, KillTimer, LWA_ALPHA, LoadCursorW, MSG,
-    MSLLHOOKSTRUCT, PostMessageW, RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE,
-    SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes,
-    SetTimer, SetWindowPos, SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx,
-    WH_MOUSE_LL, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
+    CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    GWLP_USERDATA, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow, GetMessageW,
+    GetWindowLongPtrW, GetWindowRect, HC_ACTION, HHOOK, HWND_TOPMOST, IDC_ARROW, IDC_HAND,
+    IsWindow, KillTimer, LWA_ALPHA, LoadCursorW, MSG, MSLLHOOKSTRUCT, PostMessageW,
+    RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SetCursor,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowPos, SetWindowsHookExW,
+    ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_ACTIVATE, WM_CHAR, WM_CLOSE,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WindowFromPoint,
 };
 
 use super::menu::BorderStyle;
@@ -212,9 +212,16 @@ pub struct FlyoutOptions {
     use_anchor_position: bool,
     pub retain_for_external_context_menu: bool,
     pub edge: FlyoutEdge,
-    /// A positive value gives the popup the native (`CS_DROPSHADOW`) drop shadow.
+    /// Soft-shadow preference kept for call-site compatibility. The popup never
+    /// uses `CS_DROPSHADOW` (a square shadow behind rounded corners); its shadow
+    /// comes from the DWM rounded-corner frame.
     pub shadow_rings: u8,
 }
+
+/// Window class of every dock flyout.
+const FLYOUT_CLASS_NAME: &str = "OpenTaskBarFlyout";
+/// Class style of every dock flyout: deliberately without `CS_DROPSHADOW`.
+const FLYOUT_CLASS_STYLE: u32 = 0;
 
 impl Default for FlyoutOptions {
     fn default() -> Self {
@@ -2143,17 +2150,15 @@ fn show_flyout_impl<'a>(
     // popup took it, so closing the flyout hands focus back to the dock widget.
     let previous_foreground = unsafe { GetForegroundWindow() };
 
-    // Class styles are fixed at registration, so the shadowed variant is its own class.
-    let shadow = options.shadow_rings > 0;
-    let class_name = wide(if shadow {
-        "OpenTaskBarFlyoutShadow"
-    } else {
-        "OpenTaskBarFlyout"
-    });
+    // No `CS_DROPSHADOW`: that legacy class shadow is a rectangle, so it stuck
+    // out as a square frame behind the 8 DIP rounded corners. `DWMWCP_ROUND`
+    // (set below on every path) gives the native Win11 shadow that follows the
+    // rounded outline, exactly like the dock context menu.
+    let class_name = wide(FLYOUT_CLASS_NAME);
     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
     let wc = WNDCLASSEXW {
         cbSize: size_of::<WNDCLASSEXW>() as u32,
-        style: if shadow { CS_DROPSHADOW } else { 0 },
+        style: FLYOUT_CLASS_STYLE,
         lpfnWndProc: Some(flyout_wnd_proc),
         hInstance: hinstance,
         hCursor: unsafe { LoadCursorW(std::ptr::null_mut(), IDC_ARROW) },
@@ -5052,15 +5057,16 @@ unsafe extern "system" fn flyout_wnd_proc(
 #[cfg(test)]
 mod tests {
     use super::{
-        DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, Duration, FlyoutBlock, FlyoutEdge,
-        FlyoutOptions, FlyoutSpec, Instant, LiveEvent, LiveOutcome, MENU_CLASS_CACHE_TTL,
-        MENU_CLASS_PROBE, MenuClassProbe, POINT, RECT, REOPEN_SUPPRESSION_WINDOW,
-        WM_APP_MENU_CANDIDATE, WmCloseAction, anim_interval_for_fps, app_row_targets, blend_rgb,
-        calendar_leading_blanks, calendar_weekday_order, draw_gdi_text, flyout_available_height,
-        flyout_origin, format_clock, is_native_menu_class, layout_flyout, live_tick_allowed,
-        live_tick_tag, pack_point, post_menu_candidate, preserve_calendar_navigation, pt_in_rect,
-        record_closed, resolve_live_outcome, should_suppress_reopen, stays_open_for_external_menu,
-        suppression_window_hit, unpack_point, weekday_short_label, wm_close_action,
+        DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, Duration, FLYOUT_CLASS_NAME,
+        FLYOUT_CLASS_STYLE, FlyoutBlock, FlyoutEdge, FlyoutOptions, FlyoutSpec, Instant, LiveEvent,
+        LiveOutcome, MENU_CLASS_CACHE_TTL, MENU_CLASS_PROBE, MenuClassProbe, POINT, RECT,
+        REOPEN_SUPPRESSION_WINDOW, WM_APP_MENU_CANDIDATE, WmCloseAction, anim_interval_for_fps,
+        app_row_targets, blend_rgb, calendar_leading_blanks, calendar_weekday_order, draw_gdi_text,
+        flyout_available_height, flyout_origin, format_clock, is_native_menu_class, layout_flyout,
+        live_tick_allowed, live_tick_tag, pack_point, post_menu_candidate,
+        preserve_calendar_navigation, pt_in_rect, record_closed, resolve_live_outcome,
+        should_suppress_reopen, stays_open_for_external_menu, suppression_window_hit, unpack_point,
+        weekday_short_label, wm_close_action,
     };
     use windows_sys::Win32::Graphics::Gdi::{CreateCompatibleDC, DeleteDC};
     use windows_sys::Win32::UI::WindowsAndMessaging::{WM_CLOSE, WM_KEYDOWN, WM_PAINT};
@@ -5175,6 +5181,19 @@ mod tests {
             _ => panic!("wrong event"),
         }
         assert_eq!(format_clock(125), "2:05");
+    }
+
+    #[test]
+    fn flyout_class_has_no_rectangular_drop_shadow() {
+        use windows_sys::Win32::UI::WindowsAndMessaging::CS_DROPSHADOW;
+        assert_eq!(FLYOUT_CLASS_STYLE & CS_DROPSHADOW, 0);
+        assert_eq!(FLYOUT_CLASS_NAME, "OpenTaskBarFlyout");
+        let code = include_str!("flyout.rs");
+        let register = code
+            .find("let wc = WNDCLASSEXW {")
+            .expect("flyout class registration");
+        let window: String = code[register..].chars().take(400).collect();
+        assert!(window.contains("style: FLYOUT_CLASS_STYLE"));
     }
 
     #[test]
