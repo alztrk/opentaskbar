@@ -4,11 +4,15 @@
 //! Action Center notifications, then renders a `ToastGeneric` XML template. The action
 //! button uses `activationType="protocol"`, so no WinRT event sink is required.
 
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::Instant;
+
 use opentaskbar_core::i18n as loc;
 use windows::Data::Xml::Dom::XmlDocument;
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 use windows::core::HSTRING;
-use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows_sys::Win32::System::Registry::{
     HKEY_CURRENT_USER, REG_DWORD, REG_SZ, RegCloseKey, RegCreateKeyW, RegSetValueExW,
 };
@@ -18,9 +22,7 @@ pub const MAX_ACTIVE_TOASTS: usize = 8;
 const TOAST_LIFETIME: std::time::Duration = std::time::Duration::from_secs(60);
 static REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use crate::platform::win32_helpers::wide;
 
 pub fn escape_xml(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
@@ -88,51 +90,41 @@ pub fn ensure_registered() -> bool {
     true
 }
 
-/// WinRT toast activation needs an initialized COM apartment. The update check runs on a raw
-/// background thread, so initialize here and uninitialize only when we actually initialized COM.
-struct ComApartment(bool);
-
-impl ComApartment {
-    fn enter() -> Self {
-        // SAFETY: `CoInitializeEx` takes no pointers; the matching `CoUninitialize` is in Drop.
-        let hr = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
-        // S_OK = 0, S_FALSE = 1 (already initialized). Both mean this call owns a reference.
-        Self(hr == 0 || hr == 1)
-    }
-}
-
-impl Drop for ComApartment {
-    fn drop(&mut self) {
-        if self.0 {
-            // SAFETY: paired with the successful `CoInitializeEx` above.
-            unsafe { CoUninitialize() };
-        }
-    }
-}
-
-/// Shows an update toast with one button that opens `target_url` in the browser.
-pub fn show_update_toast(title: &str, body: &str, action: &str, target_url: &str) -> bool {
-    let _apartment = ComApartment::enter();
-    ensure_registered();
-    let xml = format!(
+/// Builds the toast XML for the WinRT notifier. `launch` carries the protocol
+/// URL; `action` (when present) becomes a protocol button with the same URL.
+fn toast_xml(title: &str, body: &str, action: Option<&str>, target_url: &str) -> String {
+    let actions = action
+        .map(|label| {
+            format!(
+                "<actions><action content=\"{}\" arguments=\"{}\" activationType=\"protocol\"/></actions>",
+                escape_xml(label),
+                escape_xml(target_url)
+            )
+        })
+        .unwrap_or_default();
+    format!(
         "<toast launch=\"{}\"><visual><binding template=\"ToastGeneric\">\
-         <text>{}</text><text>{}</text></binding></visual><actions>\
-         <action content=\"{}\" arguments=\"{}\" activationType=\"protocol\"/>\
-         </actions></toast>",
+         <text>{}</text><text>{}</text></binding></visual>{}</toast>",
         escape_xml(target_url),
         escape_xml(title),
         escape_xml(body),
-        escape_xml(action),
-        escape_xml(target_url),
-    );
-    let document = match XmlDocument::new() {
-        Ok(document) => document,
-        Err(_) => return false,
+        actions
+    )
+}
+
+/// Shared WinRT display path: initialize COM, register the AUMID, render the
+/// XML and show the notification. Every public toast API funnels through here;
+/// no child process is spawned and no call-site-specific XML is left behind.
+fn show_xml(kind: ToastKind, xml: &str, title: &str) -> bool {
+    let _apartment = crate::platform::com::ComApartment::sta();
+    ensure_registered();
+    let Ok(document) = XmlDocument::new() else {
+        return false;
     };
     if document.LoadXml(&HSTRING::from(xml)).is_err() {
         return false;
     }
-    let Some(toast) = ToastNotification::CreateToastNotification(&document).ok() else {
+    let Ok(toast) = ToastNotification::CreateToastNotification(&document) else {
         return false;
     };
     let Ok(notifier) = ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(APP_ID))
@@ -140,18 +132,37 @@ pub fn show_update_toast(title: &str, body: &str, action: &str, target_url: &str
         return false;
     };
     let shown = notifier.Show(&toast).is_ok();
-    track(ToastKind::Update, title, shown);
+    track(kind, title, shown);
     shown
 }
 
-use std::fs;
-use std::path::PathBuf;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Instant;
+/// Shows an update toast with one button that opens `target_url` in the browser.
+pub fn show_update_toast(title: &str, body: &str, action: &str, target_url: &str) -> bool {
+    show_xml(
+        ToastKind::Update,
+        &toast_xml(title, body, Some(action), target_url),
+        title,
+    )
+}
 
-// ---- Toast lifecycle / activation (WS-F) ----
+/// Shows an informational toast through the same WinRT notifier.
+pub fn show_info_toast(message: &str) -> bool {
+    show_xml(
+        ToastKind::Info,
+        &toast_xml("OpenTaskbar", message, None, ""),
+        "OpenTaskbar",
+    )
+}
+
+/// Compatibility entry point for callers that already have a release tag/URL.
+pub fn show_update_toast_for_release(version_tag: &str, release_url: &str) -> bool {
+    let title = loc::t("UpdateAvailableTitle");
+    let body = loc::t_fmt("UpdateToastBody", &[version_tag]);
+    let action = loc::t_fmt("UpdateDownload", &[version_tag]);
+    show_update_toast(&title, &body, &action, release_url)
+}
+
+// ---- Toast lifecycle / activation ----
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToastKind {
     Info,
@@ -194,69 +205,6 @@ fn lock() -> std::sync::MutexGuard<'static, ToastStateStore> {
     store().lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Creates the reference toast XML (`action=update` launch argument for update toasts).
-pub fn build_toast_xml(
-    kind: ToastKind,
-    title: &str,
-    body: &str,
-    action_text: Option<&str>,
-) -> String {
-    let title = escape_xml(title);
-    let body = escape_xml(body);
-    match (kind, action_text) {
-        (ToastKind::Update, Some(action)) => format!(
-            "<toast launch=\"action=update\"><visual><binding template=\"ToastGeneric\">\
-             <text>{title}</text><text>{body}</text></binding></visual><actions>\
-             <action content=\"{}\" arguments=\"action=update\" /></actions></toast>",
-            escape_xml(action)
-        ),
-        _ => format!(
-            "<toast><visual><binding template=\"ToastGeneric\">\
-             <text>{title}</text><text>{body}</text></binding></visual></toast>"
-        ),
-    }
-}
-
-/// Shows an informational toast. Returns `false` when the toast host could not be started.
-pub fn show_info_toast(message: &str) -> bool {
-    show_via_host(ToastKind::Info, "OpenTaskbar", message, None)
-}
-
-/// Shows an update toast with a `Download` action. Clicking it must call
-/// `handle_activation_argument("action=update")` via the app entry point.
-pub fn show_update_toast_for_release(version_tag: &str, release_url: &str) -> bool {
-    let title = loc::t("UpdateAvailableTitle");
-    let body = loc::t_fmt("UpdateToastBody", &[version_tag]);
-    let action = loc::t_fmt("UpdateDownload", &[version_tag]);
-    let _ = release_url;
-    show_via_host(ToastKind::Update, &title, &body, Some(&action))
-}
-
-fn show_via_host(kind: ToastKind, title: &str, body: &str, action: Option<&str>) -> bool {
-    ensure_registered();
-    let xml = build_toast_xml(kind, title, body, action);
-    let script = powershell_script(&xml);
-    let path = script_path();
-    // PowerShell 5.1 reads `-File` scripts without a UTF-8 BOM using the legacy ANSI code page,
-    // which corrupts non-ASCII characters (e.g. Turkish diacritics) in toast notifications.
-    let utf8_bom_script = format!("\u{FEFF}{script}");
-    let written = fs::write(&path, utf8_bom_script.as_bytes()).is_ok();
-    let spawned = written
-        && std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-            ])
-            .arg(&path)
-            .spawn()
-            .is_ok();
-    track(kind, title, spawned);
-    spawned
-}
-
 /// Tracks a toast in the active list without spawning a host process (also used by tests).
 pub fn track(kind: ToastKind, title: &str, spawned: bool) -> u64 {
     let mut state = lock();
@@ -279,25 +227,6 @@ pub fn track(kind: ToastKind, title: &str, spawned: bool) -> u64 {
         },
     });
     id
-}
-
-fn script_path() -> PathBuf {
-    std::env::temp_dir()
-        .join("OpenTaskbar")
-        .join(format!("toast-{}.ps1", std::process::id()))
-}
-
-/// PowerShell host for WinRT toast APIs (single-quoted XML literal, `'` doubled).
-fn powershell_script(xml: &str) -> String {
-    let literal = xml.replace('\'', "''");
-    format!(
-        "[Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom,ContentType=WindowsRuntime] | Out-Null\n\
-         [Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime] | Out-Null\n\
-         $doc = New-Object Windows.Data.Xml.Dom.XmlDocument\n\
-         $doc.LoadXml('{literal}')\n\
-         $toast = New-Object Windows.UI.Notifications.ToastNotification($doc)\n\
-         [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{APP_ID}').Show($toast)\n"
-    )
 }
 
 fn prune_locked(state: &mut ToastStateStore) {
@@ -364,31 +293,20 @@ mod tracking_tests {
     use super::*;
 
     #[test]
-    fn toast_script_stays_under_the_temp_open_taskbar_folder() {
-        let path = script_path();
-        assert_eq!(
-            path.parent(),
-            Some(std::env::temp_dir().join("OpenTaskbar").as_path())
-        );
-        assert!(
-            path.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("toast-")
-        );
-        assert_eq!(path.extension().unwrap(), "ps1");
-    }
-
-    #[test]
     fn xml_escaping_and_templates() {
         assert_eq!(
             escape_xml("A & B <c> \"d\" 'e'"),
             "A &amp; B &lt;c&gt; &quot;d&quot; &apos;e&apos;"
         );
-        let update = build_toast_xml(ToastKind::Update, "Update", "v1.2", Some("Download"));
-        assert!(update.contains("launch=\"action=update\""));
-        assert!(update.contains("arguments=\"action=update\""));
-        let info = build_toast_xml(ToastKind::Info, "OpenTaskbar", "Hello", None);
+        let update = toast_xml(
+            "Update",
+            "v1.2",
+            Some("Download"),
+            "https://example.com/app",
+        );
+        assert!(update.contains("activationType=\"protocol\""));
+        assert!(update.contains("https://example.com/app"));
+        let info = toast_xml("OpenTaskbar", "Hello", None, "");
         assert!(!info.contains("<actions>"));
     }
 
@@ -401,13 +319,6 @@ mod tracking_tests {
         assert!(rx.try_recv().is_ok());
         assert!(rx.try_recv().is_ok());
         assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
-    fn powershell_script_contains_toast_types() {
-        let script = powershell_script("<toast/>");
-        assert!(script.contains("ToastNotificationManager"));
-        assert!(script.contains("$doc.LoadXml('<toast/>')"));
     }
 
     #[test]

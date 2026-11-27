@@ -33,9 +33,7 @@ unsafe extern "system" {
 static HELD_MODIFIERS: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 static LAST_DRAG_FALLBACK: Mutex<Option<Instant>> = Mutex::new(None);
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use crate::platform::win32_helpers::wide;
 
 fn send_key(vk: u16, flags: u32, scan: u16) -> bool {
     let input = INPUT {
@@ -136,44 +134,71 @@ fn physical_modifiers() -> Vec<u16> {
         .collect()
 }
 
-/// Releases every modifier we pressed plus any that are physically stuck down.
-/// Called on session unlock, so a modifier lost during a secure-desktop
-/// transition cannot leak into the next keystroke. `SendInput` emits real
-/// scan-code key-ups; `keybd_event` is the fallback if UIPI blocks injection.
-pub fn release_stuck_modifiers() {
-    let mut keys = physical_modifiers();
-    if let Ok(mut held) = HELD_MODIFIERS.lock() {
-        for key in held.iter().copied() {
+fn send_inputs(inputs: &[INPUT]) -> usize {
+    // SAFETY: every INPUT is initialized and the count matches the slice length.
+    unsafe {
+        SendInput(
+            inputs.len() as u32,
+            inputs.as_ptr(),
+            size_of::<INPUT>() as i32,
+        ) as usize
+    }
+}
+
+fn keybd_fallback(vk: u16, scan: u16, flags: u32, extra: usize) {
+    // SAFETY: plain scalars, no pointers.
+    unsafe { keybd_event(vk as u8, scan as u8, flags, extra) };
+}
+
+/// Shared release implementation with injectable input sinks so the emitted
+/// key-ups can be verified without synthesising real keystrokes in tests.
+fn release_stuck_modifiers_with<H, F, G>(
+    physical: &H,
+    held: &Mutex<Vec<u16>>,
+    send: &F,
+    fallback: &G,
+) where
+    H: Fn() -> Vec<u16>,
+    F: Fn(&[INPUT]) -> usize,
+    G: Fn(u16, u16, u32, usize),
+{
+    let mut keys = physical();
+    if let Ok(mut tracked) = held.lock() {
+        for key in tracked.iter().copied() {
             if !keys.contains(&key) {
                 keys.push(key);
             }
         }
-        held.clear();
+        tracked.clear();
     }
     let keys = release_order(keys);
     if keys.is_empty() {
         return;
     }
-    // SAFETY: every INPUT is initialized and the count matches the slice length.
     let inputs: Vec<INPUT> = keys.iter().copied().map(modifier_keyup).collect();
-    let sent = unsafe {
-        SendInput(
-            inputs.len() as u32,
-            inputs.as_ptr(),
-            size_of::<INPUT>() as i32,
-        )
-    };
-    if sent as usize != inputs.len() {
+    if send(&inputs) != inputs.len() {
         // Legacy fallback: same physical key-ups, accepted in more contexts.
-        for vk in keys {
-            let input = modifier_keyup(vk);
-            // SAFETY: a well-formed INPUT structure read from our own stack.
+        // `modifier_keyup` deliberately zeroes wVk and uses a scan code, so the
+        // original virtual key must be passed through to `keybd_event`.
+        for (vk, input) in keys.iter().zip(inputs.iter()) {
+            // SAFETY: the INPUT was produced by `modifier_keyup` on this stack.
             let ki = unsafe { input.Anonymous.ki };
-            unsafe {
-                keybd_event(vk as u8, ki.wScan as u8, ki.dwFlags, ki.dwExtraInfo);
-            }
+            fallback(*vk, ki.wScan, ki.dwFlags, ki.dwExtraInfo);
         }
     }
+}
+
+/// Releases every modifier we pressed plus any that are physically stuck down.
+/// Called on session unlock, so a modifier lost during a secure-desktop
+/// transition cannot leak into the next keystroke. `SendInput` emits real
+/// scan-code key-ups; `keybd_event` is the fallback if UIPI blocks injection.
+pub fn release_stuck_modifiers() {
+    release_stuck_modifiers_with(
+        &physical_modifiers,
+        &HELD_MODIFIERS,
+        &send_inputs,
+        &keybd_fallback,
+    );
 }
 
 /// Replaces the selected text in the currently focused field (Windows Search)
@@ -411,14 +436,38 @@ mod tests {
         );
         assert!(release_order(Vec::new()).is_empty());
 
-        let src = include_str!("shell_shortcuts_ex.rs");
-        for needle in [
-            "SendInput(",
-            "keybd_event(vk as u8",
-            "KEYEVENTF_SCANCODE",
-            "fn physical_modifiers()",
-        ] {
-            assert!(src.contains(needle), "release path must use {needle:?}");
-        }
+        // Release through test sinks instead of asserting on source text: the
+        // physical key-ups (and the fallback) are what actually matter.
+        use std::cell::RefCell;
+        let held = Mutex::new(vec![VK_LSHIFT, VK_LWIN, VK_LSHIFT]);
+        let sent: RefCell<Vec<(u16, u32)>> = RefCell::new(Vec::new());
+        release_stuck_modifiers_with(
+            &|| Vec::new(),
+            &held,
+            &|inputs| {
+                for input in inputs {
+                    // SAFETY: INPUT produced by `modifier_keyup` above.
+                    let ki = unsafe { input.Anonymous.ki };
+                    sent.borrow_mut().push((ki.wVk, ki.dwFlags));
+                }
+                inputs.len()
+            },
+            &|_, _, _, _| {},
+        );
+        assert_eq!(sent.borrow().len(), 2, "duplicates must be dropped");
+        assert!(held.lock().is_ok_and(|keys| keys.is_empty()));
+        assert!(
+            sent.borrow()
+                .iter()
+                .all(|(_, flags)| flags & KEYEVENTF_KEYUP != 0)
+        );
+
+        // When SendInput is blocked, the legacy fallback sends the same key-ups.
+        let held = Mutex::new(vec![VK_RCONTROL]);
+        let fallback: RefCell<Vec<u16>> = RefCell::new(Vec::new());
+        release_stuck_modifiers_with(&|| Vec::new(), &held, &|_| 0, &|vk, _, _, _| {
+            fallback.borrow_mut().push(vk)
+        });
+        assert_eq!(*fallback.borrow(), vec![VK_RCONTROL]);
     }
 }

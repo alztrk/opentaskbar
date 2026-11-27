@@ -8,8 +8,8 @@
 //!   feeding `take_events()`; `AudioEndpointMonitor::acquire_shared()` mirrors the reference ref-count.
 //! - `AppAudioSessionMatcher::score` + `find_app_session` for per-app mixer targeting.
 //!
-//! NOTE for lead/WS-B: `platform::win32_ex::set_default_audio_device(id)` currently forwards to
-//! telemetry; it should delegate to `core_audio::set_default_device(id)` after merge.
+//! `platform::win32_ex::set_default_audio_device(id)` now delegates to
+//! [`set_default_device`]; this module owns the WASAPI implementation.
 
 use std::collections::{HashSet, VecDeque};
 use std::ffi::c_void;

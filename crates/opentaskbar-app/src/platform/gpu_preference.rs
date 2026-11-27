@@ -1,36 +1,42 @@
 //! Exports the standard GPU-preference symbols recognised by NVIDIA and AMD
-//! drivers. Both return 0 so hybrid-GPU laptops keep the integrated,
+//! drivers. Both hold 0 so hybrid-GPU laptops keep the integrated,
 //! power-saving GPU for a 2D taskbar instead of loading ~150 MB of shader
 //! compilers from the discrete driver.
 //!
-//! Drivers look these symbols up by name in the process export table. The
-//! `#[used]` statics keep them alive through LTO; if a lead-side `.def` file is
-//! ever added for the binary, expose `NvOptimusEnablement` and
-//! `AmdPowerXpressRequestHighPerformance` there as well.
+//! Drivers read these as 32-bit **data** variables in the process export table,
+//! not as function addresses. They are therefore declared as statics; exporting
+//! functions under the same names could select the discrete GPU instead. The
+//! `#[used]` attribute keeps the symbols alive through LTO. If a `.def` file is
+//! ever added for the binary, list both names there as `DATA`.
 
 #[unsafe(no_mangle)]
-pub extern "C" fn NvOptimusEnablement() -> u32 {
-    0
-}
+#[used]
+pub static NvOptimusEnablement: u32 = 0;
 
 #[unsafe(no_mangle)]
-pub extern "C" fn AmdPowerXpressRequestHighPerformance() -> i32 {
-    0
-}
-
 #[used]
-static NV_OPTIMUS_ENABLEMENT_KEEP: extern "C" fn() -> u32 = NvOptimusEnablement;
+pub static AmdPowerXpressRequestHighPerformance: i32 = 0;
 
-#[used]
-static AMD_POWER_XPRESS_KEEP: extern "C" fn() -> i32 = AmdPowerXpressRequestHighPerformance;
+// Compile-time proof of the exported symbol shape: a function item cannot be
+// used where a `u32`/`i32` constant is required.
+const _: u32 = NvOptimusEnablement;
+const _: i32 = AmdPowerXpressRequestHighPerformance;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn exports_request_the_integrated_gpu() {
-        assert_eq!(NvOptimusEnablement(), 0);
-        assert_eq!(AmdPowerXpressRequestHighPerformance(), 0);
+    fn exports_are_data_words_requesting_the_integrated_gpu() {
+        let nvidia: u32 = NvOptimusEnablement;
+        let amd: i32 = AmdPowerXpressRequestHighPerformance;
+        assert_eq!(nvidia, 0);
+        assert_eq!(amd, 0);
+        // Their addresses must be readable data, not executable function stubs.
+        assert_ne!(&NvOptimusEnablement as *const u32, std::ptr::null());
+        assert_ne!(
+            &AmdPowerXpressRequestHighPerformance as *const i32,
+            std::ptr::null()
+        );
     }
 }

@@ -5,25 +5,17 @@
 //! self-deleting `apply-update.cmd` replaces the running executable.
 
 use std::fs;
-use std::io::Write;
-use std::mem::size_of;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use windows_sys::Win32::Networking::WinHttp::{
-    WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_ADDREQ_FLAG_REPLACE,
-    WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
-    WinHttpAddRequestHeaders, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
-    WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-    WinHttpSendRequest, WinHttpSetTimeouts,
-};
+
+use super::http::{self, Proxy};
 
 pub const REPOSITORY: &str = "alztrk/opentaskbar";
 pub const RELEASES_PAGE: &str = "https://github.com/alztrk/opentaskbar/releases/latest";
-/// Single source of truth for the shipped version (also shown in Settings ΓåÆ About).
+/// Single source of truth for the shipped version (also shown in Settings → About).
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const MIN_BINARY_BYTES: u64 = 1_000_000;
 const MAX_METADATA_BYTES: usize = 512 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,13 +28,13 @@ pub struct Release {
     pub sha256: Option<String>,
 }
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
-
 fn version_parts(text: &str) -> Option<[u64; 4]> {
     let clean = text.trim().trim_start_matches(['v', 'V']);
     let clean = clean.split(['-', '+']).next().unwrap_or(clean);
+    // Match `Version::parse`: more than four components is not a valid release.
+    if clean.split('.').count() > 4 {
+        return None;
+    }
     let mut parts = [0u64; 4];
     for (index, part) in clean.split('.').take(4).enumerate() {
         parts[index] = part.parse().ok()?;
@@ -58,100 +50,23 @@ fn is_newer(candidate: &str) -> bool {
 }
 
 /// Streams a GET response into `sink` and returns the HTTP status code.
+///
+/// Release binaries are ~10+ MB, so send/receive keep the full five-minute
+/// budget while resolve/connect stay short. The shared core owns the WinHTTP
+/// handles; only the caller-specific policy is configured here.
 fn http_get<F: FnMut(&[u8])>(
     host: &str,
     path: &str,
     headers: &[(&str, &str)],
-    mut sink: F,
+    sink: F,
 ) -> Option<u32> {
-    let agent = wide(&format!("OpenTaskbar/{CURRENT_VERSION}"));
-    let host_w = wide(host);
-    let verb_w = wide("GET");
-    let path_w = wide(path);
-    unsafe {
-        let session = WinHttpOpen(
-            agent.as_ptr(),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-        );
-        if session.is_null() {
-            return None;
-        }
-        // Release binaries are ~10+ MB; a slow connection must not abort the
-        // download after 20 seconds. Resolve/connect stay short, send/receive
-        // allow the full five-minute download budget.
-        WinHttpSetTimeouts(session, 5_000, 5_000, 300_000, 300_000);
-        let connect = WinHttpConnect(session, host_w.as_ptr(), 443, 0);
-        if connect.is_null() {
-            WinHttpCloseHandle(session);
-            return None;
-        }
-        let request = WinHttpOpenRequest(
-            connect,
-            verb_w.as_ptr(),
-            path_w.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            WINHTTP_FLAG_SECURE,
-        );
-        if request.is_null() {
-            WinHttpCloseHandle(connect);
-            WinHttpCloseHandle(session);
-            return None;
-        }
-        if !headers.is_empty() {
-            let header_text = headers
-                .iter()
-                .map(|(key, value)| format!("{key}: {value}\r\n"))
-                .collect::<String>();
-            let header_wide: Vec<u16> = header_text.encode_utf16().collect();
-            WinHttpAddRequestHeaders(
-                request,
-                header_wide.as_ptr(),
-                header_wide.len() as u32,
-                WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE,
-            );
-        }
-        let sent = WinHttpSendRequest(request, std::ptr::null(), 0, std::ptr::null(), 0, 0, 0) != 0
-            && WinHttpReceiveResponse(request, std::ptr::null_mut()) != 0;
-        let result = if sent {
-            let mut status = 0u32;
-            let mut status_size = size_of::<u32>() as u32;
-            WinHttpQueryHeaders(
-                request,
-                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                std::ptr::null(),
-                (&mut status as *mut u32).cast(),
-                &mut status_size,
-                std::ptr::null_mut(),
-            );
-            loop {
-                let mut available = 0u32;
-                if WinHttpQueryDataAvailable(request, &mut available) == 0 || available == 0 {
-                    break;
-                }
-                let mut buffer = vec![0u8; available as usize];
-                let mut read = 0u32;
-                if WinHttpReadData(request, buffer.as_mut_ptr().cast(), available, &mut read) == 0
-                    || read == 0
-                {
-                    break;
-                }
-                buffer.truncate(read as usize);
-                sink(&buffer);
-            }
-            Some(status)
-        } else {
-            None
-        };
-        WinHttpCloseHandle(request);
-        WinHttpCloseHandle(connect);
-        WinHttpCloseHandle(session);
-        result
-    }
+    let mut cfg = http::HttpCfg::new(format!("OpenTaskbar/{CURRENT_VERSION}"));
+    cfg.timeouts = [5_000, 5_000, 300_000, 300_000];
+    cfg.headers = headers
+        .iter()
+        .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+        .collect();
+    http::request(&cfg, host, path, "GET", sink)
 }
 
 fn select_asset<'a>(assets: &'a [Value], architecture: &str) -> Option<&'a Value> {
@@ -238,7 +153,7 @@ pub fn find_newer() -> Result<Option<Release>, ()> {
     find_newer_packaged_guard()
 }
 
-/// Packaged-build guard used by `find_newer()` (also callable directly by WS-8).
+/// Packaged-build guard used by `find_newer()`.
 pub fn find_newer_packaged_guard() -> Result<Option<Release>, ()> {
     find_newer_with_packaged(!supports_in_app_updates())
 }
@@ -288,103 +203,10 @@ fn updater_script(source: &str, target: &str) -> Result<String, &'static str> {
     generate_updater_script(Path::new(source), Path::new(target))
 }
 
-/// `UpdateChecker` uses `%TEMP%\OpenTaskbar\update`, not LOCALAPPDATA.
-/// NOTE (cross-WS): the `paths` contract has no updater helper yet; keep this
-/// literal until `opentaskbar_core::paths` exposes `update_dir()`.
+/// `UpdateChecker` uses `%TEMP%\OpenTaskbar\update`, not LOCALAPPDATA. The
+/// shared `paths` contract has no updater helper, so this literal stays here.
 fn update_dir() -> PathBuf {
     std::env::temp_dir().join("OpenTaskbar").join("update")
-}
-
-fn split_url(url: &str) -> Option<(&str, &str)> {
-    let rest = url.strip_prefix("https://")?;
-    let (host, _) = rest.split_once('/')?;
-    Some((host, &rest[host.len()..]))
-}
-
-/// Downloads, verifies and schedules the replacement. Returns an error key on failure.
-pub fn download_and_apply(release: &Release) -> Result<(), &'static str> {
-    // The batch script retries the copy until the running dock releases the
-    // executable. Refusing while the dock is alive meant an update could never
-    // be applied from the Settings UI, so we schedule it and let the caller
-    // exit normally (see `exit_for_update`).
-    let target = std::env::current_exe().map_err(|_| "ErrorUpdatePath")?;
-    // A read-only install directory forces the elevated updater path.
-    let requires_elevation = target
-        .parent()
-        .is_none_or(|parent| !is_directory_writable(parent));
-    let digest = match valid_digest(release.sha256.as_deref()) {
-        true => release.sha256.as_ref().unwrap().clone(),
-        false => return Err("ErrorUpdateExecutableInvalid"),
-    };
-    let (host, path) = split_url(release.download_url.as_deref().unwrap_or(""))
-        .ok_or("ErrorUpdateBinaryMissing")?;
-
-    let dir = update_dir();
-    fs::create_dir_all(&dir).map_err(|_| "ErrorUpdateFailed")?;
-    let part = dir.join("OpenTaskbar.exe.part");
-    let temp_exe = dir.join("OpenTaskbar.exe");
-    let _ = fs::remove_file(&part);
-
-    let mut file = fs::File::create(&part).map_err(|_| "ErrorUpdateFailed")?;
-    let mut write_failed = false;
-    let status = http_get(
-        host,
-        path,
-        &[("User-Agent", &format!("OpenTaskbar/{CURRENT_VERSION}"))],
-        |chunk| {
-            if file.write_all(chunk).is_err() {
-                write_failed = true;
-            }
-        },
-    )
-    .ok_or("ErrorUpdateHttp")?;
-    drop(file);
-    if write_failed {
-        let _ = fs::remove_file(&part);
-        return Err("ErrorUpdateFailed");
-    }
-    if !(200..300).contains(&status) {
-        let _ = fs::remove_file(&part);
-        return Err("ErrorUpdateHttp");
-    }
-
-    let bytes = fs::read(&part).map_err(|_| "ErrorUpdateFailed")?;
-    if (bytes.len() as u64) < MIN_BINARY_BYTES {
-        let _ = fs::remove_file(&part);
-        return Err("ErrorUpdateSizeInvalid");
-    }
-    if release
-        .size
-        .is_some_and(|expected| expected > 0 && expected != bytes.len() as u64)
-    {
-        let _ = fs::remove_file(&part);
-        return Err("ErrorUpdateSizeMismatch");
-    }
-    if bytes[0] != b'M' || bytes[1] != b'Z' {
-        let _ = fs::remove_file(&part);
-        return Err("ErrorUpdateExecutableInvalid");
-    }
-    let expected = digest
-        .get(7..)
-        .and_then(hex_to_bytes)
-        .ok_or("ErrorUpdateExecutableInvalid")?;
-    let actual = Sha256::digest(&bytes);
-    if !constant_time_eq(actual.as_slice(), &expected) {
-        let _ = fs::remove_file(&part);
-        return Err("ErrorUpdateExecutableInvalid");
-    }
-
-    let _ = fs::remove_file(&temp_exe);
-    fs::rename(&part, &temp_exe).map_err(|_| "ErrorUpdateFailed")?;
-
-    if requires_elevation {
-        if !launch_updater_elevated(&temp_exe, &target) {
-            return Err("ErrorUpdateFailed");
-        }
-    } else if !launch_updater_and_restart(&temp_exe, &target) {
-        return Err("ErrorUpdateFailed");
-    }
-    Ok(())
 }
 
 /// Constant-time digest comparison: the number of compared bytes never depends
@@ -541,8 +363,6 @@ pub struct DetailedRelease {
     pub sha256: Option<String>,
 }
 
-pub type ReleaseWithVersion = DetailedRelease;
-
 /// Builds the typed release shape from the canonical release used by the UI.
 impl From<&Release> for DetailedRelease {
     fn from(release: &Release) -> Self {
@@ -692,25 +512,6 @@ pub fn parse_release_detailed(
         sha256,
     };
     release.is_newer_than(current).then_some(release)
-}
-
-/// Checks GitHub; `checked == false` means the service could not be reached.
-pub fn find_newer_detailed() -> (Option<DetailedRelease>, bool) {
-    if !supports_in_app_updates() {
-        return (None, true);
-    }
-    let url = format!("https://api.github.com/repos/{REPOSITORY}/releases/latest");
-    let (status, body) = match http_get_detailed(&url) {
-        Ok(result) => result,
-        Err(_) => return (None, false),
-    };
-    if !(200..300).contains(&status) {
-        return (None, false);
-    }
-    (
-        parse_release_detailed(&String::from_utf8_lossy(&body), Version::current(), None),
-        true,
-    )
 }
 
 /// Running executable path, with a fallback to the current process module path.
@@ -998,116 +799,16 @@ pub fn exit_for_update() -> ! {
     std::process::exit(0);
 }
 
-/// Minimal synchronous HTTPS GET via WinHTTP (status code + body). No extra dependencies.
+/// Minimal synchronous HTTPS GET via the shared WinHTTP core (status + body).
 fn http_get_detailed(url: &str) -> Result<(u16, Vec<u8>), String> {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Networking::WinHttp::{
-            WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER,
-            WINHTTP_QUERY_STATUS_CODE, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen,
-            WinHttpOpenRequest, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-            WinHttpSendRequest, WinHttpSetTimeouts,
-        };
-        let (scheme, rest) = url.split_once("://").ok_or("invalid URL")?;
-        let secure = scheme.eq_ignore_ascii_case("https");
-        let (authority, resource) = rest
-            .split_once('/')
-            .map(|(host, path)| (host, format!("/{path}")))
-            .unwrap_or((rest, "/".to_owned()));
-        let host_port: Vec<&str> = authority.split(':').collect();
-        let host = host_port[0];
-        let port = host_port
-            .get(1)
-            .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(if secure { 443 } else { 80 });
-        let agent: Vec<u16> = format!("{USER_AGENT}/{}\0", Version::current())
-            .encode_utf16()
-            .collect();
-        let host_wide: Vec<u16> = format!("{host}\0").encode_utf16().collect();
-        let resource_wide: Vec<u16> = format!("{resource}\0").encode_utf16().collect();
-        // SAFETY: every handle is checked for null and closed exactly once on every path.
-        unsafe {
-            let session = WinHttpOpen(
-                agent.as_ptr(),
-                WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                std::ptr::null(),
-                std::ptr::null(),
-                0,
-            );
-            if session.is_null() {
-                return Err("WinHttpOpen failed".into());
-            }
-            // Five-minute send/receive budget for full release binaries.
-            WinHttpSetTimeouts(session, 5_000, 5_000, 300_000, 300_000);
-            let connection = WinHttpConnect(session, host_wide.as_ptr(), port, 0);
-            if connection.is_null() {
-                WinHttpCloseHandle(session);
-                return Err("WinHttpConnect failed".into());
-            }
-            let flags = if secure { WINHTTP_FLAG_SECURE } else { 0 };
-            let request = WinHttpOpenRequest(
-                connection,
-                "GET\0".encode_utf16().collect::<Vec<_>>().as_ptr(),
-                resource_wide.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                flags,
-            );
-            if request.is_null() {
-                WinHttpCloseHandle(connection);
-                WinHttpCloseHandle(session);
-                return Err("WinHttpOpenRequest failed".into());
-            }
-            let ok = WinHttpSendRequest(
-                request,
-                "Accept: application/vnd.github+json\0"
-                    .encode_utf16()
-                    .collect::<Vec<_>>()
-                    .as_ptr(),
-                0,
-                std::ptr::null_mut(),
-                0,
-                0,
-                0,
-            );
-            if ok == 0 || WinHttpReceiveResponse(request, std::ptr::null_mut()) == 0 {
-                WinHttpCloseHandle(request);
-                WinHttpCloseHandle(connection);
-                WinHttpCloseHandle(session);
-                return Err("WinHttp request failed".into());
-            }
-            let mut status: u32 = 0;
-            let mut length = size_of::<u32>() as u32;
-            WinHttpQueryHeaders(
-                request,
-                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                std::ptr::null(),
-                (&mut status as *mut u32).cast(),
-                &mut length,
-                std::ptr::null_mut(),
-            );
-            let mut body = Vec::new();
-            let mut buffer = [0u8; 64 * 1024];
-            loop {
-                let mut read = 0u32;
-                if WinHttpReadData(
-                    request,
-                    buffer.as_mut_ptr().cast(),
-                    buffer.len() as u32,
-                    &mut read,
-                ) == 0
-                    || read == 0
-                {
-                    break;
-                }
-                body.extend_from_slice(&buffer[..read as usize]);
-            }
-            WinHttpCloseHandle(request);
-            WinHttpCloseHandle(connection);
-            WinHttpCloseHandle(session);
-            Ok((status as u16, body))
-        }
+        // The old caller passed an `Accept` header pointer with length 0, which
+        // WinHTTP ignores, so no header is configured here either.
+        let mut cfg = http::HttpCfg::new(format!("{USER_AGENT}/{}", Version::current()));
+        cfg.proxy = Proxy::Default;
+        let (status, body) = http::get_body(&cfg, url).ok_or("WinHttp request failed")?;
+        Ok((status as u16, body))
     }
     #[cfg(not(windows))]
     {
@@ -1116,77 +817,9 @@ fn http_get_detailed(url: &str) -> Result<(u16, Vec<u8>), String> {
     }
 }
 
-/// Compact SHA-256 (FIPS 180-4), used to verify release asset digests offline.
+/// SHA-256 of release bytes, used to verify GitHub asset digests.
 pub fn sha256(data: &[u8]) -> Vec<u8> {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-    let mut h = [
-        0x6a09e667u32,
-        0xbb67ae85,
-        0x3c6ef372,
-        0xa54ff53a,
-        0x510e527f,
-        0x9b05688c,
-        0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    let bit_len = (data.len() as u64).wrapping_mul(8);
-    let mut message = data.to_vec();
-    message.push(0x80);
-    while message.len() % 64 != 56 {
-        message.push(0);
-    }
-    message.extend_from_slice(&bit_len.to_be_bytes());
-    for chunk in message.chunks_exact(64) {
-        let mut w = [0u32; 64];
-        for (i, word) in w[..16].iter_mut().enumerate() {
-            *word = u32::from_be_bytes(chunk[i * 4..i * 4 + 4].try_into().expect("4 bytes"));
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) =
-            (h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7]);
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let choice = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(choice)
-                .wrapping_add(K[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let majority = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(majority);
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-        for (slot, value) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
-            *slot = slot.wrapping_add(value);
-        }
-    }
-    h.iter().flat_map(|word| word.to_be_bytes()).collect()
+    Sha256::digest(data).to_vec()
 }
 
 #[cfg(test)]
@@ -1233,6 +866,10 @@ mod parity_tests {
             })
         );
         assert_eq!(Version::parse("nope"), None);
+        // Both comparators must agree that a five-component tag is invalid.
+        assert_eq!(version_parts("1.2.3.4.5"), None);
+        assert_eq!(Version::parse("1.2.3.4.5"), None);
+        assert_eq!(version_parts("v1.3"), Some([1, 3, 0, 0]));
         assert!(Version::parse("1.3.0").unwrap() > Version::parse("1.2.9").unwrap());
     }
 

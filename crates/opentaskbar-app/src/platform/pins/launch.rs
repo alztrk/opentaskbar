@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 
 use opentaskbar_core::log;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::System::Com::{
-    COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
-};
+use windows::Win32::System::Com::CoTaskMemFree;
 use windows::Win32::UI::Shell::PropertiesSystem::{IPropertyStore, SHGetPropertyStoreForWindow};
 use windows::Win32::UI::Shell::{
     FOLDERID_CommonPrograms, FOLDERID_Programs, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
@@ -220,15 +218,12 @@ fn launch_impl(
     let worker = std::thread::Builder::new()
         .name("opentaskbar-launch".into())
         .spawn(move || {
-            // SAFETY: This dedicated thread owns the COM apartment and releases it after shell execution.
-            let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-            if initialized.is_err() {
-                log::warn(format!(
-                    "App launch COM initialization failed ({:#010x})",
-                    initialized.0
-                ));
+            // This dedicated thread owns the COM apartment; the guard releases
+            // it after shell execution (no-op if the thread was already in one).
+            let Some(_com) = crate::platform::com::ComApartment::sta() else {
+                log::warn("App launch COM initialization failed");
                 return;
-            }
+            };
             if let Err(error) = execute_shell_target(&target(), elevated, args.as_deref())
                 && error != ERROR_CANCELLED
             {
@@ -236,8 +231,6 @@ fn launch_impl(
                     "Windows Shell could not launch the target (Win32 {error})"
                 ));
             }
-            // SAFETY: Balances successful initialization on this worker thread.
-            unsafe { CoUninitialize() };
         });
     if let Err(error) = worker {
         log::warn(format!(

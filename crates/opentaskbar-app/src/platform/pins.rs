@@ -9,8 +9,7 @@ use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
 use windows::Win32::System::Com::{
-    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, CoCreateInstance, CoInitializeEx,
-    CoTaskMemFree, IPersistFile, STGM_READ,
+    CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree, IPersistFile, STGM_READ,
 };
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 use windows::Win32::UI::Shell::{IShellLinkW, SLGP_RAWPATH, ShellLink};
@@ -279,9 +278,7 @@ fn manifest_app_id(xml: &str, relative_exe: &str) -> Option<String> {
 const TASKBAND_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Taskband";
 const FAVORITES_VALUE: &str = "Favorites";
 
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(Some(0)).collect()
-}
+use crate::platform::win32_helpers::wide;
 
 /// Raw `HKCU\...\Taskband\Favorites` blob; absent keys simply mean no packaged pins.
 fn taskband_favorites() -> Option<Vec<u8>> {
@@ -457,8 +454,9 @@ pub fn import_packaged_pins() -> Vec<PinnedApp> {
 pub fn load_pins() -> Vec<PinnedApp> {
     let dir = pins_dir();
     let entries = fs::read_dir(&dir).ok();
-    // SAFETY: initialize COM STA for resolving `.lnk` shortcuts on this thread.
-    let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    // Resolve `.lnk` shortcuts on this thread's STA; the shared guard balances
+    // the initialization (or tolerates a thread already in an apartment).
+    let _com = super::com::ComApartment::sta();
 
     let mut items: Vec<PinnedApp> = entries
         .into_iter()

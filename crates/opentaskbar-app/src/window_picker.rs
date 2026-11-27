@@ -257,8 +257,8 @@ pub fn navigate(
     }
 }
 
-/// Translate a new i18n key with an English fallback until WS-2 lands the
-/// 14-language catalogs. `loc::t` returns the key itself when it is missing.
+/// Translates an i18n key with an English fallback for catalogues that have not
+/// gained the key yet. `loc::t` returns the key itself when it is missing.
 pub fn label(key: &str, fallback: &str) -> String {
     let value = loc::t(key);
     if value == key {

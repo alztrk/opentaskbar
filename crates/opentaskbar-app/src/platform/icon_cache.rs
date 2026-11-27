@@ -15,6 +15,8 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
+use super::win32_helpers::CREATE_NO_WINDOW;
+
 use windows::Win32::Foundation::SIZE;
 use windows::Win32::Graphics::Gdi::{BITMAP, DeleteObject, GetObjectW, HBITMAP, HGDIOBJ};
 use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
@@ -37,7 +39,6 @@ const ICON_PX: u32 = 64;
 const CACHE_MAGIC: &[u8; 8] = b"OTICON05";
 const CACHE_HEADER_LEN: usize = 24;
 const MAX_DIM: u32 = 256;
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Debug)]
 pub struct RawIcon {
@@ -412,10 +413,18 @@ struct Worker {
     stdout: BufReader<ChildStdout>,
 }
 
+/// Terminates and reaps a child that cannot be handed to `Worker`. `Child`'s
+/// `Drop` does neither, so without this the worker process would outlive a
+/// failed pipe setup.
+fn cleanup_failed_child(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 impl Worker {
     fn spawn() -> Option<Self> {
         let exe = std::env::current_exe().ok()?;
-        let mut child = Command::new(exe)
+        let child = Command::new(exe)
             .arg(WORKER_ARG)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -423,12 +432,24 @@ impl Worker {
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .ok()?;
-        let stdin = child.stdin.take()?;
-        let stdout = BufReader::new(child.stdout.take()?);
+        Self::from_child(child)
+    }
+
+    /// Takes ownership of a spawned child; on any missing pipe the child is
+    /// killed and waited for instead of being dropped alive.
+    fn from_child(mut child: Child) -> Option<Self> {
+        let Some(stdin) = child.stdin.take() else {
+            cleanup_failed_child(&mut child);
+            return None;
+        };
+        let Some(stdout) = child.stdout.take() else {
+            cleanup_failed_child(&mut child);
+            return None;
+        };
         Some(Self {
             child,
             stdin,
-            stdout,
+            stdout: BufReader::new(stdout),
         })
     }
 
@@ -581,109 +602,55 @@ pub fn hover_variant_key(spec: &str, hovered: bool) -> String {
     }
 }
 
-/// Resolves the display name of a shell item (`GetShellItemDisplayName`).
-pub fn shell_item_display_name(parsing_name: &str) -> Option<String> {
-    use windows::Win32::UI::Shell::{IShellItem, SIGDN_NORMALDISPLAY};
-    // SAFETY: COM apartment is initialised by the icon worker; IShellItem is released on drop.
-    unsafe {
-        let item: IShellItem =
-            SHCreateItemFromParsingName(&HSTRING::from(parsing_name), None).ok()?;
-        let name = item.GetDisplayName(SIGDN_NORMALDISPLAY).ok()?;
-        let text = name.to_string().ok()?;
-        (!text.trim().is_empty()).then(|| text.trim().to_owned())
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Decoded icon image handed to the GPUI / dcomp chip renderers.
-///
-/// Backed by the same straight BGRA32 buffer as [`RawIcon`], so the raw disk cache,
-/// hover-variant cache and renderer adapter never copy or re-encode pixels.
-/// `to_bgra()` / `dimensions()` are the bridge used by the D2D bitmap upload path;
-/// GPUI callers can wrap `to_bgra()` in their own `ImageSource`.
-#[derive(Clone, Debug)]
-pub struct RenderImage {
-    raw: RawIcon,
-}
-
-impl RenderImage {
-    /// Adapts a cached/extracted raw icon without touching its pixel buffer.
-    pub fn from_raw(raw: RawIcon) -> Self {
-        Self { raw }
+    #[test]
+    fn missing_pipes_do_not_leak_the_worker_process() {
+        // `Stdio::null()` makes both `take()` calls fail, exercising the error
+        // path that used to drop a live `Child` without killing or waiting.
+        let child = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn();
+        let Ok(child) = child else {
+            return; // process creation is environment-dependent; nothing to assert
+        };
+        assert!(Worker::from_child(child).is_none());
     }
 
-    pub fn width(&self) -> u32 {
-        self.raw.width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.raw.height
-    }
-
-    pub fn dimensions(&self) -> (u32, u32) {
-        (self.raw.width, self.raw.height)
-    }
-
-    /// Straight (unassociated) BGRA32 pixels, top-down, 4 bytes per pixel.
-    pub fn to_bgra(&self) -> &[u8] {
-        &self.raw.pixels
-    }
-
-    /// Returns a premultiplied copy for D2D upload (`D2D1_ALPHA_MODE_PREMULTIPLIED`).
-    pub fn to_premultiplied_bgra(&self) -> Vec<u8> {
-        let mut pixels = self.raw.pixels.to_vec();
-        straight_to_premultiplied(&mut pixels);
-        pixels
-    }
-
-    pub fn into_raw(self) -> RawIcon {
-        self.raw
-    }
-}
-
-/// Renderer adapter for [`ApplicationIconProvider::get`]: keeps the extracted buffer
-/// in a shared handle so cache hits stay allocation-free.
-fn to_render_image(raw: RawIcon) -> Option<Arc<RenderImage>> {
-    if raw.width == 0
-        || raw.height == 0
-        || raw.pixels.len() != raw.width as usize * raw.height as usize * 4
-    {
-        return None;
-    }
-    Some(Arc::new(RenderImage::from_raw(raw)))
-}
-
-/// Provider with hover variants and a small in-memory cache (thread-safe).
-#[derive(Default)]
-pub struct ApplicationIconProvider {
-    variants: std::sync::Mutex<HashMap<String, Arc<RenderImage>>>,
-}
-
-impl ApplicationIconProvider {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn get(&self, spec: &str, size: u32, hovered: bool) -> Option<Arc<RenderImage>> {
-        let key = format!(
-            "{}@{}",
-            hover_variant_key(spec, hovered),
-            snap_icon_size(size)
+    #[test]
+    fn failed_spawn_cleanup_kills_and_reaps_the_child() {
+        let Ok(mut child) = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "Start-Sleep -Seconds 30",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+        else {
+            return;
+        };
+        assert!(child.try_wait().ok().flatten().is_none());
+        cleanup_failed_child(&mut child);
+        assert!(
+            child.try_wait().ok().flatten().is_some(),
+            "cleanup must terminate and reap the process"
         );
-        if let Some(cached) = self.variants.lock().ok()?.get(&key) {
-            return Some(Arc::clone(cached));
-        }
-        let raw = extract_best(spec)?;
-        let image = to_render_image(raw)?;
-        if let Ok(mut map) = self.variants.lock() {
-            map.insert(key, Arc::clone(&image));
-        }
-        Some(image)
-    }
-
-    pub fn clear(&self) {
-        if let Ok(mut map) = self.variants.lock() {
-            map.clear();
-        }
     }
 }
 

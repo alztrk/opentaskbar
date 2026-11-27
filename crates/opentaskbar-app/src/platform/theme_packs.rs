@@ -24,6 +24,7 @@ use crate::design::widget_pack::{WidgetPackManifest, WidgetTokenResolution};
 use super::icon_pack::{
     IconPack, IconPackCorner, IconPackFallback, IconPackShape, MANIFEST_FILE_NAME as ICON_MANIFEST,
 };
+use super::json_ext::{json_get_ci, object_get_ci, relaxed_json, string_ci};
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 /// File at the root of a theme folder that describes it.
@@ -197,83 +198,6 @@ fn unique_suffix() -> String {
 
 fn temp_path(parent: &Path, tag: &str) -> PathBuf {
     parent.join(format!(".{tag}-{}", unique_suffix()))
-}
-
-fn object_get_ci<'a>(object: &'a Map<String, Value>, key: &str) -> Option<&'a Value> {
-    object
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(key))
-        .map(|(_, value)| value)
-}
-
-fn json_get_ci<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
-    value
-        .as_object()
-        .and_then(|object| object_get_ci(object, key))
-}
-
-fn string_ci(value: &Value, key: &str) -> String {
-    json_get_ci(value, key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string()
-}
-
-/// Accepts the two JSON relaxations the reference serializer used: comments and trailing
-/// commas. String contents (including URLs such as `https://`) are left untouched.
-fn relaxed_json(input: &str) -> String {
-    let chars: Vec<char> = input.chars().collect();
-    let mut out = String::with_capacity(input.len());
-    let mut i = 0;
-    let mut in_string = false;
-    let mut escaped = false;
-    while i < chars.len() {
-        let c = chars[i];
-        if in_string {
-            out.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == '"' {
-            in_string = true;
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        if c == '/' && chars.get(i + 1) == Some(&'/') {
-            i += 2;
-            while i < chars.len() && chars[i] != '\n' && chars[i] != '\r' {
-                i += 1;
-            }
-            continue;
-        }
-        if c == '/' && chars.get(i + 1) == Some(&'*') {
-            i += 2;
-            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
-                i += 1;
-            }
-            i = (i + 2).min(chars.len());
-            continue;
-        }
-        if c == ','
-            && let Some(next) = chars[i + 1..].iter().find(|next| !next.is_whitespace())
-            && (*next == '}' || *next == ']')
-        {
-            i += 1;
-            continue;
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
 }
 
 fn read_json_object(path: &Path, max_bytes: u64) -> Option<Value> {
@@ -577,7 +501,9 @@ fn find_theme_dir(staging: &Path) -> Option<PathBuf> {
 /// Validates the manifests the same way `ThemePackTransfer.Validate` does.
 fn validate_theme(directory: &Path) -> Result<(), String> {
     let manifest = load_manifest(directory).ok_or("ErrorThemeInvalid")?;
-    if manifest.author.chars().count() > 200 || manifest.description.chars().count() > 1000 {
+    if manifest.author.chars().count() > MAX_AUTHOR_LEN
+        || manifest.description.chars().count() > MAX_DESCRIPTION_LEN
+    {
         return Err("ErrorThemeInvalid: manifest fields too long".to_string());
     }
 
@@ -1196,25 +1122,10 @@ pub fn resolve_widget_tokens(
     crate::design::widget_pack::resolve_widget_tokens(manifest, theme, current)
 }
 
-/// Discovers all valid theme folders, sorted by display name.
+/// Discovers all valid theme folders under the shared root, sorted by display
+/// name. Uses the same safe-id and symlink checks as [`discover`].
 pub fn discover_installed() -> Vec<ThemePack> {
-    let mut packs = Vec::new();
-    let Ok(entries) = fs::read_dir(root()) else {
-        return packs;
-    };
-    for entry in entries.flatten() {
-        if entry.path().is_dir()
-            && let Ok(pack) = ThemePack::load(&entry.path())
-        {
-            packs.push(pack);
-        }
-    }
-    packs.sort_by(|a, b| {
-        a.display_name()
-            .to_lowercase()
-            .cmp(&b.display_name().to_lowercase())
-    });
-    packs
+    discover(&root())
 }
 
 /// Applies a selected theme pack's widget tokens as a layered `TokenMap` for `ThemeManager`.
