@@ -8,7 +8,7 @@ gated against it by `scripts/check-release-version.ps1`.
 
 ### Removed features and stale code paths
 
-- Removed the bundled file manager, per-monitor top bar and Wi-Fi panel, including their launch modes, settings toggles, dock menu entries and 50 panel-only locale keys. The Rust catalog gate is now **1373 keys** in each of 14 languages; the frozen reference snapshots remain at 1046 keys.
+- Removed the bundled file manager, per-monitor top bar and Wi-Fi panel, including their launch modes, settings toggles, dock menu entries and 50 panel-only locale keys. The Rust catalog gate is now **1375 keys** in each of 14 languages; the frozen reference snapshots remain at 1046 keys.
 - Removed the remaining outdated documentation, history and source-path references. Documentation now describes the root workspace first — `Cargo.toml`, `crates/`, `scripts/` — alongside `docs/`, `resources/`, `packaging/`, `tests/` and `tools/`, plus the shared `%LOCALAPPDATA%\OpenTaskbar` data folder.
 
 ### Repository and pipeline
@@ -28,7 +28,7 @@ gated against it by `scripts/check-release-version.ps1`.
 
 ### Documentation
 
-- Refreshed `README.md`, `PRIVACY.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `docs/**` and `.github/*.md` against the current Rust implementation: CLI modes, 22 catalog widgets, 14 languages / 1373 keys, theme packs, and journal/watchdog recovery.
+- Refreshed `README.md`, `PRIVACY.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `docs/**` and `.github/*.md` against the current Rust implementation: CLI modes, 22 catalog widgets, 14 languages / 1375 keys, theme packs, and journal/watchdog recovery.
 
 ## 0.4.0 - 2026-11-27
 
@@ -49,7 +49,7 @@ gated against it by `scripts/check-release-version.ps1`.
 
 - All settings are stored in `%LOCALAPPDATA%\OpenTaskbar\settings.json` with a shared PascalCase schema; unknown keys are preserved, invalid JSON is backed up before defaults are restored, and profiles round-trip without data loss.
 - Added a fourth per-surface material, True black (OLED), plus independent display-care settings: reduced glow, burn-in shift, low-battery/Night Light triggers, ambient mode and an animation frame cap. The 17 new locale keys are translated into all 14 catalogs.
-- All 14 Rust locale catalogs contain **1373 keys** with identical key sets; the frozen reference snapshots under `tests/reference/locales` stay at 1046 keys. `scripts/check-locale-parity.ps1` and `crates/opentaskbar-core/tests/i18n_parity.rs` enforce both counts, required keys, non-empty values and placeholder retention.
+- All 14 Rust locale catalogs contain **1375 keys** with identical key sets; the frozen reference snapshots under `tests/reference/locales` stay at 1046 keys. `scripts/check-locale-parity.ps1` and `crates/opentaskbar-core/tests/i18n_parity.rs` enforce both counts, required keys, non-empty values and placeholder retention.
 - Six bundled theme packs are installed into `%LOCALAPPDATA%\OpenTaskbar\Themes`. Widget packs resolve typed design tokens with a 256-token limit; unknown or wrongly typed values are skipped, and user surface settings always win over theme colors.
 
 ### Version gate

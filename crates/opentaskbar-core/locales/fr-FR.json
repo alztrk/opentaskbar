@@ -1371,5 +1371,7 @@
   "AmbientModeHelp": "Après 5 minutes sans saisie, affiche uniquement l'heure et la batterie sur une fine bande noire.",
   "AnimationFpsCap": "Limite d'images d'animation",
   "AnimationFpsCapHelp": "Limite les animations basées sur les ressources pour économiser l'énergie sur les panneaux OLED à taux de rafraîchissement élevé.",
-  "FpsUnlimited": "Illimité"
+  "FpsUnlimited": "Illimité",
+  "Downloads": "Téléchargements",
+  "Documents": "Fichiers"
 }

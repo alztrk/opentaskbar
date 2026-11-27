@@ -1371,5 +1371,7 @@
   "AmbientModeHelp": "입력이 없는 지 5분이 지나면 얇은 검은 막대에 시계와 배터리만 표시합니다.",
   "AnimationFpsCap": "애니메이션 프레임 제한",
   "AnimationFpsCapHelp": "고주사율 OLED 패널에서 전력을 절약하기 위해 리소스 기반 애니메이션을 제한합니다.",
-  "FpsUnlimited": "무제한"
+  "FpsUnlimited": "무제한",
+  "Downloads": "다운로드",
+  "Documents": "문서"
 }

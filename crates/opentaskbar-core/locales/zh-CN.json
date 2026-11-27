@@ -1371,5 +1371,7 @@
   "AmbientModeHelp": "无操作 5 分钟后，在纤细的黑色条带上仅显示时钟和电量。",
   "AnimationFpsCap": "动画帧数限制",
   "AnimationFpsCapHelp": "限制基于资源的动画，以在高刷新率 OLED 面板上节省电量。",
-  "FpsUnlimited": "无限制"
+  "FpsUnlimited": "无限制",
+  "Downloads": "下载",
+  "Documents": "文档"
 }

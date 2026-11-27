@@ -1371,5 +1371,7 @@
   "AmbientModeHelp": "入力がない状態が5分続くと、細い黒い帯に時計とバッテリーだけを表示します。",
   "AnimationFpsCap": "アニメーションのフレーム制限",
   "AnimationFpsCapHelp": "リフレッシュレートの高いOLEDパネルで電力を節約するため、リソースベースのアニメーションを制限します。",
-  "FpsUnlimited": "無制限"
+  "FpsUnlimited": "無制限",
+  "Downloads": "ダウンロード",
+  "Documents": "ドキュメント"
 }

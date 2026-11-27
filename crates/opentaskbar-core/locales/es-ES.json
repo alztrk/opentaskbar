@@ -1371,5 +1371,7 @@
   "AmbientModeHelp": "Tras 5 minutos sin actividad, muestra solo el reloj y la batería en una franja negra delgada.",
   "AnimationFpsCap": "Límite de fotogramas de animación",
   "AnimationFpsCapHelp": "Limita las animaciones basadas en recursos para ahorrar energía en paneles OLED de alta tasa de refresco.",
-  "FpsUnlimited": "Sin límite"
+  "FpsUnlimited": "Sin límite",
+  "Downloads": "Descargas",
+  "Documents": "Documentos"
 }

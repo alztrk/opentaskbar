@@ -1371,5 +1371,7 @@
   "AmbientModeHelp": "Po 5 minutach bez wprowadzania danych pokazuje tylko zegar i baterię na wąskim czarnym pasku.",
   "AnimationFpsCap": "Limit klatek animacji",
   "AnimationFpsCapHelp": "Ogranicza animacje oparte na zasobach, aby oszczędzać energię na panelach OLED o wysokiej częstotliwości odświeżania.",
-  "FpsUnlimited": "Bez ograniczeń"
+  "FpsUnlimited": "Bez ograniczeń",
+  "Downloads": "Pobrane",
+  "Documents": "Dokumenty"
 }

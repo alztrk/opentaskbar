@@ -1371,5 +1371,7 @@
   "AmbientModeHelp": "After 5 minutes without input, shows only the clock and battery on a slim black strip.",
   "AnimationFpsCap": "Animation frame limit",
   "AnimationFpsCapHelp": "Caps resource-based animations to save power on high-refresh OLED panels.",
-  "FpsUnlimited": "Unlimited"
+  "FpsUnlimited": "Unlimited",
+  "Downloads": "Downloads",
+  "Documents": "Documents"
 }

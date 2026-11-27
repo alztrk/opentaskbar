@@ -1371,5 +1371,7 @@
   "AmbientModeHelp": "Após 5 minutos sem entrada, mostra apenas o relógio e a bateria em uma faixa preta fina.",
   "AnimationFpsCap": "Limite de quadros de animação",
   "AnimationFpsCapHelp": "Limita as animações baseadas em recursos para economizar energia em painéis OLED de alta taxa de atualização.",
-  "FpsUnlimited": "Ilimitado"
+  "FpsUnlimited": "Ilimitado",
+  "Downloads": "Baixados",
+  "Documents": "Documentos"
 }

@@ -20,13 +20,13 @@ Untranslated words show up in English until you translate them. Don't translate 
 <details>
 <summary><strong>Technical details</strong></summary>
 
-Supported cultures: `de-DE`, `en-US`, `es-ES`, `fr-FR`, `it-IT`, `ja-JP`, `ko-KR`, `nl-NL`, `pl-PL`, `pt-BR`, `ru-RU`, `tr-TR`, `uk-UA`, `zh-CN`. Each catalog is a BCP 47 culture tag with stable JSON keys; the 14 catalogs are embedded from `crates/opentaskbar-core/locales/*.json` (1373 keys each) through `opentaskbar_core::i18n` (`t`, `tr`, `t_fmt`, `keys`, `key_count`). Lookup order: exact culture → same two-letter language → `en-US` → the key name itself. A missing key returns the key name and is not a build error.
+Supported cultures: `de-DE`, `en-US`, `es-ES`, `fr-FR`, `it-IT`, `ja-JP`, `ko-KR`, `nl-NL`, `pl-PL`, `pt-BR`, `ru-RU`, `tr-TR`, `uk-UA`, `zh-CN`. Each catalog is a BCP 47 culture tag with stable JSON keys; the 14 catalogs are embedded from `crates/opentaskbar-core/locales/*.json` (1375 keys each) through `opentaskbar_core::i18n` (`t`, `tr`, `t_fmt`, `keys`, `key_count`). Lookup order: exact culture → same two-letter language → `en-US` → the key name itself. A missing key returns the key name and is not a build error.
 
 ### Key counts and frozen reference
 
 | Family | Location | Keys per catalog |
 | :--- | :--- | :--- |
-| Rust UI catalogs | `crates/opentaskbar-core/locales/*.json` | **1373** |
+| Rust UI catalogs | `crates/opentaskbar-core/locales/*.json` | **1375** |
 | Frozen reference snapshots | `tests/reference/locales/*.json` | **1046** |
 
 The frozen snapshots are kept only as a key-parity reference for the shared settings-era catalogs; they are not loaded at runtime. Both families must have identical key sets across all 14 languages. Rust catalogs carry the additional feature keys (Dynamic Island, calendar/fonts, widget features, UI localization, window picker/magnification, OLED/display care and searchable location labels); the 50 removed panel-only keys are absent from both families.

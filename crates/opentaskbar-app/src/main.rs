@@ -234,7 +234,8 @@ fn main() {
         }
         opentaskbar_core::log::info("Starting OpenTaskBar hybrid dock.");
         let panicked = std::panic::catch_unwind(|| dock::run(settings)).is_err();
-        opentaskbar_shell::watchdog::notify_clean_exit();
+        // `end_replacement` restores the native taskbar first and only then
+        // publishes the verified clean-exit signal to the watchdog.
         opentaskbar_shell::taskbar::end_replacement();
         if panicked {
             opentaskbar_core::log::error(

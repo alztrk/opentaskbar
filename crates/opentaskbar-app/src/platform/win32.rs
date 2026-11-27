@@ -857,7 +857,7 @@ fn dock_menu_entries(settings: &DockSettings) -> Vec<MenuEntry> {
     stack_items.push(MenuEntry::item(
         MENU_STACK_ADD_DOWNLOADS,
         MenuIcon::Folder,
-        format!("{} {}", loc::t("AddStack"), loc::t("Desktop")),
+        format!("{} {}", loc::t("AddStack"), loc::t("Downloads")),
     ));
     stack_items.push(MenuEntry::item(
         MENU_STACK_ADD_DESKTOP,
@@ -867,7 +867,7 @@ fn dock_menu_entries(settings: &DockSettings) -> Vec<MenuEntry> {
     stack_items.push(MenuEntry::item(
         MENU_STACK_ADD_DOCUMENTS,
         MenuIcon::Folder,
-        format!("{} {}", loc::t("AddStack"), loc::t("OpenFolder")),
+        format!("{} {}", loc::t("AddStack"), loc::t("Documents")),
     ));
 
     vec![

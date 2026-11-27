@@ -1371,5 +1371,7 @@
   "AmbientModeHelp": "5 dakika girdi olmadığında ince siyah bir şeritte yalnızca saati ve pili gösterir.",
   "AnimationFpsCap": "Animasyon kare sınırı",
   "AnimationFpsCapHelp": "Yüksek yenileme hızlı OLED panellerde güç tasarrufu için kaynak tabanlı animasyonları sınırlar.",
-  "FpsUnlimited": "Sınırsız"
+  "FpsUnlimited": "Sınırsız",
+  "Downloads": "İndirilenler",
+  "Documents": "Belgeler"
 }

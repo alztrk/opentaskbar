@@ -113,7 +113,9 @@ const SLIDE_OFFSET_DIPS: f32 = 7.0;
 /// window would block the low-level hook and freeze the whole system's input.
 /// Coordinates travel in (wparam, lparam); the UI-thread wndproc performs the
 /// #32768 class check and keeps the flyout alive while that menu is open.
-const WM_APP_MENU_CANDIDATE: u32 = 0x8002;
+// WM_APP+2 is the dock's WM_APP_ICONS message; use the private WM_APP+9 slot
+// so a cross-window post can never land in the dock's icon handler.
+const WM_APP_MENU_CANDIDATE: u32 = 0x8009;
 
 /// Tracks the native `WM_COMMAND`/`#32768` context menu opened from a flyout.
 static EXTERNAL_MENU_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -5043,6 +5045,7 @@ mod tests {
             vec![(0x1234 as super::HWND, WM_APP_MENU_CANDIDATE, (-12, 34))]
         );
         assert_ne!(WM_APP_MENU_CANDIDATE, 0x8001); // distinct from retired MENU_DONE
+        assert_ne!(WM_APP_MENU_CANDIDATE, 0x8002); // distinct from dock WM_APP_ICONS
 
         calls.clear();
         post_menu_candidate(0, POINT { x: 5, y: 6 }, |hwnd, msg, x, y| {

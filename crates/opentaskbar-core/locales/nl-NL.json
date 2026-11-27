@@ -1371,5 +1371,7 @@
   "AmbientModeHelp": "Toont na 5 minuten zonder invoer alleen de klok en batterij op een smalle zwarte balk.",
   "AnimationFpsCap": "Animatie-framelimiet",
   "AnimationFpsCapHelp": "Beperkt op resources gebaseerde animaties om energie te besparen op OLED-schermen met hoge verversingssnelheid.",
-  "FpsUnlimited": "Onbeperkt"
+  "FpsUnlimited": "Onbeperkt",
+  "Downloads": "Downloadmap",
+  "Documents": "Documenten"
 }

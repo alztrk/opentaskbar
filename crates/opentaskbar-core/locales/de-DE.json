@@ -1371,5 +1371,7 @@
   "AmbientModeHelp": "Zeigt nach 5 Minuten ohne Eingabe nur Uhr und Akkustand auf einem schmalen schwarzen Streifen.",
   "AnimationFpsCap": "Animations-Bildratenlimit",
   "AnimationFpsCapHelp": "Begrenzt ressourcenbasierte Animationen, um auf OLED-Panels mit hoher Bildwiederholrate Energie zu sparen.",
-  "FpsUnlimited": "Unbegrenzt"
+  "FpsUnlimited": "Unbegrenzt",
+  "Downloads": "Heruntergeladen",
+  "Documents": "Dokumente"
 }

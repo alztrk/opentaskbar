@@ -240,12 +240,7 @@ pub(crate) fn category_label(category: &str) -> String {
     match category {
         "All" => loc::t("WidgetCategoryAll"),
         "Active" => loc::t("Active"),
-        "Time & Weather" => loc::t("WidgetCategoryTime"),
-        "System & Hardware" => loc::t("WidgetCategorySystem"),
-        "AI Quotas" => loc::t("WidgetCategoryAi"),
-        "Media & Controls" => loc::t("WidgetCategoryMedia"),
-        "Productivity" => loc::t("WidgetCategoryProductivity"),
-        other => loc::t(other),
+        other => loc::t(widgets::category_i18n_key(other)),
     }
 }
 
@@ -315,11 +310,9 @@ fn country_flag_path(country: &str) -> Option<SharedString> {
 }
 
 fn widget_has_inline_settings(id: &str) -> bool {
-    // AI usage widgets no longer have per-provider account panels.
-    matches!(
-        id,
-        "clock" | "weather" | "stats" | "bluetoothbattery" | "focus"
-    )
+    // Single source of truth lives in the widget registry; AI usage widgets no
+    // longer have per-provider account panels.
+    widgets::widget_has_inline_settings(id)
 }
 
 // ---------------------------------------------------------------------------
@@ -9649,12 +9642,11 @@ impl Render for SettingsView {
 mod tests {
     use super::{
         BrushMode, DockSettings, FALLBACK_WIDGET_GLYPH, SettingsPage, WIN_H, WIN_W,
-        ai_cli_sign_in_command,
-        brush_to_json, build_backup, build_brush, city_list, civil_from_days,
-        close_spawned_settings_windows, field_cell_hsv, gradient_stop_at, import_backup_into,
-        inspect_backup, location_auto_fill_value, persist_theme_tokens, reorder_gradient_stop,
-        resolve_startup_toggle, safe_backup_path, settings_search, settings_window_options,
-        weather_country_for, widget_glyph, zip_store, zip_unstore,
+        ai_cli_sign_in_command, brush_to_json, build_backup, build_brush, city_list,
+        civil_from_days, close_spawned_settings_windows, field_cell_hsv, gradient_stop_at,
+        import_backup_into, inspect_backup, location_auto_fill_value, persist_theme_tokens,
+        reorder_gradient_stop, resolve_startup_toggle, safe_backup_path, settings_search,
+        settings_window_options, weather_country_for, widget_glyph, zip_store, zip_unstore,
     };
     use crate::design::brush::Hsv;
     use crate::design::theme::{

@@ -204,10 +204,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\check-release-vers
 | :--- | :--- |
 | `crates/opentaskbar-core/tests/shell_recovery.rs` | Journal satır ayrıştırma, retry/backoff, watchdog argümanları, `finally` modifier semantiği, 3 denemeli restore doğrulaması |
 | `crates/opentaskbar-core/tests/dock_layout_extra.rs` | Yay fiziği, raised-cosine falloff, overlap guard, gap/height çözümü, sabitlenmiş grup sırası |
-| `crates/opentaskbar-core/tests/i18n_parity.rs`, `telemetry_parity.rs` | 14 × 1373 Rust anahtarı, çeviri regresyonları, yer tutucu korunması |
+| `crates/opentaskbar-core/tests/i18n_parity.rs`, `telemetry_parity.rs` | 14 × 1375 Rust anahtarı, çeviri regresyonları, yer tutucu korunması |
 | `crates/opentaskbar-shell/src/journal.rs` (unit) | Bozuk/eski journal, `*.tmp` atomic yazım, desteklenen bit maskesi |
 | `crates/opentaskbar-shell/src/watchdog.rs` (unit) | `--watchdog` argümanı, heartbeat token'ı, clean-exit sinyali |
-| `scripts/check-locale-parity.ps1` | 14 × 1046 donmuş referans + 14 × 1373 Rust anahtarı, gerekli sözleşme anahtarları |
+| `scripts/check-locale-parity.ps1` | 14 × 1046 donmuş referans + 14 × 1375 Rust anahtarı, gerekli sözleşme anahtarları |
 | `scripts/check-release-version.ps1` | Tag ↔ Cargo workspace `0.4.0` ↔ MSIX `0.4.0.0` |
 
 ### Canlı smoke kontrol listesi
