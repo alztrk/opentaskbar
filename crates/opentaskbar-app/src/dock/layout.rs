@@ -5,22 +5,9 @@
 //! desktop session. The Win32/DirectComposition code in `dock/mod.rs` consumes these
 //! helpers; no Windows API calls happen here.
 //!
-//! Several helpers are the Rust port's public contract for policies still owned by
-//! other workstreams (WS-B shelf reservation, WS-C hover coordinator, WS-E islands),
-//! so they are intentionally available before every call site is merged.
-//!
-//! Cross-WS APIs absent from this worktree (left as named helpers instead of patched
-//! into another workstream's files):
-//! - `widgets::WidgetHoverCoordinator` (WS-C) — 350 ms hover intent / slider capture policy
-//!   lives in `hover_panel_stays_open`; the dock message loop does not call it yet.
-//! - `platform::start_menu_state` (WS-B) — Start open/close + flyout-transition detection;
-//!   `evaluate_auto_hide` passes `false` for `shell_menu_open` until it lands.
-//! - `SHAppBarMessage` secondary shelf reservation / Explorer shelf reuse (WS-B) —
-//!   `needs_own_shelf`, `missing_shelf_pixels`, `appbar_position_flags` are the pure policy.
-//! - `FileSystemWatcher` folder-stack watcher and `OpenFolderDialog` (WS-E) — only the
-//!   4-column preview, `.crdownload` filter and badge helpers are ported here.
-//! - OLE `IDropSource`/`IDataObject` CFSTR shell data package — outbound drag from the
-//!   dock still uses the existing `WM_DROPFILES` inbound path only.
+//! Pure policies shared by the dock message loop, the Dynamic Island and the
+//! preview/picker helpers. Some helpers remain available for renderers that
+//! live in other modules even when only a subset is used by the current host.
 #![allow(dead_code)]
 
 use std::time::{Duration, Instant};

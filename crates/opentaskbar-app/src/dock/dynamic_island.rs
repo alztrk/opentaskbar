@@ -6,7 +6,7 @@
 //! - Per-display widget ordering (`DynamicIslandWidgetOrders`), placement context menus,
 //!   desktop-only visibility mode, and fullscreen app suppression.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use opentaskbar_core::dynamic_island as policy;
@@ -30,11 +30,11 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use super::dcomp::{DcompEngine, IslandButton, VisualNode, WidgetInteraction};
-use super::layout::{ISLAND_ANIM_MS, effective_animations_enabled};
+use super::layout::{ISLAND_ANIM_MS, cubic_ease_out, effective_animations_enabled};
 use crate::design;
 use crate::platform::win32::{self, ForegroundProbe, MonitorInfo, WidgetContextAction};
 use crate::ui::settings as settings_ui;
-use crate::widgets::{self, WidgetRuntime};
+use crate::widgets::{self, WidgetRuntime, registry};
 
 // All geometry comes from the reference vectors in `opentaskbar_core::dynamic_island::geometry`.
 use opentaskbar_core::dynamic_island::geometry as island_geo;
@@ -58,30 +58,36 @@ const TIMER_WIDGETS: usize = 2;
 const TIMER_ANIM: usize = 3;
 const TIMER_HIDE_ANIM: usize = 4;
 
-const DEFAULT_WIDGET_ORDER: &[&str] = &[
-    "clock",
-    "weather",
-    "dayprogress",
-    "stopwatch",
-    "countdown",
-    "stats",
-    "netspeed",
-    "battery",
-    "bluetoothbattery",
-    "storage",
-    "aiusage_claude",
-    "aiusage_codex",
-    "aiusage_opencode",
-    "aiusage_copilot",
-    "aiusage_deepseek",
-    "aiusage_openrouter",
-    "aiusage_cursor",
-    "media",
-    "audio",
-    "quicksettings",
-    "keyboard",
-    "focus",
-];
+/// The island's default order is the registry's catalog order, not a second
+/// hand-maintained list: adding a catalog widget makes it appear automatically.
+const fn catalog_widget_count() -> usize {
+    let mut count = 0;
+    let mut i = 0;
+    while i < registry::BUILTINS.len() {
+        if registry::BUILTINS[i].catalog {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
+const fn build_default_widget_order() -> [&'static str; catalog_widget_count()] {
+    let mut order = [""; catalog_widget_count()];
+    let mut i = 0;
+    let mut j = 0;
+    while i < registry::BUILTINS.len() {
+        if registry::BUILTINS[i].catalog {
+            order[j] = registry::BUILTINS[i].id;
+            j += 1;
+        }
+        i += 1;
+    }
+    order
+}
+
+const DEFAULT_WIDGET_ORDER_ARRAY: [&str; catalog_widget_count()] = build_default_widget_order();
+const DEFAULT_WIDGET_ORDER: &[&str] = &DEFAULT_WIDGET_ORDER_ARRAY;
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
@@ -95,19 +101,12 @@ fn hiword_i16(v: isize) -> f32 {
     ((v as u32 >> 16) & 0xffff) as i16 as f32
 }
 
-fn ease_out_cubic(t: f32) -> f32 {
-    let inv = 1.0 - t.clamp(0.0, 1.0);
-    1.0 - inv * inv * inv
-}
-
 /// What an island button / chip click must do. Pure so the flyout dispatch can be
 /// unit tested without a HWND (WS-C: no island click may end in a dead end).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IslandClickAction {
     PrevPage,
     NextPage,
-    /// Call `WidgetRuntime::open_widget_flyout` (the real widget flyout).
-    OpenFlyout,
     /// reference in-place `DetailsPanel` for timed widgets without a separate flyout.
     ToggleDetails,
 }
@@ -137,7 +136,7 @@ pub fn has_real_widget_flyout(widget_id: &str) -> bool {
 /// `Previous_Click` / `Next_Click` / `Expand_Click`: the expand chevron toggles
 /// the island's in-place expanded details panel (`50 -> 246 DIP`), while clicking
 /// the center widget chip opens the full interactive flyout.
-pub fn island_button_click_action(button: IslandButton, _widget_id: &str) -> IslandClickAction {
+pub fn island_button_click_action(button: IslandButton) -> IslandClickAction {
     match button {
         IslandButton::Prev => IslandClickAction::PrevPage,
         IslandButton::Next => IslandClickAction::NextPage,
@@ -146,8 +145,8 @@ pub fn island_button_click_action(button: IslandButton, _widget_id: &str) -> Isl
 }
 
 /// `PageCount.Text` uses culture-aware `{0:00} / {1:00}` formatting. The
-/// catalog key is requested first; until WS-F adds it to all 14 locales the
-/// numeric fallback keeps the old behaviour instead of showing a raw key.
+/// catalog key is requested first; locales that omit it fall back to the
+/// numeric format instead of displaying a raw key.
 pub fn page_count_text(current_page: usize, total_pages: usize) -> String {
     const KEY: &str = "DynamicIslandPageCount";
     let template = loc::t(KEY);
@@ -904,7 +903,7 @@ impl DynamicIslandWindow {
         let dpi = self.monitor.dpi_scale;
         let vp_left = LEFT_CONTROLS_DIPS * dpi;
         let vp_w_px = self.viewport_width_px();
-        let top_px = ((COMPACT_HEIGHT_DIPS - 38.0) * 0.5) * dpi;
+        let top_px = ((COMPACT_HEIGHT_DIPS - CHIP_H_DIPS) * 0.5) * dpi;
         for (idx, id) in self.page_ids.iter().enumerate() {
             let Some(node) = self.page_nodes.get(idx) else {
                 continue;
@@ -1232,8 +1231,8 @@ impl DynamicIslandWindow {
         let vp_w = self.viewport_width_dips();
         let chip_w = self.widget_runtime.widget_width_dips(id).min(vp_w);
         let left = LEFT_CONTROLS_DIPS + (vp_w - chip_w) * 0.5;
-        let top = (COMPACT_HEIGHT_DIPS - 38.0) * 0.5;
-        Some((left, top, left + chip_w, top + 38.0))
+        let top = (COMPACT_HEIGHT_DIPS - CHIP_H_DIPS) * 0.5;
+        Some((left, top, left + chip_w, top + CHIP_H_DIPS))
     }
 
     fn open_current_flyout(&mut self) {
@@ -1399,11 +1398,9 @@ impl DynamicIslandWindow {
         if let Some(btn) = self.pressed_btn.take() {
             self.render_all();
             if self.hit_button(mx, my) == Some(btn) {
-                let wid = self.current_page_id().unwrap_or("").to_owned();
-                match island_button_click_action(btn, &wid) {
+                match island_button_click_action(btn) {
                     IslandClickAction::PrevPage => self.move_page(-1),
                     IslandClickAction::NextPage => self.move_page(1),
-                    IslandClickAction::OpenFlyout => self.open_current_flyout(),
                     IslandClickAction::ToggleDetails => {
                         let expanded = self.island.expanded;
                         self.set_expanded(!expanded);
@@ -1666,7 +1663,7 @@ unsafe extern "system" fn island_wnd_proc(
                                 KillTimer(hwnd, TIMER_ANIM);
                             }
                         } else {
-                            let e = ease_out_cubic(t);
+                            let e = cubic_ease_out(t);
                             state.slide_offset_px = anim.from_px + (anim.to_px - anim.from_px) * e;
                         }
                         state.update_page_positions_only();
@@ -1688,13 +1685,9 @@ unsafe extern "system" fn island_wnd_proc(
 // ---- WS-D expanded-details policy / state machine ------------------------------
 // `DynamicIslandPolicy`, `TimedWidgetTile.DetailsRequested`, `GetDetails()`.
 // Kept alongside the native Win32 island host above so both renderers share one API.
-/// `DynamicIslandVisibilityMode`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IslandVisibility {
-    Never,
-    Always,
-    DesktopOnly,
-}
+// Island visibility uses `opentaskbar_core::settings::DynamicIslandVisibilityMode`
+// directly; the old local `IslandVisibility` enum duplicated it and was only
+// used by a private copy of `should_show`.
 
 /// A single line of the 246px details panel (`WidgetChipDetails` / `GetDetails()`).
 #[derive(Clone, Debug, PartialEq)]
@@ -1801,85 +1794,9 @@ pub fn page_width(widget_id: &str) -> PageWidth {
     }
 }
 
-/// `DynamicIslandPolicy.ClampWindowWidth`.
-pub fn clamp_window_width(
-    preferred: f32,
-    monitor_width: f32,
-    requested_minimum: f32,
-    requested_maximum: f32,
-    edge_inset: f32,
-) -> f32 {
-    if !monitor_width.is_finite() || monitor_width <= 0.0 {
-        return if preferred.is_finite() {
-            preferred.clamp(240.0, 960.0)
-        } else {
-            240.0
-        };
-    }
-    let available = (monitor_width - edge_inset.max(0.0) * 2.0).max(240.0);
-    let maximum = requested_maximum.max(240.0).min(available);
-    let minimum = requested_minimum.max(240.0).min(maximum);
-    if preferred.is_finite() {
-        preferred.clamp(minimum, maximum)
-    } else {
-        minimum
-    }
-}
-
-pub fn should_show(
-    visibility: IslandVisibility,
-    desktop_visible: bool,
-    hide_in_fullscreen: bool,
-    fullscreen: bool,
-) -> bool {
-    !(hide_in_fullscreen && fullscreen)
-        && match visibility {
-            IslandVisibility::Always => true,
-            IslandVisibility::DesktopOnly => desktop_visible,
-            IslandVisibility::Never => false,
-        }
-}
-
-/// `DynamicIslandPolicy.OrderWidgets(... timedOrder)` ΓÇö the Rust signature omitted
-/// `timedOrder`; this helper restores it.
-pub fn order_widgets(
-    available: &[String],
-    display_order: &[String],
-    widget_order: &[String],
-    default_order: &[String],
-    timed_order: &[String],
-) -> Vec<String> {
-    let available: HashSet<String> = available.iter().map(|w| w.to_ascii_lowercase()).collect();
-    let mut ordered: Vec<String> = Vec::new();
-    for candidate in display_order
-        .iter()
-        .chain(widget_order)
-        .chain(default_order)
-        .chain(timed_order)
-    {
-        let key = candidate.to_ascii_lowercase();
-        if available.contains(&key) && !ordered.iter().any(|w| w.eq_ignore_ascii_case(candidate)) {
-            ordered.push(candidate.clone());
-        }
-    }
-    ordered
-}
-
-pub fn move_widget(order: &[String], widget_id: &str, offset: isize) -> Vec<String> {
-    if offset != -1 && offset != 1 {
-        return order.to_vec();
-    }
-    let Some(index) = order.iter().position(|w| w.eq_ignore_ascii_case(widget_id)) else {
-        return order.to_vec();
-    };
-    let target = index as isize + offset;
-    if target < 0 || target >= order.len() as isize {
-        return order.to_vec();
-    }
-    let mut moved = order.to_vec();
-    moved.swap(index, target as usize);
-    moved
-}
+// Policy functions live only in `opentaskbar_core::dynamic_island` (`policy::*`).
+// The former local copies silently diverged from production (different arity,
+// different `move_widget` offset type) and were tested instead of the real code.
 
 /// Mutable island state. `SetExpanded` starts a 180ms eased width transition;
 /// `pre_process_input` consumes navigation keys while expanded.
@@ -1945,7 +1862,7 @@ impl IslandState {
             return collapsed;
         }
         let expanded = width_for_page(id, true);
-        let t = super::layout::cubic_ease_out(self.animation_progress(now));
+        let t = cubic_ease_out(self.animation_progress(now));
         collapsed + (expanded - collapsed) * t
     }
 
@@ -2015,9 +1932,23 @@ impl IslandState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Tests exercise the same `policy::*` functions production calls, not copies.
+    use opentaskbar_core::settings::DynamicIslandVisibilityMode;
 
     fn pages() -> Vec<String> {
         ["clock", "focus", "media"].map(str::to_owned).to_vec()
+    }
+
+    #[test]
+    fn default_order_is_derived_from_the_registry_catalog() {
+        let expected: Vec<&str> = registry::BUILTINS
+            .iter()
+            .filter(|widget| widget.catalog)
+            .map(|widget| widget.id)
+            .collect();
+        assert_eq!(DEFAULT_WIDGET_ORDER, expected.as_slice());
+        assert_eq!(DEFAULT_WIDGET_ORDER.first(), Some(&"clock"));
+        assert!(DEFAULT_WIDGET_ORDER.contains(&"focus"));
     }
 
     #[test]
@@ -2039,36 +1970,39 @@ mod tests {
 
     #[test]
     fn clamp_window_width_respects_monitor_and_bounds() {
-        assert_eq!(clamp_window_width(500.0, 1920.0, 240.0, 960.0, 16.0), 500.0);
         assert_eq!(
-            clamp_window_width(2000.0, 1024.0, 240.0, 960.0, 16.0),
+            policy::clamp_window_width(500.0, 1920.0, 240.0, 960.0, 16.0),
+            500.0
+        );
+        assert_eq!(
+            policy::clamp_window_width(2000.0, 1024.0, 240.0, 960.0, 16.0),
             960.0
         );
-        assert_eq!(clamp_window_width(f32::NAN, 0.0, 240.0, 960.0, 16.0), 240.0);
+        assert_eq!(
+            policy::clamp_window_width(f32::NAN, 1920.0, 240.0, 960.0, 16.0),
+            240.0
+        );
     }
 
     #[test]
     fn visibility_modes() {
-        assert!(should_show(IslandVisibility::Always, false, true, false));
-        assert!(!should_show(IslandVisibility::Always, true, true, true));
-        assert!(should_show(
-            IslandVisibility::DesktopOnly,
-            true,
-            false,
-            true
-        ));
-        assert!(!should_show(IslandVisibility::Never, true, false, false));
+        use DynamicIslandVisibilityMode as V;
+        assert!(policy::should_show(V::Always, false, true, false));
+        assert!(!policy::should_show(V::Always, true, true, true));
+        assert!(policy::should_show(V::DesktopOnly, true, false, true));
+        assert!(!policy::should_show(V::DesktopOnly, false, false, false));
     }
 
     #[test]
     fn order_widgets_includes_timed_order_and_deduplicates() {
         let available = ["clock", "focus", "media"].map(str::to_owned).to_vec();
-        let order = order_widgets(
+        // Timed widgets are already part of `DEFAULT_WIDGET_ORDER`, which the
+        // production call passes as `default_order`; no duplicate policy needed.
+        let order = policy::order_widgets(
             &available,
-            &["media".into()],
-            &["clock".into(), "hidden".into()],
-            &["focus".into(), "clock".into()],
-            &["focus".into()],
+            Some(&["media".into()]),
+            Some(&["clock".into(), "hidden".into()]),
+            &["focus", "clock"],
         );
         assert_eq!(order, ["media", "clock", "focus"]);
     }
@@ -2076,9 +2010,9 @@ mod tests {
     #[test]
     fn move_widget_only_swaps_one_step() {
         let order = ["a", "b", "c"].map(str::to_owned).to_vec();
-        assert_eq!(move_widget(&order, "b", -1), ["b", "a", "c"]);
-        assert_eq!(move_widget(&order, "a", -1), order);
-        assert_eq!(move_widget(&order, "a", 2), order);
+        assert_eq!(policy::move_widget(&order, "b", -1), ["b", "a", "c"]);
+        assert_eq!(policy::move_widget(&order, "a", -1), order);
+        assert_eq!(policy::move_widget(&order, "a", 2), order);
     }
 
     #[test]
@@ -2168,32 +2102,22 @@ mod tests {
         assert!(island.details.is_none());
     }
 
-    /// WS-C: no island click may dead-end. Prev/Next page, Expand opens a *real*
-    /// widget flyout when the widget has one, otherwise the reference in-place panel.
+    /// No island click may dead-end: Prev/Next page, Expand toggles the reference
+    /// in-place details panel (the chip's own click opens the real flyout).
     #[test]
     fn island_click_dispatch_table() {
         assert_eq!(
-            island_button_click_action(IslandButton::Prev, "clock"),
+            island_button_click_action(IslandButton::Prev),
             IslandClickAction::PrevPage
         );
         assert_eq!(
-            island_button_click_action(IslandButton::Next, "clock"),
+            island_button_click_action(IslandButton::Next),
             IslandClickAction::NextPage
         );
-        for id in [
-            "clock",
-            "stats",
-            "media",
-            "aiusage_claude",
-            "audio",
-            "timer",
-        ] {
-            assert_eq!(
-                island_button_click_action(IslandButton::Expand, id),
-                IslandClickAction::ToggleDetails,
-                "Expand chevron on {id} must toggle in-place Dynamic Island expansion"
-            );
-        }
+        assert_eq!(
+            island_button_click_action(IslandButton::Expand),
+            IslandClickAction::ToggleDetails,
+        );
         assert!(has_real_widget_flyout("Clock")); // case-insensitive
         assert!(!has_real_widget_flyout("unknown"));
     }

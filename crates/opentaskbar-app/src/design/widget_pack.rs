@@ -9,13 +9,12 @@ use opentaskbar_core::settings::AppTheme;
 use serde_json::{Map, Value};
 
 use super::tokens::{
-    CornerRadius, Gradient, GradientStop, RadialGradient, Rgba, Thickness, TokenKind, TokenMap,
-    TokenValue, editor_token_kind, gradient_endpoints,
+    CornerRadius, Gradient, GradientStop, MAX_GRADIENT_STOPS, RadialGradient, Rgba, Thickness,
+    TokenKind, TokenMap, TokenValue, editor_token_kind, gradient_endpoints,
 };
 
 pub const MANIFEST_FILE_NAME: &str = "pack.json";
 const MAX_MANIFEST_BYTES: u64 = 128 * 1024;
-const MAX_GRADIENT_STOPS: usize = 16;
 const MAX_TOKENS: usize = 256;
 pub const MAX_DIMENSION: f64 = 2048.0;
 const MAX_FONT_FAMILY: usize = 128;
@@ -128,46 +127,52 @@ impl WidgetPackManifest {
 /// Parses reference-style JSON: `//` and `/* … */` comments and trailing commas are allowed (matches
 /// `JsonSerializerOptions { ReadCommentHandling.Skip, AllowTrailingCommas = true }`).
 pub fn parse_json_lenient(text: &str) -> Result<Value, String> {
-    let chars: Vec<char> = text.chars().collect();
-    let mut cleaned = String::with_capacity(text.len());
-    let (mut i, mut in_string, mut escaped) = (0usize, false, false);
-    while i < chars.len() {
-        let c = chars[i];
-        if in_string {
-            cleaned.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == '"' {
-            in_string = true;
-            cleaned.push(c);
-            i += 1;
-            continue;
-        }
-        if c == '/' && chars.get(i + 1) == Some(&'/') {
-            while i < chars.len() && chars[i] != '\n' {
+    // One string/comment scanner; the second pass only handles trailing commas.
+    fn strip_comments(text: &str) -> String {
+        let chars: Vec<char> = text.chars().collect();
+        let mut cleaned = String::with_capacity(text.len());
+        let (mut i, mut in_string, mut escaped) = (0usize, false, false);
+        while i < chars.len() {
+            let c = chars[i];
+            if in_string {
+                cleaned.push(c);
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
                 i += 1;
+                continue;
             }
-            continue;
-        }
-        if c == '/' && chars.get(i + 1) == Some(&'*') {
-            i += 2;
-            while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+            if c == '"' {
+                in_string = true;
+                cleaned.push(c);
                 i += 1;
+                continue;
             }
-            i = (i + 2).min(chars.len());
-            continue;
+            if c == '/' && chars.get(i + 1) == Some(&'/') {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if c == '/' && chars.get(i + 1) == Some(&'*') {
+                i += 2;
+                while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                    i += 1;
+                }
+                i = (i + 2).min(chars.len());
+                continue;
+            }
+            cleaned.push(c);
+            i += 1;
         }
-        cleaned.push(c);
-        i += 1;
+        cleaned
     }
+
+    let cleaned = strip_comments(text);
     // Drop commas directly followed by a closing brace/bracket.
     let chars: Vec<char> = cleaned.chars().collect();
     let mut result = String::with_capacity(cleaned.len());
@@ -593,14 +598,7 @@ mod tests {
         // a concurrent install/import cannot be observed half-written.
         let _guard = crate::design::theme::theme_test_guard();
         let root = Path::new(crate::resource!("themes"));
-        for id in [
-            "catppuccin",
-            "gruvbox",
-            "nord",
-            "prism",
-            "solarized",
-            "tokyo-night",
-        ] {
+        for id in crate::design::fonts::BUNDLED_THEME_IDS {
             let pack = WidgetPackManifest::load(&root.join(id).join("widgets"))
                 .unwrap_or_else(|e| panic!("{id}: {e}"));
             assert!(pack.raw_for(AppTheme::Dark).len() <= MAX_TOKENS);
@@ -617,9 +615,8 @@ mod tests {
                 let kind = TokenKind::for_key(_key);
                 assert!(
                     value.is_object() || value.is_string() || value.is_number(),
-                    "{_key}"
+                    "{_key} ({kind:?}) has an unsupported JSON value"
                 );
-                let _ = kind;
             }
         }
     }

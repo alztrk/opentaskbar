@@ -89,15 +89,12 @@ pub fn select_backdrop(version: WindowsVersion, high_contrast: bool) -> Backdrop
 
 /// Clamps an opacity into `0.0..=1.0`; non-finite values mean "no glass".
 pub fn clamp_opacity(opacity: f64) -> f64 {
-    if !opacity.is_finite() {
-        return 0.0;
-    }
-    opacity.clamp(0.0, 1.0)
+    super::tokens::clamp_opacity(opacity)
 }
 
 /// Converts an opacity to an 8-bit alpha byte (shared by glass helpers and theme).
 pub fn alpha_from_opacity(opacity: f64) -> u8 {
-    (clamp_opacity(opacity) * 255.0).round() as u8
+    super::tokens::alpha_from_opacity(opacity)
 }
 
 /// DIP blur radius for a given opacity: more transparent => stronger blur.
@@ -191,18 +188,16 @@ pub fn apply_window_backdrop_with(hwnd: usize, is_dark: bool, backend: &dyn Glas
         return false;
     }
 
-    let mut ok = true;
+    // These three are cosmetic refinements: log when unavailable but do not
+    // report the whole backdrop as failed when the backdrop itself applied.
     if !backend.set_window_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, u32::from(is_dark)) {
         log::warn("DWMWA_USE_IMMERSIVE_DARK_MODE failed.");
-        ok = false;
     }
     if !backend.set_window_attribute(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE) {
         log::warn("DWMWA_BORDER_COLOR=NONE failed.");
-        ok = false;
     }
     if !backend.extend_frame(hwnd) {
         log::warn("DwmExtendFrameIntoClientArea(-1) failed.");
-        ok = false;
     }
 
     let applied = match mode {
@@ -227,7 +222,7 @@ pub fn apply_window_backdrop_with(hwnd: usize, is_dark: bool, backend: &dyn Glas
         ));
         return false;
     }
-    ok
+    applied
 }
 
 /// Applies an explicit acrylic accent policy (used by callers that own the tint).
@@ -697,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn failures_and_bad_handles_return_false() {
+    fn failed_backdrop_returns_false_but_cosmetic_attributes_are_advisory() {
         assert!(!valid_handle(0));
         let backend = MutableBackend::new(RecordingBackend::win11());
         assert!(!apply_window_backdrop_with(0, true, &backend));
@@ -719,10 +714,12 @@ mod tests {
         let backend = MutableBackend::new(broken);
         assert!(!apply_window_backdrop_with(0x1234, true, &backend));
 
-        let mut broken = RecordingBackend::win11();
-        broken.fail_extend = true;
-        let backend = MutableBackend::new(broken);
-        assert!(!apply_window_backdrop_with(0x1234, true, &backend));
+        // Cosmetic DWM refinements (dark mode, border, frame extension) are
+        // advisory: the backdrop itself still applied, so report success.
+        let mut cosmetic_failure = RecordingBackend::win11();
+        cosmetic_failure.fail_extend = true;
+        let backend = MutableBackend::new(cosmetic_failure);
+        assert!(apply_window_backdrop_with(0x1234, true, &backend));
     }
 
     #[test]

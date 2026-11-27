@@ -2,7 +2,8 @@
 //!
 //! Uses `UpdateLayeredWindow` for per-pixel alpha:
 //! - Idle: 100% invisible (`alpha = 1` hit-testable corner target, zero visible rectangle)
-//! - Hover: draws only a crisp Windows 11-style `2px x 22px` vertical hairline near the edge
+//! - Hover: draws only a crisp Windows 11-style vertical hairline (1.5 DIP wide,
+//!   height derived from the dock height and clamped to 16..34 DIP).
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -160,16 +161,6 @@ fn wide(text: &str) -> Vec<u16> {
 }
 
 impl ShowDesktopCorner {
-    #[allow(dead_code)]
-    pub fn new(
-        monitor: MonitorInfo,
-        height_dips: f32,
-        is_dark: bool,
-        visible: bool,
-    ) -> Option<Self> {
-        Self::new_for_edge(DockEdge::Bottom, monitor, height_dips, is_dark, visible)
-    }
-
     /// Edge-aware strip: bottom-right hairline on the bottom dock, a horizontal
     /// strip at the foot of left/right docks.
     pub fn new_for_edge(
@@ -232,11 +223,6 @@ impl ShowDesktopCorner {
             ShowWindow(hwnd, if visible { SW_SHOWNOACTIVATE } else { SW_HIDE });
         }
         Some(Self { hwnd, state })
-    }
-
-    #[allow(dead_code)]
-    pub fn update(&self, monitor: MonitorInfo, height_dips: f32, is_dark: bool, visible: bool) {
-        self.update_for_edge(DockEdge::Bottom, monitor, height_dips, is_dark, visible);
     }
 
     pub fn update_for_edge(

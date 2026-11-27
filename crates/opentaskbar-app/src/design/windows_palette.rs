@@ -574,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn derives_32_tokens_and_wcag_foreground() {
+    fn derives_33_tokens_and_wcag_foreground() {
         let palette = WindowsPalette::from_stops(sample(), true);
         assert_eq!(palette.len(), WindowsPalette::TOKEN_COUNT);
         assert_eq!(

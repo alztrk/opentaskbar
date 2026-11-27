@@ -14,7 +14,47 @@ use windows_sys::Win32::Graphics::Gdi::{
     SetTextColor,
 };
 
+// Shared PUA codepoints. Both font families and `MDL2_FALLBACKS` reference these
+// constants so a glyph is written once, not duplicated across three tables.
+const CHEVRON_UP: &str = "\u{E70D}";
+const CHEVRON_DOWN: &str = "\u{E70E}";
+const PLUS: &str = "\u{E710}";
+const CLOSE: &str = "\u{E711}";
+const CHECK: &str = "\u{E73E}";
+const SAVE: &str = "\u{E8BB}";
+const BIN_EMPTY_FLUENT: &str = "\u{E74D}";
+const BIN_EMPTY_MDL2: &str = "\u{E921}";
+const BIN_FULL: &str = "\u{E922}";
+const DELETE: &str = "\u{E923}";
+
+/// One `(Fluent, MDL2)` pair per icon, indexed by `AppIcon` discriminant.
+const GLYPHS: [(&str, &str); 22] = [
+    ("\u{E721}", "\u{E721}"),           // Search
+    ("\u{E7C4}", "\u{E7C4}"),           // TaskView
+    (CHEVRON_DOWN, CHEVRON_DOWN),       // TrayChevron
+    (BIN_EMPTY_FLUENT, BIN_EMPTY_MDL2), // RecycleBinEmpty
+    (BIN_FULL, BIN_FULL),               // RecycleBinFull
+    ("\u{E8B7}", "\u{E8B7}"),           // Folder
+    ("\u{F0E2}", "\u{F0E2}"),           // LayoutGrid
+    ("\u{E713}", "\u{E713}"),           // Settings
+    ("\u{E9D9}", "\u{E9D9}"),           // Activity
+    ("\u{E756}", "\u{E756}"),           // Terminal
+    ("\u{EA18}", "\u{EA18}"),           // Shield
+    ("\u{E768}", "\u{E768}"),           // Play
+    ("\u{E7F4}", "\u{E7F4}"),           // Monitor
+    ("\u{E72C}", "\u{E72C}"),           // RefreshCw
+    ("\u{E7E8}", "\u{E7E8}"),           // Power
+    (PLUS, PLUS),                       // Plus
+    ("\u{E718}", "\u{E718}"),           // Pin
+    (CLOSE, CLOSE),                     // Close
+    (BIN_EMPTY_FLUENT, DELETE),         // Trash2: Fluent reuses the bin, MDL2 uses Delete
+    ("\u{E76B}", "\u{E76B}"),           // ChevronLeft (prev page)
+    ("\u{E76C}", "\u{E76C}"),           // ChevronRight (next page)
+    ("\u{E81E}", "\u{E81E}"),           // Layers
+];
+
 /// Unified icon catalog backed by Windows 11's native `Segoe Fluent Icons` font.
+#[repr(u16)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AppIcon {
     // Dock shell
@@ -46,31 +86,17 @@ pub enum AppIcon {
 
 /// Official Windows 11 `Segoe Fluent Icons` Unicode codepoint for each icon.
 pub const fn fluent_glyph(icon: AppIcon) -> &'static str {
-    match icon {
-        AppIcon::Search => "\u{E721}",
-        AppIcon::TaskView => "\u{E7C4}",
-        AppIcon::TrayChevron => "\u{E70E}",
-        // The empty/full bin states must be visually distinct (reference uses two shell icons).
-        AppIcon::RecycleBinEmpty => "\u{E74D}",
-        AppIcon::RecycleBinFull => "\u{E922}",
-        AppIcon::Trash2 => "\u{E74D}",
-        AppIcon::Folder => "\u{E8B7}",
-        AppIcon::LayoutGrid => "\u{F0E2}",
-        AppIcon::Settings => "\u{E713}",
-        AppIcon::Activity => "\u{E9D9}",
-        AppIcon::Terminal => "\u{E756}",
-        AppIcon::Shield => "\u{EA18}",
-        AppIcon::Play => "\u{E768}",
-        AppIcon::Monitor => "\u{E7F4}",
-        AppIcon::RefreshCw => "\u{E72C}",
-        AppIcon::Power => "\u{E7E8}",
-        AppIcon::Plus => "\u{E710}",
-        AppIcon::Pin => "\u{E718}",
-        AppIcon::Close => "\u{E711}",
-        AppIcon::ChevronLeft => "\u{E76B}",
-        AppIcon::ChevronRight => "\u{E76C}",
-        AppIcon::Layers => "\u{E81E}",
-    }
+    GLYPHS[icon as usize].0
+}
+
+/// A semantic MDL2 glyph by name (including chevrons/check/save without an `AppIcon`).
+pub fn named_glyph(name: &str) -> Option<&'static str> {
+    mdl2_named(name).or_else(|| match name.to_ascii_lowercase().as_str() {
+        "chevronleft" | "chevronleftfluent" => Some(fluent_glyph(AppIcon::ChevronLeft)),
+        "chevronright" | "chevronrightfluent" => Some(fluent_glyph(AppIcon::ChevronRight)),
+        "clock" => Some("\u{E823}"),
+        _ => None,
+    })
 }
 
 /// Win10-compatible `Segoe MDL2 Assets` fallback set (semantic name → PUA glyph).
@@ -78,15 +104,15 @@ pub const fn fluent_glyph(icon: AppIcon) -> &'static str {
 /// These nine codepoints are the ones the shell guarantees as far back as Windows 10.
 /// Anything not covered here keeps its Fluent codepoint (MDL2 shares most of them).
 pub const MDL2_FALLBACKS: &[(&str, &str); 9] = &[
-    ("ChevronUp", "\u{E70D}"),
-    ("ChevronDown", "\u{E70E}"),
-    ("Plus", "\u{E710}"),
-    ("Close", "\u{E711}"),
-    ("Check", "\u{E73E}"),
-    ("Save", "\u{E8BB}"),
-    ("RecycleBinEmpty", "\u{E921}"),
-    ("RecycleBinFull", "\u{E922}"),
-    ("Delete", "\u{E923}"),
+    ("ChevronUp", CHEVRON_UP),
+    ("ChevronDown", CHEVRON_DOWN),
+    ("Plus", PLUS),
+    ("Close", CLOSE),
+    ("Check", CHECK),
+    ("Save", SAVE),
+    ("RecycleBinEmpty", BIN_EMPTY_MDL2),
+    ("RecycleBinFull", BIN_FULL),
+    ("Delete", DELETE),
 ];
 
 /// Resolves one of the nine guaranteed MDL2 glyphs by its semantic name.
@@ -99,15 +125,7 @@ pub fn mdl2_named(name: &str) -> Option<&'static str> {
 
 /// MDL2 equivalent for a dock/menu icon. Unmapped icons reuse the shared Fluent codepoint.
 pub const fn mdl2_glyph(icon: AppIcon) -> &'static str {
-    match icon {
-        AppIcon::TrayChevron => "\u{E70E}",
-        AppIcon::RecycleBinEmpty => "\u{E921}",
-        AppIcon::RecycleBinFull => "\u{E922}",
-        AppIcon::Trash2 => "\u{E923}",
-        AppIcon::Plus => "\u{E710}",
-        AppIcon::Close => "\u{E711}",
-        _ => fluent_glyph(icon),
-    }
+    GLYPHS[icon as usize].1
 }
 
 /// `true` when Windows 11's `Segoe Fluent Icons` family is installed. On Windows 10
