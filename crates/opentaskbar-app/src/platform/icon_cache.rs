@@ -35,7 +35,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 pub const WORKER_ARG: &str = "--extract-icons";
 
-const ICON_PX: u32 = 64;
+/// Native rasterisation size (physical px) of every app/folder icon this module extracts.
+/// The dock's slot-icon transforms scale surfaces by `ICON_PX`, so keep them in sync.
+pub const ICON_PX: u32 = 64;
+/// The Recycle Bin is extracted sharper than ordinary slot icons; the dock scales its
+/// surface by this value instead of [`ICON_PX`].
+pub const RECYCLE_BIN_ICON_PX: u32 = 128;
 const CACHE_MAGIC: &[u8; 8] = b"OTICON05";
 const CACHE_HEADER_LEN: usize = 24;
 const MAX_DIM: u32 = 256;
@@ -71,18 +76,31 @@ fn split_icon_location(spec: &str) -> (&str, i32) {
     (spec.trim(), 0)
 }
 
+fn modified_secs(meta: &fs::Metadata) -> u64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs())
+}
+
 fn fingerprint(spec: &str) -> Option<u64> {
     if spec.starts_with("shell:") || spec.starts_with("::{") {
         return Some(0);
     }
     let (path, idx) = split_icon_location(spec);
     let meta = fs::metadata(path).ok()?;
-    let modified = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |d| d.as_secs());
-    Some(meta.len().rotate_left(17) ^ modified ^ (idx as u64).rotate_left(7))
+    let (len, modified) = if meta.is_dir() {
+        // A folder's own mtime changes whenever a child is added or removed (e.g. a
+        // download landing in `Downloads`), but its icon only depends on `desktop.ini`.
+        // Fingerprint that file instead (0 when absent) so the disk cache survives.
+        fs::metadata(Path::new(path).join("desktop.ini"))
+            .ok()
+            .filter(fs::Metadata::is_file)
+            .map_or((0, 0), |ini| (ini.len(), modified_secs(&ini)))
+    } else {
+        (meta.len(), modified_secs(&meta))
+    };
+    Some(len.rotate_left(17) ^ modified ^ (idx as u64).rotate_left(7))
 }
 
 fn cache_path(spec: &str) -> PathBuf {
@@ -248,18 +266,30 @@ fn hicon_to_bgra(hicon: HICON) -> Option<RawIcon> {
     }
 }
 
-/// Extracts the native Windows Shell Recycle Bin icon (Empty or Full) from `imageres.dll`
-/// at crisp 64x64 BGRA32 resolution.
-pub fn extract_recycle_bin_icon(full: bool) -> Option<RawIcon> {
+fn imageres_spec(res_id: i32) -> String {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_owned());
+    format!(r"{root}\System32\imageres.dll,{res_id}")
+}
+
+/// Extracts the native Windows Shell Recycle Bin icon (Empty or Full) from `imageres.dll`
+/// as a crisp [`RECYCLE_BIN_ICON_PX`]-square BGRA32 image.
+pub fn extract_recycle_bin_icon(full: bool) -> Option<RawIcon> {
     // Windows 10/11 `imageres.dll` resource IDs: -55 = Empty Recycle Bin, -54 = Full Recycle Bin.
     let res_id = if full { -54 } else { -55 };
-    let spec = format!(r"{root}\System32\imageres.dll,{res_id}");
-    extract_private_icon(&spec)
+    extract_private_icon(&imageres_spec(res_id), RECYCLE_BIN_ICON_PX)
+        .filter(|raw| raw.width == RECYCLE_BIN_ICON_PX && raw.height == RECYCLE_BIN_ICON_PX)
+}
+
+/// Extracts the native Windows folder icon (`imageres.dll,-3`) as an [`ICON_PX`]-square
+/// BGRA32 image. Synchronous and cheap (no Shell/COM), so folder stacks can show it on
+/// the first frame while their real, possibly customised, icon resolves in the worker.
+pub fn extract_default_folder_icon() -> Option<RawIcon> {
+    extract_private_icon(&imageres_spec(-3), ICON_PX)
+        .filter(|raw| raw.width == ICON_PX && raw.height == ICON_PX)
 }
 
 /// Extracts directly from `.exe` / `.ico` / `.dll` via `PrivateExtractIconsW` (mirrors `GetExecutableIcon`).
-fn extract_private_icon(spec: &str) -> Option<RawIcon> {
+fn extract_private_icon(spec: &str, size: u32) -> Option<RawIcon> {
     let (path, index) = split_icon_location(spec);
     let lower = path.to_lowercase();
     if !(lower.ends_with(".exe") || lower.ends_with(".ico") || lower.ends_with(".dll")) {
@@ -273,8 +303,8 @@ fn extract_private_icon(spec: &str) -> Option<RawIcon> {
         let count = PrivateExtractIconsW(
             wide.as_ptr(),
             index,
-            ICON_PX as i32,
-            ICON_PX as i32,
+            size as i32,
+            size as i32,
             &mut hicon,
             &mut icon_id,
             1,
@@ -367,7 +397,7 @@ fn extract_shell_icon(parsing_name: &str) -> Option<RawIcon> {
 fn extract_best(spec: &str) -> Option<RawIcon> {
     if !spec.starts_with("shell:")
         && !spec.starts_with("::{")
-        && let Some(icon) = extract_private_icon(spec)
+        && let Some(icon) = extract_private_icon(spec, ICON_PX)
     {
         return Some(icon);
     }
@@ -686,6 +716,35 @@ mod icon_provider_tests {
         assert_eq!(cache_dir(), opentaskbar_core::paths::rust_cache_dir());
         assert!(cache_dir().ends_with(Path::new("rust-cache").join("icon-cache")));
         assert_eq!(cache_path("app.exe").parent(), Some(cache_dir().as_path()));
+    }
+
+    #[test]
+    fn folder_fingerprint_ignores_children_but_tracks_desktop_ini() {
+        let dir = std::env::temp_dir().join(format!(
+            "opentaskbar-icon-fp-{}-{:x}",
+            std::process::id(),
+            hash_key(&format!("{:?}", std::time::SystemTime::now()))
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let spec = dir.to_string_lossy().into_owned();
+        let empty = fingerprint(&spec);
+        assert!(empty.is_some());
+
+        fs::write(dir.join("download.bin"), b"payload").unwrap();
+        assert_eq!(
+            fingerprint(&spec),
+            empty,
+            "a new child must not bust the folder icon cache"
+        );
+
+        fs::write(dir.join("desktop.ini"), b"[.ShellClassInfo]\r\n").unwrap();
+        assert_ne!(
+            fingerprint(&spec),
+            empty,
+            "desktop.ini decides the folder icon"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
