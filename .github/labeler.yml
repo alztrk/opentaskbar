@@ -1,9 +1,9 @@
 area/core:
   - changed-files:
       - any-glob-to-any-file:
-          - '*.cs'
-          - '*.xaml'
-          - 'OpenTaskbar.csproj'
+          - 'Rust-Port/crates/**'
+          - 'Rust-Port/Cargo.toml'
+          - 'tools/watchdog/**'
 
 area/scripts:
   - changed-files:
@@ -19,10 +19,13 @@ area/docs:
   - changed-files:
       - any-glob-to-any-file:
           - 'README.md'
+          - 'CHANGELOG.md'
           - 'LICENSE'
+          - 'docs/**'
           - '.github/CONTRIBUTING.md'
 
 area/tests:
   - changed-files:
       - any-glob-to-any-file:
-          - 'tests/**'
+          - 'Rust-Port/crates/**/tests/**'
+          - 'scripts/check-*.ps1'

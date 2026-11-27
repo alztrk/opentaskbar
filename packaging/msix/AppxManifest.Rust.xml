@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- MSIX identity for the Rust port. Identical capability set to the C# package;
-     only the executable name and application identity differ. -->
+<!-- MSIX identity for the Rust-only application and its architecture-matched
+     native watchdog payload. -->
 <Package
   xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
@@ -11,7 +11,7 @@
   <Identity
     Name="Alicanztrk.OpenTaskbar.Rust"
     Publisher="CN=EC415AE9-D8C2-4B79-8301-6B26DC5D8D0C"
-    Version="0.3.5.0"
+    Version="0.4.0.0"
     ProcessorArchitecture="x64" />
 
   <Properties>

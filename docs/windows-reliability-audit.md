@@ -4,13 +4,15 @@
 
 ## Source-grounded review targets
 
-- `Services/Interop/DisplayService.cs`: monitor enumeration, target selection, DPI conversion of screen coordinates, fallback when a selected display disappears.
-- `Views/Windows/SecondaryDockWindow.cs`: secondary monitor app bars, bottom-edge work-area reservation, foreground fullscreen suppression, grouping windows by executable.
-- `Views/Windows/MainWindow.xaml.cs`: `WM_DISPLAYCHANGE` and `SPI_SETWORKAREA` trigger secondary dock updates.
-- `Services/Interop/TaskbarReplacementSession.cs`: display/DPI messages, native taskbar hide/restore, crash-recovery journal and app-bar reservations.
-- `Services/Interop/VirtualDesktops.cs`: current-desktop COM check; failure currently falls back to showing windows.
-- `Views/DockScrollViewer.cs`: horizontal overflow, hidden scrollbar, wheel scrolling and synchronous `UpdateLayout()` during content measurement.
-- `Services/App/DockAutoHideController.cs`: reveal/hide guards, flyout and foreground transitions.
+All implementation paths are Rust-only; review them from the workspace root in `Rust-Port/`.
+
+- `crates/opentaskbar-app/src/platform/win32.rs`: `enumerate_monitors`, monitor selection, physical-pixel/DIP conversion, negative virtual-screen origins and fallback when a selected display disappears.
+- `crates/opentaskbar-app/src/main.rs`: dock event loop, `WM_DISPLAYCHANGE`/work-area messages, auto-hide evaluation and shell state reconciliation.
+- `crates/opentaskbar-shell/src/taskbar.rs` and `appbar.rs`: native taskbar hide/restore, crash-recovery journal and app-bar reservations.
+- `crates/opentaskbar-shell/src/journal.rs` and `session.rs`: journal line parsing, recovery retries and single-owner shell session.
+- `crates/opentaskbar-app/src/platform/win32_ex.rs`: current-desktop check; failure currently falls back to showing windows.
+- `crates/opentaskbar-app/src/dock/layout.rs` and `dock/mod.rs`: horizontal overflow, wheel scrolling, magnification and geometry measurement.
+- `crates/opentaskbar-shell/src/watchdog.rs` and `tools/watchdog/watchdog.c`: architecture-matched native watchdog embedded via `build.rs` (x64 `0x8664`, x86 `0x014C`).
 
 ## P0: do not leave the user without a taskbar
 
@@ -33,7 +35,7 @@
 |---|---|---|
 | MON-01 | 1, 2 and 3 monitors, mixed resolutions and portrait orientation | One correctly positioned dock per enabled display; no duplicate reservations |
 | MON-02 | Secondary monitor left/above primary (negative virtual-screen coordinates) | Correct hit testing, placement, and work-area bounds |
-| MON-03 | Mixed 100%, 125%, 150%, 200% DPI; move primary target | Physical pixel and WPF DIP coordinates agree; no offset or scaling jump |
+| MON-03 | Mixed 100%, 125%, 150%, 200% DPI; move primary target | Physical pixel and device-independent layout coordinates agree; no offset or scaling jump |
 | MON-04 | Unplug/replug HDMI/DP/USB-C dock; change primary monitor | Old secondary windows/app-bars disposed; new ones created on valid handles |
 | MON-05 | Disable selected target monitor while app runs | Fallback to a connected monitor; user can still open Settings |
 | MON-06 | Explorer taskbar at top/left/right or auto-hide | Reservation does not assume the bottom strip is always available |
@@ -60,14 +62,14 @@
 ## P1/P2: performance, security, delivery
 
 - PERF-01: Record idle and active CPU, private bytes, handles, GDI objects, GPU usage, UI frame time at 10/30/60 windows, 1/2/3 displays and 1h/8h uptime.
-  - Partial baseline captured on 2026-11-22 (Windows 11 build 26300, 16 cores, single 2560x1440 display, x64 self-contained publish, user's full widget set): steady-state working set 60–120 MB after idle trimming, private bytes 180–190 MB, ~31–35 threads, ~1300 handles. Idle CPU ~22% of one core, fisheye sweep ~36% of one core. Short private-byte spikes to ~275 MB occur on periodic widget/CLI polling and settle after GC. `scripts/measure-baseline.ps1 -Label <name>` produces the raw CSV and `summary.json` for A/B comparisons; `scripts/compare-perf.ps1` diffs two runs. Still open: 10/30/60-window scaling, multi-display, 1h/8h uptime, GDI objects and GPU usage.
-- PERF-02: Profile `UpdateLayout()`, window tracking refreshes, thumbnail previews, image decoding, widget timers and allocations; optimize only after measurement.
-  - Existing icon/flag/album-art decode caps and the bounded `RunningAppIconCache` already cover the obvious allocation sources; no single dominant leak was found in the idle/sweep baseline. The ~180 MB private footprint is mostly .NET/WPF runtime and widget visuals, not an app-level cache. Any further reduction (trimming unused assemblies, compacting GC) needs an A/B measurement before adoption.
+  - The retired C# baseline workflow (`scripts/measure-baseline.ps1`) and its numbers no longer apply to the Rust binary. There is no Rust benchmark/baseline script yet; capture a fresh baseline with Windows tools on a real session and record OS build, EXE architecture, display topology and widget set with each run. Still open: every Rust baseline point above.
+- PERF-02: Profile window tracking refreshes, thumbnail previews, image decoding, widget timers and allocations; optimize only after measurement.
+  - Existing icon/flag/album-art decode caps and the bounded icon cache cover the obvious allocation sources. The historical ~180 MB private-byte figure came from the retired .NET/WPF build and must not be attributed to the Rust binary; measure before drawing conclusions or adopting further changes.
 - SEC-01: Theme ZIP traversal, duplicate entries, reserved Windows names, size limits and import/export symmetry.
 - SEC-02: Update executable asset selection, SHA-256 verification, signing policy, atomic replacement, backup and rollback; coordinate with separate updater PR.
 - SEC-03: Review shell command arguments, paths with special characters, log privacy and permission boundaries.
-- REL-01: Release pipeline reproducibility, artifact checksums, GitHub Actions pinning and Windows test reporting. The release gate `scripts/check-release-version.ps1` checks tag ↔ csproj ↔ Cargo (0.1.0 is a registered carve-out) ↔ Rust MSIX before any build; `package-rust-release.ps1` records each artifact's watchdog architecture/PE machine/SHA-256 and verifies every `checksums.txt` row against disk before SLSA attestation.
-- ARCH-01: Reduce coupling in `MainWindow`, `SettingsWindow`, `TaskbarReplacementSession` through small independently tested changes.
+- REL-01: Release pipeline reproducibility, artifact checksums, GitHub Actions pinning and Windows test reporting. The release gate `scripts/check-release-version.ps1` checks tag ↔ Cargo workspace `0.4.0` ↔ Rust MSIX `0.4.0.0` before any build; `package-rust-release.ps1` records each artifact's watchdog architecture/PE machine/SHA-256 and verifies every `checksums.txt` row against disk before SLSA attestation.
+- ARCH-01: Reduce coupling between the GPUI dock, on-demand Settings UI and shell taskbar session in `Rust-Port/crates` through small independently tested changes.
 
 ## Cross-cutting regression controls
 
@@ -77,7 +79,7 @@ The recurring failures in issues #79, #85, #86, #95, #126, #127, #128, #131 and 
 2. **Feedback loops in layout:** measured width, scrolling, magnification, and window placement can trigger one another. Keep one source of truth for geometry, avoid changing native reservations during transient drag/slider updates, and test threshold boundaries (including a one-pixel overflow) with deterministic inputs.
 3. **Validation gaps between simulation and Windows:** logic tests can prove transitions and calculations but cannot prove Explorer timing, shell broadcasts, actual AppBar behavior, or multi-monitor placement. Keep simulated checks fast, and separately record live Windows results with OS build, process architecture, display topology, DPI, exact steps, and logs.
 
-Do not infer live compatibility from a passing source-level check. In particular, a simulated `TaskbarCreated` event does not prove Explorer restart recovery, and a single-monitor run does not prove secondary-taskbar handling. The current source-level recovery checks live in `tests/OpenTaskbar.Tests/ShellRecoveryChecks.cs`, `TaskbarRecoveryChecks.cs`, and `TaskbarWindowChecks.cs`; keep them aligned with the state machine and preserve separate live checks for the shell boundary.
+Do not infer live compatibility from a passing source-level check. In particular, a simulated `TaskbarCreated` event does not prove Explorer restart recovery, and a single-monitor run does not prove secondary-taskbar handling. The current source-level recovery checks live in `Rust-Port/crates/opentaskbar-core/tests/shell_recovery.rs`, `production_seams.rs` and `Rust-Port/crates/opentaskbar-shell/src/journal.rs`; keep them aligned with the state machine and preserve separate live checks for the shell boundary.
 
 ## Windows compatibility evidence
 
@@ -87,7 +89,7 @@ For every release candidate, attach a small compatibility record to the release 
 |---|---|
 | Minimum supported Windows build, x64 | Startup, taskbar hide/restore, Explorer restart, and updater smoke checks |
 | Current supported Windows release, x64 | The same shell checks plus Start/Search anchoring and window previews |
-| Current supported Windows release, x86 if shipped | Native handle/P/Invoke checks and watchdog recovery |
+| Current supported Windows release, x86 if shipped | Native Win32 handle checks and watchdog recovery |
 | Two displays with mixed DPI and a negative virtual-screen coordinate | Primary and secondary taskbar visibility, placement, disconnect/reconnect recovery |
 | Insider/preview Windows build, when available | Exploratory taskbar/AppBar check; record failures separately from supported-release claims |
 
@@ -107,11 +109,11 @@ The Rust port applies the same three regression classes above through its own de
 | Layout feedback loops (magnification, gap/height units, reorder hysteresis) | `dock_layout_extra.rs` — critically damped spring, raised-cosine falloff, overlap guard, gap/height resolution, pinned-group ordering | Vertical dock hit-testing, DPI changes, multi-monitor edges, fullscreen overlay filtering |
 | Validation gaps between simulation and Windows | `full_backup.rs`, `wireless_battery_vendors.rs`, `media_timeline.rs`, `audio_mixer.rs`, `ai_usage_logic.rs`, `opentaskbar_core_tests.rs`, `i18n_parity.rs`, `telemetry_parity.rs` | Real HID reports, WinRT radio toggles, CoreAudio session matching, LibreWolf UIA, provider OAuth and quota refreshes |
 
-The same caveat applies: a passing Rust source-level check is **not** live compatibility evidence. Keep the "Windows compatibility evidence" table above for both builds, and record the Rust worktree commit and OS build separately.
+The same caveat applies: a passing Rust source-level check is **not** live compatibility evidence. Keep the "Windows compatibility evidence" table above for the Rust build, and record the commit and OS build for each run.
 
 ### Rust port live smoke list
 
-Run every row on a real Windows session before signing off a release candidate. Record OS build, Rust worktree commit, EXE architecture, display topology, DPI, actual result and logs; **not run** is the only valid initial status. Collect logs from the shared data folder: `%LOCALAPPDATA%\OpenTaskbar\opentaskbar-rust.log` (rotated copy `opentaskbar-rust.log.old`), not the retired `%LOCALAPPDATA%\OpenTaskBar-Rust\` folder. The taskbar/flyout journals are read from that same `%LOCALAPPDATA%\OpenTaskbar` folder on both builds.
+Run every row on a real Windows session before signing off a release candidate. Record OS build, commit, EXE architecture, display topology, DPI, actual result and logs; **not run** is the only valid initial status. Collect logs from the shared data folder: `%LOCALAPPDATA%\OpenTaskbar\opentaskbar-rust.log` (rotated copy `opentaskbar-rust.log.old`), not the retired `%LOCALAPPDATA%\OpenTaskBar-Rust\` folder. The taskbar/flyout journals are read from that same shared `%LOCALAPPDATA%\OpenTaskbar` folder.
 
 | # | Smoke case | Steps | Pass condition | Status |
 | :--- | :--- | :--- | :--- | :--- |
@@ -124,4 +126,4 @@ Run every row on a real Windows session before signing off a release candidate. 
 | S7 | Full backup | Export, inspect, then import on a temp profile; edit the manifest `Version` to `2` and retry; craft `../` and `.exe` theme entries. | Version 1 round-trips settings/pins/theme; other versions are rejected; traversal/`.exe` entries never leave staging. | not run |
 | S8 | Updater and single instance | Run the portable updater with a Unicode path containing `%`; launch a second dock process. | Script keeps the path intact, has no BOM, and replaces atomically; second instance exits via the named mutex. | not run |
 
-Reliability-related flags and their real defaults are documented in `Rust-Port/README.md`. `enable_live_tray_host=false` keeps the native tray untouched; `native_flyout_reposition=true` is now the default because Start/Search/Control Center repositioning is generation-cancelled and journal-backed — set it to `false` to fall back to journal-read-only/legacy positioning if a live regression appears. Release-level reproducibility is enforced by generated `checksums.txt` (no stale C# rows are tracked in the repository), `release-manifest.json`, `actions/attest` SLSA provenance and the optional VirusTotal step in `.github/workflows/release.yml`, which now covers the Rust artifacts as well as the C# ones.
+Reliability-related flags and their real defaults are documented in `Rust-Port/README.md`. `enable_live_tray_host=false` keeps the native tray untouched; `native_flyout_reposition=true` is now the default because Start/Search/Control Center repositioning is generation-cancelled and journal-backed — set it to `false` to fall back to journal-read-only/legacy positioning if a live regression appears. Release-level reproducibility is enforced by generated `checksums.txt` (no stale rows are tracked in the repository), a schemaVersion 2 `release-manifest.json`, `actions/attest` SLSA provenance and the optional VirusTotal step in `.github/workflows/release.yml`, all covering the Rust-only artifacts.

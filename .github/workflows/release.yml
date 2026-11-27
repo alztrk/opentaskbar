@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag name for the release (e.g. v0.2.8 or v0.2.8-rc.1)'
+        description: 'Tag name for the release (e.g. v0.4.0 or v0.4.0-rc.1)'
         required: true
         type: string
       prerelease:
@@ -37,7 +37,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      # Gate before any build: tag <-> csproj <-> Cargo (0.1.0 carve-out) <-> Rust MSIX.
+      # Gate before any build: tag <-> Cargo workspace version <-> Rust MSIX.
       - name: Determine release tag and verify version gate
         id: release_info
         shell: pwsh
@@ -50,7 +50,7 @@ jobs:
             "${{ inputs.tag_name }}"
           }
           if ($tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?<pre>-[0-9A-Za-z.-]+)?$') {
-            throw "Release tag must look like v0.3.5 or v0.3.5-rc.1."
+            throw "Release tag must look like v0.4.0 or v0.4.0-rc.1."
           }
           $version = $Matches['base']
           $isPre = -not [string]::IsNullOrEmpty($Matches['pre'])
@@ -62,27 +62,18 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
           "is_prerelease=$($isPre.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
 
-      - name: Set up .NET 10 SDK
-        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
-        with:
-          dotnet-version: '10.0.x'
-
-      - name: Restore dependencies
-        run: dotnet restore OpenTaskbar.csproj
-
-      - name: Run behavior and contract test suite
-        shell: pwsh
-        run: dotnet run --project tests/OpenTaskbar.Tests/OpenTaskbar.Tests.csproj --configuration Release
-
-      - name: Build portable executables (x64 + x86)
+      - name: Set up Rust toolchain
         shell: pwsh
         run: |
-          & "scripts/publish-portable.ps1" -Runtime win-x64 -OutputDir release
-          & "scripts/check-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-x64.exe
-          & "scripts/publish-portable.ps1" -Runtime win-x86 -OutputDir release
-          & "scripts/check-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-x86.exe
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc i686-pc-windows-msvc
 
-      - name: Build and verify Rust portable executables
+      - name: Run Rust workspace tests
+        working-directory: Rust-Port
+        run: cargo test --workspace
+
+      - name: Build and verify Rust portable executables (x64 + x86)
         shell: pwsh
         run: |
           & "scripts/publish-rust-portable.ps1" -Runtime win-x64 -OutputDir release
@@ -90,16 +81,7 @@ jobs:
           & "scripts/publish-rust-portable.ps1" -Runtime win-x86 -OutputDir release
           & "scripts/check-rust-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-Rust-x86.exe
 
-      - name: Package release artifacts
-        shell: pwsh
-        run: |
-          $pre = '${{ steps.release_info.outputs.is_prerelease }}' -eq 'true'
-          & "scripts/package-release.ps1" `
-              -Tag '${{ steps.release_info.outputs.tag_name }}' `
-              -Commit '${{ github.sha }}' `
-              -Prerelease:$pre
-
-      - name: Package Rust release artifacts and refresh checksums
+      - name: Package Rust release artifacts, notes, checksums and manifest
         shell: pwsh
         run: |
           & "scripts/package-rust-release.ps1" `
@@ -113,10 +95,8 @@ jobs:
         with:
           name: release-assets
           path: |
-            release/OpenTaskbar-*-win-*.exe
-            release/OpenTaskbar-Rust-*.exe
-            release/OpenTaskbar-*.zip
-            release/OpenTaskbar-Rust-*.zip
+            release/OpenTaskbar-Rust-v*-win-*.exe
+            release/OpenTaskbar-Rust-v*-win-*.zip
             release/checksums.txt
             release/release-manifest.json
             release/release-notes.md
@@ -157,8 +137,8 @@ jobs:
               throw "Missing release asset: $name"
             }
           }
-          if (-not (Get-ChildItem -LiteralPath release -Filter 'OpenTaskbar-*.zip' -File)) {
-            throw 'No release ZIPs were downloaded.'
+          if (-not (Get-ChildItem -LiteralPath release -Filter 'OpenTaskbar-Rust-*.zip' -File)) {
+            throw 'No Rust release ZIPs were downloaded.'
           }
 
       # Sigstore-backed SLSA provenance. The checksums file already uses the
@@ -172,7 +152,7 @@ jobs:
         if: ${{ env.VIRUSTOTAL_API_KEY != '' }}
         shell: pwsh
         run: |
-          foreach ($file in Get-ChildItem -LiteralPath release -Filter 'OpenTaskbar-*.zip' -File) {
+          foreach ($file in Get-ChildItem -LiteralPath release -Filter 'OpenTaskbar-Rust-*.zip' -File) {
             try {
               $response = & curl -sS -F "file=@$($file.FullName)" -H "x-apikey: $env:VIRUSTOTAL_API_KEY" `
                 'https://www.virustotal.com/api/v3/files' | ConvertFrom-Json
@@ -193,8 +173,8 @@ jobs:
           generate_release_notes: false
           overwrite_files: true
           files: |
-            release/OpenTaskbar-*-win-*.exe
-            release/OpenTaskbar-*.zip
+            release/OpenTaskbar-Rust-v*-win-*.exe
+            release/OpenTaskbar-Rust-v*-win-*.zip
             release/checksums.txt
             release/release-manifest.json
 
@@ -208,10 +188,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Could not read release assets for $env:RELEASE_TAG." }
 
           $expected = @(
-            "OpenTaskbar-$env:RELEASE_TAG-win-x64.exe",
-            "OpenTaskbar-$env:RELEASE_TAG-win-x64.zip",
-            "OpenTaskbar-$env:RELEASE_TAG-win-x86.exe",
-            "OpenTaskbar-$env:RELEASE_TAG-win-x86.zip",
             "OpenTaskbar-Rust-$env:RELEASE_TAG-win-x64.exe",
             "OpenTaskbar-Rust-$env:RELEASE_TAG-win-x64.zip",
             "OpenTaskbar-Rust-$env:RELEASE_TAG-win-x86.exe",

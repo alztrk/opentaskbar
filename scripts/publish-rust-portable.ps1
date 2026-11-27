@@ -1,5 +1,5 @@
-# Builds the OpenTaskbar Rust port as a portable, self-contained EXE per architecture.
-# Mirrors scripts/publish-portable.ps1 but targets Rust-Port/Cargo.toml.
+# Builds OpenTaskbar as a portable, self-contained Rust EXE per architecture.
+# Builds from Rust-Port/Cargo.toml; no .NET SDK or C# artifacts are involved.
 param (
     [ValidateSet('win-x64', 'win-x86')]
     [string]$Runtime = 'win-x64',

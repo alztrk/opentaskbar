@@ -1,15 +1,12 @@
-# Release version gate: tag <-> OpenTaskbar.csproj <-> Rust crate <-> Rust MSIX.
+# Rust-only release version gate: tag <-> Cargo workspace version <-> Rust MSIX.
 # Runs before any build in release.yml so a mismatched tag cannot produce a
-# half-published release. The Rust crate deliberately stays at 0.1.0 (its own
-# registry version); that carve-out is registered explicitly below.
+# half-published release. There is no separate crate carve-out: the app version
+# is the workspace version.
 param (
     [string]$Tag = '',
     [string]$RepoRoot = $PSScriptRoot,
-    # The application version this gate was written for. Bump together with the
-    # csproj version, the Rust MSIX manifest and the release tag.
-    [string]$ExpectedVersion = '0.3.5',
-    # Explicitly allowed crate versions that do not track the app release.
-    [string[]]$AllowedCrateVersions = @('0.1.0'),
+    # Bump together with Rust-Port/Cargo.toml, the Rust MSIX manifest and the release tag.
+    [string]$ExpectedVersion = '0.4.0',
     [switch]$Quiet
 )
 
@@ -21,7 +18,7 @@ if (-not $Tag) { $Tag = $env:RELEASE_TAG }
 if (-not $Tag) { throw 'No release tag supplied (-Tag, GITHUB_REF_NAME or RELEASE_TAG).' }
 
 if ($Tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?<pre>-[0-9A-Za-z.-]+)?$') {
-    throw "Tag must look like v0.3.5 or v0.3.5-rc.1 (got: $Tag)."
+    throw "Tag must look like v0.4.0 or v0.4.0-rc.1 (got: $Tag)."
 }
 $tagVersion = $Matches['base']
 
@@ -38,15 +35,12 @@ function Get-CargoWorkspaceVersion {
     return $match.Groups[1].Value
 }
 
-$projectPath = Join-Path $RepoRoot 'OpenTaskbar.csproj'
 $cargoPath = Join-Path $RepoRoot 'Rust-Port\Cargo.toml'
 $msixPath = Join-Path $RepoRoot 'packaging\msix\AppxManifest.Rust.xml'
-foreach ($path in @($projectPath, $cargoPath, $msixPath)) {
+foreach ($path in @($cargoPath, $msixPath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing version source: $path" }
 }
 
-[xml]$project = Get-Content -Raw -LiteralPath $projectPath
-$projectVersion = ($project.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1).Trim()
 $cargoVersion = Get-CargoWorkspaceVersion -Path $cargoPath
 [xml]$manifest = Get-Content -Raw -LiteralPath $msixPath
 $msixVersion = $manifest.Package.Identity.Version
@@ -55,15 +49,11 @@ $failures = [System.Collections.Generic.List[string]]::new()
 if ($tagVersion -ne $ExpectedVersion) {
     $failures.Add("Tag $Tag carries $tagVersion; expected $ExpectedVersion.")
 }
-if ($projectVersion -ne $ExpectedVersion) {
-    $failures.Add("OpenTaskbar.csproj version $projectVersion != $ExpectedVersion.")
+if ($cargoVersion -ne $ExpectedVersion) {
+    $failures.Add("Rust-Port/Cargo.toml workspace version $cargoVersion != $ExpectedVersion.")
 }
-if ($tagVersion -ne $projectVersion) {
-    $failures.Add("Tag version $tagVersion does not match csproj version $projectVersion.")
-}
-$allowedCrateVersions = @($ExpectedVersion) + @($AllowedCrateVersions)
-if ($cargoVersion -notin $allowedCrateVersions) {
-    $failures.Add("Rust-Port/Cargo.toml version $cargoVersion is neither $ExpectedVersion nor a registered carve-out ($($AllowedCrateVersions -join ', ')).")
+if ($tagVersion -ne $cargoVersion) {
+    $failures.Add("Tag version $tagVersion does not match Cargo workspace version $cargoVersion.")
 }
 if ($msixVersion -ne "$ExpectedVersion.0") {
     $failures.Add("Rust MSIX identity version $msixVersion != $ExpectedVersion.0")
@@ -75,7 +65,6 @@ if ($failures.Count -gt 0) {
 }
 
 if (-not $Quiet) {
-    $crateNote = if ($cargoVersion -eq $ExpectedVersion) { 'matches release' } else { 'registered carve-out' }
-    Write-Host ("Version gate OK: tag={0} csproj={1} crate={2} ({3}) rust-msix={4}" -f `
-        $Tag, $projectVersion, $cargoVersion, $crateNote, $msixVersion) -ForegroundColor Green
+    Write-Host ("Version gate OK: tag={0} cargo={1} rust-msix={2}" -f `
+        $Tag, $cargoVersion, $msixVersion) -ForegroundColor Green
 }

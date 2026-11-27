@@ -5,10 +5,10 @@
 **A modern, customizable floating dock and modular widget system for Windows 10 and Windows 11.**
 
 [![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011-0078D6?style=flat-square&logo=windows)](https://github.com/alztrk/opentaskbar)
-[![Runtime](https://img.shields.io/badge/.NET-10.0%20WPF-512BD4?style=flat-square&logo=dotnet)](https://github.com/alztrk/opentaskbar)
-[![Architecture](https://img.shields.io/badge/Architecture-x64-blue?style=flat-square)](https://github.com/alztrk/opentaskbar)
+[![Runtime](https://img.shields.io/badge/Rust-stable-orange?style=flat-square&logo=rust)](https://github.com/alztrk/opentaskbar)
+[![Architecture](https://img.shields.io/badge/Architecture-x64%20%7C%20x86-blue?style=flat-square)](https://github.com/alztrk/opentaskbar)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/Tests-see%20suite-brightgreen?style=flat-square)](tests/OpenTaskbar.Tests)
+[![Tests](https://img.shields.io/badge/Tests-cargo%20test-brightgreen?style=flat-square)](Rust-Port/crates/opentaskbar-core/tests)
 
 <br />
 
@@ -24,7 +24,7 @@
 
 ## Overview
 
-OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replacement for Windows 10 and Windows 11. Built with pure WPF vector rendering, it delivers high performance, fluid magnification, live window thumbnail previews, modular hardware and media widgets, and foolproof native taskbar recovery.
+OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replacement for Windows 10 and Windows 11. Built as a self-contained Rust/GPUI application, it delivers high performance, fluid magnification, live window thumbnail previews, modular hardware and media widgets, and foolproof native taskbar recovery.
 
 ---
 
@@ -64,7 +64,7 @@ OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replaceme
 - **Fullscreen Detection:** Automatically yields and hides when full-screen applications, borderless games, or browser videos are playing.
 
 ### Modular Widget System
-- **AI Usage Providers:** Dedicated per-provider widgets for Claude, Codex, OpenCode, GitHub Copilot, DeepSeek, and OpenRouter with session/weekly quota bars or rings and reset countdowns. Credentials are discovered locally without logging or exporting them; the Rust port can additionally store DeepSeek/OpenRouter/OpenCode keys encrypted with Windows DPAPI.
+- **AI Usage Providers:** Dedicated per-provider widgets for Claude, Codex, OpenCode, GitHub Copilot, DeepSeek, and OpenRouter with session/weekly quota bars or rings and reset countdowns. Credentials are discovered locally without logging or exporting them; DeepSeek/OpenRouter/OpenCode keys can be stored encrypted with Windows DPAPI.
 - **Bluetooth Battery:** Live Windows PnP battery levels for connected Bluetooth headsets, mice, keyboards, controllers, watches, and phones with automatic device-type icons and active-node filtering.
 - **Real-Time Hardware Meters:** CPU usage, RAM usage, GPU usage, and GPU temperature rings with customizable thresholds. Temperature uses vendor-neutral WDDM adapter data first (AMD/Intel/NVIDIA, WDDM 2.4+), then optional NVIDIA NVML and AMD ADL libraries. Intel GPUs need driver-published WDDM data; there is no non-admin Intel API.
 - **Media Controls:** Now Playing track information, artist metadata, track seek bar, and volume slider.
@@ -125,8 +125,9 @@ OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replaceme
 
 ## Requirements
 
-- **Operating System:** Windows 10 (version 2004 / build 19041+) or Windows 11 (x64)
-- **Runtime:** .NET 10 Desktop Runtime (included in self-contained portable releases)
+- **Operating System:** Windows 10 (version 2004 / build 19041+) or Windows 11 (x64 or x86)
+- **Runtime:** None. The Rust binary is self-contained; the native watchdog is compiled into it.
+- **Building from source:** Rust stable toolchain (see `rust-version` in `Rust-Port/Cargo.toml`) and PowerShell 7+ for the packaging scripts.
 
 ---
 
@@ -134,7 +135,7 @@ OpenTaskbar is a lightweight, macOS-inspired floating dock and taskbar replaceme
 
 ### Portable Release
 
-Download the `OpenTaskbar-*-win-x64.exe` or `OpenTaskbar-*-win-x86.exe` asset for your architecture from [GitHub Releases](https://github.com/alztrk/opentaskbar/releases) and launch it directly. No installer or administrator privileges required. The in-app updater automatically picks the matching architecture.
+Download `OpenTaskbar-Rust-v<version>-win-x64.exe` or `OpenTaskbar-Rust-v<version>-win-x86.exe` for your architecture from [GitHub Releases](https://github.com/alztrk/opentaskbar/releases) and launch it directly. No installer, administrator privileges or separate runtime required. Each release also ships a deterministic ZIP with the EXE, `Rust-Port/README.md` and `LICENSE`, plus `checksums.txt`, `release-manifest.json` and release notes. The in-app updater automatically picks the matching architecture.
 
 ### Build from Source
 
@@ -143,37 +144,38 @@ Download the `OpenTaskbar-*-win-x64.exe` or `OpenTaskbar-*-win-x86.exe` asset fo
 git clone https://github.com/alztrk/opentaskbar.git
 cd opentaskbar
 
-# Run directly from source
-dotnet run --project OpenTaskbar.csproj
+# Run directly from source (binary name is OpenTaskBar)
+cargo run --manifest-path Rust-Port/Cargo.toml --bin OpenTaskBar
 
 # Run with the Settings window open on startup
-dotnet run --project OpenTaskbar.csproj -- --settings
+cargo run --manifest-path Rust-Port/Cargo.toml --bin OpenTaskBar -- --settings
 
-# Build self-contained portable executable (release\OpenTaskbar-x64.exe)
-powershell -ExecutionPolicy Bypass -File ".\scripts\publish-portable.ps1"
+# Build self-contained portable executables into release\
+powershell -ExecutionPolicy Bypass -File ".\scripts\publish-rust-portable.ps1"
+powershell -ExecutionPolicy Bypass -File ".\scripts\publish-rust-portable.ps1" -Runtime win-x86
 
-# Build the 32-bit variant (release\OpenTaskbar-x86.exe) into the same folder
-powershell -ExecutionPolicy Bypass -File ".\scripts\publish-portable.ps1" -Runtime win-x86
+# Verify the built EXEs (PE architecture, embedded watchdog, icon worker smoke test)
+powershell -ExecutionPolicy Bypass -File ".\scripts\check-rust-portable.ps1" -ExecutableName OpenTaskbar-Rust-x64.exe
+powershell -ExecutionPolicy Bypass -File ".\scripts\check-rust-portable.ps1" -ExecutableName OpenTaskbar-Rust-x86.exe
 
-# Build MSIX packages: appends _x64 or _x86 to the package name (release\msix\)
-powershell -ExecutionPolicy Bypass -File ".\scripts\publish-msix.ps1" -Runtime win-x86
+# Build MSIX packages (release\msix-rust\OpenTaskbarRust_<version>_<arch>.msix)
+powershell -ExecutionPolicy Bypass -File ".\scripts\publish-rust-msix.ps1" -Runtime win-x64
 
 # Package both builds into release\: versioned EXEs/ZIPs, checksums.txt,
-# release-manifest.json and release-notes.md (same step CI uses)
-powershell -ExecutionPolicy Bypass -File ".\scripts\package-release.ps1" -Tag "v0.3.2"
+# release-manifest.json and release-notes.md (same step the release workflow uses)
+powershell -ExecutionPolicy Bypass -File ".\scripts\package-rust-release.ps1" -Tag "v0.4.0"
 
-# Run automated behavior and visual verification tests (full suite, used by CI)
-dotnet run --project tests/OpenTaskbar.Tests/OpenTaskbar.Tests.csproj
-
-# Run only pure logic checks: no windows, no synthetic input, no desktop side effects
-dotnet run --project tests/OpenTaskbar.Tests/OpenTaskbar.Tests.csproj -- --headless
+# Rust workspace checks (same commands as CI)
+cargo fmt --manifest-path Rust-Port/Cargo.toml --all -- --check
+cargo clippy --manifest-path Rust-Port/Cargo.toml --workspace --all-targets -- -D warnings
+cargo test --manifest-path Rust-Port/Cargo.toml --workspace
 ```
 
-The full suite verifies WPF controls and therefore needs a Windows desktop session. The `--headless` mode skips those visual checks and runs the fast, side-effect-free logic tests.
+`cargo test --workspace` runs the deterministic logic, i18n and settings-compatibility checks; live Windows shell behavior still needs the manual smoke list in [docs/windows-reliability-audit.md](docs/windows-reliability-audit.md).
 
 ### Fjord top bar
 
-To open the optional top bar, run `OpenTaskbar.exe --fjord-bar` or `dotnet run --project OpenTaskbar.csproj -- --fjord-bar`. The bar opens on each display and can be closed from its desktop menu. The same menu opens Fjord Files.
+To open the optional top bar, run `OpenTaskBar.exe --fjord-bar` or `cargo run --manifest-path Rust-Port/Cargo.toml --bin OpenTaskBar -- --fjord-bar`. The bar opens on each display and can be closed from its desktop menu. The same menu opens Fjord Files.
 
 Use **Settings → Dock → Enable Fjord Files** to control the file browser. Turning it off closes any open Fjord Files windows and removes its entries from the dock and the top bar. A `--files` shortcut with an explicit folder or This PC target then opens in Windows File Explorer. A shortcut with no target simply exits.
 
@@ -185,13 +187,12 @@ Click the Wi-Fi icon to scan, connect, or disconnect. For a new network, **Remem
 
 User preferences, pinned item order, and widget configurations are stored locally in `%LOCALAPPDATA%\OpenTaskbar\`:
 
-- `settings.json` : User preferences, dock scaling, pinned applications, and active widgets.
+- `settings.json` : User preferences, dock scaling, pinned applications, and active widgets (PascalCase schema).
 - `taskbar-state.txt` : Native Windows taskbar state recovery journal.
-- `log.txt` : Diagnostic and operational log for the C# build.
-- `opentaskbar-rust.log` : Diagnostic log for the Rust port (rotation: `opentaskbar-rust.log.old`).
+- `opentaskbar-rust.log` : Diagnostic and operational log (rotation: `opentaskbar-rust.log.old`).
 - `Themes\` : Theme packs (icon and widget packs). See [docs/themes.md](docs/themes.md).
 
-After the shared-data integration, the Rust port uses the same `%LOCALAPPDATA%\OpenTaskbar\` folder and PascalCase `settings.json` schema; the old `%LOCALAPPDATA%\OpenTaskBar-Rust\` folder is retired. Writes from both builds are serialized by a short-lived named lock, and Rust-only keys survive C# saves via `[JsonExtensionData]`. Use a full-backup import when migrating from the older separate-folder layout.
+The Rust application is the only writer of this shared folder; the old `%LOCALAPPDATA%\OpenTaskBar-Rust\` location is retired and no longer read on startup. Settings compatibility with existing installations is preserved, including keys carried over from earlier builds. Use a full-backup import when migrating from the older separate-folder layout.
 
 ---
 
@@ -201,9 +202,11 @@ For in-depth documentation on OpenTaskbar's design tokens, materials, typography
 
 ---
 
-## Rust port
+## Source layout and release verification
 
-A parallel Rust + GPUI implementation lives in [`Rust-Port/`](Rust-Port/README.md). It shares the `%LOCALAPPDATA%\OpenTaskbar` folder, `settings.json` schema, 14-language locale catalogs (1034 C# / 1406 Rust keys per language after the integration union), theme packs and recovery journal with the C# build, and writes its own `opentaskbar-rust.log`. Build it with `.\scripts\publish-rust-portable.ps1 -Runtime win-x64` (or `win-x86`) and verify with `.\scripts\check-rust-portable.ps1`; the embedded watchdog is compiled per architecture and its PE machine is checked. `cargo test --workspace` runs the ported C# logic checks. Rust artifacts are included in the release checksums, manifest (`rustPort.crateVersion` and per-arch watchdog SHA-256), SLSA attestation and optional VirusTotal scan; `scripts/check-release-version.ps1` gates the tag against csproj, Cargo (0.1.0 carve-out) and the Rust MSIX identity before release builds.
+The application is implemented in Rust + GPUI under [`Rust-Port/`](Rust-Port/README.md): `crates/opentaskbar-core` (settings, i18n, paths, deterministic logic), `crates/opentaskbar-shell` (shell journal, taskbar/app-bar, native watchdog embedding) and `crates/opentaskbar-app` (GPUI dock, widgets and Win32 platform layer). Locale catalogs cover 14 languages, theme packs and the recovery journal live in the shared `%LOCALAPPDATA%\OpenTaskbar` folder, and diagnostics go to `opentaskbar-rust.log`.
+
+`scripts/publish-rust-portable.ps1 -Runtime win-x64` (or `win-x86`) builds the portable EXE; `scripts/check-rust-portable.ps1` verifies its PE architecture, embedded watchdog and icon-worker startup. Release assets are generated by `scripts/package-rust-release.ps1` and include versioned x64/x86 EXEs and deterministic ZIPs, `checksums.txt`, a schemaVersion 2 `release-manifest.json` (`rustPort.crateVersion`, per-arch watchdog PE machine and SHA-256) and `release-notes.md`. They are covered by SLSA provenance via `actions/attest` and an optional report-only VirusTotal scan. `scripts/check-release-version.ps1` gates the release tag against the Cargo workspace version (`0.4.0`) and the Rust MSIX identity (`0.4.0.0`) before any build.
 
 ---
 

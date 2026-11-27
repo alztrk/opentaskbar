@@ -1,13 +1,13 @@
 name: Continuous Integration
 
+# Rust-only gate. rust-ci.yml carries the extended checks (watchdog PE,
+# 32-bit build, locale key parity); this workflow guarantees that every push
+# and PR is formatted, linted, tested and built even when path filters in the
+# extended workflow do not fire.
 on:
   push:
-    branches:
-      - master
   pull_request:
-    branches:
-      - master
-      - redesign
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,36 +16,32 @@ jobs:
   build-and-test:
     name: Build & Test (Windows x64)
     runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: Rust-Port
 
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Set up .NET 10 SDK
-        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
-        with:
-          dotnet-version: '10.0.x'
-
-      - name: Restore dependencies
-        run: dotnet restore OpenTaskbar.csproj
-
-      - name: Build solution (Release, WarnAsError)
-        run: dotnet build OpenTaskbar.csproj --configuration Release --warnaserror --no-restore --verbosity quiet
-
-      - name: Run behavior and contract test suite
-        run: dotnet run --project tests/OpenTaskbar.Tests/OpenTaskbar.Tests.csproj --configuration Release
-
-      - name: Verify portable EXE starts without sidecar DLLs
-        shell: pwsh
+      - name: Set up Rust toolchain
         run: |
-          & "scripts/publish-portable.ps1" -Runtime win-x64 -OutputDir release
-          & "scripts/check-portable.ps1" -OutputDir release -ExecutableName OpenTaskbar-x64.exe
+          rustup toolchain install stable --profile minimal --component clippy,rustfmt
+          rustup default stable
 
-      - name: Upload Windows preview build
-        if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
         with:
-          name: OpenTaskbar-redesign-preview
-          path: release/
-          if-no-files-found: error
-          retention-days: 7
+          workspaces: Rust-Port
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (warnings as errors)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run Rust test suite
+        run: cargo test --workspace
+
+      - name: Release build
+        run: cargo build --workspace --release

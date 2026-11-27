@@ -1,6 +1,6 @@
-# Packages the Rust portable EXEs into tagged release artifacts and merges their
-# checksums + asset list into the files produced by scripts/package-release.ps1.
-# Run AFTER package-release.ps1 so checksums.txt / release-manifest.json exist.
+# Packages the Rust portable EXEs into Rust-only tagged release artifacts.
+# Generates checksums.txt, release-manifest.json (schemaVersion 2) and
+# release-notes.md under OutputDir from scratch; no C# artifact is involved.
 #
 # Attestation notes: checksums.txt is the subject-checksums input of
 # actions/attest@v4 (SLSA provenance); the optional VirusTotal step in
@@ -26,7 +26,7 @@ if (-not (Test-Path -LiteralPath $OutputDir -PathType Container)) {
 $OutputDir = (Resolve-Path -LiteralPath $OutputDir).Path
 
 if ($Tag -notmatch '^v(?<base>\d+\.\d+\.\d+)(?<pre>-[0-9A-Za-z.-]+)?$') {
-    throw "Tag must look like v0.3.5 or v0.3.5-rc.1 (got: $Tag)."
+    throw "Tag must look like v0.4.0 or v0.4.0-rc.1 (got: $Tag)."
 }
 $version = $Matches['base']
 
@@ -34,6 +34,12 @@ function Get-FileSha256([string]$Path) {
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
         ([BitConverter]::ToString($sha.ComputeHash([IO.File]::ReadAllBytes($Path))) -replace '-', '').ToLowerInvariant()
+    } finally { $sha.Dispose() }
+}
+function Get-FileSha256Bytes([byte[]]$Bytes) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        ([BitConverter]::ToString($sha.ComputeHash($Bytes)) -replace '-', '').ToLowerInvariant()
     } finally { $sha.Dispose() }
 }
 function Write-Utf8NoBom([string]$Path, [string]$Text) {
@@ -76,12 +82,6 @@ function Assert-ZipEntryHash([string]$ZipPath, [string]$EntryName, [string]$Expe
         } finally { $zip.Dispose() }
     } finally { $stream.Dispose() }
 }
-function Get-FileSha256Bytes([byte[]]$Bytes) {
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try {
-        ([BitConverter]::ToString($sha.ComputeHash($Bytes)) -replace '-', '').ToLowerInvariant()
-    } finally { $sha.Dispose() }
-}
 function Get-PeMachine([string]$Path) {
     $bytes = [IO.File]::ReadAllBytes($Path)
     if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
@@ -94,12 +94,6 @@ function Get-PeMachine([string]$Path) {
     }
     return [BitConverter]::ToUInt16($bytes, $offset + 4)
 }
-function Set-ManifestProperty($Object, [string]$Name, $Value) {
-    # New manifests are OrderedDictionary; Add-Member -Force only adds an ETS
-    # property there and would leave the original (empty) `assets` key intact.
-    if ($Object -is [System.Collections.IDictionary]) { $Object[$Name] = $Value }
-    else { $Object | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force }
-}
 function Get-CargoWorkspaceVersion([string]$Path) {
     $text = Get-Content -Raw -LiteralPath $Path
     $marker = '[workspace.package]'
@@ -111,18 +105,50 @@ function Get-CargoWorkspaceVersion([string]$Path) {
     if (-not $match.Success) { throw "Missing workspace.package version in $Path" }
     return $match.Groups[1].Value
 }
+function Get-ReleaseNotes([string]$ChangelogPath, [string]$Version, [string]$TagName) {
+    if (Test-Path -LiteralPath $ChangelogPath) {
+        $lines = @(Get-Content -LiteralPath $ChangelogPath)
+        foreach ($heading in @("^##\s+$([regex]::Escape($Version))(\s|$)", '^##\s+Unreleased(\s|$)')) {
+            $start = -1
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match $heading) { $start = $i; break }
+            }
+            if ($start -lt 0) { continue }
+
+            $end = $lines.Count
+            for ($j = $start + 1; $j -lt $lines.Count; $j++) {
+                if ($lines[$j] -match '^##\s+') { $end = $j; break }
+            }
+            if ($end -le $start + 1) { continue }
+
+            $section = @($lines[($start + 1)..($end - 1)])
+            while ($section.Count -gt 0 -and [string]::IsNullOrWhiteSpace($section[0])) {
+                $section = @($section[1..($section.Count - 1)])
+            }
+            while ($section.Count -gt 0 -and [string]::IsNullOrWhiteSpace($section[-1])) {
+                $section = @($section[0..($section.Count - 2)])
+            }
+            if ($section.Count -gt 0) { return "## OpenTaskbar $TagName`n`n" + ($section -join "`n") }
+        }
+    }
+    return "## OpenTaskbar $TagName`n`nNo changelog entry found for this version; see the commit history."
+}
 
 $rustReadme = Join-Path $RepoRoot 'Rust-Port\README.md'
 $license = Join-Path $RepoRoot 'LICENSE'
 $cargoManifest = Join-Path $RepoRoot 'Rust-Port\Cargo.toml'
+$changelog = Join-Path $RepoRoot 'CHANGELOG.md'
 foreach ($path in @($rustReadme, $license, $cargoManifest)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing packaging input: $path" }
 }
-# Recorded as rustPort.crateVersion; deliberately 0.1.0, decoupled from $version.
 $crateVersion = Get-CargoWorkspaceVersion -Path $cargoManifest
 
 # Remove only artifacts this script owns so repeated runs are reproducible.
 Get-ChildItem -LiteralPath $OutputDir -File -Filter "OpenTaskbar-Rust-$Tag-*" | Remove-Item -Force
+foreach ($name in @('checksums.txt', 'release-manifest.json', 'release-notes.md')) {
+    $path = Join-Path $OutputDir $name
+    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+}
 
 $newEntries = [System.Collections.Generic.List[object]]::new()
 $watchdogByArch = [ordered]@{}
@@ -184,26 +210,9 @@ foreach ($arch in @('x64', 'x86')) {
     }
 }
 
-# Merge checksums: keep C# entries, replace/append Rust entries, sort by file name.
+# Generate checksums.txt from the Rust assets only; no C# rows can survive.
 $checksumsPath = Join-Path $OutputDir 'checksums.txt'
-$checksums = [System.Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
-if (Test-Path -LiteralPath $checksumsPath -PathType Leaf) {
-    foreach ($line in (Get-Content -LiteralPath $checksumsPath)) {
-        if ($line -match '^([0-9a-f]{64})\s+\*?(.+)$') {
-            $checksums[$Matches[2].Trim()] = $Matches[1].ToLowerInvariant()
-        }
-    }
-    # Drop rows whose artifact is not in this release directory: a stale
-    # checksums.txt can carry C# rows from an older tag, and publishing them
-    # next to the current assets breaks reproducibility checks.
-    foreach ($name in @($checksums.Keys)) {
-        if (-not (Test-Path -LiteralPath (Join-Path $OutputDir $name) -PathType Leaf)) {
-            $checksums.Remove($name)
-        }
-    }
-}
-foreach ($entry in $newEntries) { $checksums[$entry.name] = $entry.sha256 }
-$checksumLines = @($checksums.GetEnumerator() | Sort-Object Key | ForEach-Object { "$($_.Value) *$($_.Key)" })
+$checksumLines = @($newEntries | Sort-Object name | ForEach-Object { "$($_.sha256) *$($_.name)" })
 Write-Utf8NoBom -Path $checksumsPath -Text ($checksumLines -join "`n")
 
 # Verify every checksum row against the bytes on disk before those hashes become
@@ -222,40 +231,34 @@ foreach ($line in $checksumLines) {
     }
 }
 
-# Merge manifest assets; keep the C# section untouched.
 $manifestPath = Join-Path $OutputDir 'release-manifest.json'
-$manifest = if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
-    Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
-} else {
-    [ordered]@{
-        schemaVersion = 1
-        tag = $Tag
-        version = $version
-        prerelease = [bool]$Prerelease
-        commit = $Commit
-        checksumsFile = 'checksums.txt'
-        assets = @()
+$manifest = [ordered]@{
+    schemaVersion  = 2
+    tag            = $Tag
+    version        = $version
+    prerelease     = [bool]$Prerelease
+    commit         = $Commit
+    checksumsFile  = 'checksums.txt'
+    assets         = @($newEntries)
+    rustPort       = [ordered]@{
+        manifest     = 'Rust-Port/Cargo.toml'
+        crateVersion = $crateVersion
+        locales      = 14
+        keyParity    = $true
+        watchdog     = $watchdogByArch
+    }
+    verification   = [ordered]@{
+        checksums  = 'checksums.txt (verified against release artifacts before attestation)'
+        slsa       = 'actions/attest@v4 Sigstore provenance; subjects from checksums.txt'
+        virusTotal = 'optional report-only scan of release ZIPs (VIRUSTOTAL_API_KEY)'
     }
 }
-if (-not $manifest.assets) { Set-ManifestProperty $manifest 'assets' @() }
-$existing = @($manifest.assets | Where-Object { $_.port -ne 'rust' })
-$allAssets = @($existing) + @($newEntries)
-Set-ManifestProperty $manifest 'assets' $allAssets
-Set-ManifestProperty $manifest 'rustPort' ([ordered]@{
-    manifest     = 'Rust-Port/Cargo.toml'
-    crateVersion = $crateVersion
-    locales      = 14
-    keyParity    = $true
-    watchdog     = $watchdogByArch
-})
-Set-ManifestProperty $manifest 'verification' ([ordered]@{
-    checksums   = 'checksums.txt (verified against release artifacts before attestation)'
-    slsa        = 'actions/attest@v4 Sigstore provenance; subjects from checksums.txt'
-    virusTotal  = 'optional report-only scan of release ZIPs (VIRUSTOTAL_API_KEY)'
-})
 Write-Utf8NoBom -Path $manifestPath -Text ($manifest | ConvertTo-Json -Depth 8)
 
-Write-Host "Packaged Rust port artifacts for $Tag ($($newEntries.Count) new assets, crate $crateVersion)." -ForegroundColor Green
+$notesPath = Join-Path $OutputDir 'release-notes.md'
+Write-Utf8NoBom -Path $notesPath -Text (Get-ReleaseNotes -ChangelogPath $changelog -Version $version -TagName $Tag)
+
+Write-Host "Packaged Rust-only release artifacts for $Tag ($($newEntries.Count) assets, crate $crateVersion)." -ForegroundColor Green
 foreach ($entry in $newEntries) {
     Write-Host ("  {0} [{1}, watchdog {2}, sha256 {3}]" -f `
         $entry['name'], $entry['architecture'], $entry['watchdogPeMachine'], $entry['watchdogSha256'])

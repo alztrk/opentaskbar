@@ -4,9 +4,8 @@ on:
   pull_request:
     branches: [master]
     paths:
-      - '**/*.csproj'
-      - 'Directory.Packages.props'
-      - '**/packages.lock.json'
+      - 'Rust-Port/Cargo.toml'
+      - 'Rust-Port/Cargo.lock'
       - '.github/workflows/**'
 
 permissions:
