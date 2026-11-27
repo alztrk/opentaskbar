@@ -2848,6 +2848,47 @@ fn run_probe(
     }
 }
 
+static SOURCE_IN_FLIGHT: [AtomicBool; 16] = [const { AtomicBool::new(false) }; 16];
+
+fn source_slot(source: BatterySource) -> usize {
+    match source {
+        BatterySource::XInput => 0,
+        BatterySource::LogitechHidPlusPlus => 1,
+        BatterySource::RazerHid => 2,
+        BatterySource::SteelSeriesHid => 3,
+        BatterySource::StandardHid => 4,
+        BatterySource::BluetoothGatt => 5,
+        BatterySource::AsusRogHid => 6,
+        BatterySource::CorsairHid => 7,
+        BatterySource::GamepadHid => 8,
+        BatterySource::HyperXHid => 9,
+        BatterySource::CompxAtkVxe => 10,
+        BatterySource::Keyboard24gHid => 11,
+        BatterySource::Bluetooth => 12,
+        BatterySource::SteelSeriesGg => 13,
+        BatterySource::LogitechGHub => 14,
+    }
+}
+
+struct SourceInFlightGuard {
+    slot: usize,
+}
+
+impl Drop for SourceInFlightGuard {
+    fn drop(&mut self) {
+        SOURCE_IN_FLIGHT[self.slot].store(false, Ordering::Release);
+    }
+}
+
+fn try_claim_source(source: BatterySource) -> Option<SourceInFlightGuard> {
+    let slot = source_slot(source);
+    if SOURCE_IN_FLIGHT[slot].swap(true, Ordering::AcqRel) {
+        None
+    } else {
+        Some(SourceInFlightGuard { slot })
+    }
+}
+
 /// Tüm kablosuz pil okumalarını toplar. Engelleyici değildir: her sağlayıcı ayrı
 /// iş parçacığında 1.2 sn'lik bütçeyle çalışır, zaman aşanlar atlanır.
 pub fn read_all() -> Vec<WirelessReading> {
@@ -2861,6 +2902,9 @@ pub fn read_all() -> Vec<WirelessReading> {
     let mut cancellations = Vec::with_capacity(sources.len());
     let mut threads = Vec::with_capacity(sources.len());
     for source in sources {
+        let Some(in_flight_guard) = try_claim_source(source) else {
+            continue;
+        };
         let sender = sender.clone();
         let devices = Arc::clone(&devices);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -2868,6 +2912,7 @@ pub fn read_all() -> Vec<WirelessReading> {
         if let Ok(handle) = std::thread::Builder::new()
             .name(format!("ot-wb-{source:?}"))
             .spawn(move || {
+                let _in_flight_guard = in_flight_guard;
                 let result =
                     catch_unwind(AssertUnwindSafe(|| run_probe(source, &devices, &cancel)))
                         .unwrap_or_default();
@@ -2913,6 +2958,29 @@ pub fn read_all() -> Vec<WirelessReading> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn try_claim_source_prevents_duplicates_and_releases_on_drop() {
+        let first = try_claim_source(BatterySource::SteelSeriesGg);
+        assert!(first.is_some(), "initial claim must succeed");
+        assert!(
+            try_claim_source(BatterySource::SteelSeriesGg).is_none(),
+            "duplicate concurrent claim for the same source must be rejected"
+        );
+        let other = try_claim_source(BatterySource::LogitechGHub);
+        assert!(
+            other.is_some(),
+            "different sources must be claimable concurrently"
+        );
+        drop(first);
+        let reclaimed = try_claim_source(BatterySource::SteelSeriesGg);
+        assert!(
+            reclaimed.is_some(),
+            "slot must be released when guard is dropped"
+        );
+        drop(reclaimed);
+        drop(other);
+    }
 
     #[test]
     fn live_polling_covers_every_probe_provider() {
