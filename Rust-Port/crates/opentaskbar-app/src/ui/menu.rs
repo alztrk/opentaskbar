@@ -36,7 +36,8 @@ use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, HDC, InvalidateRec
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::MARGINS;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_ESCAPE,
+    TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT,
+    VK_SPACE, VK_UP,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetCursorPos,
@@ -44,9 +45,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LoadCursorW, MF_BYPOSITION, MSG,
     RegisterClassExW, SW_SHOW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SendMessageW, SetCursor,
     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
-    WM_ACTIVATE, WM_COMMAND, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_PAINT, WM_SETCURSOR, WM_SYSCOMMAND, WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SYSCOMMAND, WNDCLASSEXW, WS_EX_NOACTIVATE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use opentaskbar_core::settings::{DockSettings, SurfaceBackground, clear_crystal_tint_alpha};
@@ -256,8 +257,12 @@ fn encode_native_command(id: u32, system: bool) -> u32 {
 }
 
 /// Reads the target window's own `GetMenu` / `GetSystemMenu` commands (C#
-/// `ApplicationWindowMenu.cs`). WS-B `win32_ex` will expose richer wrappers after merge.
-#[allow(dead_code)] // consumed by dock/window menus after WS-B `win32_ex` lands
+/// `ApplicationWindowMenu.cs`).
+///
+/// Intentionally kept as a **public wrapper** with a stable name: no call site
+/// exists in this worktree yet, and WS-6 dock will wire it to the window picker
+/// / system menu without needing to reach into this module's internals.
+#[allow(dead_code)] // consumed by WS-6 dock after its menu work lands
 pub fn native_app_menu_entries(target_hwnd: usize) -> Vec<MenuEntry> {
     if target_hwnd == 0 {
         return Vec::new();
@@ -349,6 +354,9 @@ struct MenuPane {
     entries: Vec<MenuEntry>,
     row_rects: Vec<Option<RECT>>,
     hovered: Option<usize>,
+    /// Keyboard cursor over selectable rows; independent of hover so mouse and
+    /// keyboard highlighting can coexist without fighting each other.
+    keyboard_index: Option<usize>,
     open_submenu_idx: Option<usize>,
     tracking: bool,
     d2d: Option<MenuD2d>,
@@ -432,6 +440,92 @@ fn should_close_submenu(
         return false;
     }
     true
+}
+
+/// Row indices that can receive keyboard selection. Separators are skipped so
+/// arrow keys never park the highlight on dead space.
+#[must_use]
+fn selectable_indices(entries: &[MenuEntry]) -> Vec<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| match entry {
+            MenuEntry::Separator => None,
+            MenuEntry::Item { .. } | MenuEntry::Submenu { .. } => Some(index),
+        })
+        .collect()
+}
+
+/// Moves the keyboard cursor over selectable rows, wrapping at both ends.
+/// `None` starts at the first row going down, or the last row going up.
+#[must_use]
+fn keyboard_step(entries: &[MenuEntry], current: Option<usize>, delta: isize) -> Option<usize> {
+    let rows = selectable_indices(entries);
+    if rows.is_empty() {
+        return None;
+    }
+    let len = rows.len();
+    let Some(current) = current else {
+        // No cursor yet: down starts at the first row, up at the last one.
+        return Some(if delta < 0 { rows[len - 1] } else { rows[0] });
+    };
+    let Some(position) = rows.iter().position(|&row| row == current) else {
+        // Stale cursor on a separator: resume at the nearest selectable row in
+        // the requested direction (no second step is applied).
+        let insertion = rows.partition_point(|&row| row <= current);
+        return Some(if delta < 0 {
+            rows[insertion.saturating_sub(1)]
+        } else {
+            rows[insertion.min(len - 1)]
+        });
+    };
+    let next = (position as isize + delta).rem_euclid(len as isize);
+    Some(rows[next as usize])
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuKeyAction {
+    Escape,
+    Up,
+    Down,
+    Left,
+    Right,
+    Confirm,
+    Other,
+}
+
+/// Pure `WM_KEYDOWN` classification (Enter **and** Space confirm, arrows navigate).
+#[must_use]
+fn menu_key_action(msg: u32, wparam: WPARAM) -> MenuKeyAction {
+    if msg != WM_KEYDOWN {
+        return MenuKeyAction::Other;
+    }
+    match wparam as u16 {
+        VK_ESCAPE => MenuKeyAction::Escape,
+        VK_UP => MenuKeyAction::Up,
+        VK_DOWN => MenuKeyAction::Down,
+        VK_LEFT => MenuKeyAction::Left,
+        VK_RIGHT => MenuKeyAction::Right,
+        VK_RETURN | VK_SPACE => MenuKeyAction::Confirm,
+        _ => MenuKeyAction::Other,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuCloseAction {
+    None,
+    EndSession,
+}
+
+/// `WM_CLOSE` must never reach `DefWindowProcW` while the modal loop still owns
+/// pane pointers; it ends the session so cleanup destroys every pane exactly once.
+#[must_use]
+fn menu_close_action(msg: u32) -> MenuCloseAction {
+    if msg == WM_CLOSE {
+        MenuCloseAction::EndSession
+    } else {
+        MenuCloseAction::None
+    }
 }
 
 fn rgba_f(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
@@ -709,6 +803,7 @@ fn create_pane_window(
         entries,
         row_rects,
         hovered: None,
+        keyboard_index: None,
         open_submenu_idx: None,
         tracking: false,
         d2d,
@@ -1030,6 +1125,9 @@ impl MenuPane {
             let sep_br = rt.CreateSolidColorBrush(&sep_col, None)?;
 
             let mut y = PAD_Y_DIPS;
+            // Mouse hover and keyboard selection share one highlight so the
+            // focused row is always visible even when the pointer is elsewhere.
+            let focused = self.hovered.or(self.keyboard_index);
             for (idx, entry) in self.entries.iter().enumerate() {
                 match entry {
                     MenuEntry::Item {
@@ -1039,7 +1137,7 @@ impl MenuPane {
                         destructive,
                         ..
                     } => {
-                        let hovered = self.hovered == Some(idx);
+                        let hovered = focused == Some(idx);
                         let left = PAD_X_DIPS;
                         let right = self.width_dips - PAD_X_DIPS;
                         if hovered {
@@ -1117,8 +1215,7 @@ impl MenuPane {
                         y += fonts::scaled_size(ROW_H_DIPS);
                     }
                     MenuEntry::Submenu { icon, label, .. } => {
-                        let active =
-                            self.hovered == Some(idx) || self.open_submenu_idx == Some(idx);
+                        let active = focused == Some(idx) || self.open_submenu_idx == Some(idx);
                         let left = PAD_X_DIPS;
                         let right = self.width_dips - PAD_X_DIPS;
                         if active {
@@ -1270,6 +1367,17 @@ unsafe extern "system" fn menu_wnd_proc(
     let session_ptr = unsafe { (*pane_ptr).session };
 
     match msg {
+        msg if menu_close_action(msg) == MenuCloseAction::EndSession => {
+            // End the modal loop rather than default-processing WM_CLOSE (which
+            // would destroy one HWND while the session still holds the others).
+            if !session_ptr.is_null() {
+                unsafe {
+                    (*session_ptr).selected_id = None;
+                    (*session_ptr).done.store(true, Ordering::Release);
+                }
+            }
+            0
+        }
         WM_PAINT => {
             unsafe {
                 (&*pane_ptr).paint();
@@ -1422,10 +1530,107 @@ unsafe extern "system" fn menu_wnd_proc(
             }
             0
         }
-        WM_KEYDOWN if wparam as u16 == VK_ESCAPE => {
-            if !session_ptr.is_null() {
+        WM_KEYDOWN => {
+            let action = menu_key_action(msg, wparam);
+            if action == MenuKeyAction::Other {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
+            // Snapshot pane data before touching the session: `open_submenu` /
+            // `close_submenu` can synchronously re-enter this WndProc, so no
+            // borrow of `pane_ptr` may be alive across those calls.
+            let is_submenu = unsafe { (*pane_ptr).is_submenu };
+            let entries = unsafe { (&*pane_ptr).entries.clone() };
+            let cursor = unsafe { (*pane_ptr).keyboard_index.or((*pane_ptr).hovered) };
+            let submenu_open =
+                !session_ptr.is_null() && unsafe { (*session_ptr).submenu.is_some() };
+            let mut invalidate = false;
+
+            match action {
+                MenuKeyAction::Escape => {
+                    if !session_ptr.is_null() {
+                        unsafe {
+                            let session = &mut *session_ptr;
+                            if session.submenu.is_some() {
+                                // First Escape closes the submenu, second ends the menu.
+                                session.close_submenu();
+                            } else {
+                                session.selected_id = None;
+                                session.done.store(true, Ordering::Release);
+                            }
+                        }
+                        invalidate = true;
+                    }
+                }
+                MenuKeyAction::Up | MenuKeyAction::Down => {
+                    let delta = if action == MenuKeyAction::Up { -1 } else { 1 };
+                    let next = keyboard_step(&entries, cursor, delta);
+                    unsafe {
+                        (*pane_ptr).keyboard_index = next;
+                    }
+                    // Moving the highlight is explicit intent: abandon any open submenu.
+                    if !session_ptr.is_null() && submenu_open {
+                        unsafe {
+                            (*session_ptr).close_submenu();
+                        }
+                    }
+                    invalidate = true;
+                }
+                MenuKeyAction::Left => {
+                    if !session_ptr.is_null() && submenu_open {
+                        unsafe {
+                            (*session_ptr).close_submenu();
+                        }
+                        invalidate = true;
+                    }
+                }
+                MenuKeyAction::Right => {
+                    if !session_ptr.is_null() && !is_submenu {
+                        if let Some(idx) = cursor
+                            && let Some(MenuEntry::Submenu { items, .. }) = entries.get(idx)
+                            && let Some(rect) =
+                                unsafe { (&*pane_ptr).row_rects.get(idx).copied().flatten() }
+                        {
+                            let items = items.clone();
+                            unsafe {
+                                (*session_ptr).open_submenu(idx, items, rect);
+                            }
+                            invalidate = true;
+                        }
+                    }
+                }
+                MenuKeyAction::Confirm => {
+                    if let Some(idx) = cursor {
+                        match entries.get(idx) {
+                            Some(MenuEntry::Item { id, .. }) => {
+                                if !session_ptr.is_null() {
+                                    unsafe {
+                                        (*session_ptr).selected_id = Some(*id);
+                                        (*session_ptr).done.store(true, Ordering::Release);
+                                    }
+                                }
+                            }
+                            Some(MenuEntry::Submenu { items, .. }) if !is_submenu => {
+                                if let Some(rect) =
+                                    unsafe { (&*pane_ptr).row_rects.get(idx).copied().flatten() }
+                                {
+                                    let items = items.clone();
+                                    if !session_ptr.is_null() {
+                                        unsafe {
+                                            (*session_ptr).open_submenu(idx, items, rect);
+                                        }
+                                        invalidate = true;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                MenuKeyAction::Other => unreachable!("classified as Other above"),
+            }
+            if invalidate {
                 unsafe {
-                    (*session_ptr).done.store(true, Ordering::Release);
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
                 }
             }
             0
@@ -1471,10 +1676,16 @@ unsafe extern "system" fn menu_wnd_proc(
 #[cfg(test)]
 mod tests {
     use super::{
-        MenuWndProcGuard, NATIVE_SYS_COMMAND_FLAG, SUBMENU_HOVER_GRACE_MS, encode_native_command,
-        measure_entries, pt_in_rect, screen_row_rect, should_close_submenu,
+        MenuCloseAction, MenuEntry, MenuIcon, MenuKeyAction, MenuWndProcGuard,
+        NATIVE_SYS_COMMAND_FLAG, SUBMENU_HOVER_GRACE_MS, encode_native_command, keyboard_step,
+        measure_entries, menu_close_action, menu_key_action, pt_in_rect, screen_row_rect,
+        selectable_indices, should_close_submenu,
     };
     use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        VK_DOWN, VK_END, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_UP,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{WM_CLOSE, WM_KEYDOWN, WM_PAINT};
 
     #[test]
     fn wndproc_guard_rejects_same_hwnd_reentry_and_allows_others() {
@@ -1612,6 +1823,72 @@ mod tests {
         assert!(!close(0));
         assert!(!close(SUBMENU_HOVER_GRACE_MS));
         assert!(close(SUBMENU_HOVER_GRACE_MS + 1));
+    }
+
+    #[test]
+    fn wm_close_ends_the_menu_session_instead_of_destroying_one_pane() {
+        assert_eq!(menu_close_action(WM_CLOSE), MenuCloseAction::EndSession);
+        assert_eq!(menu_close_action(WM_PAINT), MenuCloseAction::None);
+        assert_eq!(menu_close_action(WM_KEYDOWN), MenuCloseAction::None);
+    }
+
+    #[test]
+    fn keyboard_navigation_skips_separators_and_wraps() {
+        let entries = vec![
+            MenuEntry::item(1, MenuIcon::Search, "a"),
+            MenuEntry::Separator,
+            MenuEntry::item(2, MenuIcon::Settings, "b"),
+            MenuEntry::submenu(MenuIcon::Folder, "more", vec![]),
+        ];
+        assert_eq!(selectable_indices(&entries), vec![0, 2, 3]);
+        assert_eq!(keyboard_step(&entries, None, 1), Some(0));
+        assert_eq!(keyboard_step(&entries, Some(0), 1), Some(2));
+        assert_eq!(keyboard_step(&entries, Some(3), 1), Some(0));
+        assert_eq!(keyboard_step(&entries, Some(0), -1), Some(3));
+        assert_eq!(keyboard_step(&entries, Some(2), -1), Some(0));
+        // A stale cursor on a separator is normalised to the nearest row.
+        assert_eq!(keyboard_step(&entries, Some(1), 1), Some(2));
+        assert_eq!(keyboard_step(&[MenuEntry::Separator], None, 1), None);
+    }
+
+    #[test]
+    fn keyboard_action_accepts_arrows_enter_space_and_escape() {
+        assert_eq!(
+            menu_key_action(WM_KEYDOWN, VK_DOWN as usize),
+            MenuKeyAction::Down
+        );
+        assert_eq!(
+            menu_key_action(WM_KEYDOWN, VK_UP as usize),
+            MenuKeyAction::Up
+        );
+        assert_eq!(
+            menu_key_action(WM_KEYDOWN, VK_LEFT as usize),
+            MenuKeyAction::Left
+        );
+        assert_eq!(
+            menu_key_action(WM_KEYDOWN, VK_RIGHT as usize),
+            MenuKeyAction::Right
+        );
+        assert_eq!(
+            menu_key_action(WM_KEYDOWN, VK_RETURN as usize),
+            MenuKeyAction::Confirm
+        );
+        assert_eq!(
+            menu_key_action(WM_KEYDOWN, VK_SPACE as usize),
+            MenuKeyAction::Confirm
+        );
+        assert_eq!(
+            menu_key_action(WM_KEYDOWN, VK_ESCAPE as usize),
+            MenuKeyAction::Escape
+        );
+        assert_eq!(
+            menu_key_action(WM_KEYDOWN, VK_END as usize),
+            MenuKeyAction::Other
+        );
+        assert_eq!(
+            menu_key_action(WM_PAINT, VK_DOWN as usize),
+            MenuKeyAction::Other
+        );
     }
 
     #[test]
