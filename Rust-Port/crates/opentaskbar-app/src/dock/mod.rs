@@ -4683,13 +4683,14 @@ impl DockState {
         if let Some(ref mut preview) = self.preview {
             // C# size-profile card dimensions (228x154 / 250x180 DIP).
             preview.set_card_size(profile.preview_card.0, profile.preview_card.1);
-            // Clear Crystal glass backdrop / tint (ours) stays active together
-            // with the WS-6 profile card size.
-            preview.set_glass_mode(
-                self.settings.dock_background == SurfaceBackground::Glass,
-                opentaskbar_core::settings::clear_crystal_tint_alpha(
+            // Clear Crystal optical glass config (strictly active in Glass mode).
+            preview.set_glass_config(
+                crate::design::spatial_glass::SpatialGlassConfig::from_settings(
+                    &self.settings,
+                    self.settings.dock_background,
                     self.settings.dock_opacity,
                     self.is_dark,
+                    false,
                 ),
             );
             preview.show(&key, &items, anchor_x, anchor_bottom_y, self.is_dark);

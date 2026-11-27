@@ -38,6 +38,9 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use crate::design::brush::{BrushSpec, GradientSpec, Hsv, MAX_GRADIENT_STOPS};
 use crate::design::fonts;
+use crate::design::spatial_glass::{
+    SpatialGlassConfig, SpatialGlassHost, configure_host_backdrop_window,
+};
 use crate::design::theme::{
     SurfaceKind, ThemeManager, apply_pack_tokens_to_palette, apply_token_overrides,
     token_overrides_from_json,
@@ -49,11 +52,10 @@ use crate::platform::{
 };
 use crate::ui::components::{
     ButtonVariant, DropdownOption, DropdownSelectHandler, SearchableDropdownHandlers,
-    SearchableDropdownState, UiTheme, badge, button, dim_when, dropdown, dropdown_labeled,
+    SearchableDropdownState, UiTheme, badge, button, dim_when, dropdown, icon_action_menu,
     icon_glyph, ios_switch, live_slider, searchable_dropdown, section_card, setting_row,
     setting_row_desc, setting_row_with_id, setting_row_with_id_desc, sidebar_nav_item, stepper,
 };
-use crate::ui::menu::{self, BorderStyle, MenuEntry, MenuIcon};
 use crate::ui::prompt;
 use crate::ui::settings_search::{self, SettingsSearchEntry};
 use crate::ui::text_input::{TextInput, apply_keystroke, clamp_numeric};
@@ -330,20 +332,18 @@ fn high_contrast_enabled() -> bool {
     }
 }
 
-/// Applies or clears the system backdrop so Settings uses glass ONLY in Glass mode.
-fn apply_settings_backdrop(window: &Window, is_dark: bool, glass_mode: bool) {
+/// Configures the GPUI Settings HWND (`WS_EX_NOREDIRECTIONBITMAP`) for `HostBackdropBrush`
+/// strictly in Glass mode so `SpatialGlassHost` renders live Clear Crystal glass underneath.
+fn configure_settings_glass_hwnd(window: &Window, is_dark: bool, glass_mode: bool) -> usize {
     let Ok(handle) = HasWindowHandle::window_handle(window) else {
-        return;
+        return 0;
     };
     let RawWindowHandle::Win32(win32_handle) = handle.as_raw() else {
-        return;
+        return 0;
     };
     let hwnd = win32_handle.hwnd.get() as usize;
-    if glass_mode {
-        let _ = crate::design::glass::apply_window_backdrop(hwnd, is_dark);
-    } else {
-        let _ = crate::design::glass::clear_window_backdrop(hwnd, is_dark);
-    }
+    configure_host_backdrop_window(hwnd, is_dark, glass_mode);
+    hwnd
 }
 
 // ---------------------------------------------------------------------------
@@ -1042,7 +1042,10 @@ struct SettingsView {
     /// and consumed once `ScrollAnchor::scroll_to` has been scheduled.
     scroll_anchor: Option<ScrollAnchor>,
     save_failed: bool,
-    font_page: usize,
+    /// Cached installed Windows font families for the in-app searchable font dropdown.
+    installed_fonts: Vec<String>,
+    font_picker: SearchableDropdownState,
+    font_picker_focus: FocusHandle,
     hotkey_status: String,
     theme_status: String,
     weather_suggestions: Vec<widgets::telemetry::GeoLocationMatch>,
@@ -1075,7 +1078,10 @@ struct SettingsView {
     token_name: String,
     token_value: String,
     token_apply_status: String,
-    // Theme brush picker (C# `ThemeBrushPicker`).
+    // Shared Figma-style color & gradient brush picker modal state.
+    brush_picker_open: bool,
+    brush_picker_target: BrushPickerTarget,
+    brush_hex_focus: FocusHandle,
     brush_mode: BrushMode,
     brush_hsv: Hsv,
     brush_alpha: u8,
@@ -1083,6 +1089,8 @@ struct SettingsView {
     brush_stops: Vec<crate::design::tokens::Rgba>,
     brush_selected_stop: usize,
     brush_hex: String,
+    /// Clear Crystal optical glass host (`topmost = false`) underneath GPUI's DComp swapchain.
+    spatial_glass: Option<SpatialGlassHost>,
     ai_status: String,
 }
 
@@ -1090,6 +1098,12 @@ struct SettingsView {
 enum BrushMode {
     Solid,
     Gradient,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrushPickerTarget {
+    ThemeToken,
+    BorderSurface(usize),
 }
 
 impl SettingsView {
@@ -1104,13 +1118,23 @@ impl SettingsView {
             AppTheme::Light => false,
             AppTheme::System => win32::read_system_is_dark(),
         };
-        // Window-open backdrop hook: WS-B will expose this as
-        // `design::glass::apply_window_backdrop(hwnd, is_dark)` (see function note).
-        apply_settings_backdrop(
-            window,
+        let glass_cfg = SpatialGlassConfig::from_settings(
+            &settings,
+            settings.settings_background,
+            extra_f64(&settings, "SettingsOpacity", 0.95),
             is_dark,
-            settings.settings_background == SurfaceBackground::Glass,
+            false,
         );
+        let hwnd = configure_settings_glass_hwnd(window, is_dark, glass_cfg.enabled);
+        let mut spatial_glass = SpatialGlassHost::attach(hwnd, false, glass_cfg);
+        if let Some(ref mut g) = spatial_glass {
+            let dpi = win32::dpi_scale(hwnd);
+            let vp = window.viewport_size();
+            let w_px = (f32::from(vp.width) * dpi).max(WIN_W * dpi);
+            let h_px = (f32::from(vp.height) * dpi).max(WIN_H * dpi);
+            g.sync_rect(0.0, 0.0, w_px, h_px, (10.0 * dpi).round(), dpi, 0.0, 0.0);
+        }
+        let installed_fonts = fonts::installed_fonts().to_vec();
         let saved_city = settings.weather_city.clone();
         let weather_city = if saved_city.trim().is_empty() {
             "Istanbul".to_owned()
@@ -1145,7 +1169,9 @@ impl SettingsView {
             highlight_row: None,
             scroll_anchor: None,
             save_failed: false,
-            font_page: 0,
+            installed_fonts,
+            font_picker: SearchableDropdownState::new(),
+            font_picker_focus: cx.focus_handle(),
             hotkey_status: String::new(),
             theme_status: String::new(),
             weather_suggestions: Vec::new(),
@@ -1171,6 +1197,9 @@ impl SettingsView {
             token_name: String::new(),
             token_value: String::new(),
             token_apply_status: loc::t("TokenApplyHint"),
+            brush_picker_open: false,
+            brush_picker_target: BrushPickerTarget::ThemeToken,
+            brush_hex_focus: cx.focus_handle(),
             brush_mode: BrushMode::Solid,
             brush_hsv: Hsv::from(brush_color),
             brush_alpha: brush_color.a,
@@ -1179,6 +1208,7 @@ impl SettingsView {
                 .stops,
             brush_selected_stop: 0,
             brush_hex: brush_color.hex(),
+            spatial_glass,
             ai_status: loc::t(if cursor_auth::has_session() {
                 "AiCursorSignedIn"
             } else {
@@ -1410,12 +1440,11 @@ impl SettingsView {
         )
     }
 
-    /// Compact `...` action menu: one trigger instead of a row of separate buttons.
-    fn make_action_menu(
+    /// Compact vertical three-dots (`⋮`) icon-only action menu (no prefix/chevron clutter).
+    fn make_icon_action_menu(
         &self,
         id: impl Into<String>,
         t: &UiTheme,
-        label: SharedString,
         options: Vec<DropdownOption>,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
@@ -1423,7 +1452,7 @@ impl SettingsView {
         let is_open = self.open_dropdown.as_deref() == Some(id.as_str());
         let entity = cx.entity().downgrade();
         let toggle_id = id.clone();
-        dropdown_labeled(id, t, is_open, Some(label), options, move |_win, app| {
+        icon_action_menu(id, t, is_open, options, move |_win, app| {
             let _ = entity.update(app, |this, cx| {
                 if this.open_dropdown.as_deref() == Some(toggle_id.as_str()) {
                     this.open_dropdown = None;
@@ -1435,9 +1464,121 @@ impl SettingsView {
         })
     }
 
+    /// Synchronizes the Settings window's Clear Crystal optical glass host (`topmost = false`)
+    /// underneath GPUI's premultiplied DComp swapchain strictly when `settings_background == Glass`.
+    fn sync_settings_glass(&mut self, window: &Window) {
+        let is_dark = self.resolve_is_dark();
+        let glass_cfg = SpatialGlassConfig::from_settings(
+            &self.settings,
+            self.settings.settings_background,
+            extra_f64(&self.settings, "SettingsOpacity", 0.95),
+            is_dark,
+            false,
+        );
+        let hwnd = configure_settings_glass_hwnd(window, is_dark, glass_cfg.enabled);
+        if self.spatial_glass.is_none() && glass_cfg.enabled {
+            self.spatial_glass = SpatialGlassHost::attach(hwnd, false, glass_cfg);
+        }
+        if let Some(ref mut g) = self.spatial_glass {
+            g.apply_config(glass_cfg);
+            if glass_cfg.enabled {
+                let dpi = win32::dpi_scale(hwnd);
+                let vp = window.viewport_size();
+                let w_px = (f32::from(vp.width) * dpi).max(2.0);
+                let h_px = (f32::from(vp.height) * dpi).max(2.0);
+                g.sync_rect(0.0, 0.0, w_px, h_px, (10.0 * dpi).round(), dpi, 0.0, 0.0);
+            }
+        }
+    }
+
+    /// Opens the shared Figma-style Color & Gradient Brush Picker modal.
+    fn open_brush_picker(&mut self, target: BrushPickerTarget, cx: &mut Context<Self>) {
+        self.open_dropdown = None;
+        self.brush_picker_target = target;
+        match target {
+            BrushPickerTarget::ThemeToken => {}
+            BrushPickerTarget::BorderSurface(index) => {
+                self.brush_mode = BrushMode::Solid;
+                let existing = match index {
+                    0 => self.settings.dock_border_color.as_deref(),
+                    1 => self.settings.menu_border_color.as_deref(),
+                    2 => self.settings.widget_border_color.as_deref(),
+                    _ => self.settings.settings_border_color.as_deref(),
+                };
+                let parsed = existing
+                    .and_then(crate::design::brush::parse_hex)
+                    .unwrap_or_else(|| {
+                        let rgb = crate::design::palette(self.is_dark()).border_rgb;
+                        crate::design::tokens::Rgba::from_rgb(rgb.0, rgb.1, rgb.2)
+                    });
+                self.brush_hsv = Hsv::from(parsed);
+                self.brush_alpha = parsed.a;
+                self.brush_hex = parsed.hex();
+            }
+        }
+        self.brush_picker_open = true;
+        cx.notify();
+    }
+
+    fn apply_brush_picker_selection(&mut self, cx: &mut Context<Self>) {
+        match self.brush_picker_target {
+            BrushPickerTarget::BorderSurface(index) => {
+                let color = self.brush_active_color();
+                let hex = format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b);
+                let slot = match index {
+                    0 => &mut self.settings.dock_border_color,
+                    1 => &mut self.settings.menu_border_color,
+                    2 => &mut self.settings.widget_border_color,
+                    _ => &mut self.settings.settings_border_color,
+                };
+                *slot = Some(hex);
+                self.brush_picker_open = false;
+                self.auto_save(cx);
+            }
+            BrushPickerTarget::ThemeToken => {
+                let name = self.token_name.trim().to_owned();
+                if !name.is_empty() {
+                    let brush = build_brush(
+                        self.brush_mode,
+                        self.brush_hsv,
+                        self.brush_alpha,
+                        self.brush_angle,
+                        &self.brush_stops,
+                    );
+                    let mut map = self
+                        .settings
+                        .extra
+                        .get("ThemeTokens")
+                        .and_then(Value::as_object)
+                        .cloned()
+                        .unwrap_or_default();
+                    map.insert(name.clone(), brush_to_json(&brush));
+                    persist_theme_tokens(&mut self.settings, map);
+                    self.token_apply_status = loc::t_fmt("BrushTokenSaved", &[&name]);
+                    self.auto_save(cx);
+                }
+                self.brush_picker_open = false;
+                cx.notify();
+            }
+        }
+    }
+
+    fn reset_border_picker_color(&mut self, index: usize, cx: &mut Context<Self>) {
+        let slot = match index {
+            0 => &mut self.settings.dock_border_color,
+            1 => &mut self.settings.menu_border_color,
+            2 => &mut self.settings.widget_border_color,
+            _ => &mut self.settings.settings_border_color,
+        };
+        *slot = None;
+        self.brush_picker_open = false;
+        self.auto_save(cx);
+    }
+
     fn picker_state(&self, id: &str) -> &SearchableDropdownState {
         match id {
             "weather-city" => &self.city_picker,
+            "ui-font-family" => &self.font_picker,
             _ => &self.country_picker,
         }
     }
@@ -1445,6 +1586,7 @@ impl SettingsView {
     fn picker_state_mut(&mut self, id: &str) -> &mut SearchableDropdownState {
         match id {
             "weather-city" => &mut self.city_picker,
+            "ui-font-family" => &mut self.font_picker,
             _ => &mut self.country_picker,
         }
     }
@@ -2625,9 +2767,8 @@ impl SettingsView {
             );
         }
 
-        // C# `ThemeBrushPicker`: a real visual HSV field (2D saturation/value + separate hue
-        // and alpha sliders), a hex box and a draggable 16-stop gradient strip. Every edit is
-        // stored in `design::brush` types and saved into the same `ThemeTokens` map.
+        // Compact Figma-style Brush Trigger inside the card: clicking opens the shared
+        // floating Color & Gradient Picker modal instead of cramming controls inline.
         let brush = build_brush(
             self.brush_mode,
             self.brush_hsv,
@@ -2635,374 +2776,86 @@ impl SettingsView {
             self.brush_angle,
             &self.brush_stops,
         );
-        let preview_color = match &brush {
-            BrushSpec::Solid(color) => *color,
-            BrushSpec::Gradient(gradient) => gradient.stops.first().copied().unwrap_or_default(),
-        };
         let active_color = self.brush_active_color();
-        let active_hsv = Hsv::from(active_color);
-        let stop_label = (self.brush_selected_stop + 1).to_string();
-
-        // 2D saturation/value field. A grid of hit cells gives pixel-accurate clicks/drags
-        // without depending on element bounds from the render callback.
-        const FIELD_COLS: usize = 20;
-        const FIELD_ROWS: usize = 10;
-        const FIELD_W: f32 = 220.0;
-        const FIELD_H: f32 = 110.0;
-        let field_hue = active_hsv.h;
-        let mut field = div()
-            .id("brush-sv-field")
-            .relative()
-            .w(px(FIELD_W))
-            .h(px(FIELD_H))
-            .rounded(px(8.0))
+        let mut swatch_preview = div()
+            .w(px(46.0))
+            .h(px(22.0))
+            .rounded(px(6.0))
             .border_1()
             .border_color(rgba(t.border))
-            .overflow_hidden();
-        for row in 0..FIELD_ROWS {
-            let mut line = div().w_full().h(px(FIELD_H / FIELD_ROWS as f32)).flex();
-            for col in 0..FIELD_COLS {
-                let cell = field_cell_hsv(field_hue, col, row, FIELD_COLS, FIELD_ROWS);
-                let cell_color = cell.to_rgba(self.brush_alpha).to_gpui();
-                line = line.child(
-                    div()
-                        .id(SharedString::from(format!("brush-sv-{row}-{col}")))
-                        .flex_1()
-                        .h_full()
-                        .cursor_pointer()
-                        .bg(rgba(cell_color))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                this.set_brush_hsv(cell, cx);
-                            }),
-                        )
-                        .on_mouse_move(cx.listener(
-                            move |this, ev: &gpui::MouseMoveEvent, _, cx| {
-                                if ev.dragging() {
-                                    this.set_brush_hsv(cell, cx);
-                                }
-                            },
-                        )),
-                );
+            .overflow_hidden()
+            .flex();
+        match &brush {
+            BrushSpec::Solid(color) => {
+                swatch_preview = swatch_preview.bg(rgba(color.to_gpui()));
             }
-            field = field.child(line);
+            BrushSpec::Gradient(gradient) => {
+                let stops = &gradient.stops;
+                let count = stops.len().max(2);
+                const PREVIEW_STEPS: usize = 12;
+                for seg in 0..PREVIEW_STEPS {
+                    let pos = (seg as f64 + 0.5) / PREVIEW_STEPS as f64;
+                    let scaled = pos * (count - 1) as f64;
+                    let idx = scaled.floor() as usize;
+                    let frac = scaled - idx as f64;
+                    let a = stops.get(idx).copied().unwrap_or_default();
+                    let b = stops.get((idx + 1).min(count - 1)).copied().unwrap_or(a);
+                    swatch_preview = swatch_preview
+                        .child(div().flex_1().h_full().bg(rgba(a.mix(b, frac).to_gpui())));
+                }
+            }
         }
-        let marker_x =
-            (active_hsv.s * f64::from(FIELD_W) - 6.0).clamp(0.0, f64::from(FIELD_W) - 12.0) as f32;
-        let marker_y = ((1.0 - active_hsv.v) * f64::from(FIELD_H) - 6.0)
-            .clamp(0.0, f64::from(FIELD_H) - 12.0) as f32;
-        field = field.child(
-            div()
-                .absolute()
-                .left(px(marker_x))
-                .top(px(marker_y))
-                .w(px(12.0))
-                .h(px(12.0))
-                .rounded(px(6.0))
-                .border_2()
-                .border_color(rgba(t.text_primary))
-                .bg(rgba(0x00FF_FFFF)),
-        );
+        let summary_text = match self.brush_mode {
+            BrushMode::Solid => active_color.hex(),
+            BrushMode::Gradient => format!(
+                "{} · {:.0}\u{00B0} ({})",
+                loc::t("Gradient"),
+                self.brush_angle,
+                self.brush_stops.len()
+            ),
+        };
+        let trigger_hover = t.surface_hover;
+        let brush_trigger = div()
+            .id("btn-open-brush-picker")
+            .h(px(34.0))
+            .px(px(10.0))
+            .rounded(px(8.0))
+            .bg(rgba(t.surface_muted))
+            .border_1()
+            .border_color(rgba(t.border))
+            .flex()
+            .items_center()
+            .gap(px(10.0))
+            .cursor_pointer()
+            .tab_index(0)
+            .hover(move |s| s.bg(rgba(trigger_hover)))
+            .active(|s| s.opacity(0.86))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.open_brush_picker(BrushPickerTarget::ThemeToken, cx);
+            }))
+            .child(swatch_preview)
+            .child(
+                div()
+                    .text_size(px(fonts::scaled_size(12.0)))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(rgba(t.text_primary))
+                    .child(summary_text),
+            )
+            .child(icon_glyph("\u{E790}", 12.0, t.text_secondary));
 
-        let hue_handler = |i: usize| -> UiHandler {
-            let entity = cx.entity().downgrade();
-            std::rc::Rc::new(move |_win, app| {
-                let _ = entity.update(app, |this, cx| {
-                    let hsv = this.brush_active_hsv();
-                    this.set_brush_hsv(Hsv::new(i as f64 * 359.0 / 35.0, hsv.s, hsv.v), cx);
-                });
-            })
-        };
-        let alpha_handler = |i: usize| -> UiHandler {
-            let entity = cx.entity().downgrade();
-            std::rc::Rc::new(move |_win, app| {
-                let _ = entity.update(app, |this, cx| {
-                    let alpha = ((i as i32 * 255) / 16).clamp(0, 255) as u8;
-                    this.set_brush_alpha(alpha, cx);
-                });
-            })
-        };
-        let angle_handler = |i: usize| -> UiHandler {
-            let entity = cx.entity().downgrade();
-            std::rc::Rc::new(move |_win, app| {
-                let _ = entity.update(app, |this, cx| {
-                    this.brush_angle = (i as f64 * 360.0 / 36.0).min(360.0);
-                    cx.notify();
-                });
-            })
-        };
-
-        let mut brush_rows = vec![
+        let brush_rows = vec![
             self.target_row(
                 "ThemeBrushPicker",
                 t,
                 Some("\u{E790}"),
-                loc::t("BrushType"),
-                div()
-                    .flex()
-                    .gap(px(6.0))
-                    .child(button(
-                        "btn-brush-solid",
-                        t,
-                        loc::t("SurfaceSolid"),
-                        if self.brush_mode == BrushMode::Solid {
-                            ButtonVariant::Primary
-                        } else {
-                            ButtonVariant::Secondary
-                        },
-                        cx.listener(|this, _, _, cx| {
-                            this.brush_mode = BrushMode::Solid;
-                            cx.notify();
-                        }),
-                    ))
-                    .child(button(
-                        "btn-brush-gradient",
-                        t,
-                        loc::t("Gradient"),
-                        if self.brush_mode == BrushMode::Gradient {
-                            ButtonVariant::Primary
-                        } else {
-                            ButtonVariant::Secondary
-                        },
-                        cx.listener(|this, _, _, cx| {
-                            this.brush_mode = BrushMode::Gradient;
-                            cx.notify();
-                        }),
-                    )),
-            )
-            .into_any_element(),
-            setting_row(
-                t,
-                Some("\u{E790}"),
                 loc::t("ColorPalette"),
-                div().flex().items_start().gap(px(10.0)).child(field).child(
-                    div()
-                        .w(px(180.0))
-                        .h(px(22.0))
-                        .rounded(px(6.0))
-                        .border_1()
-                        .border_color(rgba(t.border))
-                        .bg(rgba(preview_color.to_gpui()))
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(rgba(t.text_secondary))
-                                .child(active_color.hex()),
-                        ),
-                ),
+                brush_trigger,
             )
             .into_any_element(),
-            setting_row(
-                t,
-                Some("\u{E790}"),
-                loc::t("ColorHue"),
-                live_slider(
-                    "brush-hue",
-                    t,
-                    active_hsv.h as f32 / 359.0,
-                    36,
-                    format!("{:.0}\u{00B0}", active_hsv.h),
-                    hue_handler,
-                ),
-            )
-            .into_any_element(),
-            setting_row(
-                t,
-                Some("\u{E790}"),
-                loc::t("ColorOpacity"),
-                live_slider(
-                    "brush-alpha",
-                    t,
-                    self.brush_alpha as f32 / 255.0,
-                    17,
-                    format!("{}", self.brush_alpha),
-                    alpha_handler,
-                ),
-            )
-            .into_any_element(),
-            setting_row(
-                t,
-                Some("\u{E790}"),
-                loc::t("ColorHEX"),
-                div()
-                    .id("brush-hex-input")
-                    .tab_index(0)
-                    .w(px(180.0))
-                    .h(px(28.0))
-                    .px(px(8.0))
-                    .rounded(px(7.0))
-                    .bg(rgba(t.surface_muted))
-                    .border_1()
-                    .border_color(rgba(t.border))
-                    .flex()
-                    .items_center()
-                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                        let mut buffer = this.brush_hex.clone();
-                        if apply_keystroke(
-                            &mut buffer,
-                            &event.keystroke.key,
-                            event.keystroke.key_char.as_deref(),
-                            false,
-                        ) {
-                            this.brush_hex = buffer;
-                            if let Some(color) = crate::design::brush::parse_hex(&this.brush_hex) {
-                                this.brush_hsv = Hsv::from(color);
-                                this.brush_alpha = color.a;
-                                if this.brush_mode == BrushMode::Gradient
-                                    && let Some(stop) =
-                                        this.brush_stops.get_mut(this.brush_selected_stop)
-                                {
-                                    *stop = color;
-                                }
-                            }
-                            cx.notify();
-                        }
-                    }))
-                    .child(div().text_size(px(12.0)).child(self.brush_hex.clone())),
-            )
-            .into_any_element(),
-        ];
-
-        if self.brush_mode == BrushMode::Gradient {
-            // Gradient strip with 64 painted segments and one draggable handle per stop
-            // (bounded by `MAX_GRADIENT_STOPS` from `design::brush`).
-            let stop_count = self.brush_stops.len().max(2);
-            let mut strip = div()
-                .id("brush-gradient-strip")
-                .relative()
-                .w(px(FIELD_W))
-                .h(px(24.0))
-                .rounded(px(6.0))
-                .border_1()
-                .border_color(rgba(t.border))
-                .overflow_hidden()
-                .flex();
-            const STRIP_SEGMENTS: usize = 48;
-            for segment in 0..STRIP_SEGMENTS {
-                let pos = (segment as f64 + 0.5) / STRIP_SEGMENTS as f64;
-                let scaled = pos * (stop_count - 1) as f64;
-                let index = scaled.floor() as usize;
-                let frac = scaled - index as f64;
-                let a = self.brush_stops.get(index).copied().unwrap_or_default();
-                let b = self
-                    .brush_stops
-                    .get((index + 1).min(stop_count - 1))
-                    .copied()
-                    .unwrap_or(a);
-                let target = gradient_stop_at(pos, stop_count);
-                let segment_color = a.mix(b, frac).to_gpui();
-                strip = strip.child(
-                    div()
-                        .id(SharedString::from(format!("brush-strip-{segment}")))
-                        .flex_1()
-                        .h_full()
-                        .cursor_pointer()
-                        .bg(rgba(segment_color))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _, _, cx| {
-                                if let Some(stop) = this.brush_stops.get(target).copied() {
-                                    this.brush_selected_stop = target;
-                                    this.brush_hsv = Hsv::from(stop);
-                                    this.brush_hex = stop.hex();
-                                    cx.notify();
-                                }
-                            }),
-                        )
-                        .on_mouse_move(cx.listener(
-                            move |this, ev: &gpui::MouseMoveEvent, _, cx| {
-                                if ev.dragging() {
-                                    let from = this.brush_selected_stop;
-                                    this.move_brush_stop(from, target, cx);
-                                }
-                            },
-                        )),
-                );
-            }
-            for (index, color) in self.brush_stops.iter().enumerate() {
-                let left = (index as f32 / (stop_count - 1) as f32) * (FIELD_W - 12.0);
-                strip = strip.child(
-                    div()
-                        .absolute()
-                        .left(px(left))
-                        .top(px(0.0))
-                        .w(px(12.0))
-                        .h(px(24.0))
-                        .rounded(px(3.0))
-                        .border_1()
-                        .border_color(rgba(t.text_primary))
-                        .bg(rgba(color.to_gpui())),
-                );
-            }
-            brush_rows.push(
-                setting_row(
-                    t,
-                    Some("\u{E790}"),
-                    loc::t("ColorAngle"),
-                    live_slider(
-                        "brush-angle",
-                        t,
-                        self.brush_angle as f32 / 360.0,
-                        37,
-                        format!("{:.0}\u{00B0}", self.brush_angle),
-                        angle_handler,
-                    ),
-                )
-                .into_any_element(),
-            );
-            brush_rows.push(
-                setting_row(
-                    t,
-                    Some("\u{E790}"),
-                    loc::t_fmt("ColorStopLabel", &[&stop_label]),
-                    strip,
-                )
-                .into_any_element(),
-            );
-            brush_rows.push(
-                setting_row(
-                    t,
-                    Some("\u{E790}"),
-                    loc::t("ColorSelectStop"),
-                    div()
-                        .flex()
-                        .gap(px(6.0))
-                        .child(button(
-                            "btn-brush-stop-add",
-                            t,
-                            loc::t("ColorAddStop"),
-                            ButtonVariant::Secondary,
-                            cx.listener(|this, _, _, cx| this.add_brush_stop(cx)),
-                        ))
-                        .child(button(
-                            "btn-brush-stop-remove",
-                            t,
-                            loc::t("ColorRemove"),
-                            ButtonVariant::Destructive,
-                            cx.listener(|this, _, _, cx| this.remove_brush_stop(cx)),
-                        ))
-                        .child(
-                            div()
-                                .pl(px(4.0))
-                                .text_size(px(11.0))
-                                .text_color(rgba(t.text_secondary))
-                                .child(format!(
-                                    "{}/{}",
-                                    self.brush_stops.len(),
-                                    MAX_GRADIENT_STOPS
-                                )),
-                        ),
-                )
-                .into_any_element(),
-            );
-        }
-
-        brush_rows.push(
             setting_row(
                 t,
                 Some("\u{E74E}"),
-                loc::t("ThemeBrushPicker"),
+                loc::t("BrushSaveToken"),
                 button(
                     "btn-save-brush",
                     t,
@@ -3037,7 +2890,7 @@ impl SettingsView {
                 ),
             )
             .into_any_element(),
-        );
+        ];
 
         vec![
             section_card(
@@ -3048,6 +2901,665 @@ impl SettingsView {
             .into_any_element(),
             section_card(t, loc::t("ThemeBrushPicker"), brush_rows).into_any_element(),
         ]
+    }
+
+    /// Shared Figma-style floating Color & Gradient Brush Picker modal (used by both
+    /// `ThemeBrushPicker` tokens and surface border colors).
+    fn render_brush_picker_overlay(
+        &self,
+        t: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !self.brush_picker_open {
+            return None;
+        }
+        let allow_gradient = self.brush_picker_target == BrushPickerTarget::ThemeToken;
+        let is_gradient = allow_gradient && self.brush_mode == BrushMode::Gradient;
+        let active_color = self.brush_active_color();
+        let active_hsv = Hsv::from(active_color);
+        let alpha_pct = ((f32::from(self.brush_alpha) / 255.0) * 100.0).round() as i32;
+
+        let modal_title = match self.brush_picker_target {
+            BrushPickerTarget::ThemeToken => loc::t("ThemeBrushPicker"),
+            BrushPickerTarget::BorderSurface(_) => loc::t("BorderColorLabel"),
+        };
+
+        // 2D Saturation / Value field (Figma-style crisp interactive square).
+        const FIELD_COLS: usize = 24;
+        const FIELD_ROWS: usize = 12;
+        const FIELD_W: f32 = 312.0;
+        const FIELD_H: f32 = 144.0;
+        let field_hue = active_hsv.h;
+        let mut sv_field = div()
+            .id("figma-sv-field")
+            .relative()
+            .w(px(FIELD_W))
+            .h(px(FIELD_H))
+            .rounded(px(8.0))
+            .border_1()
+            .border_color(rgba(t.border))
+            .overflow_hidden();
+        for row in 0..FIELD_ROWS {
+            let mut line = div().w_full().h(px(FIELD_H / FIELD_ROWS as f32)).flex();
+            for col in 0..FIELD_COLS {
+                let cell = field_cell_hsv(field_hue, col, row, FIELD_COLS, FIELD_ROWS);
+                let cell_color = cell.to_rgba(255).to_gpui();
+                line = line.child(
+                    div()
+                        .id(SharedString::from(format!("figma-sv-{row}-{col}")))
+                        .flex_1()
+                        .h_full()
+                        .cursor_pointer()
+                        .bg(rgba(cell_color))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.set_brush_hsv(cell, cx);
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(
+                            move |this, ev: &gpui::MouseMoveEvent, _, cx| {
+                                if ev.dragging() {
+                                    this.set_brush_hsv(cell, cx);
+                                }
+                            },
+                        )),
+                );
+            }
+            sv_field = sv_field.child(line);
+        }
+        let marker_x =
+            (active_hsv.s * f64::from(FIELD_W) - 7.0).clamp(0.0, f64::from(FIELD_W) - 14.0) as f32;
+        let marker_y = ((1.0 - active_hsv.v) * f64::from(FIELD_H) - 7.0)
+            .clamp(0.0, f64::from(FIELD_H) - 14.0) as f32;
+        sv_field = sv_field.child(
+            div()
+                .absolute()
+                .left(px(marker_x))
+                .top(px(marker_y))
+                .w(px(14.0))
+                .h(px(14.0))
+                .rounded(px(7.0))
+                .border_2()
+                .border_color(rgba(0xFFFF_FFFF))
+                .bg(rgba(active_color.to_gpui())),
+        );
+
+        // Rainbow Hue spectrum bar (36 steps) with circular Figma thumb.
+        const BAR_W: f32 = 312.0;
+        const HUE_STEPS: usize = 36;
+        let mut hue_bar = div()
+            .id("figma-hue-bar")
+            .relative()
+            .w(px(BAR_W))
+            .h(px(14.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(rgba(t.border))
+            .overflow_hidden()
+            .flex();
+        for i in 0..HUE_STEPS {
+            let hue = (i as f64 * 359.0) / (HUE_STEPS - 1) as f64;
+            let seg_color = Hsv::new(hue, 1.0, 1.0).to_rgba(255).to_gpui();
+            hue_bar = hue_bar.child(
+                div()
+                    .id(SharedString::from(format!("figma-hue-{i}")))
+                    .flex_1()
+                    .h_full()
+                    .cursor_pointer()
+                    .bg(rgba(seg_color))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            let cur = this.brush_active_hsv();
+                            this.set_brush_hsv(Hsv::new(hue, cur.s, cur.v), cx);
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(move |this, ev: &gpui::MouseMoveEvent, _, cx| {
+                        if ev.dragging() {
+                            let cur = this.brush_active_hsv();
+                            this.set_brush_hsv(Hsv::new(hue, cur.s, cur.v), cx);
+                        }
+                    })),
+            );
+        }
+        let hue_thumb_x = ((active_hsv.h / 359.0) * f64::from(BAR_W) - 7.0)
+            .clamp(0.0, f64::from(BAR_W) - 14.0) as f32;
+        hue_bar = hue_bar.child(
+            div()
+                .absolute()
+                .left(px(hue_thumb_x))
+                .top(px(0.0))
+                .w(px(14.0))
+                .h(px(14.0))
+                .rounded(px(7.0))
+                .border_2()
+                .border_color(rgba(0xFFFF_FFFF))
+                .bg(rgba(
+                    Hsv::new(active_hsv.h, 1.0, 1.0).to_rgba(255).to_gpui(),
+                )),
+        );
+
+        // Opacity gradient bar (24 steps) with circular thumb.
+        const ALPHA_STEPS: usize = 24;
+        let mut alpha_bar = div()
+            .id("figma-alpha-bar")
+            .relative()
+            .w(px(BAR_W))
+            .h(px(14.0))
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(rgba(t.border))
+            .bg(rgba(t.surface_muted))
+            .overflow_hidden()
+            .flex();
+        for i in 0..ALPHA_STEPS {
+            let alpha = ((i as f32 / (ALPHA_STEPS - 1) as f32) * 255.0).round() as u8;
+            let seg_color = crate::design::tokens::Rgba::new(
+                active_color.r,
+                active_color.g,
+                active_color.b,
+                alpha,
+            )
+            .to_gpui();
+            alpha_bar = alpha_bar.child(
+                div()
+                    .id(SharedString::from(format!("figma-alpha-{i}")))
+                    .flex_1()
+                    .h_full()
+                    .cursor_pointer()
+                    .bg(rgba(seg_color))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _, _, cx| {
+                            this.set_brush_alpha(alpha, cx);
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(move |this, ev: &gpui::MouseMoveEvent, _, cx| {
+                        if ev.dragging() {
+                            this.set_brush_alpha(alpha, cx);
+                        }
+                    })),
+            );
+        }
+        let alpha_thumb_x =
+            ((f32::from(self.brush_alpha) / 255.0) * BAR_W - 7.0).clamp(0.0, BAR_W - 14.0);
+        alpha_bar = alpha_bar.child(
+            div()
+                .absolute()
+                .left(px(alpha_thumb_x))
+                .top(px(0.0))
+                .w(px(14.0))
+                .h(px(14.0))
+                .rounded(px(7.0))
+                .border_2()
+                .border_color(rgba(0xFFFF_FFFF))
+                .bg(rgba(active_color.to_gpui())),
+        );
+
+        let mut modal = div()
+            .id("figma-brush-modal")
+            .w(px(348.0))
+            .max_w_full()
+            .p(px(18.0))
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .rounded(px(14.0))
+            .bg(rgba(t.popover_bg))
+            .border_1()
+            .border_color(rgba(t.border))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            });
+
+        // Header
+        let hover_bg = t.surface_hover;
+        modal = modal.child(
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(icon_glyph("\u{E790}", 14.0, t.accent))
+                        .child(
+                            div()
+                                .text_size(px(fonts::scaled_size(14.0)))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgba(t.text_primary))
+                                .child(modal_title),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("figma-brush-close-x")
+                        .w(px(28.0))
+                        .h(px(28.0))
+                        .rounded(px(7.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(rgba(hover_bg)))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.brush_picker_open = false;
+                            cx.notify();
+                        }))
+                        .child(icon_glyph("\u{E8BB}", 11.0, t.text_secondary)),
+                ),
+        );
+
+        // Mode segmented bar (Solid | Gradient) — Figma fill-type switcher
+        if allow_gradient {
+            modal = modal.child(
+                div()
+                    .w_full()
+                    .p(px(3.0))
+                    .rounded(px(9.0))
+                    .bg(rgba(t.surface_muted))
+                    .border_1()
+                    .border_color(rgba(t.border))
+                    .flex()
+                    .gap(px(4.0))
+                    .child(
+                        div()
+                            .id("figma-mode-solid")
+                            .flex_1()
+                            .h(px(28.0))
+                            .rounded(px(6.0))
+                            .bg(rgba(if !is_gradient { t.accent } else { 0x0000_0000 }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .text_size(px(fonts::scaled_size(12.0)))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(rgba(if !is_gradient {
+                                t.accent_fg
+                            } else {
+                                t.text_secondary
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.brush_mode = BrushMode::Solid;
+                                cx.notify();
+                            }))
+                            .child(loc::t("SurfaceSolid")),
+                    )
+                    .child(
+                        div()
+                            .id("figma-mode-gradient")
+                            .flex_1()
+                            .h(px(28.0))
+                            .rounded(px(6.0))
+                            .bg(rgba(if is_gradient { t.accent } else { 0x0000_0000 }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .text_size(px(fonts::scaled_size(12.0)))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(rgba(if is_gradient {
+                                t.accent_fg
+                            } else {
+                                t.text_secondary
+                            }))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.brush_mode = BrushMode::Gradient;
+                                cx.notify();
+                            }))
+                            .child(loc::t("Gradient")),
+                    ),
+            );
+        }
+
+        // Gradient stop strip + stop add/remove + angle slider (when Gradient is selected)
+        if is_gradient {
+            let stop_count = self.brush_stops.len().max(2);
+            let mut strip = div()
+                .id("figma-gradient-strip")
+                .relative()
+                .w(px(BAR_W))
+                .h(px(24.0))
+                .rounded(px(7.0))
+                .border_1()
+                .border_color(rgba(t.border))
+                .overflow_hidden()
+                .flex();
+            const STRIP_SEGMENTS: usize = 48;
+            for segment in 0..STRIP_SEGMENTS {
+                let pos = (segment as f64 + 0.5) / STRIP_SEGMENTS as f64;
+                let scaled = pos * (stop_count - 1) as f64;
+                let index = scaled.floor() as usize;
+                let frac = scaled - index as f64;
+                let a = self.brush_stops.get(index).copied().unwrap_or_default();
+                let b = self
+                    .brush_stops
+                    .get((index + 1).min(stop_count - 1))
+                    .copied()
+                    .unwrap_or(a);
+                let target = gradient_stop_at(pos, stop_count);
+                let segment_color = a.mix(b, frac).to_gpui();
+                strip = strip.child(
+                    div()
+                        .id(SharedString::from(format!("figma-strip-{segment}")))
+                        .flex_1()
+                        .h_full()
+                        .cursor_pointer()
+                        .bg(rgba(segment_color))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                if let Some(stop) = this.brush_stops.get(target).copied() {
+                                    this.brush_selected_stop = target;
+                                    this.brush_hsv = Hsv::from(stop);
+                                    this.brush_alpha = stop.a;
+                                    this.brush_hex = stop.hex();
+                                    cx.notify();
+                                }
+                            }),
+                        )
+                        .on_mouse_move(cx.listener(
+                            move |this, ev: &gpui::MouseMoveEvent, _, cx| {
+                                if ev.dragging() {
+                                    let from = this.brush_selected_stop;
+                                    this.move_brush_stop(from, target, cx);
+                                }
+                            },
+                        )),
+                );
+            }
+            for (index, color) in self.brush_stops.iter().enumerate() {
+                let left = (index as f32 / (stop_count - 1) as f32) * (BAR_W - 14.0);
+                let selected = index == self.brush_selected_stop;
+                strip = strip.child(
+                    div()
+                        .absolute()
+                        .left(px(left))
+                        .top(px(0.0))
+                        .w(px(14.0))
+                        .h(px(24.0))
+                        .rounded(px(4.0))
+                        .border_2()
+                        .border_color(rgba(if selected { t.accent } else { 0xFFFF_FFFF }))
+                        .bg(rgba(color.to_gpui())),
+                );
+            }
+
+            let angle_handler = |i: usize| -> UiHandler {
+                let entity = cx.entity().downgrade();
+                std::rc::Rc::new(move |_win, app| {
+                    let _ = entity.update(app, |this, cx| {
+                        this.brush_angle = (i as f64 * 360.0 / 36.0).min(360.0);
+                        cx.notify();
+                    });
+                })
+            };
+
+            modal = modal
+                .child(strip)
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.0))
+                                .child(button(
+                                    "figma-stop-add",
+                                    t,
+                                    loc::t("ColorAddStop"),
+                                    ButtonVariant::Secondary,
+                                    cx.listener(|this, _, _, cx| this.add_brush_stop(cx)),
+                                ))
+                                .child(button(
+                                    "figma-stop-remove",
+                                    t,
+                                    loc::t("ColorRemove"),
+                                    ButtonVariant::Destructive,
+                                    cx.listener(|this, _, _, cx| this.remove_brush_stop(cx)),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgba(t.text_secondary))
+                                .child(format!(
+                                    "{}/{}",
+                                    self.brush_stops.len(),
+                                    MAX_GRADIENT_STOPS
+                                )),
+                        ),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_size(px(fonts::scaled_size(12.0)))
+                                .text_color(rgba(t.text_secondary))
+                                .child(loc::t("ColorAngle")),
+                        )
+                        .child(live_slider(
+                            "figma-brush-angle",
+                            t,
+                            self.brush_angle as f32 / 360.0,
+                            37,
+                            format!("{:.0}\u{00B0}", self.brush_angle),
+                            angle_handler,
+                        )),
+                );
+        }
+
+        // 2D SV Field + Hue + Opacity
+        modal = modal.child(sv_field).child(
+            div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap(px(8.0))
+                .child(hue_bar)
+                .child(alpha_bar),
+        );
+
+        // Editable HEX box + Opacity % readout
+        let hex_focus = self.brush_hex_focus.clone();
+        modal = modal.child(
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .w(px(30.0))
+                        .h(px(30.0))
+                        .rounded(px(7.0))
+                        .border_1()
+                        .border_color(rgba(t.border))
+                        .bg(rgba(active_color.to_gpui())),
+                )
+                .child(
+                    div()
+                        .id("figma-hex-input")
+                        .track_focus(&self.brush_hex_focus)
+                        .tab_index(0)
+                        .flex_1()
+                        .h(px(30.0))
+                        .px(px(10.0))
+                        .rounded(px(7.0))
+                        .bg(rgba(t.surface_muted))
+                        .border_1()
+                        .border_color(rgba(t.border))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .cursor_text()
+                        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                            cx.stop_propagation();
+                            hex_focus.focus(window);
+                        })
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                            let mut buffer = this.brush_hex.clone();
+                            if apply_keystroke(
+                                &mut buffer,
+                                &event.keystroke.key,
+                                event.keystroke.key_char.as_deref(),
+                                false,
+                            ) {
+                                this.brush_hex = buffer;
+                                if let Some(color) =
+                                    crate::design::brush::parse_hex(&this.brush_hex)
+                                {
+                                    this.brush_hsv = Hsv::from(color);
+                                    this.brush_alpha = color.a;
+                                    if this.brush_mode == BrushMode::Gradient
+                                        && let Some(stop) =
+                                            this.brush_stops.get_mut(this.brush_selected_stop)
+                                    {
+                                        *stop = color;
+                                    }
+                                }
+                                cx.notify();
+                            }
+                        }))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(rgba(t.text_secondary))
+                                .child(loc::t("ColorHEX")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(gpui::FontWeight::MEDIUM)
+                                .text_color(rgba(t.text_primary))
+                                .child(self.brush_hex.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .w(px(54.0))
+                        .h(px(30.0))
+                        .rounded(px(7.0))
+                        .bg(rgba(t.surface_muted))
+                        .border_1()
+                        .border_color(rgba(t.border))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(12.0))
+                        .text_color(rgba(t.text_secondary))
+                        .child(format!("{alpha_pct}%")),
+                ),
+        );
+
+        // Quick swatches row
+        const SWATCHES: [(u8, u8, u8); 8] = [
+            (0x3B, 0x82, 0xF6),
+            (0x63, 0x66, 0xF1),
+            (0x8B, 0x5C, 0xF6),
+            (0xEC, 0x48, 0x99),
+            (0xEF, 0x44, 0x44),
+            (0xF5, 0x9E, 0x0B),
+            (0x10, 0xB9, 0x81),
+            (0xF4, 0xF4, 0xF5),
+        ];
+        let mut swatch_row = div().w_full().flex().items_center().justify_between();
+        for (idx, (r, g, b)) in SWATCHES.into_iter().enumerate() {
+            let sw = crate::design::tokens::Rgba::from_rgb(r, g, b);
+            swatch_row = swatch_row.child(
+                div()
+                    .id(SharedString::from(format!("figma-swatch-{idx}")))
+                    .w(px(28.0))
+                    .h(px(22.0))
+                    .rounded(px(6.0))
+                    .border_1()
+                    .border_color(rgba(t.border))
+                    .bg(rgba(sw.to_gpui()))
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_brush_hsv(Hsv::from(sw), cx);
+                    })),
+            );
+        }
+        modal = modal.child(swatch_row);
+
+        // Footer actions
+        let mut footer = div()
+            .w_full()
+            .pt(px(4.0))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.0));
+        if let BrushPickerTarget::BorderSurface(index) = self.brush_picker_target {
+            footer = footer.child(button(
+                "figma-brush-reset",
+                t,
+                loc::t("Reset"),
+                ButtonVariant::Secondary,
+                cx.listener(move |this, _, _, cx| this.reset_border_picker_color(index, cx)),
+            ));
+        } else {
+            footer = footer.child(div());
+        }
+        footer = footer.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .child(button(
+                    "figma-brush-cancel",
+                    t,
+                    loc::t("Close"),
+                    ButtonVariant::Secondary,
+                    cx.listener(|this, _, _, cx| {
+                        this.brush_picker_open = false;
+                        cx.notify();
+                    }),
+                ))
+                .child(button(
+                    "figma-brush-apply",
+                    t,
+                    loc::t("Apply"),
+                    ButtonVariant::Primary,
+                    cx.listener(|this, _, _, cx| this.apply_brush_picker_selection(cx)),
+                )),
+        );
+        modal = modal.child(footer);
+
+        Some(
+            div()
+                .id("figma-brush-backdrop")
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(rgba(0x7800_0000))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.brush_picker_open = false;
+                        cx.notify();
+                    }),
+                )
+                .child(modal)
+                .into_any_element(),
+        )
     }
 
     fn render_widget_preview(&self, id: &str, t: &UiTheme, is_dark: bool) -> AnyElement {
@@ -4386,115 +4898,7 @@ impl SettingsView {
     }
 
     fn edit_border_color(&mut self, surface: usize, cx: &mut Context<Self>) {
-        let current = match surface {
-            0 => self.settings.dock_border_color.clone(),
-            1 => self.settings.menu_border_color.clone(),
-            2 => self.settings.widget_border_color.clone(),
-            _ => self.settings.settings_border_color.clone(),
-        }
-        .unwrap_or_default();
-        let title = loc::t("BorderColorLabel");
-        let hint = loc::t("BorderStyleHelp");
-        let is_dark = self.is_dark();
-        let Some(text) = prompt::ask_name(0, is_dark, &title, &hint, &current) else {
-            return;
-        };
-        let text = text.trim().to_owned();
-        if !text.is_empty() && parse_hex_color(&text).is_none() {
-            return;
-        }
-        let slot = match surface {
-            0 => &mut self.settings.dock_border_color,
-            1 => &mut self.settings.menu_border_color,
-            2 => &mut self.settings.widget_border_color,
-            _ => &mut self.settings.settings_border_color,
-        };
-        *slot = if text.is_empty() { None } else { Some(text) };
-        self.auto_save(cx);
-    }
-
-    /// Native paged font picker: Windows has hundreds of installed families, so the
-    /// list is shown 24 at a time with Previous/Next entries instead of one huge menu.
-    fn choose_font(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        const PAGE_SIZE: usize = 24;
-        const NATIVE_ID: u32 = 0;
-        const PREV_ID: u32 = u32::MAX - 1;
-        const NEXT_ID: u32 = u32::MAX;
-
-        let fonts = fonts::installed_fonts();
-        let max_page = fonts.len().saturating_sub(1) / PAGE_SIZE;
-        self.font_page = self.font_page.min(max_page);
-        let start = self.font_page * PAGE_SIZE;
-
-        let mut entries = Vec::new();
-        let native_label = loc::t_fmt("FontNativeWithWindows", &[fonts::native_ui_face()]);
-        let mut native = MenuEntry::item(NATIVE_ID, MenuIcon::Settings, native_label.clone());
-        if self.settings.ui_font_family.trim().is_empty() {
-            native = MenuEntry::with_shortcut(
-                NATIVE_ID,
-                MenuIcon::Settings,
-                native_label.clone(),
-                "\u{E73E}",
-            );
-        }
-        entries.push(native);
-        entries.push(MenuEntry::Separator);
-        for (index, name) in fonts.iter().enumerate().skip(start).take(PAGE_SIZE) {
-            let id = (index + 1) as u32;
-            let mut entry = MenuEntry::item(id, MenuIcon::Settings, name.clone());
-            if self.settings.ui_font_family.eq_ignore_ascii_case(name) {
-                entry = MenuEntry::with_shortcut(id, MenuIcon::Settings, name.clone(), "\u{E73E}");
-            }
-            entries.push(entry);
-        }
-        entries.push(MenuEntry::Separator);
-        if self.font_page > 0 {
-            entries.push(MenuEntry::item(
-                PREV_ID,
-                MenuIcon::ChevronLeft,
-                loc::t("DesktopPrevious"),
-            ));
-        }
-        if self.font_page < max_page {
-            entries.push(MenuEntry::item(
-                NEXT_ID,
-                MenuIcon::ChevronRight,
-                loc::t("DesktopNext"),
-            ));
-        }
-
-        let hwnd = Self::window_hwnd(window);
-        let is_dark = self.is_dark();
-        let chosen = menu::show_popup_menu_with_border(
-            hwnd,
-            is_dark,
-            entries,
-            BorderStyle::from_menu_settings(is_dark, &self.settings),
-        )
-        .unwrap_or(u32::MAX - 2);
-        match chosen {
-            NATIVE_ID => {
-                self.settings.ui_font_family.clear();
-                fonts::set_selected_family("");
-                self.auto_save(cx);
-            }
-            PREV_ID => {
-                self.font_page = self.font_page.saturating_sub(1);
-                self.choose_font(window, cx);
-            }
-            NEXT_ID => {
-                self.font_page = (self.font_page + 1).min(max_page);
-                self.choose_font(window, cx);
-            }
-            id if id >= 1 && (id as usize) <= fonts.len() => {
-                if let Some(name) = fonts.get(id as usize - 1) {
-                    self.settings.ui_font_family = name.clone();
-                    fonts::set_selected_family(name);
-                    self.auto_save(cx);
-                }
-            }
-            _ => {}
-        }
+        self.open_brush_picker(BrushPickerTarget::BorderSurface(surface), cx);
     }
 
     #[allow(clippy::too_many_arguments)] // merged WS-E settings row helper signature
@@ -4525,16 +4929,7 @@ impl SettingsView {
                     let _ = entity.update(app, |this, cx| {
                         this.open_dropdown = None;
                         apply(&mut this.settings, background);
-                        let is_dark = match this.settings.theme {
-                            AppTheme::Dark => true,
-                            AppTheme::Light => false,
-                            AppTheme::System => win32::read_system_is_dark(),
-                        };
-                        apply_settings_backdrop(
-                            win,
-                            is_dark,
-                            this.settings.settings_background == SurfaceBackground::Glass,
-                        );
+                        this.sync_settings_glass(win);
                         this.auto_save(cx);
                     });
                 }),
@@ -5935,23 +6330,63 @@ impl SettingsView {
                 t,
                 loc::t("ThemeSectionTypography"),
                 vec![
-                    setting_row(
-                        t,
-                        Some("\u{E8D3}"),
-                        loc::t("UiFontFamily"),
-                        button(
-                            "btn-ui-font",
+                    {
+                        let mut font_options: Vec<DropdownOption> =
+                            Vec::with_capacity(self.installed_fonts.len() + 1);
+                        let native_entity = cx.entity().downgrade();
+                        font_options.push(DropdownOption {
+                            label: SharedString::from(loc::t_fmt(
+                                "FontNativeWithWindows",
+                                &[fonts::native_ui_face()],
+                            )),
+                            flag_path: None,
+                            glyph: None,
+                            selected: self.settings.ui_font_family.trim().is_empty(),
+                            on_select: std::rc::Rc::new(move |_win, app| {
+                                let _ = native_entity.update(app, |this, cx| {
+                                    this.open_dropdown = None;
+                                    this.clear_picker_state("ui-font-family");
+                                    this.settings.ui_font_family.clear();
+                                    fonts::set_selected_family("");
+                                    this.auto_save(cx);
+                                });
+                            }),
+                        });
+                        for name in &self.installed_fonts {
+                            let selected = self.settings.ui_font_family.eq_ignore_ascii_case(name);
+                            let family = name.clone();
+                            let entity = cx.entity().downgrade();
+                            font_options.push(DropdownOption {
+                                label: SharedString::from(name.clone()),
+                                flag_path: None,
+                                glyph: None,
+                                selected,
+                                on_select: std::rc::Rc::new(move |_win, app| {
+                                    let family = family.clone();
+                                    let _ = entity.update(app, |this, cx| {
+                                        this.open_dropdown = None;
+                                        this.clear_picker_state("ui-font-family");
+                                        this.settings.ui_font_family = family.clone();
+                                        fonts::set_selected_family(&family);
+                                        this.auto_save(cx);
+                                    });
+                                }),
+                            });
+                        }
+                        setting_row(
                             t,
-                            if self.settings.ui_font_family.trim().is_empty() {
-                                loc::t("UiFontNative")
-                            } else {
-                                self.settings.ui_font_family.clone()
-                            },
-                            ButtonVariant::Secondary,
-                            cx.listener(|this, _, window, cx| this.choose_font(window, cx)),
-                        ),
-                    )
-                    .into_any_element(),
+                            Some("\u{E8D3}"),
+                            loc::t("UiFontFamily"),
+                            self.make_searchable_dropdown(
+                                "ui-font-family",
+                                t,
+                                &self.font_picker_focus,
+                                &font_options,
+                                cx,
+                            ),
+                        )
+                        .into_any_element()
+                    },
                     setting_row(
                         t,
                         Some("\u{E8D3}"),
@@ -6080,20 +6515,20 @@ impl SettingsView {
                                     })),
                                     flag_path: None,
                                     glyph: Some("\u{E73E}"),
-                                    selected: false,
+                                    selected: active,
                                     on_select: use_action,
                                 },
                                 DropdownOption {
                                     label: SharedString::from(loc::t("ThemePackExport")),
                                     flag_path: None,
-                                    glyph: None,
+                                    glyph: Some("\u{EDE1}"),
                                     selected: false,
                                     on_select: export_action,
                                 },
                                 DropdownOption {
                                     label: SharedString::from(loc::t("ThemePackDelete")),
                                     flag_path: None,
-                                    glyph: None,
+                                    glyph: Some("\u{E74D}"),
                                     selected: false,
                                     on_select: delete_action,
                                 },
@@ -6113,10 +6548,9 @@ impl SettingsView {
                                             .text_size(px(fonts::scaled_size(12.0)))
                                             .child(pack.manifest.name.clone()),
                                     )
-                                    .child(self.make_action_menu(
+                                    .child(self.make_icon_action_menu(
                                         format!("theme-actions-{id}"),
                                         t,
-                                        SharedString::from("..."),
                                         actions,
                                         cx,
                                     )),
@@ -6311,6 +6745,43 @@ impl SettingsView {
                         }),
                     );
                     let color_id = SharedString::from(format!("{id}-color"));
+                    let swatch_rgba = color
+                        .as_deref()
+                        .and_then(parse_hex_color)
+                        .unwrap_or(t.border);
+                    let color_hover = t.surface_hover;
+                    let color_btn = div()
+                        .id(color_id)
+                        .h(px(30.0))
+                        .px(px(9.0))
+                        .rounded(px(8.0))
+                        .bg(rgba(t.surface_muted))
+                        .border_1()
+                        .border_color(rgba(t.border))
+                        .flex()
+                        .items_center()
+                        .gap(px(7.0))
+                        .cursor_pointer()
+                        .hover(move |s| s.bg(rgba(color_hover)))
+                        .active(|s| s.opacity(0.86))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit_border_color(index, cx);
+                        }))
+                        .child(
+                            div()
+                                .w(px(16.0))
+                                .h(px(16.0))
+                                .rounded(px(4.0))
+                                .border_1()
+                                .border_color(rgba(t.border))
+                                .bg(rgba(swatch_rgba)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(fonts::scaled_size(11.5)))
+                                .text_color(rgba(t.text_primary))
+                                .child(color.unwrap_or_else(|| loc::t("Automatic"))),
+                        );
                     border_rows.push(
                         setting_row(
                             t,
@@ -6321,15 +6792,7 @@ impl SettingsView {
                                 .items_center()
                                 .gap(px(8.0))
                                 .child(step)
-                                .child(button(
-                                    color_id,
-                                    t,
-                                    color.unwrap_or_else(|| "\u{E7A2}".to_owned()),
-                                    ButtonVariant::Secondary,
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.edit_border_color(index, cx)
-                                    }),
-                                )),
+                                .child(color_btn),
                         )
                         .into_any_element(),
                     );
@@ -8219,7 +8682,9 @@ impl EntityInputHandler for SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let is_dark = self.resolve_is_dark();
-        let mut t = UiTheme::new(is_dark);
+        let settings_glass = self.settings.settings_background == SurfaceBackground::Glass;
+        self.sync_settings_glass(window);
+        let mut t = UiTheme::for_settings(is_dark, settings_glass);
         t.border_width = self.settings.settings_border_thickness.clamp(0.0, 8.0) as f32;
         if let Some(value) = &self.settings.settings_border_color
             && let Some(color) = parse_hex_color(value)
@@ -8655,6 +9120,7 @@ impl Render for SettingsView {
             );
 
         let panel_overlay = self.render_widget_panel_overlay(&t, cx);
+        let brush_overlay = self.render_brush_picker_overlay(&t, cx);
         div()
             .id("settings")
             .track_focus(&self.focus)
@@ -8663,8 +9129,19 @@ impl Render for SettingsView {
             .on_action(|_: &TabPrevious, window, _| window.focus_prev())
             .on_action(cx.listener(|this, _: &CloseWidgetPanel, window, cx| {
                 this.open_dropdown = None;
+                this.brush_picker_open = false;
                 this.close_widget_panel(window);
                 cx.notify();
+            }))
+            .on_mouse_move(cx.listener(|this, ev: &gpui::MouseMoveEvent, window, _| {
+                if let Some(ref mut glass) = this.spatial_glass
+                    && glass.is_enabled()
+                {
+                    let dpi = win32::dpi_scale(Self::window_hwnd(window));
+                    let x_px = f32::from(ev.position.x) * dpi;
+                    let y_px = f32::from(ev.position.y) * dpi;
+                    glass.set_pointer(x_px, y_px);
+                }
             }))
             .on_mouse_down(
                 MouseButton::Left,
@@ -8757,6 +9234,9 @@ impl Render for SettingsView {
             )
             .when(panel_overlay.is_some(), |root| {
                 root.child(panel_overlay.unwrap())
+            })
+            .when(brush_overlay.is_some(), |root| {
+                root.child(brush_overlay.unwrap())
             })
     }
 }

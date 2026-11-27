@@ -6,6 +6,9 @@
 //! directly into the desktop pass.
 
 use super::layout;
+use crate::design::spatial_glass::{
+    DCompForeground, SpatialGlassConfig, SpatialGlassHost, configure_host_backdrop_window,
+};
 use crate::design::{self, Rgb, fonts, gdi_rgb};
 use opentaskbar_shell::tracker;
 use std::cell::RefCell;
@@ -34,8 +37,7 @@ use windows_numerics::Vector2;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION, DWM_TNP_VISIBLE,
-    DWMWA_BORDER_COLOR, DWMWA_EXCLUDED_FROM_PEEK, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DwmExtendFrameIntoClientArea,
+    DWMWA_BORDER_COLOR, DWMWA_EXCLUDED_FROM_PEEK, DWMWA_USE_IMMERSIVE_DARK_MODE,
     DwmQueryThumbnailSourceSize, DwmRegisterThumbnail, DwmSetWindowAttribute,
     DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
 };
@@ -44,7 +46,6 @@ use windows_sys::Win32::Graphics::Gdi::{
     DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, InvalidateRect, PAINTSTRUCT, SRCCOPY,
     SelectObject,
 };
-use windows_sys::Win32::UI::Controls::MARGINS;
 
 use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Registry::{
@@ -58,7 +59,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, HWND_TOPMOST, IDC_ARROW, IDC_HAND, LoadCursorW, RegisterClassExW, SW_HIDE,
     SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetCursor, SetWindowLongPtrW, SetWindowPos,
     ShowWindow, WM_ERASEBKGND, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR,
-    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WNDCLASSEXW, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP,
 };
 
 use crate::platform::win32;
@@ -184,6 +186,9 @@ pub struct PreviewPopup {
     is_dark: bool,
     glass_mode: bool,
     glass_tint_alpha: f32,
+    glass_config: SpatialGlassConfig,
+    spatial_glass: Option<SpatialGlassHost>,
+    dcomp_fg: Option<DCompForeground>,
     visible: bool,
     pointer_inside: bool,
     tracking_mouse: bool,
@@ -272,7 +277,7 @@ impl PreviewPopup {
 
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_NOREDIRECTIONBITMAP,
                 class_name.as_ptr(),
                 wide("").as_ptr(),
                 WS_POPUP,
@@ -290,21 +295,12 @@ impl PreviewPopup {
             return None;
         }
 
+        let default_glass = SpatialGlassConfig::default_glass(true, 0.9);
+        configure_host_backdrop_window(hwnd as usize, true, true);
+        let spatial_glass = SpatialGlassHost::attach(hwnd as usize, false, default_glass);
+        let dcomp_fg = DCompForeground::new(hwnd as usize);
+
         unsafe {
-            let corner = DWMWCP_ROUND;
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-                (&corner as *const u32).cast(),
-                size_of::<u32>() as u32,
-            );
-            let border = rgb(0x36, 0x3b, 0x48);
-            let _ = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_BORDER_COLOR as u32,
-                (&border as *const u32).cast(),
-                size_of::<u32>() as u32,
-            );
             let exclude_peek: u32 = 1;
             let _ = DwmSetWindowAttribute(
                 hwnd,
@@ -322,7 +318,10 @@ impl PreviewPopup {
             card_h_dips: CARD_H_DIPS,
             is_dark: true,
             glass_mode: true,
-            glass_tint_alpha: 0.18,
+            glass_tint_alpha: default_glass.tint_alpha,
+            glass_config: default_glass,
+            spatial_glass,
+            dcomp_fg,
             visible: false,
             pointer_inside: false,
             tracking_mouse: false,
@@ -339,29 +338,25 @@ impl PreviewPopup {
         Some(popup)
     }
 
-    pub fn set_glass_mode(&mut self, glass_mode: bool, tint_alpha: f32) {
-        self.glass_mode = glass_mode;
-        self.glass_tint_alpha = tint_alpha;
-        unsafe {
-            let margins = MARGINS {
-                cxLeftWidth: if glass_mode { -1 } else { 0 },
-                cxRightWidth: if glass_mode { -1 } else { 0 },
-                cyTopHeight: if glass_mode { -1 } else { 0 },
-                cyBottomHeight: if glass_mode { -1 } else { 0 },
-            };
-            let _ = DwmExtendFrameIntoClientArea(self.hwnd, &margins);
-            let backdrop: u32 = if glass_mode {
-                crate::design::glass::DWMSBT_TRANSIENTWINDOW
-            } else {
-                crate::design::glass::DWMSBT_NONE
-            };
-            let _ = DwmSetWindowAttribute(
-                self.hwnd,
-                DWMWA_SYSTEMBACKDROP_TYPE as u32,
-                (&backdrop as *const u32).cast(),
-                size_of::<u32>() as u32,
-            );
+    pub fn set_glass_config(&mut self, config: SpatialGlassConfig) {
+        self.glass_mode = config.enabled;
+        self.glass_tint_alpha = config.tint_alpha;
+        self.glass_config = config;
+        configure_host_backdrop_window(self.hwnd as usize, config.is_dark, config.enabled);
+        if let Some(ref mut glass) = self.spatial_glass {
+            glass.apply_config(config);
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn set_glass_mode(&mut self, glass_mode: bool, tint_alpha: f32) {
+        let mut cfg = if glass_mode {
+            SpatialGlassConfig::default_glass(self.is_dark, 0.9)
+        } else {
+            SpatialGlassConfig::disabled(self.is_dark)
+        };
+        cfg.tint_alpha = tint_alpha;
+        self.set_glass_config(cfg);
     }
 
     /// Applies the C# size-profile card dimensions (228x154 / 250x180 DIP).
@@ -580,7 +575,7 @@ impl PreviewPopup {
         }
     }
 
-    fn paint(&self) {
+    fn paint(&mut self) {
         let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
         let screen_hdc = unsafe { BeginPaint(self.hwnd, &mut ps) };
         if screen_hdc.is_null() {
@@ -603,6 +598,19 @@ impl PreviewPopup {
         }
         let cw = (client.right - client.left).max(1);
         let ch = (client.bottom - client.top).max(1);
+        let use_spatial_glass = self.dcomp_fg.is_some() && self.glass_config.enabled;
+        if let Some(ref mut glass) = self.spatial_glass {
+            glass.sync_rect(
+                0.0,
+                0.0,
+                cw as f32,
+                ch as f32,
+                (14.0 * dpi).round(),
+                dpi,
+                0.0,
+                0.0,
+            );
+        }
 
         let mem_dc = unsafe { CreateCompatibleDC(screen_hdc) };
         if mem_dc.is_null() {
@@ -661,7 +669,9 @@ impl PreviewPopup {
             }
             unsafe {
                 d2d.target.BeginDraw();
-                let bg = if self.glass_mode {
+                let bg = if use_spatial_glass {
+                    d2d_rgba((0, 0, 0), 0.0)
+                } else if self.glass_mode {
                     let tint = if self.is_dark {
                         (0x10_u8, 0x12_u8, 0x18_u8)
                     } else {
@@ -856,8 +866,19 @@ impl PreviewPopup {
             }
         });
 
+        if let Some(ref mut fg) = self.dcomp_fg
+            && !bits.is_null()
+        {
+            let byte_len = (cw as usize).saturating_mul(ch as usize).saturating_mul(4);
+            let pixels = unsafe { std::slice::from_raw_parts(bits.cast::<u8>(), byte_len) };
+            let _ = fg.upload_bgra(cw as u32, ch as u32, pixels);
+        } else {
+            unsafe {
+                let _ = BitBlt(screen_hdc, 0, 0, cw, ch, mem_dc, 0, 0, SRCCOPY);
+            }
+        }
+
         unsafe {
-            let _ = BitBlt(screen_hdc, 0, 0, cw, ch, mem_dc, 0, 0, SRCCOPY);
             SelectObject(mem_dc, old_bmp);
             DeleteObject(mem_bmp as _);
             DeleteDC(mem_dc);
@@ -867,6 +888,9 @@ impl PreviewPopup {
 
     fn handle_mouse_move(&mut self, x: i32, y: i32) {
         self.pointer_inside = true;
+        if let Some(ref mut glass) = self.spatial_glass {
+            glass.set_pointer(x as f32, y as f32);
+        }
         if !self.tracking_mouse {
             let mut tme = TRACKMOUSEEVENT {
                 cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
@@ -959,6 +983,8 @@ impl PreviewPopup {
 impl Drop for PreviewPopup {
     fn drop(&mut self) {
         self.clear_thumbnails();
+        self.dcomp_fg = None;
+        self.spatial_glass = None;
         if !self.hwnd.is_null() {
             unsafe {
                 SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);

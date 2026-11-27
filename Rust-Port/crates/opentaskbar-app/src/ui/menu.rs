@@ -16,7 +16,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_HWND_RENDER_TARGET_PROPERTIES, D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
     D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Factory,
-    ID2D1HwndRenderTarget,
+    ID2D1HwndRenderTarget, ID2D1RenderTarget,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL,
@@ -30,11 +30,10 @@ use windows_numerics::Vector2;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
-    DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+    DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{BeginPaint, EndPaint, HDC, InvalidateRect, PAINTSTRUCT};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::Controls::MARGINS;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT,
     VK_SPACE, VK_UP,
@@ -47,13 +46,16 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
     WM_ACTIVATE, WM_CLOSE, WM_COMMAND, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WM_SYSCOMMAND, WNDCLASSEXW, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use opentaskbar_core::settings::{DockSettings, SurfaceBackground, clear_crystal_tint_alpha};
 
 use crate::design::fonts;
 use crate::design::icons::{self, AppIcon};
+use crate::design::spatial_glass::{
+    DCompForeground, SpatialGlassConfig, SpatialGlassHost, configure_host_backdrop_window,
+};
 use crate::design::{self, Rgb};
 use crate::platform::win32;
 
@@ -187,6 +189,8 @@ pub struct BorderStyle {
     pub glass_mode: bool,
     /// Clear Crystal translucent tint alpha derived from the surface opacity.
     pub glass_tint_alpha: f32,
+    /// Full optical Clear Crystal configuration used by `SpatialGlassHost` in Glass mode.
+    pub glass_config: SpatialGlassConfig,
 }
 
 impl BorderStyle {
@@ -197,6 +201,7 @@ impl BorderStyle {
             width_dips: 1.0,
             glass_mode: true,
             glass_tint_alpha: clear_crystal_tint_alpha(0.9, is_dark),
+            glass_config: SpatialGlassConfig::default_glass(is_dark, 0.9),
         }
     }
 
@@ -209,6 +214,13 @@ impl BorderStyle {
         );
         style.glass_mode = settings.menu_background == SurfaceBackground::Glass;
         style.glass_tint_alpha = clear_crystal_tint_alpha(settings.menu_opacity, is_dark);
+        style.glass_config = SpatialGlassConfig::from_settings(
+            settings,
+            settings.menu_background,
+            settings.menu_opacity,
+            is_dark,
+            false,
+        );
         style
     }
 
@@ -221,6 +233,13 @@ impl BorderStyle {
         );
         style.glass_mode = settings.widget_background == SurfaceBackground::Glass;
         style.glass_tint_alpha = clear_crystal_tint_alpha(settings.widget_opacity, is_dark);
+        style.glass_config = SpatialGlassConfig::from_settings(
+            settings,
+            settings.widget_background,
+            settings.widget_opacity,
+            is_dark,
+            false,
+        );
         style
     }
 
@@ -239,6 +258,7 @@ impl BorderStyle {
             width_dips,
             glass_mode: true,
             glass_tint_alpha: clear_crystal_tint_alpha(0.9, is_dark),
+            glass_config: SpatialGlassConfig::default_glass(is_dark, 0.9),
         }
     }
 }
@@ -336,12 +356,16 @@ pub fn invoke_native_app_command(target_hwnd: usize, command_id: u32) -> bool {
     }
 }
 
-struct MenuD2d {
-    rt: ID2D1HwndRenderTarget,
+struct MenuTextFormats {
     text_fmt: IDWriteTextFormat,
     hint_fmt: IDWriteTextFormat,
     icon_fmt: IDWriteTextFormat,
     chevron_fmt: IDWriteTextFormat,
+}
+
+struct MenuD2d {
+    rt: ID2D1HwndRenderTarget,
+    formats: MenuTextFormats,
 }
 
 struct MenuPane {
@@ -360,6 +384,11 @@ struct MenuPane {
     open_submenu_idx: Option<usize>,
     tracking: bool,
     d2d: Option<MenuD2d>,
+    /// Clear Crystal optical glass host (`topmost = false`) + DComp foreground (`topmost = true`),
+    /// active strictly when `border.glass_config.enabled` is true.
+    spatial_glass: Option<SpatialGlassHost>,
+    dcomp_fg: Option<DCompForeground>,
+    glass_formats: Option<MenuTextFormats>,
     is_submenu: bool,
     border: BorderStyle,
     session: *mut MenuSession,
@@ -537,32 +566,8 @@ fn rgba_f(r: u8, g: u8, b: u8, a: f32) -> D2D1_COLOR_F {
     }
 }
 
-fn create_menu_d2d(hwnd: HWND, width_px: u32, height_px: u32, dpi: f32) -> Option<MenuD2d> {
+fn create_menu_formats() -> Option<MenuTextFormats> {
     unsafe {
-        let factory: ID2D1Factory =
-            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()?;
-        let rt_props = D2D1_RENDER_TARGET_PROPERTIES {
-            pixelFormat: D2D1_PIXEL_FORMAT {
-                format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-            },
-            dpiX: 96.0 * dpi,
-            dpiY: 96.0 * dpi,
-            ..Default::default()
-        };
-        let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
-            hwnd: WinHwnd(hwnd),
-            pixelSize: D2D_SIZE_U {
-                width: width_px.max(1),
-                height: height_px.max(1),
-            },
-            presentOptions: D2D1_PRESENT_OPTIONS_NONE,
-        };
-        let rt = factory
-            .CreateHwndRenderTarget(&rt_props, &hwnd_props)
-            .ok()?;
-        rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-
         let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED).ok()?;
         // Windows' own menu font + fallback chain: keeps native look and guarantees
         // glyph coverage for localized text (çğıöşü, Cyrillic, CJK, ...).
@@ -626,13 +631,43 @@ fn create_menu_d2d(hwnd: HWND, width_px: u32, height_px: u32, dpi: f32) -> Optio
         let _ = chevron_fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING);
         let _ = chevron_fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
 
-        Some(MenuD2d {
-            rt,
+        Some(MenuTextFormats {
             text_fmt,
             hint_fmt,
             icon_fmt,
             chevron_fmt,
         })
+    }
+}
+
+fn create_menu_d2d(hwnd: HWND, width_px: u32, height_px: u32, dpi: f32) -> Option<MenuD2d> {
+    let formats = create_menu_formats()?;
+    unsafe {
+        let factory: ID2D1Factory =
+            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()?;
+        let rt_props = D2D1_RENDER_TARGET_PROPERTIES {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0 * dpi,
+            dpiY: 96.0 * dpi,
+            ..Default::default()
+        };
+        let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
+            hwnd: WinHwnd(hwnd),
+            pixelSize: D2D_SIZE_U {
+                width: width_px.max(1),
+                height: height_px.max(1),
+            },
+            presentOptions: D2D1_PRESENT_OPTIONS_NONE,
+        };
+        let rt = factory
+            .CreateHwndRenderTarget(&rt_props, &hwnd_props)
+            .ok()?;
+        rt.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+
+        Some(MenuD2d { rt, formats })
     }
 }
 
@@ -731,7 +766,15 @@ fn create_pane_window(
         border,
     } = info;
     let (menu_w, menu_h, row_rects) = measure_entries(&entries, width_dips, dpi);
-    let ex_style = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | if is_submenu { WS_EX_NOACTIVATE } else { 0 };
+    let use_spatial_glass = border.glass_config.enabled;
+    let ex_style = WS_EX_TOOLWINDOW
+        | WS_EX_TOPMOST
+        | if is_submenu { WS_EX_NOACTIVATE } else { 0 }
+        | if use_spatial_glass {
+            WS_EX_NOREDIRECTIONBITMAP
+        } else {
+            0
+        };
     let hwnd = unsafe {
         CreateWindowExW(
             ex_style,
@@ -752,42 +795,77 @@ fn create_pane_window(
         return None;
     }
 
-    let acrylic = unsafe {
-        let dark_val: u32 = u32::from(is_dark);
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
-            (&dark_val as *const u32).cast(),
-            size_of::<u32>() as u32,
-        );
-        let corner = DWMWCP_ROUND;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-            (&corner as *const u32).cast(),
-            size_of::<u32>() as u32,
-        );
-        if border.glass_mode {
-            let margins = MARGINS {
-                cxLeftWidth: -1,
-                cxRightWidth: -1,
-                cyTopHeight: -1,
-                cyBottomHeight: -1,
-            };
-            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
-            let backdrop = DWMSBT_TRANSIENTWINDOW;
-            DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_SYSTEMBACKDROP_TYPE as u32,
-                (&backdrop as *const u32).cast(),
-                size_of::<u32>() as u32,
-            ) == 0
-        } else {
-            false
+    let (acrylic, d2d, spatial_glass, dcomp_fg, glass_formats) = if use_spatial_glass {
+        configure_host_backdrop_window(hwnd as usize, is_dark, true);
+        let mut host = SpatialGlassHost::attach(hwnd as usize, false, border.glass_config);
+        if let Some(ref mut g) = host {
+            g.sync_rect(
+                0.0,
+                0.0,
+                menu_w as f32,
+                menu_h as f32,
+                (12.0 * dpi).round(),
+                dpi,
+                0.0,
+                0.0,
+            );
         }
+        let fg = DCompForeground::new(hwnd as usize);
+        let fmts = create_menu_formats();
+        if host.is_some() && fg.is_some() && fmts.is_some() {
+            (true, None, host, fg, fmts)
+        } else {
+            // Fallback to DWM transient acrylic only if DComp composition creation fails.
+            let acrylic = unsafe {
+                let corner = DWMWCP_ROUND;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                    (&corner as *const u32).cast(),
+                    size_of::<u32>() as u32,
+                );
+                let backdrop = DWMSBT_TRANSIENTWINDOW;
+                DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_SYSTEMBACKDROP_TYPE as u32,
+                    (&backdrop as *const u32).cast(),
+                    size_of::<u32>() as u32,
+                ) == 0
+            };
+            (
+                acrylic,
+                create_menu_d2d(hwnd, menu_w as u32, menu_h as u32, dpi),
+                None,
+                None,
+                None,
+            )
+        }
+    } else {
+        unsafe {
+            let dark_val: u32 = u32::from(is_dark);
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+                (&dark_val as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+            let corner = DWMWCP_ROUND;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                (&corner as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+        }
+        (
+            false,
+            create_menu_d2d(hwnd, menu_w as u32, menu_h as u32, dpi),
+            None,
+            None,
+            None,
+        )
     };
 
-    let d2d = create_menu_d2d(hwnd, menu_w as u32, menu_h as u32, dpi);
     let mut pane = Box::new(MenuPane {
         hwnd,
         dpi,
@@ -807,10 +885,14 @@ fn create_pane_window(
         open_submenu_idx: None,
         tracking: false,
         d2d,
+        spatial_glass,
+        dcomp_fg,
+        glass_formats,
         is_submenu,
         border,
         session,
     });
+    pane.paint_glass_surface();
     let ptr = (&mut *pane) as *mut MenuPane as isize;
     unsafe {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, ptr);
@@ -825,6 +907,9 @@ fn create_pane_window(
 }
 
 fn destroy_pane(pane: &mut MenuPane) {
+    pane.dcomp_fg = None;
+    pane.spatial_glass = None;
+    pane.glass_formats = None;
     pane.d2d = None;
     unsafe {
         SetWindowLongPtrW(pane.hwnd, GWLP_USERDATA, 0);
@@ -1023,13 +1108,50 @@ fn row_rects_row(pane: &MenuPane, idx: usize) -> Option<RECT> {
 }
 
 impl MenuPane {
-    fn paint(&self) {
+    fn paint_glass_surface(&mut self) {
+        let Some(ref fmts) = self.glass_formats else {
+            return;
+        };
+        let w_px = (self.screen_rect.right - self.screen_rect.left).max(1) as u32;
+        let h_px = (self.screen_rect.bottom - self.screen_rect.top).max(1) as u32;
+        let dpi = self.dpi;
+        let is_dark = self.is_dark;
+        let width_dips = self.width_dips;
+        let height_dips = (h_px as f32) / dpi.max(1.0);
+        let border = self.border;
+        let focused = self.hovered.or(self.keyboard_index);
+        let open_submenu_idx = self.open_submenu_idx;
+        let entries = &self.entries;
+        if let Some(ref mut fg) = self.dcomp_fg {
+            let _ = fg.draw(w_px, h_px, dpi, |dc| {
+                let rt: &ID2D1RenderTarget = dc;
+                draw_menu_entries_rt(
+                    rt,
+                    fmts,
+                    entries,
+                    is_dark,
+                    true,
+                    true,
+                    dpi,
+                    width_dips,
+                    height_dips,
+                    border,
+                    focused,
+                    open_submenu_idx,
+                )
+            });
+        }
+    }
+
+    fn paint(&mut self) {
         let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
         let hdc = unsafe { BeginPaint(self.hwnd, &mut ps) };
         if hdc.is_null() {
             return;
         }
-        if let Some(d2d) = &self.d2d {
+        if self.dcomp_fg.is_some() {
+            self.paint_glass_surface();
+        } else if let Some(ref d2d) = self.d2d {
             let _ = self.paint_d2d(d2d);
         }
         unsafe {
@@ -1038,271 +1160,301 @@ impl MenuPane {
     }
 
     fn paint_d2d(&self, d2d: &MenuD2d) -> windows::core::Result<()> {
-        let rt = &d2d.rt;
-        let (
-            clear_col,
-            hover_col,
-            danger_hover_col,
-            text_col,
-            icon_col,
-            hint_col,
-            danger_col,
-            sep_col,
-        ) = if self.is_dark {
+        let rt: &ID2D1RenderTarget = &d2d.rt;
+        let height_dips =
+            (self.screen_rect.bottom - self.screen_rect.top) as f32 / self.dpi.max(1.0);
+        unsafe {
+            rt.BeginDraw();
+        }
+        let res = draw_menu_entries_rt(
+            rt,
+            &d2d.formats,
+            &self.entries,
+            self.is_dark,
+            self.acrylic,
+            false,
+            self.dpi,
+            self.width_dips,
+            height_dips,
+            self.border,
+            self.hovered.or(self.keyboard_index),
+            self.open_submenu_idx,
+        );
+        unsafe {
+            let end_res = rt.EndDraw(None, None);
+            res.and(end_res)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_menu_entries_rt(
+    rt: &ID2D1RenderTarget,
+    fmts: &MenuTextFormats,
+    entries: &[MenuEntry],
+    is_dark: bool,
+    acrylic: bool,
+    transparent_glass_bg: bool,
+    dpi: f32,
+    width_dips: f32,
+    height_dips: f32,
+    border: BorderStyle,
+    focused: Option<usize>,
+    open_submenu_idx: Option<usize>,
+) -> windows::core::Result<()> {
+    let (clear_col, hover_col, danger_hover_col, text_col, icon_col, hint_col, danger_col, sep_col) =
+        if is_dark {
             (
-                if self.acrylic {
-                    rgba_f(
-                        0x10,
-                        0x12,
-                        0x18,
-                        self.border.glass_tint_alpha.clamp(0.14, 0.45),
-                    )
+                if transparent_glass_bg {
+                    rgba_f(0, 0, 0, 0.0)
+                } else if acrylic {
+                    rgba_f(0x10, 0x12, 0x18, border.glass_tint_alpha.clamp(0.14, 0.45))
                 } else {
                     rgba_f(0x1a, 0x1a, 0x1e, 0.98)
                 },
-                rgba_f(0xff, 0xff, 0xff, 0.085),
-                rgba_f(0xef, 0x44, 0x44, 0.18),
-                rgba_f(0xf4, 0xf4, 0xf5, 0.98),
-                rgba_f(0xd4, 0xd4, 0xd8, 0.90),
-                rgba_f(0xa1, 0xa1, 0xaa, 0.85),
+                rgba_f(
+                    0xff,
+                    0xff,
+                    0xff,
+                    if transparent_glass_bg { 0.13 } else { 0.085 },
+                ),
+                rgba_f(0xef, 0x44, 0x44, 0.22),
+                rgba_f(0xf8, 0xf8, 0xfa, 0.99),
+                rgba_f(0xdc, 0xdc, 0xe2, 0.92),
+                rgba_f(0xb4, 0xb4, 0xbe, 0.88),
                 rgba_f(0xfc, 0xa5, 0xa5, 1.0),
-                rgba_f(0xff, 0xff, 0xff, 0.09),
+                rgba_f(0xff, 0xff, 0xff, 0.12),
             )
         } else {
             (
-                if self.acrylic {
-                    rgba_f(
-                        0xf6,
-                        0xf8,
-                        0xfc,
-                        self.border.glass_tint_alpha.clamp(0.18, 0.50),
-                    )
+                if transparent_glass_bg {
+                    rgba_f(0, 0, 0, 0.0)
+                } else if acrylic {
+                    rgba_f(0xf6, 0xf8, 0xfc, border.glass_tint_alpha.clamp(0.18, 0.50))
                 } else {
                     rgba_f(0xff, 0xff, 0xff, 0.98)
                 },
-                rgba_f(0x00, 0x00, 0x00, 0.055),
-                rgba_f(0xdc, 0x26, 0x26, 0.12),
-                rgba_f(0x18, 0x18, 0x1b, 0.96),
-                rgba_f(0x3f, 0x3f, 0x46, 0.90),
-                rgba_f(0x71, 0x71, 0x7a, 0.85),
+                rgba_f(
+                    0x00,
+                    0x00,
+                    0x00,
+                    if transparent_glass_bg { 0.08 } else { 0.055 },
+                ),
+                rgba_f(0xdc, 0x26, 0x26, 0.14),
+                rgba_f(0x14, 0x14, 0x18, 0.98),
+                rgba_f(0x36, 0x36, 0x3e, 0.92),
+                rgba_f(0x5c, 0x5c, 0x66, 0.88),
                 rgba_f(0xb9, 0x1c, 0x1c, 1.0),
-                rgba_f(0x00, 0x00, 0x00, 0.08),
+                rgba_f(0x00, 0x00, 0x00, 0.10),
             )
         };
 
-        unsafe {
-            rt.BeginDraw();
+    unsafe {
+        if !transparent_glass_bg {
             rt.Clear(Some(&clear_col));
+        }
 
-            // Persisted `menu_border_color` / `menu_border_thickness` stroke, drawn inside
-            // the window bounds so the full line stays visible (non-positive widths skip it).
-            if self.border.width_dips > 0.0 {
-                let height_dips =
-                    (self.screen_rect.bottom - self.screen_rect.top) as f32 / self.dpi.max(1.0);
-                let stroke_col =
-                    rgba_f(self.border.rgb.0, self.border.rgb.1, self.border.rgb.2, 1.0);
-                let stroke_br = rt.CreateSolidColorBrush(&stroke_col, None)?;
-                let inset = self.border.width_dips * 0.5;
-                rt.DrawRectangle(
-                    &D2D_RECT_F {
-                        left: inset,
-                        top: inset,
-                        right: (self.width_dips - inset).max(inset),
-                        bottom: (height_dips - inset).max(inset),
-                    },
-                    &stroke_br,
-                    self.border.width_dips,
-                    None,
-                );
-            }
+        // In Clear Crystal Glass mode, SpatialGlassHost already renders the 1 px architectural
+        // glass rim + cursor-reactive edge light; only draw an explicit user border when thick.
+        if border.width_dips > 0.0 && !transparent_glass_bg {
+            let stroke_col = rgba_f(border.rgb.0, border.rgb.1, border.rgb.2, 1.0);
+            let stroke_br = rt.CreateSolidColorBrush(&stroke_col, None)?;
+            let inset = border.width_dips * 0.5;
+            rt.DrawRectangle(
+                &D2D_RECT_F {
+                    left: inset,
+                    top: inset,
+                    right: (width_dips - inset).max(inset),
+                    bottom: (height_dips - inset).max(inset),
+                },
+                &stroke_br,
+                border.width_dips,
+                None,
+            );
+        }
 
-            let hover_br = rt.CreateSolidColorBrush(&hover_col, None)?;
-            let danger_hover_br = rt.CreateSolidColorBrush(&danger_hover_col, None)?;
-            let text_br = rt.CreateSolidColorBrush(&text_col, None)?;
-            let icon_br = rt.CreateSolidColorBrush(&icon_col, None)?;
-            let hint_br = rt.CreateSolidColorBrush(&hint_col, None)?;
-            let danger_br = rt.CreateSolidColorBrush(&danger_col, None)?;
-            let sep_br = rt.CreateSolidColorBrush(&sep_col, None)?;
+        let hover_br = rt.CreateSolidColorBrush(&hover_col, None)?;
+        let danger_hover_br = rt.CreateSolidColorBrush(&danger_hover_col, None)?;
+        let text_br = rt.CreateSolidColorBrush(&text_col, None)?;
+        let icon_br = rt.CreateSolidColorBrush(&icon_col, None)?;
+        let hint_br = rt.CreateSolidColorBrush(&hint_col, None)?;
+        let danger_br = rt.CreateSolidColorBrush(&danger_col, None)?;
+        let sep_br = rt.CreateSolidColorBrush(&sep_col, None)?;
 
-            let mut y = PAD_Y_DIPS;
-            // Mouse hover and keyboard selection share one highlight so the
-            // focused row is always visible even when the pointer is elsewhere.
-            let focused = self.hovered.or(self.keyboard_index);
-            for (idx, entry) in self.entries.iter().enumerate() {
-                match entry {
-                    MenuEntry::Item {
-                        icon,
-                        label,
-                        shortcut,
-                        destructive,
-                        ..
-                    } => {
-                        let hovered = focused == Some(idx);
-                        let left = PAD_X_DIPS;
-                        let right = self.width_dips - PAD_X_DIPS;
-                        if hovered {
-                            let rr = D2D1_ROUNDED_RECT {
-                                rect: D2D_RECT_F {
-                                    left,
-                                    top: y,
-                                    right,
-                                    bottom: y + fonts::scaled_size(ROW_H_DIPS),
-                                },
-                                radiusX: 6.0,
-                                radiusY: 6.0,
-                            };
-                            rt.FillRoundedRectangle(
-                                &rr,
-                                if *destructive {
-                                    &danger_hover_br
-                                } else {
-                                    &hover_br
-                                },
-                            );
-                        }
-
-                        let active_danger = *destructive && hovered;
-                        let glyph_w: Vec<u16> = icons::fluent_glyph(to_app_icon(*icon))
-                            .encode_utf16()
-                            .collect();
-                        rt.DrawText(
-                            &glyph_w,
-                            &d2d.icon_fmt,
-                            &D2D_RECT_F {
-                                left: left + 6.0,
+        let mut y = PAD_Y_DIPS;
+        for (idx, entry) in entries.iter().enumerate() {
+            match entry {
+                MenuEntry::Item {
+                    icon,
+                    label,
+                    shortcut,
+                    destructive,
+                    ..
+                } => {
+                    let hovered = focused == Some(idx);
+                    let left = PAD_X_DIPS;
+                    let right = width_dips - PAD_X_DIPS;
+                    if hovered {
+                        let rr = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left,
                                 top: y,
-                                right: left + 30.0,
+                                right,
                                 bottom: y + fonts::scaled_size(ROW_H_DIPS),
                             },
-                            if active_danger {
-                                &danger_br
-                            } else if hovered {
-                                &text_br
+                            radiusX: 7.0,
+                            radiusY: 7.0,
+                        };
+                        rt.FillRoundedRectangle(
+                            &rr,
+                            if *destructive {
+                                &danger_hover_br
                             } else {
-                                &icon_br
+                                &hover_br
                             },
-                            D2D1_DRAW_TEXT_OPTIONS_NONE,
-                            DWRITE_MEASURING_MODE_NATURAL,
                         );
-
-                        let label_w: Vec<u16> = label.encode_utf16().collect();
-                        let text_rect = D2D_RECT_F {
-                            left: left + 36.0,
-                            top: y,
-                            right: right - 10.0,
-                            bottom: y + fonts::scaled_size(ROW_H_DIPS),
-                        };
-                        rt.DrawText(
-                            &label_w,
-                            &d2d.text_fmt,
-                            &text_rect,
-                            if active_danger { &danger_br } else { &text_br },
-                            D2D1_DRAW_TEXT_OPTIONS_NONE,
-                            DWRITE_MEASURING_MODE_NATURAL,
-                        );
-
-                        if let Some(sc) = shortcut {
-                            let sc_w: Vec<u16> = sc.encode_utf16().collect();
-                            rt.DrawText(
-                                &sc_w,
-                                &d2d.hint_fmt,
-                                &text_rect,
-                                &hint_br,
-                                D2D1_DRAW_TEXT_OPTIONS_NONE,
-                                DWRITE_MEASURING_MODE_NATURAL,
-                            );
-                        }
-                        y += fonts::scaled_size(ROW_H_DIPS);
                     }
-                    MenuEntry::Submenu { icon, label, .. } => {
-                        let active = focused == Some(idx) || self.open_submenu_idx == Some(idx);
-                        let left = PAD_X_DIPS;
-                        let right = self.width_dips - PAD_X_DIPS;
-                        if active {
-                            let rr = D2D1_ROUNDED_RECT {
-                                rect: D2D_RECT_F {
-                                    left,
-                                    top: y,
-                                    right,
-                                    bottom: y + fonts::scaled_size(ROW_H_DIPS),
-                                },
-                                radiusX: 6.0,
-                                radiusY: 6.0,
-                            };
-                            rt.FillRoundedRectangle(&rr, &hover_br);
-                        }
 
-                        let glyph_w: Vec<u16> = icons::fluent_glyph(to_app_icon(*icon))
-                            .encode_utf16()
-                            .collect();
-                        rt.DrawText(
-                            &glyph_w,
-                            &d2d.icon_fmt,
-                            &D2D_RECT_F {
-                                left: left + 6.0,
-                                top: y,
-                                right: left + 30.0,
-                                bottom: y + fonts::scaled_size(ROW_H_DIPS),
-                            },
-                            if active { &text_br } else { &icon_br },
-                            D2D1_DRAW_TEXT_OPTIONS_NONE,
-                            DWRITE_MEASURING_MODE_NATURAL,
-                        );
-
-                        let label_w: Vec<u16> = label.encode_utf16().collect();
-                        let text_rect = D2D_RECT_F {
-                            left: left + 36.0,
+                    let active_danger = *destructive && hovered;
+                    let glyph_w: Vec<u16> = icons::fluent_glyph(to_app_icon(*icon))
+                        .encode_utf16()
+                        .collect();
+                    rt.DrawText(
+                        &glyph_w,
+                        &fmts.icon_fmt,
+                        &D2D_RECT_F {
+                            left: left + 6.0,
                             top: y,
-                            right: right - 24.0,
+                            right: left + 30.0,
                             bottom: y + fonts::scaled_size(ROW_H_DIPS),
-                        };
-                        rt.DrawText(
-                            &label_w,
-                            &d2d.text_fmt,
-                            &text_rect,
-                            &text_br,
-                            D2D1_DRAW_TEXT_OPTIONS_NONE,
-                            DWRITE_MEASURING_MODE_NATURAL,
-                        );
+                        },
+                        if active_danger {
+                            &danger_br
+                        } else if hovered {
+                            &text_br
+                        } else {
+                            &icon_br
+                        },
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
 
-                        let chev_w: Vec<u16> = "\u{E76C}".encode_utf16().collect();
+                    let label_w: Vec<u16> = label.encode_utf16().collect();
+                    let text_rect = D2D_RECT_F {
+                        left: left + 36.0,
+                        top: y,
+                        right: right - 10.0,
+                        bottom: y + fonts::scaled_size(ROW_H_DIPS),
+                    };
+                    rt.DrawText(
+                        &label_w,
+                        &fmts.text_fmt,
+                        &text_rect,
+                        if active_danger { &danger_br } else { &text_br },
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+
+                    if let Some(sc) = shortcut {
+                        let sc_w: Vec<u16> = sc.encode_utf16().collect();
                         rt.DrawText(
-                            &chev_w,
-                            &d2d.chevron_fmt,
-                            &D2D_RECT_F {
-                                left: right - 24.0,
-                                top: y,
-                                right: right - 8.0,
-                                bottom: y + fonts::scaled_size(ROW_H_DIPS),
-                            },
+                            &sc_w,
+                            &fmts.hint_fmt,
+                            &text_rect,
                             &hint_br,
                             D2D1_DRAW_TEXT_OPTIONS_NONE,
                             DWRITE_MEASURING_MODE_NATURAL,
                         );
-                        y += fonts::scaled_size(ROW_H_DIPS);
                     }
-                    MenuEntry::Separator => {
-                        let sy = (y + SEP_H_DIPS * 0.5).floor() + 0.5;
-                        rt.DrawLine(
-                            Vector2 {
-                                X: PAD_X_DIPS + 8.0,
-                                Y: sy,
+                    y += fonts::scaled_size(ROW_H_DIPS);
+                }
+                MenuEntry::Submenu { icon, label, .. } => {
+                    let active = focused == Some(idx) || open_submenu_idx == Some(idx);
+                    let left = PAD_X_DIPS;
+                    let right = width_dips - PAD_X_DIPS;
+                    if active {
+                        let rr = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left,
+                                top: y,
+                                right,
+                                bottom: y + fonts::scaled_size(ROW_H_DIPS),
                             },
-                            Vector2 {
-                                X: self.width_dips - PAD_X_DIPS - 8.0,
-                                Y: sy,
-                            },
-                            &sep_br,
-                            1.0 / self.dpi.max(1.0),
-                            None,
-                        );
-                        y += SEP_H_DIPS;
+                            radiusX: 7.0,
+                            radiusY: 7.0,
+                        };
+                        rt.FillRoundedRectangle(&rr, &hover_br);
                     }
+
+                    let glyph_w: Vec<u16> = icons::fluent_glyph(to_app_icon(*icon))
+                        .encode_utf16()
+                        .collect();
+                    rt.DrawText(
+                        &glyph_w,
+                        &fmts.icon_fmt,
+                        &D2D_RECT_F {
+                            left: left + 6.0,
+                            top: y,
+                            right: left + 30.0,
+                            bottom: y + fonts::scaled_size(ROW_H_DIPS),
+                        },
+                        if active { &text_br } else { &icon_br },
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+
+                    let label_w: Vec<u16> = label.encode_utf16().collect();
+                    let text_rect = D2D_RECT_F {
+                        left: left + 36.0,
+                        top: y,
+                        right: right - 24.0,
+                        bottom: y + fonts::scaled_size(ROW_H_DIPS),
+                    };
+                    rt.DrawText(
+                        &label_w,
+                        &fmts.text_fmt,
+                        &text_rect,
+                        &text_br,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+
+                    let chev_w: Vec<u16> = "\u{E76C}".encode_utf16().collect();
+                    rt.DrawText(
+                        &chev_w,
+                        &fmts.chevron_fmt,
+                        &D2D_RECT_F {
+                            left: right - 24.0,
+                            top: y,
+                            right: right - 8.0,
+                            bottom: y + fonts::scaled_size(ROW_H_DIPS),
+                        },
+                        &hint_br,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                    y += fonts::scaled_size(ROW_H_DIPS);
+                }
+                MenuEntry::Separator => {
+                    let sy = (y + SEP_H_DIPS * 0.5).floor() + 0.5;
+                    rt.DrawLine(
+                        Vector2 {
+                            X: PAD_X_DIPS + 8.0,
+                            Y: sy,
+                        },
+                        Vector2 {
+                            X: width_dips - PAD_X_DIPS - 8.0,
+                            Y: sy,
+                        },
+                        &sep_br,
+                        1.0 / dpi.max(1.0),
+                        None,
+                    );
+                    y += SEP_H_DIPS;
                 }
             }
-
-            rt.EndDraw(None, None)
         }
+        Ok(())
     }
 }
 
@@ -1380,7 +1532,7 @@ unsafe extern "system" fn menu_wnd_proc(
         }
         WM_PAINT => {
             unsafe {
-                (&*pane_ptr).paint();
+                (&mut *pane_ptr).paint();
             }
             0
         }
@@ -1410,6 +1562,11 @@ unsafe extern "system" fn menu_wnd_proc(
             }
             let x = (lparam as u32 & 0xffff) as i16 as i32;
             let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
+            unsafe {
+                if let Some(ref mut glass) = (*pane_ptr).spatial_glass {
+                    glass.set_pointer(x as f32, y as f32);
+                }
+            }
             let next = unsafe {
                 (*pane_ptr)
                     .row_rects
@@ -1468,6 +1625,9 @@ unsafe extern "system" fn menu_wnd_proc(
         WM_MOUSELEAVE => {
             unsafe {
                 (*pane_ptr).tracking = false;
+                if let Some(ref mut glass) = (*pane_ptr).spatial_glass {
+                    glass.clear_pointer();
+                }
                 if (*pane_ptr).hovered.take().is_some() {
                     InvalidateRect(hwnd, std::ptr::null(), 0);
                 }

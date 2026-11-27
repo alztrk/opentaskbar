@@ -46,7 +46,7 @@ use windows_numerics::Vector2;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE,
-    DWMWA_WINDOW_CORNER_PREFERENCE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+    DWMWA_WINDOW_CORNER_PREFERENCE, DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection,
@@ -58,7 +58,6 @@ use windows_sys::Win32::Graphics::Gdi::{
     DT_END_ELLIPSIS, DT_LEFT, DT_SINGLELINE, DT_VCENTER, DrawTextW, HDC,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::Controls::MARGINS;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, ReleaseCapture, SetCapture, TME_LEAVE, TRACKMOUSEEVENT,
     TrackMouseEvent, VK_BACK, VK_ESCAPE, VK_LBUTTON, VK_MBUTTON, VK_RBUTTON, VK_RETURN, VK_SHIFT,
@@ -74,10 +73,14 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, WH_MOUSE_LL, WM_ACTIVATE,
     WM_CHAR, WM_CLOSE, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
     WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
-    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WindowFromPoint,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_POPUP, WindowFromPoint,
 };
 
 use super::menu::BorderStyle;
+use crate::design::spatial_glass::{
+    DCompForeground, SpatialGlassHost, configure_host_backdrop_window,
+};
 use crate::design::{self, Rgb, gdi_rgb};
 use crate::platform::win32;
 use crate::widgets::telemetry;
@@ -620,6 +623,10 @@ struct FlyoutState<'a> {
     /// Whether this live flyout's widget expects `LiveEvent::Update` ticks.
     tick_enabled: bool,
     border: BorderStyle,
+    /// Clear Crystal optical glass host (`topmost = false`) + DComp foreground (`topmost = true`),
+    /// active strictly when `border.glass_config.enabled` is true.
+    spatial_glass: Option<SpatialGlassHost>,
+    dcomp_fg: Option<DCompForeground>,
     content_top_px: i32,
     viewport_h_px: i32,
     content_h_px: i32,
@@ -1999,9 +2006,14 @@ fn show_flyout_impl<'a>(
     let animate = win32::client_area_animations_enabled()
         && FLYOUT_ANIMATIONS_ENABLED.load(Ordering::Relaxed);
     let slide_px = if animate { s(SLIDE_OFFSET_DIPS) } else { 0 };
-    let use_glass_backdrop = border.glass_mode;
-    let ex_style =
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | if use_glass_backdrop { 0 } else { WS_EX_LAYERED };
+    let use_glass_backdrop = border.glass_config.enabled;
+    let ex_style = WS_EX_TOOLWINDOW
+        | WS_EX_TOPMOST
+        | if use_glass_backdrop {
+            WS_EX_NOREDIRECTIONBITMAP
+        } else {
+            WS_EX_LAYERED
+        };
     let hwnd = unsafe {
         CreateWindowExW(
             ex_style,
@@ -2022,52 +2034,74 @@ fn show_flyout_impl<'a>(
         return None;
     }
 
-    unsafe {
-        if !use_glass_backdrop {
-            let _ = SetLayeredWindowAttributes(hwnd, 0, if animate { 0 } else { 255 }, LWA_ALPHA);
+    let (spatial_glass, dcomp_fg) = if use_glass_backdrop {
+        configure_host_backdrop_window(hwnd as usize, is_dark, true);
+        let mut host = SpatialGlassHost::attach(hwnd as usize, false, border.glass_config);
+        if let Some(ref mut g) = host {
+            g.sync_rect(
+                0.0,
+                0.0,
+                width_px as f32,
+                height_px as f32,
+                (14.0 * dpi).round(),
+                dpi,
+                0.0,
+                0.0,
+            );
         }
-        let dark_val: u32 = u32::from(is_dark);
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
-            (&dark_val as *const u32).cast(),
-            size_of::<u32>() as u32,
-        );
-        let corner = DWMWCP_ROUND;
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_WINDOW_CORNER_PREFERENCE as u32,
-            (&corner as *const u32).cast(),
-            size_of::<u32>() as u32,
-        );
-        if use_glass_backdrop {
-            let margins = MARGINS {
-                cxLeftWidth: -1,
-                cxRightWidth: -1,
-                cyTopHeight: -1,
-                cyBottomHeight: -1,
-            };
-            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
-            let backdrop: u32 = crate::design::glass::DWMSBT_TRANSIENTWINDOW;
+        let fg = DCompForeground::new(hwnd as usize);
+        if host.is_some() && fg.is_some() {
+            (host, fg)
+        } else {
+            unsafe {
+                let corner = DWMWCP_ROUND;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                    (&corner as *const u32).cast(),
+                    size_of::<u32>() as u32,
+                );
+                let backdrop: u32 = crate::design::glass::DWMSBT_TRANSIENTWINDOW;
+                let _ = DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_SYSTEMBACKDROP_TYPE as u32,
+                    (&backdrop as *const u32).cast(),
+                    size_of::<u32>() as u32,
+                );
+            }
+            (None, None)
+        }
+    } else {
+        unsafe {
+            let _ = SetLayeredWindowAttributes(hwnd, 0, if animate { 0 } else { 255 }, LWA_ALPHA);
+            let dark_val: u32 = u32::from(is_dark);
             let _ = DwmSetWindowAttribute(
                 hwnd,
-                DWMWA_SYSTEMBACKDROP_TYPE as u32,
-                (&backdrop as *const u32).cast(),
+                DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+                (&dark_val as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+            let corner = DWMWCP_ROUND;
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                (&corner as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+            let border_c = if border.width_dips > 0.0 {
+                gdi_rgb(border.rgb)
+            } else {
+                DWMWA_COLOR_NONE
+            };
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_BORDER_COLOR as u32,
+                (&border_c as *const u32).cast(),
                 size_of::<u32>() as u32,
             );
         }
-        let border = if border.width_dips > 0.0 {
-            gdi_rgb(border.rgb)
-        } else {
-            DWMWA_COLOR_NONE
-        };
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR as u32,
-            (&border as *const u32).cast(),
-            size_of::<u32>() as u32,
-        );
-    }
+        (None, None)
+    };
 
     let hover_anchor = NEXT_HOVER_ANCHOR.with(|slot| slot.borrow_mut().take());
     let has_live_callback = on_live.is_some();
@@ -2092,6 +2126,8 @@ fn show_flyout_impl<'a>(
         on_live,
         tick_enabled,
         border,
+        spatial_glass,
+        dcomp_fg,
         content_top_px,
         viewport_h_px,
         content_h_px,
@@ -2165,6 +2201,8 @@ fn show_flyout_impl<'a>(
     }
     HOOK_TARGET.store(0, Ordering::Release);
     EXTERNAL_MENU_ACTIVE.store(false, Ordering::Release);
+    state.dcomp_fg = None;
+    state.spatial_glass = None;
     unsafe {
         KillTimer(hwnd, TIMER_ANIM);
         KillTimer(hwnd, TIMER_DISMISS);
@@ -2352,7 +2390,9 @@ impl FlyoutState<'_> {
             let alpha = (eased * 255.0).round() as u8;
             let cur_y = self.target_y_px + ((1.0 - eased) * self.slide_px as f32).round() as i32;
             unsafe {
-                let _ = SetLayeredWindowAttributes(self.hwnd, 0, alpha, LWA_ALPHA);
+                if self.dcomp_fg.is_none() {
+                    let _ = SetLayeredWindowAttributes(self.hwnd, 0, alpha, LWA_ALPHA);
+                }
                 SetWindowPos(
                     self.hwnd,
                     std::ptr::null_mut(),
@@ -2375,7 +2415,9 @@ impl FlyoutState<'_> {
             let alpha = ((1.0 - eased) * 255.0).round() as u8;
             let cur_y = self.target_y_px + (eased * (self.slide_px as f32 * 0.75)).round() as i32;
             unsafe {
-                let _ = SetLayeredWindowAttributes(self.hwnd, 0, alpha, LWA_ALPHA);
+                if self.dcomp_fg.is_none() {
+                    let _ = SetLayeredWindowAttributes(self.hwnd, 0, alpha, LWA_ALPHA);
+                }
                 SetWindowPos(
                     self.hwnd,
                     std::ptr::null_mut(),
@@ -2434,7 +2476,7 @@ impl FlyoutState<'_> {
         unsafe { InvalidateRect(self.hwnd, std::ptr::null(), 0) };
     }
 
-    fn paint(&self) {
+    fn paint(&mut self) {
         let mut ps: PAINTSTRUCT = unsafe { std::mem::zeroed() };
         let screen_hdc = unsafe { BeginPaint(self.hwnd, &mut ps) };
         if screen_hdc.is_null() {
@@ -2453,13 +2495,19 @@ impl FlyoutState<'_> {
         let w = client.right.max(1);
         let h = client.bottom.max(1);
         let wf = w as f32;
+        let use_spatial_glass = self.dcomp_fg.is_some() && self.border.glass_config.enabled;
+        if let Some(ref mut glass) = self.spatial_glass {
+            glass.sync_rect(0.0, 0.0, wf, h as f32, sf(14.0).round(), dpi, 0.0, 0.0);
+        }
         let content_w = (w - pad - right_pad).max(s(120.0));
         let content_wf = content_w as f32;
         let focused_id = self.keyboard_index.map(|index| self.targets[index].id);
 
         let pal = design::palette_with_border(self.is_dark, Some(self.border.rgb));
         let border_w = (self.border.width_dips * dpi).clamp(1.0, 2.0);
-        let surface_c = if self.border.glass_mode {
+        let surface_c = if use_spatial_glass {
+            d2d_rgba((0, 0, 0), 0.0)
+        } else if self.border.glass_mode {
             let tint = if self.is_dark {
                 (0x10_u8, 0x12_u8, 0x18_u8)
             } else {
@@ -4420,8 +4468,19 @@ impl FlyoutState<'_> {
             }
         });
 
+        if let Some(ref mut fg) = self.dcomp_fg
+            && !bits.is_null()
+        {
+            let byte_len = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+            let pixels = unsafe { std::slice::from_raw_parts(bits.cast::<u8>(), byte_len) };
+            let _ = fg.upload_bgra(w as u32, h as u32, pixels);
+        } else {
+            unsafe {
+                let _ = BitBlt(screen_hdc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
+            }
+        }
+
         unsafe {
-            let _ = BitBlt(screen_hdc, 0, 0, w, h, mem_dc, 0, 0, SRCCOPY);
             SelectObject(mem_dc, old_bmp);
             DeleteObject(mem_bmp as _);
             DeleteDC(mem_dc);
@@ -4481,6 +4540,9 @@ unsafe extern "system" fn flyout_wnd_proc(
             }
             let x = (lparam as u32 & 0xffff) as i16 as i32;
             let y = ((lparam as u32 >> 16) & 0xffff) as i16 as i32;
+            if let Some(ref mut glass) = state.spatial_glass {
+                glass.set_pointer(x as f32, y as f32);
+            }
             if let Some((sid, rect, seek)) = state.dragging_slider {
                 let w = (rect.right - rect.left).max(1) as f32;
                 let ratio = ((x - rect.left) as f32 / w).clamp(0.0, 1.0);
@@ -4503,6 +4565,9 @@ unsafe extern "system" fn flyout_wnd_proc(
         }
         WM_MOUSELEAVE => {
             state.tracking = false;
+            if let Some(ref mut glass) = state.spatial_glass {
+                glass.clear_pointer();
+            }
             if state.dragging_slider.is_none() && state.hovered_id.take().is_some() {
                 unsafe {
                     InvalidateRect(hwnd, std::ptr::null(), 0);

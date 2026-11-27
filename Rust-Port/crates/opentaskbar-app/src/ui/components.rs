@@ -42,6 +42,7 @@ pub struct UiTheme {
     pub surface: u32,
     pub surface_muted: u32,
     pub surface_hover: u32,
+    pub popover_bg: u32,
     pub dock_preview_bg: u32,
     pub dock_preview_fg: u32,
     pub dock_preview_sub: u32,
@@ -72,6 +73,7 @@ impl UiTheme {
             surface: gpui_rgba(p.surface, 0xff),
             surface_muted: gpui_rgba(p.elevated, 0xff),
             surface_hover: gpui_rgba(p.hover, 0xff),
+            popover_bg: gpui_rgba(p.surface, 0xff),
             dock_preview_bg: gpui_rgba(p.dock_pill, 0xf2),
             dock_preview_fg: gpui_rgba(p.text_primary, 0xff),
             dock_preview_sub: gpui_rgba(p.text_secondary, 0xff),
@@ -92,6 +94,37 @@ impl UiTheme {
             destructive_hover: gpui_rgba(p.danger, 0x38),
             scrollbar_thumb: if is_dark { 0xffffff38 } else { 0x00000038 },
         }
+    }
+
+    /// Settings window theme: opaque in Solid/None modes, translucent over Clear Crystal glass
+    /// strictly when `glass_mode` is true.
+    pub fn for_settings(is_dark: bool, glass_mode: bool) -> Self {
+        let mut t = Self::new(is_dark);
+        if !glass_mode {
+            return t;
+        }
+        if is_dark {
+            t.canvas_bg = 0x0000_0000;
+            t.sidebar_bg = 0x0c0e_144a;
+            t.surface = 0xffff_ff10;
+            t.surface_muted = 0xffff_ff16;
+            t.surface_hover = 0xffff_ff24;
+            t.popover_bg = 0x1619_22f0;
+            t.border = 0xffff_ff1f;
+            t.separator = 0xffff_ff14;
+            t.switch_off = 0xffff_ff2c;
+        } else {
+            t.canvas_bg = 0x0000_0000;
+            t.sidebar_bg = 0xffff_ff48;
+            t.surface = 0xffff_ff6c;
+            t.surface_muted = 0x0000_000c;
+            t.surface_hover = 0x0000_0016;
+            t.popover_bg = 0xf8fa_fcf2;
+            t.border = 0x0000_001a;
+            t.separator = 0x0000_0012;
+            t.switch_off = 0x0000_0028;
+        }
+        t
     }
 }
 
@@ -558,7 +591,7 @@ pub fn dropdown_labeled(
             .overflow_y_scroll()
             .p(px(4.0))
             .rounded(px(10.0))
-            .bg(rgba(theme.surface))
+            .bg(rgba(theme.popover_bg))
             .border_1()
             .border_color(rgba(theme.border))
             .flex()
@@ -646,6 +679,161 @@ pub fn dropdown_labeled(
                 .occlude()
                 .absolute()
                 .top(px(36.0))
+                .right_0()
+                .child(menu_list),
+        )
+        .with_priority(1);
+        wrap = wrap.child(popover);
+    }
+
+    wrap
+}
+
+/// Compact square vertical three-dots (`⋮`) action menu button with no extra prefix/chevron
+/// glyphs on the trigger, opening a right-aligned popover with per-option Fluent icons.
+pub fn icon_action_menu(
+    id: impl Into<SharedString>,
+    theme: &UiTheme,
+    open: bool,
+    options: Vec<DropdownOption>,
+    on_toggle: impl Fn(&mut gpui::Window, &mut gpui::App) + 'static,
+) -> Div {
+    let id: SharedString = id.into();
+    let trigger_bg = if open {
+        theme.surface_hover
+    } else {
+        theme.surface_muted
+    };
+    let trigger_border = if open { theme.accent } else { theme.border };
+    let hover_bg = theme.surface_hover;
+    let accent = theme.accent;
+    let dot_color = if open {
+        theme.accent
+    } else {
+        theme.text_secondary
+    };
+
+    let dot = move || {
+        div()
+            .w(px(3.0))
+            .h(px(3.0))
+            .rounded(px(999.0))
+            .bg(rgba(dot_color))
+    };
+
+    let trigger = div()
+        .id(SharedString::from(format!("icon-act-trig-{id}")))
+        .w(px(30.0))
+        .h(px(30.0))
+        .rounded(px(CONTROL_RADIUS))
+        .bg(rgba(trigger_bg))
+        .border_1()
+        .border_color(rgba(trigger_border))
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(2.5))
+        .cursor_pointer()
+        .tab_index(0)
+        .focus(move |style| style.border_color(rgba(accent)))
+        .hover(move |s| s.bg(rgba(hover_bg)))
+        .active(|s| s.opacity(0.86))
+        .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            on_toggle(window, cx);
+        })
+        .child(dot())
+        .child(dot())
+        .child(dot());
+
+    let mut wrap = div().relative().flex_shrink_0().child(trigger);
+
+    if open {
+        let mut menu_list = div()
+            .id(SharedString::from(format!("icon-act-menu-{id}")))
+            .w(px(196.0))
+            .max_h(px(240.0))
+            .overflow_y_scroll()
+            .p(px(4.0))
+            .rounded(px(10.0))
+            .bg(rgba(theme.popover_bg))
+            .border_1()
+            .border_color(rgba(theme.border))
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                cx.stop_propagation();
+            });
+
+        for (idx, opt) in options.into_iter().enumerate() {
+            let opt_bg = if opt.selected {
+                theme.accent_soft
+            } else {
+                0x00000000
+            };
+            let opt_fg = if opt.selected {
+                theme.accent
+            } else {
+                theme.text_primary
+            };
+            let opt_hover = if opt.selected {
+                theme.accent_soft
+            } else {
+                theme.surface_hover
+            };
+            let cb = opt.on_select;
+            let mut left = div()
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .min_w_0()
+                .overflow_hidden();
+            if let Some(g) = opt.glyph {
+                left = left.child(icon_glyph(g, 12.0, opt_fg));
+            }
+            left = left.child(
+                div()
+                    .text_size(px(fonts::scaled_size(12.0)))
+                    .font_weight(if opt.selected {
+                        gpui::FontWeight::SEMIBOLD
+                    } else {
+                        gpui::FontWeight::MEDIUM
+                    })
+                    .text_color(rgba(opt_fg))
+                    .overflow_hidden()
+                    .child(opt.label),
+            );
+
+            menu_list = menu_list.child(
+                div()
+                    .id(SharedString::from(format!("icon-act-opt-{id}-{idx}")))
+                    .w_full()
+                    .min_h(px(30.0))
+                    .px(px(9.0))
+                    .py(px(5.0))
+                    .rounded(px(6.0))
+                    .bg(rgba(opt_bg))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(8.0))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(rgba(opt_hover)))
+                    .on_mouse_down(MouseButton::Left, move |_, window, cx| {
+                        cx.stop_propagation();
+                        cb(window, cx);
+                    })
+                    .child(left),
+            );
+        }
+
+        let popover = deferred(
+            div()
+                .occlude()
+                .absolute()
+                .top(px(34.0))
                 .right_0()
                 .child(menu_list),
         )
@@ -1159,7 +1347,7 @@ pub fn searchable_dropdown(
             .overflow_hidden()
             .p(px(4.0))
             .rounded(px(10.0))
-            .bg(rgba(theme.surface))
+            .bg(rgba(theme.popover_bg))
             .border_1()
             .border_color(rgba(theme.border))
             .flex()

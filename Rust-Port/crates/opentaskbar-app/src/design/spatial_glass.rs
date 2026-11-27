@@ -28,6 +28,34 @@ pub struct SpatialGlassConfig {
 }
 
 impl SpatialGlassConfig {
+    /// Default Clear Crystal configuration for call sites without `DockSettings`.
+    pub fn default_glass(is_dark: bool, surface_opacity: f64) -> Self {
+        Self {
+            enabled: true,
+            is_dark,
+            blur_sigma: 9.0,
+            saturation: 1.32,
+            tint_alpha: clear_crystal_tint_alpha(surface_opacity, is_dark),
+            edge_glow: 0.88,
+            pointer_light: true,
+            top_flush: false,
+        }
+    }
+
+    /// Disabled glass configuration for Solid / None modes.
+    pub fn disabled(is_dark: bool) -> Self {
+        Self {
+            enabled: false,
+            is_dark,
+            blur_sigma: 9.0,
+            saturation: 1.32,
+            tint_alpha: 0.0,
+            edge_glow: 0.0,
+            pointer_light: false,
+            top_flush: false,
+        }
+    }
+
     /// Builds a validated Clear Crystal configuration for a specific surface mode and opacity.
     pub fn from_settings(
         settings: &DockSettings,
@@ -1051,11 +1079,256 @@ mod imp {
         }
         Ok(())
     }
+
+    /// Configures a `WS_EX_NOREDIRECTIONBITMAP` HWND so `HostBackdropBrush` samples the live
+    /// desktop cleanly without DWM system-backdrop conflicts.
+    pub fn configure_host_backdrop_window(hwnd: usize, is_dark: bool, glass_enabled: bool) {
+        if hwnd == 0 {
+            return;
+        }
+        use windows_sys::Win32::Foundation::HWND as SysHwnd;
+        use windows_sys::Win32::Graphics::Dwm::{
+            DWMWA_USE_IMMERSIVE_DARK_MODE, DwmExtendFrameIntoClientArea, DwmSetWindowAttribute,
+        };
+        use windows_sys::Win32::UI::Controls::MARGINS;
+        const DWMWA_USE_HOSTBACKDROPBRUSH: u32 = 17;
+
+        let hwnd = hwnd as SysHwnd;
+        unsafe {
+            let dark: u32 = u32::from(is_dark);
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+                (&dark as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+            let host_backdrop: u32 = u32::from(glass_enabled);
+            let _ = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_HOSTBACKDROPBRUSH,
+                (&host_backdrop as *const u32).cast(),
+                size_of::<u32>() as u32,
+            );
+            let margins = if glass_enabled {
+                MARGINS {
+                    cxLeftWidth: -1,
+                    cxRightWidth: -1,
+                    cyTopHeight: -1,
+                    cyBottomHeight: -1,
+                }
+            } else {
+                MARGINS {
+                    cxLeftWidth: 0,
+                    cxRightWidth: 0,
+                    cyTopHeight: 0,
+                    cyBottomHeight: 0,
+                }
+            };
+            let _ = DwmExtendFrameIntoClientArea(hwnd, &margins);
+        }
+    }
+
+    /// Lightweight `IDCompositionDevice` (`topmost = true`) foreground surface paired with
+    /// [`SpatialGlassHost`] (`topmost = false`) on popup windows (Menus, Flyouts, Previews).
+    ///
+    /// Draws premultiplied-alpha Direct2D content directly onto an `IDCompositionSurface` so the
+    /// live Clear Crystal glass backdrop underneath shines through untouched.
+    pub struct DCompForeground {
+        device: windows::Win32::Graphics::DirectComposition::IDCompositionDevice,
+        _target: windows::Win32::Graphics::DirectComposition::IDCompositionTarget,
+        root: windows::Win32::Graphics::DirectComposition::IDCompositionVisual,
+        surface: Option<windows::Win32::Graphics::DirectComposition::IDCompositionSurface>,
+        surface_size: (u32, u32),
+    }
+
+    impl DCompForeground {
+        pub fn new(hwnd: usize) -> Option<Self> {
+            if hwnd == 0 {
+                return None;
+            }
+            Self::try_new(hwnd).ok()
+        }
+
+        fn try_new(hwnd: usize) -> WinResult<Self> {
+            use windows::Win32::Graphics::DirectComposition::{
+                DCompositionCreateDevice2, IDCompositionDevice,
+            };
+
+            let levels = [
+                D3D_FEATURE_LEVEL_11_1,
+                D3D_FEATURE_LEVEL_11_0,
+                D3D_FEATURE_LEVEL_10_1,
+            ];
+            let mut d3d_dev = None;
+            unsafe {
+                D3D11CreateDevice(
+                    None,
+                    D3D_DRIVER_TYPE_HARDWARE,
+                    windows::Win32::Foundation::HMODULE::default(),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                    Some(&levels),
+                    D3D11_SDK_VERSION,
+                    Some(&mut d3d_dev),
+                    None,
+                    None,
+                )?;
+            }
+            let d3d_dev = d3d_dev.ok_or(windows::Win32::Foundation::E_FAIL)?;
+            let dxgi: IDXGIDevice = d3d_dev.cast()?;
+            let d2d_factory: ID2D1Factory1 =
+                unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
+            let d2d_device = unsafe { d2d_factory.CreateDevice(&dxgi)? };
+            let device: IDCompositionDevice = unsafe { DCompositionCreateDevice2(&d2d_device)? };
+            let target = unsafe { device.CreateTargetForHwnd(WinHwnd(hwnd as _), true)? };
+            let root = unsafe { device.CreateVisual()? };
+            unsafe {
+                target.SetRoot(&root)?;
+                device.Commit()?;
+            }
+            Ok(Self {
+                device,
+                _target: target,
+                root,
+                surface: None,
+                surface_size: (0, 0),
+            })
+        }
+
+        /// Draws one premultiplied-alpha frame using `ID2D1DeviceContext` and commits to DWM.
+        /// `dpi` sets the D2D context DPI (`96.0 * dpi` for DIP coordinates, or `1.0` for pixels).
+        pub fn draw<F>(&mut self, w_px: u32, h_px: u32, dpi: f32, draw_fn: F) -> WinResult<()>
+        where
+            F: FnOnce(&ID2D1DeviceContext) -> WinResult<()>,
+        {
+            use windows::Win32::Graphics::Direct2D::D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE;
+            use windows::Win32::Graphics::Dxgi::Common::{
+                DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM,
+            };
+            use windows_numerics::Matrix3x2;
+
+            let w = w_px.max(1);
+            let h = h_px.max(1);
+            if self.surface.is_none() || self.surface_size != (w, h) {
+                let surface = unsafe {
+                    self.device.CreateSurface(
+                        w,
+                        h,
+                        DXGI_FORMAT_B8G8R8A8_UNORM,
+                        DXGI_ALPHA_MODE_PREMULTIPLIED,
+                    )?
+                };
+                unsafe {
+                    self.root.SetContent(&surface)?;
+                }
+                self.surface = Some(surface);
+                self.surface_size = (w, h);
+            }
+            let Some(surface) = self.surface.as_ref() else {
+                return Ok(());
+            };
+            let mut offset = WinPoint { x: 0, y: 0 };
+            let dc: ID2D1DeviceContext = unsafe { surface.BeginDraw(None, &mut offset)? };
+            unsafe {
+                let dpi_val = 96.0 * dpi.max(0.5);
+                dc.SetDpi(dpi_val, dpi_val);
+                dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+                let ox_dips = (offset.x as f32) / dpi.max(0.5);
+                let oy_dips = (offset.y as f32) / dpi.max(0.5);
+                dc.SetTransform(&Matrix3x2 {
+                    M11: 1.0,
+                    M12: 0.0,
+                    M21: 0.0,
+                    M22: 1.0,
+                    M31: ox_dips,
+                    M32: oy_dips,
+                });
+                dc.Clear(Some(&D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
+                }));
+            }
+            let draw_res = draw_fn(&dc);
+            unsafe {
+                let _ = surface.EndDraw();
+                self.device.Commit()?;
+            }
+            draw_res
+        }
+
+        /// Uploads an already-rendered 32-bit premultiplied BGRA pixel buffer onto the DComp
+        /// surface and commits to DWM. Handy for existing `ID2D1DCRenderTarget` DIB pipelines
+        /// (Flyouts, Previews) so zero block-drawing code has to be duplicated.
+        pub fn upload_bgra(&mut self, w_px: u32, h_px: u32, pixels: &[u8]) -> WinResult<()> {
+            use windows::Win32::Graphics::Direct2D::Common::{
+                D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_PIXEL_FORMAT,
+            };
+            use windows::Win32::Graphics::Direct2D::{
+                D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1_BITMAP_PROPERTIES,
+            };
+            use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+
+            let expected = (w_px as usize)
+                .saturating_mul(h_px as usize)
+                .saturating_mul(4);
+            if pixels.len() < expected || w_px == 0 || h_px == 0 {
+                return Ok(());
+            }
+            self.draw(w_px, h_px, 1.0, |dc| {
+                let rt: &windows::Win32::Graphics::Direct2D::ID2D1RenderTarget = dc;
+                let props = D2D1_BITMAP_PROPERTIES {
+                    pixelFormat: D2D1_PIXEL_FORMAT {
+                        format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                        alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                    },
+                    dpiX: 96.0,
+                    dpiY: 96.0,
+                };
+                let size = windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U {
+                    width: w_px,
+                    height: h_px,
+                };
+                let bmp = unsafe {
+                    rt.CreateBitmap(size, Some(pixels.as_ptr().cast()), w_px * 4, &props)?
+                };
+                let dst = D2D_RECT_F {
+                    left: 0.0,
+                    top: 0.0,
+                    right: w_px as f32,
+                    bottom: h_px as f32,
+                };
+                unsafe {
+                    rt.DrawBitmap(
+                        &bmp,
+                        Some(&dst),
+                        1.0,
+                        D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR,
+                        None,
+                    );
+                }
+                Ok(())
+            })
+        }
+    }
 }
 
 #[cfg(not(windows))]
 mod imp {
     use super::SpatialGlassConfig;
+
+    pub fn configure_host_backdrop_window(_hwnd: usize, _is_dark: bool, _glass_enabled: bool) {}
+
+    pub struct DCompForeground;
+    impl DCompForeground {
+        pub fn new(_hwnd: usize) -> Option<Self> {
+            None
+        }
+        pub fn upload_bgra(&mut self, _w_px: u32, _h_px: u32, _pixels: &[u8]) -> Result<(), ()> {
+            Ok(())
+        }
+    }
 
     pub struct SpatialGlassHost {
         config: SpatialGlassConfig,
@@ -1090,7 +1363,7 @@ mod imp {
     }
 }
 
-pub use imp::SpatialGlassHost;
+pub use imp::{DCompForeground, SpatialGlassHost, configure_host_backdrop_window};
 
 #[cfg(test)]
 mod tests {
