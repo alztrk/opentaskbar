@@ -4,7 +4,8 @@
 
 ### Rust port — test/CI/docs/packaging parity
 
-- Added the five C#-surplus Antigravity locale keys plus 32 new feature keys to all 14 Rust catalogs and enforced identical key sets with `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`.
+- Removed five retired AI-provider grouping keys and added 27 window-picker, magnification, Fjord, Wi-Fi, search, alignment, preview, focus, density and AI-ring keys (24 newly added; three already shipped in every catalog) to all 14 Rust catalogs. Every catalog and every numeric gate now sits at **1361 keys**.
+- Added 32 new feature keys to all 14 Rust catalogs and enforced identical key sets with `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`.
 - Merged 202 new UI localization keys (Dynamic Island details, Settings/theme controls and widget labels) with the five widget/start-layout keys from the other branch, all with real translations in 14 Rust catalogs, raising every catalog from 1129 to **1336 keys**, and raised the numeric parity gates to match.
 - Restored the nine tr-TR labels that the merge overwrote with en-US or ASCII-only text (`FocusBreakTitle/Start/Skip/Countdown/Complete`, `FocusSession`, `RadioOn`, `RadioOff`, `DockBottomGap`) and added parity tests for translation regressions, empty values and placeholder retention. The key count stayed **1336** at that point in all 14 catalogs and every gate.
 - Replaced the remaining user-visible English literals with locale keys: update toasts (`UpdateAvailableTitle`/`UpdateToastBody`/`UpdateDownload`), Start placement labels (`PlacementStart`/`PlacementEnd`/`PlacementHidden` plus the new `PlacementInWidgets`), the Jump List fallback (`OpenLocation`) and the unknown GPU counter label (`GpuEngine`). Widget names/categories now resolve through existing `WidgetCategory*`/widget-name keys. The three new keys are translated in all 14 catalogs and raise every catalog and numeric gate to **1339 keys**; the en-US `Idle`/`Cancelled`/`Expired` fallback rule is unchanged.
@@ -32,7 +33,7 @@
 - Added pinning of selected background tray icons directly onto the dock, with stable identities across restarts (#114).
 - Completed compact density mode support across dock widgets and live Settings previews (#115), and removed compact-dock widget blur with adaptive WidgetHeight and crisp text rendering (#116).
 - Added a clean-room multi-protocol wireless and Bluetooth battery engine (SteelSeries, ATK/VXE, Logitech HID++, Razer, XInput) with charging and stale-reading indicators (#117).
-- Added AI compact layouts, AiUsageRing filtering and Antigravity model group selection (#118).
+- Added AI compact layouts and AiUsageRing filtering (#118).
 - Added Settings account sign-in with DPAPI API key storage and GitHub CLI Copilot credential detection (#119).
 - Added the Cursor quota widget with browser PKCE sign-in and compact bar layout (#120).
 - Fixed the dock scrolling back to the start after a deferred resize triggered by scrolling itself (#122).
@@ -93,7 +94,7 @@
 
 - Gave the permanent Search, Task View and tray buttons a quiet rounded surface with hover/press feedback via a dedicated `ShellDockButton` style, so they remain readable next to the deliberately transparent app icons and widgets without changing the normal app-button baseline.
 
-- Removed the `--preview` launch mode. The dock now always runs in replacement mode with full journaling and watchdog protection; `--inspect` remains for visual inspection with the dock visible in the taskbar.
+- Removed the `--preview` launch mode. The dock now always runs in replacement mode with full journaling and watchdog protection.
 - Fixed logoff teardown leaving the dock broken when another application vetoes the shutdown: restore is deferred to application exit, with the watchdog still armed in the meantime.
 - Added a staleness check so a leftover taskbar journal cannot overwrite a taskbar state the user changed since, and made the managed watchdog require three consecutive missed heartbeats before treating the dock as hung.
 

@@ -19,11 +19,6 @@ const AI_KEYS: &[&str] = &[
     "WidgetAiUsageDeepSeek",
     "WidgetAiUsageOpenCode",
     "WidgetAiUsageOpenRouter",
-    "WidgetAiUsageAntigravity",
-    "WidgetAiUsageAntigravityDescription",
-    "AiUsageGroupGemini",
-    "AiUsageGroupClaudeGpt",
-    "AiUsageAntigravityGroupsLabel",
     "AiUsageMonthly",
     "AiUsageRefresh",
     "AiUsageSettingsHeading",
@@ -54,6 +49,36 @@ const FEATURE_KEYS: &[&str] = &[
     "DropdownSearchPlaceholder",
     "DropdownNoResults",
     "WeatherLocationUsed",
+    // Window picker, magnification and Fjord labels.
+    "WindowPickerTitle",
+    "WindowPickerPrevious",
+    "WindowPickerNext",
+    "WindowPickerPage",
+    "MagnificationExpandsDock",
+    "MagnificationExpandsDockDescription",
+    "FjordFiles",
+    "FjordFilesOpen",
+    "FjordBarShow",
+    "FjordBarHide",
+    // Wi-Fi flyout labels.
+    "WifiScan",
+    "WifiConnect",
+    "WifiDisconnect",
+    "WifiPassword",
+    "WifiNoNetworks",
+    "WifiConnectFailed",
+    // Search, alignment, preview, focus and widget labels.
+    "SearchNoResults",
+    "ContentAlignStart",
+    "ContentAlignCenter",
+    "ContentAlignEnd",
+    "PreviewDisabledHint",
+    "FocusMinutesLabel",
+    "FocusBreakMinutesLabel",
+    "FocusSessionsLabel",
+    "WidgetDensityCompact",
+    "WidgetDensityFull",
+    "AiUsageRingLabel",
 ];
 
 #[test]
@@ -87,7 +112,7 @@ fn formatted_labels_keep_their_placeholders_replaceable() {
 #[test]
 fn locale_key_counts_stay_at_the_contract_value() {
     for tag in LANGS {
-        assert_eq!(i18n::key_count(tag), 1347, "{tag} key count drifted");
+        assert_eq!(i18n::key_count(tag), 1366, "{tag} key count drifted");
     }
 }
 
