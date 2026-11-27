@@ -2064,6 +2064,34 @@ impl WidgetRuntime {
         }
     }
 
+    /// Maps a clicked calendar grid cell (`day_id_base + cell`, `0..42`) to a date.
+    /// The leading blanks come from the culture's first day of week, matching the
+    /// flyout grid; a hard-coded Monday offset silently shifted every click in
+    /// Sunday-first (en-US) and Saturday-first (Arabic) cultures.
+    pub(crate) fn calendar_cell_date(
+        year: i32,
+        month: u32,
+        cell: i32,
+        first_day_of_week: u32,
+    ) -> (i32, u32, u32) {
+        let first_wd = telemetry::weekday_of(year, month, 1);
+        let leading = telemetry::calendar_leading_blanks(first_day_of_week, first_wd) as i32;
+        let prev_m = if month == 1 { 12 } else { month - 1 };
+        let prev_y = if month == 1 { year - 1 } else { year };
+        let prev_days = telemetry::days_in_month(prev_y, prev_m) as i32;
+        let cur_days = telemetry::days_in_month(year, month) as i32;
+        let next_m = if month == 12 { 1 } else { month + 1 };
+        let next_y = if month == 12 { year + 1 } else { year };
+        let d_idx = cell - leading + 1;
+        if d_idx < 1 {
+            (prev_y, prev_m, (prev_days + d_idx) as u32)
+        } else if d_idx > cur_days {
+            (next_y, next_m, (d_idx - cur_days) as u32)
+        } else {
+            (year, month, d_idx as u32)
+        }
+    }
+
     fn build_calendar_spec(
         shown_y: i32,
         shown_m: u32,
@@ -2802,22 +2830,9 @@ impl WidgetRuntime {
                         }
                         LiveEvent::Click(cell_id) if (100..142).contains(&cell_id) => {
                             let cell = (cell_id - 100) as i32;
-                            let first_wd = telemetry::weekday_of(shown_y, shown_m, 1);
-                            let mon_off = ((first_wd + 6) % 7) as i32;
-                            let prev_m = if shown_m == 1 { 12 } else { shown_m - 1 };
-                            let prev_y = if shown_m == 1 { shown_y - 1 } else { shown_y };
-                            let prev_days = telemetry::days_in_month(prev_y, prev_m) as i32;
-                            let cur_days = telemetry::days_in_month(shown_y, shown_m) as i32;
-                            let next_m = if shown_m == 12 { 1 } else { shown_m + 1 };
-                            let next_y = if shown_m == 12 { shown_y + 1 } else { shown_y };
-                            let d_idx = cell - mon_off + 1;
-                            let picked = if d_idx < 1 {
-                                (prev_y, prev_m, (prev_days + d_idx) as u32)
-                            } else if d_idx > cur_days {
-                                (next_y, next_m, (d_idx - cur_days) as u32)
-                            } else {
-                                (shown_y, shown_m, d_idx as u32)
-                            };
+                            let first_day = telemetry::first_day_of_week();
+                            let picked =
+                                Self::calendar_cell_date(shown_y, shown_m, cell, first_day);
                             selected = Some(picked);
                             shown_y = picked.0;
                             shown_m = picked.1;
@@ -4259,6 +4274,61 @@ mod tests {
                 "{disabled} should not have a flyout"
             );
         }
+    }
+
+    #[test]
+    fn calendar_cell_mapping_follows_culture_first_day() {
+        // 2024-01-01 was a Monday (.NET weekday 1).
+        // en-US: Sunday-first -> one leading blank.
+        let en_us = 0;
+        assert_eq!(telemetry::calendar_leading_blanks(en_us, 1), 1);
+        assert_eq!(
+            WidgetRuntime::calendar_cell_date(2024, 1, 0, en_us),
+            (2023, 12, 31)
+        );
+        assert_eq!(
+            WidgetRuntime::calendar_cell_date(2024, 1, 1, en_us),
+            (2024, 1, 1)
+        );
+        // Arabic: Saturday-first -> two leading blanks.
+        let ar_sa = 6;
+        assert_eq!(telemetry::calendar_leading_blanks(ar_sa, 1), 2);
+        assert_eq!(
+            WidgetRuntime::calendar_cell_date(2024, 1, 0, ar_sa),
+            (2023, 12, 30)
+        );
+        assert_eq!(
+            WidgetRuntime::calendar_cell_date(2024, 1, 2, ar_sa),
+            (2024, 1, 1)
+        );
+        // Monday-first (de-DE) keeps the historical no-blank mapping for Monday.
+        assert_eq!(telemetry::calendar_leading_blanks(1, 1), 0);
+        assert_eq!(
+            WidgetRuntime::calendar_cell_date(2024, 1, 0, 1),
+            (2024, 1, 1)
+        );
+    }
+
+    #[test]
+    fn calendar_cell_mapping_handles_sunday_first_months_and_month_edges() {
+        // 2023-10-01 was a Sunday: no blanks in en-US, six in Monday-first.
+        assert_eq!(telemetry::weekday_of(2023, 10, 1), 0);
+        assert_eq!(telemetry::calendar_leading_blanks(0, 0), 0);
+        assert_eq!(telemetry::calendar_leading_blanks(1, 0), 6);
+        assert_eq!(
+            WidgetRuntime::calendar_cell_date(2023, 10, 0, 0),
+            (2023, 10, 1)
+        );
+        assert_eq!(
+            WidgetRuntime::calendar_cell_date(2023, 10, 0, 1),
+            (2023, 9, 25)
+        );
+        // Trailing cells still roll into the next month.
+        assert_eq!(
+            WidgetRuntime::calendar_cell_date(2024, 1, 32, 0),
+            (2024, 2, 1)
+        );
+        assert!(telemetry::first_day_of_week() <= 6);
     }
 
     #[test]

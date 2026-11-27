@@ -26,6 +26,7 @@ const WLAN_INTF_OPCODE_CURRENT_CONNECTION: i32 = 7;
 const WLAN_INTERFACE_STATE_CONNECTED: i32 = 1;
 const DOT11_BSS_TYPE_INFRASTRUCTURE: i32 = 1;
 const WLAN_CONNECTION_MODE_PROFILE: i32 = 0;
+const WLAN_CONNECTION_MODE_TEMPORARY_PROFILE: i32 = 1;
 const DOT11_CAPABILITY_PRIVACY: u16 = 0x0010;
 
 // 802.11 information element identifiers and AKM suite selectors.
@@ -71,6 +72,26 @@ impl WifiSecurity {
     pub fn requires_password(self) -> bool {
         self != Self::Open
     }
+
+    /// C# `WifiNetworks.Security` numeric authentication code used by the flyout
+    /// (`WLAN_AUTH_ALGORITHM`-style values: open, WPAPSK, WPA2PSK, WPA3-SAE).
+    pub fn authentication_code(self) -> u32 {
+        match self {
+            Self::Open => 1,
+            Self::Wpa => 4,
+            Self::Wpa2 => 7,
+            Self::Wpa3 => 9,
+        }
+    }
+
+    /// C# `WifiNetworks.Security` numeric cipher code (`none`, TKIP, AES).
+    pub fn cipher_code(self) -> u32 {
+        match self {
+            Self::Open => 0,
+            Self::Wpa => 2,
+            Self::Wpa2 | Self::Wpa3 => 4,
+        }
+    }
 }
 
 /// Coarse signal-quality bucket for UI glyphs and colours.
@@ -103,6 +124,12 @@ pub struct WifiNetwork {
     pub signal_class: SignalClass,
     /// True when this SSID is the one the interface is currently associated with.
     pub is_connected: bool,
+    /// True when a saved WLAN profile exists for this SSID (`WlanGetProfile`).
+    pub has_profile: bool,
+    /// True when the BSS is usable for a connection (infrastructure, in regulatory
+    /// domain, with a non-zero signal). A known profile alone cannot make an
+    /// out-of-range / ad-hoc network connectable.
+    pub connectable: bool,
 }
 
 impl WifiNetwork {
@@ -119,8 +146,27 @@ impl WifiNetwork {
             security,
             signal_class: signal_class(signal_percent),
             is_connected,
+            has_profile: false,
+            connectable: signal_percent > 0,
         }
     }
+
+    /// Attaches the saved-profile state discovered through `WlanGetProfile`.
+    pub fn with_profile(mut self, has_profile: bool) -> Self {
+        self.has_profile = has_profile;
+        self
+    }
+
+    /// Attaches the real BSS availability discovered in the scan result.
+    pub fn with_connectable(mut self, connectable: bool) -> Self {
+        self.connectable = connectable;
+        self
+    }
+}
+
+/// Pure availability policy applied to each `WLAN_BSS_ENTRY` during a scan.
+pub fn is_connectable_bss(in_reg_domain: bool, bss_type: i32, link_quality: u32) -> bool {
+    in_reg_domain && bss_type == DOT11_BSS_TYPE_INFRASTRUCTURE && link_quality > 0
 }
 
 /// Decodes a raw SSID. Invalid UTF-8 is rendered as a stable colon-separated hex
@@ -491,6 +537,15 @@ unsafe extern "system" {
         reserved: *const c_void,
         reason_code: *mut u32,
     ) -> u32;
+    fn WlanGetProfile(
+        client_handle: *mut c_void,
+        interface_guid: *const GUID,
+        profile_name: *const u16,
+        reserved: *const c_void,
+        profile_xml: *mut *mut u16,
+        flags: *mut u32,
+        granted_access: *mut u32,
+    ) -> u32;
     fn WlanConnect(
         client_handle: *mut c_void,
         interface_guid: *const GUID,
@@ -626,6 +681,36 @@ fn connected_ssid(client: &ClientHandle, guid: &GUID) -> String {
     ssid
 }
 
+/// True when the interface already has a saved profile for `ssid`.
+#[cfg(windows)]
+fn profile_exists(client: &ClientHandle, guid: &GUID, ssid: &str) -> bool {
+    if ssid.is_empty() {
+        return false;
+    }
+    let name = wide(ssid);
+    let mut profile_xml: *mut u16 = std::ptr::null_mut();
+    let mut flags = 0u32;
+    let mut granted_access = 0u32;
+    // SAFETY: the name is null-terminated, all out-pointers are valid, and the
+    // returned profile XML (when any) is released with WlanFreeMemory below.
+    let status = unsafe {
+        WlanGetProfile(
+            client.as_ptr(),
+            guid,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut profile_xml,
+            &mut flags,
+            &mut granted_access,
+        )
+    };
+    if !profile_xml.is_null() {
+        // SAFETY: WlanGetProfile allocated this buffer for this call.
+        unsafe { WlanFreeMemory(profile_xml.cast()) };
+    }
+    status == ERROR_SUCCESS
+}
+
 #[cfg(windows)]
 fn wait_for_scan(guid: &GUID) {
     let key = guid_key(guid);
@@ -699,12 +784,19 @@ fn networks_on_interface(
             }
             let security =
                 security_from_ies(entry.capabilities & DOT11_CAPABILITY_PRIVACY != 0, ies);
-            result.push(WifiNetwork::new(
-                ssid.clone(),
-                entry.link_quality.min(100) as u8,
-                security,
-                ssid.eq_ignore_ascii_case(connected_ssid),
-            ));
+            let connectable =
+                is_connectable_bss(entry.in_reg_domain != 0, entry.bss_type, entry.link_quality);
+            let has_profile = profile_exists(client, guid, &ssid);
+            result.push(
+                WifiNetwork::new(
+                    ssid.clone(),
+                    entry.link_quality.min(100) as u8,
+                    security,
+                    ssid.eq_ignore_ascii_case(connected_ssid),
+                )
+                .with_profile(has_profile)
+                .with_connectable(connectable),
+            );
         }
         WlanFreeMemory(list.cast());
         result
@@ -757,7 +849,12 @@ pub fn scan_networks() -> Vec<WifiNetwork> {
             // The associated SSID can disappear from the BSS list while roaming;
             // keep it visible so the flyout can show the current connection.
             if !connected.is_empty() && !found.iter().any(|network| network.ssid == connected) {
-                found.push(WifiNetwork::new(connected, 100, WifiSecurity::Wpa2, true));
+                let has_profile = profile_exists(&client, &interface.guid, &connected);
+                found.push(
+                    WifiNetwork::new(connected, 100, WifiSecurity::Wpa2, true)
+                        .with_profile(has_profile)
+                        .with_connectable(true),
+                );
             }
             result.extend(found);
         }
@@ -792,26 +889,48 @@ pub fn scan_networks() -> Vec<WifiNetwork> {
     }
 }
 
-/// Creates (or refreshes) a WLAN profile for `ssid` and connects to it.
+/// Pure policy for the `remember` checkbox: only an explicitly remembered network
+/// writes a persistent WLAN profile; a one-shot connection never does.
+pub fn should_save_profile(remember: bool) -> bool {
+    remember
+}
+
+/// Pure policy for `WlanConnect`: a saved (or just persisted) profile is used by
+/// name; otherwise a temporary profile XML is passed to the WLAN API so nothing
+/// is written to the profile store.
+pub fn connection_mode(remember: bool, has_profile: bool) -> i32 {
+    if remember || has_profile {
+        WLAN_CONNECTION_MODE_PROFILE
+    } else {
+        WLAN_CONNECTION_MODE_TEMPORARY_PROFILE
+    }
+}
+
+/// Connects to `ssid`. When `remember` is true the WLAN profile is persisted;
+/// otherwise the connection uses a temporary profile and leaves no saved profile.
 ///
 /// The security class is derived from the last scan; an unknown SSID defaults to
 /// WPA2 when a password is supplied, otherwise to Open.
-pub fn connect(ssid: &str, password: &str) -> bool {
+pub fn connect(ssid: &str, password: &str, remember: bool) -> bool {
     #[cfg(windows)]
     {
         if ssid.trim().is_empty() {
             return false;
         }
-        let security = scan_networks()
+        let scanned = scan_networks()
             .into_iter()
-            .find(|network| network.ssid.eq_ignore_ascii_case(ssid))
+            .find(|network| network.ssid.eq_ignore_ascii_case(ssid));
+        let has_profile = scanned.as_ref().is_some_and(|network| network.has_profile);
+        let security = scanned
             .map(|network| network.security)
             .unwrap_or(if password.is_empty() {
                 WifiSecurity::Open
             } else {
                 WifiSecurity::Wpa2
             });
-        if security.requires_password() && password.is_empty() {
+        // A saved profile already holds the credentials; only a new/unsaved
+        // secured network needs a password from the flyout.
+        if security.requires_password() && password.is_empty() && !has_profile {
             return false;
         }
         let Some(client) = ClientHandle::open() else {
@@ -820,29 +939,37 @@ pub fn connect(ssid: &str, password: &str) -> bool {
         let Some(interfaces) = Interfaces::enumerate(&client) else {
             return false;
         };
-        let profile = wide(&build_profile_xml(ssid, password, security));
+        let profile_xml = wide(&build_profile_xml(ssid, password, security));
         let name = wide(ssid);
+        let mode = connection_mode(remember, has_profile);
+        let profile_ptr = if mode == WLAN_CONNECTION_MODE_PROFILE {
+            name.as_ptr()
+        } else {
+            profile_xml.as_ptr()
+        };
         let mut connected = false;
         for interface in interfaces.slice() {
-            let mut reason = 0u32;
-            // SAFETY: UTF-16 profile is null-terminated and borrowed for the call.
-            let profile_status = unsafe {
-                WlanSetProfile(
-                    client.as_ptr(),
-                    &interface.guid,
-                    0,
-                    profile.as_ptr(),
-                    0,
-                    std::ptr::null(),
-                    &mut reason,
-                )
-            };
-            if profile_status != ERROR_SUCCESS {
-                continue;
+            if should_save_profile(remember) {
+                let mut reason = 0u32;
+                // SAFETY: UTF-16 profile is null-terminated and borrowed for the call.
+                let profile_status = unsafe {
+                    WlanSetProfile(
+                        client.as_ptr(),
+                        &interface.guid,
+                        0,
+                        profile_xml.as_ptr(),
+                        0,
+                        std::ptr::null(),
+                        &mut reason,
+                    )
+                };
+                if profile_status != ERROR_SUCCESS {
+                    continue;
+                }
             }
             let parameters = WlanConnectionParameters {
-                mode: WLAN_CONNECTION_MODE_PROFILE,
-                profile: name.as_ptr(),
+                mode,
+                profile: profile_ptr,
                 ssid: std::ptr::null_mut(),
                 bssid_list: std::ptr::null_mut(),
                 bss_type: DOT11_BSS_TYPE_INFRASTRUCTURE,
@@ -865,7 +992,7 @@ pub fn connect(ssid: &str, password: &str) -> bool {
     }
     #[cfg(not(windows))]
     {
-        let _ = (ssid, password);
+        let _ = (ssid, password, remember);
         false
     }
 }
@@ -984,5 +1111,55 @@ mod tests {
         assert_eq!(network.signal_percent, 100);
         assert_eq!(network.signal_class, SignalClass::Excellent);
         assert!(network.is_connected);
+    }
+
+    #[test]
+    fn security_codes_match_the_c_flyout_security_values() {
+        assert_eq!(WifiSecurity::Open.authentication_code(), 1);
+        assert_eq!(WifiSecurity::Open.cipher_code(), 0);
+        assert_eq!(WifiSecurity::Wpa.authentication_code(), 4);
+        assert_eq!(WifiSecurity::Wpa.cipher_code(), 2);
+        assert_eq!(WifiSecurity::Wpa2.authentication_code(), 7);
+        assert_eq!(WifiSecurity::Wpa2.cipher_code(), 4);
+        assert_eq!(WifiSecurity::Wpa3.authentication_code(), 9);
+        assert_eq!(WifiSecurity::Wpa3.cipher_code(), 4);
+    }
+
+    #[test]
+    fn availability_requires_infrastructure_regulatory_domain_and_signal() {
+        assert!(is_connectable_bss(true, DOT11_BSS_TYPE_INFRASTRUCTURE, 40));
+        assert!(!is_connectable_bss(
+            false,
+            DOT11_BSS_TYPE_INFRASTRUCTURE,
+            40
+        ));
+        assert!(!is_connectable_bss(true, 2, 40));
+        assert!(!is_connectable_bss(true, DOT11_BSS_TYPE_INFRASTRUCTURE, 0));
+    }
+
+    #[test]
+    fn profile_and_connectable_flags_survive_the_scan_model() {
+        let network = WifiNetwork::new("Home".into(), 80, WifiSecurity::Wpa2, false)
+            .with_profile(true)
+            .with_connectable(is_connectable_bss(true, DOT11_BSS_TYPE_INFRASTRUCTURE, 80));
+        assert!(network.has_profile);
+        assert!(network.connectable);
+        let offline =
+            WifiNetwork::new("Home".into(), 80, WifiSecurity::Wpa2, false).with_connectable(false);
+        assert!(!offline.has_profile);
+        assert!(!offline.connectable);
+        assert!(!WifiNetwork::new("Hidden".into(), 0, WifiSecurity::Open, false).connectable);
+    }
+
+    #[test]
+    fn remembering_controls_profile_persistence_and_connect_mode() {
+        assert!(should_save_profile(true));
+        assert!(!should_save_profile(false));
+        assert_eq!(connection_mode(true, false), WLAN_CONNECTION_MODE_PROFILE);
+        assert_eq!(connection_mode(false, true), WLAN_CONNECTION_MODE_PROFILE);
+        assert_eq!(
+            connection_mode(false, false),
+            WLAN_CONNECTION_MODE_TEMPORARY_PROFILE
+        );
     }
 }

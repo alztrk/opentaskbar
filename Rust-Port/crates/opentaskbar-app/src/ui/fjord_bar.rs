@@ -510,6 +510,7 @@ impl FjordBarView {
             return;
         };
         let password = self.wifi.password.clone();
+        let remember = self.wifi.remember;
         self.wifi_busy = true;
         self.wifi.status = Some("WifiConnect");
         cx.notify();
@@ -517,7 +518,7 @@ impl FjordBarView {
             if network.connected {
                 wifi_ui::disconnect();
                 wifi_ui::ConnectionOutcome::Connected
-            } else if wifi_ui::connect(&network.ssid, &password) {
+            } else if wifi_ui::connect(&network.ssid, &password, remember) {
                 wifi_ui::ConnectionOutcome::Connected
             } else {
                 wifi_ui::ConnectionOutcome::Failed
