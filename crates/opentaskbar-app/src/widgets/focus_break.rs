@@ -13,7 +13,7 @@ use opentaskbar_core::settings::DockSettings;
 use crate::design;
 use crate::ui::flyout::{BarTone, FlyoutBlock, FlyoutSpec};
 
-use super::catalog_ops::{setting_i64, setting_value};
+use super::catalog_ops::setting_value_from;
 
 /// `FocusWidget.Phase`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,8 +44,8 @@ pub enum FocusEvent {
 /// Duration of the reference pulse animation applied after a phase transition.
 pub const PULSE_MS: u64 = 800;
 
-/// Core session state. Pure apart from `Instant`, so it is easy to test and share.
-#[derive(Debug)]
+/// Core session state. Pure apart from `Instant` (which is `Clone`), so it is easy to test and share.
+#[derive(Clone, Debug)]
 pub struct FocusSession {
     pub phase: FocusPhase,
     pub running: bool,
@@ -81,26 +81,29 @@ impl FocusSession {
     /// Reads `FocusMinutes`, `FocusBreakMinutes`, `FocusSessions` from settings (WS-A typed fields
     /// or `extra` — both are visible via the serialized-settings helper).
     pub fn from_settings(settings: &DockSettings) -> Self {
-        let focus = setting_i64(settings, "FocusMinutes", 25).clamp(1, 180) as u64;
-        let break_mins = setting_i64(settings, "FocusBreakMinutes", 5).clamp(0, 60) as u64;
-        let target = setting_i64(settings, "FocusSessions", 4).clamp(1, 20) as u64;
+        // Serialize once: the four keys below used to round-trip the whole settings object
+        // four separate times.
+        let root = serde_json::to_value(settings).unwrap_or_default();
+        let read = |key: &str, default: i64| -> i64 {
+            setting_value_from(&root, key)
+                .and_then(|v| v.as_i64())
+                .unwrap_or(default)
+        };
+        let focus = read("FocusMinutes", 25).clamp(1, 180) as u64;
+        let break_mins = read("FocusBreakMinutes", 5).clamp(0, 60) as u64;
+        let target = read("FocusSessions", 4).clamp(1, 20) as u64;
         // Legacy alias used by some reference profiles before the rename.
-        let target = if setting_value(settings, "FocusSessions").is_none() {
-            setting_i64(settings, "FocusBreakSessions", target as i64).clamp(1, 20) as u64
+        let target = if setting_value_from(&root, "FocusSessions").is_none() {
+            read("FocusBreakSessions", target as i64).clamp(1, 20) as u64
         } else {
             target
         };
         Self {
-            phase: FocusPhase::Focus,
-            running: false,
             remaining_secs: focus * 60,
             focus_minutes: focus,
             break_minutes: break_mins,
             sessions_target: target,
-            sessions_completed: 0,
-            focus_minutes_total: 0,
-            last_transition: None,
-            session_number: 1,
+            ..Self::default()
         }
     }
 
@@ -121,15 +124,23 @@ impl FocusSession {
             .is_some_and(|at| now.duration_since(at) < Duration::from_millis(PULSE_MS))
     }
 
-    /// Advances by `secs`; may cross one or more phase boundaries. Returns the last meaningful
-    /// event so the UI can react once per frame.
+    /// Advances by `secs`; may cross one or more phase boundaries. Leftover time is carried
+    /// into the next phase instead of being discarded, so a long stall still advances the
+    /// session correctly. Returns the first meaningful event (a `PhaseEnded` chime is never
+    /// overwritten by a later `CycleCompleted`) so the UI reacts once per frame.
     pub fn tick(&mut self, secs: u64) -> FocusEvent {
         if !self.running || secs == 0 {
             return FocusEvent::None;
         }
-        self.remaining_secs = self.remaining_secs.saturating_sub(secs);
+        let mut left = secs;
         let mut event = FocusEvent::None;
-        while self.remaining_secs == 0 {
+        while left > 0 {
+            let consumed = self.remaining_secs.min(left);
+            self.remaining_secs = self.remaining_secs.saturating_sub(consumed);
+            left -= consumed;
+            if self.remaining_secs > 0 {
+                break;
+            }
             match self.phase {
                 FocusPhase::Focus => {
                     self.focus_minutes_total =
@@ -138,19 +149,23 @@ impl FocusSession {
                     self.phase = FocusPhase::Break;
                     self.remaining_secs = self.break_minutes.saturating_mul(60);
                     self.last_transition = Some(Instant::now());
-                    event = FocusEvent::PhaseEnded(FocusPhase::Focus);
+                    if event == FocusEvent::None {
+                        event = FocusEvent::PhaseEnded(FocusPhase::Focus);
+                    }
                     if self.break_minutes == 0 {
+                        // Zero-length break: carry the overflow straight into the next focus phase.
                         continue;
                     }
-                    break;
                 }
                 FocusPhase::Break => {
                     self.phase = FocusPhase::Focus;
                     self.remaining_secs = self.focus_minutes.saturating_mul(60);
                     self.last_transition = Some(Instant::now());
-                    self.session_number = (self.sessions_completed % self.sessions_target) + 1;
-                    event = FocusEvent::CycleCompleted;
-                    break;
+                    self.session_number =
+                        (self.sessions_completed % self.sessions_target.max(1)) + 1;
+                    if event == FocusEvent::None {
+                        event = FocusEvent::CycleCompleted;
+                    }
                 }
             }
         }
@@ -169,7 +184,7 @@ impl FocusSession {
         self.running = false;
         self.phase = FocusPhase::Focus;
         self.remaining_secs = self.focus_minutes.saturating_mul(60);
-        self.session_number = (self.sessions_completed % self.sessions_target) + 1;
+        self.session_number = (self.sessions_completed % self.sessions_target.max(1)) + 1;
         self.last_transition = None;
     }
 
@@ -182,7 +197,10 @@ impl FocusSession {
     }
 
     pub fn skip_phase(&mut self) {
+        let was_running = self.running;
+        self.running = true;
         let _ = self.tick(self.remaining_secs.max(1));
+        self.running = was_running;
     }
 
     pub fn session_label(&self) -> String {
@@ -218,20 +236,7 @@ impl SharedFocusSession {
     }
 
     pub fn snapshot(&self) -> FocusSession {
-        // FocusSession is not Clone (Instant is Clone, so we clone field-by-field).
-        self.with(|s| FocusSession {
-            phase: s.phase,
-            running: s.running,
-            remaining_secs: s.remaining_secs,
-            focus_minutes: s.focus_minutes,
-            break_minutes: s.break_minutes,
-            sessions_target: s.sessions_target,
-            sessions_completed: s.sessions_completed,
-            focus_minutes_total: s.focus_minutes_total,
-            last_transition: s.last_transition,
-            session_number: s.session_number,
-        })
-        .unwrap_or_default()
+        self.with(Clone::clone).unwrap_or_default()
     }
 }
 
@@ -306,7 +311,7 @@ pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
                 value: session.session_label(),
             },
             FlyoutBlock::Hero {
-                value: format_mm_ss(session.remaining_secs),
+                value: format_mm_secs(session.remaining_secs),
                 caption: Some(format!("{} · {}", session.phase.label(), total_label)),
                 centered: false,
                 large: true,
@@ -372,7 +377,9 @@ pub fn build_focus_flyout(session: &FocusSession) -> FlyoutSpec {
     }
 }
 
-fn format_mm_secs(total: u64) -> String {
+/// Single source for the `mm:ss` / `hh:mm:ss` countdown display used by runtime chips,
+/// tooltips and the focus flyout.
+pub fn format_mm_secs(total: u64) -> String {
     if total >= 3600 {
         format!(
             "{:02}:{:02}:{:02}",
@@ -383,11 +390,6 @@ fn format_mm_secs(total: u64) -> String {
     } else {
         format!("{:02}:{:02}", total / 60, total % 60)
     }
-}
-
-// Local alias used by the flyout builder.
-fn format_mm_ss(total: u64) -> String {
-    format_mm_secs(total)
 }
 
 #[cfg(test)]
@@ -442,6 +444,48 @@ mod tests {
         assert_eq!(s.phase, FocusPhase::Focus);
         assert!(!s.running);
         assert_eq!(s.remaining_secs, s.focus_minutes * 60);
+    }
+
+    #[test]
+    fn phase_overflow_is_carried_into_the_next_phase() {
+        let mut s = FocusSession {
+            focus_minutes: 25,
+            break_minutes: 5,
+            remaining_secs: 25 * 60,
+            running: true,
+            ..Default::default()
+        };
+        // 25 min focus + 30 s into the 5 min break; the old code dropped the 30 s.
+        assert_eq!(
+            s.tick(25 * 60 + 30),
+            FocusEvent::PhaseEnded(FocusPhase::Focus)
+        );
+        assert_eq!(s.phase, FocusPhase::Break);
+        assert_eq!(s.remaining_secs, 5 * 60 - 30);
+        // A zero-length break carries the overflow into the next focus phase and keeps the chime.
+        let mut s = FocusSession {
+            focus_minutes: 1,
+            break_minutes: 0,
+            remaining_secs: 60,
+            running: true,
+            ..Default::default()
+        };
+        assert_eq!(s.tick(90), FocusEvent::PhaseEnded(FocusPhase::Focus));
+        assert_eq!(s.phase, FocusPhase::Focus);
+        assert_eq!(s.remaining_secs, 30);
+        assert_eq!(s.session_number, 2);
+    }
+
+    #[test]
+    fn skip_phase_works_while_paused() {
+        let mut s = FocusSession {
+            remaining_secs: 60,
+            running: false,
+            ..Default::default()
+        };
+        s.skip_phase();
+        assert_eq!(s.phase, FocusPhase::Break);
+        assert!(!s.running, "skip must not resume a paused session");
     }
 
     #[test]

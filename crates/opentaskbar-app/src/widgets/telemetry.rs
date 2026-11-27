@@ -3,7 +3,7 @@
 //! Includes CPU/RAM + 45-sample sparkline history + top processes by memory, Core Audio output &
 //! input (microphone) volume/mute/device names, media transport keys, network throughput + session
 //! totals (`GetIfTable2`), system battery, Bluetooth PnP device battery, fixed storage drives,
-//! keyboard layout switcher with localized display names, day progress, cached weather (`wttr.in`),
+//! keyboard layout switcher with localized display names, day progress, cached weather (Open-Meteo),
 //! Recycle Bin status, AI CLI credential presence, and optional GPU usage/temperature sampling.
 
 use std::collections::{HashMap, VecDeque};
@@ -35,10 +35,10 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2,
 use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows_sys::Win32::Networking::WinHttp::{
     WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_ADDREQ_FLAG_ADD, WINHTTP_ADDREQ_FLAG_REPLACE,
-    WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_STATUS_CODE,
-    WinHttpAddRequestHeaders, WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest,
-    WinHttpQueryDataAvailable, WinHttpQueryHeaders, WinHttpReadData, WinHttpReceiveResponse,
-    WinHttpSendRequest, WinHttpSetTimeouts,
+    WINHTTP_FLAG_SECURE, WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_QUERY_RETRY_AFTER,
+    WINHTTP_QUERY_STATUS_CODE, WinHttpAddRequestHeaders, WinHttpCloseHandle, WinHttpConnect,
+    WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable, WinHttpQueryHeaders,
+    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WinHttpSetTimeouts,
 };
 use windows_sys::Win32::Security::Cryptography::{
     CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData,
@@ -76,6 +76,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const SPARKLINE_CAPACITY: usize = 45;
+const HTTP_USER_AGENT: &str = "OpenTaskbar/1.0";
+const HTTPS_PORT: u16 = 443;
+const HTTP_MAX_BODY_BYTES: usize = 1024 * 1024;
+/// DNS / connect / send / receive budgets: short for weather, generous for AI full payloads.
+const HTTP_TIMEOUTS_FAST: (i32, i32, i32, i32) = (4_000, 4_000, 5_000, 6_000);
+const HTTP_TIMEOUTS_AI: (i32, i32, i32, i32) = (15_000, 15_000, 15_000, 15_000);
 /// `LOCALE_IFIRSTDAYOFWEEK`: 0 = Monday .. 6 = Sunday.
 const LOCALE_IFIRSTDAYOFWEEK: u32 = 0x0000_100C;
 const LOCALE_USER_DEFAULT: u32 = 0x0400;
@@ -2069,11 +2075,44 @@ pub fn day_progress_metrics() -> (f32, f32, f32, u32) {
 
 // --- In-Process WinHTTP HTTPS Helper (no secrets on argv / process command lines) ---
 
-fn winhttp_get(host: &str, path: &str, extra_headers: &[(&str, &str)]) -> Option<(u32, String)> {
-    let agent: Vec<u16> = "OpenTaskbar/1.0\0".encode_utf16().collect();
-    let host_w: Vec<u16> = host.encode_utf16().chain(Some(0)).collect();
-    let verb_w: Vec<u16> = "GET\0".encode_utf16().collect();
-    let path_w: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+/// Parses a textual `Retry-After` header value (seconds, not an HTTP date).
+fn parse_retry_after_header(value: &str) -> Option<u32> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 10 {
+        return None;
+    }
+    value.parse::<u32>().ok().filter(|&secs| secs > 0)
+}
+
+/// Whether a response status warrants a retry. The mere *presence* of `Retry-After` is not a
+/// reason to retry a successful (2xx/3xx/4xx) response — it only sets the delay for 429/5xx.
+fn is_retryable_status(status: u32) -> bool {
+    status == 429 || (500..=599).contains(&status)
+}
+
+struct HttpCfg<'a> {
+    method: &'a str,
+    host: &'a str,
+    path: &'a str,
+    headers: &'a [(&'a str, &'a str)],
+    body: Option<&'a str>,
+    timeouts: (i32, i32, i32, i32),
+    /// Only AI full-detail requests need `Retry-After`; weather calls skip the extra query.
+    retry_after: bool,
+}
+
+struct HttpReply {
+    status: u32,
+    body: String,
+    retry_after: Option<u32>,
+}
+
+/// One HTTPS request pipeline shared by `winhttp_get` and `winhttp_json`.
+fn winhttp_request(cfg: &HttpCfg<'_>) -> Option<HttpReply> {
+    let agent: Vec<u16> = format!("{HTTP_USER_AGENT}\0").encode_utf16().collect();
+    let host_w: Vec<u16> = cfg.host.encode_utf16().chain(Some(0)).collect();
+    let verb_w: Vec<u16> = cfg.method.encode_utf16().chain(Some(0)).collect();
+    let path_w: Vec<u16> = cfg.path.encode_utf16().chain(Some(0)).collect();
 
     unsafe {
         let session = WinHttpOpen(
@@ -2086,8 +2125,14 @@ fn winhttp_get(host: &str, path: &str, extra_headers: &[(&str, &str)]) -> Option
         if session.is_null() {
             return None;
         }
-        let _ = WinHttpSetTimeouts(session, 4000, 4000, 5000, 6000);
-        let connect = WinHttpConnect(session, host_w.as_ptr(), 443, 0);
+        let _ = WinHttpSetTimeouts(
+            session,
+            cfg.timeouts.0,
+            cfg.timeouts.1,
+            cfg.timeouts.2,
+            cfg.timeouts.3,
+        );
+        let connect = WinHttpConnect(session, host_w.as_ptr(), HTTPS_PORT, 0);
         if connect.is_null() {
             WinHttpCloseHandle(session);
             return None;
@@ -2106,14 +2151,14 @@ fn winhttp_get(host: &str, path: &str, extra_headers: &[(&str, &str)]) -> Option
             WinHttpCloseHandle(session);
             return None;
         }
-        if !extra_headers.is_empty() {
-            let mut hdr = String::new();
-            for (k, v) in extra_headers {
-                hdr.push_str(k);
-                hdr.push_str(": ");
-                hdr.push_str(v);
-                hdr.push_str("\r\n");
-            }
+        let mut hdr = String::new();
+        for (k, v) in cfg.headers {
+            hdr.push_str(k);
+            hdr.push_str(": ");
+            hdr.push_str(v);
+            hdr.push_str("\r\n");
+        }
+        if !hdr.is_empty() {
             let hdr_w: Vec<u16> = hdr.encode_utf16().collect();
             let _ = WinHttpAddRequestHeaders(
                 req,
@@ -2122,7 +2167,23 @@ fn winhttp_get(host: &str, path: &str, extra_headers: &[(&str, &str)]) -> Option
                 WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE,
             );
         }
-        let sent = WinHttpSendRequest(req, std::ptr::null(), 0, std::ptr::null(), 0, 0, 0) != 0
+        // UTF-16 body; the terminating NUL is not part of the wire length.
+        let body_wide = cfg
+            .body
+            .map(|b| b.encode_utf16().chain(Some(0)).collect::<Vec<_>>());
+        let (body_ptr, body_len) = body_wide
+            .as_ref()
+            .map(|b| (b.as_ptr().cast(), (b.len().saturating_sub(1)) * 2))
+            .unwrap_or((std::ptr::null(), 0));
+        let sent = WinHttpSendRequest(
+            req,
+            std::ptr::null(),
+            0,
+            body_ptr,
+            body_len as u32,
+            body_len as u32,
+            0,
+        ) != 0
             && WinHttpReceiveResponse(req, std::ptr::null_mut()) != 0;
         let result = if sent {
             let mut status: u32 = 0;
@@ -2135,13 +2196,48 @@ fn winhttp_get(host: &str, path: &str, extra_headers: &[(&str, &str)]) -> Option
                 &mut status_sz,
                 std::ptr::null_mut(),
             );
+            let retry_after = if cfg.retry_after {
+                let mut retry: u32 = 0;
+                let mut retry_sz = size_of::<u32>() as u32;
+                let numeric = WinHttpQueryHeaders(
+                    req,
+                    WINHTTP_QUERY_RETRY_AFTER | WINHTTP_QUERY_FLAG_NUMBER,
+                    std::ptr::null(),
+                    (&mut retry as *mut u32).cast(),
+                    &mut retry_sz,
+                    std::ptr::null_mut(),
+                ) != 0
+                    && retry > 0;
+                if numeric {
+                    Some(retry)
+                } else {
+                    // Providers occasionally send a textual value; the numeric query misses it.
+                    let mut text = [0u16; 32];
+                    let mut text_sz = text.len() as u32;
+                    (WinHttpQueryHeaders(
+                        req,
+                        WINHTTP_QUERY_RETRY_AFTER,
+                        std::ptr::null(),
+                        text.as_mut_ptr().cast(),
+                        &mut text_sz,
+                        std::ptr::null_mut(),
+                    ) != 0)
+                        .then(|| {
+                            let len = (text_sz as usize).min(text.len());
+                            String::from_utf16_lossy(&text[..len])
+                        })
+                        .and_then(|value| parse_retry_after_header(&value))
+                }
+            } else {
+                None
+            };
             let mut body = Vec::new();
             loop {
                 let mut avail: u32 = 0;
                 if WinHttpQueryDataAvailable(req, &mut avail) == 0 || avail == 0 {
                     break;
                 }
-                if body.len() + avail as usize > 1024 * 1024 {
+                if body.len() + avail as usize > HTTP_MAX_BODY_BYTES {
                     break;
                 }
                 let start = body.len();
@@ -2155,7 +2251,11 @@ fn winhttp_get(host: &str, path: &str, extra_headers: &[(&str, &str)]) -> Option
                 }
                 body.truncate(start + read as usize);
             }
-            Some((status, String::from_utf8_lossy(&body).into_owned()))
+            Some(HttpReply {
+                status,
+                body: String::from_utf8_lossy(&body).into_owned(),
+                retry_after,
+            })
         } else {
             None
         };
@@ -2164,6 +2264,40 @@ fn winhttp_get(host: &str, path: &str, extra_headers: &[(&str, &str)]) -> Option
         WinHttpCloseHandle(session);
         result
     }
+}
+
+/// Fast GET (weather / CLI snapshots). No `Retry-After` query, 4/4/5/6 s timeouts.
+fn winhttp_get(host: &str, path: &str, extra_headers: &[(&str, &str)]) -> Option<(u32, String)> {
+    winhttp_request(&HttpCfg {
+        method: "GET",
+        host,
+        path,
+        headers: extra_headers,
+        body: None,
+        timeouts: HTTP_TIMEOUTS_FAST,
+        retry_after: false,
+    })
+    .map(|reply| (reply.status, reply.body))
+}
+
+/// Arbitrary method with optional UTF-16 body and `Retry-After` (AI full-detail requests).
+fn winhttp_json(
+    method: &str,
+    host: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+) -> Option<(u32, String, Option<u32>)> {
+    winhttp_request(&HttpCfg {
+        method,
+        host,
+        path,
+        headers,
+        body,
+        timeouts: HTTP_TIMEOUTS_AI,
+        retry_after: true,
+    })
+    .map(|reply| (reply.status, reply.body, reply.retry_after))
 }
 
 // --- Windows Night Light Control (exact `NightLightControl.cs`) ---
@@ -3118,12 +3252,41 @@ fn guid_tmp_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Encrypts and stores an API key with the same per-user DPAPI format the reference app reads.
-/// Reads a DPAPI secret for a custom widget sidecar. Never logged, never sent anywhere.
-pub fn read_dpapi_secret_for_widget(secret_key: &str) -> Option<String> {
-    read_dpapi_secret(secret_key)
+/// Validates a sidecar's in-band secret request. Only `widget:<own-slug>:<key>` is accepted:
+/// AI provider keys (`api-key:deepseek`, …) and other widgets' namespaces stay unreachable.
+/// `slug` is the *loaded widget's* slug, never supplied by the sidecar itself.
+pub fn widget_scoped_secret_name(name: &str, slug: &str) -> Option<String> {
+    if name.len() > 256 || slug.is_empty() || slug.len() > 128 {
+        return None;
+    }
+    let prefix_len = "widget:".len();
+    if !name
+        .get(..prefix_len)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("widget:"))
+    {
+        return None;
+    }
+    let (requested_slug, key) = name[prefix_len..].split_once(':')?;
+    if requested_slug.is_empty()
+        || !requested_slug.eq_ignore_ascii_case(slug)
+        || key.is_empty()
+        || key.len() > 128
+    {
+        return None;
+    }
+    // Canonical spelling is the widget's own slug: the sanitizer maps `:`/`-` consistently,
+    // so this is the same DPAPI file for every correctly scoped request.
+    Some(format!("widget:{slug}:{key}"))
 }
 
+/// Reads a DPAPI secret for a custom widget sidecar. Never logged, never sent anywhere.
+/// Returns `None` for out-of-scope names (the caller still sends an empty `secretResult`).
+pub fn read_dpapi_secret_for_widget(name: &str, slug: &str) -> Option<String> {
+    let scoped = widget_scoped_secret_name(name, slug)?;
+    read_dpapi_secret(&scoped)
+}
+
+/// Encrypts and stores a secret using the same per-user DPAPI format as the reference app.
 pub fn save_dpapi_secret(secret_key: &str, value: &str) -> bool {
     let Some(path) = secret_file_path(secret_key) else {
         return false;
@@ -4256,147 +4419,7 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-/// HTTP response with a parsed `Retry-After` (seconds) for 429 handling.
-fn winhttp_json(
-    method: &str,
-    host: &str,
-    path: &str,
-    headers: &[(&str, &str)],
-    body: Option<&str>,
-) -> Option<(u32, String, Option<u32>)> {
-    use windows_sys::Win32::Networking::WinHttp::{
-        WINHTTP_QUERY_RETRY_AFTER, WINHTTP_QUERY_STATUS_CODE,
-    };
-    let agent: Vec<u16> = "OpenTaskbar/1.0\0".encode_utf16().collect();
-    let host_w: Vec<u16> = host.encode_utf16().chain(Some(0)).collect();
-    let verb_w: Vec<u16> = method.encode_utf16().chain(Some(0)).collect();
-    let path_w: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
-    unsafe {
-        let session = WinHttpOpen(
-            agent.as_ptr(),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-        );
-        if session.is_null() {
-            return None;
-        }
-        // `AiUsageService`: 15 s DNS/connect/send/receive budget; a full-detail payload never
-        // needs more than 1 MiB. A stalled provider must not pin the widget refresh thread.
-        let _ = WinHttpSetTimeouts(session, 15_000, 15_000, 15_000, 15_000);
-        let connect = WinHttpConnect(session, host_w.as_ptr(), 443, 0);
-        if connect.is_null() {
-            WinHttpCloseHandle(session);
-            return None;
-        }
-        let req = WinHttpOpenRequest(
-            connect,
-            verb_w.as_ptr(),
-            path_w.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            WINHTTP_FLAG_SECURE,
-        );
-        if req.is_null() {
-            WinHttpCloseHandle(connect);
-            WinHttpCloseHandle(session);
-            return None;
-        }
-        let mut hdr = String::new();
-        for (k, v) in headers {
-            hdr.push_str(k);
-            hdr.push_str(": ");
-            hdr.push_str(v);
-            hdr.push_str("\r\n");
-        }
-        if !hdr.is_empty() {
-            let hdr_w: Vec<u16> = hdr.encode_utf16().collect();
-            let _ = WinHttpAddRequestHeaders(
-                req,
-                hdr_w.as_ptr(),
-                hdr_w.len() as u32,
-                WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE,
-            );
-        }
-        let body_wide = body.map(|b| b.encode_utf16().chain(Some(0)).collect::<Vec<_>>());
-        let (body_ptr, body_len) = body_wide
-            .as_ref()
-            .map(|b| {
-                (
-                    b.as_ptr() as *const std::ffi::c_void,
-                    (b.len().saturating_sub(1)) * 2,
-                )
-            })
-            .unwrap_or((std::ptr::null(), 0));
-        let sent = WinHttpSendRequest(
-            req,
-            std::ptr::null(),
-            0,
-            body_ptr,
-            body_len as u32,
-            body_len as u32,
-            0,
-        ) != 0
-            && WinHttpReceiveResponse(req, std::ptr::null_mut()) != 0;
-        let result = if sent {
-            let mut status: u32 = 0;
-            let mut status_sz = std::mem::size_of::<u32>() as u32;
-            let _ = WinHttpQueryHeaders(
-                req,
-                WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-                std::ptr::null(),
-                (&mut status as *mut u32).cast(),
-                &mut status_sz,
-                std::ptr::null_mut(),
-            );
-            let mut retry: u32 = 0;
-            let mut retry_sz = std::mem::size_of::<u32>() as u32;
-            let got_retry = WinHttpQueryHeaders(
-                req,
-                WINHTTP_QUERY_RETRY_AFTER | WINHTTP_QUERY_FLAG_NUMBER,
-                std::ptr::null(),
-                (&mut retry as *mut u32).cast(),
-                &mut retry_sz,
-                std::ptr::null_mut(),
-            ) != 0;
-            let mut body = Vec::new();
-            loop {
-                let mut avail: u32 = 0;
-                if WinHttpQueryDataAvailable(req, &mut avail) == 0 || avail == 0 {
-                    break;
-                }
-                if body.len() + avail as usize > 1024 * 1024 {
-                    break;
-                }
-                let start = body.len();
-                body.resize(start + avail as usize, 0);
-                let mut read: u32 = 0;
-                if WinHttpReadData(req, body[start..].as_mut_ptr().cast(), avail, &mut read) == 0
-                    || read == 0
-                {
-                    body.truncate(start);
-                    break;
-                }
-                body.truncate(start + read as usize);
-            }
-            Some((
-                status,
-                String::from_utf8_lossy(&body).into_owned(),
-                got_retry.then_some(retry).filter(|&r| r > 0),
-            ))
-        } else {
-            None
-        };
-        WinHttpCloseHandle(req);
-        WinHttpCloseHandle(connect);
-        WinHttpCloseHandle(session);
-        result
-    }
-}
-
-/// Retries a full-detail request with exponential backoff and honours `Retry-After` on 429/503.
+/// Retries a full-detail request with exponential backoff and honours `Retry-After` on 429/5xx.
 /// Network errors and 5xx responses are retried up to three times; the final response (including
 /// its `Retry-After`) is returned so the flyout can show the rate-limit note.
 fn winhttp_json_with_retry(
@@ -4409,9 +4432,10 @@ fn winhttp_json_with_retry(
     let mut last = None;
     for attempt in 0..3u32 {
         last = winhttp_json(method, host, path, headers, body);
+        // `Retry-After` only *sets the delay*; it never turns a successful response into a retry.
         let retryable = last
             .as_ref()
-            .is_none_or(|(status, _, retry)| *status == 429 || *status >= 500 || retry.is_some());
+            .is_none_or(|(status, _, _)| is_retryable_status(*status));
         if !retryable || attempt == 2 {
             break;
         }
@@ -4788,6 +4812,56 @@ mod full_detail_tests {
         let root = serde_json::json!({"retry_after":"12"});
         let n = full_num(&root, "retry_after").unwrap() as u32;
         assert_eq!(n, 12);
+        assert_eq!(parse_retry_after_header(" 12 "), Some(12));
+        assert_eq!(parse_retry_after_header("0"), None);
+        assert_eq!(
+            parse_retry_after_header(" Wed, 21 Oct 2015 07:28:00 GMT "),
+            None
+        );
+    }
+
+    #[test]
+    fn only_rate_limit_and_server_errors_are_retryable() {
+        for status in [200, 204, 301, 400, 401, 403, 404, 418] {
+            assert!(!is_retryable_status(status), "{status} must not retry");
+        }
+        for status in [429, 500, 502, 503, 504, 599] {
+            assert!(is_retryable_status(status), "{status} must retry");
+        }
+    }
+
+    #[test]
+    fn widget_secrets_are_scoped_to_the_owning_slug() {
+        assert_eq!(
+            widget_scoped_secret_name("widget:usd-try:token", "usd-try").as_deref(),
+            Some("widget:usd-try:token")
+        );
+        assert_eq!(
+            widget_scoped_secret_name("WIDGET:USD-TRY:token", "usd-try").as_deref(),
+            Some("widget:usd-try:token")
+        );
+        for rejected in [
+            "api-key:deepseek",
+            "widget:other-widget:token",
+            "widget:usd-try",
+            "widget:usd-try:",
+            "xwidget:usd-try:token",
+            "widget::token",
+        ] {
+            assert_eq!(
+                widget_scoped_secret_name(rejected, "usd-try"),
+                None,
+                "{rejected} must be rejected"
+            );
+        }
+        assert_eq!(
+            widget_scoped_secret_name("widget:x:key", &"k".repeat(129)),
+            None
+        );
+        assert_eq!(
+            widget_scoped_secret_name(&format!("widget:x:{}", "k".repeat(129)), "x"),
+            None
+        );
     }
 
     #[test]

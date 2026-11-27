@@ -6,15 +6,16 @@
 //! read from here, so a widget can no longer be "known" in one place and missing
 //! in another.
 //!
-//! This is metadata only. Rendering (`chip_spec`) and interaction dispatch stay
-//! in `WidgetRuntime`; they will become `WidgetProvider` implementations later.
+//! This is metadata only. Rendering (`chip_spec`) and interaction dispatch stay in
+//! `WidgetRuntime`; every ID lookup (including legacy PascalCase and custom widget IDs)
+//! goes through [`descriptor_for`] so they cannot disagree about what a widget is.
 
 use std::sync::LazyLock;
 
 use opentaskbar_core::i18n as loc;
 use opentaskbar_core::settings::DockSettings;
 
-use super::catalog_ops::setting_value;
+use super::catalog_ops::{compact_id, setting_value};
 
 /// `DockWidget.ShrinkPriority` — lower values shrink first when the dock overflows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -190,7 +191,6 @@ const fn virtual_wd(
 /// `(alias, canonical_id)` pairs accepted by `DockWidgetService.ResolveId`.
 pub const WIDGET_ALIASES: &[(&str, &str)] = &[
     ("date", "clock"),
-    ("showdesktop", "showdesktop"),
     ("show_desktop", "showdesktop"),
     ("ai", "aiusage_all"),
     ("aiusage", "aiusage_all"),
@@ -200,7 +200,6 @@ pub const WIDGET_ALIASES: &[(&str, &str)] = &[
     ("network", "netspeed"),
     ("btbattery", "bluetoothbattery"),
     ("keyboardlayout", "keyboard"),
-    ("quicksettings", "quicksettings"),
     ("claude", "aiusage_claude"),
     ("codex", "aiusage_codex"),
     ("opencode", "aiusage_opencode"),
@@ -537,18 +536,52 @@ pub fn canonical_widget_id(id: &str) -> &str {
     // Reference writes `AiUsageClaude` / `KeyboardLayout` while the catalog uses
     // `aiusage_claude` / `keyboard`; ignore word separators so both spellings
     // resolve to the same card. Only catalog IDs participate, exactly as before.
-    let compact: String = lower.chars().filter(|c| *c != '_' && *c != '-').collect();
+    let compact = compact_id(&lower);
     BUILTINS
         .iter()
-        .find(|w| {
-            w.catalog
-                && w.id
-                    .chars()
-                    .filter(|c| *c != '_' && *c != '-')
-                    .collect::<String>()
-                    == compact
-        })
+        .find(|w| compact_id(w.id) == compact)
         .map_or(id, |w| w.id)
+}
+
+/// The single ID lookup used by names, flyout gates, options and hardware gating.
+/// Accepts canonical IDs, legacy PascalCase spellings and custom widget IDs.
+pub fn descriptor_for(id: &str) -> Option<&'static WidgetDescriptor> {
+    let canonical = canonical_widget_id(id);
+    let matches = |w: &&'static WidgetDescriptor| {
+        w.id.eq_ignore_ascii_case(id) || w.id.eq_ignore_ascii_case(canonical)
+    };
+    BUILTINS.iter().find(|w| matches(w)).or_else(|| {
+        super::custom_widgets::descriptors()
+            .into_iter()
+            .find(|w| matches(w))
+    })
+}
+
+/// Authoritative `DockWidgetOption.HasSettings` answer. Settings UI call sites that still
+/// keep a local list should delegate here (see `FIXES-M.md` for the cross-agent call site).
+pub fn descriptor_has_settings(id: &str) -> bool {
+    descriptor_for(id).is_some_and(|w| w.has_settings)
+}
+
+/// The five widgets with inline settings rows inside their catalog card. Distinct from
+/// `has_settings`, which drives the Configure button and covers more widgets.
+pub fn widget_has_inline_settings(id: &str) -> bool {
+    matches!(
+        canonical_widget_id(id),
+        "clock" | "weather" | "stats" | "bluetoothbattery" | "focus"
+    )
+}
+
+/// Category → i18n key, shared with `ui::settings::category_label`.
+pub fn category_i18n_key(category: &str) -> &str {
+    match category {
+        "Time & Weather" => "WidgetCategoryTime",
+        "System & Hardware" => "WidgetCategorySystem",
+        "AI Quotas" => "WidgetCategoryAi",
+        "Media & Controls" => "WidgetCategoryMedia",
+        "Productivity" => "WidgetCategoryProductivity",
+        other => other,
+    }
 }
 
 /// Localized widget name for the settings catalog and widget menus.
@@ -556,29 +589,15 @@ pub fn widget_name(id: &str) -> String {
     if super::custom_widgets::is_custom(id) {
         return super::custom_widgets::display_name(id);
     }
-    BUILTINS
-        .iter()
-        .find(|w| w.id == id)
-        .or_else(|| {
-            super::custom_widgets::descriptors()
-                .into_iter()
-                .find(|w| w.id == id)
-        })
-        .map_or_else(|| id.to_owned(), |w| loc::t(w.name_key))
+    descriptor_for(id).map_or_else(|| id.to_owned(), |w| loc::t(w.name_key))
 }
 
 /// Single source of truth for widgets that open a popup flyout. Used by the
 /// dock hover coordinator and direct-click dispatch.
 pub fn widget_has_flyout(id: &str) -> bool {
-    BUILTINS
-        .iter()
-        .find(|w| w.id == id)
-        .or_else(|| {
-            super::custom_widgets::descriptors()
-                .into_iter()
-                .find(|w| w.id == id)
-        })
-        .is_some_and(|w| w.has_flyout)
+    // Custom widgets always expose a flyout (see `custom_widgets::descriptor_for`), even
+    // before the first folder scan has produced a descriptor.
+    super::custom_widgets::is_custom(id) || descriptor_for(id).is_some_and(|w| w.has_flyout)
 }
 
 /// Widgets currently rendered on the dock. Reads the effective enabled state
@@ -614,15 +633,7 @@ pub struct WidgetOption {
 
 impl WidgetOption {
     pub fn for_id(id: &str) -> Option<Self> {
-        let canonical = canonical_widget_id(id);
-        let descriptor = BUILTINS
-            .iter()
-            .find(|w| (w.catalog || w.id == "showdesktop") && w.id == canonical)
-            .or_else(|| {
-                super::custom_widgets::descriptors()
-                    .into_iter()
-                    .find(|w| w.catalog && w.id == canonical)
-            })?;
+        let descriptor = descriptor_for(id).filter(|w| w.catalog || w.id == "showdesktop")?;
         Some(Self {
             descriptor,
             has_settings: descriptor.has_settings,
@@ -634,15 +645,7 @@ impl WidgetOption {
 
     /// Category label for the current locale (same keys as `ui::settings::category_label`).
     fn localized_category(&self) -> String {
-        let key = match self.descriptor.category {
-            "Time & Weather" => "WidgetCategoryTime",
-            "System & Hardware" => "WidgetCategorySystem",
-            "AI Quotas" => "WidgetCategoryAi",
-            "Media & Controls" => "WidgetCategoryMedia",
-            "Productivity" => "WidgetCategoryProductivity",
-            other => other,
-        };
-        loc::t(key)
+        loc::t(category_i18n_key(self.descriptor.category))
     }
 
     pub fn matches_search(&self, query: &str) -> bool {
@@ -696,10 +699,7 @@ pub fn widget_layout(id: &str, settings: &DockSettings, hardware_available: bool
 
 /// `DockWidgetService.IsHardwareAvailable`: capability-based visibility gating.
 pub fn hardware_available(id: &str, network: bool, battery: bool, audio: bool, bt: bool) -> bool {
-    let need = BUILTINS
-        .iter()
-        .find(|w| w.id == canonical_widget_id(id))
-        .map_or(HardwareNeed::None, |w| w.hardware);
+    let need = descriptor_for(id).map_or(HardwareNeed::None, |w| w.hardware);
     match need {
         HardwareNeed::Network => network,
         HardwareNeed::Battery => battery,
@@ -715,15 +715,25 @@ mod tests {
 
     #[test]
     fn builtin_table_is_the_only_metadata_source() {
-        assert_eq!(catalog_widgets().count(), 22);
-        assert_eq!(WIDGET_CATEGORIES.len(), 5);
-        assert_eq!(BUILTINS.len(), 26);
+        // Derive counts from the table: adding a widget must not require editing three tests.
+        assert_eq!(
+            catalog_widgets().count(),
+            BUILTINS.iter().filter(|w| w.catalog).count()
+                + super::super::custom_widgets::descriptors().len()
+        );
+        let categories: std::collections::HashSet<_> = BUILTINS
+            .iter()
+            .filter(|w| w.catalog)
+            .map(|w| w.category)
+            .collect();
+        assert_eq!(WIDGET_CATEGORIES.len(), categories.len());
         let mut seen = std::collections::HashSet::new();
         for w in BUILTINS {
             assert!(seen.insert(w.id), "duplicate widget id {}", w.id);
             assert!(w.width_dips >= 48.0);
             assert!(!loc::t(w.name_key).is_empty());
         }
+        assert!(seen.contains("showdesktop") && seen.contains("aiusage_all"));
     }
 
     #[test]
@@ -747,7 +757,20 @@ mod tests {
         assert!(WidgetOption::for_id("clock").unwrap().has_settings);
         assert!(!WidgetOption::for_id("netspeed").unwrap().has_settings);
         assert!(WidgetOption::for_id("weather").unwrap().live_preview);
-        assert!(!WidgetOption::for_id("stacks").is_some_and(|o| o.descriptor.catalog));
+        assert!(widget_descriptor("stacks").is_some_and(|d| !d.catalog && d.dock_descriptor));
+        assert!(WidgetOption::for_id("stacks").is_none());
+        // Case-insensitive + canonical lookup through the one shared helper.
+        assert_eq!(descriptor_for("Clock").unwrap().id, "clock");
+        assert_eq!(
+            descriptor_for("AiUsageClaude").unwrap().id,
+            "aiusage_claude"
+        );
+        assert_eq!(descriptor_for("ShowDesktop").unwrap().id, "showdesktop");
+        assert!(descriptor_has_settings("Clock"));
+        assert!(!descriptor_has_settings("Dns"));
+        assert!(widget_has_inline_settings("Stats"));
+        assert!(!widget_has_inline_settings("Countdown"));
+        assert_eq!(category_i18n_key("AI Quotas"), "WidgetCategoryAi");
     }
 
     #[test]

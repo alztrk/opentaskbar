@@ -13,24 +13,21 @@ pub fn catalog() -> Vec<&'static super::registry::WidgetDescriptor> {
     super::registry::catalog_widgets().collect()
 }
 
-/// Reads a settings key from the serialized `DockSettings`. WS-A is converting several keys
-/// from `extra` into typed fields; serializing first means we see either representation without
-/// this crate needing to depend on the exact struct layout.
-fn keys_match(a: &str, b: &str) -> bool {
-    if a.eq_ignore_ascii_case(b) {
-        return true;
-    }
-    let norm = |s: &str| -> String {
-        s.chars()
-            .filter(|c| *c != '_' && *c != '-')
-            .flat_map(char::to_lowercase)
-            .collect()
-    };
-    norm(a) == norm(b)
+/// One normalization rule for settings keys and widget IDs: lowercase, drop `_`/`-`.
+pub fn compact_id(id: &str) -> String {
+    id.chars()
+        .filter(|c| *c != '_' && *c != '-')
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
-pub fn setting_value(settings: &DockSettings, key: &str) -> Option<serde_json::Value> {
-    let root = serde_json::to_value(settings).ok()?;
+fn keys_match(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b) || compact_id(a) == compact_id(b)
+}
+
+/// Reads a key from an already serialized settings object. Lets multi-key readers serialize
+/// `DockSettings` once instead of once per key.
+pub fn setting_value_from(root: &serde_json::Value, key: &str) -> Option<serde_json::Value> {
     if let Some(v) = root.get(key) {
         return Some(v.clone());
     }
@@ -40,6 +37,13 @@ pub fn setting_value(settings: &DockSettings, key: &str) -> Option<serde_json::V
             .find(|(k, _)| keys_match(k, key))
             .map(|(_, v)| v.clone())
     })
+}
+
+/// Reads a settings key from the serialized `DockSettings`. WS-A is converting several keys
+/// from `extra` into typed fields; serializing first means we see either representation without
+/// this crate needing to depend on the exact struct layout.
+pub fn setting_value(settings: &DockSettings, key: &str) -> Option<serde_json::Value> {
+    setting_value_from(&serde_json::to_value(settings).ok()?, key)
 }
 
 pub fn setting_str(settings: &DockSettings, key: &str) -> Option<String> {
@@ -115,6 +119,21 @@ pub fn is_widget_installed(id: &str, settings: &DockSettings) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_id_and_cached_value_reader_share_one_rule() {
+        assert_eq!(compact_id("AiUsage_Claude"), compact_id("aiusage-claude"));
+        let root = serde_json::json!({"WeatherCity": "Izmir", "ExtraNum": 7});
+        assert_eq!(
+            setting_value_from(&root, "weather_city").and_then(|v| v.as_str().map(str::to_owned)),
+            Some("Izmir".to_owned())
+        );
+        assert_eq!(
+            setting_value_from(&root, "extra-num").and_then(|v| v.as_i64()),
+            Some(7)
+        );
+        assert!(setting_value_from(&root, "missing").is_none());
+    }
 
     #[test]
     fn settings_helper_reads_typed_and_extra_keys() {

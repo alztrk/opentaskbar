@@ -9,8 +9,8 @@
 //! - `Media & Controls`  (4): `media`, `audio`, `quicksettings`, `keyboard`
 //! - `Productivity`      (1): `focus`
 
-// Public API consumed by WS-D (dock) / WS-E (UI) after merge; keep the module warning-clean.
-#![allow(dead_code)]
+// Public API is re-exported for the dock and UI layers. Most of those re-exports are used by
+// other crates / test harnesses only, so silence `dead_code` at the re-export sites below.
 
 pub mod ai_flyout;
 pub mod catalog_ops;
@@ -27,6 +27,7 @@ pub mod widget_icons;
 pub mod widget_snapshot;
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -45,11 +46,14 @@ use telemetry::{BluetoothBatteryDevice, BluetoothDeviceKind};
 
 #[allow(unused_imports)]
 pub use catalog_ops::{
-    catalog, installed_catalog_widget_ids, is_widget_installed, set_setting, setting_bool,
-    setting_f64, setting_i64, setting_str, setting_string_list, setting_value,
+    catalog, compact_id, installed_catalog_widget_ids, is_widget_installed, set_setting,
+    setting_bool, setting_f64, setting_i64, setting_str, setting_string_list, setting_value,
+    setting_value_from,
 };
 #[allow(unused_imports)]
-pub use focus_break::{FocusEvent, FocusPhase, FocusSession, SharedFocusSession, play_break_chime};
+pub use focus_break::{
+    FocusEvent, FocusPhase, FocusSession, SharedFocusSession, format_mm_secs, play_break_chime,
+};
 #[allow(unused_imports)]
 pub use hover::{HOVER_INTENT_MS, HoverChange, HoverPhase, SUPPRESS_MS, WidgetHoverCoordinator};
 #[allow(unused_imports)]
@@ -61,8 +65,9 @@ pub use media_ext::{
 #[allow(unused_imports)]
 pub use registry::{
     WIDGET_ALIASES, WIDGET_CATEGORIES, WidgetDensity, WidgetDescriptor, WidgetLayout, WidgetOption,
-    active_widgets, canonical_widget_id, catalog_widgets, hardware_available, widget_descriptor,
-    widget_has_flyout, widget_layout, widget_name,
+    active_widgets, canonical_widget_id, catalog_widgets, category_i18n_key, descriptor_for,
+    descriptor_has_settings, hardware_available, widget_descriptor, widget_has_flyout,
+    widget_has_inline_settings, widget_layout, widget_name,
 };
 #[allow(unused_imports)]
 pub use speedtest::{STREAM_COUNT, SpeedTestController, SpeedTestResult, SpeedTestState};
@@ -74,6 +79,17 @@ pub use telemetry::{
 };
 #[allow(unused_imports)]
 pub use widget_snapshot::{POLL_TTL, WidgetPollSnapshot};
+
+/// CPU/RAM threshold coloring with a widget-specific base color.
+fn threshold_color(pal: &design::Palette, pct: u32, base: Rgb) -> Rgb {
+    if pct >= 90 {
+        pal.danger
+    } else if pct >= 75 {
+        pal.warning
+    } else {
+        base
+    }
+}
 
 pub fn ai_provider_color(id: &str) -> Rgb {
     match id {
@@ -99,8 +115,21 @@ pub enum DirectClickOutcome {
 struct TooltipTextCache {
     id: &'static str,
     sub: Option<u8>,
+    /// Settings that change tooltip text (city/unit/device names) must invalidate the cache
+    /// immediately, not after the 500 ms TTL.
+    settings_key: String,
     text: String,
     checked: Instant,
+}
+
+fn tooltip_settings_key(settings: &DockSettings) -> String {
+    format!(
+        "{}|{:?}|{}|{}",
+        settings.weather_city,
+        weather_unit(settings),
+        setting_str(settings, "WeatherUnit").unwrap_or_default(),
+        setting_str(settings, "AudioOutputDevice").unwrap_or_default()
+    )
 }
 
 pub struct WidgetRuntime {
@@ -111,10 +140,15 @@ pub struct WidgetRuntime {
     stats_uptime: String,
     stats_top: Arc<Mutex<Vec<(String, u64)>>>,
     last_stats_top: Option<Instant>,
+    /// Coalesces background top-process sampling: the live flyout may not spawn a new thread
+    /// on every 1 Hz refresh tick.
+    stats_top_in_flight: Arc<AtomicBool>,
     /// GPU utilization percent (`SystemStatsWidget` GPU meter).
     gpu_pct: u32,
     /// GPU die temperature in °C (reference GPU temperature meter).
     gpu_temp_c: Option<u32>,
+    /// Engine name from the 1 Hz GPU probe, cached so flyouts never sample GPU counters.
+    gpu_engine_name: String,
     /// Consecutive failed GPU probes; reference hides the GPU meters after 5 misses.
     gpu_misses: u32,
     /// Consecutive successful GPU probes; reference requires 2 samples before showing meters.
@@ -190,6 +224,9 @@ pub struct WidgetRuntime {
     /// events, but the layout change must still go to the app the user was typing in.
     keyboard_target_hwnd: Option<usize>,
     last_tick: Instant,
+    /// Fractional seconds carried between ticks: a 16 ms animation tick must not consume
+    /// the 1 s delta that the 2 s widget timer is about to deliver.
+    tick_debt_secs: f64,
     /// Sensor polling is capped at 1 Hz; hover/click refreshes only rebuild chip specs.
     last_poll: Option<Instant>,
     last_night_light_check: Option<Instant>,
@@ -206,8 +243,10 @@ impl Default for WidgetRuntime {
             stats_uptime: telemetry::system_uptime_string(),
             stats_top: Arc::new(Mutex::new(Vec::new())),
             last_stats_top: None,
+            stats_top_in_flight: Arc::new(AtomicBool::new(false)),
             gpu_pct: 0,
             gpu_temp_c: None,
+            gpu_engine_name: String::new(),
             gpu_misses: 0,
             gpu_samples: 0,
             gpu_thermal_state: 0,
@@ -262,23 +301,11 @@ impl Default for WidgetRuntime {
             keyboard_override: None,
             keyboard_target_hwnd: None,
             last_tick: Instant::now(),
+            tick_debt_secs: 0.0,
             last_poll: None,
             last_night_light_check: None,
             tooltip_text: None,
         }
-    }
-}
-
-fn format_mm_ss(total_secs: u64) -> String {
-    if total_secs >= 3600 {
-        format!(
-            "{:02}:{:02}:{:02}",
-            total_secs / 3600,
-            (total_secs % 3600) / 60,
-            total_secs % 60
-        )
-    } else {
-        format!("{:02}:{:02}", total_secs / 60, total_secs % 60)
     }
 }
 
@@ -367,35 +394,72 @@ fn resolved_widget_id(id: &str, settings: &DockSettings) -> String {
         .unwrap_or(canonical)
 }
 
-/// `WeatherUnit` conversion: telemetry caches Celsius, but the widget can show Fahrenheit.
-fn weather_temp(celsius: &str, settings: &DockSettings) -> String {
-    if celsius.is_empty() {
-        return "—".to_owned();
-    }
-    let unit = setting_str(settings, "WeatherUnit").unwrap_or_else(|| "Celsius".to_owned());
-    if unit.eq_ignore_ascii_case("fahrenheit") || unit == "°F" || unit.eq_ignore_ascii_case("f") {
-        let c = celsius.trim_end_matches('°').parse::<f64>().unwrap_or(0.0);
-        format!("{}°", (c * 9.0 / 5.0 + 32.0).round() as i32)
-    } else {
-        celsius.to_owned()
+/// The catalog's `WeatherUnit` override wins over the typed setting. The old flyout applied
+/// this override while the chip/tooltip did not; both now read the same effective unit.
+fn weather_unit(settings: &DockSettings) -> opentaskbar_core::settings::TemperatureUnit {
+    use opentaskbar_core::settings::TemperatureUnit;
+    match setting_str(settings, "WeatherUnit").as_deref() {
+        Some(value)
+            if value.eq_ignore_ascii_case("fahrenheit")
+                || value.eq_ignore_ascii_case("f")
+                || value == "°F" =>
+        {
+            TemperatureUnit::Fahrenheit
+        }
+        Some(_) => TemperatureUnit::Celsius,
+        None => settings.weather_unit,
     }
 }
 
-/// Native Windows 10/11 `Segoe Fluent Icons` weather glyph matching both English and Turkish conditions.
-fn weather_icon_glyph(condition: &str) -> u16 {
+/// One source for chip, flyout and tooltip temperature strings: `(temp, feels-like, today range)`.
+fn weather_display(
+    snap: &telemetry::WeatherCache,
+    settings: &DockSettings,
+) -> (String, String, String) {
+    let unit = weather_unit(settings);
+    let temp = snap.temp_c_val.map_or_else(
+        || snap.temp_c.clone(),
+        |c| telemetry::format_temperature(c, unit),
+    );
+    let feels = snap.feels_like_c_val.map_or_else(
+        || snap.feels_like.clone(),
+        |c| telemetry::format_temperature(c, unit),
+    );
+    let range = match (snap.today_hi_c, snap.today_lo_c) {
+        (Some(hi), Some(lo)) => format!(
+            "{} / {}",
+            telemetry::format_temperature(hi, unit),
+            telemetry::format_temperature(lo, unit)
+        ),
+        _ => snap.today_range.clone(),
+    };
+    (temp, feels, range)
+}
+
+/// One classification for both the glyph and its semantic color (English + Turkish keywords).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WeatherKind {
+    Storm,
+    Snow,
+    Rain,
+    Cloud,
+    Sun,
+}
+
+fn weather_kind(condition: &str) -> WeatherKind {
     let c = condition.to_lowercase();
     if c.contains("thunder") || c.contains("storm") || c.contains("fırtına") || c.contains("gök")
     {
-        0xE945 // LightningBolt
+        WeatherKind::Storm
     } else if c.contains("snow") || c.contains("kar") || c.contains("sleet") || c.contains("ice") {
-        0xE9CA // Frigid / Snowflake
+        WeatherKind::Snow
     } else if c.contains("rain")
         || c.contains("shower")
         || c.contains("drizzle")
         || c.contains("yağmur")
         || c.contains("sağanak")
     {
-        0xEB42 // Drop / Rain
+        WeatherKind::Rain
     } else if c.contains("fog")
         || c.contains("mist")
         || c.contains("haze")
@@ -404,44 +468,35 @@ fn weather_icon_glyph(condition: &str) -> u16 {
         || c.contains("overcast")
         || c.contains("bulut")
     {
-        0xE753 // Cloud
+        WeatherKind::Cloud
     } else {
-        0xE706 // Brightness / Sun
+        WeatherKind::Sun
+    }
+}
+
+/// Native Windows 10/11 `Segoe Fluent Icons` weather glyph.
+fn weather_icon_glyph(condition: &str) -> u16 {
+    match weather_kind(condition) {
+        WeatherKind::Storm => 0xE945, // LightningBolt
+        WeatherKind::Snow => 0xE9CA,  // Frigid / Snowflake
+        WeatherKind::Rain => 0xEB42,  // Drop / Rain
+        WeatherKind::Cloud => 0xE753, // Cloud
+        WeatherKind::Sun => 0xE706,   // Brightness / Sun
     }
 }
 
 /// Semantic accent color for weather glyphs (warm amber sun, cool sky rain/snow, slate cloud, amber storm).
 fn weather_icon_color(condition: &str, is_dark: bool) -> Rgb {
     let pal = design::palette(is_dark);
-    let c = condition.to_lowercase();
-    if c.contains("thunder") || c.contains("storm") || c.contains("fırtına") || c.contains("gök")
-    {
-        pal.warning
-    } else if c.contains("snow")
-        || c.contains("kar")
-        || c.contains("rain")
-        || c.contains("shower")
-        || c.contains("drizzle")
-        || c.contains("yağmur")
-        || c.contains("sağanak")
-    {
-        pal.accent
-    } else if c.contains("fog")
-        || c.contains("mist")
-        || c.contains("haze")
-        || c.contains("sis")
-        || c.contains("cloud")
-        || c.contains("overcast")
-        || c.contains("bulut")
-    {
-        pal.widget_blue
-    } else {
-        pal.warning
+    match weather_kind(condition) {
+        WeatherKind::Storm | WeatherKind::Sun => pal.warning,
+        WeatherKind::Snow | WeatherKind::Rain => pal.accent,
+        WeatherKind::Cloud => pal.widget_blue,
     }
 }
 
-/// C4 `platform::core_audio::list_devices(false)` adapter. Assumed shape is `(id, display_name)`;
-/// keeping the conversion in one place makes a signature change a one-line fix at merge time.
+/// `platform::core_audio::list_devices(false)` adapter. Assumed shape is `(id, display_name)`;
+/// keeping the conversion in one place makes a signature change a one-line fix.
 fn audio_output_devices() -> Vec<(String, String)> {
     crate::platform::core_audio::list_devices(false)
 }
@@ -503,54 +558,63 @@ impl WidgetRuntime {
     }
 
     /// Animation-only tick. The battery wave phase is derived from `battery_anim_start` inside
-    /// `chip_spec`, so this advances no sensor and leaves the snapshot untouched. WS-8 can call
-    /// this from `TIMER_WIDGET_ANIM` instead of a full `refresh_widgets` / chip surface rebuild.
+    /// `chip_spec`, so this advances no sensor, no timer and leaves the snapshot untouched.
     pub fn animation_tick(&mut self, _settings: &DockSettings) -> bool {
-        // No sensor work: DComp transforms are driven by dock::dcomp from the wave phase alone.
         false
+    }
+
+    /// Advances countdowns with fractional-second accumulation. Every call contributes its
+    /// elapsed time to `tick_debt_secs`; only complete seconds are applied, and the leftover
+    /// fraction drives the stopwatch centisecond carry. Fast animation ticks can no longer
+    /// starve the 2 s widget timer by repeatedly observing `dt == 0`.
+    fn advance_timers(&mut self, settings: &DockSettings, elapsed_secs: f64) {
+        self.tick_debt_secs += elapsed_secs.clamp(0.0, 60.0);
+        let whole_secs = self.tick_debt_secs.trunc() as u64;
+        self.tick_debt_secs -= whole_secs as f64;
+        self.stopwatch_cs = ((self.tick_debt_secs * 100.0).floor() as u32).min(99);
+        if whole_secs == 0 {
+            return;
+        }
+        if self.stopwatch_running {
+            self.stopwatch_secs = self.stopwatch_secs.saturating_add(whole_secs);
+        }
+        if self.countdown_running {
+            self.countdown_remaining_secs =
+                self.countdown_remaining_secs.saturating_sub(whole_secs);
+            if self.countdown_remaining_secs == 0 {
+                self.countdown_running = false;
+            }
+        }
+        // Shared focus/break session: crossing a phase boundary plays the Asterisk chime.
+        if settings.is_widget_enabled("focus") {
+            let event = self
+                .focus
+                .with_mut(|s| s.tick(whole_secs))
+                .unwrap_or(FocusEvent::None);
+            match event {
+                FocusEvent::PhaseEnded(FocusPhase::Focus) | FocusEvent::CycleCompleted => {
+                    play_break_chime()
+                }
+                _ => {}
+            }
+            let s = self.focus.snapshot();
+            self.focus_running = s.running;
+            self.focus_preset_mins = s.focus_minutes;
+            self.focus_remaining_secs = s.remaining_secs;
+            self.focus_completed = s.sessions_completed as u32;
+        }
     }
 
     pub fn tick(&mut self, settings: &DockSettings) {
         let now = Instant::now();
-        let dt_ms = now.duration_since(self.last_tick).as_millis() as u64;
-        let dt = (dt_ms / 1000).min(60);
-        if dt_ms > 0 {
-            self.last_tick = now;
-            if self.stopwatch_running {
-                self.stopwatch_secs = self.stopwatch_secs.saturating_add(dt);
-                self.stopwatch_cs = self
-                    .stopwatch_cs
-                    .saturating_add((dt_ms % 1000) as u32 % 100);
-            }
-            if self.countdown_running {
-                self.countdown_remaining_secs = self.countdown_remaining_secs.saturating_sub(dt);
-                if self.countdown_remaining_secs == 0 {
-                    self.countdown_running = false;
-                }
-            }
-            // Shared focus/break session: crossing a phase boundary plays the Asterisk chime.
-            if settings.is_widget_enabled("focus") {
-                let event = self
-                    .focus
-                    .with_mut(|s| s.tick(dt))
-                    .unwrap_or(FocusEvent::None);
-                match event {
-                    FocusEvent::PhaseEnded(FocusPhase::Focus) => play_break_chime(),
-                    FocusEvent::CycleCompleted => play_break_chime(),
-                    _ => {}
-                }
-                let s = self.focus.snapshot();
-                self.focus_running = s.running;
-                self.focus_preset_mins = s.focus_minutes;
-                self.focus_remaining_secs = s.remaining_secs;
-                self.focus_completed = s.sessions_completed as u32;
-            }
-        }
+        let elapsed = now.duration_since(self.last_tick).as_secs_f64();
+        self.last_tick = now;
+        self.advance_timers(settings, elapsed);
         // `refresh_widgets` also runs on hover/click; those calls must not re-sample COM,
         // registry, network and disk state. The 2 s widget timer still drives polling.
         if self
             .last_poll
-            .is_some_and(|t| now.duration_since(t) < Duration::from_secs(1))
+            .is_some_and(|t| now.duration_since(t) < POLL_TTL)
         {
             return;
         }
@@ -574,27 +638,13 @@ impl WidgetRuntime {
             let show_gpu_temp = settings.stats_meters & 32 != 0;
             (self.cpu_pct, self.ram_pct) = self.stats.sample();
             self.stats_uptime = telemetry::system_uptime_string();
-            if self
-                .last_stats_top
-                .is_none_or(|t| now.duration_since(t) >= Duration::from_secs(5))
-            {
-                self.last_stats_top = Some(now);
-                let shared = Arc::clone(&self.stats_top);
-                std::thread::Builder::new()
-                    .name("opentaskbar-stats".to_owned())
-                    .spawn(move || {
-                        let top = telemetry::sample_top_processes(5);
-                        if let Ok(mut guard) = shared.lock() {
-                            *guard = top;
-                        }
-                    })
-                    .ok();
-            }
+            self.sample_top_processes_async(now);
             if (show_gpu || show_gpu_temp)
                 && let Some((pct, temp)) = telemetry::sample_gpu_temp()
             {
                 self.gpu_pct = pct;
                 self.gpu_temp_c = temp;
+                self.gpu_engine_name = telemetry::sample_gpu_engine_name().unwrap_or_default();
                 self.stats.gpu_history.push(pct as f32 / 100.0);
                 self.gpu_samples = self.gpu_samples.saturating_add(1);
                 self.gpu_misses = 0;
@@ -641,9 +691,7 @@ impl WidgetRuntime {
                 self.net_up_history.pop_front();
             }
             self.net_up_history.push_back(tx);
-            if self.speedtest.poll(now, self.speedtest_started_at) {
-                self.speedtest_started_at = None;
-            }
+            self.poll_speedtest(now);
         }
         if settings.is_widget_enabled("weather") {
             let can_fetch = self.weather_retry_at.is_none_or(|at| now >= at);
@@ -803,6 +851,36 @@ impl WidgetRuntime {
         self.audio_vol
     }
 
+    /// Single radio toggle path for chip clicks and the Quick Settings flyout. A successful
+    /// write clears the sticky "Unavailable" flag and records the pending target; a failed
+    /// write opens the matching Settings page (reference `ChangeResult` reconciliation).
+    fn toggle_radio(&mut self, kind: &'static str) -> bool {
+        let (current, settings_uri) = match kind {
+            "wifi" => (self.wifi_on, "ms-settings:network-wifi"),
+            _ => (self.bluetooth_on, "ms-settings:bluetooth"),
+        };
+        let target = !current;
+        self.radio_failed = false;
+        self.radio_denied = false;
+        if crate::platform::radio::set(kind, target) {
+            if kind == "wifi" {
+                self.wifi_on = target;
+                self.wifi_target = Some(target);
+            } else {
+                self.bluetooth_on = target;
+                self.bluetooth_target = Some(target);
+            }
+            self.radio_unavailable = false;
+            true
+        } else {
+            self.radio_unavailable = true;
+            self.radio_denied = true;
+            self.radio_failed = true;
+            pins::launch(settings_uri.to_owned());
+            false
+        }
+    }
+
     /// `KeyboardLayoutWidget`: send `WM_INPUTLANGCHANGEREQUEST` to the last *external*
     /// foreground window (never our own dock/island/flyout windows).
     pub fn activate_keyboard_on_last_external_window(&mut self) {
@@ -906,6 +984,48 @@ impl WidgetRuntime {
         }
     }
 
+    /// Requests a background top-process refresh at most once per 5 s / while one is running.
+    fn sample_top_processes_async(&mut self, now: Instant) {
+        if self.stats_top_in_flight.swap(true, Ordering::AcqRel)
+            || self
+                .last_stats_top
+                .is_some_and(|t| now.duration_since(t) < Duration::from_secs(5))
+        {
+            return;
+        }
+        self.last_stats_top = Some(now);
+        let shared = Arc::clone(&self.stats_top);
+        let in_flight = Arc::clone(&self.stats_top_in_flight);
+        let spawned = std::thread::Builder::new()
+            .name("opentaskbar-stats".to_owned())
+            .spawn(move || {
+                let top = telemetry::sample_top_processes(5);
+                if let Ok(mut guard) = shared.lock() {
+                    *guard = top;
+                }
+                in_flight.store(false, Ordering::Release);
+            })
+            .is_ok();
+        if !spawned {
+            self.stats_top_in_flight.store(false, Ordering::Release);
+        }
+    }
+
+    /// Explicit invalidation used only by the Stats flyout Refresh button. Live ticks must
+    /// never reset the cache — that used to spawn a new thread every second.
+    pub fn invalidate_top_processes(&mut self) {
+        self.last_stats_top = None;
+        self.sample_top_processes_async(Instant::now());
+    }
+
+    /// Polls the speed test from the tick, the live flyout and the flyout buttons alike so
+    /// `speedtest_started_at` is always cleared when the controller reports completion.
+    fn poll_speedtest(&mut self, now: Instant) {
+        if self.speedtest.poll(now, self.speedtest_started_at) {
+            self.speedtest_started_at = None;
+        }
+    }
+
     /// Rebuilds a flyout spec from the *current* widget state. Called by the live flyout WM_TIMER
     /// update path (WS-7 `LiveEvent::Update`) so Clock / Stats / Focus / Countdown / Stopwatch /
     /// NetSpeed show live data instead of a frozen snapshot.
@@ -925,15 +1045,14 @@ impl WidgetRuntime {
             "stats" => {
                 (self.cpu_pct, self.ram_pct) = self.stats.sample();
                 self.stats_uptime = telemetry::system_uptime_string();
-                self.last_stats_top = None;
+                // Keep the cached top-process list: live ticks used to reset it every second.
                 self.build_stats_spec(settings, is_dark)
             }
             "focus" => focus_break::build_focus_flyout(&self.focus.snapshot()),
             "stopwatch" => self.build_stopwatch_spec(),
             "countdown" => self.build_countdown_spec(),
             "netspeed" => {
-                self.speedtest
-                    .poll(Instant::now(), self.speedtest_started_at);
+                self.poll_speedtest(Instant::now());
                 let mut spec = speedtest::build_speedtest_flyout(
                     self.speedtest.state(),
                     self.speedtest.result(),
@@ -1040,10 +1159,13 @@ impl WidgetRuntime {
             return ai_flyout::from_telemetry(&full);
         }
         let peak = snap.windows.iter().map(|w| w.used).fold(0.0f32, f32::max);
-        ai_flyout::AiFullDetail {
-            severity: ai_flyout::severity_for_usage(peak, false),
+        // Route through the same adapter as a fetched payload so severity and formatting
+        // have a single source of truth.
+        ai_flyout::from_telemetry(&telemetry::AiFullDetail {
+            provider_id: id.to_owned(),
+            used: peak,
             ..Default::default()
-        }
+        })
     }
 
     /// Exposes the hover coordinator's public API (WS-D already reaches it via the pub field).
@@ -1104,15 +1226,7 @@ impl WidgetRuntime {
                 .ok()
                 .and_then(|g| g.providers.get(ai.id).cloned())
                 .unwrap_or_default();
-            let bar_accent = |used: f32| -> Rgb {
-                if used >= 0.90 {
-                    pal.danger
-                } else if used >= 0.75 {
-                    pal.warning
-                } else {
-                    pal.widget_accent
-                }
-            };
+            let bar_accent = |used: f32| -> Rgb { design::meter_color(&pal, used) };
             return match ai.id {
                 "aiusage_claude" | "aiusage_codex" => {
                     let s_win = snap.windows.iter().find(|w| w.label == "5h");
@@ -1133,7 +1247,8 @@ impl WidgetRuntime {
                     ];
                     WidgetChipSpec::AiDual {
                         provider_id: ai.id,
-                        brand_color: (ai.id == "aiusage_claude").then_some((0xd9, 0x77, 0x57)),
+                        brand_color: (ai.id == "aiusage_claude")
+                            .then_some(ai_provider_color("aiusage_claude")),
                         rows,
                     }
                 }
@@ -1187,7 +1302,7 @@ impl WidgetRuntime {
                         let col = if w.used >= 0.75 {
                             bar_accent(w.used)
                         } else {
-                            (0x9f, 0x9f, 0xf2) // reference CopilotBrandBrush
+                            ai_provider_color("aiusage_copilot") // reference CopilotBrandBrush
                         };
                         WidgetChipSpec::AiCopilot {
                             value_text: format!("{:.0}%", w.used * 100.0),
@@ -1204,7 +1319,7 @@ impl WidgetRuntime {
                                 loc::t("AiUsageCursorSignIn")
                             },
                             used: 0.0,
-                            bar_color: (0x9f, 0x9f, 0xf2),
+                            bar_color: ai_provider_color("aiusage_copilot"),
                         }
                     }
                 }
@@ -1240,8 +1355,7 @@ impl WidgetRuntime {
                     .map(|g| g.clone())
                     .unwrap_or_default();
                 let available = !snap.temp_c.is_empty();
-                let formatted_temp = snap.formatted_temp(settings.weather_unit);
-                let formatted_range = snap.formatted_today_range(settings.weather_unit);
+                let (formatted_temp, _, formatted_range) = weather_display(&snap, settings);
                 let place = if snap.city.is_empty() {
                     settings.weather_city.clone()
                 } else {
@@ -1286,20 +1400,15 @@ impl WidgetRuntime {
             "countdown" => WidgetChipSpec::Timed {
                 is_focus: false,
                 running: self.countdown_running,
-                text: format_mm_ss(self.countdown_remaining_secs),
+                text: format_mm_secs(self.countdown_remaining_secs),
             },
             "focus" => {
                 let snapshot = self.focus.snapshot();
-                let label = if snapshot.phase == FocusPhase::Break {
-                    loc::t("Break").to_owned()
-                } else {
-                    snapshot.session_label()
-                };
-                let _ = label; // chip text stays tabular; phase is exposed in the flyout/island.
+                // Chip text stays tabular; phase/session are exposed in the flyout/island.
                 WidgetChipSpec::Timed {
                     is_focus: true,
                     running: snapshot.running,
-                    text: format_mm_ss(snapshot.remaining_secs),
+                    text: format_mm_secs(snapshot.remaining_secs),
                 }
             }
             "stats" => {
@@ -1313,7 +1422,7 @@ impl WidgetRuntime {
                         label: "CPU".to_owned(),
                         value_text: format!("{}%", self.cpu_pct),
                         ratio: (self.cpu_pct as f32 / 100.0).clamp(0.0, 1.0),
-                        bar_color: pal.widget_blue,
+                        bar_color: threshold_color(&pal, self.cpu_pct, pal.widget_blue),
                         warm_text: self.cpu_pct >= 85,
                     });
                 }
@@ -1322,7 +1431,7 @@ impl WidgetRuntime {
                         label: "RAM".to_owned(),
                         value_text: format!("{}%", self.ram_pct),
                         ratio: (self.ram_pct as f32 / 100.0).clamp(0.0, 1.0),
-                        bar_color: pal.widget_accent,
+                        bar_color: threshold_color(&pal, self.ram_pct, pal.widget_accent),
                         warm_text: self.ram_pct >= 85,
                     });
                 }
@@ -1590,14 +1699,19 @@ impl WidgetRuntime {
         settings: &DockSettings,
     ) -> &str {
         let now = Instant::now();
+        let settings_key = tooltip_settings_key(settings);
         let cached = self.tooltip_text.as_ref().is_some_and(|c| {
-            c.id == id && c.sub == sub && now.duration_since(c.checked) < Duration::from_millis(500)
+            c.id == id
+                && c.sub == sub
+                && c.settings_key == settings_key
+                && now.duration_since(c.checked) < Duration::from_millis(500)
         });
         if !cached {
             let text = self.build_hover_tooltip(id, sub, settings);
             self.tooltip_text = Some(TooltipTextCache {
                 id,
                 sub,
+                settings_key,
                 text,
                 checked: now,
             });
@@ -1664,12 +1778,8 @@ impl WidgetRuntime {
                     .map(|g| g.clone())
                     .unwrap_or_default();
                 if !snap.temp_c.is_empty() {
-                    format!(
-                        "{} · {} · {}",
-                        snap.city,
-                        snap.formatted_temp(settings.weather_unit),
-                        snap.condition
-                    )
+                    let (temp, _, _) = weather_display(&snap, settings);
+                    format!("{} · {} · {}", snap.city, temp, snap.condition)
                 } else {
                     loc::t_fmt("WeatherTooltip", &[&settings.weather_city])
                 }
@@ -1723,7 +1833,7 @@ impl WidgetRuntime {
                     format!(
                         "{} · {}",
                         loc::t("WidgetStopwatch"),
-                        format_mm_ss(self.stopwatch_secs)
+                        format_mm_secs(self.stopwatch_secs)
                     )
                 }
             }
@@ -1739,7 +1849,7 @@ impl WidgetRuntime {
                     format!(
                         "{} · {}",
                         loc::t("WidgetCountdown"),
-                        format_mm_ss(self.countdown_remaining_secs)
+                        format_mm_secs(self.countdown_remaining_secs)
                     )
                 }
             }
@@ -1755,7 +1865,7 @@ impl WidgetRuntime {
                     format!(
                         "{} · {}",
                         loc::t("WidgetFocus"),
-                        format_mm_ss(self.focus_remaining_secs)
+                        format_mm_secs(self.focus_remaining_secs)
                     )
                 }
             }
@@ -1844,24 +1954,10 @@ impl WidgetRuntime {
                 // reference QuickSettingsWidget.xaml: Wi-Fi, Bluetooth, Night Light — real radio toggles.
                 let third = (width_dips / 3.0).max(1.0);
                 if rel_x_dips < third {
-                    let kind = "wifi";
-                    let target = !self.wifi_on;
-                    if crate::platform::radio::set(kind, target) {
-                        self.wifi_on = target;
-                    } else {
-                        self.radio_unavailable = true;
-                        pins::launch("ms-settings:network-wifi".to_owned());
-                    }
+                    self.toggle_radio("wifi");
                     DirectClickOutcome::Handled
                 } else if rel_x_dips < third * 2.0 {
-                    let kind = "bluetooth";
-                    let target = !self.bluetooth_on;
-                    if crate::platform::radio::set(kind, target) {
-                        self.bluetooth_on = target;
-                    } else {
-                        self.radio_unavailable = true;
-                        pins::launch("ms-settings:bluetooth".to_owned());
-                    }
+                    self.toggle_radio("bluetooth");
                     DirectClickOutcome::Handled
                 } else {
                     if telemetry::toggle_night_light() {
@@ -1949,8 +2045,14 @@ impl WidgetRuntime {
                 Some(DirectClickOutcome::Handled)
             }
             "focus" => {
-                self.focus_running = false;
-                self.focus_remaining_secs = self.focus_preset_mins * 60;
+                // Reset the shared session, then mirror its values back. Resetting only the
+                // legacy mirror let the next tick restore the still-running shared session.
+                self.focus.with_mut(|s| s.reset());
+                let s = self.focus.snapshot();
+                self.focus_running = s.running;
+                self.focus_preset_mins = s.focus_minutes;
+                self.focus_remaining_secs = s.remaining_secs;
+                self.focus_completed = s.sessions_completed as u32;
                 Some(DirectClickOutcome::Handled)
             }
             "audio" => {
@@ -2170,53 +2272,6 @@ impl WidgetRuntime {
         }
     }
 
-    fn build_focus_spec(&self) -> FlyoutSpec {
-        let total = (self.focus_preset_mins * 60).max(1) as f32;
-        let ratio = (self.focus_remaining_secs as f32 / total).clamp(0.0, 1.0);
-        FlyoutSpec {
-            title: String::new(),
-            subtitle: None,
-            width_dips: 316.0,
-            blocks: vec![
-                FlyoutBlock::StatRow {
-                    label: loc::t("Focus"),
-                    value: loc::t_fmt("FocusSessionsCount", &[&self.focus_completed.to_string()]),
-                },
-                FlyoutBlock::Hero {
-                    value: format_mm_ss(self.focus_remaining_secs),
-                    caption: None,
-                    centered: false,
-                    large: true,
-                    right_meta: None,
-                },
-                FlyoutBlock::ProgressBar {
-                    label: String::new(),
-                    value_text: String::new(),
-                    ratio,
-                    tone: BarTone::Accent,
-                },
-                FlyoutBlock::ButtonBar(vec![
-                    (15, "15m".to_owned(), self.focus_preset_mins == 15),
-                    (25, "25m".to_owned(), self.focus_preset_mins == 25),
-                    (50, "50m".to_owned(), self.focus_preset_mins == 50),
-                ]),
-                FlyoutBlock::ButtonBar(vec![
-                    (2, loc::t("Reset").to_owned(), false),
-                    (
-                        1,
-                        if self.focus_running {
-                            loc::t("TimedWidgetPause")
-                        } else {
-                            loc::t("TimedWidgetStart")
-                        }
-                        .to_owned(),
-                        true,
-                    ),
-                ]),
-            ],
-        }
-    }
-
     fn build_stopwatch_spec(&self) -> FlyoutSpec {
         let mut blocks = vec![
             FlyoutBlock::Hero {
@@ -2235,7 +2290,7 @@ impl WidgetRuntime {
                 let num = self.stopwatch_laps.len() - i;
                 blocks.push(FlyoutBlock::StatRow {
                     label: format!("{num:02}"),
-                    value: format_mm_ss(lap),
+                    value: format_mm_secs(lap),
                 });
             }
         }
@@ -2274,7 +2329,7 @@ impl WidgetRuntime {
             width_dips: 300.0,
             blocks: vec![
                 FlyoutBlock::Hero {
-                    value: format_mm_ss(self.countdown_remaining_secs),
+                    value: format_mm_secs(self.countdown_remaining_secs),
                     caption: None,
                     centered: true,
                     large: true,
@@ -2320,8 +2375,8 @@ impl WidgetRuntime {
         }
     }
 
-    /// Unified `SystemStatsWidget` flyout: localized metrics (WIP), GPU meters with
-    /// hysteresis (WS-G), C2 `Chart`/`Sparkline` series (WS-C) and cached top processes.
+    /// Unified `SystemStatsWidget` flyout: localized metrics, hysteresis-gated GPU meters,
+    /// `Chart`/`Sparkline` series and cached top processes (sampled off the UI thread).
     fn build_stats_spec(&self, settings: &DockSettings, is_dark: bool) -> FlyoutSpec {
         let pal = design::palette(is_dark);
         let top = self
@@ -2333,20 +2388,8 @@ impl WidgetRuntime {
         let cores = std::thread::available_parallelism()
             .map(|n| n.get() as u64)
             .unwrap_or(1);
-        let cpu_col = if self.cpu_pct >= 90 {
-            pal.danger
-        } else if self.cpu_pct >= 75 {
-            pal.warning
-        } else {
-            pal.widget_blue
-        };
-        let ram_col = if self.ram_pct >= 90 {
-            pal.danger
-        } else if self.ram_pct >= 75 {
-            pal.warning
-        } else {
-            pal.widget_accent
-        };
+        let cpu_col = threshold_color(&pal, self.cpu_pct, pal.widget_blue);
+        let ram_col = threshold_color(&pal, self.ram_pct, pal.widget_accent);
         let mut blocks = vec![
             FlyoutBlock::Hero {
                 value: self.stats_uptime.clone(),
@@ -2436,21 +2479,14 @@ impl WidgetRuntime {
                 });
             }
         }
-        if settings.stats_meters & 16 != 0 {
-            let gpu = diagnostics::sample_gpu();
-            let value = if let Some(temp) = gpu.temperature_c {
-                format!(
-                    "{}% · {}°C · {}",
-                    (gpu.usage_01 * 100.0).round() as u32,
-                    temp.round() as i32,
-                    gpu.engine_name
-                )
+        // Flyout values come from the 1 Hz cache sampled by `tick`, not a second UI-thread
+        // probe — chip and flyout now always agree.
+        if settings.stats_meters & 16 != 0 && gpu_metrics_visible(self.gpu_samples, self.gpu_misses)
+        {
+            let value = if let Some(temp) = self.gpu_temp_c {
+                format!("{}% · {temp}°C · {}", self.gpu_pct, self.gpu_engine_name)
             } else {
-                format!(
-                    "{}% · {}",
-                    (gpu.usage_01 * 100.0).round() as u32,
-                    gpu.engine_name
-                )
+                format!("{}% · {}", self.gpu_pct, self.gpu_engine_name)
             };
             blocks.insert(
                 3,
@@ -2459,45 +2495,29 @@ impl WidgetRuntime {
                     value,
                 },
             );
-        } else if settings.stats_meters & 32 != 0 {
-            let gpu = diagnostics::sample_gpu();
-            if let Some(temp) = gpu.temperature_c {
-                blocks.insert(
-                    3,
-                    FlyoutBlock::StatRow {
-                        label: loc::t("GpuTemperature"),
-                        value: format!("{}°C", temp.round() as i32),
-                    },
-                );
-            }
+        } else if settings.stats_meters & 32 != 0
+            && let Some(temp) = self.gpu_temp_c
+        {
+            blocks.insert(
+                3,
+                FlyoutBlock::StatRow {
+                    label: loc::t("GpuTemperature"),
+                    value: format!("{temp}°C"),
+                },
+            );
         }
         blocks.push(FlyoutBlock::Separator);
         if top.is_empty() {
-            let sampling = self
-                .last_stats_top
-                .is_none_or(|t| t.elapsed() < Duration::from_secs(10));
+            // Wait for the background sampler; never do disk/process I/O on the UI thread.
+            let sampling = self.stats_top_in_flight.load(Ordering::Relaxed)
+                || self
+                    .last_stats_top
+                    .is_some_and(|t| t.elapsed() < Duration::from_secs(10));
             blocks.push(FlyoutBlock::Note(loc::t(if sampling {
                 "StatsSamplingProcesses"
             } else {
                 "StatsTopProcessesEmpty"
             })));
-            // WS-C fallback: sample directly while the background sampler has no data yet.
-            let procs = telemetry::sample_top_processes(5);
-            if !procs.is_empty() {
-                blocks.push(FlyoutBlock::StatRow {
-                    label: loc::t("StatsTopProcesses"),
-                    value: String::new(),
-                });
-                for (name, bytes) in procs {
-                    blocks.push(FlyoutBlock::GlyphStatRow {
-                        glyph: 0xE7FC,
-                        glyph_color: pal.widget_accent,
-                        label: name,
-                        detail: None,
-                        value: telemetry::format_bytes(bytes),
-                    });
-                }
-            }
         } else {
             blocks.push(FlyoutBlock::StatRow {
                 label: loc::t("StatsTopProcesses"),
@@ -2577,8 +2597,6 @@ impl WidgetRuntime {
             return true;
         }
 
-        let pal = design::palette(is_dark);
-
         if id == "aiusage_all" {
             let mut blocks = Vec::new();
             let guard_map = self
@@ -2646,7 +2664,6 @@ impl WidgetRuntime {
                 .ok()
                 .and_then(|g| g.providers.get(ai.id).cloned())
                 .unwrap_or_default();
-            let has_data = snap.balance_text.is_some() || !snap.windows.is_empty();
             // Kick off a full fetch when there is no cached payload yet; the returned flyout uses
             // the cache as soon as the background fetch lands (no `AiFullDetail::default()`).
             if self.ai_full_detail(ai.id).is_none() {
@@ -2660,7 +2677,6 @@ impl WidgetRuntime {
                 Some(3) => self.refresh_ai_full(ai.id),
                 _ => {}
             }
-            let _ = (has_data, &pal);
         }
 
         match id {
@@ -2687,7 +2703,7 @@ impl WidgetRuntime {
                         LiveEvent::Click(3) => {
                             (self.cpu_pct, self.ram_pct) = self.stats.sample();
                             self.stats_uptime = telemetry::system_uptime_string();
-                            self.last_stats_top = None;
+                            self.invalidate_top_processes();
                             LiveOutcome::Update(self.build_stats_spec(settings, is_dark))
                         }
                         // WM_TIMER-driven LiveEvent::Update (WS-7) refreshes live values.
@@ -2860,28 +2876,20 @@ impl WidgetRuntime {
                 } else {
                     snap.city.clone()
                 };
+                // Chip, flyout and tooltip all use the same effective unit / formatting.
+                let (temp, feels, today_range) = weather_display(&snap, settings);
                 let temp = if snap.temp_c.is_empty() {
                     "—".to_owned()
                 } else {
-                    snap.formatted_temp(settings.weather_unit)
+                    temp
                 };
                 let feels = if snap.feels_like.is_empty() {
                     "—".to_owned()
                 } else {
-                    snap.formatted_feels_like(settings.weather_unit)
-                };
-                // `WeatherUnit` override from the settings catalog (WS-C), when configured.
-                let temp = if setting_str(settings, "WeatherUnit").is_some() {
-                    weather_temp(&snap.temp_c, settings)
-                } else {
-                    temp
-                };
-                let feels = if setting_str(settings, "WeatherUnit").is_some() {
-                    weather_temp(&snap.feels_like, settings)
-                } else {
                     feels
                 };
-                let wind = snap.formatted_wind(settings.weather_unit);
+                let unit = weather_unit(settings);
+                let wind = snap.formatted_wind(unit);
                 let wind = if wind.is_empty() {
                     "—".to_owned()
                 } else {
@@ -2897,7 +2905,7 @@ impl WidgetRuntime {
                 } else {
                     snap.condition.clone()
                 };
-                let unit_label = match settings.weather_unit {
+                let unit_label = match unit {
                     opentaskbar_core::settings::TemperatureUnit::Celsius => "°C",
                     opentaskbar_core::settings::TemperatureUnit::Fahrenheit => "°F",
                 };
@@ -2923,7 +2931,7 @@ impl WidgetRuntime {
                     ]),
                     FlyoutBlock::StatRow {
                         label: loc::t("WeatherToday"),
-                        value: snap.formatted_today_range(settings.weather_unit),
+                        value: today_range,
                     },
                 ];
                 if !snap.forecast_days.is_empty() {
@@ -2939,8 +2947,8 @@ impl WidgetRuntime {
                         {
                             format!(
                                 "{} / {}",
-                                telemetry::format_temperature(*hi, settings.weather_unit),
-                                telemetry::format_temperature(*lo, settings.weather_unit)
+                                telemetry::format_temperature(*hi, unit),
+                                telemetry::format_temperature(*lo, unit)
                             )
                         } else {
                             high_low.clone()
@@ -3036,22 +3044,24 @@ impl WidgetRuntime {
                         LiveEvent::Click(1) => {
                             self.speedtest.start();
                             self.speedtest_started_at = Some(Instant::now());
-                            self.speedtest
-                                .poll(Instant::now(), self.speedtest_started_at);
+                            self.poll_speedtest(Instant::now());
                             LiveOutcome::Update(build(self))
                         }
                         LiveEvent::Click(2) => {
                             self.speedtest.cancel();
+                            self.speedtest_started_at = None;
                             LiveOutcome::Update(build(self))
                         }
                         LiveEvent::Click(3) => {
                             self.speedtest.retry();
                             self.speedtest_started_at = Some(Instant::now());
+                            self.poll_speedtest(Instant::now());
                             LiveOutcome::Update(build(self))
                         }
                         LiveEvent::Click(4) => {
                             self.speedtest.restart();
                             self.speedtest_started_at = Some(Instant::now());
+                            self.poll_speedtest(Instant::now());
                             LiveOutcome::Update(build(self))
                         }
                         LiveEvent::Click(5) => {
@@ -3059,8 +3069,7 @@ impl WidgetRuntime {
                             LiveOutcome::Close
                         }
                         _ => {
-                            self.speedtest
-                                .poll(Instant::now(), self.speedtest_started_at);
+                            self.poll_speedtest(Instant::now());
                             LiveOutcome::Update(build(self))
                         }
                     },
@@ -3971,18 +3980,7 @@ impl WidgetRuntime {
                         }
                         LiveEvent::Click(5) => {
                             // C4 `platform::radio::set` — real WinRT Wi-Fi toggle.
-                            let target = !self.wifi_on;
-                            self.radio_failed = false;
-                            self.radio_denied = false;
-                            if crate::platform::radio::set("wifi", target) {
-                                self.wifi_on = target;
-                                self.wifi_target = Some(target);
-                            } else {
-                                self.radio_unavailable = true;
-                                self.radio_denied = true;
-                                self.radio_failed = true;
-                                pins::launch("ms-settings:network-wifi".to_owned());
-                            }
+                            self.toggle_radio("wifi");
                             let cur_wifi = if self.radio_unavailable {
                                 loc::t("QuickUnavailable")
                             } else {
@@ -3999,18 +3997,7 @@ impl WidgetRuntime {
                         }
                         LiveEvent::Click(6) => {
                             // C4 `platform::radio::set` — real WinRT Bluetooth toggle.
-                            let target = !self.bluetooth_on;
-                            self.radio_failed = false;
-                            self.radio_denied = false;
-                            if crate::platform::radio::set("bluetooth", target) {
-                                self.bluetooth_on = target;
-                                self.bluetooth_target = Some(target);
-                            } else {
-                                self.radio_unavailable = true;
-                                self.radio_denied = true;
-                                self.radio_failed = true;
-                                pins::launch("ms-settings:bluetooth".to_owned());
-                            }
+                            self.toggle_radio("bluetooth");
                             let cur_bt = if self.radio_unavailable {
                                 loc::t("QuickUnavailable")
                             } else {
@@ -4167,37 +4154,22 @@ mod tests {
 
     #[test]
     fn flyout_gate_covers_every_flyout_widget() {
-        // WS-D hover dispatch and direct-click dispatch share this gate. It must stay in sync
-        // with the branches in `open_widget_flyout`, including the WS-E flyouts.
-        for enabled in [
-            "clock",
-            "weather",
-            "stopwatch",
-            "countdown",
-            "focus",
-            "audio",
-            "quicksettings",
-            "keyboard",
-            "stacks",
-            "groups",
-            "stats",
-            "netspeed",
-            "bluetoothbattery",
-            "storage",
-            "dayprogress",
-            "media",
-            "aiusage_all",
-            "aiusage_claude",
-            "aiusage_codex",
-            "aiusage_opencode",
-            "aiusage_copilot",
-            "aiusage_deepseek",
-            "aiusage_openrouter",
-            "aiusage_cursor",
-        ] {
-            assert!(widget_has_flyout(enabled), "{enabled} should have a flyout");
+        // Derived from the descriptor table so a newly added flyout widget is covered
+        // automatically; AI providers and custom widgets have their own dispatch branches.
+        for w in registry::BUILTINS {
+            assert_eq!(
+                widget_has_flyout(w.id),
+                w.has_flyout,
+                "descriptor/gate mismatch for {}",
+                w.id
+            );
+            assert_eq!(widget_has_flyout(&w.id.to_uppercase()), w.has_flyout);
         }
-        for disabled in ["battery", "unknown", "showdesktop"] {
+        for ai in telemetry::AI_PROVIDERS {
+            assert!(widget_has_flyout(ai.id), "{} should have a flyout", ai.id);
+        }
+        assert!(widget_has_flyout("CUSTOM:demo"));
+        for disabled in ["battery", "unknown"] {
             assert!(
                 !widget_has_flyout(disabled),
                 "{disabled} should not have a flyout"
@@ -4309,6 +4281,109 @@ mod tests {
         assert!(!runtime.animation_tick(&settings));
         assert_eq!(runtime.poll_snapshot.sampled_at(), after);
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn fast_ticks_accumulate_into_whole_seconds_with_centisecond_carry() {
+        let mut runtime = WidgetRuntime::default();
+        let settings = DockSettings::default();
+        runtime.stopwatch_running = true;
+        runtime.countdown_running = true;
+        runtime.countdown_remaining_secs = 10;
+        for _ in 0..60 {
+            runtime.advance_timers(&settings, 0.016);
+        }
+        assert_eq!(
+            runtime.stopwatch_secs, 0,
+            "0.96 s must not become a second yet"
+        );
+        assert_eq!(runtime.stopwatch_cs, 96);
+        assert_eq!(runtime.countdown_remaining_secs, 10);
+        runtime.advance_timers(&settings, 0.05);
+        assert_eq!(runtime.stopwatch_secs, 1);
+        assert_eq!(runtime.stopwatch_cs, 1);
+        assert_eq!(runtime.countdown_remaining_secs, 9);
+        let before = (runtime.stopwatch_secs, runtime.stopwatch_cs);
+        assert!(!runtime.animation_tick(&settings));
+        assert_eq!((runtime.stopwatch_secs, runtime.stopwatch_cs), before);
+    }
+
+    #[test]
+    fn focus_secondary_click_resets_the_shared_session() {
+        let mut runtime = WidgetRuntime::default();
+        runtime.focus.with_mut(|s| {
+            s.running = true;
+            s.remaining_secs = 1;
+        });
+        runtime.focus_running = true;
+        runtime.focus_remaining_secs = 1;
+        let mut settings = DockSettings::default();
+        assert!(matches!(
+            runtime.handle_secondary_click("focus", &mut settings),
+            Some(DirectClickOutcome::Handled)
+        ));
+        let snap = runtime.focus.snapshot();
+        assert!(!snap.running);
+        assert_eq!(snap.remaining_secs, snap.focus_minutes * 60);
+        assert_eq!(runtime.focus_remaining_secs, snap.remaining_secs);
+        assert_eq!(runtime.focus_running, snap.running);
+    }
+
+    #[test]
+    fn weather_override_is_shared_by_chip_flyout_and_tooltip() {
+        let mut settings = DockSettings::default();
+        settings
+            .extra
+            .insert("WeatherUnit".into(), serde_json::json!("Fahrenheit"));
+        let snap = telemetry::WeatherCache {
+            temp_c_val: Some(0.0),
+            feels_like_c_val: Some(10.0),
+            today_hi_c: Some(5.0),
+            today_lo_c: Some(-5.0),
+            city: "Izmir".to_owned(),
+            ..Default::default()
+        };
+        let (temp, feels, range) = weather_display(&snap, &settings);
+        assert_eq!(temp, "32°F");
+        assert_eq!(feels, "50°F");
+        assert_eq!(range, "41°F / 23°F");
+        let runtime = WidgetRuntime::default();
+        *runtime.weather.lock().unwrap() = snap;
+        let chip = runtime.chip_spec("weather", &settings, true);
+        let WidgetChipSpec::Weather {
+            temp, today_range, ..
+        } = chip
+        else {
+            panic!("expected weather chip");
+        };
+        assert_eq!(temp, "32°F");
+        assert_eq!(today_range.as_deref(), Some("41°F / 23°F"));
+    }
+
+    #[test]
+    fn tooltip_cache_invalidates_on_settings_change() {
+        let mut runtime = WidgetRuntime::default();
+        let mut settings = DockSettings {
+            weather_city: "Izmir".to_owned(),
+            ..Default::default()
+        };
+        let _ = runtime.hover_tooltip("weather", None, &settings);
+        let first_key = runtime.tooltip_text.as_ref().unwrap().settings_key.clone();
+        settings.weather_city = "Ankara".to_owned();
+        let _ = runtime.hover_tooltip("weather", None, &settings);
+        let second_key = runtime.tooltip_text.as_ref().unwrap().settings_key.clone();
+        assert_ne!(first_key, second_key);
+        assert!(second_key.contains("Ankara"));
+    }
+
+    #[test]
+    fn live_stats_tick_keeps_the_cached_top_process_list() {
+        let mut runtime = WidgetRuntime::default();
+        let settings = DockSettings::default();
+        let stamp = Instant::now();
+        runtime.last_stats_top = Some(stamp);
+        let _ = runtime.live_spec("stats", &settings, true);
+        assert_eq!(runtime.last_stats_top, Some(stamp));
     }
 
     #[test]

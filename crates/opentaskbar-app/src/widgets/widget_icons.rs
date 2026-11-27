@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, LazyLock, RwLock};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use opentaskbar_core::paths;
 use opentaskbar_core::settings::DockSettings;
@@ -25,6 +25,7 @@ use super::catalog_ops::setting_value;
 
 const MAX_ICON_DIMENSION: u32 = 256;
 const MAX_DECODE_CACHE: usize = 64;
+const MAX_ICON_CACHE: usize = 64;
 const MAX_MANIFEST_BYTES: u64 = 128 * 1024;
 
 struct CachedIcon {
@@ -66,7 +67,7 @@ fn inside_dir(base: &Path, relative: &str) -> Option<PathBuf> {
 }
 
 /// An override string is either inline `StreamGeometry` path data or a PNG path.
-fn icon_from_text(text: &str) -> Option<WidgetIcon> {
+pub(crate) fn icon_from_text(text: &str) -> Option<WidgetIcon> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
@@ -150,13 +151,33 @@ fn resolve_uncached(id: &str, settings: &DockSettings) -> Option<WidgetIcon> {
     is_file.then_some(WidgetIcon::Asset(own))
 }
 
+/// Modification time of the active theme's icon manifest. Part of the cache fingerprint so
+/// editing `pack.json` (or reloading widgets) cannot keep serving a stale icon.
+fn pack_fingerprint(settings: &DockSettings) -> String {
+    let theme = settings.theme_pack.trim();
+    if theme.is_empty() {
+        return String::new();
+    }
+    paths::theme_root()
+        .join(theme)
+        .join("widgets")
+        .join("icons")
+        .join("pack.json")
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map_or_else(String::new, |age| age.as_millis().to_string())
+}
+
 /// Resolves the icon for `id`, falling back to `default`. Cached on the settings
 /// fingerprint so repeated `chip_spec()` calls during animation stay allocation-light.
 pub fn resolve_widget_icon(id: &str, settings: &DockSettings, default: WidgetIcon) -> WidgetIcon {
     let fingerprint = format!(
-        "{}|{}",
+        "{}|{}|{}",
         settings.theme_pack,
-        user_override(settings, id).unwrap_or_default()
+        user_override(settings, id).unwrap_or_default(),
+        pack_fingerprint(settings)
     );
     if let Ok(cache) = ICON_CACHE.read()
         && let Some(cached) = cache.get(id)
@@ -166,6 +187,11 @@ pub fn resolve_widget_icon(id: &str, settings: &DockSettings, default: WidgetIco
     }
     let icon = resolve_uncached(id, settings).unwrap_or(default);
     if let Ok(mut cache) = ICON_CACHE.write() {
+        if cache.len() >= MAX_ICON_CACHE
+            && let Some(oldest) = cache.keys().next().cloned()
+        {
+            cache.remove(&oldest);
+        }
         cache.insert(
             id.to_owned(),
             CachedIcon {
@@ -175,6 +201,14 @@ pub fn resolve_widget_icon(id: &str, settings: &DockSettings, default: WidgetIco
         );
     }
     icon
+}
+
+/// Drops icon resolutions after a widget Reload / theme change. The decode cache stays:
+/// it is keyed by path + modification time and invalidates its own entries lazily.
+pub fn invalidate() {
+    if let Ok(mut cache) = ICON_CACHE.write() {
+        cache.clear();
+    }
 }
 
 /// Decodes a PNG into premultiplied BGRA32 pixels for Direct2D upload. Results
@@ -309,5 +343,24 @@ mod tests {
         ));
         assert!(icon_from_text("").is_none());
         assert!(icon_from_text("C:\\missing\\icon.png").is_none());
+        // The custom-widget icon hint goes through the same trim/parse path.
+        assert!(matches!(
+            icon_from_text("  M0 0 L24 24 Z  "),
+            Some(WidgetIcon::PathData(_))
+        ));
+    }
+
+    #[test]
+    fn invalidate_drops_cached_resolutions() {
+        ICON_CACHE.write().unwrap().insert(
+            "probe".to_owned(),
+            CachedIcon {
+                fingerprint: "stale".to_owned(),
+                icon: WidgetIcon::Glyph(1),
+            },
+        );
+        assert!(ICON_CACHE.read().unwrap().contains_key("probe"));
+        invalidate();
+        assert!(ICON_CACHE.read().unwrap().is_empty());
     }
 }
