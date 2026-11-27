@@ -141,12 +141,13 @@ pub const DYNAMIC_ISLAND_ALL_DISPLAYS: &str = "*";
 /// C# property names that the port exposes under a different Rust field name. `save_to` writes
 /// both spellings so a settings.json written by Rust is readable by the C# build as well; the
 /// canonical (Rust) spelling wins when both appear in a file that is loaded again.
-const SETTINGS_ALIAS_PAIRS: [(&str, &str); 5] = [
+const SETTINGS_ALIAS_PAIRS: [(&str, &str); 6] = [
     ("EnabledWidgets", "Widgets"),
     ("ShowClockWidget", "ShowClock"),
     ("ShowSystemStatsWidget", "ShowSystemStats"),
     ("FocusMode", "FocusModeEnabled"),
     ("UserPinnedBackgroundApps", "PinnedTrayIcons"),
+    ("DynamicIslandEnable", "DynamicIslandEnabled"),
 ];
 
 /// Collapses the double-spelled keys written by `save_to`. Serde rejects a JSON object that maps
@@ -843,10 +844,15 @@ pub struct DockSettings {
     pub dynamic_island_visibility: DynamicIslandVisibilityMode,
     #[serde(default = "default_true")]
     pub dynamic_island_hide_in_fullscreen: bool,
-    #[serde(default = "default_true")]
+    /// C# writes `DynamicIslandEnabled`; the port's historic spelling is `DynamicIslandEnable`.
+    #[serde(alias = "DynamicIslandEnabled", default = "default_true")]
     pub dynamic_island_enable: bool,
     pub dynamic_island_auto_hide: bool,
     pub dynamic_island_background: SurfaceBackground,
+    /// C# `DynamicIslandBackgroundColor` (`#RRGGBB`). Kept as text so an invalid value from an
+    /// older build is preserved; `dynamic_island_background_hex()` validates before use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dynamic_island_background_color: Option<String>,
     #[serde(default = "default_dynamic_island_opacity")]
     pub dynamic_island_opacity: f64,
     #[serde(default = "default_true")]
@@ -947,6 +953,10 @@ pub struct DockSettings {
     pub wireless_battery_listen_only: bool,
     pub weather_unit: TemperatureUnit,
     pub mirror_main_dock: bool,
+    /// C# `show_fjord_files_button`: dock visibility of the Fjord Files button. The dock host
+    /// consumes this key in a separate workstream; the schema and Settings UI already own it.
+    #[serde(default)]
+    pub show_fjord_files_button: bool,
 
     // Hotkeys are needed by `validate()` (C# `IsValid` rejects launcher/dock conflicts).
     pub launcher_hotkey: HotkeyChoice,
@@ -1024,6 +1034,7 @@ impl Default for DockSettings {
             dynamic_island_enable: true,
             dynamic_island_auto_hide: false,
             dynamic_island_background: SurfaceBackground::Glass,
+            dynamic_island_background_color: None,
             dynamic_island_opacity: default_dynamic_island_opacity(),
             dynamic_island_use_theme: true,
             dynamic_island_widget_orders: HashMap::new(),
@@ -1090,6 +1101,7 @@ impl Default for DockSettings {
             wireless_battery_listen_only: false,
             weather_unit: TemperatureUnit::Celsius,
             mirror_main_dock: false,
+            show_fjord_files_button: false,
 
             launcher_hotkey: HotkeyChoice::AltSpace,
             dock_hotkey: HotkeyChoice::CtrlAltD,
@@ -1327,6 +1339,23 @@ impl DockSettings {
             .filter(|text| !text.trim().is_empty())
             .and_then(crate::hotkey::parse)
             .or_else(|| HotkeyBinding::from_choice(self.dock_hotkey))
+    }
+
+    /// Effective island background colour (C# `DynamicIslandBackgroundColor`). The typed field
+    /// wins; older builds kept the hex string in `extra`, so that key is the fallback. Invalid
+    /// values are ignored rather than being handed to a renderer as a colour.
+    pub fn dynamic_island_background_hex(&self) -> Option<&str> {
+        let raw = self
+            .dynamic_island_background_color
+            .as_deref()
+            .or_else(|| {
+                self.extra
+                    .get("DynamicIslandBackgroundColor")
+                    .and_then(Value::as_str)
+            })?
+            .trim();
+        let digits = raw.strip_prefix('#').unwrap_or(raw);
+        (digits.len() == 6 && digits.bytes().all(|byte| byte.is_ascii_hexdigit())).then_some(raw)
     }
 
     pub fn is_widget_enabled(&self, id: &str) -> bool {
@@ -2876,6 +2905,10 @@ fn write_settings_aliases(root: &mut Map<String, Value>, settings: &DockSettings
         "PinnedTrayIcons".to_owned(),
         json!(settings.user_pinned_background_apps),
     );
+    root.insert(
+        "DynamicIslandEnabled".to_owned(),
+        json!(settings.dynamic_island_enable),
+    );
 
     if let Some(Value::Array(profiles)) = root.get_mut("Profiles") {
         for (entry, profile) in profiles.iter_mut().zip(settings.profiles.iter()) {
@@ -3373,17 +3406,19 @@ mod tests {
         let path = dir.join("settings.json");
         fs::write(
             &path,
-            r#"{
+            r##"{
                 "DynamicIslandPlacements": { "clock": "*", "media": "\\\\.\\DISPLAY1" },
                 "DynamicIslandVisibility": "DesktopOnly",
                 "DynamicIslandHideInFullscreen": false,
-                "DynamicIslandEnable": false,
+                "DynamicIslandEnabled": false,
                 "DynamicIslandAutoHide": true,
                 "DynamicIslandBackground": "Solid",
+                "DynamicIslandBackgroundColor": "#102030",
                 "DynamicIslandOpacity": 0.65,
                 "DynamicIslandUseTheme": false,
-                "DynamicIslandWidgetOrders": { "\\\\.\\DISPLAY1": ["media", "clock"] }
-            }"#,
+                "DynamicIslandWidgetOrders": { "\\\\.\\DISPLAY1": ["media", "clock"] },
+                "ShowFjordFilesButton": true
+            }"##,
         )
         .unwrap();
 
@@ -3393,11 +3428,16 @@ mod tests {
             DynamicIslandVisibilityMode::DesktopOnly
         );
         assert!(!loaded.dynamic_island_hide_in_fullscreen);
-        assert!(!loaded.dynamic_island_enable);
+        assert!(
+            !loaded.dynamic_island_enable,
+            "C# alias must override the default"
+        );
         assert!(loaded.dynamic_island_auto_hide);
         assert_eq!(loaded.dynamic_island_background, SurfaceBackground::Solid);
+        assert_eq!(loaded.dynamic_island_background_hex(), Some("#102030"));
         assert!((loaded.dynamic_island_opacity - 0.65).abs() < f64::EPSILON);
         assert!(!loaded.dynamic_island_use_theme);
+        assert!(loaded.show_fjord_files_button);
         assert_eq!(
             loaded
                 .dynamic_island_placements
@@ -3420,15 +3460,62 @@ mod tests {
             "\"DynamicIslandVisibility\"",
             "\"DynamicIslandHideInFullscreen\"",
             "\"DynamicIslandEnable\"",
+            "\"DynamicIslandEnabled\"",
             "\"DynamicIslandAutoHide\"",
             "\"DynamicIslandBackground\"",
+            "\"DynamicIslandBackgroundColor\"",
             "\"DynamicIslandOpacity\"",
             "\"DynamicIslandUseTheme\"",
             "\"DynamicIslandWidgetOrders\"",
+            "\"ShowFjordFilesButton\"",
         ] {
             assert!(raw.contains(key), "missing {key} in {raw}");
         }
+        let reloaded = load_from(&path);
+        assert!(!reloaded.dynamic_island_enable);
+        assert_eq!(reloaded.dynamic_island_background_hex(), Some("#102030"));
+        assert!(reloaded.show_fjord_files_button);
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dynamic_island_enable_default_and_csharp_alias_agree() {
+        // An absent C# key must keep the default; the C# spelling must override it.
+        assert!(DockSettings::default().dynamic_island_enable);
+        assert!(
+            serde_json::from_str::<DockSettings>(r#"{"DynamicIslandEnabled":true}"#)
+                .unwrap()
+                .dynamic_island_enable
+        );
+        assert!(
+            !serde_json::from_str::<DockSettings>(r#"{"DynamicIslandEnabled":false}"#)
+                .unwrap()
+                .dynamic_island_enable
+        );
+        // The port's own spelling stays authoritative when both keys are written by save_to.
+        let both = r#"{"DynamicIslandEnable":true,"DynamicIslandEnabled":false}"#;
+        let deduped = normalize_legacy_json(both);
+        assert!(!deduped.contains("DynamicIslandEnabled"));
+        assert!(
+            serde_json::from_str::<DockSettings>(&deduped)
+                .unwrap()
+                .dynamic_island_enable
+        );
+    }
+
+    #[test]
+    fn island_background_hex_reads_typed_field_and_legacy_extra() {
+        let mut settings = DockSettings::default();
+        assert_eq!(settings.dynamic_island_background_hex(), None);
+        settings.extra.insert(
+            "DynamicIslandBackgroundColor".to_owned(),
+            json!("  #abcdef  "),
+        );
+        assert_eq!(settings.dynamic_island_background_hex(), Some("#abcdef"));
+        settings.dynamic_island_background_color = Some("bad-colour".to_owned());
+        assert_eq!(settings.dynamic_island_background_hex(), None);
+        settings.dynamic_island_background_color = Some("112233".to_owned());
+        assert_eq!(settings.dynamic_island_background_hex(), Some("112233"));
     }
 
     #[test]
