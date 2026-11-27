@@ -1,8 +1,7 @@
 name: CodeQL
 
-# No branch filter here: the Rust job must scan every branch and PR, including
-# the short-lived integration worktrees. The C# job keeps its master-only scope
-# through its own `if` guard below.
+# No branch filter: every push, PR and the weekly schedule scan the Rust
+# workspace and the native C watchdog used by the Rust shell.
 on:
   push:
   pull_request:
@@ -13,52 +12,8 @@ permissions:
   contents: read
 
 jobs:
-  analyze:
-    name: Analyze (C#)
-    # Master-only (plus the weekly schedule) as before; branches and PRs are
-    # covered by the Rust job below.
-    if: >-
-      github.event_name == 'schedule' ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
-      (github.event_name == 'pull_request' && github.base_ref == 'master')
-    runs-on: windows-latest
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Set up .NET 10 SDK
-        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6
-        with:
-          dotnet-version: '10.0.x'
-
-      - name: Restore dependencies
-        run: dotnet restore OpenTaskbar.csproj
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@aaf92c3279600a7c7217a1cd605774c6c791c6c3 # v3
-        with:
-          languages: csharp
-          # security-extended keeps all security queries. security-and-quality additionally runs
-          # quality queries that flag P/Invoke (unmanaged code) as "bad" — unavoidable for a
-          # taskbar replacement that must call Win32 APIs, and not a security vulnerability.
-          queries: security-extended
-
-      - name: Build
-        run: dotnet build OpenTaskbar.csproj --configuration Release --no-restore
-
-      - name: Perform CodeQL analysis
-        uses: github/codeql-action/analyze@aaf92c3279600a7c7217a1cd605774c6c791c6c3 # v3
-        with:
-          category: '/language:csharp'
-
   analyze-rust:
     name: Analyze (Rust)
-    # Intentionally unguarded: every push, every PR, every branch.
     runs-on: windows-latest
     permissions:
       actions: read
@@ -90,3 +45,37 @@ jobs:
         uses: github/codeql-action/analyze@aaf92c3279600a7c7217a1cd605774c6c791c6c3 # v3
         with:
           category: '/language:rust'
+
+  analyze-watchdog:
+    name: Analyze (C/C++)
+    runs-on: windows-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@aaf92c3279600a7c7217a1cd605774c6c791c6c3 # v3
+        with:
+          languages: c-cpp
+          queries: security-extended
+          build-mode: manual
+
+      - name: Build native watchdog (x64, no fallback)
+        shell: pwsh
+        working-directory: tools/watchdog
+        run: |
+          & ./build.ps1 -Architecture x64 -Force -NoFallback
+          if ($LASTEXITCODE -ne 0) { throw "watchdog build failed with exit code $LASTEXITCODE" }
+          if (-not (Test-Path -LiteralPath 'OpenTaskbarWatchdog.exe' -PathType Leaf)) {
+            throw 'watchdog build did not produce OpenTaskbarWatchdog.exe'
+          }
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@aaf92c3279600a7c7217a1cd605774c6c791c6c3 # v3
+        with:
+          category: '/language:c-cpp'

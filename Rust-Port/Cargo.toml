@@ -7,11 +7,10 @@ members = [
 ]
 
 [workspace.package]
-# Intentionally 0.1.0: the crate's own registry version is decoupled from the
-# application release version (0.3.5). check-release-version.ps1 records this
-# carve-out explicitly and package-rust-release.ps1 publishes it as
-# rustPort.crateVersion; do not bump it as part of an app release.
-version = "0.1.0"
+# Application and crate version are the same. Bump here, in
+# packaging/msix/AppxManifest.Rust.xml and in the release tag together;
+# scripts/check-release-version.ps1 enforces the three-way match.
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"

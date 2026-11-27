@@ -433,15 +433,15 @@ mod tests {
     #[test]
     fn parses_newer_release_and_selects_arch_asset() {
         let json = r#"{
-          "tag_name":"v0.4.0",
-          "html_url":"https://github.com/alztrk/opentaskbar/releases/tag/v0.4.0",
+          "tag_name":"v0.4.1",
+          "html_url":"https://github.com/alztrk/opentaskbar/releases/tag/v0.4.1",
           "assets":[
             {"name":"OpenTaskbar-x86.exe","browser_download_url":"https://x/86.exe","size":123,"digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
             {"name":"OpenTaskbar-x64.exe","browser_download_url":"https://x/64.exe","size":456,"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
           ]
         }"#;
         let release = parse_release(json).unwrap();
-        assert_eq!(release.version, "0.4.0");
+        assert_eq!(release.version, "0.4.1");
         let expected = if cfg!(target_arch = "x86_64") {
             "https://x/64.exe"
         } else {

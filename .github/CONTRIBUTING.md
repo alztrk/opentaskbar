@@ -5,41 +5,55 @@ Thank you for your interest in contributing to OpenTaskbar!
 ## Language Policy
 
 - **All issues, pull requests, commit messages, code comments, and documentation must be written in English.**
-- Localization files under `Services/Localization/Languages/` naturally contain translated user-facing text, but metadata, keys, and pull request descriptions discussing those translations must still be in English.
+- Localization files under `Rust-Port/crates/opentaskbar-core/locales/` naturally contain translated user-facing text, but metadata, keys, and pull request descriptions discussing those translations must still be in English.
 
 ## Getting Started
 
 ### Prerequisites
-- Windows 10 (version 19041 or higher) or Windows 11
-- [.NET 10.0 SDK](https://dotnet.microsoft.com/download)
-- PowerShell 7+ (or Windows PowerShell 5.1)
+- Windows 10 (version 19041 or higher) or Windows 11, x64 or x86
+- Rust stable toolchain (`rustup`); the minimum version is declared in `Rust-Port/Cargo.toml`
+- PowerShell 7+ for the build/packaging scripts
 
 ### Building the Project
 ```pwsh
-dotnet build OpenTaskbar.csproj --warnaserror
+cargo build --manifest-path Rust-Port/Cargo.toml --workspace
+```
+
+To produce a portable EXE and verify it:
+```pwsh
+.\scripts\publish-rust-portable.ps1 -Runtime win-x64
+.\scripts\check-rust-portable.ps1 -ExecutableName OpenTaskbar-Rust-x64.exe
 ```
 
 ### Running Tests
-The project contains behavior and contract checks in `tests/OpenTaskbar.Tests/`:
+The deterministic behavior, contract and i18n checks live in the Rust workspace:
 ```pwsh
-dotnet run --project tests/OpenTaskbar.Tests/OpenTaskbar.Tests.csproj
+cargo test --manifest-path Rust-Port/Cargo.toml --workspace
 ```
-Ensure all behavior checks pass before submitting a pull request.
+
+Before submitting a pull request, also run the same gates as CI:
+```pwsh
+cargo fmt --manifest-path Rust-Port/Cargo.toml --all -- --check
+cargo clippy --manifest-path Rust-Port/Cargo.toml --workspace --all-targets -- -D warnings
+```
+
+Ensure all checks pass before submitting a pull request. Live Windows shell behavior still needs a manual smoke run; see `docs/windows-reliability-audit.md`.
 
 ## Development Guidelines
 
 1. **Focused Changes:** Keep pull requests focused on a single topic. Avoid scope creep or bundling unrelated changes.
-2. **Preserve Compatibility:** Do not introduce breaking configuration or storage format changes without migration safety.
+2. **Preserve Compatibility:** Do not introduce breaking configuration or storage format changes without migration safety. User data lives in the shared `%LOCALAPPDATA%\OpenTaskbar\` folder.
 3. **Coding Standards:**
-   - Follow existing architecture: keep business logic, UI, and platform P/Invoke decoupled.
-   - Use strict C# 13 / .NET 10 features and idiomatic patterns.
+   - Follow existing architecture: `opentaskbar-core` (settings/i18n/paths), `opentaskbar-shell` (shell journal, taskbar, watchdog) and `opentaskbar-app` (GPUI UI and Win32 platform layer).
+   - Use idiomatic Rust with workspace lint settings; keep platform P/Invoke code isolated in the app crate.
    - Write clear, meaningful comments in English explaining *why*, not just *what*.
    - Never commit credentials, personal data, or build artifacts.
+4. **Localization:** Keep all 14 locale catalogs in sync; `scripts/check-locale-parity.ps1` and `Rust-Port/crates/opentaskbar-core/tests/i18n_parity.rs` enforce key parity.
 
 ## Submitting a Pull Request
 
 1. Fork the repository and create a branch for your fix or feature.
-2. Verify that `dotnet build --warnaserror` succeeds and all tests pass.
+2. Verify that `cargo fmt`, `cargo clippy` and `cargo test --workspace` succeed, plus the portable EXE check when packaging changes.
 3. Fill out the pull request template completely in **English**.
 4. `master` is a protected branch: every change must go through a pull request with at least one approving review and a passing `Build & Test (Windows x64)` check. Do not push directly to `master`.
 5. Keep your branch current before requesting review (`git fetch origin && git rebase origin/master`) so the branch is mergeable and CI runs against the latest base.

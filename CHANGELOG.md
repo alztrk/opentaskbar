@@ -2,15 +2,23 @@
 
 ## Unreleased
 
+### Rust-only build and release pipeline
+
+- OpenTaskbar is now a Rust-only application: the C#/WPF implementation and its build/test/publish scripts have been removed. Source lives in `Rust-Port/crates/{opentaskbar-core,opentaskbar-shell,opentaskbar-app}`; portable EXEs, MSIX packages and release ZIPs are all produced from `Rust-Port/Cargo.toml`.
+- `ci.yml` is now a single Rust gate (fmt, clippy, tests, release build); `rust-ci.yml` keeps the extended watchdog/x86/locale checks. CodeQL analyses the Rust workspace and the native C watchdog (`tools/watchdog/watchdog.c`, built with `-NoFallback`) on every branch and PR.
+- `release.yml` builds and packages only Rust x64/x86 EXEs and ZIPs plus `checksums.txt`, a schemaVersion 2 `release-manifest.json` and `release-notes.md`; SLSA attestation, optional VirusTotal scanning and the protected `release` environment remain in place. The C# `measure-baseline.ps1` performance workflow was removed; no Rust benchmark suite exists yet.
+- Release version gate is now tag ↔ Cargo workspace `0.4.0` ↔ Rust MSIX `0.4.0.0`; the former Cargo `0.1.0` carve-out and csproj check are gone. `package-rust-release.ps1` generates all release text files itself and records per-architecture watchdog PE machine and SHA-256.
+- Dependabot tracks Cargo and GitHub Actions only; dependency review watches the Rust lockfiles. README, CONTRIBUTING and the reliability audit now describe Rust tooling, CLI flags and the shared `%LOCALAPPDATA%\OpenTaskbar` data folder.
+
 ### OLED / display care
 
 - Added a fourth per-surface material, **True black (OLED)**: opaque `#000000` with no rim, sheen or shadow on the dock, menus, widgets and Settings window. Available independently for each surface in Settings → Appearance, with live preview.
 - Added independent display-care settings: reduce glow & shadows, burn-in shift (5–120 minute interval), automatic OLED look on low battery and/or Night Light, ambient display (minimal clock + battery strip after 5 minutes idle), and an animation frame limit (unlimited/30/60/120 FPS). Burn-in shift uses a tiny in-pill transform so layout and geometry stay untouched; the automatic trigger never rewrites saved settings.
-- All new settings and the TrueBlack material are mirrored in the Rust port (schema, validation, glass/dock rendering and Settings UI), with 17 new locale keys translated in all 14 C# and Rust catalogs. Numeric parity gates moved to **1011 C# / 1423 Rust** keys.
+- All new settings and the TrueBlack material are implemented in Rust (schema, validation, glass/dock rendering and Settings UI), with 17 new locale keys translated in all 14 Rust catalogs. Numeric parity gate moved to **1423 Rust** keys.
 
 ### Rust port — test/CI/docs/packaging parity
 
-- Removed five retired AI-provider grouping keys and added 27 window-picker, magnification, Fjord, Wi-Fi, search, alignment, preview, focus, density and AI-ring keys (24 newly added; three already shipped in every catalog) to all 14 Rust catalogs. After the integration union the C# catalogs hold **1034 keys** (994 original plus the 40 Fjord/Wi-Fi/preview labels) and every Rust catalog and numeric gate sits at **1406 keys**.
+- Removed five retired AI-provider grouping keys and added 27 window-picker, magnification, Fjord, Wi-Fi, search, alignment, preview, focus, density and AI-ring keys (24 newly added; three already shipped in every catalog) to all 14 Rust catalogs. At that point every Rust catalog and numeric gate sat at **1406 keys**.
 - Added 32 new feature keys to all 14 Rust catalogs and enforced identical key sets with `scripts/check-locale-parity.ps1` and `tests/i18n_parity.rs`.
 - Merged 202 new UI localization keys (Dynamic Island details, Settings/theme controls and widget labels) with the five widget/start-layout keys from the other branch, all with real translations in 14 Rust catalogs, raising every catalog from 1129 to **1336 keys**, and raised the numeric parity gates to match.
 - Restored the nine tr-TR labels that the merge overwrote with en-US or ASCII-only text (`FocusBreakTitle/Start/Skip/Countdown/Complete`, `FocusSession`, `RadioOn`, `RadioOff`, `DockBottomGap`) and added parity tests for translation regressions, empty values and placeholder retention. The key count stayed **1336** at that point in all 14 catalogs and every gate.
@@ -18,7 +26,7 @@
 - Made the Weather country/city pickers searchable (case-insensitive, Turkish `ı/İ`-aware filtering, arrow/Enter/Escape navigation and an empty-result message) and persisted `"City, Country"` immediately on selection. Added `platform::country_city::geolocate()` (Windows capability consent + WinRT permission, coordinate reverse geocoding with offline-catalog fallback) which silently auto-fills an empty saved location on Settings open and logs the result. Three new locale keys (`DropdownSearchPlaceholder`, `DropdownNoResults`, `WeatherLocationUsed`) raise every catalog and every numeric gate to **1342 keys**.
 - Ported the deterministic C# checks into Rust integration tests: settings key parity, AI usage/JWT/quota/groups, `.otbackup` ZIP round-trip, wireless battery vendors, media timeline/seek, shell recovery, dock layout, audio mixer and locale completeness.
 - Linked the reference checks to production code and core APIs, removed self-validating assertions, and added production-seam tests for radio, Night Light, watchdog, monitors, auto-hide, updater bytes and the single-instance mutex (cross-WS APIs that are not landed yet are marked `#[ignore]` with a note).
-- Rust CI now runs on every branch and also on C# locale changes; CodeQL analyses Rust on every branch/PR (C# stays master-only); Dependabot tracks Cargo.
+- Rust CI now runs on every branch; CodeQL analyses Rust (and later the native C watchdog) on every branch/PR; Dependabot tracks Cargo.
 - Added Rust portable/MSIX packaging scripts and merged Rust artifacts into checksums, release manifest, SLSA attestation and optional VirusTotal scanning.
 - Expanded `Rust-Port/README.md` and updated localization/theme/reliability/privacy docs for the Rust port.
 
@@ -26,10 +34,10 @@
 
 - Added `Rust-Port/crates/opentaskbar-shell/build.rs`: maps `CARGO_CFG_TARGET_ARCH` to x64/x86, runs `tools/watchdog/build.ps1 -Architecture <arch> -Force -NoFallback` into `OUT_DIR`, verifies the PE machine (x64 `0x8664` / x86 `0x014C`) and exports `OT_WATCHDOG_EXE`. `watchdog.rs` now embeds that architecture-specific PE with `include_bytes!(env!("OT_WATCHDOG_EXE"))`.
 - `tools/watchdog/build.ps1` gained `-NoFallback`, an architecture-aware skip condition (a wrong-arch PE is never treated as current) and a hard error when no 32-bit toolchain is available for a no-fallback build.
-- `rust-ci.yml` now triggers on watchdog sources, packaging scripts, the Rust MSIX manifest, csproj and workflow changes. Its new `watchdog-arch` job asserts x86 PE machine `0x014C`, builds the workspace for `i686-pc-windows-msvc` and re-verifies the x86 portable EXE.
-- Added `scripts/check-release-version.ps1` and run it before any release build: tag ↔ csproj `0.3.5` ↔ Cargo `0.1.0` (explicitly registered carve-out) ↔ Rust MSIX `0.3.5.0`. Bumped csproj and the Rust MSIX identity to 0.3.5, removed the hardcoded MSIX version default, and staged the architecture-matched watchdog inside the MSIX package.
+- `rust-ci.yml` now triggers on watchdog sources, packaging scripts, the Rust MSIX manifest and workflow changes. Its new `watchdog-arch` job asserts x86 PE machine `0x014C`, builds the workspace for `i686-pc-windows-msvc` and re-verifies the x86 portable EXE.
+- Added `scripts/check-release-version.ps1` and run it before any release build: initially tag ↔ csproj `0.3.5` ↔ Cargo `0.1.0` (carve-out) ↔ Rust MSIX `0.3.5.0`; in the Rust-only update the gate became tag ↔ Cargo workspace `0.4.0` ↔ Rust MSIX `0.4.0.0`. Staged the architecture-matched watchdog inside the MSIX package.
 - `package-rust-release.ps1` records `rustPort.crateVersion` and per-artifact watchdog architecture/PE machine/SHA-256, verifies deterministic ZIP payloads and every `checksums.txt` row against disk before SLSA attestation, and documents the optional report-only VirusTotal scan.
-- Locale parity constants updated for the integration union (1034 C# / 1406 Rust). The smoke checklist and docs now reference the shared `%LOCALAPPDATA%\OpenTaskbar` folder and `opentaskbar-rust.log`.
+- Locale parity constants updated for the integration union (1406 Rust keys at that point). The smoke checklist and docs now reference the shared `%LOCALAPPDATA%\OpenTaskbar` folder and `opentaskbar-rust.log`.
 
 - Placed Rust Background Apps pins in a compact strip beside the Background Apps button, with overflow available in the flyout. Added a short dock closing animation that respects Windows and OpenTaskbar animation settings.
 
@@ -39,7 +47,7 @@
 
 - Redesigned the Rust port's Settings and Background Apps panels with coordinated light and dark themes, responsive Settings navigation, and inline dock pin and window close controls.
 
-- Merged origin/master's Dynamic Island, window-picker and AI-provider labels into all 14 C# catalogs; after removing the retired provider labels the numeric parity gates are **1046 C# / 1423 Rust** keys.
+- Merged Dynamic Island, window-picker and AI-provider labels into all 14 Rust catalogs; after removing the retired provider labels the numeric parity gate is **1423 Rust** keys.
 
 - Applied the active theme and theme pack tokens to the Dynamic Island, with per-user background color and opacity controls.
 
@@ -244,7 +252,7 @@
 - Improved widget catalog readability and themed input, focus, and read-only states.
 - Standardized application icon bounds and added two-sided dock resizing with horizontal scrolling.
 - Used the Windows UI language for initial preferences while preserving saved language choices.
-- Added deterministic behavior checks and rendered WPF component checks.
+- Added deterministic behavior checks and rendered component checks.
 
 ## 0.1.0 - 2026-11-15
 

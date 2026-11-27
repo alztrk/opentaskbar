@@ -58,7 +58,7 @@ if (Test-Path -LiteralPath $watchdog -PathType Leaf) {
 # The release ships a single EXE. Any third-party DLL beside it would mean the
 # Rust port is not actually portable (OS-provided api-ms-win-* DLLs are fine).
 $sidecars = @(Get-ChildItem -LiteralPath $directory -Filter '*.dll' -File | Where-Object {
-    $_.Name -notlike 'api-ms-win-*' -and $_.Name -notlike 'OpenTaskbar-*.dll'
+    $_.Name -notlike 'api-ms-win-*'
 })
 if ($sidecars.Count -gt 0) {
     throw "Unexpected sidecar DLLs next to the Rust EXE: $(($sidecars.Name) -join ', ')"

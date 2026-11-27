@@ -3008,7 +3008,7 @@ checksum = "7e036b411754132fd6b74e94b74e9a13c5cf606fa93d1885c35860d3060820b1"
 
 [[package]]
 name = "opentaskbar-app"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "gpui",
  "image",
@@ -3028,7 +3028,7 @@ dependencies = [
 
 [[package]]
 name = "opentaskbar-core"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3037,7 +3037,7 @@ dependencies = [
 
 [[package]]
 name = "opentaskbar-shell"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "opentaskbar-core",
  "windows",

@@ -1,11 +1,11 @@
-# OpenTaskbar Rust Port MSIX Publisher
-# Packages the Rust EXE with the same visual assets and capabilities as the C#
-# MSIX build, using packaging/msix/AppxManifest.Rust.xml.
+# OpenTaskbar MSIX Publisher (Rust only)
+# Packages the Rust EXE and its architecture-matched watchdog with the visual
+# assets and capabilities declared in packaging/msix/AppxManifest.Rust.xml.
 param (
     [ValidateSet('win-x64', 'win-x86')]
     [string]$Runtime = 'win-x64',
     [string]$OutputDir = "$PSScriptRoot\..\release\msix-rust",
-    # No hardcoded version: the app release version comes from OpenTaskbar.csproj.
+    # No hardcoded version: the app release version comes from Rust-Port/Cargo.toml.
     [string]$Version = '',
     [switch]$SignForLocalTest
 )
@@ -14,8 +14,16 @@ $ErrorActionPreference = 'Stop'
 $arch = ($Runtime -split '-')[-1]
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 if (-not $Version) {
-    [xml]$project = Get-Content -LiteralPath (Join-Path $repoRoot 'OpenTaskbar.csproj') -Raw
-    $Version = ($project.Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1).Trim()
+    $cargoPath = Join-Path $repoRoot 'Rust-Port\Cargo.toml'
+    $text = Get-Content -Raw -LiteralPath $cargoPath
+    $marker = '[workspace.package]'
+    $start = $text.IndexOf($marker, [StringComparison]::Ordinal)
+    if ($start -lt 0) { throw "Missing [workspace.package] in $cargoPath" }
+    $next = $text.IndexOf('[', $start + $marker.Length)
+    $section = if ($next -gt $start) { $text.Substring($start, $next - $start) } else { $text.Substring($start) }
+    $match = [regex]::Match($section, '(?m)^\s*version\s*=\s*"([^"]+)"')
+    if (-not $match.Success) { throw "Missing workspace.package version in $cargoPath" }
+    $Version = $match.Groups[1].Value
 }
 $manifestTemplate = Join-Path $repoRoot 'packaging\msix\AppxManifest.Rust.xml'
 $assetsDir = Join-Path $repoRoot 'packaging\msix\Assets'
