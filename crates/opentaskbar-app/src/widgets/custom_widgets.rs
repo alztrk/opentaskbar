@@ -8,8 +8,11 @@
 //! ```text
 //! host   -> {"cmd":"poll","protocol":1,"seq":4}
 //! widget -> {"protocol":1,"seq":4,"chip":{...},"flyout":{...}}
-//! host   -> {"cmd":"secret","name":"api-key:example","protocol":1,"seq":5}
+//! host   -> {"cmd":"secret","name":"widget:<your-slug>:token","protocol":1,"seq":5}
 //! widget -> {"protocol":1,"seq":5,"value":"..."}
+//!
+//! A sidecar may only request secrets under its own `widget:<slug>:` namespace; every other
+//! name (including AI provider keys such as `api-key:deepseek`) receives an empty value.
 //! host   -> {"cmd":"click","id":7,"protocol":1,"seq":6}
 //! widget -> {"protocol":1,"seq":6,"action":"openUrl","target":"https://..."}
 //! ```
@@ -18,9 +21,10 @@
 //! source. A sidecar runs in a kill-on-close Job Object, is approved once by the
 //! user (manifest hash pinned), and can never block the UI thread.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
-use std::io::{BufRead, BufReader, Write};
+use std::fmt::Write as FmtWrite;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -33,7 +37,7 @@ use opentaskbar_core::paths;
 use opentaskbar_core::settings::{DockSettings, load_from, save_to, settings_path};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
 use windows_sys::Win32::System::Threading::OpenProcess;
 
 use crate::design::widget_pack::parse_json_lenient;
@@ -55,6 +59,15 @@ const MAX_POLL_SECS: u32 = 86_400;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MAX_BACKOFF_SECS: u64 = 60;
+/// A single NDJSON reply must fit in this budget; oversized lines are rejected.
+const MAX_REPLY_LINE_BYTES: usize = 512 * 1024;
+/// In-band secret requests have their own budget, independent of reply attempts.
+const MAX_SECRET_REQUESTS: u32 = 8;
+const MAX_REPLY_ATTEMPTS: u32 = 4;
+const MAX_PENDING_REQUESTS: usize = 16;
+const MAX_BLOCKS: usize = 64;
+const MAX_SAMPLES: usize = 512;
+const MAX_DETAILS: usize = 64;
 
 // Win32 Job Object. `windows-sys` 0.61 does not expose these APIs, so declare
 // the small kernel32 surface we need directly.
@@ -74,16 +87,25 @@ struct JobBasicLimitInformation {
     scheduling_class: u32,
 }
 unsafe extern "system" {
-    fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> isize;
-    fn SetInformationJobObject(job: isize, class: u32, info: *const c_void, info_len: u32) -> i32;
-    fn AssignProcessToJobObject(job: isize, process: isize) -> i32;
-    fn TerminateJobObject(job: isize, exit_code: u32) -> i32;
+    fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> HANDLE;
+    fn SetInformationJobObject(job: HANDLE, class: u32, info: *const c_void, info_len: u32) -> i32;
+    fn AssignProcessToJobObject(job: HANDLE, process: HANDLE) -> i32;
+    fn TerminateJobObject(job: HANDLE, exit_code: u32) -> i32;
 }
 
-fn close_job(job: isize) {
-    if job != 0 {
+/// Job handles are only touched while holding `SidecarState`'s mutex; the newtype exists so
+/// the raw Win32 pointer can cross thread boundaries with the rest of that state.
+#[derive(Clone, Copy)]
+struct JobHandle(HANDLE);
+
+// SAFETY: every use of the raw handle is serialized by `Sidecar::state` and the handle is
+// closed exactly once (`terminate` uses `job.take()`).
+unsafe impl Send for JobHandle {}
+
+fn close_job(job: HANDLE) {
+    if !job.is_null() {
         unsafe {
-            let _ = CloseHandle(job as *mut c_void);
+            let _ = CloseHandle(job);
         }
     }
 }
@@ -132,7 +154,7 @@ struct Pipes {
 
 struct SidecarState {
     child: Option<Child>,
-    job: Option<isize>,
+    job: Option<JobHandle>,
     /// Pipes are taken out while a request is in flight so the UI thread can
     /// never block on a mutex held across a blocking `read_line`.
     pipes: Option<Pipes>,
@@ -143,11 +165,17 @@ struct Sidecar {
     snapshot: RwLock<CustomSnapshot>,
     in_flight: AtomicBool,
     seq: AtomicU64,
+    /// Incremented whenever a request is invalidated (timeout, manifest change, removal).
+    /// Replies from an older generation are discarded instead of overwriting a newer snapshot.
+    generation: AtomicU64,
     failures: AtomicU32,
-    /// Unix millis of the last request start; 0 means none.
-    started_ms: AtomicU64,
+    /// The `seq` of the active request, or 0 when idle. The watchdog compares this token so a
+    /// newly started request cannot be killed by a watchdog belonging to the previous one.
+    active_token: AtomicU64,
     /// Unix millis of the last completed attempt (for backoff).
     attempt_ms: AtomicU64,
+    /// Poll/click requests waiting for the shared single worker slot.
+    pending: Mutex<VecDeque<(String, CustomWidgetSpec, RequestKind)>>,
 }
 
 impl Sidecar {
@@ -161,11 +189,58 @@ impl Sidecar {
             snapshot: RwLock::new(CustomSnapshot::default()),
             in_flight: AtomicBool::new(false),
             seq: AtomicU64::new(0),
+            generation: AtomicU64::new(0),
             failures: AtomicU32::new(0),
-            started_ms: AtomicU64::new(0),
+            active_token: AtomicU64::new(0),
             attempt_ms: AtomicU64::new(0),
+            pending: Mutex::new(VecDeque::new()),
         }
     }
+
+    /// Kills the current child and discards every reply that belongs to it. `in_flight` is
+    /// deliberately left alone: only the request's RAII guard may clear it.
+    fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.active_token.store(0, Ordering::Release);
+        if let Ok(mut state) = self.state.lock() {
+            terminate(&mut state);
+        }
+        if let Ok(mut snapshot) = self.snapshot.write() {
+            *snapshot = CustomSnapshot::default();
+        }
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.clear();
+        }
+        self.failures.store(0, Ordering::Relaxed);
+        self.attempt_ms.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Clears `in_flight` when a request worker exits — the only writer of that flag.
+struct InFlightGuard(Arc<Sidecar>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.in_flight.store(false, Ordering::Release);
+        // Hand the worker slot to the next queued request (if any) without blocking.
+        let next = self
+            .0
+            .pending
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.pop_front());
+        if let Some((id, spec, kind)) = next {
+            dispatch(&self.0, id, spec, kind);
+        }
+    }
+}
+
+/// Kind of a queued sidecar request. Poll replies update the shared snapshot; click replies
+/// only trigger their action and never touch poll state.
+#[derive(Clone, Copy)]
+enum RequestKind {
+    Poll,
+    Click(u32),
 }
 
 impl Drop for Sidecar {
@@ -180,6 +255,9 @@ impl Drop for Sidecar {
 struct CustomRegistry {
     descriptors: Arc<Vec<&'static WidgetDescriptor>>,
     specs: HashMap<String, CustomWidgetSpec>,
+    /// True once the widget folder has been scanned; an empty folder is not scanned again
+    /// until an explicit `reload()` (the 1 Hz runtime tick used to re-scan forever).
+    loaded: bool,
 }
 
 static REGISTRY: LazyLock<RwLock<CustomRegistry>> =
@@ -208,7 +286,61 @@ pub fn widget_dir(id: &str) -> Option<PathBuf> {
     spec(id).map(|s| s.root)
 }
 
-fn parse_names(value: &Value) -> Option<(String, HashMap<String, String>)> {
+/// Keys of the manifest's `name` object in JSON source order. `serde_json::Map` is ordered,
+/// so `values().next()` would silently pick an arbitrary locale instead of the documented
+/// "first entry" fallback.
+fn name_key_order(text: &str) -> Vec<String> {
+    let Some(start) = text.find("\"name\"") else {
+        return Vec::new();
+    };
+    let rest = &text[start + "\"name\"".len()..];
+    let Some(open) = rest.find('{') else {
+        return Vec::new();
+    };
+    let mut keys = Vec::new();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut expect_key = false;
+    let mut current = String::new();
+    for ch in rest[open..].chars() {
+        if in_string {
+            if ch == '"' {
+                in_string = false;
+                if expect_key && depth == 1 {
+                    keys.push(std::mem::take(&mut current));
+                    expect_key = false;
+                }
+            } else {
+                current.push(ch);
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                current.clear();
+            }
+            '{' => {
+                depth += 1;
+                if depth == 1 {
+                    expect_key = true;
+                }
+            }
+            '}' => {
+                if depth == 0 {
+                    break;
+                }
+                depth -= 1;
+            }
+            ',' if depth == 1 => expect_key = true,
+            ':' => expect_key = false,
+            _ => {}
+        }
+    }
+    keys
+}
+
+fn parse_names(value: &Value, text: &str) -> Option<(String, HashMap<String, String>)> {
     match value.get("name")? {
         Value::String(text) => {
             let name = text.trim().to_owned();
@@ -224,10 +356,11 @@ fn parse_names(value: &Value) -> Option<(String, HashMap<String, String>)> {
                     }
                 }
             }
+            let order = name_key_order(text);
             let default = names
                 .get("en-US")
                 .or_else(|| names.get("en"))
-                .or_else(|| names.values().next())
+                .or_else(|| order.iter().find_map(|key| names.get(key)))
                 .cloned()?;
             Some((default, names))
         }
@@ -235,9 +368,15 @@ fn parse_names(value: &Value) -> Option<(String, HashMap<String, String>)> {
     }
 }
 
-fn parse_manifest(value: &Value, slug: &str, root: &Path, hash: &str) -> Option<CustomWidgetSpec> {
+fn parse_manifest(
+    value: &Value,
+    text: &str,
+    slug: &str,
+    root: &Path,
+    hash: &str,
+) -> Option<CustomWidgetSpec> {
     let object = value.as_object()?;
-    let (name, names) = parse_names(value)?;
+    let (name, names) = parse_names(value, text)?;
     let category = object
         .get("category")
         .and_then(Value::as_str)
@@ -333,10 +472,22 @@ pub fn approve(settings: &mut DockSettings, id: &str) -> bool {
 /// Scans the widget folder and replaces the in-memory registry. Unchanged
 /// manifests reuse their existing leaked descriptors, so repeated Reloads do
 /// not leak.
+/// Descriptor fields that affect rendering; the manifest hash is deliberately not among them.
+fn descriptor_matches(spec: &CustomWidgetSpec, descriptor: &WidgetDescriptor) -> bool {
+    descriptor.id == spec.id
+        && descriptor.name == spec.name
+        && descriptor.category == spec.category
+        && (descriptor.width_dips - spec.width).abs() < f32::EPSILON
+}
+
 pub fn reload() -> usize {
     let mut specs = HashMap::new();
     let mut descriptors = Vec::new();
     let old = REGISTRY.read().map(|r| r.specs.clone()).unwrap_or_default();
+    let old_descriptors = REGISTRY
+        .read()
+        .map(|r| Arc::clone(&r.descriptors))
+        .unwrap_or_default();
     if let Ok(entries) = std::fs::read_dir(root_dir()) {
         for entry in entries.flatten() {
             if specs.len() >= MAX_WIDGETS {
@@ -358,50 +509,67 @@ pub fn reload() -> usize {
             let Ok(value) = parse_json_lenient(&text) else {
                 continue;
             };
-            let Some(mut parsed) = parse_manifest(&value, &slug, &dir, &hash) else {
+            let Some(parsed) = parse_manifest(&value, &text, &slug, &dir, &hash) else {
                 continue;
             };
             let id = parsed.id.clone();
-            if let Some(previous) = old.get(&id)
-                && previous.manifest_hash == hash
-            {
-                // Reuse the descriptor; only mutable runtime data (root/hash) is refreshed.
-                parsed.root = previous.root.clone();
-            }
+            // Reuse the leaked descriptor for unchanged metadata; keep the *newly resolved*
+            // root so a moved widget folder no longer points at the old directory.
             descriptors.push(
-                REGISTRY
-                    .read()
-                    .ok()
-                    .and_then(|r| r.descriptors.iter().find(|d| d.id == id).copied())
-                    .unwrap_or_else(|| {
-                        Box::leak(Box::new(descriptor_for(&parsed))) as &'static WidgetDescriptor
-                    }),
+                old_descriptors
+                    .iter()
+                    .find(|d| descriptor_matches(&parsed, d))
+                    .copied()
+                    .unwrap_or_else(|| Box::leak(Box::new(descriptor_for(&parsed)))),
             );
             specs.insert(id, parsed);
         }
     }
     let count = specs.len();
+    // A changed hash means the user must approve new code. Kill the old child now so approval
+    // cannot silently keep running the previous exec (and clear its snapshot/backoff/in_flight).
+    let restarted: Vec<String> = specs
+        .iter()
+        .filter(|(_, spec)| hash_changed(&old, spec))
+        .map(|(id, _)| id.clone())
+        .collect();
     *REGISTRY.write().expect("custom widget registry poisoned") = CustomRegistry {
         descriptors: Arc::new(descriptors),
         specs,
+        loaded: true,
     };
-    SIDECARS
-        .lock()
-        .expect("sidecar registry poisoned")
-        .retain(|id, _| REGISTRY.read().is_ok_and(|r| r.specs.contains_key(id)));
+    super::widget_icons::invalidate();
+    if let Ok(mut sidecars) = SIDECARS.lock() {
+        sidecars.retain(|id, _| REGISTRY.read().is_ok_and(|r| r.specs.contains_key(id)));
+        for id in restarted {
+            if let Some(sidecar) = sidecars.get(&id) {
+                sidecar.invalidate();
+            }
+        }
+    }
     count
 }
 
 fn hex_hash(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    digest.iter().map(|b| format!("{b:02x}")).collect()
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest.iter() {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+/// True when a manifest change requires killing and restarting this widget's sidecar.
+fn hash_changed(old: &HashMap<String, CustomWidgetSpec>, new: &CustomWidgetSpec) -> bool {
+    old.get(&new.id)
+        .is_some_and(|prev| prev.manifest_hash != new.manifest_hash)
 }
 
 fn ensure_loaded() {
-    let empty = REGISTRY.read().is_ok_and(|r| r.specs.is_empty());
-    if empty
+    let needs_scan = REGISTRY.read().is_ok_and(|r| !r.loaded);
+    if needs_scan
         && let Ok(guard) = REGISTRY.write()
-        && guard.specs.is_empty()
+        && !guard.loaded
     {
         drop(guard);
         reload();
@@ -428,7 +596,11 @@ pub fn spec(id: &str) -> Option<CustomWidgetSpec> {
 }
 
 pub fn is_custom(id: &str) -> bool {
-    id.len() > ID_PREFIX.len() && id[..ID_PREFIX.len()].eq_ignore_ascii_case(ID_PREFIX)
+    // `get(..n)` returns None instead of panicking when byte n splits a UTF-8 character.
+    id.len() > ID_PREFIX.len()
+        && id
+            .get(..ID_PREFIX.len())
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(ID_PREFIX))
 }
 
 /// Localized display name: per-locale manifest names win, then English, then id.
@@ -473,8 +645,8 @@ fn sidecar(id: &str) -> Arc<Sidecar> {
 fn terminate(state: &mut SidecarState) {
     if let Some(job) = state.job.take() {
         unsafe {
-            TerminateJobObject(job, 1);
-            close_job(job);
+            TerminateJobObject(job.0, 1);
+            close_job(job.0);
         }
     }
     if let Some(child) = state.child.as_mut() {
@@ -485,10 +657,10 @@ fn terminate(state: &mut SidecarState) {
     state.pipes = None;
 }
 
-fn create_job(child_id: u32) -> Option<isize> {
+fn create_job(child_id: u32) -> Option<JobHandle> {
     unsafe {
         let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-        if job == 0 {
+        if job.is_null() {
             return None;
         }
         let info = JobBasicLimitInformation {
@@ -509,7 +681,7 @@ fn create_job(child_id: u32) -> Option<isize> {
         const PROCESS_TERMINATE: u32 = 0x0001;
         const PROCESS_SET_QUOTA: u32 = 0x0100;
         let process = OpenProcess(PROCESS_TERMINATE | PROCESS_SET_QUOTA, 0, child_id);
-        if process.is_null() || AssignProcessToJobObject(job, process as isize) == 0 {
+        if process.is_null() || AssignProcessToJobObject(job, process) == 0 {
             if !process.is_null() {
                 let _ = CloseHandle(process);
             }
@@ -517,7 +689,7 @@ fn create_job(child_id: u32) -> Option<isize> {
             return None;
         }
         let _ = CloseHandle(process);
-        Some(job)
+        Some(JobHandle(job))
     }
 }
 
@@ -550,11 +722,29 @@ fn ensure_child(id: &str, spec: &CustomWidgetSpec, state: &mut SidecarState) -> 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW);
-    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let child = command.spawn().map_err(|e| e.to_string())?;
     let job = create_job(child.id());
-    let stdin = child.stdin.take().ok_or("sidecar stdin unavailable")?;
-    let stdout = child.stdout.take().ok_or("sidecar stdout unavailable")?;
-    if let Some(stderr) = child.stderr.take() {
+    // Register the child + job *before* any fallible pipe take so an error path can still
+    // terminate the process and close the job handle.
+    state.child = Some(child);
+    state.job = job;
+    let stdin = state
+        .child
+        .as_mut()
+        .and_then(|child| child.stdin.take())
+        .ok_or_else(|| {
+            terminate(state);
+            "sidecar stdin unavailable".to_owned()
+        })?;
+    let stdout = state
+        .child
+        .as_mut()
+        .and_then(|child| child.stdout.take())
+        .ok_or_else(|| {
+            terminate(state);
+            "sidecar stdout unavailable".to_owned()
+        })?;
+    if let Some(stderr) = state.child.as_mut().and_then(|child| child.stderr.take()) {
         let widget_id = id.to_owned();
         let _ = std::thread::Builder::new()
             .name(format!("otb-widget-stderr-{id}"))
@@ -567,8 +757,6 @@ fn ensure_child(id: &str, spec: &CustomWidgetSpec, state: &mut SidecarState) -> 
                 }
             });
     }
-    state.child = Some(child);
-    state.job = job;
     state.pipes = Some(Pipes {
         stdin,
         stdout: BufReader::new(stdout),
@@ -576,13 +764,37 @@ fn ensure_child(id: &str, spec: &CustomWidgetSpec, state: &mut SidecarState) -> 
     Ok(())
 }
 
+/// Reads one bounded NDJSON line. An oversized / unterminated line is an error, never an
+/// unbounded allocation driven by a misbehaving sidecar.
+fn read_reply_line(stdout: &mut BufReader<ChildStdout>) -> Result<String, String> {
+    let mut limited = stdout.take(MAX_REPLY_LINE_BYTES as u64);
+    let mut bytes = Vec::new();
+    let read = limited
+        .read_until(b'\n', &mut bytes)
+        .map_err(|e| e.to_string())?;
+    if read == 0 {
+        return Err("sidecar closed stdout".to_owned());
+    }
+    if !bytes.ends_with(b"\n") {
+        return Err("sidecar reply line too long".to_owned());
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// A reply must carry the current protocol version *and* the exact request seq. Missing
+/// fields are rejected, as documented in the sidecar protocol.
+fn reply_matches(value: &Value, seq: u64) -> bool {
+    value.get("protocol").and_then(Value::as_u64) == Some(u64::from(PROTOCOL_VERSION))
+        && value.get("seq").and_then(Value::as_u64) == Some(seq)
+}
+
 fn request(
     id: &str,
     spec: &CustomWidgetSpec,
     sidecar: &Sidecar,
     command: &Value,
+    seq: u64,
 ) -> Result<Value, String> {
-    let seq = sidecar.seq.fetch_add(1, Ordering::Relaxed) + 1;
     let mut line = command.clone();
     let object = line.as_object_mut().ok_or("command must be an object")?;
     object.insert("protocol".to_owned(), Value::from(PROTOCOL_VERSION));
@@ -597,32 +809,36 @@ fn request(
         ensure_child(id, spec, &mut state)?;
         state.pipes.take().ok_or("sidecar busy")?
     };
-    sidecar.started_ms.store(now_ms(), Ordering::Relaxed);
 
     let result = (|| -> Result<Value, String> {
         let text = serde_json::to_string(&line).map_err(|e| e.to_string())?;
         writeln!(pipes.stdin, "{text}").map_err(|e| e.to_string())?;
         pipes.stdin.flush().map_err(|e| e.to_string())?;
-        for _ in 0..4 {
-            let mut response = String::new();
-            let read = pipes
-                .stdout
-                .read_line(&mut response)
-                .map_err(|e| e.to_string())?;
-            if read == 0 {
-                return Err("sidecar closed stdout".to_owned());
-            }
+        let mut secrets = 0u32;
+        let mut replies = 0u32;
+        let mut lines = 0u32;
+        // Secret requests have their own budget: a widget asking for eight secrets still
+        // gets its matching reply, and a spammer cannot keep the worker alive forever.
+        while lines < MAX_SECRET_REQUESTS + MAX_REPLY_ATTEMPTS {
+            lines += 1;
+            let response = read_reply_line(&mut pipes.stdout)?;
             let value: Value = serde_json::from_str(&response).map_err(|e| e.to_string())?;
             // A sidecar may ask for a DPAPI secret in-band; answer it without
-            // ever putting the value on a command line or in the log.
+            // ever putting the value on a command line or in the log. Out-of-scope names
+            // still get a `secretResult` — with an empty value.
             if value.get("cmd").and_then(Value::as_str) == Some("secret") {
                 let name = value
                     .get("name")
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned();
-                let secret = crate::widgets::telemetry::read_dpapi_secret_for_widget(&name)
-                    .unwrap_or_default();
+                let secret = if secrets < MAX_SECRET_REQUESTS {
+                    secrets += 1;
+                    crate::widgets::telemetry::read_dpapi_secret_for_widget(&name, &spec.slug)
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
                 let answer = serde_json::json!({
                     "cmd": "secretResult",
                     "name": name,
@@ -635,22 +851,17 @@ fn request(
                 pipes.stdin.flush().map_err(|e| e.to_string())?;
                 continue;
             }
-            let version_ok = value
-                .get("protocol")
-                .and_then(Value::as_u64)
-                .is_none_or(|v| v == u64::from(PROTOCOL_VERSION));
-            let seq_ok = value
-                .get("seq")
-                .and_then(Value::as_u64)
-                .is_none_or(|v| v == seq);
-            if version_ok && seq_ok {
+            replies += 1;
+            if reply_matches(&value, seq) {
                 return Ok(value);
+            }
+            if replies >= MAX_REPLY_ATTEMPTS {
+                break;
             }
         }
         Err("no matching sidecar reply".to_owned())
     })();
 
-    sidecar.started_ms.store(0, Ordering::Relaxed);
     if result.is_err()
         && let Ok(mut state) = sidecar.state.lock()
     {
@@ -661,40 +872,139 @@ fn request(
     result
 }
 
+/// Kills a request that is still active after `IO_TIMEOUT`, without relying on another poll.
+/// `in_flight` stays set: the worker's RAII guard clears it when the killed child unblocks it.
+fn spawn_watchdog(sidecar: &Arc<Sidecar>, token: u64) {
+    let handle = Arc::clone(sidecar);
+    let _ = std::thread::Builder::new()
+        .name(format!("otb-widget-watchdog-{token}"))
+        .spawn(move || {
+            std::thread::sleep(IO_TIMEOUT);
+            if handle
+                .active_token
+                .compare_exchange(token, 0, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                if let Ok(mut state) = handle.state.lock() {
+                    terminate(&mut state);
+                }
+                handle.generation.fetch_add(1, Ordering::AcqRel);
+                handle.failures.fetch_add(1, Ordering::Relaxed);
+                handle.attempt_ms.store(now_ms(), Ordering::Relaxed);
+            }
+        });
+}
+
+/// Shared dispatcher for poll and click requests. Both kinds pass through the single
+/// `in_flight` gate, so a click can never steal the poll's pipes or write a "sidecar busy"
+/// error into the poll snapshot. Click replies never touch snapshot/backoff state.
+fn dispatch(sidecar: &Arc<Sidecar>, id: String, spec: CustomWidgetSpec, kind: RequestKind) {
+    if sidecar.in_flight.swap(true, Ordering::AcqRel) {
+        // Busy: queue the request instead of racing for the pipes or logging a bogus
+        // "sidecar busy" error into the poll snapshot.
+        if let Ok(mut pending) = sidecar.pending.lock()
+            && pending.len() < MAX_PENDING_REQUESTS
+        {
+            pending.push_back((id, spec, kind));
+        }
+        return;
+    }
+    let guard = InFlightGuard(Arc::clone(sidecar));
+    let generation = sidecar.generation.load(Ordering::Acquire);
+    let seq = sidecar.seq.fetch_add(1, Ordering::Relaxed) + 1;
+    sidecar.active_token.store(seq, Ordering::Release);
+    spawn_watchdog(sidecar, seq);
+    let command = match &kind {
+        RequestKind::Poll => serde_json::json!({"cmd": "poll"}),
+        RequestKind::Click(action_id) => serde_json::json!({"cmd": "click", "id": action_id}),
+    };
+    let worker_sidecar = Arc::clone(sidecar);
+    let spawned = std::thread::Builder::new()
+        .name(format!("otb-widget-{id}-{seq}"))
+        .spawn(move || {
+            let _guard = guard;
+            let reply = request(&id, &spec, &worker_sidecar, &command, seq);
+            worker_sidecar.active_token.store(0, Ordering::Release);
+            match kind {
+                RequestKind::Poll => {
+                    apply_reply(&id, reply, &worker_sidecar, generation);
+                }
+                RequestKind::Click(_) => {
+                    // A late reply from a killed worker must not trigger an action either.
+                    if worker_sidecar.generation.load(Ordering::Acquire) == generation
+                        && let Some(value) = reply.ok()
+                    {
+                        apply_action(&id, &value);
+                    }
+                }
+            }
+        })
+        .is_ok();
+    if !spawned {
+        sidecar.active_token.store(0, Ordering::Release);
+    }
+}
+
+fn str_field(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn opt_str_field(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+fn num_field(value: &Value, key: &str, default: f64) -> f64 {
+    value.get(key).and_then(Value::as_f64).unwrap_or(default)
+}
+
+fn bool_field(value: &Value, key: &str) -> bool {
+    value.get(key).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn u32_field(value: &Value, key: &str) -> u32 {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0)
+}
+
+fn u16_field(value: &Value, key: &str, default: u16) -> u16 {
+    value
+        .get(key)
+        .and_then(Value::as_u64)
+        .and_then(|n| u16::try_from(n).ok())
+        .unwrap_or(default)
+}
+
+fn ratio_field(value: &Value, key: &str) -> f32 {
+    num_field(value, key, 0.0).clamp(0.0, 1.0) as f32
+}
+
 fn chip_from_value(value: &Value) -> Option<CustomChip> {
     let chip = value.get("chip")?;
     Some(CustomChip {
-        label: chip
-            .get("label")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        value: chip
-            .get("value")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
+        label: str_field(chip, "label"),
+        value: str_field(chip, "value"),
         ratio: chip
             .get("ratio")
             .and_then(Value::as_f64)
             .map(|r| r.clamp(0.0, 1.0) as f32),
-        icon: chip
-            .get("icon")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned),
+        icon: opt_str_field(chip, "icon"),
     })
 }
 
 fn block_from_value(value: &Value) -> Option<FlyoutBlock> {
     let kind = value.get("kind")?.as_str()?;
-    let text = |key: &str| {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
-    };
+    let text = |key: &str| str_field(value, key);
     match kind {
         "stat" => Some(FlyoutBlock::StatRow {
             label: text("label"),
@@ -703,10 +1013,7 @@ fn block_from_value(value: &Value) -> Option<FlyoutBlock> {
         "note" => Some(FlyoutBlock::Note(text("text"))),
         "hero" => Some(FlyoutBlock::Hero {
             value: text("value"),
-            caption: value
-                .get("caption")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            caption: opt_str_field(value, "caption"),
             centered: true,
             large: false,
             right_meta: None,
@@ -714,11 +1021,7 @@ fn block_from_value(value: &Value) -> Option<FlyoutBlock> {
         "progress" => Some(FlyoutBlock::ProgressBar {
             label: text("label"),
             value_text: text("value"),
-            ratio: value
-                .get("ratio")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0)
-                .clamp(0.0, 1.0) as f32,
+            ratio: ratio_field(value, "ratio"),
             tone: BarTone::Accent,
         }),
         "metric" => {
@@ -726,6 +1029,7 @@ fn block_from_value(value: &Value) -> Option<FlyoutBlock> {
                 .get("tiles")?
                 .as_array()?
                 .iter()
+                .take(MAX_DETAILS)
                 .filter_map(|pair| {
                     let pair = pair.as_array()?;
                     Some((
@@ -737,7 +1041,7 @@ fn block_from_value(value: &Value) -> Option<FlyoutBlock> {
             Some(FlyoutBlock::MetricTiles(tiles))
         }
         "button" => Some(FlyoutBlock::ActionRow {
-            id: value.get("id").and_then(Value::as_u64).unwrap_or(0) as u32,
+            id: u32_field(value, "id"),
             title: text("label"),
             subtitle: None,
             badge: None,
@@ -749,12 +1053,14 @@ fn block_from_value(value: &Value) -> Option<FlyoutBlock> {
                 .get("series")?
                 .as_array()?
                 .iter()
+                .take(MAX_BLOCKS)
                 .filter_map(|entry| {
                     let name = entry.get("name")?.as_str()?.to_owned();
                     let samples = entry
                         .get("samples")?
                         .as_array()?
                         .iter()
+                        .take(MAX_SAMPLES)
                         .filter_map(|v| v.as_f64().map(|f| f as f32))
                         .collect();
                     Some((name, samples))
@@ -767,55 +1073,52 @@ fn block_from_value(value: &Value) -> Option<FlyoutBlock> {
             })
         }
         "image" => Some(FlyoutBlock::Image {
-            glyph: value.get("glyph").and_then(Value::as_u64).unwrap_or(0xE81E) as u16,
-            path: value.get("path").and_then(Value::as_str).map(str::to_owned),
-            size_dips: value
-                .get("size")
-                .and_then(Value::as_f64)
-                .unwrap_or(48.0)
-                .clamp(16.0, 256.0) as f32,
+            glyph: u16_field(value, "glyph", 0xE81E),
+            path: opt_str_field(value, "path"),
+            size_dips: num_field(value, "size", 48.0).clamp(16.0, 256.0) as f32,
         }),
         "iconBar" => {
             let buttons = value
                 .get("buttons")?
                 .as_array()?
                 .iter()
+                .take(MAX_BLOCKS)
                 .filter_map(|entry| {
                     Some((
-                        entry.get("id")?.as_u64()? as u32,
+                        u32_field(entry, "id"),
                         entry.get("label")?.as_str()?.to_owned(),
-                        entry.get("glyph")?.as_u64()? as u16,
-                        entry
-                            .get("active")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false),
+                        u16_field(entry, "glyph", 0xE81E),
+                        bool_field(entry, "active"),
                     ))
                 })
                 .collect();
             Some(FlyoutBlock::IconBar { buttons })
         }
         "seek" => Some(FlyoutBlock::SeekSlider {
-            id: value.get("id").and_then(Value::as_u64).unwrap_or(0) as u32,
+            id: u32_field(value, "id"),
             label: text("label"),
-            position_secs: value.get("position").and_then(Value::as_u64).unwrap_or(0) as u32,
-            duration_secs: value.get("duration").and_then(Value::as_u64).unwrap_or(0) as u32,
-            ratio: value
-                .get("ratio")
-                .and_then(Value::as_f64)
-                .unwrap_or(0.0)
-                .clamp(0.0, 1.0) as f32,
+            position_secs: u32_field(value, "position"),
+            duration_secs: u32_field(value, "duration"),
+            ratio: ratio_field(value, "ratio"),
         }),
-        "textInput" => Some(FlyoutBlock::TextInput {
-            id: value.get("id").and_then(Value::as_u64).unwrap_or(0) as u32,
-            label: text("label"),
-            value: text("value"),
-            numeric: value
-                .get("numeric")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            min: value.get("min").and_then(Value::as_f64).unwrap_or(0.0),
-            max: value.get("max").and_then(Value::as_f64).unwrap_or(100.0),
-        }),
+        "textInput" => {
+            // A reversed range would panic in `f64::clamp` when the user presses Enter.
+            let raw_min = num_field(value, "min", 0.0);
+            let raw_max = num_field(value, "max", 100.0);
+            let (min, max) = if raw_min <= raw_max {
+                (raw_min, raw_max)
+            } else {
+                (raw_max, raw_min)
+            };
+            Some(FlyoutBlock::TextInput {
+                id: u32_field(value, "id"),
+                label: text("label"),
+                value: text("value"),
+                numeric: bool_field(value, "numeric"),
+                min,
+                max,
+            })
+        }
         _ => None,
     }
 }
@@ -826,23 +1129,13 @@ fn flyout_from_value(value: &Value) -> Option<FlyoutSpec> {
         .get("blocks")?
         .as_array()?
         .iter()
+        .take(MAX_BLOCKS)
         .filter_map(block_from_value)
         .collect();
     Some(FlyoutSpec {
-        title: flyout
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned(),
-        subtitle: flyout
-            .get("subtitle")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
-        width_dips: flyout
-            .get("width")
-            .and_then(Value::as_f64)
-            .unwrap_or(280.0)
-            .clamp(180.0, 640.0) as f32,
+        title: str_field(flyout, "title"),
+        subtitle: opt_str_field(flyout, "subtitle"),
+        width_dips: num_field(flyout, "width", 280.0).clamp(180.0, 640.0) as f32,
         blocks,
     })
 }
@@ -854,6 +1147,7 @@ fn details_from_value(value: &Value) -> Vec<(String, String)> {
         .and_then(Value::as_array)
         .map(|rows| {
             rows.iter()
+                .take(MAX_DETAILS)
                 .filter_map(|row| {
                     let row = row.as_array()?;
                     Some((
@@ -866,7 +1160,17 @@ fn details_from_value(value: &Value) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-fn apply_reply(_id: &str, reply: Result<Value, String>, sidecar: &Sidecar) -> Option<Value> {
+fn apply_reply(
+    _id: &str,
+    reply: Result<Value, String>,
+    sidecar: &Sidecar,
+    generation: u64,
+) -> Option<Value> {
+    // A reply from a killed worker (timeout / manifest change / removal) must never
+    // overwrite a newer snapshot or reset its failure counter.
+    if sidecar.generation.load(Ordering::Acquire) != generation {
+        return None;
+    }
     match reply {
         Ok(value) => {
             sidecar.failures.store(0, Ordering::Relaxed);
@@ -920,35 +1224,8 @@ pub fn poll_widget(id: &str, settings: &DockSettings) {
     {
         return;
     }
-    if sidecar.in_flight.swap(true, Ordering::AcqRel) {
-        // `try_lock` is essential: a worker may own the state while reading.
-        if let Ok(mut state) = sidecar.state.try_lock() {
-            let started = sidecar.started_ms.load(Ordering::Relaxed);
-            if started != 0 && now_ms().saturating_sub(started) > IO_TIMEOUT.as_millis() as u64 {
-                terminate(&mut state);
-                sidecar.in_flight.store(false, Ordering::Release);
-            }
-        }
-        return;
-    }
-    let worker_id = id.to_owned();
-    let worker_sidecar = Arc::clone(&sidecar);
-    let spawned = std::thread::Builder::new()
-        .name(format!("otb-widget-{id}"))
-        .spawn(move || {
-            let reply = request(
-                &worker_id,
-                &spec,
-                &worker_sidecar,
-                &serde_json::json!({"cmd": "poll"}),
-            );
-            apply_reply(&worker_id, reply, &worker_sidecar);
-            worker_sidecar.in_flight.store(false, Ordering::Release);
-        })
-        .is_ok();
-    if !spawned {
-        sidecar.in_flight.store(false, Ordering::Release);
-    }
+    // Timeouts are handled by the request watchdog; the worker alone clears `in_flight`.
+    dispatch(&sidecar, id.to_owned(), spec, RequestKind::Poll);
 }
 
 /// Applies a sidecar action. Unknown actions are ignored.
@@ -1017,21 +1294,14 @@ pub fn click_widget(id: &str, action_id: u32, settings: &DockSettings) {
     let Some(spec) = spec(id) else {
         return;
     };
-    let sidecar = sidecar(id);
-    let worker_id = id.to_owned();
-    let _ = std::thread::Builder::new()
-        .name(format!("otb-widget-click-{id}"))
-        .spawn(move || {
-            let reply = request(
-                &worker_id,
-                &spec,
-                &sidecar,
-                &serde_json::json!({"cmd": "click", "id": action_id}),
-            );
-            if let Some(value) = apply_reply(&worker_id, reply, &sidecar) {
-                apply_action(&worker_id, &value);
-            }
-        });
+    // A click shares the poll gate: if a poll is active the click is dropped rather than
+    // racing for the pipes, and its reply is applied as an action only — never as a snapshot.
+    dispatch(
+        &sidecar(id),
+        id.to_owned(),
+        spec,
+        RequestKind::Click(action_id),
+    );
 }
 
 pub fn chip(id: &str) -> Option<CustomChip> {
@@ -1065,16 +1335,10 @@ pub fn error(id: &str) -> Option<String> {
 }
 
 pub fn icon_for(chip: &CustomChip, id: &str, settings: &DockSettings) -> WidgetIcon {
-    if let Some(hint) = &chip.icon {
-        if hint.starts_with('M') || hint.starts_with('m') {
-            return WidgetIcon::PathData(hint.clone());
-        }
-        let path = PathBuf::from(hint);
-        if path.is_file() {
-            return WidgetIcon::Asset(path);
-        }
-    }
-    resolve_widget_icon(id, settings, WidgetIcon::Glyph(0xE81E))
+    chip.icon
+        .as_deref()
+        .and_then(super::widget_icons::icon_from_text)
+        .unwrap_or_else(|| resolve_widget_icon(id, settings, WidgetIcon::Glyph(0xE81E)))
 }
 
 #[cfg(test)]
@@ -1120,11 +1384,10 @@ mod tests {
 
     #[test]
     fn manifest_parses_and_clamps() {
-        let value: Value = serde_json::from_str(
-            r#"{"name":"USD/TRY","category":"Time & Weather","width":9999,"pollSeconds":1,"exec":["python","widget.py"]}"#,
-        )
-        .unwrap();
-        let spec = parse_manifest(&value, "usd-try", Path::new("C:\\widgets"), "abc").unwrap();
+        let text = r#"{"name":"USD/TRY","category":"Time & Weather","width":9999,"pollSeconds":1,"exec":["python","widget.py"]}"#;
+        let value: Value = serde_json::from_str(text).unwrap();
+        let spec =
+            parse_manifest(&value, text, "usd-try", Path::new("C:\\widgets"), "abc").unwrap();
         assert_eq!(spec.id, "custom:usd-try");
         assert_eq!(spec.category, "Time & Weather");
         assert_eq!(spec.width, 512.0);
@@ -1135,23 +1398,60 @@ mod tests {
 
     #[test]
     fn localized_names_and_manifest_hashes() {
-        let value: Value = serde_json::from_str(
-            r#"{"name":{"en-US":"Weather","tr-TR":"Hava Durumu"},"exec":["python","w.py"]}"#,
-        )
-        .unwrap();
-        let spec = parse_manifest(&value, "weather", Path::new("C:\\widgets"), "hash").unwrap();
+        let text = r#"{"name":{"en-US":"Weather","tr-TR":"Hava Durumu"},"exec":["python","w.py"]}"#;
+        let value: Value = serde_json::from_str(text).unwrap();
+        let spec =
+            parse_manifest(&value, text, "weather", Path::new("C:\\widgets"), "hash").unwrap();
         assert_eq!(spec.name, "Weather");
         assert_eq!(spec.names.get("tr-TR").unwrap(), "Hava Durumu");
         assert_eq!(hex_hash(b"abc"), hex_hash(b"abc"));
         assert_ne!(hex_hash(b"abc"), hex_hash(b"abd"));
+
+        // Without en-US/en the *first JSON entry* wins, deterministically.
+        let text = r#"{"name":{"de-DE":"Wetter","fr-FR":"Meteo"},"exec":["python","w.py"]}"#;
+        let value: Value = serde_json::from_str(text).unwrap();
+        let spec =
+            parse_manifest(&value, text, "weather", Path::new("C:\\widgets"), "hash").unwrap();
+        assert_eq!(spec.name, "Wetter");
+    }
+
+    #[test]
+    fn manifest_hash_change_forces_sidecar_restart() {
+        let mut old = HashMap::new();
+        old.insert(
+            "custom:demo".to_owned(),
+            CustomWidgetSpec {
+                id: "custom:demo".to_owned(),
+                slug: "demo".to_owned(),
+                name: "Demo".to_owned(),
+                names: HashMap::new(),
+                category: "Productivity",
+                width: 120.0,
+                poll_seconds: 5,
+                exec: vec!["python".to_owned(), "old.py".to_owned()],
+                root: PathBuf::from("C:\\old"),
+                manifest_hash: "old-hash".to_owned(),
+            },
+        );
+        let mut next = old["custom:demo"].clone();
+        assert!(!hash_changed(&old, &next));
+        next.manifest_hash = "new-hash".to_owned();
+        next.root = PathBuf::from("C:\\new");
+        assert!(hash_changed(&old, &next));
+        // The descriptor is reusable (it does not depend on the hash), but the sidecar is not.
+        let descriptor = descriptor_for(&next);
+        assert!(descriptor_matches(&next, &descriptor));
+        assert_eq!(next.root, PathBuf::from("C:\\new"));
     }
 
     #[test]
     fn manifest_rejects_missing_exec_and_bad_names() {
-        let value: Value = serde_json::from_str(r#"{"name":"No exec"}"#).unwrap();
-        assert!(parse_manifest(&value, "x", Path::new("C:\\w"), "h").is_none());
-        let value: Value = serde_json::from_str(r#"{"name":"","exec":["python"]}"#).unwrap();
-        assert!(parse_manifest(&value, "x", Path::new("C:\\w"), "h").is_none());
+        let text = r#"{"name":"No exec"}"#;
+        let value: Value = serde_json::from_str(text).unwrap();
+        assert!(parse_manifest(&value, text, "x", Path::new("C:\\w"), "h").is_none());
+        let text = r#"{"name":"","exec":["python"]}"#;
+        let value: Value = serde_json::from_str(text).unwrap();
+        assert!(parse_manifest(&value, text, "x", Path::new("C:\\w"), "h").is_none());
     }
 
     #[test]
@@ -1184,26 +1484,69 @@ mod tests {
     }
 
     #[test]
-    fn stale_sequence_replies_are_ignored() {
-        assert!(chip_from_value(&serde_json::json!({"chip":{}})).is_some());
-        assert!(
-            flyout_from_value(&serde_json::json!({"flyout":{"title":"x","blocks":[]}})).is_some()
-        );
+    fn replies_require_protocol_and_exact_sequence() {
+        assert!(reply_matches(&serde_json::json!({"protocol":1,"seq":4}), 4));
+        assert!(!reply_matches(&serde_json::json!({"seq":4}), 4));
+        assert!(!reply_matches(&serde_json::json!({"protocol":1}), 4));
+        assert!(!reply_matches(
+            &serde_json::json!({"protocol":1,"seq":3}),
+            4
+        ));
+        assert!(!reply_matches(
+            &serde_json::json!({"protocol":2,"seq":4}),
+            4
+        ));
     }
 
     #[test]
-    fn custom_ids_are_recognized() {
+    fn oversized_reply_collections_are_capped_and_ranges_normalized() {
+        let blocks: Vec<serde_json::Value> = (0..MAX_BLOCKS + 20)
+            .map(|_| serde_json::json!({"kind":"note","text":"x"}))
+            .collect();
+        let samples: Vec<f64> = (0..MAX_SAMPLES + 50).map(|i| i as f64).collect();
+        let reply = serde_json::json!({
+            "flyout": {
+                "title": "many",
+                "blocks": blocks,
+                "details": (0..MAX_DETAILS + 10).map(|i| serde_json::json!([i.to_string(), "v"])).collect::<Vec<_>>()
+            },
+            "chart": {"series":[{"name":"s","samples":samples}]}
+        });
+        let flyout = flyout_from_value(&reply).unwrap();
+        assert_eq!(flyout.blocks.len(), MAX_BLOCKS);
+        assert_eq!(details_from_value(&reply).len(), MAX_DETAILS);
+
+        let bad_range = serde_json::json!({"kind":"textInput","min":100.0,"max":1.0});
+        let FlyoutBlock::TextInput { min, max, .. } = block_from_value(&bad_range).unwrap() else {
+            panic!("expected text input");
+        };
+        assert_eq!((min, max), (1.0, 100.0));
+        // Huge u64 values are clamped to the field width instead of truncating silently.
+        let huge = serde_json::json!({"kind":"button","id":u64::MAX,"label":"x"});
+        assert!(matches!(
+            block_from_value(&huge),
+            Some(FlyoutBlock::ActionRow { .. })
+        ));
+    }
+
+    #[test]
+    fn custom_ids_are_recognized_without_unicode_panics() {
         assert!(is_custom("custom:clock"));
         assert!(is_custom("CUSTOM:x"));
         assert!(!is_custom("clock"));
         assert!(!is_custom("custom:"));
+        // The 7th byte falls inside the 2-byte 'ğ' — a byte slice used to panic here.
+        assert!(!is_custom("customğx"));
+        assert!(!is_custom("😀custom"));
+        assert!(is_custom("custom:ğ"));
     }
 
     #[test]
     fn sidecar_secret_handshake() {
         let _guard = crate::design::theme::theme_test_guard();
         let tag = unique_test_tag("secret");
-        let secret_name = format!("widget-test-secret-{tag}");
+        let slug = format!("secret-{tag}");
+        let secret_name = format!("widget:{slug}:token");
         assert!(crate::widgets::telemetry::save_dpapi_secret(
             &secret_name,
             "secret-value"
@@ -1217,15 +1560,16 @@ mod tests {
     $msg = $line | ConvertFrom-Json
     if ($msg.cmd -eq 'poll') {{
         '{{"cmd":"secret","name":"{secret_name}","seq":99,"protocol":1}}'
-        $answer = [Console]::In.ReadLine() | ConvertFrom-Json
-        '{{"protocol":1,"seq":' + $msg.seq + ',"chip":{{"label":"S","value":"' + $answer.value + '"}}}}'
+        $allowed = [Console]::In.ReadLine() | ConvertFrom-Json
+        '{{"cmd":"secret","name":"api-key:deepseek","seq":100,"protocol":1}}'
+        $denied = [Console]::In.ReadLine() | ConvertFrom-Json
+        '{{"protocol":1,"seq":' + $msg.seq + ',"chip":{{"label":"S","value":"' + $allowed.value + '|' + $denied.value + '"}}}}'
     }}
 }}
 "#
             ),
         )
         .unwrap();
-        let slug = format!("secret-{tag}");
         let spec = CustomWidgetSpec {
             id: format!("custom:{slug}"),
             slug,
@@ -1246,8 +1590,9 @@ mod tests {
         };
         let id = spec.id.clone();
         let state = sidecar(&id);
-        let reply = request(&id, &spec, &state, &serde_json::json!({"cmd":"poll"})).unwrap();
-        assert_eq!(chip_from_value(&reply).unwrap().value, "secret-value");
+        let reply = request(&id, &spec, &state, &serde_json::json!({"cmd":"poll"}), 1).unwrap();
+        // The scoped name resolves; the AI-provider namespace gets an empty secretResult.
+        assert_eq!(chip_from_value(&reply).unwrap().value, "secret-value|");
         if let Ok(mut guard) = state.state.lock() {
             terminate(&mut guard);
         }
@@ -1259,6 +1604,65 @@ mod tests {
         assert_eq!(backoff(0), Duration::from_secs(1));
         assert_eq!(backoff(1), Duration::from_secs(2));
         assert_eq!(backoff(99), Duration::from_secs(MAX_BACKOFF_SECS));
+    }
+
+    #[test]
+    fn requests_are_queued_while_the_worker_slot_is_busy() {
+        let handle = Arc::new(Sidecar::new());
+        handle.in_flight.store(true, Ordering::Release);
+        let spec = CustomWidgetSpec {
+            id: "custom:demo".to_owned(),
+            slug: "demo".to_owned(),
+            name: "Demo".to_owned(),
+            names: HashMap::new(),
+            category: "Productivity",
+            width: 120.0,
+            poll_seconds: 5,
+            exec: vec!["python".to_owned()],
+            root: PathBuf::from("C:\\demo"),
+            manifest_hash: "h".to_owned(),
+        };
+        dispatch(
+            &handle,
+            spec.id.clone(),
+            spec.clone(),
+            RequestKind::Click(7),
+        );
+        assert_eq!(handle.pending.lock().unwrap().len(), 1);
+        assert!(matches!(
+            handle.pending.lock().unwrap().front(),
+            Some((_, _, RequestKind::Click(7)))
+        ));
+        handle.invalidate();
+        assert!(handle.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn invalidated_sidecar_discards_late_replies() {
+        let handle = Arc::new(Sidecar::new());
+        handle.snapshot.write().unwrap().chip = Some(CustomChip {
+            label: "old".to_owned(),
+            ..Default::default()
+        });
+        handle.invalidate();
+        assert!(handle.snapshot.read().unwrap().chip.is_none());
+        let late = serde_json::json!({"protocol":1,"seq":7,"chip":{"label":"late","value":"99"}});
+        assert!(apply_reply("custom:demo", Ok(late), &handle, 0).is_none());
+        assert!(handle.snapshot.read().unwrap().chip.is_none());
+        assert_eq!(handle.failures.load(Ordering::Relaxed), 0);
+        assert!(
+            apply_reply(
+                "custom:demo",
+                Ok(serde_json::json!({"chip":{"label":"fresh"}})),
+                &handle,
+                handle.generation.load(Ordering::Relaxed)
+            )
+            .is_some()
+        );
+        assert_eq!(
+            handle.snapshot.read().unwrap().chip.as_ref().unwrap().label,
+            "fresh"
+        );
     }
 
     #[test]
@@ -1306,7 +1710,7 @@ mod tests {
         };
         let id = spec.id.clone();
         let state = sidecar(&id);
-        let reply = request(&id, &spec, &state, &serde_json::json!({"cmd": "poll"})).unwrap();
+        let reply = request(&id, &spec, &state, &serde_json::json!({"cmd": "poll"}), 1).unwrap();
         let chip = chip_from_value(&reply).unwrap();
         assert_eq!(chip.value, "42");
         assert_eq!(chip.ratio, Some(0.5));

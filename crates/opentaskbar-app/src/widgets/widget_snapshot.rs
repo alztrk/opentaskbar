@@ -73,9 +73,11 @@ impl WidgetPollSnapshot {
         &self.fixed_ready_drives
     }
 
-    /// Refreshes only when stale. Safe to call from a chip renderer (no work on a cache hit).
-    pub fn ensure_fresh(&mut self, now: Instant) {
-        if !self.is_fresh(now) {
+    /// Refreshes only when stale. The caller's `now` is ignored for freshness: `refresh()`
+    /// stamps with `Instant::now()`, so mixing a stale caller clock would mark a fresh
+    /// snapshot as stale (or vice versa).
+    pub fn ensure_fresh(&mut self, _now: Instant) {
+        if !self.is_fresh(Instant::now()) {
             self.refresh();
         }
     }
