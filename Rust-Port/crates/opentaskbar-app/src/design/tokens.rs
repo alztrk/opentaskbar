@@ -24,11 +24,27 @@ impl Rgba {
         Self::new(r, g, b, 255)
     }
 
-    /// Parses `#RRGGBB` or `#AARRGGBB` (case-insensitive, leading `#` optional).
+    /// Parses WPF/CSS colour literals: `#RGB`, `#ARGB`, `#RRGGBB`, `#AARRGGBB`
+    /// (case-insensitive, leading `#` optional) or a named colour such as `Transparent`.
     pub fn from_hex(text: &str) -> Option<Self> {
         let value = text.trim().trim_start_matches('#');
         let parse = |s: &str| u8::from_str_radix(s, 16).ok();
+        let nibble = |c: u8| -> Option<u8> {
+            let digit = (c as char).to_digit(16)? as u8;
+            Some(digit * 17)
+        };
         match value.len() {
+            3 => Some(Self::from_rgb(
+                nibble(value.as_bytes()[0])?,
+                nibble(value.as_bytes()[1])?,
+                nibble(value.as_bytes()[2])?,
+            )),
+            4 => Some(Self::new(
+                nibble(value.as_bytes()[1])?,
+                nibble(value.as_bytes()[2])?,
+                nibble(value.as_bytes()[3])?,
+                nibble(value.as_bytes()[0])?,
+            )),
             6 => Some(Self::from_rgb(
                 parse(&value[0..2])?,
                 parse(&value[2..4])?,
@@ -40,7 +56,7 @@ impl Rgba {
                 parse(&value[6..8])?,
                 parse(&value[0..2])?,
             )),
-            _ => None,
+            _ => named_color(text.trim()),
         }
     }
 
@@ -111,6 +127,40 @@ impl Rgba {
     pub fn darken(self, amount: f64) -> Self {
         self.mix(Self::from_rgb(0, 0, 0), amount)
     }
+}
+
+/// Named colours accepted by WPF `ColorConverter` (the subset used by C# themes).
+pub fn named_color(text: &str) -> Option<Rgba> {
+    let rgb = |r, g, b| Rgba::from_rgb(r, g, b);
+    let value = match text.trim().to_ascii_lowercase().as_str() {
+        "transparent" => Rgba::new(0, 0, 0, 0),
+        "black" => rgb(0, 0, 0),
+        "white" => rgb(255, 255, 255),
+        "red" => rgb(255, 0, 0),
+        "green" => rgb(0, 128, 0),
+        "lime" => rgb(0, 255, 0),
+        "blue" => rgb(0, 0, 255),
+        "yellow" => rgb(255, 255, 0),
+        "cyan" | "aqua" => rgb(0, 255, 255),
+        "magenta" | "fuchsia" => rgb(255, 0, 255),
+        "gray" | "grey" => rgb(128, 128, 128),
+        "darkgray" => rgb(169, 169, 169),
+        "lightgray" => rgb(211, 211, 211),
+        "slategray" => rgb(112, 128, 144),
+        "silver" => rgb(192, 192, 192),
+        "orange" => rgb(255, 165, 0),
+        "purple" => rgb(128, 0, 128),
+        "pink" => rgb(255, 192, 203),
+        "brown" => rgb(165, 42, 42),
+        "teal" => rgb(0, 128, 128),
+        "navy" => rgb(0, 0, 128),
+        "maroon" => rgb(128, 0, 0),
+        "olive" => rgb(128, 128, 0),
+        "indigo" => rgb(75, 0, 130),
+        "gold" => rgb(255, 215, 0),
+        _ => return None,
+    };
+    Some(value)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -237,6 +287,90 @@ impl Gradient {
             ..self
         }
     }
+
+    /// Gradient from stops and a C#/`WidgetPack.Convert` theme angle.
+    pub fn angled(stops: Vec<GradientStop>, angle_deg: f64) -> Self {
+        let (start, end) = gradient_endpoints(angle_deg);
+        Self { stops, start, end }
+    }
+}
+
+/// The one source of truth for gradient angle → endpoints conversion.
+///
+/// Theme angle follows C# `WidgetPack.ParseBrush` / `ThemePropertyEditor.BrushToNode`:
+/// `0° = bottom→top`, `90° = left→right`, `180° = top→bottom`.
+pub fn gradient_endpoints(angle_deg: f64) -> ((f64, f64), (f64, f64)) {
+    let radians = angle_deg.rem_euclid(360.0).to_radians();
+    let (sin, cos) = radians.sin_cos();
+    (
+        (0.5 - sin / 2.0, 0.5 + cos / 2.0),
+        (0.5 + sin / 2.0, 0.5 - cos / 2.0),
+    )
+}
+
+/// GPUI brush picker (`0° = left→right`, `90° = top→bottom`) → theme angle.
+pub fn picker_to_theme_angle(angle_deg: f64) -> f64 {
+    (angle_deg + 90.0).rem_euclid(360.0)
+}
+
+/// Theme angle → GPUI brush picker angle.
+pub fn theme_to_picker_angle(angle_deg: f64) -> f64 {
+    (angle_deg - 90.0).rem_euclid(360.0)
+}
+
+/// C# `RadialGradientBrush` (used by `IconHoverGlow` / `WidgetIsland`) data.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RadialGradient {
+    pub stops: Vec<GradientStop>,
+    /// Center of the outer circle, in relative 0..1 coordinates.
+    pub center: (f64, f64),
+    /// Focus point of the gradient, in relative 0..1 coordinates.
+    pub origin: (f64, f64),
+    pub radius: (f64, f64),
+}
+
+impl RadialGradient {
+    pub fn new(
+        stops: Vec<GradientStop>,
+        center: (f64, f64),
+        origin: (f64, f64),
+        radius: (f64, f64),
+    ) -> Self {
+        Self {
+            stops,
+            center,
+            origin,
+            radius,
+        }
+    }
+
+    pub fn scaled_alpha(self, scale: f64) -> Self {
+        Self {
+            stops: self
+                .stops
+                .into_iter()
+                .map(|stop| GradientStop {
+                    color: stop.color.scaled_alpha(scale),
+                    ..stop
+                })
+                .collect(),
+            ..self
+        }
+    }
+
+    pub fn with_alpha(self, alpha: u8) -> Self {
+        Self {
+            stops: self
+                .stops
+                .into_iter()
+                .map(|stop| GradientStop {
+                    color: stop.color.with_alpha(alpha),
+                    ..stop
+                })
+                .collect(),
+            ..self
+        }
+    }
 }
 
 /// Value of a resolved theme token.
@@ -244,6 +378,7 @@ impl Gradient {
 pub enum TokenValue {
     Solid(Rgba),
     Gradient(Gradient),
+    RadialGradient(RadialGradient),
     Color(Rgba),
     CornerRadius(CornerRadius),
     Thickness(Thickness),
@@ -261,7 +396,7 @@ impl Default for TokenValue {
 impl TokenValue {
     pub fn kind(&self) -> TokenKind {
         match self {
-            Self::Solid(_) | Self::Gradient(_) => TokenKind::Brush,
+            Self::Solid(_) | Self::Gradient(_) | Self::RadialGradient(_) => TokenKind::Brush,
             Self::Color(_) => TokenKind::Color,
             Self::CornerRadius(_) => TokenKind::CornerRadius,
             Self::Thickness(_) => TokenKind::Thickness,
@@ -287,6 +422,7 @@ impl TokenValue {
         match self {
             Self::Solid(c) => Self::Solid(c.scaled_alpha(scale)),
             Self::Gradient(g) => Self::Gradient(g.scaled_alpha(scale)),
+            Self::RadialGradient(g) => Self::RadialGradient(g.scaled_alpha(scale)),
             other => other,
         }
     }
@@ -305,6 +441,7 @@ impl TokenValue {
                     .collect(),
                 ..g
             }),
+            Self::RadialGradient(g) => Self::RadialGradient(g.with_alpha(alpha)),
             other => other,
         }
     }
@@ -325,6 +462,9 @@ impl TokenKind {
     /// Best-effort key-based inference used when a theme pack is loaded without a
     /// WPF resource tree (Rust has no `Application.Current.Resources[key]`).
     pub fn for_key(key: &str) -> Self {
+        if let Some(kind) = editor_token_kind(key) {
+            return kind;
+        }
         let lower = key.to_ascii_lowercase();
         if lower.contains("font") || lower.contains("family") {
             TokenKind::FontFamily
@@ -357,6 +497,452 @@ impl TokenKind {
     }
 }
 
+/// A key the C# theme editor (`Views/ThemePropertyEditor.cs`) or a bundled theme pack
+/// can legitimately override. Unknown keys must be rejected, not silently accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EditorToken {
+    pub key: &'static str,
+    pub kind: TokenKind,
+}
+
+/// Type registry: the 51 editor keys plus the advanced/pack keys C# ships in its
+/// palettes and `pack.json` manifests. This is what replaces WPF's
+/// `Application.Current.Resources[key]` type lookup on the Rust side.
+pub static EDITOR_TOKENS: &[EditorToken] = &[
+    // ThemePropertyEditor sections (51 keys).
+    EditorToken {
+        key: "TextPrimary",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "TextSecondary",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "AccentBrush",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "AccentText",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "StrokeSubtle",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "StrokeFocus",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "SurfaceSelected",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "SurfaceHover",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "SurfacePressed",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "DockBackgroundMode",
+        kind: TokenKind::Mode,
+    },
+    EditorToken {
+        key: "DockMaterial",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "DockBorderMaterial",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "DockHighlight",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "DockRadius",
+        kind: TokenKind::CornerRadius,
+    },
+    EditorToken {
+        key: "DockInnerRadius",
+        kind: TokenKind::CornerRadius,
+    },
+    EditorToken {
+        key: "DockWidgetPadding",
+        kind: TokenKind::Thickness,
+    },
+    EditorToken {
+        key: "DockShadowBlur",
+        kind: TokenKind::Double,
+    },
+    EditorToken {
+        key: "DockShadowOpacity",
+        kind: TokenKind::Double,
+    },
+    EditorToken {
+        key: "DockShadowColor",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetCard",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetCardHover",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetCardPressed",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetCardStroke",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetTrack",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetAccent",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "DockWidgetSurface",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "DockWidgetRadius",
+        kind: TokenKind::CornerRadius,
+    },
+    EditorToken {
+        key: "MenuMaterial",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "MenuDivider",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "SurfacePopup",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "MenuLabelWidth",
+        kind: TokenKind::Double,
+    },
+    EditorToken {
+        key: "PopupRadius",
+        kind: TokenKind::CornerRadius,
+    },
+    EditorToken {
+        key: "PopupInnerRadius",
+        kind: TokenKind::CornerRadius,
+    },
+    EditorToken {
+        key: "SettingsBackground",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "SettingsBackgroundOpacity",
+        kind: TokenKind::Double,
+    },
+    EditorToken {
+        key: "SettingsControl",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "SettingsControlHover",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "SettingsSidebarOverlay",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "IconForeground",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WindowsLogoBrush",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "IconHoverGlow",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "StartTileBackground",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "StartTileStroke",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "StartTileHover",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetWarning",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetFocusAccent",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "InterfaceFont",
+        kind: TokenKind::FontFamily,
+    },
+    EditorToken {
+        key: "TextSizeBody",
+        kind: TokenKind::Double,
+    },
+    EditorToken {
+        key: "TextSizeCaption",
+        kind: TokenKind::Double,
+    },
+    EditorToken {
+        key: "ControlRadius",
+        kind: TokenKind::CornerRadius,
+    },
+    EditorToken {
+        key: "SettingsPageInset",
+        kind: TokenKind::Thickness,
+    },
+    // Advanced editor tokens and keys shipped by the bundled theme packs.
+    EditorToken {
+        key: "AccentTrack",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "CaptionCloseForeground",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "DangerText",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "DockInnerBevelMaterial",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "DockScrollScrimStart",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "DockScrollScrimEnd",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "DockScrollScrimTop",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "DockScrollScrimBottom",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "DockSheenRadius",
+        kind: TokenKind::CornerRadius,
+    },
+    EditorToken {
+        key: "DockWidgetActionRadius",
+        kind: TokenKind::CornerRadius,
+    },
+    EditorToken {
+        key: "IndicatorBrush",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "IndicatorForegroundBrush",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "MenuStroke",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "NotificationBrush",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "SettingsTrack",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "ShellButtonHover",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "ShellButtonPressed",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "StartTileBorder",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "StartTilePressed",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "SurfaceDanger",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "SurfaceKeyboardFocus",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "SurfaceHoverColor",
+        kind: TokenKind::Color,
+    },
+    EditorToken {
+        key: "SurfaceSelectedStrong",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "TextMuted",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "TextSizeWidgetLabel",
+        kind: TokenKind::Double,
+    },
+    EditorToken {
+        key: "TextSizeWidgetValue",
+        kind: TokenKind::Double,
+    },
+    EditorToken {
+        key: "WidgetAccentFill",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetAccentText",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetActionFont",
+        kind: TokenKind::FontFamily,
+    },
+    EditorToken {
+        key: "WidgetBlue",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetDangerForeground",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetDangerHover",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetDangerStroke",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetFieldRadius",
+        kind: TokenKind::CornerRadius,
+    },
+    EditorToken {
+        key: "WidgetGlassCard",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetGlassCardHover",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetGlassCardStroke",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetGreen",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetIsland",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetIslandStroke",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetOnStroke",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetQuickActionRadius",
+        kind: TokenKind::CornerRadius,
+    },
+    EditorToken {
+        key: "WidgetRadius",
+        kind: TokenKind::CornerRadius,
+    },
+    EditorToken {
+        key: "WidgetSelectedFill",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetSelectedForeground",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "WidgetSelectedStroke",
+        kind: TokenKind::Brush,
+    },
+    EditorToken {
+        key: "MenuRowPadding",
+        kind: TokenKind::Thickness,
+    },
+    EditorToken {
+        key: "MenuDividerInset",
+        kind: TokenKind::Thickness,
+    },
+    // Per-surface opacity keys persisted by the settings UI.
+    EditorToken {
+        key: "SurfaceOpacity",
+        kind: TokenKind::Double,
+    },
+    EditorToken {
+        key: "DockOpacity",
+        kind: TokenKind::Double,
+    },
+    EditorToken {
+        key: "MenuOpacity",
+        kind: TokenKind::Double,
+    },
+    EditorToken {
+        key: "WidgetOpacity",
+        kind: TokenKind::Double,
+    },
+    EditorToken {
+        key: "SettingsOpacity",
+        kind: TokenKind::Double,
+    },
+];
+
+/// Exact (case-insensitive) type lookup for an editable theme token.
+pub fn editor_token_kind(key: &str) -> Option<TokenKind> {
+    EDITOR_TOKENS
+        .iter()
+        .find(|token| token.key.eq_ignore_ascii_case(key))
+        .map(|token| token.kind)
+}
+
+/// Number of registered editor tokens (51 C# editor keys + advanced/pack keys).
+pub const fn editor_token_count() -> usize {
+    EDITOR_TOKENS.len()
+}
+
 pub type TokenMap = BTreeMap<String, TokenValue>;
 
 /// Resolves a token from a layered map: base palette, then Windows accent, then theme pack.
@@ -378,7 +964,67 @@ mod tests {
             Rgba::from_hex("80AABBCC"),
             Some(Rgba::new(0xAA, 0xBB, 0xCC, 0x80))
         );
-        assert_eq!(Rgba::from_hex("#fff"), None);
+        assert_eq!(Rgba::from_hex("#fff"), Some(Rgba::from_rgb(255, 255, 255)));
+        assert_eq!(Rgba::from_hex("#0f0"), Some(Rgba::from_rgb(0, 255, 0)));
+        assert_eq!(Rgba::from_hex("#8f00"), Some(Rgba::new(255, 0, 0, 0x88)));
+        assert_eq!(Rgba::from_hex("Transparent"), Some(Rgba::new(0, 0, 0, 0)));
+        assert_eq!(
+            Rgba::from_hex("  slategray "),
+            Some(Rgba::from_rgb(112, 128, 144))
+        );
+        assert_eq!(Rgba::from_hex("#12"), None);
+    }
+
+    #[test]
+    fn editor_token_registry_covers_the_csharp_editor_and_pack_keys() {
+        assert!(editor_token_count() >= 45);
+        assert_eq!(
+            editor_token_kind("DockBackgroundMode"),
+            Some(TokenKind::Mode)
+        );
+        assert_eq!(
+            editor_token_kind("Dockradius"),
+            Some(TokenKind::CornerRadius)
+        );
+        assert_eq!(
+            editor_token_kind("SettingsPageInset"),
+            Some(TokenKind::Thickness)
+        );
+        assert_eq!(editor_token_kind("TextSizeBody"), Some(TokenKind::Double));
+        assert_eq!(
+            editor_token_kind("InterfaceFont"),
+            Some(TokenKind::FontFamily)
+        );
+        assert_eq!(editor_token_kind("WidgetAccent"), Some(TokenKind::Brush));
+        assert_eq!(editor_token_kind("NoSuchToken"), None);
+    }
+
+    #[test]
+    fn gradient_angle_convention_has_one_source() {
+        // C#: 0 = bottom→top, 90 = left→right, 180 = top→bottom.
+        let (start, end) = gradient_endpoints(0.0);
+        assert!((start.1 - 1.0).abs() < 1e-9 && (end.1 - 0.0).abs() < 1e-9);
+        let (start, end) = gradient_endpoints(90.0);
+        assert!((start.0 - 0.0).abs() < 1e-9 && (end.0 - 1.0).abs() < 1e-9);
+        let (start, end) = gradient_endpoints(180.0);
+        assert!((start.1 - 0.0).abs() < 1e-9 && (end.1 - 1.0).abs() < 1e-9);
+        assert_eq!(picker_to_theme_angle(90.0), 180.0);
+        assert_eq!(theme_to_picker_angle(180.0), 90.0);
+        let g = Gradient::angled(
+            vec![
+                GradientStop {
+                    color: Rgba::from_rgb(0, 0, 0),
+                    position: 0.0,
+                },
+                GradientStop {
+                    color: Rgba::from_rgb(255, 255, 255),
+                    position: 1.0,
+                },
+            ],
+            180.0,
+        );
+        assert!((g.start.0 - 0.5).abs() < 1e-9 && (g.start.1 - 0.0).abs() < 1e-9);
+        assert!((g.end.0 - 0.5).abs() < 1e-9 && (g.end.1 - 1.0).abs() < 1e-9);
     }
 
     #[test]
