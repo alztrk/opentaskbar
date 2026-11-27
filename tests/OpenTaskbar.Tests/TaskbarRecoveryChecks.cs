@@ -35,6 +35,24 @@ internal static class TaskbarRecoveryChecks
         Check(TaskbarReplacementSession.FallbackState("corrupt") == 0, "A corrupt journal must fall back to state zero.");
         Check(TaskbarReplacementSession.FallbackState("2") == 2, "A valid journal must be used as the restore state.");
 
+        // Faz 3: Rust `journal.rs` and the C watchdog read the same single masked decimal, with no BOM/newline.
+        Check(TaskbarReplacementSession.SupportedTaskbarState == 0x03
+              && TaskbarReplacementSession.DefaultTaskbarState == 0,
+            "Only ABS_AUTOHIDE | ABS_ALWAYSONTOP is a valid taskbar state; the safe default is zero.");
+        Check(TaskbarReplacementSession.FormatJournal(0) == "0"
+              && TaskbarReplacementSession.FormatJournal(0x82) == "2"
+              && TaskbarReplacementSession.FormatJournal(0xFF) == "3"
+              && TaskbarReplacementSession.FormatJournal(0x04) == "0",
+            "The journal writer must mask unsupported bits before handing the state to the watchdog.");
+        Check(TaskbarReplacementSession.JournalTemporaryFilePath.EndsWith("taskbar-state.txt.tmp", StringComparison.Ordinal)
+              && Path.GetFileName(TaskbarReplacementSession.JournalFilePath) == "taskbar-state.txt",
+            "The taskbar journal temp name must match Rust's with_extension(\"txt.tmp\").");
+        foreach (var damaged in new[] { "4", "0x2", "-1", "+1", "", "  ", "2\n3", "abc", "4294967296" })
+        {
+            Check(TaskbarReplacementSession.FallbackState(damaged) == 0,
+                $"A damaged taskbar journal must fall back to a visible taskbar: '{damaged}'");
+        }
+
         const int parentPid = 4242;
         const string token = "abc123";
         var arguments = TaskbarRecoveryWatchdog.BuildArguments(parentPid, token);

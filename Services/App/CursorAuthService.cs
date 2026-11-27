@@ -19,8 +19,11 @@ public static class CursorAuthService
     private const string ClientId = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB";
     private const string ApiBase = "https://api2.cursor.sh";
     private const uint CryptProtectUiForbidden = 0x1;
+    // Rust `platform/cursor_auth.rs` decrypts with this exact byte sequence.
+    internal const string Entropy = "OpenTaskbar.CursorAuth.v1";
+    internal const string TokenFileName = "cursor-auth.bin";
     private const int MaxTokenFileBytes = 1 << 16;
-    private static readonly byte[] EntropyBytes = "OpenTaskbar.CursorAuth.v1"u8.ToArray();
+    private static readonly byte[] EntropyBytes = Encoding.ASCII.GetBytes(Entropy);
 
     private static readonly object Sync = new();
     private static readonly SemaphoreSlim RefreshLock = new(1, 1);
@@ -29,8 +32,8 @@ public static class CursorAuthService
     internal static string TokenFilePath { get; set; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "OpenTaskbar",
-        "secrets",
-        "cursor-auth.bin");
+        AiSecretStore.SecretsFolderName,
+        TokenFileName);
 
     public static event Action? SessionChanged;
     internal static event Action? RefreshRequested;

@@ -17,6 +17,8 @@ public static class Program
 
         // Must be set before App or any WPF visual tree initializes. Hardware rendering is the default;
         // --software-render and the persisted preference trade frame rate for ~100 MB less private memory.
+        // RenderModePreference reads the SHARED %LOCALAPPDATA%\OpenTaskbar\render-mode.json ({"software":bool}),
+        // the same file and key the Rust port reads, so both implementations agree before any UI exists.
         if (args.Contains("--software-render", StringComparer.OrdinalIgnoreCase) || RenderModePreference.IsSoftware())
         {
             RenderOptions.ProcessRenderMode = RenderMode.SoftwareOnly;

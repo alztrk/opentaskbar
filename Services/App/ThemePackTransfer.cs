@@ -1,6 +1,7 @@
 using System.IO;
 using System.IO.Compression;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using OpenTaskbar.Models;
 
 namespace OpenTaskbar.Services;
@@ -21,6 +22,15 @@ internal static class ThemePackTransfer
         PropertyNameCaseInsensitive = true,
         ReadCommentHandling = JsonCommentHandling.Skip,
         AllowTrailingCommas = true
+    };
+
+    // Rust `ThemePackManifest::to_string_pretty` writes camelCase keys ("name", "preserveOriginalIcons")
+    // and omits nulls. Emit the exact same wire form so Rust's strict reader accepts it directly.
+    private static readonly JsonSerializerOptions ManifestWriteOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        WriteIndented = true
     };
 
     private static readonly HashSet<string> AllowedExtensions = new(StringComparer.OrdinalIgnoreCase)
@@ -55,7 +65,7 @@ internal static class ThemePackTransfer
             string.IsNullOrWhiteSpace(author) ? null : author.Trim(),
             null,
             preserveOriginalIcons);
-        File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }));
+        File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest, ManifestWriteOptions));
         return id;
     }
 

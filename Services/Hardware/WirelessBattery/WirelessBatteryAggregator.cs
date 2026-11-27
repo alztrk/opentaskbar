@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using OpenTaskbar.Widgets;
 
 namespace OpenTaskbar.Services;
@@ -17,7 +18,18 @@ internal sealed class WirelessBatteryAggregator
     public const ushort WraithW75ProductId = 0xC368;
     public const int OutlierDropThresholdPercent = 25;
     public const int OutlierProtectedFloorPercent = 25;
+    internal const int MaxCacheEntries = 64;
+    internal const string CacheFileName = "wireless-battery-cache.json";
+    internal const string CacheTemporaryExtension = ".json.tmp";
     private const long MaxCacheFileBytes = 65_536;
+
+    // C# writes PascalCase + a UTF-8 BOM; Rust writes lowercase wire keys without a BOM.
+    // Both shapes are accepted on read so either port can hand the cache to the other.
+    private static readonly JsonSerializerOptions CacheJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        Converters = { new JsonStringEnumConverter() }
+    };
 
     public static readonly TimeSpan DefaultProviderTimeout = TimeSpan.FromMilliseconds(1200);
     public static readonly TimeSpan StaleExpirationWindow = TimeSpan.FromMinutes(30);
@@ -45,7 +57,7 @@ internal sealed class WirelessBatteryAggregator
         cacheFilePath: Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "OpenTaskbar",
-            "wireless-battery-cache.json"));
+            CacheFileName));
 
     private readonly Func<CancellationToken, Task<IReadOnlyList<WirelessDeviceReading>>> _bluetoothReader;
     private readonly IReadOnlyList<IWirelessBatteryProvider> _providers;
@@ -459,14 +471,16 @@ internal sealed class WirelessBatteryAggregator
             if (!info.Exists || info.Length is <= 0 or > MaxCacheFileBytes) return;
 
             var json = File.ReadAllText(_cacheFilePath, Encoding.UTF8);
-            var loaded = JsonSerializer.Deserialize<Dictionary<string, WirelessDeviceReading>>(json);
-            if (loaded is null) return;
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.ValueKind != JsonValueKind.Object) return;
 
             var maxFutureSkew = TimeSpan.FromMinutes(1);
-            foreach (var (key, entry) in loaded)
+            foreach (var property in document.RootElement.EnumerateObject())
             {
-                if (_cache.Count >= 64) break;
-                if (string.IsNullOrWhiteSpace(key) || entry is null) continue;
+                if (_cache.Count >= MaxCacheEntries) break;
+                var key = property.Name;
+                if (string.IsNullOrWhiteSpace(key) || property.Value.ValueKind != JsonValueKind.Object) continue;
+                if (!TryReadCachedReading(property.Value, now, out var entry)) continue;
                 if (entry.SampledAt > now + maxFutureSkew) continue;
                 if (now - entry.SampledAt > StaleExpirationWindow) continue;
                 if (entry.BatteryLevel is < -1 or > 100) continue;
@@ -480,6 +494,99 @@ internal sealed class WirelessBatteryAggregator
         }
     }
 
+    /// <summary>
+    /// Reads either on-disk shape: C#'s PascalCase snapshot or Rust's BOM-less lowercase wire form
+    /// (<c>level</c>, <c>charging</c>, <c>source</c>, <c>age_secs</c>/<c>written_at</c>).
+    /// </summary>
+    internal static bool TryReadCachedReading(JsonElement element, DateTimeOffset now, out WirelessDeviceReading reading)
+    {
+        reading = default!;
+        if (TryGetProperty(element, "BatteryLevel", out _))
+        {
+            var parsed = JsonSerializer.Deserialize<WirelessDeviceReading>(element.GetRawText(), CacheJsonOptions);
+            if (parsed is null) return false;
+            reading = parsed;
+            return true;
+        }
+
+        if (!TryGetInt(element, "level", out var level)) return false;
+        var id = TryGetString(element, "id", out var storedId) ? storedId : string.Empty;
+        var name = TryGetString(element, "name", out var storedName) ? storedName : string.Empty;
+        var charging = TryGetBool(element, "charging", out var isCharging) && isCharging;
+        var sourceId = TryGetInt(element, "source", out var rawSource) ? rawSource : 0;
+        var source = Enum.IsDefined(typeof(WirelessBatterySource), sourceId)
+            ? (WirelessBatterySource)sourceId
+            : WirelessBatterySource.Bluetooth;
+
+        // Rust `written_at` is authoritative (wall clock); fall back to its relative `age_secs`.
+        long ageSeconds = 0;
+        if (TryGetInt64(element, "written_at", out var writtenAt))
+        {
+            ageSeconds = Math.Max(0, DateTimeOffset.UtcNow.ToUnixTimeSeconds() - writtenAt);
+        }
+        else if (TryGetInt64(element, "age_secs", out var relativeAge))
+        {
+            ageSeconds = Math.Max(0, relativeAge);
+        }
+        // Keep the full age: the caller's 30-minute stale check must reject a stale Rust
+        // `written_at` even when it would have been clamped for display in the Rust reader.
+        var sampledAt = now - TimeSpan.FromSeconds(ageSeconds);
+        reading = new WirelessDeviceReading(
+            Id: id, Name: name, Kind: BluetoothDeviceKind.Generic, BatteryLevel: level,
+            IsConnected: true, IsCharging: charging, IsStale: true, Source: source,
+            SampledAt: sampledAt, LevelOverrideText: level < 0 ? "-1" : null);
+        return true;
+    }
+
+    private static bool TryGetProperty(JsonElement element, string name, out JsonElement value)
+    {
+        foreach (var property in element.EnumerateObject())
+        {
+            if (string.Equals(property.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = property.Value;
+                return true;
+            }
+        }
+        value = default;
+        return false;
+    }
+
+    private static bool TryGetString(JsonElement element, string name, out string value)
+    {
+        value = string.Empty;
+        if (!TryGetProperty(element, name, out var property) || property.ValueKind != JsonValueKind.String) return false;
+        value = property.GetString() ?? string.Empty;
+        return true;
+    }
+
+    private static bool TryGetBool(JsonElement element, string name, out bool value)
+    {
+        value = false;
+        if (!TryGetProperty(element, name, out var property)) return false;
+        if (property.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return false;
+        value = property.GetBoolean();
+        return true;
+    }
+
+    private static bool TryGetInt(JsonElement element, string name, out int value)
+    {
+        value = 0;
+        return TryGetProperty(element, name, out var property)
+            && property.ValueKind == JsonValueKind.Number
+            && property.TryGetInt32(out value);
+    }
+
+    private static bool TryGetInt64(JsonElement element, string name, out long value)
+    {
+        value = 0;
+        return TryGetProperty(element, name, out var property)
+            && property.ValueKind == JsonValueKind.Number
+            && property.TryGetInt64(out value);
+    }
+
+    internal static string CacheTemporaryFilePath(string path) => Path.ChangeExtension(path, CacheTemporaryExtension);
+
     private static void SaveCacheToDisk(string path, Dictionary<string, WirelessDeviceReading> snapshot)
     {
         try
@@ -488,9 +595,10 @@ internal sealed class WirelessBatteryAggregator
             if (!string.IsNullOrWhiteSpace(dir))
                 Directory.CreateDirectory(dir);
 
-            var tmpPath = path + ".tmp";
+            var tmpPath = CacheTemporaryFilePath(path);
             var json = JsonSerializer.Serialize(snapshot);
-            File.WriteAllText(tmpPath, json, Encoding.UTF8);
+            // C# keeps the UTF-8 BOM and PascalCase keys; Rust's BOM-less reader tolerates both.
+            File.WriteAllText(tmpPath, json, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
             File.Move(tmpPath, path, overwrite: true);
         }
         catch

@@ -1,5 +1,6 @@
 using System.IO;
 using System.Runtime.ExceptionServices;
+using System.Text;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
@@ -1056,6 +1057,13 @@ internal static class WirelessBatteryChecks
             var firstDiskPoll = writerAgg.PollAsync().GetAwaiter().GetResult();
             check(firstDiskPoll.Count == 1 && File.Exists(cachePath),
                 "Persistent disk cache must save changed live readings to disk.");
+            var writtenBytes = File.ReadAllBytes(cachePath);
+            var writtenText = Encoding.UTF8.GetString(writtenBytes);
+            check(writtenBytes.Length >= 3 && writtenBytes[0] == 0xEF && writtenBytes[1] == 0xBB && writtenBytes[2] == 0xBF,
+                "The C# wireless cache must keep its UTF-8 BOM (the Rust reader tolerates it).");
+            check(writtenText.Contains("\"BatteryLevel\"", StringComparison.Ordinal)
+                  && !File.Exists(Path.ChangeExtension(cachePath, ".json.tmp")),
+                "The C# cache must write PascalCase keys through its .json.tmp and leave no temp file.");
 
             var readerAgg = new WirelessBatteryAggregator(
                 bluetoothReader: _ => Task.FromResult<IReadOnlyList<WirelessDeviceReading>>([]),
@@ -1075,6 +1083,36 @@ internal static class WirelessBatteryChecks
             var corruptPoll = corruptAgg.PollAsync().GetAwaiter().GetResult();
             check(corruptPoll.Count == 0,
                 "Corrupt disk cache JSON must be ignored gracefully without throwing.");
+
+            // Faz 3: the Rust port writes BOM-less JSON with lowercase wire keys. C# must read it.
+            var writtenAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 42;
+            var rustCache = "{\"name:rust\":{\"id\":\"hid:1234\",\"name\":\"Rust Mouse\","
+                            + "\"level\":73,\"charging\":true,\"source\":0,"
+                            + "\"age_secs\":42,\"written_at\":" + writtenAt.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}}";
+            File.WriteAllBytes(cachePath, Encoding.UTF8.GetBytes(rustCache));
+            var rustReaderAgg = new WirelessBatteryAggregator(
+                bluetoothReader: _ => Task.FromResult<IReadOnlyList<WirelessDeviceReading>>([]),
+                providers: [],
+                clock: () => fakeNow,
+                cacheFilePath: cachePath);
+            var rustPoll = rustReaderAgg.PollAsync().GetAwaiter().GetResult();
+            check(rustPoll.Count == 1 && rustPoll[0].BatteryLevel == 73 && rustPoll[0].IsStale
+                  && rustPoll[0].Source == WirelessBatterySource.Bluetooth,
+                "C# must restore Rust's BOM-less disk cache as a stale reading with its level and source.");
+
+            // A stale Rust written_at timestamp must be rejected even if age_secs claims freshness.
+            var staleWrittenAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - 3600;
+            var staleRustCache = "{\"name:old\":{\"id\":\"hid:9999\",\"name\":\"Old Mouse\","
+                                 + "\"level\":55,\"charging\":false,\"source\":0,"
+                                 + "\"age_secs\":0,\"written_at\":" + staleWrittenAt.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}}";
+            File.WriteAllBytes(cachePath, Encoding.UTF8.GetBytes(staleRustCache));
+            var staleReaderAgg = new WirelessBatteryAggregator(
+                bluetoothReader: _ => Task.FromResult<IReadOnlyList<WirelessDeviceReading>>([]),
+                providers: [],
+                clock: () => fakeNow,
+                cacheFilePath: cachePath);
+            check(staleReaderAgg.PollAsync().GetAwaiter().GetResult().Count == 0,
+                "Rust written_at must override a fresh-looking age_secs when deciding cache staleness.");
         }
         finally
         {

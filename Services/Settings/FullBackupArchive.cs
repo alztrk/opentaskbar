@@ -15,9 +15,10 @@ public static class FullBackupArchive
     public const string ExportExtension = ".otbackup";
     public const int CurrentVersion = 1;
 
-    private const string ManifestFileName = "manifest.json";
-    private const string SettingsFileName = "settings.json";
-    private const string ThemeFolderName = "theme";
+    // Only these entries are ever written/extracted. No secrets/ DPAPI blobs may enter an archive.
+    internal const string ManifestFileName = "manifest.json";
+    internal const string SettingsFileName = "settings.json";
+    internal const string ThemeFolderName = "theme";
 
     private static readonly JsonSerializerOptions ManifestJsonOptions = new()
     {
