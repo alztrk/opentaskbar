@@ -472,6 +472,40 @@ fn magnification_expands_dock_defaults_to_true_and_round_trips() {
 }
 
 #[test]
+fn search_and_task_view_button_flags_survive_reference_round_trip() {
+    // Both buttons are hidden in the reference via these two PascalCase keys. A C# -> Rust ->
+    // C# cycle must not turn either one back on.
+    let (dir, path) = temp_settings("hide-buttons");
+    fs::write(
+        &path,
+        r#"{
+          "ShowSearchButton": false,
+          "ShowTaskViewButton": false
+        }"#,
+    )
+    .unwrap();
+
+    let first = load_from(&path);
+    assert!(!first.show_search_button);
+    assert!(!first.show_task_view_button);
+    assert!(first.validate().is_empty(), "{:?}", first.validate());
+
+    save_to(&path, &first).unwrap();
+    let written = fs::read_to_string(&path).unwrap();
+    assert!(written.contains("\"ShowSearchButton\": false"), "{written}");
+    assert!(
+        written.contains("\"ShowTaskViewButton\": false"),
+        "{written}"
+    );
+    let second = load_from(&path);
+    assert!(!second.show_search_button);
+    assert!(!second.show_task_view_button);
+    assert_eq!(second, first);
+    assert!(second.validate().is_empty(), "{:?}", second.validate());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn dock_metrics_and_effective_layout_helpers_match_reference() {
     let compact = dock_metrics::for_size(DockSize::Compact, 1.0, 0);
     let medium = dock_metrics::for_size(DockSize::Medium, 1.0, 0);

@@ -9670,11 +9670,12 @@ impl Render for SettingsView {
 #[cfg(test)]
 mod tests {
     use super::{
-        BrushMode, DockSettings, WIN_H, WIN_W, ai_cli_sign_in_command, brush_to_json, build_backup,
-        build_brush, city_list, civil_from_days, close_spawned_settings_windows, field_cell_hsv,
-        gradient_stop_at, import_backup_into, inspect_backup, location_auto_fill_value,
-        persist_theme_tokens, reorder_gradient_stop, resolve_startup_toggle, safe_backup_path,
-        settings_search, settings_window_options, weather_country_for, zip_store, zip_unstore,
+        BrushMode, DockSettings, SettingsPage, WIN_H, WIN_W, ai_cli_sign_in_command, brush_to_json,
+        build_backup, build_brush, city_list, civil_from_days, close_spawned_settings_windows,
+        field_cell_hsv, gradient_stop_at, import_backup_into, inspect_backup,
+        location_auto_fill_value, persist_theme_tokens, reorder_gradient_stop,
+        resolve_startup_toggle, safe_backup_path, settings_search, settings_window_options,
+        weather_country_for, zip_store, zip_unstore,
     };
     use crate::design::brush::Hsv;
     use crate::design::theme::{
@@ -9682,6 +9683,7 @@ mod tests {
     };
     use crate::design::tokens::{Rgba, TokenMap, TokenValue};
     use gpui::px;
+    use opentaskbar_core::i18n as loc;
     use serde_json::Map;
 
     #[test]
@@ -9903,6 +9905,51 @@ mod tests {
         let catalog = settings_search::SearchCatalog::from_settings(&DockSettings::default());
         assert!(catalog.search("StackFolders").is_empty());
         assert!(catalog.search("Add Folder Stack").is_empty());
+        // Both dock hide switches stay discoverable through the WS-A parity catalogue too.
+        for field in ["ShowSearchButton", "ShowTaskViewButton"] {
+            assert!(
+                catalog
+                    .search(field)
+                    .iter()
+                    .any(|entry| entry.field == field),
+                "{field} must be discoverable from the settings search catalogue"
+            );
+            assert!(
+                settings_search::SETTINGS_ROWS
+                    .iter()
+                    .any(|row| row.3 == field),
+                "{field} must be mirrored in SETTINGS_ROWS"
+            );
+        }
+    }
+
+    #[test]
+    fn dock_hide_toggle_target_rows_match_search_row_ids() {
+        // Search results jump to a rendered row by `row_id`; a mismatch silently lands nowhere.
+        let source = include_str!("settings.rs");
+        let rendered_ids: Vec<&str> = source
+            .match_indices("self.target_row(")
+            .filter_map(|(offset, _)| {
+                let after = &source[offset + "self.target_row(".len()..];
+                let first_arg = after.split(',').next()?.trim();
+                first_arg.strip_prefix('"')?.split('"').next()
+            })
+            .collect();
+        let catalog = settings_search::catalog();
+        for row_id in ["ShowSearchButton", "ShowTaskViewButton"] {
+            assert!(
+                rendered_ids.contains(&row_id),
+                "{row_id} is not a rendered target_row id"
+            );
+            let hits: Vec<_> = catalog
+                .iter()
+                .filter(|entry| entry.row_id == row_id)
+                .collect();
+            assert_eq!(hits.len(), 1, "expected one search entry for {row_id}");
+            assert!(hits[0].page == SettingsPage::Dock);
+            assert_eq!(hits[0].title, loc::t(row_id));
+            assert_eq!(hits[0].section, loc::t("SectionInteractions"));
+        }
     }
 
     #[test]
