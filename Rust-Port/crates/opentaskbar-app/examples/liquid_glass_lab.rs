@@ -329,10 +329,10 @@ impl GlassParams {
         Self {
             preset_name: "1 · Spatial Glass",
             is_dark,
-            blur_sigma: 20.0,
-            saturation: 1.18,
-            tint_alpha: if is_dark { 0.24 } else { 0.36 },
-            edge_glow: 0.72,
+            blur_sigma: 16.0,
+            saturation: 1.28,
+            tint_alpha: if is_dark { 0.20 } else { 0.32 },
+            edge_glow: 0.78,
             pointer_light: true,
         }
     }
@@ -341,10 +341,10 @@ impl GlassParams {
         Self {
             preset_name: "2 · Clear Crystal",
             is_dark,
-            blur_sigma: 10.0,
-            saturation: 1.24,
-            tint_alpha: if is_dark { 0.14 } else { 0.20 },
-            edge_glow: 0.85,
+            blur_sigma: 9.0,
+            saturation: 1.32,
+            tint_alpha: if is_dark { 0.12 } else { 0.18 },
+            edge_glow: 0.88,
             pointer_light: true,
         }
     }
@@ -353,10 +353,10 @@ impl GlassParams {
         Self {
             preset_name: "3 · Deep Obsidian",
             is_dark,
-            blur_sigma: 24.0,
-            saturation: 1.14,
-            tint_alpha: if is_dark { 0.46 } else { 0.48 },
-            edge_glow: 0.62,
+            blur_sigma: 22.0,
+            saturation: 1.18,
+            tint_alpha: if is_dark { 0.44 } else { 0.46 },
+            edge_glow: 0.68,
             pointer_light: true,
         }
     }
@@ -365,10 +365,10 @@ impl GlassParams {
         Self {
             preset_name: "4 · Soft Frost",
             is_dark,
-            blur_sigma: 36.0,
-            saturation: 1.12,
-            tint_alpha: if is_dark { 0.30 } else { 0.44 },
-            edge_glow: 0.52,
+            blur_sigma: 32.0,
+            saturation: 1.16,
+            tint_alpha: if is_dark { 0.28 } else { 0.40 },
+            edge_glow: 0.58,
             pointer_light: true,
         }
     }
@@ -389,7 +389,6 @@ struct GlassPiece {
     _shadow_contact_visual: SpriteVisual,
     drop_shadow_contact: DropShadow,
     glass_visual: SpriteVisual,
-    rim_light_visual: SpriteVisual,
     _overlay_visual: SpriteVisual,
     rim_mask_surface: CompositionDrawingSurface,
     overlay_surface: CompositionDrawingSurface,
@@ -472,7 +471,7 @@ impl GlassPiece {
         shadow_contact_visual.SetShadow(&drop_shadow_contact)?;
         parent.Children()?.InsertAtTop(&shadow_contact_visual)?;
 
-        // Layer 1: Pure, flat, mirror-smooth Architectural Glass body.
+        // Layer 1: Unified Spatial Glass visual (optical body + additive 1.35 px cursor edge light).
         let glass_visual = compositor.CreateSpriteVisual()?;
         glass_visual.SetSize(Vector2 { X: w_px, Y: h_px })?;
         glass_visual.SetOffset(Vector3 {
@@ -483,7 +482,8 @@ impl GlassPiece {
         glass_visual.SetClip(&clip)?;
         parent.Children()?.InsertAtTop(&glass_visual)?;
 
-        // Layer 2: Razor-thin 1.25 px cursor-reactive 3D specular edge light (visionOS Reveal).
+        // Perimeter stroke mask multiplied into SceneLightingEffect inside `glass_visual`
+        // so unlit rim pixels contribute (0, 0, 0) instead of painting a black outline.
         let rim_mask_surface = gfx_device.CreateDrawingSurface(
             Size {
                 Width: w_px,
@@ -494,17 +494,7 @@ impl GlassPiece {
         )?;
         upload_razor_rim_mask(&rim_mask_surface, w_px, h_px, radius_px, dpi)?;
 
-        let rim_light_visual = compositor.CreateSpriteVisual()?;
-        rim_light_visual.SetSize(Vector2 { X: w_px, Y: h_px })?;
-        rim_light_visual.SetOffset(Vector3 {
-            X: x_px,
-            Y: y_px,
-            Z: 0.0,
-        })?;
-        rim_light_visual.SetClip(&clip)?;
-        parent.Children()?.InsertAtTop(&rim_light_visual)?;
-
-        // Layer 3: Crisp static 1 px top-left glass cut + UI content overlay.
+        // Layer 2: Crisp static 1 px top-left glass cut + UI content overlay.
         let overlay_surface = gfx_device.CreateDrawingSurface(
             Size {
                 Width: w_px,
@@ -538,7 +528,6 @@ impl GlassPiece {
             _shadow_contact_visual: shadow_contact_visual,
             drop_shadow_contact,
             glass_visual,
-            rim_light_visual,
             _overlay_visual: overlay_visual,
             rim_mask_surface,
             overlay_surface,
@@ -552,9 +541,9 @@ impl GlassPiece {
         backdrop: &CompositionBackdropBrush,
         params: GlassParams,
     ) -> WinResult<()> {
-        // Neutral architectural charcoal (dark) or crisp alabaster (light) — zero cyan cast.
+        // Neutral architectural obsidian (dark) or crisp alabaster (light) — zero color cast.
         let tint_rgb = if params.is_dark {
-            ui_color(255, 18, 20, 24)
+            ui_color(255, 14, 16, 22)
         } else {
             ui_color(255, 246, 248, 252)
         };
@@ -580,7 +569,7 @@ impl GlassPiece {
         .cast()?;
 
         let a = params.tint_alpha.clamp(0.0, 0.85);
-        let glass_effect: IGraphicsEffect = IGraphicsEffect::from(ArithmeticCompositeEffect {
+        let tinted_glass: IGraphicsEffect = IGraphicsEffect::from(ArithmeticCompositeEffect {
             name: RefCell::new(HSTRING::from("GlassBody")),
             c1: 0.0,
             c2: 1.0 - a,
@@ -590,52 +579,68 @@ impl GlassPiece {
             source2: tint_param,
         });
 
-        let factory = compositor.CreateEffectFactory(&glass_effect)?;
-        let effect_brush = factory.CreateBrush()?;
-        effect_brush.SetSourceParameter(&HSTRING::from("Backdrop"), backdrop)?;
-        effect_brush.SetSourceParameter(&HSTRING::from("Tint"), &tint_brush)?;
-        let brush: CompositionBrush = effect_brush.cast()?;
-        self.glass_visual.SetBrush(&brush)?;
-
-        // Razor-thin 1.25 px cursor-reactive optical edge light via SceneLightingEffect + MaskBrush.
-        if params.pointer_light && params.edge_glow > 0.05 {
+        // Composite cursor-reactive 1.35 px specular edge light directly via Screen blend:
+        // unlit pixels add (0,0,0) -> zero black outline on bright wallpapers!
+        let (final_effect, use_rim_mask) = if params.pointer_light && params.edge_glow > 0.05 {
+            let rim_mask_param: IGraphicsEffectSource =
+                CompositionEffectSourceParameter::Create(&HSTRING::from("RimMask"))?.cast()?;
             let edge_light = SceneLightingEffect::new()?;
             edge_light.SetName(&HSTRING::from("RazorEdgeLight"))?;
             edge_light.SetAmbientAmount(0.0)?;
             edge_light.SetDiffuseAmount(0.85 * params.edge_glow)?;
-            edge_light.SetSpecularAmount(0.75 * params.edge_glow)?;
+            edge_light.SetSpecularAmount(0.80 * params.edge_glow)?;
             edge_light.SetSpecularShine(28.0)?;
             edge_light.SetReflectanceModel(SceneLightingEffectReflectanceModel::BlinnPhong)?;
-            let light_effect: IGraphicsEffect = edge_light.cast()?;
+            let light_src: IGraphicsEffectSource = edge_light.cast()?;
 
-            let light_factory = compositor.CreateEffectFactory(&light_effect)?;
-            let light_brush = light_factory.CreateBrush()?;
+            let masked_light: IGraphicsEffectSource =
+                IGraphicsEffect::from(ArithmeticCompositeEffect {
+                    name: RefCell::new(HSTRING::from("MaskedEdgeLight")),
+                    c1: 1.0,
+                    c2: 0.0,
+                    c3: 0.0,
+                    c4: 0.0,
+                    source1: light_src,
+                    source2: rim_mask_param,
+                })
+                .cast()?;
 
+            let screen_glass: IGraphicsEffect = IGraphicsEffect::from(ArithmeticCompositeEffect {
+                name: RefCell::new(HSTRING::from("SpatialGlassFinal")),
+                c1: -0.60,
+                c2: 1.0,
+                c3: 1.0,
+                c4: 0.0,
+                source1: tinted_glass.cast()?,
+                source2: masked_light,
+            });
+            (screen_glass, true)
+        } else {
+            (tinted_glass, false)
+        };
+
+        let factory = compositor.CreateEffectFactory(&final_effect)?;
+        let effect_brush = factory.CreateBrush()?;
+        effect_brush.SetSourceParameter(&HSTRING::from("Backdrop"), backdrop)?;
+        effect_brush.SetSourceParameter(&HSTRING::from("Tint"), &tint_brush)?;
+        if use_rim_mask {
             let rim_mask_brush =
                 compositor.CreateSurfaceBrushWithSurface(&self.rim_mask_surface)?;
             rim_mask_brush.SetStretch(CompositionStretch::Fill)?;
-
-            let masked_rim = compositor.CreateMaskBrush()?;
-            masked_rim.SetSource(&light_brush)?;
-            masked_rim.SetMask(&rim_mask_brush)?;
-            let rim_brush: CompositionBrush = masked_rim.cast()?;
-            self.rim_light_visual.SetBrush(&rim_brush)?;
-            self.rim_light_visual
-                .SetOpacity(params.edge_glow.clamp(0.0, 1.0))?;
-            self.rim_light_visual.SetIsVisible(true)?;
-        } else {
-            self.rim_light_visual.SetIsVisible(false)?;
+            effect_brush.SetSourceParameter(&HSTRING::from("RimMask"), &rim_mask_brush)?;
         }
+        let brush: CompositionBrush = effect_brush.cast()?;
+        self.glass_visual.SetBrush(&brush)?;
 
         self.drop_shadow_lift.SetColor(if params.is_dark {
-            ui_color(74, 0, 4, 12)
+            ui_color(72, 0, 4, 12)
         } else {
-            ui_color(40, 12, 20, 32)
+            ui_color(38, 12, 20, 32)
         })?;
         self.drop_shadow_contact.SetColor(if params.is_dark {
-            ui_color(44, 0, 2, 8)
+            ui_color(42, 0, 2, 8)
         } else {
-            ui_color(26, 10, 16, 26)
+            ui_color(24, 10, 16, 26)
         })?;
         Ok(())
     }
@@ -796,8 +801,8 @@ impl LabState {
             Y: WIN_H_DIPS * dpi * 0.18,
             Z: 58.0 * dpi,
         })?;
-        point_light.Targets()?.Add(&card.rim_light_visual)?;
-        point_light.Targets()?.Add(&dock.rim_light_visual)?;
+        point_light.Targets()?.Add(&card.glass_visual)?;
+        point_light.Targets()?.Add(&dock.glass_visual)?;
 
         let mut state = Self {
             _hwnd: hwnd,
@@ -948,7 +953,7 @@ impl LabState {
                         255,
                         255,
                         255,
-                        if is_dark { 0.44 } else { 0.84 } * edge_scale,
+                        if is_dark { 0.54 } else { 0.88 } * edge_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
@@ -957,7 +962,7 @@ impl LabState {
                         255,
                         255,
                         255,
-                        if is_dark { 0.15 } else { 0.38 } * edge_scale,
+                        if is_dark { 0.18 } else { 0.42 } * edge_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
@@ -966,7 +971,7 @@ impl LabState {
                         255,
                         255,
                         255,
-                        if is_dark { 0.09 } else { 0.24 } * edge_scale,
+                        if is_dark { 0.12 } else { 0.28 } * edge_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
@@ -975,7 +980,7 @@ impl LabState {
                         255,
                         255,
                         255,
-                        if is_dark { 0.26 } else { 0.60 } * edge_scale,
+                        if is_dark { 0.32 } else { 0.64 } * edge_scale,
                     ),
                 },
             ];
