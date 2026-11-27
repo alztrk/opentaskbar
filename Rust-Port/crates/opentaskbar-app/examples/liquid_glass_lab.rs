@@ -40,12 +40,12 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     CLSID_D2D1ArithmeticComposite, CLSID_D2D1GaussianBlur, CLSID_D2D1Saturation,
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_PROPERTIES1, D2D1_BUFFER_PRECISION_8BPC_UNORM,
-    D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED, D2D1_COLOR_SPACE_SRGB,
-    D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_INTERPOLATION_MODE_LINEAR, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT,
-    D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext,
-    ID2D1Factory1,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_BRUSH_PROPERTIES1, D2D1_BITMAP_PROPERTIES1,
+    D2D1_BUFFER_PRECISION_8BPC_UNORM, D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+    D2D1_COLOR_SPACE_SRGB, D2D1_DRAW_TEXT_OPTIONS_CLIP, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_EXTEND_MODE_WRAP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_INTERPOLATION_MODE_LINEAR,
+    D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES, D2D1_ROUNDED_RECT, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+    D2D1CreateFactory, ID2D1Device, ID2D1DeviceContext, ID2D1Factory1,
 };
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_11_0,
@@ -337,11 +337,11 @@ impl GlassParams {
         Self {
             preset_name: "1 · Liquid Glass",
             is_dark,
-            blur_sigma: 18.0,
-            saturation: 1.45,
-            tint_alpha: if is_dark { 0.14 } else { 0.22 },
-            specular: 0.72,
-            shine: 56.0,
+            blur_sigma: 12.0,
+            saturation: 1.68,
+            tint_alpha: if is_dark { 0.26 } else { 0.20 },
+            specular: 1.05,
+            shine: 42.0,
             pointer_light: true,
         }
     }
@@ -350,11 +350,11 @@ impl GlassParams {
         Self {
             preset_name: "2 · Kristal Cam",
             is_dark,
-            blur_sigma: 8.0,
-            saturation: 1.65,
-            tint_alpha: if is_dark { 0.07 } else { 0.12 },
-            specular: 0.95,
-            shine: 72.0,
+            blur_sigma: 6.0,
+            saturation: 1.80,
+            tint_alpha: if is_dark { 0.12 } else { 0.10 },
+            specular: 1.25,
+            shine: 56.0,
             pointer_light: true,
         }
     }
@@ -363,11 +363,11 @@ impl GlassParams {
         Self {
             preset_name: "3 · Derin Buzlu",
             is_dark,
-            blur_sigma: 30.0,
-            saturation: 1.25,
-            tint_alpha: if is_dark { 0.28 } else { 0.38 },
-            specular: 0.50,
-            shine: 36.0,
+            blur_sigma: 26.0,
+            saturation: 1.32,
+            tint_alpha: if is_dark { 0.36 } else { 0.38 },
+            specular: 0.65,
+            shine: 32.0,
             pointer_light: true,
         }
     }
@@ -376,11 +376,11 @@ impl GlassParams {
         Self {
             preset_name: "4 · Füme Cam",
             is_dark,
-            blur_sigma: 16.0,
-            saturation: 1.10,
-            tint_alpha: if is_dark { 0.42 } else { 0.48 },
-            specular: 0.35,
-            shine: 32.0,
+            blur_sigma: 14.0,
+            saturation: 1.15,
+            tint_alpha: if is_dark { 0.50 } else { 0.48 },
+            specular: 0.50,
+            shine: 28.0,
             pointer_light: true,
         }
     }
@@ -434,9 +434,9 @@ fn build_bevel_normal_map(width: u32, height: u32, radius_px: f32, bevel_px: f32
                 } else {
                     (0.0, y.signum())
                 };
-                // Smooth concave-to-convex glass bevel rolloff confined to the thin optical rim.
+                // Smooth cubic lens bevel confined to the optical glass rim.
                 let u = (inward / bevel).clamp(0.0, 1.0);
-                let curve = (1.0 - u).powf(2.0) * 0.72;
+                let curve = (1.0 - u).powf(2.4) * 0.82;
                 let vx = gx * curve;
                 let vy = gy * curve;
                 let vz = 1.0_f32;
@@ -565,7 +565,7 @@ impl GlassPiece {
             w_px as u32,
             h_px as u32,
             radius_px,
-            6.5 * dpi,
+            9.0 * dpi,
         )?;
 
         let overlay_surface = gfx_device.CreateDrawingSurface(
@@ -613,7 +613,7 @@ impl GlassPiece {
         params: GlassParams,
     ) -> WinResult<()> {
         let tint_rgb = if params.is_dark {
-            ui_color(255, 16, 20, 28)
+            ui_color(255, 14, 18, 26)
         } else {
             ui_color(255, 248, 251, 255)
         };
@@ -669,11 +669,12 @@ impl GlassPiece {
         scene_light.SetReflectanceModel(SceneLightingEffectReflectanceModel::BlinnPhong)?;
         let light_source: IGraphicsEffectSource = scene_light.cast()?;
 
-        // 5. Soft optical Screen blend (`s1 + k * s2 * (1 - s1)`) -> never clips to white chrome.
-        let k = if params.is_dark { 0.62 } else { 0.50 };
+        // 5. Hybrid soft-Screen blend so 3D glass rim reflections stay luminous even over
+        //    bright pastel skies while avoiding harsh white chrome clipping.
+        let k = if params.is_dark { 0.78 } else { 0.72 };
         let final_effect: IGraphicsEffect = IGraphicsEffect::from(ArithmeticCompositeEffect {
             name: RefCell::new(HSTRING::from("FinalGlass")),
-            c1: -k,
+            c1: -k * 0.72,
             c2: 1.0,
             c3: k,
             c4: 0.0,
@@ -874,17 +875,17 @@ impl LabState {
         distant_light.Targets()?.Add(&card.glass_visual)?;
         distant_light.Targets()?.Add(&dock.glass_visual)?;
 
-        // Focused cursor-tracking 3D PointLight -> glides smoothly across the thin glass bevel.
+        // Focused cursor-tracking 3D PointLight -> glides smoothly across the optical glass rim.
         let point_light = compositor.CreatePointLight()?;
         point_light.SetCoordinateSpace(&root)?;
         point_light.SetColor(ui_color(255, 224, 242, 255))?;
         point_light.SetConstantAttenuation(1.0)?;
-        point_light.SetLinearAttenuation(0.0045)?;
-        point_light.SetQuadraticAttenuation(0.000_022)?;
+        point_light.SetLinearAttenuation(0.0030)?;
+        point_light.SetQuadraticAttenuation(0.000_012)?;
         point_light.SetOffset(Vector3 {
             X: WIN_W_DIPS * dpi * 0.35,
             Y: WIN_H_DIPS * dpi * 0.25,
-            Z: 38.0 * dpi,
+            Z: 34.0 * dpi,
         })?;
         point_light.Targets()?.Add(&card.glass_visual)?;
         point_light.Targets()?.Add(&dock.glass_visual)?;
@@ -946,7 +947,7 @@ impl LabState {
         let _ = self.point_light.SetOffset(Vector3 {
             X: x,
             Y: y,
-            Z: 38.0 * self.dpi,
+            Z: 34.0 * self.dpi,
         });
         let next_icon = self.hit_test_dock_icon(x, y);
         if next_icon != self.hovered_icon {
@@ -981,7 +982,31 @@ impl LabState {
         self.redraw_dock_overlay()?;
         Ok(())
     }
+}
 
+fn build_micro_grain_pixels(size: u32, is_dark: bool) -> Vec<u8> {
+    let n = (size * size) as usize;
+    let mut out = vec![0u8; n * 4];
+    let max_a = if is_dark { 6u8 } else { 5u8 };
+    for idx in 0..n {
+        // Deterministic SplitMix32 hash for fine monochrome optical glass texture.
+        let mut z = (idx as u32).wrapping_add(0x9E37_79B9);
+        z = (z ^ (z >> 16)).wrapping_mul(0x85EB_CA6B);
+        z = (z ^ (z >> 13)).wrapping_mul(0xC2B2_AE35);
+        z ^= z >> 16;
+        let bright = (z & 1) == 0;
+        let a = ((z >> 8) as u8) % (max_a + 1);
+        let c = if bright { a } else { 0 };
+        let off = idx * 4;
+        out[off] = c;
+        out[off + 1] = c;
+        out[off + 2] = c;
+        out[off + 3] = a;
+    }
+    out
+}
+
+impl LabState {
     fn draw_fresnel_rim(
         &self,
         dc: &ID2D1DeviceContext,
@@ -992,9 +1017,9 @@ impl LabState {
         r: f32,
     ) -> WinResult<()> {
         let is_dark = self.params.is_dark;
-        let spec_scale = (self.params.specular / 0.72).clamp(0.25, 1.35);
+        let spec_scale = (self.params.specular / 1.05).clamp(0.30, 1.35);
 
-        // 1. Subtle top inner glass gloss gradient (gives thin optical depth without fogging).
+        // 1. Optical glass depth gradient: subtle top luminance + calm lower legibility body.
         let gloss_stops = [
             D2D1_GRADIENT_STOP {
                 position: 0.0,
@@ -1002,21 +1027,25 @@ impl LabState {
                     255,
                     255,
                     255,
-                    if is_dark { 0.11 } else { 0.28 } * spec_scale,
+                    if is_dark { 0.14 } else { 0.34 } * spec_scale,
                 ),
             },
             D2D1_GRADIENT_STOP {
-                position: 0.36,
+                position: 0.30,
                 color: rgba_f(
                     255,
                     255,
                     255,
-                    if is_dark { 0.015 } else { 0.04 } * spec_scale,
+                    if is_dark { 0.02 } else { 0.06 } * spec_scale,
                 ),
             },
             D2D1_GRADIENT_STOP {
+                position: 0.68,
+                color: rgba_f(10, 14, 22, if is_dark { 0.06 } else { 0.01 }),
+            },
+            D2D1_GRADIENT_STOP {
                 position: 1.0,
-                color: rgba_f(0, 0, 0, if is_dark { 0.05 } else { 0.015 }),
+                color: rgba_f(8, 12, 20, if is_dark { 0.15 } else { 0.04 }),
             },
         ];
         unsafe {
@@ -1038,40 +1067,109 @@ impl LabState {
             )?;
             let body_rr = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
-                    left: ox + 1.0,
-                    top: oy + 1.0,
-                    right: ox + w - 1.0,
-                    bottom: oy + h - 1.0,
+                    left: ox,
+                    top: oy,
+                    right: ox + w,
+                    bottom: oy + h,
                 },
-                radiusX: (r - 1.0).max(1.0),
-                radiusY: (r - 1.0).max(1.0),
+                radiusX: r,
+                radiusY: r,
             };
             dc.FillRoundedRectangle(&body_rr, &gloss_brush);
 
-            // 2. Outer dark hairline glass separator (keeps capsule edges crisp over bright scenes).
-            let sep_w = (1.0 * self.dpi).max(1.0);
-            let sep_inset = sep_w * 0.5;
-            let sep_brush = dc.CreateSolidColorBrush(
-                &if is_dark {
-                    rgba_f(0, 0, 0, 0.26)
-                } else {
-                    rgba_f(15, 23, 42, 0.16)
+            // 2. Ultra-fine monochrome frosted micro-grain (1.5-2% physical glass tactility).
+            let grain_sz = 128u32;
+            let grain_px = build_micro_grain_pixels(grain_sz, is_dark);
+            let bmp_props = D2D1_BITMAP_PROPERTIES1 {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+                ..Default::default()
+            };
+            if let Ok(grain_bmp) = dc.CreateBitmap(
+                D2D_SIZE_U {
+                    width: grain_sz,
+                    height: grain_sz,
+                },
+                Some(grain_px.as_ptr().cast()),
+                grain_sz * 4,
+                &bmp_props,
+            ) {
+                let brush_props = D2D1_BITMAP_BRUSH_PROPERTIES1 {
+                    extendModeX: D2D1_EXTEND_MODE_WRAP,
+                    extendModeY: D2D1_EXTEND_MODE_WRAP,
+                    interpolationMode: D2D1_INTERPOLATION_MODE_LINEAR,
+                };
+                if let Ok(grain_brush) = dc.CreateBitmapBrush(&grain_bmp, Some(&brush_props), None)
+                {
+                    dc.FillRoundedRectangle(&body_rr, &grain_brush);
+                }
+            }
+
+            // 3. Inner refractive lens thickness band (creates 3-4mm thick curved glass depth
+            //    that stays clearly visible even against bright skies without a dark ink box).
+            let depth_w = (2.6 * self.dpi).max(2.0);
+            let depth_inset = 1.6 * self.dpi + depth_w * 0.5;
+            let depth_stops = [
+                D2D1_GRADIENT_STOP {
+                    position: 0.0,
+                    color: rgba_f(
+                        255,
+                        255,
+                        255,
+                        if is_dark { 0.14 } else { 0.28 } * spec_scale,
+                    ),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 0.45,
+                    color: rgba_f(10, 20, 36, if is_dark { 0.14 } else { 0.09 }),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 1.0,
+                    color: rgba_f(
+                        195,
+                        230,
+                        255,
+                        if is_dark { 0.16 } else { 0.24 } * spec_scale,
+                    ),
+                },
+            ];
+            let depth_coll = dc.CreateGradientStopCollection(
+                &depth_stops,
+                D2D1_COLOR_SPACE_SRGB,
+                D2D1_COLOR_SPACE_SRGB,
+                D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                D2D1_EXTEND_MODE_CLAMP,
+                D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+            )?;
+            let depth_brush = dc.CreateLinearGradientBrush(
+                &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                    startPoint: Vector2 { X: ox, Y: oy },
+                    endPoint: Vector2 {
+                        X: ox + w * 0.25,
+                        Y: oy + h,
+                    },
                 },
                 None,
+                &depth_coll,
             )?;
-            let sep_rr = D2D1_ROUNDED_RECT {
+            let depth_rr = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
-                    left: ox + sep_inset,
-                    top: oy + sep_inset,
-                    right: ox + w - sep_inset,
-                    bottom: oy + h - sep_inset,
+                    left: ox + depth_inset,
+                    top: oy + depth_inset,
+                    right: ox + w - depth_inset,
+                    bottom: oy + h - depth_inset,
                 },
-                radiusX: (r - sep_inset).max(1.0),
-                radiusY: (r - sep_inset).max(1.0),
+                radiusX: (r - depth_inset).max(1.0),
+                radiusY: (r - depth_inset).max(1.0),
             };
-            dc.DrawRoundedRectangle(&sep_rr, &sep_brush, sep_w, None);
+            dc.DrawRoundedRectangle(&depth_rr, &depth_brush, depth_w, None);
 
-            // 3. Inner Fresnel rim: brightest at top-left, delicate cyan caustic rebound at bottom.
+            // 4. Signature Liquid Glass diagonal specular Fresnel rim: brightest on top-left &
+            //    bottom-right curved corners, calm across the middle span, zero dark ink outline.
             let rim_stops = [
                 D2D1_GRADIENT_STOP {
                     position: 0.0,
@@ -1079,34 +1177,43 @@ impl LabState {
                         255,
                         255,
                         255,
-                        if is_dark { 0.44 } else { 0.80 } * spec_scale,
+                        if is_dark { 0.80 } else { 0.96 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
-                    position: 0.35,
+                    position: 0.24,
                     color: rgba_f(
-                        215,
+                        210,
                         236,
                         255,
-                        if is_dark { 0.14 } else { 0.36 } * spec_scale,
+                        if is_dark { 0.24 } else { 0.44 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
-                    position: 0.82,
+                    position: 0.50,
                     color: rgba_f(
-                        190,
-                        220,
+                        230,
+                        242,
                         255,
-                        if is_dark { 0.08 } else { 0.22 } * spec_scale,
+                        if is_dark { 0.10 } else { 0.20 } * spec_scale,
+                    ),
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 0.76,
+                    color: rgba_f(
+                        220,
+                        215,
+                        255,
+                        if is_dark { 0.22 } else { 0.40 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
                     position: 1.0,
                     color: rgba_f(
-                        215,
-                        242,
+                        232,
+                        246,
                         255,
-                        if is_dark { 0.24 } else { 0.48 } * spec_scale,
+                        if is_dark { 0.66 } else { 0.86 } * spec_scale,
                     ),
                 },
             ];
@@ -1122,15 +1229,15 @@ impl LabState {
                 &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
                     startPoint: Vector2 { X: ox, Y: oy },
                     endPoint: Vector2 {
-                        X: ox + w * 0.25,
+                        X: ox + w,
                         Y: oy + h,
                     },
                 },
                 None,
                 &rim_coll,
             )?;
-            let stroke_w = (1.15 * self.dpi).max(1.0);
-            let inset = sep_w + stroke_w * 0.5;
+            let stroke_w = (1.35 * self.dpi).max(1.0);
+            let inset = stroke_w * 0.5;
             let rim_rr = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F {
                     left: ox + inset,
@@ -1143,37 +1250,37 @@ impl LabState {
             };
             dc.DrawRoundedRectangle(&rim_rr, &rim_brush, stroke_w, None);
 
-            // 4. Subtle chromatic prism sheen along the top inner optical edge.
+            // 5. Crisp chromatic prism dispersion glint along the top optical bevel.
             let prism_stops = [
                 D2D1_GRADIENT_STOP {
                     position: 0.0,
                     color: rgba_f(120, 210, 255, 0.0),
                 },
                 D2D1_GRADIENT_STOP {
-                    position: 0.22,
+                    position: 0.18,
                     color: rgba_f(
-                        150,
-                        225,
+                        145,
+                        226,
                         255,
-                        if is_dark { 0.26 } else { 0.44 } * spec_scale,
+                        if is_dark { 0.34 } else { 0.52 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
-                    position: 0.50,
+                    position: 0.48,
                     color: rgba_f(
                         255,
                         255,
                         255,
-                        if is_dark { 0.36 } else { 0.62 } * spec_scale,
+                        if is_dark { 0.54 } else { 0.78 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
-                    position: 0.78,
+                    position: 0.80,
                     color: rgba_f(
-                        230,
-                        198,
+                        228,
+                        196,
                         255,
-                        if is_dark { 0.20 } else { 0.34 } * spec_scale,
+                        if is_dark { 0.28 } else { 0.42 } * spec_scale,
                     ),
                 },
                 D2D1_GRADIENT_STOP {
@@ -1202,15 +1309,15 @@ impl LabState {
             )?;
             dc.DrawLine(
                 Vector2 {
-                    X: ox + r * 0.7,
-                    Y: oy + 2.0 * self.dpi,
+                    X: ox + r * 0.65,
+                    Y: oy + 1.6 * self.dpi,
                 },
                 Vector2 {
-                    X: ox + w - r * 0.7,
-                    Y: oy + 2.0 * self.dpi,
+                    X: ox + w - r * 0.65,
+                    Y: oy + 1.6 * self.dpi,
                 },
                 &prism_brush,
-                (1.0 * self.dpi).max(1.0),
+                (1.1 * self.dpi).max(1.0),
                 None,
             );
         }
@@ -1256,8 +1363,32 @@ impl LabState {
                 _ => DWRITE_TEXT_ALIGNMENT_LEADING,
             });
             let _ = fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
-            let brush = dc.CreateSolidColorBrush(&style.color, None)?;
             let wtxt: Vec<u16> = text.encode_utf16().collect();
+
+            // Subtle optical legibility shadow (keeps glass typography crisp on bright skies).
+            let shadow_col = if self.params.is_dark {
+                rgba_f(0, 4, 12, 0.42)
+            } else {
+                rgba_f(255, 255, 255, 0.55)
+            };
+            let shadow_brush = dc.CreateSolidColorBrush(&shadow_col, None)?;
+            let sh_off = (0.85 * self.dpi).max(1.0);
+            let shadow_rect = D2D_RECT_F {
+                left: rect.left,
+                top: rect.top + sh_off,
+                right: rect.right,
+                bottom: rect.bottom + sh_off,
+            };
+            dc.DrawText(
+                &wtxt,
+                &fmt,
+                &shadow_rect,
+                &shadow_brush,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+
+            let brush = dc.CreateSolidColorBrush(&style.color, None)?;
             dc.DrawText(
                 &wtxt,
                 &fmt,
@@ -1283,24 +1414,24 @@ impl LabState {
         let s = |v: f32| v * self.dpi;
         let p = self.params;
         let fg = if p.is_dark {
-            rgba_f(246, 248, 252, 0.96)
+            rgba_f(250, 252, 255, 0.98)
         } else {
-            rgba_f(18, 22, 30, 0.94)
+            rgba_f(14, 20, 30, 0.96)
         };
         let muted = if p.is_dark {
-            rgba_f(205, 214, 228, 0.78)
+            rgba_f(226, 236, 248, 0.88)
         } else {
-            rgba_f(52, 60, 76, 0.80)
+            rgba_f(32, 42, 58, 0.86)
         };
         let chip_fill = if p.is_dark {
-            rgba_f(255, 255, 255, 0.10)
+            rgba_f(10, 14, 24, 0.24)
         } else {
-            rgba_f(255, 255, 255, 0.45)
+            rgba_f(255, 255, 255, 0.50)
         };
         let chip_stroke = if p.is_dark {
-            rgba_f(255, 255, 255, 0.22)
+            rgba_f(255, 255, 255, 0.26)
         } else {
-            rgba_f(255, 255, 255, 0.72)
+            rgba_f(255, 255, 255, 0.82)
         };
 
         unsafe {
@@ -1338,17 +1469,17 @@ impl LabState {
         unsafe {
             let badge_fill = dc.CreateSolidColorBrush(
                 &if p.is_dark {
-                    rgba_f(56, 189, 248, 0.16)
+                    rgba_f(14, 116, 198, 0.34)
                 } else {
-                    rgba_f(14, 116, 214, 0.14)
+                    rgba_f(14, 116, 214, 0.16)
                 },
                 None,
             )?;
             let badge_stroke = dc.CreateSolidColorBrush(
                 &if p.is_dark {
-                    rgba_f(125, 211, 252, 0.36)
+                    rgba_f(148, 224, 255, 0.52)
                 } else {
-                    rgba_f(14, 116, 214, 0.32)
+                    rgba_f(14, 116, 214, 0.38)
                 },
                 None,
             )?;
@@ -1369,9 +1500,9 @@ impl LabState {
                 weight: DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 align: 1,
                 color: if p.is_dark {
-                    rgba_f(152, 228, 255, 0.98)
+                    rgba_f(224, 246, 255, 0.99)
                 } else {
-                    rgba_f(12, 92, 188, 0.96)
+                    rgba_f(10, 74, 156, 0.98)
                 },
                 fluent: false,
             },
@@ -1507,7 +1638,7 @@ impl LabState {
         self.draw_fresnel_rim(&dc, ox, oy, w, h, self.dock.radius_px)?;
 
         // Sample dock icons inside the Liquid Glass capsule to test contrast & reflections.
-        let icons = [
+        let icons: [(&str, (u8, u8, u8)); 8] = [
             ("\u{E721}", (56, 189, 248)),
             ("\u{E7C4}", (129, 140, 248)),
             ("\u{E8B7}", (251, 191, 36)),
@@ -1527,32 +1658,70 @@ impl LabState {
             let hovered = self.hovered_icon == Some(i);
             let l = start_x + i as f32 * (icon_sz + gap);
             let lift = if hovered { s(3.0) } else { 0.0 };
-            let fill = rgba_f(
-                *r,
-                *g,
-                *b,
-                if hovered {
-                    if is_dark { 0.34 } else { 0.28 }
-                } else if is_dark {
-                    0.18
-                } else {
-                    0.16
-                },
-            );
+            let alpha_top = if hovered {
+                if is_dark { 0.64 } else { 0.56 }
+            } else if is_dark {
+                0.44
+            } else {
+                0.38
+            };
+            let alpha_bot = if hovered {
+                if is_dark { 0.48 } else { 0.42 }
+            } else if is_dark {
+                0.30
+            } else {
+                0.26
+            };
             let stroke = rgba_f(
                 255,
                 255,
                 255,
                 if hovered {
-                    0.58
+                    0.78
                 } else if is_dark {
-                    0.22
+                    0.40
                 } else {
-                    0.52
+                    0.72
                 },
             );
             unsafe {
-                let fb = dc.CreateSolidColorBrush(&fill, None)?;
+                let tile_stops = [
+                    D2D1_GRADIENT_STOP {
+                        position: 0.0,
+                        color: rgba_f(
+                            (*r).saturating_add(36),
+                            (*g).saturating_add(36),
+                            (*b).saturating_add(36),
+                            alpha_top,
+                        ),
+                    },
+                    D2D1_GRADIENT_STOP {
+                        position: 1.0,
+                        color: rgba_f(*r, *g, *b, alpha_bot),
+                    },
+                ];
+                let tile_coll = dc.CreateGradientStopCollection(
+                    &tile_stops,
+                    D2D1_COLOR_SPACE_SRGB,
+                    D2D1_COLOR_SPACE_SRGB,
+                    D2D1_BUFFER_PRECISION_8BPC_UNORM,
+                    D2D1_EXTEND_MODE_CLAMP,
+                    D2D1_COLOR_INTERPOLATION_MODE_PREMULTIPLIED,
+                )?;
+                let fb = dc.CreateLinearGradientBrush(
+                    &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                        startPoint: Vector2 {
+                            X: l,
+                            Y: top_y - lift,
+                        },
+                        endPoint: Vector2 {
+                            X: l,
+                            Y: top_y - lift + icon_sz,
+                        },
+                    },
+                    None,
+                    &tile_coll,
+                )?;
                 let sb = dc.CreateSolidColorBrush(&stroke, None)?;
                 let rr = D2D1_ROUNDED_RECT {
                     rect: D2D_RECT_F {
@@ -1568,9 +1737,9 @@ impl LabState {
                 dc.DrawRoundedRectangle(&rr, &sb, 1.0, None);
             }
             let glyph_col = if is_dark {
-                rgba_f(250, 252, 255, 0.96)
+                rgba_f(255, 255, 255, 0.98)
             } else {
-                rgba_f(18, 24, 34, 0.92)
+                rgba_f(14, 20, 32, 0.94)
             };
             self.draw_text(
                 &dc,
