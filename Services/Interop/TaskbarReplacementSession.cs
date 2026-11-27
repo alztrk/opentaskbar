@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows;
 using System.Windows.Threading;
 
@@ -19,7 +20,12 @@ public sealed class TaskbarReplacementSession : IDisposable
     private const int GwlExStyle = -20;
     private const int WindowOwner = 4;
     private const long WsCaption = 0x00C00000;
-    private const uint SupportedTaskbarState = AbsAutoHide | AbsAlwaysOnTop;
+    // Wire format shared with Rust `journal.rs` and the C watchdog: ABS_AUTOHIDE | ABS_ALWAYSONTOP only.
+    internal const uint SupportedTaskbarState = AbsAutoHide | AbsAlwaysOnTop;
+    /// <summary>Missing/damaged journal must restore a *visible* taskbar, never a guessed hidden state.</summary>
+    internal const uint DefaultTaskbarState = 0;
+    internal const string JournalFileName = "taskbar-state.txt";
+    internal const string JournalTemporaryExtension = ".txt.tmp";
     private const uint AbnStateChange = 0;
     private const uint AbnPosChanged = 1;
     private const uint AbnFullScreenApp = 2;
@@ -2206,7 +2212,17 @@ public sealed class TaskbarReplacementSession : IDisposable
     private static string JournalPath => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "OpenTaskbar",
-        "taskbar-state.txt");
+        JournalFileName);
+
+    /// <summary>The journal path read by the native watchdog and by Rust after a hard kill.</summary>
+    internal static string JournalFilePath => JournalPath;
+
+    /// <summary>Rust uses <c>path.with_extension("txt.tmp")</c>; keep the exact same atomic-write target.</summary>
+    internal static string JournalTemporaryFilePath => Path.ChangeExtension(JournalPath, JournalTemporaryExtension);
+
+    /// <summary>Single decimal number, no trailing newline, no BOM, only the two supported AppBar bits.</summary>
+    internal static string FormatJournal(uint state) =>
+        (state & SupportedTaskbarState).ToString(CultureInfo.InvariantCulture);
 
     private static void WriteJournal(uint state)
     {
@@ -2218,8 +2234,8 @@ public sealed class TaskbarReplacementSession : IDisposable
         }
 
         Directory.CreateDirectory(directory);
-        var temporaryPath = path + ".tmp";
-        File.WriteAllText(temporaryPath, state.ToString(CultureInfo.InvariantCulture));
+        var temporaryPath = JournalTemporaryFilePath;
+        File.WriteAllText(temporaryPath, FormatJournal(state), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
         File.Move(temporaryPath, path, overwrite: true);
     }
 
@@ -2239,14 +2255,14 @@ public sealed class TaskbarReplacementSession : IDisposable
     /// <summary>A missing or damaged journal must restore a visible taskbar, never a guessed hidden state.</summary>
     internal static uint FallbackState(string? journalText)
     {
-        if (journalText is null) return 0;
+        if (journalText is null) return DefaultTaskbarState;
         try
         {
             return ParseJournal(journalText);
         }
         catch (InvalidDataException)
         {
-            return 0;
+            return DefaultTaskbarState;
         }
     }
 

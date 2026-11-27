@@ -13,14 +13,17 @@ namespace OpenTaskbar.Services;
 internal static class AiSecretStore
 {
     private const uint CryptProtectUiForbidden = 0x1;
-    private const int MaxSecretFileBytes = 1 << 16;
+    // Rust `widgets/telemetry.rs` decrypts with this exact byte sequence; changing it breaks both apps.
+    internal const string Entropy = "OpenTaskbar.AiSecretStore.v1";
+    internal const string SecretsFolderName = "secrets";
+    internal const int MaxSecretFileBytes = 1 << 16;
     private static readonly object Sync = new();
-    private static readonly byte[] EntropyBytes = "OpenTaskbar.AiSecretStore.v1"u8.ToArray();
+    private static readonly byte[] EntropyBytes = Encoding.ASCII.GetBytes(Entropy);
 
     public static string DefaultRoot { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "OpenTaskbar",
-        "secrets");
+        SecretsFolderName);
 
     internal static string Root { get; set; } = DefaultRoot;
 

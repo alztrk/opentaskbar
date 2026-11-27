@@ -1,4 +1,6 @@
 using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Windows;
 using OpenTaskbar.Models;
 using OpenTaskbar.Services;
@@ -128,6 +130,53 @@ internal static class ShellFlyoutPositionChecks
         {
             File.Delete(journal);
             File.Delete(journal + ".tmp");
+        }
+
+        // Faz 3: the exact wire format shared with Rust `flyout_writer`/`flyout_journal` and the C watchdog.
+        var wire = Path.Combine(Path.GetTempPath(), "ot-flyout-wire-" + Guid.NewGuid().ToString("N") + ".txt");
+        try
+        {
+            var positions = Enumerable.Range(1, 17)
+                .Select(i => new FlyoutPosition(1000 + i, (uint)(7 + i), -320 - i, 17 + i))
+                .ToArray();
+            ShellFlyoutPositionJournal.Write(positions, wire);
+            var raw = File.ReadAllBytes(wire);
+            Check(!(raw.Length >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF),
+                "The flyout journal must be UTF-8 without a BOM.");
+            var text = Encoding.UTF8.GetString(raw);
+            Check(!text.Contains('\r'), "The flyout journal must use Rust's LF line endings.");
+            var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            Check(lines.Length == ShellFlyoutPositionJournal.MaxEntries,
+                "The flyout journal must keep at most 16 entries even when given 17.");
+            Check(lines[0] == "1001 8 -321 18",
+                "Fields must be invariant <hwnd> <pid> <left> <top>, including negative coordinates.");
+            Check(lines.All(line => Regex.IsMatch(line, @"^\d+ \d+ -?\d+ -?\d+$")),
+                "Every journal line must be parseable by the watchdog's %llu %u %d %d scan.");
+            Check(ShellFlyoutPositionJournal.TemporaryFilePath(wire) == wire + ".tmp"
+                  && !File.Exists(wire + ".tmp"),
+                "Both writers must use flyout-positions.txt.tmp and leave no stale temp file.");
+            Check(ShellFlyoutPositionJournal.Read(wire).Count == 16, "The capped journal must round-trip.");
+
+            // Rust may append generation/seq metadata; the watchdog still only reads the first four fields.
+            File.WriteAllText(wire, "1234 56 -320 17 generation=11 seq=29\n1234 56 -320 17 generation=11\n0 56 1 2\n");
+            var extended = ShellFlyoutPositionJournal.Read(wire);
+            Check(extended.Count == 1 && extended[0] == new FlyoutPosition(1234, 56, -320, 17),
+                "A complete Rust metadata suffix must read; half-written metadata and HWND 0 must be skipped.");
+
+            // HWNDs are recycled: PID mismatches must never move an unrelated window.
+            Check(ShellFlyoutPositionJournal.IsCurrent(extended[0], _ => 56, _ => true)
+                  && !ShellFlyoutPositionJournal.IsCurrent(extended[0], _ => 99, _ => true)
+                  && !ShellFlyoutPositionJournal.IsCurrent(extended[0], _ => 56, _ => false)
+                  && !ShellFlyoutPositionJournal.IsCurrent(new FlyoutPosition(1, 0, 0, 0), _ => 0, _ => true),
+                "Recovery must require a live handle still owned by the recorded PID.");
+            ShellFlyoutPositionJournal.Delete(wire);
+            Check(!File.Exists(wire) && !File.Exists(wire + ".tmp"),
+                "A verified restore must remove both the journal and its temporary file.");
+        }
+        finally
+        {
+            File.Delete(wire);
+            File.Delete(wire + ".tmp");
         }
 
         // Side-dock Start and Search flyout clamping: top, middle, and bottom anchors on tall side docks

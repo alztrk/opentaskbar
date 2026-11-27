@@ -57,8 +57,8 @@ internal static class TaskbarRecoveryWatchdog
     public static void Run(string[] args)
     {
         if (!TryParseArguments(args, out var parentPid, out var token)) return;
-        using var cleanExit = OpenEvent(CleanExitPrefix, parentPid, token);
-        using var heartbeat = OpenEvent(HeartbeatPrefix, parentPid, token);
+        using var cleanExit = OpenEvent(CleanExitPrefix, parentPid, token, manualReset: true);
+        using var heartbeat = OpenEvent(HeartbeatPrefix, parentPid, token, manualReset: false);
         if (cleanExit is null || heartbeat is null) return;
 
         Process? parent;
@@ -150,8 +150,8 @@ internal static class TaskbarRecoveryWatchdog
         var token = Guid.NewGuid().ToString("N");
         try
         {
-            _cleanExit = OpenEvent(CleanExitPrefix, parentPid, token);
-            _heartbeat = OpenEvent(HeartbeatPrefix, parentPid, token);
+            _cleanExit = OpenEvent(CleanExitPrefix, parentPid, token, manualReset: true);
+            _heartbeat = OpenEvent(HeartbeatPrefix, parentPid, token, manualReset: false);
             if (_cleanExit is null || _heartbeat is null)
             {
                 Cleanup();
@@ -264,11 +264,18 @@ internal static class TaskbarRecoveryWatchdog
         Cleanup();
     }
 
-    private static EventWaitHandle? OpenEvent(string prefix, int pid, string token)
+    /// <summary>
+    /// The clean-exit event is manual-reset (a stray wait cannot consume the shutdown signal); the heartbeat
+    /// must be auto-reset so the C watchdog's 4 s timeout loop can detect three missed pulses. Both rules match
+    /// Rust `watchdog.rs::create_event`.
+    /// </summary>
+    private static EventWaitHandle? OpenEvent(string prefix, int pid, string token, bool manualReset)
     {
         try
         {
-            return new EventWaitHandle(false, EventResetMode.AutoReset, $"{prefix}{pid}.{token}", out _);
+            return new EventWaitHandle(false,
+                manualReset ? EventResetMode.ManualReset : EventResetMode.AutoReset,
+                $"{prefix}{pid}.{token}", out _);
         }
         catch (Exception ex) when (ex is UnauthorizedAccessException or ArgumentException or IOException)
         {

@@ -14,6 +14,14 @@ namespace OpenTaskbar;
 /// </summary>
 public partial class App : Application
 {
+    // Fork-local singleton: the Rust port uses "Local\OpenTaskBar-Rust.SingleInstance", so the two
+    // implementations can run side by side during the migration. This is NOT the short-lived shared
+    // settings lock ("Local\OpenTaskbar.Settings.Lock") that guards read-modify-write of settings.json;
+    // holding this fork mutex says nothing about who currently owns the shared settings file.
+    internal const string SingletonMutexName = @"Local\OpenTaskbar.Singleton";
+    internal const string DevSingletonMutexName = @"Local\OpenTaskbar.Dev";
+    internal const string SharedSettingsLockName = @"Local\OpenTaskbar.Settings.Lock";
+
     private Mutex? _instanceMutex;
     private bool _ownsSingletonMutex;
     private int _crashHandled;
@@ -68,7 +76,7 @@ public partial class App : Application
         ThemeManager.Apply(Preferences.Current.Theme, Preferences.Current);
         ApplyWindowsPalette();
         _instanceMutex = new Mutex(initiallyOwned: true,
-            name: IsDev ? "Local\\OpenTaskbar.Dev" : "Local\\OpenTaskbar.Singleton", out var createdNew);
+            name: IsDev ? DevSingletonMutexName : SingletonMutexName, out var createdNew);
         if (!createdNew)
         {
             AppLog.ReportError("AlreadyRunning");

@@ -44,6 +44,8 @@ checks += SecondaryDockAndInteropChecks.Run();
 checks += ApplicationJumpListChecks.Run();
 checks += WirelessBatteryChecks.Run(headless);
 checks += ShellRecoveryChecks.Run();
+// Faz 3: shared wire formats (journals, secrets, themes, cache, render mode, updater, mutex notes).
+checks += SharedDataWireChecks.Run();
 checks += TraySourceChecks.RunHeadless();
 if (!headless)
 {

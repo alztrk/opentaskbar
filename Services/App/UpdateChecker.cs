@@ -165,7 +165,7 @@ public static class UpdateChecker
             return (false, "ErrorUpdateExecutableInvalid", null);
         }
 
-        var tempDir = Path.Combine(Path.GetTempPath(), "OpenTaskbar", "update");
+        var tempDir = UpdateTempDirectory;
         Directory.CreateDirectory(tempDir);
         var tempExe = Path.Combine(tempDir, "OpenTaskbar.exe");
         var partFile = tempExe + ".part";
@@ -303,6 +303,12 @@ public static class UpdateChecker
         var script = GenerateUpdaterScript(tempExe, targetExe);
         File.WriteAllText(scriptPath, script, UpdaterScriptEncoding);
     }
+
+    /// <summary>
+    /// Update staging lives under <c>%TEMP%\OpenTaskbar\update</c> (not LOCALAPPDATA, unlike the journals).
+    /// The Rust updater uses the same root and the same self-deleting, BOM-less CRLF script.
+    /// </summary>
+    internal static string UpdateTempDirectory => Path.Combine(Path.GetTempPath(), "OpenTaskbar", "update");
 
     internal static void LaunchUpdaterAndRestart(string tempExe, string targetPath)
     {
