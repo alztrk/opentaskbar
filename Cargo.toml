@@ -21,11 +21,11 @@ gpui = { version = "0.2.2", default-features = false, features = ["windows-manif
 image = { version = "0.25", default-features = false }
 raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
-sha2 = "0.10"
+sha2 = "0.11"
 serde_json = { version = "1", features = ["preserve_order"] }
 smallvec = "1"
-zip = { version = "2", default-features = false, features = ["deflate"] }
-windows = { version = "0.61", features = [
+zip = { version = "9", default-features = false, features = ["deflate"] }
+windows = { version = "0.62", features = [
     # WS-B: WinRT Start-menu/MSIX identity (Windows.ApplicationModel) and radio
     # toggles (Windows.Devices.Radios). Kept in the workspace root so every
     # crate can opt in without editing this file again.
@@ -72,8 +72,8 @@ windows = { version = "0.61", features = [
     "Win32_UI_Shell_Common",
     "Win32_UI_Shell_PropertiesSystem",
 ] }
-windows-core = "0.61"
-windows-numerics = "0.2"
+windows-core = "0.62"
+windows-numerics = "0.3"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Globalization",
