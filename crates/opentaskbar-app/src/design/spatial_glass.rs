@@ -1225,7 +1225,9 @@ mod imp {
         }
 
         /// Draws one premultiplied-alpha frame using `ID2D1DeviceContext` and commits to DWM.
-        /// `dpi` sets the D2D context DPI (`96.0 * dpi` for DIP coordinates, or `1.0` for pixels).
+        /// Keeps the device context DPI at `96.0` (matching `dock/dcomp.rs`) and applies `dpi`
+        /// via the 2D transform matrix (`dpi` for DIP coordinates, or `1.0` for pixels) so
+        /// `IDCompositionSurface::BeginDraw`'s pixel clip rect and `offset` are never corrupted.
         pub fn draw<F>(&mut self, w_px: u32, h_px: u32, dpi: f32, draw_fn: F) -> WinResult<()>
         where
             F: FnOnce(&ID2D1DeviceContext) -> WinResult<()>,
@@ -1259,19 +1261,17 @@ mod imp {
             let mut offset = WinPoint { x: 0, y: 0 };
             let dc: ID2D1DeviceContext = unsafe { surface.BeginDraw(None, &mut offset)? };
             unsafe {
-                let dpi_val = 96.0 * dpi.max(0.5);
-                dc.SetDpi(dpi_val, dpi_val);
+                let scale = dpi.max(0.5);
+                dc.SetDpi(96.0, 96.0);
                 dc.SetAntialiasMode(D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
                 dc.SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
-                let ox_dips = (offset.x as f32) / dpi.max(0.5);
-                let oy_dips = (offset.y as f32) / dpi.max(0.5);
                 dc.SetTransform(&Matrix3x2 {
-                    M11: 1.0,
+                    M11: scale,
                     M12: 0.0,
                     M21: 0.0,
-                    M22: 1.0,
-                    M31: ox_dips,
-                    M32: oy_dips,
+                    M22: scale,
+                    M31: offset.x as f32,
+                    M32: offset.y as f32,
                 });
                 dc.Clear(Some(&D2D1_COLOR_F {
                     r: 0.0,

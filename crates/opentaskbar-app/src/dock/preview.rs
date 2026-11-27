@@ -151,6 +151,30 @@ pub fn position_overlay_window(
     (x, y)
 }
 
+/// Physical card size so `count` cards, their gaps, the outer padding and the overlay
+/// margins all fit inside the work-area width `work_w`. When the preferred `desired`
+/// size would overflow (e.g. 6 previews on 1920 px at 150%), cards shrink
+/// proportionally, keeping the thumbnail aspect and every close button on screen.
+fn fit_card_size(
+    desired: (i32, i32),
+    count: i32,
+    work_w: i32,
+    pad: i32,
+    gap: i32,
+    margin: i32,
+    min_h: i32,
+) -> (i32, i32) {
+    let count = count.max(1);
+    let (want_w, want_h) = (desired.0.max(1), desired.1.max(1));
+    let available = work_w - 2 * (margin + pad) - gap * (count - 1);
+    let fit_w = (available / count).max(1);
+    if want_w <= fit_w {
+        return (want_w, want_h);
+    }
+    let scaled_h = (i64::from(want_h) * i64::from(fit_w) / i64::from(want_w)) as i32;
+    (fit_w, scaled_h.max(min_h.min(want_h)).max(1))
+}
+
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const MAX_CARDS: usize = 6;
 /// `Design/Tokens/Layout.xaml`: PreviewWidth/Height = 228x154 DIP.
@@ -430,32 +454,51 @@ impl PreviewPopup {
                 size_of::<u32>() as u32,
             );
         }
-        self.dpi = win32::dpi_scale(self.hwnd as usize);
+        // Resolve the DPI of the monitor the cards will appear on *before* sizing
+        // them: the popup HWND may still sit on another display from its last show.
+        let (work, monitor_dpi) =
+            crate::ui::flyout::monitor_work_area_at(anchor_center_x_px, anchor_bottom_y_px);
+        self.dpi = monitor_dpi
+            .filter(|d| d.is_finite() && *d > 0.0)
+            .unwrap_or_else(|| win32::dpi_scale(self.hwnd as usize))
+            .max(0.5);
         let dpi = self.dpi;
 
-        let card_w = (self.card_w_dips * dpi).round() as i32;
-        let card_h = (self.card_h_dips * dpi).round() as i32;
         let header_h = (HEADER_H_DIPS * dpi).round() as i32;
         let gap = (CARD_GAP_DIPS * dpi).round() as i32;
         let pad = (OUTER_PAD_DIPS * dpi).round() as i32;
         let close_sz = (CLOSE_BTN_DIPS * dpi).round() as i32;
         let inner_pad = (6.0 * dpi).round() as i32;
+        let margin = (8.0 * dpi).round() as i32;
+        let work_w = (work.right - work.left).max(1);
+        let work_h = (work.bottom - work.top).max(1);
+
+        let (card_w, card_h) = fit_card_size(
+            (
+                (self.card_w_dips * dpi).round() as i32,
+                (self.card_h_dips * dpi).round() as i32,
+            ),
+            count as i32,
+            work_w,
+            pad,
+            gap,
+            margin,
+            header_h + inner_pad + (40.0 * dpi).round() as i32,
+        );
 
         let total_w = pad * 2 + card_w * (count as i32) + gap * ((count as i32) - 1);
         let total_h = pad * 2 + card_h;
 
-        let monitor = win32::monitor_for_point_px(anchor_center_x_px, anchor_bottom_y_px);
-        let margin = (8.0 * monitor.dpi_scale).round() as i32;
         let (rel_x, rel_y) = position_overlay_window(
             total_w,
             total_h,
-            anchor_center_x_px - monitor.left,
-            anchor_bottom_y_px - monitor.top,
-            (monitor.right - monitor.left, monitor.bottom - monitor.top),
+            anchor_center_x_px - work.left,
+            anchor_bottom_y_px - work.top,
+            (work_w, work_h),
             margin,
         );
-        let x = monitor.left + rel_x;
-        let y = monitor.top + rel_y;
+        let x = work.left + rel_x;
+        let y = work.top + rel_y;
 
         unsafe {
             SetWindowPos(
@@ -1051,6 +1094,30 @@ mod tests {
         assert_eq!(
             position_overlay_window(400, 200, 5000, 5000, (1920, 1080), 8),
             (1512, 872)
+        );
+    }
+
+    #[test]
+    fn six_cards_fit_a_1080p_work_area_at_150_percent() {
+        let dpi = 1.5_f32;
+        let px = |v: f32| (v * dpi).round() as i32;
+        let (pad, gap, margin) = (px(OUTER_PAD_DIPS), px(CARD_GAP_DIPS), px(8.0));
+        let desired = (px(CARD_W_DIPS), px(CARD_H_DIPS));
+        let work_w = 1920;
+        let (w, h) = fit_card_size(desired, 6, work_w, pad, gap, margin, px(78.0));
+        let total_w = pad * 2 + w * 6 + gap * 5;
+        assert!(total_w <= work_w - 2 * margin, "{total_w}");
+        assert!(w < desired.0 && h < desired.1, "{w}x{h}");
+        // Aspect is preserved (within integer rounding).
+        let aspect = |(a, b): (i32, i32)| a as f32 / b as f32;
+        assert!((aspect((w, h)) - aspect(desired)).abs() < 0.02);
+        // The close button (top-right, 22 DIP + 6 DIP inset) still fits on each card.
+        assert!(w > px(CLOSE_BTN_DIPS) + px(6.0) * 2);
+
+        // When they already fit, the preferred size is kept unchanged.
+        assert_eq!(
+            fit_card_size(desired, 2, work_w, pad, gap, margin, px(78.0)),
+            desired
         );
     }
 

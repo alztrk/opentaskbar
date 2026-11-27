@@ -152,13 +152,33 @@ unsafe fn family_name(
     }
 }
 
-/// Comma-separated family list accepted by `IDWriteFactory::CreateTextFormat`.
+/// Comma-separated family list for CSS/GPUI style fallback chains.
 pub fn ui_family_list() -> String {
     family_list_with(
         selected_family()
             .as_deref()
             .unwrap_or_else(|| native_ui_face()),
     )
+}
+
+/// Single verified installed font family name for DirectWrite `CreateTextFormat`.
+///
+/// DirectWrite does not parse CSS comma-separated fallback lists: passing
+/// `"Inter, Segoe UI, ..."` causes `CreateTextFormat` to look up a literal family
+/// containing commas and silently fall back. Instead, return the user's selected
+/// installed family (if set), else `"Inter"` when present in
+/// `IDWriteFactory::GetSystemFontCollection`, else [`system_menu_face()`].
+pub fn dwrite_ui_family() -> String {
+    if let Some(selected) = selected_family() {
+        return selected;
+    }
+    if let Some(inter) = installed_fonts()
+        .iter()
+        .find(|f| f.eq_ignore_ascii_case(INTER_FAMILY))
+    {
+        return inter.clone();
+    }
+    system_menu_face().to_owned()
 }
 
 fn family_list_with(primary: &str) -> String {
@@ -294,6 +314,22 @@ mod tests {
             installed_fonts()
                 .iter()
                 .any(|f| f.eq_ignore_ascii_case(system_menu_face()))
+        );
+    }
+
+    #[test]
+    fn dwrite_ui_family_is_single_installed_family_without_commas() {
+        let family = dwrite_ui_family();
+        assert!(!family.is_empty());
+        assert!(
+            !family.contains(','),
+            "DirectWrite family must be a single name, got {family:?}"
+        );
+        assert!(
+            installed_fonts()
+                .iter()
+                .any(|f| f.eq_ignore_ascii_case(&family)),
+            "resolved DirectWrite family {family:?} must exist in installed fonts"
         );
     }
 }
