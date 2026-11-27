@@ -364,6 +364,22 @@ mod tracking_tests {
     use super::*;
 
     #[test]
+    fn toast_script_stays_under_the_temp_open_taskbar_folder() {
+        let path = script_path();
+        assert_eq!(
+            path.parent(),
+            Some(std::env::temp_dir().join("OpenTaskbar").as_path())
+        );
+        assert!(
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("toast-")
+        );
+        assert_eq!(path.extension().unwrap(), "ps1");
+    }
+
+    #[test]
     fn xml_escaping_and_templates() {
         assert_eq!(
             escape_xml("A & B <c> \"d\" 'e'"),

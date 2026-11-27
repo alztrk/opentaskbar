@@ -27,7 +27,7 @@ impl RenderPreference {
 }
 
 fn preference_path() -> std::path::PathBuf {
-    opentaskbar_core::settings::app_data_dir().join("render-mode.json")
+    opentaskbar_core::paths::render_mode_path()
 }
 
 /// True when `--software-render` was passed on the command line.
@@ -104,6 +104,19 @@ pub fn clear_override() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preference_file_is_in_the_shared_folder() {
+        assert_eq!(
+            preference_path(),
+            opentaskbar_core::paths::render_mode_path()
+        );
+        assert_eq!(preference_path().file_name().unwrap(), "render-mode.json");
+        assert_eq!(
+            preference_path().parent(),
+            Some(opentaskbar_core::paths::shared_app_data_dir().as_path())
+        );
+    }
 
     #[test]
     fn software_render_arg_is_recognized_case_insensitively() {

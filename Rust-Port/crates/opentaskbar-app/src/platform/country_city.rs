@@ -145,10 +145,7 @@ static CACHE: LazyLock<Mutex<HashMap<String, Vec<String>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn cache_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("OpenTaskbar")
+    opentaskbar_core::paths::shared_app_data_dir()
 }
 
 fn cache_file() -> PathBuf {
@@ -632,6 +629,16 @@ pub fn forecast_path(lat: f64, lon: f64, language: &str, day_count: i32) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn city_cache_is_in_the_shared_appdata_folder() {
+        assert_eq!(cache_dir(), opentaskbar_core::paths::shared_app_data_dir());
+        assert_eq!(cache_file().file_name().unwrap(), "country-city-cache.json");
+        assert_eq!(cache_file().parent(), Some(cache_dir().as_path()));
+        // There is no "." fallback: LOCALAPPDATA missing still resolves to the
+        // central paths contract instead of littering the working directory.
+        assert_ne!(cache_dir(), PathBuf::from("."));
+    }
 
     #[test]
     fn catalogue_has_21_countries_and_81_provinces() {

@@ -61,18 +61,14 @@ impl Registry {
 }
 
 fn journal_path() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join("OpenTaskbar")
-        .join("flyout-positions.txt")
+    opentaskbar_core::paths::journal_path("flyout-positions.txt")
 }
 
 fn flag_enabled() -> bool {
     match ENABLED_OVERRIDE.load(Ordering::Relaxed) {
         0 => false,
         1 => true,
-        _ => opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path())
+        _ => opentaskbar_core::settings::load_from(&opentaskbar_core::paths::settings_path())
             .extra
             .get(FLAG_NAME)
             .and_then(|value| value.as_bool())
@@ -459,11 +455,20 @@ mod tests {
     #[test]
     fn both_flyout_writers_use_the_same_temporary_file_name() {
         let journal = journal_path();
+        assert_eq!(
+            journal,
+            opentaskbar_core::paths::journal_path("flyout-positions.txt")
+        );
+        assert_eq!(journal.file_name().unwrap(), "flyout-positions.txt");
         assert_eq!(temp_path(&journal), flyout_journal::tmp_path(&journal));
         assert!(
             temp_path(&journal)
                 .file_name()
                 .is_some_and(|name| name.to_string_lossy() == "flyout-positions.txt.tmp")
+        );
+        assert_eq!(
+            opentaskbar_core::paths::settings_path(),
+            opentaskbar_core::paths::shared_app_data_dir().join("settings.json")
         );
     }
 

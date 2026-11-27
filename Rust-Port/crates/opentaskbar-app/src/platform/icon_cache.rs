@@ -49,7 +49,7 @@ pub struct RawIcon {
 }
 
 fn cache_dir() -> PathBuf {
-    opentaskbar_core::settings::app_data_dir().join("icon-cache")
+    opentaskbar_core::paths::rust_cache_dir()
 }
 
 fn hash_key(path: &str) -> u64 {
@@ -712,6 +712,13 @@ mod icon_provider_tests {
         for (got, want) in pixels.iter().zip(original.iter()) {
             assert!(got.abs_diff(*want) <= 1, "{got} vs {want}");
         }
+    }
+
+    #[test]
+    fn cache_dir_uses_the_shared_rust_cache_folder() {
+        assert_eq!(cache_dir(), opentaskbar_core::paths::rust_cache_dir());
+        assert!(cache_dir().ends_with(Path::new("rust-cache").join("icon-cache")));
+        assert_eq!(cache_path("app.exe").parent(), Some(cache_dir().as_path()));
     }
 
     #[test]

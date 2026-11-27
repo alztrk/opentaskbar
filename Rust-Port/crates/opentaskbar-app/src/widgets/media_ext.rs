@@ -643,8 +643,11 @@ pub fn get_details(snap: &MediaSessionSnapshot, volume: u32, muted: bool) -> Med
 
 /// C# `MediaWidget`缓存 album art under `%LOCALAPPDATA%\OpenTaskbar\Art` as
 /// `<artist>-<title>.jpg` (sanitized). Returns the first existing cached image.
+fn art_dir() -> PathBuf {
+    opentaskbar_core::paths::shared_app_data_dir().join("Art")
+}
+
 pub fn find_cover_art(title: &str, artist: &str) -> Option<String> {
-    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
     let stem = |s: &str| -> String {
         s.chars()
             .map(|c| {
@@ -656,7 +659,7 @@ pub fn find_cover_art(title: &str, artist: &str) -> Option<String> {
             })
             .collect()
     };
-    let dir = local.join("OpenTaskbar").join("Art");
+    let dir = art_dir();
     for name in [
         format!("-{}-{}.jpg", stem(artist), stem(title)),
         format!("{}.jpg", stem(title)),
@@ -913,6 +916,19 @@ mod tests {
     use crate::platform::core_audio::{AppAudioSession as CoreSession, AppAudioSessionState};
 
     // --- Timeline clock parsing / C# parity helpers ---
+
+    #[test]
+    fn cover_art_uses_the_shared_art_folder() {
+        assert_eq!(
+            art_dir(),
+            opentaskbar_core::paths::shared_app_data_dir().join("Art")
+        );
+        assert_eq!(art_dir().file_name().unwrap(), "Art");
+        assert_eq!(
+            art_dir().parent(),
+            Some(opentaskbar_core::paths::shared_app_data_dir().as_path())
+        );
+    }
 
     #[test]
     fn media_time_formatting() {

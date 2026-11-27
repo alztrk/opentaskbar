@@ -7,6 +7,11 @@
 //! - `--files <path>`: routes a folder request to the dock's Fjord pipe (Explorer fallback).
 //! - `--restore`: restores Explorer's taskbar from the recovery journal and exits.
 //! - default: acquires single-instance lock, loads settings, and runs the native dock.
+//!
+//! NOTE (cross-WS): all data locations go through the `opentaskbar_core::paths`
+//! contract (`SHARED_DATA_INTEGRATION_PLAN.md`, Faz 1). That module is owned by
+//! the settings/cfg workstream; until it lands in this branch, these calls need
+//! that workstream's `core/paths.rs` + `core/lib.rs` registration to compile.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 // The merged C#-parity modules expose a deliberately broad public API (hardware
 // vendors, theme tokens, flyout blocks, shell helpers). Individual call sites are
@@ -107,12 +112,8 @@ fn apply_startup_context(settings: &opentaskbar_core::settings::DockSettings) {
     let _ = design::windows_palette::install_listener();
     platform::icon_pack::set_active_pack(None);
     if !settings.theme_pack.trim().is_empty() {
-        let dir = std::env::var_os("LOCALAPPDATA")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join("OpenTaskbar")
-            .join("Themes")
-            .join(&settings.theme_pack);
+        // Shared (uppercase) `Themes` root — same folder as the C# build.
+        let dir = opentaskbar_core::paths::theme_root().join(&settings.theme_pack);
         platform::icon_pack::set_active_pack(Some(dir.as_path()));
     }
 }
@@ -145,34 +146,30 @@ fn main() {
         }
         enable_dpi_awareness();
         if args.iter().any(|a| a == ui::fjord_bar::BAR_ARG) {
-            opentaskbar_core::log::init(
-                opentaskbar_core::settings::app_data_dir().join("opentaskbar.log"),
-            );
+            opentaskbar_core::log::init(opentaskbar_core::paths::rust_log_path());
             std::panic::set_hook(Box::new(|info| {
                 opentaskbar_core::log::error(format!("FJORD BAR PANIC: {info}"));
             }));
             let settings =
-                opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
+                opentaskbar_core::settings::load_from(&opentaskbar_core::paths::settings_path());
             opentaskbar_core::i18n::init(Some(&settings.language));
             design::fonts::apply_settings(&settings);
             apply_startup_context(&settings);
             if fjord::activation::bar_visible(&settings) {
                 ui::fjord_bar::run_bar_host(
                     fjord::activation::files_enabled(&settings),
-                    opentaskbar_core::settings::settings_path(),
+                    opentaskbar_core::paths::settings_path(),
                 );
             }
             return;
         }
         if args.iter().any(|a| a == ui::settings::SETTINGS_ARG) {
-            opentaskbar_core::log::init(
-                opentaskbar_core::settings::app_data_dir().join("opentaskbar.log"),
-            );
+            opentaskbar_core::log::init(opentaskbar_core::paths::rust_log_path());
             std::panic::set_hook(Box::new(|info| {
                 opentaskbar_core::log::error(format!("SETTINGS PANIC: {info}"));
             }));
             let settings =
-                opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
+                opentaskbar_core::settings::load_from(&opentaskbar_core::paths::settings_path());
             opentaskbar_core::i18n::init(Some(&settings.language));
             design::fonts::apply_settings(&settings);
             apply_startup_context(&settings);
@@ -183,14 +180,12 @@ fn main() {
         if ui::fjord_bar::FJORD_BAR_ENABLED
             && args.iter().any(|a| a == ui::fjord_bar::FJORD_BAR_ARG)
         {
-            opentaskbar_core::log::init(
-                opentaskbar_core::settings::app_data_dir().join("opentaskbar.log"),
-            );
+            opentaskbar_core::log::init(opentaskbar_core::paths::rust_log_path());
             std::panic::set_hook(Box::new(|info| {
                 opentaskbar_core::log::error(format!("FJORD BAR PANIC: {info}"));
             }));
             let settings =
-                opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
+                opentaskbar_core::settings::load_from(&opentaskbar_core::paths::settings_path());
             opentaskbar_core::i18n::init(Some(&settings.language));
             design::fonts::apply_settings(&settings);
             apply_startup_context(&settings);
@@ -199,12 +194,12 @@ fn main() {
                 .get("FjordFilesEnabled")
                 .and_then(|v| v.as_i64().map(|n| n != 0).or_else(|| v.as_bool()))
                 .unwrap_or(false);
-            ui::fjord_bar::run_bar_host(files_enabled, opentaskbar_core::settings::settings_path());
+            ui::fjord_bar::run_bar_host(files_enabled, opentaskbar_core::paths::settings_path());
             return;
         }
     }
 
-    opentaskbar_core::log::init(opentaskbar_core::settings::app_data_dir().join("opentaskbar.log"));
+    opentaskbar_core::log::init(opentaskbar_core::paths::rust_log_path());
 
     // Never restore Explorer from the hook: it can run on worker threads (no COM apartment) while the
     // dock is still alive, which unregisters a live AppBar and clears the recovery journal. The main
@@ -227,7 +222,7 @@ fn main() {
         }
 
         let settings =
-            opentaskbar_core::settings::load_from(&opentaskbar_core::settings::settings_path());
+            opentaskbar_core::settings::load_from(&opentaskbar_core::paths::settings_path());
         opentaskbar_core::i18n::init(Some(&settings.language));
         design::fonts::apply_settings(&settings);
         apply_startup_context(&settings);
@@ -274,7 +269,7 @@ fn main() {
         // Fjord files activation: the dock is the single per-session pipe server.
         // Keep the guard alive until the message loop exits; requests are gated
         // by the current on-disk flag so disabling Fjord stops new windows.
-        let pipe_settings_path = opentaskbar_core::settings::settings_path();
+        let pipe_settings_path = opentaskbar_core::paths::settings_path();
         let _fjord_pipe = fjord::activation::PipeServer::start(move |path| {
             let snapshot = opentaskbar_core::settings::load_from(&pipe_settings_path);
             if fjord::activation::files_enabled(&snapshot) {
@@ -291,5 +286,30 @@ fn main() {
             );
             opentaskbar_shell::taskbar::restore_from_journal();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn startup_paths_live_in_the_shared_localappdata_folder() {
+        use opentaskbar_core::paths;
+
+        let root = paths::shared_app_data_dir();
+        assert_eq!(root.file_name().unwrap(), "OpenTaskbar");
+        assert_eq!(paths::settings_path(), root.join("settings.json"));
+        assert_eq!(
+            paths::rust_log_path(),
+            root.join("opentaskbar-rust.log"),
+            "Rust log must not collide with the C# log.txt"
+        );
+        assert_eq!(paths::theme_root(), root.join("Themes"));
+        assert_eq!(
+            paths::theme_root().file_name().unwrap(),
+            Path::new("Themes").file_name().unwrap(),
+            "uppercase T is required for C# theme-pack parity"
+        );
     }
 }

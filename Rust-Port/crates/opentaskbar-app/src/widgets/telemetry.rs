@@ -10,9 +10,9 @@ use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -3023,29 +3023,17 @@ pub struct AiUsageCache {
     pub providers: HashMap<String, AiUsageSnapshot>,
 }
 
+/// C# `AiSecretStore.EntropyBytes` — must never change or old blobs become unreadable.
+const AI_SECRET_ENTROPY: &[u8; 28] = b"OpenTaskbar.AiSecretStore.v1";
+
 /// Reads an encrypted per-user DPAPI secret stored by C# `AiSecretStore.cs` (never logged).
 fn read_dpapi_secret(secret_key: &str) -> Option<String> {
-    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
-    let sanitized: String = secret_key
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let path = local
-        .join("OpenTaskbar")
-        .join("secrets")
-        .join(format!("{sanitized}.bin"));
+    let path = secret_file_path(secret_key)?;
     let mut enc = std::fs::read(&path).ok()?;
     if enc.is_empty() || enc.len() > 65_536 {
         return None;
     }
-    let mut entropy = *b"OpenTaskbar.AiSecretStore.v1";
+    let mut entropy = *AI_SECRET_ENTROPY;
     let in_blob = CRYPT_INTEGER_BLOB {
         cbData: enc.len() as u32,
         pbData: enc.as_mut_ptr(),
@@ -3082,25 +3070,52 @@ fn read_dpapi_secret(secret_key: &str) -> Option<String> {
     }
 }
 
-fn secret_file_path(secret_key: &str) -> Option<PathBuf> {
-    let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
-    let sanitized: String = secret_key
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
+/// Same sanitizer as C# `AiSecretStore.SecretPath` (letters/digits/`-`/`_`, rest `_`).
+fn sanitize_secret_key(secret_key: &str) -> Option<String> {
+    let trimmed = secret_key.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
     Some(
-        local
-            .join("OpenTaskbar")
-            .join("secrets")
-            .join(format!("{sanitized}.bin")),
+        trimmed
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect(),
     )
+}
+
+fn secret_file_path(secret_key: &str) -> Option<PathBuf> {
+    let sanitized = sanitize_secret_key(secret_key)?;
+    Some(opentaskbar_core::paths::secrets_dir().join(format!("{sanitized}.bin")))
+}
+
+/// C# `AiSecretStore.Set` writes `<key>.bin.<guid-N>.tmp` and moves it into place.
+fn guid_tmp_path(path: &Path) -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64;
+    let seed = nanos.rotate_left(19) ^ (sequence << 32) ^ u64::from(std::process::id());
+    let words = [seed, seed.rotate_left(29) ^ nanos ^ sequence];
+    let mut name = path.as_os_str().to_os_string();
+    let hex: String = words.into_iter().flat_map(u64::to_le_bytes).fold(
+        String::with_capacity(32),
+        |mut out, byte| {
+            use std::fmt::Write;
+            let _ = write!(out, "{byte:02x}");
+            out
+        },
+    );
+    name.push(format!(".{hex}.tmp"));
+    PathBuf::from(name)
 }
 
 /// Encrypts and stores an API key with the same per-user DPAPI format the C# app reads.
@@ -3112,7 +3127,7 @@ pub fn save_dpapi_secret(secret_key: &str, value: &str) -> bool {
         return false;
     }
     let mut plain = value.as_bytes().to_vec();
-    let mut entropy = *b"OpenTaskbar.AiSecretStore.v1";
+    let mut entropy = *AI_SECRET_ENTROPY;
     let in_blob = CRYPT_INTEGER_BLOB {
         cbData: plain.len() as u32,
         pbData: plain.as_mut_ptr(),
@@ -3154,7 +3169,14 @@ pub fn save_dpapi_secret(secret_key: &str, value: &str) -> bool {
     {
         return false;
     }
-    std::fs::write(path, encrypted).is_ok()
+    let tmp = guid_tmp_path(&path);
+    let saved = std::fs::write(&tmp, &encrypted)
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .is_ok();
+    if !saved {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    saved
 }
 
 pub fn clear_dpapi_secret(secret_key: &str) -> bool {
@@ -3655,14 +3677,8 @@ pub fn ai_provider_detected(provider_id: &str) -> bool {
     };
     let appdata = std::env::var_os("APPDATA").map(PathBuf::from);
     let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    let has_dpapi = |name: &str| {
-        local.as_ref().is_some_and(|l| {
-            l.join("OpenTaskbar")
-                .join("secrets")
-                .join(format!("{name}.bin"))
-                .exists()
-        })
-    };
+    let secrets = opentaskbar_core::paths::secrets_dir();
+    let has_dpapi = |name: &str| secrets.join(format!("{name}.bin")).exists();
     match provider_id {
         "aiusage_claude" => home.join(".claude").exists(),
         "aiusage_codex" => home.join(".codex").exists(),
@@ -3689,6 +3705,42 @@ pub fn ai_provider_detected(provider_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_secrets_live_in_the_shared_secrets_folder() {
+        let path = secret_file_path("api-key:deepseek").expect("secret key must resolve");
+        assert_eq!(
+            path,
+            opentaskbar_core::paths::secrets_dir().join("api-key_deepseek.bin")
+        );
+        assert_eq!(
+            opentaskbar_core::paths::secrets_dir(),
+            opentaskbar_core::paths::shared_app_data_dir().join("secrets")
+        );
+        assert!(secret_file_path("   ").is_none());
+    }
+
+    #[test]
+    fn ai_secret_entropy_matches_csharp_ai_secret_store() {
+        assert_eq!(AI_SECRET_ENTROPY, b"OpenTaskbar.AiSecretStore.v1");
+        assert_eq!(AI_SECRET_ENTROPY.len(), 28);
+        // 64 KiB guard, same as `AiSecretStore.MaxSecretFileBytes`.
+        assert_eq!(1_usize << 16, 65_536);
+    }
+
+    #[test]
+    fn ai_secret_tmp_name_matches_csharp_guid_convention() {
+        let path = Path::new("secret").join("api-key_deepseek.bin");
+        let tmp = guid_tmp_path(&path);
+        let name = tmp.file_name().unwrap().to_str().unwrap();
+        let token = name
+            .strip_prefix("api-key_deepseek.bin.")
+            .and_then(|s| s.strip_suffix(".tmp"))
+            .expect("C#-style .<guid>.tmp suffix");
+        assert_eq!(token.len(), 32);
+        assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(guid_tmp_path(&path), tmp);
+    }
 
     #[test]
     fn gpu_engine_name_is_extracted_from_pdh_instance() {
