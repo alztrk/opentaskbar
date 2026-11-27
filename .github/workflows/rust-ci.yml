@@ -9,14 +9,22 @@ on:
       # Locale catalogs are mirrored into Rust by include_str!, so a C#-only
       # key change must trigger the Rust key-parity gate as well.
       - "Services/Localization/Languages/**"
-      - "scripts/check-locale-parity.ps1"
-      - ".github/workflows/rust-ci.yml"
+      - "scripts/**"
+      # The native helper is embedded via build.rs/include_bytes!, so a C-only
+      # change must rebuild and re-verify both architectures.
+      - "tools/watchdog/**"
+      - "packaging/msix/AppxManifest.Rust.xml"
+      - "OpenTaskbar.csproj"
+      - ".github/workflows/**"
   pull_request:
     paths:
       - "Rust-Port/**"
       - "Services/Localization/Languages/**"
-      - "scripts/check-locale-parity.ps1"
-      - ".github/workflows/rust-ci.yml"
+      - "scripts/**"
+      - "tools/watchdog/**"
+      - "packaging/msix/AppxManifest.Rust.xml"
+      - "OpenTaskbar.csproj"
+      - ".github/workflows/**"
   workflow_dispatch:
 
 permissions:
@@ -46,6 +54,60 @@ jobs:
         run: cargo test --workspace
       - name: Release build
         run: cargo build --workspace --release
+
+  watchdog-arch:
+    name: x86 watchdog PE + i686 portable build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain (i686 target)
+        working-directory: .
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add i686-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: Rust-Port
+          key: x86-watchdog
+
+      - name: Build x86 watchdog and assert PE machine 0x014C
+        working-directory: .
+        shell: pwsh
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'opentaskbar-watchdog-x86'
+          & 'tools/watchdog/build.ps1' -Architecture x86 -OutputDir $out -Force -NoFallback
+          $path = Join-Path $out 'OpenTaskbarWatchdog.exe'
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "x86 watchdog was not produced: $path"
+          }
+          $bytes = [IO.File]::ReadAllBytes($path)
+          if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            throw "x86 watchdog is not a PE executable: $path"
+          }
+          $peOffset = [BitConverter]::ToInt32($bytes, 0x3C)
+          if ([BitConverter]::ToUInt32($bytes, $peOffset) -ne 0x00004550) {
+            throw "Missing PE signature in x86 watchdog: $path"
+          }
+          $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+          if ($machine -ne 0x014C) {
+            throw ("x86 watchdog PE machine is 0x{0:X4}, expected 0x014C." -f $machine)
+          }
+          Write-Host ("x86 watchdog PE machine OK: 0x{0:X4}" -f $machine) -ForegroundColor Green
+
+      - name: Build Rust workspace for i686
+        working-directory: Rust-Port
+        run: cargo build --workspace --target i686-pc-windows-msvc
+
+      - name: Verify x86 portable EXE (embedded watchdog included)
+        working-directory: .
+        shell: pwsh
+        run: |
+          & 'scripts/publish-rust-portable.ps1' -Runtime win-x86 -OutputDir release -SkipTargetInstall
+          & 'scripts/check-rust-portable.ps1' -OutputDir release -ExecutableName OpenTaskbar-Rust-x86.exe
 
   locale-parity:
     name: Locale key parity (14 languages)

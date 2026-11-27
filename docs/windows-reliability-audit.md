@@ -66,7 +66,7 @@
 - SEC-01: Theme ZIP traversal, duplicate entries, reserved Windows names, size limits and import/export symmetry.
 - SEC-02: Update executable asset selection, SHA-256 verification, signing policy, atomic replacement, backup and rollback; coordinate with separate updater PR.
 - SEC-03: Review shell command arguments, paths with special characters, log privacy and permission boundaries.
-- REL-01: Release pipeline reproducibility, artifact checksums, GitHub Actions pinning and Windows test reporting.
+- REL-01: Release pipeline reproducibility, artifact checksums, GitHub Actions pinning and Windows test reporting. The release gate `scripts/check-release-version.ps1` checks tag ↔ csproj ↔ Cargo (0.1.0 is a registered carve-out) ↔ Rust MSIX before any build; `package-rust-release.ps1` records each artifact's watchdog architecture/PE machine/SHA-256 and verifies every `checksums.txt` row against disk before SLSA attestation.
 - ARCH-01: Reduce coupling in `MainWindow`, `SettingsWindow`, `TaskbarReplacementSession` through small independently tested changes.
 
 ## Cross-cutting regression controls
@@ -111,13 +111,13 @@ The same caveat applies: a passing Rust source-level check is **not** live compa
 
 ### Rust port live smoke list
 
-Run every row on a real Windows session before signing off a release candidate. Record OS build, Rust worktree commit, display topology, DPI, actual result and logs; **not run** is the only valid initial status.
+Run every row on a real Windows session before signing off a release candidate. Record OS build, Rust worktree commit, EXE architecture, display topology, DPI, actual result and logs; **not run** is the only valid initial status. Collect logs from the shared data folder: `%LOCALAPPDATA%\OpenTaskbar\opentaskbar-rust.log` (rotated copy `opentaskbar-rust.log.old`), not the retired `%LOCALAPPDATA%\OpenTaskBar-Rust\` folder. The taskbar/flyout journals are read from that same `%LOCALAPPDATA%\OpenTaskbar` folder on both builds.
 
 | # | Smoke case | Steps | Pass condition | Status |
 | :--- | :--- | :--- | :--- | :--- |
 | S1 | Start/flyout anchoring | Open and close Start 10× in quick succession, then Search and Control Center; restart Explorer mid-sequence. | One generation per open; no stale close cancels a newer open; flyout follows the anchor on both monitors. | not run |
 | S2 | Auto-hide and shell overlays | Hover the dock edge, open Task View/Alt-Tab, enter a fullscreen app, switch back. | Dock reveals on pointer entry; overlays never leave the dock hidden or stuck visible. | not run |
-| S3 | Watchdog and clean exit | Kill `OpenTaskBar.exe` with Task Manager, then close it normally. | Watchdog restores the shell once on kill; no restore after a clean exit; one process and one heartbeat event throughout. | not run |
+| S3 | Watchdog and clean exit (x64 + x86) | For each architecture, kill `OpenTaskBar.exe` with Task Manager (`taskkill /F`), then close it normally. Confirm the embedded PE and the app-directory `OpenTaskbarWatchdog.exe` match the EXE architecture (x86 = 0x014C, x64 = 0x8664). | Watchdog restores the shell once on kill; no restore after a clean exit; one process and one heartbeat event throughout; no WOW64 fallback binary in the x86 package. | not run |
 | S4 | Radio toggles | Toggle Wi-Fi and Bluetooth from Quick Settings with airplane mode on and off. | UI state matches the OS after each click; no UI-thread stall or crash from async completion. | not run |
 | S5 | Multi-monitor and mirrored dock | Move the dock between displays, disconnect/reconnect the secondary display, set a negative virtual-screen origin. | `enumerate_monitors` sees the live topology; no orphan dock, mirrored dock follows `target_display`. | not run |
 | S6 | Night Light and media | Toggle Night Light; play/pause/seek a track and a LibreWolf YouTube tab. | Registry payload decodes to the new state; stale samples are rejected; seek and rate changes stay clamped. | not run |

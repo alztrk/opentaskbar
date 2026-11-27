@@ -2,7 +2,11 @@
 # can start its short-lived icon worker without shipping sidecar DLLs.
 param (
     [string]$OutputDir = "$PSScriptRoot\..\release",
-    [string]$ExecutableName = 'OpenTaskbar-Rust-x64.exe'
+    [string]$ExecutableName = 'OpenTaskbar-Rust-x64.exe',
+    # PE COFF machine (0x014C = x86, 0x8664 = x64). Derived from the file name
+    # when omitted, so an "x86" asset can never hide an x64 payload.
+    [ValidateSet('', 'x86', 'x64')]
+    [string]$Architecture = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -12,16 +16,43 @@ if (-not (Test-Path -LiteralPath $executable -PathType Leaf)) {
     throw "Rust portable executable is missing: $executable"
 }
 
+if (-not $Architecture) {
+    if ($ExecutableName -match 'x86') { $Architecture = 'x86' }
+    elseif ($ExecutableName -match 'x64') { $Architecture = 'x64' }
+    else { throw "Cannot infer architecture from $ExecutableName; pass -Architecture." }
+}
+$expectedMachine = if ($Architecture -eq 'x86') { 0x014C } else { 0x8664 }
+
+function Get-PeMachine {
+    param ([string]$Path)
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+        throw "Not a valid Windows executable: $Path"
+    }
+    $offset = [BitConverter]::ToInt32($bytes, 0x3C)
+    if ($offset -le 0 -or ($offset + 6) -gt $bytes.Length -or
+        [BitConverter]::ToUInt32($bytes, $offset) -ne 0x00004550) {
+        throw "Missing PE signature: $Path"
+    }
+    return [BitConverter]::ToUInt16($bytes, $offset + 4)
+}
+
 # A PE/COFF header check catches truncated or wrong-architecture artifacts even
 # when the file name looks correct.
-$stream = [IO.File]::OpenRead($executable)
-try {
-    $header = New-Object byte[] 2
-    if ($stream.Read($header, 0, 2) -ne 2 -or [Text.Encoding]::ASCII.GetString($header) -ne 'MZ') {
-        throw "Not a valid Windows executable: $executable"
+$machine = Get-PeMachine -Path $executable
+if ($machine -ne $expectedMachine) {
+    throw ("Wrong PE machine for {0}: 0x{1:X4}, expected 0x{2:X4} ({3})." -f $ExecutableName, $machine, $expectedMachine, $Architecture)
+}
+Write-Host ("PE machine OK for {0}: 0x{1:X4} ({2})" -f $ExecutableName, $machine, $Architecture) -ForegroundColor DarkGray
+
+# publish-rust-portable.ps1 drops the exact watchdog embedded by build.rs next
+# to the EXE for manifest/attestation purposes; verify it is the same arch too.
+$watchdog = Join-Path $directory "OpenTaskbarWatchdog-$Architecture.exe"
+if (Test-Path -LiteralPath $watchdog -PathType Leaf) {
+    $watchdogMachine = Get-PeMachine -Path $watchdog
+    if ($watchdogMachine -ne $expectedMachine) {
+        throw ("Wrong PE machine for embedded watchdog ({0}): 0x{1:X4}, expected 0x{2:X4}." -f $Architecture, $watchdogMachine, $expectedMachine)
     }
-} finally {
-    $stream.Dispose()
 }
 
 # The release ships a single EXE. Any third-party DLL beside it would mean the
@@ -57,4 +88,4 @@ try {
     Remove-Item -LiteralPath $nullIn -Force -ErrorAction SilentlyContinue
 }
 
-Write-Host "Rust portable EXE startup check passed."
+Write-Host "Rust portable EXE startup check passed ($Architecture)."

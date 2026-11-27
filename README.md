@@ -177,10 +177,11 @@ User preferences, pinned item order, and widget configurations are stored locall
 
 - `settings.json` : User preferences, dock scaling, pinned applications, and active widgets.
 - `taskbar-state.txt` : Native Windows taskbar state recovery journal.
-- `log.txt` : Diagnostic and operational log.
+- `log.txt` : Diagnostic and operational log for the C# build.
+- `opentaskbar-rust.log` : Diagnostic log for the Rust port (rotation: `opentaskbar-rust.log.old`).
 - `Themes\` : Theme packs (icon and widget packs). See [docs/themes.md](docs/themes.md).
 
-The Rust port stores its settings in a separate folder, `%LOCALAPPDATA%\OpenTaskBar-Rust\`, using the same PascalCase schema. It does **not** migrate the C# folder automatically: copy `settings.json` there manually (or import a full backup) when switching builds.
+After the shared-data integration, the Rust port uses the same `%LOCALAPPDATA%\OpenTaskbar\` folder and PascalCase `settings.json` schema; the old `%LOCALAPPDATA%\OpenTaskBar-Rust\` folder is retired. Writes from both builds are serialized by a short-lived named lock, and Rust-only keys survive C# saves via `[JsonExtensionData]`. Use a full-backup import when migrating from the older separate-folder layout.
 
 ---
 
@@ -192,7 +193,7 @@ For in-depth documentation on OpenTaskbar's design tokens, materials, typography
 
 ## Rust port
 
-A parallel Rust + GPUI implementation lives in [`Rust-Port/`](Rust-Port/README.md). It targets the same `settings.json` schema, 14-language locale catalogs (994 C# / 1406 Rust keys per language), theme packs and recovery journal as the C# build; each build keeps its own settings folder and there is no automatic migration between them. Build it with `.\scripts\publish-rust-portable.ps1 -Runtime win-x64` and verify with `.\scripts\check-rust-portable.ps1`; `cargo test --workspace` runs the ported C# logic checks. Rust artifacts are included in the release checksums, manifest, SLSA attestation and optional VirusTotal scan.
+A parallel Rust + GPUI implementation lives in [`Rust-Port/`](Rust-Port/README.md). It shares the `%LOCALAPPDATA%\OpenTaskbar` folder, `settings.json` schema, 14-language locale catalogs (1034 C# / 1406 Rust keys per language after the integration union), theme packs and recovery journal with the C# build, and writes its own `opentaskbar-rust.log`. Build it with `.\scripts\publish-rust-portable.ps1 -Runtime win-x64` (or `win-x86`) and verify with `.\scripts\check-rust-portable.ps1`; the embedded watchdog is compiled per architecture and its PE machine is checked. `cargo test --workspace` runs the ported C# logic checks. Rust artifacts are included in the release checksums, manifest (`rustPort.crateVersion` and per-arch watchdog SHA-256), SLSA attestation and optional VirusTotal scan; `scripts/check-release-version.ps1` gates the tag against csproj, Cargo (0.1.0 carve-out) and the Rust MSIX identity before release builds.
 
 ---
 
